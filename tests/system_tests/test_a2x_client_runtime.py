@@ -175,6 +175,8 @@ async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
         card=SimpleNamespace(id="jiuwenswarm", name="main_agent"),
         ensure_initialized=AsyncMock(),
         start=AsyncMock(),
+        register_rail=AsyncMock(),
+        unregister_rail=AsyncMock(),
         attach_output=AsyncMock(return_value=_FakeInteractionStream()),
         send_input=AsyncMock(),
         goal_manager=None,
@@ -201,7 +203,10 @@ async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
     ):
         adapter = JiuWenSwarmDeepAdapter()
         await adapter.create_instance()
-        response = await adapter.process_message_impl(request, inputs)
+        try:
+            response = await adapter.process_message_impl(request, inputs)
+        finally:
+            await adapter.cleanup()
 
     assert response.ok is True
     assert response.payload.get("content") == "PONG"

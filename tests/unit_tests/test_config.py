@@ -16,6 +16,7 @@ from jiuwenswarm.common.config import (
     replace_teams_in_config,
     resolve_env_vars,
     update_external_cli_agents_in_config,
+    update_permissions_profile_in_config,
     update_skill_retrieval_in_config,
     update_setup_guide_enabled_in_config,
     update_xiaoyi_runtime_in_config,
@@ -128,6 +129,44 @@ class TestConfigFunctions:
 
         raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
         assert raw["setup_guide"] == {"enabled": False}
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        ("profile", "enabled", "mode"),
+        [
+            ("default", True, "manual"),
+            ("automatic", True, "auto"),
+            ("full_access", False, "manual"),
+        ],
+    )
+    def test_update_permissions_profile_is_canonical_and_preserves_other_config(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+        profile: str,
+        enabled: bool,
+        mode: str,
+    ) -> None:
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_permissions_profile_in_config(profile)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert raw["permissions"]["enabled"] is enabled
+        assert raw["permissions"]["mode"] == mode
+        assert raw["channels"]["web"]["enabled"] is True
+
+    @staticmethod
+    def test_invalid_permission_profile_does_not_modify_config(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ) -> None:
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        original = temp_config_file.read_bytes()
+
+        with pytest.raises(ValueError, match="invalid permissions_profile"):
+            update_permissions_profile_in_config("future")
+
+        assert temp_config_file.read_bytes() == original
 
     @pytest.mark.parametrize(
         ("config", "expected"),

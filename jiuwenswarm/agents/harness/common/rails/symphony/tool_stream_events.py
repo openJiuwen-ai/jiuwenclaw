@@ -44,7 +44,11 @@ class SymphonyToolStreamHandler:
             return
 
         async def progress_callback(event: dict[str, Any]) -> None:
-            await self._emit_progress(session, tool_call, event)
+            await self._emit_progress(
+                session,
+                tool_call,
+                event,
+            )
 
         ctx.extra[self._PROGRESS_TOKEN_KEY] = bind_tool_progress(progress_callback)
 
@@ -107,18 +111,17 @@ class SymphonyToolStreamHandler:
         if not isinstance(event.get("graph"), dict):
             return
         try:
+            payload = {
+                "tool_name": getattr(tool_call, "name", ""),
+                "tool_call_id": getattr(tool_call, "id", ""),
+                "status": "in_progress",
+                "beam_search_event": event,
+            }
             await session.write_stream(
                 OutputSchema(
                     type="tool_update",
                     index=0,
-                    payload={
-                        "tool_update": {
-                            "tool_name": getattr(tool_call, "name", ""),
-                            "tool_call_id": getattr(tool_call, "id", ""),
-                            "status": "in_progress",
-                            "beam_search_event": event,
-                        }
-                    },
+                    payload={"tool_update": payload},
                 )
             )
         except Exception:

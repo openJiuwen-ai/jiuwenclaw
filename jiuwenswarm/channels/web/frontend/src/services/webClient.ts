@@ -22,6 +22,7 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
   timeoutId: number;
+  awaitRuntimeAccepted: boolean;
 }
 
 const MAX_RECONNECT_ATTEMPTS = 5;
@@ -291,6 +292,7 @@ class WebClient {
         resolve: (value) => resolve(value as T),
         reject,
         timeoutId,
+        awaitRuntimeAccepted: options.awaitRuntimeAccepted === true,
       };
       this.pending.set(id, pending);
 
@@ -393,6 +395,7 @@ class WebClient {
       return;
     }
 
+    this.resolveRuntimeAcceptedPending(message);
     this.dispatchEvent(message);
   }
 
@@ -457,6 +460,9 @@ class WebClient {
     if (!pending) {
       return;
     }
+    if (message.ok && pending.awaitRuntimeAccepted) {
+      return;
+    }
     window.clearTimeout(pending.timeoutId);
     this.pending.delete(message.id);
 
@@ -473,6 +479,31 @@ class WebClient {
         this.isRetriableCode(message.code)
       )
     );
+  }
+
+  private resolveRuntimeAcceptedPending(message: WsEvent): void {
+    if (message.event !== 'runtime.accepted' && message.event !== 'chat.error') {
+      return;
+    }
+    const requestId = message.payload.request_id;
+    if (typeof requestId !== 'string') {
+      return;
+    }
+    const pending = this.pending.get(requestId);
+    if (!pending?.awaitRuntimeAccepted) {
+      return;
+    }
+    window.clearTimeout(pending.timeoutId);
+    this.pending.delete(requestId);
+    if (message.event === 'runtime.accepted') {
+      pending.resolve(message.payload);
+      return;
+    }
+    const error =
+      typeof message.payload.error === 'string'
+        ? message.payload.error
+        : i18n.t('network.requestFailed');
+    pending.reject(this.createWebError(error, undefined, requestId, true));
   }
 
   private dispatchEvent(event: WsEvent): void {

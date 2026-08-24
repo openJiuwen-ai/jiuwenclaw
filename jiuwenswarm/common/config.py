@@ -672,12 +672,32 @@ def update_skill_retrieval_in_config(updates: dict[str, Any]) -> None:
 
 
 def update_permissions_enabled_in_config(value: bool) -> None:
-    """更新 permissions.enabled（工具安全护栏开关）并写回。"""
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "permissions" not in data:
-        data["permissions"] = {}
-    data["permissions"]["enabled"] = value
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+    """Persist the legacy permission switch as a canonical manual profile."""
+    update_permissions_profile_in_config("default" if value else "full_access")
+
+
+def update_permissions_profile_in_config(profile: str) -> None:
+    """Atomically persist the Web permission profile to runtime fields."""
+    runtime_values = {
+        "default": (True, "manual"),
+        "automatic": (True, "auto"),
+        "full_access": (False, "manual"),
+    }
+    try:
+        enabled, mode = runtime_values[profile]
+    except KeyError as exc:
+        raise ValueError(f"invalid permissions_profile: {profile}") from exc
+
+    def _mutate(data: dict[str, Any]) -> dict[str, Any]:
+        permissions = data.get("permissions")
+        if not isinstance(permissions, dict):
+            permissions = {}
+            data["permissions"] = permissions
+        permissions["enabled"] = enabled
+        permissions["mode"] = mode
+        return data
+
+    update_config(_mutate)
 
 
 def update_auto_recap_enabled_in_config(value: bool) -> None:

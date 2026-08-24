@@ -4,7 +4,6 @@
 
 import importlib
 import os
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -125,6 +124,43 @@ class TestLoggerSetup:
         handler_types = [type(h).__name__ for h in logger.handlers]
         assert "StreamHandler" in handler_types
         assert handler_types.count("SafeRotatingFileHandler") == 5
+
+    @staticmethod
+    @pytest.mark.parametrize("outcome", ["allow", "deny", "block", "cancel"])
+    def test_log_sanitizer_preserves_only_safe_authorization_outcome(outcome: str):
+        """Keep terminal enums observable without exposing authorization data."""
+        raw = (
+            '{"authorization":"Bearer live-token",'
+            f'"authorization_outcome":"{outcome}",'
+            '"other_authorization_outcome":"live-secret"}'
+        )
+
+        sanitized = utils._sanitize_log_text(raw)
+
+        assert f'"authorization_outcome":"{outcome}"' in sanitized
+        assert "live-token" not in sanitized
+        assert "live-secret" not in sanitized
+        assert sanitized.count("******(fp:") == 2
+
+    @staticmethod
+    def test_log_sanitizer_does_not_unmask_embedded_outcome_field():
+        """An outcome-shaped substring inside a secret remains protected."""
+        raw = (
+            '{"authorization":"secretprefix '
+            '\"authorization_outcome\":\"allow\" secretsuffix",'
+            '"token":"tokenprefix '
+            '\"authorization_outcome\":\"deny\" tokensuffix"}'
+        )
+
+        sanitized = utils._sanitize_log_text(raw)
+
+        assert "secretprefix" not in sanitized
+        assert "secretsuffix" not in sanitized
+        assert "tokenprefix" not in sanitized
+        assert "tokensuffix" not in sanitized
+        assert '\"authorization_outcome\":\"allow\"' not in sanitized
+        assert '\"authorization_outcome\":\"deny\"' not in sanitized
+        assert sanitized.count("******(fp:") == 2
 
 
 class TestSourceRecordMasking:
@@ -300,8 +336,11 @@ class TestConstants:
         assert isinstance(utils.get_user_home(), Path)
 
     @staticmethod
-    def test_get_user_workspace_dir_defined():
+    def test_get_user_workspace_dir_defined(monkeypatch):
         """Test get_user_workspace_dir is defined."""
+        monkeypatch.delenv("JIUWENSWARM_DATA_DIR", raising=False)
+        monkeypatch.setattr(utils, "_workspace_base_dir", None)
+        monkeypatch.setattr(utils, "_user_home", None)
         assert hasattr(utils, "get_user_workspace_dir")
         assert isinstance(utils.get_user_workspace_dir(), Path)
         assert ".jiuwenswarm" in str(utils.get_user_workspace_dir())
