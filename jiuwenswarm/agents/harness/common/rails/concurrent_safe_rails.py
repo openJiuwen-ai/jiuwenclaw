@@ -218,25 +218,22 @@ class ConcurrentSafeTaskPlanningRail(TaskPlanningRail):
             for task in plan.tasks
         }
         changed = False
-        skipped_downgrade = 0
+        skipped_terminal_overwrite = 0
 
         for todo in todos:
             desired = status_by_task_id.get(todo.id)
             if desired is None or todo.status == desired:
                 continue
-            if (
-                todo.status == TodoStatus.COMPLETED
-                and desired in (TodoStatus.PENDING, TodoStatus.IN_PROGRESS)
-            ):
-                skipped_downgrade += 1
+            if todo.status in (TodoStatus.COMPLETED, TodoStatus.CANCELLED):
+                skipped_terminal_overwrite += 1
                 continue
             todo.status = desired
             changed = True
 
-        if skipped_downgrade:
+        if skipped_terminal_overwrite:
             logger.info(
-                "ConcurrentSafeTaskPlanningRail: skipped %d completed->active downgrade(s)",
-                skipped_downgrade,
+                "ConcurrentSafeTaskPlanningRail: skipped %d terminal todo overwrite(s)",
+                skipped_terminal_overwrite,
             )
 
         if not changed:

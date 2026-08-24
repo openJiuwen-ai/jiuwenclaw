@@ -26,6 +26,50 @@ _FIRST_BYTE_EVENT_TYPES = frozenset(
 _FIRST_ANSWER_EVENT_TYPES = frozenset({"chat.delta", "chat.final"})
 
 
+def snapshot_perf_summary_usage(request_id: str | None) -> dict[str, int] | None:
+    """Read request-scoped token totals before the perf accumulator is finalized."""
+    rid = (request_id or "").strip()
+    if not rid:
+        return None
+    acc = get_perf_collector().get_accumulator(rid)
+    if acc is None:
+        return None
+    input_tokens = max(0, int(getattr(acc, "input_tokens", 0) or 0))
+    output_tokens = max(0, int(getattr(acc, "output_tokens", 0) or 0))
+    if input_tokens <= 0 and output_tokens <= 0:
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "cache_tokens": max(0, int(getattr(acc, "cache_read_tokens", 0) or 0)),
+    }
+
+
+def merge_perf_summary_usage_fallback(
+    stream_usage: dict[str, Any],
+    perf_usage: dict[str, int] | None,
+) -> bool:
+    """Recover a dropped llm_usage frame without double-counting normal streams."""
+    if not perf_usage:
+        return False
+    stream_total = max(
+        int(stream_usage.get("total_tokens", 0) or 0),
+        int(stream_usage.get("input_tokens", 0) or 0)
+        + int(stream_usage.get("output_tokens", 0) or 0),
+    )
+    perf_total = int(perf_usage.get("total_tokens", 0) or 0)
+    if perf_total <= stream_total:
+        stream_usage["cache_tokens"] = max(
+            int(stream_usage.get("cache_tokens", 0) or 0),
+            int(perf_usage.get("cache_tokens", 0) or 0),
+        )
+        return False
+    for key in ("input_tokens", "output_tokens", "total_tokens", "cache_tokens"):
+        stream_usage[key] = int(perf_usage.get(key, 0) or 0)
+    return True
+
+
 def set_perf_summary_context(
     rail: Any | None = None,
     *,

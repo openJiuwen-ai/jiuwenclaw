@@ -735,9 +735,16 @@ def _terminal_error(
     *,
     error_code: str,
     content: str,
+    **diagnostics: Any,
 ) -> dict[str, Any]:
     state = _persist(context, state, "error", error_code=error_code)
-    return _result("error", state, error_code=error_code, content=content)
+    return _result(
+        "error",
+        state,
+        error_code=error_code,
+        content=content,
+        **diagnostics,
+    )
 
 
 async def _handle_outcome(
@@ -867,11 +874,19 @@ async def _handle_outcome(
         return _result("cancelled", state, content="DeepResearch 任务已取消。")
     error_code = str(outcome.get("error_code") or "deepresearch_failed")
     error = str(outcome.get("error") or "DeepResearch 执行失败。")
+    diagnostics: dict[str, Any] = {}
+    returncode = outcome.get("returncode")
+    if isinstance(returncode, int) and not isinstance(returncode, bool):
+        diagnostics["returncode"] = returncode
+    stderr_tail = outcome.get("stderr_tail")
+    if isinstance(stderr_tail, str) and stderr_tail:
+        diagnostics["stderr_tail"] = stderr_tail
     return _terminal_error(
         context,
         state,
         error_code=error_code,
         content=f"DeepResearch 执行失败：{error}",
+        **diagnostics,
     )
 
 

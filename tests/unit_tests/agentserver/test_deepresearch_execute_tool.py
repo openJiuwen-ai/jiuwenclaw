@@ -113,6 +113,29 @@ async def test_missing_query_fails_before_sdk_start():
 
 
 @pytest.mark.asyncio
+async def test_runner_error_preserves_bounded_subprocess_diagnostics():
+    outcome = {
+        "status": "error",
+        "error_code": "terminal_marker_missing",
+        "error": "no terminal marker",
+        "returncode": 1,
+        "stderr_tail": "ModuleNotFoundError: No module named 'aiosqlite'",
+    }
+    with patch.object(
+        de,
+        "_call_deepresearch_stream_impl",
+        new=AsyncMock(return_value=json.dumps(outcome, ensure_ascii=False)),
+    ):
+        result, saved = await _invoke(query="请生成一份详细的智能家电竞争报告")
+
+    assert result["kind"] == "error"
+    assert result["error_code"] == "terminal_marker_missing"
+    assert result["returncode"] == 1
+    assert result["stderr_tail"] == "ModuleNotFoundError: No module named 'aiosqlite'"
+    assert saved[-1]["phase"] == "error"
+
+
+@pytest.mark.asyncio
 async def test_detail_answer_starts_sdk_and_preserves_sdk_questions():
     state = {
         "schema_version": 1,

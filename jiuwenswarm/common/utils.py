@@ -506,14 +506,15 @@ def _resolve_logging_levels(
         return base
 
     console = _coerce("console_level")
-    env_console = os.getenv("LOG_LEVEL")
-    if env_console:
-        console = _parse_log_level(env_console, console)
-
     gateway = _coerce("gateway")
     channel = _coerce("channel")
     agent_server = _coerce("agent_server")
     full = _coerce("full")
+
+    env_log_level = os.getenv("LOG_LEVEL")
+    if env_log_level:
+        env_level = _parse_log_level(env_log_level, console)
+        console = gateway = channel = agent_server = full = env_level
 
     if log_level_override is not None:
         v = _parse_log_level(log_level_override)
