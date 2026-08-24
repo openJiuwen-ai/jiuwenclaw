@@ -6,12 +6,15 @@ import asyncio
 import mimetypes
 import os
 import re
-import time
+from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.common.utils import logger
 from jiuwenswarm.gateway.channel_manager.im_platforms.errors import (
     AttachmentPersistError,
+)
+from jiuwenswarm.server.runtime.attachments.upload_storage import (
+    atomic_write_unique,
 )
 
 # 类型别名，用于类型提示
@@ -136,18 +139,15 @@ class FeishuFileService:
             except Exception as exc:  # noqa: BLE001
                 raise AttachmentPersistError(str(exc)) from exc
         download_dir = self._get_download_dir(category)
-        file_path = os.path.join(download_dir, local_name)
-        # 本地回落（仅测试 / 无 AgentServer 上下文）：下载目录内同名时重命名，
-        # 避免覆盖既有文件。经钩子落盘（AgentServer 注入目录）时由 AgentServer
-        # 侧去重（unique_upload_path），此处不重复处理。
-        if os.path.exists(file_path):
-            base, ext = os.path.splitext(file_path)
-            file_path = f"{base}_{int(time.time())}{ext}"
-        with open(file_path, "wb") as f:
-            f.write(content)
+        # 本地回落（仅测试 / 无 AgentServer 上下文）：用原子独占创建落盘，
+        # 同名文件自动取 stem-N 后缀，并发下载与既有文件均不会被覆盖
+        # （修复秒级时间戳重命名在同秒并发下仍会相互覆盖的 P1）。
+        # 经钩子落盘（AgentServer 注入目录）时由 AgentServer 侧去重
+        # （unique_upload_path），此处不重复处理。
+        path = atomic_write_unique(Path(download_dir) / local_name, content)
         return {
-            "path": file_path,
-            "name": os.path.basename(file_path),
+            "path": str(path),
+            "name": path.name,
             "size": len(content),
         }
 

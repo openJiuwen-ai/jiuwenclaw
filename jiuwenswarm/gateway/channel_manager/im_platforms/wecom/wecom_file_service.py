@@ -11,12 +11,16 @@ import asyncio
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from jiuwenswarm.gateway.channel_manager.im_platforms.errors import (
     AttachmentPersistError,
+)
+from jiuwenswarm.server.runtime.attachments.upload_storage import (
+    atomic_write_unique,
 )
 
 
@@ -140,10 +144,13 @@ class WecomFileService:
             except Exception as exc:  # noqa: BLE001
                 raise AttachmentPersistError(str(exc)) from exc
         download_dir = self._get_download_dir(category)
-        file_path = os.path.join(download_dir, filename)
-        with open(file_path, "wb") as f:
-            f.write(content)
-        return {"path": file_path, "name": filename, "size": len(content)}
+        # 本地回落（仅单用户 / 无 AgentServer 上下文）：用原子独占创建落盘，
+        # 同名文件自动取 stem-N 后缀，并发下载与既有文件均不会被覆盖
+        # （修复秒级时间戳重命名在同秒并发下仍会相互覆盖的 P1）。
+        # 经钩子落盘（AgentServer 注入目录）时由 AgentServer 侧去重
+        # （unique_upload_path），此处不重复处理。
+        path = atomic_write_unique(Path(download_dir) / filename, content)
+        return {"path": str(path), "name": path.name, "size": len(content)}
 
     def _get_download_dir(self, file_category: str) -> str:
         """获取下载目录路径。"""
@@ -283,7 +290,7 @@ class WecomFileService:
             )
 
             if not result or "media_id" not in result:
-                logger.error(f"[WecomFileService] 上传文件失败：无 media_id 返回")
+                logger.error("[WecomFileService] 上传文件失败：无 media_id 返回")
                 return None
 
             media_id = result["media_id"]

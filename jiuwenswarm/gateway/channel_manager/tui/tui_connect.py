@@ -2413,7 +2413,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 real_client = _resolve_agent_client(agent_client)
                 try:
                     if real_client is None:
-                        raise RuntimeError("AgentServer is unavailable")
+                        await channel.send_response(
+                            ws, req_id, ok=False,
+                            error="AgentServer is unavailable",
+                            code="SERVICE_UNAVAILABLE",
+                        )
+                        return
                     env = e2a_from_agent_fields(
                         request_id=req_id,
                         channel_id="tui",
@@ -3442,8 +3447,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     # ── Memory RPC handlers ────────────────────────────────────────────
     # Phase 3: memory data and its workspace path belong to the target
     # AgentServer.  Gateway/TUI only preserves the RPC protocol and forwards
-    # the authenticated routing user_id; it never resolves a local workspace
-    # or falls back to deployment-side memory files.
+    # the authenticated routing user_id.  In legacy single-user mode the
+    # e2a_proxy transparently falls back to the in-process MemoryAdapter
+    # (shared ~/.jiuwenswarm); AgentOS mode returns a retryable error when
+    # the target AgentServer is unreachable.
     def _register_memory_proxy(method_name, req_method):
         async def _handler(ws, req_id, params, session_id, user_id=None) -> None:
             """TUI memory 管理转发：与其余用户业务入口统一走 e2a_proxy 薄代理

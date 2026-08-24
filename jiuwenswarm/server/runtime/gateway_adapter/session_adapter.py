@@ -1,10 +1,10 @@
 """SessionAdapter：会话域用户业务适配器。
 
-Phase 1 首批实现 ``session.list``：复用 ``server/runtime/session`` 中立门面
-（``get_all_sessions_metadata``），输出经 ``to_session_info`` 投影，与 Web
-fallback 现有 payload 完全一致。
+复用 ``server/runtime/session`` 中立门面，覆盖以下 E2A method（决策 D2：
+独立 method，一一对应原 Web/TUI handler）：
 
-Phase 2 扩展（决策 D2：独立 E2A method，一一对应原 Web/TUI handler）：
+- ``session.list`` → ``get_all_sessions_metadata``，输出经 ``to_session_info`` 投影
+  （web 通道）或原始 metadata（TUI 通道，按 channel_id 过滤）；
 - ``session.get_metadata`` → ``session_metadata.get_session_metadata``（只读 O(1)）；
 - ``session.pin`` → ``session_metadata.set_session_pinned``（置顶/取消 + 紧凑重编号）；
 - ``session.color_set`` → ``session_metadata``（accent_color 读写，TUI 语义；
@@ -91,7 +91,7 @@ def _build_preview_messages(raw: object, count: int) -> list[dict[str, object]]:
 
 
 class SessionAdapter(GatewayAdapter):
-    """会话域适配器（Phase 1：session.list；Phase 2：get_metadata/pin/color_set/preview）。"""
+    """会话域适配器：session.list/get_metadata/pin/color_set/preview/delete/rename。"""
 
     methods: frozenset[str] = frozenset(
         {
@@ -326,9 +326,9 @@ class SessionAdapter(GatewayAdapter):
             )
         color = params.get("color")
         if color is None:
-            # 查询模式
+            # 查询模式：cache_bust=True 强制读盘，跨进程拿最新（与 _handle_get_metadata 一致）
             try:
-                metadata = get_session_metadata(target)
+                metadata = get_session_metadata(target, cache_bust=True)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[SessionAdapter] session.color_set query failed: %s", exc)
                 return build_error_response(request, str(exc), code="INTERNAL_ERROR")
@@ -394,9 +394,9 @@ class SessionAdapter(GatewayAdapter):
     async def _handle_delete(self, request: AgentRequest) -> AgentResponse:
         """session.delete 文件级删除（单用户共享目录 legacy fallback 语义）。
 
-        Phase 4 整合：Web/TUI 手写 ``_delete_from_shared_dir`` 收敛到本适配器，
-        使单用户模式 AgentServer 不可达时由薄代理跑同一中立门面。与迁移前手写
-        行为一致：team session 拒绝（需 AgentServer runtime）、目录不存在返回
+        Web/TUI 手写 ``_delete_from_shared_dir`` 收敛到本适配器，使单用户模式
+        AgentServer 不可达时由薄代理跑同一中立门面。与迁移前手写行为一致：
+        team session 拒绝（需 AgentServer runtime）、目录不存在返回
         NOT_FOUND、删除前 evict KV cache、``shutil.rmtree`` 目录。
         """
         import shutil
@@ -415,7 +415,7 @@ class SessionAdapter(GatewayAdapter):
         )
 
         params = request.params if isinstance(request.params, dict) else {}
-        target = str(params.get("session_id") or "").strip()
+        target = str(params.get("session_id") or request.session_id or "").strip()
         if not target:
             return build_error_response(
                 request, "session_id is required", code="BAD_REQUEST"

@@ -2201,6 +2201,26 @@ def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, An
     return model_config_obj
 
 
+def _persist_media_locally(
+    data: bytes, safe_session_id: str, filename: str
+) -> tuple[bool, dict[str, Any]]:
+    """Write large media bytes directly to the shared user directory.
+
+    Used in legacy single-user mode where the AgentServer has no HTTP upload
+    listener.  The path matches ``media_attachments._store_image_item`` so the
+    AgentServer-side ``_persisted`` passthrough recognizes the file.
+    """
+    from jiuwenswarm.common.utils import get_agent_sessions_dir
+    from jiuwenswarm.server.runtime.attachments.upload_storage import atomic_write_unique
+
+    try:
+        upload_dir = get_agent_sessions_dir() / safe_session_id / "uploads"
+        path = atomic_write_unique(upload_dir / filename, data)
+        return True, {"path": str(path)}
+    except Exception as exc:  # noqa: BLE001
+        return False, {"error": str(exc), "code": "UPLOAD_FAILED"}
+
+
 async def _upload_media_item_via_http(
     item: dict[str, Any],
     data: bytes,
@@ -2216,10 +2236,7 @@ async def _upload_media_item_via_http(
     （``agent/sessions/<safe_session_id>/uploads/<safe_filename>``，同名去重）。
     上传失败返回 ``None``（调用方保留原 base64 项，由下游链路处理）。
     """
-    from jiuwenswarm.gateway.routing.agent_http_bridge import (
-        upload_file_bytes,
-        upload_file_bytes_via_e2a,
-    )
+    from jiuwenswarm.gateway.routing.agent_http_bridge import upload_file_bytes_via_e2a
     from jiuwenswarm.gateway.routing.e2a_proxy import is_agentos_routing_client
     from jiuwenswarm.server.runtime.attachments import media_attachments as _ma
     from jiuwenswarm.server.runtime.attachments.upload_storage import (
@@ -2249,9 +2266,15 @@ async def _upload_media_item_via_http(
             session_id=session_id,
         )
     else:
-        ok, payload = await asyncio.to_thread(upload_file_bytes, data, rel_path)
+        # Legacy single-user mode: the AgentServer has no HTTP upload
+        # listener (its upload endpoint would be on ws_port+1, which is
+        # never started).  Write directly to the shared user directory
+        # using the same path the AgentServer ``_store_image_item`` would
+        # use, avoiding a doomed HTTP attempt that always fails with
+        # ConnectionRefused.
+        ok, payload = _persist_media_locally(data, safe_session_id, filename)
     if not ok:
-        logger.warning("[media.persist] 大图 HTTP 上传失败: %s", payload.get("error"))
+        logger.warning("[media.persist] 大图上传失败: %s", payload.get("error"))
         return None
     return {
         "type": "image",
@@ -3639,7 +3662,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _session_list(ws, req_id, params, session_id, user_id=None):
         """返回会话列表，包含完整的会话管理信息。
 
-        Phase 1：经统一薄代理 E2A 转发目标 AgentServer（SessionAdapter 处理），
+        经统一薄代理 E2A 转发目标 AgentServer（SessionAdapter 处理），
         AgentServer 输出与迁移前 Web fallback 投影（to_session_info）完全一致。
         """
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -3654,7 +3677,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # state for their user state when they are unavailable.
         if (
             is_legacy_shared_directory_client(real_client)
-            and not getattr(real_client, "server_ready", False)
+            and not getattr(real_client, "server_ready", True)
         ):
             from jiuwenswarm.server.runtime.gateway_adapter.base import parse_int_param
             from jiuwenswarm.server.runtime.session.session_info import to_session_info
@@ -3692,7 +3715,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _session_get_metadata(ws, req_id, params, session_id, user_id=None):
         """返回单个会话的元数据（mode / model / project_dir / last_user_message_at 等）。
 
-        Phase 2：经统一薄代理 E2A 转发目标 AgentServer（SessionAdapter
+        经统一薄代理 E2A 转发目标 AgentServer（SessionAdapter
         SESSION_GET_METADATA），由注入目录读取（O(1)，不扫描目录）。
         """
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -3733,7 +3756,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         from jiuwenswarm.common.schema.message import ReqMethod
         from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
-        # Phase 2 整合：统一薄代理 E2A 转发（envelope.user_id 承载认证身份，
+        # 统一薄代理 E2A 转发（envelope.user_id 承载认证身份，
         # drop session_id / 缺省注入 create_token 保持与迁移前一致）。
         create_params = dict(params)
         create_params.setdefault("create_token", secrets.token_hex(16))
@@ -3754,7 +3777,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _session_rename(ws, req_id, params, session_id, user_id=None):
         """重命名会话标题(查询/设置/清除三种语义)。
 
-        Phase 2 修复：经统一薄代理 E2A 转发目标 AgentServer（SESSION_RENAME，
+        经统一薄代理 E2A 转发目标 AgentServer（SESSION_RENAME，
         AgentServer 注入目录 session_metadata），不再 Gateway 本地直写——AgentOS
         下重命名必须落在用户 AgentServer 的会话目录（方案 §10.3 契约）。
         title 不传→查询、空串/纯空白→清除、非空→设置(截断 200 字符)。
@@ -3767,7 +3790,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # Only the default local WebSocket client shares the Gateway directory.
         if (
             is_legacy_shared_directory_client(real_client)
-            and not getattr(real_client, "server_ready", False)
+            and not getattr(real_client, "server_ready", True)
         ):
             from jiuwenswarm.server.runtime.session.session_rename import apply_session_rename
 
@@ -3798,7 +3821,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _session_pin(ws, req_id, params, session_id, user_id=None):
         """置顶/取消置顶会话,操作后对所有置顶会话紧凑重编号为 1..N。幂等。
 
-        Phase 2：经统一薄代理 E2A 转发目标 AgentServer（SessionAdapter
+        经统一薄代理 E2A 转发目标 AgentServer（SessionAdapter
         SESSION_PIN，AgentServer 注入目录 session_metadata）。
         """
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -3810,7 +3833,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         real_client = _resolve(agent_client)
         if (
             is_legacy_shared_directory_client(real_client)
-            and not getattr(real_client, "server_ready", False)
+            and not getattr(real_client, "server_ready", True)
         ):
             raw_params = params if isinstance(params, dict) else {}
             sid = raw_params.get("session_id")
@@ -3846,7 +3869,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _session_delete(ws, req_id, params, session_id, user_id=None):
         """删除一个 session（统一薄代理 E2A 转发 + 单用户共享目录适配器 fallback）。
 
-        Phase 4 整合：手写 E2A 与本地 ``_delete_from_shared_dir`` 收敛到
+        手写 E2A 与本地 ``_delete_from_shared_dir`` 收敛到
         ``proxy_unary_request``——单用户 WebSocket 客户端在 AgentServer 不可达时
         由薄代理跑 SessionAdapter 的文件级删除（共享目录等价）；AgentOS 与
         client 未构造（ac=None）时返回可重试 SERVICE_UNAVAILABLE（决策 D8）。
@@ -3907,7 +3930,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _project_get_sessions(ws, req_id, params, session_id, user_id=None):
-        """获取项目下的非置顶普通会话列表（Phase 3：目标 AgentServer 执行）。"""
+        """获取项目下的非置顶普通会话列表（目标 AgentServer 执行）。"""
         from jiuwenswarm.common.schema.message import ReqMethod
         from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
@@ -3924,7 +3947,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _project_get_cron_sessions(ws, req_id, params, session_id, user_id=None):
-        """获取项目 cron 会话（Phase 3：目标 AgentServer 执行）。"""
+        """获取项目 cron 会话（目标 AgentServer 执行）。"""
         from jiuwenswarm.common.schema.message import ReqMethod
         from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
@@ -4347,7 +4370,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _path_select_directory(ws, req_id, params, session_id, user_id=None):
         """在 AgentServer 注入目录内选择项目目录（决策 D3：返回 AgentServer 侧绝对路径）。
 
-        Phase 2：经统一薄代理 E2A 转发目标 AgentServer（WorkspaceFileAdapter
+        经统一薄代理 E2A 转发目标 AgentServer（WorkspaceFileAdapter
         PATH_SELECT_DIRECTORY，注入 workspace 内解析/校验，越界返回 BAD_REQUEST）。
         """
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -4400,7 +4423,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _path_select_files(ws, req_id, params, session_id, user_id=None):
         """枚举 AgentServer 注入目录下的可上传文件（决策 D3：返回 AgentServer 侧绝对路径）。
 
-        Phase 2：经统一薄代理 E2A 转发目标 AgentServer（WorkspaceFileAdapter
+        经统一薄代理 E2A 转发目标 AgentServer（WorkspaceFileAdapter
         PATH_SELECT_FILES，注入 workspace 内枚举，返回与桌面端同形元数据）。
         """
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -4524,9 +4547,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _media_persist(ws, req_id, params, session_id, user_id=None):
-        """浏览器上传媒体附件落盘（Phase 2：E2A 转发 AgentServer 注入目录 uploads）。
+        """浏览器上传媒体附件落盘（E2A 转发 AgentServer 注入目录 uploads）。
 
-        Phase 2：经统一薄代理 E2A 转发目标 AgentServer（WorkspaceFileAdapter
+        经统一薄代理 E2A 转发目标 AgentServer（WorkspaceFileAdapter
         MEDIA_PERSIST，base64 小文件由注入目录落盘；大文件在 Gateway 侧解码后
         走受认证 HTTP bridge 上传，避免超内部 WS 帧限制）。
         """
@@ -4555,7 +4578,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _document_persist(ws, req_id, params, session_id, user_id=None):
-        """文档附件路径黑名单校验（Phase 2：E2A 转发，路径判定由 AgentServer 注入目录执行）。"""
+        """文档附件路径黑名单校验（E2A 转发，路径判定由 AgentServer 注入目录执行）。"""
         from jiuwenswarm.common.schema.message import ReqMethod
         from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
@@ -4572,7 +4595,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _document_formats(ws, req_id, params, session_id, user_id=None):
-        """返回文档上传黑名单格式（Phase 2：E2A 转发 AgentServer）。"""
+        """返回文档上传黑名单格式（E2A 转发 AgentServer）。"""
         from jiuwenswarm.common.schema.message import ReqMethod
         from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 

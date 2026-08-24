@@ -208,7 +208,8 @@ def _inject_session_work_mode(msg: Message) -> None:
     resolved_work_mode = binding.work_mode
 
     # 注意:TUI 通道的 session.create 不走 forward 路径(不在 CLI_FORWARD_REQ_METHODS),
-    # TUI 预解析在 tui_connect.py 的 _session_create 中通过 find_or_create_code_project_for_tui_params 完成。
+    # TUI 的 cwd→code project 绑定由 AgentServer 侧在 SESSION_CREATE 处理时通过
+    # find_or_create_code_project_for_tui_params 完成（经 E2A 转发后解析）。
     # 此处仅处理 WEB/ACP 通道的 work_mode 绑定注入。
 
     params["project_id"] = resolved_project_id

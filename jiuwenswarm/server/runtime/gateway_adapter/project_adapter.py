@@ -1,8 +1,8 @@
 """ProjectAdapter: project-domain requests executed in AgentServer.
 
-The initial Phase 3 slice migrates ``project.info``.  It reads both the
-project store and session metadata from this process's injected data directory;
-the request ``user_id`` remains routing/observability metadata only.
+Reads both the project store and session metadata from this process's
+injected data directory; the request ``user_id`` remains routing/observability
+metadata only.
 """
 
 from __future__ import annotations
@@ -1266,7 +1266,7 @@ async def _run_threaded(
 
 
 class ProjectAdapter(GatewayAdapter):
-    """Project-domain adapter; Phase 3 starts with the read-only info view."""
+    """Project-domain adapter: project/git CRUD, diff status, session queries."""
 
     methods: frozenset[str] = frozenset(
         {
