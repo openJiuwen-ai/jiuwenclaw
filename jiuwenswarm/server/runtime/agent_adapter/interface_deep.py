@@ -361,6 +361,14 @@ _CRON_TOOL_BOUND: ContextVar[bool] = ContextVar(
 )
 
 
+_HIDDEN_RUNTIME_TOOLS = frozenset({"video_understanding", "acp_chat"})
+
+
+def _runtime_tool_is_disabled(tool_name: str) -> bool:
+    """Return whether a runtime tool is hidden from the main agent."""
+    return tool_name in _HIDDEN_RUNTIME_TOOLS
+
+
 @dataclass(frozen=True, slots=True)
 class _RuntimeCronContextTokens:
     channel: Token[str]
@@ -2925,7 +2933,10 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         _, self._video_tool_registered = self._sync_tool_group(
             current_tools=mark_stateless([video_understanding]),
             registered=self._video_tool_registered,
-            enabled=bool(self._video_model_config),
+            enabled=(
+                bool(self._video_model_config)
+                and not _runtime_tool_is_disabled("video_understanding")
+            ),
             create_fn=lambda: mark_stateless([video_understanding]),
             warn_label="video tool",
         )
@@ -5234,7 +5245,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             )
 
         self._video_tool_registered = False
-        if self._video_model_config:
+        if self._video_model_config and not _runtime_tool_is_disabled("video_understanding"):
             try:
                 self._register_shared_tool(video_understanding)
                 tool_cards.append(video_understanding.card)
@@ -5368,7 +5379,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         # acp_chat: forward prompts to external stdio ACP agents (see acp_agents in config.yaml)
         try:
             acp_cfg = get_config().get("acp_agents")
-            if isinstance(acp_cfg, dict) and acp_cfg:
+            if (
+                isinstance(acp_cfg, dict)
+                and acp_cfg
+                and not _runtime_tool_is_disabled("acp_chat")
+            ):
                 self._register_shared_tool(acp_chat)
                 tool_cards.append(acp_chat.card)
                 logger.info("[JiuWenSwarmDeepAdapter] acp_chat tool registered")

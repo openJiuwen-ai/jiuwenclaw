@@ -32,7 +32,11 @@ def _gateway_control_url() -> str:
     host = str(os.getenv("GATEWAY_HOST", "127.0.0.1")).strip() or "127.0.0.1"
     if host in {"0.0.0.0", "::"}:
         host = "127.0.0.1"
-    port = int(os.getenv("GATEWAY_PORT", "19001"))
+    port = int(
+        os.getenv("GATEWAY_PORT")
+        or os.getenv("JIUWENSWARM_GATEWAY_PORT")
+        or "19001"
+    )
     return f"ws://{host}:{port}/channel-config"
 
 
