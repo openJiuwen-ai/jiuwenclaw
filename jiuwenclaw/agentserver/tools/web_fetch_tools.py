@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 from html import unescape
 from typing import Any
@@ -641,22 +640,23 @@ _FETCH_TOOL_CARD = ToolCard(
     id="mcp_fetch_webpage",
     name="mcp_fetch_webpage",
     description=(
-        "抓取网页文本内容。"
+        "抓取网页文本内容，支持一次传入多个 URL 并行抓取。"
         "默认优先从内存缓存读取（use_cache=true），"
         "若缓存内容不够新或需要最新数据，请用 use_cache=false 重新从原站抓取。"
-        "返回状态码、标题和纯文本正文。"
+        "返回列表，每个元素含一个 URL 的状态码、标题、纯文本正文与是否命中缓存。"
     ),
     properties={"truncate_length": 60000},
     input_params={
         "type": "object",
         "properties": {
             "url": {
-                "type": "string",
-                "description": "The URL of the webpage to fetch",
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "One or more URLs of the webpages to fetch",
             },
             "max_chars": {
                 "type": "integer",
-                "description": "Maximum characters of content to return (500-50000, default 12000)",
+                "description": "Maximum characters of content per URL (500-50000, default 12000)",
                 "default": 12000,
             },
             "timeout_seconds": {
@@ -678,29 +678,40 @@ _FETCH_TOOL_CARD = ToolCard(
 )
 
 
-async def mcp_fetch_webpage_impl(
-    url: str,
-    max_chars: int = 12000,
-    timeout_seconds: int = 5,
-    use_cache: bool = True,
-    cache: Any | None = None,
-) -> str:
-    url = _normalize_url(url)
-    if not url:
-        return "[ERROR]: url cannot be empty."
+async def _fetch_single_url(
+    raw_url: str,
+    *,
+    max_chars: int,
+    timeout_seconds: int,
+    use_cache: bool,
+    cache: Any | None,
+) -> dict[str, Any]:
+    """Fetch a single URL and return one result-item dict.
 
-    max_chars = max(500, min(max_chars, 50000))
-    timeout_seconds = max(3, min(timeout_seconds, 10))
-    overall_timeout = 5
+    The returned dict always carries the (normalized) ``url`` key plus either
+    success fields (``status_code``/``title``/``content``/``provider``/
+    ``from_cache``...) or an ``error`` field when fetching failed.
+    """
+    url = _normalize_url(raw_url)
+    if not url:
+        return {
+            "url": str(raw_url or "").strip(),
+            "status_code": None,
+            "title": "",
+            "content": "",
+            "provider": "",
+            "from_cache": False,
+            "error": "url cannot be empty.",
+        }
 
     if cache is not None and use_cache:
         cached = await _try_cache_fetch(url, cache)
         if cached is not None:
-            _log_cache_stats(cache)
-            return _format_fetch_result(cached, max_chars, from_cache=True)
+            return _build_result_item(cached, max_chars, from_cache=True)
     elif cache is not None and not use_cache:
         cache.bypassed += 1
 
+    overall_timeout = 5
     try:
         data = await _fetch_webpage_async(url, timeout_seconds, overall_timeout)
     except Exception as exc:
@@ -713,15 +724,90 @@ async def mcp_fetch_webpage_impl(
             exc_info=True,
         )
         reason = _clip_user_text(str(exc).strip() or "unknown error")
-        return _clip_user_text(f"[ERROR]: fetch failed ({reason})")
+        return {
+            "url": url,
+            "status_code": None,
+            "title": "",
+            "content": "",
+            "provider": "",
+            "from_cache": False,
+            "error": f"fetch failed ({reason})",
+        }
+
+    return _build_result_item(data, max_chars, from_cache=False)
+
+
+def _build_result_item(
+    data: dict[str, Any], max_chars: int, *, from_cache: bool
+) -> dict[str, Any]:
+    """Assemble one result-item dict from a fetch data dict."""
+    item: dict[str, Any] = {
+        "url": data.get("url", ""),
+        "status_code": data.get("status_code"),
+        "title": data.get("title", ""),
+        "content": _clip_text(str(data.get("content", "") or ""), max_chars) or "[empty]",
+        "provider": data.get("provider", ""),
+        "from_cache": from_cache,
+    }
+    if from_cache:
+        item["cache_age_days"] = data.get("cache_age_days")
+        item["page_update_days"] = data.get("page_update_days")
+    return item
+
+
+async def mcp_fetch_webpage_impl(
+    url: str | list[str],
+    max_chars: int = 12000,
+    timeout_seconds: int = 5,
+    use_cache: bool = True,
+    cache: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch one or more webpages.
+
+    ``url`` accepts either a single URL string or a list of URLs. Each URL is
+    fetched concurrently (cache-first when ``use_cache`` is true). Returns a
+    list of per-URL items ``[ {url, status_code, title, content, provider,
+    from_cache, ...?, error?}, ... ]`` preserving the input order.
+    """
+    urls = _coerce_url_list(url)
+    max_chars = max(500, min(max_chars, 50000))
+    timeout_seconds = max(3, min(timeout_seconds, 10))
+
+    if not urls:
+        if cache is not None:
+            _log_cache_stats(cache)
+        return []
+
+    tasks = [
+        _fetch_single_url(
+            u,
+            max_chars=max_chars,
+            timeout_seconds=timeout_seconds,
+            use_cache=use_cache,
+            cache=cache,
+        )
+        for u in urls
+    ]
+    items = await asyncio.gather(*tasks)
 
     if cache is not None:
         _log_cache_stats(cache)
 
-    return _format_fetch_result(data, max_chars, from_cache=False)
+    return list(items)
 
 
 mcp_fetch_webpage = tool(card=_FETCH_TOOL_CARD)(mcp_fetch_webpage_impl)
+
+
+def _coerce_url_list(url: str | list[str]) -> list[str]:
+    """Normalize the ``url`` argument into a flat list of URL strings."""
+    if url is None:
+        return []
+    if isinstance(url, str):
+        return [url] if url.strip() else []
+    if isinstance(url, (list, tuple)):
+        return [str(u).strip() for u in url if str(u).strip()]
+    return [str(url).strip()] if str(url).strip() else []
 
 
 async def _try_cache_fetch(url: str, cache: Any) -> dict[str, Any] | None:
@@ -768,28 +854,3 @@ def _log_cache_stats(cache: Any) -> None:
         stats["hit_rate_pct"],
         stats["entries"],
     )
-
-
-def _format_fetch_result(
-    data: dict[str, Any], max_chars: int, *, from_cache: bool
-) -> str:
-    lines = [
-        f"URL: {data.get('url', '')}",
-        f"Status: {data.get('status_code', '')}",
-    ]
-    if data.get("title"):
-        lines.append(f"Title: {data['title']}")
-    if data.get("provider"):
-        lines.append(f"Provider: {data['provider']}")
-    lines.append(f"FromCache: {'true' if from_cache else 'false'}")
-    if from_cache:
-        lines.append(f"CacheAgeDays: {data.get('cache_age_days', '?')}")
-        page_update = data.get("page_update_days")
-        if page_update is not None:
-            lines.append(f"PageUpdateDays: {page_update}")
-        lines.append(
-            "Hint: 若缓存内容不够新或需要最新数据，请用 use_cache=false 重新抓取。"
-        )
-    lines.append("Content:")
-    lines.append(_clip_text(str(data.get("content", "") or ""), max_chars) or "[empty]")
-    return "\n".join(lines)
