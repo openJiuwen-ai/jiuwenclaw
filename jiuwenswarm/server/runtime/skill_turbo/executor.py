@@ -350,6 +350,23 @@ def _parse_tool_name_from_call_id(tool_call_id: str) -> str | None:
     return name or None
 
 
+def _parse_call_idx_from_call_id(tool_call_id: Any) -> int | None:
+    """从 ``skill_turbo-tc-{tool_name}-{args_hash}-{idx}`` 解析末段 idx。
+
+    idx 是同一 ``(tool_name, args_hash)`` 组合的第几次调用（0-based）。
+    解析失败返回 ``None``。
+    """
+    if not isinstance(tool_call_id, str):
+        return None
+    last_dash = tool_call_id.rfind("-")
+    if last_dash <= 0 or last_dash == len(tool_call_id) - 1:
+        return None
+    try:
+        return int(tool_call_id[last_dash + 1:])
+    except ValueError:
+        return None
+
+
 class SkillTurboExecutor:
     """规划代码运行时引擎。"""
 
@@ -1349,10 +1366,15 @@ class SkillTurboExecutor:
           返回 ``(user_input, current_tool_call_id)`` 并清空 pending。
         - 回退命中（resume 重放）：``current_tool_call_id`` 因重放时 ask_user
           等工具的非确定性参数（如 LLM 生成的候选项）而与中断时不一致，但
-          ``current_tool_name == pending.expected_tool_name`` 时，返回
-          ``(user_input, expected_tool_call_id)`` 并清空 pending——用中断时的
-          ``tool_call_id`` 覆盖本次，使 rail 能把 ``user_input`` 注入到与中断点
-          对齐的 ``ctx.extra[RESUME_USER_INPUT_KEY]``，避免再次中断形成死循环。
+          ``current_tool_name == pending.expected_tool_name`` 且两者末段 idx
+          一致时，返回 ``(user_input, expected_tool_call_id)`` 并清空 pending
+          ——用中断时的 ``tool_call_id`` 覆盖本次，使 rail 能把 ``user_input``
+          注入到与中断点对齐的 ``ctx.extra[RESUME_USER_INPUT_KEY]``，避免
+          再次中断形成死循环。
+
+          idx 段比较用于区分"同一 stage 内多个同名工具调用"：idx 是同
+          ``(tool_name, args_hash)`` 组合的调用次序，中断点与重放点的 idx
+          一致才回退命中，避免把 user_input 误注入到非中断点的同名调用。
         - 未命中：返回 ``(None, current_tool_call_id)``，pending 保留待后续匹配。
 
         ``current_tool_name`` 由调用方 ``use_tool`` 传入，避免在本方法里再解析
@@ -1367,11 +1389,16 @@ class SkillTurboExecutor:
             self._pending_resume = None
             return user_input, current_tool_call_id
         expected_name = pending.get("expected_tool_name")
-        if (
-            expected_name
+        current_idx = _parse_call_idx_from_call_id(current_tool_call_id)
+        expected_idx = _parse_call_idx_from_call_id(expected_id)
+        idx_match = current_idx is not None and current_idx == expected_idx
+        fallback_match = (
+            bool(expected_name)
             and current_tool_name == expected_name
             and pending.get("user_input") is not None
-        ):
+            and idx_match
+        )
+        if fallback_match:
             user_input = pending.get("user_input")
             logger.warning(
                 "[SkillTurboExecutor] resume tool_call_id mismatch fallback: "

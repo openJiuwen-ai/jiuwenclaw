@@ -1,12 +1,16 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Resume replay: 当 ask_user 等工具因非确定性参数导致 tool_call_id 变化时，
-仍能按 tool_name 对齐注入 user_input，避免循环中断。
+仍能按 (tool_name, idx 段) 对齐注入 user_input，避免循环中断。
 
 复现 officeclaw_a873fc300d433068be0b0741 的根因：pptx-craft 的 ask_user 节点
 在 resume 重放时 LLM 重新生成主题候选 → questions args 变 → args_hash 变 →
 tool_call_id 与中断时不一致 → _consume_pending_resume_input 返回 None →
 ask_user_rail user_input=None → 再次 interrupt → 死循环。
+
+回退匹配按 (tool_name, tool_call_id 末段 idx) 对齐：idx 是同
+``(tool_name, args_hash)`` 组合的调用次序，避免同一 stage 内多个同名同参
+调用时把 user_input 误注入到非中断点的同名调用。
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from unittest.mock import MagicMock
 
 from jiuwenswarm.server.runtime.skill_turbo.executor import (
     SkillTurboExecutor,
+    _parse_call_idx_from_call_id,
     _parse_tool_name_from_call_id,
 )
 
@@ -148,3 +153,81 @@ class TestConsumePendingResumeInputFallback:
         )
         assert user_input is None
         assert effective_id == "skill_turbo-tc-ask_user-ac68cd05-0"
+
+
+class TestParseCallIdxFromCallId:
+    def test_parses_idx_zero(self):
+        assert _parse_call_idx_from_call_id("skill_turbo-tc-ask_user-605c02b1-0") == 0
+
+    def test_parses_idx_nonzero(self):
+        assert _parse_call_idx_from_call_id("skill_turbo-tc-ask_user-bbbbbbbb-2") == 2
+
+    def test_returns_none_for_non_numeric_idx(self):
+        assert _parse_call_idx_from_call_id("skill_turbo-tc-ask_user-hash-x") is None
+
+    def test_returns_none_for_missing_dash(self):
+        assert _parse_call_idx_from_call_id("no_dash_here") is None
+        assert _parse_call_idx_from_call_id("trailing-") is None
+
+    def test_returns_none_for_non_string(self):
+        assert _parse_call_idx_from_call_id(None) is None  # type: ignore[arg-type]
+
+
+class TestConsumePendingResumeIdxComparison:
+    """回退匹配额外比较 tool_call_id 末段 idx，避免多同名同参调用误注入。
+
+    idx 是同 ``(tool_name, args_hash)`` 组合的调用次序（0-based）。多同名调用
+    场景下，回退命中要求 current 与 expected 的 idx 一致。
+    """
+
+    def test_idx_match_aligns_to_expected(self):
+        """同名 + idx 一致（中断在第 2 次同参调用）：回退命中。"""
+        ex = _make_executor()
+        expected_tcid = "skill_turbo-tc-ask_user-bbbbbbbb-1"
+        replay_tcid = "skill_turbo-tc-ask_user-cccccccc-1"  # args 变了，idx 仍是 1
+        ex.set_pending_resume(
+            expected_tool_call_id=expected_tcid,
+            user_input=[{"question": "q", "selected_options": ["B"]}],
+        )
+        user_input, effective_id = ex._consume_pending_resume_input(
+            replay_tcid, "ask_user"
+        )
+        assert user_input == [{"question": "q", "selected_options": ["B"]}]
+        assert effective_id == expected_tcid
+        assert ex._pending_resume is None
+
+    def test_idx_mismatch_keeps_pending(self):
+        """同名 + idx 不一致：不消费 pending，等 idx 匹配的调用到来。"""
+        ex = _make_executor()
+        expected_tcid = "skill_turbo-tc-ask_user-bbbbbbbb-1"
+        replay_tcid = "skill_turbo-tc-ask_user-aaaaaaaa-0"  # 第 0 次同名调用
+        ex.set_pending_resume(
+            expected_tool_call_id=expected_tcid,
+            user_input=[{"question": "q", "selected_options": ["B"]}],
+        )
+        user_input, effective_id = ex._consume_pending_resume_input(
+            replay_tcid, "ask_user"
+        )
+        assert user_input is None
+        assert effective_id == replay_tcid
+        # pending 保留给第 1 次调用
+        assert ex._pending_resume is not None
+
+    def test_idx_match_then_mismatch_full_flow(self):
+        """完整流程：第 0 次不命中保留 pending，第 1 次命中消费。"""
+        ex = _make_executor()
+        expected_tcid = "skill_turbo-tc-ask_user-bbbbbbbb-1"
+        ex.set_pending_resume(
+            expected_tool_call_id=expected_tcid,
+            user_input="answer_for_second",
+        )
+        # 第 0 次同名调用（idx=0 != 1）
+        r0 = ex._consume_pending_resume_input(
+            "skill_turbo-tc-ask_user-aaaaaaaa-0", "ask_user"
+        )
+        assert r0 == (None, "skill_turbo-tc-ask_user-aaaaaaaa-0")
+        # 第 1 次同名调用（idx=1 == 1）
+        r1 = ex._consume_pending_resume_input(
+            "skill_turbo-tc-ask_user-cccccccc-1", "ask_user"
+        )
+        assert r1 == ("answer_for_second", expected_tcid)
