@@ -231,13 +231,29 @@ def _resolve_timestamp_parent_dir(inputs: dict[str, Any]) -> str:
     project_dir = inputs.get("effective_project_dir")
     if project_dir:
         session = str(inputs.get("conversation_id") or inputs.get("session_id") or "default")
-        user_id = str(inputs.get("user_id") or session)
-        chat_id = str(inputs.get("chat_id") or session)
-        return str(
-            _normalize_ppt_session_parent(
-                Path(str(project_dir)) / "files" / user_id / chat_id / "output"
-            )
+        # 优先从 inputs 顶层取 user_id/chat_id；未提供时从 inputs["metadata"] 取。
+        # chat_id 兼容 group_id（agent_compat.py 确认两者等价）。
+        metadata = inputs.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        user_id = str(
+            inputs.get("user_id")
+            or metadata.get("user_id")
+            or ""
         )
+        chat_id = str(
+            inputs.get("chat_id")
+            or metadata.get("chat_id")
+            or metadata.get("group_id")
+            or ""
+        )
+        # 去重：两者都空或相同时不重复拼两层，避免 files/{session}/{session}/output。
+        if user_id and chat_id and user_id != chat_id:
+            ns_path = Path(str(project_dir)) / "files" / user_id / chat_id / "output"
+        else:
+            ns = user_id or chat_id or session
+            ns_path = Path(str(project_dir)) / "files" / ns / "output"
+        return str(_normalize_ppt_session_parent(ns_path))
     return _resolve_workspace_base(inputs)
 
 
