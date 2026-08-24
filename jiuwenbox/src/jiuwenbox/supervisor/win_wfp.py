@@ -43,6 +43,19 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 
+def _hidden_kwargs() -> dict:
+    """Hide console windows when spawning powershell.exe on Windows."""
+    if sys.platform != "win32":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0  # SW_HIDE
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+        "startupinfo": startupinfo,
+    }
+
+
 def _require_windows() -> None:
     if sys.platform != "win32":
         raise RuntimeError(
@@ -1133,6 +1146,7 @@ def install_firewall_rule_fallback(
             subprocess.run(
                 [_get_powershell(), "-NoProfile", "-Command", ps],
                 check=True, capture_output=True, timeout=30,
+                **_hidden_kwargs(),
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             all_ok = False
@@ -1172,6 +1186,7 @@ def uninstall_firewall_rule_fallback() -> None:
                     f"-ErrorAction SilentlyContinue",
                 ],
                 check=False, capture_output=True, timeout=30,
+                **_hidden_kwargs(),
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
