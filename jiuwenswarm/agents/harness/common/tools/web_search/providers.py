@@ -83,16 +83,34 @@ def records_from_paid_payload(
         for item in (payload.get("urls") or [])
         if item
     ][:max_results]
+    # petal 携带 records（含 content/update_time/summary）；其他 provider 无此字段
+    raw_records = payload.get("records") if isinstance(payload.get("records"), list) else []
+
+    # 构建 url -> {content, update_time, summary} 映射（仅 petal 有）
+    extras: dict[str, dict[str, Any]] = {}
+    for rr in raw_records:
+        if isinstance(rr, dict):
+            u = str(rr.get("url") or "").strip()
+            if u:
+                extras[u] = {
+                    "content": str(rr.get("content") or ""),
+                    "update_time": rr.get("update_time"),   # Optional[float]，None 表示缺失
+                    "summary": str(rr.get("summary") or ""),
+                }
+
     records: list[WebSearchRecord] = []
     for url in urls:
         if not _is_valid_http_url(url):
             continue
+        extra = extras.get(url, {})
         records.append(
             WebSearchRecord(
                 title=_title_from_url(url),
                 url=url,
-                snippet="",
+                snippet=extra.get("summary", ""),      # 修复：petal summary 透传到 snippet
                 source=f"paid:{provider}",
+                content=extra.get("content", ""),
+                update_time=extra.get("update_time"),
             )
         )
     return records, answer
@@ -103,6 +121,7 @@ async def invoke_paid_provider(
     query: str,
     max_results: int,
     timeout_seconds: int,
+    cache: Any | None = None,
 ) -> ProviderRun:
     label = f"paid:{name}"
     if not paid_provider_available(name):
@@ -152,6 +171,25 @@ async def invoke_paid_provider(
         return ProviderRun(provider=label, error=str(exc))
 
     records, answer = records_from_paid_payload(name, payload, max_results)
+
+    # 仅 petal 写缓存（其他 provider 未开启 content）
+    if name == "petal" and cache is not None:
+        from jiuwenswarm.agents.harness.common.tools.web_search.content_cache import (
+            CacheEntry,
+        )
+
+        for rec in records:
+            if rec.content and rec.url:
+                await cache.put(
+                    CacheEntry(
+                        url=rec.url,
+                        content=rec.content,
+                        update_time=rec.update_time,
+                        title=rec.title,
+                        source=f"paid:{name}",
+                    )
+                )
+
     passed, reason = evaluate_search_quality(
         records,
         answer=answer,
@@ -177,6 +215,7 @@ async def run_paid_chain(
     query: str,
     settings: WebSearchSettings,
     preferred_provider: str | None = None,
+    cache: Any | None = None,
 ) -> tuple[ProviderRun | None, list[str]]:
     tried: list[str] = []
     last_run: ProviderRun | None = None
@@ -193,6 +232,7 @@ async def run_paid_chain(
             query,
             settings.max_results,
             settings.timeout_seconds,
+            cache=cache,
         )
         last_run = run
         if run.error == "skipped":

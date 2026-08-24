@@ -242,8 +242,25 @@ class SkillWhitelistSynchronizer:
         await self._remove_prebuilt_not_in_template(
             installed_skills_map, kept_prebuilt_names, result
         )
+        await self._reconcile_disk_skills_missing_from_db(installed_skills_map, result)
         result.enabled_skill_dirs = list(installed_skills_map.keys())
         return result
+
+    async def reconcile_disk_into_ledger(self) -> SkillWhitelistSyncResult:
+        """仅做盘→库对账并重算启用集（供热刷新路径复用，不跑预制模板 sync）."""
+        lock = await _skills_dir_sync_lock_for(self._skills_dir)
+        async with lock:
+            result = SkillWhitelistSyncResult()
+            installed_skills_map = await self._fetch_installed_skills_map(result)
+            if installed_skills_map is None:
+                return result
+            await self._reconcile_disk_skills_missing_from_db(installed_skills_map, result)
+            result.enabled_skill_dirs = [
+                name
+                for name in installed_skills_map.keys()
+                if self._skill_dir_ready(self._skills_dir, name)
+            ]
+            return result
 
     async def _fetch_installed_skills_map(
         self, result: SkillWhitelistSyncResult
@@ -332,6 +349,64 @@ class SkillWhitelistSynchronizer:
                     skill_name=name,
                     error_code="remove_failed",
                     error_message=msg,
+                )
+
+    async def _reconcile_disk_skills_missing_from_db(
+        self,
+        installed_skills_map: dict[str, dict[str, Any]],
+        result: SkillWhitelistSyncResult,
+    ) -> None:
+        """磁盘已有 SKILL.md，但账本没有 → 记为 SOURCE_USER 并纳入启用集。"""
+        if not self._skills_dir.is_dir():
+            return
+        try:
+            children = sorted(self._skills_dir.iterdir(), key=lambda p: p.name.lower())
+        except OSError as exc:
+            self._mark_failed(
+                result,
+                skill_name="",
+                error_code="reconcile_disk_listdir_failed",
+                error_message=f"list skills dir failed: {exc}",
+            )
+            return
+
+        for child in children:
+            name = child.name
+            if name in _RESERVED_SKILL_DIR_NAMES or not child.is_dir():
+                continue
+            if not self._skill_dir_ready(self._skills_dir, name):
+                continue
+            if name in installed_skills_map:
+                continue
+            try:
+                row = await upsert_installed_skill(
+                    service_id=self._service_id,
+                    agent_id=self._agent_id,
+                    skill_name=name,
+                    source_type=SOURCE_USER,
+                    group_id=self._group_id,
+                    bot_id=self._bot_id,
+                )
+                installed_skills_map[name] = (
+                    row
+                    if isinstance(row, dict)
+                    else {
+                        "skill_name": name,
+                        "source_type": SOURCE_USER,
+                    }
+                )
+                result.succeeded.append(f"reconciled_disk:{name}")
+                logger.info(
+                    "[SkillWhitelist] disk skill reconciled into ledger skill=%s agent=%s",
+                    name,
+                    self._agent_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._mark_failed(
+                    result,
+                    skill_name=name,
+                    error_code="reconcile_disk_failed",
+                    error_message=f"reconcile disk skill failed name={name}: {exc}",
                 )
 
     async def _ensure_prebuilt_installed(

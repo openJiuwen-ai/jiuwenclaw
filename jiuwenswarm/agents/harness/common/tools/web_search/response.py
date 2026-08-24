@@ -30,6 +30,8 @@ def _format_records_block(
     if not deduped and not include_answer.strip():
         lines.append("(no structured results)")
         return lines
+    # 提示模型按需调用 fetch_webpage（正文已在内存缓存，命中快）
+    lines.append("Hint: 仅展示摘要与 URL。如需正文，请调用 fetch_webpage 工具。")
     for idx, rec in enumerate(deduped, 1):
         lines.append(f"{idx}. {rec.title}")
         if rec.url:

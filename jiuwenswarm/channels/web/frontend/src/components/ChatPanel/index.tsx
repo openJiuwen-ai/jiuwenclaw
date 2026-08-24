@@ -14,7 +14,7 @@ import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo, type UserA
 import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
-import { InputArea } from './InputArea';
+import { InputArea, type InputAreaHandle } from './InputArea';
 import chatIcon from '../../assets/chat.svg';
 import expandIcon from '../../assets/expand.svg';
 import lineUpIcon from '../../assets/lineUp.svg';
@@ -41,6 +41,16 @@ import {
   canLoadOlderHistory,
   shouldShowHistoryRetry,
 } from '../../features/historyPagination';
+import {
+  DESKTOP_FILE_DRAG_EVENT,
+  DESKTOP_LOCAL_FILES_EVENT,
+  isDesktopShell,
+  normalizePicks,
+  registerDesktopLocalFilesConsumer,
+  type DesktopLocalFilesEventDetail,
+  type LocalFilePick,
+} from '../../features/workspace/localFilePicker';
+import { useDesktopLocalFilePickerReady } from '../../hooks';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -701,6 +711,9 @@ export function ChatPanel({
   ));
   const teamHumanShareCommands = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHumanShareCommands ?? []);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const inputAreaRef = useRef<InputAreaHandle>(null);
+  const desktopFileDropAcceptUntilRef = useRef(0);
+  const lastConsumedDesktopDropIdRef = useRef<string | null>(null);
   const historyLayoutSnapshotRef = useRef<{
     sessionId: string;
     loadedPages: number;
@@ -710,6 +723,7 @@ export function ChatPanel({
   const suppressNextScrollToEndRef = useRef(false);
   const stickToBottomUntilStableRef = useRef(false);
   const [isSending, setIsSending] = React.useState(false);
+  const isDesktopAttachmentDropEnabled = useDesktopLocalFilePickerReady();
   const hasTimelineContent = messages.length > 0 || toolExecutionOrder.length > 0;
   const hasConversation = Boolean(isHistoryRestoring || historyPager || hasTimelineContent);
   const historyLoadedPages = historyPager?.loadedPages ?? 0;
@@ -1002,8 +1016,131 @@ export function ChatPanel({
     (text: string) => handleSendMessage(text),
     [handleSendMessage],
   );
+
+  const markDesktopFileDropZoneActive = useCallback(() => {
+    desktopFileDropAcceptUntilRef.current = Date.now() + 1200;
+  }, []);
+
+  const clearDesktopFileDropZone = useCallback(() => {
+    desktopFileDropAcceptUntilRef.current = 0;
+  }, []);
+
+  const canAcceptDesktopFileDrag = useCallback(() => {
+    return isDesktopAttachmentDropEnabled || isDesktopShell();
+  }, [isDesktopAttachmentDropEnabled]);
+
+  const handleDesktopFileDragEnter = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!canAcceptDesktopFileDrag()) return;
+      if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+      event.preventDefault();
+      // OS file drags require copy; move/none show the forbidden cursor in WebView2.
+      event.dataTransfer.dropEffect = 'copy';
+      markDesktopFileDropZoneActive();
+    },
+    [canAcceptDesktopFileDrag, markDesktopFileDropZoneActive],
+  );
+
+  const handleDesktopFileDragOver = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!canAcceptDesktopFileDrag()) return;
+      if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      markDesktopFileDropZoneActive();
+    },
+    [canAcceptDesktopFileDrag, markDesktopFileDropZoneActive],
+  );
+
+  const ingestDesktopLocalFiles = useCallback(
+    (detail: DesktopLocalFilesEventDetail | null | undefined, files: LocalFilePick[]) => {
+      if (detail?.source && detail.source !== 'drop') return;
+      if (!files.length) {
+        clearDesktopFileDropZone();
+        return;
+      }
+
+      const dropId = typeof detail?.dropId === 'string' ? detail.dropId : null;
+      if (dropId && lastConsumedDesktopDropIdRef.current === dropId) {
+        clearDesktopFileDropZone();
+        return;
+      }
+
+      const acceptByTime = Date.now() <= desktopFileDropAcceptUntilRef.current;
+      const clientX = detail?.clientX;
+      const clientY = detail?.clientY;
+      const hasCoords = typeof clientX === 'number' && typeof clientY === 'number';
+      let inZone = false;
+      if (hasCoords) {
+        const hit = document.elementFromPoint(clientX, clientY);
+        inZone = Boolean(
+          hit?.closest('.chat-panel-shell') || hit?.closest('.chat-layout__surface'),
+        );
+      }
+      // Native bridge trusted=true always accepts (coords from WebView2 are often wrong).
+      const trusted = detail?.trusted === true;
+      if (!trusted && !acceptByTime && !inZone) {
+        clearDesktopFileDropZone();
+        return;
+      }
+
+      if (dropId) lastConsumedDesktopDropIdRef.current = dropId;
+      inputAreaRef.current?.appendLocalFilePicks(files);
+      clearDesktopFileDropZone();
+    },
+    [clearDesktopFileDropZone],
+  );
+
+  const handleDesktopFileDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!canAcceptDesktopFileDrag()) return;
+      if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      markDesktopFileDropZoneActive();
+      // Files arrive via the durable ingest bridge invoked by desktop_app run_js.
+      // Do NOT call pywebview APIs here: a JS->Python call racing the Python-side
+      // drop handler's run_js deadlocks the UI thread (window freezes).
+    },
+    [canAcceptDesktopFileDrag, markDesktopFileDropZoneActive],
+  );
+
+  useEffect(() => {
+    // Durable bridge lives in localFilePicker; ChatPanel only registers a consumer.
+    // Never delete window.__JIUWEN_INGEST_LOCAL_FILES__ — Python run_js requires it.
+    const unregister = registerDesktopLocalFilesConsumer((detail, files) => {
+      ingestDesktopLocalFiles(detail, files);
+    });
+
+    const onDesktopLocalFiles = (event: Event) => {
+      const detail = (event as CustomEvent<DesktopLocalFilesEventDetail>).detail;
+      ingestDesktopLocalFiles(detail, normalizePicks(detail?.files));
+    };
+
+    const onDesktopFileDrag = (event: Event) => {
+      const active = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active);
+      if (active) {
+        markDesktopFileDropZoneActive();
+      }
+    };
+
+    window.addEventListener(DESKTOP_LOCAL_FILES_EVENT, onDesktopLocalFiles as EventListener);
+    window.addEventListener(DESKTOP_FILE_DRAG_EVENT, onDesktopFileDrag as EventListener);
+    return () => {
+      unregister();
+      window.removeEventListener(DESKTOP_LOCAL_FILES_EVENT, onDesktopLocalFiles as EventListener);
+      window.removeEventListener(DESKTOP_FILE_DRAG_EVENT, onDesktopFileDrag as EventListener);
+    };
+  }, [ingestDesktopLocalFiles, markDesktopFileDropZoneActive]);
+
   return (
-    <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
+    <div
+      className="chat-panel-shell flex flex-col h-full"
+      data-testid="chat-panel"
+      onDragEnter={handleDesktopFileDragEnter}
+      onDragOver={handleDesktopFileDragOver}
+      onDrop={handleDesktopFileDrop}
+    >
       {shouldShowChatHeader && (
         <div className="chat-panel-header">
           <div className="chat-panel-header__meta">
@@ -1129,6 +1266,7 @@ export function ChatPanel({
                 <InterruptResultBubble />
                 <InteractionSlot onSubmit={onUserAnswer} />
                 <InputArea
+                  ref={inputAreaRef}
                   onSubmit={handleSendMessage}
                   onPersistMedia={onPersistMedia}
                   onPersistDocuments={onPersistDocuments}
@@ -1170,6 +1308,7 @@ export function ChatPanel({
             />
           )}
           <InputArea
+            ref={inputAreaRef}
             onSubmit={handleSendMessage}
             onPersistMedia={onPersistMedia}
             onPersistDocuments={onPersistDocuments}

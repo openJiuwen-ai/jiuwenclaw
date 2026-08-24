@@ -10,6 +10,8 @@ server 只查 member、过滤 human_agent、回 ok/members。查不到 → ok=Fa
 from __future__ import annotations
 
 import asyncio
+
+from jiuwenswarm.server.handlers import team as team_handlers
 import json
 from typing import Any
 from unittest import mock
@@ -18,6 +20,18 @@ import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+
+
+def _ctx_for_test(ws, request, send_lock, server=None):
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    return RequestContext(
+        request=request,
+        sink=WSSink(ws, send_lock),
+        connection_id=str(id(ws)),
+        services=AgentServerServices(server) if server is not None else None,
+    )
 
 
 class _FakeWS:
@@ -80,9 +94,7 @@ async def _invoke(
             },
         ),
     ):
-        await agent_ws_server.AgentWebSocketServer._handle_team_members_get(
-            None, ws, request, lock
-        )
+        await team_handlers.handle_team_members_get(_ctx_for_test(ws, request, lock))
     assert len(ws.sent) == 1
     return parse_agent_server_wire_unary(json.loads(ws.sent[0])), helper_calls
 

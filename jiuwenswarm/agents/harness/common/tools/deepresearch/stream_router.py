@@ -21,6 +21,13 @@ NODE_DISPLAY_INFO: dict[str, tuple[str, str]] = {
     "info_collector": ("信息收集", "检索网页信息"),
     "understanding_analyzer": ("理解分析", "综合分析检索结果"),
     "outline": ("大纲生成", "规划报告章节结构"),
+    "brief_outline": ("精简大纲", "规划精简报告结构"),
+    "brief_info_collector": ("报告级资料检索", "检索并评估全报告证据"),
+    "brief_evidence_reviewer": ("证据审阅", "检查证据覆盖和缺口"),
+    "brief_sub_reporter": ("精简章节撰写", "并行生成精简报告章节"),
+    "brief_reporter": ("精简报告整合", "生成核心摘要"),
+    "brief_mermaid_generator": ("图表生成", "生成精简报告图表"),
+    "brief_source_tracer": ("溯源校验", "核查精简报告引用"),
     "plan_reasoning": ("规划调研", "为当前章节制定分步信息采集计划"),
     "collector_query_generation": ("生成检索词", "为当前章节生成搜索查询"),
     "collector_info_retrieval": ("资料检索", "并行检索网页和资料"),
@@ -49,6 +56,9 @@ _FINAL_REPORT_NODES = {
     "vlm_chart_generator",
     "source_tracer",
     "source_tracer_infer",
+    "brief_reporter",
+    "brief_mermaid_generator",
+    "brief_source_tracer",
 }
 
 _CONTROL_PROCESS_VALUES = {"SUCCESS", "ALL END", "SECTION END"}
@@ -80,11 +90,18 @@ _NODE_STAGE: dict[str, int] = {
     "feedback_handler": 1,
     "outline": 2,
     "outline_interaction": 2,
+    "brief_outline": 2,
     "editor_team": 3,
     "reporter": 3,
     "vlm_chart_generator": 3,
     "source_tracer": 3,
     "source_tracer_infer": 3,
+    "brief_info_collector": 3,
+    "brief_evidence_reviewer": 3,
+    "brief_sub_reporter": 3,
+    "brief_reporter": 3,
+    "brief_mermaid_generator": 3,
+    "brief_source_tracer": 3,
 }
 
 
@@ -586,7 +603,7 @@ def _format_process_content(agent: str, value: Any) -> str:
         return _as_text(value)
 
     formatted: str | None = None
-    if agent == "outline":
+    if agent in {"outline", "brief_outline"}:
         formatted = _format_outline_markdown(data)
     elif agent == "plan_reasoning":
         formatted = _format_plan_markdown(data)
@@ -989,7 +1006,7 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
         return frames
 
     # 大纲正文只读展示在思考过程；其他非并行节点维持 reasoning_content 通用透传。
-    if agent == "outline":
+    if agent in {"outline", "brief_outline"}:
         if isinstance(content, str) and content:
             _append_text_part(state, state.outline_parts, content)
         task_content = display[0] + (f" - {display[1]}" if display[1] else "")

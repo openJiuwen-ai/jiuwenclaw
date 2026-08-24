@@ -45,6 +45,7 @@ from jiuwenswarm.common.config import (
     get_config,
     get_config_raw,
     get_default_models,
+    get_evolution_enabled,
     resolve_legacy_team_model_ref,
     replace_teams_in_config,
     update_default_models_in_config,
@@ -53,6 +54,7 @@ from jiuwenswarm.common.config import (
     replace_channel_subsection_with_cleanup,
     update_browser_in_config,
     update_preferred_language_in_config,
+    update_evolution_enabled_in_config,
     update_context_engine_enabled_in_config,
     update_default_model_provider_in_config,
     update_kv_cache_affinity_enabled_in_config,
@@ -115,11 +117,9 @@ from jiuwenswarm.common.local_env_config import (
 from jiuwenswarm.extensions.extension_config_sync import update_extensions_in_config
 from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
 from jiuwenswarm.gateway.document_attachments import (
-    coerce_document_parse_flag,
-    parse_existing_document,
+    forbidden_formats,
     persist_and_parse_documents,
 )
-from jiuwenswarm.common.document_parser import DEFAULT_MAX_CHARS, supported_formats
 from jiuwenswarm.server.runtime.session import project_store
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     coerce_root_categories_value,
@@ -823,6 +823,7 @@ CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP.keys())
 
 # 来自 config.yaml 的配置项（前端 param 名 -> config.yaml 路径）
 _CONFIG_YAML_KEYS = frozenset({
+    "evolution_enabled",
     "context_engine_enabled",
     "kv_cache_release_enabled",
     "kv_cache_affinity_enabled",
@@ -1688,6 +1689,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
             # skill_create: tip 优先，fallback to config.yaml
             evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
+            payload["evolution_enabled"] = "true" if get_evolution_enabled(raw) else "false"
             skill_create_env = read_env_if_set("SKILL_CREATE")
             if skill_create_env is not None:
                 payload["skill_create"] = "true" if skill_create_env.lower() in ("true", "1", "yes") else "false"
@@ -1719,6 +1721,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("setup_guide_enabled", "true")
+            payload.setdefault("evolution_enabled", "true")
             payload.setdefault("skill_create", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("memory_forbidden_description", "")
@@ -1903,7 +1906,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             val = params[param_key]
             parsed = _parse_config_bool(val)
             try:
-                if param_key == "context_engine_enabled":
+                if param_key == "evolution_enabled":
+                    update_evolution_enabled_in_config(parsed)
+                elif param_key == "context_engine_enabled":
                     update_context_engine_enabled_in_config(parsed)
                 elif param_key == "kv_cache_release_enabled":
                     update_kv_cache_release_enabled_in_config(parsed)
@@ -4918,6 +4923,90 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
 
+    async def _path_select_directory(ws, req_id, params, session_id):
+        """在服务端本机弹出系统文件夹对话框（浏览器 / whl 包回退方案）。
+
+        桌面端 pywebview 已提供 ``select_project_directory``；本方法覆盖无该桥接时的
+        纯浏览器访问场景。
+
+        - Windows：tkinter
+        - macOS：osascript；
+        - Linux：zenity/kdialog/yad/tkinter
+        - 不可用时返回 ``UNSUPPORTED``，前端回落到手填绝对路径
+        """
+        if not isinstance(params, dict):
+            params = {}
+        initial_dir = params.get("initial_dir")
+        if initial_dir is not None and not isinstance(initial_dir, str):
+            await channel.send_response(
+                ws, req_id, ok=False, error="initial_dir must be string", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.channels.web.directory_picker import select_directory_native
+
+        try:
+            selected = await asyncio.to_thread(
+                select_directory_native,
+                initial_dir=initial_dir.strip() if isinstance(initial_dir, str) else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[path.select_directory] picker unavailable: %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED",
+            )
+            return
+
+        if not selected:
+            await channel.send_response(ws, req_id, ok=True, payload={"path": None, "cancelled": True})
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"path": selected, "cancelled": False})
+
+    async def _path_select_files(ws, req_id, params, session_id):
+        """在服务端本机弹出系统文件对话框（浏览器 / whl 包回退方案）。
+
+        桌面端 pywebview 已提供 ``select_local_files``；本方法覆盖无该桥接时的
+        纯浏览器访问场景，返回带绝对路径的文件元数据（与桌面端同形）。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        initial_dir = params.get("initial_dir")
+        if initial_dir is not None and not isinstance(initial_dir, str):
+            await channel.send_response(
+                ws, req_id, ok=False, error="initial_dir must be string", code="BAD_REQUEST",
+            )
+            return
+        allow_multiple = params.get("allow_multiple", True)
+        if not isinstance(allow_multiple, bool):
+            await channel.send_response(
+                ws, req_id, ok=False, error="allow_multiple must be boolean", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.channels.web.file_picker import select_and_describe_files
+
+        try:
+            selected = await asyncio.to_thread(
+                select_and_describe_files,
+                allow_multiple=allow_multiple,
+                initial_dir=initial_dir.strip() if isinstance(initial_dir, str) else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[path.select_files] picker unavailable: %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED",
+            )
+            return
+
+        if selected is None:
+            await channel.send_response(
+                ws, req_id, ok=True, payload={"files": [], "cancelled": True},
+            )
+            return
+        await channel.send_response(
+            ws, req_id, ok=True, payload={"files": selected, "cancelled": False},
+        )
+
     async def _memory_compute(ws, req_id, params, session_id):
         if _HAS_PSUTIL:
             process = _psutil.Process()  # type: ignore[union-attribute]
@@ -4960,25 +5049,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _document_persist(ws, req_id, params, session_id):
-        """Upload documents (PDF/DOCX/XLSX/ipynb/...) and parse via AutoFileParser."""
+        """Validate local document paths (blacklist); do not persist or parse content."""
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         normalized = dict(params)
-        parse = coerce_document_parse_flag(normalized.get("parse", True), default=True)
-        max_chars_raw = normalized.get("max_chars", DEFAULT_MAX_CHARS)
         try:
-            max_chars = int(max_chars_raw)
-        except (TypeError, ValueError):
-            max_chars = DEFAULT_MAX_CHARS
-        max_chars = max(1, min(max_chars, 500_000))
-        try:
-            await persist_and_parse_documents(
-                normalized,
-                session_id,
-                parse=parse,
-                max_chars=max_chars,
-            )
+            await persist_and_parse_documents(normalized)
         except Exception as exc:
             logger.exception("[document.persist] failed: %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -4992,56 +5069,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "files",
             "documents",
             "document_errors",
-            "supported_formats",
+            "forbidden_formats",
         ):
             if key in normalized:
                 payload[key] = normalized[key]
-        if "supported_formats" not in payload:
-            payload["supported_formats"] = supported_formats()
+        if "forbidden_formats" not in payload:
+            payload["forbidden_formats"] = forbidden_formats()
         await channel.send_response(ws, req_id, ok=True, payload=payload)
-
-    async def _document_parse(ws, req_id, params, session_id):
-        """Parse an already-uploaded document path with AutoFileParser (+ ipynb)."""
-        if not isinstance(params, dict):
-            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
-            return
-        path = str(params.get("path") or "").strip()
-        if not path:
-            await channel.send_response(ws, req_id, ok=False, error="path is required", code="BAD_REQUEST")
-            return
-        max_chars_raw = params.get("max_chars", DEFAULT_MAX_CHARS)
-        try:
-            max_chars = int(max_chars_raw)
-        except (TypeError, ValueError):
-            max_chars = DEFAULT_MAX_CHARS
-        max_chars = max(1, min(max_chars, 500_000))
-        try:
-            result = await parse_existing_document(
-                path,
-                session_id=session_id,
-                max_chars=max_chars,
-            )
-        except FileNotFoundError as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="NOT_FOUND")
-            return
-        except PermissionError as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
-            return
-        except ValueError as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
-            return
-        except Exception as exc:
-            logger.exception("[document.parse] failed: %s", exc)
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-            return
-        await channel.send_response(ws, req_id, ok=True, payload=result)
 
     async def _document_formats(ws, req_id, params, session_id):
         await channel.send_response(
             ws,
             req_id,
             ok=True,
-            payload={"supported_formats": supported_formats()},
+            payload={"forbidden_formats": forbidden_formats()},
         )
 
     async def _chat_resume(ws, req_id, params, session_id):
@@ -6207,6 +6248,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("path.get", _path_get)
     channel.register_method("path.set", _path_set)
+    channel.register_method("path.select_directory", _path_select_directory)
+    channel.register_method("path.select_files", _path_select_files)
 
     async def _hooks_list(ws, req_id, params, session_id):
         from jiuwenswarm.common.hooks_config import load_hooks_config
@@ -6229,7 +6272,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("chat.send", _chat_send)
     channel.register_method("media.persist", _media_persist)
     channel.register_method("document.persist", _document_persist)
-    channel.register_method("document.parse", _document_parse)
     channel.register_method("document.formats", _document_formats)
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)

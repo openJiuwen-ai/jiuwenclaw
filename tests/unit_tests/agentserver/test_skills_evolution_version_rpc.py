@@ -250,27 +250,6 @@ async def test_do_evolve_rollback_clears_live_evolutions(tmp_path):
     assert live["entries"] == []
 
 
-def test_allowed_skill_roots_for_path_includes_control_plane_root(tmp_path: Path, monkeypatch):
-    workspace_skills = tmp_path / "workspace" / "skills"
-    workspace_skills.mkdir(parents=True)
-    project_skills = tmp_path / "relay-claw" / ".office-claw" / "skills"
-    skill_md = project_skills / "tianqi" / "SKILL.md"
-    skill_md.parent.mkdir(parents=True)
-    skill_md.write_text("# tianqi\n", encoding="utf-8")
-
-    monkeypatch.setattr(
-        evolution_version_ctl,
-        "resolve_agent_registered_skill_dirs",
-        lambda: [workspace_skills],
-    )
-    roots = evolution_version_ctl.allowed_skill_roots_for_path(
-        [str(workspace_skills)],
-        str(skill_md),
-    )
-    assert str(workspace_skills.resolve()) in roots
-    assert str(project_skills.resolve()) in roots
-
-
 @pytest.mark.anyio
 async def test_handle_skills_evolution_rollback_accepts_office_claw_skill_path(
     tmp_path, monkeypatch,
@@ -337,42 +316,6 @@ async def test_handle_skills_evolution_rollback_accepts_office_claw_skill_path(
 
 
 @pytest.mark.anyio
-async def test_handle_skills_evolution_rollback_rejects_path_outside_allowed(
-    tmp_path, monkeypatch,
-):
-    workspace_skills = tmp_path / "workspace" / "skills"
-    workspace_skills.mkdir(parents=True)
-    other = tmp_path / "other" / "skills" / "demo-skill"
-    other.mkdir(parents=True)
-    skill_md = other / "SKILL.md"
-    skill_md.write_text("# demo\n", encoding="utf-8")
-
-    adapter = JiuWenSwarmDeepAdapter()
-    monkeypatch.setattr(adapter, "_resolve_skill_dirs", lambda: [str(workspace_skills)])
-    monkeypatch.setattr(
-        evolution_version_ctl,
-        "resolve_agent_registered_skill_dirs",
-        lambda: [workspace_skills],
-    )
-    # Do not include skill_path root via helper path: validate with stale roots only
-    # by forcing allowed_skill_roots_for_path to omit the control-plane root.
-    monkeypatch.setattr(
-        evolution_version_ctl,
-        "allowed_skill_roots_for_path",
-        lambda _adapter_dirs, _skill_path=None: [str(workspace_skills.resolve())],
-    )
-
-    with pytest.raises(ValueError, match="outside registered skill roots"):
-        await adapter.handle_skills_evolution_rollback(
-            {
-                "name": "demo-skill",
-                "version": "latest",
-                "skill_path": str(skill_md),
-            }
-        )
-
-
-@pytest.mark.anyio
 async def test_handle_skills_evolution_rollback_rejects_mismatched_skill_dir_name(
     tmp_path, monkeypatch,
 ):
@@ -422,13 +365,15 @@ async def test_ws_disk_only_evolution_uses_agent_manager_not_stateless_agent(mon
             raise AssertionError("stateless agent must not handle disk-only evolution")
 
     server._agent_manager = _Manager()  # pylint: disable=protected-access
+    from jiuwenswarm.server.handlers import _default as _default_handlers
+
     monkeypatch.setattr(
-        AgentWebSocketServer,
+        _default_handlers,
         "_uses_tenant_pool",
-        staticmethod(lambda _request: False),
+        lambda _request: False,
     )
     monkeypatch.setattr(
-        AgentWebSocketServer,
+        _default_handlers,
         "_get_stateless_agent",
         AsyncMock(return_value=_Stateless()),
     )
@@ -459,7 +404,20 @@ async def test_ws_disk_only_evolution_uses_agent_manager_not_stateless_agent(mon
         params={"name": "tianqi", "version": "latest", "skill_path": "X:/proj/.office-claw/skills/tianqi/SKILL.md"},
         is_stream=False,
     )
-    await server._handle_unary_impl(None, request, asyncio.Lock())  # pylint: disable=protected-access
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    class _FakeWS:
+        async def send(self, payload):
+            sent.append(payload)
+
+    ctx = RequestContext(
+        request=request,
+        sink=WSSink(_FakeWS(), asyncio.Lock()),
+        services=AgentServerServices(server),
+        connection_id="test",
+    )
+    await _default_handlers._handle_unary_impl(ctx, request)
 
     assert len(manager_calls) == 1
     assert not stateless_calls

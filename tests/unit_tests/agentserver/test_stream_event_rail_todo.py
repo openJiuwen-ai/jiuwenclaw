@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
 import pytest
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRequest
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
     JiuSwarmStreamEventRail,
 )
@@ -228,3 +231,34 @@ async def test_ask_user_interrupt_emits_question_event_from_exception_cause():
     assert output.type == "chat.ask_user_question"
     assert output.payload["request_id"] == "tool-ask-2"
     assert output.payload["questions"][0]["question"] == "是否继续"
+
+
+@pytest.mark.asyncio
+async def test_deepresearch_native_interrupt_is_left_for_harness_without_tool_result():
+    session = _FakeSession()
+    tool_call = SimpleNamespace(
+        id="deepresearch-1",
+        name="deepresearch_execute",
+        arguments={"query": "q"},
+    )
+    interrupt = ToolInterruptException(
+        request=AskUserRequest(
+            message="请选择",
+            questions=[{"question": "专业版还是精简版？", "options": []}],
+        ),
+        tool_call=tool_call,
+    )
+    ctx = SimpleNamespace(
+        session=session,
+        inputs=ToolCallInputs(
+            tool_call=tool_call,
+            tool_name="deepresearch_execute",
+            tool_args=tool_call.arguments,
+            tool_result=interrupt,
+        ),
+        extra={},
+    )
+
+    await _TestRail().after_tool_call(ctx)
+
+    assert session.outputs == []

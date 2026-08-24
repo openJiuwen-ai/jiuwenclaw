@@ -248,25 +248,47 @@ async def skill_turbo(query: str) -> dict[str, Any]:
         })
     # ── [/TEMP-TEMPLATE-BYPASS] ──
 
-    from jiuwenswarm.server.runtime.skill_turbo.agent import SkillTurbo, SkillTurboNotHandled
-    try:
-        from jiuwenswarm.agents.harness.common.tools.subagent_executor import (
-            get_subagent_parent_session,
+    # ── [REGION-EDIT-BYPASS] 选区/编辑已有 PPT 请求拦截 ──
+    # office-claw 前端在用户选中 PPT 某区域做修改（改字体/文案/样式/局部替换）时，
+    # 注入的 user message 带固定选区字段（PPT选区/选区原文/选区类型/选区位置/选区容器/
+    # 选区 class/修改要求）。这类请求本质是"编辑已有 PPT 局部"，而非从零生成整套演示文稿。
+    # skill 加速器（pptx-craft 流水线）只会从 Stage 1 重新生成全新 PPT，无法复用已有文件
+    # 做局部修改（第二次选区修复被 LLM 调进 skill_acceleration_exec，从 stage1 全量重跑，丢失原 PPT）。
+    # 信号源说明：理想信号在"外层 user message"里，而本工具拿到的 query 是 LLM 重写的
+    # 忠实总结——多数选区请求会保留"选区"字样，但 LLM 偶尔会脑补成"生成 N 页 PPT"
+    # （上述 case 即如此，query 变成"8页左右"）。因此本块是对"query 保留选区语义"的兜底；
+    # 真正的主防线在 SkillTurboPromptRail 注入的排除提示词（LLM 调工具前能看到完整
+    # user message）。两层叠加降低误进概率。
+    # 删除方式：待 pptx-craft 流水线支持"编辑已有 PPT"短路分支后，搜索 [REGION-EDIT-BYPASS] 删除本块。
+    region_keywords = (
+        "PPT选区", "选区原文", "选区类型", "选区位置", "选区容器",
+        "选区 class", "选区class", "修改要求", "选区字段", "布局优化", "选区优化", "内容优化"
+    )
+    if any(kw in query for kw in region_keywords):
+        logger.info(
+            "[SkillTurboTool] 检测到 PPT 选区/编辑已有 PPT 请求，跳过 skill 加速器，"
+            "建议改用 skill_tool 走 pptx-craft 标准流程或直接编辑已有 PPT 文件"
         )
-    except ImportError:
-        def get_subagent_parent_session():
-            return None
-    try:
-        from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
-            get_effective_request_workspace_dir,
-            get_effective_request_output_dir,
-        )
-    except ImportError:
-        def get_effective_request_workspace_dir():
-            return None
+        return _wrap_skill_turbo_result({
+            "success": False,
+            "error": (
+                "检测到该请求是针对已有 PPT 某区域的局部修改（选区/编辑已有 PPT），"
+                "skill 加速器仅支持从零生成全新 PPT（会从 Stage 1 全量重跑，无法复用原文件）。"
+                "请改用 skill_tool 加载 pptx-craft 标准流程（支持编辑已有 PPT），"
+                "或直接用 edit_file / 读写 pptx 的工具完成局部修改"
+                "（直接执行，无需再调用 skill_acceleration_exec）。"
+            ),
+        })
+    # ── [/REGION-EDIT-BYPASS] ──
 
-        def get_effective_request_output_dir():
-            return None
+    from jiuwenswarm.server.runtime.skill_turbo.agent import SkillTurbo, SkillTurboNotHandled
+    from jiuwenswarm.agents.harness.common.tools.subagent_executor import (
+        get_subagent_parent_session,
+    )
+    from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+        get_effective_request_workspace_dir,
+        get_effective_request_output_dir,
+    )
     from openjiuwen.core.session.stream.base import OutputSchema
     from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError
 
@@ -288,10 +310,11 @@ async def skill_turbo(query: str) -> dict[str, Any]:
     outer_task_id = get_current_task_id()
     has_outer_todo = outer_task_id is not None
     logger.info(
-        "[SkillTurboTool] outer todo active=%s outer_task_id=%s, "
+        "[SkillTurboTool] outer todo active=%s outer_task_id=%s parent_session=%s, "
         "task events will be %s",
         has_outer_todo,
         outer_task_id,
+        type(parent_session).__name__ if parent_session is not None else None,
         "skipped" if has_outer_todo else "forwarded as-is",
     )
 
@@ -376,8 +399,29 @@ async def skill_turbo(query: str) -> dict[str, Any]:
                 )
                 try:
                     await parent_session.write_stream(output)
+                    if event_type in _SKILL_TURBO_TASK_EVENT_TYPES:
+                        tasks = chunk.payload.get("tasks") if isinstance(chunk.payload, dict) else None
+                        n_tasks = len(tasks) if isinstance(tasks, list) else 0
+                        logger.info(
+                            "[SkillTurboTool] forwarded %s via write_stream "
+                            "output_type=%s tasks=%s parent_session=%s",
+                            event_type,
+                            output_type,
+                            n_tasks,
+                            type(parent_session).__name__,
+                        )
                 except Exception:
-                    logger.debug("[SkillTurboTool] write_stream failed, skipping", exc_info=True)
+                    logger.warning(
+                        "[SkillTurboTool] write_stream failed for event_type=%s",
+                        event_type,
+                        exc_info=True,
+                    )
+            elif event_type in _SKILL_TURBO_TASK_EVENT_TYPES:
+                logger.warning(
+                    "[SkillTurboTool] drop %s: parent_session is None "
+                    "(task list will not reach frontend)",
+                    event_type,
+                )
 
         # 过程输出已通过 write_stream 实时推给前端，tool result 仅返回精简完成信号 + 产物摘要
         return _wrap_skill_turbo_result(
@@ -422,6 +466,12 @@ async def skill_turbo(query: str) -> dict[str, Any]:
             {"success": False, "error": f"执行失败: {exc}"},
             artifact_holder=skill_turbo_inst.artifact_holder,
         )
+
+
+# PPT 加速流水线经常超过 AbilityManager 默认 300s 工具超时；与 deepresearch_stream 一样
+# 豁免外层 deadline。HITL 续跑走 adapter resume_stream，本来就不经过这次 tool.invoke。
+# timeout_s=None 后仍受 MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT（默认 3600s）约束。
+skill_turbo.card.properties["resilience"] = {"timeout_s": None}
 
 
 def get_skill_turbo_tools() -> list:

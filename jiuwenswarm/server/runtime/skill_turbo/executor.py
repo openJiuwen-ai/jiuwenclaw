@@ -57,6 +57,9 @@ from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.server.runtime.skill_turbo.json_utils import extract_llm_json
 from jiuwenswarm.server.runtime.skill_turbo.fallback_handler import FallbackContractError
+from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
+    resolve_interactive_ask_from_inputs,
+)
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
 from jiuwenswarm.server.runtime.skill_turbo.validator import (
     PlanCodeValidationError,
@@ -89,6 +92,8 @@ try:
         set_effective_request_workspace_dir,
         get_effective_request_workspace_dir,
         get_effective_request_output_dir,
+        set_interactive_ask,
+        reset_interactive_ask,
     )
 except ImportError:
     # Fallback no-ops for environments without subagent_executor
@@ -106,6 +111,12 @@ except ImportError:
 
     def get_effective_request_output_dir(*args, **kwargs):
         return None
+
+    def set_interactive_ask(*args, **kwargs):
+        pass
+
+    def reset_interactive_ask(*args, **kwargs):
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +385,9 @@ class SkillTurboExecutor:
         # resume 模式下，adapter 在 run_stream 入口注入；executor 在 use_tool
         # 命中目标 tool_call_id 时一次性消费。
         self._pending_resume: dict[str, Any] | None = None
-        
+        # HITL resume 重放：对 task_states 已 completed 的二层 stage 跳过真实执行
+        self._resume_replay: bool = False
+
         # 当前任务状态（用于跨协程共享当前 task_id，解决 asyncio.create_task 复制 ContextVar 的问题）
         self._current_task_id_holder: dict[str, str | None] = {"task_id": None}
         self._task_states_holder: dict[str, dict[str, Any]] = {}
@@ -573,12 +586,15 @@ class SkillTurboExecutor:
 
         # 新一轮 SkillTurbo 执行：清除上轮残留的 node_artifacts，避免全新任务误复用旧产物。
         # holder 此时必为空（每次请求新建 Executor），清的是 session 中持久化的旧记录。
-        await self._clear_stale_node_artifacts()
+        # HITL resume 重放时保留产物（执行跳过主要靠 resume inputs；清盘会误伤可复用记录）。
+        if not self._resume_replay:
+            await self._clear_stale_node_artifacts()
 
         logger.info(
-            "[SkillTurboExecutor] execute_plan_stream start plan_code_len=%s input_keys=%s",
+            "[SkillTurboExecutor] execute_plan_stream start plan_code_len=%s input_keys=%s resume_replay=%s",
             len(plan_code),
             list(merged_inputs.keys()),
+            self._resume_replay,
         )
         # plan.started 必须最先发出，前端依赖它创建本次规划流的根节点。
         yield self._make_plan_started_chunk(request_id, channel_id)
@@ -605,6 +621,10 @@ class SkillTurboExecutor:
 
             # ⑥ 预先扫描 root 的子节点，初始化所有任务状态（状态为 pending）
             await self._initialize_pending_tasks(root)
+            # 立即排出初始化快照，避免等首个 node 输出才看到任务列表
+            # （首跑经 write_stream 转发时尤其明显；resume 复用同路径）。
+            async for task_chunk in self._drain_task_event_chunks():
+                yield task_chunk
 
             # ⑦ 流式执行规划
             # 注意：底层 LLM HTTP 调用和工具调用已有各自超时，上层暂不加整体超时
@@ -748,6 +768,7 @@ class SkillTurboExecutor:
                 await self._persist_node_artifacts(session)
             self._reset_execution_context(context_tokens)
             self._execution_inputs = {}
+            self._resume_replay = False
             await self._finish_trace(start)
 
     def _build_permission_rail(self) -> Any | None:
@@ -901,14 +922,46 @@ class SkillTurboExecutor:
                 "[SkillTurboExecutor] set send_file request context failed: %s", exc
             )
 
+        # Guided mode / outline-review skip 判定读 get_interactive_ask() ContextVar。
+        # DeepAgent 的 StreamEventRail 与 Executor 自己的 rail 不是同一实例；
+        # 必须在本执行上下文绑定，并注入 executor rail，供 before_tool_call 转绑。
+        metadata = inputs.get("metadata")
+        meta_copy = dict(metadata) if isinstance(metadata, dict) else {}
+        interactive_ask = resolve_interactive_ask_from_inputs(inputs)
+        meta_copy["interactive_ask"] = interactive_ask
+        self._stream_event_rail.set_skill_turbo_request_metadata(meta_copy)
+        try:
+            tokens["interactive_ask"] = set_interactive_ask(interactive_ask)
+            logger.info(
+                "[SkillTurboExecutor] interactive_ask ContextVar bound: %s",
+                interactive_ask,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[SkillTurboExecutor] set interactive_ask context failed: %s", exc
+            )
+
         effective_project_dir = inputs.get("effective_project_dir")
         if isinstance(effective_project_dir, str) and effective_project_dir.strip():
             try:
-                from openjiuwen.core.sys_operation.cwd import set_cwd
+                from openjiuwen.core.sys_operation.cwd import init_cwd, set_cwd
 
                 resolved_workspace_dir = effective_project_dir.strip()
                 set_effective_request_workspace_dir(resolved_workspace_dir)
-                set_cwd(resolved_workspace_dir)
+                if self._stream_event_rail is not None:
+                    self._stream_event_rail.set_runtime_cwd_paths(
+                        cwd=resolved_workspace_dir,
+                        project_root=resolved_workspace_dir,
+                        workspace=resolved_workspace_dir,
+                    )
+                try:
+                    init_cwd(
+                        resolved_workspace_dir,
+                        project_root=resolved_workspace_dir,
+                        workspace=resolved_workspace_dir,
+                    )
+                except Exception:
+                    set_cwd(resolved_workspace_dir)
                 logger.debug(
                     "[SkillTurboExecutor] effective request workspace set: %s",
                     resolved_workspace_dir,
@@ -950,6 +1003,13 @@ class SkillTurboExecutor:
             except Exception as exc:
                 logger.warning(
                     "[SkillTurboExecutor] reset send_file request context failed: %s", exc
+                )
+        if "interactive_ask" in tokens:
+            try:
+                reset_interactive_ask(tokens["interactive_ask"])
+            except Exception as exc:
+                logger.warning(
+                    "[SkillTurboExecutor] reset interactive_ask context failed: %s", exc
                 )
         _channel_id_var.reset(tokens["channel"])
         _request_id_var.reset(tokens["request"])
@@ -1206,6 +1266,7 @@ class SkillTurboExecutor:
         *,
         expected_tool_call_id: str,
         user_input: Any,
+        task_states: list[dict[str, Any]] | None = None,
     ) -> None:
         """adapter 在 resume 路径开始执行前调用，注入用户审批回复。
 
@@ -1213,13 +1274,37 @@ class SkillTurboExecutor:
         将一次性把 ``user_input`` 注入 ctx.extra[RESUME_USER_INPUT_KEY]，
         让 ``PermissionInterruptRail`` 完成 approve / reject 决策。
         其它 tool_call 不带 resume 输入（首次行为）。
+
+        ``task_states``：中断时保存的任务快照；``_initialize_pending_tasks`` 会
+        一次性取出并复用其中的 ``task_id``（不消费 ``user_input``）。
         """
         if not expected_tool_call_id:
             return
+        self._resume_replay = True
         self._pending_resume = {
             "expected_tool_call_id": expected_tool_call_id,
             "user_input": user_input,
+            "task_states": copy.deepcopy(task_states) if task_states else None,
         }
+
+    def _take_resume_task_states(self) -> list[dict[str, Any]] | None:
+        """从 pending_resume 取出任务快照（只取一次，不影响 user_input 消费）。"""
+        pending = self._pending_resume
+        if not pending:
+            return None
+        states = pending.pop("task_states", None)
+        if not isinstance(states, list) or not states:
+            return None
+        return states
+
+    def _snapshot_task_states(self) -> list[dict[str, Any]]:
+        """中断时导出当前二层任务快照，供 resume_ctx 持久化。"""
+        if self._task_states_holder:
+            return [copy.deepcopy(state) for state in self._task_states_holder.values()]
+        task_states = _task_states_var.get()
+        if task_states:
+            return [copy.deepcopy(state) for state in task_states.values()]
+        return []
 
     def _consume_pending_resume_input(self, current_tool_call_id: str) -> Any | None:
         pending = self._pending_resume
@@ -1227,8 +1312,10 @@ class SkillTurboExecutor:
             return None
         if pending.get("expected_tool_call_id") != current_tool_call_id:
             return None
+        user_input = pending.get("user_input")
+        # 保留可能尚未取出的 task_states（理论上 init 已 pop）；整表清空
         self._pending_resume = None
-        return pending.get("user_input")
+        return user_input
 
     def _next_tool_call_id(self, tool_name: str, kwargs: dict[str, Any]) -> str:
         """生成确定性 tool_call_id：基于 (tool_name, canonical_args, call_index) 哈希。
@@ -1411,6 +1498,7 @@ class SkillTurboExecutor:
                     plan_code=self._current_plan_code,
                     inputs=self._execution_inputs,
                     pending_tool_call_id=tool_call_id,
+                    task_states=self._snapshot_task_states(),
                 )
                 logger.info(
                     "[SkillTurboExecutor] HITL interrupt resume_ctx saved tcid=%s",
@@ -1992,11 +2080,14 @@ class SkillTurboExecutor:
                     # HITL 中断（PermissionInterruptRail.AbortError）必须向上抛，
                     # 不能转成 node_error_chunk —— 否则 SkillTurbo.run_stream 看不到中断，
                     # adapter 也就拿不到 AbortError 来发 HITL 三件套。
+                    # 先排空已入队的 task.*，避免中断瞬间丢最新任务快照。
                     if isinstance(item, AbortError) or extract_tool_interrupt(item) is not None:
                         logger.info(
                             "[SkillTurboExecutor] _execute_node_stream propagate HITL AbortError: %s",
                             item,
                         )
+                        async for task_chunk in self._drain_task_event_chunks():
+                            yield task_chunk
                         raise item
                     logger.error("[SkillTurboExecutor] _execute_node_stream error: %s", item)
                     async for task_chunk in self._drain_task_event_chunks():
@@ -2330,7 +2421,12 @@ class SkillTurboExecutor:
         payload["event_type"] = "task.complete" if "status" in payload else "task.start"
 
     async def _initialize_pending_tasks(self, root: PlanNode) -> None:
-        """预置二层任务列表，让前端在第一个 task.start 前就能展示完整待办。"""
+        """预置二层任务列表，让前端在第一个 task.start 前就能展示完整待办。
+
+        首次执行：为每个 sub_plan 分配新 ``task_id``。
+        HITL resume：复用 ``resume_ctx.task_states`` 中的 ``task_id`` / 状态，
+        避免前端 taskRuns 因新 UUID 叠出第二套 Stage。
+        """
         task_states = _task_states_var.get()
         if task_states is None or not getattr(root, "sub_plans", None):
             return
@@ -2338,6 +2434,19 @@ class SkillTurboExecutor:
         # 清空实例属性（新请求开始）
         self._task_states_holder.clear()
         self._current_task_id_holder["task_id"] = None
+
+        saved = self._take_resume_task_states()
+        if saved is not None:
+            restored = self._restore_task_states_from_snapshot(root, saved)
+            for task_id, task_state in restored.items():
+                task_states[task_id] = task_state
+                self._task_states_holder[task_id] = task_state
+            await self._emit_task_update_event()
+            logger.info(
+                "[SkillTurboExecutor] execute_plan_stream restored %d tasks from resume snapshot",
+                len(task_states),
+            )
+            return
 
         for idx, subplan in enumerate(root.sub_plans):
             task_id = f"task_{uuid.uuid4().hex[:8]}"
@@ -2358,28 +2467,93 @@ class SkillTurboExecutor:
             len(task_states),
         )
 
-    @staticmethod
-    async def _emit_task_update_event() -> None:
-        """发送 task.update 事件（全量任务状态快照）。"""
-        task_states = _task_states_var.get()
+    def _restore_task_states_from_snapshot(
+        self,
+        root: PlanNode,
+        saved: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """按 display name / index 对齐 resume 快照，复用原 ``task_id``。"""
+        by_content: dict[str, dict[str, Any]] = {}
+        by_index: dict[int, dict[str, Any]] = {}
+        for item in saved:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("task_content")
+            if isinstance(content, str) and content.strip():
+                by_content[content] = item
+            idx = item.get("task_index")
+            if isinstance(idx, int):
+                by_index[idx] = item
+
+        restored: dict[str, dict[str, Any]] = {}
+        used_ids: set[str] = set()
+        for idx, subplan in enumerate(root.sub_plans):
+            display = self._display_name(subplan.plan_name)
+            snap = by_content.get(display) or by_index.get(idx)
+            task_id: str | None = None
+            if snap is not None:
+                raw_id = snap.get("task_id")
+                if isinstance(raw_id, str) and raw_id.strip() and raw_id not in used_ids:
+                    task_id = raw_id.strip()
+
+            if task_id is not None and snap is not None:
+                state = copy.deepcopy(snap)
+                state["task_id"] = task_id
+                state["task_content"] = display
+                state["task_index"] = idx
+                state.setdefault("source", "skill_turbo")
+                if not isinstance(state.get("status"), str):
+                    state["status"] = "pending"
+                used_ids.add(task_id)
+            else:
+                task_id = f"task_{uuid.uuid4().hex[:8]}"
+                state = {
+                    "task_id": task_id,
+                    "task_content": display,
+                    "task_index": idx,
+                    "source": "skill_turbo",
+                    "status": "pending",
+                }
+            restored[task_id] = state
+        return restored
+
+    def _live_task_states(self) -> dict[str, dict[str, Any]] | None:
+        """运行中任务表：优先实例 holder（跨 create_task 共享），再回退 ContextVar。"""
+        if self._task_states_holder:
+            return self._task_states_holder
+        return _task_states_var.get()
+
+    async def _emit_task_update_event(self) -> None:
+        """发送 task.update 事件（全量任务状态快照）。
+
+        优先读 ``_task_states_holder``：``asyncio.create_task`` 会复制 ContextVar，
+        仅依赖 ``_task_states_var`` 可能读到空/旧 dict，把错误的 pending 快照推给前端。
+        """
         events_queue = _task_events_queue_var.get()
-        
+        task_states = self._live_task_states()
+
         if task_states is None or events_queue is None:
             logger.debug(
                 "[SkillTurboExecutor] _emit_task_update_event skip: no task_states or events_queue"
             )
             return
-        
-        # 深拷贝任务状态（避免后续修改影响已发送的事件）
-        all_tasks = [copy.deepcopy(state) for state in task_states.values()]
-        
+
+        # 深拷贝任务状态（避免后续修改影响已发送的事件）；按 index 排序保证前端稳定
+        all_tasks = sorted(
+            (copy.deepcopy(state) for state in task_states.values()),
+            key=lambda t: (
+                t.get("task_index") if isinstance(t.get("task_index"), int) else 10**9,
+                str(t.get("task_id") or ""),
+            ),
+        )
+
         # 计算统计信息
         total = len(all_tasks)
         completed = sum(1 for t in all_tasks if t.get("status") == "completed")
         in_progress = sum(1 for t in all_tasks if t.get("status") == "in_progress")
         pending = sum(1 for t in all_tasks if t.get("status") == "pending")
         failed = sum(1 for t in all_tasks if t.get("status") == "failed")
-        
+
         # 构建 payload
         payload = {
             "event_type": "task.update",
@@ -2392,12 +2566,22 @@ class SkillTurboExecutor:
             "parent_request_id": _request_id_var.get(),
             "timestamp": time.time(),
         }
-        
-        logger.debug(
-            "[SkillTurboExecutor] task.update: %d tasks - %d completed, %d in_progress, %d pending, %d failed",
-            total, completed, in_progress, pending, failed
+
+        status_preview = [
+            f"{t.get('task_index')}:{t.get('status')}"
+            for t in all_tasks[:8]
+        ]
+        logger.info(
+            "[SkillTurboExecutor] task.update: %d tasks - "
+            "%d completed, %d in_progress, %d pending, %d failed; preview=%s",
+            total,
+            completed,
+            in_progress,
+            pending,
+            failed,
+            status_preview,
         )
-        
+
         # 添加到事件队列
         task_update_event = {
             "request_id": _request_id_var.get(),
@@ -2406,6 +2590,36 @@ class SkillTurboExecutor:
             "is_complete": False,
         }
         events_queue.append(task_update_event)
+
+    async def _should_skip_subplan_execute(
+        self,
+        subplan: PlanNode,
+        inputs: dict[str, Any],
+    ) -> bool:
+        """HITL resume 重放时，跳过已 completed 的二层 Stage 真实执行。
+
+        in_progress / pending 节点仍完整重入，以便命中同一 tool_call_id 注入 answers。
+        """
+        del inputs  # 接口与 PlanNode 回调一致；跳过判定只依赖 task_states
+        if not self._resume_replay:
+            return False
+        if subplan.depth != 1:
+            return False
+        task_states = self._live_task_states()
+        if not task_states:
+            return False
+        found = self._find_task_state_by_plan_name(subplan.plan_name, task_states)
+        if found is None:
+            return False
+        _task_id, task_state = found
+        if task_state.get("status") != "completed":
+            return False
+        logger.info(
+            "[SkillTurboExecutor] resume skip execute completed stage plan_name=%s task_id=%s",
+            subplan.plan_name,
+            _task_id,
+        )
+        return True
 
     async def _before_subplan_execute(
         self, subplan: PlanNode, inputs: dict[str, Any]
@@ -2433,7 +2647,7 @@ class SkillTurboExecutor:
         )
         
         events_queue = _task_events_queue_var.get()
-        task_states = _task_states_var.get()
+        task_states = self._live_task_states()
 
         if events_queue is None or task_states is None:
             logger.debug(
@@ -2444,6 +2658,36 @@ class SkillTurboExecutor:
         task_id, task_state = self._get_or_create_task_state(subplan, task_states)
         timestamp = time.time()
         self._set_current_task_context(subplan, task_id, timestamp)
+
+        # HITL resume 会从根节点重放 plan：已 completed 的 stage 跳过真实执行
+        # （见 ``_should_skip_subplan_execute``），此处仅跳过 task.start UI，
+        # 避免与快照里仍 in_progress 的中断 stage 同时“运行”。
+        if task_state.get("status") == "completed":
+            logger.info(
+                "[SkillTurboExecutor] skip task.start for already-completed stage "
+                "(resume replay): task_id=%s plan_name=%s",
+                task_id,
+                subplan.plan_name,
+            )
+            return
+
+        # HITL 中断的 stage 在 resume 快照里仍为 in_progress。重放时若再次
+        # 发 task.start，前端会看到重复的 start（日志中“3 次 start 1 次
+        # complete”的根因）。跳过重复的 task.start 事件发送，但保留 current
+        # task context，让执行继续走到中断的 tool_call_id 命中 resume input。
+        if task_state.get("status") == "in_progress":
+            logger.info(
+                "[SkillTurboExecutor] skip duplicate task.start for in-progress stage "
+                "(HITL resume replay): task_id=%s plan_name=%s",
+                task_id,
+                subplan.plan_name,
+            )
+            return
+
+        # 兜底：启动较早 stage 时，把更靠后仍 in_progress 的 stage 收成 pending，
+        # 保证右侧任务列表同一时刻只有一个 running。
+        self._park_later_in_progress_tasks(task_state, task_states)
+
         self._update_task_state_on_start(task_state, timestamp)
 
         logger.debug(
@@ -2489,7 +2733,7 @@ class SkillTurboExecutor:
         
         task_context = _current_task_context_var.get()
         events_queue = _task_events_queue_var.get()
-        task_states = _task_states_var.get()
+        task_states = self._live_task_states()
 
         if events_queue is None or task_context is None or task_states is None:
             logger.debug(
@@ -2502,6 +2746,26 @@ class SkillTurboExecutor:
         duration_ms = int((timestamp - task_context.get("start_time", time.time())) * 1000)
         is_error = isinstance(result_or_error, Exception)
         status = "failed" if is_error else "completed"
+        prior_status = (
+            task_states[task_id].get("status") if task_id in task_states else None
+        )
+
+        # Resume 重放已完成 stage：before 已跳过 start，这里也跳过 complete/UI，
+        # 仍收集产物并清理 context。
+        if prior_status == "completed" and not is_error:
+            logger.info(
+                "[SkillTurboExecutor] skip task.complete for already-completed stage "
+                "(resume replay): task_id=%s plan_name=%s",
+                task_id,
+                subplan.plan_name,
+            )
+            _current_task_context_var.set(None)
+            self._current_task_id_holder["task_id"] = None
+            current_task_holder = _current_task_holder_var.get()
+            if current_task_holder is not None:
+                current_task_holder["task_id"] = None
+            self._collect_node_artifact(subplan, result_or_error, task_id, timestamp, is_error)
+            return
 
         logger.debug(
             "[SkillTurboExecutor] task.complete: task_id=%s task_name=%s status=%s duration_ms=%d depth=%d",
@@ -2648,6 +2912,25 @@ class SkillTurboExecutor:
         current_task_holder = _current_task_holder_var.get()
         if current_task_holder is not None:
             current_task_holder["task_id"] = task_id
+
+    @staticmethod
+    def _park_later_in_progress_tasks(
+        current: dict[str, Any],
+        task_states: dict[str, dict[str, Any]],
+    ) -> None:
+        """把 index 更大且仍 in_progress 的 stage 收成 pending。"""
+        cur_idx = current.get("task_index")
+        if not isinstance(cur_idx, int):
+            return
+        for other in task_states.values():
+            if other is current:
+                continue
+            if other.get("status") != "in_progress":
+                continue
+            other_idx = other.get("task_index")
+            if isinstance(other_idx, int) and other_idx > cur_idx:
+                other["status"] = "pending"
+                other.pop("start_time", None)
 
     @staticmethod
     def _update_task_state_on_start(
@@ -2846,6 +3129,7 @@ class SkillTurboExecutor:
             log=self._log_from_node,
             before_subplan_execute=self._before_subplan_execute,
             after_subplan_execute=self._after_subplan_execute,
+            should_skip_subplan_execute=self._should_skip_subplan_execute,
         )
 
     @staticmethod

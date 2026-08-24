@@ -542,6 +542,85 @@ async def test_config_get_returns_setup_guide_switch(monkeypatch, raw_config, ex
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_config", "expected"),
+    [
+        ({}, "false"),
+        ({"react": {"evolution": {"enabled": True}}}, "true"),
+        ({"react": {"evolution": {"enabled": False}}}, "false"),
+        ({"evolution": {"enabled": True}}, "true"),
+    ],
+)
+async def test_config_get_returns_evolution_enabled_switch(monkeypatch, raw_config, expected):
+    channel = FakeWebChannel()
+    monkeypatch.setattr(app_web_handlers, "get_config_raw", lambda: raw_config)
+    monkeypatch.setattr(app_web_handlers, "get_config", lambda: raw_config)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["config.get"](
+        object(),
+        "req-get-evolution",
+        {},
+        "sess-get-evolution",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["evolution_enabled"] == expected
+
+
+@pytest.mark.asyncio
+async def test_config_set_persists_evolution_enabled(monkeypatch):
+    channel = FakeWebChannel()
+    persisted: list[bool] = []
+    reload_options_seen: list[dict] = []
+
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config_raw",
+        lambda: {"react": {"evolution": {"enabled": True}}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config",
+        lambda: {"react": {"evolution": {"enabled": False}}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_evolution_enabled_in_config",
+        lambda enabled: persisted.append(enabled),
+    )
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        del updated_keys, env_updates, config_payload
+        reload_options_seen.append(dict(reload_options))
+        return True
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=on_config_saved,
+        )
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-evolution-enabled",
+        {"evolution_enabled": "false"},
+        "sess-evolution-enabled",
+    )
+
+    assert persisted == [False]
+    assert reload_options_seen == [{
+        "target_channel_id": "web",
+        "reload_scopes": ["agent_runtime"],
+    }]
+    assert channel.responses[-1]["payload"] == {
+        "updated": ["evolution_enabled"],
+        "applied_without_restart": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_models_replace_all_applies_scoped_reload_before_responding(monkeypatch):
     channel = FakeWebChannel()
     reload_started = asyncio.Event()

@@ -32,9 +32,11 @@ from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     resolve_sdk_choice,
 )
 from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_auto_memory_enabled, is_memory_enabled
+from jiuwenswarm.agents.harness.code.prompt import plan_approval as _plan_approval
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     append_history_record,
+    collapse_file_content_blocks,
 )
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.session.permission_response_ledger import (
@@ -69,6 +71,12 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
     is_interrupt_resume_payload,
 )
 
+PLAN_REMINDER_ORIGINAL_QUERY_KEY = getattr(
+    _plan_approval,
+    "PLAN_REMINDER_ORIGINAL_QUERY_KEY",
+    "_plan_reminder_original_query",
+)
+
 
 class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
@@ -79,6 +87,12 @@ def _permission_response_key(request: AgentRequest) -> str | None:
     if request.req_method not in (ReqMethod.CHAT_SEND, ReqMethod.CHAT_RESUME):
         return None
     params = request.params if isinstance(request.params, dict) else {}
+    # AskUser continuations may legitimately reuse the enclosing tool-call ID
+    # after that tool's permission interrupt has completed.  They are workflow
+    # input, not permission replays, so the permission ledger must not consume
+    # or deduplicate them.
+    if params.get("source") == "ask_user_interrupt":
+        return None
     answers = params.get("answers")
     if not isinstance(answers, list) or not answers:
         return None
@@ -133,12 +147,29 @@ def _history_user_content(params: Any, query: Any) -> Any:
 
     追加补充/调整请求时，``query`` 是包装后的提示词模板，会把模型提示词暴露到
     历史记录里。这里优先使用原始用户输入 ``supplement_input`` 作为展示内容。
+
+    进入 plan 的那一轮同理：``query`` 前面被拼了一段 <system-reminder>，历史里
+    要还原成用户原文，否则重新加载会话会把提示词当成用户提问显示出来。
+
+    Gateway 可能已把 ``@path`` 展开成 ``<file-content>`` 正文；历史只保留 ``@path``，
+    避免 transcript 膨胀，也不影响当轮已发给模型的内联内容。
     """
-    if isinstance(params, dict) and params.get("is_supplement"):
+    content: Any
+    if not isinstance(params, dict):
+        content = query
+    elif params.get("is_supplement"):
         supplement_input = params.get("supplement_input")
         if isinstance(supplement_input, str) and supplement_input.strip():
-            return supplement_input
-    return query
+            content = supplement_input
+        else:
+            content = query
+    else:
+        original_query = params.get(PLAN_REMINDER_ORIGINAL_QUERY_KEY)
+        content = original_query if isinstance(original_query, str) else query
+
+    if isinstance(content, str):
+        return collapse_file_content_blocks(content)
+    return content
 
 
 def _should_record_user_history(params: Any) -> bool:
@@ -1539,42 +1570,6 @@ class JiuWenSwarm:
             )
         return inputs, memory_mode, query
 
-    def _make_retry_without_a2ui_call(
-            self,
-            *,
-            adapter: AgentAdapter,
-            request: AgentRequest,
-    ):
-        async def retry_without_a2ui_call(query: str) -> str | None:
-            if getattr(adapter, "_instance", None) is None:
-                return None
-            try:
-                modified_request = AgentRequest(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    session_id=request.session_id,
-                    chat_id=request.chat_id,
-                    req_method=request.req_method,
-                    params={**request.params, "query": query},
-                    is_stream=False,
-                    timestamp=request.timestamp,
-                    metadata={**(request.metadata or {}), "skip_a2ui": True},
-                )
-                retry_inputs, _, _ = self._build_inputs(modified_request)
-                retry_inputs["_invoke_turn_id"] = request.request_id
-                result = await adapter.process_message_impl(modified_request, retry_inputs)
-                if result.ok and result.payload.get("content"):
-                    return str(result.payload["content"])
-            except Exception as exc:
-                logger.warning(
-                    "Retry without A2UI failed: request_id=%s error=%s",
-                    request.request_id,
-                    exc,
-                )
-            return None
-
-        return retry_without_a2ui_call
-
     @staticmethod
     def _team_plan_approval_payload_error_message() -> str:
         return (
@@ -2789,12 +2784,22 @@ class JiuWenSwarm:
                         return
                     async for chunk in adapter.process_message_stream_impl(request, inputs):
                         _put_count += 1
-                        if _put_count <= 3:
-                            _pl = getattr(chunk, "payload", None) or {}
-                            _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                        _pl = getattr(chunk, "payload", None) or {}
+                        _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                        # 前 3 个 chunk 全量打点；task.* 无论序号都打点，便于确认首跑
+                        # SkillTurbo write_stream 路径是否把任务列表推到外层流。
+                        if _put_count <= 3 or (
+                            isinstance(_et, str) and _et.startswith("task.")
+                        ):
+                            _n_tasks = 0
+                            if isinstance(_pl, dict) and isinstance(_pl.get("tasks"), list):
+                                _n_tasks = len(_pl["tasks"])
                             logger.info(
-                                "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s",
-                                _put_count, rid, _et,
+                                "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s%s",
+                                _put_count,
+                                rid,
+                                _et,
+                                f" tasks={_n_tasks}" if _n_tasks else "",
                             )
                         await stream_queue.put(("chunk", chunk))
                 except asyncio.CancelledError:

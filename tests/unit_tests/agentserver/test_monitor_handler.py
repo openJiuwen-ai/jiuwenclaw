@@ -515,6 +515,54 @@ async def test_handle_task_created_supplements_title_and_content_from_db() -> No
 
 
 @pytest.mark.anyio
+async def test_handle_task_created_backfills_assignee_from_db() -> None:
+    """TASK_CREATED carries no member_name; assignee is backfilled from the DB.
+
+    Lets the frontend attach a freshly-created task to its assignee's card
+    without waiting for a later TASK_CLAIMED event.
+    """
+    task_dao = _FakeTaskDao(
+        _FakeTask(task_id="task-1", title="research", content="do", assignee="worker-1")
+    )
+    handler = _make_handler(task_dao)
+    base = {"type": "team.task.created", "team_id": "team-1"}
+    event = MonitorEvent(
+        event_type=MonitorEventType.TASK_CREATED,
+        team_name="team-1",
+        timestamp=123,
+        task_id="task-1",
+        status=None,
+    )
+
+    result = await handler._handle_task(base, event)
+
+    assert result["assignee"] == "worker-1"
+    assert "member_id" not in result
+    assert task_dao.get_task_call_count == 1
+
+
+@pytest.mark.anyio
+async def test_handle_task_created_no_assignee_when_db_task_unassigned() -> None:
+    """An unassigned DB task must not synthesize an assignee field."""
+    task_dao = _FakeTaskDao(
+        _FakeTask(task_id="task-1", title="research", content="do", assignee=None)
+    )
+    handler = _make_handler(task_dao)
+    base = {"type": "team.task.created", "team_id": "team-1"}
+    event = MonitorEvent(
+        event_type=MonitorEventType.TASK_CREATED,
+        team_name="team-1",
+        timestamp=123,
+        task_id="task-1",
+        status=None,
+    )
+
+    result = await handler._handle_task(base, event)
+
+    assert "assignee" not in result
+
+
+@pytest.mark.anyio
 async def test_handle_task_updated_supplements_body_from_db() -> None:
     """TASK_UPDATED also triggers the DB body lookup."""
     task_dao = _FakeTaskDao(

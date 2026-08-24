@@ -1,4 +1,4 @@
-"""Public four-tool DeepResearch surface with lazy rewrite registration."""
+"""Public DeepResearch surface with one interactive entry and low-level tools."""
 
 from typing import Any
 
@@ -9,6 +9,7 @@ from .tools import (
     push_deepresearch_route,
     reset_deepresearch_route,
 )
+from .execution import deepresearch_execute
 
 
 def enable_deepresearch() -> bool:
@@ -31,6 +32,7 @@ def get_deepresearch_tools() -> list[Any]:
     )
 
     return [
+        deepresearch_execute,
         deepresearch_stream,
         deepresearch_prepare_rewrite,
         deepresearch_commit_rewrite,
@@ -38,6 +40,7 @@ def get_deepresearch_tools() -> list[Any]:
     ]
 
 __all__ = [
+    "deepresearch_execute",
     "deepresearch_stream",
     "enable_deepresearch",
     "get_deepresearch_tools",

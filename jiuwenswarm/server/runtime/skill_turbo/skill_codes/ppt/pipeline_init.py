@@ -173,6 +173,36 @@ def _parse_cli_path(output: str) -> str:
     raise PipelineInitError(f"无法从命令输出解析路径:\n{output}")
 
 
+def _normalize_ppt_session_parent(path: Path) -> Path:
+    """PPT 时间戳目录的父路径：智能体工作空间本身，不再套一层 workspace。
+
+    智能体工作空间是 ``.../agent/workspace``（部分环境为 ``.../agent/jiuwenclaw_workspace``）。
+    历史兜底 ``{cwd}/workspace`` 会在工作空间已叫 workspace 时变成
+    ``.../agent/workspace/workspace``。
+    """
+    resolved = path.expanduser()
+    try:
+        resolved = resolved.resolve()
+    except OSError:
+        resolved = resolved.absolute()
+    agent_names = {"workspace", "jiuwenclaw_workspace"}
+    if resolved.name.lower() == "workspace" and resolved.parent.name.lower() in agent_names:
+        return resolved.parent
+    if resolved.name.lower() == "projects" and resolved.parent.name.lower() in agent_names:
+        return resolved.parent
+    return resolved
+
+
+def _default_ppt_session_parent() -> Path:
+    """最后兜底：相对 cwd 的 workspace，经 normalize 避免套一层 workspace。
+
+    不直接 import ``jiuwenswarm.common.utils``：builtin skill_code 校验只允许
+    安全标准库与 ``skill_turbo`` 内部模块；上游通常已通过 ``workspace_base`` /
+    ``effective_project_dir`` 传入正确目录，此处仅作无输入时的兜底。
+    """
+    return _normalize_ppt_session_parent(Path("workspace"))
+
+
 def _resolve_explicit_output_dir(inputs: dict[str, Any]) -> str | None:
     """上游显式指定的最终产物目录（完整路径，不再追加时间戳）。"""
     explicit = inputs.get("output_dir")
@@ -181,7 +211,7 @@ def _resolve_explicit_output_dir(inputs: dict[str, Any]) -> str | None:
     text = str(explicit).strip()
     if not text:
         return None
-    return str(Path(text).expanduser().resolve())
+    return str(_normalize_ppt_session_parent(Path(text)))
 
 
 def _resolve_timestamp_parent_dir(inputs: dict[str, Any]) -> str:
@@ -195,7 +225,7 @@ def _resolve_timestamp_parent_dir(inputs: dict[str, Any]) -> str:
     # 优先使用显式指定的 workspace_base（通常来自 SkillTurbo 工具传入的 output_dir）
     workspace_base = inputs.get("workspace_base") or inputs.get("workspace")
     if workspace_base:
-        return str(Path(str(workspace_base)).expanduser().resolve())
+        return str(_normalize_ppt_session_parent(Path(str(workspace_base))))
 
     # fallback：从 effective_project_dir 重建路径
     project_dir = inputs.get("effective_project_dir")
@@ -204,7 +234,9 @@ def _resolve_timestamp_parent_dir(inputs: dict[str, Any]) -> str:
         user_id = str(inputs.get("user_id") or session)
         chat_id = str(inputs.get("chat_id") or session)
         return str(
-            (Path(str(project_dir)) / "files" / user_id / chat_id / "output").resolve()
+            _normalize_ppt_session_parent(
+                Path(str(project_dir)) / "files" / user_id / chat_id / "output"
+            )
         )
     return _resolve_workspace_base(inputs)
 
@@ -212,11 +244,11 @@ def _resolve_timestamp_parent_dir(inputs: dict[str, Any]) -> str:
 def _resolve_workspace_base(inputs: dict[str, Any]) -> str:
     workspace_base = inputs.get("workspace_base")
     if workspace_base:
-        return str(Path(str(workspace_base)).expanduser().resolve())
+        return str(_normalize_ppt_session_parent(Path(str(workspace_base))))
     workspace = inputs.get("workspace")
     if workspace:
-        return str(Path(str(workspace)).expanduser().resolve())
-    return str(Path("./workspace").expanduser().resolve())
+        return str(_normalize_ppt_session_parent(Path(str(workspace))))
+    return str(_default_ppt_session_parent())
 
 
 class P01EnvDepsNode(PlanNode):

@@ -65,7 +65,6 @@ process_down() {
     fi
 
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
 
     # MODULES是ALL_MODULES的子集，卸载顺序倒着来
     local reversed_modules=()

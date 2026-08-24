@@ -272,6 +272,7 @@ _SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_adapter_token"
 _SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_metadata_token"
 _SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_workspace_token"
 _SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_interactive_ask_token"
+_SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY = "_jiuwenswarm_subagent_parent_session_token"
 
 
 def _reset_skill_turbo_adapter_token(ctx: AgentCallbackContext) -> None:
@@ -312,6 +313,16 @@ def _reset_skill_turbo_interactive_ask_token(ctx: AgentCallbackContext) -> None:
             reset_interactive_ask,
         )
         reset_interactive_ask(token)
+
+
+def _reset_subagent_parent_session_token(ctx: AgentCallbackContext) -> None:
+    """Restore subagent parent session ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+            reset_subagent_parent_session,
+        )
+        reset_subagent_parent_session(token)
 
 
 class JiuSwarmStreamEventRail(DeepAgentRail):
@@ -358,6 +369,12 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # metadata 的 ContextVar 在请求任务中设置，但工具在 harness 执行任务里运行，
         # ContextVar 不跨任务传播，故经由本属性在 before_tool_call（工具执行上下文）转绑。
         self._skill_turbo_request_metadata: Optional[dict[str, Any]] = None
+        # Per-request openjiuwen CwdState paths (cwd / project_root / workspace).
+        # Seeded by the adapter in the request task; rebound here because the
+        # interaction supervisor / round task does not inherit that ContextVar.
+        self._runtime_cwd: Optional[str] = None
+        self._runtime_project_root: Optional[str] = None
+        self._runtime_workspace: Optional[str] = None
 
     def set_checkpointer(self, checkpointer: Optional[Any]) -> None:
         """Bind tenant-scoped checkpointer for early checkpoint saves."""
@@ -372,6 +389,183 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         self._skill_turbo_request_metadata = (
             dict(metadata) if isinstance(metadata, dict) else None
         )
+
+    def set_runtime_cwd_paths(
+        self,
+        *,
+        cwd: str | None = None,
+        project_root: str | None = None,
+        workspace: str | None = None,
+    ) -> None:
+        """Store per-request CWD layers for rebind in the interaction task.
+
+        ``write_file`` / ``bash`` / ``glob`` / etc. resolve relative paths via
+        ``get_cwd()`` / ``get_workspace()``. Those ContextVars are seeded in the
+        request task but tools run under the DeepAgent supervisor round task,
+        so this rail must re-apply the paths at invoke / tool boundaries.
+        """
+        def _norm(value: str | None) -> str | None:
+            if not isinstance(value, str):
+                return None
+            stripped = value.strip()
+            return stripped or None
+
+        self._runtime_cwd = _norm(cwd)
+        self._runtime_project_root = _norm(project_root) or self._runtime_cwd
+        self._runtime_workspace = _norm(workspace) or self._runtime_cwd
+        if self._runtime_cwd:
+            logger.info(
+                "[StreamEventRail] runtime cwd paths stored cwd=%s project_root=%s "
+                "workspace=%s",
+                self._runtime_cwd,
+                self._runtime_project_root,
+                self._runtime_workspace,
+            )
+
+    def _resolve_runtime_cwd_paths(self) -> tuple[str, str, str] | None:
+        """Resolve cwd / project_root / workspace for the current request."""
+        cwd = self._runtime_cwd
+        project_root = self._runtime_project_root
+        workspace = self._runtime_workspace
+        if not cwd and isinstance(self._skill_turbo_request_metadata, dict):
+            epd = self._skill_turbo_request_metadata.get("effective_project_dir")
+            if isinstance(epd, str) and epd.strip():
+                cwd = project_root = workspace = epd.strip()
+        if not cwd:
+            return None
+        return (
+            cwd,
+            project_root or cwd,
+            workspace or cwd,
+        )
+
+    def _rebind_runtime_cwd(self, *, replace: bool) -> None:
+        """Apply stored runtime paths onto openjiuwen CwdState in this task.
+
+        Args:
+            replace: When True, ``init_cwd`` installs a fresh CwdState (use in
+                ``before_invoke`` before tool ``asyncio.gather`` copies the
+                ContextVar reference). When False, mutate the shared CwdState
+                via ``set_cwd`` / ``set_project_root`` / ``set_workspace`` so
+                gather siblings already holding the reference see the update.
+        """
+        paths = self._resolve_runtime_cwd_paths()
+        if paths is None:
+            return
+        cwd, project_root, workspace = paths
+        try:
+            if replace:
+                from openjiuwen.core.sys_operation.cwd import init_cwd
+
+                init_cwd(cwd, project_root=project_root, workspace=workspace)
+            else:
+                from openjiuwen.core.sys_operation.cwd import (
+                    set_cwd,
+                    set_project_root,
+                    set_workspace,
+                )
+
+                set_cwd(cwd)
+                set_project_root(project_root)
+                set_workspace(workspace)
+            logger.debug(
+                "[StreamEventRail] rebound runtime cwd replace=%s cwd=%s",
+                replace,
+                cwd,
+            )
+        except Exception:
+            logger.warning(
+                "[StreamEventRail] rebind runtime cwd failed replace=%s cwd=%s",
+                replace,
+                cwd,
+                exc_info=True,
+            )
+
+    # Agent-internal subtrees that must stay under the agent workspace even when
+    # a per-request project_dir is bound (todos, context offload, memory, …).
+    _AGENT_INTERNAL_PATH_PREFIXES = frozenset(
+        {
+            "todo",
+            "context",
+            "skills",
+            "memory",
+            "sub_agents",
+            ".agent_history",
+            ".checkpoint",
+            ".workspace",
+        }
+    )
+
+    def _rebase_path_from_agent_workspace(self, file_path: str) -> str | None:
+        """Rebase absolute agent-workspace user paths onto the request project_dir.
+
+        OfficeClaw models often emit absolute paths under ``agent_default`` when
+        the prompt lacked project_dir context. Relative resolution alone cannot
+        fix those; rewrite only non-internal artifact paths.
+        """
+        if not isinstance(file_path, str) or not file_path.strip():
+            return None
+        expanded = os.path.expanduser(file_path.strip())
+        if not (os.path.isabs(expanded) or expanded.startswith("\\\\") or expanded.startswith("//")):
+            return None
+        paths = self._resolve_runtime_cwd_paths()
+        if paths is None:
+            return None
+        runtime_cwd, _, _ = paths
+        try:
+            from jiuwenswarm.common.utils import get_agent_workspace_dir
+        except Exception:
+            return None
+        try:
+            agent_ws = os.path.abspath(str(get_agent_workspace_dir()))
+            abs_path = os.path.abspath(expanded)
+            runtime_cwd_abs = os.path.abspath(runtime_cwd)
+        except (OSError, TypeError, ValueError):
+            return None
+        if os.path.normcase(agent_ws) == os.path.normcase(runtime_cwd_abs):
+            return None
+        try:
+            rel = os.path.relpath(abs_path, agent_ws)
+        except ValueError:
+            return None
+        if rel.startswith("..") or os.path.isabs(rel):
+            return None
+        first = rel.replace("\\", "/").split("/", 1)[0].lower()
+        if first in self._AGENT_INTERNAL_PATH_PREFIXES or first.startswith("."):
+            return None
+        rebased = os.path.abspath(os.path.join(runtime_cwd_abs, rel))
+        if os.path.normcase(rebased) == os.path.normcase(abs_path):
+            return None
+        return rebased
+
+    def _rebase_user_artifact_path_args(self, tool_call: Any, tool_name: str) -> None:
+        """Rewrite write/edit file_path when model hardcodes agent workspace."""
+        args = getattr(tool_call, "arguments", None)
+        if not isinstance(args, dict):
+            return
+        key = "file_path" if "file_path" in args else ("path" if "path" in args else None)
+        if key is None:
+            return
+        original = args.get(key)
+        rebased = self._rebase_path_from_agent_workspace(original) if isinstance(original, str) else None
+        if not rebased:
+            return
+        try:
+            new_args = dict(args)
+            new_args[key] = rebased
+            tool_call.arguments = new_args
+            logger.info(
+                "[StreamEventRail] rebased %s path from agent workspace: %s -> %s",
+                tool_name,
+                original,
+                rebased,
+            )
+        except (AttributeError, TypeError) as exc:
+            logger.warning(
+                "[StreamEventRail] failed to rebase %s path: %s",
+                tool_name,
+                exc,
+            )
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -688,6 +882,11 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         except Exception:
             logger.debug("[StreamEventRail] set_shell_session_id failed", exc_info=True)
 
+        # Install request CwdState before tool gather copies the ContextVar ref.
+        # Without this, relative write_file/bash/glob resolve against the default
+        # agent workspace instead of relay/project_dir.
+        self._rebind_runtime_cwd(replace=True)
+
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         token = ctx.extra.pop(self._SHELL_SID_TOKEN_KEY, None)
         if token is None:
@@ -720,6 +919,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_metadata_token(ctx)
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
+        _reset_subagent_parent_session_token(ctx)
 
     # ------------------------------------------------------------------
     # before_model_call: pause check + context fix + compression info
@@ -730,6 +930,10 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         await self._get_pause_event(sid).wait()
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
+
+        # Some task-loop paths reach model call without before_invoke; keep cwd
+        # aligned for any rail/tool that reads get_cwd during the model turn.
+        self._rebind_runtime_cwd(replace=False)
 
         self._inject_tool_call_goal_schema(ctx)
         self._ensure_tool_call_goal_prompt()
@@ -903,12 +1107,18 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
+        # Mutate shared CwdState (gather children hold the same reference).
+        # Covers write_file/edit_file/bash/glob/grep/command_tools/etc.
+        self._rebind_runtime_cwd(replace=False)
+
         session = ctx.session
         if session is not None and isinstance(ctx.inputs, ToolCallInputs):
             tc = ctx.inputs.tool_call
             tool_name = str(
                 getattr(ctx.inputs, "tool_name", "") or getattr(tc, "name", "") or ""
             )
+            if tool_name in ("write_file", "edit_file"):
+                self._rebase_user_artifact_path_args(tc, tool_name)
             if is_read_file_tool(tool_name):
                 path = extract_path_from_arguments(getattr(tc, "arguments", {}))
                 if path:
@@ -990,11 +1200,28 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 ia_token = set_interactive_ask(bool(_ia))
                 ctx.extra[_SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY] = ia_token
 
+        # Parent session for subagent / SkillTurbo event forwarding: tools such as
+        # skill_acceleration_exec read get_subagent_parent_session() and write_stream
+        # internal chunks back to the DeepAgent main session for frontend + history.
+        parent_bind_session = session
+        if parent_bind_session is not None:
+            if not hasattr(ctx, "extra"):
+                ctx.extra = {}
+            from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+                set_subagent_parent_session,
+            )
+
+            actual_session = getattr(parent_bind_session, "_parent", parent_bind_session)
+            parent_token = set_subagent_parent_session(actual_session)
+            ctx.extra[_SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY] = parent_token
+
     # ------------------------------------------------------------------
     # after_tool_call: emit tool_result + todo.updated
     # ------------------------------------------------------------------
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        _reset_subagent_parent_session_token(ctx)
+
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
             return
@@ -1044,6 +1271,12 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     exc_info=True,
                 )
 
+        if (
+            str(getattr(tc, "name", "") or "").strip() == "deepresearch_execute"
+            and _extract_tool_interrupt(ctx.inputs.tool_result) is not None
+        ):
+            return
+
         normalize_read_file_tool_outcome(ctx)
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
         self._symphony_stream_handler.request_force_finish(
@@ -1083,6 +1316,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_metadata_token(ctx)
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
+        _reset_subagent_parent_session_token(ctx)
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
             await self._fix_incomplete_tool_context(ctx)

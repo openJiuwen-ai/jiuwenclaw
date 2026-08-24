@@ -43,9 +43,7 @@ gen_web_file() {
 
     add_resource_if_set "WEB" "${file}"
 
-    if [ "${DEPLOY_VARS["IS_MOUNT_WEB_CODE"]}" == "true" ]; then
-        enable_dev_mode_if_needed ${file}
-    fi
+    enable_dev_mode_if_needed ${file} web
 }
 
 render_web_files() {

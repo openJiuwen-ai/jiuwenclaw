@@ -28,6 +28,22 @@ from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.server.runtime import agent_manager as agent_manager_module
+from jiuwenswarm.server.handlers import ops as ops_handlers
+from tests.unit_tests.conftest import patch_handler_name
+
+
+def _ctx_for_test(ws, request, send_lock, server=None):
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    return RequestContext(
+        request=request,
+        sink=WSSink(ws, send_lock),
+        connection_id=str(id(ws)),
+        services=AgentServerServices(server) if server is not None else None,
+    )
+
+
 
 
 class FakeWebSocket:
@@ -236,15 +252,11 @@ async def test_agent_reload_config_handler_passes_explicit_scope(monkeypatch):
         calls.append((config, env, kwargs))
 
     monkeypatch.setattr(server._agent_manager, "reload_agents_config", fake_reload)
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        lambda resp, response_id: {
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", lambda resp, response_id: {
             "response_id": response_id,
             "ok": resp.ok,
             "payload": resp.payload,
-        },
-    )
+        })
 
     request = AgentRequest(
         request_id="reload-1",
@@ -259,7 +271,7 @@ async def test_agent_reload_config_handler_passes_explicit_scope(monkeypatch):
     )
 
     ws = FakeWebSocket()
-    await server._handle_agent_reload_config(ws, request, asyncio.Lock())
+    await ops_handlers.handle_agent_reload_config(_ctx_for_test(ws, request, asyncio.Lock(), server))
 
     assert calls == [
         (
@@ -278,15 +290,11 @@ async def test_agent_reload_config_handler_skips_agent_manager_for_web_ui_scope(
     server = agent_ws_server_module.AgentWebSocketServer()
     reload_agents = AsyncMock()
     monkeypatch.setattr(server._agent_manager, "reload_agents_config", reload_agents)
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        lambda resp, response_id: {
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", lambda resp, response_id: {
             "response_id": response_id,
             "ok": resp.ok,
             "payload": resp.payload,
-        },
-    )
+        })
 
     request = AgentRequest(
         request_id="reload-ui",
@@ -300,7 +308,7 @@ async def test_agent_reload_config_handler_skips_agent_manager_for_web_ui_scope(
     )
 
     ws = FakeWebSocket()
-    await server._handle_agent_reload_config(ws, request, asyncio.Lock())
+    await ops_handlers.handle_agent_reload_config(_ctx_for_test(ws, request, asyncio.Lock(), server))
 
     reload_agents.assert_not_awaited()
     assert json.loads(ws.sent[-1])["ok"] is True
@@ -314,20 +322,12 @@ async def test_agent_reload_config_handler_applies_proactive_scope_without_agent
     server._proactive_engine = proactive_engine
 
     monkeypatch.setattr(server._agent_manager, "reload_agents_config", reload_agents)
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_config",
-        lambda: {"proactive_recommendation": {"enabled": True}},
-    )
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        lambda resp, response_id: {
+    patch_handler_name(monkeypatch, "get_config", lambda: {"proactive_recommendation": {"enabled": True}})
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", lambda resp, response_id: {
             "response_id": response_id,
             "ok": resp.ok,
             "payload": resp.payload,
-        },
-    )
+        })
 
     request = AgentRequest(
         request_id="reload-proactive",
@@ -341,7 +341,7 @@ async def test_agent_reload_config_handler_applies_proactive_scope_without_agent
     )
 
     ws = FakeWebSocket()
-    await server._handle_agent_reload_config(ws, request, asyncio.Lock())
+    await ops_handlers.handle_agent_reload_config(_ctx_for_test(ws, request, asyncio.Lock(), server))
 
     reload_agents.assert_not_awaited()
     proactive_engine.reload_config.assert_called_once_with({"enabled": True})

@@ -1,8 +1,8 @@
 #!/bin/bash
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-SRC_FILE=${PROJECT_DIR}/jiuwenclaw/resources/config.yaml
-DEST_FILE=${PROJECT_DIR}/deploy/templates/gateway-config-jiuwen.template.yaml
+SRC_FILE=${PROJECT_DIR}/jiuwenswarm/resources/config.yaml
+DEST_FILE=${PROJECT_DIR}/deploy/enterprise/templates/gateway-config.template.yaml
 
 rm -f "${DEST_FILE}"
 cp -f "${SRC_FILE}" "${DEST_FILE}"

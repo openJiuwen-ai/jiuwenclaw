@@ -2,16 +2,12 @@
 set -euo >/dev/null 2>&1
 
 gen_gateway_env_file() {
-    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
     local env_template_file="${CONFIG["GATEWAY_ENV_TEMPLATE_FILE"]}"
-    local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
+    local envfile_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_CM_NAME"]}"
     local env_file="${CONFIG["GATEWAY_ENV_FILE"]}"
     local deploy_mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]}"
 
-    if [ "${client_type}" != "jiuwen" ]; then
-        return
-    fi
 
     if [ "${deploy_mode}" == "active-standby" ]; then
          DEPLOY_VARS["GATEWAY_INSTANCE_ID"]="gateway-${namespace}"
@@ -35,13 +31,12 @@ gen_gateway_env_file() {
         | awk -F'=' '$2 != ""' \
         | sort > "${env_file}.tmp" && mv -f "${env_file}.tmp" "${env_file}"
 
-    kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${env_file} --dry-run=client -o yaml | yq eval 'del(.metadata.creationTimestamp)' > ${CONFIG_DIR}/gateway-env.configmap.yaml
+    kubectl create configmap -n ${namespace} ${envfile_name} --from-file=.env=${env_file} --dry-run=client -o yaml | yq eval 'del(.metadata.creationTimestamp)' > ${CONFIG_DIR}/gateway-envfile.configmap.yaml
 }
 
 gen_gateway_config_file() {
-    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local field_name="feishu"
-    local template_file="${TEMPLATE_DIR}/gateway-config-${client_type}.template.yaml"
+    local template_file="${TEMPLATE_DIR}/gateway-config.template.yaml"
     local file="${CONFIG["GATEWAY_CONFIG_FILE"]}"
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
     local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
@@ -76,19 +71,13 @@ gen_gateway_config_file() {
 }
 
 gen_gateway_file() {
-    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local mode="${DEPLOY_VARS["MODE"]}"
     local template_file="${CONFIG["GATEWAY_TEMPLATE_FILE"]}"
     local file="${CONFIG["GATEWAY_FILE"]}"
     local enable_gw_lable="${DEPLOY_VARS["GATEWAY_SCHED_LABEL_ENABLED"]}"
 
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
-    if [ "${client_type}" != "jiuwen" ]; then
-        success "Gateway file generation completed: ${file}"
-        return
-    fi
-
-    enable_dev_mode_if_needed ${file}
+    enable_dev_mode_if_needed ${file} gateway
 
     # No need to install packages
     if [[ "${mode}" == "dev" && -n "${DEPLOY_VARS["CLAW_CODE_PATH"]:-}" ]]; then
@@ -98,18 +87,6 @@ gen_gateway_file() {
     fi
 
     add_resource_if_set "GATEWAY" "${file}"
-
-    # Bind dedicated ServiceAccount to grant pod creation privileges
-    yq eval 'select(.kind == "Deployment").spec.template.spec.serviceAccountName = "'"${DEPLOY_VARS["GATEWAY_SERVICE_ACCOUNT"]}"'"' -i "${file}"
-
-    # Inject environment variables via ConfigMap binding
-    yq eval '
-        select(.kind == "Deployment").spec.template.spec.containers[0].envFrom += [{
-            "configMapRef": {
-                "name": "'"${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"'"
-            }
-        }]
-    ' -i "${file}"
 
     if [[ "${mode}" != "dev" &&  "${enable_gw_lable}" == "true" ]]; then
         # Automatically create nodeSelector and set gateway=enable
@@ -161,7 +138,7 @@ render_gateway_files() {
 
 deploy_gateway() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
+    local envfile_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_CM_NAME"]}"
     local env_file="${CONFIG["GATEWAY_ENV_FILE"]}"
     local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
     local conf_file="${CONFIG["GATEWAY_CONFIG_FILE"]}"
@@ -172,7 +149,7 @@ deploy_gateway() {
     local is_external_pvc="${DEPLOY_VARS["ENABLE_EXTERNAL_PVC"]}"
 
     ensure_secret_configmap
-    exec_cmd kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${env_file}
+    exec_cmd kubectl create configmap -n ${namespace} ${envfile_name} --from-file=.env=${env_file}
     exec_cmd kubectl create configmap -n ${namespace} ${conf_name} --from-file=config.yaml=${conf_file}
 
     if [[ "${mount_type}" == "pvc" && "${is_external_pvc}" == "false" ]]; then
@@ -187,7 +164,7 @@ uninstall_gateway() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
     local gateway_name="${DEPLOY_VARS["GATEWAY_NAME"]}"
     local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
-    local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
+    local envfile_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_CM_NAME"]}"
     local gateway_file="${CONFIG["GATEWAY_FILE"]}"
     local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
     local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
@@ -221,7 +198,7 @@ uninstall_gateway() {
     delete_k8s_resource "configmap" "${conf_name}" "${namespace}"
 
     if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "jiuwen" ]; then
-        delete_k8s_resource "configmap" "${env_name}" "${namespace}"
+        delete_k8s_resource "configmap" "${envfile_name}" "${namespace}"
     fi
 
     if [[ "${mount_type}" == "pvc" && -z "${DEPLOY_VARS["CLAW_PVC"]:-}" ]]; then

@@ -311,6 +311,31 @@ async def _connect_with_retry(
             backoff = min(backoff * 2, interval)
 
 
+def _gateway_agent_client_type() -> str:
+    """``gateway.agent_client.type``，缺省 websocket。不探测 Agent 开没开 HTTP。"""
+    from jiuwenswarm.common.config import get_config
+
+    try:
+        full_cfg = get_config()
+        gateway_cfg = full_cfg.get("gateway") if isinstance(full_cfg, dict) else {}
+        agent_cfg = gateway_cfg.get("agent_client") if isinstance(gateway_cfg, dict) else {}
+        if isinstance(agent_cfg, dict):
+            return str(agent_cfg.get("type") or "websocket").strip().lower()
+    except Exception:  # noqa: BLE001
+        pass
+    return "websocket"
+
+
+def _default_agent_server_url() -> str:
+    """未设 AGENT_SERVER_URL 时：type=http 默认 HTTP 口，否则 WS 口。"""
+    host = os.getenv("AGENT_SERVER_HOST", "127.0.0.1")
+    if _gateway_agent_client_type() == "http":
+        port = os.getenv("AGENT_HTTP_PORT") or "8766"
+        return f"http://{host}:{port}"
+    port = os.getenv("AGENT_SERVER_PORT") or os.getenv("AGENT_PORT", "18092")
+    return f"ws://{host}:{port}"
+
+
 async def _connect_wrap_and_create_message_handler(
     client,
     *,
@@ -321,14 +346,14 @@ async def _connect_wrap_and_create_message_handler(
 ):
     """Connect the selected raw client before installing its telemetry proxy."""
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+    from jiuwenswarm.gateway.routing.http_agent_client import HttpSseAgentServerClient
     from jiuwenswarm.telemetry.gateway_client import wrap_gateway_agent_client
 
-    telemetry_target_uri = (
-        agent_server_url
-        if isinstance(client, WebSocketAgentServerClient)
-        else None
+    needs_url_connect = isinstance(
+        client, (WebSocketAgentServerClient, HttpSseAgentServerClient)
     )
-    if isinstance(client, WebSocketAgentServerClient):
+    telemetry_target_uri = agent_server_url if needs_url_connect else None
+    if needs_url_connect:
         await _connect_with_retry(
             client,
             agent_server_url,
@@ -1510,6 +1535,7 @@ async def _run_with_telemetry(
     from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.extensions.redis import init_gateway_redis_from_config
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+    from jiuwenswarm.gateway.routing.http_agent_client import HttpSseAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
     from jiuwenswarm.gateway.cron import CronTenantRegistry
     from jiuwenswarm.gateway.heartbeat.heartbeat import GatewayHeartbeatService, HeartbeatConfig
@@ -1564,11 +1590,14 @@ async def _run_with_telemetry(
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
 
-    # 从扩展注册表获取 AgentServerClient（WebSocket 或 Yuanrong 等扩展实现）
+    # 从扩展注册表获取 AgentServerClient（WebSocket / HTTP / Yuanrong 等扩展实现）
     agent_server_ext = extension_registry.get_agent_server_client_extension()
     if agent_server_ext is not None:
         logger.info("[App] using extension AgentServerClient: %s", agent_server_ext.metadata.name)
         client = agent_server_ext.get_client()
+    elif _gateway_agent_client_type() == "http":
+        logger.info("[App] using HttpSseAgentServerClient (gateway.agent_client.type=http)")
+        client = HttpSseAgentServerClient()
     else:
         client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=600.0)
 
@@ -2644,6 +2673,16 @@ async def _run_with_telemetry(
     )
 
     await channel_manager.start_dispatch()
+
+    config_poll_scheduler = None
+    try:
+        from jiuwenswarm.gateway.config_poll import get_config_poll_scheduler
+
+        config_poll_scheduler = get_config_poll_scheduler()
+        await config_poll_scheduler.start()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[App] gateway config poll scheduler failed to start: %s", exc)
+
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
     # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。
     # default/default scheduler already started via get_controller above.
@@ -2721,6 +2760,11 @@ async def _run_with_telemetry(
     except asyncio.CancelledError:
         pass
     finally:
+        if config_poll_scheduler is not None:
+            try:
+                await config_poll_scheduler.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[App] gateway config poll scheduler stop failed: %s", exc)
         if prewarm_sync_debounce_task is not None:
             prewarm_sync_debounce_task.cancel()
             try:
@@ -2880,7 +2924,7 @@ def main() -> None:
         "-u",
         default=None,
         metavar="URL",
-        help="AgentServer WebSocket URL (default: AGENT_SERVER_URL or ws://AGENT_SERVER_HOST:AGENT_SERVER_PORT).",
+        help="AgentServer URL (default: AGENT_SERVER_URL, or type=http → http://host:8766, else ws://host:18092).",
     )
     parser.add_argument(
         "--host",
@@ -2923,12 +2967,10 @@ def main() -> None:
             # Error was already printed by parse_dotenv_early()
             raise SystemExit(1)
 
-    default_host = os.getenv("AGENT_SERVER_HOST", "127.0.0.1")
-    default_port = os.getenv("AGENT_SERVER_PORT") or os.getenv("AGENT_PORT", "18092")
     agent_server_url = (
             args.agent_server_url
             or os.getenv("AGENT_SERVER_URL")
-            or f"ws://{default_host}:{default_port}"
+            or _default_agent_server_url()
     )
     web_host = args.host or os.getenv("WEB_HOST", "127.0.0.1")
     web_port = args.port or int(os.getenv("WEB_PORT", "19000"))
