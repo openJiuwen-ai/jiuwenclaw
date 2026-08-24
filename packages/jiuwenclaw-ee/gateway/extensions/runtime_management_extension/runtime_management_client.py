@@ -605,6 +605,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("RUNTIME_DB_POOL_SIZE", os.getenv("RUNTIME_DB_POOL_SIZE")),
                 ("RUNTIME_DB_MAX_OVERFLOW", os.getenv("RUNTIME_DB_MAX_OVERFLOW")),
                 ("RUNTIME_DB_POOL_TIMEOUT", os.getenv("RUNTIME_DB_POOL_TIMEOUT")),
+                ("RUNTIME_DB_QUERY_TIMEOUT", os.getenv("RUNTIME_DB_QUERY_TIMEOUT")),
                 ("JIUWENCLAW_ID", os.getenv("JIUWENCLAW_ID")),
                 ("LLM_SSL_VERIFY", os.getenv("LLM_SSL_VERIFY")),
                 ("PYTHONPATH", os.getenv("PYTHONPATH")),
