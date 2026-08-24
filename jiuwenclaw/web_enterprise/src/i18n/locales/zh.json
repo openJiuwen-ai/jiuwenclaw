@@ -967,6 +967,8 @@
     "connectionClosed": "连接已关闭",
     "connectionUnavailable": "连接不可用",
     "requestTimeout": "请求超时",
+    "dbQueryTimeout": "数据库查询超时，请稍后重试",
+    "requestProcessingFailed": "请求处理失败，请稍后重试",
     "requestAborted": "请求已取消",
     "requestFailed": "请求失败",
     "sendMessageFailed": "发送消息失败",

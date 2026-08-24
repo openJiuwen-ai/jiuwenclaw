@@ -52,6 +52,8 @@ export interface Message {
   toolResult?: ToolResult;
   // 是否正在流式输出
   isStreaming?: boolean;
+  /** 对话区错误提示（如 chat.error / 处理失败） */
+  isError?: boolean;
   usageSummary?: UsageSummary;
 }
 
