@@ -321,6 +321,35 @@ class _StreamBufferState:
         self.buckets.clear()
 
 
+_SKILL_TURBO_TC_PREFIX = "skill_turbo-tc-"
+
+
+def _parse_tool_name_from_call_id(tool_call_id: str) -> str | None:
+    """从 ``skill_turbo-tc-{tool_name}-{args_hash}-{idx}`` 解析 tool_name。
+
+    tool_name 自身可能含 ``-``（如 ``ask_user``），所以从尾部剥掉 ``-{idx}``
+    和 ``-{args_hash}``（各 8/16 进制 hex 段），剩余即 tool_name。
+
+    解析失败返回 ``None``（如非本格式或过短）。
+    """
+    if not isinstance(tool_call_id, str) or not tool_call_id.startswith(
+        _SKILL_TURBO_TC_PREFIX
+    ):
+        return None
+    body = tool_call_id[len(_SKILL_TURBO_TC_PREFIX):]
+    if not body:
+        return None
+    last_dash = body.rfind("-")
+    if last_dash <= 0:
+        return None
+    body = body[:last_dash]  # 去掉末段 idx
+    last_dash = body.rfind("-")
+    if last_dash <= 0:
+        return None
+    name = body[:last_dash]  # 去掉 args_hash
+    return name or None
+
+
 class SkillTurboExecutor:
     """规划代码运行时引擎。"""
 
@@ -1283,6 +1312,9 @@ class SkillTurboExecutor:
         self._resume_replay = True
         self._pending_resume = {
             "expected_tool_call_id": expected_tool_call_id,
+            "expected_tool_name": _parse_tool_name_from_call_id(
+                expected_tool_call_id
+            ),
             "user_input": user_input,
             "task_states": copy.deepcopy(task_states) if task_states else None,
         }
@@ -1306,16 +1338,56 @@ class SkillTurboExecutor:
             return [copy.deepcopy(state) for state in task_states.values()]
         return []
 
-    def _consume_pending_resume_input(self, current_tool_call_id: str) -> Any | None:
+    def _consume_pending_resume_input(
+        self, current_tool_call_id: str, current_tool_name: str
+    ) -> tuple[Any | None, str]:
+        """取出对当前 tool_call 的用户回复。
+
+        返回 ``(user_input, effective_tool_call_id)``：
+
+        - 精确命中：``current_tool_call_id == pending.expected_tool_call_id``，
+          返回 ``(user_input, current_tool_call_id)`` 并清空 pending。
+        - 回退命中（resume 重放）：``current_tool_call_id`` 因重放时 ask_user
+          等工具的非确定性参数（如 LLM 生成的候选项）而与中断时不一致，但
+          ``current_tool_name == pending.expected_tool_name`` 时，返回
+          ``(user_input, expected_tool_call_id)`` 并清空 pending——用中断时的
+          ``tool_call_id`` 覆盖本次，使 rail 能把 ``user_input`` 注入到与中断点
+          对齐的 ``ctx.extra[RESUME_USER_INPUT_KEY]``，避免再次中断形成死循环。
+        - 未命中：返回 ``(None, current_tool_call_id)``，pending 保留待后续匹配。
+
+        ``current_tool_name`` 由调用方 ``use_tool`` 传入，避免在本方法里再解析
+        一次 ``current_tool_call_id``。
+        """
         pending = self._pending_resume
         if not pending:
-            return None
-        if pending.get("expected_tool_call_id") != current_tool_call_id:
-            return None
-        user_input = pending.get("user_input")
-        # 保留可能尚未取出的 task_states（理论上 init 已 pop）；整表清空
-        self._pending_resume = None
-        return user_input
+            return None, current_tool_call_id
+        expected_id = pending.get("expected_tool_call_id")
+        if expected_id == current_tool_call_id:
+            user_input = pending.get("user_input")
+            self._pending_resume = None
+            return user_input, current_tool_call_id
+        expected_name = pending.get("expected_tool_name")
+        if (
+            expected_name
+            and current_tool_name == expected_name
+            and pending.get("user_input") is not None
+        ):
+            user_input = pending.get("user_input")
+            logger.warning(
+                "[SkillTurboExecutor] resume tool_call_id mismatch fallback: "
+                "current_tcid=%s expected_tcid=%s tool_name=%s; "
+                "aligning to expected_tcid to inject user_input "
+                "(likely non-deterministic ask_user args on replay)",
+                current_tool_call_id,
+                expected_id,
+                current_tool_name,
+            )
+            self._pending_resume = None
+            aligned_id = (
+                expected_id if isinstance(expected_id, str) else current_tool_call_id
+            )
+            return user_input, aligned_id
+        return None, current_tool_call_id
 
     def _next_tool_call_id(self, tool_name: str, kwargs: dict[str, Any]) -> str:
         """生成确定性 tool_call_id：基于 (tool_name, canonical_args, call_index) 哈希。
@@ -1351,7 +1423,9 @@ class SkillTurboExecutor:
         """
         session = _session_var.get()
         tool_call_id = self._next_tool_call_id(tool_name, kwargs)
-        resume_input = self._consume_pending_resume_input(tool_call_id)
+        resume_input, tool_call_id = self._consume_pending_resume_input(
+            tool_call_id, tool_name
+        )
 
         # ─── 工具调用 trace 上下文 ───
         # begin_tool_trace_event 在本次 use_tool 调用范围内分配独立 event_id，
