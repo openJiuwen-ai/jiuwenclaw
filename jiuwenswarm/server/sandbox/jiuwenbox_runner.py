@@ -148,32 +148,27 @@ def _resolve_jiuwenbox_src_dir() -> Optional[Path]:
 def _resolve_jiuwenbox_configs_dir() -> Optional[Path]:
     """探测 ``jiuwenbox/configs/`` 目录 (policy 模板所在).
 
-    优先在仓库目录树里寻找 (开发场景, ``jiuwenbox/src/jiuwenbox/configs``);
-    失败再尝试已 ``pip install`` 的 jiuwenbox 包内 ``configs/`` (打包态:
-    jiuwenbox 随 jiuwenclaw wheel 装进 site-packages/jiuwenbox/, configs/
-    随 package-data 一起带出, 见 §8.1 Q1)。
-    返回 ``None`` 表示未找到。
+    与 ``config._jiuwenbox_configs_dir`` 同一探测顺序: 冻包 ``_MEIPASS``、
+    仓库目录树、pip 安装包。
     """
-    here = Path(__file__).resolve()
-    for ancestor in here.parents[1:7]:
-        for candidate in (
-            ancestor / "jiuwenbox" / "src" / "jiuwenbox" / "configs",
-            ancestor / "jiuwenbox" / "configs",
-        ):
-            if candidate.is_dir():
-                return candidate
+    from jiuwenswarm.common.config import _jiuwenbox_configs_dir
+    return _jiuwenbox_configs_dir()
+
+
+def _frozen_exe_error_log_tail(max_chars: int = 4000) -> str:
+    """窗口化冻包 stderr 为空时, 读 jiuwenswarm_exe_error.log 尾部."""
+    log_dir = Path(os.environ.get("JIUWENSWARM_DATA_DIR", Path.home() / ".jiuwenswarm")) / "logs"
+    log_file = log_dir / "jiuwenswarm_exe_error.log"
     try:
-        import jiuwenbox  # type: ignore[import-not-found]
-    except ImportError:
-        return None
-    try:
-        pkg_dir = Path(jiuwenbox.__file__).resolve().parent
-    except Exception:  # noqa: BLE001
-        return None
-    direct = pkg_dir / "configs"
-    if direct.is_dir():
-        return direct
-    return None
+        if not log_file.is_file():
+            return ""
+        text = log_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    text = text.strip()
+    if len(text) > max_chars:
+        return text[-max_chars:]
+    return text
 
 
 def _try_set_pdeathsig() -> None:
@@ -299,7 +294,7 @@ class JiuwenBoxRunner:
         target_port = port or self.port
         url = f"http://{target_host}:{target_port}/health"
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
                 resp = await client.get(url)
                 return resp.status_code == 200
         except Exception:
@@ -311,7 +306,7 @@ class JiuwenBoxRunner:
         target_port = port or self.port
         url = f"http://{target_host}:{target_port}/health"
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
                 resp = await client.get(url)
                 if resp.status_code != 200:
                     return None
@@ -425,25 +420,39 @@ class JiuwenBoxRunner:
             self.host = host
             self.port = port
 
-            cmd = [
-                sys.executable,
-                "-m",
-                "uvicorn",
-                "jiuwenbox.server.app:app",
-                "--host",
-                host,
-                "--port",
-                str(port),
-            ]
+            if getattr(sys, "frozen", False):
+                cmd = [
+                    sys.executable,
+                    "--desktop-run-jiuwenbox",
+                    "--host",
+                    host,
+                    "--port",
+                    str(port),
+                ]
+            else:
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "uvicorn",
+                    "jiuwenbox.server.app:app",
+                    "--host",
+                    host,
+                    "--port",
+                    str(port),
+                ]
             # 构造 box-server 子进程 env (P0-5 收口: 不全量 dict(os.environ), 避免凭据/token/API key 灌进子进程).
             # 只继承白名单键 (PATH/SystemRoot 等运行必需) + JIUWENBOX_* (调用方 extra_env 传入的动态路径), 其余不透传.
             _env_allowlist = {  # noqa: N806 - Win32 常量风格
                 "PATH", "PATHEXT", "SystemRoot", "windir", "COMSPEC",
                 "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA",
                 "HOME", "LANG", "LC_ALL", "LC_CTYPE",
-                "PYTHONPATH", "PYTHONHOME", "PYTHONIOENCODING",
+                "PYTHONIOENCODING",
                 "JIUWENCLAW_DATA_DIR", "OFFICE_CLAW_DATA_DIR",
+                "JIUWENSWARM_DATA_DIR", "JIUWENSWARM_HOME",
+                "CLAW_PYTHON_HOME", "JIUWENCLAW_BASE_PYTHON",
             }
+            if not getattr(sys, "frozen", False):
+                _env_allowlist.update({"PYTHONPATH", "PYTHONHOME"})
             env: dict[str, str] = {}
             for _k in _env_allowlist:
                 _v = os.environ.get(_k)
@@ -459,7 +468,7 @@ class JiuwenBoxRunner:
                 env.update({str(k): str(v) for k, v in extra_env.items()})
             # 若 jiuwenbox 未安装到 site-packages, 尝试用仓库内源码目录注入 PYTHONPATH
             local_src = _resolve_jiuwenbox_src_dir()
-            if local_src is not None:
+            if local_src is not None and not getattr(sys, "frozen", False):
                 existing = env.get("PYTHONPATH", "")
                 parts = [str(local_src)]
                 if existing:
@@ -526,12 +535,14 @@ class JiuwenBoxRunner:
             ok = await self._wait_until_ready(host, port, timeout=timeout)
             if not ok:
                 tail = "\n".join(self._stderr_tail[-40:])
+                exe_err = _frozen_exe_error_log_tail()
                 if self.process is not None and self.process.returncode is not None:
                     logger.error(
                         "[JiuwenBoxRunner] jiuwenbox subprocess exited rc=%s during startup. "
-                        "stderr tail:\n%s",
+                        "stderr tail:\n%s%s",
                         self.process.returncode,
-                        tail or "(empty; check if uvicorn / jiuwenbox is installed)",
+                        tail or "(empty)",
+                        f"\njiuwenswarm_exe_error.log tail:\n{exe_err}" if exe_err else "",
                     )
                 else:
                     logger.warning(
@@ -577,9 +588,11 @@ class JiuwenBoxRunner:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.process is not None and self.process.returncode is not None:
+                exe_err = _frozen_exe_error_log_tail()
                 logger.warning(
-                    "[JiuwenBoxRunner] subprocess exited prematurely (rc=%s)",
+                    "[JiuwenBoxRunner] subprocess exited prematurely (rc=%s)%s",
                     self.process.returncode,
+                    f"\njiuwenswarm_exe_error.log tail:\n{exe_err}" if exe_err else "",
                 )
                 return False
             if await self.health_check(host, port):

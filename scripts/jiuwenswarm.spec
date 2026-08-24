@@ -17,9 +17,15 @@ block_cipher = None
 
 SPEC_DIR = os.path.abspath(globals().get("SPECPATH", os.getcwd()))
 project_root = os.path.abspath(os.path.join(SPEC_DIR, os.pardir))
+# src layout: 必须先扫 jiuwenbox/src, 否则仓库根 jiuwenbox/ 会被收成 PEP 420 命名空间。
+jiuwenbox_src = os.path.join(project_root, "jiuwenbox", "src")
+_jbx_init = os.path.join(jiuwenbox_src, "jiuwenbox", "__init__.py")
+if not os.path.isfile(_jbx_init):
+    raise SystemExit(f"jiuwenswarm.spec: missing {_jbx_init}")
+sys.path.insert(0, jiuwenbox_src)
 symphony_root = os.path.join(project_root, "jiuwenswarm", "symphony")
 if symphony_root not in sys.path:
-    sys.path.insert(0, symphony_root)
+    sys.path.insert(1, symphony_root)
 
 DATA_FILE_PATTERNS = ["**/*.yaml", "**/*.yml", "**/*.json", "**/*.md"]
 EXTENSION_DATA_FILE_PATTERNS = ["**/*.py", *DATA_FILE_PATTERNS]
@@ -293,9 +299,70 @@ datas += _rust_datas
 hiddenimports += _rust_hidden
 _bundled_binaries = _bundled_binaries + _rust_binaries
 
+# YAML 抽到 jiuwenbox_configs/, 不要落到 _internal/jiuwenbox/ 以免盖住 PYZ。
+def _reloc_jiuwenbox_yaml(entries):
+    relocated = []
+    for src, dest in entries:
+        dest_n = str(dest).replace("\\", "/")
+        if dest_n == "jiuwenbox" or dest_n.startswith("jiuwenbox/"):
+            dest = "jiuwenbox_configs" + dest_n[len("jiuwenbox"):]
+        relocated.append((src, dest))
+    return relocated
+
+
+import jiuwenbox as _jbx_pkg  # noqa: E402
+if not getattr(_jbx_pkg, "__file__", None):
+    raise SystemExit(
+        "jiuwenswarm.spec: import jiuwenbox 得到的是命名空间包（无 __file__）。"
+        "请确认 jiuwenbox/src 已插到 sys.path 最前。"
+    )
+print("jiuwenswarm.spec: jiuwenbox.__file__ =", _jbx_pkg.__file__)
+
+datas += _reloc_jiuwenbox_yaml(collect_data_files("jiuwenbox", include_py_files=False))
+hiddenimports += collect_submodules("jiuwenbox")
+hiddenimports += [
+    "jiuwenbox",
+    "jiuwenbox.server",
+    "jiuwenbox.server.app",
+    "jiuwenbox.bundled_configs",
+]
+
+# win_setup/win_acl 惰性 import pywin32, 静态分析收集不到。
+if sys.platform == "win32":
+    hiddenimports += [
+        "win32api",
+        "win32con",
+        "win32security",
+        "win32crypt",
+        "win32file",
+        "pywintypes",
+        "pythoncom",
+    ]
+    for _pw_name in ("win32", "pywintypes", "pythoncom"):
+        try:
+            _d, _b, _h = collect_all(_pw_name)
+        except Exception as _pw_exc:  # noqa: BLE001
+            print(f"WARNING: collect_all({_pw_name!r}) skipped: {_pw_exc}")
+            continue
+        datas += _d
+        hiddenimports += _h
+        _bundled_binaries = _bundled_binaries + _b
+    if _sp_dir:
+        for _dll_glob in (
+            os.path.join(_sp_dir, "pywin32_system32", "*.dll"),
+            os.path.join(_sp_dir, "win32", "win32api*.pyd"),
+            os.path.join(_sp_dir, "win32", "win32security*.pyd"),
+            os.path.join(_sp_dir, "win32", "win32crypt*.pyd"),
+            os.path.join(_sp_dir, "win32", "win32file*.pyd"),
+            os.path.join(_sp_dir, "win32", "pywintypes*.dll"),
+            os.path.join(_sp_dir, "win32", "pythoncom*.dll"),
+        ):
+            for _p in _glob.glob(_dll_glob):
+                _bundled_binaries.append((_p, "."))
+
 a = Analysis(
     [entry_script],
-    pathex=[project_root, symphony_root],
+    pathex=[jiuwenbox_src, project_root, symphony_root],
     binaries=_bundled_binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -308,6 +375,28 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+def _analysis_has_jiuwenbox_server(analysis):
+    for entry in analysis.pure:
+        name = entry[0] if isinstance(entry, (tuple, list)) else str(entry)
+        if name == "jiuwenbox.server" or name.startswith("jiuwenbox.server."):
+            return True
+    for entry in analysis.datas:
+        dest = str(entry[1] if isinstance(entry, (tuple, list)) else entry).replace("\\", "/")
+        if "jiuwenbox/server" in dest:
+            return True
+    return False
+
+
+if not _analysis_has_jiuwenbox_server(a):
+    jbx = next(
+        (m for m in a.pure if isinstance(m, (tuple, list)) and m[0] == "jiuwenbox"),
+        None,
+    )
+    raise SystemExit(
+        "jiuwenswarm.spec: Analysis 未收集 jiuwenbox.server。"
+        f" jiuwenbox TOC={jbx!r}"
+    )
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

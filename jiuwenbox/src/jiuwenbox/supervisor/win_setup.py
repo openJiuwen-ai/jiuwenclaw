@@ -807,6 +807,112 @@ def _load_policy_acl_paths(policy_path: str) -> list[str]:
     return out
 
 
+def _quote_arg(arg: str) -> str:
+    """参数含空格/制表符时用双引号包裹 (Windows 命令行规则)."""
+    if " " in arg or "\t" in arg:
+        return f'"{arg}"'
+    return arg
+
+
+_PYTHON_EXE_NAMES = frozenset({"python.exe", "pythonw.exe", "python3.exe"})
+
+
+def _looks_like_python_exe(path: str) -> bool:
+    """True if basename is a CPython interpreter (UAC 将显示为 Python)."""
+    return os.path.basename(path).lower() in _PYTHON_EXE_NAMES
+
+
+def _iter_bundled_python_candidates() -> list[str]:
+    """随包 python.exe 候选路径 (CLAW_PYTHON_HOME / dataDir/runtime/python-win)."""
+    candidates: list[str] = []
+    for env_key in ("JIUWENCLAW_BASE_PYTHON",):
+        raw = (os.environ.get(env_key) or "").strip()
+        if raw:
+            candidates.append(raw)
+    for env_key in ("CLAW_PYTHON_HOME", "JIUWENBOX_BUNDLED_PYTHON"):
+        raw = (os.environ.get(env_key) or "").strip()
+        if raw:
+            candidates.append(raw)
+            candidates.append(os.path.join(raw, "python.exe"))
+            candidates.append(os.path.join(raw, "pythonw.exe"))
+    for data_key in ("JIUWENSWARM_DATA_DIR", "JIUWENSWARM_HOME"):
+        data_dir = (os.environ.get(data_key) or "").strip()
+        if not data_dir:
+            continue
+        runtime_py = (
+            Path(data_dir).expanduser() / ".." / "runtime" / "python-win" / "python.exe"
+        )
+        candidates.append(str(runtime_py))
+    return candidates
+
+
+def _resolve_uac_python() -> str | None:
+    """找随包 python.exe 作为 UAC 展示名 (冻包 payload 是 JiuwenSwarm.exe)."""
+    seen: set[str] = set()
+    for cand in _iter_bundled_python_candidates():
+        try:
+            resolved = str(Path(cand).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+        key = os.path.normcase(resolved)
+        if key in seen or not os.path.isfile(resolved):
+            continue
+        seen.add(key)
+        if _looks_like_python_exe(resolved):
+            return resolved
+    return None
+
+
+def _write_uac_python_launcher(payload_exe: str, payload_args: list[str]) -> str:
+    """临时脚本: 提权后的 python.exe 再拉起冻包 exe 跑 win_setup."""
+    import tempfile
+
+    argv = [payload_exe, *payload_args]
+    body = (
+        "import os, subprocess, sys\n"
+        f"_argv = {argv!r}\n"
+        "try:\n"
+        "    raise SystemExit(int(subprocess.call(_argv)))\n"
+        "finally:\n"
+        "    try:\n"
+        "        os.remove(__file__)\n"
+        "    except OSError:\n"
+        "        pass\n"
+    )
+    fd, path = tempfile.mkstemp(prefix="jbx-uac-", suffix=".py")
+    try:
+        os.write(fd, body.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return path
+
+
+def _uac_shell_execute_target(payload_exe: str, payload_args: list[str]) -> tuple[str, str]:
+    """ShellExecuteW 的 (file, params); 能找到 python.exe 时用它做 UAC 展示名."""
+    direct_params = " ".join(_quote_arg(p) for p in payload_args)
+    uac_py = _resolve_uac_python()
+    if not uac_py:
+        logger.warning(
+            "未找到随包 python.exe, UAC 将显示 %s; 请确认桌面 runtime/python-win 已解压",
+            payload_exe,
+        )
+        return payload_exe, direct_params
+    try:
+        same = os.path.normcase(str(Path(uac_py).resolve())) == os.path.normcase(
+            str(Path(payload_exe).resolve())
+        )
+    except (OSError, RuntimeError):
+        same = False
+    if same:
+        return uac_py, direct_params
+    launcher = _write_uac_python_launcher(payload_exe, payload_args)
+    logger.info(
+        "UAC 展示 python=%s, 实际 install payload=%s, launcher=%s",
+        uac_py, payload_exe, launcher,
+    )
+    return uac_py, _quote_arg(launcher)
+
+
 def _elevate_and_run_install(
     force: bool = False,
     preinstall_paths: list[str] | None = None,
@@ -835,8 +941,6 @@ def _elevate_and_run_install(
     """
     shell32 = _get_shell32()
     kernel32 = get_kernel32()
-    # install 提权子进程用真实 CPython (不用 sys.executable: uv venv 时它是 trampoline, 提权新会话跑 -m 崩在 import).
-    # 复用 agent_ws_server 探测的 JIUWENBOX_RUNNER_PYTHON, 没注入则 fallback sys.executable.
     py = (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip() or sys.executable
     # 每次调用生成唯一 event 名, 避免多 box-server 实例/并发 install 串扰.
     event_name = f"Global\\JiuwenBox-Install-Done-{secrets.token_hex(8)}"
@@ -878,20 +982,19 @@ def _elevate_and_run_install(
     if policy_path:
         parts.append("--policy-path")
         parts.append(policy_path)
-    # 用 subprocess.list2cmdline 风格构造参数串 (ShellExecuteW 接受单一 params 字符串).
-    params = " ".join(_quote_arg(p) for p in parts)
+    uac_file, params = _uac_shell_execute_target(py, parts)
 
-    # 诊断: 打出实际用的 python 路径 + event 名 + 完整命令行, 便于排查
+    # 诊断: 打出 UAC 展示文件 + payload + event 名 + 完整命令行, 便于排查
     # "install 子进程没进 _main / 没法 SetEvent" 类问题 (install_force.log 空时
     # 靠这条日志反推子进程到底收到什么).
     logger.info(
-        "install 提权调用: py=%s event=%s cmd='%s %s'",
-        py, event_name, py, params,
+        "install 提权调用: uac=%s payload=%s event=%s cmd='%s %s'",
+        uac_file, py, event_name, uac_file, params,
     )
 
     # ShellExecuteW(parent, verb, file, parameters, directory, show).
     # SW_UAC_SHOW: 弹出可见 UAC 确认框 (SW_HIDE 时用户看不到, 120s 超时导致沙箱/AgentServer 反复重启).
-    result = shell32.ShellExecuteW(None, "runas", py, params, None, SW_UAC_SHOW)
+    result = shell32.ShellExecuteW(None, "runas", uac_file, params, None, SW_UAC_SHOW)
     logger.info(
         "ShellExecuteW(runas, SW_UAC_SHOW) 返回 %s (>32=已发起 UAC, 不代表用户已点确认)",
         result,
@@ -942,13 +1045,6 @@ def _elevate_and_run_install(
     finally:
         kernel32.CloseHandle(wintypes.HANDLE(h_event))
     return 0
-
-
-def _quote_arg(arg: str) -> str:
-    """参数含空格/制表符时用双引号包裹 (Windows 命令行规则)."""
-    if " " in arg or "\t" in arg:
-        return f'"{arg}"'
-    return arg
 
 
 # ---------------------------------------------------------------------------
@@ -1937,11 +2033,12 @@ def uninstall() -> None:
 
 def _elevate_uninstall() -> None:
     shell32 = _get_shell32()
-    py = sys.executable
-    params = f'-m jiuwenbox.supervisor.win_setup {const.UNINSTALL_SUBCOMMAND}'
+    py = (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip() or sys.executable
+    parts = ["-m", "jiuwenbox.supervisor.win_setup", const.UNINSTALL_SUBCOMMAND]
+    uac_file, params = _uac_shell_execute_target(py, parts)
     # SW_HIDE: 与 install 一致, 卸载提权子进程也静默, 不弹 CMD.
     result = shell32.ShellExecuteW(
-        None, "runas", py, params, None, SW_HIDE,
+        None, "runas", uac_file, params, None, SW_HIDE,
     )
     if result <= 32:
         raise RuntimeError(f"UAC 提权卸载失败 (返回 {result})")
