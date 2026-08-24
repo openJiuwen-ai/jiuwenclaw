@@ -216,6 +216,20 @@ check_if_db_up() {
         if [ -z "${DEPLOY_VARS["GATEWAY_DB_PASSWORD"]:-}" ]; then
             error "Please set up GATEWAY_DB_PASSWORD or DB_PASSWORD."
         fi
+
+        if [ -z "${DEPLOY_VARS["WEB_DB_USER"]:-}" ]; then
+            DEPLOY_VARS["WEB_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
+        fi
+        if [ -z "${DEPLOY_VARS["WEB_DB_USER"]:-}" ]; then
+            error "Please set up WEB_DB_USER or DB_USER."
+        fi
+
+        if [ -z "${DEPLOY_VARS["WEB_DB_PASSWORD"]:-}" ]; then
+            DEPLOY_VARS["WEB_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
+        fi
+        if [ -z "${DEPLOY_VARS["WEB_DB_PASSWORD"]:-}" ]; then
+            error "Please set up WEB_DB_PASSWORD or DB_PASSWORD."
+        fi
     fi
 }
 
