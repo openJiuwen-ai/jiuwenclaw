@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from .alert_rules import AlertRule
 from .config import AuditConfig
@@ -62,6 +61,9 @@ class AlertEngine:
                 continue
 
             if alert is not None:
+                if await self._is_duplicate(alert):
+                    logger.debug("[Audit] Suppressed duplicate alert for rule %s", rule.name)
+                    continue
                 triggered.append(alert)
                 # 持久化告警
                 await self._store.write_alert(alert)
@@ -86,9 +88,9 @@ class AlertEngine:
         """获取告警历史."""
         return await self._store.query_alerts({"hours": hours, "limit": 500})
 
-    async def resolve_alert(self, alert_id: str) -> None:
+    async def resolve_alert(self, alert_id: str) -> bool:
         """手动解决一条告警."""
-        await self._store.resolve_alert(alert_id)
+        return await self._store.resolve_alert(alert_id)
 
     def suppress_rule(self, rule_name: str) -> None:
         """抑制某个规则（不触发告警但仍记录审计事件）."""
@@ -98,7 +100,29 @@ class AlertEngine:
         """取消规则抑制."""
         self._suppressed_rules.discard(rule_name)
 
+    @property
+    def rule_names(self) -> tuple[str, ...]:
+        """Names of registered rules in evaluation order."""
+        return tuple(rule.name for rule in self._rules)
+
+    @property
+    def suppressed_rules(self) -> frozenset[str]:
+        return frozenset(self._suppressed_rules)
+
     # ── 内部方法 ────────────────────────────────────────────────
+
+    async def _is_duplicate(self, alert: Alert) -> bool:
+        cooldown = self._config.alert_cooldown_seconds
+        if cooldown <= 0:
+            return False
+        recent = await self._store.query_alerts({
+            "rule_name": alert.rule_name,
+            "status": "active",
+            "start_time": alert.triggered_at - cooldown,
+            "limit": 100,
+        })
+        identity = _alert_identity(alert)
+        return any(_alert_identity(existing) == identity for existing in recent)
 
     def _log_alert(self, alert: Alert) -> None:
         """将告警写入 logger（按严重级别选择日志级别）."""
@@ -114,3 +138,12 @@ class AlertEngine:
         # 同时输出告警上下文（供运维排查）
         if alert.context:
             logger.info("[Audit Alert Context] %s", alert.context)
+
+
+def _alert_identity(alert: Alert) -> tuple[str, str]:
+    """Return a stable rule/scope key used for cooldown deduplication."""
+    for key in ("request_id", "session_id", "channel_id"):
+        value = alert.context.get(key)
+        if value:
+            return alert.rule_name, f"{key}:{value}"
+    return alert.rule_name, "global"

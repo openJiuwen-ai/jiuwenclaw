@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,35 @@ class AuditConfig:
     permission_denial_threshold: int = 10
     error_rate_window_minutes: int = 15
     error_rate_threshold_ratio: float = 0.5
+    alert_cooldown_seconds: float = 300.0
+    query_limit: int = 500
+
+    def __post_init__(self) -> None:
+        """Normalize unsafe values supplied by hand-written configuration."""
+        self.enabled = _bool_val(self.enabled, default=True)
+        self.retention_days = max(0, _int_val(self.retention_days, 30))
+        self.consecutive_failure_threshold = max(
+            1, _int_val(self.consecutive_failure_threshold, 3),
+        )
+        self.token_daily_threshold = max(0, _int_val(self.token_daily_threshold, 0))
+        self.response_timeout_seconds = max(
+            0.0, _float_val(self.response_timeout_seconds, 120.0),
+        )
+        self.permission_denial_window_minutes = max(
+            1, _int_val(self.permission_denial_window_minutes, 5),
+        )
+        self.permission_denial_threshold = max(
+            1, _int_val(self.permission_denial_threshold, 10),
+        )
+        self.error_rate_window_minutes = max(
+            1, _int_val(self.error_rate_window_minutes, 15),
+        )
+        ratio = _float_val(self.error_rate_threshold_ratio, 0.5)
+        self.error_rate_threshold_ratio = min(1.0, max(0.0, ratio))
+        self.alert_cooldown_seconds = max(
+            0.0, _float_val(self.alert_cooldown_seconds, 300.0),
+        )
+        self.query_limit = min(10_000, max(1, _int_val(self.query_limit, 500)))
 
     def resolve_audit_dir(self) -> Path:
         """解析审计日志目录（优先用配置值，否则推导默认路径）."""
@@ -36,12 +65,12 @@ class AuditConfig:
         return get_agent_workspace_dir() / _AUDIT_SUBDIR
 
 
-def load_audit_config() -> AuditConfig:
+def load_audit_config(source: dict[str, Any] | None = None) -> AuditConfig:
     """从 config.yaml 的 audit 字段加载配置.
 
     若 config.yaml 中没有 audit 段，则全部使用默认值。
     """
-    cfg = get_config()
+    cfg = source if source is not None else get_config()
     audit_cfg: dict[str, Any] | None = None
 
     if isinstance(cfg, dict):
@@ -74,6 +103,10 @@ def load_audit_config() -> AuditConfig:
         error_rate_threshold_ratio=_float_val(
             audit_cfg.get("error_rate_threshold_ratio"), default=0.5,
         ),
+        alert_cooldown_seconds=_float_val(
+            audit_cfg.get("alert_cooldown_seconds"), default=300.0,
+        ),
+        query_limit=_int_val(audit_cfg.get("query_limit"), default=500),
     )
 
 
@@ -85,7 +118,12 @@ def _bool_val(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return default
     return bool(value)
 
 

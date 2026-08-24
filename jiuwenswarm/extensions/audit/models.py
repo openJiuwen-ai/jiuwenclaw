@@ -89,8 +89,15 @@ class AuditEvent:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.event_type, AuditEventType):
+            try:
+                self.event_type = AuditEventType(self.event_type)
+            except (TypeError, ValueError):
+                self.event_type = AuditEventType.SYSTEM_START
         if not self.event_id:
             self.event_id = _new_event_id()
+        else:
+            self.event_id = str(self.event_id)
         if not self.timestamp:
             self.timestamp = time.time()
 
@@ -111,28 +118,40 @@ class AuditEvent:
             "metadata": self.metadata,
         }
 
+    @property
+    def is_error(self) -> bool:
+        """Whether this event represents a failed operation."""
+        return self.event_type == AuditEventType.CHAT_ERROR or self.error_type is not None
+
+    @property
+    def total_tokens(self) -> int:
+        """Return the normalized total-token count carried by this event."""
+        usage = self.token_usage or {}
+        value = usage.get("total_tokens", usage.get("total", 0))
+        return _coerce_int(value)
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AuditEvent:
         """从字典反序列化."""
         event_type_raw = data.get("event_type", "")
         try:
             event_type = AuditEventType(event_type_raw)
-        except ValueError:
+        except (TypeError, ValueError):
             event_type = AuditEventType.SYSTEM_START
 
         return cls(
-            event_id=data.get("event_id", _new_event_id()),
+            event_id=data.get("event_id") or _new_event_id(),
             event_type=event_type,
-            timestamp=float(data.get("timestamp", 0.0)),
+            timestamp=_coerce_float(data.get("timestamp")),
             session_id=data.get("session_id"),
             channel_id=data.get("channel_id"),
             request_id=data.get("request_id"),
             agent_name=data.get("agent_name"),
-            duration_ms=data.get("duration_ms"),
-            token_usage=data.get("token_usage"),
+            duration_ms=_coerce_optional_float(data.get("duration_ms")),
+            token_usage=_coerce_optional_dict(data.get("token_usage")),
             error_type=data.get("error_type"),
             error_detail=data.get("error_detail"),
-            metadata=data.get("metadata", {}),
+            metadata=_coerce_dict(data.get("metadata")),
         )
 
 
@@ -181,8 +200,20 @@ class Alert:
     resolved_at: float | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.severity, AlertSeverity):
+            try:
+                self.severity = AlertSeverity(self.severity)
+            except (TypeError, ValueError):
+                self.severity = AlertSeverity.WARNING
+        if not isinstance(self.status, AlertStatus):
+            try:
+                self.status = AlertStatus(self.status)
+            except (TypeError, ValueError):
+                self.status = AlertStatus.ACTIVE
         if not self.alert_id:
             self.alert_id = _new_event_id()
+        else:
+            self.alert_id = str(self.alert_id)
         if not self.triggered_at:
             self.triggered_at = time.time()
 
@@ -204,28 +235,60 @@ class Alert:
         severity_raw = data.get("severity", "warning")
         try:
             severity = AlertSeverity(severity_raw)
-        except ValueError:
+        except (TypeError, ValueError):
             severity = AlertSeverity.WARNING
 
         status_raw = data.get("status", "active")
         try:
             status = AlertStatus(status_raw)
-        except ValueError:
+        except (TypeError, ValueError):
             status = AlertStatus.ACTIVE
 
         return cls(
-            alert_id=data.get("alert_id", _new_event_id()),
+            alert_id=data.get("alert_id") or _new_event_id(),
             alert_type=data.get("alert_type", ""),
             severity=severity,
             status=status,
-            triggered_at=float(data.get("triggered_at", 0.0)),
+            triggered_at=_coerce_float(data.get("triggered_at")),
             rule_name=data.get("rule_name", ""),
             message=data.get("message", ""),
-            context=data.get("context", {}),
-            resolved_at=data.get("resolved_at"),
+            context=_coerce_dict(data.get("context")),
+            resolved_at=_coerce_optional_float(data.get("resolved_at")),
         )
 
 
 def _new_event_id() -> str:
     """生成唯一事件 ID."""
     return f"audit_{uuid.uuid4().hex[:12]}"
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    """Convert persisted numeric data without failing on legacy null/bad values."""
+    try:
+        return float(value) if value is not None else default
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value) if value is not None else default
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _coerce_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _coerce_optional_dict(value: Any) -> dict[str, Any] | None:
+    return dict(value) if isinstance(value, dict) else None

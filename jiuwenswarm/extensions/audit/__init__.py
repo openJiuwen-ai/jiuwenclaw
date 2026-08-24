@@ -19,16 +19,25 @@
 
 便捷 API:
     from jiuwenswarm.extensions.audit import get_audit_store, get_audit_config
+
+    store = await get_audit_store()
+    try:
+        events = await store.query_events({"hours": 24})
+    finally:
+        await store.close()
 """
 
 from __future__ import annotations
 
-from .config import AuditConfig, load_audit_config
-from .models import Alert, AlertSeverity, AlertStatus, AuditEvent, AuditEventType
-from .log_store import LogStore
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from .alert_engine import AlertEngine
 from .alert_rules import AlertRule, DEFAULT_RULES
 from .auditor import Auditor
+from .config import AuditConfig, load_audit_config
+from .log_store import LogStore
+from .models import Alert, AlertSeverity, AlertStatus, AuditEvent, AuditEventType
 
 __all__ = [
     "AuditConfig",
@@ -45,6 +54,7 @@ __all__ = [
     "Auditor",
     "get_audit_store",
     "get_audit_config",
+    "open_audit_store",
 ]
 
 
@@ -53,12 +63,24 @@ def get_audit_config() -> AuditConfig:
     return load_audit_config()
 
 
-def get_audit_store() -> LogStore:
-    """获取审计 LogStore 实例（按默认配置初始化）.
+async def get_audit_store() -> LogStore:
+    """Create and initialize an independent audit store.
 
-    注意: 返回的 LogStore 需要先调用 initialize() 才能使用。
-    对于运行中的系统，审计扩展已自动初始化，可直接查询。
+    The caller owns the returned connection and must call ``await store.close()``.
+    Use :func:`open_audit_store` when a context manager is more convenient.
     """
     config = load_audit_config()
     audit_dir = config.resolve_audit_dir()
-    return LogStore(audit_dir)
+    store = LogStore(audit_dir)
+    await store.initialize()
+    return store
+
+
+@asynccontextmanager
+async def open_audit_store() -> AsyncIterator[LogStore]:
+    """Open an initialized store and reliably close it on exit."""
+    store = await get_audit_store()
+    try:
+        yield store
+    finally:
+        await store.close()

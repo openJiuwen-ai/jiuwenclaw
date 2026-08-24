@@ -15,16 +15,11 @@
 
 from __future__ import annotations
 
-import logging
 from abc import ABC, abstractmethod
-from typing import Any
 
 from .config import AuditConfig
 from .log_store import LogStore
 from .models import Alert, AlertSeverity, AuditEvent, AuditEventType
-
-logger = logging.getLogger(__name__)
-
 
 class AlertRule(ABC):
     """告警规则基类."""
@@ -83,21 +78,27 @@ class ConsecutiveFailureRule(AlertRule):
         if not session_id:
             return None
 
-        # 查询该会话最近的错误事件
-        recent_errors = await store.query_events({
+        # Query all recent session events. Requests and memory-before markers are
+        # neutral; a completed response resets the failure streak.
+        recent_events = await store.query_events({
             "session_id": session_id,
-            "event_type": "chat_error",
             "hours": 1,
-            "limit": threshold + 5,
+            "limit": max(50, threshold * 4),
         })
 
-        # 检查是否连续 N 次都是错误（无成功请求穿插）
+        # Results are newest first, so count the current failure backwards until
+        # the most recent successful completion. A chat_request must not reset the
+        # streak because every failed operation normally has a request marker.
         consecutive = 0
-        for err_event in recent_errors:
-            if err_event.event_type == AuditEventType.CHAT_ERROR:
+        success_events = {
+            AuditEventType.CHAT_RESPONSE,
+            AuditEventType.MEMORY_AFTER_CHAT,
+        }
+        for recent_event in recent_events:
+            if recent_event.event_type == AuditEventType.CHAT_ERROR:
                 consecutive += 1
-            else:
-                consecutive = 0
+            elif recent_event.event_type in success_events:
+                break
             if consecutive >= threshold:
                 break
 
@@ -139,6 +140,9 @@ class TokenBudgetExceededRule(AlertRule):
         config: AuditConfig,
     ) -> Alert | None:
         threshold = config.token_daily_threshold
+
+        if threshold <= 0:
+            return None
 
         # 仅在有 Token 数据的事件时检查
         if not event.token_usage:
@@ -195,7 +199,10 @@ class ResponseTimeoutRule(AlertRule):
         timeout_threshold = config.response_timeout_seconds
 
         # 仅在对话完成事件时检查
-        if event.event_type != AuditEventType.MEMORY_AFTER_CHAT:
+        if event.event_type not in {
+            AuditEventType.CHAT_RESPONSE,
+            AuditEventType.MEMORY_AFTER_CHAT,
+        }:
             return None
 
         # duration_ms 可能直接在 metadata 中
@@ -214,15 +221,19 @@ class ResponseTimeoutRule(AlertRule):
                         "threshold_seconds": timeout_threshold,
                     },
                 )
+            # An explicitly measured duration is authoritative. Falling back to
+            # a different historical request can otherwise create false alerts.
+            return None
 
         # 也可通过查找对应的 chat_request 事件计算时差
         session_id = event.session_id or ""
-        if session_id:
+        if session_id and event.request_id:
             recent_requests = await store.query_events({
                 "session_id": session_id,
                 "event_type": "chat_request",
+                "request_id": event.request_id,
                 "hours": 1,
-                "limit": 5,
+                "limit": 1,
             })
 
             for req_event in recent_requests:
@@ -346,10 +357,16 @@ class ErrorRateSpikeRule(AlertRule):
         total_in_window = 0
         errors_in_window = 0
 
+        outcome_events = {
+            AuditEventType.CHAT_ERROR,
+            AuditEventType.CHAT_RESPONSE,
+            AuditEventType.MEMORY_AFTER_CHAT,
+        }
+
         for ev in recent_all:
-            if ev.timestamp >= cutoff_time:
+            if ev.timestamp >= cutoff_time and ev.event_type in outcome_events:
                 total_in_window += 1
-                if ev.error_type is not None or ev.event_type == AuditEventType.CHAT_ERROR:
+                if ev.is_error:
                     errors_in_window += 1
 
         if total_in_window < 5:

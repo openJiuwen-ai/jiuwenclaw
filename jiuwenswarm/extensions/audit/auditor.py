@@ -29,6 +29,9 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+_REQUEST_TIMER_TTL_SECONDS = 24 * 60 * 60
+_MAX_REQUEST_TIMERS = 10_000
+
 
 class Auditor:
     """审计器 — Hook 事件的接收与转换中心.
@@ -68,7 +71,7 @@ class Auditor:
 
         # 记录请求到达时间（用于后续计算响应时延）
         if request_id:
-            self._request_timestamps[request_id] = time.time()
+            self._track_request(request_id)
 
         # 更新会话追踪器
         if session_id:
@@ -117,7 +120,7 @@ class Auditor:
         session_id, channel_id, request_id, req_method, params = _extract_context(context)
 
         if request_id and request_id not in self._request_timestamps:
-            self._request_timestamps[request_id] = time.time()
+            self._track_request(request_id)
 
         event = AuditEvent(
             event_type=AuditEventType.CHAT_REQUEST,
@@ -154,12 +157,7 @@ class Auditor:
         memory_meta = _extract_memory_metadata(context)
 
         # 计算响应时延（从请求首次出现到完成）
-        duration_ms = None
-        if request_id and request_id in self._request_timestamps:
-            elapsed = (time.time() - self._request_timestamps[request_id]) * 1000
-            duration_ms = elapsed
-            # 清理计时器
-            del self._request_timestamps[request_id]
+        duration_ms = self._finish_request_timer(request_id)
 
         # 提取 Token 消耗
         token_usage = None
@@ -229,6 +227,80 @@ class Auditor:
         )
         await self._record_and_check(event)
 
+    async def record_chat_response(
+        self,
+        *,
+        session_id: str | None,
+        request_id: str | None = None,
+        channel_id: str | None = None,
+        agent_name: str | None = None,
+        token_usage: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AuditEvent:
+        """Record a successful response from integrations without an after hook."""
+        event = AuditEvent(
+            event_type=AuditEventType.CHAT_RESPONSE,
+            session_id=session_id,
+            request_id=request_id,
+            channel_id=channel_id,
+            agent_name=agent_name,
+            duration_ms=self._finish_request_timer(request_id),
+            token_usage=token_usage,
+            metadata=metadata or {},
+        )
+        await self._record_and_check(event)
+        return event
+
+    async def record_chat_error(
+        self,
+        *,
+        session_id: str | None,
+        error_type: str,
+        error_detail: str | None = None,
+        request_id: str | None = None,
+        channel_id: str | None = None,
+        agent_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AuditEvent:
+        """Record a failed request and feed it through all alert rules."""
+        if session_id and session_id in self._session_tracker:
+            self._session_tracker[session_id]["error_count"] += 1
+        event = AuditEvent(
+            event_type=AuditEventType.CHAT_ERROR,
+            session_id=session_id,
+            request_id=request_id,
+            channel_id=channel_id,
+            agent_name=agent_name,
+            duration_ms=self._finish_request_timer(request_id),
+            error_type=error_type,
+            error_detail=error_detail,
+            metadata=metadata or {},
+        )
+        await self._record_and_check(event)
+        return event
+
+    async def end_session(
+        self,
+        session_id: str,
+        *,
+        channel_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AuditEvent:
+        """Record a session end marker and release its in-memory tracker."""
+        tracker = self._session_tracker.pop(session_id, None)
+        event_metadata = dict(metadata or {})
+        if tracker:
+            event_metadata.setdefault("request_count", tracker.get("request_count", 0))
+            event_metadata.setdefault("error_count", tracker.get("error_count", 0))
+        event = AuditEvent(
+            event_type=AuditEventType.SESSION_END,
+            session_id=session_id,
+            channel_id=channel_id or (tracker or {}).get("channel_id"),
+            metadata=event_metadata,
+        )
+        await self._record_and_check(event)
+        return event
+
     # ── 内部方法 ────────────────────────────────────────────────
 
     async def _record_and_check(self, event: AuditEvent) -> None:
@@ -243,7 +315,7 @@ class Auditor:
             return
 
         try:
-            alerts = await self._alert_engine.check_event(event)
+            await self._alert_engine.check_event(event)
             # 告警已由 AlertEngine 自动持久化
         except Exception as exc:
             logger.warning("[Audit] check_event alert failed: %s", exc)
@@ -251,6 +323,33 @@ class Auditor:
     def get_session_tracker(self) -> dict[str, dict[str, Any]]:
         """获取会话追踪器（供 CLI 查询使用）."""
         return self._session_tracker
+
+    def _track_request(self, request_id: str) -> None:
+        now = time.time()
+        if len(self._request_timestamps) >= _MAX_REQUEST_TIMERS:
+            cutoff = now - _REQUEST_TIMER_TTL_SECONDS
+            stale = [
+                tracked_id
+                for tracked_id, started_at in self._request_timestamps.items()
+                if started_at < cutoff
+            ]
+            for tracked_id in stale:
+                self._request_timestamps.pop(tracked_id, None)
+            if len(self._request_timestamps) >= _MAX_REQUEST_TIMERS:
+                oldest_id = min(
+                    self._request_timestamps,
+                    key=self._request_timestamps.__getitem__,
+                )
+                self._request_timestamps.pop(oldest_id, None)
+        self._request_timestamps[request_id] = now
+
+    def _finish_request_timer(self, request_id: str | None) -> float | None:
+        if not request_id:
+            return None
+        started_at = self._request_timestamps.pop(request_id, None)
+        if started_at is None:
+            return None
+        return max(0.0, (time.time() - started_at) * 1000)
 
 
 # ── 上下文提取辅助 ──────────────────────────────────────────────
@@ -335,9 +434,10 @@ def _extract_memory_metadata(context: Any) -> dict:
     if hasattr(context, "metadata"):
         meta = context.metadata
         if isinstance(meta, dict):
-            return meta
+            return dict(meta)
 
     if isinstance(context, dict):
-        return context.get("metadata", {})
+        metadata = context.get("metadata", {})
+        return dict(metadata) if isinstance(metadata, dict) else {}
 
     return {}

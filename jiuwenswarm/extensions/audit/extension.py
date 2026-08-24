@@ -21,13 +21,13 @@ from __future__ import annotations
 import logging
 
 from jiuwenswarm.extensions.sdk.base import BaseExtension
-from jiuwenswarm.extensions.types import ExtensionConfig, ExtensionMetadata
+from jiuwenswarm.extensions.types import ExtensionConfig
 
-from .alert_engine import AlertEngine
-from .alert_rules import DEFAULT_RULES
-from .auditor import Auditor
-from .config import AuditConfig, load_audit_config
-from .log_store import LogStore
+from jiuwenswarm.extensions.audit.alert_engine import AlertEngine
+from jiuwenswarm.extensions.audit.alert_rules import DEFAULT_RULES
+from jiuwenswarm.extensions.audit.auditor import Auditor
+from jiuwenswarm.extensions.audit.config import AuditConfig, load_audit_config
+from jiuwenswarm.extensions.audit.log_store import LogStore
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,7 @@ class AuditExtension(BaseExtension):
         self._alert_engine: AlertEngine | None = None
         self._auditor: Auditor | None = None
         self._registry = None
+        self._registered_hooks: list[tuple[str, object]] = []
 
     async def initialize(self, config: ExtensionConfig) -> None:
         """初始化审计模块.
@@ -68,7 +69,14 @@ class AuditExtension(BaseExtension):
         3. 创建 AlertEngine（预置规则）
         4. 创建 Auditor（核心审计器）
         """
-        self._config = load_audit_config()
+        self._unregister_hooks()
+        if self._store is not None:
+            await self._store.close()
+        self._store = None
+        self._alert_engine = None
+        self._auditor = None
+
+        self._config = load_audit_config(config.config)
 
         if not self._config.enabled:
             logger.info("[Audit] Audit extension is disabled by config")
@@ -94,10 +102,28 @@ class AuditExtension(BaseExtension):
 
     async def shutdown(self) -> None:
         """关闭审计模块 — 释放 SQLite 连接等资源."""
+        self._unregister_hooks()
+
         if self._store is not None:
             await self._store.close()
             self._store = None
+        self._auditor = None
+        self._alert_engine = None
         logger.info("[Audit] AuditExtension shut down")
+
+    def _unregister_hooks(self) -> None:
+        if self._registry is not None:
+            for event_name, callback in self._registered_hooks:
+                try:
+                    self._registry.unregister(event_name, callback)
+                except Exception as exc:
+                    logger.warning(
+                        "[Audit] Failed to unregister hook %s: %s",
+                        event_name,
+                        exc,
+                    )
+        self._registered_hooks.clear()
+        self._registry = None
 
     def register(self, registry) -> None:
         """注册 Hook 事件回调到 ExtensionRegistry.
@@ -109,7 +135,10 @@ class AuditExtension(BaseExtension):
             return
 
         if self._auditor is None:
-            logger.warning("[Audit] Auditor not initialized, skipping registration")
+            raise RuntimeError("AuditExtension must be initialized before registration")
+
+        if self._registered_hooks:
+            logger.debug("[Audit] Hooks are already registered")
             return
 
         self._registry = registry
@@ -118,6 +147,7 @@ class AuditExtension(BaseExtension):
             callback = getattr(self._auditor, callback_name, None)
             if callback is not None:
                 registry.register(event_name, callback, priority=200)
+                self._registered_hooks.append((event_name, callback))
                 logger.info("[Audit] Registered hook: %s → %s", event_name, callback_name)
 
         logger.info("[Audit] All hooks registered (%d events)", len(_HOOK_REGISTRY))
@@ -149,5 +179,6 @@ async def register_extensions(registry):
     返回扩展对象列表，ExtensionManager 会追踪其生命周期。
     """
     ext = AuditExtension()
+    await ext.initialize(registry.config)
     ext.register(registry)
     return [ext]
