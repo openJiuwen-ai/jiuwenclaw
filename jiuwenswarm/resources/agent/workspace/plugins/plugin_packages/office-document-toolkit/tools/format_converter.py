@@ -31,12 +31,15 @@ class FormatConverter(Tool):
                             "enum": ["word", "pdf", "excel", "csv", "ppt"],
                             "description": "目标格式",
                         },
-                        "output_subdir": {
+                        "output_dir": {
                             "type": "string",
-                            "description": "输出子目录名，默认为 converted",
+                            "description": (
+                                "产物输出目录的绝对路径。传当前项目目录；"
+                                "用户指定了保存位置时用用户指定的目录。"
+                            ),
                         },
                     },
-                    "required": ["source_path", "target_format"],
+                    "required": ["source_path", "target_format", "output_dir"],
                 },
             )
         )
@@ -44,16 +47,19 @@ class FormatConverter(Tool):
     async def invoke(self, inputs, **kwargs):
         source_path = inputs.get("source_path", "")
         target_format = inputs.get("target_format", "")
-        output_subdir = inputs.get("output_subdir", "converted")
+        output_dir = inputs.get("output_dir", "")
 
         if not source_path or not os.path.isfile(source_path):
             return {"success": False, "error": f"源文件不存在: {source_path}"}
         if not target_format:
             return {"success": False, "error": "缺少 target_format 参数"}
+        if not output_dir:
+            return {
+                "success": False,
+                "error": "缺少 output_dir：请传入当前项目目录的绝对路径",
+            }
 
-        from openjiuwen.core.sys_operation.cwd import get_cwd
-
-        base_dir = Path(get_cwd()) / output_subdir
+        base_dir = Path(output_dir).expanduser()
         base_dir.mkdir(parents=True, exist_ok=True)
 
         source_ext = Path(source_path).suffix.lower()

@@ -1,11 +1,8 @@
 {
   "version": "1.0.0",
-  "packageType": "agent_template",
-  "agentCard": {
-    "id": "health-life-advisor",
-    "name": "康安",
-    "description": "依托现代健康科学体系，提供营养膳食、作息睡眠、情绪调养咨询，生成个性化长期健康生活规划方案"
-  },
+  "package_type": "agent_template",
+  "name": "health-life-advisor",
+  "description": "依托现代健康科学体系，提供营养膳食、作息睡眠、情绪调养咨询，生成个性化长期健康生活规划方案",
   "persona": {
     "dir": "./persona"
   },
@@ -19,11 +16,11 @@
     {
       "file": "tools/health_profile_tool.py",
       "class": "HealthProfileTool",
-      "displayName": {
+      "display_name": {
         "en": "health_profile_tool",
         "zh": "health_profile_tool"
       },
-      "displayDescription": {
+      "display_description": {
         "en": "User health profile management: create/update profiles, generate/iterate plans, log progress, and review.",
         "zh": "用户健康档案管理：建档、更新档案、生成/迭代健康方案、记录执行、阶段性复盘。"
       }
@@ -33,31 +30,33 @@
     {
       "file": "rails/safety_guard_rail.py",
       "class": "SafetyGuardRail",
-      "displayName": {
+      "display_name": {
         "en": "safety_guard",
         "zh": "safety_guard"
       },
-      "displayDescription": {
+      "display_description": {
         "en": "Safety boundary rail: detects high-risk keywords and triggers emergency guidance to seek professional help.",
         "zh": "安全边界拦截：检测高危关键词，触发紧急安全提示，引导寻求专业医疗/心理帮助。"
       }
     }
   ],
   "mcps": [
-    { "connector": "amap" }
+    {
+      "connector": "amap"
+    }
   ],
-  "displayName": {
+  "display_name": {
     "en": "Health Life Advisor",
     "zh": "健康生活顾问"
   },
-  "displayDescription": {
+  "display_description": {
     "en": "Evidence-based health advisor for nutrition, sleep, emotional wellness, and personalized long-term lifestyle planning.",
     "zh": "依托现代健康科学，提供营养膳食、作息睡眠、情绪调养咨询，生成个性化可迭代的长期健康生活规划方案。"
   },
   "category": "Life",
   "avatar": "",
-  "source": "local",
-  "defaultInitInput": {
+  "source": "builtin",
+  "default_init_input": {
     "zh": "帮我评估饮食、睡眠和情绪状况，制定个性化的健康生活方案。",
     "en": "Help me to assess my diet, sleep, and emotional wellness, and craft a personalized lifestyle plan."
   },
@@ -75,7 +74,7 @@
       "zh": "本地健康生活"
     }
   ],
-  "quickInputs": [
+  "quick_inputs": [
     {
       "en": "Help me to assess my diet, sleep, and emotional wellness, and craft a personalized lifestyle plan.",
       "zh": "帮我评估饮食、睡眠和情绪状况，制定个性化的健康生活方案。"

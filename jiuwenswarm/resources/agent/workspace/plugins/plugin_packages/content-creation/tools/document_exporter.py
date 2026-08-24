@@ -1,7 +1,6 @@
-import os
+from pathlib import Path
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
-from openjiuwen.core.sys_operation.cwd import get_cwd
 
 
 class DocumentExporter(Tool):
@@ -61,15 +60,31 @@ class DocumentExporter(Tool):
                             "type": "object",
                             "description": "Optional document metadata for YAML front matter",
                             "properties": {
-                                "author": {"type": "string", "description": "Author name"},
-                                "date": {"type": "string", "description": "Date string"},
-                                "summary": {"type": "string", "description": "Document summary"},
+                                "author": {
+                                    "type": "string",
+                                    "description": "Author name",
+                                },
+                                "date": {
+                                    "type": "string",
+                                    "description": "Date string",
+                                },
+                                "summary": {
+                                    "type": "string",
+                                    "description": "Document summary",
+                                },
                                 "tags": {
                                     "type": "array",
                                     "items": {"type": "string"},
                                     "description": "Document tags",
                                 },
                             },
+                        },
+                        "output_dir": {
+                            "type": "string",
+                            "description": (
+                                "产物输出目录的绝对路径。传当前项目目录；"
+                                "用户指定了保存位置时用用户指定的目录。"
+                            ),
                         },
                         "output_filename": {
                             "type": "string",
@@ -79,7 +94,7 @@ class DocumentExporter(Tool):
                             ),
                         },
                     },
-                    "required": ["title", "sections"],
+                    "required": ["title", "sections", "output_dir"],
                 },
             )
         )
@@ -90,7 +105,14 @@ class DocumentExporter(Tool):
             sections = inputs.get("sections", [])
             citations = inputs.get("citations", [])
             metadata = inputs.get("metadata", {})
+            output_dir = inputs.get("output_dir", "")
             output_filename = inputs.get("output_filename")
+
+            if not output_dir:
+                return {
+                    "success": False,
+                    "error": "缺少 output_dir：请传入当前项目目录的绝对路径",
+                }
 
             lines = []
 
@@ -142,11 +164,6 @@ class DocumentExporter(Tool):
 
             document = "\n".join(lines)
 
-            # --- Write file ---
-            cwd = get_cwd()
-            output_dir = os.path.join(str(cwd), "exports")
-            os.makedirs(output_dir, exist_ok=True)
-
             if not output_filename:
                 safe_title = self._sanitize_filename(title)[:50]
                 output_filename = f"{safe_title}.md"
@@ -154,23 +171,28 @@ class DocumentExporter(Tool):
             if not output_filename.endswith(".md"):
                 output_filename += ".md"
 
-            filepath = os.path.join(output_dir, output_filename)
+            base_dir = Path(output_dir).expanduser()
+            base_dir.mkdir(parents=True, exist_ok=True)
+            output_path = base_dir / output_filename
+            output_path.write_text(document, encoding="utf-8")
 
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(document)
-
-            # --- Stats ---
-            char_count = len(document.replace(" ", "").replace("\n", ""))
-            section_count = len(sections)
-            citation_count = len(citations)
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                return {
+                    "success": False,
+                    "error": "文件生成失败，输出文件为空或不存在",
+                }
 
             return {
                 "success": True,
-                "filepath": filepath,
+                "format": "markdown",
+                "path": str(output_path),
+                "absolute_path": str(output_path.resolve()),
+                "size_bytes": output_path.stat().st_size,
+                "exists": True,
                 "stats": {
-                    "char_count": char_count,
-                    "section_count": section_count,
-                    "citation_count": citation_count,
+                    "char_count": len(document.replace(" ", "").replace("\n", "")),
+                    "section_count": len(sections),
+                    "citation_count": len(citations),
                 },
             }
         except Exception as e:

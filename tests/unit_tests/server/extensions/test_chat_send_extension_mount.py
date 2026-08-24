@@ -28,9 +28,11 @@ from tests.unit_tests.server.extensions.conftest import (
 
 _LIFECYCLE_METHODS: tuple[tuple[ReqMethod, str], ...] = (
     (ReqMethod.AGENT_TEMPLATES_CREATE, "agent_templates.create"),
+    (ReqMethod.AGENT_TEMPLATES_IMPORT_LOCAL, "agent_templates.import_local"),
     (ReqMethod.AGENT_TEMPLATES_INSTALL, "agent_templates.install"),
     (ReqMethod.AGENT_TEMPLATES_UNINSTALL, "agent_templates.uninstall"),
     (ReqMethod.PLUGIN_PACKAGES_CREATE, "plugin_packages.create"),
+    (ReqMethod.PLUGIN_PACKAGES_IMPORT_LOCAL, "plugin_packages.import_local"),
     (ReqMethod.PLUGIN_PACKAGES_INSTALL, "plugin_packages.install"),
     (ReqMethod.PLUGIN_PACKAGES_UNINSTALL, "plugin_packages.uninstall"),
 )

@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
@@ -37,12 +36,15 @@ class DocumentGenerator(Tool):
                                 "tables[], sheets[], slides[]"
                             ),
                         },
-                        "output_subdir": {
+                        "output_dir": {
                             "type": "string",
-                            "description": "输出子目录名，默认为 generated",
+                            "description": (
+                                "产物输出目录的绝对路径。传当前项目目录；"
+                                "用户指定了保存位置时用用户指定的目录。"
+                            ),
                         },
                     },
-                    "required": ["format", "filename", "content"],
+                    "required": ["format", "filename", "content", "output_dir"],
                 },
             )
         )
@@ -51,17 +53,15 @@ class DocumentGenerator(Tool):
         fmt = inputs.get("format", "")
         filename = inputs.get("filename", "")
         content = inputs.get("content", {})
-        output_subdir = inputs.get("output_subdir", "generated")
+        output_dir = inputs.get("output_dir", "")
 
-        if not fmt or not filename or not content:
+        if not all((fmt, filename, content, output_dir)):
             return {
                 "success": False,
-                "error": "缺少必要参数: format, filename, content",
+                "error": "缺少必要参数: format, filename, content, output_dir",
             }
 
-        from openjiuwen.core.sys_operation.cwd import get_cwd
-
-        base_dir = Path(get_cwd()) / output_subdir
+        base_dir = Path(output_dir).expanduser()
         base_dir.mkdir(parents=True, exist_ok=True)
 
         ext_map = {

@@ -665,11 +665,13 @@ _PACKAGE_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.AGENT_TEMPLATES_FILE_LIST: "list_agent_template_files",
     ReqMethod.AGENT_TEMPLATES_FILE_READ: "read_agent_template_file",
     ReqMethod.AGENT_TEMPLATES_CREATE: "create_agent_template",
+    ReqMethod.AGENT_TEMPLATES_IMPORT_LOCAL: "import_agent_template",
     ReqMethod.AGENT_TEMPLATES_INSTALL: "install_agent_template",
     ReqMethod.AGENT_TEMPLATES_UNINSTALL: "uninstall_agent_template",
     ReqMethod.PLUGIN_PACKAGES_LIST: "list_plugin_packages",
     ReqMethod.PLUGIN_PACKAGES_SHOW: "show_plugin_package",
     ReqMethod.PLUGIN_PACKAGES_CREATE: "create_plugin_package",
+    ReqMethod.PLUGIN_PACKAGES_IMPORT_LOCAL: "import_plugin_package",
     ReqMethod.PLUGIN_PACKAGES_INSTALL: "install_plugin_package",
     ReqMethod.PLUGIN_PACKAGES_UNINSTALL: "uninstall_plugin_package",
 }
@@ -1838,6 +1840,10 @@ class JiuWenSwarm:
                 payload = package_manager.uninstall_equipment_with_notice(
                     "plugin_packages", params
                 )
+            elif method == ReqMethod.AGENT_TEMPLATES_IMPORT_LOCAL:
+                payload = package_manager.import_agent_template(params)
+            elif method == ReqMethod.PLUGIN_PACKAGES_IMPORT_LOCAL:
+                payload = package_manager.import_plugin_package(params)
             else:
                 # lifecycle: create → ok + {}
                 getattr(package_manager, _PACKAGE_ROUTES[method])(params)

@@ -277,11 +277,13 @@ class ReqMethod(Enum):
     AGENT_TEMPLATES_FILE_LIST = "agent_templates.file.list"
     AGENT_TEMPLATES_FILE_READ = "agent_templates.file.read"
     AGENT_TEMPLATES_CREATE = "agent_templates.create"
+    AGENT_TEMPLATES_IMPORT_LOCAL = "agent_templates.import_local"
     AGENT_TEMPLATES_INSTALL = "agent_templates.install"
     AGENT_TEMPLATES_UNINSTALL = "agent_templates.uninstall"
     PLUGIN_PACKAGES_LIST = "plugin_packages.list"
     PLUGIN_PACKAGES_SHOW = "plugin_packages.show"
     PLUGIN_PACKAGES_CREATE = "plugin_packages.create"
+    PLUGIN_PACKAGES_IMPORT_LOCAL = "plugin_packages.import_local"
     PLUGIN_PACKAGES_INSTALL = "plugin_packages.install"
     PLUGIN_PACKAGES_UNINSTALL = "plugin_packages.uninstall"
 

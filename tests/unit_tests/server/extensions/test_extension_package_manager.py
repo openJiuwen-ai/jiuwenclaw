@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -169,11 +170,11 @@ class TestCreateInstallUninstall:
 
             assert manifest["package_type"] == "agent_template"
             assert "persona" in manifest
-            assert manifest["name"] == "N"
+            assert manifest["name"] == "mine"
             assert manifest["description"] == "D"
             assert "agentCard" not in manifest
             template = load_agent_template_package(pkg / "manifest.json")
-            assert template.agent_card.name == "N"
+            assert template.agent_card.name == "mine"
         else:
             from openjiuwen.harness.resources import load_plugin_package
 
@@ -185,7 +186,30 @@ class TestCreateInstallUninstall:
         entry = next(e for e in marketplace_entries(kind) if e["id"] == "mine")
         assert entry["installed"] is False
         assert entry["source"] == "local"
-        assert "enabled" not in entry
+        assert set(entry) == {"id", "source", "installed"}
+        assert "mcps" not in manifest
+
+    @pytest.mark.parametrize("kind", _KINDS)
+    def test_create_writes_mcp_connectors(
+        self, extension_workspace: Path, kind: str
+    ) -> None:
+        params = {
+            "id": "mine",
+            "name": "N",
+            "description": "D",
+            "skills": [],
+            "mcps": ["amap", "feishu"],
+        }
+        if kind == AGENT_TEMPLATES:
+            catalog.create_agent_template({**params, "persona": "P"})
+        else:
+            catalog.create_plugin_package(params)
+        pkg = extension_workspace / "plugins" / kind / "local" / "mine"
+        manifest = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["mcps"] == [
+            {"connector": "amap"},
+            {"connector": "feishu"},
+        ]
 
     @pytest.mark.parametrize("kind", _KINDS)
     @pytest.mark.parametrize("conflict", ["local", "built_in", "resources"])
@@ -320,6 +344,126 @@ class TestCreateInstallUninstall:
         assert rec.get("state") == "connected"
 
 
+def _import_package(kind: str, params: dict) -> dict:
+    if kind == AGENT_TEMPLATES:
+        return catalog.import_agent_template(params)
+    return catalog.import_plugin_package(params)
+
+
+def _src_manifest(kind: str, package_id: str) -> dict:
+    if kind == AGENT_TEMPLATES:
+        return {
+            "package_type": "agent_template",
+            "name": package_id,
+            "description": "Imported expert package.",
+        }
+    return {"package_type": "plugin", "id": package_id}
+
+
+def _write_src_dir(root: Path, kind: str, package_id: str) -> Path:
+    src = root / package_id
+    src.mkdir(parents=True)
+    (src / "manifest.json").write_text(
+        json.dumps(_src_manifest(kind, package_id)), encoding="utf-8"
+    )
+    return src
+
+
+def _write_src_zip(root: Path, kind: str, package_id: str) -> Path:
+    src = _write_src_dir(root, kind, package_id)
+    zip_path = root / f"{package_id}.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for path in src.rglob("*"):
+            if path.is_file():
+                zf.write(path, Path(src.name) / path.relative_to(src))
+    return zip_path
+
+
+class TestImportLocal:
+    """import_local: path → local/{id}/ + marketplace installed=false."""
+
+    @pytest.mark.parametrize("kind", _KINDS)
+    def test_import_zip_writes_local_uninstalled(
+        self, extension_workspace: Path, tmp_path: Path, kind: str
+    ) -> None:
+        zip_path = _write_src_zip(tmp_path, kind, "office-kit")
+        result = _import_package(kind, {"path": str(zip_path)})
+        assert result == {"id": "office-kit"}
+        dest = extension_workspace / "plugins" / kind / "local" / "office-kit"
+        assert dest.is_dir()
+        assert (dest / "manifest.json").is_file()
+        entry = next(e for e in marketplace_entries(kind) if e["id"] == "office-kit")
+        assert entry["installed"] is False
+        assert entry["source"] == "local"
+
+    @pytest.mark.parametrize("kind", _KINDS)
+    def test_import_dir_writes_local_uninstalled(
+        self, extension_workspace: Path, tmp_path: Path, kind: str
+    ) -> None:
+        src = _write_src_dir(tmp_path, kind, "from-dir")
+        result = _import_package(kind, {"path": str(src)})
+        assert result == {"id": "from-dir"}
+        dest = extension_workspace / "plugins" / kind / "local" / "from-dir"
+        assert dest.is_dir()
+        entry = next(e for e in marketplace_entries(kind) if e["id"] == "from-dir")
+        assert entry["installed"] is False
+        assert entry["source"] == "local"
+
+    @pytest.mark.parametrize("kind", _KINDS)
+    def test_import_rejects_existing_id(
+        self, extension_workspace: Path, tmp_path: Path, kind: str
+    ) -> None:
+        create_package(kind, "mine")
+        pkg = extension_workspace / "plugins" / kind / "local" / "mine"
+        marker = pkg / "_keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        src = _write_src_dir(tmp_path, kind, "mine")
+        with pytest.raises(ValueError, match="already exists"):
+            _import_package(kind, {"path": str(src)})
+        assert marker.read_text(encoding="utf-8") == "keep"
+        manifest = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
+        if kind == AGENT_TEMPLATES:
+            assert manifest["name"] == "mine"
+            assert "agent_card" not in manifest
+            assert (pkg / "persona" / "mine.md").is_file()
+        else:
+            assert manifest["id"] == "mine"
+
+    @pytest.mark.parametrize("kind", _KINDS)
+    def test_import_rejects_relative_path(
+        self, extension_workspace: Path, kind: str
+    ) -> None:
+        with pytest.raises(ValueError):
+            _import_package(kind, {"path": "packs/office-kit"})
+        local_root = extension_workspace / "plugins" / kind / "local"
+        assert not local_root.exists() or not any(local_root.iterdir())
+
+    @pytest.mark.parametrize("kind", _KINDS)
+    def test_import_rejects_missing_manifest(
+        self, extension_workspace: Path, tmp_path: Path, kind: str
+    ) -> None:
+        src = tmp_path / "no-manifest"
+        src.mkdir()
+        (src / "README.md").write_text("x", encoding="utf-8")
+        with pytest.raises(ValueError):
+            _import_package(kind, {"path": str(src)})
+        dest = extension_workspace / "plugins" / kind / "local"
+        assert not dest.exists() or not any(dest.iterdir())
+
+    def test_import_rejects_wrong_package_type(
+        self, extension_workspace: Path, tmp_path: Path
+    ) -> None:
+        zip_path = _write_src_zip(tmp_path, PLUGIN_PACKAGES, "office-kit")
+        with pytest.raises(ValueError):
+            catalog.import_agent_template({"path": str(zip_path)})
+        assert not (
+            extension_workspace / "plugins" / AGENT_TEMPLATES / "local" / "office-kit"
+        ).exists()
+        assert not (
+            extension_workspace / "plugins" / PLUGIN_PACKAGES / "local" / "office-kit"
+        ).exists()
+
+
 class TestInstallPendingConnectorsGate:
     """Two-phase install: read-only gate, no connect_mcp, pending then retry."""
 
@@ -413,6 +557,43 @@ class TestInstallPendingConnectorsGate:
 
 class TestListShowAndFileRead:
     """list/show contract, filter, connection_state, file.read user-disk only."""
+
+    def test_list_show_keep_camel_case_card_fields(
+        self, extension_workspace: Path
+    ) -> None:
+        seed_package(
+            extension_workspace,
+            AGENT_TEMPLATES,
+            "named",
+            extra_manifest={
+                "display_name": {"zh": "专家", "en": "Expert"},
+                "display_description": {"zh": "简介", "en": "Desc"},
+                "quick_inputs": [{"zh": "问我", "en": "Ask me"}],
+                "tools": [
+                    {
+                        "class": "DemoTool",
+                        "display_name": {"zh": "工具", "en": "Tool"},
+                        "display_description": {"zh": "做某事", "en": "Does a thing"},
+                    }
+                ],
+            },
+        )
+        listed = next(c for c in catalog.list_agent_templates() if c["id"] == "named")
+        assert listed["displayName"] == {"zh": "专家", "en": "Expert"}
+        assert listed["displayDescription"] == {"zh": "简介", "en": "Desc"}
+        assert "display_name" not in listed
+        shown = catalog.show_agent_template("named")
+        assert shown is not None
+        assert shown["displayName"] == {"zh": "专家", "en": "Expert"}
+        assert shown["quickInputs"] == [{"zh": "问我", "en": "Ask me"}]
+        assert "quick_inputs" not in shown
+        assert shown["tools"] == [
+            {
+                "id": "DemoTool",
+                "displayName": {"zh": "工具", "en": "Tool"},
+                "displayDescription": {"zh": "做某事", "en": "Does a thing"},
+            }
+        ]
 
     def test_list_resources_filter_and_card_fields(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extension_workspace: Path

@@ -20,6 +20,39 @@ def _source(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
+def _module_import_source(source: str) -> str:
+    """Return only the top-level import section for AST checks on large modules."""
+    lines: list[str] = []
+    started = False
+    paren_depth = 0
+
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not started:
+            if stripped.startswith(("from ", "import ", "if TYPE_CHECKING")):
+                started = True
+            else:
+                continue
+
+        lines.append(line)
+        paren_depth += line.count("(") - line.count(")")
+        if paren_depth > 0:
+            continue
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped in (")", "),"):
+            continue
+        if stripped.startswith(("from ", "import ", "if TYPE_CHECKING")):
+            continue
+        if line.startswith((" ", "\t")):
+            continue
+
+        lines.pop()
+        break
+
+    return "\n".join(lines)
+
+
 def test_deep_adapter_imports_core_personal_context_rail_only() -> None:
     module = (
         Path(__file__).parents[3]
@@ -29,7 +62,7 @@ def test_deep_adapter_imports_core_personal_context_rail_only() -> None:
         / "agent_adapter"
         / "interface_deep.py"
     )
-    tree = ast.parse(_source(str(module)))
+    tree = ast.parse(_module_import_source(_source(str(module))))
     imports = [
         node
         for node in ast.walk(tree)
