@@ -4280,7 +4280,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     )
 
     async def _path_get(ws, req_id, params, session_id, user_id=None):
-        """读 browser.chrome_path 并返回给前端（会解析环境变量）。"""
+        """读 browser.chrome_path / browser_type 并返回给前端（会解析环境变量）。"""
         from jiuwenswarm.gateway.routing.e2a_proxy import is_legacy_shared_directory_client, proxy_unary_request
         from jiuwenswarm.common.schema.message import ReqMethod
 
@@ -4299,7 +4299,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws,
                 req_id,
                 ok=True,
-                payload={"chrome_path": "", "headless": True},
+                payload={"chrome_path": "", "browser_type": "auto", "headless": True},
             )
             return
 
@@ -4309,18 +4309,31 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         config = _resolve_env_vars(config_base)
         browser_cfg = config.get("browser", {}) if isinstance(config, dict) else {}
         chrome_path = ""
+        browser_type = "auto"
         headless = True
         if isinstance(browser_cfg, dict):
             value = browser_cfg.get("chrome_path", "")
             if isinstance(value, str):
                 chrome_path = value
+            raw_type = browser_cfg.get("browser_type", "auto")
+            if isinstance(raw_type, str) and raw_type.strip():
+                normalized = raw_type.strip().lower()
+                if normalized in {"chrome", "google-chrome", "google_chrome"}:
+                    browser_type = "chrome"
+                elif normalized in {"msedge", "edge", "microsoft-edge", "microsoft_edge"}:
+                    browser_type = "msedge"
+                else:
+                    browser_type = "auto"
             raw_headless = browser_cfg.get("headless", True)
             headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
 
-        await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
+        await channel.send_response(
+            ws, req_id, ok=True,
+            payload={"chrome_path": chrome_path, "browser_type": browser_type, "headless": headless},
+        )
 
     async def _path_set(ws, req_id, params, session_id, user_id=None):
-        """更新 browser.chrome_path / browser.headless 并写回 config。"""
+        """更新 browser.chrome_path / browser_type / headless 并写回 config。"""
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
@@ -4331,19 +4344,86 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         chrome_path = chrome_path.strip()
 
+        raw_browser_type = params.get("browser_type", "auto")
+        if not isinstance(raw_browser_type, str):
+            await channel.send_response(ws, req_id, ok=False, error="browser_type must be string", code="BAD_REQUEST")
+            return
+        normalized_type = raw_browser_type.strip().lower()
+        if normalized_type in {"chrome", "google-chrome", "google_chrome"}:
+            browser_type = "chrome"
+        elif normalized_type in {"msedge", "edge", "microsoft-edge", "microsoft_edge"}:
+            browser_type = "msedge"
+        elif normalized_type in {"", "auto"}:
+            browser_type = "auto"
+        else:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="browser_type must be one of: auto, chrome, msedge",
+                code="BAD_REQUEST",
+            )
+            return
+
         raw_headless = params.get("headless", True)
         headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
 
-        from jiuwenswarm.gateway.routing.e2a_proxy import is_legacy_shared_directory_client, proxy_unary_request
+        from jiuwenswarm.gateway.routing.e2a_proxy import (
+            fetch_agent_unary,
+            is_legacy_shared_directory_client,
+            proxy_unary_request,
+        )
         from jiuwenswarm.common.schema.message import ReqMethod
 
         resolved_client = _resolve(agent_client)
         if resolved_client is not None and not is_legacy_shared_directory_client(resolved_client):
+            # Fetch current browser config so the restart callback can match the
+            # old runtime identity (custom binary / headed mode).
+            previous_chrome_path = ""
+            previous_headless = True
+            try:
+                prev_ok, prev_payload = await fetch_agent_unary(
+                    agent_client=resolved_client,
+                    req_method=ReqMethod.PATH_GET,
+                    params=None,
+                    session_id=session_id,
+                    user_id=user_id,
+                    channel_id=channel.channel_id,
+                    label="path.get (prev)",
+                )
+                if prev_ok and isinstance(prev_payload, dict):
+                    prev_chrome = prev_payload.get("chrome_path")
+                    if isinstance(prev_chrome, str):
+                        previous_chrome_path = prev_chrome
+                    prev_headless_val = prev_payload.get("headless", True)
+                    previous_headless = (
+                        bool(prev_headless_val) if isinstance(prev_headless_val, bool) else True
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[path.set] failed to fetch previous browser config: %s", e)
+
+            async def _on_path_set_done(ok: bool, _payload: dict) -> None:
+                if not ok:
+                    return
+                try:
+                    await _clear_agent_config_cache(resolved_client)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[path.set] AgentServer config cache clear failed: %s", e)
+                try:
+                    await _restart_agent_browser_runtime(
+                        resolved_client,
+                        previous_chrome_path=previous_chrome_path,
+                        previous_headless=previous_headless,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[path.set] browser runtime restart failed: %s", e)
+
             await proxy_unary_request(
                 channel=channel, agent_client=resolved_client, ws=ws, req_id=req_id,
-                params={"chrome_path": chrome_path, "headless": headless},
+                params={"chrome_path": chrome_path, "browser_type": browser_type, "headless": headless},
                 session_id=session_id, user_id=user_id,
                 req_method=ReqMethod.PATH_SET, label="path.set",
+                on_done=_on_path_set_done,
             )
             return
 
@@ -4361,7 +4441,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
         try:
-            update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
+            update_browser_in_config({"chrome_path": chrome_path, "browser_type": browser_type, "headless": headless})
             resolved_agent_client = _resolve(agent_client)
             await _clear_agent_config_cache(resolved_agent_client)
         except Exception as e:  # noqa: BLE001
@@ -4381,7 +4461,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 e,
             )
 
-        await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
+        await channel.send_response(
+            ws, req_id, ok=True,
+            payload={"chrome_path": chrome_path, "browser_type": browser_type, "headless": headless},
+        )
 
     async def _path_select_directory(ws, req_id, params, session_id, user_id=None):
         """在 AgentServer 注入目录内选择项目目录（决策 D3：返回 AgentServer 侧绝对路径）。

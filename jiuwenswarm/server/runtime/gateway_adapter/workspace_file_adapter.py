@@ -1,6 +1,6 @@
 """WorkspaceFileAdapter：工作区与文件域用户业务适配器。
 
-复用基准：``server/runtime/attachments``（媒体/文档附件中立工具）与
+复用 ``server/runtime/attachments``（媒体/文档附件中立工具）与
 ``common/utils`` 目录门面；本适配器只读写当前 AgentServer 注入目录。
 
 覆盖：
@@ -11,7 +11,11 @@
 - ``path.select_directory`` / ``path.select_files``：**注入目录内枚举**（决策 D3）。
   目录选择在注入 workspace 根内解析/校验并返回 AgentServer 侧绝对路径；
   文件选择枚举注入目录下可上传文件元数据（不含 base64，避免大帧压垮
-  WebSocket；小附件内容经 E2A 或受认证 HTTP bridge 传输）。
+  WebSocket；小附件内容经 E2A 或受认证 HTTP bridge 传输）；
+- ``file.import_url``：chat.send 上行外部 url 文件由 AgentServer 下载落盘；
+- ``file.upload_chunk``：分块上传（受认证 HTTP bridge 大文件传输）；
+- ``im.file_persist``：IM 平台附件落盘（Gateway 下载字节后经 E2A 交
+  AgentServer 落盘注入目录，Gateway 不直写用户目录）。
 """
 
 from __future__ import annotations
@@ -500,7 +504,7 @@ def _import_url_file(item: dict[str, Any], *, overwrite: bool = False) -> dict[s
 def _describe_local_file(path: Path) -> dict[str, Any]:
     """与桌面端 select_local_files 同形的文件元数据。
 
-    - image 文件附带 ``base64`` 内容（≤10MB，与 ``media_attachments`` 上限一致），
+    - image 文件附带 ``base64`` 内容（≤4MB，``_SELECT_IMAGE_MAX_BYTES``），
       供前端 ``InputArea`` 预览与上传（前端硬判 ``kind=image && base64``）；
     - document 只返回路径元数据（内容经 CHAT_SEND 链路按 ``@path`` 引用）。
     """

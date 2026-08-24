@@ -2192,15 +2192,15 @@ class MessageHandler(ABC):
         *,
         turn_index: int = 1,
     ) -> None:
-        """受控通道 /rewind N：回退当前会话到指定轮次并通知。"""
-        from jiuwenswarm.agents.harness.common.session_ops_service import rewind_session
         """受控通道 /rewind N：回退当前会话到指定轮次并通知。
 
-        优先转发到 AgentServer（原子性截断 history + context + checkpointer），
-        失败则 fallback 到本地仅截断 history.json。
+        优先转发到 AgentServer（原子性截断 history + context + checkpointer）；
+        E2A 不可达时仅对单用户共享目录 client 回退到本地截断 history.json，
+        远程/AgentOS client 返回可重试错误（方案 §8：禁止用部署侧目录代替用户目录）。
         """
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import is_legacy_shared_directory_client
 
         state = self.get_or_create_channel_state(msg)
         target_sid = state.session_id
@@ -2245,12 +2245,26 @@ class MessageHandler(ABC):
                         target_sid, turn_index, context_ok,
                     )
                     return
-                # AgentServer returned error — fall through to local fallback
-                logger.warning("[MessageHandler] /rewind E2A failed: %s", resp.payload)
+                # AgentServer 已返回业务错误，说明传输可用。远程/AgentOS 模式
+                # 不能以“不可达”覆盖真实错误，也不能回退到 Gateway 本地目录。
+                error_payload = resp.payload if isinstance(resp.payload, dict) else {}
+                logger.warning("[MessageHandler] /rewind E2A failed: %s", error_payload)
+                if not is_legacy_shared_directory_client(self.agent_client):
+                    await self.send_channel_notice(
+                        user_infos, channel_id, reply_session_id,
+                        error_payload or {"error": "回退失败"},
+                    )
+                    return
             except Exception as e2a_exc:
                 logger.warning("[MessageHandler] /rewind E2A failed, fallback local: %s", e2a_exc)
 
-            # --- Fallback: 仅本地截断 history.json ---
+            # --- Fallback: 仅单用户共享目录 client 回退到本地截断 history.json ---
+            if not is_legacy_shared_directory_client(self.agent_client):
+                await self.send_channel_notice(
+                    user_infos, channel_id, reply_session_id,
+                    {"error": "AgentServer 不可达，无法回退（远程模式不回退本地目录）"},
+                )
+                return
             from jiuwenswarm.agents.harness.common.session_ops_service import rewind_session
             result = rewind_session(session_id=target_sid, turn_index=turn_index)
             preview = result.get("content_preview", "")

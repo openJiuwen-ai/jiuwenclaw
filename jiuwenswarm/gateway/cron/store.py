@@ -119,7 +119,7 @@ class CronJobStore:
 
     并发安全:
       - ``asyncio.Lock``：同进程协程互斥；
-      - ``portalocker`` 伴生 ``cron_jobs.json.lock``：跨进程（多 Gateway / Agent）互斥。
+      - ``portalocker`` 伴生 ``cron_jobs.json.lock``：跨进程（多 Gateway）互斥。
       整个 read-modify-write 在双层锁内完成，避免 lost update。
     """
 

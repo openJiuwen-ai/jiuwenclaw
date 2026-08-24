@@ -42,9 +42,10 @@ def normalize_chat_media_attachments(params: dict[str, Any], session_id: str | N
     """Validate browser media_items, persist images, and enrich the chat params.
 
     The frontend sends images as base64 for cross-platform browser compatibility.
-    The gateway stores images under the current session and returns structured
-    image file records. Downstream multimodal rails can load images from these
-    paths without sending long base64 payloads through normal text context.
+    Images are persisted under the current session directory and returned as
+    structured image file records. Downstream multimodal rails can load images
+    from these paths without sending long base64 payloads through normal text
+    context.
     """
 
     raw_items = params.get("media_items")

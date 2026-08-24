@@ -557,7 +557,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       setDrawer(null);
       setActiveTab('list');
       await loadJobs(projects);
-      // 新任务按 updated_at 倒序会排到列表最前面（见 gateway/cron/store.py:179 的排序规则），
+      // 新任务按 updated_at 倒序会排到列表最前面（见 gateway/cron/store.py 的 jobs.sort 排序规则），
       // 跳回第 1 页并滚到表格顶部，让用户直接看到刚创建的任务，不用自己翻页去找
       goToPage(1);
       void reloadCronStore();

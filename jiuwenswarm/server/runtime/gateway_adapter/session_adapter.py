@@ -10,7 +10,15 @@
 - ``session.color_set`` → ``session_metadata``（accent_color 读写，TUI 语义；
   color=None 为查询模式，合法值白名单与 TUI 一致）；
 - ``session.preview`` → ``session_history.load_history_records`` + 对话白名单过滤
-  （chat.final / team.message，与 TUI 预览行为一致）。
+  （chat.final / team.message，与 TUI 预览行为一致）；
+- ``session.delete`` → 目录删除（team session 拒绝、evict KV cache）；
+- ``session.rename`` → 会话重命名；
+- ``session.restore_files`` → 会话文件恢复；
+- ``history.list_turns`` → 会话历史轮次列表。
+
+注：``session.delete`` / ``session.rename`` 在 AgentServer 在线 dispatch 时
+由 ``_GATEWAY_ADAPTER_LEGACY_METHODS`` 跳过适配器、走原 handler（保留
+KV cache evict 等在线状态清理语义）。
 """
 
 from __future__ import annotations

@@ -7,7 +7,10 @@
 约束（方案 §4/§6/§8）：
 - Gateway 不直接读写用户态文件，也不保留依赖用户 ``.jiuwenswarm`` 的
   业务逻辑；目标 AgentServer 不可达时返回可重试错误，**禁止**用部署侧
-  目录代替用户目录执行（不 fallback）。
+  目录代替用户目录执行。
+- 单用户共享目录布局（默认本地 WebSocket client）保留可用性兼容路径
+  （``_try_legacy_shared_directory_adapter``）：同一 ``~/.jiuwenswarm``
+  时可直接运行中立适配器，此路径不对远程/AgentOS client 开放。
 - user_id 只用于路由/观测关联，不要求 AgentServer 据此选择目录。
 - 传输层客户端由配置驱动（websocket / agentos_router），本薄代理对
   两者透明。
