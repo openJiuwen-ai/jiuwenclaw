@@ -9,7 +9,6 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
@@ -21,6 +20,7 @@ from jiuwenswarm.common.e2a.wire_codec import (
     parse_agent_server_wire_chunk,
     parse_agent_server_wire_unary,
 )
+from jiuwenswarm.common.reverse_rpc.constants import REVERSE_RPC_RESPONSE_METHOD
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
 from jiuwenswarm.common.ws_diagnostics import (
@@ -167,12 +167,21 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._running = False
         # AgentServer send_push：旁路投递，勿进入与 request_id 绑定的 RPC 等待队列
         self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self._on_disconnect: Callable[[BaseException | None], Awaitable[None]] | None = None
+        self._disconnect_notified = False
 
     def set_server_push_handler(
         self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
     ) -> None:
         """注册 Agent 主动推送处理回调（metadata 含 ``E2A_WIRE_SERVER_PUSH_KEY`` 的帧）。"""
         self._on_server_push = handler
+
+    def set_disconnect_handler(
+        self,
+        handler: Callable[[BaseException | None], Awaitable[None]] | None,
+    ) -> None:
+        """Register a process-local transport-disconnect lifecycle callback."""
+        self._on_disconnect = handler
 
     def _diagnostic_state(self, ws: Any | None = None) -> dict[str, Any]:
         target_ws = self._ws if ws is None else ws
@@ -222,6 +231,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             close_timeout=5.0,
             max_size=AGENT_WS_MAX_MESSAGE_BYTES,
         )
+        self._disconnect_notified = False
         logger.info("[WebSocketAgentServerClient] 已连接: %s", uri)
 
         # 读取 AgentServer 的 connection.ack 事件
@@ -341,11 +351,13 @@ class WebSocketAgentServerClient(AgentServerClient):
         async with self._queue_lock:
             for queue in self._message_queues.values():
                 queue.put_nowait(failure)
+        await self._notify_disconnect(exc)
         logger.info("[WebSocketAgentServerClient] 接收任务已停止并通知等待队列: %s", detail)
 
     async def disconnect(self) -> None:
         # 停止接收任务
         self._running = False
+        await self._notify_disconnect(None)
         if self._receiver_task and not self._receiver_task.done():
             self._receiver_task.cancel()
             try:
@@ -374,6 +386,20 @@ class WebSocketAgentServerClient(AgentServerClient):
             self._ws = None
             self._uri = None
         logger.info("[WebSocketAgentServerClient] 已断开")
+
+    async def _notify_disconnect(self, exc: BaseException | None) -> None:
+        if self._disconnect_notified:
+            return
+        self._disconnect_notified = True
+        handler = self._on_disconnect
+        if handler is None:
+            return
+        try:
+            await handler(exc)
+        except Exception:
+            logger.exception(
+                "[WebSocketAgentServerClient] disconnect handler failed"
+            )
 
     def _ensure_connected(self) -> None:
         if self._ws is None:
@@ -437,10 +463,24 @@ class WebSocketAgentServerClient(AgentServerClient):
             envelope.method,
             envelope.is_stream,
         )
-        logger.debug(
-            "[WebSocketAgentServerClient] 发送请求(非流式) E2A: %s",
-            _to_json(envelope.to_dict()),
-        )
+        is_reverse_rpc_response = envelope.method == REVERSE_RPC_RESPONSE_METHOD
+        if is_reverse_rpc_response:
+            params = envelope.params if isinstance(envelope.params, dict) else {}
+            error = params.get("error")
+            error_code = error.get("code") if isinstance(error, dict) else None
+            logger.debug(
+                "[WebSocketAgentServerClient] 发送 Reverse RPC response: "
+                "request_id=%s rpc_id=%s ok=%s error_code=%s",
+                rid,
+                params.get("rpc_id"),
+                params.get("ok"),
+                error_code,
+            )
+        else:
+            logger.debug(
+                "[WebSocketAgentServerClient] 发送请求(非流式) E2A: %s",
+                _to_json(envelope.to_dict()),
+            )
 
         if rid in self._message_queues:
             raise RuntimeError(
@@ -456,7 +496,20 @@ class WebSocketAgentServerClient(AgentServerClient):
             # 发送请求
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
-                logger.info("[WebSocketAgentServerClient] 发送请求(非流式) payload: %s", _to_json(payload))
+                if is_reverse_rpc_response:
+                    logger.info(
+                        "[WebSocketAgentServerClient] 发送 Reverse RPC response: "
+                        "request_id=%s rpc_id=%s ok=%s error_code=%s",
+                        rid,
+                        params.get("rpc_id"),
+                        params.get("ok"),
+                        error_code,
+                    )
+                else:
+                    logger.info(
+                        "[WebSocketAgentServerClient] 发送请求(非流式) payload: %s",
+                        _to_json(payload),
+                    )
                 await self._send_wire_payload(payload)
 
             try:
