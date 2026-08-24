@@ -2208,6 +2208,15 @@ def _normalize_preserve_file_sharing_mode(value: Any) -> str | None:
 _VALID_SANDBOX_STARTUP_MODES = ("internal", "external")
 _DEFAULT_SANDBOX_STARTUP_MODE = "internal"
 _DEFAULT_SANDBOX_POLICY_FILE = "code-agent-policy.yaml"
+_WINDOWS_SANDBOX_POLICY_FILE = "windows-policy.yaml"
+_BUNDLED_POLICY_FILENAMES = frozenset({
+    "windows-policy.yaml",
+    "code-agent-policy.yaml",
+    "default-policy.yaml",
+    "java-policy.yaml",
+    "enterprise-policy.yaml",
+    "inference-policy.yaml",
+})
 
 # YuanRong sandbox knobs under flat ``sandbox:`` (see get_sandbox_endpoint).
 _VALID_YUANRONG_EXECUTORS = ("default", "docker")
@@ -2231,6 +2240,13 @@ DEFAULT_SANDBOX_STARTUP_MODE = _DEFAULT_SANDBOX_STARTUP_MODE
 DEFAULT_SANDBOX_POLICY_FILE = _DEFAULT_SANDBOX_POLICY_FILE
 DEFAULT_YUANRONG_SANDBOX_URL = _DEFAULT_YUANRONG_URL
 DEFAULT_YUANRONG_EXECUTOR = _DEFAULT_YUANRONG_EXECUTOR
+
+
+def default_sandbox_policy_file() -> str:
+    """平台默认的 bundled policy 文件名。写入 config.yaml 时必须是裸文件名。"""
+    if sys.platform == "win32":
+        return _WINDOWS_SANDBOX_POLICY_FILE
+    return _DEFAULT_SANDBOX_POLICY_FILE
 
 
 def _normalize_yuanrong_executor(value: Any) -> str:
@@ -2307,12 +2323,30 @@ def _looks_like_bare_filename(value: str) -> bool:
     return "/" not in value and "\\" not in value and not Path(value).is_absolute()
 
 
+def _frozen_jiuwenbox_configs_dir() -> Path | None:
+    """PyInstaller onedir: ``_MEIPASS/jiuwenbox_configs/configs``."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return None
+    for candidate in (
+        Path(meipass) / "jiuwenbox_configs" / "configs",
+        Path(meipass) / "jiuwenbox" / "configs",
+    ):
+        if candidate.is_dir() and any(candidate.glob("*.yaml")):
+            return candidate
+    return None
+
+
 def _jiuwenbox_configs_dir() -> Path | None:
     """探测仓库或安装位置上的 ``jiuwenbox/configs/`` 目录。
 
-    优先在仓库目录树里寻找 (开发场景, ``jiuwenbox/src/jiuwenbox/configs``);
-    失败再尝试已 ``pip install`` 的 jiuwenbox 包内 ``configs/``。
+    优先冻包 ``_MEIPASS`` (桌面 exe), 再仓库目录树 (开发场景),
+    最后已 ``pip install`` 的包内 ``configs/``。
     """
+    frozen = _frozen_jiuwenbox_configs_dir()
+    if frozen is not None:
+        return frozen
+
     here = Path(__file__).resolve()
 
     for ancestor in here.parents[1:7]:
@@ -2348,11 +2382,11 @@ def _jiuwenbox_configs_dir() -> Path | None:
 def resolve_sandbox_policy_path(value: str | None) -> Path | None:
     r"""把 ``sandbox.policy_file`` 的取值解析为宿主机绝对路径。
 
-    - ``None`` / 空字符串 → 返回 None, 由调用方决定是否落到 jiuwenbox 自身默认 policy;
-    - 仅文件名 (不含路径分隔符) → 在 ``jiuwenbox/configs/`` 下拼接;
-      ``configs/`` 探测不到时返回 None (调用方应当报错并提示给绝对路径);
-    - 含 ``/`` ``\\`` 或绝对路径 → 展开 ``~`` / ``$VAR`` 后按整路径返回 (不强校验是否存在,
-      留给上游 ``_load_policy_file`` / jiuwenbox 自己做存在性检查并给出明确错误)。
+    - ``None`` / 空字符串 → 返回 None;
+    - 仅文件名 → 在 ``jiuwenbox/configs/`` 下拼接;
+    - 官方模板的绝对路径 (``windows-policy.yaml`` 等) → 一律改走包内同名文件,
+      避免开发机 ``D:\CODE\...`` 打进 exe 后在别的机器上失效;
+    - 其它自定义绝对路径 → 展开后按整路径使用。
     """
     if not value:
         return None
@@ -2360,12 +2394,54 @@ def resolve_sandbox_policy_path(value: str | None) -> Path | None:
     if not text:
         return None
     expanded = os.path.expandvars(os.path.expanduser(text))
-    if _looks_like_bare_filename(expanded):
-        configs_dir = _jiuwenbox_configs_dir()
-        if configs_dir is None:
+    name = Path(expanded).name
+    if _looks_like_bare_filename(expanded) or name in _BUNDLED_POLICY_FILENAMES:
+        lookup = expanded if _looks_like_bare_filename(expanded) else name
+        bundled = _bundled_policy_by_name(lookup)
+        if bundled is not None:
+            return bundled
+        if _looks_like_bare_filename(expanded):
             return None
-        return (configs_dir / expanded).resolve()
     return Path(expanded).resolve()
+
+
+def _bundled_policy_by_name(name: str) -> Path | None:
+    """``jiuwenbox/configs/<name>`` if that file exists; otherwise None."""
+    if not _looks_like_bare_filename(name):
+        return None
+    configs_dir = _jiuwenbox_configs_dir()
+    if configs_dir is None:
+        return None
+    candidate = (configs_dir / name).resolve()
+    return candidate if candidate.is_file() else None
+
+
+def _portable_sandbox_policy_file(value: str) -> str:
+    """把官方模板压成裸文件名; 自定义 policy 保留绝对路径。"""
+    text = str(value or "").strip()
+    if not text or _looks_like_bare_filename(text):
+        return text
+    name = Path(os.path.expandvars(os.path.expanduser(text))).name
+    if name in _BUNDLED_POLICY_FILENAMES:
+        return name
+    return text
+
+
+def ensure_portable_sandbox_policy_file() -> str | None:
+    """若 config.yaml 里是开发机绝对路径的官方模板, 改写成裸文件名并写回。"""
+    raw = get_sandbox_policy_file()
+    if not raw:
+        return None
+    portable = _portable_sandbox_policy_file(raw)
+    if portable == raw:
+        return portable
+    update_sandbox_policy_file(portable)
+    logger.info(
+        "normalized sandbox.policy_file %r -> %r (portable bundled name)",
+        raw,
+        portable,
+    )
+    return portable
 
 
 def get_sandbox_policy_file() -> str:
@@ -2378,16 +2454,16 @@ def get_sandbox_policy_file() -> str:
 def get_sandbox_policy_path() -> Path | None:
     """返回 ``sandbox.policy_file`` 解析后的绝对路径。
 
-    未配置时回落到 ``_DEFAULT_SANDBOX_POLICY_FILE`` (即 ``code-agent-policy.yaml``);
+    未配置时回落到 :func:`default_sandbox_policy_file`;
     解析失败 (例如仅给文件名但 ``configs/`` 不可达) 返回 None。
     """
-    raw = get_sandbox_policy_file() or _DEFAULT_SANDBOX_POLICY_FILE
+    raw = get_sandbox_policy_file() or default_sandbox_policy_file()
     return resolve_sandbox_policy_path(raw)
 
 
 def update_sandbox_policy_file(value: str) -> str:
-    """写入 ``sandbox.policy_file`` (仅文件名或绝对路径) 到 config.yaml; 返回归一化后的字符串。"""
-    text = str(value or "").strip()
+    """写入 ``sandbox.policy_file`` 到 config.yaml; 官方模板压成裸文件名。"""
+    text = _portable_sandbox_policy_file(str(value or "").strip())
     if not text:
         raise ValueError("policy_file must be non-empty")
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
@@ -2484,7 +2560,7 @@ def update_sandbox_endpoint(
         policy_text = str(policy_file).strip()
         if not policy_text:
             raise ValueError("policy_file must be non-empty when provided")
-        policy_value = policy_text
+        policy_value = _portable_sandbox_policy_file(policy_text)
 
     executor_value: str | None = None
     if executor is not None:

@@ -13,12 +13,20 @@ _CONFIGS_DIR = Path(jiuwenbox.__file__).resolve().parent / "configs"
 
 def configs_dir() -> Path:
     """Directory containing default policy templates bundled with the wheel."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        for frozen in (
+            Path(meipass) / "jiuwenbox_configs" / "configs",
+            Path(meipass) / "jiuwenbox" / "configs",
+        ):
+            if frozen.is_dir():
+                return frozen
     return _CONFIGS_DIR
 
 
 def default_policy_path() -> Path:
     """Default ``default-policy.yaml`` path when ``JIUWENBOX_POLICY_PATH`` is unset."""
-    return _CONFIGS_DIR / "default-policy.yaml"
+    return configs_dir() / "default-policy.yaml"
 
 
 def base_policy_path() -> Path:
@@ -29,4 +37,4 @@ def base_policy_path() -> Path:
     (用户副本 user_config) 合并, 不生成合并文件 (见 policy_merge).
     """
     name = "windows-policy.yaml" if sys.platform == "win32" else "default-policy.yaml"
-    return _CONFIGS_DIR / name
+    return configs_dir() / name

@@ -99,8 +99,9 @@ from jiuwenswarm.server.sandbox_config_rpc import (
     get_sandbox_config_req_methods,
 )
 from jiuwenswarm.common.config import (
-    DEFAULT_SANDBOX_POLICY_FILE,
     DEFAULT_SANDBOX_STARTUP_MODE,
+    default_sandbox_policy_file,
+    ensure_portable_sandbox_policy_file,
     get_config,
     get_default_models,
     get_mcp_server_config,
@@ -1177,6 +1178,13 @@ class AgentWebSocketServer:
 
             # startup_mode=internal 已经定下来; 其余字段从归一后的 endpoint
             # 取, 缺啥用默认。
+            try:
+                ensure_portable_sandbox_policy_file()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] normalize sandbox.policy_file failed: %s",
+                    exc,
+                )
             endpoint = get_sandbox_endpoint()
             url = endpoint.get("url") or "http://127.0.0.1:8321"
             sandbox_type = endpoint.get("type") or "jiuwenbox"
@@ -1188,7 +1196,7 @@ class AgentWebSocketServer:
                 )
                 return
             raw_policy = endpoint.get("policy_file") or ""
-            effective_policy_file = raw_policy or DEFAULT_SANDBOX_POLICY_FILE
+            effective_policy_file = raw_policy or default_sandbox_policy_file()
             policy_path = resolve_sandbox_policy_path(effective_policy_file)
             if policy_path is None or not policy_path.is_file():
                 logger.warning(
@@ -1248,16 +1256,38 @@ class AgentWebSocketServer:
                     from jiuwenswarm.server.runtime.pip_env import (
                         ensure_runtime_venv, resolve_base_python,
                     )
-                    venv_dir = ensure_runtime_venv()
-                    sandbox_env["JIUWENBOX_VENV_DIR"] = str(venv_dir)
-                    bundled_python = resolve_base_python()
-                    sandbox_env["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
+                    try:
+                        bundled_python = resolve_base_python()
+                        sandbox_env["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
+                        sandbox_env["JIUWENCLAW_BASE_PYTHON"] = str(bundled_python)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[AgentWebSocketServer] inject JIUWENBOX_BUNDLED_PYTHON failed: %s",
+                            exc,
+                        )
+                    try:
+                        venv_dir = ensure_runtime_venv()
+                        sandbox_env["JIUWENBOX_VENV_DIR"] = str(venv_dir)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[AgentWebSocketServer] inject JIUWENBOX_VENV_DIR failed: %s",
+                            exc,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "[AgentWebSocketServer] inject JIUWENBOX_BUNDLED_PYTHON/VENV_DIR failed: %s",
+                        "[AgentWebSocketServer] inject sandbox python/venv env failed: %s",
                         exc,
                     )
-                if not (sandbox_env.get("JIUWENBOX_RUNNER_PYTHON")
+                for _py_key in ("CLAW_PYTHON_HOME", "JIUWENCLAW_BASE_PYTHON"):
+                    _py_val = (os.environ.get(_py_key) or "").strip()
+                    if _py_val and not sandbox_env.get(_py_key):
+                        sandbox_env[_py_key] = _py_val
+                _desktop_data = (os.environ.get("JIUWENBOX_DESKTOP_DATA_DIR") or "").strip()
+                if _desktop_data:
+                    sandbox_env["JIUWENBOX_DESKTOP_DATA_DIR"] = _desktop_data
+                if getattr(sys, "frozen", False):
+                    sandbox_env["JIUWENBOX_RUNNER_PYTHON"] = str(Path(sys.executable).resolve())
+                elif not (sandbox_env.get("JIUWENBOX_RUNNER_PYTHON")
                         or os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip():
                     logger.info(
                         "[AgentWebSocketServer][sandbox] JIUWENBOX_RUNNER_PYTHON "
@@ -6401,7 +6431,14 @@ class AgentWebSocketServer:
         # 1. 解析 sandbox endpoint: 优先 config.yaml::sandbox.url/type, 缺省走本地 jiuwenbox.
         # ``get_sandbox_endpoint`` 已经把 startup_mode / policy_file 的归一化值一并返回:
         # - startup_mode 缺省/非法 → "internal"
-        # - policy_file 缺省 → "" (此处再回落到 DEFAULT_SANDBOX_POLICY_FILE)
+        # - policy_file 缺省 → "" (此处再回落到 default_sandbox_policy_file)
+        try:
+            ensure_portable_sandbox_policy_file()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] normalize sandbox.policy_file failed: %s",
+                exc,
+            )
         endpoint = get_sandbox_endpoint()
         url = endpoint.get("url") or "http://127.0.0.1:8321"
         sandbox_type = endpoint.get("type") or "jiuwenbox"
@@ -6414,10 +6451,10 @@ class AgentWebSocketServer:
 
         # policy_file:
         # - 仅文件名 → 在 jiuwenbox/configs 下查找; 含路径 / 绝对路径 → 整路径使用;
-        # - 未配置 → 回落到 DEFAULT_SANDBOX_POLICY_FILE (即 code-agent-policy.yaml),
+        # - 未配置 → 回落到 default_sandbox_policy_file (Windows: windows-policy.yaml),
         #   并在下方与 url/type 一起写回 config.yaml, 让重启后无需再走 fallback 路径。
         raw_policy = endpoint.get("policy_file") or ""
-        effective_policy_file = raw_policy or DEFAULT_SANDBOX_POLICY_FILE
+        effective_policy_file = raw_policy or default_sandbox_policy_file()
         policy_path = resolve_sandbox_policy_path(effective_policy_file)
         if policy_path is None:
             raise RuntimeError(
@@ -6429,7 +6466,7 @@ class AgentWebSocketServer:
             raise RuntimeError(
                 f"sandbox policy 文件不存在: {policy_path} "
                 f"(原始配置 sandbox.policy_file="
-                f"{raw_policy or f'<default:{DEFAULT_SANDBOX_POLICY_FILE}>'!r})",
+                f"{raw_policy or f'<default:{default_sandbox_policy_file()}>'!r})",
             )
 
         # 2. 解析 host:port 并 (internal 模式下) 完成端口分配。
@@ -6927,7 +6964,7 @@ class AgentWebSocketServer:
             health = await self._jiuwenbox_runner.fetch_health(host, port)
             landlock_supported = bool(health.get("landlock_supported")) if health else False
 
-            policy_file = endpoint.get("policy_file") or DEFAULT_SANDBOX_POLICY_FILE
+            policy_file = endpoint.get("policy_file") or default_sandbox_policy_file()
             policy_path = resolve_sandbox_policy_path(policy_file)
             compatibility = self._read_landlock_compatibility(policy_path)
 

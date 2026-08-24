@@ -604,6 +604,12 @@ def append_history_record(
         logger.warning("更新会话元数据失败: %s", exc)
 
 
+def flush_history_writes() -> None:
+    """等待异步 history writer 队列刷盘，供错误恢复前强制同步读取历史."""
+    _ensure_worker_started()
+    _WRITE_QUEUE.join()
+
+
 def append_compact_history_records(
     *,
     session_id: str,

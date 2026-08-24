@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sys
 import ctypes
+import shutil
 import subprocess
 import traceback
 from pathlib import Path
@@ -97,13 +98,16 @@ if getattr(sys, "frozen", False):
 
 _DESKTOP_RUN_AGENT = "--desktop-run-agent"
 _DESKTOP_RUN_GATEWAY = "--desktop-run-gateway"
+_DESKTOP_RUN_JIUWENBOX = "--desktop-run-jiuwenbox"
+_DESKTOP_RUN_WIN_SETUP = "--desktop-run-win-setup"
 
 # 子进程 flag 集合，这些模式下需要将错误写入日志文件，
 # 因为 console=False 的 PyInstaller exe 在 Windows 上无法通过 stderr 捕获错误。
 _DESKTOP_INSTALL_UPDATE = "--desktop-install-update"
 
 _CHILD_FLAGS = {"--desktop-run-app", "--desktop-run-web",
-        _DESKTOP_RUN_AGENT, _DESKTOP_RUN_GATEWAY, _DESKTOP_INSTALL_UPDATE}
+        _DESKTOP_RUN_AGENT, _DESKTOP_RUN_GATEWAY, _DESKTOP_RUN_JIUWENBOX,
+        _DESKTOP_RUN_WIN_SETUP, _DESKTOP_INSTALL_UPDATE}
 
 # ── 单实例锁（在重量级 import 之前执行） ──────────────────────────
 _SINGLE_INSTANCE_LOCK_FD: int | None = None
@@ -198,6 +202,50 @@ def _pop_flag(flag: str) -> bool:
         return False
     sys.argv.remove(flag)
     return True
+
+
+def _unshadow_frozen_jiuwenbox_namespace() -> None:
+    """挪走 ``_MEIPASS/jiuwenbox/``, 避免磁盘目录盖住 PYZ 包."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return
+    pkg = Path(meipass) / "jiuwenbox"
+    if not pkg.is_dir():
+        return
+    dest = Path(meipass) / "jiuwenbox_legacy_overlay"
+    try:
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        pkg.rename(dest)
+    except OSError:
+        pass
+
+
+def _run_win_setup() -> None:
+    """安装器已提权时调用: 在本进程内跑 win_setup, 不再 ShellExecuteW(runas)."""
+    _unshadow_frozen_jiuwenbox_namespace()
+    from jiuwenbox.supervisor.win_setup import _main as win_setup_main
+
+    raise SystemExit(win_setup_main(sys.argv[1:]))
+
+
+def _run_jiuwenbox_server() -> None:
+    import argparse
+    import uvicorn
+
+    _unshadow_frozen_jiuwenbox_namespace()
+    from jiuwenbox.server.app import app as jiuwenbox_app
+
+    parser = argparse.ArgumentParser(prog="jiuwenswarm --desktop-run-jiuwenbox")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8321)
+    args, _unknown = parser.parse_known_args()
+    uvicorn.run(
+        jiuwenbox_app,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+    )
 
 
 def main() -> None:
@@ -353,6 +401,12 @@ def _dispatch() -> None:
         from jiuwenswarm.gateway.app_gateway import main as gateway_main
         gateway_main()
         return
+    if _pop_flag(_DESKTOP_RUN_JIUWENBOX):
+        _run_jiuwenbox_server()
+        return
+    if _pop_flag(_DESKTOP_RUN_WIN_SETUP):
+        _run_win_setup()
+        return
     if _DESKTOP_INSTALL_UPDATE in sys.argv:
         from jiuwenswarm.channels.desktop.desktop_app import main as desktop_main
         desktop_main()
@@ -380,8 +434,10 @@ def _dispatch() -> None:
             # via the rebound stdio so callers receive it.
             if sys.argv[2] == "ruff":
                 raise SystemExit(_forward_to_ruff_binary(sys.argv[3:]))
+            module_name = sys.argv[2]
+            sys.argv = [sys.argv[0], *sys.argv[3:]]
             import runpy
-            runpy.run_module(sys.argv[2], run_name="__main__", alter_sys=True)
+            runpy.run_module(module_name, run_name="__main__", alter_sys=True)
             raise SystemExit(0)
 
         # 其他有参数的情况：直接执行，不检查单实例锁
