@@ -10,6 +10,7 @@ import os
 import re
 import stat
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -43,6 +44,8 @@ class ReportBundle:
     inference_manifest: list[dict]
     chart_manifest: list[dict]
     final_result_snapshot: dict
+    inference_graph_path: str | None = None
+    inference_graph_bytes: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -679,6 +682,45 @@ def build_report_bundle(
             chart_messages,
             chart_ids,
         )
+        # Build inference graphs JSON — parse all inference HTMLs, merge, write
+        graphs: list[dict] = []
+        infer_msg_by_id = {str(im.get("id", "")): im for im in infer_messages}
+        for resource in infer_resources:
+            html_str = resource.payload.decode("utf-8", errors="replace")
+            parsed = parse_inference_html(html_str)
+            nodes = parsed.get("nodes", [])
+            edges = parsed.get("edges", [])
+            parse_error = parsed.get("parse_error")
+            if not parse_error:
+                nodes = _supplement_intermediate_nodes(nodes, edges)
+                nodes = _enrich_citation_nodes(nodes, citations)
+            inference_id = resource.resource_id
+            msg = infer_msg_by_id.get(inference_id, {})
+            graph: dict = {
+                "inference_id": inference_id,
+                "conclusion": msg.get("conclusion", ""),
+                "inference": msg.get("inference", ""),
+                "nodes": nodes,
+                "edges": edges,
+            }
+            if parse_error:
+                graph["parse_error"] = parse_error
+            graphs.append(graph)
+        if graphs:
+            graph_data = {
+                "schema_version": 1,
+                "conversation_id": "",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "graphs": graphs,
+            }
+            graph_bytes = json.dumps(graph_data, ensure_ascii=False).encode("utf-8")
+            graph_path = groups[0].directory / "inference_graphs.json"
+            graph_path.write_bytes(graph_bytes)
+            inference_graph_path = f"{groups[0].directory.name}/inference_graphs.json"
+            inference_graph_bytes = graph_bytes
+        else:
+            inference_graph_path = None
+            inference_graph_bytes = None
         return ReportBundle(
             markdown_text=markdown_text,
             infer_dir=infer_dir,
@@ -687,8 +729,196 @@ def build_report_bundle(
             inference_manifest=inference_manifest,
             chart_manifest=chart_manifest,
             final_result_snapshot=final_result_snapshot,
+            inference_graph_path=inference_graph_path,
+            inference_graph_bytes=inference_graph_bytes,
         )
     except BaseException:
         for group in reversed(groups):
             _cleanup_group(group)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Node colour → type mapping (source: generate_html.py _select_show_info)
+# ---------------------------------------------------------------------------
+_NODE_COLOR_TO_TYPE: dict[str, str] = {
+    "#e1cef0": "programmer_node",
+    "#def0ce": "citation_node",
+    "#d2e6f4": "conclusion_node",
+    "#f6f6d2": "intermediate_node",
+    "#f5c2c7": "final_conclusion_node",
+}
+
+# Edge label → type mapping (bilingual, case-insensitive)
+_EDGE_LABEL_TO_TYPE: dict[str, str] = {
+    "引用": "citation_edge",
+    "refer": "citation_edge",
+    "推理": "infer_edge",
+    "infer": "infer_edge",
+    "汇总": "combine_edge",
+    "summ": "combine_edge",
+}
+
+
+def _extract_js_array(html: str, marker: str) -> str | None:
+    """Locate ``marker`` in *html*, then extract the first ``[...]`` JSON
+    array using string-aware bracket counting.  Returns the raw JSON string
+    (including the outer brackets) or *None* if the marker or array cannot
+    be found."""
+    pos = html.find(marker)
+    if pos == -1:
+        return None
+    pos = html.find("[", pos)
+    if pos == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    for i in range(pos, len(html)):
+        ch = html[i]
+        if in_string:
+            if ch == '"' and (i == 0 or html[i - 1] != "\\"):
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch in ("[", "{"):
+            depth += 1
+        elif ch in ("]", "}"):
+            depth -= 1
+            if depth == 0:
+                return html[pos : i + 1]
+    return None
+
+
+def _map_node_type(node: dict) -> dict:
+    """Add a ``type`` field to *node* based on its colour."""
+    raw_color = node.get("color", "")
+    if isinstance(raw_color, dict):
+        colour = raw_color.get("background", "").lower()
+    else:
+        colour = str(raw_color).lower()
+    node["type"] = _NODE_COLOR_TO_TYPE.get(colour, "unknown")
+    return node
+
+
+def _map_edge_type(edge: dict) -> dict:
+    """Add a ``type`` field to *edge* based on its label."""
+    label = str(edge.get("label", "")).lower().strip()
+    edge["type"] = _EDGE_LABEL_TO_TYPE.get(label, "unknown")
+    return edge
+
+
+def parse_inference_html(html_content: str) -> dict:
+    """Parse a pyvis-generated HTML string and return its nodes and edges.
+
+    Returns a dictionary with the following keys:
+    - ``nodes`` – list of node dicts, each with an added ``type`` field.
+    - ``edges`` – list of edge dicts, each with an added ``type`` field.
+    - ``parse_error`` – (only on failure) a human-readable error message.
+    """
+    try:
+        nodes_raw = _extract_js_array(html_content, "nodes = new vis.DataSet(")
+        edges_raw = _extract_js_array(html_content, "edges = new vis.DataSet(")
+
+        if nodes_raw is None:
+            return {"nodes": [], "edges": [], "parse_error": "nodes marker not found"}
+        if edges_raw is None:
+            return {"nodes": [], "edges": [], "parse_error": "edges marker not found"}
+
+        nodes: list[dict] = json.loads(nodes_raw)
+        edges: list[dict] = json.loads(edges_raw)
+
+        return {
+            "nodes": [_map_node_type(n) for n in nodes],
+            "edges": [_map_edge_type(e) for e in edges],
+        }
+    except (json.JSONDecodeError, ValueError, TypeError, IndexError) as exc:
+        return {"nodes": [], "edges": [], "parse_error": str(exc)}
+
+
+def _supplement_intermediate_nodes(nodes: list[dict], edges: list[dict]) -> list[dict]:
+    """Enrich intermediate nodes with a human-readable label derived from
+    their incoming *combine* edges.
+
+    For each node where ``type == "intermediate_node"`` and ``label`` is
+    empty or equal to the node's own ID (pyvis replaces empty labels with
+    the integer node ID during JSON serialization), the function finds all
+    incoming combine edges, collects the ``source_labels`` from the source
+    nodes, and sets ``label`` to ``"汇总 N 条结论"``.
+
+    The input *nodes* and *edges* lists are **not** modified — a deep copy
+    is returned.
+    """
+    result = copy.deepcopy(nodes)
+    node_by_id = {n["id"]: n for n in result}
+
+    for node in result:
+        if node.get("type") != "intermediate_node":
+            continue
+        # SDK creates intermediate nodes with label="" (empty string), but
+        # pyvis replaces empty labels with the node's integer ID during
+        # serialization.  Accept both forms as "no real label".
+        label = node.get("label", "")
+        node_id_str = str(node.get("id", ""))
+        if label != "" and str(label) != node_id_str:
+            continue
+
+        from_ids = [
+            e["from"]
+            for e in edges
+            if e.get("to") == node["id"]
+            and (e.get("type") == "combine_edge" or e.get("label") == "汇总")
+        ]
+        source_labels = [
+            node_by_id[from_id]["label"]
+            for from_id in from_ids
+            if from_id in node_by_id
+        ]
+        node["label"] = f"汇总 {len(source_labels)} 条结论"
+        node["source_labels"] = source_labels
+
+    return result
+
+
+def _enrich_citation_nodes(nodes: list[dict], citations: list[dict]) -> list[dict]:
+    """Enrich citation nodes with metadata from the citations list.
+
+    For each node where ``type == "citation_node"`` and ``url`` is non-empty,
+    the function looks up the URL in the citations list and sets the
+    ``title``, ``source``, and ``publish_time`` fields. If the URL is not
+    found, all three fields are set to empty string.
+
+    The input *nodes* and *citations* lists are **not** modified — a deep
+    copy is returned.
+    """
+    result = copy.deepcopy(nodes)
+    url_to_meta = {
+        c["url"]: {
+            "title": c.get("title", ""),
+            "source": c.get("source", ""),
+            "publish_time": c.get("publish_time", ""),
+        }
+        for c in citations
+        if c.get("url")
+    }
+
+    for node in result:
+        if node.get("type") != "citation_node":
+            continue
+        url = node.get("url", "")
+        if not url:
+            continue
+
+        meta = url_to_meta.get(url)
+        if meta is not None:
+            node["title"] = meta["title"]
+            node["source"] = meta["source"]
+            node["publish_time"] = meta["publish_time"]
+        else:
+            node["title"] = ""
+            node["source"] = ""
+            node["publish_time"] = ""
+
+    return result
