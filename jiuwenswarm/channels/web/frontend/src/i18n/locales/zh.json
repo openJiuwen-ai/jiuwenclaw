@@ -667,8 +667,8 @@
       "permission": {
         "default": "默认权限",
         "defaultDesc": "编辑外部文件和使用互联网时始终询问",
-        "automatic": "自动审批",
-        "automaticDesc": "由 AutoReviewer 对单次工具调用自动通过、拒绝或转人工，下一轮对话生效",
+        "automatic": "智能审批",
+        "automaticDesc": "结合当前任务和权限规则，帮你处理每次工具审批；不确定时仍会询问你",
         "fullAccess": "完全访问权限",
         "fullAccessDesc": "可不受限制地访问互联网和您电脑上的任何文件",
         "fullAccessWarning": {
@@ -2422,7 +2422,7 @@
       "details": {
         "source": "决策来源",
         "sourceValues": {
-          "automatic": "自动审批",
+          "automatic": "智能审批",
           "manual": "人工审批",
           "system": "系统权限检查"
         },
@@ -2438,7 +2438,7 @@
         "reasonValues": {
           "approved": "权限审查已允许此操作。",
           "denied": "权限审查已拒绝此操作。",
-          "manual": "当前信息不足以自动批准，需要人工判断。",
+          "manual": "当前信息不足以完成智能审批，需要人工判断。",
           "inProgress": "权限审查正在进行。"
         },
         "hint": "人工判断建议",

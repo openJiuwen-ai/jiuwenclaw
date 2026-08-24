@@ -682,8 +682,8 @@
       "permission": {
         "default": "Default",
         "defaultDesc": "Always ask when editing external files or accessing the internet",
-        "automatic": "Automatic Approval",
-        "automaticDesc": "AutoReviewer allows once, denies, or escalates each tool call; effective next turn",
+        "automatic": "Smart Approval",
+        "automaticDesc": "Reviews tool requests against your task and permissions, asking you when needed",
         "fullAccess": "Full Access",
         "fullAccessDesc": "Unrestricted access to the internet and any files on your computer",
         "fullAccessWarning": {
@@ -2437,7 +2437,7 @@
       "details": {
         "source": "Decision source",
         "sourceValues": {
-          "automatic": "Automatic approval",
+          "automatic": "Smart Approval",
           "manual": "Manual approval",
           "system": "System permission check"
         },
@@ -2453,7 +2453,7 @@
         "reasonValues": {
           "approved": "Permission review allowed this operation.",
           "denied": "Permission review denied this operation.",
-          "manual": "Available information is insufficient for automatic approval; manual judgment is required.",
+          "manual": "Available information is insufficient for Smart Approval; manual judgment is required.",
           "inProgress": "Permission review is in progress."
         },
         "hint": "Manual review guidance",
