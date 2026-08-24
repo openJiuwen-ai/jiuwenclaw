@@ -337,10 +337,16 @@ class SymphonyToolkit:
                     "skills or an ordered skill workflow. Discovery, comparison, and "
                     "recommendation alone do not require this tool. Pass only shortlisted "
                     "exact skill IDs in candidate_skill_ids; omit that argument when the "
-                    "user requested a plan but no candidate is known. The tool may refresh a "
-                    "missing or stale graph before composing. Use its returned plan and ask "
-                    "for any missing inputs it reports. If it returns graph_build_timeout or "
-                    "manual_graph_build, do not retry graph tools in the same round."
+                    "user requested a plan but no candidate is known. Before composing, use "
+                    "discovery metadata directly; do not call skill_tool, read_file, or read "
+                    "any SKILL.md. The tool may refresh a missing or stale graph before "
+                    "composing. Use its returned plan and ask for any missing inputs it "
+                    "reports. When the plan is ready, choose one currently executable Skill, "
+                    "read only that Skill's SKILL.md immediately before executing it, and do "
+                    "not preload all selected Skill instructions. When the plan needs input "
+                    "or no plan is available, do not read Skills merely for orchestration. "
+                    "If it returns graph_build_timeout or manual_graph_build, do not retry "
+                    "graph tools in the same round."
                 ),
                 {
                     "type": "object",
