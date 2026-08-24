@@ -2,14 +2,26 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_common import PptCommon
+from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.utils.bash_utils import (
+    normalize_tool_text,
+)
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_STRUCTURAL_PAGES = 2
+
+_SEND_FAIL_MARKERS = (
+    "发送文件失败",
+    "所有文件均不存在",
+    "没有可发送的文件",
+    "提交文件失败",
+    "文件不存在，未发送",
+)
 
 
 def _looks_like_path(value: str) -> bool:
@@ -79,12 +91,13 @@ class DeliveryNode(PlanNode):
                 "summary": "交付失败：pages_dir 为空",
             }
 
-        pptx_ok = bool(pptx_path) and export_status != "failed"
+        pptx_ok = bool(pptx_path) and export_status != "failed" and Path(pptx_path).is_file()
         if not pptx_ok:
             logger.error(
-                "[P10] PPTX 产物异常 pptx_path=%s export_status=%s",
+                "[P10] PPTX 产物异常 pptx_path=%s export_status=%s exists=%s",
                 bool(pptx_path),
                 export_status,
+                bool(pptx_path and Path(pptx_path).is_file()),
             )
 
         pages_ok = await self._check_pages(pages_dir, total_pages)
@@ -93,17 +106,16 @@ class DeliveryNode(PlanNode):
         if pptx_ok and pptx_path:
             send_file_status = await self._send_file(pptx_path)
 
-        if not pptx_ok:
+        if not pptx_ok or send_file_status == "failed":
             delivery_status = "failed"
         elif not pages_ok:
             delivery_status = "partial"
         else:
             delivery_status = "ok"
 
-        # 当 PPT 已成功发送给用户时，HTML 页面校验失败不应影响"任务已完成"判定：
-        # send_file_status=sent 表示用户已实际收到 PPT，task_completed 用于 __artifact__.info，
-        # 让 DeepAgent 主链路 LLM 能明确识别任务已完成，避免误调 skill_tool 重跑流程。
-        task_completed = send_file_status == "sent"
+        # 仅当文件真实存在且工具确认发送成功时，才标记 task_completed。
+        # send_file_to_user 在文件缺失时返回错误字符串但不抛异常，旧逻辑会误标 sent。
+        task_completed = send_file_status == "sent" and pptx_ok
 
         need_artifact = send_file_status != "sent"
         artifact_tag = f"<!-- artifact:pptx {pages_dir} -->" if need_artifact and pages_dir else ""
@@ -147,11 +159,19 @@ class DeliveryNode(PlanNode):
             logger.info("[P10] send_file_to_user 工具不可用，跳过文件发送")
             return "skipped"
 
+        if not Path(pptx_path).is_file():
+            logger.error("[P10] send_file 前文件不存在: %s", pptx_path)
+            return "failed"
+
         try:
-            await self.call_tool(
+            result = await self.call_tool(
                 "send_file_to_user",
                 abs_file_path_list=[pptx_path],
             )
+            text = normalize_tool_text(result)
+            if self._is_send_failure(text):
+                logger.error("[P10] send_file_to_user 发送失败: %s", text[:500])
+                return "failed"
             logger.info("[P10] send_file_to_user 发送成功: %s", pptx_path)
             return "sent"
         except Exception as e:
@@ -159,6 +179,17 @@ class DeliveryNode(PlanNode):
                 raise
             logger.warning("[P10] send_file_to_user 发送失败: %s", e)
             return "failed"
+
+    @staticmethod
+    def _is_send_failure(text: str) -> bool:
+        if not text or not text.strip():
+            # 空结果视为失败，避免“无回执当成功”
+            return True
+        lowered = text.strip()
+        # 明确成功 / 会话内已投递过 → 不算失败
+        if "成功发送" in lowered or "文件已在本次会话发送过" in lowered:
+            return False
+        return any(marker in lowered for marker in _SEND_FAIL_MARKERS)
 
     async def _check_pages(self, pages_dir: str, page_count: int) -> bool:
         files: list[str] = []

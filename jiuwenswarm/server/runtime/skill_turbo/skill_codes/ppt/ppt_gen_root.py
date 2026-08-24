@@ -29,16 +29,25 @@ _P3_SKIP_FIELDS = {
 }
 
 
+_MERGE_SKIP_KEYS = frozenset(
+    {
+        "node",
+        "status",
+        "message",
+        "content",
+        "skipped",
+        "resume_skip",
+    }
+)
+
+
 def _merge_subplan_result(inputs: dict[str, Any], result: Any) -> None:
     if not isinstance(result, dict):
         return
-    inputs.update(
-        {
-            key: value
-            for key, value in result.items()
-            if key not in {"node", "status", "message", "content"}
-        }
-    )
+    for key, value in result.items():
+        if key in _MERGE_SKIP_KEYS:
+            continue
+        inputs[key] = value
 
 
 def _result_status(result: Any) -> str:

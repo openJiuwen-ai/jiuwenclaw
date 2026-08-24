@@ -133,6 +133,27 @@ _ERROR_EVENT = getattr(InteractionEventType, "EXECUTION_ERROR", None)
 if _ERROR_EVENT is None:
     _ERROR_EVENT = getattr(InteractionEventType, "RUNTIME_ERROR")
 ERROR_EVENT_TYPE = _ERROR_EVENT.value
+# 与 skill_turbo/executor.STREAM_SOURCE_ID_FIELD 一致：并发节点用它标识 source，
+# 前端据其路由到 subagent 行。adapter 转发 llm_reasoning / llm_output 时须原样透传。
+STREAM_SOURCE_ID_FIELD = "stream_source_id"
+
+
+def _propagate_stream_source_id(
+    src_payload: Any, result: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """将上游 payload 中的 stream_source_id 透传到输出帧（原地写入，无则原样返回）。
+
+    skill_turbo 并发节点（如 p6_1_page_worker）用它标识 source，
+    前端据其路由到 subagent 行，避免并发思考/正文混流。
+    """
+    if result is None or not isinstance(src_payload, dict):
+        return result
+    source_id = src_payload.get(STREAM_SOURCE_ID_FIELD)
+    if source_id:
+        result[STREAM_SOURCE_ID_FIELD] = source_id
+    return result
+
+
 _DEEPRESEARCH_REWRITE_REPLAY_STATE_KEY = "deepresearch_rewrite_fast_path_replays"
 _DEEPRESEARCH_REWRITE_REPLAY_SCHEMA_VERSION = 1
 _DEEPRESEARCH_REWRITE_REPLAY_MAX_ENTRIES = 32
@@ -184,6 +205,7 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
 )
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails import (
+    DeepResearchExecutionRail,
     JiuSwarmStreamEventRail,
     MultimodalImageRail,
     ResponsePromptRail,
@@ -1189,6 +1211,10 @@ def build_progressive_tool_rail_from_config(
             lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
             _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
         )
+        # This tool owns native multi-step HITL. It must execute directly;
+        # invoke_tool would hide the outer call from its lifecycle Rail.
+        if "deepresearch_execute" not in eager_tools:
+            eager_tools.insert(2, "deepresearch_execute")
 
     normalized_language = resolve_language(language)
     logger.info(
@@ -1911,6 +1937,7 @@ class JiuWenSwarmDeepAdapter:
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
         self._progressive_tool_rail: ProgressiveToolRail | None = None
+        self._deepresearch_execution_rail: DeepResearchExecutionRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._enabled_skills: list[str] | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
@@ -6120,6 +6147,23 @@ class JiuWenSwarmDeepAdapter:
             stream_event_rail = None
         return stream_event_rail
 
+    def _build_deepresearch_execution_rail(
+        self,
+    ) -> DeepResearchExecutionRail | None:
+        """Build the native HITL bridge for deepresearch_execute."""
+        try:
+            rail = DeepResearchExecutionRail(model_provider=lambda: self._model)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] DeepResearchExecutionRail create success"
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] DeepResearchExecutionRail create failed: %s",
+                exc,
+            )
+            return None
+
     @staticmethod
     def _build_context_overflow_recovery_rail() -> ContextOverflowRecoveryRail | None:
         """Build ContextOverflowRecoveryRail."""
@@ -6707,6 +6751,10 @@ class JiuWenSwarmDeepAdapter:
                 {
                     "enable_image_multimodal": self._resolve_enable_read_image_multimodal(config),
                 },
+            ),
+            _RailBuildInfo(
+                "_deepresearch_execution_rail",
+                self._build_deepresearch_execution_rail,
             ),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             # an example to use extension rail (enterprise)
@@ -8770,6 +8818,16 @@ class JiuWenSwarmDeepAdapter:
         )
         task_cwd = runtime_config.cwd or task_workspace
         self._seed_runtime_cwd(task_cwd, workspace=task_workspace)
+        # Persist paths on StreamEventRail so the interaction round task can
+        # rebind openjiuwen CwdState (request-task init_cwd does not propagate).
+        if self._stream_event_rail is not None:
+            self._stream_event_rail.set_runtime_cwd_paths(
+                cwd=task_cwd,
+                project_root=runtime_config.project_dir
+                or self._project_dir
+                or task_workspace,
+                workspace=task_workspace,
+            )
         resolved_language = self._resolve_runtime_language()
         resolved_channel = (
             str(
@@ -8880,6 +8938,20 @@ class JiuWenSwarmDeepAdapter:
                 # （OfficeClaw 会话 HITL 能力恒为 True，否则未点引导模式也会走大纲审阅）。
                 meta["interactive_ask"] = bool(runtime_config.interactive_ask)
                 set_current_request_metadata(meta)
+                # Align with test/jiuwenclaw: also bind effective workspace ContextVar
+                # in the request task (skill_turbo / fork readers). Tool CwdState is
+                # rebound separately via StreamEventRail.set_runtime_cwd_paths.
+                try:
+                    from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+                        set_effective_request_workspace_dir,
+                    )
+
+                    set_effective_request_workspace_dir(meta["effective_project_dir"])
+                except Exception:
+                    logger.debug(
+                        "[AgentServer] set_effective_request_workspace_dir failed",
+                        exc_info=True,
+                    )
                 # 同步副本到 StreamEventRail：工具在 harness 执行任务里运行，
                 # 本任务设置的 ContextVar 不跨任务传播，rail 会在 before_tool_call
                 # （工具执行上下文）重新绑定，否则 skill_turbo 的 HITL 断点会存到
@@ -11151,14 +11223,9 @@ class JiuWenSwarmDeepAdapter:
         )
         skill_path = params.get("skill_path") or params.get("path")
         if skill_path:
-            allowed = evolution_version_ctl.allowed_skill_roots_for_path(
-                self._resolve_skill_dirs(),
-                str(skill_path),
-            )
             evolution_version_ctl.validate_rebuild_skill_path(
                 str(skill_path),
                 skill_name=skill_name,
-                allowed_roots=allowed,
             )
             skills_base = evolution_version_ctl.skills_root_from_skill_md_path(str(skill_path))
             store = evolution_version_ctl.get_disk_evolution_store(
@@ -11223,16 +11290,10 @@ class JiuWenSwarmDeepAdapter:
             store_dirs = [str(skills_dirs_param).strip()]
         else:
             store_dirs = None
-        resolve_dirs = store_dirs if store_dirs is not None else self._resolve_skill_dirs()
         if skill_path:
-            allowed = evolution_version_ctl.allowed_skill_roots_for_path(
-                resolve_dirs,
-                str(skill_path),
-            )
             resolved_skill_md = evolution_version_ctl.validate_rebuild_skill_path(
                 str(skill_path),
                 skill_name=name,
-                allowed_roots=allowed,
             )
 
         logger.info(
@@ -14372,6 +14433,10 @@ class JiuWenSwarmDeepAdapter:
             # chat.invocation_paused 终结帧（而非普通完成帧），避免前端把"等待用户
             # 输入"误判为"任务完成"。镜像 vendor(clowder-ai) 的 _detect_hitl_pause。
             hitl_pending_stream = False
+            # HITL 检测到 ask_user 后，跳过后续所有 chunk（chat.final / chat.delta /
+            # chat.reasoning 等），由循环后的 chat.invocation_paused 终结帧收尾。
+            # 镜像 enterprise_dev 的 suppress_stream_after_hitl 机制。
+            suppress_stream_after_hitl = False
             # Start of the wait for the runner's first chunk; every branch above
             # has either handed the message over or attached to a running round.
             runner_stream_started_at = time.monotonic()
@@ -14387,6 +14452,8 @@ class JiuWenSwarmDeepAdapter:
                 and not goal_stream_request
             )
             async for chunk in interaction_stream:
+                if suppress_stream_after_hitl:
+                    continue
                 # [DIAG] HITL resume 调试：对照 forwarder([DeepAgent][fwd]) 转发的 chunk，
                 # 确认主循环实际从 interaction_stream 消费到什么类型。
                 _stream_ct = getattr(chunk, "type", None) or type(chunk).__name__
@@ -14510,6 +14577,7 @@ class JiuWenSwarmDeepAdapter:
                     )
                     if reasoning_payload is None:
                         continue
+                    _propagate_stream_source_id(chunk.payload, reasoning_payload)
                     boundary = self._begin_visible_chat_content(stream_is_user_originated)
                     if boundary is not None:
                         yield AgentResponseChunk(
@@ -14536,6 +14604,7 @@ class JiuWenSwarmDeepAdapter:
                     delta_payload = self._stream_text_payload("chat.delta", content)
                     if delta_payload is None:
                         continue
+                    _propagate_stream_source_id(chunk.payload, delta_payload)
                     has_streamed_content = True
                     if accumulated_reasoning:
                         yield AgentResponseChunk(
@@ -15105,9 +15174,10 @@ class JiuWenSwarmDeepAdapter:
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    delta_payload = JiuWenSwarmDeepAdapter._stream_text_payload(
                         "chat.delta", content
                     )
+                    return _propagate_stream_source_id(payload, delta_payload)
 
                 if chunk_type == "llm_reasoning":
                     content = (
@@ -15115,9 +15185,10 @@ class JiuWenSwarmDeepAdapter:
                         if isinstance(payload, dict)
                         else str(payload)
                     )
-                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    reasoning_payload = JiuWenSwarmDeepAdapter._stream_text_payload(
                         "chat.reasoning", content
                     )
+                    return _propagate_stream_source_id(payload, reasoning_payload)
 
                 if chunk_type == "content_chunk":
                     content = (

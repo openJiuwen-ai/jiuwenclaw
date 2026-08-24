@@ -10,6 +10,21 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _propagate_stream_source_id(src_payload: Any) -> dict[str, Any]:
+    """从上游 payload 提取 stream_source_id（skill_turbo 并发节点用它标识 source）。
+
+    并发节点（如 p6_1_page_worker）在 llm_reasoning / llm_output 的 payload 里注入
+    stream_source_id，前端据其把内容路由到 subagent 行。解析分支重建 payload 时
+    必须原样透传，否则并发思考/正文无法分桶、逐字交错。无 source_id 返回空 dict，
+    行为与不透传完全一致。
+    """
+    if isinstance(src_payload, dict):
+        source_id = src_payload.get("stream_source_id")
+        if source_id:
+            return {"stream_source_id": source_id}
+    return {}
+
+
 def parse_stream_chunk(chunk: Any, *, _has_streamed_content: bool = False) -> dict[str, Any] | None:
     """Parse agent output chunk to frontend-consumable payload dict.
 
@@ -246,7 +261,11 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         )
         if not content or not content.strip():
             return None
-        return {"event_type": "chat.delta", "content": content}
+        return {
+            "event_type": "chat.delta",
+            "content": content,
+            **_propagate_stream_source_id(payload),
+        }
 
     if chunk_type == "llm_reasoning":
         content = (
@@ -256,7 +275,11 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         )
         if not content or not content.strip():
             return None
-        return {"event_type": "chat.reasoning", "content": content}
+        return {
+            "event_type": "chat.reasoning",
+            "content": content,
+            **_propagate_stream_source_id(payload),
+        }
 
     if chunk_type == "content_chunk":
         content = (
@@ -266,7 +289,11 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         )
         if not content or not content.strip():
             return None
-        return {"event_type": "chat.delta", "content": content}
+        return {
+            "event_type": "chat.delta",
+            "content": content,
+            **_propagate_stream_source_id(payload),
+        }
 
     if chunk_type == "answer":
         if isinstance(payload, dict):

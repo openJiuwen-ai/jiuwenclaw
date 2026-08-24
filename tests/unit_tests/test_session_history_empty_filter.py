@@ -123,6 +123,42 @@ def test_has_persistable_assistant_payload_processing_status_still_rejected():
     ) is False
 
 
+def test_has_persistable_assistant_payload_keeps_usage_events():
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.usage_summary",
+        extra={"usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}},
+    ) is True
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.usage_metadata",
+        extra={"metadata": {"usage_metadata": {"input_tokens": 10}}},
+    ) is True
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.usage_summary",
+        extra={},
+    ) is False
+
+
+def test_append_history_persists_usage_summary(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+    session_history.append_history_record(
+        session_id="s-usage",
+        request_id="r-usage",
+        channel_id="web",
+        role="assistant",
+        event_type="chat.usage_summary",
+        content="",
+        timestamp=1.0,
+        extra={"usage": {"input_tokens": 33709, "output_tokens": 4, "total_tokens": 33713, "cache_tokens": 10880}},
+    )
+    data = _wait_history("s-usage", min_count=1)
+    assert data[0]["event_type"] == "chat.usage_summary"
+    assert data[0]["usage"]["input_tokens"] == 33709
+    assert data[0]["content"] == ""
+
+
 def test_has_persistable_assistant_payload_tool_update_is_merged():
     assert session_history._has_persistable_assistant_payload(
         content_text="",

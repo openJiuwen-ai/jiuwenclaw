@@ -1680,3 +1680,51 @@ def test_user_input_ended_does_not_mutate_state():
     route_chunk({"event": "user_input_ended"}, state)
     assert state.active_nodes == {}
     assert state.interrupt_node_id == ""
+
+
+def test_brief_outline_uses_stage_two_and_outline_preview_contract():
+    state = RouterState(current_stage=1)
+    outline = json.dumps(
+        {
+            "title": "智能家电竞品速览",
+            "sections": [
+                {"id": "1", "title": "市场格局"},
+                {"id": "2", "title": "产品对比"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    frames = route_chunk(
+        {"agent": "brief_outline", "event": "start", "content": outline},
+        state,
+    )
+
+    _assert_stage(_stage_update(frames), 2)
+    assert "".join(state.outline_parts) == outline
+    reasoning = _process_reasoning(frames)
+    assert reasoning
+    assert reasoning[-1]["task_id"] == "deepresearch_stage_2"
+    assert reasoning[-1]["stream_source_id"] == "dr_outline"
+    assert "市场格局" in reasoning[-1]["content"]
+
+
+@pytest.mark.parametrize(
+    "agent",
+    [
+        "brief_info_collector",
+        "brief_evidence_reviewer",
+        "brief_sub_reporter",
+        "brief_reporter",
+        "brief_mermaid_generator",
+        "brief_source_tracer",
+    ],
+)
+def test_brief_research_nodes_are_visible_in_stage_three(agent):
+    frames = route_chunk(
+        {"agent": agent, "event": "start", "content": "处理中"},
+        RouterState(current_stage=2),
+    )
+
+    _assert_stage(_stage_update(frames), 3)
+    assert any(frame["event_type"] == "chat.reasoning" for frame in frames)

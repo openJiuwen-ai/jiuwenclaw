@@ -70,9 +70,9 @@ spec:
         - name: gateway
           image: <<GATEWAY_IMAGE>>
           imagePullPolicy: IfNotPresent
-          # 用于调试模式：启用后容器将保持运行，可进入 Pod 手动调试程序
-          # command: ["/bin/sh"]
-          # args: ["-c", "sleep infinity"]
+          # 调试模式：gateway 崩溃后容器不退出（sleep 保活），便于进 Pod 排查。
+          # command: ["/bin/sh", "-c"]
+          # args: ["jiuwenswarm-gateway; echo '[debug-keepalive] gateway exited rc=$?, sleeping'; sleep infinity"]
           envFrom:
             - secretRef:
                 name: <<SECRET_CM_NAME>>
@@ -93,8 +93,13 @@ spec:
                   fieldPath: metadata.namespace
           volumeMounts:
             - name: gateway-config
-              mountPath: /root/.jiuwenclaw/config/config.yaml
+              mountPath: /root/.jiuwenswarm/config/config.yaml
               subPath: config.yaml
+              readOnly: true
+            # 用渲染后的 gateway.env 覆盖镜像里烘焙的空 EXTENSION_DIRS .env
+            - name: gateway-env-file
+              mountPath: /root/.jiuwenswarm/config/.env
+              subPath: .env
               readOnly: true
       volumes:
         - name: gateway-config
@@ -103,3 +108,11 @@ spec:
             items:
               - key: config.yaml
                 path: config.yaml
+        # 持有渲染后 conf/gateway.env 整个文件（单 key=.env）的 configmap
+        - name: gateway-env-file
+          configMap:
+            name: <<GATEWAY_ENV_FILE_CM_NAME>>
+            items:
+              - key: .env
+                path: .env
+      serviceAccountName: <<GATEWAY_SERVICE_ACCOUNT>>

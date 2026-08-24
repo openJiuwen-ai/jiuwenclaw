@@ -1,0 +1,20 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""permissions_config：Repository + access。"""
+
+from jiuwenswarm.gateway.config.permissions.repository import (
+    PERMISSIONS_CONFIG_STORE_NAME,
+    PermissionsConfigRepository,
+)
+from jiuwenswarm.gateway.config.section import (
+    DbBodySectionCodec,
+    SectionDocument,
+    YamlSectionCodec,
+)
+
+__all__ = [
+    "PERMISSIONS_CONFIG_STORE_NAME",
+    "DbBodySectionCodec",
+    "PermissionsConfigRepository",
+    "SectionDocument",
+    "YamlSectionCodec",
+]

@@ -126,8 +126,7 @@ class ManagerWsClient:
         self._on_config_push = handler
 
     async def connect(self, uri: str) -> None:
-        # 同一 URI 且会话任务仍在跑时勿重复 disconnect，否则会清空 JIUWENCLAW_ID
-        # 并以无 id 的 register 在 Manager 侧再建一条 instance。
+        # 同一 URI 且会话任务仍在跑时勿重复 disconnect，避免无意义的断连重连。
         if (
             self._uri == uri
             and self._session_task is not None
@@ -145,9 +144,13 @@ class ManagerWsClient:
         )
 
     async def disconnect(self) -> None:
+        """断开 Manager WS 并释放 GatewayDb 连接池。
+
+        保留进程内 ``JIUWENCLAW_ID``：active-standby 降主时若清空，升主后
+        register 不带 id，Manager 会分配新实例，导致 cron_job / 策略等数据对不上。
+        """
         self._running = False
         self._ready = False
-        set_jiuwenclaw_id(None)
         await GatewayDb.release()
         if self._ws is not None:
             try:
@@ -162,7 +165,10 @@ class ManagerWsClient:
             except asyncio.CancelledError:
                 pass
             self._session_task = None
-        logger.info("[ManagerWsClient] disconnected")
+        logger.info(
+            "[ManagerWsClient] disconnected (jiuwenclaw_id=%s retained)",
+            get_jiuwenclaw_id() or "unset",
+        )
 
     def _compute_reconnect_delay(self, consecutive_failures: int) -> float:
         """根据连续失败次数计算下次重连等待时间（秒）。

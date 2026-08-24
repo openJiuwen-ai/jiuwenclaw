@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 _CHART_CANDIDATE_TYPES = {"data", "comparison", "technology", "trend"}
+# P8.2：只读校验 / 单页 fix 硬超时，避免 read_file 或 bash 挂死拖死 gather。
+_P82_READ_TIMEOUT_SECONDS = 60.0
+_P82_FIX_ONE_TIMEOUT_SECONDS = 360.0
 
 
 def _extract_designer_section(
@@ -439,6 +442,100 @@ def _has_placeholder_slop(text: str) -> bool:
     return normalized in _PLACEHOLDER_SLOP_VALUES
 
 
+def _plain_text_fragment(html_fragment: str) -> str:
+    return re.sub(r"<[^>]+>", "", html_fragment or "").strip()
+
+
+def _extract_filled_title_inner(filled_html: str) -> str:
+    match = _H1_INNER_TEXT_RE.search(filled_html or "")
+    if match:
+        return match.group(2).strip()
+    match = _TITLE_TAG_RE.search(filled_html or "")
+    return match.group(2).strip() if match else ""
+
+
+def _extract_filled_footer_inner(filled_html: str) -> str:
+    footer_block = _extract_footer_block(filled_html)
+    if not footer_block:
+        return ""
+    match = _P_INNER_TEXT_RE.search(footer_block)
+    return match.group(2).strip() if match else ""
+
+
+def _replace_main_inner_html(html: str, new_inner: str) -> str:
+    open_match = _MAIN_OPEN_TAG_RE.search(html or "")
+    if not open_match:
+        return html or ""
+    close_match = _MAIN_CLOSE_TAG_RE.search(html or "", open_match.end())
+    if not close_match:
+        return html or ""
+    return (html or "")[:open_match.end()] + new_inner + (html or "")[close_match.start():]
+
+
+_REPAIRABLE_CONTENT_TEMPLATE_REASONS = frozenset({
+    "content_template_chrome_changed",
+    "main_tag_changed",
+})
+
+
+def _repair_content_template_chrome(seed_html: str, filled_html: str) -> str | None:
+    """Restore Page Chrome from seed; keep filled title/content/footer slot values.
+
+    When the model rewrites head/header/footer/`<main>` chrome but still fills usable
+    slots, reassemble onto the seed skeleton instead of forcing a full LLM retry.
+    Returns None when filled output lacks extractable slot content.
+    """
+    if not (seed_html or "").strip() or not (filled_html or "").strip():
+        return None
+
+    title_inner = _extract_filled_title_inner(filled_html)
+    if not title_inner or _has_placeholder_slop(_plain_text_fragment(title_inner)):
+        return None
+
+    main_inner = _extract_main_inner_html(filled_html)
+    if not main_inner.strip() or "{{PAGE_CONTENT}}" in main_inner:
+        return None
+
+    footer_inner = _extract_filled_footer_inner(filled_html)
+    if not footer_inner or _has_placeholder_slop(_plain_text_fragment(footer_inner)):
+        return None
+
+    out = seed_html
+    if "{{PAGE_TITLE}}" in out:
+        out = out.replace("{{PAGE_TITLE}}", title_inner)
+    else:
+        out = _TITLE_TAG_RE.sub(
+            lambda m: f"{m.group(1)}{title_inner}{m.group(3)}",
+            out,
+            count=1,
+        )
+        out = _H1_INNER_TEXT_RE.sub(
+            lambda m: f"{m.group(1)}{title_inner}{m.group(3)}",
+            out,
+            count=1,
+        )
+
+    if "{{PAGE_CONTENT}}" in out:
+        out = out.replace("{{PAGE_CONTENT}}", main_inner)
+    else:
+        out = _replace_main_inner_html(out, main_inner)
+
+    if "{{PAGE_FOOTER}}" in out:
+        out = out.replace("{{PAGE_FOOTER}}", footer_inner)
+    else:
+        seed_footer = _extract_footer_block(out)
+        if not seed_footer:
+            return None
+        repaired_footer = _P_INNER_TEXT_RE.sub(
+            lambda m: f"{m.group(1)}{footer_inner}{m.group(3)}",
+            seed_footer,
+            count=1,
+        )
+        out = out.replace(seed_footer, repaired_footer, 1)
+
+    return out
+
+
 def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> tuple[bool, str]:
     """Stage 6 软门禁：内容页必须基于 seed 填槽，不能改 chrome。"""
     if not _is_valid_html(filled_html):
@@ -521,6 +618,7 @@ def _build_content_template_fill_prompt(
     designer_md_text: str = "",
     user_query: str = "",
     total_pages: int = 0,
+    rewrite_hint: str = "",
 ) -> str:
     """预设四风格内容页：content-template 预铺后仅填三处占位符。"""
     user_query_section = ""
@@ -552,6 +650,13 @@ def _build_content_template_fill_prompt(
         if designer_md:
             designer_section = f"\n## skill designer 约束（仅作用于 `{{PAGE_CONTENT}}`）\n{designer_md}\n"
     layout_template = _build_content_layout_template(page_type)
+    rewrite_section = ""
+    if rewrite_hint:
+        rewrite_section = (
+            "\n## 重写指引（必须修复的问题）\n"
+            f"{rewrite_hint}\n"
+            "⚠️ 仅修复上述不通过项，不要改动其他正常部分。\n"
+        )
     return (
         f"{user_query_section}"
         f"## 任务：填充第 {page_number} 页预设风格 content-template 官方模板\n"
@@ -567,6 +672,18 @@ def _build_content_template_fill_prompt(
         "7. 每个占位符必须填有意义内容；禁止空串、`—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位`\n"
         "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；禁止额外手写第二套图表初始化框架\n"
         "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
+        "## Page Chrome 硬锁（违反将导致校验失败 `content_template_chrome_changed`）\n"
+        "- **Chrome = 除 `{{PAGE_CONTENT}}` 以外的一切**：`<head>`（含 script/link/style/`tailwind.config`）、"
+        "`.content-safe` 到 `<main>` 之前的 header 带、`<main>` 开标签、footer 骨架\n"
+        "- **允许改动的仅是占位符文本**：\n"
+        "  - `<title>` / `<h1>` 内文字 ← `{{PAGE_TITLE}}`\n"
+        "  - footer 内首个 `<p>` 文字 ← `{{PAGE_FOOTER}}`\n"
+        "  - `<main>` **内部** HTML ← `{{PAGE_CONTENT}}`\n"
+        "- **禁止**增删/重排 chrome 节点，禁止改 chrome 上的 class/style/属性/注释/空白结构，"
+        "禁止把图表、卡片、遮罩、装饰线挪到 header/footer/`<head>`\n"
+        "- **操作方式**：以预铺 HTML 为底稿，只做三处字符串级替换后原样输出；"
+        "不要“重新生成一版更美观的同款页面”\n"
+        "- **自检**：输出前对比预铺稿——若除上述三处文本/main 内部外仍有任何差异，必须撤回重填\n\n"
         "## 风格文件（正文区配色/字体/组件权威；不得把风格元数据写成观众可见文字）\n"
         f"{style_text}\n\n"
         "## 大纲 — 本页规划\n"
@@ -579,7 +696,8 @@ def _build_content_template_fill_prompt(
         f"{_EDITABLE_LAYERING_RULES}"
         f"{designer_section}"
         f"{layout_template}\n"
-        "## 预铺模板 HTML（只填槽，勿重写）\n"
+        f"{rewrite_section}"
+        "## 预铺模板 HTML（只填槽，勿重写；Chrome 必须与下方稿逐字节一致，除三处占位符外）\n"
         f"{seed_html}\n"
     )
 
@@ -791,8 +909,10 @@ _DESIGN_RULES_DIGEST = (
     "4.2 图表最小高度（强制）：图表容器实际渲染高度必须 ≥ 160px（防塌缩下限），"
     "用 `min-h-[160px]` 或 `flex-1` 确保图表区域能初始化渲染；"
     "建议图表可读高度 ≥ 300px，由页面预算保证\n"
-    "4.2.1 图表高度链（强制）：图表外层卡片须 `flex-1 min-h-0 flex flex-col`（或 `flex-[N] min-h-0 flex flex-col`），"
-    "内层 `#xxx-chart` 用 `flex-1 min-h-0 w-full`；禁止在无 `min-h-0`/`flex-1` 的 flex-col 父容器内单独给 chart div 加 `flex-1`\n"
+    "4.2.1 图表高度链（强制）：包含 chart div 的最近 `flex flex-col` 祖先容器必须带 `flex-1 min-h-0`（或 `flex-[N] min-h-0`），"
+    "chart div 用 `flex-1 min-h-0 w-full` 或 `w-full h-full`；"
+    "标准写法 `div.flex-1.min-h-0.flex.flex-col > div#chart-1.w-full.h-full`；"
+    "禁止在无 `min-h-0`/`flex-1` 的 flex-col 父容器内放置 chart div\n"
     "4.3 图表颜色（强制）：图表数据系列颜色必须来自风格文件的图表配色表，禁止使用相近色；"
     "坐标轴标签用深色，分割线用浅色\n"
     "4.4 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}` 防止同系列标签重叠；"
@@ -1261,6 +1381,10 @@ _CHART_WRAPPER_HEIGHT_RE = re.compile(
     r"\bmin-h-0\b|\bflex-1\b|\bflex-\[\d+\]",
     re.IGNORECASE,
 )
+_FLEX_GROW_RE = re.compile(
+    r"\bflex-1\b|\bflex-\[\d+\]",
+    re.IGNORECASE,
+)
 
 
 def _chart_wrapper_has_height_chain(wrapper_tag: str) -> bool:
@@ -1284,6 +1408,84 @@ def _validate_chart_height_chain(html: str) -> bool:
         if not _chart_wrapper_has_height_chain(wrappers[-1].group(0)):
             return False
     return True
+
+
+def _inject_class_into_chart_wrappers(
+    html: str,
+    class_name: str,
+    *,
+    needs_inject: Callable[[str], bool],
+) -> tuple[str, int]:
+    """向满足条件的图表 flex-col 包装器注入 class；已含该类则跳过。"""
+    if "echarts.init" not in html.lower():
+        return html, 0
+
+    chart_divs = list(_CHART_DIV_RE.finditer(html))
+    if not chart_divs:
+        return html, 0
+
+    repair_offsets: set[tuple[int, int]] = set()
+    for chart_match in chart_divs:
+        window_start = max(0, chart_match.start() - 2000)
+        before = html[window_start:chart_match.start()]
+        wrappers = list(_FLEX_COL_DIV_RE.finditer(before))
+        if not wrappers:
+            continue
+        last_wrapper = wrappers[-1]
+        if needs_inject(last_wrapper.group(0)):
+            abs_start = window_start + last_wrapper.start()
+            abs_end = window_start + last_wrapper.end()
+            repair_offsets.add((abs_start, abs_end))
+
+    if not repair_offsets:
+        return html, 0
+
+    result = html
+    injected = 0
+    class_re = re.compile(rf"\b{re.escape(class_name)}\b")
+    for abs_start, abs_end in sorted(repair_offsets, reverse=True):
+        wrapper_tag = result[abs_start:abs_end]
+        if class_re.search(wrapper_tag):
+            continue
+        fixed_tag = re.sub(
+            r'(class="[^"]*)"',
+            rf'\1 {class_name}"',
+            wrapper_tag,
+            count=1,
+        )
+        if fixed_tag == wrapper_tag:
+            continue
+        result = result[:abs_start] + fixed_tag + result[abs_end:]
+        injected += 1
+
+    return result, injected
+
+
+def _fix_chart_height_chain(html: str) -> str:
+    """写盘前修复图表高度链：缺高度链类时注入 min-h-0，再对缺 flex-1/flex-[N] 的包装器注入 flex-1。"""
+    result, count_1 = _inject_class_into_chart_wrappers(
+        html,
+        "min-h-0",
+        needs_inject=lambda tag: not _chart_wrapper_has_height_chain(tag),
+    )
+    if count_1:
+        logger.info(
+            "[P8.1] repaired=chart_height_chain 注入 min-h-0 %d 处",
+            count_1,
+        )
+
+    result, count_2 = _inject_class_into_chart_wrappers(
+        result,
+        "flex-1",
+        needs_inject=lambda tag: not bool(_FLEX_GROW_RE.search(tag)),
+    )
+    if count_2:
+        logger.info(
+            "[P8.1] repaired=chart_height_chain 注入 flex-1 %d 处",
+            count_2,
+        )
+
+    return result
 
 
 def _extract_backup_timestamp(path: str) -> str:
@@ -2541,6 +2743,27 @@ _REWRITE_ACTIONS = {
         "若内容确实需要更多空间，将 `flex-col` 改为更少的子元素或改为 `flex-shrink-0` 自适应高度；"
         "不得用绝对定位、负 margin 或 `overflow-hidden` 掩盖越界"
     ),
+    # 页面生成校验失败 reason → 定向重试补救动作
+    "invalid_chart_height_chain": (
+        "修复图表容器高度链：包含 chart div 的最近 flex-col 祖先容器"
+        "必须带 flex-1 min-h-0（或 flex-[N] min-h-0），"
+        "标准写法 div.flex-1.min-h-0.flex.flex-col > div#chart-1.w-full.h-full"
+    ),
+    "invalid_html": "输出完整合法 HTML 文档，须含闭合 </body></html>，禁止截断或夹杂解释文字",
+    "invalid_dom": "修复 DOM：消除畸形片段，确保 <main> 位于 .ppt-slide 内",
+    "unfilled_placeholders": "填完所有 {{...}} / PAGE_* 占位符，禁止残留未替换标记",
+    "seed_not_modified": "必须基于预铺模板填入本页标题、正文与页脚，禁止原样返回 seed",
+    "main_tag_changed": "禁止改动 <main> 开标签（class/属性）；仅替换 main 内部 PAGE_CONTENT",
+    "content_template_chrome_changed": (
+        "禁止改动模板 chrome（<head>、header 结构、footer 结构）；"
+        "仅替换 PAGE_TITLE / PAGE_CONTENT / PAGE_FOOTER 三处占位内容"
+    ),
+    "empty_page_content": "在 main 内填入本页正文内容，禁止空的 PAGE_CONTENT",
+    "page_content_unfilled": "将 {{PAGE_CONTENT}} 替换为本页实际 HTML 内容",
+    "title_invalid": "将 PAGE_TITLE 替换为大纲中的真实标题，禁止占位敷衍文案",
+    "footer_missing": "保留 footer 结构并填入 PAGE_FOOTER",
+    "footer_invalid": "将 PAGE_FOOTER 替换为有效页脚文案，禁止占位敷衍文案",
+    "llm_failed": "重新生成完整页面 HTML，确保输出可解析",
 }
 
 
@@ -2552,6 +2775,18 @@ def _build_rewrite_hint(failed_items: list[str]) -> str:
         action = _REWRITE_ACTIONS.get(item, "针对性优化该项")
         lines.append(f"- {item} → {action}")
     return "\n".join(lines)
+
+
+def _build_page_gen_rewrite_hint(reason: str) -> str:
+    """定向重试指引：按真实校验 reason 生成，避免一律导向图表高度链。"""
+    reason = (reason or "").strip()
+    if not reason:
+        return (
+            "上一轮生成的 HTML 校验失败。"
+            "请对照模板填槽/DOM/图表高度链等校验规则修复后重试。"
+        )
+    body = _build_rewrite_hint([reason])
+    return f"上一轮生成的 HTML 校验失败（reason={reason}）。\n{body}"
 
 
 def _extract_page_keywords(research_page: str) -> list[str]:
@@ -3315,14 +3550,23 @@ class PageWorkerNode(PlanNode):
         )
 
         html = ""
+        last_raw_html = ""
+        last_fail_reason = ""
         attempt_count = min(
             max(gen_retry_round + 1, 1),
             _MAX_PAGE_GENERATION_ATTEMPTS,
         )
         for attempt in range(attempt_count):
+            rewrite_hint = ""
+            original_html = ""
             if attempt > 0:
                 logger.info("[P8.1] 页面 %d 第 %d 轮生成重试", page_num, attempt + 1)
-            html = await self._generate_one(ctx)
+                if last_raw_html or last_fail_reason:
+                    rewrite_hint = _build_page_gen_rewrite_hint(last_fail_reason)
+                    original_html = last_raw_html
+            html, last_raw_html, last_fail_reason = await self._generate_one(
+                ctx, rewrite_hint=rewrite_hint, original_html=original_html
+            )
             if html:
                 break
         if not html:
@@ -3463,11 +3707,16 @@ class PageWorkerNode(PlanNode):
         """预设/custom agenda：官方模板预铺 + 仅填 {{}}。"""
         return await self._generate_structural_template_fill(ctx, "agenda")
 
-    async def _generate_content_template_fill(self, ctx: PageGenContext) -> str:
-        """预设四风格内容页：官方 content-template 预铺 + 仅填三处占位符。"""
+    async def _generate_content_template_fill(
+        self, ctx: PageGenContext, *, rewrite_hint: str = ""
+    ) -> tuple[str, str, str]:
+        """预设四风格内容页：官方 content-template 预铺 + 仅填三处占位符。
+
+        返回 (校验通过的 html 或空串, 最后一次产物 html 或空串, 失败 reason 或空串)。
+        """
         if not ctx.pptx_root:
             logger.error("[P8.1] 内容页填槽缺少 pptx_root page=%d", ctx.page_num)
-            return ""
+            return "", "", ""
 
         template_path = _resolve_style_page_template_path(
             ctx.pptx_root,
@@ -3482,7 +3731,7 @@ class PageWorkerNode(PlanNode):
                 ctx.style_id,
                 template_path,
             )
-            return ""
+            return "", "", ""
 
         try:
             result = await self.stream_llm_collect(
@@ -3498,10 +3747,14 @@ class PageWorkerNode(PlanNode):
                     designer_md_text=ctx.designer_md_text,
                     user_query=ctx.user_query,
                     total_pages=ctx.total_pages,
+                    rewrite_hint=rewrite_hint,
                 ),
                 system_prompt=(
-                    "你是 PPT 内容页模板填充师。只替换模板中的 PAGE_TITLE、PAGE_CONTENT、PAGE_FOOTER，"
-                    "直接输出完整 HTML 原文，不输出任何解释。"
+                    "你是 PPT 内容页模板填充师，不是设计师。"
+                    "唯一任务：在预铺 HTML 上替换 {{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}} 三处占位符。"
+                    "Page Chrome（head/header/`<main>` 开标签/footer 骨架/class/script/style）必须与预铺稿保持一致；"
+                    "改 chrome 会触发 content_template_chrome_changed 校验失败。"
+                    "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
                 ),
                 node_name=f"p8_1_content_fill_{ctx.page_num}",
                 concurrent=True,
@@ -3510,7 +3763,7 @@ class PageWorkerNode(PlanNode):
             if isinstance(e, AbortError):
                 raise
             logger.warning("[P8.1] 内容页填槽 LLM 失败 page=%d: %s", ctx.page_num, e)
-            return ""
+            return "", "", "llm_failed"
 
         html = _strip_html_fence(result or "")
         html = _replace_placeholder_headings(html, ctx.outline_page)
@@ -3524,7 +3777,36 @@ class PageWorkerNode(PlanNode):
         html = _fix_echarts_svg_renderer(html)
         html = _strip_unsupported_fullpage_overlays(html)
         html = _strip_chart_header_unit(html)
+        html = _fix_chart_height_chain(html)
         ok, reason = _validate_content_template_fill_output(seed_html, html)
+        if not ok and reason in _REPAIRABLE_CONTENT_TEMPLATE_REASONS:
+            repaired = _repair_content_template_chrome(seed_html, html)
+            if repaired:
+                repaired = _fix_echarts_svg_renderer(repaired)
+                repaired = _strip_unsupported_fullpage_overlays(repaired)
+                repaired = _strip_chart_header_unit(repaired)
+                repaired = _fix_chart_height_chain(repaired)
+                ok_repaired, reason_repaired = _validate_content_template_fill_output(
+                    seed_html,
+                    repaired,
+                )
+                if ok_repaired:
+                    logger.info(
+                        "[P8.1] repaired=content_template_chrome page=%d style=%s "
+                        "from_reason=%s",
+                        ctx.page_num,
+                        ctx.style_id,
+                        reason,
+                    )
+                    return repaired, "", ""
+                logger.warning(
+                    "[P8.1] 内容页 chrome 自动修复后仍失败 page=%d style=%s "
+                    "from_reason=%s repair_reason=%s",
+                    ctx.page_num,
+                    ctx.style_id,
+                    reason,
+                    reason_repaired,
+                )
         if not ok:
             logger.warning(
                 "[P8.1] 内容页填槽校验失败 page=%d style=%s reason=%s",
@@ -3532,21 +3814,29 @@ class PageWorkerNode(PlanNode):
                 ctx.style_id,
                 reason,
             )
-            return ""
+            return "", html, reason
         logger.info(
             "[P8.1] 内容页官方模板填槽完成 page=%d style=%s",
             ctx.page_num,
             ctx.style_id,
         )
-        return html
+        return html, "", ""
 
-    async def _generate_one(self, ctx: PageGenContext) -> str:
-        """生成单页 HTML，返回校验通过的 html 或空串。"""
+    async def _generate_one(
+        self, ctx: PageGenContext, *, rewrite_hint: str = "", original_html: str = ""
+    ) -> tuple[str, str, str]:
+        """生成单页 HTML，返回 (校验通过的 html 或空串, 最后一次产物 html 或空串, 失败 reason 或空串)。
+
+        rewrite_hint / original_html 非空时，prompt 中追加重写指引，用于定向重试。
+        """
         page_type = _detect_page_type(ctx.outline_page)
         if _uses_structural_template_fill(ctx.style_id, page_type):
-            return await self._generate_structural_template_fill(ctx, page_type)
+            filled = await self._generate_structural_template_fill(ctx, page_type)
+            return (filled or "", "", "")
         if _uses_content_template_fill(ctx.style_id, page_type, ctx.outline_page):
-            return await self._generate_content_template_fill(ctx)
+            return await self._generate_content_template_fill(
+                ctx, rewrite_hint=rewrite_hint
+            )
 
         try:
             result = await self.stream_llm_collect(
@@ -3562,6 +3852,8 @@ class PageWorkerNode(PlanNode):
                     designer_md_text=ctx.designer_md_text,
                     user_query=ctx.user_query,
                     total_pages=ctx.total_pages,
+                    rewrite_hint=rewrite_hint,
+                    original_html=original_html,
                 ),
                 system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
                 node_name=f"p8_1_page_{ctx.page_num}",
@@ -3571,11 +3863,11 @@ class PageWorkerNode(PlanNode):
             if isinstance(e, AbortError):
                 raise
             logger.warning("[P8.1] 页面 %d 生成 LLM 失败: %s", ctx.page_num, e)
-            return ""
+            return "", "", "llm_failed"
         html = _strip_html_fence(result or "")
         if not _is_valid_html(html):
             logger.warning("[P8.1] 页面 %d HTML 校验失败", ctx.page_num)
-            return ""
+            return "", html, "invalid_html"
         # 后置校验：替换「第X页」标题占位符为 outline 中的实际标题
         html = _replace_placeholder_headings(html, ctx.outline_page)
         html = _apply_visible_page_number_policy(
@@ -3588,13 +3880,14 @@ class PageWorkerNode(PlanNode):
         html = _fix_echarts_svg_renderer(html)
         html = _strip_unsupported_fullpage_overlays(html)
         html = _strip_chart_header_unit(html)
+        html = _fix_chart_height_chain(html)
         if not _validate_slide_dom(html):
             logger.warning("[P8.1] 页面 %d DOM 结构校验失败", ctx.page_num)
-            return ""
+            return "", html, "invalid_dom"
         if not _validate_chart_height_chain(html):
             logger.warning("[P8.1] 页面 %d 图表容器高度链校验失败", ctx.page_num)
-            return ""
-        return html
+            return "", html, "invalid_chart_height_chain"
+        return html, "", ""
 
     async def _write_file(self, path: str, content: str) -> bool:
         if not self.has_tool("write_file"):
@@ -3733,8 +4026,18 @@ class QAFixNode(PlanNode):
         if not path or not self.has_tool("read_file"):
             return ""
         try:
-            result = await self.call_tool("read_file", file_path=path)
+            result = await asyncio.wait_for(
+                self.call_tool("read_file", file_path=path),
+                timeout=_P82_READ_TIMEOUT_SECONDS,
+            )
             return PptCommon.parse_tool_file_content(result)
+        except TimeoutError:
+            logger.warning(
+                "[P8.2] 读取页面超时 path=%s timeout=%.0fs",
+                path,
+                _P82_READ_TIMEOUT_SECONDS,
+            )
+            return ""
         except Exception as e:
             if isinstance(e, AbortError):
                 raise
@@ -3762,14 +4065,23 @@ class QAFixNode(PlanNode):
                 pattern=f"_backup/*/page-{page_num}.pptx.html",
                 path=pages_dir,
             )
-            paths = self._parse_listing(result)
         except Exception as e:
             if isinstance(e, AbortError):
                 raise
             logger.warning("[P8.2] 查找 backup 失败 page=%d: %s", page_num, e)
             return ""
-        if not paths:
+        # 不能用 _parse_listing：它会把结果裁成裸文件名，丢失 _backup/<ts>/ 目录，
+        # 直接从原始返回中提取时间戳，重建以 pages_dir 为锚点的完整路径。
+        timestamps = re.findall(
+            rf"_backup[/\\]+(\d+)[/\\]+page-{page_num}\.pptx\.html",
+            str(result),
+        )
+        if not timestamps:
             return ""
+        paths = [
+            f"{pages_dir}/_backup/{ts}/page-{page_num}.pptx.html"
+            for ts in set(timestamps)
+        ]
         return max(paths, key=_extract_backup_timestamp)
 
     async def _fix_pages(
@@ -3783,51 +4095,69 @@ class QAFixNode(PlanNode):
         """仅对指定页面并发执行新版 pptx-craft fix。"""
         sem = asyncio.Semaphore(10)
 
+        async def _fix_one_body(page_num: int) -> tuple[int, bool, str]:
+            page_path = f"{pages_dir}/page-{page_num}.pptx.html"
+            before_html = await self._read_page_file(page_path)
+            before_ok = bool(before_html) and _is_slide_exportable(before_html)
+
+            style_arg = (
+                f" --style {quote_path(style_file_path)}"
+                if style_file_path
+                else ""
+            )
+            cmd = (
+                f"{cli_path('fix', pptx_root)} {quote_path(pages_dir + '/')} "
+                f"--fix --pages {page_num}{style_arg}"
+            )
+            result = await run_bash(
+                self,
+                cmd,
+                timeout_seconds=300,
+                required=False,
+                workdir=pptx_root,
+            )
+            output = combined_output(result)[:500]
+            ok = result.exit_code == 0
+            if not ok:
+                logger.warning(
+                    "[P8.2] page-%d fix 失败 exit=%d",
+                    page_num,
+                    result.exit_code,
+                )
+
+            after_html = await self._read_page_file(page_path)
+            after_ok = bool(after_html) and _is_slide_exportable(after_html)
+            if before_ok and not after_ok:
+                backup_path = await self._find_latest_backup_path(pages_dir, page_num)
+                if backup_path:
+                    backup_html = await self._read_page_file(backup_path)
+                    if backup_html and _is_slide_exportable(backup_html):
+                        if await self._write_page_file(page_path, backup_html):
+                            logger.warning(
+                                "[P8.2] page-%d fix 破坏 DOM，已回退 backup",
+                                page_num,
+                            )
+                            output = f"{output} dom_restored_from_backup"
+            return page_num, ok, output
+
         async def _fix_one(page_num: int) -> tuple[int, bool, str]:
             async with sem:
-                page_path = f"{pages_dir}/page-{page_num}.pptx.html"
-                before_html = await self._read_page_file(page_path)
-                before_ok = bool(before_html) and _is_slide_exportable(before_html)
-
-                style_arg = (
-                    f" --style {quote_path(style_file_path)}"
-                    if style_file_path
-                    else ""
-                )
-                cmd = (
-                    f"{cli_path('fix', pptx_root)} {quote_path(pages_dir + '/')} "
-                    f"--fix --pages {page_num}{style_arg}"
-                )
-                result = await run_bash(
-                    self,
-                    cmd,
-                    timeout_seconds=300,
-                    required=False,
-                    workdir=pptx_root,
-                )
-                output = combined_output(result)[:500]
-                ok = result.exit_code == 0
-                if not ok:
-                    logger.warning(
-                        "[P8.2] page-%d fix 失败 exit=%d",
-                        page_num,
-                        result.exit_code,
+                try:
+                    return await asyncio.wait_for(
+                        _fix_one_body(page_num),
+                        timeout=_P82_FIX_ONE_TIMEOUT_SECONDS,
                     )
-
-                after_html = await self._read_page_file(page_path)
-                after_ok = bool(after_html) and _is_slide_exportable(after_html)
-                if before_ok and not after_ok:
-                    backup_path = await self._find_latest_backup_path(pages_dir, page_num)
-                    if backup_path:
-                        backup_html = await self._read_page_file(backup_path)
-                        if backup_html and _is_slide_exportable(backup_html):
-                            if await self._write_page_file(page_path, backup_html):
-                                logger.warning(
-                                    "[P8.2] page-%d fix 破坏 DOM，已回退 backup",
-                                    page_num,
-                                )
-                                output = f"{output} dom_restored_from_backup"
-                return page_num, ok, output
+                except TimeoutError:
+                    logger.error(
+                        "[P8.2] page-%d fix 整体超时 timeout=%.0fs",
+                        page_num,
+                        _P82_FIX_ONE_TIMEOUT_SECONDS,
+                    )
+                    return page_num, False, "fix_one_timeout"
+                except AbortError:
+                    raise
+                except asyncio.CancelledError:
+                    raise
 
         results = await asyncio.gather(
             *[_fix_one(page_num) for page_num in page_nums],
@@ -4743,12 +5073,15 @@ class PPTPageGenNode(PlanNode):
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)
         status_map = {"ok": "ok", "partial": "warning", "failed": "error"}
+        page_files = result.get("page_files") or []
+        missing = result.get("missing_pages") or []
+        status = result.get("ppt_gen_status", "")
+        message = f"PPT 页面生成 status={status} 成功 {len(page_files)} 页"
+        if missing:
+            message += f"，缺失 {len(missing)} 页（不可按成功交付）"
         yield {
             **result,
             "node": self.plan_name,
-            "status": status_map.get(result.get("ppt_gen_status", ""), "warning"),
-            "message": (
-                f"PPT 生成完成 status={result.get('ppt_gen_status')} "
-                f"成功 {len(result.get('page_files', []))} 页"
-            ),
+            "status": status_map.get(status, "warning"),
+            "message": message,
         }

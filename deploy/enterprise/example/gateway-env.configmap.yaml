@@ -22,7 +22,7 @@ data:
   AGENT_SERVER_SESSION_CONCURRENCY: "10"
   AGENT_SERVER_SESSION_TTL: "60"
   API_BASE: <<API_BASE>>
-  CLAW_CODE_POD_PATH: /app/jiuwenclaw
+  CLAW_POD_CODE_PATH: /app/jiuwenclaw
   CLAW_MOUNT_TYPE: nfs
   CLAW_NFS_PATH: <<NFS_SHARE_PATH>>/jiuwenclaw
   CLAW_NFS_SERVER: <<NFS_SERVER_ADDR>>
@@ -72,7 +72,7 @@ data:
   REDIS_KEY_PREFIX: 'jiuwenclaw:'
   REDIS_MODE: standalone
   REDIS_PORT: <<REDIS_PORT>>
-  RUNTIME_CODE_POD_PATH: /usr/local/lib/python3.11/site-packages/openjiuwen_runtime
+  RUNTIME_POD_PKG_PATH: /usr/local/lib/python3.11/site-packages/openjiuwen_runtime
   RUNTIME_DB_MAX_OVERFLOW: "20"
   RUNTIME_DB_POOL_SIZE: "2"
   RUNTIME_DB_POOL_TIMEOUT: "30"

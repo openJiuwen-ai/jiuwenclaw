@@ -80,36 +80,6 @@ def disk_only_evolution_skill_dirs(params: dict[str, Any] | None = None) -> list
     return [str(p) for p in resolve_agent_registered_skill_dirs()]
 
 
-def allowed_skill_roots_for_path(
-    adapter_dirs: Sequence[str | Path],
-    skill_path: str | None = None,
-) -> list[str]:
-    """Union adapter dirs, live registered dirs, and control-plane skill_path root.
-
-    Disk-only / control-plane RPCs may pass an explicit ``…/<name>/SKILL.md`` whose
-    skills root is outside a warm agent's workspace-only snapshot. Include that root
-    so path validation matches enterprise AgentManager binding semantics.
-    """
-    roots: list[str] = []
-    seen: set[str] = set()
-    for raw in (
-        *adapter_dirs,
-        *(str(p) for p in resolve_agent_registered_skill_dirs()),
-    ):
-        try:
-            key = str(Path(str(raw)).expanduser().resolve())
-        except OSError:
-            key = str(raw)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        roots.append(key)
-    skill_root = skills_root_from_skill_md_path(skill_path)
-    if skill_root and skill_root not in seen:
-        roots.append(skill_root)
-    return roots
-
-
 def get_disk_evolution_store(skills_dirs: str | list[str] | None = None) -> EvolutionStore:
     """Build a disk-only EvolutionStore (no EvolutionRail / LLM)."""
     if skills_dirs is None:
@@ -161,9 +131,8 @@ def validate_rebuild_skill_path(
     skill_path: str,
     *,
     skill_name: str,
-    allowed_roots: Sequence[str | Path],
 ) -> str:
-    """Ensure skill_path is SKILL.md under an allowed skills root and matches name."""
+    """Normalize skill_path; require SKILL.md and matching skill directory name."""
     try:
         resolved = Path(str(skill_path).strip()).expanduser().resolve()
     except OSError as exc:
@@ -175,23 +144,7 @@ def validate_rebuild_skill_path(
             f"skill_path directory name must match skill name "
             f"(expected={skill_name}, resolve_path={resolved})"
         )
-    allowed: list[Path] = []
-    for raw in allowed_roots:
-        try:
-            allowed.append(Path(str(raw)).expanduser().resolve())
-        except OSError:
-            continue
-    for root in allowed:
-        try:
-            resolved.relative_to(root)
-            return str(resolved)
-        except ValueError:
-            continue
-    allowed_display = ", ".join(str(p) for p in allowed[:5]) or "(none)"
-    raise ValueError(
-        f"skill_path outside registered skill roots: "
-        f"resolve_path={resolved}, allowed_path={allowed_display}"
-    )
+    return str(resolved)
 
 
 def normalize_record_ids(raw: Any) -> list[str] | None:
@@ -466,7 +419,6 @@ def is_body_archive_name(archive_name: str) -> bool:
 
 
 __all__ = [
-    "allowed_skill_roots_for_path",
     "disk_only_evolution_skill_dirs",
     "do_evolve_rollback",
     "finalize_rebuild_followup",
