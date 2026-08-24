@@ -32,8 +32,9 @@ export type PlanWorkProfile = 'work' | 'code';
 /**
  * Plan 对单 agent 与集群均开放；Auto / auto_harness 不提供 Plan 入口。
  *
- * Auto 路由到 agent.plan 时由 MACRO 写 wire mode。集群 Plan 由 Leader
- * 先产出计划、经用户审批再执行；profile（Deep / Code）映射到
+ * MACRO 的调度 lane 仅为 agent / team；Auto 是每次请求重新分类的用户选择，
+ * 不参与 Plan mode 的 wire 组合。集群 Plan 由 Leader 先产出计划、经用户审批再执行；
+ * profile（Deep / Code）映射到
  * `team.work.plan` / `team.code.plan`。
  */
 export function supportsPlanMode(mode: PlanBaseMode | string | undefined): boolean {

@@ -48,12 +48,17 @@ import { FileIcon } from '../FileIcon';
 import { webRequest } from '../../services/webClient';
 import { useChatStore } from '../../stores/chatStore';
 import { useSessionStore } from '../../stores/sessionStore';
+import { isEffectiveTeamMode } from '../../utils/agentMode';
 import { extractTokenFromDownloadUrl } from '../../utils/fileDownloadDedup';
 
 function openArtifactPanelForActiveMode(selectedArtifactId: string): void {
   const sessionId = useChatStore.getState().activeSessionId;
-  const mode = useSessionStore.getState().runtimes[sessionId ?? '']?.mode ?? 'agent';
-  if (mode === 'team' || mode === 'auto_harness') {
+  const runtime = useSessionStore.getState().runtimes[sessionId ?? ''];
+  const mode = runtime?.mode ?? 'agent';
+  if (
+    mode === 'auto_harness' ||
+    isEffectiveTeamMode(mode, runtime?.lastMacroRoutedMode)
+  ) {
     openArtifactPanel(selectedArtifactId);
     return;
   }

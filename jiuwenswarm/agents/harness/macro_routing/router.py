@@ -25,7 +25,7 @@ async def route_macro_mode(
     requested_mode: str | None,
     config_base: dict[str, Any] | None = None,
 ) -> MacroRoutingDecision:
-    """Resolve Auto MACRO mode; pass through forced agent / agent.plan / team.
+    """Resolve Auto MACRO mode; pass through forced agent / team.
 
     Precedence:
     1. Forced non-auto mode → return as-is (source=forced)

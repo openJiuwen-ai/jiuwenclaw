@@ -694,7 +694,7 @@ def resolve_agent_request_mode(
     )
 
     # MACRO Auto: keep canonical "auto" so the adapter can run the scheduler
-    # before picking agent.plan / agent / team. AgentManager still uses mode "agent".
+    # before picking agent / team. AgentManager still uses mode "agent".
     if mode_text in {"auto", "agent.auto", "macro.auto"}:
         return "auto", None, "auto"
 
@@ -768,6 +768,74 @@ def _agent_manager_mode_for_request(mode: str) -> str:
     if mode in {"auto", "auto_harness"}:
         return "agent"
     return mode
+
+
+def _chat_turn_query_text(params: dict[str, Any]) -> str:
+    """User text for MACRO; empty for background RPCs that only carry mode."""
+    for key in ("query", "content"):
+        raw = params.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return ""
+
+
+async def _resolve_auto_macro_lane_for_request(
+    request: AgentRequest,
+) -> dict[str, Any] | None:
+    """Run MACRO while mode is still Auto, then rewrite params.mode to agent|team.
+
+    Must run before ``_apply_resolved_mode_to_request`` so ``work_mode=code`` can
+    compose to ``code.normal`` / ``code.team`` and select CodeAdapter. Returns the
+    routing payload when MACRO ran; ``None`` when mode is not Auto or there is no
+    user query (skip classify on prepare-only RPCs).
+    """
+    from jiuwenswarm.agents.harness.macro_routing import (
+        is_auto_mode,
+        macro_mode_label,
+        normalize_macro_mode,
+        route_macro_mode,
+    )
+    from jiuwenswarm.common.config import get_config
+
+    params = request.params if isinstance(request.params, dict) else {}
+    requested = str(params.get("mode") or "").strip()
+    if not is_auto_mode(requested):
+        return None
+    query = _chat_turn_query_text(params)
+    if not query:
+        return None
+
+    decision = await route_macro_mode(
+        query,
+        requested_mode=requested,
+        config_base=get_config(),
+    )
+    resolved = normalize_macro_mode(decision.mode)
+    decision.mode = resolved
+    routing = decision.to_dict()
+    label = macro_mode_label(resolved)
+
+    params = dict(params)
+    params["mode"] = resolved
+    params["macro_mode_requested"] = "auto"
+    params["macro_routing"] = routing
+    request.params = params
+    if isinstance(request.metadata, dict):
+        request.metadata = dict(request.metadata)
+        request.metadata["macro_routing"] = routing
+        request.metadata["mode"] = resolved
+    elif request.metadata is None:
+        request.metadata = {"macro_routing": routing, "mode": resolved}
+
+    logger.info(
+        "[MacroRouter] Selected (pre-adapter): %s (%s) conf=%.2f source=%s rationale=%s",
+        label,
+        resolved,
+        decision.confidence,
+        decision.source,
+        decision.rationale,
+    )
+    return routing
 
 
 def _apply_resolved_mode_to_request(
@@ -2609,6 +2677,15 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         _raw_mode = params.get("mode")
         explicit_mode_provided = isinstance(_raw_mode, str) and bool(_raw_mode.strip())
+        # Preserve UI Auto selection for session metadata even after MACRO + compose
+        # rewrites params.mode to code.normal / code.team for adapter selection.
+        from jiuwenswarm.agents.harness.macro_routing import is_auto_mode as _is_auto_mode
+
+        original_ui_mode = (
+            canonicalize_mode_text(_raw_mode) if explicit_mode_provided else ""
+        )
+        if explicit_mode_provided and not hasattr(request, "_original_mode"):
+            setattr(request, "_original_mode", original_ui_mode)
         runtime_work_mode = None
         session_metadata: dict[str, Any] = {}
         sid = str(request.session_id or "").strip()
@@ -2663,6 +2740,8 @@ class AgentWebSocketServer:
                     request.session_id,
                 )
         params["work_mode"] = runtime_work_mode
+        # MACRO before compose/get_agent so Auto + work_mode=code → CodeAdapter.
+        await _resolve_auto_macro_lane_for_request(request)
         mode, sub_mode = _apply_resolved_mode_to_request(
             request,
             work_mode=runtime_work_mode,
@@ -2672,14 +2751,18 @@ class AgentWebSocketServer:
         requested_project_dir = resolve_request_project_dir(request)
         # [改动] 写盘用 canonical mode（request.params["mode"]，已被规范化为
         # "agent.plan"/"team"/"auto" 等），而非一级 mode（"agent"）。
+        # Auto stays "auto" on disk so TUI/Web keep Auto selected across turns.
         canonical_mode = (
             request.params.get("mode") if isinstance(request.params, dict) else None
         )
+        sync_mode = canonical_mode if canonical_mode else mode
+        if _is_auto_mode(original_ui_mode):
+            sync_mode = "auto"
         if sync_metadata:
             project_dir = _sync_chat_request_metadata(
                 request,
                 requested_project_dir,
-                canonical_mode if canonical_mode else mode,
+                sync_mode,
                 explicit_mode_provided=explicit_mode_provided,
                 user_id=str(getattr(request, "user_id", "") or "").strip(),
             )

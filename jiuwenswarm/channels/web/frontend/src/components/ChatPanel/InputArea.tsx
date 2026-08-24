@@ -620,8 +620,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   // 输入框上方常驻的 GoalBar 完整覆盖，工具栏这里再挂一份重复的常驻入口只会显得"选择没解除"。
   const goalTagVisible = canUseGoalMenu && goalArmed;
   // Plan 是持续开关（不是 Goal 那种"下一条消息生效"的过渡态）：打开后一直用
-  // agent.plan 发送，直到用户点叉或后端推 plan.mode_exited。
-  // 和 Goal 一样只对单 agent 开放，集群模式不提供 Plan 入口。
+  // agent.plan / team.plan.* 发送，直到用户点叉或后端推 plan.mode_exited。
+  // agent 与 team 都提供 Plan 入口；Auto 不提供（MACRO 只路由到 agent / team）。
   const planActive = usePlanStore((s) => s.runtimes[activeSessionId ?? '']?.active ?? false);
   const planPendingExplicitEntry = usePlanStore(
     (s) => s.runtimes[activeSessionId ?? '']?.pendingExplicitEntry ?? false,

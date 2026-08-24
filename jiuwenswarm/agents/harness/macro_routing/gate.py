@@ -33,22 +33,6 @@ _DEFAULT_TEAM_MARKERS = (
     "并行",
     "辩论",
 )
-_DEFAULT_PLAN_MARKERS = (
-    "plan",
-    "design",
-    "architecture",
-    "tradeoff",
-    "trade-off",
-    "should we",
-    "pros and cons",
-    "compare options",
-    "roadmap",
-    "strategy",
-    "规划",
-    "方案",
-    "架构",
-    "权衡",
-)
 _DEFAULT_FAST_MARKERS = (
     "fix",
     "rename",
@@ -87,7 +71,6 @@ def route_with_gate(
     cfg = config or {}
     text = str(query or "").strip()
     team_markers = tuple(cfg.get("team_markers") or _DEFAULT_TEAM_MARKERS)
-    plan_markers = tuple(cfg.get("plan_markers") or _DEFAULT_PLAN_MARKERS)
     fast_markers = tuple(cfg.get("fast_markers") or _DEFAULT_FAST_MARKERS)
     confidence_threshold = float(cfg.get("confidence_threshold", 0.72))
 
@@ -95,9 +78,7 @@ def route_with_gate(
         "length": len(text),
         "is_greeting": bool(_GREETING_RE.match(text)) if text else False,
         "team_hits": _marker_hits(text, team_markers),
-        "plan_hits": _marker_hits(text, plan_markers),
         "fast_hits": _marker_hits(text, fast_markers),
-        "question_marks": text.count("?"),
     }
 
     if not text or features["is_greeting"]:
@@ -116,21 +97,12 @@ def route_with_gate(
     if features["length"] > 900:
         team_score += 1.0
 
-    plan_score = len(features["plan_hits"]) * 1.5
-    if features["question_marks"] >= 2:
-        plan_score += 0.5
-    if 120 <= features["length"] <= 500 and not features["fast_hits"]:
-        plan_score += 0.4
-
     agent_score = len(features["fast_hits"]) * 1.5
     if features["length"] < 160 and features["fast_hits"]:
         agent_score += 1.0
-    # Do NOT boost Agent Mode for short messages without execution markers —
-    # casual Q&A like "tell me the weather" should stay ambiguous → Planning bias.
 
     scores = {
         "team": team_score,
-        "agent.plan": plan_score,
         "agent": agent_score,
     }
     features["scores"] = dict(scores)
@@ -140,11 +112,11 @@ def route_with_gate(
     margin = best - second
 
     if best <= 0.2:
-        # Ambiguous — prefer planning bias, low confidence.
+        # Ambiguous — default to single Agent, low confidence.
         return MacroRoutingDecision(
-            mode="agent.plan",
+            mode="agent",
             confidence=0.45,
-            rationale="Ambiguous intent — defaulting toward Planning Mode.",
+            rationale="Ambiguous intent — defaulting to Agent Mode.",
             source="rules",
             features=features,
             gate_confident=False,
@@ -156,16 +128,12 @@ def route_with_gate(
 
     rationale_bits = {
         "team": "Multi-area / collaborative markers — Cluster Mode.",
-        "agent.plan": "Design / tradeoff / planning markers — Planning Mode.",
         "agent": "Direct execution markers — Agent Mode.",
     }
     return MacroRoutingDecision(
         mode=normalize_macro_mode(best_mode),
         confidence=float(confidence),
-        rationale=rationale_bits.get(
-            best_mode,
-            "Design / tradeoff / planning markers — Planning Mode.",
-        ),
+        rationale=rationale_bits.get(best_mode, "Defaulting to Agent Mode."),
         source="rules",
         features=features,
         gate_confident=gate_confident,
