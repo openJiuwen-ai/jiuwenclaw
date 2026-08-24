@@ -1209,8 +1209,10 @@ class PageWorkerNode(PlanNode):
                 max_chars=8000,
                 timeout_seconds=8,
             )
-        except Exception as exc:
-            logger.warning("[P6.1] WebFetch 批量抓取失败 urls=%s: %s", fetch_urls, exc)
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P6.1] WebFetch 批量抓取失败 urls=%s: %s", fetch_urls, e)
             return []
 
         items = _extract_fetch_result_items(result)
