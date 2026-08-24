@@ -7,7 +7,13 @@ from typing import Optional, TYPE_CHECKING
 
 from shared.rich_compat import Console, Panel
 
-from .prompts import GROUP_DISCOVERY_PROMPT, GROUP_MERGE_PROMPT, SKILL_ASSIGNMENT_PROMPT
+from .prompts import (
+    GROUP_DISCOVERY_PROMPT,
+    GROUP_MERGE_PROMPT,
+    SKILL_ASSIGNMENT_PROMPT,
+    TAXONOMY_GROUP_DISCOVERY_PROMPT,
+    TAXONOMY_SKILL_ASSIGNMENT_PROMPT,
+)
 from .schema import SKILL_DESCRIPTION_MAX_LENGTH
 
 if TYPE_CHECKING:
@@ -119,7 +125,12 @@ class TreeGroupingEngine:
                 group_lines.append(f"  Select when: {select_when}")
             if dont_select_when:
                 group_lines.append(f"  Don't select when: {dont_select_when}")
-        prompt = SKILL_ASSIGNMENT_PROMPT.format(
+        prompt_template = (
+            TAXONOMY_SKILL_ASSIGNMENT_PROMPT
+            if bool(getattr(self._builder, "_equiv_grouping_enabled", False))
+            else SKILL_ASSIGNMENT_PROMPT
+        )
+        prompt = prompt_template.format(
             groups_list="\n".join(group_lines),
             skills_list=self.format_skills_list(skills),
         )
@@ -226,7 +237,12 @@ class TreeGroupingEngine:
         del verbose
         builder = self._builder
         context_section = self._render_context(parent_context)
-        prompt = GROUP_DISCOVERY_PROMPT.format(
+        prompt_template = (
+            TAXONOMY_GROUP_DISCOVERY_PROMPT
+            if bool(getattr(builder, "_equiv_grouping_enabled", False))
+            else GROUP_DISCOVERY_PROMPT
+        )
+        prompt = prompt_template.format(
             count=len(skills),
             context_section=context_section,
             skills_list=self.format_skills_list(skills),

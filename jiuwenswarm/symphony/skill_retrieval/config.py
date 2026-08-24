@@ -32,7 +32,12 @@ class BuildSettings:
     postprocess_enabled: bool = True
     postprocess_max_passes: int = 1
     postprocess_min_skills: int = 6
-    equivalence_enabled: bool = True
+    equivalence_enabled: bool = False
+    equivalence_all_pairs_scope_limit: int = 12
+    equivalence_candidate_neighbors: int = 8
+    equivalence_max_pairwise_pairs: int = 10_000
+    max_skills_per_node: int = 0
+    model_discovery_max_depth: int = 0
 
 
 @dataclass(frozen=True)
@@ -147,7 +152,15 @@ def _load_build(raw: dict[str, Any]) -> BuildSettings:
         postprocess_enabled=_as_bool(raw.get("postprocess_enabled"), True),
         postprocess_max_passes=_as_non_negative_int(raw.get("postprocess_max_passes"), 1),
         postprocess_min_skills=_as_int(raw.get("postprocess_min_skills"), 6),
-        equivalence_enabled=_as_bool(raw.get("equivalence_enabled"), True),
+        equivalence_enabled=_as_bool(raw.get("equivalence_enabled"), False),
+        equivalence_all_pairs_scope_limit=_as_int(raw.get("equivalence_all_pairs_scope_limit"), 12),
+        equivalence_candidate_neighbors=_as_int(raw.get("equivalence_candidate_neighbors"), 8),
+        equivalence_max_pairwise_pairs=_as_int(raw.get("equivalence_max_pairwise_pairs"), 10_000),
+        max_skills_per_node=_as_non_negative_int(raw.get("max_skills_per_node"), 0),
+        model_discovery_max_depth=_as_non_negative_int(
+            raw.get("model_discovery_max_depth"),
+            0,
+        ),
     )
 
 

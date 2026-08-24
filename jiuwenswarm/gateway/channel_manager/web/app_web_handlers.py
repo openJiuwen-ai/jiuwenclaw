@@ -1027,7 +1027,7 @@ _SKILL_RETRIEVAL_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
     "skill_retrieval_build_postprocess_enabled": (("build", "postprocess_enabled"), "bool", True),
     "skill_retrieval_build_postprocess_max_passes": (("build", "postprocess_max_passes"), "non_negative_int", 1),
     "skill_retrieval_build_postprocess_min_skills": (("build", "postprocess_min_skills"), "int", 6),
-    "skill_retrieval_build_equivalence_enabled": (("build", "equivalence_enabled"), "bool", True),
+    "skill_retrieval_build_equivalence_enabled": (("build", "equivalence_enabled"), "bool", False),
     "skill_retrieval_retrieve_compact_codes_enabled": (("retrieve", "compact_codes_enabled"), "bool", False),
     "skill_retrieval_retrieve_flatten_tree": (("retrieve", "flatten_tree"), "bool", False),
     "skill_retrieval_retrieve_max_exposure_depth": (("retrieve", "max_exposure_depth"), "int", 1),

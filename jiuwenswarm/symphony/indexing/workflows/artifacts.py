@@ -61,6 +61,16 @@ class TaxonomyBuildConfig:
         postprocess_min_skills: Minimum skill count for repair candidates.
         equivalence_enabled: Whether to add one equivalence-group layer under
             sibling leaf sets after normal tree construction.
+        equivalence_all_pairs_scope_limit: Enumerate every Skill pair when a
+            terminal classification scope has at most this many Skills.
+        equivalence_candidate_neighbors: Maximum candidate neighbors requested
+            per Skill for larger terminal scopes.
+        equivalence_max_pairwise_pairs: Hard per-build pairwise validation
+            budget. Exceeding it fails instead of silently truncating work.
+        max_skills_per_node: Optional positive override for the derived leaf-size
+            threshold. Zero keeps the branching-factor-derived threshold.
+        model_discovery_max_depth: Optional depth limit for model-discovered
+            groups. Configured taxonomy levels are still expanded.
     """
 
     branching_factor: int = 128
@@ -71,7 +81,12 @@ class TaxonomyBuildConfig:
     postprocess_max_passes: int = 1
     postprocess_min_skills: int = 6
 
-    equivalence_enabled: bool = True
+    equivalence_enabled: bool = False
+    equivalence_all_pairs_scope_limit: int = 12
+    equivalence_candidate_neighbors: int = 8
+    equivalence_max_pairwise_pairs: int = 10_000
+    max_skills_per_node: int = 0
+    model_discovery_max_depth: int = 0
 
 
 @dataclass(frozen=True)
@@ -138,6 +153,11 @@ class ResolvedTaxonomyBuildConfig:
         postprocess_max_passes: Normalized repair pass limit.
         postprocess_min_skills: Normalized repair minimum size.
         equivalence_enabled: Whether equivalence-group refinement runs.
+        equivalence_all_pairs_scope_limit: Full-pair enumeration scope limit.
+        equivalence_candidate_neighbors: Candidate-neighbor cap for large scopes.
+        equivalence_max_pairwise_pairs: Hard pairwise-validation budget.
+        max_skills_per_node: Normalized optional leaf-size threshold override.
+        model_discovery_max_depth: Normalized model-discovery depth limit.
     """
 
     branching_factor: int
@@ -149,6 +169,11 @@ class ResolvedTaxonomyBuildConfig:
     postprocess_min_skills: int
 
     equivalence_enabled: bool
+    equivalence_all_pairs_scope_limit: int
+    equivalence_candidate_neighbors: int
+    equivalence_max_pairwise_pairs: int
+    max_skills_per_node: int
+    model_discovery_max_depth: int
 
 
 @dataclass(frozen=True)
@@ -194,11 +219,22 @@ def resolve_build_config(*, config: BuildConfig | None = None) -> ResolvedBuildC
         taxonomy_config=ResolvedTaxonomyBuildConfig(
             branching_factor=max(1, int(taxonomy_cfg.branching_factor or 8)),
             max_depth=max(1, int(taxonomy_cfg.max_depth or 6)),
+            max_skills_per_node=max(0, int(taxonomy_cfg.max_skills_per_node or 0)),
+            model_discovery_max_depth=max(0, int(taxonomy_cfg.model_discovery_max_depth or 0)),
             root_categories=resolve_tree_root_categories(taxonomy_cfg.root_categories),
             postprocess_enabled=bool(taxonomy_cfg.postprocess_enabled),
             postprocess_max_passes=max(0, int(taxonomy_cfg.postprocess_max_passes or 0)),
             postprocess_min_skills=max(2, int(taxonomy_cfg.postprocess_min_skills or 2)),
             equivalence_enabled=bool(taxonomy_cfg.equivalence_enabled),
+            equivalence_all_pairs_scope_limit=max(
+                2, int(taxonomy_cfg.equivalence_all_pairs_scope_limit or 2)
+            ),
+            equivalence_candidate_neighbors=max(
+                1, int(taxonomy_cfg.equivalence_candidate_neighbors or 1)
+            ),
+            equivalence_max_pairwise_pairs=max(
+                1, int(taxonomy_cfg.equivalence_max_pairwise_pairs or 1)
+            ),
         ),
         execution_config=BuildExecutionConfig(
             max_workers=max(1, int(execution_cfg.max_workers or 1)),

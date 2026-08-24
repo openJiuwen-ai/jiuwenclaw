@@ -36,7 +36,10 @@ TREE_BUILD_TIMEOUT = 180.0
 TREE_BUILD_POSTPROCESS_ENABLED = True
 TREE_BUILD_POSTPROCESS_MAX_PASSES = 1
 TREE_BUILD_POSTPROCESS_MIN_SKILLS = 6
-TREE_BUILD_EQUIV_GROUPING_ENABLED = True
+TREE_BUILD_EQUIV_GROUPING_ENABLED = False
+TREE_BUILD_EQUIVALENCE_ALL_PAIRS_SCOPE_LIMIT = 12
+TREE_BUILD_EQUIVALENCE_CANDIDATE_NEIGHBORS = 8
+TREE_BUILD_EQUIVALENCE_MAX_PAIRWISE_PAIRS = 10000
 
 MAX_SKILLS_PER_NODE_MULTIPLIER = 1.5
 EXPAND_THRESHOLD_MULTIPLIER = 0.7
@@ -185,6 +188,9 @@ class TreeBuildConfig:
     postprocess_max_passes: int = TREE_BUILD_POSTPROCESS_MAX_PASSES
     postprocess_min_skills: int = TREE_BUILD_POSTPROCESS_MIN_SKILLS
     equiv_grouping_enabled: bool = TREE_BUILD_EQUIV_GROUPING_ENABLED
+    equivalence_all_pairs_scope_limit: int = TREE_BUILD_EQUIVALENCE_ALL_PAIRS_SCOPE_LIMIT
+    equivalence_candidate_neighbors: int = TREE_BUILD_EQUIVALENCE_CANDIDATE_NEIGHBORS
+    equivalence_max_pairwise_pairs: int = TREE_BUILD_EQUIVALENCE_MAX_PAIRWISE_PAIRS
     discovery_seed: int = 42
     classify_batch_cap: int = 20
 
@@ -203,6 +209,8 @@ class DynamicTreeConfig:
     max_depth: int = MAX_DEPTH
     root_categories: Optional[dict] = None
     rebalance_interval: int = 50
+    max_skills_per_node_override: int = 0
+    model_discovery_max_depth: int = 0
 
     def _scaled(self, multiplier: float, seed: Optional[int] = None) -> int:
         anchor = self.branching_factor if seed is None else seed
@@ -225,6 +233,8 @@ class DynamicTreeConfig:
 
     @property
     def max_skills_per_node(self) -> int:
+        if self.max_skills_per_node_override > 0:
+            return self.max_skills_per_node_override
         return self._derived_value("max_skills_per_node")
 
     @property

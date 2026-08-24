@@ -19,7 +19,13 @@ from jiuwenswarm.symphony.skill_retrieval.config import (
     SkillRetrievalSettings,
 )
 from jiuwenswarm.symphony.skill_retrieval.dispatch_imports import dispatch_import_path
-from jiuwenswarm.symphony.skill_retrieval.index_service import SkillIndexService, expected_index_fingerprint
+from jiuwenswarm.symphony.skill_retrieval.index_service import (
+    SkillIndexService,
+    _changed_inventory_paths,
+    _write_index_build_metadata,
+    _is_complete_index,
+    expected_index_fingerprint,
+)
 from jiuwenswarm.symphony.skill_retrieval.inventory import scan_skill_inventory
 
 
@@ -31,6 +37,79 @@ def _write_skill(root: Path, dirname: str, *, name: str | None = None, descripti
         f"---\nname: {skill_name}\ndescription: {description}\n---\n\nBody\n",
         encoding="utf-8",
     )
+
+
+def _write_complete_equivalence_sidecars(
+    index_dir: Path,
+    settings: SkillRetrievalSettings,
+    *,
+    worker_id: str,
+) -> tuple[str, str]:
+    with dispatch_import_path():
+        from indexing.tree.equivalence import (
+            EQUIVALENCE_PROTOCOL_HASH,
+            equivalence_build_complete_event,
+            summarize_equivalence_scopes,
+        )
+        from indexing.workflows.artifacts import resolve_build_config
+        from indexing.workflows.index_builder import _equivalence_incremental_signature
+
+        resolved = resolve_build_config(config=SkillIndexService._make_build_config(settings))
+        signature = _equivalence_incremental_signature(
+            resolved,
+            protocol_hash=EQUIVALENCE_PROTOCOL_HASH,
+        )
+    scope = {
+        "protocol_hash": EQUIVALENCE_PROTOCOL_HASH,
+        "model": settings.llm.model,
+        "scope_path": "root/existing",
+        "scope_path_parts": ["root", "existing"],
+        "scope_cid": "Existing",
+        "skill_hashes": {worker_id: "content-hash"},
+        "skills": [{"skill_id": worker_id, "content_hash": "content-hash"}],
+        "candidate_pairs": [],
+        "pairwise_pair_count": 0,
+        "pairwise_decisions": [],
+        "audit_rejected_pairs": [],
+        "groups": [
+            {
+                "group_id": "equiv-0000000000000001",
+                "name": "Existing capability",
+                "description": "Existing capability.",
+                "select_when": "Use for the existing capability.",
+                "dont_select_when": "Do not use for unrelated requests.",
+                "member_skill_ids": [worker_id],
+                "audit_passed": True,
+            }
+        ],
+    }
+    report = {
+        "status": "complete",
+        "protocol_version": "terminal-skill-equivalence-v1",
+        "protocol_hash": EQUIVALENCE_PROTOCOL_HASH,
+        "incremental_signature": signature,
+        "model": settings.llm.model,
+        "scopes": [scope],
+        "metrics": {},
+    }
+    report.update(
+        summarize_equivalence_scopes(
+            [scope],
+            status="complete",
+            expected_input_count=1,
+        )
+    )
+    report_text = json.dumps(report, ensure_ascii=False, sort_keys=True) + "\n"
+    audit_text = "".join(
+        json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n"
+        for event in (
+            {"event": "skill_aliases", "protocol_hash": EQUIVALENCE_PROTOCOL_HASH},
+            equivalence_build_complete_event(report),
+        )
+    )
+    (index_dir / "equivalence_report.json").write_text(report_text, encoding="utf-8")
+    (index_dir / "equivalence_audit.jsonl").write_text(audit_text, encoding="utf-8")
+    return report_text, audit_text
 
 
 class _InventoryManager:
@@ -69,7 +148,7 @@ def test_scan_skill_inventory_includes_all_installed_skills(tmp_path: Path) -> N
     ]
 
 
-def test_index_fingerprint_tracks_only_skill_inventory(tmp_path: Path) -> None:
+def test_index_fingerprint_tracks_semantic_build_inputs_without_secrets(tmp_path: Path) -> None:
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir()
     _write_skill(skills_dir, "enabled-skill")
@@ -87,15 +166,247 @@ def test_index_fingerprint_tracks_only_skill_inventory(tmp_path: Path) -> None:
         llm=LLMSettings(model="model-b", api_key="key-b", base_url="https://api-b.example", seed=123),
     )
     changed_build = replace(settings, build=BuildSettings(max_depth=5))
+    changed_secret = replace(
+        settings,
+        llm=LLMSettings(model="model-a", api_key="rotated-key", base_url="https://api-a.example"),
+    )
+    changed_timeout = replace(settings, build=BuildSettings(max_depth=4, request_timeout_seconds=999))
     _write_skill(skills_dir, "another-skill")
     changed_inventory = scan_skill_inventory(SimpleNamespace(_skills_dir=skills_dir))
 
-    assert expected_index_fingerprint(inventory, changed_llm) == expected_index_fingerprint(inventory, settings)
-    assert expected_index_fingerprint(inventory, changed_build) == expected_index_fingerprint(inventory, settings)
+    assert expected_index_fingerprint(inventory, changed_llm) != expected_index_fingerprint(inventory, settings)
+    assert expected_index_fingerprint(inventory, changed_build) != expected_index_fingerprint(inventory, settings)
+    assert expected_index_fingerprint(inventory, changed_secret) == expected_index_fingerprint(inventory, settings)
+    assert expected_index_fingerprint(inventory, changed_timeout) == expected_index_fingerprint(inventory, settings)
     assert expected_index_fingerprint(changed_inventory, settings) != expected_index_fingerprint(inventory, settings)
 
 
-def test_status_and_tree_keep_index_available_when_build_llm_changes(monkeypatch, tmp_path: Path) -> None:
+def test_index_fingerprint_tracks_root_taxonomy_file_content(tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir, "enabled-skill")
+    inventory = scan_skill_inventory(SimpleNamespace(_skills_dir=skills_dir))
+    taxonomy_path = tmp_path / "taxonomy.yaml"
+    taxonomy_path.write_text("tree_root_categories:\n  - id: docs\n    name: Docs\n", encoding="utf-8")
+    settings = SkillRetrievalSettings(
+        enabled=True,
+        artifact_root=tmp_path / "artifact",
+        llm=LLMSettings(model="model", api_key="key", base_url="https://api.example"),
+        build=BuildSettings(root_categories=str(taxonomy_path)),
+        retrieve=RetrieveSettings(),
+    )
+
+    before = expected_index_fingerprint(inventory, settings)
+    taxonomy_path.write_text("tree_root_categories:\n  - id: search\n    name: Search\n", encoding="utf-8")
+
+    assert expected_index_fingerprint(inventory, settings) != before
+
+
+def test_complete_index_requires_equivalence_sidecars_when_enabled(tmp_path: Path) -> None:
+    for filename in ("tree_index.yaml", "catalog.jsonl", "manifest.json"):
+        (tmp_path / filename).write_text("{}\n", encoding="utf-8")
+
+    assert _is_complete_index(tmp_path)
+    assert not _is_complete_index(tmp_path, equivalence_enabled=True)
+
+    (tmp_path / "equivalence_audit.jsonl").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "equivalence_report.json").write_text(
+        '{"status": "complete", "protocol_hash": "test-protocol"}\n',
+        encoding="utf-8",
+    )
+    assert _is_complete_index(tmp_path, equivalence_enabled=True)
+
+
+def test_complete_index_rejects_incompatible_report_and_corrupt_audit(tmp_path: Path) -> None:
+    settings = SkillRetrievalSettings(
+        enabled=True,
+        artifact_root=tmp_path.parent / "artifact",
+        llm=LLMSettings(model="model", api_key="key", base_url="https://api.example"),
+        build=BuildSettings(equivalence_enabled=True),
+        retrieve=RetrieveSettings(),
+    )
+    for filename in ("tree_index.yaml", "catalog.jsonl", "manifest.json"):
+        (tmp_path / filename).write_text("{}\n", encoding="utf-8")
+    report_text, _ = _write_complete_equivalence_sidecars(
+        tmp_path,
+        settings,
+        worker_id="existing-skill",
+    )
+
+    assert _is_complete_index(tmp_path, settings=settings)
+
+    report = json.loads(report_text)
+    report["protocol_hash"] = "stale-protocol"
+    (tmp_path / "equivalence_report.json").write_text(json.dumps(report), encoding="utf-8")
+    assert not _is_complete_index(tmp_path, settings=settings)
+
+    (tmp_path / "equivalence_report.json").write_text(report_text, encoding="utf-8")
+    (tmp_path / "equivalence_audit.jsonl").write_text("not-json\n", encoding="utf-8")
+    assert not _is_complete_index(tmp_path, settings=settings)
+
+
+def test_changed_inventory_paths_detects_in_place_skill_update(tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir, "updated-skill", description="before")
+    manager = SimpleNamespace(_skills_dir=skills_dir)
+    before = scan_skill_inventory(manager)
+    previous_state = {"inventory": before.to_state_payload()}
+
+    skill_file = skills_dir / "updated-skill" / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: updated-skill\ndescription: after\n---\n\nChanged body\n",
+        encoding="utf-8",
+    )
+    after = scan_skill_inventory(manager)
+
+    assert _changed_inventory_paths(previous_state, before) == set()
+    assert _changed_inventory_paths(previous_state, after) == {
+        str((skills_dir / "updated-skill").resolve())
+    }
+
+
+def test_recovery_rejects_same_path_backup_built_from_old_skill_content(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir, "updated-skill", description="before")
+    manager = SimpleNamespace(_skills_dir=skills_dir)
+    before = scan_skill_inventory(manager)
+    artifact_root = tmp_path / "artifact"
+    backup_dir = artifact_root / "index.backup-1"
+    backup_dir.mkdir(parents=True)
+    settings = SkillRetrievalSettings(
+        enabled=True,
+        artifact_root=artifact_root,
+        llm=LLMSettings(model="model", api_key="key", base_url="https://api.example"),
+        build=BuildSettings(),
+        retrieve=RetrieveSettings(),
+    )
+    (backup_dir / "tree_index.yaml").write_text("nodes: []\n", encoding="utf-8")
+    (backup_dir / "catalog.jsonl").write_text("", encoding="utf-8")
+    (backup_dir / "manifest.json").write_text(
+        json.dumps({"item_paths": before.item_paths}),
+        encoding="utf-8",
+    )
+    _write_index_build_metadata(
+        backup_dir,
+        fingerprint=expected_index_fingerprint(before, settings),
+        inventory=before,
+    )
+
+    (skills_dir / "updated-skill" / "SKILL.md").write_text(
+        "---\nname: updated-skill\ndescription: after\n---\n\nChanged body\n",
+        encoding="utf-8",
+    )
+    after = scan_skill_inventory(manager)
+
+    recovered = SkillIndexService(manager)._recover_index(
+        settings=settings,
+        inventory=after,
+        expected_fingerprint=expected_index_fingerprint(after, settings),
+    )
+
+    assert recovered is False
+    assert not (artifact_root / "index").exists()
+    assert backup_dir.exists()
+
+
+def test_failed_equivalence_incremental_build_preserves_last_complete_index(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir, "existing-skill")
+    manager = SimpleNamespace(_skills_dir=skills_dir)
+    previous_inventory = scan_skill_inventory(manager)
+    artifact_root = tmp_path / "artifact"
+    index_dir = artifact_root / "index"
+    index_dir.mkdir(parents=True)
+    settings = SkillRetrievalSettings(
+        enabled=True,
+        artifact_root=artifact_root,
+        llm=LLMSettings(model="model", api_key="key", base_url="https://api.example"),
+        build=BuildSettings(equivalence_enabled=True),
+        retrieve=RetrieveSettings(),
+    )
+    original_tree = "nodes:\n  - cid: Existing\n    type: branch\n"
+    (index_dir / "tree_index.yaml").write_text(original_tree, encoding="utf-8")
+    (index_dir / "catalog.jsonl").write_text("", encoding="utf-8")
+    (index_dir / "manifest.json").write_text(
+        json.dumps({"item_paths": previous_inventory.item_paths}),
+        encoding="utf-8",
+    )
+    original_report, original_audit = _write_complete_equivalence_sidecars(
+        index_dir,
+        settings,
+        worker_id="existing-skill",
+    )
+    (artifact_root / "state.json").write_text(
+        json.dumps(
+            {
+                "fingerprint": expected_index_fingerprint(previous_inventory, settings),
+                "inventory": previous_inventory.to_state_payload(),
+                "indexed_count": previous_inventory.count,
+            }
+        ),
+        encoding="utf-8",
+    )
+    skill_file = skills_dir / "existing-skill" / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: existing-skill\ndescription: updated\n---\n\nChanged body\n",
+        encoding="utf-8",
+    )
+    current_inventory = scan_skill_inventory(manager)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.skill_retrieval.index_service.load_settings",
+        lambda: settings,
+    )
+    monkeypatch.setattr(
+        SkillIndexService,
+        "_check_build_llm_access",
+        staticmethod(lambda settings: None),
+    )
+
+    def fail_incremental_build(self, **kwargs):
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "equivalence_audit.jsonl").write_text(
+            '{"event":"llm_exchange","validation_error":"bad pairwise payload"}\n',
+            encoding="utf-8",
+        )
+        (output_dir / "equivalence_report.json").write_text(
+            '{"status":"failed","error":"pairwise protocol failed"}\n',
+            encoding="utf-8",
+        )
+        raise RuntimeError("pairwise protocol failed")
+
+    monkeypatch.setattr(SkillIndexService, "incremental_build", fail_incremental_build)
+
+    result = SkillIndexService(manager).build_index(force=False)
+
+    assert result["success"] is False
+    assert "pairwise protocol failed" in result["result"]
+    assert (index_dir / "tree_index.yaml").read_text(encoding="utf-8") == original_tree
+    assert (index_dir / "equivalence_audit.jsonl").read_text(encoding="utf-8") == original_audit
+    assert (index_dir / "equivalence_report.json").read_text(encoding="utf-8") == original_report
+    failed_state = json.loads((artifact_root / "state.json").read_text(encoding="utf-8"))
+    assert failed_state["inventory"] == previous_inventory.to_state_payload()
+    assert _changed_inventory_paths(failed_state, current_inventory) == {
+        str((skills_dir / "existing-skill").resolve())
+    }
+    diagnostics_dir = Path(failed_state["build"]["diagnostics_dir"])
+    assert diagnostics_dir.is_dir()
+    assert "bad pairwise payload" in (
+        diagnostics_dir / "index" / "equivalence_audit.jsonl"
+    ).read_text(encoding="utf-8")
+    assert SkillIndexService(manager).status()["build_diagnostics_dir"] == str(diagnostics_dir)
+
+
+def test_status_and_tree_require_rebuild_when_build_llm_changes(monkeypatch, tmp_path: Path) -> None:
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir()
     _write_skill(skills_dir, "enabled-skill")
@@ -140,9 +451,9 @@ def test_status_and_tree_keep_index_available_when_build_llm_changes(monkeypatch
     tree = SkillIndexService(manager).tree(language="zh")
 
     assert status["index_exists"] is True
-    assert status["fresh"] is True
-    assert status["build_status"] == "success"
-    assert tree["success"] is True
+    assert status["fresh"] is False
+    assert status["build_status"] == "idle"
+    assert tree["success"] is False
     assert tree["index_dir"] == str(index_dir)
 
 

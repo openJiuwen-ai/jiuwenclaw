@@ -1675,6 +1675,7 @@ def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
     assert "symphony_orchestration_mode" not in flat
     assert flat["skill_retrieval_enabled"] == "true"
     assert flat["skill_retrieval_build_branching_factor"] == "64"
+    assert flat["skill_retrieval_build_equivalence_enabled"] == "false"
     assert "skill_retrieval_retrieve_top_k" not in flat
     assert flat["skill_retrieval_retrieve_flatten_tree"] == "true"
 
