@@ -268,7 +268,9 @@ class MultiSessionToolkit:
                 session_result_summary += (f"\nsession_id: {st.session_id}\n"
                                            f"description: {st.description}\nresult: {st.result}\n")
 
-            agent_wrapper = server.get_agent_manager().get_agent_nowait(self.channel_id)
+            agent_manager = server.get_agent_manager()
+            await agent_manager.wait_for_permissions_ready()
+            agent_wrapper = agent_manager.get_agent_nowait(self.channel_id)
             if agent_wrapper is None:
                 agent_wrapper = server.get_agent()
             agent_instance = (

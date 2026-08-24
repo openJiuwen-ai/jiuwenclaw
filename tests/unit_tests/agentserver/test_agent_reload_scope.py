@@ -6,6 +6,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
+from jiuwenswarm.server.runtime import agent_manager as agent_manager_module
+
 
 _OJ_MEMORY_MANAGER_MODULE = "openjiuwen.core.memory.lite.manager"
 
@@ -23,11 +28,6 @@ def _maybe_patch_aclose_memory_cache():
             yield
     else:
         yield
-
-from jiuwenswarm.common.schema.agent import AgentRequest
-from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
-from jiuwenswarm.server.runtime import agent_manager as agent_manager_module
 
 
 class FakeWebSocket:
@@ -53,6 +53,20 @@ class FakeAgent:
         _ = session_id
         return None
 
+    def _should_defer_permission_reload(
+        self,
+        _config_base,
+        *,
+        session_id: str,
+        **_kwargs,
+    ) -> bool:
+        """Model an idle child with no pending permission reload lifecycle."""
+        _ = session_id
+        return False
+
+    def _has_permission_config_delta(self, *_args, **_kwargs) -> bool:
+        return False
+
 
 class FailingReloadAgent(FakeAgent):
     async def reload_agent_config(self, *args, **kwargs):
@@ -67,6 +81,227 @@ class FakeTeamManager:
 
     async def update_evolution_config(self, config):
         self.calls.append((self.channel_id, config))
+
+
+@pytest.mark.asyncio
+async def test_permission_change_notification_uses_existing_global_reload() -> None:
+    manager = agent_manager_module.AgentManager()
+    manager.reload_agents_config = AsyncMock()
+
+    manager.schedule_permissions_reload()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    manager.reload_agents_config.assert_awaited_once_with(
+        None,
+        None,
+        reload_scopes={"permissions"},
+    )
+    assert manager._permissions_reload_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_waits_for_visible_permission_reload_tail() -> None:
+    manager = agent_manager_module.AgentManager()
+    cached = FakeAgent()
+    manager.agents = {"web": {"agent::": cached}}
+    reload_started = asyncio.Event()
+    reload_release = asyncio.Event()
+
+    async def slow_reload(*_args, **_kwargs):
+        reload_started.set()
+        await reload_release.wait()
+
+    manager.reload_agents_config = slow_reload
+    manager.schedule_permissions_reload()
+    await reload_started.wait()
+
+    get_task = asyncio.create_task(manager.get_agent("web"))
+    await asyncio.sleep(0)
+    assert get_task.done() is False
+
+    reload_release.set()
+    assert await get_task is cached
+
+
+@pytest.mark.asyncio
+async def test_get_agent_propagates_visible_permission_reload_failure() -> None:
+    manager = agent_manager_module.AgentManager()
+    manager.agents = {"web": {"agent::": FakeAgent()}}
+
+    async def failing_reload(*_args, **_kwargs):
+        raise RuntimeError("reload failed")
+
+    manager.reload_agents_config = failing_reload
+    manager.schedule_permissions_reload()
+
+    with pytest.raises(RuntimeError, match="reload failed"):
+        await manager.get_agent("web")
+
+
+@pytest.mark.asyncio
+async def test_permission_reload_waiter_cancellation_does_not_cancel_tail() -> None:
+    manager = agent_manager_module.AgentManager()
+    reload_started = asyncio.Event()
+    reload_release = asyncio.Event()
+
+    async def slow_reload(*_args, **_kwargs):
+        reload_started.set()
+        await reload_release.wait()
+
+    manager.reload_agents_config = slow_reload
+    tail = manager.schedule_permissions_reload()
+    await reload_started.wait()
+    waiter = asyncio.create_task(manager.wait_for_permissions_ready())
+    await asyncio.sleep(0)
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert tail.cancelled() is False
+
+    reload_release.set()
+    await tail
+    await manager.wait_for_permissions_ready()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_new_reload_does_not_run_after_waiting_for_prior_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = agent_manager_module.AgentManager()
+    first_started = asyncio.Event()
+    first_release = asyncio.Event()
+    second_waiting = asyncio.Event()
+    calls = 0
+
+    async def serialized_reload(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            await first_release.wait()
+
+    manager.reload_agents_config = serialized_reload
+    first = manager.schedule_permissions_reload()
+    await first_started.wait()
+    real_shield = asyncio.shield
+
+    def observed_shield(awaitable):
+        shielded = real_shield(awaitable)
+        second_waiting.set()
+        return shielded
+
+    monkeypatch.setattr(asyncio, "shield", observed_shield)
+    cancelled = manager.schedule_permissions_reload()
+    await second_waiting.wait()
+    cancelled.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    assert calls == 1
+
+    monkeypatch.setattr(asyncio, "shield", real_shield)
+    first_release.set()
+    await first
+    recovered = manager.schedule_permissions_reload()
+    await recovered
+    await manager.wait_for_permissions_ready()
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_later_permission_reload_retries_after_prior_failure() -> None:
+    manager = agent_manager_module.AgentManager()
+    calls = 0
+
+    async def flaky_reload(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("first reload failed")
+
+    manager.reload_agents_config = flaky_reload
+    first = manager.schedule_permissions_reload()
+    with pytest.raises(RuntimeError, match="first reload failed"):
+        await first
+
+    second = manager.schedule_permissions_reload()
+    await second
+    await manager.wait_for_permissions_ready()
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_schedule_failure_latch_survives_older_tail_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = agent_manager_module.AgentManager()
+    reload_started = asyncio.Event()
+    reload_release = asyncio.Event()
+
+    async def slow_reload(*_args, **_kwargs):
+        reload_started.set()
+        await reload_release.wait()
+
+    manager.reload_agents_config = slow_reload
+    older_tail = manager.schedule_permissions_reload()
+    await reload_started.wait()
+    real_get_running_loop = asyncio.get_running_loop
+
+    def fail_get_running_loop():
+        raise RuntimeError("scheduler unavailable")
+
+    monkeypatch.setattr(asyncio, "get_running_loop", fail_get_running_loop)
+    with pytest.raises(RuntimeError, match="scheduler unavailable"):
+        manager.schedule_permissions_reload()
+    monkeypatch.setattr(asyncio, "get_running_loop", real_get_running_loop)
+
+    reload_release.set()
+    await older_tail
+    with pytest.raises(RuntimeError, match="permission reload scheduling failed"):
+        await manager.wait_for_permissions_ready()
+
+    recovered = manager.schedule_permissions_reload()
+    await recovered
+    await manager.wait_for_permissions_ready()
+
+
+@pytest.mark.asyncio
+async def test_reused_schedule_exception_cannot_clear_newer_failure_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = agent_manager_module.AgentManager()
+    shared_error = RuntimeError("scheduler unavailable")
+    reload_started = asyncio.Event()
+    reload_release = asyncio.Event()
+    real_get_running_loop = asyncio.get_running_loop
+
+    def fail_get_running_loop():
+        raise shared_error
+
+    monkeypatch.setattr(asyncio, "get_running_loop", fail_get_running_loop)
+    with pytest.raises(RuntimeError, match="scheduler unavailable"):
+        manager.schedule_permissions_reload()
+    monkeypatch.setattr(asyncio, "get_running_loop", real_get_running_loop)
+
+    async def slow_reload(*_args, **_kwargs):
+        reload_started.set()
+        await reload_release.wait()
+
+    manager.reload_agents_config = slow_reload
+    recovery = manager.schedule_permissions_reload()
+    await reload_started.wait()
+
+    monkeypatch.setattr(asyncio, "get_running_loop", fail_get_running_loop)
+    with pytest.raises(RuntimeError, match="scheduler unavailable"):
+        manager.schedule_permissions_reload()
+    monkeypatch.setattr(asyncio, "get_running_loop", real_get_running_loop)
+
+    reload_release.set()
+    await recovery
+    with pytest.raises(RuntimeError, match="permission reload scheduling failed"):
+        await manager.wait_for_permissions_ready()
 
 
 @pytest.mark.asyncio
@@ -425,7 +660,18 @@ async def test_deep_adapter_global_reload_marks_sessions_stale_without_fanout(mo
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_filesystem_rail_enabled_for_profile", MagicMock(return_value=True)),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "load_user_rails", AsyncMock()),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_get_current_agent_rails", MagicMock(return_value=[])),
-        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_make_deep_agent_config", MagicMock(return_value=object())),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_make_deep_agent_config",
+            MagicMock(
+                return_value=SimpleNamespace(
+                    rails=[],
+                    permissions=None,
+                    model=None,
+                    system_prompt=None,
+                )
+            ),
+        ),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_sync_active_evolution_review_agent_after_reload", MagicMock()),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_sync_mcp_servers_for_runtime", _async_noop),
     ):

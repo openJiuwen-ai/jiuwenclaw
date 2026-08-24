@@ -6179,6 +6179,7 @@ class JiuWenSwarmDeepAdapter:
         if send_file_enabled is None:
             send_file_enabled = (channel == "web")
         if send_file_enabled and request_id and session_id:
+            require_send_authorization = self._enable_auto_permission
             channel_for_tool = _CRON_TOOL_CHANNEL_ID.get()
             metadata_for_tool = _CRON_TOOL_METADATA.get()
             already_registered = any(
@@ -6193,6 +6194,7 @@ class JiuWenSwarmDeepAdapter:
                     metadata=metadata_for_tool,
                     user_id=_CRON_TOOL_USER_ID.get(),
                     project_dir=self._project_dir,
+                    require_execution_authorization=require_send_authorization,
                 )
                 for sf_tool in self._send_file_toolkit.get_tools():
                     self._register_agent_owned_tool(sf_tool, self._tool_owner_id())
@@ -6205,6 +6207,7 @@ class JiuWenSwarmDeepAdapter:
                     metadata=metadata_for_tool,
                     user_id=_CRON_TOOL_USER_ID.get(),
                     project_dir=self._project_dir,
+                    require_execution_authorization=require_send_authorization,
                 )
 
     def _refresh_acp_runtime_tools(

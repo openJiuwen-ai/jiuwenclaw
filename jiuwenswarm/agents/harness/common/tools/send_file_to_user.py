@@ -78,6 +78,7 @@ class SendFileToolkit:
         user_id: str | None = None,
         project_dir: str | None = None,
         team_workspace_root: str | None = None,
+        require_execution_authorization: bool = False,
     ) -> None:
         """Initialize SendFileToolkit.
 
@@ -96,6 +97,7 @@ class SendFileToolkit:
         self._team_workspace_root = (
             str(Path(team_workspace_root).resolve()) if team_workspace_root else None
         )
+        self._require_execution_authorization = bool(require_execution_authorization)
         logger.debug(
             "[SendFileToolkit] 初始化 request_id=%s session_id=%s channel_id=%s has_metadata=%s",
             request_id,
@@ -114,6 +116,7 @@ class SendFileToolkit:
         user_id: str | None = None,
         project_dir: str | None = None,
         team_workspace_root: str | None = None,
+        require_execution_authorization: bool | None = None,
     ) -> None:
         """Update per-request runtime context without recreating the toolkit/tool.
         """
@@ -126,6 +129,10 @@ class SendFileToolkit:
         self._team_workspace_root = (
             str(Path(team_workspace_root).resolve()) if team_workspace_root else None
         )
+        if require_execution_authorization is not None:
+            self._require_execution_authorization = bool(
+                require_execution_authorization
+            )
         logger.debug(
             "[SendFileToolkit] update_runtime_context request_id=%s session_id=%s channel_id=%s has_metadata=%s",
             request_id,
@@ -274,6 +281,28 @@ class SendFileToolkit:
                 "[SendFileToolkit] send_file target_channels=%s session_id=%s",
                 target_channel_list, self.session_id,
             )
+        if self._require_execution_authorization:
+            from jiuwenswarm.agents.harness.common.rails.permissions.generated_artifact_delivery import (
+                consume_send_file_execution_grant,
+                normalize_send_file_paths,
+            )
+
+            requested_paths = normalize_send_file_paths(abs_file_path_list)
+            try:
+                authorization_items = consume_send_file_execution_grant(
+                    requested_paths,
+                    target_channels=target_channels,
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "[SendFileToolkit] rejected unauthorized send session_id=%s error=%s",
+                    self.session_id,
+                    exc,
+                )
+                return f"提交文件失败: {exc!s}"
+            abs_file_path_list = [
+                item.resolved_path.as_posix() for item in authorization_items
+            ]
         if isinstance(abs_file_path_list, str):
             try:
                 parsed = json.loads(abs_file_path_list)

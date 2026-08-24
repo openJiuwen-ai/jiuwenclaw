@@ -118,7 +118,9 @@ async def trigger_main_agent(server, request: ProactiveTriggerRequest) -> bool:
     # sub_mode），会建出第二个 agent，导致推荐进的不是用户对话用的 context。
     # agent 不在内存 = 用户尚未在该 channel 发过消息（无活跃 context 可投递）→ 跳过本次 tick，
     # 等用户用过一次、agent 建好后下个 tick 自然拿到。
-    agent = server.get_agent_manager().get_agent_nowait(cid)
+    agent_manager = server.get_agent_manager()
+    await agent_manager.wait_for_permissions_ready()
+    agent = agent_manager.get_agent_nowait(cid)
     if agent is None or not hasattr(agent, "process_message_stream"):
         logger.info("[ProactiveEngine] trigger: no agent for channel=%s "
                     "(user hasn't used this channel yet), skipping", cid)
