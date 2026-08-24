@@ -910,6 +910,58 @@ def update_permissions_file_guard_workspace_rw_enabled_in_config(value: bool) ->
     _persist_permissions(mutate)
 
 
+_PERMISSIONS_WORKSPACE_ACCESS_AXES: tuple[str, ...] = ("read", "write", "exec")
+_PERMISSIONS_WORKSPACE_ACCESS_LEVELS: frozenset[str] = frozenset({"allow", "ask", "deny"})
+
+
+def get_permissions_file_guard_workspace_access() -> dict[str, str]:
+    """读取 ``permissions.file_guard.workspace`` 的 read/write/exec 三轴。
+
+    缺省轴按 openjiuwen 引擎语义返回 ``ask``（与 ``default_level=ASK`` 一致）。
+    """
+    fg = _effective_permissions().get("file_guard")
+    if not isinstance(fg, dict):
+        return {axis: "ask" for axis in _PERMISSIONS_WORKSPACE_ACCESS_AXES}
+    ws = fg.get("workspace")
+    if not isinstance(ws, dict):
+        return {axis: "ask" for axis in _PERMISSIONS_WORKSPACE_ACCESS_AXES}
+    return {axis: ws.get(axis, "ask") for axis in _PERMISSIONS_WORKSPACE_ACCESS_AXES}
+
+
+def update_permissions_file_guard_workspace_access_in_config(axis: dict[str, Any]) -> dict[str, str]:
+    """更新 ``permissions.file_guard.workspace`` 的 read/write/exec 三轴并写回。
+
+    支持部分更新：仅写入 ``axis`` 中出现的键（read/write/exec），取值必须为
+    ``allow`` / ``ask`` / ``deny`` 之一。返回更新后的完整三轴快照。
+    """
+    normalized: dict[str, str] = {}
+    for axis_name in _PERMISSIONS_WORKSPACE_ACCESS_AXES:
+        if axis_name not in axis:
+            continue
+        val = axis[axis_name]
+        if val not in _PERMISSIONS_WORKSPACE_ACCESS_LEVELS:
+            raise ValueError(
+                f"workspace.{axis_name} must be one of "
+                f"{sorted(_PERMISSIONS_WORKSPACE_ACCESS_LEVELS)}, got {val!r}"
+            )
+        normalized[axis_name] = val
+
+    def mutate(perms: dict[str, Any]) -> None:
+        fg = perms.get("file_guard")
+        if not isinstance(fg, dict):
+            fg = {}
+            perms["file_guard"] = fg
+        ws = fg.get("workspace")
+        if not isinstance(ws, dict):
+            ws = {}
+            fg["workspace"] = ws
+        for axis_name, val in normalized.items():
+            ws[axis_name] = val
+
+    _persist_permissions(mutate)
+    return get_permissions_file_guard_workspace_access()
+
+
 def update_auto_recap_enabled_in_config(value: bool) -> None:
     """更新 auto_recap.enabled（自动回顾开关）并写回。"""
     data = load_yaml_round_trip(_current_config_yaml_path())

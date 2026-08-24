@@ -31,6 +31,8 @@ _PERMISSIONS_CFG_METHODS: frozenset[ReqMethod] = frozenset(
         ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_DELETE,
         ReqMethod.PERMISSIONS_WORKSPACE_ENABLE_GET,
         ReqMethod.PERMISSIONS_WORKSPACE_ENABLE_SET,
+        ReqMethod.PERMISSIONS_WORKSPACE_ACCESS_GET,
+        ReqMethod.PERMISSIONS_WORKSPACE_ACCESS_SET,
     }
 )
 
@@ -102,11 +104,13 @@ def dispatch_permissions_config_request(
         get_config,
         get_permissions_approval_overrides,
         get_permissions_file_guard_workspace_rw_enabled,
+        get_permissions_file_guard_workspace_access,
         get_permissions_rules,
         get_permissions_tools,
         replace_permissions_tools_in_config,
         update_permissions_enabled_in_config,
         update_permissions_file_guard_workspace_rw_enabled_in_config,
+        update_permissions_file_guard_workspace_access_in_config,
         update_permissions_rule_in_config,
         update_permissions_tool_in_config,
     )
@@ -150,6 +154,26 @@ def dispatch_permissions_config_request(
             except Exception as e:
                 logger.warning("[%s] Failed to hot reload permission engine: %s", tag, e)
             return _ok(request, {"rw_enabled": value})
+
+        if m == ReqMethod.PERMISSIONS_WORKSPACE_ACCESS_GET:
+            access = get_permissions_file_guard_workspace_access()
+            return _ok(request, access)
+
+        if m == ReqMethod.PERMISSIONS_WORKSPACE_ACCESS_SET:
+            if not isinstance(params, dict):
+                return _err(request, "params must be object")
+            axis = params.get("access")
+            if not isinstance(axis, dict):
+                return _err(request, "access must be object with read/write/exec")
+            try:
+                updated = update_permissions_file_guard_workspace_access_in_config(axis)
+            except ValueError as e:
+                return _err(request, str(e))
+            try:
+                _hot_reload_permissions_config_cache()
+            except Exception as e:
+                logger.warning("[%s] Failed to hot reload permission engine: %s", tag, e)
+            return _ok(request, updated)
 
         if m == ReqMethod.PERMISSIONS_TOOLS_GET:
             return _ok(request, dict(get_permissions_tools()))
