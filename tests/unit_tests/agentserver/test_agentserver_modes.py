@@ -1536,7 +1536,6 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda *a, **k: None)
     monkeypatch.setattr(adapter, "_build_security_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_heartbeat_rail", lambda: None)
-    monkeypatch.setattr(adapter, "_build_circuit_breaker_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_avatar_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_subagent_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_skill_rail", lambda **_kwargs: None)

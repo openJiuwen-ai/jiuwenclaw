@@ -219,10 +219,6 @@ from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
     ConcurrentSafeSysOperationRail,
     ConcurrentSafeTaskPlanningRail,
 )
-from jiuwenswarm.agents.harness.common.rails.execution_guard import (
-    CircuitBreakerRail,
-    CircuitBreakerConfig,
-)
 from jiuwenswarm.common.config import get_model_names
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.log_preview import preview_text
@@ -1873,6 +1869,27 @@ class _RuntimeCronToolContext:
         return self._tool_scope
 
 
+def _agent_ras_kwargs_from_config(config_base: dict[str, Any] | None) -> dict[str, Any]:
+    """Thin YAML gate for create_deep_agent ``agent_ras``.
+
+    Schema validation stays in agent-core. Missing / non-dict section → do
+    not pass (core defaults to Agent RAS enabled). Explicit ``enabled: false``
+    passes ``False`` to disable. Otherwise pass a deep-copied raw dict.
+    """
+    raw = (config_base or {}).get("agent_ras")
+    if not isinstance(raw, dict):
+        if raw is not None:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ignoring invalid agent_ras section: "
+                "expected dict, got %s",
+                type(raw).__name__,
+            )
+        return {}
+    if raw.get("enabled", True) is not True:
+        return {"agent_ras": False}
+    return {"agent_ras": copy.deepcopy(raw)}
+
+
 class JiuWenSwarmDeepAdapter:
     SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
@@ -2520,16 +2537,6 @@ class JiuWenSwarmDeepAdapter:
                         "[JiuWenSwarmDeepAdapter] cleanup_session(%s) failed: %s",
                         sid, exc,
                     )
-            if cleanup_rail:
-                circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
-                if circuit_breaker_rail is not None:
-                    try:
-                        circuit_breaker_rail.cleanup_session(sid)
-                    except Exception as exc:
-                        logger.warning(
-                            "[JiuWenSwarmDeepAdapter] circuit_breaker cleanup_session(%s) failed: %s",
-                            sid, exc,
-                        )
         else:
             self._active_session_ids[sid] = count - 1
 
@@ -6575,31 +6582,6 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] LLMRetryRail create failed: %s", exc)
             return None
 
-    def _build_circuit_breaker_rail(self) -> CircuitBreakerRail | None:
-        try:
-            guard_cfg = (get_config() or {}).get("execution_guard") or {}
-            cb_cfg = guard_cfg.get("circuit_breaker") or {}
-            if cb_cfg.get("enabled", False) is not True:
-                logger.info("[JiuWenSwarmDeepAdapter] CircuitBreakerRail disabled by config")
-                return None
-            defaults = CircuitBreakerConfig()
-            config = CircuitBreakerConfig(
-                warning_threshold=cb_cfg.get("warning_threshold", defaults.warning_threshold),
-                critical_threshold=cb_cfg.get("critical_threshold", defaults.critical_threshold),
-                global_breaker_threshold=cb_cfg.get(
-                    "global_breaker_threshold", defaults.global_breaker_threshold
-                ),
-                unknown_tool_threshold=cb_cfg.get(
-                    "unknown_tool_threshold", defaults.unknown_tool_threshold
-                ),
-            )
-            rail = CircuitBreakerRail(config, language=self._resolve_runtime_language())
-            logger.info("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create success")
-            return rail
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create failed: %s", exc)
-            return None
-
     def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
         """Build RuntimePromptRail for per-model-call time/channel/runtime injection."""
         try:
@@ -6850,7 +6832,6 @@ class JiuWenSwarmDeepAdapter:
                 self._build_llm_retry_rail,
                 {"config_base": config_base},
             ),
-            _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
             _RailBuildInfo(
@@ -7637,6 +7618,9 @@ class JiuWenSwarmDeepAdapter:
                 language=self._resolve_runtime_language(),
                 auto_create_workspace=False
             )
+
+            # agent_ras YAML passthrough (Agent RAS owns loop detection / recovery).
+            common_kwargs.update(_agent_ras_kwargs_from_config(config_base))
 
             self._instance = create_deep_agent(
                 **common_kwargs,
@@ -8953,9 +8937,6 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] permission_rail.set_trusted_dirs failed",
                     exc_info=True,
                 )
-        circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
-        if circuit_breaker_rail is not None:
-            circuit_breaker_rail.set_language(resolved_language)
         stage_timer.mark("rail_setters")
 
         self._schedule_runtime_state_write(
