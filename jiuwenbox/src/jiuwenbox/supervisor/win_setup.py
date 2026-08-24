@@ -12,8 +12,11 @@ r"""Windows 沙箱一次性环境准备.
 幂等: 通过注册表 ``HKLM\Software\JiuwenBox\WindowsSandbox\installed`` 标记
 判断是否已完成, 重复执行无副作用.
 
-UAC 提权: 若当前进程非管理员, 通过 ShellExecuteW "runas" verb 拉起一个
-提权子进程执行 ``python -m jiuwenbox.supervisor.win_setup --install``.
+安装入口:
+  - 桌面安装器 (已提权) 调用 ``jiuwenswarm.exe --desktop-run-win-setup --install``
+    在本进程完成准备, 运行时不再弹 UAC / python.exe.
+  - 显式 CLI ``python -m jiuwenbox.supervisor.win_setup --install`` 在非管理员
+    下仍会 ShellExecuteW(runas); 运行时 ``ensure_windows_setup`` 不再走这条路.
 """
 
 from __future__ import annotations
@@ -822,8 +825,18 @@ def _looks_like_python_exe(path: str) -> bool:
     return os.path.basename(path).lower() in _PYTHON_EXE_NAMES
 
 
+def _prefer_pythonw(path: str) -> str:
+    """python.exe 会弹控制台; 同目录有 pythonw.exe 时改用它 (UAC 仍显示 Python)."""
+    name = os.path.basename(path).lower()
+    if name in {"python.exe", "python3.exe"}:
+        sibling = os.path.join(os.path.dirname(path), "pythonw.exe")
+        if os.path.isfile(sibling):
+            return sibling
+    return path
+
+
 def _iter_bundled_python_candidates() -> list[str]:
-    """随包 python.exe 候选路径 (CLAW_PYTHON_HOME / dataDir/runtime/python-win)."""
+    """随包 pythonw.exe/python.exe 候选路径 (CLAW_PYTHON_HOME / dataDir/runtime/python-win)."""
     candidates: list[str] = []
     for env_key in ("JIUWENCLAW_BASE_PYTHON",):
         raw = (os.environ.get(env_key) or "").strip()
@@ -833,16 +846,15 @@ def _iter_bundled_python_candidates() -> list[str]:
         raw = (os.environ.get(env_key) or "").strip()
         if raw:
             candidates.append(raw)
-            candidates.append(os.path.join(raw, "python.exe"))
             candidates.append(os.path.join(raw, "pythonw.exe"))
+            candidates.append(os.path.join(raw, "python.exe"))
     for data_key in ("JIUWENSWARM_DATA_DIR", "JIUWENSWARM_HOME"):
         data_dir = (os.environ.get(data_key) or "").strip()
         if not data_dir:
             continue
-        runtime_py = (
-            Path(data_dir).expanduser() / ".." / "runtime" / "python-win" / "python.exe"
-        )
-        candidates.append(str(runtime_py))
+        runtime_dir = Path(data_dir).expanduser() / ".." / "runtime" / "python-win"
+        candidates.append(str(runtime_dir / "pythonw.exe"))
+        candidates.append(str(runtime_dir / "python.exe"))
     return candidates
 
 
@@ -859,7 +871,7 @@ def _resolve_uac_python() -> str | None:
             continue
         seen.add(key)
         if _looks_like_python_exe(resolved):
-            return resolved
+            return _prefer_pythonw(resolved)
     return None
 
 
@@ -871,8 +883,17 @@ def _write_uac_python_launcher(payload_exe: str, payload_args: list[str]) -> str
     body = (
         "import os, subprocess, sys\n"
         f"_argv = {argv!r}\n"
+        "if sys.platform == 'win32':\n"
+        "    try:\n"
+        "        import ctypes\n"
+        "        ctypes.windll.kernel32.FreeConsole()\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "_kw = {}\n"
+        "if sys.platform == 'win32':\n"
+        "    _kw['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)\n"
         "try:\n"
-        "    raise SystemExit(int(subprocess.call(_argv)))\n"
+        "    raise SystemExit(int(subprocess.call(_argv, **_kw)))\n"
         "finally:\n"
         "    try:\n"
         "        os.remove(__file__)\n"
@@ -1510,17 +1531,10 @@ def ensure_acl_policy_paths_authorized(
     proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
     policy_path: str | None = None,
 ) -> None:
-    """确保 deny/allow 路径已预授 WRITE_DAC, 未授权则弹 UAC 补授权.
+    """确保 deny/allow 路径已预授 WRITE_DAC.
 
-    _create_windows 创建沙箱时调: 对 per-sandbox policy 的 deny/allow 路径
-    做增量检测, 发现新路径 (owner 非当前用户, 需管理员预授 WRITE_DAC) 时
-    自动弹 UAC 补授权. 避免运行时 grant_ace WinError 5 → Deny Read 不生效.
-
-    Args:
-        acl_paths: 本次沙箱的所有 deny/allow 路径 (allow_read/deny_read/
-            allow_write/deny_write 合并去重后的展开路径).
-        proxy_port_start/end: 透传给 _elevate_and_run_install.
-        policy_path: windows-policy.yaml 路径, 透传给 install.
+    _create_windows 创建沙箱时调. 运行时不再弹 UAC: 未授权且当前不是管理员
+    时只记日志; 已是管理员则本进程 install() 补授权.
     """
     _require_windows()
     if reg_get_str(const.REG_VALUE_INSTALLED) != "1":
@@ -1552,12 +1566,19 @@ def ensure_acl_policy_paths_authorized(
         _record_acl_policy_paths(set(skipped))
     if not need_elevate:
         return
+    if not _is_admin():
+        logger.warning(
+            "新增 deny/allow 路径未预授 WRITE_DAC, 运行时不再弹 UAC: %s. "
+            "请重新运行安装包以管理员补授权, 否则 grant_ace 可能 WinError 5.",
+            sorted(need_elevate),
+        )
+        return
     logger.info(
         "检测到新增 deny/allow 路径未预授 WRITE_DAC: %s. "
-        "自动弹 UAC 补授权 (否则运行时 grant_ace 会 WinError 5).",
+        "当前进程已是管理员, 本进程补授权 (不弹 UAC).",
         sorted(need_elevate),
     )
-    _elevate_and_run_install(
+    install(
         force=True,
         preinstall_paths=[],
         proxy_port_start=proxy_port_start,
@@ -1576,7 +1597,9 @@ def ensure_windows_setup(
     """运行时入口: 确保安装已完成 (幂等).
 
     由 ProcessRuntime.create / app.py lifespan 在 win32 分支调用.
-    非管理员进程时, 会通过 UAC 拉起提权子进程完成首次安装.
+    运行时不再弹 UAC / python.exe: 一次性准备由桌面安装器
+    ``jiuwenswarm.exe --desktop-run-win-setup --install`` 在已提权进程里完成.
+    若尚未安装且当前进程不是管理员, 记录错误并失败, 而不是 ShellExecuteW(runas).
 
     Args:
         preinstall_paths: 读 ACL 预装路径 (根 policy 的
@@ -1585,7 +1608,7 @@ def ensure_windows_setup(
         proxy_port_start/end: WFP Permit filter 放行的 loopback 端口范围
             (根 policy 的 ``windows.proxy.port_range_*``).
         policy_path: windows-policy.yaml 路径; 已安装时用于增量检测
-            deny/allow 路径变更, 新增路径会自动弹 UAC 补授权 WRITE_DAC.
+            deny/allow 路径变更. 新增路径若当前不是管理员, 只记日志不弹 UAC.
     """
     _require_windows()
     try:
@@ -1637,32 +1660,49 @@ def ensure_windows_setup(
                     _record_acl_policy_paths(_skip_owned)
                 if _deferred_uac:
                     logger.info(
-                        "需管理员预授的 deny/allow 路径 %s 推迟至创建沙箱时再弹 UAC "
-                        "(避免 box-server 重启时打断用户)",
+                        "需管理员预授的 deny/allow 路径 %s 推迟至创建沙箱时检查 "
+                        "(运行时不弹 UAC; 无管理员权限则只记日志)",
                         sorted(_deferred_uac),
                     )
                 new_acl_paths = set()
             if new_paths or new_acl_paths:
-                # relay-claw / officeace 是终端产品, 不能让用户手动跑
-                # --install --force. 这里自动走 UAC 提权子进程补预装新路径
-                # 的读 ACL + 预授新 deny/allow 路径的 WRITE_DAC (最多弹一次 UAC, 用户授权即可).
-                logger.info(
-                    "Windows 沙箱已安装, 但检测到新增路径: 预装=%s, deny/allow=%s. "
-                    "自动弹 UAC 提权补预装+预授权 (否则运行时 grant_ace 会 WinError 5).",
-                    sorted(new_paths), sorted(new_acl_paths),
-                )
-                _elevate_and_run_install(
-                    force=True,
-                    preinstall_paths=sorted(new_paths),
-                    proxy_port_start=proxy_port_start,
-                    proxy_port_end=proxy_port_end,
-                    policy_path=policy_path,
-                )
+                if _is_admin():
+                    logger.info(
+                        "Windows 沙箱已安装, 检测到新增路径: 预装=%s, deny/allow=%s. "
+                        "当前进程已是管理员, 本进程补预装 (不弹 UAC).",
+                        sorted(new_paths), sorted(new_acl_paths),
+                    )
+                    install(
+                        force=True,
+                        preinstall_paths=sorted(new_paths),
+                        proxy_port_start=proxy_port_start,
+                        proxy_port_end=proxy_port_end,
+                        policy_path=policy_path,
+                    )
+                else:
+                    logger.warning(
+                        "Windows 沙箱已安装, 但检测到新增路径需管理员预装: "
+                        "预装=%s, deny/allow=%s. 运行时不再弹 UAC; "
+                        "请重新运行安装包, 或管理员执行 "
+                        "jiuwenswarm.exe --desktop-run-win-setup --install --force.",
+                        sorted(new_paths), sorted(new_acl_paths),
+                    )
             # 密码一致性验证: install 回滚不彻底时 jbx-sandbox 可能残留旧密码, 注册表密码与实际不一致 → 1326.
             # 幂等检查只看 installed=1 发现不了. 用 LogonUserW 测登录, 失败则自动重设密码 (创建者有权限). 避免反复 1326.
             _verify_or_reset_sandbox_user_password()
             return
-        # installed != "1" 或 force=True: 执行安装 (内部会判 admin / UAC 提权).
+        # installed != "1" 或 force=True: 本进程安装. 非管理员不再弹 UAC.
+        if not _is_admin():
+            logger.error(
+                "Windows 沙箱尚未安装且当前进程无管理员权限; 运行时不再弹 UAC. "
+                "请重新运行安装包 (安装器已提权并完成沙箱准备), 或管理员执行 "
+                "jiuwenswarm.exe --desktop-run-win-setup --install"
+            )
+            raise RuntimeError(
+                "Windows sandbox is not installed. Re-run the installer "
+                "(it prepares the sandbox while elevated), or run "
+                "jiuwenswarm.exe --desktop-run-win-setup --install as Administrator."
+            )
         install(
             force=force,
             preinstall_paths=preinstall_paths,

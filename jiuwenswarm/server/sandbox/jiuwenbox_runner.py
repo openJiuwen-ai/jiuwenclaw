@@ -55,6 +55,20 @@ def _get_powershell() -> str:
     return "powershell"
 
 
+def _win_hidden_kwargs() -> dict:
+    """Hide console windows for powershell.exe / other console children on Windows."""
+    if sys.platform != "win32":
+        return {}
+    import subprocess
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0  # SW_HIDE
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+        "startupinfo": startupinfo,
+    }
+
+
 def _cleanup_stale_win_proxy_ports(
     port_start: int = _WIN_PROXY_DEFAULT_PORT_START,
     port_end: int = _WIN_PROXY_DEFAULT_PORT_END,
@@ -81,6 +95,7 @@ def _cleanup_stale_win_proxy_ports(
                  f"Get-NetTCPConnection -LocalPort {port} -State Listen "
                  f"-ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess"],
                 capture_output=True, timeout=5,
+                **_win_hidden_kwargs(),
             )
             out = result.stdout.decode("utf-8", errors="replace").strip()
             if not out:
@@ -101,6 +116,7 @@ def _cleanup_stale_win_proxy_ports(
                 [_get_powershell(), "-NoProfile", "-Command",
                  f"(Get-Process -Id {pid} -ErrorAction SilentlyContinue).ProcessName"],
                 capture_output=True, timeout=5,
+                **_win_hidden_kwargs(),
             )
             proc_name = name_result.stdout.decode("utf-8", errors="replace").strip()
         except Exception:  # noqa: BLE001
@@ -118,6 +134,7 @@ def _cleanup_stale_win_proxy_ports(
             subprocess.run(
                 [_get_powershell(), "-NoProfile", "-Command", f"Stop-Process -Id {pid} -Force"],
                 capture_output=True, timeout=5,
+                **_win_hidden_kwargs(),
             )
             logger.warning(
                 "[JiuwenBoxRunner] 清理占用 win_proxy 端口 %s 的残留进程 PID=%d "
@@ -505,7 +522,8 @@ class JiuwenBoxRunner:
                 # 而非 TerminateProcess 即时强杀 (活沙箱成孤儿).
                 if sys.platform == "win32":
                     create_new_process_group = 0x00000200  # noqa: N806 - Win32 常量风格
-                    spawn_kwargs["creationflags"] = create_new_process_group
+                    create_no_window = 0x08000000  # noqa: N806 - CREATE_NO_WINDOW
+                    spawn_kwargs["creationflags"] = create_new_process_group | create_no_window
                 self.process = await asyncio.create_subprocess_exec(
                     *cmd,
                     **spawn_kwargs,

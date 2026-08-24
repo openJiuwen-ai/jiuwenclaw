@@ -25,6 +25,19 @@ _venv_lock = threading.Lock()
 _venv_ready: Path | None = None
 _import_path_ready = False
 
+
+def _hidden_kwargs() -> dict:
+    """Hide console windows for python.exe / pip on Windows."""
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0  # SW_HIDE
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+        "startupinfo": startupinfo,
+    }
+
 # pip install patterns for shell command rewriting
 _PIP_INSTALL_RE = re.compile(
     r"(?i)(?<!\w)(?<!-m )pip3?\s+install\b",
@@ -132,6 +145,7 @@ def _discover_system_python() -> Path | None:
             text=True,
             timeout=30,
             check=True,
+            **_hidden_kwargs(),
         )
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return None
@@ -206,6 +220,7 @@ def _ensure_runtime_pip(runtime_py: Path) -> None:
             text=True,
             timeout=60,
             check=True,
+            **_hidden_kwargs(),
         )
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         logger.warning(
@@ -405,6 +420,7 @@ def _pip_show_version(package: str) -> str | None:
             text=True,
             timeout=60,
             env=runtime_subprocess_env(),
+            **_hidden_kwargs(),
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -486,6 +502,7 @@ def install_packages(
             text=True,
             timeout=600,
             env=runtime_subprocess_env(),
+            **_hidden_kwargs(),
         )
     except subprocess.TimeoutExpired as exc:
         return InstallResult(1, "", f"pip install timed out: {exc}", warnings)

@@ -99,6 +99,7 @@ if getattr(sys, "frozen", False):
 _DESKTOP_RUN_AGENT = "--desktop-run-agent"
 _DESKTOP_RUN_GATEWAY = "--desktop-run-gateway"
 _DESKTOP_RUN_JIUWENBOX = "--desktop-run-jiuwenbox"
+_DESKTOP_RUN_WIN_SETUP = "--desktop-run-win-setup"
 
 # 子进程 flag 集合，这些模式下需要将错误写入日志文件，
 # 因为 console=False 的 PyInstaller exe 在 Windows 上无法通过 stderr 捕获错误。
@@ -106,7 +107,7 @@ _DESKTOP_INSTALL_UPDATE = "--desktop-install-update"
 
 _CHILD_FLAGS = {"--desktop-run-app", "--desktop-run-web",
         _DESKTOP_RUN_AGENT, _DESKTOP_RUN_GATEWAY, _DESKTOP_RUN_JIUWENBOX,
-        _DESKTOP_INSTALL_UPDATE}
+        _DESKTOP_RUN_WIN_SETUP, _DESKTOP_INSTALL_UPDATE}
 
 # ── 单实例锁（在重量级 import 之前执行） ──────────────────────────
 _SINGLE_INSTANCE_LOCK_FD: int | None = None
@@ -218,6 +219,14 @@ def _unshadow_frozen_jiuwenbox_namespace() -> None:
         pkg.rename(dest)
     except OSError:
         pass
+
+
+def _run_win_setup() -> None:
+    """安装器已提权时调用: 在本进程内跑 win_setup, 不再 ShellExecuteW(runas)."""
+    _unshadow_frozen_jiuwenbox_namespace()
+    from jiuwenbox.supervisor.win_setup import _main as win_setup_main
+
+    raise SystemExit(win_setup_main(sys.argv[1:]))
 
 
 def _run_jiuwenbox_server() -> None:
@@ -394,6 +403,9 @@ def _dispatch() -> None:
         return
     if _pop_flag(_DESKTOP_RUN_JIUWENBOX):
         _run_jiuwenbox_server()
+        return
+    if _pop_flag(_DESKTOP_RUN_WIN_SETUP):
+        _run_win_setup()
         return
     if _DESKTOP_INSTALL_UPDATE in sys.argv:
         from jiuwenswarm.channels.desktop.desktop_app import main as desktop_main
