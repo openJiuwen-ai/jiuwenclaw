@@ -597,6 +597,10 @@ class AgentManager:
             project_dir or None,
         )
         agent = JiuWenSwarm()
+        agent.set_permissions_changed_notifier(self.schedule_permissions_reload)
+        agent.set_permissions_external_input_context_builder(
+            self.build_permissions_external_input_context
+        )
         await agent.create_instance(config, mode=mode_key, sub_mode=sub_mode_key or None)
         setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
         setattr(agent, "_jiuwenswarm_agent_mode", mode_key)

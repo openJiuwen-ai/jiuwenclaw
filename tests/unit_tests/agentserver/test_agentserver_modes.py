@@ -23,6 +23,16 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
         await self._handle_stream(ws, request, send_lock)
 
 
+class _PermissionAdapterContractStub:
+    """Minimal permission composition contract for adapter test doubles."""
+
+    def set_permissions_changed_notifier(self, notifier) -> None:
+        self.permissions_changed_notifier = notifier
+
+    def set_permissions_external_input_context_builder(self, builder) -> None:
+        self.permissions_external_input_context_builder = builder
+
+
 def fake_encode_agent_chunk_for_wire(chunk, response_id, sequence):
     return {
         "response_id": response_id,
@@ -56,6 +66,7 @@ def _is_regular_skill_evolution_rail(rail):
         ("team.plan", ("team", "plan", "team.plan.normal")),
         ("team.plan.normal", ("team", "plan", "team.plan.normal")),
         ("team.plan.code", ("code", "team", "team.plan.code")),
+        ("auto_harness", ("auto_harness", "auto_harness", "auto_harness")),
         (None, ("agent", None, "agent")),
     ],
 )
@@ -81,6 +92,15 @@ def test_resolve_agent_request_mode_aligns_single_agent_with_work_mode(
         raw_mode,
         work_mode=work_mode,
     ) == expected
+
+
+def test_auto_harness_uses_distinct_agent_cache_identity():
+    from jiuwenswarm.server.runtime.agent_manager import _make_agent_cache_key
+
+    regular = _make_agent_cache_key("agent", None, None)
+    harness = _make_agent_cache_key("agent", "auto_harness", None)
+
+    assert regular != harness
 
 
 def test_team_plan_params_are_team_mode():
@@ -241,7 +261,7 @@ def test_build_inputs_keeps_stable_project_dir_and_dynamic_cwd(monkeypatch):
         async def submit_and_wait(self, _session_id, task_func):
             return await task_func()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         def __init__(self):
             self.seen_inputs = None
             self.skill_manager = None
@@ -377,6 +397,73 @@ def test_build_inputs_maps_skill_evolution_interrupt_answers_to_actions(monkeypa
         assert interactive_input is not None
         assert interactive_input.user_inputs["call_123"] == {"action": expected_action}
         assert "approved" not in interactive_input.user_inputs["call_123"]
+
+
+@pytest.mark.parametrize(
+    ("selected_option", "expected_payload"),
+    [
+        (
+            "本次允许",
+            {"approved": True, "auto_confirm": False, "feedback": ""},
+        ),
+        (
+            "会话内记住",
+            {
+                "approved": True,
+                "auto_confirm": True,
+                "persist_allow": False,
+                "feedback": "",
+            },
+        ),
+        (
+            "永久记住",
+            {
+                "approved": True,
+                "auto_confirm": True,
+                "persist_allow": True,
+                "feedback": "",
+            },
+        ),
+        (
+            "拒绝",
+            {"approved": False, "auto_confirm": False, "feedback": "用户拒绝"},
+        ),
+    ],
+)
+def test_build_inputs_maps_paired_develop_permission_scopes(
+    monkeypatch,
+    selected_option: str,
+    expected_payload: dict[str, object],
+) -> None:
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    request = AgentRequest(
+        request_id="req-permission-answer",
+        channel_id="shared-transport",
+        session_id="permission-session",
+        params={
+            "query": "",
+            "request_id": "tool-call-17",
+            "answers": [
+                {
+                    "selected_options": [selected_option],
+                    "custom_input": "",
+                    "card_id": "tool-invocation-17",
+                }
+            ],
+            "source": "permission_interrupt",
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-invocation-17": expected_payload
+    }
 
 
 @pytest.mark.parametrize(
@@ -625,7 +712,7 @@ def test_build_inputs_drops_bare_other_without_custom_input(monkeypatch):
 def test_chat_answer_routes_team_plan_confirm_interrupt_to_adapter(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         requests = []
 
         async def handle_user_answer(self, request):
@@ -682,7 +769,7 @@ def test_process_message_stream_routes_team_plan_confirm_interrupt_as_team_follo
             cls.submit_task_calls.append(session_id)
             await task_factory()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         seen_inputs = None
 
         @staticmethod
@@ -768,7 +855,7 @@ def test_process_message_stream_routes_web_evolution_interrupt_without_user_hist
         async def submit_task(_session_id, task_factory):
             await task_factory()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         seen_inputs = None
 
         @staticmethod
@@ -840,7 +927,7 @@ def test_process_message_stream_keeps_passive_evolution_approval_as_user_history
         async def submit_task(_session_id, task_factory):
             await task_factory()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         seen_inputs = None
 
         @staticmethod
@@ -971,7 +1058,7 @@ def test_process_message_stream_treats_team_plan_confirm_resume_as_team_follow_u
             cls.submit_task_calls.append(session_id)
             await task_factory()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         seen_inputs = None
 
         @staticmethod
@@ -1083,7 +1170,7 @@ def test_process_message_stream_treats_plain_team_query_as_first_request_after_r
             cls.submit_task_calls.append(session_id)
             await task_factory()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         seen_inputs = None
 
         @staticmethod
@@ -1181,7 +1268,7 @@ def test_process_message_stream_treats_plain_team_query_as_first_request_after_r
 def test_team_plan_answer_routing(monkeypatch, params):
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         async def handle_user_answer(self, request):
             return AgentResponse(
                 request_id=request.request_id,
@@ -1292,7 +1379,7 @@ def test_deep_adapter_registers_evolution_interrupt_rail_before_skill_evolution(
     assert interrupt_index < skill_evolution_index
 
 
-def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatch):
+def test_deep_adapter_profile_rails_add_ask_user_for_agent_modes(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     class FakeHooksConfig:
@@ -1320,8 +1407,18 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(interface_deep_module, "_build_context_processor_rail", lambda **_kwargs: None)
     monkeypatch.setattr(interface_deep_module, "load_hooks_config", lambda _config: FakeHooksConfig())
 
-    plan_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.plan")
-    fast_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.fast")
+    plan_specs = adapter._build_profile_rail_specs(
+        {}, {"models": {}}, mode="agent.plan"
+    )
+    plan_rails = adapter._instantiate_agent_rail_specs(
+        adapter._profile_rail_infos(plan_specs)
+    )
+    fast_specs = adapter._build_profile_rail_specs(
+        {}, {"models": {}}, mode="agent.fast"
+    )
+    fast_rails = adapter._instantiate_agent_rail_specs(
+        adapter._profile_rail_infos(fast_specs)
+    )
 
     assert orchestration_rail in plan_rails
     assert orchestration_rail in fast_rails
@@ -1798,7 +1895,7 @@ def test_build_inputs_threads_workspace_dir_into_cwd(monkeypatch, tmp_path):
         async def submit_and_wait(self, _session_id, task_func):
             return await task_func()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         def __init__(self):
             self.seen_inputs = None
             self.skill_manager = None
@@ -1873,7 +1970,7 @@ def test_build_inputs_omits_cwd_when_workspace_dir_unset(monkeypatch):
         async def submit_and_wait(self, _session_id, task_func):
             return await task_func()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         def __init__(self):
             self.seen_inputs = None
             self.skill_manager = None
@@ -2085,7 +2182,7 @@ def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
     class FakeSessionManager:
         pass
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         async def create_instance(self, config=None, *, mode="agent", sub_mode=None):
             calls.append(
                 {
@@ -2136,7 +2233,7 @@ def test_agent_manager_creates_deep_adapter_for_team_plan_alias(monkeypatch):
     class FakeSessionManager:
         pass
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         async def create_instance(self, config=None, *, mode="agent", sub_mode=None):
             calls.append(
                 {
@@ -2190,7 +2287,7 @@ def test_agent_manager_uses_project_dir_in_cache_identity(monkeypatch, tmp_path)
     class FakeSessionManager:
         pass
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         def __init__(self):
             self.config = {}
             self.mode = "agent"

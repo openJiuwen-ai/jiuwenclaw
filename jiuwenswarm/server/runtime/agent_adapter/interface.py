@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-import json
 import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Tuple
+from typing import Any, AsyncIterator, Callable, Tuple
 
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
@@ -82,10 +81,107 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
     EVOLUTION_INTERRUPT_METADATA_SOURCES,
     is_interrupt_resume_payload,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
+    HOST_USER_ORIGIN_EXTERNAL,
+    HOST_USER_ORIGIN_INTERNAL,
+)
 
 
 class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
+
+
+def resolve_request_query(params: Any) -> Any:
+    """Return the request payload accepted by the AgentOS input contract."""
+    if not isinstance(params, dict):
+        return ""
+    query = params.get("query")
+    return params.get("content", "") if query is None or query == "" else query
+
+
+def _permission_card_ids_from_answers(answers: list[dict]) -> list[str]:
+    """Normalize the single opaque permission-card locator."""
+
+    if len(answers) != 1:
+        return []
+    for answer in answers:
+        if not isinstance(answer, dict):
+            return []
+        raw_card_id = answer.get("card_id")
+        if not isinstance(raw_card_id, str):
+            return []
+        card_id = raw_card_id.strip()
+        if not card_id or len(card_id) > 128:
+            return []
+        return [card_id]
+    return []
+
+
+def _permission_confirm_payload(
+    answer: Any,
+    *,
+    allow_plan_actions: bool = False,
+) -> dict[str, Any]:
+    selected_options = answer.get("selected_options", []) if isinstance(answer, dict) else []
+    custom_input = answer.get("custom_input", "") if isinstance(answer, dict) else ""
+    value = selected_options[0] if selected_options else ""
+
+    if value in ("approve", "本次允许", "Approve", "Proceed", "批准", "开始执行"):
+        return {"approved": True, "auto_confirm": False, "feedback": ""}
+    if value in ("session_allow", "会话内记住", "Session Allow"):
+        return {
+            "approved": True,
+            "auto_confirm": True,
+            "persist_allow": False,
+            "feedback": "",
+        }
+    if value in (
+        "always_allow",
+        "allow_always",
+        "永久记住",
+        "总是允许",
+        "Always Allow",
+    ):
+        return {
+            "approved": True,
+            "auto_confirm": True,
+            "persist_allow": True,
+            "feedback": "",
+        }
+    if allow_plan_actions and value in PLAN_EXECUTE_OPTION_VALUES:
+        return {
+            "approved": True,
+            "auto_confirm": False,
+            "feedback": "",
+            "plan_execute": True,
+        }
+    if allow_plan_actions and value in PLAN_SKIP_OPTION_VALUES:
+        return {
+            "approved": False,
+            "auto_confirm": False,
+            "feedback": custom_input
+            or plan_skip_feedback(get_config().get("preferred_language")),
+            "plan_skip": True,
+        }
+    if allow_plan_actions and value in PLAN_REVISE_OPTION_VALUES:
+        return {
+            "approved": False,
+            "auto_confirm": False,
+            "feedback": custom_input or "用户希望继续规划",
+            "plan_revise": True,
+        }
+    if value in ("reject", "拒绝", "Reject", "继续规划", "其他意见"):
+        feedback = custom_input or (
+            "用户希望继续规划" if value in ("Keep planning", "继续规划", "其他意见") else "用户拒绝"
+        )
+        return {"approved": False, "auto_confirm": False, "feedback": feedback}
+    if custom_input:
+        return {"approved": False, "auto_confirm": False, "feedback": custom_input}
+    return {
+        "approved": False,
+        "auto_confirm": False,
+        "feedback": f"未知选项: {value}",
+    }
 
 
 def _schedule_symphony_session_feedback(
@@ -143,17 +239,51 @@ def _history_user_content(params: Any, query: Any) -> Any:
     return content
 
 
-def _should_record_user_history(params: Any) -> bool:
+def is_external_user_authored_dispatch(
+    params: Any,
+    *,
+    channel_id: Any = "",
+    request_method: Any = None,
+) -> bool:
+    """Return whether Host ingress proved an external user-authored dispatch."""
+
     if not isinstance(params, dict):
-        return True
+        return False
     if params.get("log_as_user") is False:
         return False
-    # Second-step goal attach is host control traffic, not a user utterance.
     if params.get("attach_goal") is True:
         return False
     if is_interrupt_resume_payload(params):
         return False
-    return str(params.get("source") or "") != "proactive_recommendation"
+    if request_method == ReqMethod.COMMAND_GOAL:
+        return False
+    if str(channel_id or "").strip().lower() in {"cron", "heartbeat"}:
+        return False
+    return not str(params.get("source") or "").strip()
+
+
+def _should_record_user_history(
+    params: Any,
+    *,
+    channel_id: Any = "",
+    request_method: Any = None,
+) -> bool:
+    """Keep history and permission authority on the same Host predicate."""
+
+    if (
+        isinstance(params, dict)
+        and str(params.get("source") or "").strip() == "skill_evolution_approval"
+    ):
+        # AgentOS keeps passive skill-evolution approvals in the transcript.
+        # This is display history only; interrupt resumes remain non-external
+        # for permission-authority and root-intent classification.
+        return True
+
+    return is_external_user_authored_dispatch(
+        params,
+        channel_id=channel_id,
+        request_method=request_method,
+    )
 
 
 def _resolve_final_record_timestamp(
@@ -684,7 +814,8 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
 
 def build_user_prompt(content: str | dict, files: dict, channel: str, language: str, *,
     trusted_dirs: list[str] | None = None, metadata: dict[str, Any] | None = None,
-    skills: list[str] | None = None) -> str:
+    skills: list[str] | None = None,
+    origin_kind: str = HOST_USER_ORIGIN_INTERNAL) -> str:
     """Build the user prompt for an agent.
 
     Thin wrapper over :meth:`UserTurn.render` — the single renderer shared by
@@ -715,6 +846,7 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
         trusted_dirs=trusted_dirs,
         skills=skills,
         metadata=metadata,
+        origin_kind=origin_kind,
     ).render()
 
 
@@ -740,6 +872,8 @@ class JiuWenSwarm:
         self._sdk_name: str | None = None
         self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
         self._session_manager = SessionManager()
+        self._permissions_changed_notifier: Callable[[], None] | None = None
+        self._permissions_external_input_context_builder: Callable[..., Any] | None = None
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
 
@@ -808,11 +942,35 @@ class JiuWenSwarm:
             self._adapter = create_adapter(self._sdk_name, mode=mode)
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
+            self._adapter.set_permissions_changed_notifier(
+                self._permissions_changed_notifier
+            )
+            self._adapter.set_permissions_external_input_context_builder(
+                self._permissions_external_input_context_builder
+            )
             self._skill_manager.set_skillnet_install_complete_hook(
                 self._on_skillnet_install_complete
             )
             logger.info("[JiuWenSwarm] Initialized adapter: sdk=%s, mode=%s", self._sdk_name, mode)
         return self._adapter
+
+    def set_permissions_changed_notifier(
+        self,
+        notifier: Callable[[], None] | None,
+    ) -> None:
+        """Inject the host composition callback for persisted permission changes."""
+        self._permissions_changed_notifier = notifier
+        if self._adapter is not None:
+            self._adapter.set_permissions_changed_notifier(notifier)
+
+    def set_permissions_external_input_context_builder(
+        self,
+        builder: Callable[..., Any] | None,
+    ) -> None:
+        """Inject the Host external-input permission publication context."""
+        self._permissions_external_input_context_builder = builder
+        if self._adapter is not None:
+            self._adapter.set_permissions_external_input_context_builder(builder)
 
     @staticmethod
     def _adapter_mode_for_request(request: AgentRequest) -> str:
@@ -953,9 +1111,7 @@ class JiuWenSwarm:
         config_base = get_config()
         memory_mode = get_memory_mode(config_base)
         params: ChatSendParams = request.params if isinstance(request.params, dict) else {}
-        query = params.get("query")
-        if query is None or query == "":
-            query = params.get("content", "")
+        query = resolve_request_query(params)
         # /debug 请求级指令：仅 agent/code 在此剥离前缀；team 自行从
         # ``turn.text`` 解析 /debug（见 team_helpers），故此处对 team 不剥离。
         _request_debug = False
@@ -984,6 +1140,15 @@ class JiuWenSwarm:
         if isinstance(raw_skills, list):
             skills = [s.strip() for s in raw_skills if isinstance(s, str) and s.strip()] or None
         metadata = request.metadata or {}
+        origin_kind = (
+            HOST_USER_ORIGIN_EXTERNAL
+            if is_external_user_authored_dispatch(
+                params,
+                channel_id=channel,
+                request_method=request.req_method,
+            )
+            else HOST_USER_ORIGIN_INTERNAL
+        )
         param_project_dir = params.get("project_dir")
         metadata_project_dir = metadata.get("project_dir") if isinstance(metadata, dict) else None
         project_dir = (
@@ -1019,6 +1184,7 @@ class JiuWenSwarm:
             trusted_dirs=trusted_dirs,
             skills=skills,
             metadata=request.metadata,
+            origin_kind=origin_kind,
         )
 
         if isinstance(query, InteractiveInput):
@@ -1028,14 +1194,39 @@ class JiuWenSwarm:
             if answers:
                 request_id = params.get("request_id", "")
                 source = params.get("source", "")
-                raw_original_request = params.get("original_request") if source == "ask_user_interrupt" else ""
-                original_request = raw_original_request.strip() if isinstance(raw_original_request, str) else ""
+                raw_original_request = (
+                    params.get("original_request")
+                    if source == "ask_user_interrupt"
+                    else ""
+                )
+                original_request = (
+                    raw_original_request.strip()
+                    if isinstance(raw_original_request, str)
+                    else ""
+                )
                 interactive_input = self._build_interactive_input_from_answers(
                     request_id,
                     answers,
                     source,
-                    original_request=original_request,
                 )
+                has_ask_user_context = (
+                    source == "ask_user_interrupt"
+                    and bool(original_request)
+                    and interactive_input is not None
+                )
+                if has_ask_user_context and str(request_id or "").strip():
+                    bound_id = str(request_id).strip()
+                    bound_payload = interactive_input.user_inputs.get(bound_id)
+                    if isinstance(bound_payload, dict) and isinstance(
+                        bound_payload.get("answers"), dict
+                    ):
+                        # AgentOS display context is attached only after the
+                        # strict call/question adapter has accepted the answer.
+                        # Permission/root authority never derives from it.
+                        interactive_input.update(
+                            bound_id,
+                            {**bound_payload, "original_request": original_request},
+                        )
                 if interactive_input is not None:
                     final_query = interactive_input
                     turn = turn.with_text(interactive_input)
@@ -1217,8 +1408,6 @@ class JiuWenSwarm:
             request_id: str,
             answers: list[dict],
             source: str = "",
-            *,
-            original_request: str = "",
     ) -> Any:
         """从用户答案构建 InteractiveInput.
 
@@ -1235,11 +1424,15 @@ class JiuWenSwarm:
         interactive_input = InteractiveInput()
 
         if source == "ask_user_interrupt":
+            request_id = str(request_id or "").strip()
+            if not request_id:
+                return interactive_input
             answers_dict = {}
-            free_text_answer = ""
+            has_question_key = False
             for answer in answers:
                 if isinstance(answer, dict):
                     question_text = str(answer.get("question", "") or "").strip()
+                    has_question_key = has_question_key or bool(question_text)
                     selected_options = answer.get("selected_options", [])
                     custom_input = str(answer.get("custom_input", "") or "").strip()
                     if selected_options and isinstance(selected_options, list):
@@ -1277,24 +1470,15 @@ class JiuWenSwarm:
                         answer_value = ""
                     if question_text and answer_value:
                         answers_dict[question_text] = answer_value
-                    elif answer_value:
-                        free_text_answer = (
-                            answer_value
-                            if isinstance(answer_value, str)
-                            else ", ".join(answer_value)
-                        )
-            if not answers_dict and free_text_answer:
-                answers_dict["__free_text__"] = free_text_answer
+            if not has_question_key:
+                return interactive_input
             payload: dict[str, Any] = {"answers": answers_dict}
-            if isinstance(original_request, str) and original_request.strip():
-                payload["original_request"] = original_request.strip()
             interactive_input.update(request_id, payload)
             logger.info(
                 "[JiuWenSwarm] AskUserRail InteractiveInput.update: request_id=%s "
-                "answer_count=%s has_original_request=%s",
+                "answer_count=%s",
                 request_id,
                 len(answers_dict),
-                "original_request" in payload,
             )
             return interactive_input
 
@@ -1330,87 +1514,28 @@ class JiuWenSwarm:
             )
             return interactive_input
 
-        if source and source not in {
-            "permission_interrupt",
-            "confirm_interrupt",
-        }:
+        if source == "confirm_interrupt":
+            answer = answers[0] if answers else {}
+            confirm_payload = _permission_confirm_payload(
+                answer,
+                allow_plan_actions=True,
+            )
+            interactive_input.update(request_id, confirm_payload)
+            return interactive_input
+
+        if source != "permission_interrupt":
             return None
 
-        answer = answers[0] if answers else {}
-        selected_options = answer.get("selected_options", []) if isinstance(answer, dict) else []
-        custom_input = answer.get("custom_input", "") if isinstance(answer, dict) else ""
-
-        value = selected_options[0] if selected_options else ""
-
-        if value in ("approve", "本次允许", "Approve", "Proceed", "批准", "开始执行"):
-            confirm_payload = {"approved": True, "auto_confirm": False, "feedback": ""}
-        elif value in ("session_allow", "会话内记住", "Session Allow"):
-            confirm_payload = {
-                "approved": True,
-                "auto_confirm": True,
-                "persist_allow": False,
-                "feedback": "",
-            }
-        elif value in (
-            "always_allow",
-            "allow_always",
-            "永久记住",
-            "总是允许",
-            "Always Allow",
-        ):
-            confirm_payload = {
-                "approved": True,
-                "auto_confirm": True,
-                "persist_allow": True,
-                "feedback": "",
-            }
-        elif value in PLAN_EXECUTE_OPTION_VALUES:
-            # Web 的"执行"：批准并退出 plan，但本轮不再调模型。真正的执行由前端
-            # 紧接着补发的普通消息开启新一轮完成。``plan_execute`` 是额外键，
-            # ConfirmPayload 会忽略它，rail 在校验前从原始 dict 读取。
-            confirm_payload = {
-                "approved": True,
-                "auto_confirm": False,
-                "feedback": "",
-                "plan_execute": True,
-            }
-        elif value in PLAN_SKIP_OPTION_VALUES:
-            # Web 的"跳过"：不退出 plan，也不继续修改，直接结束本轮。
-            # ``plan_skip`` 是额外键，ConfirmPayload 会忽略它；
-            # PlanApprovalInterruptRail 在校验前从原始 dict 读取该标记。
-            confirm_payload = {
-                "approved": False,
-                "auto_confirm": False,
-                "feedback": custom_input
-                or plan_skip_feedback(get_config().get("preferred_language")),
-                "plan_skip": True,
-            }
-        elif value in PLAN_REVISE_OPTION_VALUES:
-            # Web 的"下一步"：不退出 plan，按修改意见续跑。``plan_revise`` 是额外键，
-            # ConfirmPayload 会忽略它；rail 只在看到它时才给假回执包修订前缀。
-            # TUI 仍发 ``reject``，不会进这个分支。
-            confirm_payload = {
-                "approved": False,
-                "auto_confirm": False,
-                "feedback": custom_input or "用户希望继续规划",
-                "plan_revise": True,
-            }
-        elif value in ("reject", "拒绝", "Reject", "继续规划", "其他意见"):
-            feedback = custom_input or (
-                "用户希望继续规划" if value in ("Keep planning", "继续规划", "其他意见") else "用户拒绝"
-            )
-            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": feedback}
-        elif custom_input:
-            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": custom_input}
-        else:
-            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": f"未知选项: {value}"}
-
-        interactive_input.update(request_id, confirm_payload)
+        card_ids = _permission_card_ids_from_answers(answers)
+        if not card_ids:
+            return interactive_input
+        interactive_input.update(card_ids[0], _permission_confirm_payload(answers[0]))
         logger.info(
-            "[JiuWenSwarm] PermissionRail InteractiveInput.update: request_id=%s payload=%s",
-            request_id, confirm_payload
+            "[JiuWenSwarm] PermissionRail card InteractiveInput.update: "
+            "request_id=%s card_id=%s",
+            request_id,
+            card_ids[0],
         )
-
         return interactive_input
 
     async def _handle_skilldev_request(self, request: AgentRequest) -> AgentResponse | None:
@@ -1717,6 +1842,11 @@ class JiuWenSwarm:
 
         if request.req_method == ReqMethod.CHAT_ANSWER:
             adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+            validator = getattr(
+                adapter, "validate_auto_permission_workspace_request", None
+            )
+            if callable(validator):
+                validator(request)
             return await adapter.handle_user_answer(request)
 
         if request.req_method == ReqMethod.CHAT_SWARMFLOW_REPLY:
@@ -1837,6 +1967,9 @@ class JiuWenSwarm:
             return plugins_response
 
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        validator = getattr(adapter, "validate_auto_permission_workspace_request", None)
+        if callable(validator):
+            validator(request)
 
         heartbeat_response = await adapter.handle_heartbeat(request)
         if heartbeat_response is not None:
@@ -1858,7 +1991,11 @@ class JiuWenSwarm:
             feedback_scheduled = True
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
-        if _should_record_user_history(request.params):
+        if _should_record_user_history(
+            request.params,
+            channel_id=request.channel_id,
+            request_method=request.req_method,
+        ):
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -2100,6 +2237,9 @@ class JiuWenSwarm:
                 return
 
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        validator = getattr(adapter, "validate_auto_permission_workspace_request", None)
+        if callable(validator):
+            validator(request)
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
@@ -2120,7 +2260,11 @@ class JiuWenSwarm:
         params_for_history = request.params if isinstance(request.params, dict) else {}
         if (
             request.req_method != ReqMethod.COMMAND_GOAL
-            and _should_record_user_history(params_for_history)
+            and _should_record_user_history(
+                params_for_history,
+                channel_id=request.channel_id,
+                request_method=request.req_method,
+            )
         ):
             append_history_record(
                 session_id=session_id,
@@ -3310,6 +3454,19 @@ class JiuWenSwarm:
         if session_id is None:
             return bool(has_runtime())
         return bool(has_runtime(session_id))
+
+    def has_auto_permission_session(self, session_id: str | None) -> bool:
+        adapter = self._adapter
+        checker = getattr(adapter, "has_auto_permission_session", None)
+        return bool(callable(checker) and checker(session_id))
+
+    def validate_auto_permission_workspace_request(self, request: AgentRequest) -> None:
+        adapter = self._adapter
+        validator = getattr(
+            adapter, "validate_auto_permission_workspace_request", None
+        )
+        if callable(validator):
+            validator(request)
 
     async def cancel_inflight_work(self, log_prefix: str = "[gateway disconnect] ") -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时调用：取消 session 流式任务并中止 adapter 内层循环。"""

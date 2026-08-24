@@ -34,6 +34,9 @@ from openjiuwen.harness.workspace.workspace import WorkspaceNode
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     convert_interactions_to_ask_user_question,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue import (
+    RootPermissionQueue,
+)
 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
     strip_image_content_from_model_context,
 )
@@ -234,11 +237,18 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     _SID_KEY = "__jiuwenswarm_session_id__"
     _SHELL_SID_TOKEN_KEY = "__jiuwenswarm_shell_session_token__"
 
-    def __init__(self, *, member_name: str | None = None, role: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        member_name: str | None = None,
+        role: str | None = None,
+        root_permission_queue: RootPermissionQueue | None = None,
+    ) -> None:
         super().__init__()
         self._deep_agent: Optional[Any] = None
         self._member_name = str(member_name or "").strip()
         self._role = str(role or "").strip().lower()
+        self._root_permission_queue = root_permission_queue
         # Per-session pause/abort state.  Keyed by session_id (conversation_id).
         # Shared adapter instances serve multiple concurrent sessions; scalar state
         # would cause cross-session contamination (session A cancel kills session B).

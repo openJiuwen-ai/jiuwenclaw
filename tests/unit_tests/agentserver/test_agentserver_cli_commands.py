@@ -1,6 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -183,6 +184,12 @@ async def test_handle_command_add_dir_returns_path_and_remember(
         "persist_cli_trusted_directory",
         lambda _raw: persist_stub,
     )
+    reload_notify = MagicMock()
+    monkeypatch.setattr(
+        server.get_agent_manager(),
+        "schedule_permissions_reload",
+        reload_notify,
+    )
     request = AgentRequest(
         request_id="req-add-dir",
         channel_id="tui",
@@ -203,10 +210,46 @@ async def test_handle_command_add_dir_returns_path_and_remember(
             "ok": True,
         }
     ]
+    reload_notify.assert_called_once_with()
 
 
 @pytest.mark.asyncio
-async def test_handle_command_add_dir_does_not_wait_for_agent_reload(
+async def test_handle_command_add_dir_reports_reload_schedule_failure(
+    server, fake_ws, monkeypatch
+):
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "persist_cli_trusted_directory",
+        lambda _raw: {"ok": True, "normalized": "/tmp/demo"},
+    )
+    monkeypatch.setattr(
+        server.get_agent_manager(),
+        "schedule_permissions_reload",
+        MagicMock(side_effect=RuntimeError("scheduler unavailable")),
+    )
+    request = AgentRequest(
+        request_id="req-add-dir-schedule-failed",
+        channel_id="tui",
+        req_method=ReqMethod.COMMAND_ADD_DIR,
+        params={"path": "/tmp/demo"},
+    )
+
+    await server.handle_command_add_dir_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-add-dir-schedule-failed",
+            "payload": {
+                "error": "scheduler unavailable",
+                "code": "SESSION_CREATE_FAILED",
+            },
+            "ok": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_command_add_dir_sends_no_target_dirty_signal_without_waiting(
     server, fake_ws, monkeypatch
 ):
     persist_stub = {
@@ -218,12 +261,14 @@ async def test_handle_command_add_dir_does_not_wait_for_agent_reload(
         "persist_cli_trusted_directory",
         lambda _raw: persist_stub,
     )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {})
     reload_started = asyncio.Event()
+    reload_release = asyncio.Event()
+    reload_calls = []
 
-    async def _blocking_reload(_config, _env):
+    async def _blocking_reload(_config, _env, **kwargs):
+        reload_calls.append((_config, _env, kwargs))
         reload_started.set()
-        await asyncio.Event().wait()
+        await reload_release.wait()
 
     monkeypatch.setattr(
         server.get_agent_manager(),
@@ -242,7 +287,10 @@ async def test_handle_command_add_dir_does_not_wait_for_agent_reload(
         timeout=0.5,
     )
 
-    assert not reload_started.is_set()
+    await asyncio.wait_for(reload_started.wait(), timeout=0.5)
+    assert reload_calls == [
+        (None, None, {"reload_scopes": {"permissions"}}),
+    ]
     assert fake_ws.sent == [
         {
             "response_id": "req-add-dir-no-reload-wait",
@@ -254,6 +302,8 @@ async def test_handle_command_add_dir_does_not_wait_for_agent_reload(
             "ok": True,
         }
     ]
+    reload_release.set()
+    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -1114,12 +1164,10 @@ async def test_handle_permissions_config_does_not_block_on_slow_reload(server, f
         lambda _req: _Resp(),
         raising=True,
     )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {})
+    reload_calls = []
 
-    reload_calls = {"n": 0}
-
-    async def _slow_reload(_config, _env):
-        reload_calls["n"] += 1
+    async def _slow_reload(_config, _env, **kwargs):
+        reload_calls.append((_config, _env, kwargs))
         await asyncio.sleep(0.2)  # 模拟慢 reload
 
     monkeypatch.setattr(server.get_agent_manager(), "reload_agents_config", _slow_reload)
@@ -1143,4 +1191,42 @@ async def test_handle_permissions_config_does_not_block_on_slow_reload(server, f
 
     # reload 在后台被调度: 等它跑完确认调用过一次
     await asyncio.sleep(0.3)
-    assert reload_calls["n"] == 1, f"期望 reload 被调用 1 次, 实际 {reload_calls['n']}"
+    assert reload_calls == [
+        (None, None, {"reload_scopes": {"permissions"}}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_permissions_config_reports_reload_schedule_failure(
+    server, fake_ws, monkeypatch
+):
+    from jiuwenswarm.agents.harness.common.rails.permissions import permissions_config_rpc as _rpc_mod
+
+    response = SimpleNamespace(ok=True, payload={"ok": True})
+    monkeypatch.setattr(
+        _rpc_mod,
+        "dispatch_permissions_config_request",
+        lambda _request: response,
+    )
+    monkeypatch.setattr(
+        server.get_agent_manager(),
+        "schedule_permissions_reload",
+        MagicMock(side_effect=RuntimeError("scheduler unavailable")),
+    )
+    request = AgentRequest(
+        request_id="req-perm-schedule-failed",
+        channel_id="tui",
+        session_id="sess_demo",
+        req_method=ReqMethod.PERMISSIONS_TOOLS_UPDATE,
+        params={"tool": "bash", "level": "deny"},
+    )
+
+    await server.handle_permissions_config_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-perm-schedule-failed",
+            "payload": {"error": "scheduler unavailable"},
+            "ok": False,
+        }
+    ]
