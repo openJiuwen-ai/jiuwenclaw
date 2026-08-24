@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -8,7 +9,15 @@ from jiuwenswarm.common.work_mode import (
     DEFAULT_WEB_WORK_MODE,
     normalize_work_mode,
 )
+from jiuwenswarm.common.mode_matrix import (
+    TEAM_PLAN_CODE_MODE,
+    TEAM_PLAN_NORMAL_MODE,
+    deprecate_mode,
+    is_team_mode,
+)
 from jiuwenswarm.gateway.cron.cron_expr import validate_cron_expression
+
+logger = logging.getLogger(__name__)
 
 
 class CronTargetChannel(str, Enum):
@@ -72,13 +81,32 @@ CRON_JOB_MODES: frozenset[str] = frozenset(
         "agent",       # 合并后的单一 agent 模式
         "plan",        # legacy shorthand（归一到 agent）
         "team",        # multi-agent team mode
-        "agent.plan",  # legacy（归一到 agent）
+        "agent.plan",  # legacy（真实 plan 模式，deprecate 后 agent.work.plan）
         "agent.fast",  # legacy（归一到 agent）
         "team.plan",
+        TEAM_PLAN_NORMAL_MODE,
+        TEAM_PLAN_CODE_MODE,
         "code.team",
+        # standalone code profile canonical（与 Mode.from_raw / DEPRECATION_MAP 同源）。
+        # 不加会导致同串在非 cron 路径合法、在 cron 路径被拒（400）。
+        "code",
+        "code.normal",
+        "code.plan",
+        "team.code",
         # 不走 chat.send，scheduler 消费时直接发 PROACTIVE_TICK WS 请求
         # 触发 AgentServer ProactiveEngine.tick_now()。由 proactive_cron_sync 自动注册。
         "proactive.tick",
+        # 新三段命名 canonical（P3 引入，与 message_handler /mode 同源）。
+        # 创建/更新 cron 任务时可直接传新串；存量 cron 数据读取走 coerce + 运行时
+        # deprecate_mode 兜底，二者均无需扩 _CRON_JOB_MODE_ALIASES。
+        "agent.work.normal",
+        "agent.work.plan",
+        "agent.code.normal",
+        "agent.code.plan",
+        "team.work.normal",
+        "team.work.plan",
+        "team.code.normal",
+        "team.code.plan",
     }
 )
 
@@ -93,16 +121,30 @@ CRON_JOB_DESCRIPTION_MAX_LENGTH: int = 500
 
 _CRON_JOB_MODE_ALIASES: dict[str, str] = {
     "plan": "agent",
-    "agent.plan": "agent",
+    # agent.plan 是真实 plan 模式：不并入 agent，交由 deprecate_mode
+    # 映射到 agent.work.plan，与运行时 resolve_agent_request_mode / 会话迁移一致。
     "agent.fast": "agent",
+    "team.plan": TEAM_PLAN_NORMAL_MODE,
 }
 
 
 def normalize_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
     """Normalize and validate a cron job execution mode (strict, for create/update APIs).
 
-    legacy 别名（plan / agent.plan / agent.fast）在此处即归一为 "agent" 后落库，
-    而非仅依赖运行时（AgentServer 侧）兜底归一。
+    两步归一（P3 重写）：
+    1. legacy 别名经 ``_CRON_JOB_MODE_ALIASES`` 映射到旧 canonical
+       （plan → agent；team.plan → team.plan.normal；agent.fast → agent；
+       agent.plan 不并入 agent，是真实 plan 模式，经第 2 步落到 agent.work.plan）。
+       这一步把 ``team.plan`` 单一映射到 ``team.plan.normal``，避免原方案中
+       ``team.plan`` 同时被 ``_CRON_JOB_MODE_ALIASES`` 映成
+       ``TEAM_PLAN_NORMAL_MODE``、又被 deprecate_mode 映成 ``team.work.normal``
+       的双键冲突。
+    2. 旧 canonical 经 ``deprecate_mode`` 静默映射到新 canonical（如
+       agent → agent.work.normal；agent.plan → agent.work.plan；
+       team.plan.normal → team.work.plan）。
+
+    新 canonical（8 个新串）不在 ``_CRON_JOB_MODE_ALIASES`` 中，第一步直通，
+    第二步 deprecate_mode 也原样返回，最终落库为新 canonical。
     """
     if raw is None:
         return default
@@ -114,17 +156,40 @@ def normalize_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -
             f"Invalid cron job mode {raw!r}. "
             f"Valid: {', '.join(sorted(CRON_JOB_MODES))}"
         )
-    return _CRON_JOB_MODE_ALIASES.get(value, value)
+    # 步骤1：legacy 别名归一到旧 canonical。
+    legacy = _CRON_JOB_MODE_ALIASES.get(value)
+    if legacy is not None:
+        logger.debug(
+            "normalize_cron_job_mode: step1 legacy alias '%s' -> '%s'",
+            value, legacy,
+        )
+        value = legacy
+    # 步骤2：旧 canonical 经 deprecate_mode 转新 canonical。
+    new_value = deprecate_mode(value)
+    if new_value != value:
+        logger.debug(
+            "normalize_cron_job_mode: step2 deprecate '%s' -> '%s'",
+            value, new_value,
+        )
+    return new_value
 
 
 def coerce_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
-    """Normalize mode for runtime/persistence; unknown values pass through lowercased."""
+    """Normalize mode for runtime/persistence; unknown values pass through lowercased.
+
+    与 ``normalize_cron_job_mode`` 同走两步归一：legacy 别名（``_CRON_JOB_MODE_ALIASES``）
+    → 旧 canonical → ``deprecate_mode`` → 新 canonical。这样磁盘读出的旧串在 coerce
+    后即落新 canonical，cron_jobs.json 经一次读改写回即完成迁移。
+    """
     if raw is None:
         return default
     value = str(raw).strip().lower()
     if not value:
         return default
-    return _CRON_JOB_MODE_ALIASES.get(value, value)
+    legacy = _CRON_JOB_MODE_ALIASES.get(value)
+    if legacy is not None:
+        value = legacy
+    return deprecate_mode(value)
 
 
 def cron_job_modes_for_tools() -> list[str]:
@@ -142,10 +207,8 @@ def cron_job_metadata() -> dict[str, str | list[str] | int]:
     }
 
 
-_TEAM_CRON_MODES: frozenset[str] = frozenset({"team", "team.plan", "code.team"})
-
-CRON_DEFAULT_TIMEOUT_SECONDS: int = 10 * 60
-CRON_TEAM_DEFAULT_TIMEOUT_SECONDS: int = 20 * 60
+CRON_DEFAULT_TIMEOUT_SECONDS: int = 60 * 60
+CRON_TEAM_DEFAULT_TIMEOUT_SECONDS: int = 60 * 60
 CRON_MAX_TIMEOUT_SECONDS: int = 72 * 60 * 60
 # Backward-compatible alias used by older imports/tests.
 CRON_TEAM_STREAM_TIMEOUT_SECONDS: float = float(CRON_TEAM_DEFAULT_TIMEOUT_SECONDS)
@@ -171,6 +234,13 @@ def validate_cron_model(raw: Any) -> str | None:
 
     If the input is an alias, resolves to the underlying ``model_client_config.model_name``
     so the stored value is always a key AgentServer ``_model_cache`` can look up.
+
+    Opencode Zen free models are in-memory only (never written to config.yaml), so a
+    configured-models miss falls back to the Zen free-model cache: the frontend appends
+    free models to ``models.list`` and lets the user pick one for a cron job, and the
+    stored canonical id is later resolved by AgentServer the same way. When the free-model
+    toggle is off or Zen is unreachable the cache is empty and the Unknown-model error is
+    raised as before.
     """
     if raw is None:
         return None
@@ -184,6 +254,22 @@ def validate_cron_model(raw: Any) -> str | None:
         mcc = entry.get("model_client_config") or {}
         canonical = (mcc.get("model_name") or "").strip()
         return canonical if canonical else value
+
+    # Opencode Zen 免费模型（纯内存态，不入 config.yaml）：按 model_name 或 alias
+    # 匹配内存缓存，返回 canonical model_name（即 Zen API id），与 get_model_config
+    # 的解析语义保持一致。匹配失败/缓存为空时保持原 Unknown model 行为。
+    try:
+        from jiuwenswarm.server.runtime.opencode_zen import get_zen_free_model_entries
+        for zent in get_zen_free_model_entries():
+            zmcc = zent.get("model_client_config") or {}
+            zname = (zmcc.get("model_name") or "").strip()
+            if zname and (
+                zname == value or str(zent.get("alias") or "").strip() == value
+            ):
+                return zname
+    except Exception as exc:  # noqa: BLE001 - free-model lookup must never break cron create
+        logger.debug("[cron] zen free-model lookup failed for %r: %s", value, exc)
+
     available = get_model_names()
     hint = ", ".join(available[:20]) if available else "(no models configured)"
     if len(available) > 20:
@@ -205,8 +291,7 @@ def resolve_cron_job_timeout_seconds(job: "CronJob") -> float:
 
 def is_team_cron_mode(mode: str | None) -> bool:
     """Return True when a cron job should run via Team + SwarmFlow streaming."""
-    value = str(mode or "").strip().lower()
-    return value in _TEAM_CRON_MODES
+    return is_team_mode(mode)
 
 
 @dataclass(frozen=True)
@@ -258,7 +343,7 @@ class CronJob:
     mode: str = CRON_JOB_DEFAULT_MODE
     # 执行一次后自动删除（用于提醒类任务）
     delete_after_run: bool = False
-    # 单次执行超时（秒）；未配置时普通模式 10 分钟，team 模式 20 分钟
+    # 单次执行超时（秒）；未配置时普通模式与 team 模式默认均为 1 小时
     timeout_seconds: int | None = None
     # 归属项目 ID；由创建时 project_dir 匹配获得，匹配不到可见项目为空串（默认项目）
     project_id: str = ""
@@ -268,6 +353,10 @@ class CronJob:
     model_name: str | None = None
     # 飞书多应用场景：创建该定时任务的 app_id，用于推送时定位到正确的 app 配置
     app_id: str = ""
+    # 创建者标识（web 端 user_id）。执行时透传给 faas 的 X-Session-Context，
+    # 否则 CreateSandbox 拉不起导致 60s 超时（见 plan-cron-user-id）。
+    # 默认空串兼容旧数据；语义=创建者，创建后不可变。
+    user_id: str = ""
     # 工作模式派生快照：由 project_id 归属推导（"code" / "work"）。
     # 不作为独立隔离维度，任务归属仍以 project_id 为准。
     # from_dict 仅做 normalize + 兜底 "work"，不做跨层 Project 反查；
@@ -309,6 +398,8 @@ class CronJob:
             d["model_name"] = self.model_name
         if self.app_id:
             d["app_id"] = self.app_id
+        if self.user_id:
+            d["user_id"] = self.user_id
         return d
 
     @staticmethod
@@ -409,6 +500,10 @@ class CronJob:
         app_id_raw = data.get("app_id", "")
         job_app_id = str(app_id_raw).strip() if isinstance(app_id_raw, str) else ""
 
+        # user_id：老数据兜底（无 user_id → ""）
+        job_user_id_raw = data.get("user_id", "")
+        job_user_id = str(job_user_id_raw).strip() if isinstance(job_user_id_raw, str) else ""
+
         # work_mode：仅做 normalize + 兜底 "work"，不做跨层 Project 反查
         # （gateway.cron.models 是底层数据模型，不应反向依赖 server.runtime.session.project_store）
         # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
@@ -435,6 +530,7 @@ class CronJob:
             last_session_id=last_session_id,
             model_name=job_model_name,
             app_id=job_app_id,
+            user_id=job_user_id,
             work_mode=job_work_mode,
         )
 

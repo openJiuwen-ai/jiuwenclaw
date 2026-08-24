@@ -41,9 +41,9 @@ async function loadCronJobMeta(ctx: CommandContext): Promise<CronJobMetaPayload>
   const payload = await ctx.request("cron.job.meta", {}) as CronJobMetaPayload;
   cachedCronMeta = {
     modes: Array.isArray(payload.modes) ? payload.modes : [],
-    default_mode: payload.default_mode || "agent.fast",
-    default_timeout_seconds: payload.default_timeout_seconds ?? 600,
-    default_team_timeout_seconds: payload.default_team_timeout_seconds ?? 1200,
+    default_mode: payload.default_mode || "agent.work.normal",
+    default_timeout_seconds: payload.default_timeout_seconds ?? 3600,
+    default_team_timeout_seconds: payload.default_team_timeout_seconds ?? 3600,
   };
   return cachedCronMeta;
 }
@@ -52,13 +52,32 @@ function isValidCronMode(modes: string[], mode: string): boolean {
   return modes.includes(mode.trim().toLowerCase());
 }
 
-const TEAM_MODES = new Set(["team", "team.plan", "code.team"]);
+const TEAM_MODES = new Set([
+  "team",
+  "team.work.normal",
+  "team.work.plan",
+  "team.code.normal",
+  "team.code.plan",
+  // Legacy canonical modes still arriving over the wire from cron jobs created
+  // before the three-segment rename — treat as team. See
+  // jiuwenswarm/common/mode_matrix.py DEPRECATION_MAP: these are the old
+  // canonical IDs (team.plan / team.plan.normal / team.plan.code / code.team)
+  // that the backend silently remaps to the new team.work.* / team.code.*
+  // canonicals, but stored cron jobs may still carry the old value.
+  "team.plan",
+  "team.plan.normal",
+  "team.plan.code",
+  "code.team",
+]);
 
 function resolveDefaultTimeoutSeconds(job: Pick<CronJobPayload, "mode">, cronMeta: CronJobMetaPayload): number {
-  const mode = String(job.mode || cronMeta.default_mode || "agent.fast").trim().toLowerCase();
+  const DEFAULT_MODE = "agent.work.normal";
+  const mode = String(job.mode || cronMeta.default_mode || DEFAULT_MODE)
+    .trim()
+    .toLowerCase();
   return TEAM_MODES.has(mode)
-    ? (cronMeta.default_team_timeout_seconds ?? 1200)
-    : (cronMeta.default_timeout_seconds ?? 600);
+    ? (cronMeta.default_team_timeout_seconds ?? 3600)
+    : (cronMeta.default_timeout_seconds ?? 3600);
 }
 
 function formatTimeoutLabel(
@@ -288,7 +307,7 @@ export function createCronCommand(): SlashCommand {
         name: "add",
         description: "创建定时任务",
         usage: "/cron add name=... cron_expr=\"...\" description=\"...\"",
-        argGuide: "name=任务名 cron_expr=\"时间表达式(5字段或7字段)\" description=\"让Agent做什么\" mode=agent.fast|team targets=tui (默认 agent.fast；mode=team 走 Team+SwarmFlow)",
+        argGuide: "name=任务名 cron_expr=\"时间表达式(5字段或7字段)\" description=\"让Agent做什么\" mode=agent.work.normal|team targets=tui (默认 agent.work.normal；mode=team 走 Team+SwarmFlow)",
         kind: CommandKind.BUILT_IN,
         takesArgs: true,
         action: async (ctx, args) => _handleAdd(ctx, `add ${args}`),

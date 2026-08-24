@@ -16,7 +16,12 @@ import { dirname, resolve } from "node:path";
 import { type TUI, type SelectItem, SelectList } from "@mariozechner/pi-tui";
 import { addInfo } from "../core/commands/helpers.js";
 import type { CliPiAppState } from "../app-state.js";
-import { openFileInEditor as openInExternalEditor, openFolderInExplorer, getEditorInfo } from "../core/utils/editor.js";
+import {
+  getEditorEnvironmentHint,
+  getEditorInfo,
+  openFileInEditor as openInExternalEditor,
+  openFolderInExplorer,
+} from "../core/utils/editor.js";
 import { collectOrderedMemoryFiles, type MemoryFile } from "../core/commands/builtins/memory.js";
 import {
   formatMemoryPathForDisplay,
@@ -139,7 +144,7 @@ export class MemoryViewController {
    */
   async getMemoryCompletions(sub: string): Promise<{ label: string; description: string }[]> {
     const ctx = this.appState.getCommandContext();
-    const mode = this.shortMode(ctx.mode ?? "code.normal");
+    const mode = this.shortMode(ctx.mode ?? "agent.code.normal");
 
     if (sub === "edit") {
       const { files, projectDir, userMemoryPath } = await collectOrderedMemoryFiles(ctx, mode).catch(() => ({
@@ -193,7 +198,7 @@ export class MemoryViewController {
     this.editing = false;
     this.editingPath = null;
     const ctx = this.appState.getCommandContext();
-    const fullMode = ctx.mode ?? "code.normal";
+    const fullMode = ctx.mode ?? "agent.code.normal";
     const projectDir = ctx.getCurrentProjectDir() || process.cwd();
     const initialTab: MemoryViewTab = tab ?? "edit";
 
@@ -298,15 +303,18 @@ export class MemoryViewController {
     lines.push(...this.renderTabBar(width));
     lines.push(padToWidth(palette.text.dim("─".repeat(width)), width));
     if (this.editing) {
-      // 不可操作态:列表冻结(对应 CC editFileInEditor 的 pause()+suspendStdin())。
-      // 显示编辑器来源,便于用户在编辑期间知道当前用的是哪个编辑器。
+      // 保留原列表并整体灰化，让用户清楚看到选择上下文已经进入不可操作态。
+      // 同步编辑器会在下一行的强制 render 后暂停 TUI，因此该画面会一直保留到编辑器退出。
+      for (const line of this.state.list.render(width)) {
+        lines.push(padToWidth(palette.text.dim(line), width));
+      }
       const { source, value } = getEditorInfo();
       const editorHint = source !== "default" ? ` (${source}="${value}")` : " (default editor)";
       const displayPath = this.editingPath
         ? getDisplayPath(this.editingPath, this.state.projectDir, this.state.gitRoot)
         : "";
       lines.push(padToWidth(palette.status.warning(`  Editing ${displayPath}${editorHint}`), width));
-      lines.push(padToWidth(palette.text.dim("  Close the editor to return — list frozen"), width));
+      lines.push(padToWidth(palette.text.dim("  Memory list disabled until the editor closes"), width));
     } else if (this.state.loading) {
       lines.push(padToWidth(palette.text.dim("  Loading..."), width));
     } else if (this.state.tab === "status") {
@@ -555,19 +563,28 @@ export class MemoryViewController {
         return;
       }
       // 打开编辑器前先冻结列表(进入不可操作态)。编辑器关闭后由 onExit 退出列表
-      // 并提示编辑成功(含编辑器来源与环境变量切换提示),与 CC memory.tsx 行为一致:
-      // CC 在 await editFileInEditor 期间 pause()+suspendStdin() 使对话框不可操作,
-      // 退出后 onDone() 输出单条 “Opened memory file at <path>” + 编辑器切换提示。
-      const { source, value } = getEditorInfo();
+      // 并提示编辑成功(含编辑器来源与环境变量切换提示)。
+      const editorEnvironmentHint = getEditorEnvironmentHint();
       this.editing = true;
       this.editingPath = filePath;
-      this.statusMessage = "Opening editor…";
-      this.tui.requestRender();
-      // GUI 编辑器：异步 spawn，TUI 不阻塞，编辑器关闭后通过 onExit 回调
-      // 终端编辑器：spawnSync 阻塞，tui.start() 后同步调用 onExit
-      this.openEditor(this.tui, filePath, () => {
-        this.handleEditComplete(filePath, source, value);
-      });
+      this.statusMessage = null;
+      // requestRender(true) is intentionally immediate: openFileInEditor may
+      // block the JS event loop. pi-tui schedules even forced renders on the
+      // next tick, so yield once to ensure the disabled list is painted first.
+      this.tui.requestRender(true);
+      await new Promise<void>((resolveRender) => setImmediate(resolveRender));
+      // 编辑器进程退出后触发回调；同步实现会在此期间停止 TUI 输入。
+      try {
+        await this.openEditor(this.tui, filePath, (success) => {
+          if (success === false) {
+            this.handleEditorOpenFailure("configured editor and fallback editor both failed");
+            return;
+          }
+          this.handleEditComplete(filePath, editorEnvironmentHint);
+        });
+      } catch (err) {
+        this.handleEditorOpenFailure(err instanceof Error ? err.message : String(err));
+      }
       return;
     }
     if (tab === "toggle" && item.value && item.value !== "__display__") {
@@ -620,36 +637,41 @@ export class MemoryViewController {
 
   /**
    * 编辑器退出后的收尾:清掉不可操作态,关闭 MemoryView(列表退出),
-   * 并向 transcript 写入一条信息。与 CC memory.tsx 行为对齐:
-   *  - 动词用 “Opened”(编辑器已打开过,不假设用户一定保存),而非 “saved”;
-   *  - 始终附上编辑器来源与环境变量切换提示(见下方 editorHint 措辞)。
+   * 并向 transcript 写入一条明确的编辑成功信息，同时附上编辑器来源与环境变量切换提示。
    * 不复用 close():close() 会额外写一条“Memory console dismissed”,
    * 与编辑成功提示重复,故这里静默置空 state,只保留一条提示。
    */
-  private handleEditComplete(filePath: string, source: string, value: string): void {
+  private handleEditComplete(filePath: string, editorEnvironmentHint: string): void {
     this.editing = false;
     this.editingPath = null;
     const sessionId = this.appState.getSnapshot().sessionId;
     const projectDir = this.state?.projectDir ?? "";
     const gitRoot = this.state?.gitRoot ?? null;
     const displayPath = getDisplayPath(filePath, projectDir, gitRoot);
-    // 措辞与 CC memory.tsx 的 editorHint 保持一致:
-    //   命中 $VISUAL/$EDITOR: “> Using $VAR="value". To change editor, set $EDITOR or $VISUAL environment variable.”
-    //   均未设置(默认):      “> To use a different editor, set the $EDITOR or $VISUAL environment variable.”
-    const editorHint = source !== "default"
-      ? `> Using ${source}="${value}". To change editor, set $EDITOR or $VISUAL environment variable.`
-      : `> To use a different editor, set the $EDITOR or $VISUAL environment variable.`;
-    this.appState.addItem(addInfo(sessionId, `Opened memory file at ${displayPath}\n\n${editorHint}`, "✓"));
+    this.appState.addItem(
+      addInfo(sessionId, `Memory file edited successfully: ${displayPath}\n\n> ${editorEnvironmentHint}`, "✓"),
+    );
     this.statusMessage = null;
     this.state = null;
     this.tui.requestRender();
   }
 
+  private handleEditorOpenFailure(reason: string): void {
+    this.editing = false;
+    this.editingPath = null;
+    this.statusMessage = `Failed to open editor: ${reason}`;
+    this.tui.requestRender(true);
+  }
+
   // ── 辅助方法 ──
 
   private shortMode(mode: string): string {
-    if (mode.startsWith("code")) return "code";
-    return mode.replace("agent.", "");
+    // 新三段命名 agent.code.* / team.code.* 也是 code profile（旧实现落到 "code.normal"，
+    // modeCategory 归到 agent，导致 code 会话不显示 auto_coding_memory 开关）。
+    if (mode.startsWith("code") || mode.startsWith("agent.code") || mode.startsWith("team.code")) return "code";
+    // agent.work.* / agent.plan 归到 canonical "agent"，避免发送 "work.normal" 等非 canonical 值。
+    if (mode.startsWith("agent")) return "agent";
+    return mode;
   }
 
   private modeCategory(mode: string): "agent" | "code" {

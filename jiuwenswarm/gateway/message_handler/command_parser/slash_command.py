@@ -46,6 +46,18 @@ class ModeSubcommand(str, Enum):
     CODE_PLAN = "code.plan"
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
+    TEAM_PLAN = "team.plan"
+    TEAM_PLAN_NORMAL = "team.plan.normal"
+    TEAM_PLAN_CODE = "team.plan.code"
+    # 新三段命名 canonical（P2 引入；旧成员保留）。
+    AGENT_WORK_NORMAL = "agent.work.normal"
+    AGENT_WORK_PLAN = "agent.work.plan"
+    AGENT_CODE_NORMAL = "agent.code.normal"
+    AGENT_CODE_PLAN = "agent.code.plan"
+    TEAM_WORK_NORMAL = "team.work.normal"
+    TEAM_WORK_PLAN = "team.work.plan"
+    TEAM_CODE_NORMAL = "team.code.normal"
+    TEAM_CODE_PLAN = "team.code.plan"
 
 
 _VALID_MODE_LINES: frozenset[str] = frozenset(
@@ -354,7 +366,7 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
     SlashCommandEntry(
         id="mode",
         canonical_text=f"{GatewaySlashCommand.MODE.value} agent|code|team|agent.plan|agent.fast|code.plan|"
-                       f"code.normal|code.team|team.plan",
+                       f"code.normal|code.team|team.plan|team.plan.normal|team.plan.code",
         scope="gateway",
         req_method=None,
         notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）；"

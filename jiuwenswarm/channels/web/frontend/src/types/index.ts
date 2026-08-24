@@ -8,6 +8,7 @@ export * from './skillTree';
 export * from './beamSearch';
 export * from './todo';
 export * from './websocket';
+export * from './subagent';
 export * from '../features/workspace/projectTypes';
 
 // 会话类型
@@ -16,6 +17,8 @@ export interface Session {
   title: string;
   project_id: string;
   project_dir: string;
+  /** Session 创建时锁定；true 表示启用 Persist Session，创建后不可修改。 */
+  persist_session?: boolean;
   work_mode?: import('../features/workspace/projectTypes').WorkMode;
   pinned?: boolean;
   pin_order?: number;
@@ -42,11 +45,21 @@ export interface Session {
 }
 
 export type AgentMode =
+  // UI 基础模式
   | 'agent'
   | 'agent.plan'
   | 'team'
   | 'auto'
-  | 'auto_harness';
+  | 'auto_harness'
+  // 新三段命名 canonical（与 TUI ClientMode 对齐，前端仍归一到基础模式）
+  | 'agent.work.normal'
+  | 'agent.work.plan'
+  | 'agent.code.normal'
+  | 'agent.code.plan'
+  | 'team.work.normal'
+  | 'team.work.plan'
+  | 'team.code.normal'
+  | 'team.code.plan';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
 export type Permission = 'default' | 'full_access';
 
@@ -71,6 +84,8 @@ export interface ModelEntry {
    * 新增条目不带此字段。
    */
   origin_index?: number;
+  /** 免费模型标识（如 Opencode Zen 免费模型）。前端据此归入"免费模型"分组；非免费模型不带此字段。 */
+  is_free?: boolean;
 }
 
 export interface OffloadFileListResponse {

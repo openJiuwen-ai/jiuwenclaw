@@ -1,4 +1,5 @@
 import { visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+import { formatModeForDisplay } from "../core/modes.js";
 import type { ConnectionStatus } from "../core/ws-client.js";
 import { padToWidth } from "./rendering/text.js";
 import { chalk } from "./theme.js";
@@ -84,12 +85,13 @@ export function buildWelcomeLines(
   const version = modelInfo.version || "0.1.0";
   const provider = modelInfo.provider || "";
   const model = modelInfo.model || "";
+  const displayMode = formatModeForDisplay(mode);
   if (width >= artWidth + 6) {
     const coloredArt = ART_TITLE_RAW.map((line, index) => {
       const coloredLine = applyGradient(line, index);
       return centerLine(coloredLine, width);
     });
-    const subtitle = chalk.hex("#FFFFFF")(`v${version} | Provider: ${provider} | Model: ${model} | Mode: ${mode}`);
+    const subtitle = chalk.hex("#FFFFFF")(`v${version} | Provider: ${provider} | Model: ${model} | Mode: ${displayMode}`);
     const poweredBy = chalk.hex("#FFFFFF")("Powered by ") + chalk.hex("#655795")("openJiuwen SDK") + chalk.hex("#FFFFFF")(` v${version} (`) + chalk.hex("#3a7378")("https://gitcode.com/openJiuwen/agent-core") + chalk.hex("#FFFFFF")(")");
     const cmdBoxWidth = 80;
     const cmdBoxLine = (content: string) => {
@@ -135,7 +137,7 @@ export function buildWelcomeLines(
   return [
     padToWidth(chalk.hex("#FFD700")("JIUWEN SWARM"), width),
     "",
-    padToWidth(chalk.hex("#FFFFFF")(`v${version} | Provider: ${provider} | Model: ${model} | Mode: ${mode}`), width),
+    padToWidth(chalk.hex("#FFFFFF")(`v${version} | Provider: ${provider} | Model: ${model} | Mode: ${displayMode}`), width),
     padToWidth(chalk.hex("#FFFFFF")("Powered by ") + chalk.hex("#655795")("openJiuwen SDK") + chalk.hex("#FFFFFF")(` v${version}`), width),
     padToWidth(chalk.hex("#3a7378")("https://gitcode.com/openJiuwen/agent-core"), width),
     "",

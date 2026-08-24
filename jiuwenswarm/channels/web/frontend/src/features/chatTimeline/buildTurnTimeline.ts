@@ -231,9 +231,17 @@ function consolidateReasoning(items: RenderItem[], isTeamMode: boolean): RenderI
         const mergedText = [prev.segment.text, item.segment.text]
           .filter((text) => text.trim())
           .join('\n\n');
+        // 合并时推进末帧时刻，避免后一段较新的 updatedAt 被前一段覆盖导致耗时少算
+        const mergedUpdatedAt =
+          Math.max(prev.segment.updatedAt ?? 0, item.segment.updatedAt ?? 0) || undefined;
         out[out.length - 1] = {
           ...prev,
-          segment: { ...prev.segment, text: mergedText, closed: item.segment.closed },
+          segment: {
+            ...prev.segment,
+            text: mergedText,
+            closed: item.segment.closed,
+            updatedAt: mergedUpdatedAt,
+          },
         };
         continue;
       }
@@ -266,6 +274,16 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
   };
 
   const pushMessage = (item: Extract<TimelineItem, { type: 'message' }>) => {
+    // 主动推荐消息是系统后台触发的主 agent 话术，不是用户这一轮的回复。
+    // assistant 消息默认沿用 currentTurnId（与上一轮同 turn），会让推荐消息并入
+    // 上一轮 turn——既存 proactive 补丁（buildTurnWorkMeta）据此把该 turn 的
+    // hasWork 置 false，误伤上一轮：上一轮 reasoning 从折叠的 turn chip
+    // （「已完成」）变成展开的 ReasoningBlock（「已完成思考」+ team_leader avatar）。
+    // 给 proactive 消息推进一个独立 turnId，自成一块。insertTurnSummaries 里
+    // 对 proactive 消息做了同样的 flush+turnId+1，两者保持同步。
+    if (item.message.role !== 'user' && item.message.isProactiveRecommendation) {
+      currentTurnId += 1;
+    }
     renderItems.push({
       type: 'message',
       key: item.key,
@@ -330,7 +348,13 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
     if (isAssistantReply) {
       const inRunningTurn = isProcessing && renderItem.turnId === activeTurnId;
       renderItem.hideMeta = laterAssistantInTurn || inRunningTurn;
-      laterAssistantInTurn = true;
+      // 主动推荐消息是系统后台插入的推荐卡片，不是用户这一轮的后续回复。
+      // 若让它置 laterAssistantInTurn=true，会把它前面的上一轮回复当成「中间文字」
+      // 折叠进 turn chip，导致上一轮 agent 回复正文被整个收起（只剩「已完成」）。
+      // proactive 消息自成一块，不影响其前方回复的折叠判定。
+      if (!renderItem.message.isProactiveRecommendation) {
+        laterAssistantInTurn = true;
+      }
     }
   }
 
@@ -466,6 +490,17 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       out.push(item);
       continue;
     }
+    // 主动推荐消息自成一块（与 buildRenderItems 里推进 currentTurnId 对齐）：
+    // 先 flush 掉上一轮，再 +1 进入新 turn，避免推荐消息并入上一轮导致
+    // buildTurnWorkMeta 的 proactive 补丁误把上一轮 hasWork 置 false。
+    if (
+      item.type === 'message' &&
+      item.message.role !== 'user' &&
+      item.message.isProactiveRecommendation
+    ) {
+      flush(false);
+      turnId += 1;
+    }
     if (item.type === 'toolGroup') {
       hasActivity = true;
       hasWork = true;
@@ -490,6 +525,10 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       // reasoning.startedAt 必须是真实 epoch ms；忽略 0/过小哨兵，避免撑爆耗时
       if (item.segment.startedAt > 1_000_000_000_000) {
         acc(item.segment.startedAt, true);
+      }
+      // 每个 delta 到达都推进 updatedAt，作为不依赖收尾事件的耗时终点兜底
+      if (typeof item.segment.updatedAt === 'number' && item.segment.updatedAt > 1_000_000_000_000) {
+        acc(item.segment.updatedAt, true);
       }
       if (typeof item.segment.closedAt === 'number' && item.segment.closedAt > 1_000_000_000_000) {
         acc(item.segment.closedAt, true);
@@ -670,9 +709,22 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
       map.set(item.turnId, next);
     }
   }
+  // 收集含主动推荐消息的 turnId：proactive 消息是系统插入的推荐（带
+  // isProactiveRecommendation 标记），不该和用户那轮混在一起触发 turn 折叠——
+  // 否则 proactive 触发的主 agent 这轮（带工具/思考）会让用户上一轮回复被收起。
+  // 把含 proactive 的 turn 的 hasWork 置 false，让它不 foldable，上一轮回复保持展开。
+  const proactiveTurnIds = new Set<number>();
+  for (const item of items) {
+    if (item.type === 'message' && item.message?.isProactiveRecommendation) {
+      proactiveTurnIds.add(item.turnId);
+    }
+  }
   for (const meta of map.values()) {
     if (meta.thinkingCount > 0 || meta.toolCount > 0) {
       meta.hasWork = true;
+    }
+    if (proactiveTurnIds.has(meta.turnId)) {
+      meta.hasWork = false;
     }
     const isLast = Number.isFinite(lastTurnId) && meta.turnId === lastTurnId;
     meta.completed = !(isProcessing && isLast);

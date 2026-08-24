@@ -69,6 +69,9 @@ export default {
           DEFAULT: color('--color-action-secondary'),
           foreground: color('--color-action-secondary-text'),
         },
+        chat: {
+          accent: 'var(--color-chat-accent)',
+        },
         control: {
           emphasis: color('--color-control-emphasis'),
           'emphasis-foreground': color('--color-control-emphasis-text'),
@@ -98,6 +101,12 @@ export default {
           'action-link': color('--color-cron-action-link'),
           'auto-managed-surface': color('--color-cron-auto-managed-surface'),
           'auto-managed-text': color('--color-cron-auto-managed-text'),
+        },
+        connector: {
+          'tag-surface': color('--color-connector-tag-surface'),
+          'tool-icon-surface': color('--color-connector-tool-icon-surface'),
+          'tool-icon-border': color('--color-connector-tool-icon-border'),
+          'add-hover-surface': color('--color-connector-add-hover-surface'),
         },
         overlay: {
           'cron-dialog': color('--color-overlay-cron-dialog'),

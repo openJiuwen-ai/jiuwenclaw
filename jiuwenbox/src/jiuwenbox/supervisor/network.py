@@ -378,6 +378,7 @@ class UplinkHandle:
     subnet: str
     uplink_if: str
     nat: bool
+    sandbox_ip: str
     management_ports: list[int] = field(default_factory=list)
     forward_rules: list[list[str]] = field(default_factory=list)
 
@@ -536,6 +537,72 @@ def resolve_uplink_interface(interface: str) -> str:
         if "dev" in parts:
             return parts[parts.index("dev") + 1]
     raise NetworkSetupError("No default route interface found for uplink")
+
+
+def _is_usable_egress_ipv4(value: str) -> bool:
+    try:
+        address = ipaddress.IPv4Address(value)
+    except ValueError:
+        return False
+    return not (address.is_loopback or address.is_unspecified or address.is_link_local)
+
+
+def resolve_host_egress_ipv4() -> str | None:
+    """Best-effort IPv4 egress address for the current network namespace.
+
+    Prefer the kernel-selected ``src`` from ``ip -4 route get 1.1.1.1``.
+    Fall back to the first usable global address when route lookup fails.
+    Returns ``None`` when no usable address can be resolved.
+    """
+    try:
+        route = subprocess.run(
+            [IP_BINARY, "-4", "route", "get", "1.1.1.1"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        logger.debug("Failed to resolve host egress IPv4 via route get: %s", exc)
+        route = None
+
+    if route is not None and route.returncode == 0:
+        parts = route.stdout.split()
+        if "src" in parts:
+            candidate = parts[parts.index("src") + 1]
+            if _is_usable_egress_ipv4(candidate):
+                return candidate
+
+    try:
+        addresses = subprocess.run(
+            [IP_BINARY, "-4", "-o", "addr", "show", "scope", "global"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        logger.debug("Failed to list host global IPv4 addresses: %s", exc)
+        return None
+
+    if addresses.returncode != 0:
+        logger.debug(
+            "Failed to list host global IPv4 addresses: %s",
+            addresses.stderr.strip() or addresses.stdout.strip(),
+        )
+        return None
+
+    for line in addresses.stdout.splitlines():
+        parts = line.split()
+        if "inet" not in parts:
+            continue
+        inet_index = parts.index("inet")
+        if inet_index + 1 >= len(parts):
+            continue
+        candidate = parts[inet_index + 1].split("/", 1)[0]
+        if _is_usable_egress_ipv4(candidate):
+            return candidate
+
+    logger.debug("No usable host egress IPv4 address found")
+    return None
 
 
 def ensure_ip_forward() -> None:
@@ -730,11 +797,13 @@ def setup_network_uplink(
         raise
 
     logger.info(
-        "Network uplink applied for sandbox %s: host_if=%s sandbox_if=%s subnet=%s uplink_if=%s nat=%s",
+        "Network uplink applied for sandbox %s: host_if=%s sandbox_if=%s "
+        "subnet=%s sandbox_ip=%s uplink_if=%s nat=%s",
         sandbox_id,
         host_if,
         sandbox_if,
         subnet,
+        sandbox_ip,
         uplink_if,
         uplink.nat,
     )
@@ -744,6 +813,7 @@ def setup_network_uplink(
         subnet=subnet,
         uplink_if=uplink_if,
         nat=uplink.nat,
+        sandbox_ip=str(sandbox_ip),
         management_ports=protected_ports,
         forward_rules=applied_forward_rules,
     )
@@ -861,6 +931,19 @@ def apply_iptables_rules(
     _apply_ingress_rules(ingress_rules, namespace=namespace)
 
 
+def flush_filter_rules(namespace: str | None = None) -> None:
+    """Flush filter-table INPUT/OUTPUT chains inside a network namespace.
+
+    Resets chain policies to ACCEPT so a subsequent
+    :func:`setup_network_isolation` can rebuild rules from scratch.
+    Does not touch NAT/FORWARD or host-side uplink rules.
+    """
+    for chain in ("INPUT", "OUTPUT"):
+        _run_iptables_both(["-F", chain], namespace=namespace)
+        _run_iptables_both(["-P", chain, "ACCEPT"], namespace=namespace)
+    logger.info("Flushed filter INPUT/OUTPUT rules in namespace %s", namespace or "current")
+
+
 def setup_network_isolation(policy: NetworkPolicy, namespace: str | None = None) -> None:
     """Top-level entry point for network isolation setup.
 
@@ -874,3 +957,18 @@ def setup_network_isolation(policy: NetworkPolicy, namespace: str | None = None)
     egress_rules = build_network_rules(policy.egress)
     ingress_rules = build_network_rules(policy.ingress)
     apply_iptables_rules(egress_rules, ingress_rules, namespace=namespace)
+
+
+def replace_network_isolation(policy: NetworkPolicy, namespace: str | None = None) -> None:
+    """Replace egress/ingress iptables rules in an existing network namespace.
+
+    Flushes the current filter INPUT/OUTPUT chains, then reapplies rules
+    from ``policy`` the same way :func:`setup_network_isolation` does at
+    create time. Host-side NAT/uplink state is left untouched.
+    """
+    if policy.mode == NetworkMode.HOST:
+        logger.info("Network mode is 'host', skipping isolation replace")
+        return
+
+    flush_filter_rules(namespace=namespace)
+    setup_network_isolation(policy, namespace=namespace)

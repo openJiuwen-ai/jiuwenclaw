@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
+from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
 
 class _FakeRootAgent:
@@ -70,6 +71,45 @@ async def _wait_until(predicate, *, attempts: int = 100) -> None:
     raise AssertionError("condition did not become true")
 
 
+@pytest.mark.asyncio
+async def test_persist_session_is_create_identity_but_not_warm_key() -> None:
+    class WarmPool:
+        def __init__(self):
+            self.claim_calls = 0
+
+        @staticmethod
+        def make_key(**kwargs):
+            return AgentWarmPool.make_key(**kwargs)
+
+        async def claim(self, _key):
+            self.claim_calls += 1
+            return object()
+
+    warm_pool = WarmPool()
+    manager = object.__new__(AgentManager)
+    manager.warm_pool = warm_pool
+    manager._session_create_token_lock = asyncio.Lock()
+    manager._session_create_tokens = {}
+    params = {
+        "channel_id": "web",
+        "project_id": "default",
+        "project_dir": "",
+        "work_mode": "work",
+        "is_swarm": False,
+        "prewarm_eligible": True,
+        "create_token": "stable-token",
+    }
+
+    first = await manager.claim_prewarmed_session(**params, persist_session=True)
+    second = await manager.claim_prewarmed_session(**params, persist_session=True)
+
+    assert first is second
+    assert warm_pool.claim_calls == 1
+    with pytest.raises(ValueError, match="different session parameters"):
+        await manager.claim_prewarmed_session(**params, persist_session=False)
+    assert warm_pool.claim_calls == 1
+
+
 @pytest.fixture
 def isolated_pool(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
@@ -82,14 +122,14 @@ def isolated_pool(monkeypatch, tmp_path: Path):
     )
 
     def factory(agent: _FakeRootAgent) -> AgentWarmPool:
-        # Prewarming is on by default; stay explicit so a developer environment
-        # that opts out cannot silently turn these cases into no-ops.
+        # Prewarming is off by default; stay explicit so a developer environment
+        # that opts in cannot silently turn these cases into no-ops.
         return AgentWarmPool(_FakeManager(agent), max_concurrency=4, enabled=True)
 
     yield factory
 
 
-def test_prewarm_is_enabled_unless_the_environment_opts_out(
+def test_prewarm_is_disabled_unless_the_environment_opts_in(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
@@ -101,7 +141,7 @@ def test_prewarm_is_enabled_unless_the_environment_opts_out(
         return AgentWarmPool(_FakeManager(_FakeRootAgent()))
 
     monkeypatch.delenv("JIUWENSWARM_AGENT_PREWARM", raising=False)
-    assert build()._enabled is True
+    assert build()._enabled is False
 
     monkeypatch.setenv("JIUWENSWARM_AGENT_PREWARM", " OFF ")
     assert build()._enabled is False

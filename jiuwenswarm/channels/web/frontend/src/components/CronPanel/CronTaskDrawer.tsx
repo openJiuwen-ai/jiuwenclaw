@@ -13,7 +13,7 @@ import { cronExprToSchedule, isOnceScheduleExpired } from './scheduleConvert';
 import { TIMEZONE_OPTIONS } from './constants';
 import { isDefaultLikeProject } from './cronProjectDisplay';
 import type { CronTaskUI, CronTemplateUI } from '../../types/cron';
-import type { ProjectInfo } from '../../features/workspace/projectTypes';
+import type { ProjectInfo, WorkMode } from '../../features/workspace/projectTypes';
 import { getProjectDisplayName } from '../../stores/workspaceStore';
 import type { AgentMode } from '../../types';
 // 会话输入框工具栏那一套 .chat-mode-select pill 下拉组件（模式/模型选择器）的 CSS，
@@ -42,6 +42,9 @@ export interface CronTaskFormValue {
   // project_dir 反查可见项目——只传 project_dir 会多走一层查找，带上 projectId 更直接、更可靠
   // （与会话内 cron_create_job 工具调用那条链路天然自带 project_id 的行为对齐）。
   projectId: string | null;
+  // 与 projectId 配套的 work_mode（AgentOS 多用户下 Gateway 不再本地反查项目表，
+  // work_mode 需由前端随 project_id 一并下发；见 index.tsx handleCreateSubmit）。
+  workMode: WorkMode | null;
   modelName: string | null;
   description: string;
   /** 执行模式：单Agent('agent')/集群('team')，下发到后端 CronJob.mode（见 index.tsx handleCreateSubmit/handleEditSubmit） */
@@ -60,6 +63,7 @@ function emptyForm(): CronTaskFormValue {
     name: '',
     projectDir: null,
     projectId: null,
+    workMode: null,
     modelName: null,
     description: '',
     mode: 'agent',
@@ -77,6 +81,7 @@ export function jobToForm(job: CronTaskUI): CronTaskFormValue {
     name: job.name,
     projectDir: null,
     projectId: null,
+    workMode: null,
     modelName: job.modelName,
     description: job.description,
     mode: job.mode,
@@ -94,6 +99,7 @@ export function templateToForm(tpl: CronTemplateUI, title: string, description: 
     name: title,
     projectDir: null,
     projectId: null,
+    workMode: null,
     modelName: null,
     description,
     mode: 'agent',
@@ -136,6 +142,12 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
   const { t } = useTranslation();
   const [form, setForm] = useState<CronTaskFormValue>(initial ?? emptyForm());
 
+  const handleModeChange = (nextMode: AgentMode) => {
+    setForm((current) => ({ ...current, mode: nextMode }));
+  };
+
+  const submittedForm = form;
+
   const title = mode === 'edit' ? t('cron.drawer.titleEdit') : mode === 'template' ? t('cron.drawer.titleTemplate') : t('cron.drawer.titleCreate');
   // 显式加一条 value 为空串的"-"选项，代表"未选项目"，放在真实项目列表最后面（列表顺序：
   // 真实项目在前，"-"清空项在最后）。SimpleSelect 按 value 严格匹配，真实项目的 project_dir
@@ -165,18 +177,21 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
   const lockedTitle = proactiveLocked ? t('cron.autoManagedToggleDisabled') ?? undefined : undefined;
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-overlay-cron-drawer" onClick={onClose}>
+    <div className="fixed inset-0 z-40 flex justify-end bg-overlay-cron-drawer" data-testid="cron-drawer-overlay" onClick={onClose}>
       <div
         className="relative flex h-full w-[560px] flex-col overflow-y-auto bg-card p-6 shadow-xl animate-slide-in-right"
+        data-testid="cron-drawer"
+        data-variant={mode}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-6 flex items-center justify-between">
-          <h3 className="text-2xl font-bold text-text-strong">{title}</h3>
+          <h3 className="text-2xl font-bold text-text-strong" data-testid="cron-drawer-title" data-variant={mode}>{title}</h3>
           <div className="flex items-center gap-3">
             {mode === 'template' && onSwitchToManual && (
               <button
                 type="button"
                 onClick={onSwitchToManual}
+                data-testid="cron-drawer-switch-to-manual-btn"
                 className="flex items-center gap-1 text-sm text-text hover:opacity-70"
               >
                 <Pencil size={14} /> {t('cron.drawer.switchToManual')}
@@ -186,12 +201,13 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
               <button
                 type="button"
                 onClick={onSwitchToTemplate}
+                data-testid="cron-drawer-switch-to-template-btn"
                 className="flex items-center gap-1 text-sm text-text hover:opacity-70"
               >
                 <TemplateClusterIcon size={14} /> {t('cron.drawer.switchToTemplate')}
               </button>
             )}
-            <button onClick={onClose} className="text-text-muted hover:text-text">
+            <button onClick={onClose} data-testid="cron-drawer-close-btn" className="text-text-muted hover:text-text">
               <X size={18} />
             </button>
           </div>
@@ -199,15 +215,15 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
 
         <div className="flex flex-col gap-5">
           {proactiveLocked && (
-            <p className="rounded-md bg-bg-muted px-3 py-2 text-xs text-text-muted">{t('cron.autoManagedHint')}</p>
+            <p className="rounded-md bg-bg-muted px-3 py-2 text-xs text-text-muted" data-testid="cron-drawer-locked-hint">{t('cron.autoManagedHint')}</p>
           )}
 
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-2">
-              <label className="block text-sm font-bold text-text-strong">
+              <label className="block text-sm font-bold text-text-strong" data-testid="cron-drawer-name-label">
                 {t('cron.drawer.fieldName')} <span className="text-danger">*</span>
               </label>
-              <span className={`shrink-0 text-xs ${form.name.length >= CRON_NAME_MAX_LENGTH ? 'text-danger' : 'text-text-muted'}`}>
+              <span data-testid="cron-drawer-name-counter" className={`shrink-0 text-xs ${form.name.length >= CRON_NAME_MAX_LENGTH ? 'text-danger' : 'text-text-muted'}`}>
                 {t('cron.drawer.charCount', { count: form.name.length, max: CRON_NAME_MAX_LENGTH })}
               </span>
             </div>
@@ -219,6 +235,7 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
               maxLength={CRON_NAME_MAX_LENGTH}
               disabled={proactiveLocked}
               title={lockedTitle}
+              data-testid="cron-drawer-name-input"
               className={fieldClass}
             />
             {form.name.length >= CRON_NAME_MAX_LENGTH && (
@@ -227,15 +244,15 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
           </div>
 
           {mode !== 'edit' && (
-            <div>
-              <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldProject')}</label>
+            <div data-testid="cron-simple-select-2">
+              <label className="mb-1.5 block text-sm font-bold text-text-strong" data-testid="cron-drawer-project-label">{t('cron.drawer.fieldProject')}</label>
               <SimpleSelect
                 value={form.projectDir ?? ''}
                 onChange={(v) => {
                   // SimpleSelect 只回传 value（即 project_dir），这里按 project_dir 反查出
-                  // 对应的 project_id 一并写入表单，提交时两者一起下发（见 CronTaskFormValue.projectId 注释）
+                  // 对应的 project_id + work_mode 一并写入表单，提交时一起下发（见 CronTaskFormValue.projectId/workMode 注释）
                   const matched = v ? filterNonDefaultProjects(projects).find((p) => p.project_dir === v) : undefined;
-                  setForm({ ...form, projectDir: v || null, projectId: matched?.project_id ?? null });
+                  setForm({ ...form, projectDir: v || null, projectId: matched?.project_id ?? null, workMode: matched?.work_mode ?? null });
                 }}
                 options={projectOptions}
                 placeholder={t('cron.drawer.placeholderProject') ?? undefined}
@@ -245,10 +262,10 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
 
           <div>
             <div className="mb-1.5 flex items-center justify-between gap-2">
-              <label className="block text-sm font-bold text-text-strong">
+              <label className="block text-sm font-bold text-text-strong" data-testid="cron-drawer-description-label">
                 {t('cron.drawer.fieldDescription')} <span className="text-danger">*</span>
               </label>
-              <span className={`shrink-0 text-xs ${form.description.length >= CRON_DESCRIPTION_MAX_LENGTH ? 'text-danger' : 'text-text-muted'}`}>
+              <span data-testid="cron-drawer-description-counter" className={`shrink-0 text-xs ${form.description.length >= CRON_DESCRIPTION_MAX_LENGTH ? 'text-danger' : 'text-text-muted'}`}>
                 {t('cron.drawer.charCount', { count: form.description.length, max: CRON_DESCRIPTION_MAX_LENGTH })}
               </span>
             </div>
@@ -259,7 +276,7 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
             {/* fieldClass 自带的 focus:border-accent 对这个容器 div 本身不会触发（div 不可聚焦）；
                 额外加 focus-within:border-accent，textarea 获得焦点时通过子元素状态高亮容器边框，
                 避免用户聚焦描述框时完全没有视觉反馈（见 review G3）。 */}
-            <div className={`${fieldClass} focus-within:border-accent flex flex-col gap-2 p-0`}>
+            <div className={`${fieldClass} focus-within:border-accent flex flex-col gap-2 p-0`} data-testid="cron-drawer-description-field">
               <textarea
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
@@ -268,15 +285,20 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
                 maxLength={CRON_DESCRIPTION_MAX_LENGTH}
                 disabled={proactiveLocked}
                 title={lockedTitle}
+                data-testid="cron-drawer-description-input"
                 className="w-full resize-none border-0 bg-transparent px-3 py-1.5 text-sm text-text outline-none placeholder:text-text-muted disabled:cursor-not-allowed disabled:opacity-50"
               />
-              <div className="cron-drawer-mode-model-row flex items-center gap-1.5 border-t border-border/60 px-1 py-1">
+              <div className="cron-drawer-mode-model-row flex items-center gap-1.5 border-t border-border/60 px-1 py-1" data-testid="cron-drawer-mode-model-row">
                 <ModeSelector
                   value={form.mode}
-                  onChange={(m) => setForm({ ...form, mode: m })}
+                  onChange={handleModeChange}
                   disabled={proactiveLocked}
                 />
-                <ModelPicker value={form.modelName} onChange={(modelName) => setForm({ ...form, modelName })} disabled={proactiveLocked} />
+                <ModelPicker
+                  value={form.modelName}
+                  onChange={(modelName) => setForm({ ...form, modelName })}
+                  disabled={proactiveLocked}
+                />
               </div>
             </div>
             {form.description.length >= CRON_DESCRIPTION_MAX_LENGTH && (
@@ -284,8 +306,8 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
             )}
           </div>
 
-          <div>
-            <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldChannel')}</label>
+          <div data-testid="cron-simple-select-3">
+            <label className="mb-1.5 block text-sm font-bold text-text-strong" data-testid="cron-drawer-channel-label">{t('cron.drawer.fieldChannel')}</label>
             <SimpleSelect
               value={form.targets}
               onChange={(v) => setForm({ ...form, targets: v })}
@@ -303,8 +325,8 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
             wakeOffsetDisabled={proactiveLocked}
           />
 
-          <div>
-            <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldTimezone')}</label>
+          <div data-testid="cron-simple-select-4">
+            <label className="mb-1.5 block text-sm font-bold text-text-strong" data-testid="cron-drawer-timezone-label">{t('cron.drawer.fieldTimezone')}</label>
             <SimpleSelect
               value={form.timezone}
               onChange={(v) => setForm({ ...form, timezone: v })}
@@ -313,7 +335,7 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
           </div>
 
           {CRON_EFFECTIVE_DATE_UI_ENABLED && (
-            <div>
+            <div data-testid="cron-date-picker-1">
               <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldEffectiveDate')}</label>
               <DatePicker
                 value={form.effectiveDate ?? ''}
@@ -330,13 +352,15 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
               disabled={proactiveLocked}
               title={lockedTitle}
               onClick={() => setForm({ ...form, enabled: !form.enabled })}
+              data-testid="cron-drawer-enabled-toggle"
+              data-variant={form.enabled ? 'enabled' : 'disabled'}
               className={`inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${form.enabled ? 'bg-accent' : 'bg-border-strong'}`}
             >
               <span
                 className={`inline-block h-4 w-4 transform rounded-full bg-card transition-transform ${form.enabled ? 'translate-x-6' : 'translate-x-1'}`}
               />
             </button>
-            <span className="text-sm font-bold text-text">
+            <span className="text-sm font-bold text-text" data-testid="cron-drawer-enabled-label" data-variant={form.enabled ? 'enabled' : 'disabled'}>
               {form.enabled ? t('cron.status.enabled') : t('cron.status.disabled')}
             </span>
           </div>
@@ -351,8 +375,9 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
                 提示渠道，span 上的 title 只是锦上添花的 hover 备份。 */}
             <span title={missingFieldsHint}>
               <button
-                onClick={() => onSubmit(form)}
+                onClick={() => onSubmit(submittedForm)}
                 disabled={!canSubmit}
+                data-testid="cron-drawer-submit-btn"
                 className="rounded-full bg-cron-action px-10 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:opacity-50"
               >
                 {t('cron.actions.confirm')}
@@ -360,13 +385,14 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
             </span>
             <button
               onClick={onClose}
+              data-testid="cron-drawer-cancel-btn"
               className="rounded-full border border-border bg-card px-10 py-1.5 text-sm font-bold text-text hover:bg-bg-hover"
             >
               {t('common.cancel')}
             </button>
           </div>
           {missingFieldsHint && (
-            <p className="text-xs text-danger">{missingFieldsHint}</p>
+            <p className="text-xs text-danger" data-testid="cron-drawer-missing-hint">{missingFieldsHint}</p>
           )}
         </div>
       </div>

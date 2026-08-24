@@ -2,7 +2,7 @@
  * TeamArea component - cluster mode task overview and member execution detail.
  */
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FileCheck2, FileText, Minimize2 } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -22,7 +22,7 @@ import {
 } from './shared';
 import { getTasksForCurrentProgress } from '../../features/teamTaskProgressBaseline';
 
-function useTaskPlanningMetrics() {
+export function useTaskPlanningMetrics() {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
   const teamTaskEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskEvents ?? []);
@@ -34,6 +34,12 @@ function useTaskPlanningMetrics() {
       : teamTasks,
     [taskProgressBaseline, teamTasks]
   );
+
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 3_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const totalTasks = useMemo(() => {
     if (teamTasks.length > 0) return teamTasks.length;
@@ -61,7 +67,7 @@ function useTaskPlanningMetrics() {
     return completed.size;
   }, [teamTaskEvents, teamTasks, todos]);
 
-  return { completedTasks, progressTasks, teamTasks, totalTasks };
+  return { completedTasks, progressTasks, teamTasks, totalTasks, now };
 }
 
 function CompactTeamArea({
@@ -71,7 +77,7 @@ function CompactTeamArea({
   members: TeamMember[];
   onExpand?: (tab: TabType, memberId?: string) => void;
 }) {
-  const { completedTasks, progressTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
+  const { completedTasks, progressTasks, teamTasks, totalTasks, now } = useTaskPlanningMetrics();
 
   return (
     <>
@@ -79,6 +85,7 @@ function CompactTeamArea({
         variant="compact"
         tasks={teamTasks}
         progressTasks={progressTasks}
+        now={now}
         members={members}
         totalTasks={totalTasks}
         completedTasks={completedTasks}
@@ -125,7 +132,7 @@ function ExpandedTeamArea({
   reviewPanel?: ReactNode;
 }) {
   const { t } = useTranslation();
-  const { completedTasks, progressTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
+  const { completedTasks, progressTasks, teamTasks, totalTasks, now } = useTaskPlanningMetrics();
   const artifactsCount = useSessionArtifactsCount();
   const resolvedTab =
     (activeTab === 'artifacts' && artifactsCount === 0) ||
@@ -166,12 +173,14 @@ function ExpandedTeamArea({
   ];
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-card">
-      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border">
+    <div className="flex h-full flex-col overflow-hidden bg-card" data-testid="team-area-expanded-root">
+      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border" data-testid="team-area-tab-bar">
         <div className="flex items-center gap-2">
           {tabs.map((tab) => (
             <button
               key={tab.key}
+              data-testid="team-area-tab-button"
+              data-variant={tab.key}
               className={`h-9 rounded-lg px-4 text-sm  flex items-center gap-2 ${
                 resolvedTab === tab.key
                   ? 'bg-secondary font-medium text-text'
@@ -187,6 +196,7 @@ function ExpandedTeamArea({
 
         <button
           onClick={onCollapse}
+          data-testid="team-area-collapse-button"
           className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
           title={t('team.collapse')}
         >
@@ -194,12 +204,13 @@ function ExpandedTeamArea({
         </button>
       </div>
 
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden" data-testid="team-area-expanded-body">
         {resolvedTab === 'planning' ? (
           <TaskPlanningPanel
             variant="expanded"
             tasks={teamTasks}
             progressTasks={progressTasks}
+            now={now}
             members={members}
             totalTasks={totalTasks}
             completedTasks={completedTasks}

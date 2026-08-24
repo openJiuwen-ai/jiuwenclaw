@@ -12,7 +12,7 @@ import { CommandKind, type CommandContext, type SlashCommand } from "../types.js
  * Handles: absolute paths (/Users/...), home-relative (~/...), cwd-relative (./..., ../...),
  * and bare names. Returns only directories (not files).
  */
-function completeDirPath(partial: string): string[] {
+export function completeDirPath(partial: string): string[] {
   const trimmed = partial.trim();
 
   // Expand ~ to home directory
@@ -71,6 +71,28 @@ function completeDirPath(partial: string): string[] {
 
   results.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
   return results;
+}
+
+export type ProjectScopeSwitchResult =
+  | { ok: true; projectDir: string; trustedDirs: string[] }
+  | { ok: false; reason: "not_found" | "invalid" | "no_access" };
+
+/** Reuse `/workspace set` semantics without duplicating permission state logic. */
+export function switchProjectScope(ctx: CommandContext, rawPath: string): ProjectScopeSwitchResult {
+  const validation = ctx.validateDirPath(rawPath);
+  if (validation !== "valid") {
+    return { ok: false, reason: validation };
+  }
+
+  ctx.setCurrentProjectDir(rawPath);
+  ctx.addTrustedDir(rawPath);
+  const projectDir = ctx.getCurrentProjectDir();
+  try {
+    ctx.sendEventOnly("command.add_dir", { path: projectDir, remember: true });
+  } catch (error) {
+    console.warn("Failed to sync trusted directory to server:", error);
+  }
+  return { ok: true, projectDir, trustedDirs: ctx.getTrustedDirs() };
 }
 
 function showAllTrustedPaths(ctx: CommandContext): void {
@@ -192,47 +214,60 @@ export function createWorkspaceCommand(): SlashCommand {
             return;
           }
 
-          // Validate path without modifying state
-          const result = ctx.validateDirPath(rawPath);
-          if (result === "not_found") {
+          const result = switchProjectScope(ctx, rawPath);
+          if (!result.ok && result.reason === "not_found") {
             ctx.addItem(addError(ctx.sessionId, `Path does not exist: ${rawPath}`));
             return;
           }
-          if (result === "invalid") {
+          if (!result.ok && result.reason === "invalid") {
             ctx.addItem(addError(ctx.sessionId, `Path is not a directory: ${rawPath}`));
             return;
           }
-          if (result === "no_access") {
+          if (!result.ok && result.reason === "no_access") {
             ctx.addItem(addError(ctx.sessionId, `Permission denied: cannot access directory ${rawPath}`));
             return;
           }
-
-          // Switch project scope to the new directory (absolute path)
-          ctx.setCurrentProjectDir(rawPath);
-          // Add the new directory itself as a trusted dir for this project
-          ctx.addTrustedDir(rawPath);
-          // Sync to server-side permissions
+          if (!result.ok) return;
+          const rebindItems: Array<{ label: string; value: string }> = [
+            { label: "project scope", value: result.projectDir },
+            ...result.trustedDirs.map((dir, i) => ({ label: `trusted[${i}]`, value: dir })),
+          ];
           try {
-            ctx.sendEventOnly("command.add_dir", {
-              path: ctx.getCurrentProjectDir(),
-              remember: true
+            const rebind = await ctx.request<{
+              session_id?: string;
+              project_id?: string;
+              project_dir?: string;
+              project_name?: string;
+              work_mode?: string;
+            }>("session.rebind_project", {
+              session_id: ctx.sessionId,
+              project_dir: result.projectDir,
             });
+            rebindItems.push(
+              { label: "rebind project", value: rebind?.project_name || rebind?.project_id || "" },
+              { label: "rebind project_id", value: rebind?.project_id || "" },
+              { label: "work_mode", value: rebind?.work_mode || "" },
+            );
+            ctx.addItem(
+              addInfo(
+                ctx.sessionId,
+                `Project scope switched & session rebound: ${result.projectDir}`,
+                "c",
+                { view: "kv", title: "Set Trusted Dir", items: rebindItems },
+              ),
+            );
           } catch (error) {
-            console.warn("Failed to sync trusted directory to server:", error);
+            const message = error instanceof Error ? error.message : String(error);
+            rebindItems.push({ label: "rebind", value: `failed: ${message}` });
+            ctx.addItem(
+              addInfo(
+                ctx.sessionId,
+                `Project scope switched but session rebind failed: ${message}`,
+                "c",
+                { view: "kv", title: "Set Trusted Dir", items: rebindItems },
+              ),
+            );
           }
-
-          const projectDir = ctx.getCurrentProjectDir();
-          const finalDirs = ctx.getTrustedDirs();
-          ctx.addItem(
-            addInfo(ctx.sessionId, `Project scope switched: ${projectDir}`, "c", {
-              view: "kv",
-              title: "Set Trusted Dir",
-              items: [
-                { label: "project scope", value: projectDir },
-                ...finalDirs.map((dir, i) => ({ label: `trusted[${i}]`, value: dir })),
-              ],
-            }),
-          );
         },
       },
       {

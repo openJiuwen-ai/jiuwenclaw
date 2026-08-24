@@ -1,9 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Policy API routes (static policies only)."""
+"""Policy API routes."""
 
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
@@ -11,6 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import TimeoutPolicy
+from jiuwenbox.models.sandbox import PolicyMode
 
 router = APIRouter(tags=["policies"])
 
@@ -34,6 +36,68 @@ async def get_policy(sandbox_id: str):
             content={"error": f"No policy found for sandbox '{sandbox_id}'"},
         )
     return policy.model_dump(mode="json")
+
+
+class UpdatePolicyRequest(BaseModel):
+    """Partial policy update payload shared by single-sandbox and batch PUT.
+
+    This period only supports ``policy.network.egress`` /
+    ``policy.network.ingress``. Field shape matches ``POST /sandboxes``.
+    """
+
+    policy: dict[str, Any]
+    policy_mode: PolicyMode = PolicyMode.OVERRIDE
+
+
+class UpdatePolicySkippedItem(BaseModel):
+    sandbox_id: str
+    reason: str
+
+
+class UpdatePolicyFailedItem(BaseModel):
+    sandbox_id: str
+    error: str
+
+
+class UpdateAllPoliciesResponse(BaseModel):
+    updated: list[str] = Field(default_factory=list)
+    skipped: list[UpdatePolicySkippedItem] = Field(default_factory=list)
+    failed: list[UpdatePolicyFailedItem] = Field(default_factory=list)
+
+
+@router.put("/policies", response_model=UpdateAllPoliciesResponse)
+async def update_all_policies(request: UpdatePolicyRequest):
+    """Apply a network ingress/egress update to every registered sandbox."""
+    mgr = _mgr()
+    result = await mgr.update_all_policies(
+        policy_data=request.policy,
+        policy_mode=request.policy_mode,
+    )
+    logger.info(
+        "batch network policy update: updated=%d skipped=%d failed=%d mode=%s",
+        len(result["updated"]),
+        len(result["skipped"]),
+        len(result["failed"]),
+        request.policy_mode.value,
+    )
+    return result
+
+
+@router.put("/policies/{sandbox_id}")
+async def update_policy(sandbox_id: str, request: UpdatePolicyRequest):
+    """Update network ingress/egress for a single sandbox."""
+    mgr = _mgr()
+    applied = await mgr.update_policy(
+        sandbox_id,
+        policy_data=request.policy,
+        policy_mode=request.policy_mode,
+    )
+    logger.info(
+        "sandbox %s network policy updated (mode=%s)",
+        sandbox_id,
+        request.policy_mode.value,
+    )
+    return applied.model_dump(mode="json")
 
 
 class UpdateTimeoutRequest(BaseModel):

@@ -16,6 +16,11 @@ from weakref import WeakValueDictionary
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config, get_default_models
+from jiuwenswarm.common.mode_matrix import (
+    NEW_AGENT_WORK_NORMAL,
+    NEW_AGENT_WORK_PLAN,
+    deprecate_mode,
+)
 
 if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -113,6 +118,9 @@ class AgentManager:
 
     def __init__(self) -> None:
         self.agents: dict[str, dict[str, "JiuWenSwarm"]] = {}
+        # Snapshot of the optional PersonalContext runtime switch.  New
+        # cached agents inherit it before their first rail synchronization.
+        self._personal_context_runtime_enabled: bool = False
         # 记录每个 (channel_id, mode) 的创建参数, 便于 recreate_agent 立刻重建
         self._agent_create_params: dict[str, dict[str, dict[str, Any]]] = {}
         self._client_capabilities_by_channel: dict[str, dict[str, Any]] = {}
@@ -366,6 +374,20 @@ class AgentManager:
         target_session_id: str | None,
         reload_scopes: list[str] | None = None,
     ) -> str:
+        # state.json MCP enabled set (TUI global-default switch). config.yaml
+        # changes alone don't cover MCP enable/disable / add / remove written
+        # to state.json — without this in the fingerprint, those ops hit
+        # fingerprint==last and reload is skipped, so the TUI agent never
+        # picks up the change (tools don't load / unload).
+        try:
+            from jiuwenswarm.server.runtime.mcp.state_store import (
+                list_tui_enabled_mcps,
+            )
+            mcp_enabled = sorted(
+                str(r.get("name", "")) for r in list_tui_enabled_mcps()
+            )
+        except Exception:  # noqa: BLE001
+            mcp_enabled = []
         payload = {
             "config": config,
             "env": env if isinstance(env, dict) else {},
@@ -373,6 +395,7 @@ class AgentManager:
             "target_channel_id": str(target_channel_id or "").strip() or None,
             "target_session_id": str(target_session_id or "").strip() or None,
             "reload_scopes": reload_scopes if reload_scopes is not None else [],
+            "mcp_enabled": mcp_enabled,
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=repr)
 
@@ -432,6 +455,9 @@ class AgentManager:
             project_dir or None,
         )
         agent = JiuWenSwarm()
+        setter = getattr(agent, "set_personal_context_runtime_enabled", None)
+        if callable(setter):
+            setter(self._personal_context_runtime_enabled)
         await agent.create_instance(config, mode=mode_key, sub_mode=sub_mode_key or None)
         setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
         setattr(agent, "_jiuwenswarm_agent_mode", mode_key)
@@ -447,6 +473,39 @@ class AgentManager:
         }
         logger.info("[AgentManager] %s agent created cache_key=%s", channel_key, agent_cache_key)
         return agent
+
+    async def set_personal_context_runtime_enabled(self, enabled: bool) -> None:
+        """Broadcast the Host switch to already cached Agent facades.
+
+        The manager deliberately iterates only existing wrappers.  Toggling
+        PersonalContext must not create an Agent or otherwise affect normal
+        AgentServer work when the feature is disabled.
+        """
+
+        self._personal_context_runtime_enabled = bool(enabled)
+        for channel_agents in list(self.agents.values()):
+            if not isinstance(channel_agents, dict):
+                continue
+            for agent in list(channel_agents.values()):
+                cancelled: asyncio.CancelledError | None = None
+                try:
+                    setter = getattr(
+                        agent, "set_personal_context_runtime_enabled", None
+                    )
+                    if callable(setter):
+                        setter(self._personal_context_runtime_enabled)
+                    refresher = getattr(agent, "refresh_personal_context_rail", None)
+                    if callable(refresher):
+                        await refresher()
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentManager] PersonalContext Rail refresh failed: %s",
+                        type(exc).__name__,
+                    )
+                if cancelled is not None:
+                    raise cancelled
 
     async def initialize(
         self, channel_id: str = "", extra_config: dict[str, Any] | None = None
@@ -592,6 +651,154 @@ class AgentManager:
             )
         return cleaned
 
+    async def apply_mcp_change(
+        self, name: str, action: str, *, enabled: bool = True,
+        target_channel_id: str | None = None,
+    ) -> bool:
+        """Phase-2: targeted single-MCP change, no full config reload.
+
+        Fans out to every live agent instance (or just target_channel_id's
+        agents if given) and asks its adapter to add/remove/toggle that one
+        MCP — bypassing reload_agents_config's heavy resync of the entire
+        mcp.servers list. The agent reads the merged get_mcp_servers() so a
+        state.json write done just before this call is visible.
+
+        Returns True if at least one adapter applied it. Raises RuntimeError
+        when NO adapter applied it — so a failed register (e.g. the MCP
+        server returned an error, or the SDK raised a cancel-scope error
+        during add) surfaces to the caller instead of silently returning
+        False and letting the connect handler report "connected". The first
+        adapter's error reason is carried in the message. A single-adapter
+        failure among several successes still returns True (no raise).
+        """
+        if target_channel_id:
+            channels = [(target_channel_id, self.agents.get(target_channel_id, {}))]
+        else:
+            channels = list(self.agents.items())
+        applied_any = False
+        first_error: str = ""
+        for channel_key, channel_agents in channels:
+            if not isinstance(channel_agents, dict):
+                continue
+            for _cache_key, agent in list(channel_agents.items()):
+                try:
+                    ok = await agent.apply_mcp_change(name, action, enabled=enabled)
+                    if ok:
+                        applied_any = True
+                    elif not first_error:
+                        first_error = (
+                            f"adapter on {channel_key} returned ok=False for "
+                            f"'{name}'/{action} (register/unregister rejected)"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    # register_mcp_by_name surfaces plain Exceptions only
+                    # (openjiuwen add_tool_server coerces cancel-scope errors to
+                    # WorkflowError). Collect the first failure so the caller
+                    # can report it; raise if none succeeded.
+                    logger.warning(
+                        "[AgentManager] apply_mcp_change '%s'/%s on %s failed: %s",
+                        name, action, channel_key, exc,
+                    )
+                    if not first_error:
+                        first_error = str(exc) or repr(exc)
+        if not applied_any:
+            # No adapter succeeded. For "remove" on a skill-only / pure-CLI MCP
+            # (no server entry — get_mcp_server_config returns None), there was
+            # never a server to unregister, so ok=False from every adapter is
+            # the expected no-op, not a failure. Treating it as a failure would
+            # make disconnect raise "register/unregister rejected" for MCPs
+            # that legitimately have no MCP server. register_mcp_by_name mirrors
+            # this: it returns True (no-op) when the entry is None.
+            if action in ("remove", "toggle"):
+                from jiuwenswarm.common.config import get_mcp_server_config
+                if get_mcp_server_config(name) is None:
+                    logger.debug(
+                        "[AgentManager] apply_mcp_change '%s'/%s: no server entry "
+                        "(skill-only / pure-CLI); no-op success",
+                        name, action,
+                    )
+                    return True
+            # No adapter succeeded — surface the failure so the connect/
+            # disconnect handler reports failure to the frontend instead of
+            # a stale "connected"/"disconnected".
+            raise RuntimeError(first_error or f"MCP '{name}' {action} failed")
+        return applied_any
+
+    async def probe_mcp_live_connection(self, name: str) -> tuple[bool, str]:
+        """Live-connect probe for one MCP (connect-time preflight).
+
+        Thin entry point for the connect handler; the probe logic lives in
+        ``mcp_config.probe_mcp_live_connection``. That function talks to the
+        process-level ``Runner.resource_mgr`` directly — no adapter instance
+        needed — so cold-start (no conversation yet) still validates the MCP
+        and caches the spawned stdio subprocess / HTTP connection for the
+        first chat turn's reconcile to reuse (no duplicate spawn).
+        """
+        from jiuwenswarm.common.mcp_config import probe_mcp_live_connection as _probe
+        return await _probe(name)
+
+    def sync_mcp_credentials(self) -> None:
+        """Sync connected MCPs' tokens into os.environ.
+
+        os.environ is process-global, so syncing on any one live agent covers
+        the whole process. Stops on the first agent that actually syncs
+        (returns True); if an agent has no adapter yet (cold-start race) or
+        throws, falls through to the next live agent instead of giving up
+        after the first. No-op if no agent can sync (the cold-start path
+        syncs inside _build_configured_subagents instead).
+        """
+        for channel_agents in self.agents.values():
+            if not isinstance(channel_agents, dict):
+                continue
+            for _cache_key, agent in channel_agents.items():
+                try:
+                    if agent.sync_mcp_credentials():
+                        return  # synced — env is process-global
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "[AgentManager] sync_mcp_credentials on %s failed: %s",
+                        _cache_key, exc,
+                    )
+                    continue  # try the next live agent
+
+    def clear_mcp_credentials(self, name: str) -> None:
+        """Clear a disconnected MCP's token env vars from os.environ.
+
+        Stops on the first agent that clears (env is process-global); if an
+        agent has no adapter yet or throws, falls through to the next.
+        """
+        for channel_agents in self.agents.values():
+            if not isinstance(channel_agents, dict):
+                continue
+            for _cache_key, agent in channel_agents.items():
+                try:
+                    if agent.clear_mcp_credentials(name):
+                        return  # cleared — env is process-global
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "[AgentManager] clear_mcp_credentials '%s' on %s failed: %s",
+                        name, _cache_key, exc,
+                    )
+                    continue  # try the next live agent
+
+    async def refresh_skill_rails(self) -> None:
+        """Reload every live agent's SkillUseRail so MCP bundled skills
+        (installed/uninstalled by skill_installer) surface without a full
+        reload_agents_config. Fans out to all live agents; each agent's adapter
+        reloads its parent + session child skill rails.
+        """
+        for channel_key, channel_agents in self.agents.items():
+            if not isinstance(channel_agents, dict):
+                continue
+            for _cache_key, agent in list(channel_agents.items()):
+                try:
+                    await agent.refresh_skill_rails()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentManager] refresh_skill_rails on %s/%s failed: %s",
+                        channel_key, _cache_key, exc,
+                    )
+
     def get_client_capabilities(self, channel_id: str = "") -> dict[str, Any]:
         channel_key = str(channel_id or "").strip()
         caps = self._client_capabilities_by_channel.get(channel_key)
@@ -647,6 +854,7 @@ class AgentManager:
         project_dir: str | None,
         work_mode: str,
         is_swarm: bool,
+        persist_session: bool = False,
         prewarm_eligible: bool = True,
         create_token: str | None = None,
     ):
@@ -658,7 +866,10 @@ class AgentManager:
             work_mode=work_mode,
             is_swarm=is_swarm,
         )
-        create_signature = (key, bool(prewarm_eligible))
+        # persist_session 不属于 WarmKey：同一预热 Agent 可服务开启或关闭的
+        # Session，避免为布尔开关复制预热槽。但它属于 session.create 的幂等
+        # 身份，同一 create_token 不允许用不同值重试。
+        create_signature = (key, bool(prewarm_eligible), bool(persist_session))
         token_key = (key.channel_id, token)
         async with self._session_create_token_lock:
             if token:
@@ -741,6 +952,11 @@ class AgentManager:
             config = {}
             if project_key:
                 config["project_dir"] = project_key
+            # Surface the channel id to the adapter so session-scoped children
+            # can branch their MCP load strategy (TUI = global config.yaml ∪
+            # state.json enabled; web = session-level via chat.send's mcp field,
+            # init loads nothing).
+            config["channel_id"] = channel_key
             if channel_key == "acp":
                 config = {
                     **config,
@@ -754,6 +970,38 @@ class AgentManager:
                 cache_key=cache_key,
             )
             return self._borrow_agent(agent)
+
+    def get_agent_for_session_nowait(
+        self,
+        channel_id: str,
+        session_id: str,
+    ) -> "JiuWenSwarm | None":
+        """Return the cached channel agent that owns ``session_id`` runtime."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+
+        channel_key = _normalize_channel_id(channel_id)
+        channel_agents = self.agents.get(channel_key, {})
+        if not isinstance(channel_agents, dict):
+            return None
+
+        for cache_key, agent in channel_agents.items():
+            has_runtime = getattr(agent, "has_session_runtime", None)
+            if not callable(has_runtime):
+                continue
+            try:
+                if has_runtime(sid):
+                    return self._borrow_agent(agent)
+            except Exception:
+                logger.exception(
+                    "[AgentManager] session runtime lookup failed: "
+                    "channel_id=%s session_id=%s cache_key=%s",
+                    channel_key,
+                    sid,
+                    cache_key,
+                )
+        return None
 
     def get_agent_nowait(
         self,
@@ -797,7 +1045,13 @@ class AgentManager:
 
         if mode is None and project_dir is None and sub_mode is None:
             for agent in channel_agents.values():
-                if getattr(agent, "_jiuwenswarm_agent_mode", "") == "agent":
+                # 默认回落优先取"普通 agent"实例：旧串 "agent" 与新 canonical
+                # agent.work.* 都要命中。deprecate 归一把新旧形式统一成
+                # agent.work.normal / agent.work.plan 再判定。
+                if deprecate_mode(getattr(agent, "_jiuwenswarm_agent_mode", "")) in (
+                    NEW_AGENT_WORK_NORMAL,
+                    NEW_AGENT_WORK_PLAN,
+                ):
                     return self._borrow_agent(agent)
             agent = next(iter(channel_agents.values()), None)
             return self._borrow_agent(agent) if agent is not None else None
@@ -823,8 +1077,10 @@ class AgentManager:
             channel_id: Optional channel ID to limit broadcast scope.
             skip_instance: Optional agent instance to skip (already processed by caller).
         """
-        # plan / fast 已合并为单一 agent；agent.fast / agent.plan 作为历史 token 仍兼容匹配。
-        target_modes = {"agent", "agent.fast", "agent.plan"}
+        # 单 agent 模式热生效：work(agent) 与 code。manager_mode 在上游已归一，
+        # cache_key 前缀只会是 agent 或 code。code.team / team.* 走独立
+        # TeamAgent 体系，cache_key 前缀为 code.team/team，严格相等不命中。
+        target_modes = {"agent", "code"}
 
         for channel_key, channel_agents in self.agents.items():
             # Limit to specific channel if provided

@@ -20,13 +20,13 @@ export function GoalCompletedCard({ content }: GoalCompletedCardProps) {
   if (!data) return null;
 
   return (
-    <div className="flex justify-start mb-3 animate-rise">
-      <div className="goal-completed-card">
-        <div className="goal-completed-card__head">
-          <Target size={14} strokeWidth={2} className="goal-completed-card__head-icon" />
-          <span>{t('goal.completedCardTitle')}</span>
+    <div className="flex justify-start mb-3 animate-rise" data-testid="goal-bar-completed-card-wrap">
+      <div className="goal-completed-card" data-testid="goal-bar-completed-card">
+        <div className="goal-completed-card__head" data-testid="goal-bar-completed-card-head">
+          <Target size={14} strokeWidth={2} className="goal-completed-card__head-icon" data-testid="goal-bar-completed-card-head-icon" />
+          <span data-testid="goal-bar-completed-card-head-title">{t('goal.completedCardTitle')}</span>
         </div>
-        <div className="goal-completed-card__body">
+        <div className="goal-completed-card__body" data-testid="goal-bar-completed-card-body">
           {data.evidence?.trim() || t('goal.completedMessageFallback')}
         </div>
       </div>

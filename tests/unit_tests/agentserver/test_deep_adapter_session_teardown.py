@@ -45,6 +45,19 @@ class _BlockingCleanupChildAdapter(_IdleChildAdapter):
         await super().cleanup()
 
 
+class _EvolutionRail:
+    def __init__(self) -> None:
+        self.cleaned = False
+
+    async def cleanup_background_tasks(self) -> None:
+        self.cleaned = True
+
+
+class _FailingEvolutionRail:
+    async def cleanup_background_tasks(self) -> None:
+        raise RuntimeError("background evolution remains active")
+
+
 def test_other_active_sessions_treats_subagent_as_related() -> None:
     adapter = _make_adapter(
         _active_session_ids={
@@ -55,6 +68,24 @@ def test_other_active_sessions_treats_subagent_as_related() -> None:
 
     assert getattr(adapter, "_other_active_sessions")("tui_main") == 0
     assert getattr(adapter, "_other_active_sessions")("tui_main_sub_explore") == 0
+
+
+@pytest.mark.asyncio
+async def test_adapter_cleanup_drains_detached_evolution_tasks() -> None:
+    rail = _EvolutionRail()
+    adapter = _make_adapter(_skill_evolution_rail=rail)
+
+    await getattr(adapter, "_cleanup_evolution_background_tasks")()
+
+    assert rail.cleaned is True
+
+
+@pytest.mark.asyncio
+async def test_adapter_cleanup_propagates_evolution_cleanup_failure() -> None:
+    adapter = _make_adapter(_skill_evolution_rail=_FailingEvolutionRail())
+
+    with pytest.raises(RuntimeError, match="background evolution remains active"):
+        await getattr(adapter, "_cleanup_evolution_background_tasks")()
 
 
 def test_other_active_sessions_counts_unrelated_sessions() -> None:

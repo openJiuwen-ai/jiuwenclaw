@@ -10,6 +10,8 @@ import {
   type SlashCommand as TuiSlashCommand,
   TUI,
   matchesKey,
+  isKeyRelease,
+  isKeyRepeat,
   decodeKittyPrintable,
   truncateToWidth,
   visibleWidth,
@@ -56,7 +58,7 @@ import type { McpListItem, McpListPayload } from "../core/commands/builtins/mcp.
 import { buildModeAutocompleteItems } from "../core/commands/builtins/mode.js";
 import { MemoryViewController, type MemoryViewTab } from "./memory-view.js";
 import { PIPELINE_VALUES, PIPELINE_OPTIONS, INTERVAL_VALUES, INTERVAL_OPTIONS, FLAG_OPTIONS } from "../core/commands/builtins/auto-harness.js";
-import { isClientMode, isTeamMode } from "../core/modes.js";
+import { formatModeForDisplay, isTeamMode, normalizeToClientMode } from "../core/modes.js";
 import {
   countWaitingForHuman,
   sessionTurnLabelNumber,
@@ -125,6 +127,7 @@ const TRANSCRIPT_WHEEL_SCROLL_LINES = 3;
 // 不可中断的命令列表（ESC 按下时显示提示）
 const UNINTERRUPTIBLE_COMMANDS = ["compact"];
 const SWARM_WORKFLOW_LOG_PREVIEW_ROWS = 8;
+const SWARM_WORKFLOW_AGENT_PREVIEW_LIMIT = 8;
 const SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS = 6;
 const PERMISSION_TOOL_RE = /工具\s+`([^`]+)`\s+需要授权/;
 const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
@@ -804,8 +807,12 @@ function patchEditorInlineSlash(editor: Editor): void {
   };
 
   // Patch 1: 打字母时的触发判断
+  // 触发条件：(a) 行首以 / 开头（行首 slash 命令，含其参数区，如 /auto-harness run --pipeline），
+  // 或 (b) 光标前最后一个 token 以 / 开头（行内 /skill，如 文字 /sk）。
+  // 原 pi-tui 只判 (a)；若只判 (b) 会丢失命令参数区的自动触发（参数 token 不以 / 开头）。
   target.isInSlashCommandContext = function (textBeforeCursor: string): boolean {
     if (this.state.cursorLine !== 0) return false;
+    if (textBeforeCursor.trimStart().startsWith("/")) return true;
     const tokens = textBeforeCursor.split(/\s+/);
     const lastToken = tokens[tokens.length - 1] ?? "";
     return lastToken.startsWith("/");
@@ -1711,6 +1718,11 @@ export class AppScreen implements Component, Focusable {
   /** Whether the eager skill-cache fetch on first WebSocket connection has already been fired. */
   private didEagerFetchSkills = false;
   private didEagerFetchSandboxMeta = false;
+  /** The exact human turn most recently submitted from a swarmflow reply editor. */
+  private lastRepliedHumanPrompt: {
+    workflowRunId: string;
+    correlationId: string;
+  } | null = null;
   private pendingSubmittedInput: string | null = null;
   private pendingSubmittedBaseline = 0;
   private pendingSubmittedSessionId: string | null = null;
@@ -1981,7 +1993,8 @@ export class AppScreen implements Component, Focusable {
   private handleFileViewerInput(data: string): void {
     if (!this.fileViewerState) return;
 
-    const contentLines = this.fileViewerState.content.split("\n");
+    const width = this.tui.terminal.columns || 80;
+    const contentLines = this.getWrappedViewerLines(width);
     const height = this.tui.terminal.rows;
     const availableHeight = Math.max(1, height - 2); // Reserve for title + hint
     const maxScroll = Math.max(0, contentLines.length - availableHeight);
@@ -2031,17 +2044,26 @@ export class AppScreen implements Component, Focusable {
     const titleText = `━━━ ${this.fileViewerState.title} ━━━`;
     lines.push(padToWidth(palette.border.panel(titleText), safeWidth));
 
-    // Content area
-    const contentLines = this.fileViewerState.content.split("\n");
+    // Content area — wrap each source line to the available width so long
+    // lines (e.g. a human prompt question) flow onto multiple rows instead
+    // of being truncated to a single clipped row that the user must widen
+    // the terminal to read.
+    const contentLines = this.getWrappedViewerLines(safeWidth);
     const availableHeight = Math.max(1, height - 2);
+    // Clamp scroll within range after a terminal resize changes the wrap row
+    // count (e.g. narrowing wraps into more rows), so the view never lands
+    // past the end of the content.
+    const maxScroll = Math.max(0, contentLines.length - availableHeight);
+    if (this.fileViewerState.scrollOffset > maxScroll) {
+      this.fileViewerState.scrollOffset = maxScroll;
+    }
     const scrollOffset = this.fileViewerState.scrollOffset;
 
     // Add visible content lines
     for (let i = 0; i < availableHeight; i++) {
       const lineIndex = scrollOffset + i;
       if (lineIndex < contentLines.length) {
-        const rawLine = contentLines[lineIndex] || "";
-        lines.push(truncateToWidth(rawLine, safeWidth, ""));
+        lines.push(padToWidth(contentLines[lineIndex] ?? "", safeWidth));
       } else {
         // Pad with empty lines
         lines.push(" ".repeat(safeWidth));
@@ -2056,6 +2078,30 @@ export class AppScreen implements Component, Focusable {
     lines.push(padToWidth(palette.text.dim(hintText), safeWidth));
 
     return lines;
+  }
+
+  /**
+   * Wrap the FileViewer's raw content to a given width, returning the logical
+   * rows the viewer should render and scroll over. Each source line is split
+   * by ``wrapTextWithAnsi`` (ANSI-aware, CJK-wide-char aware) and then each
+   * resulting row is truncated to the width as a safety net so a runaway row
+   * can never exceed the terminal columns.
+   */
+  private getWrappedViewerLines(safeWidth: number): string[] {
+    if (!this.fileViewerState) return [];
+    const maxWidth = Math.max(1, safeWidth - 1);
+    const out: string[] = [];
+    for (const rawLine of this.fileViewerState.content.split("\n")) {
+      const wrapped = wrapTextWithAnsi(rawLine, maxWidth);
+      if (wrapped.length > 0) {
+        for (const row of wrapped) {
+          out.push(truncateToWidth(row, safeWidth, ""));
+        }
+      } else {
+        out.push("");
+      }
+    }
+    return out;
   }
 
   /** Enter DiffViewer mode to browse git/turn diffs interactively */
@@ -2633,6 +2679,22 @@ export class AppScreen implements Component, Focusable {
     ) {
       this.transientNotice = null;
       this.interruptTask();
+      this.tui.requestRender();
+      return;
+    }
+
+    if (
+      pendingQuestion &&
+      (pendingQuestion.source === "harmonyos_dev_install_confirm" ||
+        pendingQuestion.source === "harmonyos_dev_update_confirm" ||
+        pendingQuestion.source === "harmonyos_knowledge_mcp_confirm") &&
+      (isKeyRepeat(data) || isKeyRelease(data)) &&
+      matchesKey(data, "enter")
+    ) {
+      // The Enter used to submit /harmonyos-dev-init can still emit Kitty
+      // repeat/release events after the confirmation becomes visible. Ignore
+      // those residual events, but keep the first option selected so a new
+      // Enter press explicitly confirms installation/configuration.
       this.tui.requestRender();
       return;
     }
@@ -3407,12 +3469,17 @@ export class AppScreen implements Component, Focusable {
       // /<installedSkill> 行首分流：命中已装 skill 时当普通消息发送（content 原样
       // 保留 /<skill> 前缀，skill 名由 extractSkillsFromContent 提取注入 params.skills）。
       // 未命中已装 skill 的 /xxx 不在此拦截，继续走下面的命令分支（仍可能 Unknown command）。
+      // 新建技能后缓存可能仍旧：若首 token 也不是注册命令，先 refresh 再重试，避免误报 Unknown command。
       {
         const slashMatch = text.match(/^\/(\S+)/);
         const firstToken = slashMatch?.[1] ?? "";
-        const installedSkill = firstToken
+        let installedSkill = firstToken
           ? this.commands.getInstalledSkills().find((s) => s.name === firstToken)
           : undefined;
+        if (!installedSkill && firstToken && !this.commands.resolve(firstToken)) {
+          await this.commands.refreshSkills(this.state.getCommandContext());
+          installedSkill = this.commands.getInstalledSkills().find((s) => s.name === firstToken);
+        }
         if (installedSkill) {
           // 只有 /<skill> 而没有内容时没什么可发的。pi-tui 在补全弹窗上按回车会
           // 「应用补全」并顺势提交（见其 editor 的 tui.select.confirm 分支），这一下
@@ -3604,8 +3671,8 @@ export class AppScreen implements Component, Focusable {
           enterConfigEditor: (focusKey, configPayload, mode) => {
             this.openConfigEditor(focusKey, configPayload, mode);
           },
-          openInEditor: (filePath: string, onDone?: () => void) => {
-            openInExternalEditor(this.tui, filePath, onDone);
+          openInEditor: async (filePath: string, onDone?: (success?: boolean) => void) => {
+            await openInExternalEditor(this.tui, filePath, onDone);
           },
           openFolder: (folderPath: string) => {
             return openFolderInExplorer(folderPath);
@@ -3673,6 +3740,10 @@ export class AppScreen implements Component, Focusable {
     );
     for (const key of this.shownBudgetExhaustedWorkflowKeys) {
       if (!currentWorkflowKeys.has(key)) this.shownBudgetExhaustedWorkflowKeys.delete(key);
+    }
+    if (this.commands.setSkillEvolutionEnabled(snapshot.skillEvolutionEnabled)) {
+      this.composerAutocompleteProvider = this.rebuildAutocompleteProvider();
+      this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
     }
     // Populate the skill cache as soon as the WebSocket connection is established
     if (!this.didEagerFetchSkills && snapshot.connectionStatus === "connected") {
@@ -4118,10 +4189,10 @@ export class AppScreen implements Component, Focusable {
     this.resumeSessionList = null;
     const snapshot = this.state.getSnapshot();
     const previousSessionId = snapshot.sessionId;
+    // 历史 session 可能存旧 canonical 串（agent.plan / team / code.team），
+    // 走 normalizeToClientMode 归一到新串；空/未知串回退当前 mode。
     const targetMode =
-      matchedSession?.mode && isClientMode(matchedSession.mode)
-        ? matchedSession.mode
-        : snapshot.mode;
+      normalizeToClientMode(matchedSession?.mode ?? "") ?? snapshot.mode;
     try {
       await this.state.request("session.switch", {
         session_id: nextSessionId,
@@ -5815,6 +5886,7 @@ export class AppScreen implements Component, Focusable {
   private closeSwarmWorkflowsView(): void {
     if (!this.swarmWorkflowsViewState) return;
     this.swarmWorkflowsViewState = null;
+    this.lastRepliedHumanPrompt = null;
     this.state.flushDeferredTranscript();
     this.tui.requestRender();
   }
@@ -5830,6 +5902,19 @@ export class AppScreen implements Component, Focusable {
       return;
     }
     if (current.phase === "pending-list") {
+      // The pending list exists solely to collect waiting-for-human turns.
+      // Once there are none left — typically because the user just submitted a
+      // reply and the backend resumed (or the run completed) — return to the
+      // previous screen instead of stranding the user on an empty "No pending
+      // replies" page that only Esc can leave.
+      const snapshot = this.state.getSnapshot();
+      const stillWaiting = snapshot.workflowRuns.some(
+        (wf) => countWaitingForHuman(wf) > 0,
+      );
+      if (!stillWaiting) {
+        this.restoreFromPendingList(current.previous_phase);
+        return;
+      }
       this.swarmWorkflowsViewState = this.buildPendingListState(
         current.previous_phase ?? "list",
         current.selectedIndex,
@@ -5847,6 +5932,27 @@ export class AppScreen implements Component, Focusable {
       return;
     }
     if (current.phase === "session-detail") {
+      // A submitted turn may complete while the workflow immediately opens its
+      // next human turn. Leave this history view as soon as the exact replied
+      // turn stops waiting, returning the user to chat where the new pending
+      // input indicator is visible. Merely browsing completed history does not
+      // trigger this path because no submitted-turn marker is present.
+      const replied = this.lastRepliedHumanPrompt;
+      if (replied?.workflowRunId === current.workflowId) {
+        const agentId = this.findAgentIdForHumanReply(
+          replied.workflowRunId,
+          replied.correlationId,
+        );
+        const lookup = findWorkflowAgent(
+          this.state.getSnapshot().workflowRuns,
+          replied.workflowRunId,
+          agentId,
+        );
+        if (lookup && lookup.agent.status !== "waiting_for_human") {
+          this.closeSwarmWorkflowsView();
+          return;
+        }
+      }
       // Re-render only — buildSessionDetailLines reads live workflow snapshot.
       return;
     }
@@ -6126,7 +6232,7 @@ export class AppScreen implements Component, Focusable {
       void this.openSwarmWorkflowBudget();
       return;
     }
-    if (action === "swarm:back") {
+    if (action === "swarm:back" || action === "swarm:left") {
       if (state.phase === "pending-list") {
         this.restoreFromPendingList(state.previous_phase);
         this.tui.requestRender();
@@ -6135,7 +6241,15 @@ export class AppScreen implements Component, Focusable {
       if (state.phase === "list") {
         this.closeSwarmWorkflowsView();
       } else if (state.phase === "workflow") {
-        this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false, state.workflowId);
+        this.swarmWorkflowsViewState =
+          state.focus === "agents"
+            ? this.buildSwarmWorkflowDetailState(
+                state.workflowId,
+                state.selectedPhaseId,
+                "phases",
+                state.agentList.getSelectedItem()?.value,
+              )
+            : this.buildSwarmWorkflowsListState(false, state.workflowId);
       } else if (state.phase === "agent") {
         if (state.returnTo?.kind === "pending-list") {
           this.replyingToHumanPrompt = null;
@@ -6161,55 +6275,6 @@ export class AppScreen implements Component, Focusable {
         this.restoreFromSessionDetail(state.returnTo);
       }
       // pending-list phase is handled separately above
-      this.tui.requestRender();
-      return;
-    }
-    if (action === "swarm:left") {
-      if (state.phase === "list") {
-        this.closeSwarmWorkflowsView();
-        this.tui.requestRender();
-        return;
-      }
-      if (state.phase === "pending-list") {
-        this.restoreFromPendingList(state.previous_phase);
-        this.tui.requestRender();
-        return;
-      }
-      if (state.phase === "agent") {
-        if (state.returnTo?.kind === "pending-list") {
-          this.replyingToHumanPrompt = null;
-          this.editor.setText("");
-          this.editor.focused = false;
-          this.swarmWorkflowsViewState = this.buildPendingListState(
-            state.returnTo.previous_phase ?? "chat",
-          );
-          this.tui.requestRender();
-          return;
-        }
-        const lookup = findWorkflowAgent(
-          this.state.getSnapshot().workflowRuns,
-          state.workflowId,
-          state.agentId,
-        );
-        this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
-          state.workflowId,
-          lookup?.phase.id,
-          "agents",
-          state.agentId,
-        );
-      } else if (state.phase === "session-detail") {
-        this.restoreFromSessionDetail(state.returnTo);
-      } else if (state.phase === "workflow") {
-        this.swarmWorkflowsViewState =
-          state.focus === "agents"
-            ? this.buildSwarmWorkflowDetailState(
-                state.workflowId,
-                state.selectedPhaseId,
-                "phases",
-                state.agentList.getSelectedItem()?.value,
-              )
-            : this.buildSwarmWorkflowsListState(false, state.workflowId);
-      }
       this.tui.requestRender();
       return;
     }
@@ -6306,6 +6371,8 @@ export class AppScreen implements Component, Focusable {
           this.tui.requestRender();
           return;
         }
+        this.showHumanReplyUnavailableNotice(lookup?.agent.status, lookup?.agent.kind);
+        return;
       }
     }
     if (state.phase === "session-detail") {
@@ -6368,6 +6435,20 @@ export class AppScreen implements Component, Focusable {
             }
           }
         }
+        const sessionAgents = sessionMembersInPhase(
+          phase?.agents ?? [],
+          state.sessionLabel,
+          state.nodeType,
+        );
+        const sessionCompleted =
+          sessionAgents.length > 0 &&
+          sessionAgents.every((agent) => agent.status === "completed");
+        this.showTransientNotice(
+          sessionCompleted
+            ? "This session is completed and can no longer accept replies."
+            : "This session has no turn waiting for a reply.",
+        );
+        return;
       }
     }
     if (action === "swarm:refresh") {
@@ -6460,7 +6541,11 @@ export class AppScreen implements Component, Focusable {
             this.tui.requestRender();
             return;
           }
+          this.showHumanReplyUnavailableNotice(lookup?.agent.status, lookup?.agent.kind);
+          return;
         }
+        this.showTransientNotice("Select a human turn that is waiting for a reply.");
+        return;
       }
       const activeList = state.focus === "phases" ? state.phaseList : state.agentList;
       activeList.handleInput(data);
@@ -6915,6 +7000,12 @@ export class AppScreen implements Component, Focusable {
     const statusBanner = workflowStatusBannerText(workflow.status);
     const selectedPhase =
       workflow.phases.find((phase) => phase.id === state.selectedPhaseId) ?? workflow.phases[0];
+    const selectedAgentId = state.agentList.getSelectedItem()?.value;
+    const selectedAgent = selectedPhase?.agents.find((agent) => agent.id === selectedAgentId);
+    const replyHint =
+      selectedAgent?.kind === "human" && selectedAgent.status === "waiting_for_human"
+        ? " · Tab reply"
+        : "";
     const workflowSummary = workflow.summary.trim();
     const budgetKey = this.swarmActionKeyLabel("swarm:budget");
     const runTokens = formatTokenCount(workflow.token_count);
@@ -6984,6 +7075,20 @@ export class AppScreen implements Component, Focusable {
     ];
     if (state.focus === "phases") {
       lines.push(...this.renderSwarmWorkflowDetailTree(workflow, state.selectedPhaseId, width));
+      lines.push("");
+      const agentsTitle = selectedPhase ? `Agents · ${selectedPhase.name}` : "Agents";
+      lines.push(padToWidth(palette.text.secondary(agentsTitle), width));
+      if (selectedPhase) {
+        lines.push(
+          ...this.renderSwarmWorkflowAgentRows(
+            selectedPhase.agents ?? [],
+            width,
+            SWARM_WORKFLOW_AGENT_PREVIEW_LIMIT,
+          ),
+        );
+      } else {
+        lines.push(padToWidth(palette.text.dim("No agents"), width));
+      }
     } else {
       lines.push(...this.renderSwarmWorkflowPhaseRows(workflow, state.selectedPhaseId, width));
       lines.push("");
@@ -6999,7 +7104,7 @@ export class AppScreen implements Component, Focusable {
         palette.text.secondary(
           state.focus === "phases"
             ? `↑/↓ select phase · Enter/→ show agents · Esc/← back`
-            : `↑/↓ select · Enter/→ show detail or session · Tab reply (human) · Esc/← back to phases`,
+            : `↑/↓ select · Enter/→ show detail or session${replyHint} · Esc/← back to phases`,
         ),
         width,
       ),
@@ -7192,6 +7297,9 @@ export class AppScreen implements Component, Focusable {
   }
 
   private restoreFromSessionDetail(returnTo: SessionDetailReturnTo): void {
+    // Manual leave clears the pending auto-jump so re-entering the session
+    // view later (e.g. to browse a finished run's history) never triggers it.
+    this.lastRepliedHumanPrompt = null;
     switch (returnTo.kind) {
       case "pending-list":
         this.swarmWorkflowsViewState = this.buildPendingListState(returnTo.previous_phase ?? "list");
@@ -7345,7 +7453,6 @@ export class AppScreen implements Component, Focusable {
     } else if (options.waiting) {
       parts.push("Tab to reply");
     }
-    parts.push("r refresh");
     parts.push(`${this.swarmActionKeyLabel("swarm:budget")} budget`);
     parts.push("Esc/← back to agents");
     return parts.join(" · ");
@@ -8386,7 +8493,7 @@ export class AppScreen implements Component, Focusable {
       { value: "__display__", label: `session: ${payload.session_id || snapshot.sessionId}`, description: "" },
       { value: "__display__", label: `name: ${snapshot.sessionTitle || "/rename to add a name"}`, description: "" },
       { value: "__display__", label: `cwd: ${payload.cwd || "unknown"}`, description: "" },
-      { value: "__display__", label: `mode: ${snapshot.mode}`, description: "" },
+      { value: "__display__", label: `mode: ${formatModeForDisplay(snapshot.mode)}`, description: "" },
       { value: "__display__", label: `model: ${payload.model || "unknown"}`, description: "" },
       { value: "__display__", label: `provider: ${payload.provider || "unknown"}`, description: "" },
       { value: "__display__", label: `api_base: ${payload.api_base || "unknown"}`, description: "" },
@@ -9783,6 +9890,20 @@ export class AppScreen implements Component, Focusable {
         correlation_id: correlationId,
         answer,
       });
+      // Track the exact turn so session-detail can close as soon as this reply
+      // is accepted, even if the workflow continues or opens another turn.
+      this.lastRepliedHumanPrompt = { workflowRunId, correlationId };
+      const currentView = this.swarmWorkflowsViewState;
+      if (
+        currentView?.phase === "agent" &&
+        currentView.returnTo?.kind === "pending-list"
+      ) {
+        // Entering a pending turn's detail is a temporary drill-down. Once the
+        // reply is submitted, return to the screen that opened the pending list
+        // instead of leaving the user on the now-completed detail page.
+        this.restoreFromPendingList(currentView.returnTo.previous_phase);
+        return true;
+      }
       this.replyingToHumanPrompt = null;
       this.editor.setText("");
       this.editor.focused = false;
@@ -9791,6 +9912,38 @@ export class AppScreen implements Component, Focusable {
 
     this.editor.handleInput(data);
     return true;
+  }
+
+  private showHumanReplyUnavailableNotice(
+    status?: WorkflowStatus,
+    kind?: WorkflowAgent["kind"],
+  ): void {
+    if (kind && kind !== "human") {
+      this.showTransientNotice("Only human nodes can accept replies.");
+      return;
+    }
+    if (status === "completed") {
+      this.showTransientNotice("This node is completed and can no longer accept replies.");
+      return;
+    }
+    if (status === "failed" || status === "stopped") {
+      this.showTransientNotice(`This node is ${status} and can no longer accept replies.`);
+      return;
+    }
+    this.showTransientNotice("This node is not waiting for a reply.");
+  }
+
+  private showTransientNotice(message: string, durationMs = 3000): void {
+    this.transientNotice = message;
+    if (this.transientNoticeTimer) {
+      clearTimeout(this.transientNoticeTimer);
+    }
+    this.transientNoticeTimer = setTimeout(() => {
+      this.transientNotice = null;
+      this.transientNoticeTimer = null;
+      this.tui.requestRender();
+    }, durationMs);
+    this.tui.requestRender();
   }
 
   private findAgentIdForHumanReply(workflowId: string, correlationId: string): string {

@@ -132,5 +132,20 @@ The browser lifecycle is:
 - The Playwright MCP endpoint is injected from the managed browser instance; it
   is not supplied by a frontend-launched browser.
 
-This keeps browser startup, profile ownership, endpoint allocation, and cleanup
-under one lifecycle owner: the browser agent.
+### 6.1 Core code
+
+| Module | File path | Description |
+|--------|-----------|-------------|
+| Frontend BrowserPanel | `jiuwenswarm/channels/web/frontend/src/components/BrowserPanel/index.tsx` | Reads and saves Chrome path and display mode |
+| Backend Web RPC handlers | `jiuwenswarm/gateway/channel_manager/web/app_web_handlers.py` | Provides `path.get`, `path.set` endpoints |
+| Browser MCP integration | `jiuwenswarm/agents/harness/common/tools/browser_tools.py` | MCP client, auto-start wrapper, configuration builder |
+| Chrome launch and management | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/drivers/managed_browser.py` | `ManagedBrowserDriver`: port allocation, Chrome process management, profile reuse |
+| Browser runtime orchestration | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/runtime.py` | Runtime orchestration layer |
+| Browser task execution | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/service.py` | Task execution, session reuse, timeout guardrails, driver lifecycle management |
+| Browser runtime config | `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime/config.py` | Playwright MCP and runtime configuration parsing |
+
+## 7. Summary
+
+Browser tools let agents operate on a real Chrome instance that the user has
+already authorized. The frontend handles configuration; the backend manages
+automatic startup and execution.

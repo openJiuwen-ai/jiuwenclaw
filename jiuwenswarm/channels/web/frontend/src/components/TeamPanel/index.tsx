@@ -345,6 +345,8 @@ export function TeamPanel({ onSessionsDeleted }: TeamPanelProps) {
               className="w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-text-muted hover:bg-secondary/40 hover:text-text "
               style={{ paddingLeft: `${depth * 16 + 12}px` }}
               title={item.path}
+              data-testid="team-panel-directory-folder-item"
+              data-variant={item.path}
             >
               <span className="w-4 h-4 flex items-center justify-center text-text-muted/80">
                 {hasChildren ? (
@@ -388,6 +390,8 @@ export function TeamPanel({ onSessionsDeleted }: TeamPanelProps) {
           }`}
           style={{ paddingLeft: `${depth * 16 + 12}px` }}
           title={item.path}
+          data-testid="team-panel-directory-file-item"
+          data-variant={item.path}
         >
           <span className="w-4 h-4 flex items-center justify-center" />
           <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -397,9 +401,9 @@ export function TeamPanel({ onSessionsDeleted }: TeamPanelProps) {
               <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3.75h7.5l4.5 4.5v12a1.5 1.5 0 01-1.5 1.5h-10.5a1.5 1.5 0 01-1.5-1.5v-15a1.5 1.5 0 011.5-1.5zM14.25 3.75v4.5h4.5" />
             )}
           </svg>
-          <span className="flex-1 min-w-0 truncate">{item.name}</span>
+          <span className="flex-1 min-w-0 truncate" data-testid="team-panel-directory-file-name">{item.name}</span>
           {!selectable ? (
-            <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/50 text-text-muted">
+            <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/50 text-text-muted" data-testid="team-panel-directory-file-not-previewable">
               {t('teams.notPreviewable')}
             </span>
           ) : null}
@@ -411,44 +415,45 @@ export function TeamPanel({ onSessionsDeleted }: TeamPanelProps) {
   const resolvedDirectoryWidth = directoryWidth ?? clampDirectoryWidth(splitPaneWidth * 0.25, splitPaneWidth);
 
   return (
-    <div className="flex-1 min-h-0">
-      <div className="card w-full h-full flex flex-col">
+    <div className="flex-1 min-h-0" data-testid="team-panel-root">
+      <div className="card w-full h-full flex flex-col" data-testid="team-panel-card">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
-            <h2 className="text-lg font-semibold">{t('teams.title')}</h2>
-            <p className="text-sm text-text-muted mt-1">{t('teams.subtitle')}</p>
+            <h2 className="text-lg font-semibold" data-testid="team-panel-title">{t('teams.title')}</h2>
+            <p className="text-sm text-text-muted mt-1" data-testid="team-panel-subtitle">{t('teams.subtitle')}</p>
           </div>
           <button
             type="button"
             onClick={handleRefresh}
             disabled={loadingTeams || loadingFiles}
             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            data-testid="team-panel-refresh-button"
           >
             {loadingTeams || loadingFiles ? t('common.refreshing') : t('common.refresh')}
           </button>
         </div>
 
         {error ? (
-          <div className="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger" data-testid="team-panel-error">
             {error}
           </div>
         ) : null}
 
         <div className="flex-1 min-h-0 grid grid-cols-[minmax(240px,1.2fr)_minmax(0,4fr)] gap-4">
-          <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0">
+          <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0" data-testid="team-panel-list-pane">
             <div className="px-4 py-3 bg-secondary/30 border-b border-border">
-              <h3 className="text-sm font-medium text-text">{t('teams.teamList')}</h3>
-              <p className="text-xs text-text-muted mt-1">
+              <h3 className="text-sm font-medium text-text" data-testid="team-panel-list-heading">{t('teams.teamList')}</h3>
+              <p className="text-xs text-text-muted mt-1" data-testid="team-panel-list-count">
                 {t('teams.count', { count: teams.length })}
               </p>
             </div>
-            <div className="flex-1 overflow-auto p-2 space-y-1">
+            <div className="flex-1 overflow-auto p-2 space-y-1" data-testid="team-panel-team-list">
               {loadingTeams ? (
-                <div className="h-full flex items-center justify-center">
+                <div className="h-full flex items-center justify-center" data-testid="team-panel-team-list-state" data-variant="loading">
                   <div className="w-7 h-7 rounded-full border-4 border-border border-t-accent animate-spin" />
                 </div>
               ) : teams.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('teams.empty')}</div>
+                <div className="h-full flex items-center justify-center text-sm text-text-muted" data-testid="team-panel-team-list-state" data-variant="empty">{t('teams.empty')}</div>
               ) : (
                 teams.map((team) => (
                   <div
@@ -458,15 +463,18 @@ export function TeamPanel({ onSessionsDeleted }: TeamPanelProps) {
                         ? 'border-[var(--color-border-accent)] bg-accent-subtle text-text'
                         : 'border-transparent hover:bg-secondary/40 text-text-muted hover:text-text'
                     }`}
+                    data-testid="team-panel-team-item"
+                    data-variant={team.name}
                   >
                     <button
                       type="button"
                       onClick={() => setSelectedTeamName(team.name)}
                       className="min-w-0 flex-1 text-left"
                       title={team.name}
+                      data-testid="team-panel-team-select-button"
                     >
-                      <span className="truncate block font-medium">{team.name}</span>
-                      <span className="mt-1 block text-[11px] text-text-muted">
+                      <span className="truncate block font-medium" data-testid="team-panel-team-name">{team.name}</span>
+                      <span className="mt-1 block text-[11px] text-text-muted" data-testid="team-panel-team-session-count">
                         {t('teams.sessionCount', { count: team.sessionCount })}
                       </span>
                     </button>
@@ -479,6 +487,7 @@ export function TeamPanel({ onSessionsDeleted }: TeamPanelProps) {
                       disabled={deletingTeam}
                       className="shrink-0 text-xs px-2 py-1 rounded-md border border-danger/30 text-danger hover:bg-danger-subtle disabled:opacity-50 disabled:cursor-not-allowed"
                       title={t('teams.deleteTeam')}
+                      data-testid="team-panel-team-delete-button"
                     >
                       {deletingTeamName === team.name ? t('teams.deleting') : t('teams.deleteTeam')}
                     </button>
@@ -491,33 +500,36 @@ export function TeamPanel({ onSessionsDeleted }: TeamPanelProps) {
           <div
             ref={splitPaneRef}
             className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex min-h-0"
+            data-testid="team-panel-split-pane"
           >
             <div
               ref={directoryPaneRef}
               className="shrink-0 flex flex-col min-h-0 overflow-hidden"
               style={{ width: resolvedDirectoryWidth }}
+              data-testid="team-panel-directory-pane"
             >
               <div className="px-4 py-3 bg-secondary/30 border-b border-border">
                 <div className="min-w-0">
-                  <h3 className="text-sm font-medium text-text">{t('teams.directory')}</h3>
-                  <p className="text-xs text-text-muted mt-1 truncate" title={selectedTeamName || t('teams.noneSelected')}>
+                  <h3 className="text-sm font-medium text-text" data-testid="team-panel-directory-heading">{t('teams.directory')}</h3>
+                  <p className="text-xs text-text-muted mt-1 truncate" title={selectedTeamName || t('teams.noneSelected')} data-testid="team-panel-directory-selected-name">
                     {selectedTeamName || t('teams.noneSelected')}
                   </p>
                 </div>
               </div>
               <div className="flex-1 overflow-auto p-2">
                 {!selectedTeamName ? (
-                  <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('teams.selectFirst')}</div>
+                  <div className="h-full flex items-center justify-center text-sm text-text-muted" data-testid="team-panel-directory-body" data-variant="empty">{t('teams.selectFirst')}</div>
                 ) : loadingFiles ? (
-                  <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('teams.loadingDirectory')}</div>
+                  <div className="h-full flex items-center justify-center text-sm text-text-muted" data-testid="team-panel-directory-body" data-variant="loading">{t('teams.loadingDirectory')}</div>
                 ) : (
-                  <div className="space-y-1">
+                  <div className="space-y-1" data-testid="team-panel-directory-body" data-variant="tree">
                     <div>
                       <button
                         type="button"
                         onClick={() => toggleExpanded(selectedRoot)}
                         className="w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-text-muted hover:bg-secondary/40 hover:text-text "
                         title={selectedRoot}
+                        data-testid="team-panel-root-folder-toggle"
                       >
                         <span className="w-4 h-4 flex items-center justify-center text-text-muted/80">
                           <svg
@@ -533,7 +545,7 @@ export function TeamPanel({ onSessionsDeleted }: TeamPanelProps) {
                         <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                           <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h4.5l1.5 2.25h10.5v8.25A2.25 2.25 0 0118 19.5H6A2.25 2.25 0 013.75 17.25V6.75z" />
                         </svg>
-                        <span className="flex-1 min-w-0 truncate">{selectedTeamName}</span>
+                        <span className="flex-1 min-w-0 truncate" data-testid="team-panel-root-folder-name">{selectedTeamName}</span>
                       </button>
                       {expandedPaths.has(selectedRoot) ? renderDirectoryChildren(selectedRoot, 1) : null}
                     </div>
@@ -551,13 +563,16 @@ export function TeamPanel({ onSessionsDeleted }: TeamPanelProps) {
               onLostPointerCapture={() => {
                 resizeDragRef.current = null;
               }}
+              data-testid="team-panel-resize-divider"
             />
 
-            <div className="flex-1 min-w-0 min-h-0">
+            <div className="flex-1 min-w-0 min-h-0" data-testid="team-panel-preview-pane">
               {selectedFile ? (
-                <FileViewer filePath={selectedFile.path} fileName={selectedFile.name} />
+                <div data-testid="team-panel-file-viewer">
+                  <FileViewer filePath={selectedFile.path} fileName={selectedFile.name} />
+                </div>
               ) : (
-                <div className="h-full flex items-center justify-center text-text-muted">
+                <div className="h-full flex items-center justify-center text-text-muted" data-testid="team-panel-preview-empty">
                   {t('teams.selectFile')}
                 </div>
               )}

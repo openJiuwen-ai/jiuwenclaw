@@ -115,6 +115,22 @@ def test_has_persistable_assistant_payload_tool_result_falsy_values_rejected():
     ) is False
 
 
+def test_has_persistable_assistant_payload_subagent_activity():
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.subagent_activity",
+        extra={
+            "subagent_activity": {
+                "subagent_id": "sub-a",
+                "task_id": "turn-1",
+                "seq": 1,
+                "kind": "thinking",
+                "summary": "planning",
+            }
+        },
+    ) is True
+
+
 def test_has_persistable_assistant_payload_processing_status_still_rejected():
     assert session_history._has_persistable_assistant_payload(
         content_text="",
@@ -172,6 +188,34 @@ def test_append_history_persists_tool_result(tmp_path, monkeypatch):
     assert tool_result_record["event_type"] == "chat.tool_result"
     assert tool_result_record["tool_call_id"] == "call_abc"
     assert tool_result_record["tool_name"] == "list_files"
+
+
+def test_request_completion_is_persisted_after_prior_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+
+    session_history.append_history_record(
+        session_id="s-complete",
+        request_id="r1",
+        channel_id="web",
+        role="assistant",
+        event_type="chat.final",
+        content="Done",
+        timestamp=1.0,
+    )
+    receipt = session_history.enqueue_history_request_completion(
+        "s-complete",
+        "r1",
+        terminal_status="success",
+    )
+    assert receipt is not None
+    receipt.result(timeout=2)
+
+    records = session_history.load_history_records("s-complete")
+    assert [record.get("event_type") for record in records] == [
+        "chat.final",
+        session_history.SESSION_REQUEST_COMPLETED_EVENT,
+    ]
+    assert records[-1]["status"] == "success"
 
 
 def test_append_history_persists_tool_result_with_nested_payload(tmp_path, monkeypatch):

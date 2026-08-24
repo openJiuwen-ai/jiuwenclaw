@@ -654,7 +654,7 @@ def test_child_seal_delta_includes_child_and_parent():
 
 
 def test_failed_agent_does_not_bump_phase_or_run_completed_count():
-    """completed_agent_count counts only status=completed, not failed/stopped."""
+    """completed_agent_count counts all terminal agents (completed + failed + stopped)."""
     r = WorkflowRunState()
     r.apply(_make_progress("workflow_started", workflow_name="review"))
     r.apply(_agent_started("review", "a1", "k1"))
@@ -665,14 +665,15 @@ def test_failed_agent_does_not_bump_phase_or_run_completed_count():
     phase = next(p for p in r.phases if p.name == "review")
     assert phase.agents[0].status == "completed"
     assert phase.agents[1].status == "failed"
-    assert phase.completed_agent_count == 1
+    # both agents are terminal — completed_agent_count counts failed too
+    assert phase.completed_agent_count == 2
     assert phase.agent_count == 2
-    assert r.completed_agent_count == 1
+    assert r.completed_agent_count == 2
     assert r.agent_count == 2
 
 
 def test_child_phase_seals_when_all_agents_terminal_including_failed():
-    """Child seals on all agents terminal; completed count excludes failed."""
+    """Child seals on all agents terminal; completed count includes failed (terminal)."""
     child = "\u25b8 intro #0"
     r = WorkflowRunState()
     r.apply(_make_progress("workflow_started", workflow_name="launch", phases=[
@@ -689,6 +690,7 @@ def test_child_phase_seals_when_all_agents_terminal_including_failed():
 
     child_phase = next(p for p in r.phases if p.phase_type == "child")
     assert child_phase.status == "completed"
-    assert child_phase.completed_agent_count == 1
+    # both agents terminal (completed + failed) \u2014 completed_agent_count counts both
+    assert child_phase.completed_agent_count == 2
     assert child_phase.agent_count == 2
-    assert r.completed_agent_count == 1
+    assert r.completed_agent_count == 2
