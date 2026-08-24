@@ -466,7 +466,10 @@ function resolvePlanEntryPayload(
 ): Record<string, string> {
   if (!isPlanWireMode(outgoingMode)) return {};
   if (!usePlanStore.getState().hasPendingExplicitEntry(sessionId)) return {};
-  return { plan_entry_source: 'plan_toggle' };
+  return {
+    plan_entry_source:
+      usePlanStore.getState().getPendingEntrySource(sessionId) ?? 'plan_toggle',
+  };
 }
 
 /** 请求成功发出后才消费标记，失败时保留以便重试。 */

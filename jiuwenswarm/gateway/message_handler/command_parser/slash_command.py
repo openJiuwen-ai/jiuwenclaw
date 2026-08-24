@@ -481,14 +481,13 @@ BUILTIN_COMMANDS_META: tuple[dict[str, Any], ...] = (
         "available_modes": None,
     },
     {
-        # web 语义的 /plan：翻转 Plan 开关（非 TUI 的带描述切 code.plan）。
-        # 纯本地操作，规划请求由下一条消息携带 agent.plan 发出。
+        # Web 侧复用现有 Plan 开关与 chat.send，可只打开模式，也可直接发送规划描述。
         "name": "plan",
         "description": "切换计划模式（只读规划 → 审批 → 执行）",
-        "usage": "/plan",
-        "example": None,
+        "usage": "/plan [open|<description>]",
+        "example": "/plan outline the migration steps",
         "kind": "built-in",
-        "takesArgs": False,
+        "takesArgs": True,
         "scope": "agent",
         "execution": "chat.send_with_mode",
         "mode": "agent.plan",

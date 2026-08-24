@@ -843,7 +843,8 @@ overflow: hidden;
 }
 
 .chat-input-chip-inline--member,
-.chat-input-chip-inline--role {
+.chat-input-chip-inline--role,
+.chat-input-chip-inline--slash-command {
   background-color: var(--color-surface-card);
   background-image: linear-gradient(
     rgba(var(--color-action-primary-rgb), 0.12),
@@ -910,7 +911,8 @@ overflow: hidden;
 /* Member/role chips have no leading icon container. Keep their remove action
    in a reserved trailing slot so it never covers the member name on hover. */
 .chat-input-chip-inline--member .chat-input-chip-inline__remove,
-.chat-input-chip-inline--role .chat-input-chip-inline__remove {
+.chat-input-chip-inline--role .chat-input-chip-inline__remove,
+.chat-input-chip-inline--slash-command .chat-input-chip-inline__remove {
   position: static;
   transform: none;
   color: var(--color-action-primary);
@@ -924,6 +926,229 @@ overflow: hidden;
 .chat-input-chip-inline__remove:focus-visible {
   opacity: 1;
   outline: none;
+}
+
+/* /btw 是不写回主历史的单轮侧问，使用独立卡片避免伪装成普通 assistant 回复。 */
+.chat-btw-card {
+  width: min(85%, 44rem);
+  margin: 10px auto;
+  overflow: hidden;
+  border: 1px solid rgba(var(--color-action-primary-rgb), 0.24);
+  border-radius: 14px;
+  background-color: var(--color-surface-card);
+  background-image: linear-gradient(
+    rgba(var(--color-action-primary-rgb), 0.035),
+    rgba(var(--color-action-primary-rgb), 0.035)
+  );
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+}
+
+.chat-btw-card__header {
+  display: flex;
+  width: 100%;
+  min-height: 48px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 0;
+  background-color: var(--color-surface-card);
+  background-image: linear-gradient(
+    rgba(var(--color-action-primary-rgb), 0.07),
+    rgba(var(--color-action-primary-rgb), 0.07)
+  );
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-btw-card__header:hover,
+.chat-btw-card__header:focus-visible {
+  background-image: linear-gradient(
+    rgba(var(--color-action-primary-rgb), 0.11),
+    rgba(var(--color-action-primary-rgb), 0.11)
+  );
+  outline: none;
+}
+
+.chat-btw-card__header:focus-visible {
+  box-shadow: inset 0 0 0 2px rgba(var(--color-action-primary-rgb), 0.5);
+}
+
+.chat-btw-card__icon {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--color-action-primary);
+  color: var(--color-text-inverse);
+}
+
+.chat-btw-card__heading {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.chat-btw-card__badge {
+  color: var(--color-action-primary);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+.chat-btw-card__title {
+  color: var(--color-text-strong);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.chat-btw-card__scope {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1 1 auto;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-btw-card__chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--color-text-secondary);
+}
+
+.chat-btw-card__body {
+  padding: 14px 16px 16px;
+}
+
+.chat-btw-card__question {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(var(--color-border-default-rgb), 0.76);
+}
+
+.chat-btw-card__section-label {
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 20px;
+}
+
+.chat-btw-card__question-text {
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.chat-btw-card__answer {
+  padding-top: 12px;
+}
+
+.chat-btw-card__answer-header {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.chat-btw-card__copy {
+  display: inline-flex;
+  height: 26px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chat-btw-card__copy:hover,
+.chat-btw-card__copy:focus-visible {
+  background: var(--color-action-secondary);
+  color: var(--color-action-primary);
+  outline: none;
+}
+
+.chat-btw-card__copy:focus-visible {
+  box-shadow: inset 0 0 0 1px rgba(var(--color-action-primary-rgb), 0.45);
+}
+
+.chat-btw-card__copy:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.chat-btw-card__answer-content {
+  color: var(--color-text-primary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.chat-btw-card__empty {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+/* /compact 的后端结果是时间线状态，不作为一条普通对话消息展示。 */
+.chat-compact-divider {
+  display: flex;
+  width: min(85%, 44rem);
+  align-items: center;
+  gap: 12px;
+  margin: 16px auto;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+}
+
+.chat-compact-divider__line {
+  height: 1px;
+  min-width: 24px;
+  flex: 1 1 auto;
+  background: rgba(var(--color-border-default-rgb), 0.9);
+}
+
+.chat-compact-divider__label {
+  max-width: 70%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 720px) {
+  .chat-btw-card {
+    width: calc(100% - 16px);
+    border-radius: 12px;
+  }
+
+  .chat-compact-divider {
+    width: calc(100% - 32px);
+    gap: 8px;
+  }
+
+  .chat-btw-card__scope {
+    display: none;
+  }
+
+  .chat-btw-card__body {
+    padding: 12px;
+  }
 }
 
 /* 用户消息气泡内的技能 chip（非交互，仅展示） */
@@ -1036,6 +1261,147 @@ overflow: hidden;
   padding: 0 10px;
   color: var(--color-text-secondary);
   font-size: 13px;
+}
+
+.chat-composer-suggestion--slash {
+  left: 0;
+  width: 100%;
+  border-radius: 18px;
+}
+
+.chat-composer-suggestion--below {
+  position: relative;
+  left: auto;
+  bottom: auto;
+  z-index: 2;
+  margin-top: 8px;
+}
+
+.chat-composer-suggestion--slash .chat-composer-suggestion__list {
+  max-height: 320px;
+  padding: 10px 8px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.chat-composer-suggestion__section-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 10px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.chat-composer-suggestion__section-title:not(:first-child) {
+  margin-top: 8px;
+  border-top: 1px solid var(--color-border-default);
+  padding-top: 8px;
+  height: 39px;
+}
+
+.chat-composer-suggestion--slash .chat-composer-suggestion__item {
+  height: 48px;
+  border-radius: 10px;
+}
+
+.chat-composer-suggestion--slash .chat-composer-suggestion__item:hover,
+.chat-composer-suggestion--slash .chat-composer-suggestion__item:focus-visible,
+.chat-composer-suggestion--slash .chat-composer-suggestion__item--active {
+  background: var(--color-action-secondary);
+}
+
+/* 键盘导航时，停在列表上的静止鼠标不能再绘制第二个 hover 高亮。
+   一旦指针真实移动，组件会切回 pointer 模式并高亮指针所在项。 */
+.chat-composer-suggestion--slash.chat-composer-suggestion--keyboard-nav
+  .chat-composer-suggestion__item:hover:not(.chat-composer-suggestion__item--active) {
+  background: transparent;
+}
+
+.chat-composer-suggestion--slash .chat-composer-suggestion__text {
+  align-items: baseline;
+  flex-direction: row;
+  gap: 10px;
+}
+
+.chat-composer-suggestion--slash .chat-composer-suggestion__label {
+  max-width: 42%;
+  flex: 0 0 auto;
+  font-size: 14px;
+}
+
+.chat-composer-suggestion--slash .chat-composer-suggestion__meta {
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.chat-composer-suggestion__slash-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border: 1.5px solid currentColor;
+  border-radius: 7px;
+  color: var(--color-text-primary);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.chat-composer-suggestion__slash-icon--skill {
+  border: 0;
+}
+
+.chat-composer-suggestion__slash-icon--skill::before {
+  content: '';
+  width: 20px;
+  height: 20px;
+  background: currentColor;
+  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+}
+
+.chat-composer-suggestion__source {
+  max-width: 24%;
+  overflow: hidden;
+  flex: 0 1 auto;
+  border-radius: 6px;
+  padding: 2px 7px;
+  background: var(--color-surface-page);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .chat-composer-suggestion--slash {
+    border-radius: 14px;
+  }
+
+  .chat-composer-suggestion--slash .chat-composer-suggestion__list {
+    max-height: 240px;
+  }
+
+  .chat-composer-suggestion__source {
+    display: none;
+  }
+
+  .chat-composer-suggestion--slash .chat-composer-suggestion__text {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .chat-composer-suggestion--slash .chat-composer-suggestion__label {
+    max-width: 100%;
+  }
 }
 
 .chat-message-skills {

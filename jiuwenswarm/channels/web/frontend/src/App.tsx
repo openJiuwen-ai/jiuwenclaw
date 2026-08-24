@@ -1960,6 +1960,8 @@ function AppContent() {
             explicitEntry: usePlanStore
               .getState()
               .hasPendingExplicitEntry(NEW_CONVERSATION_ID),
+            entrySource:
+              usePlanStore.getState().getPendingEntrySource(NEW_CONVERSATION_ID) ?? undefined,
           });
         }
         usePlanStore.getState().removeRuntime(NEW_CONVERSATION_ID);

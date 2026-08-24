@@ -16,15 +16,11 @@ export type SlashCommandContext = {
   /** 用户原始输入行（如 "/btw 介绍自己"），用于在结果消息第一行回显 */
   inputLine: string;
   addMessage: (sessionId: string, message: Message) => void;
+  submitMessage?: (content: string) => void;
 };
 
 export interface SlashCommand {
   name: string;
-  description: string;
-  usage?: string;
-  takesArgs: boolean;
-  /** hidden 的命令不进弹窗 */
-  hidden?: boolean;
   /** 是否要求真实会话；纯本地命令（/plan）设 false，欢迎页也能用 */
   requiresSession?: boolean;
   execute: (ctx: SlashCommandContext, args: string) => Promise<void>;
@@ -46,19 +42,18 @@ export function findSlashCommand(name: string): SlashCommand | undefined {
   return SLASH_COMMANDS.find((c) => c.name === lower);
 }
 
-/** 弹窗过滤：按命令名匹配；hidden 的不展示 */
-export function filterSlashCommands(query: string): SlashCommand[] {
-  const q = query.trim().toLowerCase();
-  return SLASH_COMMANDS.filter((c) => !c.hidden && (!q || c.name.toLowerCase().includes(q)));
-}
-
-/** 命令结果消息：system + isCommandOutput 标记，走居中浅色渲染。content 第一行 = 命令行。 */
+/** 命令结果消息：保留兼容 content，同时附带结构化字段供专用卡片渲染。 */
 function commandResultMessage(inputLine: string, output: string): Message {
+  const normalizedInput = inputLine.trim();
+  const normalizedOutput = output.trim();
   return {
     id: `slash-out-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     role: 'system',
     isCommandOutput: true,
-    content: output ? `${inputLine.trim()}\n${output.trim()}` : inputLine.trim(),
+    commandName: parseSlashLine(normalizedInput).name,
+    commandInput: normalizedInput,
+    commandOutput: normalizedOutput,
+    content: normalizedOutput ? `${normalizedInput}\n${normalizedOutput}` : normalizedInput,
     timestamp: new Date().toISOString(),
   };
 }
@@ -66,9 +61,6 @@ function commandResultMessage(inputLine: string, output: string): Message {
 /** /btw —— 快速侧问：单轮、无工具、复用当前上下文，不打断主对话。 */
 const btwCommand: SlashCommand = {
   name: 'btw',
-  description: '快速侧问，不打断主对话（基于当前上下文）',
-  usage: '/btw <问题>',
-  takesArgs: true,
   execute: async (ctx, args) => {
     const question = args.trim();
     if (!question) {
@@ -99,9 +91,6 @@ const btwCommand: SlashCommand = {
 /** /compact —— 压缩对话历史为摘要；token 计数刷新由 context.* 事件监听处理。 */
 const compactCommand: SlashCommand = {
   name: 'compact',
-  description: '压缩对话历史，保留摘要以节省上下文',
-  usage: '/compact',
-  takesArgs: false,
   execute: async (ctx) => {
     let output: string;
     try {
@@ -140,11 +129,8 @@ const compactCommand: SlashCommand = {
  */
 const planCommand: SlashCommand = {
   name: 'plan',
-  description: '切换计划模式（只读规划 → 审批 → 执行）',
-  usage: '/plan',
-  takesArgs: false,
   requiresSession: false,
-  execute: async (ctx) => {
+  execute: async (ctx, args) => {
     // 集群不支持：仅回提示；正常开关静默（状态已由工具栏可视化）
     if (ctx.mode === 'team') {
       ctx.addMessage(
@@ -155,10 +141,19 @@ const planCommand: SlashCommand = {
     }
     const store = usePlanStore.getState();
     store.ensureRuntime(ctx.sessionId);
-    if (store.isActive(ctx.sessionId)) {
+    const request = args.trim();
+    if (!request && store.isActive(ctx.sessionId)) {
       store.setActive(ctx.sessionId, false);
     } else {
-      store.setActive(ctx.sessionId, true, { explicitEntry: true });
+      if (!store.isActive(ctx.sessionId)) {
+        store.setActive(ctx.sessionId, true, {
+          explicitEntry: true,
+          entrySource: 'slash_command',
+        });
+      }
+      if (request && request !== 'open') {
+        ctx.submitMessage?.(request);
+      }
     }
   },
 };
