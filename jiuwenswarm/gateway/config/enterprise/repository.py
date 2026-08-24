@@ -14,7 +14,7 @@ from jiuwenswarm.gateway.storage.protocols.persistent import PersistentStore
 _LIST_ALL_CAP = 10_000
 
 
-class ConfigRecordRepository:
+class EnterpriseRecordRepository:
     """企业配置 / 模板 / 密钥等表的通用 CRUD。
 
     record 即业务 dict（与 EE ``DBHandler`` 行形状对齐）；不引入领域 dataclass。
@@ -202,4 +202,4 @@ class ConfigRecordRepository:
         return {"synced_count": synced, "deleted_count": deleted}
 
 
-__all__ = ["ConfigRecordRepository"]
+__all__ = ["EnterpriseRecordRepository"]

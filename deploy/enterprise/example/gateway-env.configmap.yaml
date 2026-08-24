@@ -2,6 +2,7 @@ apiVersion: v1
 data:
   AGENT_BOT_ID_GROUP_NUM: "0"
   AGENT_RUNTIME: jiuwen
+  GATEWAY_EDITION: enterprise
   AGENT_SERVER_AUTOSCALE_INTERVAL: "5"
   AGENT_SERVER_CONFIGMAP_NAME: jiuwenclaw-gateway-config
   AGENT_SERVER_CONTAINER_NAME: jiuwenclaw-agentserver

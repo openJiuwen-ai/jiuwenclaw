@@ -360,6 +360,8 @@ data:
       operation_timeout: ${REDIS_OPERATION_TIMEOUT:-10}
       health_check_interval: ${REDIS_HEALTH_CHECK_INTERVAL:-30}
     gateway:
+      # 产品形态：personal | enterprise；企业部署保持 enterprise
+      edition: ${GATEWAY_EDITION:-enterprise}
       # AgentServer client mode.
       # websocket: default ws client
       # yuanrong: provided by AgentServerClientExtension
