@@ -278,6 +278,17 @@ class TaskCompleteEventData:
     error: Any | None
 
 
+def _is_subplan_business_failure(result: Any) -> bool:
+    """子节点返回业务失败状态时，也应标记 task.complete 为 failed。"""
+    if not isinstance(result, dict):
+        return False
+    if result.get("export_status") == "failed":
+        return True
+    if result.get("status") == "error":
+        return True
+    return False
+
+
 @dataclass
 class _StreamBufferBucket:
     """单个 (stream_source_id, event_type) 桶的缓冲状态。
@@ -2744,7 +2755,9 @@ class SkillTurboExecutor:
         task_id = task_context["task_id"]
         timestamp = time.time()
         duration_ms = int((timestamp - task_context.get("start_time", time.time())) * 1000)
-        is_error = isinstance(result_or_error, Exception)
+        is_error = isinstance(result_or_error, Exception) or _is_subplan_business_failure(
+            result_or_error
+        )
         status = "failed" if is_error else "completed"
         prior_status = (
             task_states[task_id].get("status") if task_id in task_states else None
