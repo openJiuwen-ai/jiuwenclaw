@@ -315,6 +315,9 @@ from jiuwenswarm.agents.harness.common.tools import (
     skill_sources_from_manager,
     SymphonyToolkit,
 )
+from jiuwenswarm.agents.harness.common.rails.symphony.retrieval_context_processor import (
+    symphony_retrieval_compact_processor_spec,
+)
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
@@ -1231,7 +1234,7 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
         config: 配置字典
     """
     try:
-        user_processors: List[Tuple[str, dict]] = []
+        user_processors: List[Tuple[str, Any]] = []
         raw_context_engine_cfg = config.get("context_engine_config", {})
         context_engine_cfg = raw_context_engine_cfg if isinstance(raw_context_engine_cfg, dict) else {}
         session_memory_cfg = _resolve_session_memory_config(context_engine_cfg)
@@ -1256,6 +1259,8 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
         round_level_cfg = context_engine_cfg.get("round_level_compressor_config", {})
         if isinstance(round_level_cfg, dict) and round_level_cfg:
             user_processors.append(("RoundLevelCompressor", round_level_cfg))
+
+        user_processors.append(symphony_retrieval_compact_processor_spec())
 
         context_rail = ContextProcessorRail(
             processors=user_processors if user_processors else None,

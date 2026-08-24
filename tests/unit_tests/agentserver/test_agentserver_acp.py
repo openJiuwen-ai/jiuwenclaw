@@ -18,6 +18,9 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _build_context_assemble_rail,
     _build_context_processor_rail,
 )
+from jiuwenswarm.agents.harness.common.rails.symphony.retrieval_context_processor import (
+    SymphonyRetrievalCompactProcessorConfig,
+)
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
@@ -3629,7 +3632,7 @@ def test_build_context_processor_rail_uses_summary_offloader_config(monkeypatch)
 
     assert isinstance(rail, FakeContextProcessorRail)
     assert rail.preset is True
-    assert rail.processors == [
+    assert rail.processors[:-1] == [
         (
             "MessageSummaryOffloader",
             {
@@ -3639,6 +3642,8 @@ def test_build_context_processor_rail_uses_summary_offloader_config(monkeypatch)
         ),
         ("DialogueCompressor", {"tokens_threshold": 100000}),
     ]
+    assert rail.processors[-1][0] == "SymphonyRetrievalCompactProcessor"
+    assert isinstance(rail.processors[-1][1], SymphonyRetrievalCompactProcessorConfig)
 
 
 def test_build_context_processor_rail_prefers_summary_offloader_config(monkeypatch):
@@ -3663,9 +3668,11 @@ def test_build_context_processor_rail_prefers_summary_offloader_config(monkeypat
     )
 
     assert isinstance(rail, FakeContextProcessorRail)
-    assert rail.processors == [
+    assert rail.processors[:-1] == [
         ("MessageSummaryOffloader", {"tokens_threshold": 6000}),
     ]
+    assert rail.processors[-1][0] == "SymphonyRetrievalCompactProcessor"
+    assert isinstance(rail.processors[-1][1], SymphonyRetrievalCompactProcessorConfig)
 
 
 def test_build_context_processor_rail_passes_session_memory_config(monkeypatch):
@@ -3689,7 +3696,9 @@ def test_build_context_processor_rail_passes_session_memory_config(monkeypatch):
 
     assert isinstance(rail, FakeContextProcessorRail)
     assert rail.preset is True
-    assert rail.processors is None
+    assert rail.processors == [
+        ("SymphonyRetrievalCompactProcessor", SymphonyRetrievalCompactProcessorConfig())
+    ]
     assert rail.session_memory == {
         "trigger_tokens": 12000,
         "update_mode": "direct_replace",
