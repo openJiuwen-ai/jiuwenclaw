@@ -918,6 +918,8 @@ def get_permissions_file_guard_workspace_access() -> dict[str, str]:
     """读取 ``permissions.file_guard.workspace`` 的 read/write/exec 三轴。
 
     缺省轴按 openjiuwen 引擎语义返回 ``ask``（与 ``default_level=ASK`` 一致）。
+    非法值（非字符串、或不在 allow/ask/deny 范围内）会被清洗为 ``ask``，
+    确保 GET 端点始终返回合法值，与 SET 路径的校验对称。
     """
     fg = _effective_permissions().get("file_guard")
     if not isinstance(fg, dict):
@@ -925,7 +927,21 @@ def get_permissions_file_guard_workspace_access() -> dict[str, str]:
     ws = fg.get("workspace")
     if not isinstance(ws, dict):
         return {axis: "ask" for axis in _PERMISSIONS_WORKSPACE_ACCESS_AXES}
-    return {axis: ws.get(axis, "ask") for axis in _PERMISSIONS_WORKSPACE_ACCESS_AXES}
+
+    result: dict[str, str] = {}
+    for axis in _PERMISSIONS_WORKSPACE_ACCESS_AXES:
+        raw = ws.get(axis, "ask")
+        if not isinstance(raw, str) or raw not in _PERMISSIONS_WORKSPACE_ACCESS_LEVELS:
+            logger.warning(
+                "[config] permissions.file_guard.workspace.%s has invalid value %r, "
+                "coerced to 'ask'",
+                axis,
+                raw,
+            )
+            result[axis] = "ask"
+        else:
+            result[axis] = raw
+    return result
 
 
 def update_permissions_file_guard_workspace_access_in_config(axis: dict[str, Any]) -> dict[str, str]:

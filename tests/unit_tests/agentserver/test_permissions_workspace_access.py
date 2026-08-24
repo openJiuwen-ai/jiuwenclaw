@@ -99,6 +99,45 @@ def test_workspace_access_get_defaults_when_file_guard_missing(
     assert resp.payload == {"read": "ask", "write": "ask", "exec": "ask"}
 
 
+@pytest.mark.parametrize(
+    "bad_value",
+    ["maybe", True, None, 1, "ALLOW"],
+    ids=["str-invalid", "bool", "none", "int", "wrong-case"],
+)
+def test_workspace_access_get_sanitizes_invalid_levels(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_value,
+) -> None:
+    state = _install_fake_permissions(monkeypatch)
+    state["permissions"] = {
+        "file_guard": {"workspace": {"read": bad_value, "write": "allow", "exec": "ask"}}
+    }
+
+    resp = permissions_config_rpc.dispatch_permissions_config_request(
+        _access_request(ReqMethod.PERMISSIONS_WORKSPACE_ACCESS_GET, {})
+    )
+
+    assert resp.ok is True
+    # 非法 read 被清洗为 ask；合法 write/exec 原样透传
+    assert resp.payload == {"read": "ask", "write": "allow", "exec": "ask"}
+
+
+def test_workspace_access_get_sanitizes_all_invalid_axes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _install_fake_permissions(monkeypatch)
+    state["permissions"] = {
+        "file_guard": {"workspace": {"read": "maybe", "write": True, "exec": 1}}
+    }
+
+    resp = permissions_config_rpc.dispatch_permissions_config_request(
+        _access_request(ReqMethod.PERMISSIONS_WORKSPACE_ACCESS_GET, {})
+    )
+
+    assert resp.ok is True
+    assert resp.payload == {"read": "ask", "write": "ask", "exec": "ask"}
+
+
 def test_workspace_access_set_writes_all_axes(monkeypatch: pytest.MonkeyPatch) -> None:
     state = _install_fake_permissions(monkeypatch)
 
