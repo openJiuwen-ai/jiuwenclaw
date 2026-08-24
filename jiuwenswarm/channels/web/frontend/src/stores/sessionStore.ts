@@ -121,7 +121,9 @@ export function resolveEffectiveModel(
     const exact = chatAvailableModels.find((m) => modelSelectKey(m) === displayed);
     if (exact) return exact;
     // 回退：按 alias || model_name 找同名首个（恒 defaults，兼容老版纯 name 值）
-    const byName = chatAvailableModels.find((m) => modelDisplayName(m) === displayed);
+    const byName = chatAvailableModels.find(
+      (m) => modelDisplayName(m) === displayed || m.model_name === displayed,
+    );
     if (byName) return byName;
   }
   return chatAvailableModels[0];
@@ -554,7 +556,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // {model_name}#{idx} cache key 对齐，后端 _resolve_model_for_request
     // 据此精确命中同名 defaults/agentos 中的指定条目（issue）。
     // 失配兜底仍用 runtime.selectedModelName（兼容老值）。
-    return resolved ? modelSelectKey(resolved) : runtime.selectedModelName;
+    return resolved
+      ? (resolved.alias ? resolved.model_name : modelSelectKey(resolved))
+      : runtime.selectedModelName;
   },
 
   removeRuntime: (sessionId) => {
@@ -1425,9 +1429,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // is_default=false，is_default!==false 过滤后顺序在前），符合"agentos 不抢启动默认"。
       const matchedModel = activeModel ? chatModels.find((m) => m.model_name === activeModel) : null;
       const baseModel = matchedModel ?? chatModels[0] ?? null;
-      // defaultModelName 存 modelSelectKey（含 #origin_index）以同名区分，
-      // 也写回 MODEL_STORAGE_KEY（仍存别名或纯名以兼容旧版读 localStorage 的逻辑）。
-      const selected = baseModel ? modelSelectKey(baseModel) : null;
+      // 启动默认始终是 defaults 条目，保留 develop 的纯 model_name 契约；
+      // #origin_index 仅用于用户显式选择同名条目时区分 defaults / agentos。
+      const selected = baseModel?.model_name ?? null;
       const persisted = baseModel ? (baseModel.alias || baseModel.model_name) : null;
       if (persisted) {
         try { localStorage.setItem(MODEL_STORAGE_KEY, persisted); } catch { /* noop */ }
