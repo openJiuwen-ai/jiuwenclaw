@@ -6,6 +6,7 @@ import pytest
 
 from jiuwenswarm.channels.web.history_store import (
     ChatHistoryStore,
+    default_enterprise_history_db_path,
     get_session_detail_sync,
     list_sessions_sync,
     make_history_callback,
@@ -100,6 +101,40 @@ async def test_callback_pending_backfill_on_final(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_callback_uplink_request_id_in_payload(tmp_path) -> None:
+    store = ChatHistoryStore(tmp_path / "h.db")
+    cb = make_history_callback(store)
+    await cb(
+        "browser",
+        json.dumps({"type": "req", "id": "r1", "method": "chat.send", "params": {"query": "hi"}}),
+    )
+    await cb(
+        "uplink",
+        json.dumps(
+            {
+                "type": "event",
+                "event": "chat.delta",
+                "payload": {"session_id": "s1", "request_id": "r1", "content": "ok"},
+            },
+        ),
+    )
+    await cb(
+        "uplink",
+        json.dumps(
+            {
+                "type": "event",
+                "event": "chat.final",
+                "payload": {"session_id": "s1", "request_id": "r1", "content": ""},
+            },
+        ),
+    )
+    detail = await store.get_session_detail("s1")
+    assert detail is not None
+    assert detail["messages"][-1]["content"] == "ok"
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_callback_ignores_delta_events(tmp_path) -> None:
     store = ChatHistoryStore(tmp_path / "h.db")
     cb = make_history_callback(store)
@@ -165,3 +200,43 @@ async def test_sync_read_after_write(tmp_path) -> None:
     # db 不存在：返回空 / None，不抛
     assert list_sessions_sync(tmp_path / "missing.db") == []
     assert get_session_detail_sync(tmp_path / "missing.db", "x") is None
+
+
+def test_default_enterprise_history_db_path_is_web_history_db() -> None:
+    path = default_enterprise_history_db_path()
+    assert path.endswith("web_history.db")
+
+
+def test_resolve_history_db_type_mysql_when_host_set(monkeypatch) -> None:
+    from jiuwenswarm.channels.web.history_store import resolve_history_db_type
+
+    monkeypatch.delenv("WEB_DB_TYPE", raising=False)
+    monkeypatch.delenv("DB_TYPE", raising=False)
+    monkeypatch.setenv("WEB_DB_HOST", "127.0.0.1")
+    assert resolve_history_db_type() == "mysql"
+
+
+def test_mysql_store_unavailable_without_host(monkeypatch) -> None:
+    from jiuwenswarm.channels.web.history_store import ChatHistoryStore
+
+    monkeypatch.delenv("WEB_DB_HOST", raising=False)
+    store = ChatHistoryStore.for_db_type("mysql")
+    assert store.backend == "mysql"
+    assert store.available is False
+
+
+@pytest.mark.asyncio
+async def test_memory_backend_record_and_list() -> None:
+    store = ChatHistoryStore.memory()
+    await store.record_user(request_id="r1", session_id="s1", query="你好", ts=1000.0, user="u1")
+    await store.record_assistant(
+        request_id="r1", session_id="s1", content="答", event_type="chat.final", ts=1001.0,
+    )
+    sessions = store.list_sessions_blocking(limit=20, offset=0, user="u1")
+    assert len(sessions) == 1
+    detail = store.get_session_detail_blocking("s1", user="u1")
+    assert detail is not None
+    assert len(detail["messages"]) == 2
+    assert store.get_session_detail_blocking("s1", user="other") is None
+
+

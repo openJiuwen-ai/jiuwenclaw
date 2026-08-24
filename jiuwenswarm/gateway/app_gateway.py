@@ -1866,7 +1866,12 @@ async def _run_with_telemetry(
 
     web_channel = None
     tui_channel = None
-    web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
+    web_config = WebChannelConfig(
+        enabled=True,
+        host=web_host,
+        ws_port=web_port,
+        path=web_path,
+    )
     web_channel = WebChannel(web_config, _DummyBus())
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
@@ -2738,12 +2743,24 @@ async def _run_with_telemetry(
         if web_channel is not None
         else None
     )
+    # Give WebChannel.start() a tick to bind WS + start Web HTTP before logging.
+    if web_task is not None:
+        for _ in range(40):
+            if getattr(web_channel, "web_http_port", None):
+                break
+            await asyncio.sleep(0.05)
+    web_http_port_for_log: int | str = "-"
+    if web_channel is not None:
+        port_val = getattr(web_channel, "web_http_port", None)
+        web_http_port_for_log = port_val if port_val is not None else "-"
     if web_channel is not None:
         logger.info(
-            "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit.",
+            "[App] started: Web ws://%s:%s%s  WebHTTP http://%s:%s/api/v1  AgentServer: %s  Press Ctrl+C to exit.",
             web_host,
             web_port,
             web_path,
+            web_host,
+            web_http_port_for_log,
             agent_server_url,
         )
 

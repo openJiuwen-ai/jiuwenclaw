@@ -1,74 +1,53 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
-import io
 import json
 import time
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from jiuwenswarm.agents.harness.common.tools import web_file_download
 from jiuwenswarm.agents.harness.common.tools.web_file_download import (
     WebFileDownloadManager,
 )
+from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+from jiuwenswarm.gateway.channel_manager.web.web_http_app import create_web_http_app
+from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebChannelConfig
 
 
-class _DownloadHandlerStub:
-    def __init__(
-        self,
-        *,
-        command: str = "HEAD",
-        headers: dict[str, str] | None = None,
-    ) -> None:
-        self.command = command
-        self.headers = headers or {}
-        self.wfile = io.BytesIO()
-        self.status: int | None = None
-        self.response_headers: dict[str, str] = {}
-        self.headers_ended = False
-
-    def send_response(self, status: int) -> None:
-        self.status = status
-
-    def send_header(self, name: str, value: str) -> None:
-        self.response_headers[name] = value
-
-    def end_headers(self) -> None:
-        self.headers_ended = True
-
-    def _write_json(self, status: int, payload: dict) -> None:
-        raise AssertionError(f"unexpected JSON response: {status} {payload}")
-
-    def log_error(self, message: str, *args: object) -> None:
-        raise AssertionError(message % args)
+def _download_client() -> TestClient:
+    channel = WebChannel(WebChannelConfig(host="127.0.0.1", port=0), RobotMessageRouter())
+    return TestClient(create_web_http_app(channel))
 
 
-def _spa_static_handler():
-    """Lazy import: app_web pulls cgi (removed in Py3.13) which handler tests need."""
-    from jiuwenswarm.channels.web.app_web import _SpaStaticHandler
-
-    return _SpaStaticHandler
-
-
-def _serve_file(
+def _get_download(
     monkeypatch: pytest.MonkeyPatch,
     file_path: Path,
-    query: dict[str, str],
     *,
-    command: str = "HEAD",
-    headers: dict[str, str] | None = None,
-) -> _DownloadHandlerStub:
+    inline: str | None = None,
+    range_header: str | None = None,
+    method: str = "GET",
+):
+    monkeypatch.setenv("JIUWENSWARM_WEB_RECEIVED_FILES", str(file_path.parent))
     monkeypatch.setattr(
         web_file_download,
         "validate_file_download_token",
         lambda _token: {"path": str(file_path)},
     )
-    handler = _DownloadHandlerStub(command=command, headers=headers)
-    _spa_static_handler()._handle_file_download(handler, query)
-    return handler
+    client = _download_client()
+    params: dict[str, str] = {"token": "signed-token"}
+    if inline is not None:
+        params["inline"] = inline
+    headers = {"Range": range_header} if range_header else None
+    if method == "HEAD":
+        return client.head("/file-api/download", params=params, headers=headers)
+    return client.get("/file-api/download", params=params, headers=headers)
 
 
 def _signed_token(secret: str, payload: object) -> str:
@@ -120,35 +99,36 @@ def test_download_handler_uses_inline_disposition_for_preview(
 ) -> None:
     file_path = tmp_path / "preview sample.pdf"
     file_path.write_bytes(b"%PDF-1.7")
-    handler = _serve_file(
+    response = _get_download(
         monkeypatch,
         file_path,
-        {"token": "signed-token", "inline": inline_value},
+        inline=inline_value,
+        method="HEAD",
     )
 
-    assert handler.status == 200
-    assert handler.headers_ended is True
-    assert handler.response_headers["Content-Type"] == "application/pdf"
-    assert handler.response_headers["Accept-Ranges"] == "bytes"
-    assert handler.response_headers["Content-Disposition"] == (
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.headers["content-disposition"] == (
         "inline; filename*=UTF-8''preview%20sample.pdf"
     )
 
 
 @pytest.mark.parametrize(
-    "query", [{"token": "signed-token"}, {"token": "signed-token", "inline": "0"}]
+    "inline",
+    [None, "0"],
 )
 def test_download_handler_keeps_attachment_disposition_for_download(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
-    query: dict[str, str],
+    inline: str | None,
 ) -> None:
     file_path = tmp_path / "report.pdf"
     file_path.write_bytes(b"%PDF-1.7")
-    handler = _serve_file(monkeypatch, file_path, query)
+    response = _get_download(monkeypatch, file_path, inline=inline, method="HEAD")
 
-    assert handler.status == 200
-    assert handler.response_headers["Content-Disposition"] == (
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == (
         "attachment; filename*=UTF-8''report.pdf"
     )
 
@@ -171,19 +151,18 @@ def test_download_handler_serves_single_byte_range(
 ) -> None:
     file_path = tmp_path / "media.bin"
     file_path.write_bytes(b"0123456789")
-    handler = _serve_file(
+    response = _get_download(
         monkeypatch,
         file_path,
-        {"token": "signed-token", "inline": "1"},
-        command="GET",
-        headers={"Range": range_header},
+        inline="1",
+        range_header=range_header,
     )
 
-    assert handler.status == 206
-    assert handler.response_headers["Content-Length"] == str(len(expected_body))
-    assert handler.response_headers["Accept-Ranges"] == "bytes"
-    assert handler.response_headers["Content-Range"] == expected_content_range
-    assert handler.wfile.getvalue() == expected_body
+    assert response.status_code == 206
+    assert response.headers["content-length"] == str(len(expected_body))
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.headers["content-range"] == expected_content_range
+    assert response.content == expected_body
 
 
 @pytest.mark.parametrize(
@@ -203,14 +182,13 @@ def test_download_handler_rejects_invalid_byte_range(
 ) -> None:
     file_path = tmp_path / "media.bin"
     file_path.write_bytes(b"0123456789")
-    handler = _serve_file(
+    response = _get_download(
         monkeypatch,
         file_path,
-        {"token": "signed-token", "inline": "1"},
-        command="GET",
-        headers={"Range": range_header},
+        inline="1",
+        range_header=range_header,
     )
 
-    assert handler.status == 416
-    assert handler.response_headers["Content-Range"] == "bytes */10"
-    assert handler.wfile.getvalue() == b""
+    assert response.status_code == 416
+    assert response.headers["content-range"] == "bytes */10"
+    assert response.content == b""
