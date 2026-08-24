@@ -6,24 +6,32 @@
 
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
-import { useEffect, useId, useMemo, useRef, type ReactNode } from 'react';
-import { FileCheck2, FileText, Minimize2 } from 'lucide-react';
-import { webRequest } from '../../services/webClient';
-import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
-import { TeamArea } from '../teamArea';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { FileCheck2, FileText, Info, Minimize2 } from 'lucide-react';
+import { ArtifactsPanel, useSessionArtifacts, useSessionArtifactsCount } from '../ArtifactsPanel';
+import { TeamArea, useTaskPlanningMetrics } from '../teamArea';
 import { loadTeamHistoryPanelState } from '../../features/teamHistoryPanelRestore';
 import { TaskPlanningPanel } from '../teamArea/TaskPlanningPanel';
-import { HarnessExtensionTree } from './HarnessExtensionTree';
-import { type TabType, type TeamDetailTab } from '../teamArea/shared';
+import { CompactTaskList } from '../teamArea/CompactTaskList';
+import { FileIcon } from '../FileIcon';
+import { CollapsibleSection } from './CollapsibleSection';
+import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
+import { getMemberPlainName, type TabType, type TeamDetailTab } from '../teamArea/shared';
 import type { TeamTask, TeamTaskStatus } from '../../stores/sessionStore';
 import type { ProjectInfo, TodoItem, TodoStatus } from '../../types';
 import teamProcessIcon from '../../assets/team-process.svg';
+import teamIcon from '../../assets/team.svg';
+import recentTasksIcon from '../../assets/work-mode/recent-tasks.svg';
+import artifactsIcon from '../../assets/artifacts.svg';
+import skillIcon from '../../assets/sidebar/skill.svg';
+import maximizeIcon from '../../assets/maximize.svg';
+import expandIcon from '../../assets/expand.svg';
 import { CodeEnvironmentPanel } from '../../features/code-mode/CodeEnvironmentPanel';
 import { CodeReviewPanel } from '../../features/code-mode/CodeReviewPanel';
 import type { CodeReviewTarget } from '../../features/code-mode/types';
 import { useCodeGitDiffWatch } from '../../features/code-mode/useCodeGitDiffWatch';
 import { type SingleAgentToolTab } from '../../features/singleAgentPanelState';
-import { SubagentCompactPanel } from '../subagent/SubagentCompactPanel';
 import { SubagentExpandedPanel } from '../subagent/SubagentExpandedPanel';
 import { useSubagentStore } from '../../stores/subagentStore';
 import TeamMembersIcon from '../../assets/subagent/team-members.svg?react';
@@ -69,6 +77,9 @@ interface ToolPanelProps {
   setSingleAgentPanelExpanded: (expanded: boolean) => void;
   setSingleAgentPanelActiveTab: (tab: SingleAgentToolTab) => void;
   setSingleAgentPanelSelectedArtifactId: (artifactId: string) => void;
+  onMaximize?: () => void;
+  onRestore?: () => void;
+  maximized?: boolean;
 }
 
 function isEmptyValue(value: unknown): boolean {
@@ -109,6 +120,9 @@ function ExpandedSingleAgentArea({
   completedTasks,
   onTabChange,
   onCollapse,
+  onMaximize,
+  onRestore,
+  maximized,
   reviewPanel,
   selectedArtifactId,
   onArtifactSelect,
@@ -121,6 +135,9 @@ function ExpandedSingleAgentArea({
   completedTasks: number;
   onTabChange: (tab: SingleAgentToolTab) => void;
   onCollapse: () => void;
+  onMaximize: () => void;
+  onRestore: () => void;
+  maximized: boolean;
   reviewPanel?: ReactNode;
   selectedArtifactId?: string;
   onArtifactSelect: (artifactId: string) => void;
@@ -189,16 +206,26 @@ function ExpandedSingleAgentArea({
           ))}
         </div>
 
-        <button
-          type="button"
-          onClick={onCollapse}
-          data-testid="tool-panel-collapse"
-          className="single-agent-tool-tabs__collapse rounded p-2 text-text-muted hover:bg-secondary hover:text-text"
-          aria-label={t('team.collapse')}
-          title={t('team.collapse')}
-        >
-          <Minimize2 size={12} />
-        </button>
+        <div className="flex items-center gap-2" >
+          <button
+            onClick={maximized ? onRestore : onMaximize}
+            data-testid="tool-panel-maximize"
+            className="rounded p-2 text-text-muted hover:bg-secondary hover:text-text"
+            aria-label={maximized ? t('team.restore') : t('team.maximize')}
+            title={maximized ? t('team.restore') : t('team.maximize')}
+          >
+            {maximized ? <Minimize2 size={12} /> : <img src={maximizeIcon} alt="" width={12} height={12} />}
+          </button>
+          <button
+            onClick={onCollapse}
+            data-testid="tool-panel-collapse"
+            className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
+            aria-label={t('team.collapse')}
+            title={t('team.collapse')}
+          >
+            <img src={expandIcon} alt="" width={12} height={12} />
+          </button>
+        </div>
       </div>
 
       <div
@@ -253,9 +280,12 @@ export function ToolPanel({
   setSingleAgentPanelExpanded,
   setSingleAgentPanelActiveTab,
   setSingleAgentPanelSelectedArtifactId,
+  onMaximize,
+  onRestore,
+  maximized = false,
 }: ToolPanelProps) {
   const { t } = useTranslation();
-  const { isConnected, memoryUsage, setMemoryUsage } = useSessionStore();
+  const { isConnected, memoryUsage } = useSessionStore();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const contextCompressionRate = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRate ?? 0);
   const contextCompressionBefore = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionBefore ?? null);
@@ -272,7 +302,60 @@ export function ToolPanel({
   const setTeamHistoryMessages = useSessionStore((s) => s.setTeamHistoryMessages);
   const setTeamHumanShareCommands = useSessionStore((s) => s.setTeamHumanShareCommands);
   const isProcessing = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isProcessing ?? false);
+  const [planningExpanded, setPlanningExpanded] = useState(false);
+  const [teamPlanningExpanded, setTeamPlanningExpanded] = useState(false);
+  const [teamMembersExpanded, setTeamMembersExpanded] = useState(false);
+  const { completedTasks: teamCompletedTasks, teamTasks, totalTasks: teamTotalTasks } = useTaskPlanningMetrics();
+  const artifactsCount = useSessionArtifactsCount();
+  const sessionArtifacts = useSessionArtifacts();
+  const artifactTasks = useMemo(
+    () => sessionArtifacts.map((artifact) => ({
+      task_id: artifact.id,
+      title: artifact.name,
+      status: 'completed' as const,
+      timestamp: artifact.timestamp,
+    })),
+    [sessionArtifacts],
+  );
   const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
+  const skillTasks = useMemo(() => {
+    const seen = new Set<string>();
+    for (const msg of messages) {
+      if (msg.skills && msg.skills.length > 0) {
+        for (const skill of msg.skills) {
+          const trimmed = skill.trim();
+          if (trimmed && !seen.has(trimmed)) {
+            seen.add(trimmed);
+          }
+        }
+      }
+    }
+    return Array.from(seen).map((name) => ({
+      task_id: `skill-${name}`,
+      title: name,
+      status: 'completed' as const,
+    }));
+  }, [messages]);
+  const teamLeaderMemberIds = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamLeaderMemberIds ?? []);
+  const memberTasks = useMemo(
+    () => teamMembers
+      .filter((member) => {
+        const memberKeys = [member.member_id, member.name || ''].map((v) => v.trim().toLowerCase().replace(/[\s_-]+/g, ''));
+        return !(
+          isTeamLeaderMember(member.member_id) ||
+          member.mode === 'leader' ||
+          member.mode === 'team_leader' ||
+          teamLeaderMemberIds.some((leaderId) => memberKeys.includes(leaderId.trim().toLowerCase().replace(/[\s_-]+/g, '')))
+        );
+      })
+      .map((member) => ({
+        task_id: member.member_id,
+        title: `${getMemberPlainName(member)} @${member.member_id}`,
+        status: 'completed' as const,
+        assignee: member.member_id,
+      })),
+    [teamMembers, teamLeaderMemberIds],
+  );
   // 规划/性能模式下复用 TaskPlanningPanel 紧凑态：把 TodoItem 降级为 TeamTask
   const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
   const codeProject = project?.work_mode === 'code' && !project.is_default ? project : null;
@@ -292,50 +375,6 @@ export function ToolPanel({
   );
   const hydratedTeamHistorySessionRef = useRef<string | null>(null);
   const loadingTeamHistorySessionRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    if (!isConnected) {
-      setMemoryUsage(null);
-      return;
-    }
-
-    let disposed = false;
-    let timerId: number | null = null;
-
-    const refreshMemoryUsage = async () => {
-      try {
-        const payload = await webRequest<Record<string, unknown>>('memory.compute');
-        if (disposed) return;
-
-        const rssMb =
-          typeof payload.rss_mb === 'number' && Number.isFinite(payload.rss_mb)
-            ? payload.rss_mb
-            : null;
-        const usedPercent =
-          typeof payload.used_percent === 'number' && Number.isFinite(payload.used_percent)
-            ? payload.used_percent
-            : null;
-
-        setMemoryUsage({ rssMb, usedPercent });
-      } catch {
-        if (!disposed) {
-          setMemoryUsage(null);
-        }
-      }
-    };
-
-    void refreshMemoryUsage();
-    timerId = window.setInterval(() => {
-      void refreshMemoryUsage();
-    }, 10000);
-
-    return () => {
-      disposed = true;
-      if (timerId != null) {
-        window.clearInterval(timerId);
-      }
-    };
-  }, [isConnected, setMemoryUsage]);
 
   useEffect(() => {
     if (
@@ -487,7 +526,7 @@ export function ToolPanel({
       return (
         <div
           data-testid="tool-panel-expanded-single-agent"
-          className="bg-panel h-full overflow-hidden flex-1 flex flex-col"
+          className="bg-panel h-full overflow-hidden flex-1 flex flex-col min-w-[512px]"
         >
           <div className="h-full bg-panel flex flex-col overflow-hidden">
             <ExpandedSingleAgentArea
@@ -499,6 +538,9 @@ export function ToolPanel({
               completedTasks={todoCompletedTasks}
               onTabChange={setSingleAgentPanelActiveTab}
               onCollapse={() => setSingleAgentPanelExpanded(false)}
+              onMaximize={() => onMaximize?.()}
+              onRestore={() => onRestore?.()}
+              maximized={maximized}
               reviewPanel={codeReviewPanel}
               selectedArtifactId={singleAgentPanelSelectedArtifactId}
               onArtifactSelect={setSingleAgentPanelSelectedArtifactId}
@@ -538,68 +580,105 @@ export function ToolPanel({
     );
   }
 
-  // 收起模式 - 原始宽度
-  return (
-    <div
-      data-testid="tool-panel-collapsed"
-      className={`bg-panel border-l border-border h-full overflow-hidden shrink-0 ${mode === 'team' || mode === 'auto_harness' ? 'py-3' : 'py-0'}`}
-      style={{ width: 'var(--tool-panel-width)' }}
-    >
-      <div className="h-full bg-panel flex flex-col overflow-hidden">
-        {/* Auto-harness extension file tree */}
-        {mode === 'auto_harness' ? (
-          <div data-testid="tool-panel-harness-tree-pane" className="flex flex-1 flex-col overflow-hidden mb-3">
-            <div className="overflow-hidden h-full flex flex-col px-3">
-              <HarnessExtensionTree />
-            </div>
-          </div>
-        ) : mode === 'team' ? (
-          /* 团队任务概览和成员列表 */
-          <div data-testid="tool-panel-team-pane" className="flex-1 overflow-hidden mb-3">
-            <div className="overflow-hidden h-full flex flex-col">
-              <TeamArea
-                members={teamMembers}
-                historyMessages={teamHistoryMessages}
-                expanded={false}
-                onExpand={(tab, memberId) => {
-                  setTeamAreaActiveTab(tab);
-                  setTeamAreaActiveDetailTab('members');
-                  setTeamAreaSelectedMemberId(memberId || '');
-                  setTeamAreaExpanded(true);
-                }}
-              />
-            </div>
-          </div>
-        ) : (
-          /* 任务概述（复用集群模式紧凑态样式，数据来自 TodoItem） */
-          <div data-testid="tool-panel-planning-pane" className="toolpanel-collapsed-sections">
-            <div className="toolpanel-collapsed-task-section">
-              <TaskPlanningPanel
-                variant="compact"
-                tasks={todoTeamTasks}
-                members={teamMembers}
-                totalTasks={todos.length}
-                completedTasks={todoCompletedTasks}
-                hideBorder
-                onExpand={() => {
-                  setSingleAgentPanelActiveTab('planning');
-                  setSingleAgentPanelExpanded(true);
-                }}
-                hideAssignee
-                title={t('chat.recentTasks')}
-              />
-            </div>
-            <SubagentCompactPanel
-              sessionId={resolvedSessionId}
-              onExpand={() => {
-                setSingleAgentPanelActiveTab('subagents');
-                setSingleAgentPanelExpanded(true);
-              }}
-            />
-          </div>
-        )}
+  // 收起模式 - 悬浮面板
+  const isTeam = mode === 'team';
+  const planningProps = isTeam
+    ? {
+        tasks: teamTasks,
+        totalTasks: teamTotalTasks,
+        completedTasks: teamCompletedTasks,
+        expanded: teamPlanningExpanded,
+      }
+    : {
+        tasks: todoTeamTasks,
+        totalTasks: todos.length,
+        completedTasks: todoCompletedTasks,
+        expanded: planningExpanded,
+      };
+  const expandTo = (tab: TabType) => {
+    if (isTeam) {
+      setTeamAreaActiveTab(tab);
+      setTeamAreaExpanded(true);
+    } else {
+      setSingleAgentPanelActiveTab(tab as SingleAgentToolTab);
+      setSingleAgentPanelExpanded(true);
+    }
+  };
 
-        {canReviewCode && codeProject && sessionId ? (
+  const collapsedSections = [
+    {
+      key: 'planning',
+      testId: isTeam ? 'tool-panel-team-pane' : 'tool-panel-planning-pane',
+      render: () => (
+        <CollapsibleSection
+          title={t('chat.recentTasks')}
+          icon={<img src={recentTasksIcon} width={16} height={16} aria-hidden="true" />}
+          childCount={planningProps.tasks.length}
+          maxCollapsedCount={4}
+          onExpand={() => expandTo('planning')}
+          onExpandAll={() => (isTeam ? setTeamPlanningExpanded(true) : setPlanningExpanded(true))}
+          dataTestId={isTeam ? 'tool-panel-team-planning' : 'tool-panel-planning'}
+        >
+          <TaskPlanningPanel
+            variant="compact"
+            members={teamMembers}
+            hideBorder
+            hideHeader
+            hideExpandButton
+            hideAssignee={!isTeam}
+            title={t('chat.recentTasks')}
+            maxCollapsedCount={4}
+            {...planningProps}
+          />
+        </CollapsibleSection>
+      ),
+    },
+    isTeam && {
+      key: 'members',
+      testId: 'tool-panel-team-members-pane',
+      render: () => (
+        <CollapsibleSection
+          title={t('team.membersTab')}
+          icon={<img src={teamIcon} width={16} height={16} aria-hidden="true" />}
+          childCount={teamMembers.length}
+          maxCollapsedCount={4}
+          onExpand={() => expandTo('team')}
+          onExpandAll={() => setTeamMembersExpanded(true)}
+          dataTestId="tool-panel-team-members"
+        >
+          <CompactTaskList
+            tasks={memberTasks}
+            members={teamMembers}
+            hideAssignee
+            maxCollapsedCount={4}
+            expanded={teamMembersExpanded}
+            emptyText={t('team.noMemberData')}
+            renderStatusIcon={(task) => (
+              <TeamMemberAvatar
+                member={task.assignee ?? ''}
+                alt={task.title ?? ''}
+                className="h-4 w-4 rounded-full shrink-0"
+                imageClassName="rounded-full"
+              />
+            )}
+          />
+        </CollapsibleSection>
+      ),
+    },
+    canReviewCode && codeProject && sessionId && {
+      key: 'code',
+      testId: 'tool-panel-code-environment-pane',
+      render: () => (
+        <CollapsibleSection
+          title={t('codeMode.environment')}
+          icon={<Info size={16} />}
+          showExpandButton={false}
+          onExpand={() => {
+            setCodeReviewTarget?.({ source: 'working_tree' });
+            expandTo('review');
+          }}
+          dataTestId="tool-panel-code-environment"
+        >
           <CodeEnvironmentPanel
             project={codeProject}
             isProcessing={isProcessing}
@@ -615,8 +694,68 @@ export function ToolPanel({
               }
             }}
           />
-        ) : null}
+        </CollapsibleSection>
+      ),
+    },
+    {
+      key: 'artifacts',
+      testId: 'tool-panel-artifacts-pane',
+      render: () => (
+        <CollapsibleSection
+          title={t('artifacts.tab')}
+          icon={<img src={artifactsIcon} width={16} height={16} aria-hidden="true" />}
+          childCount={artifactsCount}
+          onExpand={() => expandTo('artifacts')}
+          dataTestId="tool-panel-artifacts"
+        >
+          <CompactTaskList
+            tasks={artifactTasks}
+            members={[]}
+            hideAssignee
+            emptyText={t('artifacts.empty')}
+            renderStatusIcon={(task) => <FileIcon fileName={task.title ?? ''} size={16} className="shrink-0" />}
+          />
+        </CollapsibleSection>
+      ),
+    },
+    {
+      key: 'references',
+      testId: 'tool-panel-references-pane',
+      render: () => (
+        <CollapsibleSection
+          title={t('references.tab')}
+          icon={<img src={artifactsIcon} width={16} height={16} aria-hidden="true" />}
+          childCount={skillTasks.length}
+          showExpandButton={false}
+          dataTestId="tool-panel-references"
+        >
+          <CompactTaskList
+            tasks={skillTasks}
+            members={[]}
+            hideAssignee
+            emptyText={t('references.empty')}
+            renderStatusIcon={() => <img src={skillIcon} width={16} height={16} aria-hidden="true" className="shrink-0" />}
+          />
+        </CollapsibleSection>
+      ),
+    },
+  ].filter(Boolean) as {
+    key: string;
+    testId: string;
+    render: () => ReactNode;
+  }[];
 
+  return (
+    <div
+      data-testid="tool-panel-collapsed"
+      className="bg-panel py-0 px-6 tool-panel-floating"
+    >
+      <div className="bg-panel flex flex-col">
+        {collapsedSections.map((section) => (
+          <div key={section.key} data-testid={section.testId}>
+            {section.render()}
+          </div>
+        ))}
         {/* 状态显示 - 只在收起模式下显示 */}
         {!panelExpanded && (
           <>

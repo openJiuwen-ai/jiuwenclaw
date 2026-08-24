@@ -46,7 +46,7 @@ import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
-import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages } from './hooks';
+import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout } from './hooks';
 import { webRequest } from './services/webClient';
 import { processOAuthCallback } from './utils/gitcodeOAuth';
 import { useTeamPanelState } from './features/teamPanelState';
@@ -366,6 +366,16 @@ function AppContent() {
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
+  const {
+    conversationSidebarCollapsed,
+    setConversationSidebarCollapsed,
+    conversationSidebarFloating,
+    toolPanelHidden,
+    setToolPanelHidden,
+    toolPanelMaximized,
+    setToolPanelMaximized,
+  } = useResponsiveLayout();
+
   const [modelSetupGuideStep, setModelSetupGuideStep] = useState<ModelSetupGuideStep | null>(null);
   const [modelSetupGuideManual, setModelSetupGuideManual] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
@@ -549,6 +559,12 @@ function AppContent() {
   }, [navigate, route, setSingleAgentPanelExpanded, setTeamAreaExpanded]);
 
   useEffect(() => {
+    if (!teamAreaExpanded || toolPanelHidden) {
+      setToolPanelMaximized(false);
+    }
+  }, [teamAreaExpanded, toolPanelHidden]);
+
+  useEffect(() => {
     ensureSessionRuntimes(sessionId);
     useChatStore.getState().setActiveSessionId(sessionId);
     useSubagentStore.getState().hydrateRuntime(sessionId);
@@ -603,16 +619,29 @@ function AppContent() {
     setCodeReviewTarget(null);
   }, [sessionId]);
 
-  const handleToggleDetailPanel = useCallback((expanded: boolean) => {
+  const handleToggleDetailPanel = useCallback((expanded: boolean | null) => {
+    if (expanded === null) {
+      setToolPanelHidden(true);
+      setTeamAreaExpanded(false);
+      setSingleAgentPanelExpanded(false);
+      setToolPanelMaximized(false);
+      return;
+    }
+    setToolPanelHidden(false);
+    setToolPanelMaximized(false);
     if (mode === 'team') {
       setTeamAreaExpanded(expanded);
       return;
     }
+    if (expanded && teamAreaActiveTab === 'team') {
+      setTeamAreaActiveTab('planning');
+    }
     setSingleAgentPanelExpanded(expanded);
-  }, [mode, setSingleAgentPanelExpanded, setTeamAreaExpanded]);
+  }, [mode, setSingleAgentPanelExpanded, setTeamAreaActiveTab, setTeamAreaExpanded, teamAreaActiveTab]);
 
   const handleOpenCodeReview = useCallback((target: CodeReviewTarget) => {
     setCodeReviewTarget(target);
+    setToolPanelHidden(false);
     if (mode === 'team') {
       setTeamAreaActiveTab('review');
       setTeamAreaExpanded(true);
@@ -620,7 +649,7 @@ function AppContent() {
       setSingleAgentPanelActiveTab('review');
       setSingleAgentPanelExpanded(true);
     }
-  }, [mode, setSingleAgentPanelActiveTab, setSingleAgentPanelExpanded, setTeamAreaActiveTab, setTeamAreaExpanded]);
+  }, [mode, setSingleAgentPanelActiveTab, setSingleAgentPanelExpanded, setTeamAreaActiveTab, setTeamAreaExpanded, setToolPanelHidden]);
 
   const handleDividerPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || chatPanelResizeDragRef.current) return;
@@ -1358,8 +1387,8 @@ function AppContent() {
       if (!modelSetupGuideEvaluatedRef.current) {
         modelSetupGuideEvaluatedRef.current = true;
         if (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled)) {
-          setActiveNav('chat');
-          setModelSetupGuideManual(false);
+        setActiveNav('chat');
+        setModelSetupGuideManual(false);
           setModelSetupGuideStep(0);
         }
       }
@@ -2708,8 +2737,12 @@ function AppContent() {
 
   const requestSessionNavigation = useCallback((target: Session | 'new', options?: NewConversationOptions) => {
     if (target === 'new') { enterNewConversation(mode, options); return; }
+    if (window.matchMedia('(max-width: 823px)').matches) {
+      setTeamAreaExpanded(false);
+      setToolPanelHidden(true);
+    }
     void handleRestoreSession(target.session_id, target.mode, target);
-  }, [enterNewConversation, handleRestoreSession, mode]);
+  }, [enterNewConversation, handleRestoreSession, mode, setTeamAreaExpanded, setToolPanelHidden]);
 
   const handleTeamSessionsDeleted = useCallback(async (sessionIds: string[]) => {
     const deletedSessionIds = new Set(sessionIds);
@@ -2784,13 +2817,21 @@ function AppContent() {
   }, [deleteTarget, enterNewConversation, mode, request, t]);
 
   const handleNavigate = useCallback((nav: MainNavKey) => {
+    const isSmallScreen = window.matchMedia('(max-width: 823px)').matches;
     setActiveNav(nav);
+    if (nav === 'chat') {
+      setConversationSidebarCollapsed(false);
+      if (isSmallScreen) {
+        setTeamAreaExpanded(false);
+        setToolPanelHidden(true);
+      }
+    }
     if (modelSetupGuideStep === 1 && nav === 'configpanel') {
       setModelSetupGuideStep(2);
     }
     if (nav === 'skills') setHasVisitedSkills(true);
     if (nav === 'channels') setHasVisitedChannels(true);
-  }, [modelSetupGuideStep]);
+  }, [modelSetupGuideStep, setTeamAreaExpanded, setToolPanelHidden]);
 
   const skipModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
@@ -2920,7 +2961,7 @@ function AppContent() {
     && missingSessionId === routeSessionId
     && isConversationMissing(routeSessionId, true, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
-  const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound;
+  const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound && !toolPanelMaximized;
   const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
 
@@ -2984,6 +3025,9 @@ function AppContent() {
                 onDelete={(session) => { setDialogError(null); setDeleteTarget(session); }}
                 onOpenCron={() => handleNavigate('cron')}
                 isCronActive={false}
+                collapsed={conversationSidebarCollapsed}
+                floating={conversationSidebarFloating}
+                onToggleCollapse={() => setConversationSidebarCollapsed((v) => !v)}
               />
               <div className="chat-workspace flex-1 flex min-h-0 overflow-hidden">
                 {showConversationNotFound && (
@@ -2998,7 +3042,7 @@ function AppContent() {
                 )}
                 {/* Chat Panel - 在展开时可拖拽调整宽度 */}
                 <div
-                  className={`${showConversationNotFound ? 'hidden' : 'flex'} chat-layout__surface p-3 pt-0 flex-col min-w-0 min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
+                  className={`${showConversationNotFound || toolPanelMaximized ? 'hidden' : 'flex'} chat-layout__surface  pt-0 flex-col ${isTeamAreaExpanded ? '' : 'min-w-0'} min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
                   style={isTeamAreaExpanded ? { width: `${chatPanelWidthPct}%` } : undefined}
                   data-testid="app-chat-surface"
                 >
@@ -3019,7 +3063,7 @@ function AppContent() {
                       sessionTitle={sessionTitle}
                       sessionProjectName={sessionProjectName}
                       sessionProject={sessionProject}
-                      teamAreaExpanded={isTeamAreaExpanded}
+                      teamAreaExpanded={toolPanelHidden ? null : isTeamAreaExpanded}
                       autoFocusKey={composerFocusKey}
                       onNavigateToSkills={() => handleNavigate('skills')}
                       onToggleTeamArea={handleToggleDetailPanel}
@@ -3055,7 +3099,7 @@ function AppContent() {
                 )}
 
                 {/* Tool Panel / Expanded Team Panel */}
-                {(toolPanelHasContent || isRestoringTeamHistory) && !showConversationNotFound && (
+                {(!toolPanelHidden && (toolPanelHasContent || isRestoringTeamHistory)) && !showConversationNotFound && (
                   <ToolPanel
                     sessionId={sessionId}
                     project={sessionProject}
@@ -3078,6 +3122,9 @@ function AppContent() {
                     setSingleAgentPanelExpanded={setSingleAgentPanelExpanded}
                     setSingleAgentPanelActiveTab={setSingleAgentPanelActiveTab}
                     setSingleAgentPanelSelectedArtifactId={setSingleAgentPanelSelectedArtifactId}
+                    onMaximize={() => setToolPanelMaximized(true)}
+                    onRestore={() => setToolPanelMaximized(false)}
+                    maximized={toolPanelMaximized}
                   />
                 )}
               </div>
@@ -3115,6 +3162,9 @@ function AppContent() {
               onDelete={(session) => { setDialogError(null); setDeleteTarget(session); }}
               onOpenCron={() => handleNavigate('cron')}
               isCronActive
+              collapsed={conversationSidebarCollapsed}
+              floating={conversationSidebarFloating}
+              onToggleCollapse={() => setConversationSidebarCollapsed((v) => !v)}
             />
             <div className="chat-workspace flex-1 flex min-h-0 overflow-hidden">
               <CronPanel

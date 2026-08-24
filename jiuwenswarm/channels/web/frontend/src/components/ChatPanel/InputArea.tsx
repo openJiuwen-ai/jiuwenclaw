@@ -14,6 +14,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { AtSign, CircleX, ClipboardList, FileText, Loader2, Plus, Square, Target, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
@@ -58,6 +59,14 @@ import {
 } from '../../features/workspace/localFilePicker';
 import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
+
+const MENU_GAP = 10;
+
+function resolveMenuDirection(anchorBottom: number, menuHeight: number) {
+  const spaceBelow = window.innerHeight - anchorBottom - MENU_GAP;
+  if (spaceBelow >= menuHeight) return 'down' as const;
+  return 'up' as const;
+}
 import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
@@ -276,7 +285,9 @@ const ATTACHMENT_ACCEPT = [
   .filter((item) => !FORBIDDEN_DOCUMENT_EXTENSIONS.has(item.toLowerCase()))
   .join(',');
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+const MAX_FILE_BYTES = 100 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_ATTACHMENT_COUNT = 20;
 const ATTACHMENT_ALERT_DURATION_MS = 3000;
 
 type AttachmentKind = 'image' | 'document';
@@ -406,12 +417,12 @@ function resolveAttachmentKind(file: File): AttachmentKind | null {
   return 'document';
 }
 
-function getImageValidationError(file: File): string | null {
+function getImageValidationError(file: File, t: TFunction): string | null {
   if (!isImageFile(file)) {
-    return `文件类型不支持：${file.name || '未命名文件'}`;
+    return t('chat.inputAttachment.unsupportedFileType', { name: file.name || t('chat.inputAttachment.unnamedFile') });
   }
-  if (file.size > MAX_IMAGE_BYTES) {
-    return `文件大小超出限制：${file.name || '未命名文件'}（最大${formatAttachmentSize(MAX_IMAGE_BYTES)}）`;
+  if (file.size > MAX_FILE_BYTES) {
+    return t('chat.inputAttachment.fileSizeExceeded', { name: file.name || t('chat.inputAttachment.unnamedFile'), limit: formatAttachmentSize(MAX_FILE_BYTES) });
   }
   return null;
 }
@@ -423,17 +434,21 @@ function clearAttachmentAlertTimers(timers: Map<string, number>): void {
 
 function getDocumentValidationError(
   file: File | undefined,
+  t: TFunction,
   options?: { filename?: string; localPath?: string },
 ): string | null {
-  const filename = options?.filename || file?.name || '未命名文件';
+  const filename = options?.filename || file?.name || t('chat.inputAttachment.unnamedFile');
+  if (file && file.size > MAX_FILE_BYTES) {
+    return t('chat.inputAttachment.fileSizeExceeded', { name: filename, limit: formatAttachmentSize(MAX_FILE_BYTES) });
+  }
   if (file && isForbiddenDocumentFile(file)) {
-    return `禁止上传该文件类型：${filename}`;
+    return t('chat.inputAttachment.forbiddenFileType', { name: filename });
   }
   if (file && !isDocumentFile(file)) {
-    return `文件类型不支持：${filename}`;
+    return t('chat.inputAttachment.unsupportedFileType', { name: filename });
   }
   if (!getLocalFilePath(file, options?.localPath)) {
-    return `无法获取本地文件路径：${filename}（请使用桌面端选择文件）`;
+    return t('chat.inputAttachment.localPathUnavailable', { name: filename });
   }
   return null;
 }
@@ -458,8 +473,8 @@ function readBinaryFileAsBase64(file: File): Promise<Pick<AttachmentDraft, 'base
   });
 }
 
-function readImageFile(file: File): Promise<Pick<AttachmentDraft, 'base64Data' | 'previewUrl'> | null> {
-  if (getImageValidationError(file)) {
+function readImageFile(file: File, t: TFunction): Promise<Pick<AttachmentDraft, 'base64Data' | 'previewUrl'> | null> {
+  if (getImageValidationError(file, t)) {
     return Promise.resolve(null);
   }
   return readBinaryFileAsBase64(file);
@@ -509,6 +524,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [attachmentAlerts, setAttachmentAlerts] = useState<AttachmentAlert[]>([]);
   const attachmentAlertTimersRef = useRef<Map<string, number>>(new Map());
   const [attachmentMenuId, setAttachmentMenuId] = useState<string | null>(null);
+  const [attachmentMenuAnchor, setAttachmentMenuAnchor] = useState<DOMRect | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [workMenuOpen, setWorkMenuOpen] = useState<'project' | null>(null);
   const [workDialogOpen, setWorkDialogOpen] = useState(false);
@@ -710,7 +726,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       autoSendTimeoutRef.current = setTimeout(() => {}, 100);
     },
     onError: (error) => {
-      console.error('语音识别错误:', error);
+      console.error('Speech recognition error:', error);
     },
   });
 
@@ -830,11 +846,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     }
   }, []);
 
-  const startAttachmentMenuTimer = useCallback((id: string) => {
+  const startAttachmentMenuTimer = useCallback((id: string, el: HTMLElement) => {
     stopAttachmentMenuTimer();
     attachmentMenuOpenedByLongPressRef.current = false;
     attachmentMenuTimerRef.current = setTimeout(() => {
       attachmentMenuOpenedByLongPressRef.current = true;
+      setAttachmentMenuAnchor(el.getBoundingClientRect());
       setAttachmentMenuId(id);
     }, 520);
   }, [stopAttachmentMenuTimer]);
@@ -850,13 +867,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const uploadAttachment = useCallback((attachment: AttachmentDraft) => {
     const validationError =
       attachment.kind === 'document'
-        ? getDocumentValidationError(attachment.file, {
+        ? getDocumentValidationError(attachment.file, t, {
             filename: attachment.filename,
             localPath: attachment.localPath,
           })
         : attachment.file
-          ? getImageValidationError(attachment.file)
-          : (attachment.base64Data ? null : `文件类型不支持：${attachment.filename || '未命名文件'}`);
+          ? getImageValidationError(attachment.file, t)
+          : (attachment.base64Data ? null : t('chat.inputAttachment.unsupportedFileType', { name: attachment.filename || t('chat.inputAttachment.unnamedFile') }));
     if (validationError) {
       pushAttachmentAlert(validationError);
       updateAttachment(attachment.id, { status: 'error', error: validationError });
@@ -868,7 +885,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (attachment.kind === 'document') {
       const localPath = getLocalFilePath(attachment.file, attachment.localPath);
       if (!localPath) {
-        const error = `无法获取本地文件路径：${attachment.filename || '未命名文件'}`;
+        const error = t('chat.inputAttachment.localPathUnavailable', { name: attachment.filename || t('chat.inputAttachment.unnamedFile') });
         pushAttachmentAlert(error);
         updateAttachment(attachment.id, { status: 'error', error });
         return;
@@ -911,10 +928,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             error: undefined,
           });
         } catch (error) {
-          console.error('文档上传失败:', error);
+          console.error('Document upload failed:', error);
           updateAttachment(attachment.id, {
             status: 'error',
-            error: '上传失败，请重试',
+            error: t('chat.inputAttachment.uploadFailed'),
           });
         }
       })();
@@ -950,11 +967,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             error: undefined,
           });
         } catch (error) {
-          console.error('图片上传失败:', error);
+          console.error('Image upload failed:', error);
           updateAttachment(attachment.id, {
             ...payload,
             status: 'error',
-            error: '上传失败，请重试',
+            error: t('chat.inputAttachment.uploadFailed'),
           });
         }
       })();
@@ -962,17 +979,17 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     }
 
     if (!attachment.file) {
-      const error = '上传失败，请重试';
+      const error = t('chat.inputAttachment.uploadFailed');
       pushAttachmentAlert(error);
       updateAttachment(attachment.id, { status: 'error', error });
       return;
     }
 
-    void readImageFile(attachment.file).then(async (payload) => {
+    void readImageFile(attachment.file, t).then(async (payload) => {
       if (!payload) {
         updateAttachment(attachment.id, {
           status: 'error',
-          error: '上传失败，请重试',
+          error: t('chat.inputAttachment.uploadFailed'),
         });
         return;
       }
@@ -998,15 +1015,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           error: undefined,
         });
       } catch (error) {
-        console.error('图片上传失败:', error);
+        console.error('Image upload failed:', error);
         updateAttachment(attachment.id, {
           ...payload,
           status: 'error',
-          error: '上传失败，请重试',
+          error: t('chat.inputAttachment.uploadFailed'),
         });
       }
     });
-  }, [canPersistAttachments, onPersistDocuments, onPersistMedia, pushAttachmentAlert, updateAttachment]);
+  }, [canPersistAttachments, onPersistDocuments, onPersistMedia, pushAttachmentAlert, updateAttachment, t]);
 
   const retryAttachment = useCallback((attachment: AttachmentDraft) => {
     uploadAttachment(attachment);
@@ -1016,12 +1033,23 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     const selectedFiles = Array.from(files);
     if (!selectedFiles.length) return;
 
-    const drafts = selectedFiles.reduce<AttachmentDraft[]>((items, file) => {
+    const remaining = MAX_ATTACHMENT_COUNT - attachments.length;
+    if (remaining <= 0) {
+      pushAttachmentAlert(t('chat.inputAttachment.attachmentCountExceeded', { limit: MAX_ATTACHMENT_COUNT }));
+      return;
+    }
+
+    const filesToAdd = selectedFiles.slice(0, remaining);
+    if (selectedFiles.length > remaining) {
+      pushAttachmentAlert(t('chat.inputAttachment.attachmentCountPartialAdd', { limit: MAX_ATTACHMENT_COUNT, count: remaining }));
+    }
+
+    const drafts = filesToAdd.reduce<AttachmentDraft[]>((items, file) => {
       const kind = resolveAttachmentKind(file);
       if (!kind) {
         const message = isForbiddenDocumentFile(file)
-          ? `禁止上传该文件类型：${file.name || '未命名文件'}`
-          : `文件类型不支持：${file.name || '未命名文件'}`;
+          ? t('chat.inputAttachment.forbiddenFileType', { name: file.name || t('chat.inputAttachment.unnamedFile') })
+          : t('chat.inputAttachment.unsupportedFileType', { name: file.name || t('chat.inputAttachment.unnamedFile') });
         pushAttachmentAlert(message);
         return items;
       }
@@ -1037,8 +1065,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       };
       const validationError =
         kind === 'document'
-          ? getDocumentValidationError(file, { filename: base.filename, localPath })
-          : getImageValidationError(file);
+          ? getDocumentValidationError(file, t, { filename: base.filename, localPath })
+          : getImageValidationError(file, t);
       if (validationError) {
         pushAttachmentAlert(validationError);
         items.push({
@@ -1062,28 +1090,43 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       if (draft.status !== 'uploading') return;
       uploadAttachment(draft);
     });
-  }, [pushAttachmentAlert, uploadAttachment]);
+  }, [attachments, pushAttachmentAlert, uploadAttachment, t]);
 
   const appendLocalFilePicks = useCallback((picks: LocalFilePick[]) => {
     if (!picks.length) return;
 
-    const drafts = picks.reduce<AttachmentDraft[]>((items, pick) => {
+    const remaining = MAX_ATTACHMENT_COUNT - attachments.length;
+    if (remaining <= 0) {
+      pushAttachmentAlert(t('chat.inputAttachment.attachmentCountExceeded', { limit: MAX_ATTACHMENT_COUNT }));
+      return;
+    }
+
+    const picksToAdd = picks.slice(0, remaining);
+    if (picks.length > remaining) {
+      pushAttachmentAlert(t('chat.inputAttachment.attachmentCountPartialAdd', { limit: MAX_ATTACHMENT_COUNT, count: remaining }));
+    }
+
+    const drafts = picksToAdd.reduce<AttachmentDraft[]>((items, pick) => {
       if (pick.error === 'forbidden') {
-        pushAttachmentAlert(`禁止上传该文件类型：${pick.filename}`);
+        pushAttachmentAlert(t('chat.inputAttachment.forbiddenFileType', { name: pick.filename }));
         return items;
       }
       if (pick.error === 'image_too_large') {
         pushAttachmentAlert(
-          `文件大小超出限制：${pick.filename}（最大${formatAttachmentSize(MAX_IMAGE_BYTES)}）`,
+          t('chat.inputAttachment.imageSizeExceeded', { name: pick.filename, limit: formatAttachmentSize(MAX_IMAGE_BYTES) }),
         );
         return items;
       }
       if (pick.error === 'read_failed') {
-        pushAttachmentAlert(`读取文件失败：${pick.filename}`);
+        pushAttachmentAlert(t('chat.inputAttachment.readFileFailed', { name: pick.filename }));
         return items;
       }
       if (pick.kind === 'image' && !pick.base64) {
-        pushAttachmentAlert(`读取图片失败：${pick.filename}`);
+        pushAttachmentAlert(t('chat.inputAttachment.readImageFailed', { name: pick.filename }));
+        return items;
+      }
+      if (pick.size > MAX_FILE_BYTES) {
+        pushAttachmentAlert(t('chat.inputAttachment.fileSizeExceeded', { name: pick.filename, limit: formatAttachmentSize(MAX_FILE_BYTES) }));
         return items;
       }
 
@@ -1111,7 +1154,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     drafts.forEach((draft) => {
       uploadAttachment(draft);
     });
-  }, [pushAttachmentAlert, uploadAttachment]);
+  }, [attachments, pushAttachmentAlert, uploadAttachment, t]);
 
   const openAttachmentPicker = useCallback(async () => {
     if (imageInputDisabled) return;
@@ -1129,10 +1172,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     }
     const hint =
       result.reason === 'unsupported'
-        ? '当前环境无法打开本机文件选择器（请确认 jiuwenswarm 在本机运行且已重启加载最新后端）'
-        : (result.message || '打开文件选择器失败');
+        ? t('chat.inputAttachment.filePickerUnsupported')
+        : (result.message || t('chat.inputAttachment.filePickerFailed'));
     pushAttachmentAlert(hint);
-  }, [appendLocalFilePicks, imageInputDisabled, pushAttachmentAlert]);
+  }, [appendLocalFilePicks, imageInputDisabled, pushAttachmentAlert, t]);
 
   const acceptExternalLocalFilePicks = useCallback(
     (picks: LocalFilePick[]) => {
@@ -2110,6 +2153,16 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         </div>
       )}
 
+      {composerSuggestion && (
+        <ComposerSuggestionMenu
+          suggestion={composerSuggestion}
+          items={composerSuggestionItems}
+          highlightedIndex={composerSuggestionIndex}
+          onHighlight={setComposerSuggestionIndex}
+          onPick={insertComposerToken}
+        />
+      )}
+      <div className="chat-input-body" data-testid="chat-panel-input-body">
       {attachments.length > 0 && (
         <div className="chat-input-attachment-panel" data-testid="chat-panel-input-attachment-panel">
           <div
@@ -2152,7 +2205,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     {attachment.status === 'uploading' ? (
                       <>
                         <Loader2 className="chat-input-attachment-spin" size={12} strokeWidth={2} />
-                        <span data-testid="chat-panel-input-attachment-status" data-variant="uploading">上传中...</span>
+                        <span data-testid="chat-panel-input-attachment-status" data-variant="uploading">{t('chat.uploading')}</span>
                       </>
                     ) : attachment.status === 'error' ? (
                       <>
@@ -2160,9 +2213,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                           className="chat-input-attachment-status-error"
                           data-testid="chat-panel-input-attachment-status"
                           data-variant="error"
-                          title={attachment.error || '上传失败'}
+                          title={attachment.error || t('chat.uploadFailed')}
                         >
-                          上传失败
+                          {t('chat.uploadFailed')}
                         </span>
                         {attachment.file && (
                           <button
@@ -2171,7 +2224,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             data-testid="chat-panel-input-attachment-retry"
                             onClick={() => retryAttachment(attachment)}
                           >
-                            重试
+                            {t('chat.retry')}
                           </button>
                         )}
                       </>
@@ -2191,30 +2244,41 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   type="button"
                   className="chat-input-attachment-remove"
                   data-testid="chat-panel-input-attachment-remove"
-                  onPointerDown={() => startAttachmentMenuTimer(attachment.id)}
+                  onPointerDown={(e) => startAttachmentMenuTimer(attachment.id, e.currentTarget)}
                   onPointerUp={stopAttachmentMenuTimer}
                   onPointerCancel={stopAttachmentMenuTimer}
                   onPointerLeave={stopAttachmentMenuTimer}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     stopAttachmentMenuTimer();
+                    setAttachmentMenuAnchor(event.currentTarget.getBoundingClientRect());
                     setAttachmentMenuId(attachment.id);
                   }}
                   onClick={() => handleAttachmentRemoveClick(attachment.id)}
-                  title="删除，长按显示更多操作"
-                  aria-label="删除附件"
+                  title={t('chat.deleteLongPress')}
+                  aria-label={t('chat.deleteAttachment')}
                 >
                   <X size={12} strokeWidth={2} />
                 </button>
-                {attachmentMenuId === attachment.id && (
-                  <div className="chat-input-attachment-menu" role="menu" data-testid="chat-panel-input-attachment-menu">
+                {attachmentMenuId === attachment.id && attachmentMenuAnchor && createPortal(
+                  <div
+                    className="chat-input-attachment-menu"
+                    role="menu"
+                    data-testid="chat-panel-input-attachment-menu"
+                    style={{
+                      position: 'fixed',
+                      top: attachmentMenuAnchor.top,
+                      left: attachmentMenuAnchor.right + 4,
+                      zIndex: 9999,
+                    }}
+                  >
                     <button
                       type="button"
                       role="menuitem"
                       data-testid="chat-panel-input-attachment-menu-delete"
                       onClick={() => removeAttachment(attachment.id)}
                     >
-                      删除
+                      {t('chat.delete')}
                     </button>
                     <button
                       type="button"
@@ -2222,24 +2286,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       data-testid="chat-panel-input-attachment-menu-clear"
                       onClick={clearAttachments}
                     >
-                      清空附件
+                      {t('chat.clearAttachments')}
                     </button>
-                  </div>
+                  </div>,
+                  document.body
                 )}
               </div>
             ))}
           </div>
         </div>
-      )}
-
-      {composerSuggestion && (
-        <ComposerSuggestionMenu
-          suggestion={composerSuggestion}
-          items={composerSuggestionItems}
-          highlightedIndex={composerSuggestionIndex}
-          onHighlight={setComposerSuggestionIndex}
-          onPick={insertComposerToken}
-        />
       )}
       <div
         ref={inputRef}
@@ -2499,9 +2554,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 if (hasHistory || isProcessing) return;
                 if (!isModeMenuOpen && modeMenuRef.current) {
                   const rect = modeMenuRef.current.getBoundingClientRect();
-                  const spaceBelow = window.innerHeight - rect.bottom;
-                  const dir = spaceBelow >= 120 ? 'down' : 'up';
-                  setMenuDirection(dir);
+                  setMenuDirection(resolveMenuDirection(rect.bottom, 160));
                   setModeMenuAnchor(rect);
                 }
                 setIsModeMenuOpen((open) => !open);
@@ -2706,6 +2759,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           </button>
         </div>
       </div>
+      </div>
 
       {showWorkContextRow ? (
         <div ref={workMenuRef} className="chat-work-context-row" data-testid="chat-panel-work-context-row">
@@ -2720,27 +2774,32 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             >
               <WorkIcon name="folder" className="chat-work-select__root-icon" />
               <span>{getProjectLabel(displayedProject, t('multiSession.project.chooseProjectDirectory'))}</span>
-              <svg className="chat-work-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
-              </svg>
+              {displayedProject && !isWorkContextLocked ? (
+                <span className="chat-work-select__trigger-action">
+                  <svg className="chat-work-select__chevron" width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
+                  </svg>
+                  <button
+                    type="button"
+                    className="chat-work-select__clear"
+                    data-testid="chat-panel-work-select-clear"
+                    aria-label={t('multiSession.project.clearProject')}
+                    data-tooltip={t('multiSession.project.clearProject')}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedProject(null);
+                      setWorkMenuOpen(null);
+                    }}
+                  >
+                    <WorkIcon name="close" />
+                  </button>
+                </span>
+              ) : (
+                <svg className="chat-work-select__chevron" width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
+                </svg>
+              )}
             </button>
-            {displayedProject && !isWorkContextLocked ? (
-              <span className="chat-work-select__clear-wrap" aria-hidden="false">
-                <button
-                  type="button"
-                  className="chat-work-select__clear"
-                  data-testid="chat-panel-work-select-clear"
-                  aria-label={t('multiSession.project.clearProject')}
-                  data-tooltip={t('multiSession.project.clearProject')}
-                  onClick={() => {
-                    setSelectedProject(null);
-                    setWorkMenuOpen(null);
-                  }}
-                >
-                  <WorkIcon name="close" />
-                </button>
-              </span>
-            ) : null}
             {workMenuOpen === 'project' && !isWorkContextLocked ? (
               <div className={clsx('chat-work-select__menu', hasInputProjectOptions && 'chat-work-select__menu--projects')} role="menu" data-testid="chat-panel-work-select-menu">
                 {!hasInputProjectOptions ? (
@@ -2934,17 +2993,18 @@ function ComposerSuggestionMenu({
   onPick: (kind: ComposerSuggestionKind, value: string, label: string) => void;
 }) {
   const tokenPrefix = suggestion.kind === 'role' ? '$' : '@';
+  const { t } = useTranslation();
 
   return (
     <div className="chat-composer-suggestion" role="listbox" data-testid="chat-panel-composer-suggestion">
       <div className="chat-composer-suggestion__header" data-testid="chat-panel-composer-suggestion-header">
         <AtSign size={14} />
-        <span>选择团队成员</span>
+        <span>{t('chat.selectTeamMembers')}</span>
       </div>
       <div className="chat-composer-suggestion__list" data-testid="chat-panel-composer-suggestion-list">
         {items.length === 0 ? (
           <div className="chat-composer-suggestion__empty" data-testid="chat-panel-composer-suggestion-empty">
-            暂无可选择的团队成员
+            {t('chat.noTeamMembersAvailable')}
           </div>
         ) : items.map((item, index) => (
           <button
@@ -3215,11 +3275,11 @@ function PermissionSelector({
           title={disabled ? t('chat.configLockedHistory') : undefined}
           onClick={() => {
             if (disabled) return;
-            if (!isOpen && menuRef.current) {
-              const rect = menuRef.current.getBoundingClientRect();
-              setMenuDirection(window.innerHeight - rect.bottom >= 160 ? 'down' : 'up');
-              setMenuAnchor(rect);
-            }
+          if (!isOpen && menuRef.current) {
+            const rect = menuRef.current.getBoundingClientRect();
+            setMenuDirection(resolveMenuDirection(rect.bottom, 358));
+            setMenuAnchor(rect);
+          }
             setIsOpen((v) => !v);
           }}
           aria-haspopup="menu"
@@ -3311,6 +3371,9 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
   const [plugins, setPlugins] = useState<InputAreaInstalledPlugin[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuPortalRef = useRef<HTMLDivElement>(null);
+  const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null);
+  const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
 
   const installedSkillMap = useMemo(() => {
     const map = new Map<string, InputAreaInstalledPlugin>();
@@ -3384,12 +3447,33 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
   useEffect(() => {
     if (!isOpen) return;
     const handlePointerDown = (event: PointerEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) {
+      if (
+        !menuRef.current?.contains(event.target as Node) &&
+        !menuPortalRef.current?.contains(event.target as Node)
+      ) {
         setIsOpen(false);
       }
     };
     document.addEventListener('pointerdown', handlePointerDown);
     return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [isOpen]);
+
+  // 滚动/缩放时重新计算菜单位置
+  useEffect(() => {
+    if (!isOpen) return;
+    const updateAnchor = () => {
+      if (menuRef.current) {
+        const rect = menuRef.current.getBoundingClientRect();
+        setMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
+        setMenuAnchor(rect);
+      }
+    };
+    window.addEventListener('scroll', updateAnchor, true);
+    window.addEventListener('resize', updateAnchor);
+    return () => {
+      window.removeEventListener('scroll', updateAnchor, true);
+      window.removeEventListener('resize', updateAnchor);
+    };
   }, [isOpen]);
 
   const handleOpenSkillsPage = useCallback(() => {
@@ -3420,7 +3504,14 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
       <button
         type="button"
         className="chat-skill-select__trigger"
-        onClick={() => setIsOpen((open) => !open)}
+        onClick={() => {
+          if (!isOpen && menuRef.current) {
+            const rect = menuRef.current.getBoundingClientRect();
+            setMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
+            setMenuAnchor(rect);
+          }
+          setIsOpen((open) => !open);
+        }}
         aria-haspopup="menu"
         aria-expanded={isOpen}
         title={t('chat.skillsToggle')}
@@ -3437,8 +3528,17 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
         </svg>
       </button>
 
-      {isOpen && (
-        <div className="chat-skill-select__menu" role="menu" data-testid="chat-panel-skill-select-menu">
+      {isOpen && menuAnchor && createPortal(
+        <div
+          ref={menuPortalRef}
+          className="chat-skill-select__menu"
+          role="menu"
+          data-testid="chat-panel-skill-select-menu"
+          style={menuDirection === 'up'
+            ? { position: 'fixed', bottom: window.innerHeight - menuAnchor.top + 10, left: menuAnchor.left, zIndex: 9999 }
+            : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
+          }
+        >
           {/* 顶部搜索框 */}
           <div className="chat-skill-select__search" data-testid="chat-panel-skill-select-search">
             <svg className="chat-skill-select__search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
@@ -3519,7 +3619,8 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
               <span>{t('chat.skillsManage')}</span>
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

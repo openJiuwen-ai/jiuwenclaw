@@ -16,7 +16,8 @@ body {
 }
 
 html {
-  min-width: 1200px;
+  min-width: 584px;
+  overflow-y: hidden;
 }
 
 body {
@@ -260,7 +261,7 @@ body.workspace-resize-active iframe {
 
   /* Shell icon rail */
   .shell--icon-rail {
-    grid-template-columns: 64px minmax(0, 1fr);
+    grid-template-columns: 72px minmax(0, 1fr);
     grid-template-areas: 'nav content';
     --tool-panel-width: 300px;
   }
@@ -609,8 +610,10 @@ body.workspace-resize-active iframe {
 
   /* AI disclaimer — footer note pinned below the composer */
   .chat-ai-disclaimer {
+    width: 816px;
+    max-width: calc(100% - 48px);
+    margin-inline: auto;
     flex: 0 0 auto;
-    margin: 0 auto;
     padding: 8px 12px;
     color: var(--color-text-secondary);
     font-size: 11px;
@@ -968,7 +971,8 @@ body.workspace-resize-active iframe {
 
   /* Chat compose wrapper */
   .chat-compose {
-    width: min(var(--chat-page-max-width), calc(100% - 16px));
+    width: 816px;
+    max-width: calc(100% - 48px);
     margin-inline: auto;
     padding-top: 4px;
     position: relative;
@@ -979,6 +983,7 @@ body.workspace-resize-active iframe {
     --chat-page-max-width: 920px;
     --chat-page-gutter: clamp(12px, 3vw, 40px);
     --chat-content-width: min(var(--chat-page-max-width), calc(100% - (var(--chat-page-gutter) * 2)));
+    --chat-floating-panel-offset: 0px;
     position: relative;
   }
 
@@ -987,8 +992,25 @@ body.workspace-resize-active iframe {
   }
 
   .chat-content {
-    width: var(--chat-content-width);
+    width: 816px;
+    max-width: calc(100% - 48px);
     margin-inline: auto;
+  }
+
+  @media (min-width: 1600px) {
+    .chat-panel-shell--team-floating .chat-scroll:not(:has(.chat-content--welcome)) {
+      padding-right: 364px;
+    }
+
+    .chat-panel-shell--team-floating .chat-compose {
+      width: calc(816px + 364px);
+      padding-right: 364px;
+    }
+
+    .chat-panel-shell--team-floating .chat-ai-disclaimer {
+      width: calc(816px + 364px);
+      padding-right: 364px;
+    }
   }
 
   .chat-content--welcome {
@@ -2156,6 +2178,13 @@ body.workspace-resize-active iframe {
 /* ===========================================
    Responsive - Large screens
    =========================================== */
+
+@media (min-width: 1441px) {
+  .conversation-sidebar {
+    width: 296px;
+    min-width: 296px;
+  }
+}
 
 @media (min-width: 1440px) {
   :root {
