@@ -493,7 +493,7 @@ export function ToolPanel({
               totalTasks={todos.length}
               completedTasks={todoCompletedTasks}
               onTabChange={setSingleAgentPanelActiveTab}
-              onCollapse={() => setSingleAgentPanelExpanded(false)}
+              onCollapse={() => { setSingleAgentPanelExpanded(false); onRestore?.(); }}
               onMaximize={() => onMaximize?.()}
               onRestore={() => onRestore?.()}
               maximized={maximized}
