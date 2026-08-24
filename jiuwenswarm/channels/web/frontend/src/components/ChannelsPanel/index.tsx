@@ -22,6 +22,8 @@ import './ChannelsPanel.css';
 
 interface ChannelsPanelProps {
   isConnected: boolean;
+  discardConfirmMessage: string;
+  onHasChangesChange?: (hasChanges: boolean) => void;
 }
 
 type ChannelItem = {
@@ -319,7 +321,6 @@ const DEFAULT_WECOM_CONF: WecomConfig = {
 };
 
 const SUPPORTED_CHANNELS: Array<{ channel_id: SupportedChannelId; logo_src: string | null }> = [
-  { channel_id: 'web', logo_src: null },
   { channel_id: 'xiaoyi', logo_src: '/xiaoyi.webp' },
   { channel_id: 'feishu', logo_src: '/feishu.webp' },
   { channel_id: 'dingtalk', logo_src: '/dingtalk.png' },
@@ -926,7 +927,7 @@ function ChannelHeaderLogo({ channelId, label }: { channelId: SupportedChannelId
   );
 }
 
-export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
+export function ChannelsPanel({ isConnected, discardConfirmMessage, onHasChangesChange }: ChannelsPanelProps) {
   const { t, i18n } = useTranslation();
   const [channels, setChannels] = useState<ChannelItem[]>(() => buildChannels([]));
   const [activeChannelId, setActiveChannelId] = useState<SupportedChannelId>('xiaoyi');
@@ -1183,16 +1184,6 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     }
   }, [t]);
 
-  const handleSelectChannel = useCallback(
-    (channelId: SupportedChannelId) => {
-      if (ADAPTING_CHANNEL_IDS.has(channelId)) {
-        return;
-      }
-      setActiveChannelId(channelId);
-    },
-    [],
-  );
-
   useEffect(() => {
     if (activeChannelId === 'feishu') {
       void fetchFeishuConfig();
@@ -1397,6 +1388,33 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
       baseDraft.credential_file !== wechatDraft.credential_file
     );
   }, [wechatConfig, wechatDraft]);
+
+  const activeChannelHasChanges =
+    activeChannelId === 'feishu'
+      ? hasConfigChanges
+      : activeChannelId === 'xiaoyi'
+        ? hasXiaoyiConfigChanges
+        : activeChannelId === 'dingtalk'
+          ? hasDingtalkConfigChanges
+          : activeChannelId === 'telegram'
+            ? hasTelegramConfigChanges
+            : activeChannelId === 'discord'
+              ? hasDiscordConfigChanges
+              : activeChannelId === 'slack'
+                ? hasSlackConfigChanges
+                : activeChannelId === 'whatsapp'
+                  ? hasWhatsAppConfigChanges
+                  : (activeChannelId as string) === 'wecom'
+                    ? hasWecomConfigChanges
+                    : (activeChannelId as string) === 'wechat'
+                      ? hasWechatConfigChanges
+                      : false;
+
+  useEffect(() => {
+    onHasChangesChange?.(activeChannelHasChanges);
+  }, [activeChannelHasChanges, onHasChangesChange]);
+
+  useEffect(() => () => onHasChangesChange?.(false), [onHasChangesChange]);
 
   const handleFeishuAppFieldChange = <K extends keyof FeishuAppDraft>(
     index: number,
@@ -1644,6 +1662,27 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setWechatDraft(draftFromWechatConfig(wechatConfig));
     setWechatSaveError(null);
     setWechatSuccess(null);
+  };
+
+  const handleSelectChannel = (channelId: SupportedChannelId) => {
+    if (channelId === activeChannelId || ADAPTING_CHANNEL_IDS.has(channelId)) {
+      return;
+    }
+    if (activeChannelHasChanges && !window.confirm(discardConfirmMessage)) {
+      return;
+    }
+    if (activeChannelHasChanges) {
+      if (activeChannelId === 'feishu') handleCancelConfig();
+      else if (activeChannelId === 'xiaoyi') handleCancelXiaoyiConfig();
+      else if (activeChannelId === 'dingtalk') handleCancelDingtalkConfig();
+      else if (activeChannelId === 'telegram') handleCancelTelegramConfig();
+      else if (activeChannelId === 'discord') handleCancelDiscordConfig();
+      else if (activeChannelId === 'slack') handleCancelSlackConfig();
+      else if (activeChannelId === 'whatsapp') handleCancelWhatsAppConfig();
+      else if ((activeChannelId as string) === 'wecom') handleCancelWecomConfig();
+      else if ((activeChannelId as string) === 'wechat') handleCancelWechatConfig();
+    }
+    setActiveChannelId(channelId);
   };
 
   const handleSaveConfig = async () => {

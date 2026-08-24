@@ -1534,6 +1534,7 @@ const OPENAI_ACCOUNT_LOGIN_START_TIMEOUT_MS = 90_000;
 
 const MODEL_PROVIDER_OPTIONS = [
   "OpenAI",
+  OPENAI_ACCOUNT_PROVIDER,
   "OpenRouter",
   "DashScope",
   "SiliconFlow",
@@ -2820,7 +2821,7 @@ function MultiModelSection({
                       field === "model_name"
                         ? newModelIsOpenAIAccount
                           ? t("config.openaiAccount.modelNameUseDropdown")
-                          : "e.g. gpt-4o"
+                          : t("config.modelList.modelNamePlaceholder")
                         : field === "api_base" && newModelIsOpenAIAccount
                           ? t("config.openaiAccount.apiBaseManaged")
                         : field === "api_key" ? (
@@ -4498,14 +4499,12 @@ export function ConfigPanel({
 
   const groups = useMemo<ConfigGroup[]>(() => {
     if (!Object.keys(normalizedConfig).length) return [];
+    const externalCliAgentsSupported = parseBoolValue(normalizedConfig[EXTERNAL_CLI_AGENTS_SUPPORTED_KEY] ?? 'true');
     const buckets: Record<string, [string, string][]> = {};
     for (const [key, value] of Object.entries(normalizedConfig)) {
       if (HIDDEN_CONFIG_KEYS.has(key) || HIDDEN_FROM_UI_CONFIG_KEYS.has(key)) continue;
       const tag = classifyKey(key);
-      // 按产品要求暂不在配置页展示三方 Agent，保留后端下发值及运行能力。
-      if (tag === "external_cli_agents") continue;
-      // 按产品要求暂不在配置页展示记忆敏感信息过滤，保留后端下发值及运行能力。
-      if (tag === "memory") continue;
+      if (tag === 'external_cli_agents' && !externalCliAgentsSupported) continue;
       // 临时注释：先隐藏邮件配置，后续需要时可恢复。
       if (tag === "email") continue;
       // 飞书配置已迁移到 ChannelsPanel 管理，这里不再展示。

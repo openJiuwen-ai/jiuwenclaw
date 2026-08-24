@@ -14,8 +14,11 @@
     "ok": "确定",
     "and": "和",
     "modify": "修改",
+    "expand": "展开",
+    "collapse": "收起",
     "delete": "删除",
     "expandMore": "展开 {{count}} 个",
+    "optional": "（可选）",
     "processing": "处理中…"
   },
   "a2ui": {
@@ -44,6 +47,273 @@
     "browser": "浏览器",
     "logs": "日志",
     "update": "更新"
+  },
+  "settingsPanel": {
+    "title": "设置",
+    "categories": {
+      "general": "常规",
+      "models": "模型",
+      "agent": "智能体",
+      "browser": "浏览器",
+      "channels": "频道",
+      "memory": "记忆",
+      "security": "安全与权限",
+      "experimental": "实验功能"
+    },
+    "moduleDescriptions": {
+      "general": "管理界面语言并查看服务连接状态。",
+      "models": "管理免费模型、对话模型及其验证方式。",
+      "agent": "管理技能、搜索、多模态工具和智能体团队能力。",
+      "browser": "设置浏览器自动化运行时及可执行文件路径。",
+      "channels": "配置外部消息频道的连接凭据与消息行为。",
+      "memory": "管理敏感信息过滤与上下文处理能力。",
+      "security": "管理全局权限开关与逐工具权限规则。",
+      "experimental": "管理试验性界面和智能体能力。"
+    },
+    "feedback": {
+      "loadFailed": "设置加载失败",
+      "reconnecting": "正在重新连接",
+      "saving": "正在保存",
+      "saved": "已保存",
+      "saveFailed": "保存失败",
+      "retry": "重试"
+    },
+    "access": {
+      "readOnly": "当前为只读状态。"
+    },
+    "dialog": {
+      "discardTitle": "放弃未保存的修改",
+      "discardConfirm": "当前修改尚未保存，确定放弃吗？"
+    },
+    "common": {
+      "configured": "已配置",
+      "notConfigured": "未配置",
+      "configure": "配置",
+      "showValue": "显示明文",
+      "hideValue": "隐藏明文"
+    },
+    "general": {
+      "preferences": "界面与连接",
+      "language": "界面语言",
+      "languageDescription": "设置应用程序界面的界面显示语言。",
+      "chinese": "中文（简体）",
+      "english": "English",
+      "connection": "服务连接状态",
+      "connectionDescription": "表示当前页面与 WorkSwarm 服务的连接状态。",
+      "connectionStatus": {
+        "connected": "已连接",
+        "connecting": "连接中",
+        "disconnected": "未连接"
+      }
+    },
+    "models": {
+      "freeModels": "免费模型",
+      "freeModelsDescription": "开启后实时拉取可用的免费模型，并在对话模型选择中展示。免费模型不属于可编辑的模型配置。",
+      "primaryModels": "对话模型",
+      "primaryModelsDescription": "列表第一项是主模型。当多个配置使用相同模型名称时，直接使用该模型名称会采用组内默认项。",
+      "empty": "尚未配置模型",
+      "emptyDescription": "添加模型后，可在这里测试连接并管理主模型。",
+      "primary": "主模型",
+      "groupDefault": "组内默认",
+      "setPrimary": "设为主模型",
+      "setGroupDefault": "设为组内默认",
+      "setGroupDefaultConfirm": "设为组内默认后，直接使用模型名称“{{model}}”且未指定别名时，将使用此配置；同组原默认配置会被取消。确定继续吗？",
+      "setPrimaryGroupDefaultConfirm": "“{{model}}”当前是主模型。设为组内默认后，此配置会同时成为主模型；直接使用该模型名称且未指定别名时也会使用此配置。同组原默认配置会被取消。确定继续吗？",
+      "addModel": "添加模型",
+      "add": "添加",
+      "editModel": "编辑模型",
+      "deleteConfirm": "确定删除模型“{{model}}”吗？",
+      "deleteConfirmTitle": "删除模型",
+      "groupDefaultConfirmTitle": "设置组内默认模型",
+      "loadFailed": "模型列表获取失败，请重试。",
+      "formDescription": "带 * 的字段为必填项。确认后立即保存；测试连接不会保存当前草稿。",
+      "validationOk": "连接测试通过",
+      "validationFailed": "连接测试失败",
+      "validation": {
+        "modelProviderRequired": "模型提供商为必填项",
+        "aliasConflict": "别名必须唯一，且不能与其他模型名称相同",
+        "modelNameConflict": "模型名称不能与其他配置的别名相同"
+      },
+      "testConnection": "测试连接",
+      "test": "测试"
+    },
+    "agent": {
+      "skills": "技能",
+      "skillsDescription": "管理技能自动演进与技能自动搜索能力。",
+      "webSearch": "网页搜索",
+      "webSearchDescription": "配置免费搜索来源和现有第三方搜索服务密钥。",
+      "mediaTools": "图片、音频与视频工具",
+      "mediaToolsDescription": "沿用原多模态模型字段，仅调整到工具相关位置。",
+      "vision": "图片处理模型",
+      "audio": "音频处理模型",
+      "video": "视频理解模型",
+      "team": "智能体团队",
+      "teamDescription": "管理当前项目已有的动态工作流能力。"
+    },
+    "browser": {
+      "runtime": "浏览器运行配置",
+      "runtimeDescription": "浏览器配置保存后会由现有后端逻辑重置运行时。",
+      "path": "浏览器路径",
+      "pathDescription": "指定浏览器可执行文件路径；留空时自动探测。",
+      "preferredBrowser": "优先浏览器",
+      "runMode": "浏览器运行方式",
+      "runModeDescription": "选择在前台显示浏览器窗口或以无头模式运行。",
+      "headed": "前台显示",
+      "headless": "无头模式",
+      "headlessDescription": "不显示浏览器窗口运行自动化任务。",
+      "chromePath": "Chrome 可执行文件路径",
+      "chromePathPlaceholder": "例如 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    },
+    "memory": {
+      "filtering": "禁止记忆规则",
+      "filteringEnabledDescription": "过滤已启用。系统会阻止敏感信息写入记忆，并应用下方规则。",
+      "filteringDisabledDescription": "过滤已关闭。下方规则仍会保留，但不会生效。",
+      "editRule": "编辑规则",
+      "editRuleTitle": "编辑禁止记忆规则",
+      "editRuleDescription": "该规则按当前界面语言单独保存，不会覆盖其他语言的规则。",
+      "context": "上下文处理"
+    },
+    "security": {
+      "guardrails": "系统风险操作权限",
+      "guardrailsDescription": "普通 Agent 与 Team 统一使用全局权限控制；逐工具规则在下方维护。",
+      "toolPermissions": "逐工具权限",
+      "toolPermissionsDescription": "权限等级修改后立即保存。",
+      "noTools": "尚未配置逐工具权限",
+      "noToolsDescription": "添加工具后，可单独设置自动执行、用户确认或拒绝。",
+      "deleteToolConfirm": "确定删除工具“{{tool}}”的权限规则吗？",
+      "deleteToolTitle": "删除工具权限",
+      "addTool": "添加工具权限",
+      "toolNamePlaceholder": "工具名称",
+      "toolAlreadyExists": "工具已存在",
+      "add": "添加",
+      "permissionLevels": {
+        "allow": "自动执行",
+        "ask": "用户确认",
+        "deny": "拒绝"
+      },
+      "permissionModes": {
+        "auto": "默认权限",
+        "full_access": "完全访问权限",
+        "strict": "严格审批"
+      }
+    },
+    "experimental": {
+      "externalCliAgents": "三方 Agent",
+      "externalCliAgentsDescription": "配置 Team 模式中可由 Leader 拉起的 Claude 与 Codex Agent。",
+      "a2ui": "A2UI 界面生成",
+      "a2uiDescription": "切换后保存并刷新页面，让界面渲染能力立即采用新配置。",
+      "proactive": "主动推荐",
+      "proactiveDescription": "允许系统根据对话上下文主动给出建议。",
+      "proactiveLimits": "推荐频率限制",
+      "proactiveLimitsDescription": "每天最多 {{daily}} 条，每次检查 {{rounds}} 轮对话。",
+      "proactiveLimitsDisabledDescription": "开启主动推荐后可设置。当前保存值：每天最多 {{daily}} 条，每次检查 {{rounds}} 轮对话。"
+    },
+    "fields": {
+      "preferred_language": {
+        "title": "界面语言",
+        "description": "设置应用程序界面的显示语言。"
+      },
+      "chrome_path": {
+        "title": "浏览器路径",
+        "description": "指定浏览器可执行文件路径；留空时自动探测。",
+        "placeholder": "例如 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      },
+      "browser_type": {
+        "title": "优先浏览器",
+        "description": "指定类型时只查找该浏览器；填写路径时以路径为准。"
+      },
+      "headless": {
+        "title": "浏览器运行方式",
+        "description": "选择在前台显示浏览器窗口或以无头模式运行。"
+      },
+      "model_name": { "title": "模型名称", "placeholder": "例如：glm-4.7" },
+      "alias": { "title": "自定义别名", "placeholder": "例如：GLM-4.7 生产环境" },
+      "api_base": { "title": "API 地址", "placeholder": "例如：https://api.openai.com/v1" },
+      "api_key": { "title": "API 密钥", "placeholder": "例如：sk-..." },
+      "model_provider": { "title": "模型提供商" },
+      "reasoning_level": { "title": "推理强度" },
+      "embed_api_base": { "title": "API 地址" },
+      "embed_api_key": { "title": "API 密钥" },
+      "embed_model": { "title": "模型名称" },
+      "enable_free_models": {
+        "title": "启用免费模型",
+        "description": "允许实时拉取可用的免费模型，并在对话模型选择中展示。"
+      },
+      "skill_evolution": { "title": "本地技能自动演进与沉淀", "description": "控制本地技能的自动演进和沉淀" },
+      "skill_retrieval_enabled": { "title": "技能自动搜索", "description": "控制智能体是否自动检索可用技能" },
+      "free_search_ddg_enabled": { "title": "DuckDuckGo 搜索", "description": "启用 DuckDuckGo 免费搜索来源。" },
+      "free_search_bing_enabled": { "title": "Bing 搜索", "description": "启用 Bing 免费搜索来源。" },
+      "jina_api_key": { "title": "Jina API 密钥" },
+      "bocha_api_key": { "title": "博查 API 密钥" },
+      "perplexity_api_key": { "title": "Perplexity API 密钥" },
+      "serper_api_key": { "title": "Serper API 密钥" },
+      "github_token": { "title": "GitHub 访问令牌" },
+      "vision_api_base": { "title": "API 地址" },
+      "vision_api_key": { "title": "API 密钥" },
+      "vision_model": { "title": "模型名称" },
+      "vision_provider": { "title": "模型提供商" },
+      "audio_api_base": { "title": "API 地址" },
+      "audio_api_key": { "title": "API 密钥" },
+      "audio_model": { "title": "模型名称" },
+      "audio_provider": { "title": "模型提供商" },
+      "video_api_base": { "title": "API 地址" },
+      "video_api_key": { "title": "API 密钥" },
+      "video_model": { "title": "模型名称" },
+      "video_provider": { "title": "模型提供商" },
+      "swarmflow_enabled": { "title": "动态工作流", "description": "控制智能体团队是否启用动态工作流能力" },
+      "memory_forbidden_enabled": {
+        "title": "启用禁止记忆过滤",
+        "description": "启用内置敏感信息过滤，并将下方规则作为记忆限制。"
+      },
+      "memory_forbidden_description": {
+        "title": "禁止规则",
+        "description": "描述不应写入记忆的内容。系统仍会使用内置敏感信息检测。",
+        "placeholder": "例如：密码、API 密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息"
+      },
+      "context_engine_enabled": { "title": "上下文压缩", "description": "启用现有上下文引擎压缩能力。" },
+      "permissions_enabled": {
+        "title": "启用全局权限控制",
+        "description": "为普通 Agent 与 Team 启用统一的权限检查。"
+      },
+      "permissions_mode": { "title": "全局权限模式", "description": "为普通 Agent 与 Team 选择统一的安全护栏模式。" },
+      "a2ui_enabled": { "title": "启用 A2UI", "description": "允许将支持的结果渲染成交互式界面。" },
+      "external_cli_agent_claude_enabled": {
+        "title": "启用 Claude",
+        "description": "允许 Team Leader 拉起 Claude Agent。"
+      },
+      "external_cli_agent_claude_use_builtin": {
+        "title": "Claude 使用内置方式",
+        "description": "不指定本机 CLI 路径，由 SDK 使用默认查找方式。"
+      },
+      "external_cli_agent_claude_cli_path": { "title": "Claude CLI 路径" },
+      "external_cli_agent_codex_enabled": {
+        "title": "启用 Codex",
+        "description": "允许 Team Leader 拉起 Codex Agent；首次启用可能需要安装依赖。"
+      },
+      "external_cli_agent_codex_use_builtin": {
+        "title": "Codex 使用内置方式",
+        "description": "不指定本机 CLI 路径，由 SDK 使用默认查找方式。"
+      },
+      "external_cli_agent_codex_cli_path": { "title": "Codex CLI 路径" },
+      "proactive_recommendation_enabled": {
+        "title": "启用主动推荐",
+        "description": "允许系统在满足条件时主动发送推荐。"
+      },
+      "proactive_recommendation_max_recommend_per_day": {
+        "title": "每日推荐上限",
+        "description": "每个用户每日主动推荐次数上限，防止打扰过多。默认值：10。",
+        "placeholder": "请输入 1–50 的整数"
+      },
+      "proactive_recommendation_max_rounds_per_tick": {
+        "title": "每次检查对话轮数",
+        "description": "每次检查时最多读取的近期对话轮数，用于推断推荐上下文。默认值：20。",
+        "placeholder": "请输入 1–50 的整数"
+      }
+    },
+    "validation": {
+      "required": "此字段为必填项",
+      "integerRange": "请输入 {{min}}–{{max}} 之间的整数"
+    }
   },
   "team": {
     "members": "团队成员",
@@ -608,9 +878,6 @@
   },
   "sessionSidebar": {
     "newSession": "新会话",
-    "connectionStatus": "连接状态",
-    "version": "版本",
-    "language": "语言",
     "moreSettings": "更多设置"
   },
   "offloadFiles": {
@@ -667,6 +934,13 @@
     "listMeta": "频道个数：{{status}}，刷新时间：{{time}}",
     "hideValue": "隐藏明文",
     "showValue": "显示明文",
+    "fieldToggleAria": "切换 {{field}}",
+    "telegramGroupModes": {
+      "mention": "仅响应 @提及（mention）",
+      "reply": "仅响应回复（reply）",
+      "all": "响应所有消息（all）",
+      "off": "禁用群聊（off）"
+    },
     "labels": {
       "web": "网页",
       "xiaoyi": "小艺",
@@ -679,6 +953,27 @@
       "wecom": "企业微信",
       "wechat": "微信"
     },
+    "descriptions": {
+      "xiaoyi": "是否启用小艺频道；关闭后停止接收和发送消息，但保留已有配置。",
+      "feishu": "是否启用飞书频道；关闭后停止接收和发送消息，但保留已有配置。",
+      "dingtalk": "是否启用钉钉频道；关闭后保留已有配置。",
+      "telegram": "是否启用 Telegram 频道；关闭后保留已有配置。",
+      "discord": "是否启用 Discord 频道；关闭后停止接收和发送消息，但保留已有配置。",
+      "slack": "是否启用 Slack 频道；关闭后保留已有配置。",
+      "whatsapp": "是否启用 WhatsApp 频道；关闭后保留已有配置。"
+    },
+    "configurationGuide": "配置方法",
+    "addConfiguration": "添加配置",
+    "enable": "启用",
+    "disable": "禁用",
+    "enableSuccess": "已启用“{{name}}”",
+    "disableSuccess": "已禁用“{{name}}”",
+    "unbind": "解绑",
+    "unbindConfigurationTitle": "解绑频道配置",
+    "unbindConfigurationMessage": "确定解绑“{{name}}”的频道配置吗？解绑后将清除已保存的配置。",
+    "unbindConfigurationSuccess": "已解绑“{{name}}”的频道配置",
+    "boundSuccess": "绑定成功",
+    "configurationIncomplete": "配置不完整",
     "status": {
       "loadFailed": "加载失败",
       "enabledSummary": "{{enabledCount}}/{{total}} 已启用",
@@ -690,21 +985,21 @@
       "webTitle": "网页频道参数配置",
       "webSubtitle": "配置网页频道服务相关参数",
       "webEmpty": "网页频道暂无配置，点击其他频道加载配置。",
-      "xiaoyiTitle": "小艺频道参数配置",
+      "xiaoyiTitle": "注册小艺频道",
       "xiaoyiSubtitle": "配置小艺频道服务相关参数",
-      "dingtalkTitle": "钉钉频道参数配置",
+      "dingtalkTitle": "注册钉钉频道",
       "dingtalkSubtitle": "配置钉钉频道服务相关参数",
-      "feishuTitle": "飞书频道参数配置",
+      "feishuTitle": "注册飞书频道",
       "feishuSubtitle": "配置飞书频道服务相关参数",
-      "discordTitle": "Discord 频道参数配置",
+      "discordTitle": "注册 Discord 频道",
       "discordSubtitle": "配置 Discord Bot 服务相关参数",
       "discordHint": "支持 Discord Bot 消息收发，请确保已在开发者后台开启 Message Content Intent 并配置目标频道，可使用block_dm开关屏蔽私信。",
-      "slackTitle": "Slack 频道参数配置",
+      "slackTitle": "注册 Slack 频道",
       "slackSubtitle": "配置 Slack Socket Mode 机器人服务参数",
       "slackHint": "请创建并启用 Socket Mode 的 Slack App，配置 xoxb Bot Token 和 xapp App Token，并订阅 app_mention 与 message.im 事件。",
-      "telegramTitle": "Telegram 频道参数配置",
+      "telegramTitle": "注册 Telegram 频道",
       "telegramSubtitle": "配置 Telegram Bot 服务相关参数",
-      "whatsappTitle": "WhatsApp 频道参数配置",
+      "whatsappTitle": "注册 WhatsApp 频道",
       "whatsappSubtitle": "配置 WhatsApp Baileys Bridge 服务相关参数",
       "wecomTitle": "企业微信频道参数配置",
       "wecomSubtitle": "配置企业微信频道相关参数",
@@ -796,11 +1091,17 @@
       "wechatNumericInvalid": "{{field}} 需为 {{min}}–{{max}} 之间的有效数值",
       "wechatBackoffOrder": "backoff_max_sec 不得小于 backoff_base_sec"
     },
+    "xiaoyiApps": {
+      "defaultAppName": "默认小艺应用",
+      "unnamedAppName": "未命名小艺应用",
+      "appNameTemplate": "小艺应用 {{index}}"
+    },
     "feishuApps": {
       "defaultAppName": "飞书默认应用",
       "legacyDefaultAppName": "默认应用",
       "unnamedAppName": "未命名飞书应用",
       "appNameTemplate": "飞书应用 {{index}}",
+      "appNameLabel": "应用名称",
       "appNamePlaceholder": "应用名称",
       "collapseConfig": "收起应用配置",
       "expandConfig": "展开应用配置",
@@ -953,8 +1254,8 @@
     "keyHelp": {
       "apiBase": "模型服务的 API 基础地址，须以 http:// 或 https:// 开头，例如 https://api.openai.com/v1（一般不要带具体聊天路径）。",
       "apiKey": "调用该模型服务的鉴权密钥。本地无鉴权服务可填任意占位值（如 sk-1234）；OpenAI 账号 OAuth 登录后无需填写。",
-      "model": "提供商侧的模型 ID/名称，例如 gpt-4o、qwen-plus；须与所选供应商兼容。",
-      "modelName": "提供商侧的模型 ID/名称，例如 gpt-4o、qwen-plus；同一名称可配置多条不同供应商/地址的入口。",
+      "model": "提供商侧的模型 ID/名称，例如 glm-4.7；须与所选供应商兼容。",
+      "modelName": "提供商侧的模型 ID/名称，例如 glm-4.7；同一名称可配置多条不同供应商/地址的入口。",
       "modelProvider": "模型协议/供应商类型，决定请求格式与鉴权方式（如 OpenAI 兼容协议、DashScope 等）。",
       "alias": "可选显示别名，便于区分同名模型的多条配置；留空则界面仅显示模型名。",
       "reasoningLevel": "推理强度等级。留空使用提供商默认；仅对支持 reasoning/thinking 的模型生效。",
@@ -1066,10 +1367,11 @@
       "apiBaseRequired": "API Base URL 为必填项，请填写后再保存",
       "apiBaseUrlInvalid": "API Base URL 必须以 http:// 或 https:// 开头",
       "modelNameRequired": "模型名称为必填项，请先选择模型后再保存",
+      "modelNamePlaceholder": "例如：glm-4.7",
       "modelNameTooLong": "模型名称过长，请控制在 100 字符以内",
       "aliasTooLong": "别名过长，请控制在 100 字符以内",
       "apiBaseTooLong": "API Base URL 过长，请控制在 512 字符以内",
-      "apiKeyTooLong": "API Key 过长，请控制在 2048 字符以内",
+      "apiKeyTooLong": "API Key 过长，请控制在 500 字符以内",
       "reasoningDefault": "使用默认值",
       "alias": "别名",
       "aliasPlaceholder": "选填，默认为空"

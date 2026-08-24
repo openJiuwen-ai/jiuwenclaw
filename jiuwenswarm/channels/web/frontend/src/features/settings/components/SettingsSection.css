@@ -1,0 +1,39 @@
+.settings-section + .settings-section {
+  margin-top: 36px;
+}
+
+.settings-section__heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 16px;
+}
+
+.settings-section__heading h2 {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.settings-section__heading p {
+  max-width: 70ch;
+  margin: 2px 0 0;
+  color: var(--color-settings-text-secondary);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
+}
+
+.settings-section__heading-action {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.settings-section__items {
+  display: grid;
+  gap: 16px;
+}

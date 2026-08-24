@@ -1,0 +1,103 @@
+.settings-oauth {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-muted);
+}
+.settings-oauth__header,
+.settings-oauth__login,
+.settings-oauth__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.settings-oauth__identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+.settings-oauth__identity > div {
+  display: grid;
+  gap: 3px;
+}
+.settings-oauth__identity strong,
+.settings-oauth__login strong {
+  color: var(--color-text-strong);
+  font-size: var(--font-size-sm);
+}
+.settings-oauth__identity span,
+.settings-oauth__login span,
+.settings-oauth__login small {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+.settings-oauth__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  min-height: 28px;
+  color: var(--color-text-strong);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-card);
+}
+.settings-oauth__badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 3px 8px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-card);
+}
+.settings-oauth__badge--success {
+  color: var(--color-feedback-success);
+  background: var(--color-feedback-success-subtle);
+}
+.settings-oauth__badge--warning {
+  color: var(--color-feedback-warning);
+  background: var(--color-feedback-warning-subtle);
+}
+.settings-oauth__login {
+  align-items: flex-start;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border-default);
+}
+.settings-oauth__login > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+.settings-oauth__error {
+  color: var(--color-feedback-danger);
+  font-size: var(--font-size-xs);
+  line-height: 1.45;
+}
+.settings-oauth__model-field {
+  display: grid;
+  gap: 6px;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+}
+.settings-oauth__model-field small {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+@media (max-width: 640px) {
+  .settings-oauth__header,
+  .settings-oauth__login {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .settings-oauth__actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+}

@@ -1,0 +1,56 @@
+export type SettingsSaveStatus = {
+  status: 'idle' | 'saving' | 'saved' | 'error';
+  operation: string | null;
+  error: string | null;
+};
+type Listener = (status: SettingsSaveStatus) => void;
+
+const SAVE_SUCCESS_VISIBLE_MS = 2000;
+
+/** Strictly serializes real settings writes. Tests, OAuth, installation, polling and ChannelsPanel internal writes intentionally bypass this queue. */
+export class SettingsSaveQueue {
+  private tail: Promise<void> = Promise.resolve();
+  private status: SettingsSaveStatus = { status: 'idle', operation: null, error: null };
+  private listeners = new Set<Listener>();
+  private successTimer: ReturnType<typeof setTimeout> | null = null;
+  subscribe(listener: Listener): () => void {
+    this.listeners.add(listener);
+    listener(this.status);
+    return () => this.listeners.delete(listener);
+  }
+  getSnapshot = (): SettingsSaveStatus => this.status;
+  enqueue<T>(operation: string, write: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.tail = this.tail
+        .catch(() => undefined)
+        .then(async () => {
+          this.publish({ status: 'saving', operation, error: null });
+          try {
+            const result = await write();
+            this.publish({ status: 'saved', operation, error: null });
+            resolve(result);
+          } catch (error) {
+            this.publish({ status: 'error', operation, error: error instanceof Error ? error.message : String(error) });
+            reject(error);
+          }
+        });
+    });
+  }
+  clear(): void {
+    if (this.status.status !== 'saving') this.publish({ status: 'idle', operation: null, error: null });
+  }
+  private publish(status: SettingsSaveStatus): void {
+    if (this.successTimer !== null) {
+      clearTimeout(this.successTimer);
+      this.successTimer = null;
+    }
+    this.status = status;
+    this.listeners.forEach((listener) => listener(status));
+    if (status.status === 'saved' && this.status === status) {
+      this.successTimer = setTimeout(() => {
+        this.successTimer = null;
+        if (this.status === status) this.clear();
+      }, SAVE_SUCCESS_VISIBLE_MS);
+    }
+  }
+}

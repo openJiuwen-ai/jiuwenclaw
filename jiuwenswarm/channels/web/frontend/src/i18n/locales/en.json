@@ -14,8 +14,11 @@
     "ok": "OK",
     "and": "and",
     "modify": "Modify",
+    "expand": "Expand",
+    "collapse": "Collapse",
     "delete": "Delete",
     "expandMore": "Show {{count}} more",
+    "optional": "(optional)",
     "processing": "Processing…"
   },
   "a2ui": {
@@ -44,6 +47,291 @@
     "browser": "Browser",
     "logs": "Logs",
     "update": "Updates"
+  },
+  "settingsPanel": {
+    "title": "Settings",
+    "categories": {
+      "general": "General",
+      "models": "Models",
+      "agent": "Agent",
+      "browser": "Browser",
+      "channels": "Channels",
+      "memory": "Memory",
+      "security": "Security & Permissions",
+      "experimental": "Experimental"
+    },
+    "moduleDescriptions": {
+      "general": "Manage the interface language and review service connectivity.",
+      "models": "Manage free models, chat models, and their validation.",
+      "agent": "Manage skills, search, multimodal tools, and agent-team capabilities.",
+      "browser": "Configure the browser automation runtime and executable path.",
+      "channels": "Configure external channel credentials and message behavior.",
+      "memory": "Manage sensitive-information filtering and context handling.",
+      "security": "Manage the global permission switch and per-tool permission rules.",
+      "experimental": "Manage experimental interface and agent capabilities."
+    },
+    "feedback": {
+      "loadFailed": "Failed to load settings",
+      "reconnecting": "Reconnecting",
+      "saving": "Saving",
+      "saved": "Saved",
+      "saveFailed": "Save failed",
+      "retry": "Retry"
+    },
+    "access": {
+      "readOnly": "This setting is currently read-only."
+    },
+    "dialog": {
+      "discardTitle": "Discard unsaved changes",
+      "discardConfirm": "You have unsaved changes. Discard them?"
+    },
+    "common": {
+      "configured": "Configured",
+      "notConfigured": "Not configured",
+      "configure": "Configure",
+      "showValue": "Show value",
+      "hideValue": "Hide value"
+    },
+    "general": {
+      "preferences": "Interface and connection",
+      "language": "Interface language",
+      "languageDescription": "Set the display language for the application interface.",
+      "chinese": "中文（简体）",
+      "english": "English",
+      "connection": "Service connection",
+      "connectionDescription": "Shows the connection status between this page and the WorkSwarm service.",
+      "connectionStatus": {
+        "connected": "Connected",
+        "connecting": "Connecting",
+        "disconnected": "Disconnected"
+      }
+    },
+    "models": {
+      "freeModels": "Free models",
+      "freeModelsDescription": "Fetch available free models and show them in the chat model picker. Free models are not editable model configurations.",
+      "primaryModels": "Chat models",
+      "primaryModelsDescription": "The first item is the primary model. When multiple configurations share a model name, requests using that name use the group default.",
+      "empty": "No models configured",
+      "emptyDescription": "Add a model to test its connection and manage the primary model here.",
+      "primary": "Primary",
+      "groupDefault": "Group default",
+      "setPrimary": "Make primary",
+      "setGroupDefault": "Make group default",
+      "setGroupDefaultConfirm": "After this becomes the group default, requests using the model name “{{model}}” without an alias will use this configuration. The previous default in this group will be cleared. Continue?",
+      "setPrimaryGroupDefaultConfirm": "“{{model}}” is currently the primary model. Making this configuration the group default will also make it the primary configuration. Requests using this model name without an alias will use it, and the previous group default will be cleared. Continue?",
+      "addModel": "Add model",
+      "add": "Add",
+      "editModel": "Edit model",
+      "deleteConfirm": "Delete model “{{model}}”?",
+      "deleteConfirmTitle": "Delete model",
+      "groupDefaultConfirmTitle": "Set group default model",
+      "loadFailed": "Failed to load the model list. Please try again.",
+      "formDescription": "Fields marked * are required. Confirm to save immediately. Testing does not save this draft.",
+      "validationOk": "Connection test passed",
+      "validationFailed": "Connection test failed",
+      "validation": {
+        "modelProviderRequired": "Model provider is required",
+        "aliasConflict": "Alias must be unique and cannot match another model name",
+        "modelNameConflict": "Model name cannot match another configuration's alias"
+      },
+      "testConnection": "Test connection",
+      "test": "Test"
+    },
+    "agent": {
+      "skills": "Skills",
+      "skillsDescription": "Manage automatic skill evolution and skill search.",
+      "webSearch": "Web search",
+      "webSearchDescription": "Configure free search sources and existing third-party search credentials.",
+      "mediaTools": "Image, audio, and video tools",
+      "mediaToolsDescription": "Uses the existing multimodal model fields in a tool-oriented location.",
+      "vision": "Image processing model",
+      "audio": "Audio processing model",
+      "video": "Video understanding model",
+      "team": "Agent team",
+      "teamDescription": "Manage the dynamic workflow capability already available in this project."
+    },
+    "browser": {
+      "runtime": "Browser runtime",
+      "runtimeDescription": "The existing backend resets the browser runtime after saving.",
+      "path": "Browser path",
+      "pathDescription": "Specify the browser executable path, or leave it empty for automatic detection.",
+      "preferredBrowser": "Preferred browser",
+      "runMode": "Browser run mode",
+      "runModeDescription": "Show the browser window in the foreground or run in headless mode.",
+      "headed": "Show in foreground",
+      "headless": "Headless mode",
+      "headlessDescription": "Run browser automation without showing a browser window.",
+      "chromePath": "Chrome executable path",
+      "chromePathPlaceholder": "For example, /Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    },
+    "memory": {
+      "filtering": "Forbidden memory rules",
+      "filteringEnabledDescription": "Filtering is on. The system blocks sensitive information from memory and applies the rule below.",
+      "filteringDisabledDescription": "Filtering is off. The rule below remains saved but does not take effect.",
+      "editRule": "Edit rule",
+      "editRuleTitle": "Edit forbidden memory rule",
+      "editRuleDescription": "This rule is saved separately for the current interface language and does not overwrite other languages.",
+      "context": "Context processing"
+    },
+    "security": {
+      "guardrails": "System risk-operation permissions",
+      "guardrailsDescription": "Ordinary Agents and Teams use the same global permission control; maintain per-tool rules below.",
+      "toolPermissions": "Per-tool permissions",
+      "toolPermissionsDescription": "Permission level changes are saved immediately.",
+      "noTools": "No per-tool permissions configured",
+      "noToolsDescription": "Add a tool to choose whether it runs automatically, asks for confirmation, or is denied.",
+      "deleteToolConfirm": "Delete the permission rule for “{{tool}}”?",
+      "deleteToolTitle": "Delete tool permission",
+      "addTool": "Add tool permission",
+      "toolNamePlaceholder": "Tool name",
+      "toolAlreadyExists": "Tool already exists",
+      "add": "Add",
+      "permissionLevels": {
+        "allow": "Run automatically",
+        "ask": "Ask for confirmation",
+        "deny": "Deny"
+      },
+      "permissionModes": {
+        "auto": "Default",
+        "full_access": "Full Access",
+        "strict": "Strict Approval"
+      }
+    },
+    "experimental": {
+      "externalCliAgents": "Third-Party Agents",
+      "externalCliAgentsDescription": "Configure Claude and Codex Agents that a Team Leader can spawn in Team mode.",
+      "a2ui": "A2UI generation",
+      "a2uiDescription": "Saving this switch refreshes the page so rendering uses the new configuration.",
+      "proactive": "Proactive recommendations",
+      "proactiveDescription": "Allow the system to proactively suggest actions based on conversation context.",
+      "proactiveLimits": "Recommendation limits",
+      "proactiveLimitsDescription": "Up to {{daily}} per day and {{rounds}} conversation rounds per check.",
+      "proactiveLimitsDisabledDescription": "Enable proactive recommendations to configure these limits. Saved values: up to {{daily}} per day and {{rounds}} conversation rounds per check."
+    },
+    "fields": {
+      "preferred_language": {
+        "title": "Interface language",
+        "description": "Set the display language for the application interface."
+      },
+      "chrome_path": {
+        "title": "Browser path",
+        "description": "Specify the browser executable path, or leave it empty for automatic detection.",
+        "placeholder": "For example, /Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      },
+      "browser_type": {
+        "title": "Preferred browser",
+        "description": "Pinning a type searches only that browser; an explicit path always wins."
+      },
+      "headless": {
+        "title": "Browser run mode",
+        "description": "Show the browser window in the foreground or run in headless mode."
+      },
+      "model_name": { "title": "Model name", "placeholder": "e.g. glm-4.7" },
+      "alias": { "title": "Custom alias", "placeholder": "e.g. GLM-4.7 Production" },
+      "api_base": { "title": "API URL", "placeholder": "e.g. https://api.openai.com/v1" },
+      "api_key": { "title": "API key", "placeholder": "e.g. sk-..." },
+      "model_provider": { "title": "Model provider" },
+      "reasoning_level": { "title": "Reasoning level" },
+      "embed_api_base": { "title": "API URL" },
+      "embed_api_key": { "title": "API key" },
+      "embed_model": { "title": "Model name" },
+      "enable_free_models": {
+        "title": "Enable free models",
+        "description": "Fetch available free models and show them in the chat model picker."
+      },
+      "skill_evolution": {
+        "title": "Automatic evolution and retention of local skills",
+        "description": "Control automatic evolution and retention of local skills."
+      },
+      "skill_retrieval_enabled": {
+        "title": "Automatic skill search",
+        "description": "Control whether the agent automatically retrieves available skills."
+      },
+      "free_search_ddg_enabled": {
+        "title": "DuckDuckGo search",
+        "description": "Enable the free DuckDuckGo search source."
+      },
+      "free_search_bing_enabled": { "title": "Bing search", "description": "Enable the free Bing search source." },
+      "jina_api_key": { "title": "Jina API key" },
+      "bocha_api_key": { "title": "Bocha API key" },
+      "perplexity_api_key": { "title": "Perplexity API key" },
+      "serper_api_key": { "title": "Serper API key" },
+      "github_token": { "title": "GitHub access token" },
+      "vision_api_base": { "title": "API URL" },
+      "vision_api_key": { "title": "API key" },
+      "vision_model": { "title": "Model name" },
+      "vision_provider": { "title": "Model provider" },
+      "audio_api_base": { "title": "API URL" },
+      "audio_api_key": { "title": "API key" },
+      "audio_model": { "title": "Model name" },
+      "audio_provider": { "title": "Model provider" },
+      "video_api_base": { "title": "API URL" },
+      "video_api_key": { "title": "API key" },
+      "video_model": { "title": "Model name" },
+      "video_provider": { "title": "Model provider" },
+      "swarmflow_enabled": {
+        "title": "Dynamic workflow",
+        "description": "Control whether the agent team enables dynamic workflow capabilities."
+      },
+      "memory_forbidden_enabled": {
+        "title": "Enable forbidden-memory filtering",
+        "description": "Enable built-in sensitive-information filtering and apply the rule below as a memory restriction."
+      },
+      "memory_forbidden_description": {
+        "title": "Forbidden rule",
+        "description": "Describe content that should not be stored in memory. Built-in sensitive-information detection still applies.",
+        "placeholder": "For example: passwords, API keys, secrets, tokens, credit card numbers, ID numbers, or phone numbers"
+      },
+      "context_engine_enabled": {
+        "title": "Context compression",
+        "description": "Enable the existing context-engine compression capability."
+      },
+      "permissions_enabled": {
+        "title": "Enable global permission controls",
+        "description": "Apply unified permission checks to ordinary Agents and Teams."
+      },
+      "permissions_mode": {
+        "title": "Global permission mode",
+        "description": "Choose the shared guardrail mode for ordinary Agents and Teams."
+      },
+      "a2ui_enabled": { "title": "Enable A2UI", "description": "Render supported results as interactive interfaces." },
+      "external_cli_agent_claude_enabled": {
+        "title": "Enable Claude",
+        "description": "Allow a Team Leader to spawn a Claude Agent."
+      },
+      "external_cli_agent_claude_use_builtin": {
+        "title": "Use built-in Claude",
+        "description": "Do not specify a local CLI path; let the SDK use its default lookup."
+      },
+      "external_cli_agent_claude_cli_path": { "title": "Claude CLI path" },
+      "external_cli_agent_codex_enabled": {
+        "title": "Enable Codex",
+        "description": "Allow a Team Leader to spawn a Codex Agent; first use may install dependencies."
+      },
+      "external_cli_agent_codex_use_builtin": {
+        "title": "Use built-in Codex",
+        "description": "Do not specify a local CLI path; let the SDK use its default lookup."
+      },
+      "external_cli_agent_codex_cli_path": { "title": "Codex CLI path" },
+      "proactive_recommendation_enabled": {
+        "title": "Enable proactive recommendations",
+        "description": "Allow recommendations to be sent when their conditions are met."
+      },
+      "proactive_recommendation_max_recommend_per_day": {
+        "title": "Daily recommendation limit",
+        "description": "Maximum proactive recommendations per user per day to avoid excessive interruption. Default: 10.",
+        "placeholder": "Enter an integer from 1 to 50"
+      },
+      "proactive_recommendation_max_rounds_per_tick": {
+        "title": "Conversation rounds per check",
+        "description": "Maximum recent conversation rounds read on each check to infer recommendation context. Default: 20.",
+        "placeholder": "Enter an integer from 1 to 50"
+      }
+    },
+    "validation": {
+      "required": "This field is required",
+      "integerRange": "Enter an integer from {{min}} to {{max}}"
+    }
   },
   "team": {
     "members": "Team Members",
@@ -608,9 +896,6 @@
   },
   "sessionSidebar": {
     "newSession": "New session",
-    "connectionStatus": "Connection Status",
-    "version": "Version",
-    "language": "Language",
     "moreSettings": "More Settings"
   },
   "offloadFiles": {
@@ -667,6 +952,13 @@
     "listMeta": "Channels: {{status}}, refreshed at: {{time}}",
     "hideValue": "Hide value",
     "showValue": "Show value",
+    "fieldToggleAria": "Toggle {{field}}",
+    "telegramGroupModes": {
+      "mention": "Only respond to @mentions (mention)",
+      "reply": "Only respond to replies (reply)",
+      "all": "Respond to all messages (all)",
+      "off": "Disable group chat (off)"
+    },
     "labels": {
       "web": "Web",
       "xiaoyi": "Xiaoyi",
@@ -679,32 +971,53 @@
       "wecom": "WeCom",
       "wechat": "WeChat"
     },
+    "descriptions": {
+      "xiaoyi": "Enable the Xiaoyi channel. Disabling stops messages while preserving existing settings.",
+      "feishu": "Enable the Lark channel. Disabling stops messages while preserving existing settings.",
+      "dingtalk": "Enable the DingTalk channel. Disabling preserves existing settings.",
+      "telegram": "Enable the Telegram channel. Disabling preserves existing settings.",
+      "discord": "Enable the Discord channel. Disabling stops messages while preserving existing settings.",
+      "slack": "Enable the Slack channel. Disabling preserves existing settings.",
+      "whatsapp": "Enable the WhatsApp channel. Disabling preserves existing settings."
+    },
+    "configurationGuide": "Configuration guide",
+    "addConfiguration": "Add configuration",
+    "enable": "Enable",
+    "disable": "Disable",
+    "enableSuccess": "Enabled “{{name}}”",
+    "disableSuccess": "Disabled “{{name}}”",
+    "unbind": "Unbind",
+    "unbindConfigurationTitle": "Unbind channel configuration",
+    "unbindConfigurationMessage": "Unbind the channel configuration for “{{name}}”? The saved configuration will be cleared.",
+    "unbindConfigurationSuccess": "Unbound the channel configuration for “{{name}}”",
+    "boundSuccess": "Bound successfully",
+    "configurationIncomplete": "Incomplete configuration",
     "status": {
       "loadFailed": "Load failed",
       "enabledSummary": "{{enabledCount}}/{{total}} enabled",
       "adapting": "Adapting",
       "enabled": "Enabled",
-      "disabled": "Disabled"
+      "disabled": "Not enabled"
     },
     "config": {
       "webTitle": "Web Channel Configuration",
       "webSubtitle": "Configure web channel service settings",
       "webEmpty": "The web channel has no configurable settings. Click another channel to load its configuration.",
-      "xiaoyiTitle": "Xiaoyi Channel Configuration",
+      "xiaoyiTitle": "Register Xiaoyi Channel",
       "xiaoyiSubtitle": "Configure Xiaoyi channel service settings",
-      "dingtalkTitle": "DingTalk Channel Configuration",
+      "dingtalkTitle": "Register DingTalk Channel",
       "dingtalkSubtitle": "Configure DingTalk channel service settings",
-      "feishuTitle": "Lark Channel Configuration",
+      "feishuTitle": "Register Lark Channel",
       "feishuSubtitle": "Configure Lark channel service settings",
-      "discordTitle": "Discord Channel Configuration",
+      "discordTitle": "Register Discord Channel",
       "discordSubtitle": "Configure Discord bot service settings",
       "discordHint": "Discord Bot messaging is supported. Enable Message Content Intent in Developer Portal and optionally set the target channel, the block_dm toggle can be used to block direct message.",
-      "slackTitle": "Slack Channel Configuration",
+      "slackTitle": "Register Slack Channel",
       "slackSubtitle": "Configure Slack Socket Mode bot settings",
       "slackHint": "Create a Slack app with Socket Mode enabled, an xoxb bot token, and an xapp app token. Subscribe to app_mention and message.im events.",
-      "telegramTitle": "Telegram Channel Configuration",
+      "telegramTitle": "Register Telegram Channel",
       "telegramSubtitle": "Configure Telegram Bot service settings",
-      "whatsappTitle": "WhatsApp Channel Configuration",
+      "whatsappTitle": "Register WhatsApp Channel",
       "whatsappSubtitle": "Configure WhatsApp Baileys Bridge service settings",
       "wecomTitle": "WeCom Channel Configuration",
       "wecomSubtitle": "Configure WeCom channel service settings",
@@ -796,11 +1109,17 @@
       "wechatNumericInvalid": "{{field}} must be a valid number between {{min}} and {{max}}",
       "wechatBackoffOrder": "backoff_max_sec must not be less than backoff_base_sec"
     },
+    "xiaoyiApps": {
+      "defaultAppName": "Default Xiaoyi App",
+      "unnamedAppName": "Unnamed Xiaoyi App",
+      "appNameTemplate": "Xiaoyi App {{index}}"
+    },
     "feishuApps": {
       "defaultAppName": "Default Lark App",
       "legacyDefaultAppName": "Default App",
       "unnamedAppName": "Unnamed Lark App",
       "appNameTemplate": "Lark App {{index}}",
+      "appNameLabel": "App name",
       "appNamePlaceholder": "App name",
       "collapseConfig": "Collapse app configuration",
       "expandConfig": "Expand app configuration",
@@ -953,8 +1272,8 @@
     "keyHelp": {
       "apiBase": "Base URL of the model API. Must start with http:// or https://, e.g. https://api.openai.com/v1 (usually without a chat-specific path).",
       "apiKey": "Auth key for this model service. For local unauthenticated servers, any placeholder (e.g. sk-1234) is fine. Not needed after OpenAI account OAuth.",
-      "model": "Provider model ID/name, e.g. gpt-4o or qwen-plus. Must be compatible with the selected provider.",
-      "modelName": "Provider model ID/name, e.g. gpt-4o or qwen-plus. The same name can have multiple entries with different providers/endpoints.",
+      "model": "Provider model ID/name, e.g. glm-4.7. Must be compatible with the selected provider.",
+      "modelName": "Provider model ID/name, e.g. glm-4.7. The same name can have multiple entries with different providers/endpoints.",
       "modelProvider": "Provider/protocol type that determines request format and auth (e.g. OpenAI-compatible, DashScope).",
       "alias": "Optional display alias to distinguish multiple entries with the same model name. Leave empty to show the model name only.",
       "reasoningLevel": "Reasoning intensity. Leave empty for the provider default. Only applies to models that support reasoning/thinking.",
@@ -1062,14 +1381,15 @@
       "isDefault": "Group Default",
       "onlyOneInGroup": "Only one in group, auto-default",
       "apiKeyRequired": "API Key is required, please fill it in before saving",
-      "apiKeyPlaceholder": "Local models don't need an API Key — enter any value, e.g. sk-1234",
+      "apiKeyPlaceholder": "Local models do not need an API key. Enter any value, for example sk-1234",
       "apiBaseRequired": "API Base URL is required, please fill it in before saving",
       "apiBaseUrlInvalid": "API Base URL must start with http:// or https://",
       "modelNameRequired": "Model name is required. Select a model before saving",
-      "modelNameTooLong": "Model name is too long, please keep it under 100 characters",
-      "aliasTooLong": "Alias is too long, please keep it under 100 characters",
-      "apiBaseTooLong": "API Base URL is too long, please keep it under 512 characters",
-      "apiKeyTooLong": "API Key is too long, please keep it under 2048 characters",
+      "modelNamePlaceholder": "e.g. glm-4.7",
+      "modelNameTooLong": "Model name is too long. Use 100 characters or fewer",
+      "aliasTooLong": "Alias is too long. Use 100 characters or fewer",
+      "apiBaseTooLong": "API Base URL is too long. Use 512 characters or fewer",
+      "apiKeyTooLong": "API key is too long. Use 500 characters or fewer",
       "reasoningDefault": "Use default",
       "alias": "Alias",
       "aliasPlaceholder": "Optional, defaults to empty"
@@ -1130,11 +1450,20 @@
       "kvCacheAffinity": { "label": "Compute Affinity", "hint": "Control Ascend KV Cache affinity" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
       "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
-      "swarmflow": { "label": "SwarmFlow", "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode." },
-      "externalCliAgents": { "label": "Third-Party Agents", "hint": "Configure third-party agents available in Team mode." },
+      "swarmflow": {
+        "label": "SwarmFlow",
+        "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode."
+      },
+      "externalCliAgents": {
+        "label": "Third-Party Agents",
+        "hint": "Configure third-party agents available in Team mode."
+      },
       "symphony": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
       "skillRetrieval": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
-      "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
+      "memory": {
+        "label": "Memory Sensitive Info Filter",
+        "hint": "Configure sensitive content types forbidden from memory"
+      },
       "email": { "label": "Email Settings", "hint": "Email account and token settings" },
       "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" },
       "proactive": {
@@ -2642,9 +2971,16 @@
       "confirm": "Confirm"
     },
     "runtime": { "processing": "Processing" },
-    "deleteDialog": { "title": "Delete", "description": "Delete “<name>{{title}}</name>”? This action cannot be undone." },
+    "deleteDialog": {
+      "title": "Delete",
+      "description": "Delete “<name>{{title}}</name>”? This action cannot be undone."
+    },
     "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
-    "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
+    "errors": {
+      "delete": "Failed to delete conversation",
+      "create": "Failed to create conversation",
+      "send": "Failed to send message"
+    }
   },
   "subagent": {
     "title": "Subagents",

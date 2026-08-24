@@ -15,9 +15,12 @@ import CronPanel from './components/CronPanel';
 import HeartbeatPanel from './components/HeartbeatPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
-import { ChannelsPanel } from './components/ChannelsPanel';
 import { BrowserPanel } from './components/BrowserPanel';
+import { ChannelsPanel } from './components/ChannelsPanel';
 import { UpdatePanel } from './components/UpdatePanel';
+import { SettingsPage } from './features/settings/SettingsPage';
+import type { SettingsPageDefinition } from './features/settings/registry/types';
+import type { SettingsRequest } from './features/settings/services/settingsContract';
 import { ExtensionsHubPanel } from './components/ExtensionsHubPanel';
 import { ConnectorMarketPanel } from './components/ConnectorMarket';
 import {
@@ -336,7 +339,13 @@ async function saveShareImage(blob: Blob, filename: string): Promise<boolean> {
   return outcome === 'saved';
 }
 
-function AppContent() {
+function AppContent({
+  settingsPageDefinition,
+  resolveSettingsRequest,
+}: {
+  settingsPageDefinition: SettingsPageDefinition;
+  resolveSettingsRequest: (openSourceRequest: SettingsRequest) => SettingsRequest;
+}) {
   const { t, i18n } = useTranslation();
   const { route, navigate } = useChatRoute();
   const tRef = useRef(t);
@@ -446,6 +455,8 @@ function AppContent() {
   const saveToastTimerRef = useRef<number | null>(null);
   const proactiveToastTimerRef = useRef<number | null>(null);
   const hasChangesRef = useRef(false);
+  const settingsHasChangesRef = useRef(false);
+  const channelsHasChangesRef = useRef(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyPrepending, setHistoryPrepending] = useState(false);
   const [historyRetrySessions, setHistoryRetrySessions] = useState<ReadonlySet<string>>(
@@ -868,6 +879,7 @@ function AppContent() {
   // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递
   const {
     isConnected,
+    connectionState,
     request,
     persistMedia,
     persistDocuments,
@@ -913,6 +925,7 @@ function AppContent() {
       }
     },
   });
+  const settingsRequest = useMemo(() => resolveSettingsRequest(request), [request, resolveSettingsRequest]);
 
   const applySubagentHistoryReplay = useCallback((sid: string, items: HistorySubagentReplayItem[]) => {
     const subagentStore = useSubagentStore.getState();
@@ -1561,6 +1574,14 @@ function AppContent() {
     hasChangesRef.current = hasChanges;
   }, []);
 
+  const handleSettingsHasChangesChange = useCallback((hasChanges: boolean) => {
+    settingsHasChangesRef.current = hasChanges;
+  }, []);
+
+  const handleChannelsHasChangesChange = useCallback((hasChanges: boolean) => {
+    channelsHasChangesRef.current = hasChanges;
+  }, []);
+
   const handleModelsRefresh = useCallback(async () => {
     try {
       const resp = await request<{ models: ModelEntry[]; active_model: string }>('models.list');
@@ -1617,6 +1638,11 @@ function AppContent() {
       );
     },
     [request],
+  );
+
+  const getCodexDependencyInstallStatus = useCallback(
+    () => getExternalCliDependencyInstallStatus('codex'),
+    [getExternalCliDependencyInstallStatus],
   );
 
   const saveConfigAndRestart = useCallback(async (updates: Record<string, string>): Promise<ConfigSaveResult> => {
@@ -2863,21 +2889,40 @@ function AppContent() {
     finally { setDialogBusy(false); }
   }, [deleteTarget, enterNewConversation, mode, request, t]);
 
-  const handleNavigate = useCallback((nav: MainNavKey) => {
-    setActiveNav(nav);
-    if (nav === 'chat') {
-      setConversationSidebarCollapsed(false);
-      if (isMobile) {
-        setTeamAreaExpanded(false);
-        setToolPanelHidden(true);
+  const handleNavigate = useCallback(
+    (nav: MainNavKey) => {
+      if (
+        activeNav === 'settings' &&
+        nav !== 'settings' &&
+        settingsHasChangesRef.current &&
+        !window.confirm(t('settingsPanel.dialog.discardConfirm'))
+      ) {
+        return;
       }
-    }
-    if (modelSetupGuideStep === 1 && nav === 'configpanel') {
-      setModelSetupGuideStep(2);
-    }
-    if (nav === 'skills') setHasVisitedSkills(true);
-    if (nav === 'channels') setHasVisitedChannels(true);
-  }, [isMobile, modelSetupGuideStep, setTeamAreaExpanded, setToolPanelHidden]);
+      if (
+        activeNav === 'channels' &&
+        nav !== 'channels' &&
+        channelsHasChangesRef.current &&
+        !window.confirm(t('settingsPanel.dialog.discardConfirm'))
+      ) {
+        return;
+      }
+      setActiveNav(nav);
+      if (nav === 'chat') {
+        setConversationSidebarCollapsed(false);
+        if (isMobile) {
+          setTeamAreaExpanded(false);
+          setToolPanelHidden(true);
+        }
+      }
+      if (modelSetupGuideStep === 1 && nav === 'configpanel') {
+        setModelSetupGuideStep(2);
+      }
+      if (nav === 'skills') setHasVisitedSkills(true);
+      if (nav === 'channels') setHasVisitedChannels(true);
+    },
+    [activeNav, isMobile, modelSetupGuideStep, setTeamAreaExpanded, setToolPanelHidden, t],
+  );
 
   const skipModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
@@ -3028,8 +3073,6 @@ function AppContent() {
       <SessionSidebar
         activeNav={activeNav}
         onNavigate={handleNavigate}
-        appVersion={typeof serverConfig?.app_version === 'string' ? serverConfig.app_version : ''}
-        isConnected={isConnected}
         onNewSession={handleNewSession}
         showNewSession={false}
         hiddenNavItems={hiddenNavItems}
@@ -3274,6 +3317,20 @@ function AppContent() {
             <BrowserPanel isConnected={isConnected} request={request} />
           </div>
         )}
+        {activeNav === 'settings' && (
+          <div className="app-section">
+            <SettingsPage
+              definition={settingsPageDefinition}
+              isConnected={isConnected}
+              connectionState={connectionState}
+              request={settingsRequest}
+              onHasChangesChange={handleSettingsHasChangesChange}
+              onDetectExternalCli={detectExternalCli}
+              onSelectExternalCliPath={selectExternalCliPath}
+              onGetCodexDependencyInstallStatus={getCodexDependencyInstallStatus}
+            />
+          </div>
+        )}
         {FEATURE_APP_UPDATER_UI && activeNav === 'updatepanel' && (
           <div className="app-section">
             <UpdatePanel isConnected={isConnected} request={request} />
@@ -3297,7 +3354,11 @@ function AppContent() {
         )}
         {hasVisitedChannels && (
           <div className={`app-section ${activeNav === 'channels' ? '' : 'is-hidden'}`}>
-            <ChannelsPanel isConnected={isConnected} />
+            <ChannelsPanel
+              isConnected={isConnected}
+              discardConfirmMessage={t('settingsPanel.dialog.discardConfirm')}
+              onHasChangesChange={handleChannelsHasChangesChange}
+            />
           </div>
         )}
         {activeNav === 'extensions' && (
@@ -3486,10 +3547,19 @@ function AppContent() {
   );
 }
 
-function App() {
+function App({
+  settingsPageDefinition,
+  resolveSettingsRequest,
+}: {
+  settingsPageDefinition: SettingsPageDefinition;
+  resolveSettingsRequest: (openSourceRequest: SettingsRequest) => SettingsRequest;
+}) {
   return (
     <ErrorBoundary>
-      <AppContent />
+      <AppContent
+        settingsPageDefinition={settingsPageDefinition}
+        resolveSettingsRequest={resolveSettingsRequest}
+      />
     </ErrorBoundary>
   );
 }
@@ -3505,7 +3575,13 @@ function App() {
  * control-panel 只认 Authorization: Bearer, app_web.py 的 _proxy_auth_http
  * 会从 jw_token cookie 取 token 注入头, 故前端只需同源请求。
  */
-function AppWithAuth() {
+function AppWithAuth({
+  settingsPageDefinition,
+  resolveSettingsRequest,
+}: {
+  settingsPageDefinition: SettingsPageDefinition;
+  resolveSettingsRequest: (openSourceRequest: SettingsRequest) => SettingsRequest;
+}) {
   const [authStatus, setAuthStatus] = useState<'checking' | 'loggedOut' | 'loggedIn' | 'noIam'>('checking');
   const [remote, setRemote] = useState(false);
 
@@ -3568,7 +3644,7 @@ function AppWithAuth() {
   return (
     <>
       {remote && <LogoutButton />}
-      <App />
+      <App settingsPageDefinition={settingsPageDefinition} resolveSettingsRequest={resolveSettingsRequest} />
     </>
   );
 }

@@ -1,7 +1,18 @@
 export type FrontendPlatform = 'web' | 'harmony';
 
 export type SidebarNavKey =
-  'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
+  | 'chat'
+  | 'skills'
+  | 'agents'
+  | 'teams'
+  | 'sessions'
+  | 'cron'
+  | 'channels'
+  | 'settings'
+  | 'extensions'
+  | 'configpanel'
+  | 'browserpanel'
+  | 'updatepanel';
 
 export const DEFAULT_FRONTEND_PLATFORM: FrontendPlatform = 'web';
 
