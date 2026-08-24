@@ -246,6 +246,36 @@ def test_config_specs_bakes_attribute_params() -> None:
     )
 
 
+def test_chat_team_permissions_mount_user_interrupt_only_on_leader() -> None:
+    """Chat-team leaders ask the user; teammates continue asking the leader."""
+    from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
+
+    config = {
+        "permissions": {"enabled": True},
+        "models": {"default": {"model_client_config": {"model_name": "gpt-4o"}}},
+    }
+    leader_rails, _ = build_member_capability_specs(
+        config, "team", "leader", enable_permissions=True
+    )
+    teammate_rails, _ = build_member_capability_specs(
+        config, "team", "teammate", enable_permissions=True
+    )
+    leader_by_type = {spec.type: spec.params for spec in leader_rails}
+    teammate_by_type = {spec.type: spec.params for spec in teammate_rails}
+
+    assert registry.TEAM_PERMISSION_POLICY in leader_by_type
+    assert registry.PERMISSION_INTERRUPT in leader_by_type
+    assert registry.TEAM_PERMISSION not in leader_by_type
+    assert leader_by_type[registry.PERMISSION_INTERRUPT] == {
+        "permissions_config": {"enabled": True},
+        "model_name": "gpt-4o",
+    }
+
+    assert registry.TEAM_PERMISSION in teammate_by_type
+    assert registry.PERMISSION_INTERRUPT not in teammate_by_type
+    assert registry.TEAM_PERMISSION_POLICY not in teammate_by_type
+
+
 def test_config_specs_maps_review_trigger_for_leader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
