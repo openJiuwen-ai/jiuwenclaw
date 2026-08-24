@@ -16,6 +16,7 @@ render_secret_configmap() {
         "GATEWAY_DB_PASSWORD"
         "MANAGER_DB_PASSWORD"
         "IDENTITY_DB_PASSWORD"
+        "WEB_DB_PASSWORD"
         "REDIS_PASSWORD"
         "OBS_SECRET_KEY"
         "API_KEY"

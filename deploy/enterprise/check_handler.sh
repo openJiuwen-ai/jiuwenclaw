@@ -192,7 +192,7 @@ check_if_db_up() {
     check_if_${db_type}_up
 
     if [[ "${DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]}" == "true" || "${DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]}" == "true" ]]; then
-        for module in MANAGER GATEWAY IDENTITY
+        for module in MANAGER GATEWAY IDENTITY WEB
         do
             if [ -z "${DEPLOY_VARS["${module}_DB_USER"]:-}" ]; then
                 DEPLOY_VARS["${module}_DB_USER"]=${DEPLOY_VARS["DB_USER"]}

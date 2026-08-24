@@ -123,6 +123,7 @@ declare -A DEPLOY_VARS=(
     ["TOOL_RESULT_DISPLAY_MAX_CHARS"]="500"
     ["GATEWAY_CONFIG_MAP_NAME"]="jiuwenclaw-gateway-config"
     ["GATEWAY_DB_NAME"]="gateway"
+    ["WEB_DB_NAME"]="web"
     ["GATEWAY_DB_MAX_OVERFLOW"]="20"
     ["GATEWAY_DB_POOL_SIZE"]="2"
     ["GATEWAY_DB_POOL_TIMEOUT"]="30"

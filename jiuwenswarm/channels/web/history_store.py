@@ -7,12 +7,12 @@
 - Gateway ``WebChannel`` Listen（无 Pod 时的主路径）
 
 存储按库类型分支：
-- ``sqlite``：本地 ``web_history.db``（``WEB_HISTORY_SQLITE_PATH`` 可覆盖）
+- ``sqlite``：本地 ``web_history.db``（``WEB_SQLITE_PATH`` 可覆盖；兼容旧名 ``WEB_HISTORY_SQLITE_PATH``）
 - ``mysql``：独立库 ``web``（``WEB_DB_*``）；缺 ``WEB_DB_HOST`` 则不可用，不回退 SQLite
 - ``postgresql`` 等：暂不支持，明确不可用
 
 选型与 Gateway ``GATEWAY_DB_TYPE`` 对齐：``WEB_DB_TYPE`` → ``DB_TYPE`` →
-已配 ``WEB_DB_HOST`` 则视为 mysql → 默认 sqlite。
+已配 ``WEB_DB_HOST`` 则视为 mysql → 按 ``DEPLOYMENT_MODE``（企业主备/分布式 mysql，standalone sqlite）。
 """
 
 from __future__ import annotations
@@ -138,19 +138,29 @@ def _env(*names: str, default: str = "") -> str:
 def resolve_history_db_type() -> str:
     """解析 Web 会话历史库类型。
 
-    优先级：``WEB_DB_TYPE`` → ``DB_TYPE`` → 已配 ``WEB_DB_HOST`` 则 ``mysql`` → 默认 ``sqlite``。
+    优先级：``WEB_DB_TYPE`` → ``DB_TYPE`` → 已配 ``WEB_DB_HOST`` 则 ``mysql`` →
+    按 ``DEPLOYMENT_MODE``（企业主备/分布式 ``mysql``，standalone ``sqlite``）。
     """
     explicit = _env("WEB_DB_TYPE") or _env("DB_TYPE")
     if explicit:
         return explicit.strip().lower()
     if _env("WEB_DB_HOST"):
         return "mysql"
-    return "sqlite"
+    try:
+        from jiuwenswarm.deployment_mode import (
+            history_storage_backend,
+            normalize_deployment_mode,
+        )
+
+        mode = normalize_deployment_mode(os.getenv("DEPLOYMENT_MODE", "standalone"))
+        return history_storage_backend(mode)
+    except Exception:
+        return "sqlite"
 
 
 def default_history_sqlite_path() -> Path:
-    """SQLite 历史默认路径；``WEB_HISTORY_SQLITE_PATH`` 可覆盖。"""
-    override = _env("WEB_HISTORY_SQLITE_PATH")
+    """SQLite 历史默认路径；``WEB_SQLITE_PATH`` 可覆盖，兼容旧名 ``WEB_HISTORY_SQLITE_PATH``。"""
+    override = _env("WEB_SQLITE_PATH", "WEB_HISTORY_SQLITE_PATH")
     if override:
         return Path(override).expanduser().resolve()
     from jiuwenswarm.common.utils import (
