@@ -7,6 +7,25 @@ import pytest
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.handlers import commands as commands_handlers
+from jiuwenswarm.server.handlers import mcp as mcp_handlers
+from jiuwenswarm.server.handlers import ops as ops_handlers
+from jiuwenswarm.server.handlers import permissions as permissions_handlers
+from tests.unit_tests.conftest import patch_handler_name  # noqa: F401
+
+
+def _ctx_for_test(ws, request, send_lock, server=None):
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    return RequestContext(
+        request=request,
+        sink=WSSink(ws, send_lock),
+        connection_id=str(id(ws)),
+        services=AgentServerServices(server) if server is not None else None,
+    )
+
+
 
 
 class FakeWebSocket:
@@ -19,34 +38,34 @@ class FakeWebSocket:
 
 class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
     async def handle_browser_runtime_restart_for_test(self, ws, request, send_lock):
-        await self._handle_browser_runtime_restart(ws, request, send_lock)
+        await ops_handlers.handle_browser_runtime_restart(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_add_dir_for_test(self, ws, request, send_lock):
-        await self._handle_command_add_dir(ws, request, send_lock)
+        await commands_handlers.handle_command_add_dir(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_compact_for_test(self, ws, request, send_lock):
-        await self._handle_command_compact(ws, request, send_lock)
+        await commands_handlers.handle_command_compact(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_diff_for_test(self, ws, request, send_lock):
-        await self._handle_command_diff(ws, request, send_lock)
+        await commands_handlers.handle_command_diff(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_simplify_for_test(self, ws, request, send_lock):
-        await self._handle_command_simplify(ws, request, send_lock)
+        await commands_handlers.handle_command_simplify(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_model_for_test(self, ws, request, send_lock):
-        await self._handle_command_model(ws, request, send_lock)
+        await commands_handlers.handle_command_model(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_mcp_for_test(self, ws, request, send_lock):
-        await self._handle_command_mcp(ws, request, send_lock)
+        await mcp_handlers.handle_command_mcp(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_resume_for_test(self, ws, request, send_lock):
-        await self._handle_command_resume(ws, request, send_lock)
+        await commands_handlers.handle_command_resume(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_command_session_for_test(self, ws, request, send_lock):
-        await self._handle_command_session(ws, request, send_lock)
+        await commands_handlers.handle_command_session(_ctx_for_test(ws, request, send_lock, self))
 
     async def handle_permissions_config_for_test(self, ws, request, send_lock):
-        await self._handle_permissions_config(ws, request, send_lock)
+        await permissions_handlers.handle_permissions_config(_ctx_for_test(ws, request, send_lock, self))
 
     def get_agent_manager_for_test(self):
         return self._agent_manager
@@ -72,11 +91,7 @@ def fake_ws():
 
 @pytest.fixture(autouse=True)
 def patch_wire_encoder(monkeypatch):
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        fake_encode_agent_response_for_wire,
-    )
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", fake_encode_agent_response_for_wire)
 
 
 @pytest.mark.asyncio
@@ -147,11 +162,7 @@ async def test_handle_command_add_dir_returns_path_and_remember(
         "shell_pattern": "re:.*/tmp/demo.*",
         "tiered_overrides": True,
     }
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "persist_cli_trusted_directory",
-        lambda _raw: persist_stub,
-    )
+    patch_handler_name(monkeypatch, "persist_cli_trusted_directory", lambda _raw: persist_stub)
     request = AgentRequest(
         request_id="req-add-dir",
         channel_id="tui",
@@ -182,12 +193,8 @@ async def test_handle_command_add_dir_does_not_wait_for_agent_reload(
         "ok": True,
         "normalized": "/tmp/demo",
     }
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "persist_cli_trusted_directory",
-        lambda _raw: persist_stub,
-    )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {})
+    patch_handler_name(monkeypatch, "persist_cli_trusted_directory", lambda _raw: persist_stub)
+    patch_handler_name(monkeypatch, "get_config", lambda: {})
     reload_started = asyncio.Event()
 
     async def _blocking_reload(_config, _env):
@@ -388,17 +395,20 @@ async def test_handle_command_diff_includes_session_extra_history_roots(
             [f"/history/{session_id}/worktrees"],
         )[2],
     )
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "_sessions_dir_for_request",
-        lambda _request: tenant_sessions_root,
-    )
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "_agent_workspace_dir_for_request",
-        lambda _request: tenant_agent_workspace_root,
-        raising=False,
-    )
+    from jiuwenswarm.server.handlers import _shared as _shared_handlers
+    from jiuwenswarm.server.handlers import commands as commands_handlers
+
+    for _mod in (_shared_handlers, commands_handlers):
+        monkeypatch.setattr(
+            _mod, "_sessions_dir_for_request", lambda _request: tenant_sessions_root,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            _mod,
+            "_agent_workspace_dir_for_request",
+            lambda _request: tenant_agent_workspace_root,
+            raising=False,
+        )
     request = AgentRequest(
         request_id="req-diff-extra-roots",
         channel_id="tui",
@@ -535,11 +545,7 @@ async def test_handle_command_model_add_model(server, fake_ws):
 
 @pytest.mark.asyncio
 async def test_handle_command_mcp_list(server, fake_ws, monkeypatch):
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_mcp_servers",
-        lambda: [{"name": "demo", "transport": "stdio", "enabled": True, "env": {"TOKEN": "abc"}}],
-    )
+    patch_handler_name(monkeypatch, "get_mcp_servers", lambda: [{"name": "demo", "transport": "stdio", "enabled": True, "env": {"TOKEN": "abc"}}])
     request = AgentRequest(
         request_id="req-mcp-list",
         channel_id="tui",
@@ -563,22 +569,15 @@ async def test_handle_command_mcp_list(server, fake_ws, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_command_mcp_add_triggers_reload(server, fake_ws, monkeypatch):
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "upsert_mcp_server_in_config",
-        lambda payload: (payload, True),
+    patch_handler_name(monkeypatch, "upsert_mcp_server_in_config", lambda payload: (payload, True),
     )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
+    patch_handler_name(monkeypatch, "get_config", lambda: {"mcp": {"servers": []}})
 
     # Mock pre-check so it does not attempt a real MCP connection.
     async def _pre_check_ok(_payload):
         return True, "pre-check ok"
 
-    monkeypatch.setattr(
-        agent_ws_server_module.AgentWebSocketServer,
-        "_pre_check_mcp_server",
-        staticmethod(_pre_check_ok),
-    )
+    patch_handler_name(monkeypatch, "_pre_check_mcp_server", _pre_check_ok)
 
     called = {"reload": 0}
 
@@ -615,7 +614,7 @@ async def test_handle_command_mcp_enable_not_found(server, fake_ws, monkeypatch)
     def _raise_not_found(_name, _enabled):
         raise KeyError("MCP server 'demo' not found")
 
-    monkeypatch.setattr(agent_ws_server_module, "set_mcp_server_enabled_in_config", _raise_not_found)
+    patch_handler_name(monkeypatch, "set_mcp_server_enabled_in_config", _raise_not_found)
     request = AgentRequest(
         request_id="req-mcp-enable",
         channel_id="tui",
@@ -635,12 +634,8 @@ async def test_handle_command_mcp_enable_not_found(server, fake_ws, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_handle_command_mcp_remove(server, fake_ws, monkeypatch):
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "remove_mcp_server_in_config",
-        lambda name: {"name": name, "enabled": True, "transport": "sse", "url": "http://127.0.0.1:9000/sse"},
-    )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
+    patch_handler_name(monkeypatch, "remove_mcp_server_in_config", lambda name: {"name": name, "enabled": True, "transport": "sse", "url": "http://127.0.0.1:9000/sse"})
+    patch_handler_name(monkeypatch, "get_config", lambda: {"mcp": {"servers": []}})
 
     async def _reload(_config, _env):
         return None
@@ -670,17 +665,10 @@ async def test_handle_command_mcp_remove(server, fake_ws, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_command_mcp_update(server, fake_ws, monkeypatch):
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "get_mcp_server_config",
-        lambda name: {"name": name, "enabled": True, "transport": "sse", "url": "http://127.0.0.1:9000/sse"},
+    patch_handler_name(monkeypatch, "get_mcp_server_config", lambda name: {"name": name, "enabled": True, "transport": "sse", "url": "http://127.0.0.1:9000/sse"})
+    patch_handler_name(monkeypatch, "upsert_mcp_server_in_config", lambda payload: (payload, False),
     )
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "upsert_mcp_server_in_config",
-        lambda payload: (payload, False),
-    )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
+    patch_handler_name(monkeypatch, "get_config", lambda: {"mcp": {"servers": []}})
 
     async def _reload(_config, _env):
         return None
@@ -732,10 +720,10 @@ async def test_handle_command_mcp_minimal_flow_add_list_disable(server, fake_ws,
                 return dict(item)
         raise KeyError(f"MCP server '{name}' not found")
 
-    monkeypatch.setattr(agent_ws_server_module, "upsert_mcp_server_in_config", _upsert)
-    monkeypatch.setattr(agent_ws_server_module, "get_mcp_servers", _get_servers)
-    monkeypatch.setattr(agent_ws_server_module, "set_mcp_server_enabled_in_config", _set_enabled)
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": _get_servers()}})
+    patch_handler_name(monkeypatch, "upsert_mcp_server_in_config", _upsert)
+    patch_handler_name(monkeypatch, "get_mcp_servers", _get_servers)
+    patch_handler_name(monkeypatch, "set_mcp_server_enabled_in_config", _set_enabled)
+    patch_handler_name(monkeypatch, "get_config", lambda: {"mcp": {"servers": _get_servers()}})
 
     async def _reload(_config, _env):
         return None
@@ -847,7 +835,7 @@ async def test_handle_permissions_config_does_not_block_on_slow_reload(server, f
         lambda _req, **_kw: _Resp(),
         raising=True,
     )
-    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {})
+    patch_handler_name(monkeypatch, "get_config", lambda: {})
 
     reload_calls = {"n": 0}
 

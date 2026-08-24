@@ -58,6 +58,7 @@ def create_bootstrap_env(config: InstanceConfig) -> Path:
         "web": "WEB_PORT",
         "gateway": "GATEWAY_PORT",
         "frontend": "FRONTEND_PORT",
+        "http_api": "AGENT_HTTP_PORT",
     }
 
     for port_type, env_name in port_env_mapping.items():

@@ -327,6 +327,11 @@ def _build_child_env(name: str, ports: dict[str, int]) -> dict[str, str]:
     env["AGENT_SERVER_PORT"] = str(ports["agent_server"])
     env["AGENT_PORT"] = str(ports["agent_server"])
     env["FRONTEND_PORT"] = str(ports["frontend"])
+    # AgentServer 的 HTTP/SSE 入口端口。是否真正监听由 config.yaml 的
+    # http_server.enabled 决定；端口无条件下发，这样开启时不会撞上别的实例。
+    # get 兜底：兼容不含 http_api 的历史端口组。
+    if ports.get("http_api"):
+        env["AGENT_HTTP_PORT"] = str(ports["http_api"])
     # Gateway prefers AGENT_SERVER_URL over AGENT_SERVER_PORT; drop any stale
     # URL from the parent shell so the remapped port is used.
     env.pop("AGENT_SERVER_URL", None)

@@ -32,6 +32,17 @@ def _make_request(params: dict, *, request_id: str = "req-1") -> SimpleNamespace
     )
 
 
+def _ctx_for_reset(mod, request):
+    ctx = MagicMock()
+    ctx.request = request
+
+    async def _send_wire(wire):
+        return await mod.send_wire_payload(None, wire)
+
+    ctx.sink.send_wire = _send_wire
+    return ctx
+
+
 def _capture_response():
     """Return (capture_dict, fake_encode) wiring encode -> capture resp."""
     captured: dict = {}
@@ -49,6 +60,7 @@ async def _call_handler(request) -> dict:
     only, NO `team`/`mode` marker — the reset RPC is team-scoped by relay
     gate, not by is_team_params)."""
     from jiuwenswarm.server import agent_ws_server as mod
+    from jiuwenswarm.server.handlers import team as team_handlers
 
     captured, fake_encode = _capture_response()
     fake_tm = MagicMock()
@@ -69,15 +81,13 @@ async def _call_handler(request) -> dict:
         "openjiuwen.core.runner.Runner.reset_agent_team_session",
         new=AsyncMock(return_value=True),
     ) as runner_reset, patch.object(
-        mod, "_sessions_dir_for_request", return_value="/tmp/sessions",
+        team_handlers, "_sessions_dir_for_request", return_value="/tmp/sessions",
     ), patch.object(
-        mod, "encode_agent_response_for_wire", side_effect=fake_encode,
+        team_handlers, "encode_agent_response_for_wire", side_effect=fake_encode,
     ), patch.object(
         mod, "send_wire_payload", new=AsyncMock(),
     ) as send_wire:
-        await mod.AgentWebSocketServer._handle_team_session_reset(
-            MagicMock(), MagicMock(), request, asyncio.Lock()
-        )
+        await team_handlers.handle_team_session_reset(_ctx_for_reset(mod, request))
         captured["fake_tm"] = fake_tm
         captured["get_tm"] = get_tm
         captured["runner_reset"] = runner_reset
@@ -122,17 +132,16 @@ async def test_handler_resolves_runtime_team_name_and_calls_runner_reset():
 @pytest.mark.asyncio
 async def test_handler_bad_request_when_missing_session_id():
     from jiuwenswarm.server import agent_ws_server as mod
+    from jiuwenswarm.server.handlers import team as team_handlers
 
     # Realistic params without `team` marker; session_id absent -> BAD_REQUEST.
     params = {"team_name": "oc_team_x"}  # no session_id
     request = _make_request(params)
     captured, fake_encode = _capture_response()
 
-    with patch.object(mod, "encode_agent_response_for_wire", side_effect=fake_encode), \
+    with patch.object(team_handlers, "encode_agent_response_for_wire", side_effect=fake_encode), \
             patch.object(mod, "send_wire_payload", new=AsyncMock()):
-        await mod.AgentWebSocketServer._handle_team_session_reset(
-            MagicMock(), MagicMock(), request, asyncio.Lock()
-        )
+        await team_handlers.handle_team_session_reset(_ctx_for_reset(mod, request))
 
     resp = captured["resp"]
     assert resp.ok is False
@@ -160,6 +169,7 @@ async def test_handler_runner_failure_returns_ok_false_not_raises():
     """A Runner.reset_agent_team_session failure must degrade to ok=False
     without raising (so the chat.send path stays usable)."""
     from jiuwenswarm.server import agent_ws_server as mod
+    from jiuwenswarm.server.handlers import team as team_handlers
 
     params = {"team": "oc_team_x", "team_name": "oc_team_x", "session_id": "sess_1"}
     request = _make_request(params)
@@ -182,16 +192,14 @@ async def test_handler_runner_failure_returns_ok_false_not_raises():
         "openjiuwen.core.runner.Runner.reset_agent_team_session",
         new=AsyncMock(side_effect=RuntimeError("boom")),
     ), patch.object(
-        mod, "_sessions_dir_for_request", return_value="/tmp/sessions",
+        team_handlers, "_sessions_dir_for_request", return_value="/tmp/sessions",
     ), patch.object(
-        mod, "encode_agent_response_for_wire", side_effect=fake_encode,
+        team_handlers, "encode_agent_response_for_wire", side_effect=fake_encode,
     ), patch.object(
         mod, "send_wire_payload", new=AsyncMock(),
     ):
         # Must not raise.
-        await mod.AgentWebSocketServer._handle_team_session_reset(
-            MagicMock(), MagicMock(), request, asyncio.Lock()
-        )
+        await team_handlers.handle_team_session_reset(_ctx_for_reset(mod, request))
 
     resp = captured["resp"]
     assert resp.ok is False

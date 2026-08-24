@@ -76,6 +76,7 @@ DESKTOP_PRESERVED_ENV_KEYS = (
     "AGENT_SERVER_PORT",
     "AGENT_PORT",
     "FRONTEND_PORT",
+    "AGENT_HTTP_PORT",
 )
 
 # Flag set by jiuwenswarm-start when it injects the resolved port group into

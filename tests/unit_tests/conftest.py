@@ -78,3 +78,22 @@ def _reset_local_env_config_state() -> None:
     reset_local_env_state_for_tests()
     yield
     reset_local_env_state_for_tests()
+
+
+def patch_handler_name(monkeypatch, name, value):
+    import importlib
+    import pkgutil
+
+    from jiuwenswarm.server import agent_ws_server as _ws_mod
+    from jiuwenswarm.server import handlers as _handlers_pkg
+
+    mods = [_ws_mod]
+    for info in pkgutil.iter_modules(_handlers_pkg.__path__):
+        mods.append(importlib.import_module(f"{_handlers_pkg.__name__}.{info.name}"))
+
+    hit = False
+    for mod in mods:
+        if hasattr(mod, name):
+            monkeypatch.setattr(mod, name, value)
+            hit = True
+    assert hit, f"没有任何目标模块定义 {name!r}，patch 会静默失效"
