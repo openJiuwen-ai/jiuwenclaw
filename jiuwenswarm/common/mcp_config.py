@@ -771,11 +771,47 @@ def _stdio_server_parameters(params: Mapping[str, Any]):
     )
 
 
+_OFFICE_CLAW_MCP_TOOLS_CACHE: dict[tuple, list[dict[str, Any]]] = {}
+_OFFICE_CLAW_MCP_TOOLS_LOCK = asyncio.Lock()
+
+
+def _office_claw_mcp_cache_key(params: Mapping[str, Any]) -> tuple:
+    """Cache key = server identity (command/args/cwd).
+
+    Tool schemas are determined by the server binary and do not vary with the
+    per-request callback env, so the same binary lists the same tools.
+    """
+    return (
+        str(params.get("command", "") or ""),
+        tuple(str(a) for a in (params.get("args") or [])),
+        str(params.get("cwd", "") or ""),
+    )
+
+
 async def list_office_claw_mcp_tools(
     params: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    """Start OfficeClaw MCP once, collect its tool schemas, then stop it."""
+    """Start OfficeClaw MCP once, collect its tool schemas, then stop it.
 
+    Tool schemas are determined by the server binary (command/args/cwd) and do
+    not vary per request, so the result is cached per process to avoid
+    re-spawning the stdio subprocess on every request (the first spawn is the
+    expensive cold start; subsequent requests hit the cache).
+    """
+    cache_key = _office_claw_mcp_cache_key(params)
+    async with _OFFICE_CLAW_MCP_TOOLS_LOCK:
+        cached = _OFFICE_CLAW_MCP_TOOLS_CACHE.get(cache_key)
+        if cached is not None:
+            logger.debug("[office-claw-mcp] list_tools cache hit key=%s", cache_key[:1])
+            return cached
+        tools = await _list_office_claw_mcp_tools_uncached(params)
+        _OFFICE_CLAW_MCP_TOOLS_CACHE[cache_key] = tools
+        return tools
+
+
+async def _list_office_claw_mcp_tools_uncached(
+    params: Mapping[str, Any],
+) -> list[dict[str, Any]]:
     from mcp import ClientSession
     from mcp.client.stdio import stdio_client
 

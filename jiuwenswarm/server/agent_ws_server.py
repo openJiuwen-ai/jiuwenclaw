@@ -157,6 +157,7 @@ logger = logging.getLogger(__name__)
 
 _INTERFACE_DEEP_MODULE = "jiuwenswarm.server.runtime.agent_adapter.interface_deep"
 _interface_deep_warmup_task: asyncio.Task[None] | None = None
+_office_claw_mcp_warmup_task: asyncio.Task[None] | None = None
 
 
 def _import_interface_deep_blocking() -> None:
@@ -190,6 +191,67 @@ def _start_interface_deep_warmup() -> None:
     if _interface_deep_warmup_task is not None and not _interface_deep_warmup_task.done():
         return
     _interface_deep_warmup_task = asyncio.get_running_loop().create_task(_warm_interface_deep_import())
+
+
+async def _warm_office_claw_mcp() -> None:
+    """Pre-spawn the OfficeClaw MCP stdio server once at boot to populate the
+    list_tools cache, so the first user request doesn't pay the ~15s cold
+    start. Tool schemas are independent of the per-request callback env, so a
+    boot-time spawn with the startup identity is sufficient. Never fatal: on
+    any failure the first request will (re)spawn on demand.
+    """
+    command = os.environ.get("OFFICE_CLAW_MCP_COMMAND", "").strip()
+    args_json = os.environ.get("OFFICE_CLAW_MCP_ARGS_JSON", "").strip()
+    cwd = os.environ.get("OFFICE_CLAW_MCP_CWD", "").strip()
+    if not command or not args_json or not cwd:
+        logger.info(
+            "[AgentWebSocketServer] office_claw_mcp_warmup skipped: startup identity env not set"
+        )
+        return
+    try:
+        args = json.loads(args_json)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning(
+            "[AgentWebSocketServer] office_claw_mcp_warmup skipped: OFFICE_CLAW_MCP_ARGS_JSON invalid"
+        )
+        return
+    if not isinstance(args, list):
+        logger.warning(
+            "[AgentWebSocketServer] office_claw_mcp_warmup skipped: OFFICE_CLAW_MCP_ARGS_JSON not a list"
+        )
+        return
+    params = {
+        "command": command,
+        "args": [str(a) for a in args],
+        "cwd": cwd,
+        "env": dict(os.environ),
+    }
+    t0 = time.perf_counter()
+    logger.info("[AgentWebSocketServer] office_claw_mcp_warmup starting background spawn")
+    try:
+        from jiuwenswarm.common.mcp_config import list_office_claw_mcp_tools
+
+        await list_office_claw_mcp_tools(params)
+    except Exception:
+        logger.warning(
+            "[AgentWebSocketServer] office_claw_mcp_warmup failed elapsed_ms=%.1f",
+            (time.perf_counter() - t0) * 1000,
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "[AgentWebSocketServer] office_claw_mcp_warmup ok elapsed_ms=%.1f",
+        (time.perf_counter() - t0) * 1000,
+    )
+
+
+def _start_office_claw_mcp_warmup() -> None:
+    global _office_claw_mcp_warmup_task
+    if _office_claw_mcp_warmup_task is not None and not _office_claw_mcp_warmup_task.done():
+        return
+    _office_claw_mcp_warmup_task = asyncio.get_running_loop().create_task(
+        _warm_office_claw_mcp(), name="office-claw-mcp-warmup"
+    )
 
 
 from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported for tests / handlers
@@ -450,6 +512,9 @@ class AgentWebSocketServer:
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
         _start_interface_deep_warmup()
+        # 后台预热 office-claw MCP 子进程(list_tools 缓存), 避免首条用户消息付 ~15s 冷启动.
+        # 预热失败不影响启动, 首请求会按需重新 spawn.
+        _start_office_claw_mcp_warmup()
 
         # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
@@ -691,6 +756,18 @@ class AgentWebSocketServer:
                 pass
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[AgentWebSocketServer] checkpointer warmup cancel failed: %s", exc)
+        # 取消 office-claw MCP 预热(可能正持有 stdio 子进程), 让其 finally 关闭子进程.
+        global _office_claw_mcp_warmup_task
+        ocm_warmup = _office_claw_mcp_warmup_task
+        _office_claw_mcp_warmup_task = None
+        if ocm_warmup is not None and not ocm_warmup.done():
+            ocm_warmup.cancel()
+            try:
+                await ocm_warmup
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[AgentWebSocketServer] office-claw mcp warmup cancel failed: %s", exc)
         had_server = self._server is not None
         if had_server:
             self._server.close()
