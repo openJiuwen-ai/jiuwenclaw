@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from jiuwenswarm.common.e2a.models import E2AEnvelope
+from jiuwenswarm.common.local_env_config import read_env
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
 from jiuwenswarm.gateway.routing.http_agent_client import HttpSseAgentServerClient
@@ -29,6 +30,15 @@ logger = logging.getLogger(__name__)
 
 _ROUTE_ATTEMPTS = 3
 _TOUCH_INTERVAL_SECONDS = 20.0
+_ROUTELESS_METHODS = frozenset(
+    {
+        "agent.reload_config",
+        "agent.prewarm.sync",
+        "agent.prewarm_sync",
+        "browser.runtime_restart",
+        "initialize",
+    }
+)
 
 
 def http_base_from_pod_sse_url(pod_sse_url: str) -> str:
@@ -84,6 +94,21 @@ def _is_heartbeat_envelope(envelope: E2AEnvelope) -> bool:
     if isinstance(run, dict) and str(run.get("kind") or "").strip().lower() == "heartbeat":
         return True
     return False
+
+
+def _is_routeless_envelope(envelope: E2AEnvelope) -> bool:
+    """无需 session route 的管理类请求（如启动期 reload_config）。"""
+    if _is_heartbeat_envelope(envelope):
+        return True
+    method = str(envelope.method or "").strip().lower()
+    return method in _ROUTELESS_METHODS
+
+
+def _default_http_base() -> str:
+    base = read_env("GATEWAY_RUNTIME_DEFAULT_HTTP_BASE", "http://127.0.0.1:18092").strip()
+    if not base:
+        base = "http://127.0.0.1:18092"
+    return base.rstrip("/")
 
 
 def identity_from_envelope(envelope: E2AEnvelope) -> tuple[str, str, str, str, str | None]:
@@ -185,6 +210,9 @@ class RuntimeRoutedAgentClient(AgentServerClient):
         self._ensure_connected()
         if _is_heartbeat_envelope(envelope):
             return self._heartbeat_response(envelope)
+        if _is_routeless_envelope(envelope):
+            result = await self._http.send_request(envelope, base_url=_default_http_base())
+            return result
         session_id, group_id, bot_id, request_id, user_id = identity_from_envelope(envelope)
         base_url, route_id = await self._route_with_retry(
             session_id=session_id,
@@ -225,6 +253,12 @@ class RuntimeRoutedAgentClient(AgentServerClient):
                 payload={},
                 is_complete=True,
             )
+            return
+        if _is_routeless_envelope(envelope):
+            async for chunk in self._http.send_request_stream(
+                envelope, base_url=_default_http_base()
+            ):
+                yield chunk
             return
         session_id, group_id, bot_id, request_id, user_id = identity_from_envelope(envelope)
         base_url, route_id = await self._route_with_retry(
