@@ -1842,3 +1842,268 @@ class TestGatewayLock:
                 )
         finally:
             lock.release()
+class TestIssue2788SafeStop:
+    """Regression coverage for ownership-validated setsid cleanup."""
+
+    @staticmethod
+    def test_reused_live_pid_is_not_signalled(tmp_path):
+        from jiuwenswarm.instance_manager import status as status_mod
+
+        # A current-format record carries launcher birth identity, so a PID
+        # that is alive but whose creation time no longer matches is treated
+        # as a recycled PID and must not be signalled.
+        config = InstanceConfig("manager", tmp_path, {"gateway": 20001})
+        write_pid_file(
+            config, 4242, started_at=100.0,
+            metadata={
+                "schema_version": 2,
+                "launcher": {"pid": 4242, "create_time": 100.0},
+                "pgid": 4242,
+                "sid": 4242,
+                "dedicated_session": True,
+                "witnesses": [],
+            },
+        )
+        with patch.object(status_mod, "is_process_alive", return_value=True), \
+             patch.object(status_mod, "_pid_matches_record", return_value=False), \
+             patch.object(status_mod.os, "killpg") as killpg, \
+             patch.object(status_mod, "stop_process_by_pid") as kill_pid:
+            assert status_mod.stop_instance_process(config) is False
+
+        killpg.assert_not_called()
+        kill_pid.assert_not_called()
+        assert read_pid_file(config) is not None
+
+    @staticmethod
+    def test_pid_birth_time_matches_current_process():
+        from jiuwenswarm.instance_manager import status as status_mod
+        import psutil
+
+        assert status_mod._pid_matches_record(
+            os.getpid(), psutil.Process(os.getpid()).create_time()
+        ) is True
+
+    @staticmethod
+    def test_legacy_live_record_is_not_rejected_by_birth_time(tmp_path):
+        from jiuwenswarm.instance_manager import status as status_mod
+
+        config = InstanceConfig("manager", tmp_path, {"gateway": 20001})
+        write_pid_file(config, 4242, started_at=100.0)
+        with patch.object(status_mod, "is_process_alive", return_value=True), \
+             patch.object(status_mod, "_pid_matches_record", return_value=False), \
+             patch.object(status_mod, "stop_process_by_pid", return_value=True) as stop_pid, \
+             patch.object(status_mod, "_ports_are_clear", return_value=True):
+            assert status_mod.stop_instance_process(config) is True
+
+        stop_pid.assert_called_once_with(4242, 10.0)
+
+    @staticmethod
+    def test_dead_leader_group_requires_recorded_witness_not_port_scan(tmp_path):
+        from jiuwenswarm.instance_manager import status as status_mod
+
+        config = InstanceConfig("manager", tmp_path, {"gateway": 20001})
+        write_pid_file(
+            config, 4242, started_at=100.0,
+            metadata={
+                "schema_version": 2,
+                "launcher": {"pid": 4242, "create_time": 100.0},
+                "pgid": 4242,
+                "sid": 4242,
+                "dedicated_session": True,
+                "witnesses": [{"pid": 5000, "create_time": 101.0,
+                               "module": "jiuwenswarm.app", "dotenv": "/tmp/manager.env"}],
+            },
+        )
+        with patch.object(status_mod, "is_process_alive", return_value=False), \
+             patch.object(status_mod, "_has_live_group_witness", return_value=True) as witness, \
+             patch.object(status_mod, "_listener_pids", side_effect=AssertionError("no port scan")), \
+             patch.object(status_mod, "_stop_process_group", return_value=True) as stop_group, \
+             patch.object(status_mod, "_ports_are_clear", return_value=True):
+            assert status_mod.stop_instance_process(config) is True
+
+        witness.assert_called_once()
+        stop_group.assert_called_once_with(4242, 10.0)
+        assert read_pid_file(config) is None
+
+    @staticmethod
+    def test_live_dedicated_launcher_stops_its_group(tmp_path):
+        from jiuwenswarm.instance_manager import status as status_mod
+
+        config = InstanceConfig("manager", tmp_path, {"gateway": 20001})
+        write_pid_file(
+            config, 4242, started_at=100.0,
+            metadata={
+                "schema_version": 2,
+                "launcher": {"pid": 4242, "create_time": 100.0},
+                "pgid": 4242,
+                "sid": 4242,
+                "dedicated_session": True,
+            },
+        )
+        with patch.object(status_mod, "is_process_alive", return_value=True), \
+             patch.object(status_mod, "_pid_matches_record", return_value=True), \
+             patch.object(status_mod, "_has_dedicated_session", return_value=True), \
+             patch.object(status_mod.os, "getpgid", return_value=4242), \
+             patch.object(status_mod.os, "getsid", return_value=4242), \
+             patch.object(status_mod, "_stop_process_group", return_value=True) as stop_group, \
+             patch.object(status_mod, "_ports_are_clear", return_value=True):
+            assert status_mod.stop_instance_process(config) is True
+
+        stop_group.assert_called_once_with(4242, 10.0)
+
+    @staticmethod
+    def test_stop_retains_record_when_new_start_holds_final_lock(tmp_path):
+        from jiuwenswarm.instance_manager import status as status_mod
+
+        config = InstanceConfig("manager", tmp_path, {"gateway": 20001})
+        write_pid_file(
+            config, 4242, started_at=100.0,
+            metadata={
+                "schema_version": 2,
+                "launcher": {"pid": 4242, "create_time": 100.0},
+                "pgid": 4242,
+                "sid": 4242,
+                "dedicated_session": True,
+            },
+        )
+        final_lock = MagicMock()
+        final_lock.acquire.return_value = False
+        with patch.object(status_mod, "is_process_alive", return_value=True), \
+             patch.object(status_mod, "_pid_matches_record", return_value=True), \
+             patch.object(status_mod, "_has_dedicated_session", return_value=True), \
+             patch.object(status_mod.os, "getpgid", return_value=4242), \
+             patch.object(status_mod.os, "getsid", return_value=4242), \
+             patch.object(status_mod, "_stop_process_group", return_value=True), \
+             patch.object(status_mod, "_ports_are_clear", return_value=True), \
+             patch.object(status_mod, "InstanceLock", return_value=final_lock):
+            assert status_mod.stop_instance_process(config) is False
+
+        assert read_pid_file(config) is not None
+
+    @staticmethod
+    def test_witness_requires_dedicated_session_and_exact_dotenv(tmp_path):
+        from jiuwenswarm.instance_manager import status as status_mod
+        import sys
+
+        dotenv = str((tmp_path / "manager.env").resolve())
+        data = {
+            "pid": 4242,
+            "started_at": 100.0,
+            "schema_version": 2,
+            "launcher": {"pid": 4242, "create_time": 100.0},
+            "pgid": 4242,
+            "sid": 4242,
+            "dedicated_session": True,
+            "witnesses": [{"pid": 5000, "create_time": 101.0,
+                           "module": "jiuwenswarm.app", "dotenv": dotenv}],
+        }
+        fake_psutil = MagicMock()
+        fake_psutil.Process.return_value.create_time.return_value = 101.0
+        fake_psutil.Process.return_value.cmdline.return_value = [
+            "python", "-m", "jiuwenswarm.app", "--dotenv", dotenv,
+        ]
+        with patch.dict(sys.modules, {"psutil": fake_psutil}), \
+             patch.object(status_mod.os, "getpgid", return_value=4242), \
+             patch.object(status_mod.os, "getsid", return_value=4242):
+            assert status_mod._has_live_group_witness(data, 4242) is True
+
+        data["witnesses"][0]["dotenv"] = str(tmp_path / "other.env")
+        with patch.dict(sys.modules, {"psutil": fake_psutil}), \
+             patch.object(status_mod.os, "getpgid", return_value=4242), \
+             patch.object(status_mod.os, "getsid", return_value=4242):
+            assert status_mod._has_live_group_witness(data, 4242) is False
+
+    @staticmethod
+    def test_dead_leader_without_proof_does_not_kill_group(tmp_path):
+        from jiuwenswarm.instance_manager import status as status_mod
+
+        config = InstanceConfig("manager", tmp_path, {"gateway": 20001})
+        write_pid_file(config, 4242, started_at=100.0)
+        with patch.object(status_mod, "is_process_alive", return_value=False), \
+             patch.object(status_mod, "_find_owned_listener_pids", return_value=[]), \
+             patch.object(status_mod, "_stop_owned_listeners", return_value=True), \
+             patch.object(status_mod, "_ports_are_clear", return_value=False), \
+             patch.object(status_mod, "_stop_process_group") as stop_group:
+            assert status_mod.stop_instance_process(config) is False
+
+        stop_group.assert_not_called()
+        assert read_pid_file(config) is not None
+
+    @staticmethod
+    def test_listener_identity_requires_instance_dotenv_and_group(tmp_path):
+        from jiuwenswarm.instance_manager import status as status_mod
+        import sys
+
+        config = InstanceConfig("manager", tmp_path, {"gateway": 20001})
+        fake_psutil = MagicMock()
+        fake_psutil.Process.return_value.cmdline.return_value = [
+            "python", "-m", "jiuwenswarm.app", "--dotenv", "/other/.env"
+        ]
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            assert status_mod._listener_matches_instance(5000, config, 4242) is False
+
+    @staticmethod
+    def test_stop_and_restart_propagate_cleanup_failure(tmp_path):
+        from jiuwenswarm import start_services
+
+        cmd = MagicMock()
+        cmd.validate_and_load.return_value = None
+        cmd.check_running.return_value = False
+        cmd.config = InstanceConfig("manager", tmp_path, {"gateway": 20001})
+        cmd.name = "manager"
+        cmd.is_default = False
+        with patch.object(start_services, "InstanceCommand", return_value=cmd), \
+             patch.object(start_services, "stop_instance_process", return_value=False), \
+             patch.object(start_services, "_start_named_instance") as start:
+            assert start_services._action_stop("manager") == 1
+            assert start_services._action_restart("manager") == 1
+
+        start.assert_not_called()
+
+    @staticmethod
+    def test_windows_reused_pid_is_not_taskkilled(tmp_path):
+        from jiuwenswarm.instance_manager import status as status_mod
+
+        config = InstanceConfig("manager", tmp_path, {"gateway": 20001})
+        write_pid_file(
+            config, 4242, started_at=100.0,
+            metadata={"schema_version": 2, "launcher": {"pid": 4242, "create_time": 100.0}},
+        )
+        with patch.object(status_mod.platform, "system", return_value="Windows"), \
+             patch.object(status_mod, "is_process_alive", return_value=True), \
+             patch.object(status_mod, "_pid_matches_record", return_value=False), \
+             patch.object(status_mod.subprocess, "run") as taskkill:
+            assert status_mod.stop_instance_process(config) is False
+
+        taskkill.assert_not_called()
+
+    @staticmethod
+    def test_launcher_pid_record_uses_process_birth_time():
+        from jiuwenswarm import start_services
+        import sys
+
+        fake_psutil = MagicMock()
+        fake_psutil.Process.return_value.create_time.return_value = 123.5
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            assert start_services._launcher_create_time() == 123.5
+
+    @staticmethod
+    def test_named_launcher_writes_process_birth_time_to_pid_file(tmp_path):
+        from jiuwenswarm import start_services
+
+        config = InstanceConfig("manager", tmp_path, {"gateway": 20001})
+        process = MagicMock()
+        process.poll.return_value = 0
+        with patch.object(start_services, "_start_process", return_value=process), \
+             patch.object(start_services, "_launcher_create_time", return_value=123.5), \
+             patch.object(start_services, "_instance_process_metadata", return_value={"schema_version": 2}) as metadata, \
+             patch.object(start_services, "write_pid_file") as write_pid, \
+             patch.object(start_services, "_wait_for_services_ready"), \
+             patch.object(start_services, "_terminate_processes"):
+            assert start_services._run_instance_with_pid(
+                [("app", ["stub"], tmp_path)], config
+            ) == 0
+
+        write_pid.assert_called_once()
+        assert write_pid.call_args.args == (config, os.getpid(), 123.5, {"schema_version": 2})
+        metadata.assert_called_once_with({"app": process}, 123.5)
