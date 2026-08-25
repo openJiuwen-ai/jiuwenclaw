@@ -264,6 +264,10 @@ from jiuwenswarm.agents.harness.common.tools.channel_config_tools import (
 )
 from jiuwenswarm.agents.harness.common.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
+from jiuwenswarm.agents.harness.common.tools.invoke_meta.invoke_tool import InvokeTool
+from jiuwenswarm.agents.harness.common.tools.invoke_meta.workspace_context import (
+    set_effective_request_workspace_dir,
+)
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     get_user_location,
     create_note,
@@ -1156,6 +1160,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         self._session_instance_mode: str = "agent"
         self._session_instance_sub_mode: str | None = None
         self._xiaoyi_phone_tools_registered: bool = False
+        self._invoke_tool_registered: bool = False
         self._paid_search_registered: bool = False
         self._paid_search_tool: WebPaidSearchTool | None = None
         self._symphony_tools: list[Any] = []
@@ -5396,7 +5401,39 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] acp_chat registration failed: %s", exc)
 
+        # Unified invoke meta-tool (plugin / agent_as_a_tool). Enabled by default.
+        invoke_cfg = (config_base.get("agents") or {}).get("invoke_tool") or {}
+        if bool(invoke_cfg.get("enabled", True)) and not self._invoke_tool_registered:
+            try:
+                invoke_tool = InvokeTool()
+                owner_id = self._tool_owner_id()
+                self._register_agent_owned_tool(invoke_tool, owner_id)
+                tool_cards.append(invoke_tool.card)
+                self._invoke_tool_registered = True
+                logger.info("[JiuWenSwarmDeepAdapter] invoke meta-tool registered")
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] invoke meta-tool registration failed: %s",
+                    exc,
+                )
+
         return tool_cards
+
+    def _bind_invoke_workspace_context(self) -> None:
+        """Publish request workspace for invoke registry / plugin resolution."""
+        workspace = (
+            getattr(self, "_project_dir", None)
+            or getattr(self, "_workspace_dir", None)
+            or ""
+        )
+        workspace_str = str(workspace).strip() if workspace else ""
+        try:
+            set_effective_request_workspace_dir(workspace_str or None)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] set_effective_request_workspace_dir failed: %s",
+                exc,
+            )
 
     def _build_cron_tools(self) -> list[Any]:
         """Build cron tools from the shared runtime bridge."""
@@ -5588,6 +5625,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
 
         await asyncio.sleep(0)
         await self._instance.ensure_initialized()
+        self._bind_invoke_workspace_context()
         # create_deep_agent 只从 system_prompt 字符串重建 identity + prompt_attachments，
         # conventions 等动态 section 在此补挂（专家替换 identity 时不受影响）
         self._restore_dynamic_prompt_sections()
@@ -8851,6 +8889,8 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
+        self._bind_invoke_workspace_context()
+
         _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
         if not self._has_valid_model_config(_req_model):
             return AgentResponse(
@@ -9182,6 +9222,8 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
 
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
+
+        self._bind_invoke_workspace_context()
 
         _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
         if not self._has_valid_model_config(_req_model):
