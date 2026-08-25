@@ -351,7 +351,6 @@ from jiuwenswarm.common.mcp_config import (
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
     preflight_mcp_server_reachable,
-    probe_mcp_live_connection,
 )
 from jiuwenswarm.server.runtime.mcp.call_timeout_patch import apply_mcp_call_timeout_patch
 from jiuwenswarm.common.task_loop_config import (
@@ -3386,43 +3385,9 @@ class JiuWenSwarmDeepAdapter:
         )
 
     async def _do_mcp_prewarm(self) -> None:
-        """对 state=connected 的 MCP 跑 probe_mcp_live_connection 建进程级缓存。
-
-        预热失败不降级 state（保持 connected，让首轮对话 reconcile 重试）——web
-        用户可能重启后还没发消息，不应自动摘掉连接态，与 TUI 的 one-shot
-        disconnected 降级不同。
-        """
-        try:
-            from jiuwenswarm.server.runtime.mcp.state_store import (
-                list_truly_connected_mcps,
-            )
-            names = [
-                str(r.get("name", "")).strip()
-                for r in list_truly_connected_mcps()
-                if r.get("name")
-            ]
-            if not names:
-                return
-            logger.info(
-                "[mcp-prewarm] prewarming %d connected MCP(s): %s",
-                len(names), names,
-            )
-            for name in names:
-                try:
-                    ok, reason = await probe_mcp_live_connection(name)
-                    if ok:
-                        logger.info("[mcp-prewarm] '%s' prewarmed", name)
-                    else:
-                        logger.warning(
-                            "[mcp-prewarm] '%s' prewarm failed: %s "
-                            "(will lazy-connect on first chat)", name, reason,
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "[mcp-prewarm] '%s' prewarm error: %s", name, exc,
-                    )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[mcp-prewarm] background prewarm failed: %s", exc)
+        """委托 ``prewarm_connected_mcps`` 建进程级缓存（启动预热任务的幂等兜底）。"""
+        from jiuwenswarm.common.mcp_config import prewarm_connected_mcps
+        await prewarm_connected_mcps()
 
     async def _register_mcp_servers_from_config(
         self, config_base: dict[str, Any], *, tag: str = "agent.main"

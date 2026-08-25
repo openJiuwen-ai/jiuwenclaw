@@ -1023,6 +1023,8 @@ class AgentWebSocketServer:
         self._personal_context_start_task: asyncio.Task[None] | None = None
         # checkpointer 后台预热任务 (start() 里 fire-and-forget, stop() 时 cancel)
         self._checkpointer_warmup_task: Optional[asyncio.Task] = None
+        # MCP 连接缓存预热任务 (同上, 建 Runner.resource_mgr 供首轮对话命中)
+        self._mcp_prewarm_task: Optional[asyncio.Task] = None
         # 图像模态探针重探任务 (模型配置变更时拉起, stop() 时 cancel)
         self._image_modality_refresh_task: Optional[asyncio.Task] = None
         # Proactive recommendation engine (set by app_agentserver for debug trigger)
@@ -1157,6 +1159,21 @@ class AgentWebSocketServer:
 
         self._checkpointer_warmup_task = asyncio.create_task(
             _warmup_checkpointer(), name="checkpointer-warmup"
+        )
+
+        async def _warmup_mcp_connections() -> None:
+            try:
+                from jiuwenswarm.common.mcp_config import prewarm_connected_mcps
+                await prewarm_connected_mcps()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] MCP prewarm failed "
+                    "(will lazy-connect on first chat): %s", exc,
+                )
+
+        # 端口已 listen, 后台预热 connected MCP 的进程级连接缓存, 不阻塞启动与握手.
+        self._mcp_prewarm_task = asyncio.create_task(
+            _warmup_mcp_connections(), name="mcp-prewarm"
         )
         self._personal_context_start_task = asyncio.create_task(
             self._start_personal_context_best_effort(),
@@ -1476,6 +1493,17 @@ class AgentWebSocketServer:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[AgentWebSocketServer] checkpointer warmup cancel failed: %s", exc)
         await self._heartbeat_runtime.stop()
+        # 同理取消 MCP 连接缓存预热任务.
+        mcp_prewarm = self._mcp_prewarm_task
+        self._mcp_prewarm_task = None
+        if mcp_prewarm is not None and not mcp_prewarm.done():
+            mcp_prewarm.cancel()
+            try:
+                await mcp_prewarm
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[AgentWebSocketServer] MCP prewarm cancel failed: %s", exc)
         # 同理取消图像模态重探任务.
         image_modality_refresh = self._image_modality_refresh_task
         self._image_modality_refresh_task = None
