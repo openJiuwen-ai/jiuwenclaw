@@ -1,30 +1,22 @@
 import { generateCreateToken } from "../../session-state.js";
-import { addCommandEcho, addError, addInfo, parseArgs } from "../helpers.js";
+import { addCommandEcho, addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
-
-function shouldPersistSessionFromArgs(rawArgs: string): boolean {
-  const parts = parseArgs(rawArgs);
-  return parts.includes("--persist") || parts.includes("--persist-session");
-}
 
 export function createClearCommand(): SlashCommand {
   return {
     name: "clear",
     altNames: ["reset"],
     description: "Clear conversation history and free up context",
-    usage: "/clear [--persist|--persist-session]",
+    usage: "/clear",
     example: "/new",
-    argGuide: "[--persist|--persist-session]",
-    takesArgs: true,
     kind: CommandKind.BUILT_IN,
-    action: async (ctx, args) => {
+    action: async (ctx) => {
       if (ctx.isProcessing) {
         ctx.addItem(
           addError(ctx.sessionId, "session is busy; stop the current run before clearing"),
         );
         return;
       }
-      const persistSession = shouldPersistSessionFromArgs(args);
 
       const created = await ctx.request<{ session_id?: string; sessionId?: string }>(
         "session.create",
@@ -32,7 +24,6 @@ export function createClearCommand(): SlashCommand {
           create_token: generateCreateToken(),
           previous_session_id: ctx.sessionId,
           previous_mode: ctx.mode,
-          ...(persistSession ? { persist_session: true } : {}),
           mode: ctx.mode,
         },
       );

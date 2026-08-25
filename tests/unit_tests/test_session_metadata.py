@@ -1008,46 +1008,6 @@ class TestSyncSessionRequestMetadata:
     """sync_session_request_metadata：校验请求参数 vs 磁盘 metadata，按字段语义写入。"""
 
     @staticmethod
-    def test_persist_session_is_initialized_and_immutable(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            get_session_metadata,
-            init_session_metadata,
-            sync_session_request_metadata,
-        )
-
-        init_session_metadata(session_id="persist_locked", persist_session=True)
-        sync_session_request_metadata(
-            session_id="persist_locked", persist_session=False
-        )
-        _drain_queue()
-
-        assert get_session_metadata("persist_locked")["persist_session"] is True
-
-    @staticmethod
-    def test_legacy_metadata_can_lock_persist_session_once(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            _write_metadata_sync,
-            get_session_metadata,
-            sync_session_request_metadata,
-        )
-
-        _write_metadata_sync(
-            "persist_legacy",
-            {"session_id": "persist_legacy", "project_dir": ""},
-        )
-        sync_session_request_metadata(
-            session_id="persist_legacy", persist_session=True
-        )
-        _drain_queue()
-        assert get_session_metadata("persist_legacy")["persist_session"] is True
-
-        sync_session_request_metadata(
-            session_id="persist_legacy", persist_session=False
-        )
-        _drain_queue()
-        assert get_session_metadata("persist_legacy")["persist_session"] is True
-
-    @staticmethod
     def test_project_dir_first_lock_writes_and_returns(sessions_dir):
         """project_dir 首次锁定：磁盘为空 → 写入请求值并返回"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
