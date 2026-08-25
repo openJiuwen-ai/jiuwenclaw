@@ -2645,6 +2645,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               automation: hbFinalAutomation,
             });
           }
+          // §2.2 兜底：chat.final 是这一轮的收尾标志之一，正常应该由紧随其后的
+          // chat.processing_status(false) 关闭 session 级 isProcessing/isThinking；
+          // 这里是它丢帧时的兜底，避免输入区转圈/停止按钮卡死。只关这个 session 的
+          // 状态，不碰任何消息内容，不会影响另一条普通聊天或另一条 Heartbeat run。
+          useChatStore.getState().setProcessing(sessionId, false);
+          useChatStore.getState().setThinking(sessionId, false);
+          drainTaskQueueIfIdle(sessionId);
           return;
         }
 
@@ -3403,6 +3410,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           // 关掉该 run 的 assistant 消息 streaming（若有），避免光标永久闪烁
           const assistantMsgId = heartbeatAssistantMessageId(hbErrorAutomation.run_id);
           chatStore.updateMessage(sessionId, assistantMsgId, { isStreaming: false });
+          // §2.2/§10 兜底：execution.error 已经确定这一 run 失败，不等可能不会再来的
+          // chat.final/chat.processing_status(false)，立即关闭 session 级 processing 展示。
+          chatStore.setProcessing(sessionId, false);
+          chatStore.setThinking(sessionId, false);
+          drainTaskQueueIfIdle(sessionId);
         }
       }),
       webClient.on('context.usage', ({ payload }) => {
@@ -3713,6 +3725,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             });
           }
           chatStore.updateMessage(sessionId, heartbeatAssistantMessageId(hbChatErrorAutomation.run_id), { isStreaming: false });
+          // §2.2 兜底：setThinking 已经在上面统一关过，这里补 setProcessing + 排空队列。
+          chatStore.setProcessing(sessionId, false);
+          drainTaskQueueIfIdle(sessionId);
           return;
         }
         useChatStore.getState().setExecutionError(sessionId, errorMsg);
