@@ -78,6 +78,16 @@ def resolve_runtime_device_id() -> str:
         return ""
 
 
+def resolve_device_hostname() -> str:
+    """PC hostname from desktop getDeviceInfo (CLAW_DEVICE_HOSTNAME)."""
+    return (os.environ.get("CLAW_DEVICE_HOSTNAME") or "").strip()
+
+
+def resolve_device_sandbox_system() -> str:
+    """OS label from desktop getDeviceInfo (windows/macos/…)."""
+    return (os.environ.get("CLAW_DEVICE_SANDBOX_SYSTEM") or "").strip()
+
+
 def build_local_relay_headers(*, extra: dict[str, str] | None = None) -> dict[str, str]:
     """Headers for AgentServer → CloudWsRelay (localAuth + x-relay-role=plugin)."""
     xiaoyi = _xiaoyi_channel()
@@ -132,9 +142,15 @@ def build_plugin_skill_extra_info(
     session_id: str | None = None,
     interaction_id: int = 0,
 ) -> dict[str, Any]:
-    """Build extraInfo aligned with skills/request.txt."""
+    """Build extraInfo aligned with skills/request.txt.
+
+    deviceInfo 优先用桌面 getDeviceInfo 注入的环境变量（与 CloudWsRelay / model-proxy 同源）：
+    AGENT_RUNTIME_DEVICE_ID / CLAW_DEVICE_HOSTNAME / CLAW_DEVICE_SANDBOX_SYSTEM。
+    """
     uid = resolve_runtime_uid()
     device_id = resolve_runtime_device_id()
+    hostname = resolve_device_hostname()
+    sandbox_system = resolve_device_sandbox_system()
 
     resolved_session = session_id or ""
     try:
@@ -161,15 +177,16 @@ def build_plugin_skill_extra_info(
     except Exception:  # noqa: BLE001
         pass
 
+    # PC 端映射：hostname→deviceName，sandboxSystem→x-device-type/sysVersion（非鸿蒙字段，与样例同结构）
     return {
         "context": {
             "deviceInfo": {
-                "deviceName": "",
+                "deviceName": hostname or "sandbox_pc",
                 "ohosApiVersion": 0,
                 "romVersion": "",
-                "sysVersion": "",
+                "sysVersion": sandbox_system or "",
                 "x-device-id": device_id,
-                "x-device-type": "",
+                "x-device-type": sandbox_system or "pc",
             },
             "userInfo": {
                 "uid": uid,
@@ -240,6 +257,8 @@ __all__ = [
     "missing_agent_baseurl_error",
     "missing_plugin_url_error",
     "resolve_agent_runtime_baseurl",
+    "resolve_device_hostname",
+    "resolve_device_sandbox_system",
     "resolve_plugin_runtime_url",
     "resolve_runtime_device_id",
     "resolve_runtime_uid",

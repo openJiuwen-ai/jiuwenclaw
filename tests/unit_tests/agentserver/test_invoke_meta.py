@@ -277,6 +277,8 @@ async def test_invoke_agent_routes_to_runtime(monkeypatch):
 def test_build_request_body_aligns_skills_request(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_UID", "uid-1")
     monkeypatch.setenv("AGENT_RUNTIME_DEVICE_ID", "dev-1")
+    monkeypatch.setenv("CLAW_DEVICE_HOSTNAME", "DESKTOP-PC")
+    monkeypatch.setenv("CLAW_DEVICE_SANDBOX_SYSTEM", "windows")
     spec = ExternalToolSpec(
         plugin_id="com.atomicservice.5765880207845681341",
         tool_name="seedreamLite4Skill",
@@ -305,6 +307,9 @@ def test_build_request_body_aligns_skills_request(monkeypatch):
     assert body["extraInfo"]["session"]["sessionId"] == "sess-1"
     assert body["extraInfo"]["context"]["userInfo"]["uid"] == "uid-1"
     assert body["extraInfo"]["context"]["deviceInfo"]["x-device-id"] == "dev-1"
+    assert body["extraInfo"]["context"]["deviceInfo"]["deviceName"] == "DESKTOP-PC"
+    assert body["extraInfo"]["context"]["deviceInfo"]["x-device-type"] == "windows"
+    assert body["extraInfo"]["session"]["deviceId"] == "dev-1"
 
 
 def test_is_final_frame_stream_type_final():
