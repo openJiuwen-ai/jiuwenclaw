@@ -32,6 +32,9 @@ from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk, A
 
 logger = logging.getLogger(__name__)
 
+# YuanRong POST /files/mkdir ``mode``: 3-4 octal digits (e.g. 755 / 0700).
+_MKDIR_MODE_RE = re.compile(r"^[0-7]{3,4}$")
+
 
 class AgentMount(TypedDict, total=False):
     """Bind mount for POST /api/agent ``mounts``."""
@@ -88,7 +91,7 @@ class AgentFileDownloadChunk:
 
 
 class YuanrongAgentFileError(RuntimeError):
-    """Raised when YuanRong agent file upload/download fails."""
+    """Raised when YuanRong agent file upload/download/list/mkdir fails."""
 
     def __init__(self, message: str, *, http_status: int = 500, error_code: str = "INTERNAL_ERROR") -> None:
         super().__init__(message)
@@ -423,6 +426,40 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         )
         return self._parse_agent_file_list_response(body, status)
 
+    async def mkdir_agent_dir(
+        self,
+        instance_id: str,
+        path: str,
+        *,
+        mode: str | None = None,
+        recursive: bool = False,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Create a directory in an agent container via POST /api/agent/:id/files/mkdir."""
+        self._ensure_connected()
+        normalized_id = str(instance_id or "").strip()
+        normalized_path = str(path or "").strip()
+        if not normalized_id:
+            raise ValueError("instance_id is required to mkdir agent directory")
+        if not normalized_path:
+            raise ValueError("path is required to mkdir agent directory")
+        if "\x00" in normalized_path:
+            raise YuanrongAgentFileError(
+                "path must not contain NUL",
+                http_status=400,
+                error_code="BAD_REQUEST",
+            )
+        normalized_mode = self._normalize_mkdir_mode(mode)
+        status, body = await asyncio.to_thread(
+            self._do_agent_file_mkdir,
+            normalized_id,
+            normalized_path,
+            normalized_mode,
+            bool(recursive),
+            dict(auth_headers or {}),
+        )
+        return self._parse_agent_file_mkdir_response(body, status, normalized_path)
+
     def _ensure_connected(self) -> None:
         if not self._connected:
             raise RuntimeError("client not connected")
@@ -463,6 +500,39 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             }
         )
         return f"{self._frontend_endpoint}/api/agent/{encoded_id}/files/list?{query}"
+
+    def _agent_files_mkdir_url(
+        self,
+        instance_id: str,
+        path: str,
+        *,
+        mode: str | None,
+        recursive: bool,
+    ) -> str:
+        encoded_id = urllib.parse.quote(instance_id, safe="")
+        query: dict[str, str] = {
+            "path": path,
+            "recursive": "true" if recursive else "false",
+        }
+        if mode:
+            query["mode"] = mode
+        return f"{self._frontend_endpoint}/api/agent/{encoded_id}/files/mkdir?{urllib.parse.urlencode(query)}"
+
+    @staticmethod
+    def _normalize_mkdir_mode(mode: str | None) -> str | None:
+        """Return 3-4 octal digits, or None when omitted (caller umask)."""
+        if mode is None:
+            return None
+        text = str(mode).strip()
+        if not text:
+            return None
+        if _MKDIR_MODE_RE.fullmatch(text) is None:
+            raise YuanrongAgentFileError(
+                "mode must be 3-4 octal digits (e.g. 755 or 0700)",
+                http_status=400,
+                error_code="BAD_REQUEST",
+            )
+        return text
 
     @staticmethod
     def _merge_auth_headers(base_headers: dict[str, str], auth_headers: dict[str, str]) -> dict[str, str]:
@@ -628,6 +698,58 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             )
         return [item for item in items if isinstance(item, dict)]
 
+    def _parse_agent_file_mkdir_response(
+        self,
+        body: str,
+        status: int,
+        path: str,
+    ) -> dict[str, Any]:
+        if not (200 <= status < 300):
+            raise self._agent_file_http_error(status, body)
+        try:
+            parsed = json.loads(body) if body else {}
+        except json.JSONDecodeError as exc:
+            raise YuanrongAgentFileError(
+                f"invalid mkdir response: {body!r}",
+                http_status=status,
+                error_code="INTERNAL_ERROR",
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise YuanrongAgentFileError(
+                f"invalid mkdir response shape: {body!r}",
+                http_status=status,
+                error_code="INTERNAL_ERROR",
+            )
+        # Frontend POST /files/mkdir 可能包 FaaS invoke 外壳，与 list 一致。
+        if self._is_faas_envelope(parsed):
+            parsed, faas_err = self._normalize_faas_body(parsed)
+            if faas_err:
+                raise self._agent_file_http_error(
+                    status or 500,
+                    json.dumps({"error": f"faas mkdir failed: innerCode={faas_err}"}),
+                )
+            if not isinstance(parsed, dict):
+                raise YuanrongAgentFileError(
+                    f"invalid mkdir response shape: {body!r}",
+                    http_status=status,
+                    error_code="INTERNAL_ERROR",
+                )
+        code = parsed.get("code")
+        if code not in (None, 200, "200"):
+            raise self._agent_file_http_error(status or 500, body)
+        payload = parsed.get("data") if isinstance(parsed.get("data"), dict) else parsed
+        if payload.get("success") is False:
+            error = str(payload.get("error") or payload.get("message") or "mkdir failed")
+            raise self._agent_file_http_error(status or 500, json.dumps({"error": error}))
+        created = payload.get("created")
+        if created is None:
+            created = True
+        return {
+            "success": True,
+            "path": str(payload.get("path") or path),
+            "created": bool(created),
+        }
+
     def _do_agent_file_upload(
         self,
         instance_id: str,
@@ -726,6 +848,32 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             ),
             headers=headers,
             method="GET",
+        )
+        return self._urlopen_request(
+            req,
+            timeout=self._agent_timeout_s,
+            raise_on_timeout=True,
+        )
+
+    def _do_agent_file_mkdir(
+        self,
+        instance_id: str,
+        path: str,
+        mode: str | None,
+        recursive: bool,
+        auth_headers: dict[str, str],
+    ) -> tuple[int, str]:
+        headers = self._merge_auth_headers({"Accept": "application/json"}, auth_headers)
+        req = urllib.request.Request(
+            self._agent_files_mkdir_url(
+                instance_id,
+                path,
+                mode=mode,
+                recursive=recursive,
+            ),
+            data=b"",
+            headers=headers,
+            method="POST",
         )
         return self._urlopen_request(
             req,
