@@ -451,7 +451,7 @@ const A2UI_KEYS = new Set([
   "a2ui_generation_enabled",
   "a2ui_rendering_enabled",
 ]);
-const SWARMFLOW_KEYS = new Set(["swarmflow_enabled"]);
+const SWARMFLOW_KEYS = new Set(["swarmflow_enabled", "swarmflow_budget"]);
 const RUNTIME_PLATFORM_KEY = "runtime_platform";
 const EXTERNAL_CLI_AGENTS_SUPPORTED_KEY = "external_cli_agents_supported";
 const EXTERNAL_CLI_AGENT_KEYS = new Set([
@@ -918,6 +918,7 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   memory_forbidden_enabled: "config.keys.memoryForbiddenEnabled",
   memory_forbidden_description: "config.keys.memoryForbiddenDescription",
   swarmflow_enabled: "config.keys.swarmflowEnabled",
+  swarmflow_budget: "config.keys.swarmflowBudget",
   external_cli_agent_claude_enabled: "config.keys.externalCliAgentClaudeEnabled",
   external_cli_agent_claude_use_builtin: "config.keys.externalCliAgentUseBuiltin",
   external_cli_agent_claude_cli_path: "config.keys.externalCliAgentCliPath",

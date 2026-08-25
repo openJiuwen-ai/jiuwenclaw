@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from openjiuwen.agent_teams.runtime.background_task_controller import BackgroundTaskController
 from openjiuwen.agent_teams.schema.team import TeamRole
 
 from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
@@ -4535,3 +4536,101 @@ def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest
     team_helpers._persist_team_file_monitor_roots("sess-1", team_spec)
 
     assert len(written) == 0
+
+
+def test_get_background_task_controller_returns_controller() -> None:
+    controller = team_helpers.get_background_task_controller("sess_bgctl_one")
+
+    assert isinstance(controller, BackgroundTaskController)
+
+
+def test_get_background_task_controller_is_idempotent() -> None:
+    controller_a = team_helpers.get_background_task_controller("sess_bgctl_same")
+    controller_b = team_helpers.get_background_task_controller("sess_bgctl_same")
+
+    assert controller_a is controller_b
+
+
+def test_get_background_task_controller_distinct_sessions_differ() -> None:
+    controller_a = team_helpers.get_background_task_controller("sess_bgctl_x")
+    controller_b = team_helpers.get_background_task_controller("sess_bgctl_y")
+
+    assert controller_a is not controller_b
+
+
+async def test_consume_stream_passes_session_scoped_background_task_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Runner streaming call forwards the session's BackgroundTaskController."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_stream(**kwargs: Any):
+        captured.update(kwargs)
+        if False:  # pragma: no cover - make this an async generator
+            yield None
+
+    monkeypatch.setattr(
+        team_helpers.Runner,
+        "run_agent_team_streaming",
+        _fake_stream,
+    )
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _noop_broadcast)
+    monkeypatch.setattr(team_helpers, "_broadcast_team_state_snapshot", _noop_broadcast)
+
+    session_id = "sess_bgctl_stream"
+    await team_helpers._consume_stream_with_query(
+        "web",
+        session_id,
+        SimpleNamespace(team_name="unit-team", enable_swarmflow=True),
+        "hello",
+        round_id=1,
+    )
+
+    assert isinstance(
+        captured.get("background_task_controller"),
+        BackgroundTaskController,
+    )
+    assert captured["background_task_controller"] is team_helpers.get_background_task_controller(
+        session_id
+    )
+
+
+def test_persist_and_restore_session_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """session budget round-trips through session metadata (session_budget key)."""
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    store: dict[str, Any] = {"session_id": "sess-budget", "title": "t"}
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: dict(store),
+    )
+    written: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        session_metadata,
+        "_enqueue_write",
+        lambda session_id, metadata: written.append((session_id, dict(metadata))),
+    )
+
+    snapshot = {"total": 500000, "spent": 280000, "remaining": 220000, "scope": "session", "exhausted": False}
+    team_helpers.persist_session_budget("sess-budget", snapshot)
+
+    assert written == [("sess-budget", {**store, "session_budget": snapshot})]
+    # restore reads it back
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: {**store, "session_budget": snapshot},
+    )
+    assert team_helpers.restore_session_budget("sess-budget") == snapshot
+
+
+def test_restore_session_budget_absent_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: {"session_id": "sess-budget"},
+    )
+    assert team_helpers.restore_session_budget("sess-budget") is None

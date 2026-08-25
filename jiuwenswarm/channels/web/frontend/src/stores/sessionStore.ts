@@ -21,6 +21,14 @@ import {
   registerConfirmedTaskCreation,
   type TaskProgressBaseline,
 } from '../features/teamTaskProgressBaseline';
+import {
+  applyWorkflowUpdate as applyWorkflowUpdateImpl,
+  reassembleAgentFieldParts,
+  type WorkflowAgent,
+  type WorkflowPhase,
+  type WorkflowRun,
+} from '../components/teamArea/workflowTypes';
+import { requestAgentDetail, requestPhaseAgents } from '../services/webClient';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
@@ -337,6 +345,10 @@ export interface SessionRuntime {
   teamHistoryMessages: Message[];
   /** 当前会话输入栏已选中的技能名（用于随消息发送） */
   selectedSkills: string[];
+  /** SwarmFlow 是否激活（曾收到过 swarmflow 事件即置真，粘性） */
+  swarmflowActive: boolean;
+  /** SwarmFlow 工作流运行列表（树视图渲染） */
+  workflowRuns: WorkflowRun[];
 }
 
 function createEmptyRuntime(): SessionRuntime {
@@ -360,6 +372,8 @@ function createEmptyRuntime(): SessionRuntime {
     teamMemberContextCompression: {},
     teamHistoryMessages: [],
     selectedSkills: [],
+    swarmflowActive: false,
+    workflowRuns: [],
   };
 }
 
@@ -440,6 +454,26 @@ interface SessionState {
   clearTeamMemberContextCompressionStatus: (sessionId: string, memberId: string) => void;
   clearAllTeamMemberContextCompressionStatus: (sessionId: string) => void;
   setTeamHistoryMessages: (sessionId: string, messages: Message[]) => void;
+
+  // SwarmFlow actions
+  /** 增量合并一条 workflow 更新到 workflowRuns */
+  applyWorkflowUpdate: (sessionId: string, workflow: WorkflowRun) => void;
+  /** 切换 swarmflowActive（粘性：置真后不再回 false） */
+  setSwarmflowActive: (sessionId: string, active: boolean) => void;
+  /** 懒加载 phase 完整 agents（command.workflows get_phase） */
+  loadPhaseAgents: (
+    sessionId: string,
+    workflowId: string,
+    phaseId: string,
+    agentOffset?: number,
+  ) => Promise<void>;
+  /** 懒加载单个 agent 完整体（command.workflows get_agent） */
+  loadAgentDetail: (
+    sessionId: string,
+    workflowId: string,
+    phaseId: string,
+    agentId: string,
+  ) => Promise<void>;
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -1231,6 +1265,76 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, teamHistoryMessages: messages },
+        },
+      };
+    });
+  },
+
+  applyWorkflowUpdate: (sessionId, workflow) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            swarmflowActive: true,
+            workflowRuns: applyWorkflowUpdateImpl(runtime.workflowRuns, workflow),
+          },
+        },
+      };
+    });
+  },
+
+  loadPhaseAgents: async (sessionId, workflowId, phaseId, agentOffset = 0) => {
+    const payload = await requestPhaseAgents(sessionId, workflowId, phaseId, agentOffset);
+    if (payload.error || !payload.phase || typeof payload.phase !== 'object') return;
+    const phase = payload.phase as WorkflowPhase;
+    const runtime = get().runtimes[sessionId];
+    const existing = runtime?.workflowRuns.find((item) => item.id === workflowId);
+    if (!existing) return;
+    const updatedPhases = (existing.phases ?? []).map((p) =>
+      p.id === phaseId
+        ? {
+            ...p,
+            ...phase,
+            agents: (phase.agents ?? p.agents ?? []).map((a) =>
+              reassembleAgentFieldParts(a),
+            ),
+          }
+        : p,
+    );
+    get().applyWorkflowUpdate(sessionId, { ...existing, phases: updatedPhases });
+  },
+
+  loadAgentDetail: async (sessionId, workflowId, phaseId, agentId) => {
+    const payload = await requestAgentDetail(sessionId, workflowId, phaseId, agentId);
+    if (payload.error || !payload.agent || typeof payload.agent !== 'object') return;
+    const agent = reassembleAgentFieldParts(payload.agent as WorkflowAgent);
+    const runtime = get().runtimes[sessionId];
+    const existing = runtime?.workflowRuns.find((item) => item.id === workflowId);
+    if (!existing) return;
+    const updatedPhases = (existing.phases ?? []).map((phase) =>
+      phase.id === phaseId
+        ? {
+            ...phase,
+            agents: (phase.agents ?? []).map((a) =>
+              a.id === agentId ? { ...a, ...agent } : a,
+            ),
+          }
+        : phase,
+    );
+    get().applyWorkflowUpdate(sessionId, { ...existing, phases: updatedPhases });
+  },
+
+  setSwarmflowActive: (sessionId, active) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, swarmflowActive: active },
         },
       };
     });
