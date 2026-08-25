@@ -864,9 +864,32 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
         header = f"权限审批: {tool_name}" if tool_name else "权限审批"
         question = message
 
+    skill_name = ""
+    if isinstance(tool_args, dict):
+        skill_name = str(
+            tool_args.get("skill_name") or tool_args.get("skillName") or ""
+        ).strip()
+    if not skill_name:
+        meta = _extract_interrupt_metadata(value_obj)
+        skill_name = str(
+            meta.get("skill_name") or meta.get("skillName") or ""
+        ).strip()
+    if not skill_name and "-" in tool_name:
+        try:
+            from pathlib import Path
+            from jiuwenswarm.common.utils import get_agent_skills_dir
+            _skills_root = Path(get_agent_skills_dir()).expanduser()
+            if _skills_root.is_dir() and (_skills_root / tool_name / "SKILL.md").is_file():
+                skill_name = tool_name
+        except Exception:
+            skill_name = tool_name
+
     return {
         "question": question,
         "header": header,
+        "tool_name": tool_name,
+        "tool_args": tool_args,
+        "skill_name": skill_name,
         "options": _question_options_from_ui_options(value_obj, source, tool_name, message),
         "multi_select": False,
     }

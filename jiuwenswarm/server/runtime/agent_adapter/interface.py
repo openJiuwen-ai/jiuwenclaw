@@ -2099,6 +2099,10 @@ class JiuWenSwarm:
             )
             if isinstance(content, str):
                 result.payload["content"] = content_str
+            from jiuwenswarm.server.runtime.expert.expert_service import (
+                history_expert_identity_extra,
+            )
+
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -2107,6 +2111,8 @@ class JiuWenSwarm:
                 event_type="chat.final",
                 content=content_str,
                 timestamp=time.time(),
+                # 按消息记录"当时是谁答的"（专家身份快照；卸载/换绑后历史身份不变）
+                extra=history_expert_identity_extra(session_id),
                 mode=request.params.get("mode", "unknown"),
             )
 
@@ -2390,6 +2396,10 @@ class JiuWenSwarm:
             durable_pending_final_chunks = []
             if not pending_text or pending_text == durable_final_content:
                 return
+            from jiuwenswarm.server.runtime.expert.expert_service import (
+                history_expert_identity_extra,
+            )
+
             append_history_record(
                 session_id=session_id,
                 request_id=rid,
@@ -2400,9 +2410,13 @@ class JiuWenSwarm:
                 timestamp=time.time(),
                 # 透传 proactive 标记到 history——刷新页面时前端靠 payload.source===
                 # 'proactive_recommendation' 渲染推荐卡片，不带则退化白色气泡。
+                # 专家身份快照：按写盘时刻会话绑定记录"当时是谁答的"。
                 extra=_attach_reasoning_content({
-                    k: v for k, v in request.params.items()
-                    if k in ("source", "proactive_type", "proactive_target")
+                    **{
+                        k: v for k, v in request.params.items()
+                        if k in ("source", "proactive_type", "proactive_target")
+                    },
+                    **history_expert_identity_extra(session_id),
                 }),
                 mode=request.params.get("mode", "unknown"),
             )
@@ -2664,6 +2678,14 @@ class JiuWenSwarm:
                                                 extra_fields[k] = v
                                 if et in {"chat.final", "chat.tool_call"}:
                                     extra_fields = _attach_reasoning_content(extra_fields)
+                                # 主应答落盘携带专家身份（无绑定显式写空串=默认角色作答标记）——
+                                # 前端据"键存在但空"区分默认角色与存量无字段；漏写会导致
+                                # 中途绑专家后历史刷新把本轮身份回落成新专家
+                                if et == "chat.final" and "expert_id" not in extra_fields:
+                                    from jiuwenswarm.server.runtime.expert.expert_service import (
+                                        history_expert_identity_extra,
+                                    )
+                                    extra_fields.update(history_expert_identity_extra(session_id))
                                 # 透传 proactive 标记——刷新页面时前端靠 source 识别卡片
                                 for pk in ("source", "proactive_type", "proactive_target"):
                                     if pk not in extra_fields and pk in request.params:
@@ -2780,6 +2802,14 @@ class JiuWenSwarm:
                                             extra_fields[k] = v
                             if et in {"chat.final", "chat.tool_call"}:
                                 extra_fields = _attach_reasoning_content(extra_fields)
+                            # 主应答落盘携带专家身份（无绑定显式写空串=默认角色作答标记）
+                            # 前端据"键存在但空"区分默认角色与存量无字段；漏写会导致
+                            # 中途绑专家后历史刷新把本轮身份回落成新专家
+                            if et == "chat.final" and "expert_id" not in extra_fields:
+                                from jiuwenswarm.server.runtime.expert.expert_service import (
+                                    history_expert_identity_extra,
+                                )
+                                extra_fields.update(history_expert_identity_extra(session_id))
                             # 透传 proactive 标记——刷新页面时前端靠 source 识别卡片
                             for pk in ("source", "proactive_type", "proactive_target"):
                                 if pk not in extra_fields and pk in request.params:
@@ -2855,6 +2885,10 @@ class JiuWenSwarm:
         if finalized_assistant_message and (
                 finalized_assistant_message != assistant_message or suppress_a2ui_stream
         ):
+            from jiuwenswarm.server.runtime.expert.expert_service import (
+                history_expert_identity_extra,
+            )
+
             append_history_record(
                 session_id=session_id,
                 request_id=rid,
@@ -2864,8 +2898,11 @@ class JiuWenSwarm:
                 content=finalized_assistant_message,
                 timestamp=time.time(),
                 extra=_attach_reasoning_content({
-                    k: v for k, v in request.params.items()
-                    if k in ("source", "proactive_type", "proactive_target")
+                    **{
+                        k: v for k, v in request.params.items()
+                        if k in ("source", "proactive_type", "proactive_target")
+                    },
+                    **history_expert_identity_extra(session_id),
                 }),
                 mode=request.params.get("mode", "unknown"),
             )

@@ -44,9 +44,12 @@ class ExpertSummary:
     available: bool
     unavailable_reason: str = ""
     tags: list[str] = field(default_factory=list)
-    type: str = "agent"  # "agent" | "team"（专家团预留）
+    type: str = "agent"  # "agent" | "team"（专家团）
     metadata: dict[str, Any] = field(default_factory=dict)
     avatar_url: str = ""  # 仓库下发的头像绝对地址（<img> 直连）；空 = 无头像
+    # 专家团成员摘要（type="team" 时非空，leader 置顶）：
+    # [{"id", "name", "description", "role": "lead"|"member"}]
+    members: list[dict[str, str]] = field(default_factory=list)
 
 
 class ExpertNotFound(Exception):
@@ -90,6 +93,10 @@ def validate_expert_package(package_dir: Path) -> list[str]:
 
     与仓库侧 list 判定同规但各自独立（双保险）；整包解析在装载时由
     agent-core loader 再做一次。
+
+    按顶层 manifest 键分派两类包：
+    - 含 ``package_type`` → 专家团（agent_group）包，走严格加载器全量校验；
+    - 否则按单专家（agent_template）包校验。
     """
     manifest_path = package_dir / "manifest.json"
     if not manifest_path.is_file():
@@ -100,6 +107,16 @@ def validate_expert_package(package_dir: Path) -> list[str]:
         raise InvalidExpertPackage(f"manifest.json 无法解析: {exc}") from exc
     if not isinstance(manifest, dict):
         raise InvalidExpertPackage("manifest.json 不是合法 JSON 对象")
+    if "package_type" in manifest:
+        if manifest.get("package_type") != "agent_group":
+            raise InvalidExpertPackage(
+                f"package_type 不支持: {manifest.get('package_type')!r}"
+            )
+        from jiuwenswarm.server.runtime.expert.agent_group import (
+            validate_agent_group_package,
+        )
+
+        return validate_agent_group_package(package_dir)
     if manifest.get("packageType") != "agent_template":
         raise InvalidExpertPackage("packageType 必须是 agent_template")
     card = manifest.get("agentCard")
@@ -222,6 +239,7 @@ class HttpRepoExpertPackageSource:
                 type=str(item.get("type", "agent")),
                 metadata=dict(item.get("metadata") or {}),
                 avatar_url=str(item.get("avatar_url") or ""),
+                members=[dict(m) for m in item.get("members") or [] if isinstance(m, dict)],
             )
             for item in items
         ]
@@ -274,26 +292,41 @@ class LocalDirExpertPackageSource:
         reason = ""
         metadata: dict[str, Any] = {}
         card: dict[str, Any] = {}
+        group: dict[str, str] = {}
+        members: list[dict[str, str]] = []
         pkg_type = "agent"
         try:
             validate_expert_package(package_dir)
             manifest = json.loads(
                 (package_dir / "manifest.json").read_text(encoding="utf-8")
             )
-            card = manifest.get("agentCard") or {}
-            metadata = manifest.get("metadata") or {}
+            if manifest.get("package_type") == "agent_group":
+                # 专家团：无 agentCard，展示名取顶层 name、描述取 leader 子包，
+                # 成员摘要供叠放头像/成员数展示
+                pkg_type = "team"
+                from jiuwenswarm.server.runtime.expert.agent_group import (
+                    read_group_display,
+                    read_group_members,
+                )
+
+                group = read_group_display(package_dir)
+                members = read_group_members(package_dir)
+            else:
+                card = manifest.get("agentCard") or {}
+                metadata = manifest.get("metadata") or {}
         except (InvalidExpertPackage, json.JSONDecodeError) as exc:
             reason = str(exc)
         return ExpertSummary(
             id=str(card.get("id") or package_dir.name),
-            name=str(card.get("name") or package_dir.name),
-            description=str(card.get("description", "")),
+            name=str(card.get("name") or group.get("name") or package_dir.name),
+            description=str(card.get("description") or group.get("description") or ""),
             source="local",
             available=not reason,
             unavailable_reason=reason,
             tags=list(metadata.get("tags") or []),
             type=pkg_type,
             metadata=metadata,
+            members=members,
         )
 
     async def fetch(self, expert_id: str) -> Path:

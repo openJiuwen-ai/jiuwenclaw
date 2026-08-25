@@ -1,0 +1,6 @@
+{
+  "packageType": "agent_template",
+  "name": "主理人",
+  "description": "专家团主理人，负责拆解任务、调度成员、质检汇总",
+  "persona": {"dir": "."}
+}

@@ -592,3 +592,45 @@ class TestHttpRepoOverNamedPipe:
         source = es.HttpRepoExpertPackageSource(base_url="np://claw-test-np-expert-down")
         with pytest.raises(es.ExpertRepoUnavailable):
             await source.list()
+def test_metadata_init_defaults_expert_type_agent(sessions_dir: Path) -> None:
+    sm.init_session_metadata(session_id="t1", channel_id="desktop")
+    assert sm.get_session_metadata("t1", cache_bust=True)["expert_type"] == "agent"
+
+
+def test_metadata_init_and_update_expert_type(sessions_dir: Path) -> None:
+    sm.init_session_metadata(
+        session_id="t2",
+        channel_id="desktop",
+        expert_id="sample-expert-group",
+        expert_type="team",
+        mode="team",
+        team_name="expert-group-sample-expert-group-t2",
+        team_template_id="expert_group",
+    )
+    metadata = sm.get_session_metadata("t2", cache_bust=True)
+    assert metadata["expert_type"] == "team"
+    assert metadata["mode"] == "team"
+    assert metadata["team_name"] == "expert-group-sample-expert-group-t2"
+    sm.update_session_metadata(
+        session_id="t2",
+        expert_id="",
+        expert_type="agent",
+        team_name="",
+        team_template_id="",
+        mode="agent",
+        sync_write=True,
+    )
+    metadata = sm.get_session_metadata("t2", cache_bust=True)
+    assert metadata["expert_type"] == "agent"
+    assert metadata["mode"] == "agent"
+    assert metadata["team_name"] == ""
+
+
+def test_metadata_legacy_session_defaults_expert_type_agent(sessions_dir: Path) -> None:
+    """旧会话 metadata.json 无 expert_type 键时读出默认 "agent"（无需迁移）。"""
+    session_dir = sessions_dir / "legacy2"
+    session_dir.mkdir()
+    (session_dir / "metadata.json").write_text(
+        json.dumps({"session_id": "legacy2", "title": "旧会话"}), encoding="utf-8"
+    )
+    assert sm.get_session_metadata("legacy2", cache_bust=True)["expert_type"] == "agent"

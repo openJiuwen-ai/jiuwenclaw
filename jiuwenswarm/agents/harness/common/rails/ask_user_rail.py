@@ -59,10 +59,13 @@ _QUESTIONS_ITEM_SCHEMA: dict[str, Any] = {
             "description": "A short label displayed as a chip/tag.",
         },
         "options": {
-            "type": "array",
             "description": "Available choices for this question (2-4 items).",
-            "maxItems": 4,
-            "anyOf": [{"maxItems": 0}, {"minItems": 2}],
+            # 约束全部在 anyOf 分支内（父级不放 type/minItems/maxItems，
+            # 避免与分支冲突）：空数组（成员问题无选项）或 2-4 项
+            "anyOf": [
+                {"type": "array", "maxItems": 0},
+                {"type": "array", "minItems": 2, "maxItems": 4},
+            ],
             "items": {
                 "type": "object",
                 "properties": {

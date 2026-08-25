@@ -8,17 +8,21 @@ import { useSessionStore } from './sessionStore';
 export const PROJECT_SESSION_PAGE_SIZE = 10;
 const DEFAULT_PROJECT_ID = 'default';
 const DEFAULT_CODE_PROJECT_ID = 'default_code';
+const DEFAULT_DESIGN_PROJECT_ID = 'default_design';
 const WORK_MODE_STORAGE_KEY = 'jiuwenswarm_work_mode';
 
 function readInitialWorkMode(): WorkMode {
   if (typeof window === 'undefined') return 'work';
-  return window.localStorage.getItem(WORK_MODE_STORAGE_KEY) === 'code' ? 'code' : 'work';
+  const stored = window.localStorage.getItem(WORK_MODE_STORAGE_KEY);
+  if (stored === 'code') return 'code';
+  if (stored === 'design') return 'design';
+  return 'work';
 }
 
 function normalizeProject(project: ProjectInfo, fallbackWorkMode: WorkMode): ProjectInfo {
   return {
     ...project,
-    work_mode: project.work_mode === 'code' || project.work_mode === 'work'
+    work_mode: project.work_mode === 'code' || project.work_mode === 'work' || project.work_mode === 'design'
       ? project.work_mode
       : fallbackWorkMode,
     git: project.git ?? {
@@ -75,7 +79,8 @@ function findProject(projects: ProjectInfo[], projectId: string): ProjectInfo | 
 function isDefaultProject(project: ProjectInfo): boolean {
   return project.is_default
     || project.project_id === DEFAULT_PROJECT_ID
-    || project.project_id === DEFAULT_CODE_PROJECT_ID;
+    || project.project_id === DEFAULT_CODE_PROJECT_ID
+    || project.project_id === DEFAULT_DESIGN_PROJECT_ID;
 }
 
 // 默认项目节点由后端按固定中文文案实时生成、不入库也不可重命名，

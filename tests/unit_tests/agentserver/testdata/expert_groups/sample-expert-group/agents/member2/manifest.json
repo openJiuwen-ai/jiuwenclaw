@@ -1,0 +1,6 @@
+{
+  "packageType": "agent_template",
+  "name": "成员二",
+  "description": "撰写与润色专家",
+  "persona": {"dir": "persona"}
+}

@@ -518,10 +518,19 @@ class CodeSkillUseInput(ConstructionInput):
     input_model=CodeSkillUseInput,
 )
 def build_code_skill_use(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
-    """Build SkillUseRail from the config source (skill_mode + disabled skills)."""
+    """Build SkillUseRail from the config source (skill_mode + disabled skills).
+
+    用 ``ReconcilingSkillUseRail``（baseline 双向对齐子类）：member 的 child
+    session 与 team session 共享持久化 state，团包 skills 热卸后 baseline
+    「只建不刷」会残留旧技能进系统提示词 ``# 技能`` 段；与单专家
+    （interface_deep）同一兜底。
+    """
     from jiuwenswarm.common.utils import get_agent_skills_dir
     from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
         is_skill_retrieval_enabled,
+    )
+    from jiuwenswarm.server.runtime.agent_adapter.skill_rail_reconcile import (
+        ReconcilingSkillUseRail,
     )
     from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
@@ -532,7 +541,7 @@ def build_code_skill_use(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
             if is_skill_retrieval_enabled()
             else inp.skill_mode
         )
-        return SkillUseRail(
+        return ReconcilingSkillUseRail(
             skills_dir=str(get_agent_skills_dir()),
             skill_mode=skill_mode,
             include_tools=inp.include_tools,

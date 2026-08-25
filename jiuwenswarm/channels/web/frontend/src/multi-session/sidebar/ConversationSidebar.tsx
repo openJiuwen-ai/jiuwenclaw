@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, CircleAlert, Code2, LoaderCircle, Workflow } from 'lucide-react';
+import { Check, ChevronDown, CircleAlert, Code2, LoaderCircle, Palette, Workflow } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
 import { webClient } from '../../services/webClient';
@@ -770,7 +770,7 @@ export function ConversationSidebar({
     };
   }, [workModeMenuOpen]);
 
-  const switchWorkMode = async (nextMode: 'work' | 'code') => {
+  const switchWorkMode = async (nextMode: 'work' | 'code' | 'design') => {
     setWorkModeMenuOpen(false);
     if (nextMode === workMode) return;
     await setWorkMode(nextMode);
@@ -1203,7 +1203,13 @@ export function ConversationSidebar({
           aria-haspopup="menu"
           aria-expanded={workModeMenuOpen}
         >
-          <span>{workMode === 'code' ? t('codeMode.code') : t('codeMode.work')}</span>
+          <span>
+            {workMode === 'code'
+              ? t('codeMode.code')
+              : workMode === 'design'
+                ? t('codeMode.design')
+                : t('codeMode.work')}
+          </span>
           <ChevronDown size={15} className={workModeMenuOpen ? 'is-open' : ''} />
         </button>
         {workModeMenuOpen ? (
@@ -1235,6 +1241,20 @@ export function ConversationSidebar({
                 <small>{t('codeMode.codeDescription')}</small>
               </span>
               {workMode === 'code' ? <Check size={16} /> : null}
+            </button>
+            <button
+              type="button"
+              className={workMode === 'design' ? 'is-active' : ''}
+              onClick={() => void switchWorkMode('design')}
+              role="menuitemradio"
+              aria-checked={workMode === 'design'}
+            >
+              <Palette size={17} />
+              <span>
+                <strong>{t('codeMode.design')}</strong>
+                <small>{t('codeMode.designDescription')}</small>
+              </span>
+              {workMode === 'design' ? <Check size={16} /> : null}
             </button>
           </div>
         ) : null}

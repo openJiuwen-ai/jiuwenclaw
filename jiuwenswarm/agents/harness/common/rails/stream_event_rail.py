@@ -21,6 +21,7 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
 )
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -49,6 +50,10 @@ from jiuwenswarm.common.tool_display import (
 from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
+_TODO_TOOL_NAMES_WITH_IDX = frozenset(["todo_complete", "todo_remove", "todo_get", "todo_modify"])
+_STRUCTURED_INTERRUPT_RE = re.compile(
+    r"^\s*\{\s*[\"']result_type[\"']\s*:\s*[\"']interrupt[\"'](?:\s*,|\s*\})"
+)
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -410,6 +415,17 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         tool_call_id = getattr(message, "tool_call_id", "")
         if not tool_call_id:
             return False
+        raw_content = getattr(message, "content", None)
+        if (
+            isinstance(raw_content, dict)
+            and raw_content.get("result_type") == "interrupt"
+        ):
+            return True
+        if (
+            isinstance(raw_content, str)
+            and _STRUCTURED_INTERRUPT_RE.match(raw_content)
+        ):
+            return True
         expected = placeholders_by_id.get(tool_call_id)
         content = self._tool_message_text(message)
         if not content:
@@ -754,8 +770,18 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                         exc,
                     )
                 ctx.inputs.tool_args = cleaned_args
-            await self._emit_tool_call(session, tc, model_display_name=model_display)
-            await self._emit_tool_update(session, tc, status="in_progress")
+            is_task_tool_resume = (
+                ctx.inputs.tool_name == "task_tool"
+                and isinstance(cleaned_args.get("query"), InteractiveInput)
+            )
+            if not is_task_tool_resume:
+                await self._emit_tool_call(
+                    session,
+                    tc,
+                    model_display_name=model_display,
+                    session_id=sid,
+                )
+                await self._emit_tool_update(session, tc, status="in_progress")
             self._symphony_stream_handler.bind_progress(ctx, session, tc)
             # Track in-flight tool call for cancellation
             tc_id = getattr(tc, "id", "")
@@ -782,7 +808,15 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if tc_id:
             self._inflight_tool_calls.pop(tc_id, None)
 
-        await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
+        interrupt = _extract_tool_interrupt(
+            ctx.inputs.tool_result
+        ) or _extract_tool_interrupt(ctx.exception)
+        is_interrupt_result = (
+            isinstance(ctx.inputs.tool_result, dict)
+            and ctx.inputs.tool_result.get("result_type") == "interrupt"
+        )
+        if interrupt is None and not is_interrupt_result:
+            await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
         self._symphony_stream_handler.request_force_finish(
             ctx,
             tc,
@@ -863,6 +897,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         tool_call: Any,
         *,
         model_display_name: str = "",
+        session_id: str = "",
     ) -> None:
         try:
             name = getattr(tool_call, "name", "")
@@ -873,8 +908,27 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "tool_call_id": getattr(tool_call, "id", ""),
             }
             # 优先用主模型随 tool_call 产出的目标文案；未填时再规则兜底。
+            # todo 工具：按 idx 反查 todo.md，把具体任务内容拼进展示名，避免「第3项」这类难懂文案。
+            task_text = ""
+            if session_id and name in _TODO_TOOL_NAMES_WITH_IDX:
+                try:
+                    from jiuwenswarm.agents.harness.common.tools.todo_toolkits import TodoToolkit
+                    tk = TodoToolkit(session_id)
+                    tasks = tk._load_tasks()
+                    raw_idx = arguments.get("idx") if isinstance(arguments, dict) else None
+                    try:
+                        idx_val = int(raw_idx)
+                    except (TypeError, ValueError):
+                        idx_val = None
+                    if idx_val is not None:
+                        for t in tasks:
+                            if t.idx == idx_val:
+                                task_text = t.tasks
+                                break
+                except Exception:
+                    logger.debug("todo reverse-lookup failed", exc_info=True)
             display_name = (model_display_name or "").strip() or build_tool_display_name(
-                name, arguments
+                name, arguments, task_text=task_text
             )
             if display_name:
                 tool_call_payload["display_name"] = display_name
@@ -934,10 +988,21 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         result: Any,
         exception: Any = None,
     ) -> bool:
-        interrupt = _extract_tool_interrupt(result) or _extract_tool_interrupt(exception)
-        if interrupt is None:
-            return False
-        payload = _ask_user_question_payload_from_interrupt(tool_call, interrupt, tool_name)
+        payload = None
+        if isinstance(result, dict) and result.get("result_type") == "interrupt":
+            state_outputs = result.get("state")
+            if isinstance(state_outputs, list):
+                interactions = [
+                    getattr(output, "payload", output)
+                    for output in state_outputs
+                ]
+                payload = convert_interactions_to_ask_user_question(interactions)
+
+        if payload is None:
+            interrupt = _extract_tool_interrupt(result) or _extract_tool_interrupt(exception)
+            if interrupt is None:
+                return False
+            payload = _ask_user_question_payload_from_interrupt(tool_call, interrupt, tool_name)
         if not payload:
             logger.debug("[StreamEventRail] ask_user interrupt payload unavailable")
             return False

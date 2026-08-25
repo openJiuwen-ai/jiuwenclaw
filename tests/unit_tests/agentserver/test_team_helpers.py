@@ -4273,3 +4273,249 @@ def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest
     team_helpers._persist_team_file_monitor_roots("sess-1", team_spec)
 
     assert len(written) == 0
+
+
+def test_persist_member_final_output_writes_attributed_history(
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """teammate chat.final 按 member_name 归因落盘；无归属/非 final 不写。"""
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        team_helpers, "append_history_record", lambda **kw: persisted.append(kw)
+    )
+
+    team_helpers._persist_member_final_output(
+        "web", "s1",
+        {"event_type": "chat.final", "member_name": "member1", "content": "骨架完成"},
+    )
+    assert len(persisted) == 1
+    assert persisted[0]["extra"]["member_name"] == "member1"
+    assert persisted[0]["content"] == "骨架完成"
+    assert persisted[0]["mode"] == "team"
+    assert persisted[0]["event_type"] == "chat.final"
+
+    # 无 member_name（leader/无归属）不落
+    team_helpers._persist_member_final_output(
+        "web", "s1", {"event_type": "chat.final", "content": "leader 正文"}
+    )
+    # 非 chat.final 不落
+    team_helpers._persist_member_final_output(
+        "web", "s1", {"event_type": "chat.delta", "member_name": "member1", "content": "增量"}
+    )
+    assert len(persisted) == 1
+
+
+def test_persist_team_history_event_accepts_p2p_message_with_truncation(
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """team.message p2p/broadcast 入白名单，正文超 512 截断。"""
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        team_helpers, "append_history_record", lambda **kw: persisted.append(kw)
+    )
+
+    team_helpers._persist_team_history_event(
+        "web", "s1",
+        {
+            "event_type": "team.message",
+            "event": {
+                "type": "team.message.p2p",
+                "from_member": "member1",
+                "to_member": "member2",
+                "content": "x" * 600,
+            },
+        },
+    )
+    assert len(persisted) == 1
+    assert persisted[0]["event_type"] == "team.message"
+    saved_content = persisted[0]["extra"]["event"]["content"]
+    assert saved_content.endswith("…")
+    assert len(saved_content) == 513
+
+
+def test_persist_team_history_event_rejects_non_whitelisted_message_types(
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 p2p/broadcast 的 team.message 子类型仍不落盘。"""
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        team_helpers, "append_history_record", lambda **kw: persisted.append(kw)
+    )
+
+    team_helpers._persist_team_history_event(
+        "web", "s1",
+        {"event_type": "team.message", "event": {"type": "team.message.notice", "from_member": "m1"}},
+    )
+    assert persisted == []
+
+
+def test_persist_member_tool_event_writes_attributed_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """成员工具事件按 member_name 归因落盘；结果超 512 截断；无归属不落。"""
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        team_helpers, "append_history_record", lambda **kw: persisted.append(kw)
+    )
+
+    team_helpers._persist_member_tool_event(
+        "web", "s1",
+        {
+            "event_type": "chat.tool_result",
+            "member_name": "member1",
+            "tool_name": "read_file",
+            "tool_call_id": "call-1",
+            "result": "r" * 600,
+        },
+    )
+    assert len(persisted) == 1
+    rec = persisted[0]
+    assert rec["event_type"] == "chat.tool_result"
+    assert rec["extra"]["member_name"] == "member1"
+    assert rec["extra"]["tool_name"] == "read_file"
+    assert rec["extra"]["tool_call_id"] == "call-1"
+    assert rec["content"].endswith("…")
+    assert len(rec["content"]) == 513
+
+    # tool_call 同样落（开始相位）
+    team_helpers._persist_member_tool_event(
+        "web", "s1",
+        {
+            "event_type": "chat.tool_call",
+            "member_name": "member1",
+            "tool_call": {"tool_name": "write_file", "tool_id": "call-2"},
+        },
+    )
+    assert len(persisted) == 2
+    assert persisted[1]["event_type"] == "chat.tool_call"
+
+    # 无 member_name（leader 工具帧）不落
+    team_helpers._persist_member_tool_event(
+        "web", "s1",
+        {"event_type": "chat.tool_result", "tool_name": "read_file", "result": "x"},
+    )
+    assert len(persisted) == 2
+
+
+class _RecordingTeamManager(_InactiveTeamRuntimeManagerMixin):
+    """记录 broadcast_event 的测试管理器（finally 段需要的 runtime 清理方法置空）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[dict] = []
+
+    def broadcast_event(self, session_id: str, event: dict) -> None:
+        self.events.append(event)
+
+    @staticmethod
+    def get_monitor_handler(session_id: str):
+        return None
+
+    @staticmethod
+    def clear_pending_runtime(session_id: str) -> None:
+        pass
+
+    @staticmethod
+    def clear_active_runtime(session_id: str) -> None:
+        pass
+
+    @staticmethod
+    def resolve_team_agent(session_id: str):
+        return None
+
+
+def _completion_chunk(output: str):
+    """leader 轮末 controller_output/task_completion chunk（parse 会丢弃它）。"""
+    return SimpleNamespace(
+        type="controller_output",
+        payload=SimpleNamespace(
+            type="task_completion",
+            data=[SimpleNamespace(data={"output": output, "result_type": "answer"})],
+        ),
+        role=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_plain_text_round_emits_final_and_finishes_stream_early(monkeypatch):
+    """纯文本回合（无团队事件）——leader task_completion 合成 chat.final
+    （内容为本轮累计正文），广播回合完成信号后即时收尾（trailing chunk 不再处理）。"""
+    manager = _RecordingTeamManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+
+    def _fake_parse(chunk):
+        if getattr(chunk, "type", None) == "content_chunk":
+            return {"event_type": "chat.delta", "content": chunk.payload["content"]}
+        return None  # task_completion 被 parse 丢弃（生产行为）
+
+    monkeypatch.setattr(team_helpers, "parse_stream_chunk", _fake_parse)
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(type="content_chunk", payload={"content": "你好"}, role=None)
+        yield _completion_chunk("你好")
+        # 收尾后的 trailing chunk：不应再被广播（验证 break）
+        yield SimpleNamespace(type="content_chunk", payload={"content": "不应出现"}, role=None)
+
+    monkeypatch.setattr(team_helpers.Runner, "run_agent_team_streaming", _fake_stream)
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web", "sess-plain", SimpleNamespace(team_name="spec-team"), "你好",
+    )
+
+    deltas = [e for e in manager.events if e.get("event_type") == "chat.delta"]
+    assert [e.get("content") for e in deltas] == ["你好"]
+    finals = [e for e in manager.events if e.get("event_type") == "chat.final"]
+    assert len(finals) == 1
+    assert finals[0]["content"] == "你好"
+    assert finals[0].get("role") == "leader"
+    complete = [
+        e for e in manager.events
+        if e.get("event_type") == "chat.processing_status" and e.get("is_complete")
+    ]
+    assert complete, "纯文本回合应广播回合完成信号"
+
+
+@pytest.mark.asyncio
+async def test_workflow_round_does_not_break_early(monkeypatch):
+    """工作流回合（本轮已有团队事件）：chat.final 照广播但不提前断流——
+    leader 总结后成员仍可能有收尾消息（实测成员确认晚于主理人总结到达）。"""
+    manager = _RecordingTeamManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+
+    def _fake_parse(chunk):
+        ctype = getattr(chunk, "type", None)
+        if ctype == "content_chunk":
+            return {"event_type": "chat.delta", "content": chunk.payload["content"]}
+        if ctype == "team.member":
+            return {
+                "event_type": "team.member",
+                "event": {"type": "team.member.status_changed", "member_id": "m1"},
+            }
+        return None
+
+    monkeypatch.setattr(team_helpers, "parse_stream_chunk", _fake_parse)
+
+    async def _fake_stream(**kwargs):
+        # 团队事件先行（成员 spawn/状态）——本回合标 seen，不触发即时收尾
+        yield SimpleNamespace(
+            type="team.member",
+            payload={},
+            role=TeamRole.LEADER,
+        )
+        yield SimpleNamespace(type="content_chunk", payload={"content": "总结"}, role=None)
+        yield _completion_chunk("总结")
+        # 工作流回合不提前断：leader 总结后的成员消息仍应送达
+        yield SimpleNamespace(
+            type="content_chunk",
+            payload={"content": "成员收尾"},
+            role=TeamRole.TEAMMATE,
+        )
+
+    monkeypatch.setattr(team_helpers.Runner, "run_agent_team_streaming", _fake_stream)
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web", "sess-wf", SimpleNamespace(team_name="spec-team"), "做个任务",
+    )
+
+    deltas = [e for e in manager.events if e.get("event_type") == "chat.delta"]
+    assert [e.get("content") for e in deltas] == ["总结", "成员收尾"]

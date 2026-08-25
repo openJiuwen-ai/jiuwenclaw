@@ -9,12 +9,13 @@ import { createPortal } from 'react-dom';
 import { ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Share2, Sparkles, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
-import { useChatStore, useHarnessStore, useSessionStore, useTodoStore } from '../../stores';
+import { useChatStore, useHarnessStore, useSessionStore, useTodoStore, useWorkspaceStore } from '../../stores';
 import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo } from '../../types';
 import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea } from './InputArea';
+import { DesignWelcomeContent } from '../../features/design-mode';
 import chatIcon from '../../assets/chat.svg';
 import expandIcon from '../../assets/expand.svg';
 import lineUpIcon from '../../assets/lineUp.svg';
@@ -691,6 +692,7 @@ export function ChatPanel({
   const contextCompressionRuntime = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRuntime);
   const contextCompressionSummary = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionSummary);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const workMode = useWorkspaceStore((s) => s.workMode);
   const hasHarnessProgress = useHarnessStore((s) => (
     mode === 'auto_harness' && (s.runtimes[activeSessionId ?? '']?.stageResults.length ?? 0) > 0
   ));
@@ -1139,11 +1141,15 @@ export function ChatPanel({
                   onClearGoal={onClearGoal}
                 />
               </div>
-              <div className="chat-suggestions">
-                {suggestions.map((text) => (
-                  <SuggestionCard key={text} text={text} onClick={() => handleSuggestion(text)} />
-                ))}
-              </div>
+              {workMode === 'design' ? (
+                <DesignWelcomeContent onSendPrompt={(prompt) => handleSendMessage(prompt)} />
+              ) : (
+                <div className="chat-suggestions">
+                  {suggestions.map((text) => (
+                    <SuggestionCard key={text} text={text} onClick={() => handleSuggestion(text)} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
           <div />

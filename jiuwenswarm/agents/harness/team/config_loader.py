@@ -11,7 +11,7 @@ from typing import Any
 
 from openjiuwen.agent_teams.paths import get_agent_teams_home
 
-from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.config import get_config, _parse_custom_headers
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +251,17 @@ def _build_default_model_dict(
     )
     model_client_config = dict(model_config.get("model_client_config", {}))
     model_request_config = dict(model_config.get("model_config_obj", {}))
+
+    # 防御：custom_headers 必须是 dict 或 None——config 归一化漏网（如
+    # CUSTOM_HEADERS 环境变量为空串）时，'' 会在 TeamAgentSpec 校验期抛出
+    # dict_type 错误；此处兜底解析/剔除。
+    raw_headers = model_client_config.get("custom_headers")
+    if raw_headers is not None and not isinstance(raw_headers, dict):
+        parsed_headers = _parse_custom_headers(raw_headers)
+        if parsed_headers is None:
+            model_client_config.pop("custom_headers", None)
+        else:
+            model_client_config["custom_headers"] = parsed_headers
 
     model_name = model_client_config.get("model_name", "")
     if model_name and "model" not in model_request_config:

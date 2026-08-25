@@ -462,6 +462,7 @@ def init_session_metadata(
     cron_id: str = "",
     work_mode: str = "",
     expert_id: str = "",
+    expert_type: str = "agent",
     channel_metadata: dict[str, Any] | None = None,
 ) -> None:
     """初始化会话元数据(同步写,确保创建后立即可读)
@@ -497,6 +498,11 @@ def init_session_metadata(
         "status": "idle",
         "work_mode": resolved_work_mode,
         "expert_id": expert_id,
+        "expert_type": expert_type,
+        # 粘性留痕：建会话即绑团时直接置 "team"（卸载团不清，供切换弹窗判定）
+        "was_expert_type": "team" if expert_type == "team" else "",
+        # 最近绑定记录：建会话即绑定时同步（卸载时不清，供归档面板 roster 解析）
+        "last_expert_id": expert_id,
     }
     if isinstance(channel_metadata, dict) and channel_metadata:
         metadata["channel_metadata"] = channel_metadata
@@ -530,6 +536,9 @@ def update_session_metadata(
     sync_write: bool = False,
     work_mode: str | None = None,
     expert_id: str | None = None,
+    expert_type: str | None = None,
+    was_expert_type: str | None = None,
+    last_expert_id: str | None = None,
 ) -> None:
     """更新会话元数据(异步写入,不阻塞调用方)
 
@@ -602,6 +611,7 @@ def update_session_metadata(
             "status": "idle",
             "work_mode": resolved_work_mode,
             "expert_id": expert_id or "",
+            "expert_type": expert_type or "agent",
         }
         # 首次创建时写入 channel_metadata
         if channel_metadata:
@@ -648,6 +658,17 @@ def update_session_metadata(
         # "" 表示清除（退出专家）
         if expert_id is not None:
             metadata["expert_id"] = expert_id
+        # expert_type：覆盖式——"agent"（单专家）| "team"（专家团），与 expert_id 联动写入
+        if expert_type is not None:
+            metadata["expert_type"] = expert_type
+        # was_expert_type：粘性留痕——绑团时写 "team"，卸载团只清 expert_* 四字段、
+        # 此字段保留（会话"用过团协作"的跨重启证据，前端切换弹窗判定用）
+        if was_expert_type is not None:
+            metadata["was_expert_type"] = was_expert_type
+        # last_expert_id：最近绑定过的专家 id——卸载时保留（退团后归档成员面板的
+        # roster 解析源：成员头像/展示名按包解析，跨重启不丢）
+        if last_expert_id is not None:
+            metadata["last_expert_id"] = last_expert_id
         # 显式清除优先级高于 title 入参
         if clear_title:
             metadata["title"] = ""
@@ -858,6 +879,12 @@ def get_session_metadata(
         metadata.setdefault("team_name", "")
         metadata.setdefault("team_template_id", "")
         metadata.setdefault("expert_id", "")
+        # 存量会话无 expert_type 字段：默认单专家，零迁移
+        metadata.setdefault("expert_type", "agent")
+        # 存量会话无 was_expert_type：默认从未绑团，零迁移
+        metadata.setdefault("was_expert_type", "")
+        # 存量会话无 last_expert_id：默认无（归档面板解析降级为首字回退），零迁移
+        metadata.setdefault("last_expert_id", "")
     return metadata
 
 

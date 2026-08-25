@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import re
@@ -1156,6 +1157,38 @@ def _is_teammate_output(chunk: Any) -> bool:
     return str(role_value).strip().lower() != TeamRole.LEADER.value
 
 
+def _leader_task_completion_text(chunk: Any) -> str:
+    """提取 leader 轮末 task_completion 的答案全文。
+
+    leader 每个执行回合以 ``controller_output``/``task_completion`` 收尾（payload.data
+    为 JsonDataFrame 列表，data.output 即该轮答案）；``parse_stream_chunk`` 对这类
+    chunk 返回 None（静默丢弃）。纯文本/无工作流回合因此没有任何收尾信号
+    （无 chat.final、team.completed 只在 workflow 完成时发），流空转到超时——
+    本 helper 供消费循环补出 chat.final。
+    """
+    if getattr(chunk, "type", None) != "controller_output":
+        return ""
+    payload = getattr(chunk, "payload", None)
+    inner_t = getattr(payload, "type", None) if payload is not None else None
+    if inner_t is None and isinstance(payload, dict):
+        inner_t = payload.get("type")
+    inner_val = getattr(inner_t, "value", inner_t)
+    if str(inner_val or "").strip().lower() != "task_completion":
+        return ""
+    data = getattr(payload, "data", None)
+    if data is None and isinstance(payload, dict):
+        data = payload.get("data", [])
+    if not isinstance(data, (list, tuple)):
+        return ""
+    for item in data:
+        item_data = getattr(item, "data", None)
+        if isinstance(item_data, dict):
+            output = item_data.get("output")
+            if isinstance(output, str) and output.strip():
+                return output
+    return ""
+
+
 def _enrich_teammate_event(parsed: dict[str, Any], chunk: Any) -> dict[str, Any]:
     """Enrich a parsed teammate event with role and source_member for frontend display."""
     parsed["role"] = TeamRole.TEAMMATE.value
@@ -2042,6 +2075,15 @@ async def _consume_stream_with_query(
     received_chunks = 0
     first_model_output_at: float | None = None
     emitted_ask_user_request_ids: set[str] = set()
+    # 本轮 leader 累计正文（合成 chat.final 的快照内容用；逐轮重置）
+    leader_round_text = ""
+    # 纯文本回合的即时收尾标记：仅当本轮无任何团队活动（无团队事件/无工具调用/
+    # 无成员产出）且 leader 以 task_completion 收尾时置位——下一轮循环开头 break
+    # （运行时暂停，下次发送 resume_from_pause 热恢复）。leader 先答、成员后报的
+    # 回合不断流（成员确认实测晚于主理人总结到达）。
+    finish_after_final = False
+    saw_tool_call = False
+    saw_teammate_output = False
     # Reset the team-events flag at the start of a new round so chat.final
     # can correctly determine whether the team is active.
     tm_ = get_team_manager(channel_id)
@@ -2094,6 +2136,10 @@ async def _consume_stream_with_query(
             envs=envs,
             stream_logger=lg,
         ):
+            # 纯文本/已完成工作流回合即时收尾：上轮 chat.final 已发 + 回合完成
+            # 信号已广播，剩余 trailing chunk（usage 等）不再需要
+            if finish_after_final:
+                break
             received_chunks += 1
             # First event of any kind from the runner — usually a framework
             # control event (team.runtime_ready and friends), not model output.
@@ -2135,6 +2181,21 @@ async def _consume_stream_with_query(
             if _team_hide_teammate_enabled() and not is_leader:
                 continue
             parsed = parse_stream_chunk(chunk)
+            # leader 轮末 task_completion（携带该轮答案全文）被 parse 丢弃，
+            # 纯文本/无工作流回合因此没有 chat.final、没有回合完成信号，流空转到
+            # 超时，前后端回合边界错位（后续消息被 follow-up 并入 旧流，两问答案揉进一个气泡）。
+            # 这里把它合成 chat.final（本轮 leader
+            # 累计正文快照），走下方统一的 chat.final 分支（广播 + 收尾判定）。
+            final_from_completion = False
+            if parsed is None and is_leader:
+                completion_text = _leader_task_completion_text(chunk)
+                if completion_text:
+                    parsed = {
+                        "event_type": "chat.final",
+                        "content": leader_round_text or completion_text,
+                        "role": TeamRole.LEADER.value,
+                    }
+                    final_from_completion = True
             if parsed is not None:
                 # Time to first token: the first frame actually produced by a
                 # model (reasoning counts — on a thinking model it comes first).
@@ -2162,11 +2223,22 @@ async def _consume_stream_with_query(
                     continue
                 parsed["rid"] = round_id
                 if is_teammate:
+                    saw_teammate_output = True
                     parsed = _enrich_teammate_event(parsed, chunk)
+                    # 成员文本输出归因落盘（member_name + content），
+                    # 供刷新后前端重放成员子聊天框
+                    _persist_member_final_output(channel_id, session_id, parsed)
+                    # 成员工具事件归因落盘（成员视图工具活动跨刷新恢复）
+                    _persist_member_tool_event(channel_id, session_id, parsed)
                 elif is_leader:
                     # 标记 role=leader，使 _build_logical_targets() 走 godview 兜底
                     # （leader 不在 _ROLE_FANOUT 中，落到 [godview]）。
                     parsed["role"] = TeamRole.LEADER.value
+                    # 累计本轮 leader 正文（task_completion 合成 chat.final 的快照内容）
+                    if parsed.get("event_type") == "chat.delta":
+                        leader_round_text += str(parsed.get("content") or "")
+                if parsed.get("event_type") == "chat.tool_call":
+                    saw_tool_call = True
                 parsed = _truncate_team_tool_result_event(parsed)
                 if parsed.get("event_type") == "team.runtime_ready":
                     ready_team_name = str(parsed.get("team_name") or team_spec.team_name)
@@ -2192,11 +2264,26 @@ async def _consume_stream_with_query(
                         hide_dm=hide_dm,
                         enable_swarmflow=bool(getattr(team_spec, "enable_swarmflow", False)),
                     )
+                    # 人类成员：注册 team→user 通知回调（消息抵达人类席位 →
+                    # team.human_prompt 帧，前端成员视图显示待回答问题）
+                    await _register_human_inbound_hooks(
+                        channel_id, session_id, ready_team_name
+                    )
                     ensure_team_evolution_watcher(
                         channel_id,
                         session_id,
                         source="runtime_ready",
                     )
+                elif parsed.get("event_type") == "team.member":
+                    # 成员 spawn（含运行时 /join 进来的人类席位）：刷新人类入站回调注册
+                    inner_member_event = parsed.get("event")
+                    if (
+                        isinstance(inner_member_event, dict)
+                        and inner_member_event.get("type") == "team.member.spawned"
+                    ):
+                        await _register_human_inbound_hooks(
+                            channel_id, session_id, team_spec.team_name
+                        )
                 elif parsed.get("event_type") == "team.interact.failed":
                     reason = str(parsed.get("reason") or "").strip()
                     error_msg = _INTERACT_REASON_ERROR_MAP.get(
@@ -2296,6 +2383,18 @@ async def _consume_stream_with_query(
                                 "is_complete": True,
                             },
                         )
+                        # 即时收尾只限「纯文本回合」：本轮无团队事件、无工具调用、
+                        # 无成员产出，且收尾信号来自 task_completion（leader 任务真实
+                        # 完成）——运行时暂停，下次发送 resume_from_pause 热恢复，不再
+                        # 空转等 idle 超时。其余回合不断流：leader 先答、
+                        # 成员后报的回合里成员收尾消息晚于主理人总结到达。
+                        if (
+                            final_from_completion
+                            and not tm_.has_seen_team_events(session_id)
+                            and not saw_tool_call
+                            and not saw_teammate_output
+                        ):
+                            finish_after_final = True
                     continue
                 await _broadcast_event(channel_id, session_id, parsed)
 
@@ -2648,7 +2747,7 @@ def _persist_team_history_event(
 ) -> None:
     """Persist team monitor events required by team.history.get panel restore."""
     evt_type = event.get("event_type")
-    if evt_type not in {"team.member", "team.task"}:
+    if evt_type not in {"team.member", "team.task", "team.message"}:
         return
 
     payload = event.get("event")
@@ -2674,6 +2773,19 @@ def _persist_team_history_event(
         ):
             return
         request_key = f"{member_id}-{member_event_type.rsplit('.', 1)[-1]}"
+    elif evt_type == "team.message":
+        # 团队动态（成员间通信）：只收 p2p/broadcast，正文截断防历史膨胀
+        message_event_type = str(payload.get("type") or "").strip()
+        if message_event_type not in {"team.message.p2p", "team.message.broadcast"}:
+            return
+        from_member = str(payload.get("from_member") or payload.get("member_name") or "").strip()
+        if not from_member:
+            return
+        # 内容截断（落盘字段级，不改事件本体）
+        content = payload.get("content")
+        if isinstance(content, str) and len(content) > 512:
+            payload = {**payload, "content": content[:512] + "…"}
+        request_key = f"{from_member}-{message_event_type.rsplit('.', 1)[-1]}-{int(time.time() * 1000)}"
     else:
         task_id = str(payload.get("task_id") or payload.get("id") or "").strip()
         if not task_id:
@@ -2692,6 +2804,160 @@ def _persist_team_history_event(
         extra={
             "session_id": session_id,
             "event": dict(payload),
+        },
+        mode="team",
+    )
+
+
+async def _register_human_inbound_hooks(
+        channel_id: str | None,
+        session_id: str,
+        team_name: str,
+) -> None:
+    """为团队的全部人类成员注册 team→user 通知回调：消息抵达人类席位即广播
+    team.human_prompt 帧（前端成员视图据此显示"待你回复"的问题）。
+
+    幂等可重入（register 覆盖同名成员的旧回调）；human_agent 在运行时加入
+    （/join）时由调用方再次调用本函数刷新注册。成员非人类/无运行时静默跳过。
+    """
+    from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+    from jiuwenswarm.agents.harness.team.team_manager import (
+        _runner_team_runtime_manager,
+    )
+
+    if not team_name:
+        return
+    try:
+        members = await query_team_human_members_for_join(session_id, team_name)
+    except Exception:
+        return
+    human_names = [
+        str(m.get("member_id") or "").strip()
+        for m in members
+        if isinstance(m, dict) and m.get("role") == "human_agent"
+        and str(m.get("member_id") or "").strip()
+    ]
+    if not human_names:
+        return
+    runtime_mgr = _runner_team_runtime_manager(GLOBAL_RUNNER)
+    for member_name in human_names:
+
+        async def _on_inbound(event: Any, _member: str = member_name) -> None:
+            await _broadcast_event(channel_id, session_id, {
+                "event_type": "team.human_prompt",
+                "session_id": session_id,
+                "event": {
+                    "type": "team.human_prompt",
+                    "member_name": _member,
+                    "prompt": str(getattr(event, "body", "") or ""),
+                    "sender": str(getattr(event, "sender", "") or ""),
+                    "message_id": str(getattr(event, "message_id", "") or ""),
+                },
+            })
+
+        try:
+            await runtime_mgr.register_human_agent_inbound(
+                team_name=team_name,
+                session_id=session_id,
+                member_name=member_name,
+                callback=_on_inbound,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[TeamHelpers] register human inbound failed: team=%s member=%s error=%s",
+                team_name, member_name, exc,
+            )
+
+
+def _persist_member_final_output(
+        channel_id: str | None,
+        session_id: str,
+        parsed: dict[str, Any],
+) -> None:
+    """成员子聊天框内容落盘：teammate chat.final 按 member_name 归因写入 session 历史。
+
+    供前端刷新后从 chat.history 重放 memberOutputs（成员子聊天框跨刷新恢复）。
+    chat.final 是该成员本轮全文快照，内容即正文。
+    """
+    if parsed.get("event_type") != "chat.final":
+        return
+    member_name = str(parsed.get("member_name") or "").strip()
+    content = str(parsed.get("content") or "").strip()
+    if not member_name or not content:
+        return
+    from jiuwenswarm.server.runtime.expert.expert_service import (
+        current_expert_identity_extra,
+    )
+
+    timestamp = time.time()
+    append_history_record(
+        session_id=session_id,
+        request_id=f"member-final-{member_name}-{int(timestamp * 1000)}",
+        channel_id=_resolve_channel_id(channel_id),
+        role="assistant",
+        content=content,
+        timestamp=timestamp,
+        event_type="chat.final",
+        # member_name 之外同时记会话当时绑定的专家身份（换团后历史归属仍准）
+        extra={"member_name": member_name, **current_expert_identity_extra(session_id)},
+        mode="team",
+    )
+
+
+def _persist_member_tool_event(
+        channel_id: str | None,
+        session_id: str,
+        parsed: dict[str, Any],
+) -> None:
+    """成员工具事件归因落盘：teammate chat.tool_call/tool_result 按 member_name 写入
+    session 历史，供成员视图的工具活动跨刷新恢复。工具结果内容截断防膨胀。"""
+    event_type = parsed.get("event_type")
+    if event_type not in ("chat.tool_call", "chat.tool_result"):
+        return
+    member_name = str(parsed.get("member_name") or "").strip()
+    if not member_name:
+        return
+    tool_payload = parsed.get("tool_call") or parsed.get("tool_result") or {}
+    if not isinstance(tool_payload, dict):
+        tool_payload = {}
+    # 字段两层取：chat.tool_result 的 tool_name/tool_call_id 在帧顶层，
+    # chat.tool_call 的在 tool_call 子载荷里（parse_stream_chunk 两种形态）
+    tool_name = str(
+        parsed.get("tool_name")
+        or tool_payload.get("tool_name") or tool_payload.get("name") or ""
+    ).strip()
+    if not tool_name:
+        return
+    tool_call_id = str(
+        parsed.get("tool_call_id")
+        or tool_payload.get("tool_call_id") or tool_payload.get("tool_id")
+        or tool_payload.get("toolCallId") or ""
+    ).strip()
+    # content：result 相位存结果；call 相位存入参（成员视图展开详情重放用）
+    if event_type == "chat.tool_call":
+        args_raw = tool_payload.get("arguments") or tool_payload.get("args")
+        result_text = (
+            args_raw if isinstance(args_raw, str)
+            else json.dumps(args_raw, ensure_ascii=False) if args_raw is not None
+            else ""
+        )
+    else:
+        result_text = str(tool_payload.get("result") or parsed.get("result") or "")
+    if len(result_text) > 512:
+        result_text = result_text[:512] + "…"
+    timestamp = time.time()
+    append_history_record(
+        session_id=session_id,
+        request_id=f"member-tool-{member_name}-{tool_call_id or 'x'}-{int(timestamp * 1000)}",
+        channel_id=_resolve_channel_id(channel_id),
+        role="assistant",
+        content=result_text,
+        timestamp=timestamp,
+        event_type=event_type,
+        extra={
+            "member_name": member_name,
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
         },
         mode="team",
     )

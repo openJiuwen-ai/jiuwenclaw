@@ -438,6 +438,17 @@ class ExpertCapabilityMixin:
         expert_id = (metadata or {}).get("expert_id") or None
         if not expert_id:
             return
+        # 专家团（expert_type="team"）走 team 线冷构造（assembly._apply_agent_group），
+        # 不是会话 DeepAgent 热加载——团包 manifest 不是 agent_template，误走
+        # load_agent_template 必失败降级并写错误 notice，必须跳过（防污染关键点）。
+        if str((metadata or {}).get("expert_type") or "agent") == "team":
+            logger.info(
+                "[session_id=%s] [JiuWenSwarmDeepAdapter] expert replay skipped: "
+                "expert=%s 是专家团（team 线装配）",
+                session_id,
+                expert_id,
+            )
+            return
         try:
             await self._apply_expert(
                 expert_id,

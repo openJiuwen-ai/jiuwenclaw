@@ -60,6 +60,10 @@ from jiuwenswarm.agents.swarm.providers import tools as _tools
 
 # Modes that route to the code adapter and get the code member profile.
 _CODE_MODES: frozenset[str] = frozenset({"code.team", "team.plan"})
+# Modes that route to the design adapter and get the design member profile.
+# design 派生自 code：rails 通过继承 CodeAgentModeRail 复用 plan 兜底，仅
+# system prompt 与 plan 提示词是 design 专属的全新内容。
+_DESIGN_MODES: frozenset[str] = frozenset({"design", "design.normal", "design.plan"})
 logger = logging.getLogger(__name__)
 
 
@@ -190,6 +194,16 @@ def _is_code_mode(mode: str) -> bool:
     return mode in _CODE_MODES
 
 
+def _is_design_mode(mode: str) -> bool:
+    """Return whether *mode* routes to the design member profile.
+
+    design 模式派生自 code：复用 code 的 rails/tools 装配（通过
+    ``DesignAgentModeRail(CodeAgentModeRail)`` 继承），但 system prompt 走
+    design 专属的 ``build_design_system_prompt``，对齐 WorkBuddy 设计模式。
+    """
+    return mode in _DESIGN_MODES
+
+
 def _resolve_member_skills(config: dict[str, Any], role: str) -> list[str]:
     """Resolve the skill names selected for *role* from the config source.
 
@@ -266,7 +280,13 @@ def _retrieval_enabled(config: dict[str, Any] | None = None) -> bool:
 
 def _normalize_skill_use_rails_for_agentic_retrieval(rails: list[RailSpec]) -> list[RailSpec]:
     """Normalize skill-use rails to auto-list mode and remove duplicates."""
-    skill_rail_types = {CORE_SKILL_USE, "skill_use", "SkillUseRail", registry.CODE_SKILL_USE}
+    skill_rail_types = {
+        CORE_SKILL_USE,
+        "skill_use",
+        "SkillUseRail",
+        registry.CODE_SKILL_USE,
+        registry.TEAM_SKILL_USE,
+    }
     has_skill_rail = False
     normalized: list[RailSpec] = []
     for rail in rails:
@@ -472,6 +492,14 @@ def _build_team_capability_specs(
         RailSpec(type=name, params=_rail_params(name, config))
         for name in _team_common_rail_names(role)
     ]
+    # 显式声明 member skill-use rail(ReconcilingSkillUseRail,baseline 双向对齐,
+    # 见 swarm.team_skill_use provider):issubclass 命中 agent-core factory 的
+    # _already_provided(SkillUseRail) 短路,抑制 enable_skill_discovery 自动注入
+    # 的普通 SkillUseRail;位置先于 retrieval 模式的 CORE_SKILL_USE,去重保留本 rail。
+    rails_specs.append(RailSpec(type=registry.TEAM_SKILL_USE))
+    # member 身份占位:params 由装配期 _apply_agent_group 渲染填入;
+    # 非专家团恒空,provider 返回 None 不挂载。
+    rails_specs.append(RailSpec(type=registry.TEAM_MEMBER_IDENTITY))
     if role == "leader":
         rails_specs.append(RailSpec(type=registry.STRUCTURED_ASK_USER))
 
@@ -578,6 +606,9 @@ def _build_code_capability_specs(
         RailSpec(type=name, params=_rail_params(name, config))
         for name in _CODE_SHARED_RAIL_NAMES
     )
+    # member 身份占位:params 由装配期 _apply_agent_group 渲染填入;
+    # 非专家团恒空,provider 返回 None 不挂载。
+    rails_specs.append(RailSpec(type=registry.TEAM_MEMBER_IDENTITY))
     rails_specs.extend(_role_evolution_rails(config, role))
 
     tool_specs: list[BuiltinToolSpec] = [
@@ -610,7 +641,7 @@ def build_member_capability_specs(
     Returns:
         A ``(rails_specs, tool_specs)`` tuple of openjiuwen specs.
     """
-    if _is_code_mode(mode):
+    if _is_code_mode(mode) or _is_design_mode(mode):
         return _build_code_capability_specs(config, mode, role, enable_permissions=enable_permissions)
     return _build_team_capability_specs(config, role, enable_permissions=enable_permissions)
 
@@ -686,7 +717,7 @@ def build_member_subagent_specs(
     Returns:
         The ``SubAgentSpec`` list (empty when not a code mode).
     """
-    if not _is_code_mode(mode):
+    if not (_is_code_mode(mode) or _is_design_mode(mode)):
         return []
     react = (config or {}).get("react", {})
     react = react if isinstance(react, dict) else {}
@@ -759,7 +790,7 @@ def build_member_deep_agent_spec(
         # Force off agent-core's enable_task_planning auto-inject path so a YAML
         # base spec cannot re-mount harness todo rails via resolve_deep_agent_parts.
         update["enable_task_planning"] = False
-    if not _is_code_mode(mode):
+    if not (_is_code_mode(mode) or _is_design_mode(mode)):
         update["enable_skill_discovery"] = not retrieval_enabled
 
     subagent_specs = build_member_subagent_specs(config, mode, role)
@@ -772,7 +803,7 @@ def build_member_deep_agent_spec(
     # In code mode build_member_subagent_specs already returns SWARM_BROWSER_AGENT,
     # so this branch only runs for non-code modes.
     team_browser_spec: SubAgentSpec | None = None
-    if not _is_code_mode(mode):
+    if not (_is_code_mode(mode) or _is_design_mode(mode)):
         react_cfg = (config or {}).get("react", {})
         react_cfg = react_cfg if isinstance(react_cfg, dict) else {}
         subagents_cfg = react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
@@ -782,9 +813,9 @@ def build_member_deep_agent_spec(
                 "browser_agent", registry.SWARM_BROWSER_AGENT, react_cfg, language
             )
 
-    if _is_code_mode(mode) or subagent_specs or team_browser_spec:
+    if _is_code_mode(mode) or _is_design_mode(mode) or subagent_specs or team_browser_spec:
         merged_subagents = list(base_spec.subagents or [])
-        if _is_code_mode(mode):
+        if _is_code_mode(mode) or _is_design_mode(mode):
             filtered = []
             for spec in merged_subagents:
                 is_temporarily_disabled = (
@@ -818,6 +849,12 @@ def build_member_deep_agent_spec(
         )
 
         update["system_prompt"] = build_code_system_prompt()
+    elif _is_design_mode(mode):
+        from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
+            build_design_system_prompt,
+        )
+
+        update["system_prompt"] = build_design_system_prompt()
 
     return base_spec.model_copy(update=update)
 

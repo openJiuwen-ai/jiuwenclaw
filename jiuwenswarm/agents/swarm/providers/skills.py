@@ -47,6 +47,97 @@ logger = logging.getLogger(__name__)
 # Provider name registered for the member-skill toolkit rail.
 MEMBER_SKILL_TOOLKIT = "swarm.member_skill_toolkit"
 
+# Provider name for the chat-profile member skill-use rail (Reconciling 版).
+TEAM_SKILL_USE = "swarm.team_skill_use"
+
+
+def _member_workspace_skill_dirs(ctx: Any) -> list[str]:
+    """复刻 agent-core ``factory._make_skill_rail`` 的 skills_dir 语义。
+
+    member workspace 的 ``skills`` 节点 + 各 team 共享 workspace 链接下的
+    ``skills``（符号链接指向共享 workspace 根）。任一来源缺失即跳过——
+    SkillUseRail 对不存在的目录在 refresh 时容错。
+    """
+    dirs: list[str] = []
+    workspace = getattr(ctx, "workspace", None)
+    if workspace is None:
+        return dirs
+    get_node_path = getattr(workspace, "get_node_path", None)
+    if callable(get_node_path):
+        base = get_node_path("skills")
+        if base:
+            dirs.append(str(base))
+    list_team_links = getattr(workspace, "list_team_links", None)
+    if callable(list_team_links):
+        for _team_id, target_path in list_team_links():
+            dirs.append(str(Path(target_path) / "skills"))
+    return dirs
+
+
+def _collect_disabled_skills(skills_dirs: list[str]) -> list[str]:
+    """收集各 skills_dir 的 skills_state.json 里禁用的技能名（同 agent-core factory）。"""
+    try:
+        from openjiuwen.harness.factory import _collect_disabled_skills_from_state
+
+        return _collect_disabled_skills_from_state(skills_dirs)
+    except Exception as exc:
+        logger.warning("[swarm.team_skill_use] collect disabled skills failed: %s", exc)
+        return []
+
+
+class TeamSkillUseInput(ConstructionInput):
+    """Construction inputs for the chat-profile member skill-use rail."""
+
+    skill_mode: str = param_field(
+        default="all",
+        description="Skill exposure mode; factory auto-inject 恒为 all,"
+        " retrieval 模式由 _normalize_skill_use_rails_for_agentic_retrieval 覆写为 auto_list。",
+    )
+    include_tools: bool = param_field(
+        default=False,
+        description="chat profile 恒有 SysOperationRail 持文件工具，skill rail 不再带 fallback 集。",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_SKILL_USE,
+    description="Chat-profile member skill-use rail (ReconcilingSkillUseRail): "
+                "workspace-derived skills_dir, session-baseline reconcile on hot unmount.",
+    input_model=TeamSkillUseInput,
+)
+def build_team_skill_use(params: dict, ctx: Any) -> object | None:
+    """Build the chat-profile member skill-use rail.
+
+    chat profile 此前依赖 agent-core ``enable_skill_discovery`` 自动注入的
+    普通 ``SkillUseRail``——session baseline「只建不刷」，团包 skills 热卸后
+    旧技能残留系统提示词 ``# 技能`` 段。此处显式声明 ``ReconcilingSkillUseRail``
+    （单专家同款 baseline 双向对齐兜底），并经 ``issubclass`` 命中 factory 的
+    ``_already_provided(SkillUseRail)`` 短路，抑制自动注入的普通 rail。
+
+    Args:
+        params: Provider params（skill_mode / include_tools，均有默认）。
+        ctx: The active ``SwarmBuildContext`` for the current member.
+
+    Returns:
+        A ``ReconcilingSkillUseRail`` instance, or ``None`` when the member has
+        no workspace（无 skills 来源，交给 factory 自动注入兜底）。
+    """
+    from jiuwenswarm.server.runtime.agent_adapter.skill_rail_reconcile import (
+        ReconcilingSkillUseRail,
+    )
+
+    inp = TeamSkillUseInput.resolve(params, ctx)
+    skills_dirs = _member_workspace_skill_dirs(ctx)
+    if not skills_dirs:
+        return None
+    return ReconcilingSkillUseRail(
+        skills_dir=skills_dirs,
+        skill_mode=inp.skill_mode,
+        include_tools=inp.include_tools,
+        disabled_skills=_collect_disabled_skills(skills_dirs) or None,
+    )
+
 
 def _link_member_configured_skills(
     member_skills_dir: Path,
@@ -239,5 +330,7 @@ def build_member_skill_toolkit(params: dict, ctx: Any) -> object | None:
 
 __all__ = [
     "MEMBER_SKILL_TOOLKIT",
+    "TEAM_SKILL_USE",
     "build_member_skill_toolkit",
+    "build_team_skill_use",
 ]

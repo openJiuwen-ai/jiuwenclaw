@@ -630,7 +630,13 @@ def _install_default_builtin_skills(
         cumulative_diff: 累积的文件变更追踪结果
     """
     # 定义默认安装的技能列表
-    default_skills = ["xiaoyi-web-search"]
+    default_skills = [
+        "xiaoyi-web-search",
+        "aigc_marker",
+        "execution-validator-skill",
+        "secret-guardian",
+        "skill-scope",
+    ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
         logger.warning(f"内置技能目录不存在，跳过默认技能安装: {builtin_dir}")
@@ -683,7 +689,13 @@ def ensure_builtin_skills_installed() -> None:
     只补装 default_skills 中指定的技能，不扫描全部内置技能。
     """
     # 默认预装的技能列表
-    default_skills = ["xiaoyi-web-search"]
+    default_skills = [
+        "xiaoyi-web-search",
+        "aigc_marker",
+        "execution-validator-skill",
+        "secret-guardian",
+        "skill-scope",
+    ]
 
     builtin_dir = get_builtin_skills_dir()
     if not builtin_dir.exists() or not builtin_dir.is_dir():

@@ -23,6 +23,7 @@ from jiuwenswarm.common.kv_cache_affinity_config import (
     set_default_model_provider_in_entries,
     validate_affinity_invariant,
 )
+from jiuwenswarm.common.connectors import connector_excluded_commands
 from jiuwenswarm.common.utils import get_config_dir, get_config_file
 
 logger = logging.getLogger(__name__)
@@ -120,10 +121,15 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
     models = config.get("models", {})
     if isinstance(models, dict):
         for entry in models.values():
-            if isinstance(entry, dict):
-                mcc = entry.get("model_client_config")
-                if isinstance(mcc, dict) and "custom_headers" in mcc:
-                    mcc["custom_headers"] = _parse_custom_headers(mcc["custom_headers"])
+            # models.defaults 等列表型键：逐条目走同一归一化
+            # （此前只处理 dict 值，defaults 列表里的 custom_headers 空串漏网，
+            #  会在 TeamAgentSpec 校验期抛出 dict_type 错误）
+            candidates = entry if isinstance(entry, list) else [entry]
+            for item in candidates:
+                if isinstance(item, dict):
+                    mcc = item.get("model_client_config")
+                    if isinstance(mcc, dict) and "custom_headers" in mcc:
+                        mcc["custom_headers"] = _parse_custom_headers(mcc["custom_headers"])
 
     react = config.get("react", {})
     if isinstance(react, dict):
@@ -2106,6 +2112,18 @@ _SANDBOX_RUNTIME_DEFAULTS: dict[str, Any] = {
 # 受 ``get_sandbox_runtime`` / ``update_sandbox_runtime`` 管辖的 sandbox 字段。
 _SANDBOX_RUNTIME_KEYS: tuple[str, ...] = tuple(_SANDBOX_RUNTIME_DEFAULTS.keys())
 
+# 连接器 CLI glob 强制并入 excluded_commands；入口名只改 connect_cli_config.json。
+def merge_connector_excluded_commands(patterns: list[str] | None) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in (*connector_excluded_commands(), *(patterns or [])):
+        item = str(raw).strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
 
 def _coerce_optional_positive_int(
     value: Any, *, field: str, allow_zero: bool = False
@@ -2152,6 +2170,9 @@ def _ensure_sandbox_runtime_shape(runtime: Any) -> dict[str, Any]:
     base = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
             for k, v in _SANDBOX_RUNTIME_DEFAULTS.items()}
     if not isinstance(runtime, dict):
+        base["excluded_commands"] = merge_connector_excluded_commands(
+            base.get("excluded_commands")
+        )
         return base
     out = dict(base)
     if "enabled" in runtime:
@@ -2181,6 +2202,9 @@ def _ensure_sandbox_runtime_shape(runtime: Any) -> dict[str, Any]:
         out["idle_check_interval"] = _coerce_optional_positive_int(
             runtime["idle_check_interval"], field="sandbox.idle_check_interval",
         )
+    out["excluded_commands"] = merge_connector_excluded_commands(
+        out.get("excluded_commands")
+    )
     return out
 
 
@@ -2724,6 +2748,9 @@ def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
         merged["idle_check_interval"] = _coerce_optional_positive_int(
             patch["idle_check_interval"], field="sandbox.idle_check_interval",
         )
+    merged["excluded_commands"] = merge_connector_excluded_commands(
+        merged.get("excluded_commands")
+    )
 
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
     if "sandbox" not in data or not isinstance(data.get("sandbox"), dict):

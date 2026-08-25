@@ -338,3 +338,82 @@ async def test_stream_event_rail_inserts_missing_tool_result_after_cancelled_cal
     assert messages[2].tool_call_id == "compose-call"
     assert "symphony_compose_score" in messages[2].content
     assert isinstance(messages[3], UserMessage)
+
+
+@pytest.mark.asyncio
+async def test_stream_event_rail_replaces_structured_interrupt_with_final_result():
+    rail = JiuSwarmStreamEventRail()
+    ctx = _model_ctx([
+        UserMessage(content="delegate a file task"),
+        AssistantMessage(
+            content="",
+            tool_calls=[{
+                "type": "function",
+                "id": "task-call",
+                "function": {
+                    "name": "task_tool",
+                    "arguments": "{\"task_description\":\"write and verify\"}",
+                },
+            }],
+        ),
+        ToolMessage(
+            content=(
+                "{'result_type': 'interrupt', 'state': [], "
+                "'interrupt_ids': ['write-approval']}"
+            ),
+            tool_call_id="task-call",
+        ),
+        ToolMessage(
+            content="{'success': True, 'data': {'output': 'verified'}}",
+            tool_call_id="task-call",
+        ),
+    ])
+
+    await rail.before_model_call(ctx)
+
+    task_results = [
+        message
+        for message in ctx.context.get_messages()
+        if isinstance(message, ToolMessage)
+        and message.tool_call_id == "task-call"
+    ]
+    assert len(task_results) == 1
+    assert "'success': True" in task_results[0].content
+    assert "'result_type': 'interrupt'" not in task_results[0].content
+
+
+@pytest.mark.asyncio
+async def test_stream_event_rail_keeps_active_structured_interrupt():
+    rail = JiuSwarmStreamEventRail()
+    ctx = _model_ctx([
+        UserMessage(content="delegate a file task"),
+        AssistantMessage(
+            content="",
+            tool_calls=[{
+                "type": "function",
+                "id": "task-call",
+                "function": {
+                    "name": "task_tool",
+                    "arguments": "{\"task_description\":\"write and verify\"}",
+                },
+            }],
+        ),
+        ToolMessage(
+            content=(
+                '{"result_type": "interrupt", "state": [], '
+                '"interrupt_ids": ["write-approval"]}'
+            ),
+            tool_call_id="task-call",
+        ),
+    ])
+
+    await rail.before_model_call(ctx)
+
+    task_results = [
+        message
+        for message in ctx.context.get_messages()
+        if isinstance(message, ToolMessage)
+        and message.tool_call_id == "task-call"
+    ]
+    assert len(task_results) == 1
+    assert '"result_type": "interrupt"' in task_results[0].content

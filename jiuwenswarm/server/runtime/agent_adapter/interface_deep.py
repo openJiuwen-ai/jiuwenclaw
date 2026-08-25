@@ -229,7 +229,10 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
     EvolutionSlashContext,
     handle_evolution_slash_command,
 )
-from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
+from jiuwenswarm.server.utils.stream_utils import (
+    parse_ask_user_question_payload,
+    parse_stream_chunk as parse_common_stream_chunk,
+)
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
@@ -261,6 +264,10 @@ from jiuwenswarm.agents.harness.common.tools.channel_config_tools import (
 )
 from jiuwenswarm.agents.harness.common.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
+from jiuwenswarm.agents.harness.common.tools.invoke_meta.invoke_tool import InvokeTool
+from jiuwenswarm.agents.harness.common.tools.invoke_meta.workspace_context import (
+    set_effective_request_workspace_dir,
+)
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     get_user_location,
     create_note,
@@ -302,6 +309,7 @@ from jiuwenswarm.common.config import (
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_skill_create_enabled,
+    merge_connector_excluded_commands,
     resolve_env_vars,
 )
 from jiuwenswarm.common.mcp_config import (
@@ -359,6 +367,14 @@ _CRON_TOOL_BOUND: ContextVar[bool] = ContextVar(
     "cron_tool_bound",
     default=False,
 )
+
+
+_HIDDEN_RUNTIME_TOOLS = frozenset({"video_understanding", "acp_chat"})
+
+
+def _runtime_tool_is_disabled(tool_name: str) -> bool:
+    """Return whether a runtime tool is hidden from the main agent."""
+    return tool_name in _HIDDEN_RUNTIME_TOOLS
 
 
 @dataclass(frozen=True, slots=True)
@@ -762,6 +778,19 @@ def _model_provider(model: Any) -> str:
     return ""
 
 
+def _api_type_for_provider(provider: Any) -> str:
+    """根据模型 provider 推导 API 协议类型（仅用于 history 落盘标识，不含敏感信息）。"""
+    name = str(getattr(provider, "value", provider) or "").strip()
+    if not name:
+        return ""
+    if name == "Anthropic":
+        return "anthropic-messages"
+    if is_openai_account_provider(name):
+        return "openai-responses"
+    # OpenAI / DeepSeek / SiliconFlow / DashScope / OpenRouter / Affinity 等均走 chat/completions
+    return "openai-completions"
+
+
 def _deep_agent_kv_cache_affinity_config(
         react_cfg: dict[str, Any] | None,
         model: Model | None = None,
@@ -1131,6 +1160,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         self._session_instance_mode: str = "agent"
         self._session_instance_sub_mode: str | None = None
         self._xiaoyi_phone_tools_registered: bool = False
+        self._invoke_tool_registered: bool = False
         self._paid_search_registered: bool = False
         self._paid_search_tool: WebPaidSearchTool | None = None
         self._symphony_tools: list[Any] = []
@@ -2912,7 +2942,10 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         _, self._video_tool_registered = self._sync_tool_group(
             current_tools=mark_stateless([video_understanding]),
             registered=self._video_tool_registered,
-            enabled=bool(self._video_model_config),
+            enabled=(
+                bool(self._video_model_config)
+                and not _runtime_tool_is_disabled("video_understanding")
+            ),
             create_fn=lambda: mark_stateless([video_understanding]),
             warn_label="video tool",
         )
@@ -3917,7 +3950,9 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             return
 
         extra = launcher.extra_params or {}
-        extra["excluded_commands"] = list(runtime.get("excluded_commands") or [])
+        extra["excluded_commands"] = merge_connector_excluded_commands(
+            runtime.get("excluded_commands")
+        )
         extra["fallback_on_failure"] = bool(runtime.get("fallback_on_failure", False))
         new_policy, upload_list = build_filesystem_policy(
             runtime.get("files") or {},
@@ -5238,7 +5273,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             )
 
         self._video_tool_registered = False
-        if self._video_model_config:
+        if self._video_model_config and not _runtime_tool_is_disabled("video_understanding"):
             try:
                 self._register_shared_tool(video_understanding)
                 tool_cards.append(video_understanding.card)
@@ -5372,14 +5407,50 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         # acp_chat: forward prompts to external stdio ACP agents (see acp_agents in config.yaml)
         try:
             acp_cfg = get_config().get("acp_agents")
-            if isinstance(acp_cfg, dict) and acp_cfg:
+            if (
+                isinstance(acp_cfg, dict)
+                and acp_cfg
+                and not _runtime_tool_is_disabled("acp_chat")
+            ):
                 self._register_shared_tool(acp_chat)
                 tool_cards.append(acp_chat.card)
                 logger.info("[JiuWenSwarmDeepAdapter] acp_chat tool registered")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] acp_chat registration failed: %s", exc)
 
+        # Unified invoke meta-tool (plugin / agent_as_a_tool). Enabled by default.
+        invoke_cfg = (config_base.get("agents") or {}).get("invoke_tool") or {}
+        if bool(invoke_cfg.get("enabled", True)) and not self._invoke_tool_registered:
+            try:
+                invoke_tool = InvokeTool()
+                owner_id = self._tool_owner_id()
+                self._register_agent_owned_tool(invoke_tool, owner_id)
+                tool_cards.append(invoke_tool.card)
+                self._invoke_tool_registered = True
+                logger.info("[JiuWenSwarmDeepAdapter] invoke meta-tool registered")
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] invoke meta-tool registration failed: %s",
+                    exc,
+                )
+
         return tool_cards
+
+    def _bind_invoke_workspace_context(self) -> None:
+        """Publish request workspace for invoke registry / plugin resolution."""
+        workspace = (
+            getattr(self, "_project_dir", None)
+            or getattr(self, "_workspace_dir", None)
+            or ""
+        )
+        workspace_str = str(workspace).strip() if workspace else ""
+        try:
+            set_effective_request_workspace_dir(workspace_str or None)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] set_effective_request_workspace_dir failed: %s",
+                exc,
+            )
 
     def _build_cron_tools(self) -> list[Any]:
         """Build cron tools from the shared runtime bridge."""
@@ -5571,6 +5642,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
 
         await asyncio.sleep(0)
         await self._instance.ensure_initialized()
+        self._bind_invoke_workspace_context()
         # create_deep_agent 只从 system_prompt 字符串重建 identity + prompt_attachments，
         # conventions 等动态 section 在此补挂（专家替换 identity 时不受影响）
         self._restore_dynamic_prompt_sections()
@@ -6819,7 +6891,20 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 ctx_eng = self._instance.react_agent.context_engine
                 flush_history_writes()
                 records = load_history_records(session_id)
-                rebuilt = self._build_messages_for_model(records)
+                rebuilt = self._build_rewind_messages_for_model(records)
+                _rebuilt_roles = [getattr(m, "role", "?") for m in rebuilt]
+                _rebuilt_tool_calls = sum(
+                    len(getattr(m, "tool_calls", None) or []) for m in rebuilt
+                )
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] %s: rewind rebuilt messages roles=%s "
+                    "tool_calls=%d records=%d session=%s",
+                    reason,
+                    _rebuilt_roles,
+                    _rebuilt_tool_calls,
+                    len(records),
+                    session_id,
+                )
                 if rebuilt:
                     try:
                         from openjiuwen.core.single_agent import create_agent_session
@@ -8830,6 +8915,8 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
+        self._bind_invoke_workspace_context()
+
         _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
         if not self._has_valid_model_config(_req_model):
             return AgentResponse(
@@ -9162,6 +9249,8 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
+        self._bind_invoke_workspace_context()
+
         _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
         if not self._has_valid_model_config(_req_model):
             yield AgentResponseChunk(
@@ -9206,10 +9295,32 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 request_metadata,
             )
 
+        # 专家团 mode 防御：已绑定专家团的会话只接受 team 系 mode，
+        # 显式报错、不静默改道（避免干扰 code.*/plan 组合语义）。
+        if mode not in ("team", "team.plan", "code.team"):
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                get_session_metadata,
+            )
+
+            _expert_md = get_session_metadata(session_id)
+            if isinstance(_expert_md, dict) and str(
+                _expert_md.get("expert_type") or "agent"
+            ) == "team":
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "chat.error",
+                        "error": "该会话已绑定专家团，请使用 team 模式发起对话",
+                        "code": "BAD_REQUEST",
+                    },
+                    is_complete=True,
+                )
+                return
+
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):
             from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
-
             resolved_model = self._resolve_model_for_request(request)
             self._apply_model_to_react_agent(
                 resolved_model,
@@ -9447,6 +9558,15 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 had_assistant_output = True
             if event_type == "chat.final":
                 emitted_terminal_chat_final = True
+                payload = dict(payload)
+                _mcc = getattr(resolved_model, "model_client_config", None)
+                _mc = getattr(resolved_model, "model_config", None)
+                payload["model"] = getattr(_mc, "model_name", "") or ""
+                payload["model_provider"] = str(getattr(_mcc, "client_provider", "") or "")
+                payload["api_type"] = _api_type_for_provider(
+                    getattr(_mcc, "client_provider", "")
+                )
+                payload["usage"] = dict(usage_accumulator)
             # Persist goal-completed cards at the stream yield choke point so
             # every goal.updated path (typed chunk / dict chunk) is covered once
             # without touching the pure payload parser.
@@ -9760,49 +9880,35 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                     interaction_stream_abort = False
                     return
             else:
-                if _runner_session is not None:
-                    # cancel-rewind 路径：cancel 后下一轮 invoke 发现有预置的 rewind session，
-                    # 直接走 Runner.run_agent_streaming(session=_runner_session)，绕过
-                    # attach_output+send_input，让 core 复用预置 session 中重建好的对话历史，
-                    # 避免 stale checkpointer 导致上下文丢失。
-                    server_logger.info(
-                        "[AgentServer] rewind path: using pre-built session to restore history"
-                        " session_id=%s request_id=%s channel_id=%s mode=%s",
-                        session_id, rid, cid, mode,
-                    )
-                    interaction_stream = Runner.run_agent_streaming(
-                        self._instance, inputs, session=_runner_session
-                    )
-                    # run_agent_streaming 是普通 async generator，不需要 abort close，
-                    # 设 False 以防 finally 块调 close(abort_active_round=...) 出错。
+                # 重建后的上下文已经在 _prepare_rewind_session_for_next_invoke 里
+                # 同步回原始 session（task-loop controller 绑定的是原始 session），
+                # 所以这里统一走 attach_output+send_input 的正常路径即可。
+                # 之前的 rewind 分支 Runner.run_agent_streaming(session=_runner_session)
+                # 会导致 stream 归属错位（core 写原始 session 的流，adapter 读
+                # _runner_session 的流），从而丢掉 output/notice chunk。
+                interaction_stream = await self._instance.attach_output()
+                if interaction_stream is None:
+                    async for chunk in _yield_runtime_accepted():
+                        yield chunk
                     interaction_stream_abort = False
-                else:
-                    interaction_stream = await self._instance.attach_output()
-                    if interaction_stream is None:
-                        async for chunk in _yield_runtime_accepted():
-                            yield chunk
-                        interaction_stream_abort = False
-                        return
-                    # Last stop before the message enters the single-agent runner
-                    # streaming path. ``prepare_ms`` covers everything this adapter
-                    # did with the turn before handing it over.
-                    server_logger.info(
-                        "[AgentServer] message entering runner streaming: session_id=%s request_id=%s"
-                        " channel_id=%s mode=%s prepare_ms=%.1f query=%s",
-                        session_id,
-                        rid,
-                        cid,
-                        mode,
-                        (time.monotonic() - stream_impl_started_at) * 1000,
-                        preview_text(inputs.get("query", "")),
+                    return
+                server_logger.info(
+                    "[AgentServer] message entering runner streaming: session_id=%s request_id=%s"
+                    " channel_id=%s mode=%s prepare_ms=%.1f query=%s",
+                    session_id,
+                    rid,
+                    cid,
+                    mode,
+                    (time.monotonic() - stream_impl_started_at) * 1000,
+                    preview_text(inputs.get("query", "")),
+                )
+                await self._instance.send_input(
+                    SendInputRequest(
+                        request_id=rid,
+                        inputs=inputs,
+                        mode=self._resolve_input_dispatch_mode(request.params),
                     )
-                    await self._instance.send_input(
-                        SendInputRequest(
-                            request_id=rid,
-                            inputs=inputs,
-                            mode=self._resolve_input_dispatch_mode(request.params),
-                        )
-                    )
+                )
             run_failure: tuple[str, str] | None = None
             # Start of the wait for the runner's first chunk; every branch above
             # has either handed the message over or attached to a running round.
@@ -10399,6 +10505,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 if chunk_type == "controller_output" and payload is not None:
                     inner_t = getattr(payload, "type", None)
                     inner_val = getattr(inner_t, "value", inner_t) if inner_t is not None else None
+                    if inner_val == "task_interaction":
+                        return parse_common_stream_chunk(
+                            chunk,
+                            _has_streamed_content=_has_streamed_content,
+                        )
                     if inner_val == "task_completion":
                         return None
                     if inner_val == "task_failed":
@@ -11562,6 +11673,138 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                     if event_type in ("context.compact_boundary",):
                         continue
                     messages.append(AssistantMessage(content=content))
+
+        return messages
+
+    @staticmethod
+    def _build_rewind_messages_for_model(records: list[dict[str, Any]]) -> list[Any]:
+        """为 rewind 重建模型可接受的完整消息序列，保留 tool_call / tool_result。
+
+        与 ``_build_messages_for_model``（仅供 compact/摘要使用，会跳过 tool 记录）不同，
+        本函数把 ``chat.tool_call`` 还原成带 ``tool_calls`` 的 AssistantMessage，
+        把 ``chat.tool_result`` 还原成 ToolMessage，保证模型报错后下一轮复盘时
+        能看到完整的工具轨迹。一条「要调工具的 assistant 消息」在 history.jsonl
+        里被拆成 ``chat.final``（正文）+ ``chat.tool_call``（调用），这里重新合并。
+        """
+        from openjiuwen.core.foundation.llm.schema.message import (
+            AssistantMessage,
+            ToolMessage,
+            UserMessage,
+        )
+        from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+
+        # 单个 tool_result 的最大回放长度，避免把超大文件内容塞回上下文。
+        _MAX_TOOL_RESULT_CHARS = 4000
+
+        messages: list[Any] = []
+        i = 0
+        n = len(records)
+        while i < n:
+            rec = records[i]
+            if not isinstance(rec, dict):
+                i += 1
+                continue
+
+            role = rec.get("role")
+            event_type = rec.get("event_type")
+            request_id = rec.get("request_id")
+
+            # 用户消息
+            if role == "user":
+                content = rec.get("content")
+                content = content if isinstance(content, str) else ""
+                cleaned = re.sub(
+                    r"<file-content[^>]*>.*?</file-content>",
+                    "",
+                    content,
+                    flags=re.DOTALL,
+                ).strip()
+                if cleaned:
+                    messages.append(UserMessage(content=cleaned))
+                i += 1
+                continue
+
+            # 工具结果 -> ToolMessage
+            if event_type == "chat.tool_result":
+                tool_call_id = str(rec.get("tool_call_id") or "")
+                result = rec.get("result")
+                if isinstance(result, (dict, list)):
+                    result = json.dumps(result, ensure_ascii=False)
+                result = str(result or "")
+                if len(result) > _MAX_TOOL_RESULT_CHARS:
+                    result = result[:_MAX_TOOL_RESULT_CHARS] + "…[truncated]"
+                if tool_call_id:
+                    messages.append(
+                        ToolMessage(content=result, tool_call_id=tool_call_id)
+                    )
+                i += 1
+                continue
+
+            # 工具调用（一轮可能并行多个，合并成一条带 tool_calls 的 assistant 消息）
+            if role == "assistant" and event_type == "chat.tool_call":
+                tool_calls: list[ToolCall] = []
+                j = i
+                while (
+                    j < n
+                    and isinstance(records[j], dict)
+                    and records[j].get("event_type") == "chat.tool_call"
+                ):
+                    tc = records[j].get("tool_call") or {}
+                    if isinstance(tc, dict):
+                        tool_calls.append(
+                            ToolCall(
+                                id=str(tc.get("tool_call_id") or ""),
+                                type="function",
+                                name=str(tc.get("name") or ""),
+                                arguments=str(tc.get("arguments") or ""),
+                            )
+                        )
+                    j += 1
+
+                # 工具调用前的 chat.final（同 request_id）是这条 assistant 消息的正文
+                text = ""
+                if i > 0 and isinstance(records[i - 1], dict):
+                    prev = records[i - 1]
+                    if (
+                        prev.get("event_type") == "chat.final"
+                        and prev.get("request_id") == request_id
+                    ):
+                        prev_content = prev.get("content")
+                        text = prev_content if isinstance(prev_content, str) else ""
+
+                if tool_calls:
+                    messages.append(AssistantMessage(content=text, tool_calls=tool_calls))
+                i = j
+                continue
+
+            # assistant 普通文本 / 摘要
+            if role == "assistant":
+                if rec.get("is_goal_completed_message"):
+                    i += 1
+                    continue
+                if event_type in ("chat.final", "context.compact_summary", "context.rewind_summary") or not event_type:
+                    if event_type == "context.compact_boundary":
+                        i += 1
+                        continue
+                    # 该 chat.final 后紧跟同 request 的 tool_call 时，正文归 tool_call 消息，
+                    # 这里跳过，避免重复出现两条相邻 assistant 消息。
+                    nxt = records[i + 1] if i + 1 < n else None
+                    if (
+                        event_type == "chat.final"
+                        and isinstance(nxt, dict)
+                        and nxt.get("event_type") == "chat.tool_call"
+                        and nxt.get("request_id") == request_id
+                    ):
+                        i += 1
+                        continue
+                    content = rec.get("content")
+                    content = content if isinstance(content, str) else ""
+                    if content.strip():
+                        messages.append(AssistantMessage(content=content))
+                i += 1
+                continue
+
+            i += 1
 
         return messages
 

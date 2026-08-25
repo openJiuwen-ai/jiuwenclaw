@@ -528,8 +528,8 @@ class RuntimePromptRail(DeepAgentRail):
                 priority=98,
             ))
 
-        if self._channel in ("tui", "web"):
-            # Trusted directories policy for TUI and Web mode
+        if self._channel in ("tui", "web", "desktop"):
+            # Trusted directories policy for TUI / Web / Desktop
             trusted_dirs = self._existing_dirs(self._trusted_dirs)
             # This agent's own workspace. Team members each own one; without
             # it (single-agent runs) the process-wide agent workspace is the
