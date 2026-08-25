@@ -89,6 +89,12 @@ def app_with_mock(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, AsyncMock]:
     file_compat.catalog_file_compat_entries = lambda: []  # type: ignore[attr-defined]
     sys.modules["jiuwenswarm.gateway.channel_manager.web.web_http_file_compat"] = file_compat
 
+    # web_http_app imports timeout helpers from web_http_server (stdlib-only).
+    _load_module(
+        "jiuwenswarm.gateway.channel_manager.web.web_http_server",
+        SERVER_PATH,
+    )
+
     web_http_app = _load_module("jw_web_http_app_under_test", HTTP_PATH)
     channel = object()
     app = web_http_app.create_web_http_app(channel)
