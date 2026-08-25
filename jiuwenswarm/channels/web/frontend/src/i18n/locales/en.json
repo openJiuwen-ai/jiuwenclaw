@@ -475,6 +475,12 @@
     "approvalNext": "Next",
     "approvalInputPlaceholder": "Add revision notes then click Next; leave empty and click Skip"
   },
+  "persistSession": {
+    "toolbarTag": "Persist Session",
+    "closeTag": "Turn off Persist Session",
+    "lockedHint": "Persist Session was locked when this session was created and cannot be changed",
+    "textRequired": "Enter a task after /persist"
+  },
   "goal": {
     "formSubmit": "Confirm",
     "formCancel": "Cancel",
