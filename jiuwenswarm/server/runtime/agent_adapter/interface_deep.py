@@ -130,6 +130,12 @@ _ROUND_TERMINAL_CHUNK_TYPES = frozenset(
 # many-step round cannot grow it without limit.
 _ROUND_VISIBLE_TEXT_MAX_CHARS = 256 * 1024
 
+# Safety bound for cleanup confirmation after DeepAgent.cancel_round().  A
+# timeout is a conservative failure; it never turns an unproven cleanup into
+# success.  This is intentionally independent from AgentServer's short stream
+# cleanup grace window.
+_INTERACTION_CANCEL_CLEANUP_TIMEOUT_SECONDS = 2.0
+
 
 def _strip_whitespace(text: str) -> str:
     """Whitespace-free form used to compare two renderings of the same text.
@@ -2416,6 +2422,8 @@ class JiuWenSwarmDeepAdapter:
         self,
         session_id: str | None,
         frozen_keys: tuple[ToolInvocationKeyV1, ...],
+        *,
+        allow_missing_core_state: bool = False,
     ) -> bool:
         """Discard one exact Core permission continuation and balance its context."""
         instance = getattr(self, "_instance", None)
@@ -2429,14 +2437,71 @@ class JiuWenSwarmDeepAdapter:
             return False
 
         try:
+            frozen = {key.invocation_id: key for key in frozen_keys}
+            if len(frozen) != len(frozen_keys):
+                return False
             state = loop_session.get_state(INTERRUPTION_KEY)
+            if state is None:
+                if not allow_missing_core_state:
+                    return False
+                queue = getattr(self, "_root_permission_queue", None)
+                if queue is None:
+                    return False
+                tool_call_ids: set[str] = set()
+                for key in frozen_keys:
+                    if (
+                        key.root_session_id != target_sid
+                        or key.execution_session_id != target_sid
+                        or not key.tool_call_id
+                        or key.tool_call_id in tool_call_ids
+                    ):
+                        return False
+                    card = queue.get(key)
+                    request = getattr(card, "request", None)
+                    metadata = getattr(request, "metadata", None)
+                    wire_key = (
+                        metadata.get("tool_invocation_key")
+                        if isinstance(metadata, Mapping)
+                        else None
+                    )
+                    if (
+                        card is None
+                        or getattr(card, "state", None) != "pending"
+                        or ToolInvocationKeyV1.from_wire(wire_key) != key
+                    ):
+                        return False
+                    tool_call_ids.add(key.tool_call_id)
+
+                react_agent = getattr(instance, "react_agent", None)
+                context_engine = getattr(react_agent, "context_engine", None)
+                context = (
+                    context_engine.get_context(session_id=target_sid)
+                    if context_engine is not None
+                    else None
+                )
+                if context is None:
+                    return False
+                for message in list(context.get_messages() or []):
+                    for call in list(getattr(message, "tool_calls", None) or []):
+                        if str(getattr(call, "id", "") or "") in tool_call_ids:
+                            return False
+                    if str(getattr(message, "tool_call_id", "") or "") in tool_call_ids:
+                        return False
+                # Persist the exact context inspection point before queue state
+                # is discarded.  A failed save keeps the scope quarantined.
+                await context_engine.save_contexts(loop_session)
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] confirmed already-discarded exact "
+                    "permission continuation session=%s cards=%d",
+                    target_sid,
+                    len(frozen_keys),
+                )
+                return True
+
             interrupted_tools = getattr(state, "interrupted_tools", None)
             if not isinstance(interrupted_tools, Mapping) or not interrupted_tools:
                 return False
 
-            frozen = {key.invocation_id: key for key in frozen_keys}
-            if len(frozen) != len(frozen_keys):
-                return False
             pending: dict[str, ToolInvocationKeyV1] = {}
             pending_tool_ids: list[str] = []
             for entry in interrupted_tools.values():
@@ -8739,6 +8804,7 @@ class JiuWenSwarmDeepAdapter:
         session_id: str,
         discard_confirmed: bool,
         keep_lock: bool,
+        allow_missing_core_state: bool = False,
     ) -> bool:
         try:
             if not discard_confirmed:
@@ -8756,6 +8822,7 @@ class JiuWenSwarmDeepAdapter:
             if frozen_keys and not await self._discard_frozen_permission_continuation(
                 session_id,
                 frozen_keys,
+                allow_missing_core_state=allow_missing_core_state,
             ):
                 return False
             self._root_permission_queue.discard_continuation(
@@ -9534,14 +9601,22 @@ class JiuWenSwarmDeepAdapter:
             # A scheduler task may be installed while cancel_round is
             # unwinding; repeat the targeted cancellation as a safety net.
             self._cancel_scheduler_running_tasks()
+        cleanup_confirmed = (
+            cancel_call_completed
+            and await self._confirm_interaction_cancel_cleanup(
+                request.session_id,
+                cutover_handoff=cutover_handoff,
+            )
+        )
         continuation_discarded = True
         if cutover_handoff is not None:
             try:
                 continuation_discarded = await self._complete_root_permission_cutover(
                     cutover_handoff,
                     session_id=request.session_id,
-                    discard_confirmed=cancel_call_completed,
+                    discard_confirmed=cleanup_confirmed,
                     keep_lock=False,
+                    allow_missing_core_state=cleanup_confirmed,
                 )
             except RootPermissionQueueError:
                 continuation_discarded = False
@@ -9549,13 +9624,14 @@ class JiuWenSwarmDeepAdapter:
             await self._clear_pending_ask_user_interrupt_for_supplement(request.session_id)
         message = "任务已切换" if intent == "supplement" else "任务已取消"
 
+        cleanup_succeeded = cleanup_confirmed and continuation_discarded
         payload: dict[str, Any] = {
             "event_type": "chat.interrupt_result",
             "intent": intent,
-            "success": continuation_discarded,
+            "success": cleanup_succeeded,
             "message": message,
         }
-        if not continuation_discarded:
+        if not cleanup_succeeded:
             payload["error"] = "permission_continuation_discard_failed"
         if new_input:
             payload["new_input"] = new_input
@@ -9581,10 +9657,86 @@ class JiuWenSwarmDeepAdapter:
         return AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
-            ok=continuation_discarded,
+            ok=cleanup_succeeded,
             payload=payload,
             metadata=request.metadata,
         )
+
+    async def _confirm_interaction_cancel_cleanup(
+        self,
+        session_id: str | None,
+        *,
+        cutover_handoff: _RootPermissionDispatchHandoff | None,
+    ) -> bool:
+        """Confirm that an interaction cancel left no producer able to resume."""
+        if cutover_handoff is not None and not cutover_handoff.lock.locked():
+            return False
+
+        instance = getattr(self, "_instance", None)
+        if instance is None:
+            return True
+        instance_state = vars(instance)
+        current = asyncio.current_task()
+        tracked: set[asyncio.Task[Any]] = set()
+        round_task = instance_state.get("_interaction_round_task")
+        if isinstance(round_task, asyncio.Task) and round_task is not current:
+            tracked.add(round_task)
+
+        sid = self._resolve_interrupt_session_id(session_id)
+        for task in tuple(getattr(self, "_session_agent_tasks", {}).get(sid, ())):
+            if isinstance(task, asyncio.Task) and task is not current:
+                tracked.add(task)
+
+        controller = instance_state.get("_loop_controller")
+        scheduler = getattr(controller, "_task_scheduler", None)
+        running = getattr(scheduler, "_running_tasks", None)
+        if isinstance(running, Mapping):
+            for _executor, task in tuple(running.values()):
+                if isinstance(task, asyncio.Task) and task is not current:
+                    tracked.add(task)
+
+        if tracked:
+            done, pending = await asyncio.wait(
+                tracked,
+                timeout=_INTERACTION_CANCEL_CLEANUP_TIMEOUT_SECONDS,
+            )
+            if pending:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] interrupt cleanup confirmation timed out: "
+                    "session=%s pending=%d",
+                    sid,
+                    len(pending),
+                )
+                return False
+            for task in done:
+                if task.cancelled():
+                    continue
+                try:
+                    error = task.exception()
+                except asyncio.CancelledError:
+                    continue
+                if error is not None:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] interrupt cleanup task failed: "
+                        "session=%s error=%s",
+                        sid,
+                        error,
+                    )
+                    return False
+
+        # All possible producers above are terminal before these checks.  The
+        # held dispatch mutex plus queue quarantine prevents a permission
+        # continuation from being admitted while the checks are in progress.
+        if cutover_handoff is not None and not cutover_handoff.lock.locked():
+            return False
+        if instance_state.get("_active_interaction_round") is not None:
+            return False
+        if self._session_has_other_running_agent_tasks(sid):
+            return False
+        running = getattr(scheduler, "_running_tasks", None)
+        if isinstance(running, Mapping) and running:
+            return False
+        return True
 
     def _cancel_scheduler_running_tasks(self) -> None:
         """Cancel in-flight asyncio.Tasks in the Controller's TaskScheduler.
