@@ -11,6 +11,7 @@ import {
 } from '../types';
 import { getGatewayHttpBase } from '../utils/env';
 import i18n from '../i18n';
+import { buildRuntimeIdentityHeaders } from './runtimeScope';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -21,13 +22,6 @@ const DEFAULT_TIMEOUT_MS = 15000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function pickHeaderString(value: unknown): string | undefined {
-  if (typeof value === 'string' && value.trim()) {
-    return value;
-  }
-  return undefined;
 }
 
 type HttpVerb = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -778,16 +772,7 @@ export class WebHttpClient {
     requestId: string,
     params: Record<string, unknown>
   ): Record<string, string> {
-    const headers: Record<string, string> = { 'X-Request-Id': requestId };
-    const userId = pickHeaderString(params.user_id);
-    const groupId = pickHeaderString(params.group_id);
-    const botId = pickHeaderString(params.bot_id);
-    const sessionId = pickHeaderString(params.session_id);
-    if (userId) headers['X-User-Id'] = userId;
-    if (groupId) headers['X-Group-Id'] = groupId;
-    if (botId) headers['X-Bot-Id'] = botId;
-    if (sessionId) headers['X-Session-Id'] = sessionId;
-    return headers;
+    return buildRuntimeIdentityHeaders(requestId, params);
   }
 
   private dispatchEvent(event: WsEvent): void {

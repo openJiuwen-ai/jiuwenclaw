@@ -36,7 +36,11 @@ from jiuwenswarm.common.config import (
     get_config,
     get_evolution_auto_save_enabled,
     get_evolution_review_trigger_enabled,
+    get_passive_skill_evolution_triggers,
     get_skill_create_enabled,
+)
+from jiuwenswarm.agents.harness.observability_runtime import (
+    get_trajectory_span_processor,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
@@ -69,7 +73,6 @@ class TeamWorkspaceInfo:
     skills_dir: str | None = None
     team_id: str | None = None
     config: dict[str, Any] | None = None
-    trajectory_registry: Any | None = None
 
 
 RAIL_WHITELIST = frozenset({
@@ -167,7 +170,6 @@ def build_member_rails(
     team_ws_skills_dir = team_workspace.skills_dir
     team_id = team_workspace.team_id
     config = team_workspace.config
-    team_trajectory_registry = team_workspace.trajectory_registry
 
     rails_list = []
 
@@ -282,7 +284,6 @@ def build_member_rails(
             llm_model, actual_model_name = build_evolution_llm()
             evolution_review_trigger = get_evolution_review_trigger_enabled(config)
             evolution_auto_save = get_evolution_auto_save_enabled(config)
-            bound_team_trajectory_registry = team_trajectory_registry if team_id else None
             review_runtime = EvolutionReviewRuntime()
             team_skill_rail = TeamSkillEvolutionRail(
                 skills_dir=team_ws_skills_dir,
@@ -290,8 +291,7 @@ def build_member_rails(
                 model=actual_model_name,
                 review_runtime=review_runtime,
                 language=language,
-                trajectory_source=bound_team_trajectory_registry,
-                trajectory_sink=bound_team_trajectory_registry,
+                trajectory_span_processor=get_trajectory_span_processor(),
                 member_role=role,
                 auto_save=evolution_auto_save,
                 review_trigger=evolution_review_trigger,
@@ -311,11 +311,10 @@ def build_member_rails(
             rails_list.append(team_skill_rail)
             logger.info(
                 "[TeamRuntime] TeamSkillEvolutionRail created: skills_dir=%s, "
-                "model=%s, review_trigger=%s, team_trajectory_registry=%s",
+                "model=%s, review_trigger=%s",
                 team_ws_skills_dir,
                 actual_model_name,
                 evolution_review_trigger,
-                bool(bound_team_trajectory_registry),
             )
         except Exception as exc:
             logger.warning("[TeamRuntime] TeamSkillEvolutionRail failed: %s", exc, exc_info=True)
@@ -329,6 +328,7 @@ def build_member_rails(
                 skills_dir=team_ws_skills_dir,
                 language=language,
                 auto_trigger=True,
+                trajectory_span_processor=get_trajectory_span_processor(),
             )
             rails_list.append(team_skill_create_rail)
             logger.info(
@@ -344,8 +344,6 @@ def build_member_rails(
         evo_rail = build_skill_evolution_rail(
             skills_dir=team_ws_skills_dir,
             config=config,
-            team_trajectory_sink=team_trajectory_registry,
-            team_id=team_id,
             review_runtime=review_runtime,
         )
         if evo_rail is not None:
@@ -530,8 +528,6 @@ def build_evolution_llm(
 def build_skill_evolution_rail(
     skills_dir: str,
     config: dict[str, Any] | None = None,
-    team_trajectory_sink: Any | None = None,
-    team_id: str | None = None,
     review_runtime: EvolutionReviewRuntime | None = None,
 ) -> Any | None:
     """为 Team member 构造 SkillEvolutionRail.
@@ -546,6 +542,7 @@ def build_skill_evolution_rail(
     try:
         llm, model_name = build_evolution_llm(config)
         review_runtime = review_runtime or EvolutionReviewRuntime()
+        evolution_triggers = get_passive_skill_evolution_triggers(config)
 
         rail = SkillEvolutionRail(
             skills_dir=skills_dir,
@@ -553,22 +550,16 @@ def build_skill_evolution_rail(
             model=model_name,
             review_runtime=review_runtime,
             auto_save=True,
+            signal_trigger=evolution_triggers["signal_trigger"],
+            review_trigger=evolution_triggers["review_trigger"],
+            trajectory_span_processor=get_trajectory_span_processor(),
             disabled_skills=merge_evolution_disabled_skills(
                 load_execution_disabled_skills()
             ),
         )
-        has_team_trajectory_sink = team_trajectory_sink is not None and bool(team_id)
-        if has_team_trajectory_sink:
-            rail.set_trajectory_sink(
-                team_trajectory_sink,
-                team_id=team_id,
-                member_role="teammate",
-            )
         logger.info(
-            "[TeamRuntime] SkillEvolutionRail created: model=%s, "
-            "team_trajectory_sink=%s",
+            "[TeamRuntime] SkillEvolutionRail created: model=%s",
             model_name,
-            has_team_trajectory_sink,
         )
         return rail
     except Exception as exc:

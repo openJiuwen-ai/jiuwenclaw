@@ -9,6 +9,7 @@ so downstream tool/artifact events can be attributed to the active task.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from contextvars import ContextVar
@@ -44,6 +45,9 @@ _IMAGE_ARTIFACT_EXTENSIONS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
 })
 
+# mtime 校验容差（秒）：覆盖 FAT32 2 秒时间戳粒度等文件系统精度问题
+_MTIME_TOLERANCE_S = 2.0
+
 # 文件路径检测的正则表达式模式（仿 PR#1440；调用方按扩展名白名单过滤）
 _FILE_PATH_PATTERNS = [
     # Windows绝对路径 (D:\path, D:/path)
@@ -59,6 +63,21 @@ _FILE_PATH_PATTERNS = [
 
 _PATH_TRAILING_CHARS = "'\"`\\]\\}\\),.;:，。；、："
 _PYTHON_SCRIPT_EXTENSIONS = frozenset({".py", ".pyw"})
+
+# 允许空格的产物路径正则（用于 code/bash stdout 中含空格的 Windows 路径）
+# 与 _FILE_PATH_PATTERNS 的区别：\s → \r\n（允许空格，仅换行截断）
+# 且要求路径以扩展名结尾，避免匹配到无扩展名的目录名
+_ARTIFACT_PATH_PATTERNS = [
+    # Windows绝对路径，允许空格（停在换行/引号/括号等边界）
+    re.compile(
+        r'[A-Za-z]:[/\\][^\r\n\]\}\)\'\"`<>，。；、：]+'
+        r'\.[a-zA-Z0-9]{1,10}'
+    ),
+    # Unix绝对路径，允许空格
+    re.compile(
+        r'/[^\r\n\]\}\)\'\"`<>，。；、：]+\.[a-zA-Z0-9]{1,10}'
+    ),
+]
 
 
 def _clean_path_candidate(path_str: str) -> str:
@@ -87,6 +106,17 @@ def _tool_result_to_text(tool_result: Any) -> str:
         return tool_result
     if isinstance(tool_result, dict):
         return json.dumps(tool_result, ensure_ascii=False)
+    # ToolOutput (pydantic): 直接取 data 中的 stdout/stderr，
+    # 避免 str() 序列化导致反斜杠转义和路径含空格被正则截断
+    data = getattr(tool_result, "data", None)
+    if isinstance(data, dict):
+        parts = []
+        for key in ("stdout", "stderr", "output", "result"):
+            val = data.get(key)
+            if isinstance(val, str) and val:
+                parts.append(val)
+        if parts:
+            return "\n".join(parts)
     if hasattr(tool_result, "__dict__"):
         return str(tool_result)
     return str(tool_result)
@@ -149,6 +179,87 @@ def _extract_image_paths_from_tool_result(tool_result: Any) -> list[str]:
     ]
 
 
+def _artifact_identity(path: str) -> tuple[str, int, int] | None:
+    """返回文件的 (规范化绝对路径, mtime_ns, size) 身份标识。
+
+    stat 失败（文件不存在等）返回 None。
+    """
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return None
+    return (
+        os.path.normcase(os.path.abspath(path)),
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
+
+
+def _is_path_within(path: Path, base: Path) -> bool:
+    """判断 path 是否位于 base 目录内（大小写不敏感，兼容 Windows）。"""
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        return False
+    norm_resolved = os.path.normcase(resolved)
+    norm_base = os.path.normcase(str(base))
+    return norm_resolved == norm_base or norm_resolved.startswith(
+        norm_base + os.sep
+    )
+
+
+def _extract_artifact_paths_from_result(
+    tool_result: Any,
+    tool_start_time: float | None = None,
+    workspace_base: Path | None = None,
+) -> list[str]:
+    """从工具输出中提取产物路径（按扩展名白名单过滤）。
+
+    用于 code/bash/mcp_exec_command 等代码执行工具，从 stdout/stderr 中
+    正则提取文件路径。过滤规则（对齐 clowder-ai artifact_emitter）：
+    - 扩展名白名单；文件必须实际存在
+    - mtime 校验：仅保留工具执行期间写入的文件，避免旧文件误报
+    - 工作区校验：仅保留 workspace_base 内的文件，避免处理工作区外文件
+    - 按规范化绝对路径去重（Windows 上同一绝对路径会被 Windows/Unix
+      两个正则重复命中，且 E:/x 与 /x 可能指向同一文件）
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+    # 使用允许空格的 _ARTIFACT_PATH_PATTERNS 提取（code/bash stdout 中
+    # 路径常含空格，_FILE_PATH_PATTERNS 在空格处截断）
+    result_text = _tool_result_to_text(tool_result)
+    raw_paths: list[str] = []
+    if result_text:
+        for pattern in _ARTIFACT_PATH_PATTERNS:
+            for match in pattern.findall(result_text):
+                cleaned = _clean_path_candidate(match)
+                if cleaned:
+                    raw_paths.append(cleaned)
+    for raw_path in raw_paths:
+        path = os.path.normpath(raw_path)
+        file_path = Path(path)
+        try:
+            stat = file_path.stat()
+        except OSError:
+            continue
+        if (
+            workspace_base is not None
+            and not _is_path_within(file_path, workspace_base)
+        ):
+            continue
+        if (
+            tool_start_time is not None
+            and stat.st_mtime < tool_start_time - _MTIME_TOLERANCE_S
+        ):
+            continue
+        identity = os.path.normcase(os.path.abspath(path))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        paths.append(path)
+    return paths
+
+
 @dataclass
 class TaskExecutionContext:
     task_id: str
@@ -198,6 +309,12 @@ class TaskExecutionRail(DeepAgentRail):
         "write",
         "write_text_file",
     })
+    # 代码执行类工具：产物路径从 stdout/stderr 正则提取
+    CODE_EXEC_TOOLS = frozenset({"code", "bash", "mcp_exec_command"})
+    # 触发产物后处理 hook 的全部工具（对齐 clowder-ai artifact_emitter 的白名单思路）
+    ARTIFACT_DETECTION_TOOLS = frozenset(
+        IMAGE_TOOLS | FILE_ARTIFACT_TOOLS | CODE_EXEC_TOOLS
+    )
 
     def __init__(self) -> None:
         super().__init__()
@@ -206,6 +323,10 @@ class TaskExecutionRail(DeepAgentRail):
         self._active_tasks: dict[str, TaskExecutionContext] = {}
         self._todo_started: set[str] = set()
         self._deep_agent: Any | None = None
+        # 产物检测：工具调用开始时间（按 tool_call_id 记录，用于 mtime 校验）
+        self._tool_start_times: dict[str, float] = {}
+        # 已触发过产物 hook 的文件身份（路径+mtime_ns+size），防止重复后处理
+        self._hooked_artifacts: set[tuple[str, int, int]] = set()
 
     def get_current_task_id(self) -> str | None:
         return _ACTIVE_TASK_ID.get()
@@ -239,6 +360,7 @@ class TaskExecutionRail(DeepAgentRail):
         self._todo_map_before_tool = {}
         self._active_tasks = {}
         self._todo_started = set()
+        self._tool_start_times = {}
         _ACTIVE_TASK_ID.set(None)
         if isinstance(ctx.inputs, InvokeInputs):
             await self._init_task_tracking(ctx.session)
@@ -300,6 +422,13 @@ class TaskExecutionRail(DeepAgentRail):
                 )
             return
 
+        if tool_name in self.ARTIFACT_DETECTION_TOOLS:
+            # 记录工具开始时间，供 after_tool_call 做 mtime 校验
+            tc = ctx.inputs.tool_call
+            tool_call_id = str(getattr(tc, "id", "") or "")
+            if tool_call_id:
+                self._tool_start_times[tool_call_id] = time.time()
+
         self._bind_context_to_in_progress_task()
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
@@ -311,21 +440,19 @@ class TaskExecutionRail(DeepAgentRail):
             await self._sync_todo_and_emit_transitions(ctx)
             return
 
-        if tool_name in self.IMAGE_TOOLS:
-            await self._trigger_image_artifact_hook(ctx)
+        if tool_name in self.ARTIFACT_DETECTION_TOOLS:
+            await self._trigger_artifact_hooks(ctx)
             return
 
-        if tool_name in self.FILE_ARTIFACT_TOOLS:
-            await self._trigger_artifact_post_process_hook(ctx)
-            return
-
-    async def _trigger_image_artifact_hook(
+    async def _trigger_artifact_hooks(
         self, ctx: AgentCallbackContext
     ) -> None:
-        """图像产物落盘后触发 IMAGE_ARTIFACT_POST_PROCESS 扩展 hook。
+        """产物落盘后触发扩展 hook（图像 + 文件）。
 
-        从 tool_result 解析图像路径，构建 ImageArtifactHookContext 并触发
-        扩展回调；扩展可在 handler 中对文件做原地后处理（如加水印）。
+        图像产物触发 IMAGE_ARTIFACT_POST_PROCESS，文件产物触发
+        ARTIFACT_POST_PROCESS（同一文件只触发其中一个）。扩展可在
+        handler 中对文件做原地后处理（如加水印）。已触发过 hook 且内容
+        未变化的文件会被跳过，防止重复后处理（如水印叠盖）。
         ExtensionRegistry 未初始化或扩展抛错时仅记 warning，不阻断主流程。
         """
         session = ctx.session
@@ -335,100 +462,92 @@ class TaskExecutionRail(DeepAgentRail):
             session_id = session.get_session_id()
         except Exception:
             logger.debug(
-                "[TaskExecutionRail] image artifact hook: "
+                "[TaskExecutionRail] artifact hooks: "
                 "failed to get session_id",
                 exc_info=True,
             )
             return
 
-        tool_result = getattr(ctx.inputs, "tool_result", None)
-        image_paths = _extract_image_paths_from_tool_result(tool_result)
-        if not image_paths:
-            return
-
-        task_id = _ACTIVE_TASK_ID.get()
         tool_name = ctx.inputs.tool_name
-
-        try:
-            from jiuwenswarm.extensions.registry import ExtensionRegistry
-            from jiuwenswarm.extensions.hook_event import (
-                AgentServerHookEvents,
-            )
-            from jiuwenswarm.extensions.hooks_context import (
-                ImageArtifactHookContext,
-            )
-        except ImportError as exc:
-            logger.warning(
-                "[TaskExecutionRail] skip image artifact hook, "
-                "import failed: %s",
-                exc,
-            )
-            return
-
-        hook_ctx = ImageArtifactHookContext(
-            session_id=session_id,
-            tool_name=tool_name,
-            task_id=task_id,
-            artifact_paths=image_paths,
-        )
-        try:
-            await ExtensionRegistry.get_instance().trigger(
-                AgentServerHookEvents.IMAGE_ARTIFACT_POST_PROCESS,
-                hook_ctx,
-            )
-        except RuntimeError:
-            logger.warning(
-                "[TaskExecutionRail] skip image artifact hook: "
-                "ExtensionRegistry not initialized",
-            )
-            return
-        except Exception as exc:
-            logger.warning(
-                "[TaskExecutionRail] image artifact hook failed "
-                "session_id=%s tool=%s error=%s",
-                session_id,
-                tool_name,
-                exc,
-            )
-            return
-
-        logger.info(
-            "[TaskExecutionRail] image artifact hook done "
-            "session_id=%s tool=%s count=%d",
-            session_id,
-            tool_name,
-            len(image_paths),
-        )
-
-    async def _trigger_artifact_post_process_hook(
-        self, ctx: AgentCallbackContext
-    ) -> None:
-        """文件产物落盘后触发 ARTIFACT_POST_PROCESS 扩展 hook。"""
-        session = ctx.session
-        if session is None:
-            return
-        try:
-            session_id = session.get_session_id()
-        except Exception:
-            logger.debug(
-                "[TaskExecutionRail] artifact post-process hook: "
-                "failed to get session_id",
-                exc_info=True,
-            )
-            return
-
         tool_args = getattr(ctx.inputs, "tool_args", None)
         tool_result = getattr(ctx.inputs, "tool_result", None)
-        artifact_paths = _extract_file_paths_from_write_tool(
-            ctx.inputs.tool_name,
-            tool_args,
-            tool_result,
-        )
-        if not artifact_paths:
-            return
-
         task_id = _ACTIVE_TASK_ID.get()
-        tool_name = ctx.inputs.tool_name
+        tool_start_time = self._pop_tool_start_time(ctx)
+        workspace_base = self._get_workspace_base()
+
+        # 按工具类型分提取策略（图像/文件互斥，避免同一文件触发双 hook）
+        if tool_name in self.IMAGE_TOOLS:
+            # 图像工具返回权威路径，不做 mtime/工作区校验
+            image_paths = _extract_image_paths_from_tool_result(tool_result)
+            file_paths = []
+        elif tool_name in self.FILE_ARTIFACT_TOOLS:
+            # write 类工具维持原有提取逻辑
+            image_paths = []
+            file_paths = _extract_file_paths_from_write_tool(
+                tool_name, tool_args, tool_result
+            )
+        else:
+            # code / bash / mcp_exec_command：统一提取后按扩展名分流
+            detected = _extract_artifact_paths_from_result(
+                tool_result,
+                tool_start_time=tool_start_time,
+                workspace_base=workspace_base,
+            )
+            image_paths = [
+                p for p in detected
+                if Path(p).suffix.lower() in _IMAGE_ARTIFACT_EXTENSIONS
+            ]
+            file_paths = [
+                p for p in detected
+                if Path(p).suffix.lower() not in _IMAGE_ARTIFACT_EXTENSIONS
+            ]
+
+        # 去重：跳过已 hook 过且内容未变化的文件
+        image_paths = self._filter_unhooked(image_paths)
+        file_paths = self._filter_unhooked(file_paths)
+
+        if image_paths:
+            fired = await self._fire_artifact_hook(
+                session_id=session_id,
+                tool_name=tool_name,
+                task_id=task_id,
+                artifact_paths=image_paths,
+                image=True,
+            )
+            if fired:
+                self._mark_hooked(image_paths)
+
+        if file_paths:
+            fired = await self._fire_artifact_hook(
+                session_id=session_id,
+                tool_name=tool_name,
+                task_id=task_id,
+                artifact_paths=file_paths,
+                image=False,
+            )
+            if fired:
+                self._mark_hooked(file_paths)
+
+    async def _fire_artifact_hook(
+        self,
+        session_id: str,
+        tool_name: str,
+        task_id: str | None,
+        artifact_paths: list[str],
+        *,
+        image: bool,
+    ) -> bool:
+        """触发产物后处理扩展 hook（图像 / 文件）。
+
+        返回是否成功触发（跳过或异常均返回 False，调用方据此决定
+        是否记录去重身份，避免失败后永久跳过该文件）。
+        """
+        if image:
+            event_name = "IMAGE_ARTIFACT_POST_PROCESS"
+            event_desc = "image artifact hook"
+        else:
+            event_name = "ARTIFACT_POST_PROCESS"
+            event_desc = "artifact post-process hook"
 
         try:
             from jiuwenswarm.extensions.registry import ExtensionRegistry
@@ -437,16 +556,22 @@ class TaskExecutionRail(DeepAgentRail):
             )
             from jiuwenswarm.extensions.hooks_context import (
                 ArtifactPostProcessHookContext,
+                ImageArtifactHookContext,
             )
         except ImportError as exc:
             logger.warning(
-                "[TaskExecutionRail] skip artifact post-process hook, "
-                "import failed: %s",
+                "[TaskExecutionRail] skip %s, import failed: %s",
+                event_desc,
                 exc,
             )
-            return
+            return False
 
-        hook_ctx = ArtifactPostProcessHookContext(
+        ctx_class = (
+            ImageArtifactHookContext
+            if image
+            else ArtifactPostProcessHookContext
+        )
+        hook_ctx = ctx_class(
             session_id=session_id,
             tool_name=tool_name,
             task_id=task_id,
@@ -454,32 +579,84 @@ class TaskExecutionRail(DeepAgentRail):
         )
         try:
             await ExtensionRegistry.get_instance().trigger(
-                AgentServerHookEvents.ARTIFACT_POST_PROCESS,
+                getattr(AgentServerHookEvents, event_name),
                 hook_ctx,
             )
         except RuntimeError:
             logger.warning(
-                "[TaskExecutionRail] skip artifact post-process hook: "
+                "[TaskExecutionRail] skip %s: "
                 "ExtensionRegistry not initialized",
+                event_desc,
             )
-            return
+            return False
         except Exception as exc:
             logger.warning(
-                "[TaskExecutionRail] artifact post-process hook failed "
+                "[TaskExecutionRail] %s failed "
                 "session_id=%s tool=%s error=%s",
+                event_desc,
                 session_id,
                 tool_name,
                 exc,
             )
-            return
+            return False
 
         logger.info(
-            "[TaskExecutionRail] artifact post-process hook done "
-            "session_id=%s tool=%s count=%d",
+            "[TaskExecutionRail] %s done session_id=%s tool=%s count=%d",
+            event_desc,
             session_id,
             tool_name,
             len(artifact_paths),
         )
+        return True
+
+    def _pop_tool_start_time(self, ctx: AgentCallbackContext) -> float | None:
+        """取出本次工具调用的开始时间（before_tool_call 时记录）。"""
+        tc = getattr(ctx.inputs, "tool_call", None)
+        tool_call_id = str(getattr(tc, "id", "") or "")
+        if not tool_call_id:
+            return None
+        return self._tool_start_times.pop(tool_call_id, None)
+
+    def _get_workspace_base(self) -> Path | None:
+        """解析工作区根目录，用于产物路径范围校验；获取不到返回 None（跳过校验）。
+
+        与 clowder-ai artifact_emitter 对齐：只使用请求级
+        effective_project_dir，获取不到时返回 None，让 workspace
+        校验自然降级（绝对路径仍能通过，相对路径被过滤）。
+        """
+        try:
+            from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+                get_effective_request_workspace_dir,
+            )
+
+            epd = get_effective_request_workspace_dir()
+            if epd:
+                return Path(epd).resolve()
+        except ImportError:
+            pass
+        except Exception as exc:
+            logger.debug(
+                "[TaskExecutionRail] Failed to get effective_request_workspace_dir: %s",
+                exc,
+            )
+        return None
+
+    def _filter_unhooked(self, paths: list[str]) -> list[str]:
+        """过滤已触发过 hook 且内容未变化的文件。"""
+        result: list[str] = []
+        for path in paths:
+            identity = _artifact_identity(path)
+            if identity is not None and identity in self._hooked_artifacts:
+                continue
+            result.append(path)
+        return result
+
+    def _mark_hooked(self, paths: list[str]) -> None:
+        """记录已触发 hook 的文件身份（hook 可能原地改写文件，故事后重新 stat）。"""
+        for path in paths:
+            identity = _artifact_identity(path)
+            if identity is not None:
+                self._hooked_artifacts.add(identity)
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         self._todo_map_before_tool = {}

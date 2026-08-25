@@ -9,6 +9,35 @@ check_cmd() {
     fi
 }
 
+check_boolean_value() {
+    local name="$1"
+    local value="${DEPLOY_VARS["${name}"]:-}"
+    if [[ "${value}" != "true" && "${value}" != "false" ]]; then
+        error "${name} must be true or false, current value: ${value}"
+    fi
+}
+
+check_user_web_embedding_config() {
+    check_boolean_value "ENABLE_USER_WEB_EMBEDDING"
+    check_boolean_value "IS_UP_MANAGER_WEB"
+
+    if [[ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" \
+        && "${DEPLOY_VARS["IS_UP_MANAGER_WEB"]}" != "true" ]]; then
+        error "ENABLE_USER_WEB_EMBEDDING=true requires IS_UP_MANAGER_WEB=true"
+    fi
+}
+
+module_is_selected() {
+    local expected="$1"
+    local module=""
+    for module in "${MODULES[@]}"; do
+        if [ "${module}" == "${expected}" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 check_yq() {
     local YQ_VERSION=$(yq --version 2>&1)
 
@@ -412,6 +441,14 @@ check_gateway_up_dependency(){
 }
 
 check_web_up_dependency(){
+    check_user_web_embedding_config
+    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ] \
+        && ! module_is_selected "MANAGER"; then
+        if ! check_k8s_resource_exists \
+            "deployment" "${DEPLOY_VARS["MANAGER_WEB_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
+            error "Embedded User Web requires the Manager Web module to be deployed"
+        fi
+    fi
     check_if_db_up
     check_if_obs_up
 
@@ -421,6 +458,14 @@ check_web_up_dependency(){
 }
 
 check_manager_up_dependency(){
+    check_user_web_embedding_config
+    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ] \
+        && ! module_is_selected "WEB"; then
+        if ! check_k8s_resource_exists \
+            "deployment" "${DEPLOY_VARS["WEB_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
+            error "Embedded User Web requires the Web module to be deployed"
+        fi
+    fi
     #check_if_rabbitmq_up
     check_if_db_up
 }

@@ -12,6 +12,7 @@ import { getWebTransport, getWsBase } from '../utils/env';
 import i18n from '../i18n';
 import { GoalRecord } from '../types/goal';
 import { WebHttpClient } from './webHttpClient';
+import { appendRuntimeScopeQuery } from './runtimeScope';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -518,6 +519,7 @@ class WebClient {
     if (options.apiBase) params.set('api_base', options.apiBase);
     if (options.model) params.set('model', options.model);
     if (options.projectDir) params.set('project_dir', options.projectDir);
+    appendRuntimeScopeQuery(params);
     const query = params.toString();
     const target = `${base}${path}`;
     return query ? `${target}?${query}` : target;

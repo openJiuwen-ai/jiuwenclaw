@@ -87,6 +87,11 @@ deploy_manager() {
         wait_k8s_resource_ready "deployment" "${manager_web_name}" "${namespace}"
         success "MANAGER_WEB_NODE_PORT: ${DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]}"
     fi
+
+    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ]; then
+        delete_k8s_resource \
+            "service" "${DEPLOY_VARS["WEB_NAME"]}-nodeport" "${namespace}"
+    fi
 }
 
 uninstall_manager() {
