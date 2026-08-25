@@ -64,6 +64,8 @@
   --color-action-secondary-rgb: 244, 244, 245;
   --color-action-secondary-text: #3f3f46;
   --color-brand-secondary: #0d9488;
+  --color-tool-tab-active-bg: #ededed;
+  --color-tool-tab-hover-bg: #FAFAFA;
 
   /* Feedback */
   --color-feedback-success: #16a34a;
@@ -136,7 +138,7 @@
   --color-skill-capsule-active: #0066ff;
   --color-team-event-surface: var(--color-surface-elevated);
   --color-team-event-summary-surface: transparent;
-  --color-sidebar-nav-hover: #f5f5f5;
+  --color-sidebar-nav-hover: #FAFAFA;
   --color-sidebar-nav-active: #e6e6e6;
   --color-sidebar-nav-active-hover: #dedee0;
   --color-sidebar-action-hover: #e6e6e6;

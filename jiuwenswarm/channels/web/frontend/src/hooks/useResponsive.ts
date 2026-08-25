@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { breakpoints, canFitBoth, canFitToolPanelOnly, type BreakpointKey } from '../styles/breakpoints';
 
 /* ── 基础：通用媒体查询 ── */
@@ -75,22 +75,36 @@ export function useResponsivePanelResize({
   setTeamAreaExpanded,
   mode,
 }: ResponsivePanelResizeParams) {
-  const shouldFullscreen = useMemo(
-    () => isTeamAreaExpanded && !canFitToolPanelOnly(),
-    [isTeamAreaExpanded],
-  );
+  const [shouldFullscreen, setShouldFullscreen] = useState(false);
   const stateRef = useRef({ isTeamAreaExpanded, conversationSidebarCollapsed, mode });
   stateRef.current = { isTeamAreaExpanded, conversationSidebarCollapsed, mode };
   const prevRef = useRef({ isTeamAreaExpanded, conversationSidebarCollapsed });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isTeamAreaExpanded) {
+      setShouldFullscreen(false);
       prevRef.current = { isTeamAreaExpanded, conversationSidebarCollapsed };
       return;
     }
 
+    const prev = prevRef.current;
+    const justExpanded = isTeamAreaExpanded && !prev.isTeamAreaExpanded;
+
     const check = () => {
       const s = stateRef.current;
+      if (!canFitToolPanelOnly()) {
+        if (justExpanded) {
+          setShouldFullscreen(true);
+        } else if (s.isTeamAreaExpanded && !shouldFullscreen) {
+          if (s.mode === 'team') {
+            setTeamAreaExpanded(false);
+          } else {
+            setSingleAgentPanelExpanded(false);
+          }
+        }
+        return;
+      }
+      setShouldFullscreen(false);
       if (!canFitBoth() && !s.conversationSidebarCollapsed) {
         setConversationSidebarCollapsed(true);
       }
@@ -99,7 +113,7 @@ export function useResponsivePanelResize({
     check();
     window.addEventListener('resize', check);
     return () => window.removeEventListener('resize', check);
-  }, [isTeamAreaExpanded, setConversationSidebarCollapsed]);
+  }, [isTeamAreaExpanded, shouldFullscreen, setConversationSidebarCollapsed, setSingleAgentPanelExpanded, setTeamAreaExpanded]);
 
   useEffect(() => {
     if (shouldFullscreen) {

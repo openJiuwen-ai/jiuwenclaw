@@ -1271,7 +1271,7 @@ export function ChatPanel({
                     <span className="share-export-btn__label" data-testid="chat-panel-share-export-loading-label">{t('share.generating')}</span>
                   </>
                 ) : (
-                  <ShareExportIcon className="h-[24px] w-[24px]" />
+                  <ShareExportIcon className="h-[32px] w-[32px]" />
                 )}
               </button>
             )}
@@ -1293,7 +1293,7 @@ export function ChatPanel({
               data-variant="collapse"
               onClick={() => onToggleTeamArea?.(teamAreaExpanded === false ? null : false)}
             >
-              <ChatOverviewIcon className="h-[24px] w-[24px]" aria-hidden />
+              <ChatOverviewIcon className="h-[32px] w-[32px]" aria-hidden />
             </button>
             {!(teamAreaExpanded && mode !== 'team') && (
               <button
@@ -1303,7 +1303,7 @@ export function ChatPanel({
                 data-variant="expand"
                 onClick={() => onToggleTeamArea?.(teamAreaExpanded === true ? null : true)}
               >
-                <PanelCollapseIcon className="h-[24px] w-[24px]" aria-hidden />
+                <PanelCollapseIcon className="h-[32px] w-[32px]" aria-hidden />
               </button>
             )}
           </div>

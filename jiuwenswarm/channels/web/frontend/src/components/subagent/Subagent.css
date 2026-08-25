@@ -11,7 +11,7 @@
 
 .single-agent-tool-tabs {
   display: flex;
-  min-height: 56px;
+  min-height: 68px;
   flex-shrink: 0;
   align-items: stretch;
   justify-content: space-between;
@@ -23,8 +23,8 @@
 .single-agent-tool-tabs__list {
   display: flex;
   min-width: 0;
-  align-items: stretch;
-  gap: 24px;
+  align-items: center;
+  gap: 16px;
 }
 
 .single-agent-tool-tab {
@@ -32,8 +32,10 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  height: 36px;
+  padding: 8px 16px;
   border-bottom: 2px solid transparent;
-  color: var(--color-text-secondary);
+  color: var(--color-text-primary);
   font-size: var(--font-size-sm);
   white-space: nowrap;
 }
@@ -43,10 +45,17 @@
   color: var(--color-text-primary);
 }
 
+.single-agent-tool-tab:not(.single-agent-tool-tab--active):hover,
+.single-agent-tool-tab:not(.single-agent-tool-tab--active):focus-visible {
+  background: var(--color-tool-tab-hover-bg);
+  border-radius: 8px;
+}
+
 .single-agent-tool-tab--active {
-  border-bottom-color: var(--color-action-primary);
   color: var(--color-text-primary);
   font-weight: 600;
+  background: var(--color-tool-tab-active-bg);
+  border-radius: 8px;
 }
 
 .single-agent-tool-tabs__collapse {

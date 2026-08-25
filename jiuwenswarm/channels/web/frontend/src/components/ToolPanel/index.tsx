@@ -30,7 +30,7 @@ import emptyMembersIcon from '../../assets/empty-members.svg';
 import emptyPlanningIcon from '../../assets/empty-planning.svg';
 import emptyReferencesIcon from '../../assets/empty-references.svg';
 import skillIcon from '../../assets/sidebar/skill.svg';
-import maximizeIcon from '../../assets/maximize.svg';
+import MaximizeIcon from '../../assets/maximize.svg?react';
 import PanelCollapseIcon from '../../assets/panel-collapse.svg?react';
 import { CodeEnvironmentPanel } from '../../features/code-mode/CodeEnvironmentPanel';
 import { CodeReviewPanel } from '../../features/code-mode/CodeReviewPanel';
@@ -123,6 +123,7 @@ function ExpandedSingleAgentArea({
   reviewPanel,
   selectedArtifactId,
   onArtifactSelect,
+  emptyIllustration,
 }: {
   sessionId: string;
   activeTab: SingleAgentToolTab;
@@ -136,6 +137,7 @@ function ExpandedSingleAgentArea({
   reviewPanel?: ReactNode;
   selectedArtifactId?: string;
   onArtifactSelect: (artifactId: string) => void;
+  emptyIllustration?: string;
 }) {
   const { t } = useTranslation();
   const tabPanelId = useId();
@@ -162,7 +164,6 @@ function ExpandedSingleAgentArea({
     {
       key: 'planning',
       label: t('team.planning.tab'),
-      count: `${completedTasks}/${totalTasks}`,
       icon: <img src={teamProcessIcon} width={16} height={16} aria-hidden="true" />,
     },
     ...(subagentCount > 0
@@ -179,7 +180,6 @@ function ExpandedSingleAgentArea({
           {
             key: 'artifacts' as const,
             label: t('artifacts.tab'),
-            count: artifactsCount,
             icon: <FileText size={16} />,
           },
         ]
@@ -206,7 +206,6 @@ function ExpandedSingleAgentArea({
             >
               {tab.icon}
               {tab.label}
-              {'count' in tab ? ` (${tab.count})` : ''}
             </button>
           ))}
         </div>
@@ -215,20 +214,20 @@ function ExpandedSingleAgentArea({
           <button
             onClick={toggleFullscreen}
             data-testid="tool-panel-maximize"
-            className="rounded p-2 text-text-muted hover:bg-secondary hover:text-text"
+            className="flex h-[36px] w-[36px] items-center justify-center rounded p-2 text-text hover:bg-secondary hover:text-text-muted"
             aria-label={isFullscreen ? t('team.restore') : t('team.maximize')}
             title={isFullscreen ? t('team.restore') : t('team.maximize')}
           >
-            {isFullscreen ? <Minimize2 size={12} /> : <img src={maximizeIcon} alt="" width={12} height={12} />}
+            {isFullscreen ? <Minimize2 size={12} /> : <MaximizeIcon className="h-[12px] w-[12px]" aria-hidden="true" />}
           </button>
           <button
             onClick={onCollapse}
             data-testid="tool-panel-collapse"
-            className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
+            className="flex h-[36px] w-[36px] items-center justify-center rounded p-2 text-text hover:bg-secondary hover:text-text-muted"
             aria-label={t('team.collapse')}
             title={t('team.collapse')}
           >
-            <PanelCollapseIcon className="h-[24px] w-[24px]" aria-hidden="true" />
+            <PanelCollapseIcon className="h-[18px] w-[18px]" aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -251,7 +250,7 @@ function ExpandedSingleAgentArea({
             {reviewPanel}
           </div>
         ) : (
-          <TaskPlanningPanel variant="expanded" tasks={tasks} members={members} totalTasks={totalTasks} completedTasks={completedTasks} hideAssignee />
+          <TaskPlanningPanel variant="expanded" tasks={tasks} members={members} totalTasks={totalTasks} completedTasks={completedTasks} hideAssignee emptyIllustration={emptyIllustration} />
         )}
       </div>
     </div>
@@ -515,6 +514,7 @@ export function ToolPanel({
               reviewPanel={codeReviewPanel}
               selectedArtifactId={singleAgentPanelSelectedArtifactId}
               onArtifactSelect={setSingleAgentPanelSelectedArtifactId}
+              emptyIllustration={emptyPlanningIcon}
             />
           </div>
         </div>

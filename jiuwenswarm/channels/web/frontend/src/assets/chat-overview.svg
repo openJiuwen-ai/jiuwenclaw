@@ -12,14 +12,14 @@
 		<rect id="模版-operator-template" width="21.333332" height="21.333334" x="5.333496" y="5.333496" />
 		<g id="组合 91335241">
 			<g id="组合 91335242">
-				<rect id="矩形 544821" width="3.466666" height="3.466666" x="9.022602" y="9.822407" rx="1.733333" stroke="rgb(0,0,0)" stroke-width="1.155555" />
-				<rect id="矩形 544821" width="2.311111" height="2.311111" x="9.600380" y="10.400185" rx="1.155555" stroke="rgb(0,0,0)" stroke-width="1.155555" />
-				<path id="直线 55" d="M15.1113 11.5557L23.1113 11.5557" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-width="1.333333" />
+				<rect id="矩形 544821" width="3.466666" height="3.466666" x="9.022602" y="9.822407" rx="1.733333" stroke="currentColor" stroke-width="1.155555" />
+				<rect id="矩形 544821" width="2.311111" height="2.311111" x="9.600380" y="10.400185" rx="1.155555" stroke="currentColor" stroke-width="1.155555" />
+				<path id="直线 55" d="M15.1113 11.5557L23.1113 11.5557" stroke="currentColor" stroke-linecap="round" stroke-width="1.333333" />
 			</g>
 			<g id="组合 91335243">
-				<rect id="矩形 544822" width="3.466666" height="3.466666" x="8.933247" y="18.711079" rx="1.733333" stroke="rgb(0,0,0)" stroke-width="1.155555" />
-				<rect id="矩形 544822" width="2.311111" height="2.311111" x="9.511024" y="19.288857" rx="1.155555" stroke="rgb(0,0,0)" stroke-width="1.155555" />
-				<path id="直线 56" d="M15.1113 20.4443L23.1113 20.4443" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-width="1.333333" />
+				<rect id="矩形 544822" width="3.466666" height="3.466666" x="8.933247" y="18.711079" rx="1.733333" stroke="currentColor" stroke-width="1.155555" />
+				<rect id="矩形 544822" width="2.311111" height="2.311111" x="9.511024" y="19.288857" rx="1.155555" stroke="currentColor" stroke-width="1.155555" />
+				<path id="直线 56" d="M15.1113 20.4443L23.1113 20.4443" stroke="currentColor" stroke-linecap="round" stroke-width="1.333333" />
 			</g>
 		</g>
 	</g>

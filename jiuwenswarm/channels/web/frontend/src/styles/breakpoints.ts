@@ -35,3 +35,7 @@ export function canFitBoth(): boolean {
 export function canFitToolPanelOnly(): boolean {
   return window.innerWidth >= panelThresholds.fitToolPanelOnly;
 }
+
+export function canFitToolPanelItself(): boolean {
+  return window.innerWidth >= TOOL_PANEL_MIN_WIDTH;
+}

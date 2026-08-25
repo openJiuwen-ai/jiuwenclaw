@@ -87,11 +87,12 @@ export function ProgressSection({
   emptyIllustration?: string;
 }) {
   const { t } = useTranslation();
+  const emptyIllustrationSize = displayMode === 'count' ? 48 : 72;
 
   if (tasks.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 text-center text-sm text-text-muted" style={{ height: 120 }} data-testid="team-area-task-planning-empty">
-        {emptyIllustration && <img src={emptyIllustration} alt="" width={48} height={48} className="shrink-0" />}
+        {emptyIllustration && <img src={emptyIllustration} alt="" width={emptyIllustrationSize} height={emptyIllustrationSize} className="shrink-0" />}
         <span>{t('team.noTasks')}</span>
       </div>
     );
@@ -341,6 +342,7 @@ export function TaskPlanningPanel({
             displayMode="percent"
             members={members}
             hideAssignee={hideAssignee}
+            emptyIllustration={emptyIllustration}
           />
         </div>
       ) : (
