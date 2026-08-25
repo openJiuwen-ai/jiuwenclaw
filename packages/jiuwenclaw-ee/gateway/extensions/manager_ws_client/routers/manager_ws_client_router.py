@@ -6,7 +6,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..core.application_config.channel_config import apply_channel_config
 from ..core.application_config.log_masking_rule import apply_log_masking_rule
 from ..core.application_config.logging_config import apply_logging_config
 from ..core.application_config.task_memory_config import apply_task_memory_config
@@ -82,7 +81,6 @@ async def apply_config_push(
     result: dict[str, Any] | None = None
     skip_runtime_update = False
 
-    channel_config = config.get("channel_config")
     log_masking_rule = config.get("log_masking_rule")
     logging_config = config.get("logging_config")
     task_memory_config = config.get("task_memory_config")
@@ -103,11 +101,6 @@ async def apply_config_push(
         matched_payload = instance_data_lifecycle
         skip_runtime_update = True
         result = await apply_instance_data_lifecycle(instance_data_lifecycle)
-
-    elif isinstance(channel_config, dict) and channel_config.get("op"):
-        matched_payload = channel_config
-        skip_runtime_update = True
-        result = await apply_channel_config(channel_config)
 
     elif isinstance(log_masking_rule, dict) and log_masking_rule.get("op"):
         matched_payload = log_masking_rule

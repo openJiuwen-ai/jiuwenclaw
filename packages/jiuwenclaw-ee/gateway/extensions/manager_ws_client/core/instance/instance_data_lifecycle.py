@@ -28,7 +28,6 @@ INSTANCE_PURGE_TABLES: tuple[str, ...] = (
     "config_effective_agent_policy",
     "config_default_template_mapping",
     "log_masking_rule",
-    "channel_config",
     "logging_config",
     "task_memory_config",
     "permissions_config",
