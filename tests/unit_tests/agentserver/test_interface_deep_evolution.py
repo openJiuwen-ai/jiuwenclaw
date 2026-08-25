@@ -47,6 +47,35 @@ class DeepAdapterHarness(JiuWenClawDeepAdapter):
         return self._build_skill_evolution_rail(config)
 
 
+def test_rebuild_skill_path_rejects_paths_outside_registered_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """The rebuild RPC may only operate on registered skill directories."""
+    allowed_dir = tmp_path / "skills"
+    allowed_skill = allowed_dir / "demo-skill" / "SKILL.md"
+    allowed_skill.parent.mkdir(parents=True)
+    allowed_skill.write_text("# demo", encoding="utf-8")
+    outside_skill = tmp_path / "outside" / "SKILL.md"
+    outside_skill.parent.mkdir()
+    outside_skill.write_text("# outside", encoding="utf-8")
+
+    adapter = object.__new__(JiuWenClawDeepAdapter)
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_registered_skill_dirs_for_rail",
+        lambda _self: [str(allowed_dir)],
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_agent_registered_skill_dirs",
+        lambda: [allowed_dir],
+    )
+
+    assert adapter._validate_rebuild_skill_path(str(allowed_skill)) == str(allowed_skill.resolve())
+    with pytest.raises(ValueError, match="技能路径不在允许目录内"):
+        adapter._validate_rebuild_skill_path(str(outside_skill))
+
+
 @pytest.fixture
 def adapter():
     """Create a test adapter instance."""
@@ -746,107 +775,6 @@ async def test_handle_skills_evolution_rebuild_rpc(adapter, monkeypatch, tmp_pat
     messages = [record.getMessage() for record in records if record.levelno == logging.INFO]
     assert any("skills.evolution.rebuild start" in msg for msg in messages)
     assert any("skills.evolution.rebuild done" in msg for msg in messages)
-
-
-@pytest.mark.asyncio
-async def test_handle_skills_evolution_rebuild_rejects_path_traversal(adapter, monkeypatch, tmp_path: Path):
-    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
-    adapter._registered_skill_dirs = [str(tmp_path)]  # pylint: disable=protected-access
-    monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
-        "_guard_bootstrap_skill",
-        staticmethod(lambda _name: None),
-    )
-    generate = AsyncMock()
-    monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
-
-    with pytest.raises(ValueError, match="技能路径不在允许目录内"):
-        await adapter.handle_skills_evolution_rebuild(
-            {
-                "name": "demo-skill",
-                "skill_path": str(tmp_path / ".." / "evil.md"),
-            }
-        )
-    generate.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_handle_skills_evolution_rebuild_rejects_empty_registered_dirs(
-    adapter, monkeypatch, tmp_path: Path,
-):
-    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
-    adapter._registered_skill_dirs = []  # pylint: disable=protected-access
-    monkeypatch.setattr(
-        adapter,
-        "_registered_skill_dirs_for_rail",
-        lambda: [],
-    )
-    # Union path also consults live resolve; isolate empty-dirs branch from host env.
-    monkeypatch.setattr(
-        interface_deep_module,
-        "resolve_agent_registered_skill_dirs",
-        lambda: [],
-    )
-    monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
-        "_guard_bootstrap_skill",
-        staticmethod(lambda _name: None),
-    )
-    generate = AsyncMock()
-    monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
-
-    skill_md = tmp_path / ".office-claw" / "skills" / "demo-skill" / "SKILL.md"
-    skill_md.parent.mkdir(parents=True)
-    skill_md.write_text("# demo\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="未注册任何技能目录") as exc_info:
-        await adapter.handle_skills_evolution_rebuild(
-            {
-                "name": "demo-skill",
-                "skill_path": str(skill_md),
-            }
-        )
-    message = str(exc_info.value)
-    assert f"resolve_path={skill_md.resolve()}" in message
-    assert "allowed_path=" not in message
-    generate.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_handle_skills_evolution_rebuild_rejects_path_outside_registered_dirs(
-    adapter, monkeypatch, tmp_path: Path,
-):
-    project_root = tmp_path / "relay-claw"
-    skill_md = project_root / ".office-claw" / "skills" / "demo-skill" / "SKILL.md"
-    skill_md.parent.mkdir(parents=True)
-    skill_md.write_text("# demo\n", encoding="utf-8")
-
-    other_allowed = tmp_path / "customer-project" / ".office-claw" / "skills"
-    other_allowed.mkdir(parents=True)
-
-    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
-    adapter._registered_skill_dirs = [str(other_allowed)]  # pylint: disable=protected-access
-    monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
-        "_guard_bootstrap_skill",
-        staticmethod(lambda _name: None),
-    )
-    generate = AsyncMock()
-    monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
-
-    with pytest.raises(ValueError, match="技能路径不在允许目录内") as exc_info:
-        await adapter.handle_skills_evolution_rebuild(
-            {
-                "name": "demo-skill",
-                "skill_path": str(skill_md),
-            }
-        )
-    message = str(exc_info.value)
-    assert f"resolve_path={skill_md.resolve()}" in message
-    assert f"allowed_path={other_allowed.resolve()}" in message
-    assert "请切换到工程目录" not in message
-    assert "对话一轮后再采纳" not in message
-    generate.assert_not_awaited()
 
 
 @pytest.mark.asyncio

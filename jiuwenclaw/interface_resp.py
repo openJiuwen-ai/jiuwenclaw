@@ -105,11 +105,11 @@ def _cell(v: str | None) -> str:
 
 def _rid(header: str | None, fallback: str | None) -> str:
     """Resolve request_id: header → explicit fallback → agent context (never synthesize UUID)."""
-    for c in (header, fallback, get_interface_request_id()):
+    for c in (header, fallback):
         t = str(c or "").strip()[:256]
         if t:
             return t
-    return ""
+    return get_interface_request_id()
 
 
 def _http_status(exc: BaseException | None) -> str:
@@ -316,7 +316,7 @@ def start_gateway_e2a_resp(
         peer=peer,
         host=host,
         session_id=session_id or None,
-        rid=_rid(hdr, request_id),
+        rid=request_id,
         header_rid=hdr,
         info={"kind": "e2a", "channel_id": channel_id, "method": method},
     )

@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import math
+import time
 import uuid
 import os
 import re
@@ -108,24 +110,45 @@ logger = logging.getLogger(__name__)
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
 
+_INTERFACE_DEEP_MODULE = "jiuwenclaw.agentserver.deep_agent.interface_deep"
+_interface_deep_warmup_task: asyncio.Task[None] | None = None
+
+
+def _import_interface_deep_blocking() -> None:
+    if _INTERFACE_DEEP_MODULE not in sys.modules:
+        importlib.import_module(_INTERFACE_DEEP_MODULE)
+
+
+async def _warm_interface_deep_import() -> None:
+    if _INTERFACE_DEEP_MODULE in sys.modules:
+        logger.info("[AgentWebSocketServer] interface_deep_warmup cache=hit elapsed_ms=0.0")
+        return
+    t0 = time.perf_counter()
+    logger.info("[AgentWebSocketServer] interface_deep_warmup cache=miss starting background import")
+    try:
+        await asyncio.to_thread(_import_interface_deep_blocking)
+    except Exception:
+        logger.warning(
+            "[AgentWebSocketServer] interface_deep_warmup failed elapsed_ms=%.1f",
+            (time.perf_counter() - t0) * 1000,
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "[AgentWebSocketServer] interface_deep_warmup cache=miss ok elapsed_ms=%.1f",
+        (time.perf_counter() - t0) * 1000,
+    )
+
+
+def _start_interface_deep_warmup() -> None:
+    global _interface_deep_warmup_task
+    if _interface_deep_warmup_task is not None and not _interface_deep_warmup_task.done():
+        return
+    _interface_deep_warmup_task = asyncio.get_running_loop().create_task(_warm_interface_deep_import())
+
 _SYSTEM_PROMPT_USER_HISTORY_PATTERN = re.compile(r"(\[[^\]\n]*用户\]\s*)(.*?)(\s*\[/对话历史\])", re.DOTALL)
 
 
-def _is_std_cpython(python_exe: str) -> bool:
-    """判断 python.exe 是否标准 CPython 安装 (非 venv trampoline/launcher)."""
-    p = Path(python_exe)
-    try:
-        if not p.is_file():
-            return False
-    except OSError:
-        return False
-    parent = p.parent
-    # venv 的 python.exe 在 <venv>/Scripts/ 下, 同目录无 python3*.dll.
-    if parent.name.lower() == "scripts":
-        return False
-    # 标准 CPython 根目录有 python313.dll / python312.dll 等.
-    has_dll = any(parent.glob("python3*.dll"))
-    return has_dll
 
 
 def _mask_text_for_log(value: str) -> str:
@@ -458,14 +481,9 @@ class AgentWebSocketServer:
                     sys.platform,
                 )
                 return
-            from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
             from jiuwenclaw.config import (
-                DEFAULT_SANDBOX_POLICY_FILE,
-                get_sandbox_endpoint,
                 get_sandbox_runtime,
                 get_sandbox_startup_mode_explicit,
-                resolve_sandbox_policy_path,
-                update_sandbox_endpoint,
             )
 
             # sandbox.enabled 门控: false 时整个跳过 (不拉起 box-server, 不触发 install/
@@ -497,146 +515,8 @@ class AgentWebSocketServer:
                 )
                 return
 
-            endpoint = get_sandbox_endpoint()
-            url = endpoint.get("url") or "http://127.0.0.1:8321"
-            sandbox_type = endpoint.get("type") or "jiuwenbox"
-            raw_policy = endpoint.get("policy_file") or ""
-            effective_policy_file = raw_policy or DEFAULT_SANDBOX_POLICY_FILE
-            policy_path = resolve_sandbox_policy_path(effective_policy_file)
-            if policy_path is None or not policy_path.is_file():
-                logger.warning(
-                    "[AgentWebSocketServer] sandbox auto-start skipped: "
-                    "policy_file=%r 无法解析到存在的文件 (resolved=%s).",
-                    effective_policy_file, policy_path,
-                )
-                return
-            if sys.platform == "win32":
-                try:
-                    from jiuwenclaw.agentserver.sandbox_policy_render import (
-                        _ensure_copy_exists,
-                    )
-                    runtime_policy = _ensure_copy_exists()
-                    if runtime_policy is not None and runtime_policy.is_file():
-                        policy_path = runtime_policy
-                        logger.info(
-                            "[AgentWebSocketServer][sandbox] using runtime policy copy: %s "
-                            "(box-server merges base + copy)",
-                            policy_path,
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "[AgentWebSocketServer][sandbox] ensure runtime copy failed, "
-                        "fall back to base policy: %s",
-                        exc,
-                    )
-
-            from jiuwenclaw.agentserver.sandbox.port_util import (
-                allocate_internal_jiuwenbox_port,
-                parse_sandbox_host_port,
-            )
-            host, preferred_port = parse_sandbox_host_port(url)
-            port = allocate_internal_jiuwenbox_port(host, preferred_port)
-            if port != preferred_port:
-                url = f"http://{host}:{port}"
-                logger.info(
-                    "[AgentWebSocketServer] jiuwenbox auto-start: "
-                    "preferred port %d busy, using %d",
-                    preferred_port, port,
-                )
-            sandbox_env: dict[str, str] = {}
-            try:
-                from jiuwenclaw.runtime.pip_env import (
-                    ensure_runtime_venv, resolve_base_python,
-                )
-                venv_dir = ensure_runtime_venv()
-                sandbox_env["JIUWENBOX_VENV_DIR"] = str(venv_dir)
-                bundled_python = resolve_base_python()
-                sandbox_env["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
-                if not (sandbox_env.get("JIUWENBOX_RUNNER_PYTHON")
-                        or os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip():
-                    logger.info("[AgentWebSocketServer][sandbox] JIUWENBOX_RUNNER_PYTHON 未注入探测候选路径...")
-                    # 探测标准 CPython (非 venv trampoline): jbx-sandbox 跑不了 uv
-                    import shutil as _shutil
-                    import glob as _glob
-                    _runner_py: str | None = None
-                    _candidates: list[str] = []
-                    # 1. 打包
-                    _candidates.append(
-                        str(Path(__file__).resolve().parents[2] / "tools" / "python" / "python.exe"))
-                    # 2. C:\Python3* (系统安装, 逐版本 glob 覆盖 3.10-3.13+)
-                    _candidates += sorted(_glob.glob(r"C:\Python3*\python.exe"))
-                    # 3. %LOCALAPPDATA%\Programs\Python\Python3* (用户级安装)
-                    _lad = os.environ.get("LOCALAPPDATA", "")
-                    if _lad:
-                        _candidates += sorted(_glob.glob(
-                            str(Path(_lad) / "Programs" / "Python" / "Python3*" / "python.exe")))
-                    for _cand in _candidates:
-                        if _cand and Path(_cand).is_file() and _is_std_cpython(_cand):
-                            _runner_py = _cand
-                            break
-                    # 4. PATH 里的 python.exe (校验非 venv)
-                    if not _runner_py:
-                        _which = _shutil.which("python") or _shutil.which("python3")
-                        if _which and _is_std_cpython(_which):
-                            _runner_py = _which
-                    if _runner_py:
-                        sandbox_env["JIUWENBOX_RUNNER_PYTHON"] = _runner_py
-                logger.info(
-                    "[AgentWebSocketServer][sandbox] injected env: "
-                    "JIUWENBOX_VENV_DIR=%s, JIUWENBOX_BUNDLED_PYTHON=%s, "
-                    "JIUWENBOX_RUNNER_PYTHON=%s",
-                    venv_dir, bundled_python.parent,
-                    sandbox_env.get("JIUWENBOX_RUNNER_PYTHON") or "<未注入>",
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[AgentWebSocketServer] inject JIUWENBOX_BUNDLED_PYTHON/VENV_DIR failed: %s",
-                    exc,
-                )
-
-            logger.info(
-                "[AgentWebSocketServer][sandbox] spawning box-server (startup_mode=internal)..."
-            )
-            runner = JiuwenBoxRunner.instance()
-            ok = await runner.ensure_running(
-                host=host,
-                port=port,
-                startup_mode="internal",
-                policy_path=policy_path,
-                extra_env=sandbox_env or None,
-                # Windows 沙箱首次起 box-server 时, lifespan 的 ensure_windows_setup
-                # 同步阻塞等 install 子进程 (UAC 弹窗 + 用户安装几十秒).
-                timeout=120.0,
-            )
-            if not ok:
-                stderr_tail = runner.get_stderr_tail(20)
-                hint = "\n--- jiuwenbox stderr (tail) ---\n" + stderr_tail if stderr_tail else ""
-                logger.warning(
-                    "[AgentWebSocketServer] jiuwenbox auto-start failed at %s:%d "
-                    "(policy=%s).%s",
-                    host, port, policy_path, hint,
-                )
-                return
-
-            # 落盘最终生效的 url (端口可能被换过), 让后续会话/agent 直接读到正确端点。
-            actual_url = runner.base_url
-            if actual_url and actual_url != endpoint.get("url"):
-                try:
-                    update_sandbox_endpoint(
-                        actual_url, sandbox_type,
-                        startup_mode="internal",
-                        policy_file=effective_policy_file,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "[AgentWebSocketServer] persist sandbox endpoint failed "
-                        "after auto-start: %s", exc,
-                    )
-            logger.info(
-                "[AgentWebSocketServer][sandbox] box-server ready at %s, "
-                "sandbox_id 按需 lazy 创建",
-                actual_url,
-            )
+            from jiuwenclaw.agentserver.sandbox_lifecycle import start_box_server_internal
+            await start_box_server_internal()
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[AgentWebSocketServer] jiuwenbox auto-start bootstrap failed: %s", exc,
@@ -683,6 +563,7 @@ class AgentWebSocketServer:
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port,
             extra={'user_visible': 'critical'},
         )
+        _start_interface_deep_warmup()
         # 按 config.yaml::sandbox.startup_mode 自动拉起 jiuwenbox 子进程 (internal 模式)。
         await self._bootstrap_internal_jiuwenbox()
 
@@ -1469,11 +1350,31 @@ class AgentWebSocketServer:
     async def _handle_sandbox_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 sandbox.* 配置 E2A 请求 (officeAce 经 WS 控制沙箱开关/启动方式/文件/网络)."""
         from jiuwenclaw.agentserver.sandbox_config_rpc import dispatch_sandbox_config_request
+        from jiuwenclaw.schema.message import ReqMethod
 
         resp = dispatch_sandbox_config_request(request)
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
+
+        # 沙箱开关变更后必须 reload_agent_config, 否则同 session 已活着的
+        # ReActAgent 仍持有旧 SANDBOX sysop id (已被 teardown 从 resource_mgr
+        # 移除), 后续工具调用拿到 None sysop 表现为无权限.
+        # 新 session 不受影响: 它懒创建时直接读新 enabled 值造 LOCAL sysop.
+        if resp.ok and request.req_method == ReqMethod.SANDBOX_ENABLED_SET:
+            try:
+                from jiuwenclaw.config import get_config
+                config_base = get_config()
+                await self._agent_manager.reload_agents_config(config_base, None)
+                logger.info(
+                    "[AgentWebSocketServer] sandbox.enabled.set 后触发 reload_agents_config, "
+                    "同 session ReActAgent 将切到新 sysop",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] sandbox.enabled.set 后 reload_agents_config 失败: %s",
+                    exc,
+                )
 
     async def _handle_history_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         params = request.params if isinstance(request.params, dict) else {}
@@ -2480,7 +2381,7 @@ class AgentWebSocketServer:
         from jiuwenclaw.config import (
             get_config,
             replace_teams_in_config,
-            upsert_subagent_in_config,
+            batch_upsert_subagents_in_config,
         )
 
         agent_params = build_team_member_agent_params(teams_payload)
@@ -2534,8 +2435,11 @@ class AgentWebSocketServer:
                     agent_service.create_agent(item)
                     for item in agent_params
                 ]
-                for agent in materialized_agents:
-                    upsert_subagent_in_config(agent.name, enabled=True)
+                if materialized_agents:
+                    batch_upsert_subagents_in_config(
+                        [agent.name for agent in materialized_agents],
+                        enabled=True,
+                    )
 
                 config_base = get_config()
                 if entity_store is not None:
@@ -2584,7 +2488,7 @@ class AgentWebSocketServer:
             AgentConfigService,
             build_single_agent_params,
         )
-        from jiuwenclaw.config import upsert_subagent_in_config
+        from jiuwenclaw.config import batch_upsert_subagents_in_config
 
         agent_params = build_single_agent_params(agents_payload)
         builtin_names = {agent.name for agent in BUILTIN_AGENTS}
@@ -2606,8 +2510,11 @@ class AgentWebSocketServer:
                 materialized_agents = [
                     agent_service.create_agent(item) for item in agent_params
                 ]
-                for agent in materialized_agents:
-                    upsert_subagent_in_config(agent.name, enabled=True)
+                if materialized_agents:
+                    batch_upsert_subagents_in_config(
+                        [agent.name for agent in materialized_agents],
+                        enabled=True,
+                    )
 
                 await self._reload_after_agents_sync()
             except Exception:

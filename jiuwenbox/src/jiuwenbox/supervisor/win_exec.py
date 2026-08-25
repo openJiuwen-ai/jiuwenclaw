@@ -1619,10 +1619,9 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
                         break
                     if not chunk:
                         break
-                    out_buf.extend(chunk)
-                    if len(out_buf) > MAX_STDOUT_BYTES:
-                        del out_buf[MAX_STDOUT_BYTES:]
-                        break
+                    remaining = max(0, MAX_STDOUT_BYTES - len(out_buf))
+                    if remaining:
+                        out_buf.extend(chunk[:remaining])
             except Exception as exc:  # noqa: BLE001
                 _drain_exc.append(exc)
 
@@ -1712,13 +1711,10 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             "stderr": "",
             "killed": _child_killed,
         })
-        # 上报 exec 结果: command 摘要 + exit + 输出前缀经日志长连发回 box-server. 输出截断防撑爆日志帧.
+        # 上报 exec 结果: command 摘要 + exit + 完整输出经日志长连发回 box-server.
+        # 日志帧有 4GiB 帧上限保护, 输出不再截断, 便于排查沙箱内执行细节.
         cmd_summary = " ".join(str(c) for c in (header.get("command") or []))[:200]
-        # 失败含 EPERM 时取更长 preview (含完整错误路径).
-        if ec != 0 and "EPERM" in out_text:
-            out_preview = out_text[:4000]
-        else:
-            out_preview = out_text[:512]
+        out_preview = out_text
         if ec != 0:
             # 失败时把完整 stdout 落盘到 workspace (.exec_failed.log), 供宿主机直接读.
             if workspace:

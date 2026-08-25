@@ -699,7 +699,7 @@ def install_wfp_filters(
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V4, const.JBX_FILTER_PERMIT_KEY_V4),
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V6, const.JBX_FILTER_PERMIT_KEY_V6),
             ):
-                is_v4 = (layer == const.FWPM_LAYER_ALE_AUTH_CONNECT_V4)
+                is_v4 = layer == const.FWPM_LAYER_ALE_AUTH_CONNECT_V4
                 for port in range(permit_port_start, permit_port_end + 1):
                     user_cond, user_ka = _build_ale_user_condition(sandbox_user_sid)
                     keeps.append(user_ka)

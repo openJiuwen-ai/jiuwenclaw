@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -11,6 +12,8 @@ class WebSearchRecord:
     url: str
     snippet: str
     source: str
+    content: str = ""
+    update_time: Optional[float] = None
 
 
 @dataclass

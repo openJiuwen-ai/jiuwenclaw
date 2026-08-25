@@ -2450,3 +2450,88 @@ class TestNewAttributes:
         tp.shutdown()  # tool span test end
 
 
+# ---------------------------------------------------------------------------
+# 10. TelemetryRail.after_tool_call — 工具完成日志 status 字段
+# ---------------------------------------------------------------------------
+
+class TestTelemetryRailToolStatusLog:
+    """验证 after_tool_call 中“工具调用完成”用户可见日志的 status 字段。
+
+    改动目标：日志移到 is_error 判定之后，新增 status=success/error。
+    """
+
+    @staticmethod
+    def _build_rail_and_ctx(result):
+        import jiuwenclaw.telemetry.instrumentors.telemetry_rail as rail_mod
+
+        rail = rail_mod.TelemetryRail()
+        rail.set_telemetry_context(channel_id="ch", session_id="s1", request_id="r1")
+
+        span_key = "call_1"
+        rail._tool_spans[span_key] = (MagicMock(), time.monotonic(), "memory_search")
+        ctx = types.SimpleNamespace(
+            _otel_tool_span_key=span_key,
+            inputs=types.SimpleNamespace(tool_result=result),
+        )
+        return rail, ctx
+
+    @staticmethod
+    def _run_and_get_status(result) -> str:
+        import jiuwenclaw.telemetry.instrumentors.telemetry_rail as rail_mod
+
+        rail, ctx = TestTelemetryRailToolStatusLog._build_rail_and_ctx(result)
+        with patch.object(rail_mod, "tool_duration", MagicMock()), \
+             patch.object(rail_mod, "tool_error_count", MagicMock()), \
+             patch.object(rail_mod.logger, "info") as mock_info:
+            _run(rail.after_tool_call(ctx))
+
+        completion_calls = [
+            c for c in mock_info.call_args_list
+            if c.args and "工具调用完成" in c.args[0]
+        ]
+        assert len(completion_calls) == 1
+        # fmt: "[TelemetryRail] 工具调用完成: tool=%s, status=%s, duration=%.2fs"
+        assert completion_calls[0].args[1] == "memory_search"
+        return completion_calls[0].args[2]
+
+    @staticmethod
+    def test_normal_result_logs_success():
+        status = TestTelemetryRailToolStatusLog._run_and_get_status("memory search done")
+        assert status == "success"
+
+    @staticmethod
+    def test_error_key_string_logs_error():
+        status = TestTelemetryRailToolStatusLog._run_and_get_status({"error": "boom"})
+        assert status == "error"
+
+    @staticmethod
+    def test_error_none_dict_logs_success():
+        # 结构化 error=None 不应被误判为错误
+        status = TestTelemetryRailToolStatusLog._run_and_get_status({"error": None})
+        assert status == "success"
+
+    @staticmethod
+    def test_error_object_logs_error():
+        status = TestTelemetryRailToolStatusLog._run_and_get_status(
+            types.SimpleNamespace(error="boom")
+        )
+        assert status == "error"
+
+    @staticmethod
+    def test_traceback_string_logs_error():
+        status = TestTelemetryRailToolStatusLog._run_and_get_status(
+            "Traceback (most recent call last): ValueError error occurred"
+        )
+        assert status == "error"
+
+    @staticmethod
+    def test_empty_value_logs_success():
+        status = TestTelemetryRailToolStatusLog._run_and_get_status("")
+        assert status == "success"
+
+    @staticmethod
+    def test_none_result_logs_success():
+        status = TestTelemetryRailToolStatusLog._run_and_get_status(None)
+        assert status == "success"
+
+
