@@ -5,6 +5,25 @@ function cleanModelText(text: string): string {
     .trim();
 }
 
+interface SearchStatusItem {
+  status: 'running' | 'queued' | 'failed';
+}
+
+export function searchAwareToolStatus(
+  status: string,
+  jobs: Iterable<SearchStatusItem>,
+): string {
+  const foreground = status.trim();
+  const runningCount = [...jobs].filter((job) => job.status === 'running').length;
+  if (runningCount === 0) return foreground;
+
+  const background = `${runningCount} 项正在后台搜索，可继续提问…`;
+  if (!foreground || /后台搜索|正在使用.+搜索/.test(foreground)) {
+    return runningCount === 1 ? '正在后台搜索，可继续提问…' : background;
+  }
+  return `${foreground.replace(/[；。…]+$/u, '')}；另有 ${background}`;
+}
+
 export function groundedSearchAnswer(text: string): string {
   const normalized = cleanModelText(text);
   if (!normalized.startsWith('九问检索摘要')) return normalized;

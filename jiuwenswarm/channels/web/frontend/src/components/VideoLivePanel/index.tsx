@@ -15,6 +15,7 @@ import {
 import { JoyAIProvider } from './joyaiProvider';
 import { createRealtimeProvider, RealtimeDuplexSession } from './realtimeProvider';
 import { MINICPM_CURRENT_TASK_MONITORING_ENABLED } from '../../utils/realtimeDuplex';
+import { searchAwareToolStatus } from '../../utils/searchPresentation';
 import {
   AgentAction,
   ChatContextItem,
@@ -111,6 +112,10 @@ export function VideoLivePanel() {
     }, { timeoutMs: 5_000 }).catch(() => undefined);
   };
 
+  const setSearchStatus = (status: string) => {
+    setToolStatus(searchAwareToolStatus(status, searchJobsRef.current.values()));
+  };
+
   const stopModelTransport = () => {
     duplexRef.current?.stop();
     duplexRef.current = null;
@@ -192,9 +197,7 @@ export function VideoLivePanel() {
     }
     if (toolJobId) {
       searchJobsRef.current.delete(toolJobId);
-      if (![...searchJobsRef.current.values()].some((job) => job.status !== 'failed')) {
-        setToolStatus('');
-      }
+      setSearchStatus('');
     }
   };
 
@@ -232,7 +235,7 @@ export function VideoLivePanel() {
       status: 'running',
       frameDataUrl: existing?.frameDataUrl || framesRef.current.at(-1)?.data_url,
     });
-    setToolStatus('正在后台搜索，可继续提问…');
+    setSearchStatus('');
   };
 
   const getJoyAIProvider = (): JoyAIProvider => {
@@ -266,7 +269,7 @@ export function VideoLivePanel() {
       },
       setAwaitingVoiceTranscript: setIsAwaitingVoiceTranscript,
       setError,
-      setToolStatus,
+      setToolStatus: setSearchStatus,
       setRecording: setIsRecording,
       setStatus: setRealtimeStatus,
       setStarting: setIsRealtimeStarting,
@@ -376,13 +379,13 @@ export function VideoLivePanel() {
     });
     if (queued) {
       appendChat('tool', result);
-      setToolStatus(`${payload.engine || '九问搜索 Agent'}完成，等待模型空闲后回答…`);
+      setSearchStatus(`${payload.engine || '九问搜索 Agent'}完成，等待模型空闲后回答…`);
     } else {
       reportRealtimeEvent('search_result_queue_failed', {
         job_id: payload.job_id,
         message: duplexRef.current ? 'tool result rejected' : 'realtime session unavailable',
       });
-      setToolStatus('搜索结果暂未回填，正在重试…');
+      setSearchStatus('搜索结果暂未回填，正在重试…');
     }
   };
 
@@ -396,7 +399,7 @@ export function VideoLivePanel() {
       query: payload.query?.trim() || existing?.query || '',
       status: 'failed',
     });
-    setToolStatus(`${payload.engine || '九问搜索 Agent'}失败：${payload.error || '请重试'}`);
+    setSearchStatus(`${payload.engine || '九问搜索 Agent'}失败：${payload.error || '请重试'}`);
   };
 
   useEffect(() => {
@@ -414,7 +417,7 @@ export function VideoLivePanel() {
         status: 'running',
         frameDataUrl: framesRef.current.at(-1)?.data_url,
       });
-      setToolStatus(`正在使用${payload.engine || '九问搜索 Agent'}，可继续提问…`);
+      setSearchStatus('');
     });
     const unsubscribeCompleted = webClient.on<SearchJobPayload>('video.search.completed', ({ payload }) => {
       if (belongsToCurrentSession(payload)) acceptCompletedSearch(payload);
@@ -828,7 +831,7 @@ export function VideoLivePanel() {
         },
         onError: setError,
         onToolResultDispatched: () => {
-          setToolStatus('');
+          setSearchStatus('');
         },
         onToolResultReady: (toolResult) => {
           commitAssistantAnswer(toolResult.result, toolResult.jobId);

@@ -5,7 +5,33 @@ import {
   groundedSearchAnswer,
   joyaiSearchAnswerInstruction,
   joyaiSearchFinalAnswer,
+  searchAwareToolStatus,
 } from '../node_modules/.cache/search-presentation/searchPresentation.js';
+
+test('searchAwareToolStatus keeps concurrent background searches visible', () => {
+  assert.equal(
+    searchAwareToolStatus('', [
+      { status: 'running' },
+      { status: 'running' },
+    ]),
+    '2 项正在后台搜索，可继续提问…',
+  );
+  assert.equal(
+    searchAwareToolStatus('JoyAI 正在根据搜索资料生成回答…', [
+      { status: 'queued' },
+      { status: 'running' },
+    ]),
+    'JoyAI 正在根据搜索资料生成回答；另有 1 项正在后台搜索，可继续提问…',
+  );
+});
+
+test('searchAwareToolStatus clears only after all background searches finish', () => {
+  assert.equal(searchAwareToolStatus('', [{ status: 'queued' }]), '');
+  assert.equal(
+    searchAwareToolStatus('搜索回答生成失败', [{ status: 'failed' }]),
+    '搜索回答生成失败',
+  );
+});
 
 test('groundedSearchAnswer keeps the answer but removes evidence metadata and citations', () => {
   const result = [
