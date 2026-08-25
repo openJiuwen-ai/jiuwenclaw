@@ -713,3 +713,53 @@ async def test_push_loop_backs_off_after_clean_stream_end(monkeypatch):
         await client.disconnect()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_send_request_with_base_url_skips_connect():
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={"request_id": "r1", "ok": True, "data": {"result": {"n": 1}}},
+        )
+
+    client = HttpSseAgentServerClient(
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    try:
+        env = e2a_from_agent_fields(
+            request_id="r1",
+            channel_id="web",
+            req_method=ReqMethod.SESSION_LIST,
+            params={},
+        )
+        result = await client.send_request(env, base_url="http://10.42.1.8:8080")
+        assert result.ok is True
+        assert any("10.42.1.8:8080/api/v1/sessions" in url for url in seen)
+        assert client.server_ready is False
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_request_base_url_5xx_raises():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, json={"ok": False, "error": {"message": "bad gateway"}})
+
+    client = HttpSseAgentServerClient(
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    env = e2a_from_agent_fields(
+        request_id="r1",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_LIST,
+        params={},
+    )
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.send_request(env, base_url="http://10.42.1.8:8080")
+    finally:
+        await client.disconnect()
