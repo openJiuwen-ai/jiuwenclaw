@@ -80,6 +80,11 @@ _ALWAYS_EXCLUDED_PATH_PATTERNS = [
     re.compile(r'[/\\][^/\\]*powershell_outputs[/\\]', re.IGNORECASE),
 ]
 
+# 新增：放通用户产物目录
+_ALLOWED_PATH_PATTERNS = [
+    re.compile(r'[/\\]jiuwenclaw_workspace[/\\]files[/\\]', re.IGNORECASE),
+]
+
 _STRUCTURED_PATH_FIELD_KEYWORDS = frozenset({
     "path",
     "file",
@@ -97,6 +102,11 @@ def _is_excluded_path(path_str: str) -> bool:
     """检查路径是否应排除（非产物）
     正文回退扫描另由 _FILE_PATH_PATTERNS 限定 workspace/output 路径。
     """
+    # 白名单优先：用户产物目录下的文件不排除
+    for pattern in _ALLOWED_PATH_PATTERNS:
+        if pattern.search(path_str):
+            return False
+    
     for pattern in _ALWAYS_EXCLUDED_PATH_PATTERNS:
         if pattern.search(path_str):
             return True
