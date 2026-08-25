@@ -86,4 +86,8 @@ class ModelRequestConfig(BaseModel):
     )
     max_tokens: Optional[int] = Field(default=None, description="Maximum number of tokens to generate")
     stop: Union[Optional[str], None] = Field(default=None, description="Stop sequence")
+    context_window: Optional[int] = Field(
+        default=None,
+        description="Maximum context window supported by the model, in tokens; internal context metadata",
+    )
     model_config = {"extra": "allow"}

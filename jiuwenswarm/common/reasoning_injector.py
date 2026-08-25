@@ -160,10 +160,24 @@ def _build_model_request_kwargs(
     #   经 model_dump 透传给厂商 SDK 报 unexpected keyword argument -> 需 pop。
     # - core 已加字段：context_window 作正式字段，core 自行 exclude 不发厂商、
     #   self.model_config.context_window 可读 -> 不得 pop（否则切掉 core 想读的值）。
-    # 不再守 _source=="agentos"：所有条目一视同仁，defaults 配了 context_window
-    # 同样需要过渡期 pop 防发厂商。
-    if not core_has_context_window_field():
-        request_kwargs.pop("context_window", None)
+    if "context_window" in request_kwargs:
+        if not core_has_context_window_field():
+            request_kwargs.pop("context_window", None)
+        else:
+            raw_context_window = request_kwargs.get("context_window")
+            if raw_context_window is not None:
+                try:
+                    normalized_context_window = (
+                        None
+                        if isinstance(raw_context_window, bool)
+                        else int(raw_context_window)
+                    )
+                except (TypeError, ValueError):
+                    normalized_context_window = None
+                if normalized_context_window is None or normalized_context_window <= 0:
+                    request_kwargs.pop("context_window", None)
+                else:
+                    request_kwargs["context_window"] = normalized_context_window
     request_kwargs["model"] = _resolve_model_name(model_name, model_config_obj)
     return request_kwargs
 
