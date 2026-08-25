@@ -16,6 +16,15 @@ from jiuwenswarm.agents.harness.common.prompt.browser_task_prompt import (
 class BrowserTaskPromptRail(SubagentRail):
     """Append browser policy only when the browser subagent is available."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._channel: str | None = None
+
+    def set_channel(self, channel: str | None) -> None:
+        """Store the active runtime channel for this prompt rail."""
+        value = str(channel or "").strip()
+        self._channel = value or None
+
     def _task_prompt_extension(
         self,
         ctx: AgentCallbackContext,
