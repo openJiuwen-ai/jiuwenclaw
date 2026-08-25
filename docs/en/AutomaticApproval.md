@@ -13,7 +13,7 @@ Automatic Approval does not permanently unlock a tool and cannot override an exp
 | Scenario | Automatic Approval | Notes |
 | --- | --- | --- |
 | Web single-agent work mode | Supported | This is the primary user entry point. |
-| Code Agent and Code plan | Not supported | Automatic Approval for Code modes will be added later. |
+| Code Agent and Code plan | Supported | Plan write restrictions and plan approval remain separate safeguards. |
 | Teams, clusters, and distributed teams | Not supported | This matches existing tool-permission approval support. Team Automatic Approval will be added after tool-permission support is available. |
 
 “Not supported” in this table means that Automatic Approval does not currently provide a behavior guarantee for that scenario; it does not mean the mode itself is unavailable.
