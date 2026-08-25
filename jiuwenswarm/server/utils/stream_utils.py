@@ -48,6 +48,36 @@ def normalize_context_usage_payload(payload: Any) -> dict[str, Any] | None:
             usage_payload["context_max"] = context_window.get("limit_tokens") or 0
         if usage_payload.get("tokens_used") is None:
             usage_payload["tokens_used"] = context_window.get("input_tokens") or 0
+
+        # Keep a small structured summary for the frontend. The display text
+        # is rendered by the frontend so it can follow the active locale;
+        # the wire payload only carries numeric values.
+        if not isinstance(usage_payload.get("context_usage_summary"), dict):
+            used_tokens = context_window.get("input_tokens")
+            limit_tokens = context_window.get("limit_tokens")
+            occupancy_rate = context_window.get("occupancy_rate")
+            if (
+                not isinstance(occupancy_rate, (int, float))
+                or isinstance(occupancy_rate, bool)
+            ) and (
+                isinstance(used_tokens, (int, float))
+                and not isinstance(used_tokens, bool)
+                and isinstance(limit_tokens, (int, float))
+                and not isinstance(limit_tokens, bool)
+                and limit_tokens > 0
+            ):
+                occupancy_rate = used_tokens / limit_tokens
+            usage_payload["context_usage_summary"] = {
+                "used_tokens": used_tokens,
+                "limit_tokens": limit_tokens,
+                "occupancy_rate": occupancy_rate,
+                "percentage": (
+                    occupancy_rate * 100
+                    if isinstance(occupancy_rate, (int, float))
+                    and not isinstance(occupancy_rate, bool)
+                    else None
+                ),
+            }
     else:
         for key in ("rate", "context_max", "tokens_used"):
             if usage_payload.get(key) is None:

@@ -12,6 +12,7 @@ import {
   Message,
   ContextCompressionRuntime,
   ContextCompressionSummary,
+  ContextUsageSummary,
   TeamMemberContextCompressionState,
 } from '../types';
 import {
@@ -258,6 +259,8 @@ interface ContextCompressionStats {
   rate: number;
   beforeCompressed: number | null;
   afterCompressed: number | null;
+  sessionKvCacheHitRate: number | null;
+  contextUsageSummary: ContextUsageSummary | null;
 }
 
 export interface TeamTaskEvent {
@@ -393,6 +396,8 @@ export interface SessionRuntime {
   contextCompressionRate: number;
   contextCompressionBefore: number | null;
   contextCompressionAfter: number | null;
+  sessionKvCacheHitRate: number | null;
+  contextUsageSummary: ContextUsageSummary | null;
   teamTaskEvents: TeamTaskEvent[];
   teamTasks: TeamTask[];
   teamTaskProgressBaseline: TaskProgressBaseline;
@@ -430,6 +435,8 @@ function createEmptyRuntime(sessionId?: string): SessionRuntime {
     contextCompressionRate: 0,
     contextCompressionBefore: null,
     contextCompressionAfter: null,
+    sessionKvCacheHitRate: null,
+    contextUsageSummary: null,
     teamTaskEvents: [],
     teamTasks: [],
     teamTaskProgressBaseline: createTaskProgressBaseline(),
@@ -720,7 +727,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         const runtime = state.runtimes[sessionId];
         if (!runtime) return state;
         return { runtimes: { ...state.runtimes, [sessionId]: {
-          ...runtime, contextCompressionRate: 0, contextCompressionBefore: null, contextCompressionAfter: null,
+          ...runtime,
+          contextCompressionRate: 0,
+          contextCompressionBefore: null,
+          contextCompressionAfter: null,
+          sessionKvCacheHitRate: null,
+          contextUsageSummary: null,
         } } };
       });
       return;
@@ -738,15 +750,51 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       typeof stats.afterCompressed === 'number' && Number.isFinite(stats.afterCompressed)
         ? Math.max(Math.round(stats.afterCompressed), 0)
         : null;
+    const hasContextUsageSummary = Object.prototype.hasOwnProperty.call(
+      stats,
+      'contextUsageSummary'
+    );
+    const normalizedContextUsageSummary = hasContextUsageSummary
+      ? (() => {
+          const summary = stats.contextUsageSummary;
+          if (!summary) return null;
+          const usedTokens =
+            typeof summary.usedTokens === 'number' && Number.isFinite(summary.usedTokens)
+              ? Math.max(Math.round(summary.usedTokens), 0)
+              : null;
+          const limitTokens =
+            typeof summary.limitTokens === 'number' && Number.isFinite(summary.limitTokens)
+              ? Math.max(Math.round(summary.limitTokens), 0)
+              : null;
+          const occupancyRate =
+            typeof summary.occupancyRate === 'number' && Number.isFinite(summary.occupancyRate)
+              ? Math.max(summary.occupancyRate, 0)
+              : null;
+          return { usedTokens, limitTokens, occupancyRate };
+        })()
+      : undefined;
 
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      const hasSessionKvCacheHitRate = Object.prototype.hasOwnProperty.call(
+        stats,
+        'sessionKvCacheHitRate'
+      );
+      const normalizedSessionKvCacheHitRate = hasSessionKvCacheHitRate
+        ? (typeof stats.sessionKvCacheHitRate === 'number' && Number.isFinite(stats.sessionKvCacheHitRate)
+            ? Math.min(Math.max(stats.sessionKvCacheHitRate, 0), 1)
+            : null)
+        : runtime.sessionKvCacheHitRate;
       return { runtimes: { ...state.runtimes, [sessionId]: {
         ...runtime,
         contextCompressionRate: normalizedRate,
         contextCompressionBefore: normalizedBefore,
         contextCompressionAfter: normalizedAfter,
+        sessionKvCacheHitRate: normalizedSessionKvCacheHitRate,
+        contextUsageSummary: hasContextUsageSummary
+          ? normalizedContextUsageSummary ?? null
+          : runtime.contextUsageSummary,
       } } };
     });
   },

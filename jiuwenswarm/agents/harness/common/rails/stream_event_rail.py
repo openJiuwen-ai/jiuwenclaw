@@ -659,7 +659,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # capability marker; emitting the legacy rail event as well would add
         # a second, incomplete ``context.usage`` frame after the full one.
         if (
-            getattr(ctx, "context_usage_report", None) is not None
+            bool(getattr(ctx, "extra", {}).get("_context_usage_event_emitted"))
+            or getattr(ctx, "context_usage_report", None) is not None
             or getattr(getattr(ctx, "inputs", None), "context_usage_report", None) is not None
         ):
             return

@@ -26,6 +26,7 @@ import {
   FileDownloadItem,
   ContextCompressionRuntime,
   ContextCompressionSummary,
+  ContextUsageSummary,
   WsEvent,
   GoalRecord,
   GoalAction,
@@ -105,6 +106,40 @@ const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
 function streamDeltaBatchKey(sessionId: string, streamId: string): string {
   return `${sessionId}\u0000${streamId}`;
+}
+
+function parseContextUsageSummary(payload: Record<string, unknown>): ContextUsageSummary | null {
+  const rawSummary = payload.context_usage_summary;
+  const summary = rawSummary && typeof rawSummary === 'object' && !Array.isArray(rawSummary)
+    ? rawSummary as Record<string, unknown>
+    : null;
+  const contextWindow = payload.context_window && typeof payload.context_window === 'object'
+    && !Array.isArray(payload.context_window)
+    ? payload.context_window as Record<string, unknown>
+    : null;
+  const readFiniteNumber = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+  const usedTokens = readFiniteNumber(
+    summary?.used_tokens ?? contextWindow?.input_tokens ?? payload.tokens_used
+  );
+  const limitTokens = readFiniteNumber(
+    summary?.limit_tokens ?? contextWindow?.limit_tokens ?? payload.context_max
+  );
+  let occupancyRate = readFiniteNumber(
+    summary?.occupancy_rate ?? contextWindow?.occupancy_rate
+  );
+  if (occupancyRate === null) {
+    const legacyPercentage = readFiniteNumber(payload.rate);
+    occupancyRate = legacyPercentage === null
+      ? null
+      : legacyPercentage > 1 ? legacyPercentage / 100 : legacyPercentage;
+  }
+  if (occupancyRate === null && usedTokens !== null && limitTokens && limitTokens > 0) {
+    occupancyRate = usedTokens / limitTokens;
+  }
+  if (usedTokens === null && limitTokens === null && occupancyRate === null) return null;
+  return { usedTokens, limitTokens, occupancyRate };
 }
 
 function isCompletedResumeResult(interruptResult: unknown): boolean {
@@ -968,6 +1003,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     rate: number;
     beforeCompressed: number | null;
     afterCompressed: number | null;
+    sessionKvCacheHitRate: number | null;
+    contextUsageSummary: ContextUsageSummary | null;
   }>>(new Map());
   const streamDeltaBatcherRef = useRef<ReturnType<typeof createStreamDeltaBatcher> | null>(null);
   if (streamDeltaBatcherRef.current === null) {
@@ -1504,6 +1541,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           rate: 0,
           beforeCompressed: 0,
           afterCompressed: 0,
+          contextUsageSummary: null,
         });
       }
 
@@ -3475,7 +3513,27 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           typeof payload.tokens_used === 'number' && Number.isFinite(payload.tokens_used)
             ? payload.tokens_used
             : null;
-        const stats = { rate, beforeCompressed: contextMax, afterCompressed: tokensUsed };
+        const nestedKvCache = payload.kv_cache;
+        const nestedSessionKvCache =
+          nestedKvCache && typeof nestedKvCache === 'object' && !Array.isArray(nestedKvCache)
+            ? (nestedKvCache as Record<string, unknown>).session
+            : null;
+        const sessionKvCacheHitRate =
+          typeof payload.session_kv_cache_hit_rate === 'number' && Number.isFinite(payload.session_kv_cache_hit_rate)
+            ? payload.session_kv_cache_hit_rate
+            : nestedSessionKvCache && typeof nestedSessionKvCache === 'object' && !Array.isArray(nestedSessionKvCache)
+              && typeof (nestedSessionKvCache as Record<string, unknown>).weighted_hit_rate === 'number'
+              && Number.isFinite((nestedSessionKvCache as Record<string, unknown>).weighted_hit_rate)
+              ? (nestedSessionKvCache as Record<string, unknown>).weighted_hit_rate as number
+              : null;
+        const contextUsageSummary = parseContextUsageSummary(payload as Record<string, unknown>);
+        const stats = {
+          rate,
+          beforeCompressed: contextMax,
+          afterCompressed: tokensUsed,
+          sessionKvCacheHitRate,
+          contextUsageSummary,
+        };
         if (heldContextUsageSessionsRef.current.has(sessionId)) {
           pendingContextUsageRef.current.set(sessionId, stats);
           setContextCompressionStats(sessionId, {
@@ -3486,12 +3544,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         } else {
           setContextCompressionStats(sessionId, stats);
         }
-        console.debug('[ws] context.usage', {
-          session_id: payload.session_id,
-          rate,
-          context_max: contextMax,
-          tokens_used: tokensUsed,
-        });
+        // Keep the complete Core snapshot visible in the browser console.
+        // The summary values above remain for the existing compression card,
+        // while `parts` contains the per-category token percentages.
+        console.debug('[ws] context.usage', payload);
       }),
       webClient.on<ContextCompressionStatePayload>(
         'context.compression_state',

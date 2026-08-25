@@ -144,6 +144,23 @@ async def test_context_usage_rail_does_not_duplicate_core_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_context_usage_rail_does_not_duplicate_core_snapshot_without_report():
+    session = _FakeSession()
+    ctx = SimpleNamespace(
+        session=session,
+        context=SimpleNamespace(),
+        context_usage_report=None,
+        extra={"_context_usage_event_emitted": True},
+        agent=None,
+        inputs=SimpleNamespace(response=None, context_usage_report=None),
+    )
+
+    await _TestRail().after_model_call(ctx)
+
+    assert session.outputs == []
+
+
+@pytest.mark.asyncio
 async def test_context_usage_keeps_runtime_context_limit_fallback(monkeypatch):
     captured_kwargs = {}
 

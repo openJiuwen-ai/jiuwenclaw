@@ -747,6 +747,9 @@
     "status": "Status",
     "context": "Context",
     "contextCompression": "Context window",
+    "contextUsage": "Context usage",
+    "contextUsageValue": "{{percent}}% · {{used}}/{{limit}} context used",
+    "sessionKvCache": "Session average KV cache",
     "memoryUsage": "Memory usage",
     "poweredBy": "Powered by openJiuwen",
     "fileNotPreviewable": "This file type is not previewable"

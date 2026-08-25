@@ -36,6 +36,7 @@ from openjiuwen.core.context_engine.schema.config import (
     CompressionRecallConfig,
     ContextEngineConfig,
 )
+from openjiuwen.core.context_engine.token.tokenizer_registry import TokenizerRegistry
 from openjiuwen.core.context_engine.token.tokenizer_spec import TokenizerSpec
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
@@ -1061,6 +1062,34 @@ def _deep_agent_context_engine_config(
             or getattr(getattr(model, "model_client_config", None), "model_name", "")
             or ""
         )
+    if selected_model_name:
+        # Context usage/tokenizer selection must follow the model that will
+        # actually receive this request.  The old path left these fields at
+        # their startup values, so switching models changed the provider call
+        # but not the cached context's usage identity.
+        supported["model_name"] = selected_model_name
+    selected_model_provider = model_provider(model) if model is not None else ""
+    selected_tokenizer_provider = selected_model_provider or str(
+        cec.get("model_provider") or ""
+    ).strip()
+    if selected_model_provider:
+        supported["model_provider"] = selected_model_provider
+
+    # ``tokenizer_spec`` is an exact call-site override.  When it came from
+    # the startup model and a request switches to another model, keeping it
+    # would make the new model silently use the old tokenizer.  Move the old
+    # spec into the registry so the selected model can resolve its own exact
+    # entry (or a safe family entry) instead.
+    if tokenizer_spec is not None and selected_model_name:
+        explicit_match = TokenizerRegistry([tokenizer_spec]).resolve_match(
+            selected_tokenizer_provider,
+            selected_model_name,
+        )
+        if explicit_match is None:
+            tokenizer_registry.append(tokenizer_spec)
+            tokenizer_spec = None
+            supported["tokenizer_spec"] = None
+            supported["tokenizer_registry"] = tokenizer_registry
     agentos_cw: int | None = None
     if model is not None:
         agentos_cw = parse_int(getattr(model, "_agentos_ctx_window", None), None)
@@ -5453,7 +5482,12 @@ class JiuWenSwarmDeepAdapter:
             return False
         return None
 
-    def _apply_model_to_react_agent(self, model: Model) -> None:
+    def _apply_model_to_react_agent(
+        self,
+        model: Model,
+        *,
+        session_id: str | None = None,
+    ) -> None:
         """将指定模型应用到 react_agent 实例（替换 _llm 和 _config 字段）。
 
         react_agent._railed_model_call 使用 self._config.model_name 作为 model= 参数，
@@ -5500,6 +5534,48 @@ class JiuWenSwarmDeepAdapter:
             config.model_name = model.model_config.model_name
             config.model_client_config = model.model_client_config
             config.model_config_obj = model.model_config
+
+            # ``ContextEngine`` keeps contexts by session/context ID.  Update
+            # its global config for future contexts and rebind only the active
+            # request's cached context so message history is retained while
+            # tokenizer/window/usage state follows the selected model.
+            try:
+                context_config = _deep_agent_context_engine_config(
+                    self._config_cache,
+                    full_config=self._config_base_cache,
+                    model_name=model.model_config.model_name,
+                    model=model,
+                    config_base=self._config_base_cache,
+                )
+                config.context_engine_config = context_config
+                context_engine = getattr(react_agent, "context_engine", None)
+                rebind_context_model = getattr(context_engine, "rebind_context_model", None)
+                rebound = 0
+                if callable(rebind_context_model):
+                    rebound = rebind_context_model(
+                        context_config,
+                        session_id=session_id,
+                    )
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] synchronized context model=%s provider=%s "
+                    "session_id=%s rebound_contexts=%s",
+                    context_config.model_name,
+                    context_config.model_provider,
+                    session_id or "<all>",
+                    rebound,
+                )
+            except Exception:  # noqa: BLE001 - model switching must remain fail-open
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] failed to synchronize context model binding "
+                    "for model=%s; keeping the provider model switch",
+                    getattr(model.model_config, "model_name", ""),
+                    exc_info=True,
+                )
+        if deep_config is not None and config is not None:
+            try:
+                deep_config.context_engine_config = config.context_engine_config
+            except (AttributeError, TypeError):
+                pass
         # TaskCompletionRail 的 transcript assessor 读的是 deep_config.model，
         # 只换 react_agent 会让每轮目标评估仍打到构建时的默认模型。
         deep_config = getattr(self._instance, "deep_config", None)
@@ -11349,7 +11425,10 @@ class JiuWenSwarmDeepAdapter:
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
         resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
+        self._apply_model_to_react_agent(
+            resolved_model,
+            session_id=request.session_id,
+        )
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         if self._stream_event_rail is not None:
@@ -11627,7 +11706,10 @@ class JiuWenSwarmDeepAdapter:
             )
 
             resolved_model = self._resolve_model_for_request(request)
-            self._apply_model_to_react_agent(resolved_model)
+            self._apply_model_to_react_agent(
+                resolved_model,
+                session_id=request.session_id,
+            )
             # Images take the single-agent path: native input rides the
             # ``_CURRENT_MULTIMODAL_IMAGE_FILES`` ContextVar into each member's
             # MultimodalImageRail (members mount ``swarm.multimodal_image``),
@@ -11989,7 +12071,10 @@ class JiuWenSwarmDeepAdapter:
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
+        self._apply_model_to_react_agent(
+            resolved_model,
+            session_id=request.session_id,
+        )
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         stream_consumer_cancelled = False

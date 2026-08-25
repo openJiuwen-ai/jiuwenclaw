@@ -9,6 +9,7 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
 )
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _deep_agent_context_engine_config,
+    build_model_from_entry,
 )
 
 
@@ -26,6 +27,73 @@ def test_deep_agent_context_engine_config_ignores_invalid_context_window_tokens(
     )
 
     assert config.context_window_tokens is None
+
+
+def test_deep_agent_context_engine_config_tracks_selected_model_identity():
+    model = build_model_from_entry(
+        {
+            "model_name": "selected-model",
+            "client_provider": "OpenAI",
+            "api_base": "http://example.invalid",
+            "api_key": "test-key",
+        },
+        {},
+    )
+
+    config = _deep_agent_context_engine_config(
+        {
+            "context_engine_config": {
+                "model_name": "startup-model",
+                "model_provider": "startup-provider",
+            }
+        },
+        model_name="selected-model",
+        model=model,
+    )
+
+    assert config.model_name == "selected-model"
+    assert config.model_provider == "OpenAI"
+
+
+def test_selected_model_does_not_keep_startup_exact_tokenizer_spec():
+    model = build_model_from_entry(
+        {
+            "model_name": "selected-model",
+            "client_provider": "OpenAI",
+            "api_base": "http://example.invalid",
+            "api_key": "test-key",
+        },
+        {},
+    )
+
+    config = _deep_agent_context_engine_config(
+        {
+            "context_engine_config": {
+                "tokenizer_spec": {
+                    "provider": "OpenAI",
+                    "model": "startup-model",
+                    "source": "local",
+                    "id": "/tmp/startup-tokenizer.json",
+                },
+                "tokenizer_registry": [
+                    {
+                        "provider": "OpenAI",
+                        "model": "selected-model",
+                        "source": "local",
+                        "id": "/tmp/selected-tokenizer.json",
+                    }
+                ],
+            }
+        },
+        model_name="selected-model",
+        model=model,
+    )
+
+    assert config.tokenizer_spec is None
+    assert {spec.model for spec in config.tokenizer_registry} == {
+        "startup-model",
+        "selected-model",
+    }
 
 
 def test_deep_agent_context_engine_config_forwards_tokenizer_policy(tmp_path):

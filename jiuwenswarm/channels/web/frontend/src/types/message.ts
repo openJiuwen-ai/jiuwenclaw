@@ -53,6 +53,13 @@ export interface ContextCompressionSummary {
   summaries: string[];
 }
 
+/** Numeric context-window summary used by the compact status display. */
+export interface ContextUsageSummary {
+  usedTokens: number | null;
+  limitTokens: number | null;
+  occupancyRate: number | null;
+}
+
 export interface TeamMemberContextCompressionState {
   runtime?: ContextCompressionRuntime;
   summary?: ContextCompressionSummary;

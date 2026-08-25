@@ -732,6 +732,9 @@
     "status": "状态",
     "context": "上下文",
     "contextCompression": "上下文窗口",
+    "contextUsage": "上下文使用",
+    "contextUsageValue": "{{percent}}% · {{used}}/{{limit}} 上下文已使用",
+    "sessionKvCache": "Session 平均 KV Cache",
     "memoryUsage": "内存占用",
     "poweredBy": "Powered by openJiuwen",
     "fileNotPreviewable": "此文件类型不支持预览"

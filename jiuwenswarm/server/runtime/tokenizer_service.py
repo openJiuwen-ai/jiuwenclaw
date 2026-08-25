@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,15 +27,171 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CACHE_DIR = Path("tokenizers")
 _NATIVE_WARM_SOURCES = frozenset({"native_tokenizer", "family_tokenizer_fallback"})
 _MODEL_VARIANT_SEPARATORS = frozenset({"_", "-", ":", "."})
+_HUGGINGFACE_ENDPOINT = "https://hf-mirror.com"
+_TOKENIZER_METADATA_TIMEOUT_SECONDS = 10.0
+_TOKENIZER_METADATA_CACHE: dict[tuple[str, str | None], dict[str, Any] | None] = {}
+_TOKENIZER_METADATA_CACHE_LOCK = threading.Lock()
 
-# These are model-vendor identities, not API client providers.  A model may be
+# These are model-vendor identities, not API client providers. A model may be
 # served through an OpenAI-compatible or another provider adapter, so the
 # mapping deliberately resolves by model name and then records the configured
 # provider on the generated spec.
-_DEFAULT_TOKENIZER_REPOSITORIES: tuple[tuple[str, str], ...] = (
-    ("glm-5.2", "zai-org/GLM-5.2"),
-    ("glm-5", "zai-org/GLM-5"),
-    ("deepseek-v4-flash", "deepseek-ai/DeepSeek-V4-Flash"),
+
+
+@dataclass(frozen=True)
+class _DefaultTokenizerRepository:
+    base: str
+    tokenizer_id: str
+    engine: str = "tokenizers"
+    fallback: tuple[str, str, str] | None = None
+
+
+_DEFAULT_TOKENIZER_REPOSITORIES: tuple[_DefaultTokenizerRepository, ...] = (
+    _DefaultTokenizerRepository(
+        "glm-5.2",
+        "zai-org/GLM-5.2",
+        fallback=("glm-5", "zai-org/GLM-5", "tokenizers"),
+    ),
+    _DefaultTokenizerRepository(
+        "glm-5.1",
+        "zai-org/GLM-5.1",
+        fallback=("glm-5", "zai-org/GLM-5", "tokenizers"),
+    ),
+    _DefaultTokenizerRepository("glm-5", "zai-org/GLM-5"),
+    _DefaultTokenizerRepository(
+        "zai-org/glm-5.2",
+        "zai-org/GLM-5.2",
+        fallback=("glm-5", "zai-org/GLM-5", "tokenizers"),
+    ),
+    _DefaultTokenizerRepository(
+        "zai-org/glm-5.1",
+        "zai-org/GLM-5.1",
+        fallback=("glm-5", "zai-org/GLM-5", "tokenizers"),
+    ),
+    _DefaultTokenizerRepository("zai-org/glm-5", "zai-org/GLM-5"),
+    _DefaultTokenizerRepository(
+        "deepseek-v4-pro",
+        "deepseek-ai/DeepSeek-V4-Pro",
+        fallback=(
+            "deepseek-v4-flash",
+            "deepseek-ai/DeepSeek-V4-Flash",
+            "tokenizers",
+        ),
+    ),
+    _DefaultTokenizerRepository(
+        "deepseek-v4-flash",
+        "deepseek-ai/DeepSeek-V4-Flash",
+    ),
+    _DefaultTokenizerRepository(
+        "deepseek-ai/deepseek-v4-pro",
+        "deepseek-ai/DeepSeek-V4-Pro",
+        fallback=(
+            "deepseek-v4-flash",
+            "deepseek-ai/DeepSeek-V4-Flash",
+            "tokenizers",
+        ),
+    ),
+    _DefaultTokenizerRepository(
+        "deepseek-ai/deepseek-v4-flash",
+        "deepseek-ai/DeepSeek-V4-Flash",
+    ),
+    _DefaultTokenizerRepository(
+        "qwen/qwen3.8-27b",
+        "Qwen/Qwen3.8-27B",
+        fallback=("qwen3-8b", "Qwen/Qwen3-8B", "tokenizers"),
+    ),
+    _DefaultTokenizerRepository(
+        "qwen/qwen3-8b",
+        "Qwen/Qwen3-8B",
+    ),
+    _DefaultTokenizerRepository(
+        "qwen3.8",
+        "Qwen/Qwen3.8-27B",
+        fallback=("qwen3-8b", "Qwen/Qwen3-8B", "tokenizers"),
+    ),
+    # Kimi publishes model-native ``tiktoken.model`` files. Each configured
+    # version is attempted first; the family uses one fixed K2.7 fallback and
+    # never walks a version-by-version fallback chain.
+    _DefaultTokenizerRepository(
+        "moonshotai/kimi-k2.7-code",
+        "moonshotai/Kimi-K2.7-Code",
+        engine="tiktoken",
+    ),
+    _DefaultTokenizerRepository(
+        "kimi-k2.7-code",
+        "moonshotai/Kimi-K2.7-Code",
+        engine="tiktoken",
+    ),
+    _DefaultTokenizerRepository(
+        "moonshotai/kimi-k2.7",
+        "moonshotai/Kimi-K2.7-Code",
+        engine="tiktoken",
+    ),
+    _DefaultTokenizerRepository(
+        "kimi-k2.7",
+        "moonshotai/Kimi-K2.7-Code",
+        engine="tiktoken",
+    ),
+    _DefaultTokenizerRepository(
+        "moonshotai/kimi-k2.6",
+        "moonshotai/Kimi-K2.6",
+        engine="tiktoken",
+        fallback=("kimi-k2.7", "moonshotai/Kimi-K2.7-Code", "tiktoken"),
+    ),
+    _DefaultTokenizerRepository(
+        "kimi-k2.6",
+        "moonshotai/Kimi-K2.6",
+        engine="tiktoken",
+        fallback=("kimi-k2.7", "moonshotai/Kimi-K2.7-Code", "tiktoken"),
+    ),
+    _DefaultTokenizerRepository(
+        "moonshotai/kimi-k2.5",
+        "moonshotai/Kimi-K2.5",
+        engine="tiktoken",
+        fallback=("kimi-k2.7", "moonshotai/Kimi-K2.7-Code", "tiktoken"),
+    ),
+    _DefaultTokenizerRepository(
+        "kimi-k2.5",
+        "moonshotai/Kimi-K2.5",
+        engine="tiktoken",
+        fallback=("kimi-k2.7", "moonshotai/Kimi-K2.7-Code", "tiktoken"),
+    ),
+    _DefaultTokenizerRepository(
+        "moonshotai/kimi-k2-instruct",
+        "moonshotai/Kimi-K2-Instruct",
+        engine="tiktoken",
+        fallback=("kimi-k2.7", "moonshotai/Kimi-K2.7-Code", "tiktoken"),
+    ),
+    _DefaultTokenizerRepository(
+        "kimi-k2-instruct",
+        "moonshotai/Kimi-K2-Instruct",
+        engine="tiktoken",
+        fallback=("kimi-k2.7", "moonshotai/Kimi-K2.7-Code", "tiktoken"),
+    ),
+    _DefaultTokenizerRepository(
+        "moonshotai/kimi-k2",
+        "moonshotai/Kimi-K2-Instruct",
+        engine="tiktoken",
+        fallback=("kimi-k2.7", "moonshotai/Kimi-K2.7-Code", "tiktoken"),
+    ),
+    _DefaultTokenizerRepository(
+        "kimi-k2",
+        "moonshotai/Kimi-K2-Instruct",
+        engine="tiktoken",
+        fallback=("kimi-k2.7", "moonshotai/Kimi-K2.7-Code", "tiktoken"),
+    ),
+    _DefaultTokenizerRepository(
+        "moonshotai/kimi-k3",
+        "moonshotai/Kimi-K3",
+        engine="tiktoken",
+        fallback=("kimi-k2.7", "moonshotai/Kimi-K2.7-Code", "tiktoken"),
+    ),
+    _DefaultTokenizerRepository(
+        "kimi-k3",
+        "moonshotai/Kimi-K3",
+        engine="tiktoken",
+        fallback=("kimi-k2.7", "moonshotai/Kimi-K2.7-Code", "tiktoken"),
+    ),
 )
 _TOKENIZER_WARMUP_MAX_ATTEMPTS = 3
 _TOKENIZER_WARMUP_RETRY_DELAYS_SECONDS = (1.0, 3.0)
@@ -47,6 +204,7 @@ class TokenizerProfile:
     provider: str
     model: str
     spec: dict[str, Any] | None = None
+    allow_metadata_discovery: bool = False
 
 
 @dataclass(frozen=True)
@@ -54,7 +212,6 @@ class TokenizerWarmupSettings:
     enabled: bool
     cache_dir: Path
     offline: bool
-    proxy: str | None
     registry: tuple[dict[str, Any], ...]
 
 
@@ -104,18 +261,33 @@ def _default_tokenizer_spec(*, provider: str, model: str) -> dict[str, Any] | No
     if not normalized_model:
         return None
 
-    candidates: list[tuple[int, str, str]] = []
-    for base, tokenizer_id in _DEFAULT_TOKENIZER_REPOSITORIES:
-        if normalized_model == base or _model_variant_match(base, normalized_model):
-            candidates.append((len(base), base, tokenizer_id))
+    candidates: list[tuple[int, _DefaultTokenizerRepository]] = []
+    for repository in _DEFAULT_TOKENIZER_REPOSITORIES:
+        if normalized_model == repository.base or _model_variant_match(
+            repository.base, normalized_model
+        ):
+            candidates.append((len(repository.base), repository))
     if candidates:
-        _, base, tokenizer_id = max(candidates, key=lambda item: item[0])
-        return {
+        _, repository = max(candidates, key=lambda item: item[0])
+        spec: dict[str, Any] = {
             "provider": provider,
-            "model": base,
-            "id": tokenizer_id,
+            "model": repository.base,
+            "id": repository.tokenizer_id,
             "source": "huggingface",
         }
+        if repository.engine != "auto":
+            spec["engine"] = repository.engine
+        if repository.fallback is not None:
+            fallback_model, fallback_id, fallback_engine = repository.fallback
+            spec["compatible_fallbacks"] = [
+                {
+                    "model": fallback_model,
+                    "id": fallback_id,
+                    "source": "huggingface",
+                    "engine": fallback_engine,
+                }
+            ]
+        return spec
 
     # A slash-delimited model name is already in the canonical repository form.
     # Keep this inference limited to HuggingFace-compatible IDs; plain aliases
@@ -128,6 +300,299 @@ def _default_tokenizer_spec(*, provider: str, model: str) -> dict[str, Any] | No
             "source": "huggingface",
         }
     return None
+
+
+def _is_huggingface_repo_id(value: Any) -> bool:
+    """Return whether ``value`` is a safe Hugging Face ``org/model`` ID."""
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip()
+    if not candidate or "://" in candidate or candidate.startswith((".", "/")):
+        return False
+    parts = candidate.split("/")
+    return len(parts) == 2 and all(part and part not in {".", ".."} for part in parts)
+
+
+def _repo_id_from_metadata(value: Any) -> str | None:
+    """Extract one repository ID from HF ``base_model`` metadata."""
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            repo_id = _repo_id_from_metadata(item)
+            if repo_id:
+                return repo_id
+        return None
+    if isinstance(value, dict):
+        for key in ("id", "repo_id", "model", "name", "base_model"):
+            repo_id = _repo_id_from_metadata(value.get(key))
+            if repo_id:
+                return repo_id
+        return None
+    if _is_huggingface_repo_id(value):
+        return str(value).strip()
+    return None
+
+
+def _tokenizer_engine_from_info(info: Any) -> str | None:
+    filenames = {
+        Path(str(getattr(sibling, "rfilename", ""))).name.casefold()
+        for sibling in (getattr(info, "siblings", None) or [])
+        if getattr(sibling, "rfilename", None)
+    }
+    if "tiktoken.model" in filenames:
+        return "tiktoken"
+    if "tokenizer.json" in filenames:
+        return "tokenizers"
+    return None
+
+
+def _same_family_repository(
+    api: Any,
+    repo_id: str,
+    *,
+    family_key: str | None,
+) -> str | None:
+    """Find one tokenizer-bearing sibling in the same namespace and family."""
+    if not family_key:
+        return None
+    namespace = repo_id.split("/", 1)[0]
+    try:
+        try:
+            candidates = api.list_models(
+                author=namespace,
+                filter=family_key,
+                sort="downloads",
+                limit=20,
+                full=True,
+                fetch_config=True,
+            )
+        except TypeError:
+            candidates = api.list_models(
+                author=namespace,
+                search=family_key,
+                limit=20,
+            )
+        for candidate in candidates:
+            candidate_id = str(getattr(candidate, "id", None) or "").strip()
+            if not _is_huggingface_repo_id(candidate_id):
+                continue
+            if candidate_id.casefold() == repo_id.casefold():
+                continue
+            candidate_engine = _tokenizer_engine_from_info(candidate)
+            if candidate_engine is None:
+                continue
+            candidate_config = getattr(candidate, "config", None)
+            candidate_config = (
+                candidate_config if isinstance(candidate_config, dict) else {}
+            )
+            candidate_type = str(candidate_config.get("model_type") or "").casefold()
+            candidate_tags = {
+                str(tag).strip().casefold()
+                for tag in (getattr(candidate, "tags", None) or [])
+            }
+            if candidate_type and candidate_type != family_key.casefold():
+                continue
+            if not candidate_type and family_key.casefold() not in candidate_tags:
+                continue
+            return candidate_id
+    except Exception as exc:  # noqa: BLE001 - family discovery is optional
+        logger.debug(
+            "[TokenizerService] same-family tokenizer discovery failed for %s: %s",
+            repo_id,
+            exc,
+        )
+    return None
+
+
+def _configure_huggingface_mirror_client() -> None:
+    """Make metadata requests go directly to the fixed domestic mirror."""
+    try:
+        import httpx
+        import huggingface_hub
+    except ImportError:
+        return
+
+    set_client_factory = getattr(huggingface_hub, "set_client_factory", None)
+    if not callable(set_client_factory):
+        try:
+            from huggingface_hub.utils._http import set_client_factory
+        except ImportError:
+            return
+
+    def client_factory() -> httpx.Client:
+        return httpx.Client(
+            follow_redirects=True,
+            timeout=None,
+            trust_env=False,
+        )
+
+    set_client_factory(client_factory)
+
+
+def _huggingface_repository_metadata(
+    repo_id: str,
+    *,
+    revision: str | None = None,
+    allow_network: bool,
+) -> dict[str, Any] | None:
+    """Read tokenizer/base-model metadata from HF mirror during warm-up.
+
+    This function deliberately has an explicit ``allow_network`` parameter.
+    The AgentServer warm-up passes ``True``; ContextEngine integration only
+    reads the process cache with ``False`` and therefore cannot trigger a
+    network request while a context is being created.
+    """
+    if not _is_huggingface_repo_id(repo_id):
+        return None
+    cache_key = (repo_id, revision)
+    with _TOKENIZER_METADATA_CACHE_LOCK:
+        if cache_key in _TOKENIZER_METADATA_CACHE:
+            cached = _TOKENIZER_METADATA_CACHE[cache_key]
+            return dict(cached) if cached is not None else None
+    if not allow_network:
+        return None
+
+    metadata: dict[str, Any] | None = None
+    try:
+        from huggingface_hub import HfApi
+
+        _configure_huggingface_mirror_client()
+        api = HfApi(endpoint=_HUGGINGFACE_ENDPOINT)
+        try:
+            info = api.model_info(
+                repo_id,
+                revision=revision,
+                timeout=_TOKENIZER_METADATA_TIMEOUT_SECONDS,
+            )
+        except TypeError:
+            # Keep compatibility with older huggingface_hub releases that do
+            # not expose the timeout keyword on ``model_info``.
+            info = api.model_info(repo_id, revision=revision)
+
+        engine = _tokenizer_engine_from_info(info)
+
+        card_data = getattr(info, "cardData", None)
+        card_base_model = (
+            card_data.get("base_model")
+            if isinstance(card_data, dict)
+            else getattr(card_data, "base_model", None)
+        )
+        config = getattr(info, "config", None)
+        config = config if isinstance(config, dict) else {}
+        base_model = _repo_id_from_metadata(getattr(info, "base_model", None))
+        if base_model is None:
+            base_model = _repo_id_from_metadata(card_base_model)
+        if base_model is None:
+            base_model = _repo_id_from_metadata(config.get("base_model"))
+        if base_model is None:
+            base_model = _repo_id_from_metadata(config.get("base_model_name_or_path"))
+        if base_model and base_model.casefold() == repo_id.casefold():
+            base_model = None
+
+        model_type = str(config.get("model_type") or "").strip()
+        tags = {
+            str(tag).strip().casefold() for tag in (getattr(info, "tags", None) or [])
+        }
+        family_key = model_type or next(
+            (
+                tag
+                for tag in tags
+                if tag
+                and tag
+                not in {
+                    "transformers",
+                    "safetensors",
+                    "text-generation",
+                    "conversational",
+                    "pytorch",
+                }
+            ),
+            None,
+        )
+        same_family = None
+        if base_model is None:
+            same_family = _same_family_repository(
+                api,
+                repo_id,
+                family_key=family_key,
+            )
+
+        metadata = {
+            "repo_id": str(getattr(info, "id", None) or repo_id),
+            "engine": engine,
+            "base_model": base_model,
+            "same_family": same_family,
+        }
+    except Exception as exc:  # noqa: BLE001 - discovery is optional/fail-open
+        logger.debug(
+            "[TokenizerService] tokenizer metadata discovery failed for %s: %s",
+            repo_id,
+            exc,
+        )
+
+    # Keep successful metadata (including a successful response with no
+    # tokenizer/base-model fields), but do not permanently cache a transient
+    # network/import failure. A later model reload can then retry discovery.
+    if metadata is not None:
+        with _TOKENIZER_METADATA_CACHE_LOCK:
+            _TOKENIZER_METADATA_CACHE[cache_key] = metadata
+    return dict(metadata) if metadata is not None else None
+
+
+def _discover_tokenizer_spec(
+    profile: TokenizerProfile,
+    *,
+    allow_network: bool,
+) -> dict[str, Any] | None:
+    """Enrich an inferred repository spec with its engine and one fallback."""
+    spec = profile.spec
+    if not profile.allow_metadata_discovery or not isinstance(spec, dict):
+        return spec
+    if str(spec.get("source") or "").strip().casefold() != "huggingface":
+        return spec
+    tokenizer_id = str(spec.get("id") or spec.get("tokenizer_id") or "").strip()
+    if not _is_huggingface_repo_id(tokenizer_id):
+        return spec
+
+    metadata = _huggingface_repository_metadata(
+        tokenizer_id,
+        revision=spec.get("revision"),
+        allow_network=allow_network,
+    )
+    if metadata is None:
+        return spec
+
+    enriched = dict(spec)
+    detected_engine = metadata.get("engine")
+    configured_engine = str(enriched.get("engine") or "auto").strip().casefold()
+    if detected_engine and configured_engine == "auto":
+        enriched["engine"] = detected_engine
+
+    existing_fallbacks = enriched.get("compatible_fallbacks")
+    if existing_fallbacks:
+        return enriched
+
+    base_model = metadata.get("base_model") or metadata.get("same_family")
+    if not isinstance(base_model, str) or not _is_huggingface_repo_id(base_model):
+        return enriched
+
+    fallback_metadata = _huggingface_repository_metadata(
+        base_model,
+        allow_network=allow_network,
+    )
+    fallback_engine = (
+        fallback_metadata.get("engine")
+        if fallback_metadata is not None and fallback_metadata.get("engine")
+        else "auto"
+    )
+    enriched["compatible_fallbacks"] = [
+        {
+            "model": base_model,
+            "id": base_model,
+            "source": "huggingface",
+            "engine": fallback_engine,
+        }
+    ]
+    return enriched
 
 
 def resolve_tokenizer_cache_dir(config: dict[str, Any] | None = None) -> Path:
@@ -152,23 +617,22 @@ def resolve_tokenizer_cache_dir(config: dict[str, Any] | None = None) -> Path:
     return path
 
 
-def tokenizer_warmup_settings(config: dict[str, Any] | None = None) -> TokenizerWarmupSettings:
+def tokenizer_warmup_settings(
+    config: dict[str, Any] | None = None,
+) -> TokenizerWarmupSettings:
     """Extract the AgentServer tokenizer policy from the resolved config."""
     effective_config = config if isinstance(config, dict) else get_config()
     context_config = _context_engine_config(effective_config)
     registry = context_config.get("tokenizer_registry")
-    normalized_registry = tuple(
-        dict(item) for item in registry if isinstance(item, dict)
-    ) if isinstance(registry, list) else ()
-    raw_proxy = context_config.get("tokenizer_proxy")
-    if raw_proxy is None:
-        raw_proxy = os.getenv("JIUWENSWARM_TOKENIZER_PROXY")
-    tokenizer_proxy = str(raw_proxy).strip() if raw_proxy not in (None, "") else None
+    normalized_registry = (
+        tuple(dict(item) for item in registry if isinstance(item, dict))
+        if isinstance(registry, list)
+        else ()
+    )
     return TokenizerWarmupSettings(
         enabled=_as_bool(context_config.get("enable_tiktoken_counter"), default=False),
         cache_dir=resolve_tokenizer_cache_dir(effective_config),
         offline=_as_bool(context_config.get("tokenizer_offline"), default=False),
-        proxy=tokenizer_proxy,
         registry=normalized_registry,
     )
 
@@ -199,36 +663,30 @@ def _entry_tokenizer_spec(
         if isinstance(model_client_config, dict)
         else None,
     ]
-    raw_spec = next((candidate for candidate in candidates if candidate is not None), None)
+    raw_spec = next(
+        (candidate for candidate in candidates if candidate is not None), None
+    )
     if raw_spec is None:
         # Accept tokenizer metadata alongside the model client without forcing
         # callers to construct a nested TokenizerSpec object. Explicit
         # metadata is preferred; only known model families and
         # repository-shaped IDs are inferred below.
-        metadata_owner = model_client_config if isinstance(model_client_config, dict) else {}
-        tokenizer_id = (
-            entry.get("tokenizer_id")
-            or metadata_owner.get("tokenizer_id")
+        metadata_owner = (
+            model_client_config if isinstance(model_client_config, dict) else {}
         )
-        tokenizer_path = (
-            entry.get("tokenizer_path")
-            or metadata_owner.get("tokenizer_path")
+        tokenizer_id = entry.get("tokenizer_id") or metadata_owner.get("tokenizer_id")
+        tokenizer_path = entry.get("tokenizer_path") or metadata_owner.get(
+            "tokenizer_path"
         )
-        model_path = (
-            entry.get("model_path")
-            or metadata_owner.get("model_path")
+        model_path = entry.get("model_path") or metadata_owner.get("model_path")
+        tokenizer_source = entry.get("tokenizer_source") or metadata_owner.get(
+            "tokenizer_source"
         )
-        tokenizer_source = (
-            entry.get("tokenizer_source")
-            or metadata_owner.get("tokenizer_source")
+        tokenizer_engine = entry.get("tokenizer_engine") or metadata_owner.get(
+            "tokenizer_engine"
         )
-        tokenizer_engine = (
-            entry.get("tokenizer_engine")
-            or metadata_owner.get("tokenizer_engine")
-        )
-        tokenizer_family = (
-            entry.get("tokenizer_family")
-            or metadata_owner.get("tokenizer_family")
+        tokenizer_family = entry.get("tokenizer_family") or metadata_owner.get(
+            "tokenizer_family"
         )
         local_path = tokenizer_path or model_path
         if local_path:
@@ -262,7 +720,9 @@ def _entry_tokenizer_spec(
     return spec
 
 
-def configured_tokenizer_profiles(config: dict[str, Any] | None = None) -> list[TokenizerProfile]:
+def configured_tokenizer_profiles(
+    config: dict[str, Any] | None = None,
+) -> list[TokenizerProfile]:
     """Return distinct text-model profiles from ``models.defaults``.
 
     The helper deliberately does not construct an LLM client, so warming a
@@ -271,9 +731,11 @@ def configured_tokenizer_profiles(config: dict[str, Any] | None = None) -> list[
     effective_config = config if isinstance(config, dict) else get_config()
     context_config = _context_engine_config(effective_config)
     raw_registry = context_config.get("tokenizer_registry")
-    registry_specs = [
-        dict(item) for item in raw_registry if isinstance(item, dict)
-    ] if isinstance(raw_registry, list) else []
+    registry_specs = (
+        [dict(item) for item in raw_registry if isinstance(item, dict)]
+        if isinstance(raw_registry, list)
+        else []
+    )
     tokenizer_registry = None
     if registry_specs:
         try:
@@ -288,7 +750,7 @@ def configured_tokenizer_profiles(config: dict[str, Any] | None = None) -> list[
         *,
         provider: str,
         model: str,
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, bool]:
         # Explicit per-model metadata wins over the registry. For models with
         # no explicit metadata, a user registry entry wins over built-in
         # vendor mappings, then the automatic mapping is attempted.
@@ -299,15 +761,29 @@ def configured_tokenizer_profiles(config: dict[str, Any] | None = None) -> list[
             infer_defaults=False,
         )
         if spec is not None:
-            return spec
+            return spec, False
         if tokenizer_registry is not None:
             try:
                 match = tokenizer_registry.resolve_match(provider, model)
                 if match is not None:
-                    return match.spec.model_dump(mode="json", by_alias=True)
+                    return match.spec.model_dump(mode="json", by_alias=True), False
             except Exception:  # noqa: BLE001 - optional registry enrichment
                 pass
-        return _default_tokenizer_spec(provider=provider, model=model)
+        spec = _default_tokenizer_spec(provider=provider, model=model)
+        # Built-in mappings are already deterministic. Metadata discovery is
+        # reserved for an unknown, repository-shaped model ID so aliases do
+        # not trigger fuzzy or accidental mirror requests.
+        allow_discovery = bool(
+            spec
+            and "/" in model
+            and not model.startswith(("/", "./", "../"))
+            and not any(
+                model.strip().casefold() == repository.base
+                or _model_variant_match(repository.base, model.strip().casefold())
+                for repository in _DEFAULT_TOKENIZER_REPOSITORIES
+            )
+        )
+        return spec, allow_discovery
 
     profiles: list[TokenizerProfile] = []
     seen: set[str] = set()
@@ -315,11 +791,11 @@ def configured_tokenizer_profiles(config: dict[str, Any] | None = None) -> list[
         if not isinstance(entry, dict):
             continue
         model_client_config = entry.get("model_client_config")
-        model_client_config = model_client_config if isinstance(model_client_config, dict) else {}
+        model_client_config = (
+            model_client_config if isinstance(model_client_config, dict) else {}
+        )
         model = str(
-            model_client_config.get("model_name")
-            or entry.get("model_name")
-            or ""
+            model_client_config.get("model_name") or entry.get("model_name") or ""
         ).strip()
         if not model:
             continue
@@ -329,9 +805,27 @@ def configured_tokenizer_profiles(config: dict[str, Any] | None = None) -> list[
             or entry.get("provider")
             or ""
         ).strip()
-        spec = resolve_profile_spec(entry, provider=provider, model=model)
+        spec, allow_discovery = resolve_profile_spec(
+            entry,
+            provider=provider,
+            model=model,
+        )
+        if allow_discovery:
+            spec = _discover_tokenizer_spec(
+                TokenizerProfile(
+                    provider=provider,
+                    model=model,
+                    spec=spec,
+                    allow_metadata_discovery=True,
+                ),
+                allow_network=False,
+            )
         identity = json.dumps(
-            {"provider": provider.casefold(), "model": model.casefold(), "spec": _identity_value(spec)},
+            {
+                "provider": provider.casefold(),
+                "model": model.casefold(),
+                "spec": _identity_value(spec),
+            },
             sort_keys=True,
             ensure_ascii=False,
             default=str,
@@ -339,27 +833,56 @@ def configured_tokenizer_profiles(config: dict[str, Any] | None = None) -> list[
         if identity in seen:
             continue
         seen.add(identity)
-        profiles.append(TokenizerProfile(provider=provider, model=model, spec=spec))
+        profiles.append(
+            TokenizerProfile(
+                provider=provider,
+                model=model,
+                spec=spec,
+                allow_metadata_discovery=allow_discovery,
+            )
+        )
 
     # A small legacy configuration can define only ``react.model_name``. Keep
     # that form warmable as well; normal installations use models.defaults.
     if not profiles:
-        react = effective_config.get("react") if isinstance(effective_config, dict) else None
+        react = (
+            effective_config.get("react")
+            if isinstance(effective_config, dict)
+            else None
+        )
         react = react if isinstance(react, dict) else {}
         model = str(react.get("model_name") or "").strip()
         if model:
             model_client_config = react.get("model_client_config")
-            model_client_config = model_client_config if isinstance(model_client_config, dict) else {}
+            model_client_config = (
+                model_client_config if isinstance(model_client_config, dict) else {}
+            )
             provider = str(
                 react.get("model_provider")
                 or model_client_config.get("client_provider")
                 or ""
             ).strip()
+            spec, allow_discovery = resolve_profile_spec(
+                react,
+                provider=provider,
+                model=model,
+            )
+            if allow_discovery:
+                spec = _discover_tokenizer_spec(
+                    TokenizerProfile(
+                        provider=provider,
+                        model=model,
+                        spec=spec,
+                        allow_metadata_discovery=True,
+                    ),
+                    allow_network=False,
+                )
             profiles.append(
                 TokenizerProfile(
                     provider=provider,
                     model=model,
-                    spec=resolve_profile_spec(react, provider=provider, model=model),
+                    spec=spec,
+                    allow_metadata_discovery=allow_discovery,
                 )
             )
     return profiles
@@ -390,8 +913,7 @@ def _stable_key(
         except Exception:  # noqa: BLE001 - dedup must not block warm-up
             pass
     has_explicit_artifact_identity = isinstance(profile.spec, dict) and any(
-        profile.spec.get(field)
-        for field in ("id", "tokenizer_id", "artifact_path")
+        profile.spec.get(field) for field in ("id", "tokenizer_id", "artifact_path")
     )
     same_artifact = resolved_from_registry or has_explicit_artifact_identity
     payload = {
@@ -403,7 +925,9 @@ def _stable_key(
         "offline": settings.offline,
     }
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode(
+            "utf-8"
+        )
     ).hexdigest()
 
 
@@ -416,7 +940,13 @@ def _identity_value(value: Any, *, _key: str = "") -> Any:
         }
     if isinstance(value, list):
         return [_identity_value(item, _key=_key) for item in value]
-    if isinstance(value, str) and _key in {"provider", "model", "source", "engine", "family"}:
+    if isinstance(value, str) and _key in {
+        "provider",
+        "model",
+        "source",
+        "engine",
+        "family",
+    }:
         return value.strip().casefold()
     return value
 
@@ -428,6 +958,22 @@ def _is_remote_tokenizer_spec(spec: dict[str, Any] | None) -> bool:
         "huggingface",
         "modelscope",
     }
+
+
+def _tokenizer_id(spec: dict[str, Any] | None) -> str | None:
+    if not isinstance(spec, dict):
+        return None
+    value = spec.get("id") or spec.get("tokenizer_id")
+    return str(value).strip() if value else None
+
+
+def _fallback_tokenizer_id(spec: dict[str, Any] | None) -> str | None:
+    if not isinstance(spec, dict):
+        return None
+    fallbacks = spec.get("compatible_fallbacks")
+    if not isinstance(fallbacks, list) or not fallbacks:
+        return None
+    return _tokenizer_id(fallbacks[0]) if isinstance(fallbacks[0], dict) else None
 
 
 class TokenizerService:
@@ -459,9 +1005,8 @@ class TokenizerService:
         profiles = configured_tokenizer_profiles(effective_config)
         if not settings.enabled:
             # The switch is the application-level master switch: disabled
-            # means no tokenizer warm-up/download and the ContextEngine will
-            # use StringLengthCounter directly, even if an old artifact is
-            # still present in the cache.
+            # means no tokenizer warm-up/download. ContextEngine may still
+            # consume an already cached artifact when it creates a context.
             self._warmed_keys.clear()
             result = {
                 "enabled": False,
@@ -505,6 +1050,36 @@ class TokenizerService:
             )
             return result
 
+        if not settings.offline and any(
+            profile.allow_metadata_discovery for profile in profiles
+        ):
+            discovered_specs = await asyncio.gather(
+                *(
+                    asyncio.to_thread(
+                        _discover_tokenizer_spec,
+                        profile,
+                        allow_network=True,
+                    )
+                    if profile.allow_metadata_discovery
+                    else asyncio.sleep(0, result=profile.spec)
+                    for profile in profiles
+                ),
+                return_exceptions=True,
+            )
+            profiles = [
+                TokenizerProfile(
+                    provider=profile.provider,
+                    model=profile.model,
+                    spec=(
+                        discovered_spec
+                        if isinstance(discovered_spec, (dict, type(None)))
+                        else profile.spec
+                    ),
+                    allow_metadata_discovery=profile.allow_metadata_discovery,
+                )
+                for profile, discovered_spec in zip(profiles, discovered_specs)
+            ]
+
         settings.cache_dir.mkdir(parents=True, exist_ok=True)
 
         async with self._lock:
@@ -539,20 +1114,16 @@ class TokenizerService:
 
             logger.info(
                 "[TokenizerService] warming %d tokenizer profile(s) (%s), cache=%s "
-                "offline=%s counter_enabled=%s proxy_configured=%s",
+                "offline=%s counter_enabled=%s",
                 len(pending),
                 reason,
                 settings.cache_dir,
                 settings.offline,
                 settings.enabled,
-                bool(settings.proxy),
             )
 
             outcomes = await asyncio.gather(
-                *(
-                    self._warm_one(profile, settings)
-                    for _, profile in pending
-                ),
+                *(self._warm_one(profile, settings) for _, profile in pending),
                 return_exceptions=True,
             )
 
@@ -575,6 +1146,8 @@ class TokenizerService:
                             "model": profile.model,
                             "ok": False,
                             "status": "failed",
+                            "primary_tokenizer": _tokenizer_id(profile.spec),
+                            "fallback_tokenizer": _fallback_tokenizer_id(profile.spec),
                             "error": str(outcome),
                         }
                     )
@@ -593,7 +1166,9 @@ class TokenizerService:
                 status = (
                     "unresolved"
                     if fallback_reason == "model_tokenizer_spec_missing"
-                    else "native_warmed" if is_native else "fallback"
+                    else "native_warmed"
+                    if is_native
+                    else "fallback"
                 )
                 statuses.append(
                     {
@@ -601,19 +1176,33 @@ class TokenizerService:
                         "model": profile.model,
                         "ok": is_native,
                         "status": status,
+                        "primary_tokenizer": _tokenizer_id(profile.spec),
+                        "fallback_tokenizer": _fallback_tokenizer_id(profile.spec),
                         "source": source,
                         "tokenizer": getattr(outcome, "measurement_tokenizer", None),
+                        "selected_tokenizer": getattr(
+                            outcome,
+                            "measurement_tokenizer",
+                            None,
+                        ),
+                        "fallback_tokenizer_model": getattr(
+                            outcome,
+                            "measurement_fallback_tokenizer_model",
+                            None,
+                        ),
                         "fallback_reason": fallback_reason,
                     }
                 )
                 logger.info(
                     "[TokenizerService] model result provider=%s model=%s status=%s "
-                    "source=%s tokenizer=%s fallback_reason=%s",
+                    "source=%s tokenizer=%s fallback_tokenizer=%s "
+                    "fallback_reason=%s",
                     profile.provider,
                     profile.model,
                     status,
                     source,
                     getattr(outcome, "measurement_tokenizer", None),
+                    getattr(outcome, "measurement_fallback_tokenizer_model", None),
                     fallback_reason,
                 )
 
@@ -650,9 +1239,9 @@ class TokenizerService:
         ):
             react = dict(current["react"])
             react.update(config["react"])
-            if isinstance(current["react"].get("context_engine_config"), dict) and isinstance(
-                config["react"].get("context_engine_config"), dict
-            ):
+            if isinstance(
+                current["react"].get("context_engine_config"), dict
+            ) and isinstance(config["react"].get("context_engine_config"), dict):
                 context_config = dict(current["react"]["context_engine_config"])
                 context_config.update(config["react"]["context_engine_config"])
                 react["context_engine_config"] = context_config
@@ -682,7 +1271,6 @@ class TokenizerService:
                 cache_dir=str(settings.cache_dir),
                 enable_download=True,
                 offline=settings.offline,
-                proxy=settings.proxy,
             )
             selector = TokenizerSelector(
                 provider=profile.provider,

@@ -21,7 +21,7 @@ import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import { getMemberPlainName, type TabType, type TeamDetailTab } from '../teamArea/shared';
 import type { TeamTask, TeamTaskStatus } from '../../stores/sessionStore';
-import type { ProjectInfo, TodoItem, TodoStatus } from '../../types';
+import type { ContextUsageSummary, ProjectInfo, TodoItem, TodoStatus } from '../../types';
 import teamIcon from '../../assets/team.svg';
 import RecentTasksIcon from '../../assets/work-mode/progress-tasks.svg?react';
 import artifactsIcon from '../../assets/artifacts.svg';
@@ -88,6 +88,33 @@ function isEmptyValue(value: unknown): boolean {
   return value === undefined || value === null || value === '';
 }
 
+function formatContextTokens(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return '--';
+  const absolute = Math.abs(value);
+  if (absolute < 1000) return `${Math.round(value)}`;
+  if (absolute < 1_000_000) {
+    const compact = Number((value / 1000).toFixed(absolute < 100_000 ? 1 : 0));
+    return `${compact}k`;
+  }
+  const compact = Number((value / 1_000_000).toFixed(absolute < 10_000_000 ? 1 : 0));
+  return `${compact}m`;
+}
+
+function formatContextPercentage(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return '--';
+  const percentage = Number((value * 100).toFixed(1));
+  return Number.isInteger(percentage) ? `${percentage}` : percentage.toFixed(1);
+}
+
+function hasRenderableContextUsageSummary(summary: ContextUsageSummary | null): summary is ContextUsageSummary {
+  return Boolean(
+    summary &&
+      summary.usedTokens !== null &&
+      summary.limitTokens !== null &&
+      summary.occupancyRate !== null
+  );
+}
+
 function mergeById<T>(historyItems: T[], currentItems: T[], getId: (item: T) => string): T[] {
   const itemsById = new Map<string, T>(historyItems.map(item => [getId(item), item]));
   currentItems.forEach(item => {
@@ -149,6 +176,11 @@ export function ToolPanel({
   const setTeamHistoryMessages = useSessionStore(s => s.setTeamHistoryMessages);
   const setTeamHumanShareCommands = useSessionStore(s => s.setTeamHumanShareCommands);
   const isProcessing = useChatStore(s => s.runtimes[activeSessionId ?? '']?.isProcessing ?? false);
+  const contextCompressionRate = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.contextCompressionRate ?? 0);
+  const contextCompressionBefore = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.contextCompressionBefore ?? null);
+  const contextCompressionAfter = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.contextCompressionAfter ?? null);
+  const sessionKvCacheHitRate = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.sessionKvCacheHitRate ?? null);
+  const contextUsageSummary = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.contextUsageSummary ?? null);
   const [planningExpanded, setPlanningExpanded] = useState(false);
   const [teamPlanningExpanded, setTeamPlanningExpanded] = useState(false);
   const [teamMembersExpanded, setTeamMembersExpanded] = useState(false);
@@ -367,6 +399,52 @@ export function ToolPanel({
   ]);
 
   const panelExpanded = mode === 'team' ? teamAreaExpanded : singleAgentPanelExpanded;
+  let latestUserMessageIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === 'user') {
+      latestUserMessageIndex = i;
+      break;
+    }
+  }
+  const hasVisibleReplyAfterLatestUser = messages
+    .slice(latestUserMessageIndex + 1)
+    .some(
+      (message) =>
+        (message.role === 'assistant' || message.id.startsWith('team-leader-')) &&
+        Boolean(message.content.trim())
+    );
+  const shouldMaskContextUsage =
+    isProcessing && latestUserMessageIndex >= 0 && !hasVisibleReplyAfterLatestUser;
+  const visibleContextCompressionBefore = shouldMaskContextUsage ? 0 : contextCompressionBefore;
+  const visibleContextCompressionAfter = shouldMaskContextUsage ? 0 : contextCompressionAfter;
+  const beforeK = ((visibleContextCompressionBefore ?? 0) / 1000).toFixed(1);
+  const afterK = ((visibleContextCompressionAfter ?? 0) / 1000).toFixed(1);
+  let compressionRateDisplay;
+  if (
+    visibleContextCompressionBefore === 0 ||
+    visibleContextCompressionBefore === null ||
+    visibleContextCompressionAfter === 0 ||
+    visibleContextCompressionAfter === null
+  ) {
+    compressionRateDisplay = '--';
+  } else if (visibleContextCompressionAfter === visibleContextCompressionBefore) {
+    compressionRateDisplay = '100.0';
+  } else {
+    compressionRateDisplay = Number.isFinite(contextCompressionRate)
+      ? contextCompressionRate.toFixed(1)
+      : '0.0';
+  }
+  const compressionDisplay = `${afterK}K/${beforeK}K (${compressionRateDisplay}%)`;
+  const visibleContextUsageSummary = shouldMaskContextUsage ? null : contextUsageSummary;
+  const contextUsageDisplay = hasRenderableContextUsageSummary(visibleContextUsageSummary)
+    ? t('toolPanel.contextUsageValue', {
+        percent: formatContextPercentage(visibleContextUsageSummary.occupancyRate),
+        used: formatContextTokens(visibleContextUsageSummary.usedTokens),
+        limit: formatContextTokens(visibleContextUsageSummary.limitTokens),
+      })
+    : compressionDisplay;
+  const sessionKvCacheDisplay =
+    sessionKvCacheHitRate == null ? '--' : `${(sessionKvCacheHitRate * 100).toFixed(1)}%`;
 
   if (panelExpanded && mode !== 'auto_harness') {
     const isTeam = mode === 'team';
@@ -652,6 +730,35 @@ export function ToolPanel({
             {section.render()}
           </div>
         ))}
+        {!teamAreaExpanded && (
+          <>
+            <hr className="border-0 border-t border-border m-0" />
+            <div data-testid="tool-panel-status-card" className="toolpanel-status-card px-3">
+              <h3 data-testid="tool-panel-status-title" className="toolpanel-status-card__title">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <rect x="1" y="8" width="3" height="7" rx="0.5" fill="currentColor" opacity="0.5" />
+                  <rect x="6" y="4" width="3" height="11" rx="0.5" fill="currentColor" opacity="0.7" />
+                  <rect x="11" y="1" width="3" height="14" rx="0.5" fill="currentColor" />
+                </svg>
+                {t('toolPanel.status')}
+              </h3>
+              <div className="space-y-2">
+                <div data-testid="tool-panel-status-context-compression" className="toolpanel-status-card__row">
+                  <span className="text-text-muted">{t('toolPanel.contextCompression')}</span>
+                  <span className="mono text-text">{compressionDisplay}</span>
+                </div>
+                <div className="toolpanel-status-card__row">
+                  <span className="text-text-muted">{t('toolPanel.contextUsage')}</span>
+                  <span className="mono text-text">{contextUsageDisplay}</span>
+                </div>
+                <div className="toolpanel-status-card__row">
+                  <span className="text-text-muted">{t('toolPanel.sessionKvCache')}</span>
+                  <span className="mono text-text">{sessionKvCacheDisplay}</span>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
