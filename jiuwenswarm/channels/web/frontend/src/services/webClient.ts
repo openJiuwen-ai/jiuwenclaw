@@ -449,14 +449,14 @@ class WebClient {
       return;
     }
 
-    pending.reject(
-      this.createWebError(
-        message.error ?? i18n.t('network.requestFailed'),
-        message.code,
-        message.id,
-        this.isRetriableCode(message.code)
-      )
+    const error = this.createWebError(
+      message.error ?? i18n.t('network.requestFailed'),
+      message.code,
+      message.id,
+      this.isRetriableCode(message.code)
     );
+    error.payload = message.payload;
+    pending.reject(error);
   }
 
   private dispatchEvent(event: WsEvent): void {

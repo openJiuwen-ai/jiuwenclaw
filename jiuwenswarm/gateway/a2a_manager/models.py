@@ -103,6 +103,12 @@ class A2AIngressSnapshot:
     desired_port: int
     desired_rpc_path: str
     desired_card_path: str
+    desired_extended_card_path: str
+    desired_protocol_version: str
+    desired_app_name: str
+    desired_app_description: str
+    desired_app_version: str
+    desired_expose_reasoning: bool
     desired_rpc_url: str
     desired_card_url: str
     effective_host: str | None
