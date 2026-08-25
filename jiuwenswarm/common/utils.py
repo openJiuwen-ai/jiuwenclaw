@@ -733,6 +733,8 @@ def _install_default_builtin_skills(
         "swarmskill-creator",
         "skill-omni-creation",
         "huawei-cloud-maas-setup",
+        "agent-creator",
+        "plugin-creator"
     ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():

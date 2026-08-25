@@ -81,7 +81,7 @@ README_TEMPLATE = """# %(title)s
 
 ## 使用方式
 
-[TODO: 在 JiuwenSwarm 插件中心安装并启用本插件，对话输入区勾选插件 chip（可配合任意专家），然后发送推荐问法。]
+[TODO: 在 JiuwenSwarm 扩展安装并启用本插件，对话输入区勾选插件 chip，然后发送推荐问法。]
 """
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$")

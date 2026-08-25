@@ -21,8 +21,8 @@ description: |
 ├── README.md              # 必须
 ├── persona/<agent-name>.md
 ├── skills/<name>/SKILL.md # 可选
-├── tools/<name>.py        # 可选
-└── rails/<name>.py        # 可选
+├── tools/<name>_tool.py        # 可选
+└── rails/<name>_rail.py        # 可选
 ```
 
 包落盘目录（由 `JIUWENSWARM_DATA_DIR` 决定，未设置时默认 `~/.jiuwenswarm`）：
@@ -102,7 +102,7 @@ python3 <skill_dir>/scripts/init_template.py <agent-name>
 
 读取并遵守 `@references/fill-package.md`。
 
-`create` 完整填充；`update` 只做用户确认范围内的局部修改。涉及 skill/tool/rail/persona 增删时，必须同步回写 `manifest.json`。
+`create` 完整填充；`update` 只做用户确认范围内的局部修改。涉及 skill/tool/rail/persona 增删时，必须同步回写 `manifest.json`；`update` 新增 Tool 时，还必须同步回写 persona 的「工作流程」，写清调用时机与调用顺序。
 
 ### 第四步：校验
 
@@ -151,8 +151,9 @@ python3 <skill_dir>/scripts/register_template.py <agent-name> --bump
 
 1. **update 只做局部修改**：禁止 init、禁止重写整包；只修改 `local/`，`built_in/` 只读。
 2. **不改唯一标识**：包目录名、manifest 顶层 `name`、persona 文件名、`source`。
-3. **manifest 以 spec 为准**：组件声明、禁用字段、展示字段规则见 `references/manifest-spec.md`；不要复制本 skill 的 `references/`。
-4. **顺序不可跳**：必须 `validate_template.py` 跑到 `RESULT: PASS` 后再 `register_template.py`；`create/update` 都一样。
+3. **禁止自动生成 MCP**：不得创建 MCP 配置、连接器或在 manifest 声明 `mcps`；只生成 Skill、Tool、Rail 与 persona。
+4. **manifest 以 spec 为准**：组件声明、禁用字段、展示字段规则见 `references/manifest-spec.md`；不要复制本 skill 的 `references/`。
+5. **顺序不可跳**：必须 `validate_template.py` 跑到 `RESULT: PASS` 后再 `register_template.py`；`create/update` 都一样。
 
 ---
 

@@ -34,14 +34,14 @@ manifest 是整个 agent 模板包的总清单，声明包的元信息、组件�
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|----|------|
-| `file` | string | 是 | 包内相对路径，如 `tools/<name>.py` / `rails/<name>.py` |
+| `file` | string | 是 | 包内相对路径，如 `tools/<name>_tool.py` / `rails/<name>_rail.py` |
 | `class` | string | 是 | PascalCase，与 `.py` 中类名完全一致 |
 | `display_name` | `{en, zh}` | 是 | 卡片标题；优先与 `ToolCard.name` / rail 逻辑名一致（如 `content_analyzer`） |
 | `display_description` | `{en, zh}` | 是 | 卡片简介，中英各一句，说明用途 |
 
 ```json
 {
-  "file": "tools/content_analyzer.py",
+  "file": "tools/content_analyzer_tool.py",
   "class": "ContentAnalyzer",
   "display_name": { "en": "content_analyzer", "zh": "content_analyzer" },
   "display_description": {
