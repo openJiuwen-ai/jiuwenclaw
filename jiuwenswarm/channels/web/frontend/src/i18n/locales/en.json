@@ -14,7 +14,6 @@
     "ok": "OK",
     "and": "and",
     "modify": "Modify",
-    "expand": "Expand",
     "collapse": "Collapse",
     "delete": "Delete",
     "expandMore": "Show {{count}} more",
@@ -56,7 +55,6 @@
       "agent": "Agent",
       "browser": "Browser",
       "channels": "Channels",
-      "memory": "Memory",
       "experimental": "Experimental"
     },
     "moduleDescriptions": {
@@ -65,7 +63,6 @@
       "agent": "Manage skills, search, multimodal tools, and agent-team capabilities.",
       "browser": "Configure the browser automation runtime and executable path.",
       "channels": "Configure external channel credentials and message behavior.",
-      "memory": "Manage sensitive-information filtering and context handling.",
       "experimental": "Manage experimental interface and agent capabilities."
     },
     "feedback": {
@@ -162,15 +159,6 @@
       "chromePath": "Chrome executable path",
       "chromePathPlaceholder": "For example, /Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     },
-    "memory": {
-      "filtering": "Forbidden memory rules",
-      "filteringEnabledDescription": "Filtering is on. The system blocks sensitive information from memory and applies the rule below.",
-      "filteringDisabledDescription": "Filtering is off. The rule below remains saved but does not take effect.",
-      "editRule": "Edit rule",
-      "editRuleTitle": "Edit forbidden memory rule",
-      "editRuleDescription": "This rule is saved separately for the current interface language and does not overwrite other languages.",
-      "context": "Context processing"
-    },
     "experimental": {
       "externalCliAgents": "Third-Party Agents",
       "externalCliAgentsDescription": "Configure Claude and Codex Agents that a Team Leader can spawn in Team mode.",
@@ -246,19 +234,6 @@
       "swarmflow_enabled": {
         "title": "Dynamic workflow",
         "description": "Control whether the agent team enables dynamic workflow capabilities."
-      },
-      "memory_forbidden_enabled": {
-        "title": "Enable forbidden-memory filtering",
-        "description": "Enable built-in sensitive-information filtering and apply the rule below as a memory restriction."
-      },
-      "memory_forbidden_description": {
-        "title": "Forbidden rule",
-        "description": "Describe content that should not be stored in memory. Built-in sensitive-information detection still applies.",
-        "placeholder": "For example: passwords, API keys, secrets, tokens, credit card numbers, ID numbers, or phone numbers"
-      },
-      "context_engine_enabled": {
-        "title": "Context compression",
-        "description": "Enable the existing context-engine compression capability."
       },
       "permissions_mode": {
         "title": "Global permission mode",

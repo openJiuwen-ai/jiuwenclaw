@@ -1,8 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  buildConfigSavePayload,
-  mergeSettingsConfigValues,
-} from './settingsContract';
+import { buildConfigSavePayload } from './settingsContract';
 import { useSettingsServices } from './SettingsServicesProvider';
 
 export function useSettingsConfig() {
@@ -35,12 +32,12 @@ export function useSettingsConfig() {
     };
   }, [reload]);
   const save = useCallback(
-    async (updates: Record<string, string>, operation: string, language: string) => {
+    async (updates: Record<string, string>, operation: string) => {
       const payload = buildConfigSavePayload(updates);
       const result = await saveQueue.enqueue(operation, () =>
         request('config.save_all', payload, { timeoutMs: 600_000 }),
       );
-      setConfig((current) => mergeSettingsConfigValues(current, payload.config, language));
+      setConfig((current) => ({ ...current, ...payload.config }));
       return result;
     },
     [request, saveQueue],

@@ -7,8 +7,6 @@ import {
   buildConfigSavePayload,
   buildModelValidationPayload,
   buildModelsSavePayload,
-  getLocalizedMemoryDescription,
-  mergeSettingsConfigValues,
   normalizeSettingsConfigUpdates,
   normalizePermissionLevel,
   SETTINGS_CONFIG_FIELDS,
@@ -234,11 +232,11 @@ function translationAt(locale, key) {
   return key.split('.').reduce((value, part) => value?.[part], locale);
 }
 
-test('registry definition preserves the fixed seven-module order and fails invalid registrations', () => {
+test('registry definition preserves the fixed six-module order and fails invalid registrations', () => {
   const definition = source('src/features/settings/registry/openSourceDefinition.ts');
   assert.match(
     definition,
-    /generalModule,\s*modelsModule,\s*agentModule,\s*browserModule,\s*channelsModule,\s*memoryModule,\s*experimentalModule/,
+    /generalModule,\s*modelsModule,\s*agentModule,\s*browserModule,\s*channelsModule,\s*experimentalModule/,
   );
   assert.doesNotMatch(definition, /securityModule/);
   for (const removedPath of [
@@ -246,6 +244,10 @@ test('registry definition preserves the fixed seven-module order and fails inval
     'src/features/settings/modules/security/definition.ts',
     'src/features/settings/modules/security/index.ts',
     'src/assets/settings/navigation/security.svg',
+    'src/features/settings/modules/memory/MemorySettings.tsx',
+    'src/features/settings/modules/memory/definition.ts',
+    'src/features/settings/modules/memory/index.ts',
+    'src/assets/settings/navigation/memory.svg',
   ]) {
     assert.equal(existsSync(new URL(removedPath, root)), false, `${removedPath} must not exist`);
   }
@@ -376,26 +378,26 @@ test('simple Settings definitions reject unknown sources and derive required i18
   assert.throws(
     () =>
       create({
-        id: 'memory',
-        titleKey: 'settings.memory',
+        id: 'experimental',
+        titleKey: 'settings.experimental',
         icon: Icon,
         source: 'config',
         sections: [
           {
-            id: 'memory',
+            id: 'experimental',
             items: [
               {
                 id: 'enabled',
                 component: 'switch',
-                key: 'memory_forbidden_enabled',
+                key: 'proactive_recommendation_enabled',
                 subItems: {
                   show: 'sometimes',
                   disabled: 'never',
                   items: [
                     {
-                      id: 'description',
-                      component: 'input',
-                      key: 'memory_forbidden_description',
+                      id: 'limits',
+                      component: 'custom',
+                      render: Icon,
                     },
                   ],
                 },
@@ -407,47 +409,34 @@ test('simple Settings definitions reject unknown sources and derive required i18
     /invalid subItems\.show/,
   );
   const definition = create({
-    id: 'memory',
-    titleKey: 'settings.memory',
+    id: 'browser',
+    titleKey: 'settings.browser',
     icon: Icon,
-    source: 'config',
+    source: 'browser',
     sections: [
       {
-        id: 'memory',
+        id: 'browser',
         items: [
           {
-            id: 'enabled',
-            component: 'switch',
-            key: 'memory_forbidden_enabled',
-            subItems: {
-              show: 'when-parent-checked',
-              disabled: 'never',
-              items: [
-                {
-                  id: 'description',
-                  component: 'input',
-                  key: 'memory_forbidden_description',
-                },
-              ],
-            },
+            id: 'path',
+            component: 'input',
+            key: 'chrome_path',
           },
         ],
       },
     ],
   });
   const requiredKeys = new Set([
-    'settings.memory',
-    'settingsPanel.fields.memory_forbidden_enabled.title',
-    'settingsPanel.fields.memory_forbidden_enabled.description',
-    'settingsPanel.fields.memory_forbidden_description.title',
-    'settingsPanel.fields.memory_forbidden_description.description',
-    'settingsPanel.fields.memory_forbidden_description.placeholder',
+    'settings.browser',
+    'settingsPanel.fields.chrome_path.title',
+    'settingsPanel.fields.chrome_path.description',
+    'settingsPanel.fields.chrome_path.placeholder',
   ]);
   validateSettingsI18n(definition, (key) => requiredKeys.has(key));
-  requiredKeys.delete('settingsPanel.fields.memory_forbidden_description.placeholder');
+  requiredKeys.delete('settingsPanel.fields.chrome_path.placeholder');
   assert.throws(
     () => validateSettingsI18n(definition, (key) => requiredKeys.has(key)),
-    /Missing settings i18n key: settingsPanel\.fields\.memory_forbidden_description\.placeholder/,
+    /Missing settings i18n key: settingsPanel\.fields\.chrome_path\.placeholder/,
   );
 });
 
@@ -713,7 +702,7 @@ test('new Settings architecture has no legacy giant page or setting-specific pri
   assert.equal(existsSync(new URL('src/components/SettingsPanel/index.tsx', root)), false);
   assert.equal(existsSync(new URL('src/components/SettingsPanel/SettingsPrimitives.tsx', root)), false);
   const layout = source('src/features/settings/SettingsPageLayout.tsx');
-  assert.doesNotMatch(layout, /case ['"](general|models|agent|browser|channels|memory|security|experimental)/);
+  assert.doesNotMatch(layout, /case ['"](general|models|agent|browser|channels|security|experimental)/);
   assert.match(layout, /data-settings-module/);
   assert.match(layout, /settings-page__status/);
   assert.match(layout, /settingsPanel\.feedback\.(saving|saved|saveFailed)/);
@@ -732,7 +721,7 @@ test('new Settings architecture has no legacy giant page or setting-specific pri
 });
 
 test('simple Settings controls are declared per module and enforced by the shared renderer', () => {
-  const modules = ['general', 'models', 'agent', 'browser', 'channels', 'memory', 'experimental'];
+  const modules = ['general', 'models', 'agent', 'browser', 'channels', 'experimental'];
   const definitions = modules.map((module) => ({
     module,
     source: source(`src/features/settings/modules/${module}/definition.ts`),
@@ -887,7 +876,7 @@ test('Settings request router uses exact method ownership and rejects ambiguous 
   );
 });
 
-test('settings contract rejects unknown keys and retains memory translations', () => {
+test('settings contract rejects unknown keys and normalizes supported values', () => {
   assert.equal(new Set(SETTINGS_CONFIG_FIELDS.map((field) => field.key)).size, SETTINGS_CONFIG_FIELDS.length);
   assert.equal(
     SETTINGS_CONFIG_FIELDS.some((field) => field.key === 'permissions_mode'),
@@ -900,12 +889,12 @@ test('settings contract rejects unknown keys and retains memory translations', (
   assert.throws(() => buildConfigSavePayload({ unknown: 'x' }), /Unknown settings config key/);
   assert.deepEqual(
     normalizeSettingsConfigUpdates({
-      memory_forbidden_description: '  keep this rule  ',
+      external_cli_agent_claude_cli_path: '  /usr/bin/claude  ',
       proactive_recommendation_max_recommend_per_day: ' 10 ',
       permissions_enabled: 'true',
     }),
     {
-      memory_forbidden_description: 'keep this rule',
+      external_cli_agent_claude_cli_path: '/usr/bin/claude',
       proactive_recommendation_max_recommend_per_day: '10',
       permissions_enabled: 'true',
     },
@@ -928,17 +917,6 @@ test('settings contract rejects unknown keys and retains memory translations', (
     },
   );
   assert.equal(normalizePermissionLevel(' ASK '), 'ask');
-  assert.equal(getLocalizedMemoryDescription({ zh: '中文', en: 'English' }, 'en-US'), 'English');
-  assert.deepEqual(
-    mergeSettingsConfigValues(
-      { memory_forbidden_description: { zh: '旧', en: 'old' } },
-      { memory_forbidden_description: 'new' },
-      'en',
-    ),
-    {
-      memory_forbidden_description: { zh: '旧', en: 'new' },
-    },
-  );
 });
 
 test('Settings i18n is symmetrical and includes the optional field affordance', () => {
@@ -992,15 +970,6 @@ test('every visible Settings control maps to an exact persistence field or RPC',
     [...modelVisible],
     [...contractByCategory('models')].filter((key) => !key.startsWith('embed_')),
   );
-  const memoryVisible = new Set([
-    ...findSettingDefinitionKeys(parseTsx('src/features/settings/modules/memory/definition.ts')),
-    'memory_forbidden_description',
-  ]);
-  assert.deepEqual([...memoryVisible].sort(), [
-    'context_engine_enabled',
-    'memory_forbidden_description',
-    'memory_forbidden_enabled',
-  ]);
   assert.deepEqual(findSettingDefinitionKeys(parseTsx('src/features/settings/modules/experimental/definition.ts')), [
     'proactive_recommendation_enabled',
   ]);
@@ -1097,7 +1066,6 @@ test('every visible Settings control maps to an exact persistence field or RPC',
 
 test('reachable Settings dialog confirmations are not disabled by unchanged drafts', () => {
   for (const path of [
-    'src/features/settings/modules/memory/MemorySettings.tsx',
     'src/features/settings/modules/agent/AgentSettings.tsx',
     'src/features/settings/modules/experimental/ExperimentalSettings.tsx',
   ]) {
@@ -1153,8 +1121,6 @@ test('SettingRow exposes a business-agnostic subSettings slot for dependent rows
   const collapsibleTextCss = source('src/components/ui/CollapsibleText/CollapsibleText.css');
   const uiComponents = source('src/components/ui/index.ts');
   const settingsComponents = source('src/features/settings/components/index.ts');
-  const memorySettings = source('src/features/settings/modules/memory/MemorySettings.tsx');
-  const memoryDefinition = source('src/features/settings/modules/memory/definition.ts');
   const experimentalDefinition = source('src/features/settings/modules/experimental/definition.ts');
   const browserDefinition = source('src/features/settings/modules/browser/definition.ts');
   const sourceProvider = source('src/features/settings/services/SettingsSourceProvider.tsx');
@@ -1179,13 +1145,6 @@ test('SettingRow exposes a business-agnostic subSettings slot for dependent rows
   assert.match(itemRenderer, /subSettings=\{[\s\S]*item\.subItems\.items\.map/);
   assert.match(itemRenderer, /item\.subItems\?\.show === 'always' \|\| checked/);
   assert.match(itemRenderer, /item\.subItems\?\.disabled === 'when-parent-unchecked'/);
-  assert.match(memoryDefinition, /show: 'always',[\s\S]*disabled: 'when-parent-unchecked'/);
-  assert.match(memorySettings, /<CollapsibleText[\s\S]*maxLines=\{3\}/);
-  assert.match(memorySettings, /controlPlacement="top"/);
-  assert.match(memorySettings, /disabled=\{disabled \|\| !isConnected\}/);
-  assert.match(memorySettings, /\{t\('common\.modify'\)\}/);
-  assert.match(memorySettings, /confirmLabel=\{t\('common\.save'\)\}/);
-  assert.doesNotMatch(memorySettings, /useUnsavedChanges/);
   assert.match(experimentalDefinition, /show: 'always',[\s\S]*disabled: 'when-parent-unchecked'/);
   assert.doesNotMatch(browserDefinition, /component: 'switch'|key: 'enabled'|subItems:/);
   assert.deepEqual(findSettingDefinitionKeys(parseTsx('src/features/settings/modules/browser/definition.ts')), [
@@ -1213,12 +1172,6 @@ test('SettingRow exposes a business-agnostic subSettings slot for dependent rows
   assert.match(itemRenderer, /readOnly=\{!editing\}/);
   assert.match(itemRenderer, /editing \? \([\s\S]*common\.cancel[\s\S]*common\.save/);
   assert.match(itemRenderer, /common\.modify/);
-  assert.equal(zh.settingsPanel.fields.memory_forbidden_description.title, '禁止规则');
-  assert.equal(en.settingsPanel.fields.memory_forbidden_description.title, 'Forbidden rule');
-  assert.equal(zh.common.expand, '展开');
-  assert.equal(en.common.expand, 'Expand');
-  assert.equal(zh.common.collapse, '收起');
-  assert.equal(en.common.collapse, 'Collapse');
 });
 
 test('general connection status matches the high-fidelity badge geometry and palette', () => {
@@ -1423,7 +1376,6 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
     'src/assets/settings/navigation/agent.svg',
     'src/assets/settings/navigation/browser.svg',
     'src/assets/settings/navigation/channels.svg',
-    'src/assets/settings/navigation/memory.svg',
     'src/assets/settings/navigation/experimental.svg',
     'src/assets/settings/channels/xiaoyi.svg',
     'src/assets/settings/channels/feishu.svg',

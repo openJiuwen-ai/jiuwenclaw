@@ -1,1 +1,0 @@
-export { memoryModule } from './definition';

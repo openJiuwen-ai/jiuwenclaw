@@ -14,7 +14,6 @@
     "ok": "确定",
     "and": "和",
     "modify": "修改",
-    "expand": "展开",
     "collapse": "收起",
     "delete": "删除",
     "expandMore": "展开 {{count}} 个",
@@ -56,7 +55,6 @@
       "agent": "智能体",
       "browser": "浏览器",
       "channels": "频道",
-      "memory": "记忆",
       "experimental": "实验功能"
     },
     "moduleDescriptions": {
@@ -65,7 +63,6 @@
       "agent": "管理技能、搜索、多模态工具和智能体团队能力。",
       "browser": "设置浏览器自动化运行时及可执行文件路径。",
       "channels": "配置外部消息频道的连接凭据与消息行为。",
-      "memory": "管理敏感信息过滤与上下文处理能力。",
       "experimental": "管理试验性界面和智能体能力。"
     },
     "feedback": {
@@ -162,15 +159,6 @@
       "chromePath": "Chrome 可执行文件路径",
       "chromePathPlaceholder": "例如 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     },
-    "memory": {
-      "filtering": "禁止记忆规则",
-      "filteringEnabledDescription": "过滤已启用。系统会阻止敏感信息写入记忆，并应用下方规则。",
-      "filteringDisabledDescription": "过滤已关闭。下方规则仍会保留，但不会生效。",
-      "editRule": "编辑规则",
-      "editRuleTitle": "编辑禁止记忆规则",
-      "editRuleDescription": "该规则按当前界面语言单独保存，不会覆盖其他语言的规则。",
-      "context": "上下文处理"
-    },
     "experimental": {
       "externalCliAgents": "三方 Agent",
       "externalCliAgentsDescription": "配置 Team 模式中可由 Leader 拉起的 Claude 与 Codex Agent。",
@@ -235,16 +223,6 @@
       "video_model": { "title": "模型名称" },
       "video_provider": { "title": "模型提供商" },
       "swarmflow_enabled": { "title": "动态工作流", "description": "控制智能体团队是否启用动态工作流能力" },
-      "memory_forbidden_enabled": {
-        "title": "启用禁止记忆过滤",
-        "description": "启用内置敏感信息过滤，并将下方规则作为记忆限制。"
-      },
-      "memory_forbidden_description": {
-        "title": "禁止规则",
-        "description": "描述不应写入记忆的内容。系统仍会使用内置敏感信息检测。",
-        "placeholder": "例如：密码、API 密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息"
-      },
-      "context_engine_enabled": { "title": "上下文压缩", "description": "启用现有上下文引擎压缩能力。" },
       "permissions_mode": { "title": "全局权限模式", "description": "为普通 Agent 与 Team 选择统一的安全护栏模式。" },
       "a2ui_enabled": { "title": "启用 A2UI", "description": "允许将支持的结果渲染成交互式界面。" },
       "external_cli_agent_claude_enabled": {

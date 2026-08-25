@@ -1,7 +1,7 @@
 import type { ModelEntry } from '../../../types';
 
 export type SettingsCategory =
-  'general' | 'models' | 'agent' | 'browser' | 'channels' | 'memory' | 'security' | 'experimental';
+  'general' | 'models' | 'agent' | 'browser' | 'channels' | 'security' | 'experimental';
 
 export type SettingsRequest = <T = unknown>(
   method: string,
@@ -90,15 +90,6 @@ export const SETTINGS_CONFIG_FIELDS: readonly ConfigFieldContract[] = [
   envField('video_model', 'agent', 'text', 'VIDEO_MODEL_NAME'),
   envField('video_provider', 'agent', 'text', 'VIDEO_PROVIDER'),
   yamlField('swarmflow_enabled', 'agent', 'boolean', 'modes.team.jiuwen_team.enable_swarmflow'),
-
-  yamlField('memory_forbidden_enabled', 'memory', 'boolean', 'memory.forbidden_memory_definition.enabled'),
-  yamlField(
-    'memory_forbidden_description',
-    'memory',
-    'text',
-    'memory.forbidden_memory_definition.description.<preferred_language>',
-  ),
-  yamlField('context_engine_enabled', 'memory', 'boolean', 'react.context_engine_config.enabled'),
 
   yamlField('permissions_enabled', 'security', 'boolean', 'permissions.enabled'),
 
@@ -223,43 +214,6 @@ export function normalizePermissionLevel(value: unknown): PermissionLevel | unde
 export function normalizePermissionsMode(value: unknown): PermissionsMode | undefined {
   if (value === 'auto' || value === 'full_access' || value === 'strict') return value;
   return undefined;
-}
-
-export function getLocalizedMemoryDescription(value: unknown, language: string): string {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    const description = String(value ?? '');
-    return description.trim() ? description : '';
-  }
-
-  const descriptions = value as Record<string, unknown>;
-  const normalizedLanguage = language.startsWith('zh') ? 'zh' : 'en';
-  for (const key of new Set([language, normalizedLanguage, 'zh'])) {
-    const description = String(descriptions[key] ?? '');
-    if (description.trim()) return description;
-  }
-  return '';
-}
-
-export function mergeSettingsConfigValues(
-  current: Record<string, unknown>,
-  updates: Record<string, string>,
-  language: string,
-): Record<string, unknown> {
-  const next: Record<string, unknown> = { ...current, ...updates };
-  const memoryDescription = current.memory_forbidden_description;
-  if (
-    updates.memory_forbidden_description !== undefined &&
-    memoryDescription &&
-    typeof memoryDescription === 'object' &&
-    !Array.isArray(memoryDescription)
-  ) {
-    const normalizedLanguage = language.startsWith('zh') ? 'zh' : 'en';
-    next.memory_forbidden_description = {
-      ...(memoryDescription as Record<string, unknown>),
-      [normalizedLanguage]: updates.memory_forbidden_description,
-    };
-  }
-  return next;
 }
 
 export function normalizeSettingsConfigUpdates(updates: Record<string, string>): Record<string, string> {

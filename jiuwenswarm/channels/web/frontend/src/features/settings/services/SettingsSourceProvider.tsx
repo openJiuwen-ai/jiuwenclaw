@@ -2,7 +2,6 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useTranslation } from 'react-i18next';
 import { Loading } from '../../../components/ui';
 import type { SettingValue, SettingsSource } from '../registry/types';
-import { mergeSettingsConfigValues } from './settingsContract';
 import { useSettingsServices } from './SettingsServicesProvider';
 import { serializeConfigSettingValue } from './settingsSourceContract';
 import { useSettingsConfig } from './useSettingsConfig';
@@ -33,7 +32,7 @@ function removeSavingKeys(current: ReadonlySet<string>, keys: readonly string[])
 }
 
 function ConfigSourceProvider({ children }: { children: ReactNode }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { config, setConfig, loading, error, save: saveConfig } = useSettingsConfig();
   const [savingKeys, setSavingKeys] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -45,9 +44,9 @@ function ConfigSourceProvider({ children }: { children: ReactNode }) {
       const keys = Object.keys(serialized);
       const previous = Object.fromEntries(keys.map((key) => [key, config[key]]));
       setSavingKeys((current) => addSavingKeys(current, keys));
-      setConfig((current) => mergeSettingsConfigValues(current, serialized, i18n.language));
+      setConfig((current) => ({ ...current, ...serialized }));
       try {
-        return await saveConfig(serialized, operation, i18n.language);
+        return await saveConfig(serialized, operation);
       } catch (saveError) {
         setConfig((current) => {
           const next = { ...current };
@@ -62,7 +61,7 @@ function ConfigSourceProvider({ children }: { children: ReactNode }) {
         setSavingKeys((current) => removeSavingKeys(current, keys));
       }
     },
-    [config, i18n.language, saveConfig, setConfig],
+    [config, saveConfig, setConfig],
   );
   const patchLocal = useCallback(
     (updates: Record<string, unknown>) => setConfig((current) => ({ ...current, ...updates })),
