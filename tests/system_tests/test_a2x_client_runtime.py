@@ -195,6 +195,22 @@ async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_update_runtime_config", AsyncMock()),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "load_user_rails", AsyncMock()),
         patch.object(interface_module, "get_config", return_value=config_base),
+        patch(
+            "jiuwenswarm.agents.harness.agent_observability.get_skill_evolution_enabled",
+            return_value=False,
+        ),
+        patch(
+            "jiuwenswarm.agents.harness.agent_observability.sync_agent_observability",
+            return_value=None,
+        ),
+        patch(
+            "jiuwenswarm.agents.harness.agent_observability.open_agent_run_span",
+            return_value=None,
+        ),
+        patch(
+            "jiuwenswarm.agents.harness.agent_observability.close_agent_run_span",
+            return_value=None,
+        ),
         patch.object(interface_module, "init_permission_engine", return_value=None),
         patch.object(interface_module, "create_deep_agent", return_value=created_agent),
         patch.dict("os.environ", {"API_KEY": "system-test-key"}),
