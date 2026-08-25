@@ -63,7 +63,15 @@ def test_configure_code_team_member_uses_same_fallback_for_workspace_and_rail(
         observed_project_dirs["rail"] = project_dir
         return object()
 
-    def build_only_coding_memory_rail(self, react_config, config_base, *, mode):
+    def build_only_coding_memory_rail(
+        self,
+        react_config,
+        config_base,
+        *,
+        mode,
+        composition_scope,
+    ):
+        assert composition_scope == "team_member"
         rail = self._build_coding_memory_rail()
         return [rail] if rail is not None else []
 

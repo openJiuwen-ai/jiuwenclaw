@@ -7,6 +7,7 @@ from jiuwenswarm.common.mode_matrix import (
     base_mode_without_plan,
     is_plan_mode,
     is_team_mode,
+    resolve_agent_composition_scope,
     resolve_request_mode,
 )
 from jiuwenswarm.server.agent_ws_server import (
@@ -17,6 +18,32 @@ from jiuwenswarm.server.agent_ws_server import (
 
 def _resolve(params):
     return resolve_request_mode(params, resolve_agent_request_mode)
+
+
+@pytest.mark.parametrize(
+    ("mode", "sub_mode", "expected"),
+    [
+        ("agent", None, "single_agent"),
+        ("agent", "plan", "single_agent"),
+        ("code", "normal", "single_agent"),
+        ("code", "plan", "single_agent"),
+        ("team", None, "team_root"),
+        ("code", "team", "team_root"),
+        ("agent", "auto_harness", "auto_harness"),
+        ("auto_harness", None, "auto_harness"),
+    ],
+)
+def test_common_composition_scope_is_closed(mode, sub_mode, expected):
+    assert resolve_agent_composition_scope(mode, sub_mode) == expected
+
+
+@pytest.mark.parametrize(
+    ("mode", "sub_mode"),
+    [("unknown", None), ("team", "code"), ("code", "auto_harness")],
+)
+def test_common_composition_scope_rejects_unclassified_pairs(mode, sub_mode):
+    with pytest.raises(RuntimeError, match="agent_composition_scope_unclassified"):
+        resolve_agent_composition_scope(mode, sub_mode)
 
 
 def test_request_preserves_original_mode_when_web_composition_rewrites_it():

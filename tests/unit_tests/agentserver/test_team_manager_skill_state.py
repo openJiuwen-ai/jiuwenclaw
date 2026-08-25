@@ -44,10 +44,21 @@ def test_configure_code_team_member_uses_agent_workspace_coding_memory_path(monk
         "build_code_tool_cards",
         lambda self, agent_id: [],
     )
+    def build_no_rails(
+        self,
+        react_config,
+        config_base,
+        *,
+        mode,
+        composition_scope,
+    ):
+        assert composition_scope == "team_member"
+        return []
+
     monkeypatch.setattr(
         interface_code.JiuwenSwarmCodeAdapter,
         "_build_agent_rails",
-        lambda self, react_config, config_base, mode: [],
+        build_no_rails,
     )
     monkeypatch.setattr(
         interface_code.JiuwenSwarmCodeAdapter,

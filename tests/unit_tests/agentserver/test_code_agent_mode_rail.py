@@ -11,6 +11,13 @@ import pytest
 
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import PLAN_EXECUTE_CTX_KEY
 from jiuwenswarm.agents.harness.code.rails.code_agent_mode_rail import CodeAgentModeRail
+from jiuwenswarm.agents.harness.code.rails.code_plan_pre_permission_guard_rail import (
+    CodePlanPrePermissionGuardRail,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.permission_interrupt_rail import (
+    JiuwenSwarmPermissionInterruptRail,
+    has_pre_permission_hard_rejection,
+)
 
 
 @pytest.mark.asyncio
@@ -64,6 +71,86 @@ async def test_before_tool_call_blocks_non_git_write_in_plan_mode() -> None:
 
     parent.assert_awaited_once()
     assert ctx.extra.get("_skip_tool") is True
+
+
+@pytest.mark.asyncio
+async def test_plan_guard_rejection_precedes_and_silences_permission() -> None:
+    mode_rail = CodeAgentModeRail(allowed_tools=["bash"])
+    agent = MagicMock()
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan", plan_slug="test-plan")
+    )
+    mode_rail._agent = agent
+    guard = CodePlanPrePermissionGuardRail(mode_rail)
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(),
+        inputs=SimpleNamespace(
+            tool_name="bash",
+            tool_call=SimpleNamespace(id="call_1"),
+            tool_args={"command": "mkdir -p src/generated"},
+        ),
+        extra={},
+    )
+    parent_mode = AsyncMock()
+    parent_permission = AsyncMock()
+
+    with (
+        patch.object(CodeAgentModeRail.__bases__[0], "before_tool_call", parent_mode),
+        patch.object(
+            JiuwenSwarmPermissionInterruptRail.__bases__[0],
+            "before_tool_call",
+            parent_permission,
+        ),
+    ):
+        await guard.before_tool_call(ctx)
+        await mode_rail.before_tool_call(ctx)
+        permission = object.__new__(JiuwenSwarmPermissionInterruptRail)
+        await permission.before_tool_call(ctx)
+
+    assert ctx.extra.get("_skip_tool") is True
+    assert has_pre_permission_hard_rejection(ctx) is True
+    parent_mode.assert_awaited_once()
+    parent_permission.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_plan_guard_allows_valid_exit_without_duplicate_mode_check() -> None:
+    mode_rail = CodeAgentModeRail(allowed_tools=["exit_plan_mode"])
+    agent = MagicMock()
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan", plan_slug="test-plan")
+    )
+    mode_rail._agent = agent
+    guard = CodePlanPrePermissionGuardRail(mode_rail)
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(),
+        inputs=SimpleNamespace(
+            tool_name="exit_plan_mode",
+            tool_call=SimpleNamespace(id="call_1"),
+            tool_args={},
+        ),
+        extra={},
+    )
+    parent = AsyncMock()
+
+    with patch.object(CodeAgentModeRail.__bases__[0], "before_tool_call", parent):
+        await guard.before_tool_call(ctx)
+        await mode_rail.before_tool_call(ctx)
+
+    assert ctx.extra.get("_skip_tool") is not True
+    assert has_pre_permission_hard_rejection(ctx) is False
+    parent.assert_awaited_once()
+
+
+def test_pre_permission_marker_cannot_be_forged_by_plain_extra_value() -> None:
+    ctx = SimpleNamespace(
+        extra={
+            "_skip_tool": True,
+            "_jiuwenswarm_pre_permission_hard_rejection": True,
+        }
+    )
+
+    assert has_pre_permission_hard_rejection(ctx) is False
 
 
 _EXIT_NOTIFICATION = "<system-reminder>\nStart executing the first step now.\n</system-reminder>"
