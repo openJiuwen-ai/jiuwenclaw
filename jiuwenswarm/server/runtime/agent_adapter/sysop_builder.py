@@ -24,6 +24,7 @@ from jiuwenswarm.common.config import (
     get_sandbox_endpoint,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
+    merge_connector_excluded_commands,
 )
 from jiuwenswarm.common.utils import (
     get_agent_root_dir,
@@ -633,7 +634,7 @@ def create_sandbox_sysop_card(
         extra_params = {
             "policy": policy,
             "policy_mode": "append",
-            "excluded_commands": list(excluded_commands or []),
+            "excluded_commands": merge_connector_excluded_commands(excluded_commands),
             "fallback_on_failure": bool(fallback_on_failure),
             "preserve_file_sharing_mode": _PRESERVE_FILE_SHARING_MODE,
             "preserve_files_upload": upload_list,

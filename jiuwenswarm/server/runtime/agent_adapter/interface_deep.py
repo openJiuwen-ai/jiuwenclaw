@@ -305,6 +305,7 @@ from jiuwenswarm.common.config import (
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_skill_create_enabled,
+    merge_connector_excluded_commands,
     resolve_env_vars,
 )
 from jiuwenswarm.common.mcp_config import (
@@ -3944,7 +3945,9 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             return
 
         extra = launcher.extra_params or {}
-        extra["excluded_commands"] = list(runtime.get("excluded_commands") or [])
+        extra["excluded_commands"] = merge_connector_excluded_commands(
+            runtime.get("excluded_commands")
+        )
         extra["fallback_on_failure"] = bool(runtime.get("fallback_on_failure", False))
         new_policy, upload_list = build_filesystem_policy(
             runtime.get("files") or {},
