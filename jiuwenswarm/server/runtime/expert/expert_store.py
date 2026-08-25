@@ -20,6 +20,11 @@ from typing import Any, Protocol
 
 import httpx
 
+from jiuwenswarm.common.np_transport import (
+    PipeError,
+    is_named_pipe_url,
+    named_pipe_transport_for,
+)
 from jiuwenswarm.common.utils import get_agent_experts_dir, get_expert_cache_dir, logger
 
 DEFAULT_REPO_URL = "http://127.0.0.1:18901"
@@ -152,7 +157,13 @@ def validate_expert_package(package_dir: Path) -> list[str]:
 
 
 class HttpRepoExpertPackageSource:
-    """调简易包仓库 API 的实现。"""
+    """调简易包仓库 API 的实现。
+
+    base_url 两种形态：
+      - ``http(s)://<host>:<port>``（默认 http://127.0.0.1:18901，loopback TCP）
+      - ``np://<管道名>[/path 前缀]``（桌面命名管道迁移形态：HTTP/1.1 字节流经
+        ``common.np_transport.NamedPipeTransport`` 过管道，对端是桌面主进程的本机代理）
+    """
 
     def __init__(self, base_url: str | None = None, client: Any = None) -> None:
         self._base_url = (base_url or os.environ.get(REPO_URL_ENV) or DEFAULT_REPO_URL).rstrip("/")
@@ -160,7 +171,22 @@ class HttpRepoExpertPackageSource:
         self._client = client
 
     def _http(self) -> Any:
-        return self._client or httpx.AsyncClient(
+        if self._client is not None:
+            return self._client
+        if is_named_pipe_url(self._base_url):
+            # 实测结论（httpx 0.28.1）：AsyncClient 直接接受 np:// base_url
+            # （httpx.URL 是通用 URI 解析，不做 scheme 白名单），raw_path 拼接语义
+            # 与 http 一致（np://claw-expert-repo + /api/v1/packages →
+            # raw_path=b"/api/v1/packages"），无需占位 http:// base_url。
+            # transport 只取 authority 段（管道名）；trust_env=False 防 HTTP(S)_PROXY
+            # 等代理 env 干扰本机管道。
+            return httpx.AsyncClient(
+                base_url=self._base_url,
+                timeout=_FETCH_TIMEOUT_SEC,
+                transport=named_pipe_transport_for(self._base_url),
+                trust_env=False,
+            )
+        return httpx.AsyncClient(
             base_url=self._base_url, timeout=_FETCH_TIMEOUT_SEC
         )
 
@@ -171,7 +197,8 @@ class HttpRepoExpertPackageSource:
                 return await client.get(path)
             async with client:
                 return await client.get(path)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, PipeError) as exc:
+            # PipeError：np:// 形态管道不可达（桌面代理未起/超时），与 http 连接失败同语义
             raise ExpertRepoUnavailable(f"专家仓库不可达: {exc}") from exc
 
     async def list(self) -> list[ExpertSummary]:

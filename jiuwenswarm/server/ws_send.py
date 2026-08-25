@@ -93,12 +93,26 @@ def _build_oversized_fallback(
     return fallback
 
 
+async def _transport_send(ws: Any, data: str) -> None:
+    """按传输形态发送一条文本消息。
+
+    E2A 通道三形态（docs/named-pipe-migration-design.md §5.2）：
+    MessageTransport（send_text：WS 皮/命名管道/stdio）或裸 websockets 连接
+    （send；测试 fake 与旧调用方）。
+    """
+    send_text = getattr(ws, "send_text", None)
+    if callable(send_text):
+        await send_text(data)
+        return
+    await ws.send(data)
+
+
 async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
     """Send one bounded wire payload, replacing oversized data with an error."""
     serialized = json.dumps(wire, ensure_ascii=False)
     actual_bytes = len(serialized.encode("utf-8"))
     if actual_bytes <= AGENT_WS_SEND_BUDGET_BYTES:
-        await ws.send(serialized)
+        await _transport_send(ws, serialized)
         return True
 
     _preview = serialized[:1000]
@@ -127,5 +141,5 @@ async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
             f"actual_bytes={fallback_bytes} "
             f"max_bytes={AGENT_WS_SEND_BUDGET_BYTES}"
         )
-    await ws.send(fallback_json)
+    await _transport_send(ws, fallback_json)
     return False

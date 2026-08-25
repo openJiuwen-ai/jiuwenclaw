@@ -60,7 +60,25 @@ def resolve_env_vars(value: Any) -> Any:
             var_name = match.group(1)
             default = match.group(2)
             current = os.getenv(var_name)
-            is_need_decrypt = ("api_key" in var_name.lower() or "token" in var_name.lower()) and current
+            from_vault = False
+            # 桌面形态（密钥包已下发）且 env 无值：${API_KEY} 由密钥包 proxyKey 兜底——
+            # 桌面端 env 已剔密（密钥不落环境变量），模型条目的 ModelClientConfig
+            # 校验要求 api_key 非空；真正的出站 api_key 由 llm_np_patch 在客户端
+            # 构造时同样取 proxyKey（同一来源，口径一致）
+            if (current is None or current == "") and var_name == "API_KEY":
+                try:
+                    from jiuwenswarm.common.secrets_bootstrap import get_secret, secrets_loaded
+
+                    if secrets_loaded():
+                        current = get_secret("proxyKey") or None
+                        from_vault = current is not None
+                except Exception:  # noqa: BLE001 - 防御：模块异常时按 env 原语义
+                    pass
+            # 密钥包兜底值不经过 crypto 解密（它本来就不是加密落盘的形态）
+            is_need_decrypt = (
+                ("api_key" in var_name.lower() or "token" in var_name.lower())
+                and current and not from_vault
+            )
             reg_mod = sys.modules.get("jiuwenswarm.extensions.registry")
             if reg_mod is not None and hasattr(reg_mod, "ExtensionRegistry"):
                 try:

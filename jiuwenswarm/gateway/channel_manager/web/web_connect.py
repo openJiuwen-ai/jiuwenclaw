@@ -9,13 +9,16 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import inspect
 import json
 import logging
 import os
 import secrets
+import sys
 import time
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
@@ -93,6 +96,12 @@ MethodHandler = Callable[..., Awaitable[None]]
 # 连接钩子签名: (ws) -> None | Awaitable[None]
 ConnectHook = Callable[..., Any]
 
+# ── 命名管道形态（桌面集成，docs/named-pipe-migration-design.md §5.4）──
+# 管道连接首帧 auth 的等待超时（秒）
+_PIPE_AUTH_TIMEOUT_SECONDS = 10.0
+# 管道连接的 remote 标识（日志/路由兜底 user_id 用；管道无对端地址概念）
+_PIPE_REMOTE_LABEL = "named-pipe:cron"
+
 
 @dataclass(frozen=True)
 class _MethodHandlerInvocation:
@@ -115,6 +124,38 @@ class WebChannelConfig:
     allow_from: list[str] = field(default_factory=list)
 
 
+class _PipeClientAdapter:
+    """命名管道连接的 ws 皮：让管道连接复用 WebChannel 的协议内核与出站 writer。
+
+    与 websockets 连接的差异仅在 IO 层：
+    - ``send(data)``：writer 把出站 dict 帧序列化为 str 后调本方法，这里 loads 回
+      dict 再按长度前缀帧发出——管道对端 ``recv_frame`` 直接拿到 JSON 对象，
+      与 WS 客户端 ``JSON.parse`` 后的形态一致。
+    - ``closed`` / ``close()``：映射到 ``PipeStream``（close 的 code/reason
+      参数仅作 WS 兼容占位，管道无关闭帧语义）。
+    连接级属性（``_jiuwen_ws_id`` / ``_jiuwen_initial_sid`` / 连接 user_id）
+    由协议内核 setattr 挂到本对象上，与 WS 连接同机制。
+    """
+
+    def __init__(self, stream: Any, *, remote: str = _PIPE_REMOTE_LABEL) -> None:
+        self._stream = stream
+        self.remote_address = remote
+
+    @property
+    def closed(self) -> bool:
+        return bool(self._stream.closed)
+
+    async def send(self, data: Any) -> None:
+        if isinstance(data, (bytes, bytearray)):
+            data = bytes(data).decode("utf-8")
+        if isinstance(data, str):
+            data = json.loads(data)
+        await self._stream.send_frame(data)
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        await self._stream.close()
+
+
 class WebChannel(BaseWsChannel):
     """Web 前端 WebSocket 通道.
 
@@ -133,6 +174,10 @@ class WebChannel(BaseWsChannel):
         super().__init__(config, router)
         self.config: WebChannelConfig = config
         self._server: Any = None
+        # 桌面形态的命名管道 server（np_transport.PipeServer；非桌面形态恒 None）
+        self._pipe_server: Any = None
+        # 桌面形态（仅管道）下 start() 的常驻退出事件（stop() 置位）
+        self._pipe_only_stop: asyncio.Event | None = None
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._method_handlers: dict[str, MethodHandler] = {}
         self._connect_hooks: list[ConnectHook] = []
@@ -535,12 +580,29 @@ class WebChannel(BaseWsChannel):
     # ── Channel 生命周期 ──────────────────────────────────
 
     async def start(self) -> None:
-        """启动 WebSocket 服务并监听客户端连接."""
+        """启动 WebSocket 服务并监听客户端连接.
+
+        桌面集成形态（密钥包已下发，secrets_loaded()）：不监听 TCP——cron 通道
+        由命名管道承载（零监听端口目标，docs/named-pipe-migration-design.md）；
+        非桌面形态（无密钥包）行为不变。
+        """
         if self._running:
             logger.warning("WebChannel 已在运行")
             return
         if not self.config.enabled:
             logger.warning("WebChannel 未启用（enabled=False）")
+            return
+
+        from jiuwenswarm.common.secrets_bootstrap import secrets_loaded
+
+        if secrets_loaded():
+            # 桌面形态：仅管道 server，不监听 TCP（WS 18590 不再存在）
+            await self._maybe_start_pipe_server()
+            self._running = True
+            # start() 语义是「常驻直到 stop」：用事件保持，stop() 置位退出
+            self._pipe_only_stop = asyncio.Event()
+            logger.info("WebChannel 桌面形态：仅命名管道监听（TCP 不监听）")
+            await self._pipe_only_stop.wait()
             return
 
         try:
@@ -561,6 +623,8 @@ class WebChannel(BaseWsChannel):
             ping_timeout=60,
             max_size=WEB_WS_MAX_MESSAGE_BYTES,
         )
+        # 桌面形态：并行起命名管道 server（cron 通道目标态载体），失败不阻断 WS
+        await self._maybe_start_pipe_server()
         self._running = True
         logger.info(
             f"WebChannel 已启动: ws://{self.config.host}:{self.config.port}{self.config.path}"
@@ -570,6 +634,10 @@ class WebChannel(BaseWsChannel):
     async def stop(self) -> None:
         """停止 WebSocket 服务并清理连接."""
         self._running = False
+        # 桌面形态（仅管道）：唤醒 start() 的常驻等待
+        if self._pipe_only_stop is not None:
+            self._pipe_only_stop.set()
+            self._pipe_only_stop = None
 
         all_clients = list(self.clients)
         close_tasks = [client.close(code=1001, reason="server shutdown") for client in all_clients]
@@ -583,6 +651,12 @@ class WebChannel(BaseWsChannel):
             self._server = None
         # 兜底清理未走正常断连路径的 writer 协程（正常断连已由 unregister_ws 清理）
         await self._shutdown_all_writers()
+        if self._pipe_server is not None:
+            try:
+                await self._pipe_server.stop()
+            except Exception as e:  # noqa: BLE001 - 关闭路径容错
+                logger.warning("[WebChannel] 管道 server 停止异常: %s", e)
+            self._pipe_server = None
         logger.info("WebChannel 已停止")
 
     async def connect(self) -> None:
@@ -980,6 +1054,60 @@ class WebChannel(BaseWsChannel):
             await ws.close(code=1008, reason=f"unsupported path: {request_path}")
             return
 
+        try:
+            await self._run_client_session(
+                ws, query, remote, self._ws_json_frames(ws), path_label=request_path,
+            )
+        except WebSocketConnectionClosed as e:  # pragma: no cover - 连接生命周期容错
+            logger.info(
+                "WebChannel 连接关闭: %s",
+                format_ws_diagnostics(
+                    {"remote": remote, "path": request_path},
+                    describe_ws_peer(ws),
+                    describe_ws_exception(e),
+                ),
+            )
+        except Exception as e:  # pragma: no cover - 连接生命周期容错
+            logger.warning(
+                "WebChannel 连接异常: %s",
+                format_ws_diagnostics(
+                    {"remote": remote, "path": request_path},
+                    describe_ws_peer(ws),
+                    describe_ws_exception(e),
+                ),
+            )
+
+    async def _ws_json_frames(self, ws: Any) -> AsyncIterator[dict[str, Any]]:
+        """WS 文本帧 → dict 帧迭代器（公共内核的 WS 入口皮）。
+
+        JSON 解析失败回 BAD_REQUEST 错误帧后继续接收（与原 ``_handle_raw_message``
+        循环内行为一致）。
+        """
+        async for raw in ws:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                await self.send_response(ws, "", ok=False, error="invalid json", code="BAD_REQUEST")
+                continue
+            yield data
+
+    async def _run_client_session(
+        self,
+        ws: Any,
+        query: dict[str, list[str]],
+        remote: Any,
+        frames: AsyncIterator[dict[str, Any]],
+        *,
+        path_label: str = "",
+    ) -> None:
+        """单连接公共内核（WS 与命名管道两种传输皮共用）：注册 + 连接钩子 + 帧循环 + 断连清理。
+
+        入站：``frames`` 为已解析的 dict 帧迭代器（WS 文本帧 JSON.parse / 管道长度
+        前缀帧），逐帧走 :meth:`_handle_message_dict`。
+        出站：统一经 per-ws writer（``_enqueue_send``），WS 发文本帧、管道发长度
+        前缀帧，由各自的 ws 皮（websockets 连接 / ``_PipeClientAdapter``）承担。
+        """
+        _flat_query = {k: (v[0] if v else "") for k, v in query.items()}
         connection_user_id, _user_id = self._resolve_ws_identity(
             ws, _flat_query, remote, route_type="ws",
         )
@@ -1022,40 +1150,22 @@ class WebChannel(BaseWsChannel):
                 logger.warning(
                     "WebChannel on_connect hook error: %s",
                     format_ws_diagnostics(
-                        {"remote": remote, "path": request_path},
+                        {"remote": remote, "path": path_label},
                         describe_ws_peer(ws),
                         describe_ws_exception(e),
                     ),
                 )
 
         try:
-            async for raw in ws:
-                await self._handle_raw_message(ws, raw, query)
-        except WebSocketConnectionClosed as e:  # pragma: no cover - 连接生命周期容错
-            logger.info(
-                "WebChannel 连接关闭: %s",
-                format_ws_diagnostics(
-                    {"remote": remote, "path": request_path},
-                    describe_ws_peer(ws),
-                    describe_ws_exception(e),
-                ),
-            )
-        except Exception as e:  # pragma: no cover - 连接生命周期容错
-            logger.warning(
-                "WebChannel 连接异常: %s",
-                format_ws_diagnostics(
-                    {"remote": remote, "path": request_path},
-                    describe_ws_peer(ws),
-                    describe_ws_exception(e),
-                ),
-            )
+            async for data in frames:
+                await self._handle_message_dict(ws, data, query)
         finally:
             await self.unregister_ws(ws)
 
             logger.info(
                 "WebChannel 连接清理完成: %s",
                 format_ws_diagnostics(
-                    {"remote": remote, "path": request_path, "clients": len(self._clients_by_key)},
+                    {"remote": remote, "path": path_label, "clients": len(self._clients_by_key)},
                     describe_ws_peer(ws),
                 ),
             )
@@ -1159,13 +1269,118 @@ class WebChannel(BaseWsChannel):
                 remote,
             )
 
+    # ── 命名管道形态（桌面集成：cron 通道目标态载体）────────────────
+
+    async def _maybe_start_pipe_server(self) -> None:
+        """桌面形态下并行启动命名管道 server（docs/named-pipe-migration-design.md §5.4）。
+
+        判定：密钥包已由 stdin 下发（``secrets_loaded()``）且携带 ``pipes.cron``
+        管道路径。非桌面形态（无密钥包）不起管道 server，行为零变化。
+        管道启动失败仅记录日志，不阻断既有 WS 通道。
+        """
+        if self._pipe_server is not None:
+            return
+        try:
+            from jiuwenswarm.common.secrets_bootstrap import get_secret, secrets_loaded
+        except Exception:  # pragma: no cover - 防御：模块不可用时视为非桌面形态
+            return
+        if not secrets_loaded():
+            return
+        pipe_path = str(get_secret("pipes.cron", "") or "").strip()
+        if not pipe_path:
+            return
+        if sys.platform != "win32":
+            logger.warning(
+                "[WebChannel] 命名管道仅支持 Windows，跳过 cron 管道 server: %s", pipe_path,
+            )
+            return
+        try:
+            from jiuwenswarm.common.np_transport import make_image_verifier, serve_pipe
+        except Exception as exc:  # pragma: no cover - pywin32 缺失时降级 WS 单通道
+            logger.error("[WebChannel] 命名管道传输不可用，跳过 cron 管道 server: %s", exc)
+            return
+
+        # 对端进程身份校验：密钥包携带桌面主进程 exe 路径时启用 PID→镜像白名单
+        desktop_exe = str(get_secret("desktopExe", "") or "").strip()
+        verify_client = make_image_verifier([desktop_exe]) if desktop_exe else None
+        try:
+            self._pipe_server = await serve_pipe(
+                pipe_path,
+                self._handle_pipe_connection,
+                verify_client=verify_client,
+            )
+        except Exception as exc:  # noqa: BLE001 - 管道启动失败不阻断 WS 通道
+            logger.error("[WebChannel] cron 管道 server 启动失败（仅 WS 可用）: %s", exc)
+            return
+        logger.info(
+            "[WebChannel] cron 命名管道 server 已启动: %s（verify_client=%s）",
+            pipe_path,
+            "on" if verify_client is not None else "off",
+        )
+
+    async def _handle_pipe_connection(self, stream: Any) -> None:
+        """管道连接处理：首帧 auth（e2aToken）→ 通过后进入与 WS 相同的会话内核。
+
+        鉴权失败/首帧异常即返回（``PipeServer`` 兜底关管）。连接级异常只影响
+        本连接，不波及其他管道连接与 WS 通道。
+        """
+        try:
+            from jiuwenswarm.common.np_transport import FrameCodecError, PipeError
+            from jiuwenswarm.common.secrets_bootstrap import get_secret
+
+            try:
+                first = await stream.recv_frame(timeout=_PIPE_AUTH_TIMEOUT_SECONDS)
+            except (FrameCodecError, PipeError) as exc:
+                logger.info("[WebChannel] 管道连接首帧读取失败，断开: %s", exc)
+                return
+            token = (
+                first.get("token")
+                if isinstance(first, dict) and first.get("type") == "auth"
+                else None
+            )
+            expected = str(get_secret("e2aToken", "") or "")
+            if (
+                not expected
+                or not isinstance(token, str)
+                or not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
+            ):
+                logger.warning("[WebChannel] 管道连接 auth 校验失败，断开")
+                return
+            ws = _PipeClientAdapter(stream)
+            await self._run_client_session(
+                ws, {}, _PIPE_REMOTE_LABEL, self._pipe_frames(stream), path_label="np:cron",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 连接级容错
+            logger.warning("[WebChannel] 管道连接异常: %s", exc)
+
+    async def _pipe_frames(self, stream: Any) -> AsyncIterator[dict[str, Any]]:
+        """管道长度前缀帧 → dict 帧迭代器；断管即结束，协议错误记录后关管。"""
+        from jiuwenswarm.common.np_transport import FrameCodecError, PipeClosedError, PipeError
+
+        while not stream.closed:
+            try:
+                frame = await stream.recv_frame()
+            except PipeClosedError:
+                return
+            except (FrameCodecError, PipeError) as exc:
+                logger.warning("[WebChannel] 管道帧协议/传输错误，关闭连接: %s", exc)
+                return
+            yield frame
+
     async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
             await self.send_response(ws, "", ok=False, error="invalid json", code="BAD_REQUEST")
             return
+        await self._handle_message_dict(ws, data, query)
 
+    async def _handle_message_dict(
+        self, ws: Any, data: Any, query: dict[str, list[str]],
+    ) -> None:
+        """消息处理公共内核（收 dict / 发 dict）：WS 与命名管道传输皮共用。"""
         if not isinstance(data, dict):
             await self.send_response(ws, "", ok=False, error="invalid request", code="BAD_REQUEST")
             return

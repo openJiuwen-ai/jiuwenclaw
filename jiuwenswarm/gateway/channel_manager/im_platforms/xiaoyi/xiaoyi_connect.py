@@ -14,6 +14,8 @@ import json
 import os
 import re
 import ssl
+import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -21,8 +23,20 @@ from typing import Any, Callable, List, Optional
 from urllib.parse import urlparse, urlsplit
 
 import aiohttp
+import httpx
 
 from jiuwenswarm.common.device_rpc.models import DeviceCommandRequest
+from jiuwenswarm.common.local_proxy_auth import with_local_proxy_bearer
+from jiuwenswarm.common.np_transport import (
+    PipeClosedError,
+    PipeError,
+    PipeStream,
+    is_named_pipe_url,
+    named_pipe_transport_for,
+    open_pipe,
+    pipe_path_from_url,
+)
+from jiuwenswarm.common.secrets_bootstrap import get_secret
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.gateway.routing.keys import XiaoyiDeliveryTarget
@@ -206,6 +220,10 @@ class XYFileUploadService:
         self.api_key = str(api_key) if api_key is not None else ""
         self.uid = str(uid) if uid is not None else ""
         self.session = None
+        # np:// baseUrl（桌面命名管道形态）：phase1/3 经 httpx + 命名管道 transport，
+        # phase2（OBS 签名 URL 直传，真实外网地址）仍走 aiohttp + 智能代理分流。
+        self._use_named_pipe = is_named_pipe_url(self.base_url)
+        self._pipe_client: httpx.AsyncClient | None = None
 
     @staticmethod
     def _smart_proxy_for(url: str) -> str | None:
@@ -251,10 +269,36 @@ class XYFileUploadService:
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
+        if self._use_named_pipe:
+            # 控制面（prepare/completeAndQuery）走命名管道；超时对齐 aiohttp 默认 total=300s
+            self._pipe_client = httpx.AsyncClient(
+                transport=named_pipe_transport_for(self.base_url),
+                timeout=httpx.Timeout(300.0, connect=10.0),
+            )
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.session.close()
+        if self._pipe_client is not None:
+            await self._pipe_client.aclose()
+            self._pipe_client = None
+        if self.session is not None:
+            await self.session.close()
+            self.session = None
+
+    async def _post_control_plane(
+        self, url: str, payload: dict[str, Any], headers: dict[str, str]
+    ) -> tuple[int, bytes]:
+        """phase1/3 控制面 POST（打向 baseUrl 派生地址，即本机代理或上游网关）。
+
+        打本地代理（np:// 管道 / loopback 直连形态）时补 Authorization: Bearer
+        <uploadToken>（密钥包下发，取不到则不带，兼容旧版桌面零鉴权代理）。
+        np:// 经 httpx + 命名管道 transport；http(s):// 保持 aiohttp + TLS 拦截兜底。
+        """
+        headers = with_local_proxy_bearer(headers, url)
+        if self._pipe_client is not None:
+            resp = await self._pipe_client.post(url, json=payload, headers=headers)
+            return resp.status_code, resp.content
+        return await self._request_with_tls_fallback("POST", url, json=payload, headers=headers)
 
     async def upload_file(self, file_path: str, object_type: str = "TEMPORARY_MATERIAL_DOC") -> Optional[str]:
         try:
@@ -288,9 +332,7 @@ class XYFileUploadService:
             if self.api_key:
                 headers["x-api-key"] = self.api_key
 
-            status, body = await self._request_with_tls_fallback(
-                "POST", prepare_url, json=prepare_data, headers=headers
-            )
+            status, body = await self._post_control_plane(prepare_url, prepare_data, headers)
             if status < 200 or status >= 300:
                 raise Exception(f"Prepare failed: HTTP {status}")
             prepare_resp = json.loads(body.decode("utf-8"))
@@ -324,9 +366,7 @@ class XYFileUploadService:
                 "draftId": draft_id,
             }
 
-            status, body = await self._request_with_tls_fallback(
-                "POST", complete_url, json=complete_data, headers=headers
-            )
+            status, body = await self._post_control_plane(complete_url, complete_data, headers)
             if status < 200 or status >= 300:
                 raise RuntimeError(f"Complete failed: HTTP {status}")
 
@@ -358,6 +398,37 @@ def _generate_auth_headers(config: XiaoyiChannelConfig) -> dict[str, str]:
         "x-ts": timestamp,
         "x-agent-id": config.agent_id
     }
+
+
+def _resolve_relay_credentials(config: XiaoyiChannelConfig) -> tuple[str, str, str]:
+    """本地中转（np:// 管道形态）的 (ak, sk, agent_id)。
+
+    优先密钥包 vault（桌面 stdin 密钥包下发，不落 env/命令行）；
+    取不到回退渠道配置（兼容旧版桌面形态）。
+    """
+    ak = get_secret("localAuth.ak") or config.ak or ""
+    sk = get_secret("localAuth.sk") or config.sk or ""
+    agent_id = get_secret("localAuth.agentId") or config.agent_id or ""
+    return str(ak), str(sk), str(agent_id)
+
+
+def _generate_pipe_auth_frame(config: XiaoyiChannelConfig) -> dict[str, Any]:
+    """管道形态首帧鉴权：WS 握手头（x-access-key/x-sign/x-ts/x-agent-id）的下沉形态。
+
+    ts 为毫秒时间戳字符串，sign = base64(HMAC-SHA256(sk, ts))——与桌面侧
+    cloud-ws-relay verifyPipeAuthFrame / verifyLocalAuthFields 同一口径。
+    """
+    ak, sk, agent_id = _resolve_relay_credentials(config)
+    timestamp = str(int(time.time() * 1000))
+    return {
+        "type": "auth",
+        "agentId": agent_id,
+        "ak": ak,
+        "ts": timestamp,
+        "sign": _generate_signature(sk, timestamp),
+    }
+
+
 
 
 class XiaoyiChannel(BaseChannel):
@@ -527,9 +598,9 @@ class XiaoyiChannel(BaseChannel):
         for url_key, ws in list(self._ws_connections.items()):
             if ws:
                 try:
-                    await ws.close()
+                    await self._close_transport(ws)
                 except Exception as e:
-                    logger.warning(f"关闭 WebSocket 连接失败 ({url_key}): {e}")
+                    logger.warning(f"关闭连接失败 ({url_key}): {e}")
                 self._ws_connections[url_key] = None
         self._heartbeat_tasks.clear()
         self._connect_tasks.clear()
@@ -1630,6 +1701,11 @@ class XiaoyiChannel(BaseChannel):
 
     async def _connect(self, url_key: str, url: str) -> None:
         """连接到小艺服务器（双通道）."""
+        if is_named_pipe_url(url):
+            # 桌面集成形态：本地中转已迁命名管道（np://claw-relay）
+            await self._connect_pipe(url_key, url)
+            return
+
         import websockets
 
         headers = _generate_auth_headers(self.config)
@@ -1676,6 +1752,63 @@ class XiaoyiChannel(BaseChannel):
                     f"XiaoyiChannel 连接关闭 {url_key}: {url} (code={close_code}, reason={close_reason})"
                 )
 
+    async def _connect_pipe(self, url_key: str, url: str) -> None:
+        """命名管道形态的本地中转连接（桌面集成形态，替代 ws://127.0.0.1:19690）。
+
+        协议（与 claw_desktop cloud-ws-relay 的管道 server 同一契约）：
+        长度前缀帧（np_transport FrameCodec）；首帧必须是鉴权帧
+        {"type":"auth","agentId":...,"ak":...,"ts":...,"sign":...}（WS 握手头下沉），
+        之后每帧 = 一条原 WS 文本消息（JSON 对象）；下行同样逐帧下发。
+        断连/异常返回后由 _reconnect_loop 统一 5s 退避重连。
+        """
+        pipe = await open_pipe(pipe_path_from_url(url))
+        # PipeStream 为 overlapped 全双工（读驻留不阻塞写），直接承担本渠道
+        # 「常驻 recv + 并发 send（心跳/业务帧）」形态，无需额外适配层
+        self._ws_connections[url_key] = pipe
+        self._send_locks[url_key] = asyncio.Lock()
+        logger.info(f"XiaoyiChannel 已连接 {url_key}: {url}（命名管道）")
+        try:
+            # 首帧鉴权（必须在任何业务帧之前；验签失败对端直接断管）
+            await pipe.send_frame(_generate_pipe_auth_frame(self.config))
+
+            # 发送初始化消息（必须在 heartbeat 之前）
+            await self._send_init_message(url_key)
+
+            # 启动心跳
+            self._heartbeat_tasks[url_key] = asyncio.create_task(self._heartbeat_loop(url_key))
+
+            try:
+                while True:
+                    frame = await pipe.recv_frame()
+                    if not isinstance(frame, (str, bytes)):
+                        # 帧负载即解析好的 JSON 对象：还原为文本复用既有处理路径
+                        frame = json.dumps(frame, ensure_ascii=False)
+                    await self._handle_raw_message(frame, url_key)
+            except Exception as e:
+                logger.warning(f"XiaoyiChannel 管道连接异常 ({url_key}): {e}")
+        finally:
+            if self._heartbeat_tasks.get(url_key):
+                self._heartbeat_tasks[url_key].cancel()
+                self._heartbeat_tasks[url_key] = None
+            self._ws_connections[url_key] = None
+            self._send_locks.pop(url_key, None)
+            try:
+                await self._close_transport(pipe)
+            except Exception as close_error:
+                logger.warning(f"XiaoyiChannel 关闭管道连接失败 ({url_key}): {close_error}")
+            logger.info(f"XiaoyiChannel 管道连接关闭 {url_key}: {url}")
+
+    async def _close_transport(self, ws: Any) -> None:
+        """关闭一条中转连接（WebSocket 或命名管道 PipeStream）。
+
+        管道关闭内需解除读驻留并收尾句柄（overlapped CancelIoEx），
+        加 5s 兜底防关闭路径挂死 stop()/重连流程。
+        """
+        if isinstance(ws, PipeStream):
+            await asyncio.wait_for(ws.close(), timeout=5)
+            return
+        await ws.close()
+
     async def _send_init_message(self, url_key: str) -> None:
         """发送初始化消息 (clawd_bot_init) 到指定通道."""
         ws = self._ws_connections.get(url_key)
@@ -1703,7 +1836,7 @@ class XiaoyiChannel(BaseChannel):
                 ws = self._ws_connections.get(url_key)
                 if ws:
                     try:
-                        await ws.close()
+                        await self._close_transport(ws)
                     except Exception as close_error:
                         logger.warning(f"XiaoyiChannel 关闭连接失败 ({url_key}): {close_error}")
                 break
@@ -3382,9 +3515,13 @@ class XiaoyiChannel(BaseChannel):
         if lock is None:
             lock = asyncio.Lock()
             self._send_locks[url_key] = lock
-        data = json.dumps(payload, ensure_ascii=False)
         async with lock:
-            await ws.send(data)
+            if isinstance(ws, PipeStream):
+                # 命名管道形态：帧负载即 JSON 对象（桌面侧按帧 JSON.parse 后透传）
+                await ws.send_frame(payload)
+            else:
+                data = json.dumps(payload, ensure_ascii=False)
+                await ws.send(data)
 
     async def send_agent_response_to_all(
             self, session_id: str, task_id: str, response: dict[str, Any]

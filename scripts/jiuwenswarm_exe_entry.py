@@ -374,6 +374,26 @@ def _dispatch() -> None:
     # frozen exe (console=False) 主进程的 sys.stdout/stderr 可能为 None
     if getattr(sys, "frozen", False):
         _ensure_stdio()
+    # 桌面集成形态：密钥包经 stdin 首帧下发（不落 env/命令行——同用户进程可读）。
+    # 在任何子命令分发前读取（agent/gateway 的消费点启动即需要）。
+    if _pop_flag("--desktop-secrets-stdin"):
+        from jiuwenswarm.common.secrets_bootstrap import (
+            bootstrap_secrets_from_stdin,
+        )
+        from jiuwenswarm.server.e2a_transports import (
+            e2a_stdio_mode_enabled,
+            redirect_stdout_to_stderr,
+        )
+
+        bootstrap_secrets_from_stdin()
+        if e2a_stdio_mode_enabled() and _DESKTOP_RUN_AGENT in sys.argv:
+            # E2A stdio 形态（密钥包 e2aTransport=='stdio'，非「密钥包存在」——
+            # 迁移期桌面默认仍走 WS，stdout 彼时仍是日志通道）：fd 1 只承载协议帧，
+            # print/openjiuwen console 日志（default 后端 StreamHandler(sys.stdout)、
+            # loguru console sink 均为 sys.stdout，logger/sink 创建时即捕获该对象）
+            # 一律改道 stderr。必须在分发（import app_agentserver 触发模块级
+            # configure_log）之前完成；帧由 StdioMessageTransport 经 os.write(1) 直写。
+            redirect_stdout_to_stderr()
     # 已知子命令分发（不检查单实例锁）
     if len(sys.argv) >= 2 and sys.argv[1].lower() == "init":
         sys.argv.pop(1)

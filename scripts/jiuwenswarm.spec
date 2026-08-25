@@ -337,7 +337,7 @@ hiddenimports += [
     "jiuwenbox.bundled_configs",
 ]
 
-# win_setup/win_acl 惰性 import pywin32, 静态分析收集不到。
+# win_setup/win_acl/np_transport 惰性 import pywin32, 静态分析收集不到。
 if sys.platform == "win32":
     hiddenimports += [
         "win32api",
@@ -345,6 +345,10 @@ if sys.platform == "win32":
         "win32security",
         "win32crypt",
         "win32file",
+        # np_transport（命名管道传输）用：CreateNamedPipe/GetNamedPipeClientProcessId 等
+        "win32pipe",
+        "win32process",
+        "winerror",
         "pywintypes",
         "pythoncom",
     ]
@@ -364,6 +368,9 @@ if sys.platform == "win32":
             os.path.join(_sp_dir, "win32", "win32security*.pyd"),
             os.path.join(_sp_dir, "win32", "win32crypt*.pyd"),
             os.path.join(_sp_dir, "win32", "win32file*.pyd"),
+            # np_transport（命名管道传输）依赖的 pyd
+            os.path.join(_sp_dir, "win32", "win32pipe*.pyd"),
+            os.path.join(_sp_dir, "win32", "win32process*.pyd"),
             os.path.join(_sp_dir, "win32", "pywintypes*.dll"),
             os.path.join(_sp_dir, "win32", "pythoncom*.dll"),
         ):

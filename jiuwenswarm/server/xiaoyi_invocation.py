@@ -131,6 +131,20 @@ def get_xiaoyi_request_extension(request: AgentRequest) -> XiaoyiInvocationExten
 
 def build_xiaoyi_trace_context(request: AgentRequest) -> TraceContext | None:
     """Convert Xiaoyi task/cron identity to the public trace contract."""
+    # 桌面计费链路（优先于渠道分支）：客户端在 metadata.interaction_id 显式下发
+    # 本轮交互 id 时，trace 固定为 sessionId&interactionId——与端侧计费状态上报
+    # （fulfillment NEW→FINISH/FAILED）同号；HITL 续跑 request_id 变更但
+    # interaction_id 不变，本轮所有模型调用的 x-hag-trace-id 全程稳定。
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    session_id = _first_text(request.session_id)
+    explicit_interaction_id = _first_text(metadata.get("interaction_id"))
+    if session_id and explicit_interaction_id:
+        return TraceContext(
+            version=TRACE_CONTEXT_VERSION,
+            trace_id=f"{session_id}&{explicit_interaction_id}",
+            conversation_id=session_id,
+            interaction_id=explicit_interaction_id,
+        )
     extension = get_xiaoyi_request_extension(request)
     if extension is None:
         return None
@@ -199,12 +213,37 @@ class XiaoyiTraceHeaderExporter:
         return headers
 
 
+class DesktopTraceHeaderExporter:
+    """桌面/通用渠道兜底导出：无 Xiaoyi 扩展但 invocation 带 trace（计费链路）。
+
+    与 XiaoyiTraceHeaderExporter 互斥（supports 条件互补），导出同形态头：
+    x-hag-trace-id = sessionId&interactionId，与端侧计费上报同号。
+    """
+
+    def supports(self, invocation: InvocationContext) -> bool:
+        return (
+            invocation.trace is not None
+            and get_xiaoyi_invocation_extension(invocation) is None
+        )
+
+    def export(self, trace: TraceContext) -> dict[str, str]:
+        headers = {"x-hag-trace-id": trace.trace_id}
+        if trace.conversation_id:
+            headers["x-session-id"] = trace.conversation_id
+        if trace.interaction_id:
+            headers["x-interaction-id"] = trace.interaction_id
+        return headers
+
+
 _XIAOYI_TRACE_HEADER_EXPORTER = XiaoyiTraceHeaderExporter()
+_DESKTOP_TRACE_HEADER_EXPORTER = DesktopTraceHeaderExporter()
 register_trace_header_exporter("xiaoyi", _XIAOYI_TRACE_HEADER_EXPORTER)
+register_trace_header_exporter("desktop", _DESKTOP_TRACE_HEADER_EXPORTER)
 
 
-def get_xiaoyi_trace_header_exporters() -> tuple[XiaoyiTraceHeaderExporter, ...]:
-    return (_XIAOYI_TRACE_HEADER_EXPORTER,)
+def get_xiaoyi_trace_header_exporters() -> tuple[XiaoyiTraceHeaderExporter | DesktopTraceHeaderExporter, ...]:
+    # 顺序安全：两个 exporter 的 supports 互斥（有/无 Xiaoyi 扩展）
+    return (_XIAOYI_TRACE_HEADER_EXPORTER, _DESKTOP_TRACE_HEADER_EXPORTER)
 
 
 def export_xiaoyi_trace_headers(trace: TraceContext | None) -> dict[str, str]:
@@ -224,6 +263,7 @@ def export_current_xiaoyi_trace_headers() -> dict[str, str]:
 
 __all__ = [
     "XIAOYI_INVOCATION_EXTENSION_KEY",
+    "DesktopTraceHeaderExporter",
     "XiaoyiInvocationExtension",
     "XiaoyiTraceHeaderExporter",
     "build_xiaoyi_device_command_context",

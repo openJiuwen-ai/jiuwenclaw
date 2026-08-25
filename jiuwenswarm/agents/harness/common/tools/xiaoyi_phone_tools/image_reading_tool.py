@@ -11,13 +11,16 @@ import json
 import os
 import tempfile
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 from urllib.parse import unquote, urlparse
 
 import aiohttp
+import httpx
 
 from openjiuwen.core.foundation.tool import tool
 
+from jiuwenswarm.common.local_proxy_auth import with_local_proxy_bearer
+from jiuwenswarm.common.np_transport import is_named_pipe_url, named_pipe_transport_for
 from jiuwenswarm.common.utils import logger
 from jiuwenswarm.server.xiaoyi_invocation import export_current_xiaoyi_trace_headers
 
@@ -70,6 +73,35 @@ async def _download_remote_to_temp(url: str) -> str:
     return path
 
 
+async def _extract_caption_from_sse(chunks: AsyncIterator[bytes]) -> str:
+    """从 SSE 字节流提取最后一个 streamContent 作为图像理解结果。"""
+    last_caption = ""
+    buffer = ""
+    async for chunk in chunks:
+        if not chunk:
+            continue
+        buffer += chunk.decode("utf-8", errors="replace")
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.rstrip("\r")
+            if not line or not line.startswith("data:"):
+                continue
+            data_content = line[5:].strip()
+            if not data_content or data_content == "[DONE]":
+                continue
+            try:
+                data_json = json.loads(data_content)
+            except json.JSONDecodeError:
+                continue
+            for info in data_json.get("abilityInfos") or []:
+                reply = (info.get("actionExecutorResult") or {}).get("reply") or {}
+                si = reply.get("streamInfo") or {}
+                sc = si.get("streamContent")
+                if sc:
+                    last_caption = sc
+    return last_caption
+
+
 async def _call_image_understanding_api(
     image_url: str, text: str, api_key: str, uid: str, file_upload_url: str
 ) -> str:
@@ -89,6 +121,9 @@ async def _call_image_understanding_api(
         "x-prd-pkg-name": "com.huawei.hag",
     }
     headers.update(trace_headers)
+    # 打本地代理（np:// 管道 / loopback 直连形态）补 uploadToken Bearer；
+    # 取不到令牌则不带（兼容旧版桌面零鉴权代理）
+    headers = with_local_proxy_bearer(headers, api_url)
     payload: Dict[str, Any] = {
         "version": "1.0",
         "session": {
@@ -124,41 +159,31 @@ async def _call_image_understanding_api(
         ],
     }
 
-    last_caption = ""
-    buffer = ""
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            api_url,
-            json=payload,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=120),
-        ) as resp:
-            if not resp.ok:
-                body = await resp.text()
-                raise RuntimeError(f"API request failed: {resp.status} {body[:500]}")
-            async for chunk in resp.content.iter_chunked(4096):
-                if not chunk:
-                    continue
-                buffer += chunk.decode("utf-8", errors="replace")
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.rstrip("\r")
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data_content = line[5:].strip()
-                    if not data_content or data_content == "[DONE]":
-                        continue
-                    try:
-                        data_json = json.loads(data_content)
-                    except json.JSONDecodeError:
-                        continue
-                    for info in data_json.get("abilityInfos") or []:
-                        reply = (info.get("actionExecutorResult") or {}).get("reply") or {}
-                        si = reply.get("streamInfo") or {}
-                        sc = si.get("streamContent")
-                        if sc:
-                            last_caption = sc
+    if is_named_pipe_url(file_upload_url):
+        # np:// base（桌面命名管道形态）：SSE 经 httpx + 命名管道 transport 流式读取
+        async with httpx.AsyncClient(
+            transport=named_pipe_transport_for(file_upload_url),
+            timeout=httpx.Timeout(120.0, connect=10.0),
+        ) as client:
+            async with client.stream(
+                "POST", api_url, json=payload, headers=headers
+            ) as resp:
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise RuntimeError(f"API request failed: {resp.status_code} {body[:500]}")
+                last_caption = await _extract_caption_from_sse(resp.aiter_bytes(4096))
+    else:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                api_url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                if not resp.ok:
+                    body = await resp.text()
+                    raise RuntimeError(f"API request failed: {resp.status} {body[:500]}")
+                last_caption = await _extract_caption_from_sse(resp.content.iter_chunked(4096))
     if not last_caption:
         raise RuntimeError("No caption received from image understanding API")
     return last_caption
