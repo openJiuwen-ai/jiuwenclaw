@@ -11,10 +11,11 @@ import json
 import os
 import re
 import sys
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 from urllib.parse import urlparse
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -674,6 +675,49 @@ class OfficeClawMcpRegistration:
     tool_names: tuple[str, ...]
 
 
+OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX = "office-claw-request-"
+
+# Task-local allowlist for request-scoped OfficeClaw tool ids. Set for the
+# duration of one Relay chat.send so a concurrent session cannot invoke this
+# request's MCP tools (or vice versa) via a polluted short-name AbilityManager.
+_active_office_claw_tool_ids: ContextVar[frozenset[str] | None] = ContextVar(
+    "active_office_claw_tool_ids",
+    default=None,
+)
+
+
+@contextmanager
+def bind_active_office_claw_mcp_tools(
+    tool_ids: Iterable[str] | None,
+) -> Iterator[None]:
+    """Bind the request-scoped OfficeClaw tool id allowlist for this task."""
+
+    allowed = frozenset(str(tool_id) for tool_id in (tool_ids or ()) if str(tool_id))
+    token = _active_office_claw_tool_ids.set(allowed)
+    try:
+        yield
+    finally:
+        _active_office_claw_tool_ids.reset(token)
+
+
+def ensure_request_scoped_office_claw_tool_allowed(tool_id: str) -> None:
+    """Refuse request-scoped OfficeClaw tools outside the active request allowlist."""
+
+    normalized = str(tool_id or "").strip()
+    if not normalized.startswith(OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX):
+        return
+    allowed = _active_office_claw_tool_ids.get()
+    if allowed is None:
+        raise RuntimeError(
+            "OfficeClaw MCP tool invoked without an active request binding; "
+            "refusing unbound request-scoped invoke"
+        )
+    if normalized not in allowed:
+        raise RuntimeError(
+            "OfficeClaw MCP tool is bound to another request; refusing cross-request invoke"
+        )
+
+
 def extract_office_claw_mcp(params: Any) -> dict[str, Any] | None:
     """Return only the legacy ``office_claw_mcp`` request field."""
 
@@ -815,6 +859,18 @@ class RequestScopedOfficeClawMcpTool(Tool):
         from mcp import ClientSession
         from mcp.client.stdio import stdio_client
 
+        tool_id = str(getattr(self._card, "id", "") or "")
+        try:
+            ensure_request_scoped_office_claw_tool_allowed(tool_id)
+        except RuntimeError as exc:
+            raise build_error(
+                StatusCode.TOOL_MCP_EXECUTION_ERROR,
+                cause=exc,
+                reason=str(exc),
+                method="invoke",
+                card=self._card,
+            ) from exc
+
         arguments = inputs if isinstance(inputs, dict) else {}
         stack = AsyncExitStack()
         try:
@@ -843,11 +899,14 @@ class RequestScopedOfficeClawMcpTool(Tool):
 
 
 __all__ = [
+    "OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX",
     "OfficeClawMcpRegistration",
     "RequestScopedOfficeClawMcpTool",
+    "bind_active_office_claw_mcp_tools",
     "build_enabled_mcp_server_configs",
     "build_mcp_server_config",
     "create_mcp_tool",
+    "ensure_request_scoped_office_claw_tool_allowed",
     "extract_enabled_mcp_server_entries",
     "extract_office_claw_mcp",
     "list_office_claw_mcp_tools",

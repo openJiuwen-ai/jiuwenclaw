@@ -391,6 +391,7 @@ from jiuwenswarm.common.config import (
 from jiuwenswarm.common.mcp_config import (
     OfficeClawMcpRegistration,
     RequestScopedOfficeClawMcpTool,
+    bind_active_office_claw_mcp_tools,
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
     extract_office_claw_mcp,
@@ -2026,6 +2027,10 @@ class JiuWenSwarmDeepAdapter:
         self._instance_overrides: dict[str, Any] = {}
         self._is_session_scoped_adapter: bool = False
         self._parent_session_id: str | None = None
+        # Active request-scoped OfficeClaw MCP registration for this session
+        # adapter. Used for safe short-name cleanup and diagnostics; invoke
+        # allowlisting is enforced via bind_active_office_claw_mcp_tools.
+        self._active_office_claw_mcp: OfficeClawMcpRegistration | None = None
         # Tenant tip namespace for Track-B env reads (sync_agents_configs).
         # Defaults match unbound single-tenant; AgentManager / copy_tenant_env_bindings_from
         # overwrite for per-agent scopes.
@@ -3658,20 +3663,24 @@ class JiuWenSwarmDeepAdapter:
                 # are still fully removable by the common cleanup path.
                 tool_ids.append(tool_id)
                 tool_names.append(tool_name)
-                ability_result = self._instance.ability_manager.add(card)
-                if not bool(getattr(ability_result, "added", True)):
-                    raise RuntimeError(f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name}")
+                self._install_office_claw_ability_card(card)
 
             registration = OfficeClawMcpRegistration(
                 request_id=request.request_id,
                 tool_ids=tuple(tool_ids),
                 tool_names=tuple(tool_names),
             )
+            self._active_office_claw_mcp = registration
+            request_env = params.get("env") if isinstance(params.get("env"), dict) else {}
+            invocation_id = str(request_env.get("OFFICE_CLAW_INVOCATION_ID") or "").strip()
             logger.info(
                 "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP registered: "
-                "request_id=%s tools=%s",
+                "request_id=%s session_id=%s invocation_id=%s tools=%s tool_ids=%s",
                 request.request_id,
+                request.session_id,
+                invocation_id or "-",
                 tool_names,
+                tool_ids,
             )
             return registration
         except asyncio.CancelledError:
@@ -3697,6 +3706,77 @@ class JiuWenSwarmDeepAdapter:
             )
             return None
 
+    def _owned_office_claw_tool_ids(self) -> frozenset[str]:
+        active = self._active_office_claw_mcp
+        if active is None:
+            return frozenset()
+        return frozenset(active.tool_ids)
+
+    def _install_office_claw_ability_card(self, card: ToolCard) -> None:
+        """Register a request-scoped OfficeClaw tool card by short name.
+
+        Same-id rebinds are allowed. A different id is replaced only when the
+        existing card belongs to this adapter's active registration; otherwise
+        registration fails hard so a concurrent request cannot silently steal
+        the short-name mapping.
+        """
+
+        if self._instance is None:
+            raise RuntimeError("OfficeClaw MCP ability install requires an initialized agent")
+        ability_manager = self._instance.ability_manager
+        tool_name = str(card.name or "").strip()
+        tool_id = str(card.id or "").strip()
+        if not tool_name or not tool_id:
+            raise RuntimeError("OfficeClaw MCP tool card is missing name or id")
+
+        existing = None
+        getter = getattr(ability_manager, "get", None)
+        if callable(getter):
+            existing = getter(tool_name)
+        existing_id = str(getattr(existing, "id", "") or "") if existing is not None else ""
+
+        if existing is not None and existing_id and existing_id != tool_id:
+            if existing_id in self._owned_office_claw_tool_ids():
+                try:
+                    ability_manager.remove(tool_name)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"failed to replace owned OfficeClaw MCP ability: {tool_name}"
+                    ) from exc
+                try:
+                    Runner.resource_mgr.remove_tool(existing_id)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] failed to remove replaced OfficeClaw MCP "
+                        "resource: tool_id=%s error=%s",
+                        existing_id,
+                        exc,
+                    )
+            else:
+                raise RuntimeError(
+                    f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name} "
+                    f"(existing_id={existing_id}, new_id={tool_id})"
+                )
+
+        ability_result = ability_manager.add(card)
+        if ability_result is None:
+            # Legacy AbilityManager.add returned None and may overwrite by name.
+            return
+        added = getattr(ability_result, "added", None)
+        if added is False:
+            # Conflict-aware AbilityManager kept the existing card. Retry once if
+            # we own it; otherwise fail closed.
+            existing = getter(tool_name) if callable(getter) else None
+            existing_id = str(getattr(existing, "id", "") or "") if existing is not None else ""
+            if existing_id and existing_id in self._owned_office_claw_tool_ids():
+                ability_manager.remove(tool_name)
+                ability_result = ability_manager.add(card)
+                added = getattr(ability_result, "added", None)
+            if added is False:
+                raise RuntimeError(
+                    f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name}"
+                )
+
     async def cleanup_request_scoped_office_claw_mcp(
         self,
         registration: OfficeClawMcpRegistration | None,
@@ -3717,9 +3797,29 @@ class JiuWenSwarmDeepAdapter:
                     exc,
                 )
         if self._instance is not None:
+            ability_manager = self._instance.ability_manager
+            getter = getattr(ability_manager, "get", None)
+            owned_ids = frozenset(registration.tool_ids)
             for tool_name in registration.tool_names:
                 try:
-                    self._instance.ability_manager.remove(tool_name)
+                    existing = getter(tool_name) if callable(getter) else None
+                    existing_id = (
+                        str(getattr(existing, "id", "") or "") if existing is not None else ""
+                    )
+                    # Only drop the short-name mapping when it still points at
+                    # this request's tool id — never delete another request's bind.
+                    if existing is None:
+                        continue
+                    if existing_id and existing_id not in owned_ids:
+                        logger.warning(
+                            "[JiuWenSwarmDeepAdapter] skip OfficeClaw MCP ability cleanup; "
+                            "short name rebound: request_id=%s tool=%s existing_id=%s",
+                            registration.request_id,
+                            tool_name,
+                            existing_id,
+                        )
+                        continue
+                    ability_manager.remove(tool_name)
                 except Exception as exc:
                     logger.warning(
                         "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP ability cleanup failed: "
@@ -3728,6 +3828,11 @@ class JiuWenSwarmDeepAdapter:
                         tool_name,
                         exc,
                     )
+        if (
+            self._active_office_claw_mcp is not None
+            and self._active_office_claw_mcp.request_id == registration.request_id
+        ):
+            self._active_office_claw_mcp = None
         logger.info(
             "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP cleaned up: request_id=%s",
             registration.request_id,
@@ -13109,7 +13214,10 @@ class JiuWenSwarmDeepAdapter:
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
             request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
-                return await session_adapter.process_message_impl(request, inputs)
+                with bind_active_office_claw_mcp_tools(
+                    request_mcp.tool_ids if request_mcp is not None else ()
+                ):
+                    return await session_adapter.process_message_impl(request, inputs)
             finally:
                 try:
                     await session_adapter.cleanup_request_scoped_office_claw_mcp(request_mcp)
@@ -13679,8 +13787,11 @@ class JiuWenSwarmDeepAdapter:
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
             request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
-                async for chunk in session_adapter.process_message_stream_impl(request, inputs):
-                    yield chunk
+                with bind_active_office_claw_mcp_tools(
+                    request_mcp.tool_ids if request_mcp is not None else ()
+                ):
+                    async for chunk in session_adapter.process_message_stream_impl(request, inputs):
+                        yield chunk
                 return
             finally:
                 try:
