@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -77,6 +78,18 @@ class _FailedCancelAgentClient:
 
     @staticmethod
     async def send_request_stream(env: object):
+        if False:
+            yield env
+
+
+class _ReplacementRecordingAgentClient(_FakeAgentClient):
+    replacement_started: asyncio.Event
+    sent_stream_requests: list[object] = []
+
+    @classmethod
+    async def send_request_stream(cls, env: object):
+        cls.sent_stream_requests.append(env)
+        cls.replacement_started.set()
         if False:
             yield env
 
@@ -326,6 +339,45 @@ async def test_new_chat_does_not_start_when_old_continuation_cleanup_fails() -> 
         )
 
     assert old_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_new_chat_starts_after_idempotent_old_cleanup_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ReplacementRecordingAgentClient.replacement_started = asyncio.Event()
+    _ReplacementRecordingAgentClient.sent_stream_requests = []
+    handler = _TestMessageHandler.create_with_client(
+        _ReplacementRecordingAgentClient()
+    )
+    monkeypatch.setattr(
+        handler,
+        "_trigger_before_chat_request_hook",
+        AsyncMock(),
+    )
+    old_task = _seed_stream_task(
+        handler,
+        rid="rid-old-confirmed",
+        channel_id="web",
+        session_id="sess-replace-confirmed",
+    )
+    await handler.start_forwarding()
+    try:
+        await handler.publish_user_messages(
+            _chat_send_message(
+                channel_id="web",
+                session_id="sess-replace-confirmed",
+            )
+        )
+        await asyncio.wait_for(
+            _ReplacementRecordingAgentClient.replacement_started.wait(),
+            timeout=1,
+        )
+    finally:
+        await handler.stop_forwarding()
+
+    assert old_task.cancelled()
+    assert len(_ReplacementRecordingAgentClient.sent_stream_requests) == 1
 
 
 @pytest.mark.asyncio

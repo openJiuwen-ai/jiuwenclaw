@@ -411,6 +411,117 @@ async def test_disconnect_cancel_cleans_session_runtime_when_stream_task_cleanup
 
 
 @pytest.mark.asyncio
+async def test_cancel_prefers_completed_stream_cleanup_before_interrupt() -> None:
+    order: list[str] = []
+    stream_started = asyncio.Event()
+
+    async def stream_work() -> None:
+        stream_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            order.append("stream_cleanup")
+
+    class OrderingAgent(_FakeInterruptAgent):
+        async def process_message(self, request):
+            order.append("interrupt")
+            return await super().process_message(request)
+
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    manager = _CleanupRecordingAgentManager()
+    manager.agent = OrderingAgent()
+    server._agent_manager = manager
+    stream_task = asyncio.create_task(stream_work())
+    await stream_started.wait()
+    server._session_stream_tasks = {
+        "sess-cleanup-first": {stream_task: asyncio.Event()}
+    }
+    env = e2a_from_agent_fields(
+        request_id="req-cleanup-first",
+        channel_id="web",
+        session_id="sess-cleanup-first",
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={"intent": "cancel", "session_id": "sess-cleanup-first"},
+        is_stream=False,
+        timestamp=0.0,
+    )
+
+    await server.handle_message_for_test(
+        FakeWebSocket(),
+        json.dumps(env.to_dict(), ensure_ascii=False),
+        asyncio.Lock(),
+    )
+
+    assert order == ["stream_cleanup", "interrupt"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_result_is_independent_of_stream_exiting_after_grace_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    interrupt_started = asyncio.Event()
+    stream_started = asyncio.Event()
+
+    async def stream_work() -> None:
+        stream_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await allow_cleanup.wait()
+            cleanup_finished.set()
+
+    class UnblockingAgent(_FakeInterruptAgent):
+        async def process_message(self, request):
+            interrupt_started.set()
+            allow_cleanup.set()
+            await cleanup_finished.wait()
+            return await super().process_message(request)
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_CANCELLED_STREAM_CLEANUP_GRACE_SECONDS",
+        0,
+    )
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    manager = _CleanupRecordingAgentManager()
+    manager.agent = UnblockingAgent()
+    server._agent_manager = manager
+    stream_task = asyncio.create_task(stream_work())
+    await stream_started.wait()
+    server._session_stream_tasks = {
+        "sess-after-grace": {stream_task: asyncio.Event()}
+    }
+    env = e2a_from_agent_fields(
+        request_id="req-after-grace",
+        channel_id="web",
+        session_id="sess-after-grace",
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={"intent": "cancel", "session_id": "sess-after-grace"},
+        is_stream=False,
+        timestamp=0.0,
+    )
+    ws = FakeWebSocket()
+
+    await server.handle_message_for_test(
+        ws,
+        json.dumps(env.to_dict(), ensure_ascii=False),
+        asyncio.Lock(),
+    )
+
+    assert cleanup_started.is_set()
+    assert interrupt_started.is_set()
+    assert cleanup_finished.is_set()
+    assert stream_task.done()
+    response = parse_agent_server_wire_unary(ws.sent[0])
+    assert response.ok is True
+    assert response.payload["success"] is True
+
+
+@pytest.mark.asyncio
 async def test_cancel_source_param_does_not_trigger_session_runtime_cleanup() -> None:
     env = e2a_from_agent_fields(
         request_id="req-param-source",
