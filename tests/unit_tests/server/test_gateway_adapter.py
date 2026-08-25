@@ -272,7 +272,7 @@ class TestSessionAdapter:
         """查询模式返回当前色值；非法色值拒绝（白名单与 TUI 一致）。"""
         monkeypatch.setattr(
             "jiuwenswarm.server.runtime.gateway_adapter.session_adapter.get_session_metadata",
-            lambda sid: {"accent_color": "blue"},
+            lambda sid, cache_bust=False: {"accent_color": "blue"},
         )
         resp = await SessionAdapter().handle(
             _request(ReqMethod.SESSION_COLOR_SET, {"session_id": "sess-1"})

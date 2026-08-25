@@ -1,10 +1,10 @@
 """HarmonyOSAdapter: TUI HarmonyOS DevEco bootstrap executed in AgentServer.
 
-Phase 3 moves the user-state side of HarmonyOS project inspection and DevEco
-CLI / Skill bootstrap into the target AgentServer. The Gateway keeps the TUI
-entry protocol and long-operation cancellation; it forwards these RPCs here so
-that project context (``agent/workspace/harmonyos-projects``), skills and MCP
-state are written to this process's injected ``.jiuwenswarm``.
+HarmonyOS project inspection and DevEco CLI / Skill bootstrap run in the
+target AgentServer. The Gateway keeps the TUI entry protocol and long-operation
+cancellation; it forwards these RPCs here so that project context
+(``agent/workspace/harmonyos-projects``), skills and MCP state are written to
+this process's injected ``.jiuwenswarm``.
 
 ``user_id`` carried by the E2A envelope is never used for directory selection.
 """

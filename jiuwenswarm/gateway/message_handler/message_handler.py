@@ -4657,6 +4657,7 @@ class MessageHandler(ABC):
         """发送 chat.processing_status 事件到客户端。"""
         from jiuwenswarm.common.schema.message import Message, EventType
 
+        _mode = self._stream_modes.get(request_id)
         status_msg = Message(
             id=request_id,
             type="event",
@@ -4673,7 +4674,7 @@ class MessageHandler(ABC):
                 "is_complete": not is_processing
             },
             event_type=EventType.CHAT_PROCESSING_STATUS,
-            metadata=None,
+            metadata={"mode": _mode} if _mode else None,
         )
         await self.publish_robot_messages(status_msg)
         # 广播全局运行态快照给所有 ws 客户端（不按 session 路由），用于多窗口配置保存锁。

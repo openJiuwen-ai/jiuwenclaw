@@ -1054,7 +1054,7 @@ class CronSchedulerService:
                         # 文件推送的 channel_id，与 cron 文本结果推送到同一批渠道。
                         "targets": str(job.targets or "").strip(),
                     },
-                    user_id=job.user_id,
+                    user_id=job.user_id or None,
                 )
                 if not str(job.user_id or "").strip():
                     logger.warning(

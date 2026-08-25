@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 import requests
 from pydantic import BaseModel, Field
+from jiuwenswarm.common.mode_matrix import is_team_mode
 from jiuwenswarm.common.schema.message import Message, ReqMethod, EventType
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter, BaseChannel
 from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_file_service import (
@@ -1875,6 +1876,12 @@ class FeishuChannel(BaseChannel):
         if event_name == "chat.processing_status":
             if payload.get("is_processing") is False:
                 return await self._finalize_cardkit_session(key, session, "")
+            # team 模式信使流只产 processing_status 没 delta：lazy 不创建 session，
+            # 等首个 chat.delta 抵达时再 lazy 创建。否则空卡片永不被 finalize → 白框。
+            # mode 由 message_handler._send_processing_status 从 _stream_modes 透传，
+            # 随消息在网关进程内流动，分进程/分布式部署同样可靠（不依赖会话磁盘）。
+            if is_team_mode(metadata.get("mode")):
+                return True
             return await self._start_cardkit_session(key, receive_id, id_type)
 
         if event_name == "chat.delta":

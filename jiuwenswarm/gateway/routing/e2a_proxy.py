@@ -12,8 +12,9 @@
 - 传输层客户端由配置驱动（websocket / agentos_router），本薄代理对
   两者透明。
 
-Phase 1 首批服务 ``session.list``；流式封装（``proxy_stream_request``）
-预留供 Phase 2+ 的流式入口复用。
+覆盖会话、配置、工作区/文件、项目/Git、记忆、HarmonyOS 等 E2A 方法；
+``fetch_agent_unary`` / ``fetch_git_diff_status`` 用于非通道上下文
+（轮询 fetcher、/ws/git 首次快照等）的 E2A 请求。
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from typing import Any
 
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
 from jiuwenswarm.gateway.routing.agent_request_timeout import (
     AGENT_SERVER_TIMEOUT_CODE,
     AGENT_SERVER_TIMEOUT_ERROR,
@@ -65,13 +67,7 @@ def is_legacy_shared_directory_client(agent_client: Any) -> bool:
     must retain the normal unavailable error instead of accidentally falling
     back to deployment-side state.
     """
-    if agent_client is None:
-        return False
-    client_type = type(agent_client)
-    return (
-        client_type.__name__ == "WebSocketAgentServerClient"
-        and client_type.__module__ == "jiuwenswarm.gateway.routing.agent_client"
-    )
+    return isinstance(agent_client, WebSocketAgentServerClient)
 
 
 async def _try_legacy_shared_directory_adapter(

@@ -1,9 +1,9 @@
-"""WorkspaceFileAdapter：工作区与文件域用户业务适配器（Phase 2）。
+"""WorkspaceFileAdapter：工作区与文件域用户业务适配器。
 
 复用基准：``server/runtime/attachments``（媒体/文档附件中立工具）与
 ``common/utils`` 目录门面；本适配器只读写当前 AgentServer 注入目录。
 
-Phase 2 覆盖：
+覆盖：
 - ``media.persist``：浏览器上传图片 base64 解码后落盘
   ``agent/sessions/<sid>/uploads``（复用 ``normalize_chat_media_attachments``）；
 - ``document.persist`` / ``document.formats``：文档本地路径黑名单校验与格式
@@ -91,7 +91,7 @@ def _resolve_within_workspace(raw: str | None, base: Path) -> Path | None:
 
 
 class WorkspaceFileAdapter(GatewayAdapter):
-    """工作区与文件域适配器（Phase 2）。"""
+    """工作区与文件域适配器：media/document/path/upload/file_import/im_file_persist。"""
 
     methods: frozenset[str] = frozenset(
         {
@@ -299,7 +299,7 @@ class WorkspaceFileAdapter(GatewayAdapter):
         )
 
     async def _handle_im_file_persist(self, request: AgentRequest) -> AgentResponse:
-        """IM 平台附件落盘（Phase 3：在 AgentServer 注入目录写入 <平台>_files/downloads）。
+        """IM 平台附件落盘（在 AgentServer 注入目录写入 <平台>_files/downloads）。
 
         Gateway 通过平台 API 下载附件字节后，经 base64 交给本 method 落盘到
         注入目录，返回带本地 ``path`` 的文件元数据供后续链路消费；Gateway
@@ -405,7 +405,7 @@ class WorkspaceFileAdapter(GatewayAdapter):
         )
 
     async def _handle_import_url(self, request: AgentRequest) -> AgentResponse:
-        """chat.send 上行外部 url 文件导入（Phase 2：AgentServer 下载落盘注入目录）。
+        """chat.send 上行外部 url 文件导入（AgentServer 下载落盘注入目录）。
 
         Gateway ``web_connect._process_files`` 不再下载/落盘，改为把 ``files``
         中的外部 ``url`` 列表经本 method 交给 AgentServer：AgentServer 在

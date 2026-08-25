@@ -108,11 +108,7 @@ class _CapturingSessionListAgentClient:
         )()
 
 
-class WebSocketAgentServerClient:
-    server_ready = False
-
-
-WebSocketAgentServerClient.__module__ = "jiuwenswarm.gateway.routing.agent_client"
+from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
 
 
 class _OfflineRemoteAgentClient:
@@ -481,8 +477,6 @@ async def test_agentos_cron_update_project_fields_with_dict_job(monkeypatch) -> 
 async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
-
     channel = FakeWebChannel()
     # Match the default single-user transport so path.set follows the local
     # shared-directory branch rather than the AgentOS/remote proxy branch.
@@ -2600,6 +2594,30 @@ def test_update_channel_subsection_in_config_overwrites_existing(tmp_path, monke
 
 
 # ── media.persist 大图 HTTP bridge 分流（Phase 2 传输取舍） ──────────────────
+
+
+def test_persist_media_locally_concurrent_same_name_does_not_clobber(tmp_path, monkeypatch):
+    """单用户大图本地落盘在同名并发请求下必须各自占用唯一文件。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: tmp_path
+    )
+
+    def _persist(index: int):
+        return app_web_handlers._persist_media_locally(
+            f"image-{index}".encode(), "session-1", "image.png"
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(_persist, range(16)))
+
+    assert all(ok for ok, _payload in results)
+    paths = [Path(payload["path"]) for _ok, payload in results]
+    assert len(set(paths)) == 16
+    assert {path.read_bytes() for path in paths} == {
+        f"image-{index}".encode() for index in range(16)
+    }
 
 
 @pytest.mark.asyncio
