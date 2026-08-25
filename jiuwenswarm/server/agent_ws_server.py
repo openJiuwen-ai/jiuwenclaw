@@ -1145,8 +1145,6 @@ class AgentWebSocketServer:
                     await ensure_persistent_checkpointer()
                     await self._heartbeat_runtime.start()
                     return
-                except asyncio.CancelledError:
-                    raise
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "[AgentWebSocketServer] Heartbeat runtime warmup failed; "
@@ -3302,13 +3300,17 @@ class AgentWebSocketServer:
                 # A runtime may emit another processing=true frame without
                 # content. Preserve the prompt on every start frame so clients
                 # never replace this run's visible user turn with an empty one.
-                if (
-                    isinstance(chunk.payload, dict)
-                    and chunk.payload.get("event_type") == "chat.processing_status"
-                    and bool(chunk.payload.get("is_processing"))
-                    and not str(chunk.payload.get("content") or "")
-                ):
-                    chunk.payload = {**chunk.payload, "content": prompt}
+                payload = chunk.payload
+                is_processing_start = (
+                    isinstance(payload, dict)
+                    and payload.get("event_type") == "chat.processing_status"
+                    and bool(payload.get("is_processing"))
+                )
+                content_is_missing = isinstance(payload, dict) and not str(
+                    payload.get("content") or ""
+                )
+                if is_processing_start and content_is_missing:
+                    chunk.payload = {**payload, "content": prompt}
                 chunk_finishes_processing = (
                     isinstance(chunk.payload, dict)
                     and chunk.payload.get("event_type") == "chat.processing_status"

@@ -99,12 +99,10 @@ class SessionRunAdmission:
     async def try_begin_heartbeat(self, session_id: str, run_id: str) -> bool:
         async with self._condition:
             state = self._state(session_id)
-            if (
-                state.heartbeat_blocked
-                or state.active_users
-                or state.user_waiters
-                or state.heartbeat_run_id
-            ):
+            session_has_work = bool(
+                state.active_users or state.user_waiters or state.heartbeat_run_id
+            )
+            if state.heartbeat_blocked or session_has_work:
                 return False
             state.heartbeat_run_id = run_id
             return True
@@ -121,12 +119,10 @@ class SessionRunAdmission:
     def _drop_idle_state(
         self, session_id: str, state: _SessionAdmissionState
     ) -> None:
-        if (
-            not state.active_users
-            and not state.user_waiters
-            and not state.heartbeat_run_id
-            and not state.heartbeat_blocked
-        ):
+        session_has_work = bool(
+            state.active_users or state.user_waiters or state.heartbeat_run_id
+        )
+        if not session_has_work and not state.heartbeat_blocked:
             self._states.pop(session_id, None)
 
 
