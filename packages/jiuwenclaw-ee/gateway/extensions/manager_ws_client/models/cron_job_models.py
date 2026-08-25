@@ -46,7 +46,10 @@ CRON_JOB_TABLE_DEF = TableDefinition(
     ],
     indexes=[
         IndexDefinition(["jiuwenclaw_id", "job_id"], unique=True),
-        IndexDefinition(["jiuwenclaw_id", "group_id", "bot_id", "user_id"]),
+        # 该索引暂时注释掉：jiuwenclaw_id(64)+group_id(256)+bot_id(256)+user_id(256)
+        # 在 utf8mb4 下共 3328 字节，超过 MySQL 索引键上限 3072 字节。
+        # 缩短 group_id/bot_id/user_id 列长度或改用前缀索引后再启用。
+        # IndexDefinition(["jiuwenclaw_id", "group_id", "bot_id", "user_id"]),
         IndexDefinition(["jiuwenclaw_id", "group_id", "bot_id"]),
         IndexDefinition(["jiuwenclaw_id", "user_id"]),
         IndexDefinition(["jiuwenclaw_id", "enabled", "expired", "next_run_at"]),

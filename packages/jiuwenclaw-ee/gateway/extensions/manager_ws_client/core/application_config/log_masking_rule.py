@@ -9,7 +9,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw.infrastructure.log_masking.engine import LogMaskingEngine
+from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 
 from ...infrastructure.db import ensure_db_handler
 from ...infrastructure.utils import assert_jiuwenclaw_id_matches, format_ts, get_jiuwenclaw_id, utc_now
@@ -54,7 +54,7 @@ async def _create_log_masking_rule_record(
     *,
     jiuwenclaw_id: str,
 ) -> dict[str, Any]:
-    from jiuwenclaw.infrastructure.log_masking.engine import (
+    from jiuwenswarm.infrastructure.log_masking.engine import (
         normalize_replacement,
         normalize_rule_id,
         normalize_source,
@@ -97,7 +97,7 @@ async def _update_log_masking_rule_record(
     *,
     jiuwenclaw_id: str,
 ) -> dict[str, Any] | None:
-    from jiuwenclaw.infrastructure.log_masking.engine import (
+    from jiuwenswarm.infrastructure.log_masking.engine import (
         normalize_replacement,
         normalize_rule_id,
         normalize_source,
@@ -139,7 +139,7 @@ async def _delete_log_masking_rule_record(
     *,
     jiuwenclaw_id: str,
 ) -> bool:
-    from jiuwenclaw.infrastructure.log_masking.engine import normalize_rule_id
+    from jiuwenswarm.infrastructure.log_masking.engine import normalize_rule_id
 
     rid = normalize_rule_id(rule_id)
     return await handler.delete(_TABLE, _instance_filters(jiuwenclaw_id, rid))
@@ -151,7 +151,7 @@ async def _upsert_log_masking_rule_record(
     *,
     jiuwenclaw_id: str,
 ) -> dict[str, Any]:
-    from jiuwenclaw.infrastructure.log_masking.engine import (
+    from jiuwenswarm.infrastructure.log_masking.engine import (
         normalize_replacement,
         normalize_rule_id,
         normalize_source,
@@ -211,7 +211,7 @@ async def _sync_log_masking_rules_records(
         req = LogMaskingRuleCreateRequest.model_validate(raw)
         jid = str(req.jiuwenclaw_id or jiuwenclaw_id).strip()
         assert_jiuwenclaw_id_matches(jid)
-        from jiuwenclaw.infrastructure.log_masking.engine import normalize_rule_id
+        from jiuwenswarm.infrastructure.log_masking.engine import normalize_rule_id
 
         rid = normalize_rule_id(req.rule_id)
         incoming_rule_ids.add(rid)
