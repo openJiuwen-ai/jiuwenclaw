@@ -55,8 +55,9 @@ def _extract_designer_section(
         return text[start:end].rstrip()
 
     sections = [
+        # 只认现行 designer.md：预算为加粗正文 **E. …**，终点「阶段 4」。
         _extract_bounded_section(
-            "### 页面内容预算契约",
+            "**E. 页面内容预算契约",
             ("\n### 阶段 4：交付",),
         ),
         _extract_bounded_section(
@@ -71,9 +72,10 @@ def _extract_designer_section(
             "## 视觉设计规范",
             ("\n## 图表与数据可视化",),
         ),
+        # 只认现行终点「禁止事项」，避免吃到文末。
         _extract_bounded_section(
             "## 关键原则",
-            ("\n## 质量控制清单",),
+            ("\n## 禁止事项",),
         ),
     ]
     if include_charts:
@@ -657,6 +659,20 @@ def _build_content_template_fill_prompt(
             f"{rewrite_hint}\n"
             "⚠️ 仅修复上述不通过项，不要改动其他正常部分。\n"
         )
+    # custom content-template：page-main 已是根容器，PAGE_CONTENT 须 ≥2 直接子块；
+    # 四预设仍用唯一首层根容器（与现行预设脚手架一致）。
+    if style_id == "custom":
+        page_content_rule = (
+            "5. `{{PAGE_CONTENT}}` 必须作为 `<main class=\"page-main\">` 的至少两个直接子块"
+            "（例如结论条/关键指标 + 主体图表或分栏）；高度归属写在各直接子块上"
+            "（如 `flex-shrink-0` / `flex-1 min-h-0`）；需要分栏时只在其中一个直接子块内部"
+            "使用 grid/flex-row，禁止再用唯一根容器包住全部内容\n"
+        )
+    else:
+        page_content_rule = (
+            "5. `{{PAGE_CONTENT}}` 必须替换为一个且仅一个首层根容器，"
+            "根容器必须带 `w-full flex-1 min-h-0`\n"
+        )
     return (
         f"{user_query_section}"
         f"## 任务：填充第 {page_number} 页预设风格 content-template 官方模板\n"
@@ -667,7 +683,7 @@ def _build_content_template_fill_prompt(
         "2. **只允许替换 3 类占位符**：`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`\n"
         "3. `{{PAGE_TITLE}}` 只填写本页标题文字；不得改 `<h1>` 的 class、字号、字重、字体、装饰线、padding\n"
         "4. `{{PAGE_FOOTER}}` 只填写来源/备注；不得追加运行页码\n"
-        "5. `{{PAGE_CONTENT}}` 必须替换为一个且仅一个首层根容器，根容器必须带 `w-full flex-1 min-h-0`\n"
+        f"{page_content_rule}"
         "6. 不得修改预铺模板 `<main>` 的 class；所有布局变化仅在 `{{PAGE_CONTENT}}` 内完成\n"
         "7. 每个占位符必须填有意义内容；禁止空串、`—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位`\n"
         "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；禁止额外手写第二套图表初始化框架\n"
