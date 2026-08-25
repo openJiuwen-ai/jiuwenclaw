@@ -208,7 +208,7 @@ class FakeHeartbeatController:
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_web_methods_use_current_names_and_session() -> None:
+async def test_heartbeat_web_methods_preserve_health_check_aliases_and_session() -> None:
     channel = FakeWebChannel()
     controller = FakeHeartbeatController()
     _register_web_handlers(
@@ -217,9 +217,11 @@ async def test_heartbeat_web_methods_use_current_names_and_session() -> None:
     assert "health_check.get_conf" in channel.methods
     assert "health_check.set_conf" in channel.methods
     assert "health_check.get_path" not in channel.methods
-    assert "heartbeat.get_conf" not in channel.methods
-    assert "heartbeat.set_conf" not in channel.methods
+    assert "heartbeat.get_conf" in channel.methods
+    assert "heartbeat.set_conf" in channel.methods
     assert "heartbeat.get_path" not in channel.methods
+    assert channel.methods["heartbeat.get_conf"] is channel.methods["health_check.get_conf"]
+    assert channel.methods["heartbeat.set_conf"] is channel.methods["health_check.set_conf"]
     expected = {
         "heartbeat.job.list", "heartbeat.job.meta", "heartbeat.job.get",
         "heartbeat.job.create", "heartbeat.job.update", "heartbeat.job.delete",
@@ -896,6 +898,7 @@ async def test_openai_account_logout_wins_against_inflight_poll(
         ("channel.feishu.set_conf", {"apps": [{"app_id": "app-1"}]}),
         ("channel.dingtalk.set_conf", {"enabled": False, "client_id": "client-1"}),
         ("health_check.set_conf", {"every": 30, "target": "web"}),
+        ("heartbeat.set_conf", {"every": 30, "target": "web"}),
     ],
 )
 async def test_config_save_handlers_respond_before_agent_reload_finishes(monkeypatch, method, params):

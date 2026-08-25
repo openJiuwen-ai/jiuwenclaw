@@ -292,6 +292,9 @@ class ReqMethod(Enum):
     # 旧探活使用 health_check 命名空间。
     HEALTH_CHECK_GET_CONF = "health_check.get_conf"
     HEALTH_CHECK_SET_CONF = "health_check.set_conf"
+    # Deprecated probe RPC aliases kept for clients upgrading across the rename.
+    HEARTBEAT_GET_CONF = "heartbeat.get_conf"
+    HEARTBEAT_SET_CONF = "heartbeat.set_conf"
 
     # Gateway -> AgentServer proxy for AgentServer-owned Heartbeat job operations.
     HEARTBEAT_JOB = "heartbeat.job"
@@ -406,8 +409,17 @@ class EventType(Enum):
     # 旧探活结果通过 health_check.relay 发送。
     # 新心跳任务(heartbeat.job.*)不使用 relay 事件,结果通过普通 chat.send 进入原会话。
     HEALTH_CHECK_RELAY = "health_check.relay"
+    # Deprecated source-level alias. Legacy wire frames are normalized by
+    # _missing_ so every downstream channel sees HEALTH_CHECK_RELAY.
+    HEARTBEAT_RELAY = "health_check.relay"
     HISTORY_GET = "history.message"
     PROACTIVE_RECOMMENDATION = "proactive_recommendation"
+
+    @classmethod
+    def _missing_(cls, value):
+        if value == "heartbeat.relay":
+            return cls.HEALTH_CHECK_RELAY
+        return None
 
 
 class Mode(Enum):

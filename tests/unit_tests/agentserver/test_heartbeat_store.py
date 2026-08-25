@@ -118,77 +118,140 @@ async def test_delete_job_physical_delete(store: HeartbeatJobStore) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 状态机方法
+# 原子状态机方法
 # ---------------------------------------------------------------------------
 
 
-async def test_mark_running_sets_current_run(store: HeartbeatJobStore) -> None:
+async def test_claim_run_sets_current_run(store: HeartbeatJobStore) -> None:
     job = await store.create_job(
         name="n", channel_id="web", session_id="s1", prompt="p",
         schedule=_interval_schedule(), source="agent_tool",
     )
-    job = await store.mark_running(job.id, "run1", 1000.0)
+    decision, job, replaced = await store.claim_run(
+        job.id,
+        "run1",
+        1000.0,
+        trigger="run_now",
+        reschedule=False,
+    )
+    assert decision == "run"
+    assert replaced is None
     assert job.status == STATUS_RUNNING
     assert job.run_state.current_run_id == "run1"
     assert job.run_state.current_run_started_at == 1000.0
 
 
-async def test_mark_queued_preserves_existing_reservation(
+async def test_claim_run_coalesces_existing_queue_reservation(
+    store: HeartbeatJobStore,
+) -> None:
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=_interval_schedule(), source="agent_tool",
+        concurrency_policy="queue",
+    )
+    first, _, _ = await store.claim_run(
+        job.id, "active", 1000.0, trigger="run_now", reschedule=False
+    )
+    queued, _, _ = await store.claim_run(
+        job.id, "queued-1", 1001.0, trigger="run_now", reschedule=False
+    )
+    coalesced, job, _ = await store.claim_run(
+        job.id, "queued-2", 1002.0, trigger="run_now", reschedule=False
+    )
+
+    assert (first, queued, coalesced) == ("run", "queued", "coalesced")
+    assert job.run_state.queued_run_id == "queued-1"
+
+
+async def test_finish_run_succeeded_increments_run_count(
     store: HeartbeatJobStore,
 ) -> None:
     job = await store.create_job(
         name="n", channel_id="web", session_id="s1", prompt="p",
         schedule=_interval_schedule(), source="agent_tool",
     )
-    await store.mark_queued(job.id, "queued-1")
-    job = await store.mark_queued(job.id, "queued-2")
-
-    assert job.run_state.queued_run_id == "queued-1"
-
-
-async def test_mark_succeeded_increments_run_count(store: HeartbeatJobStore) -> None:
-    job = await store.create_job(
-        name="n", channel_id="web", session_id="s1", prompt="p",
-        schedule=_interval_schedule(), source="agent_tool",
+    await store.claim_run(
+        job.id, "run1", 1000.0, trigger="scheduler", reschedule=False
     )
-    await store.mark_running(job.id, "run1", 1000.0)
-    job = await store.mark_succeeded(job.id, "run1", 1001.0)
+    matched, job = await store.finish_run(
+        job.id,
+        "run1",
+        1001.0,
+        outcome="succeeded",
+        error=None,
+        next_run_at=1120.0,
+        terminal=False,
+    )
+    assert matched is True
     assert job.run_count == 1
     assert job.run_state.current_run_id is None
     assert job.run_state.last_run_status == "succeeded"
     assert job.status == STATUS_SCHEDULED
 
 
-async def test_mark_failed_records_error(store: HeartbeatJobStore) -> None:
+async def test_finish_run_failed_records_error(store: HeartbeatJobStore) -> None:
     job = await store.create_job(
         name="n", channel_id="web", session_id="s1", prompt="p",
         schedule=_interval_schedule(), source="agent_tool",
     )
-    await store.mark_running(job.id, "run1", 1000.0)
-    job = await store.mark_failed(job.id, "run1", 1001.0, error="boom")
+    await store.claim_run(
+        job.id, "run1", 1000.0, trigger="scheduler", reschedule=False
+    )
+    matched, job = await store.finish_run(
+        job.id,
+        "run1",
+        1001.0,
+        outcome="failed",
+        error="boom",
+        next_run_at=1120.0,
+        terminal=False,
+    )
+    assert matched is True
     assert job.run_state.last_run_status == "failed"
     assert "boom" in (job.run_state.last_error or "")
     assert job.run_count == 1
 
 
-async def test_record_skipped_increments_counter(store: HeartbeatJobStore) -> None:
+async def test_claim_run_skip_increments_counter(store: HeartbeatJobStore) -> None:
     job = await store.create_job(
         name="n", channel_id="web", session_id="s1", prompt="p",
         schedule=_interval_schedule(), source="agent_tool",
     )
-    await store.record_skipped(job.id, 1000.0, "previous_run_active")
-    await store.record_skipped(job.id, 1001.0, "previous_run_active")
+    await store.claim_run(
+        job.id, "active", 1000.0, trigger="run_now", reschedule=False
+    )
+    first, _, _ = await store.claim_run(
+        job.id, "skipped-1", 1001.0, trigger="run_now", reschedule=False
+    )
+    second, _, _ = await store.claim_run(
+        job.id, "skipped-2", 1002.0, trigger="run_now", reschedule=False
+    )
     job = await store.get_job(job.id)
+    assert (first, second) == ("skip", "skip")
     assert job.run_state.skipped_count == 2
     assert job.run_state.last_run_status == "skipped"
 
 
-async def test_mark_completed_terminal_state_preserves_record(store: HeartbeatJobStore) -> None:
+async def test_finish_run_terminal_state_preserves_record(
+    store: HeartbeatJobStore,
+) -> None:
     job = await store.create_job(
         name="n", channel_id="web", session_id="s1", prompt="p",
         schedule=_interval_schedule(), source="agent_tool", max_runs=2,
     )
-    job = await store.mark_completed(job.id, "run1", 1000.0, reason="stop_condition_reached")
+    await store.claim_run(
+        job.id, "run1", 999.0, trigger="run_now", reschedule=False
+    )
+    matched, job = await store.finish_run(
+        job.id,
+        "run1",
+        1000.0,
+        outcome="succeeded",
+        error=None,
+        next_run_at=None,
+        terminal=True,
+    )
+    assert matched is True
     assert job.status == STATUS_COMPLETED
     assert job.enabled is False
     assert job.next_run_at is None
@@ -202,8 +265,21 @@ async def test_delete_after_run_marks_completed(store: HeartbeatJobStore) -> Non
     job = await store.create_job(
         name="once", channel_id="web", session_id="s1", prompt="p",
         schedule=sched, source="agent_tool", delete_after_run=True,
+        now=1.0,
     )
-    job = await store.mark_completed(job.id, "run1", 1000.0)
+    await store.claim_run(
+        job.id, "run1", 999.0, trigger="run_now", reschedule=False
+    )
+    matched, job = await store.finish_run(
+        job.id,
+        "run1",
+        1000.0,
+        outcome="succeeded",
+        error=None,
+        next_run_at=None,
+        terminal=True,
+    )
+    assert matched is True
     assert job.status == STATUS_COMPLETED
     assert job.run_count == 1
 
@@ -230,7 +306,18 @@ async def test_toggle_requires_more_budget_before_reactivating_completed(store: 
         name="n", channel_id="web", session_id="s1", prompt="p",
         schedule=_interval_schedule(), source="agent_tool", max_runs=1,
     )
-    await store.mark_completed(job.id, "run1", 1000.0)
+    await store.claim_run(
+        job.id, "run1", 999.0, trigger="run_now", reschedule=False
+    )
+    await store.finish_run(
+        job.id,
+        "run1",
+        1000.0,
+        outcome="succeeded",
+        error=None,
+        next_run_at=None,
+        terminal=True,
+    )
     assert (await store.get_job(job.id)).status == STATUS_COMPLETED
     with pytest.raises(ValueError, match="exhausted max_runs"):
         await store.toggle_job(job.id, True)
@@ -291,7 +378,18 @@ async def test_reschedule_ignored_for_terminal_state(store: HeartbeatJobStore) -
         name="n", channel_id="web", session_id="s1", prompt="p",
         schedule=_interval_schedule(), source="agent_tool", max_runs=1,
     )
-    await store.mark_completed(job.id, "run1", 1000.0)
+    await store.claim_run(
+        job.id, "run1", 999.0, trigger="run_now", reschedule=False
+    )
+    await store.finish_run(
+        job.id,
+        "run1",
+        1000.0,
+        outcome="succeeded",
+        error=None,
+        next_run_at=None,
+        terminal=True,
+    )
     # completed 状态不接受 reschedule,保持不变
     await store.reschedule(job.id, 9999.0)
     job = await store.get_job(job.id)

@@ -250,7 +250,11 @@ class GatewayHealthCheckService(IHealthCheck):
                     params={},
                     timestamp=time.time(),
                     ok=True,
-                    payload={"health_check": health_check_content},
+                    payload={
+                        "health_check": health_check_content,
+                        # Deprecated payload alias for legacy relay consumers.
+                        "heartbeat": health_check_content,
+                    },
                     event_type=EventType.HEALTH_CHECK_RELAY,
                 )
                 await self._message_handler.publish_robot_messages(relay_msg)

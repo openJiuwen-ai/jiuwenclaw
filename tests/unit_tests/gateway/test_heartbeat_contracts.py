@@ -13,11 +13,16 @@ from websockets.legacy.server import serve as websocket_serve
 from jiuwenswarm.agents.harness.code.rails.heartbeat.tools import (
     HeartbeatRuntimeBridge,
 )
-from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.gateway.heartbeat import (
     HeartbeatControllerProxy,
     HeartbeatServiceUnavailableError,
 )
+from jiuwenswarm.gateway.health_check import (
+    GatewayHealthCheckService,
+    HealthCheckConfig,
+)
+from jiuwenswarm.gateway.message_handler import MessageHandler
 from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
@@ -27,6 +32,61 @@ class _Context:
     session_id = "session-1"
     user_id = "user-1"
     metadata = {"user_id": "fallback-user"}
+
+
+def test_health_check_accepts_legacy_probe_wire_names() -> None:
+    assert ReqMethod.HEARTBEAT_GET_CONF.value == "heartbeat.get_conf"
+    assert ReqMethod.HEARTBEAT_SET_CONF.value == "heartbeat.set_conf"
+    assert EventType.HEARTBEAT_RELAY is EventType.HEALTH_CHECK_RELAY
+    assert EventType("heartbeat.relay") is EventType.HEALTH_CHECK_RELAY
+    assert EventType("health_check.relay") is EventType.HEALTH_CHECK_RELAY
+
+
+def test_legacy_health_check_relay_normalizes_at_gateway_ingress() -> None:
+    message = MessageHandler._response_to_message(
+        SimpleNamespace(
+            request_id="legacy-probe",
+            channel_id="web",
+            payload={"event_type": "heartbeat.relay", "heartbeat": "HEALTH_CHECK_OK"},
+            metadata={},
+            agent_ref=None,
+        ),
+        "health-check-session",
+    )
+
+    assert message.type == "event"
+    assert message.event_type is EventType.HEALTH_CHECK_RELAY
+    assert message.payload == {
+        "event_type": "health_check.relay",
+        "heartbeat": "HEALTH_CHECK_OK",
+        "health_check": "HEALTH_CHECK_OK",
+    }
+
+
+async def test_health_check_relay_keeps_legacy_payload_alias() -> None:
+    published = []
+
+    class Client:
+        async def send_request(self, envelope):  # noqa: ANN001
+            return SimpleNamespace(payload={"health_check": "HEALTH_CHECK_OK"})
+
+    class Handler:
+        async def publish_robot_messages(self, message):  # noqa: ANN001
+            published.append(message)
+
+    service = GatewayHealthCheckService(
+        Client(),
+        HealthCheckConfig(interval_seconds=30, relay_channel_id="web"),
+        message_handler=Handler(),
+    )
+    await service._tick()
+
+    assert len(published) == 1
+    assert published[0].event_type is EventType.HEALTH_CHECK_RELAY
+    assert published[0].payload == {
+        "health_check": "HEALTH_CHECK_OK",
+        "heartbeat": "HEALTH_CHECK_OK",
+    }
 
 
 async def test_agent_tools_call_agentserver_local_service() -> None:

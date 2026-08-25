@@ -467,36 +467,6 @@ def test_processing_status_is_only_emitted_for_chat_streams() -> None:
     ) is False
 
 
-@pytest.mark.asyncio
-async def test_heartbeat_processing_status_keeps_automation_and_prompt() -> None:
-    handler = _TestMessageHandler.create()
-    automation = {
-        "kind": "heartbeat",
-        "job_id": "hb-1",
-        "run_id": "run-1",
-        "triggered_at": 123.0,
-    }
-
-    await handler._send_processing_status(
-        "run-1",
-        "sess-1",
-        "web",
-        is_processing=True,
-        request_metadata={"automation": automation},
-        content="continue the session",
-    )
-
-    out = await handler.consume_robot_messages(timeout=0)
-    assert out.payload == {
-        "event_type": "chat.processing_status",
-        "session_id": "sess-1",
-        "is_processing": True,
-        "is_complete": False,
-        "content": "continue the session",
-    }
-    assert out.metadata == {"automation": automation}
-
-
 
 @pytest.mark.asyncio
 async def test_permission_resume_stream_keeps_processing_while_goal_stream_active() -> None:

@@ -48,6 +48,39 @@ def _interval_schedule(seconds: int = 120) -> HeartbeatSchedule:
     return HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": seconds})
 
 
+async def _claim_running_job(
+    ctrl: HeartbeatController,
+    job_id: str,
+    run_id: str,
+) -> None:
+    decision, _, _ = await ctrl._store.claim_run(
+        job_id,
+        run_id,
+        1000.0,
+        trigger="run_now",
+        reschedule=False,
+    )
+    assert decision == "run"
+
+
+async def _complete_job(
+    ctrl: HeartbeatController,
+    job_id: str,
+    run_id: str,
+) -> None:
+    await _claim_running_job(ctrl, job_id, run_id)
+    matched, _ = await ctrl._store.finish_run(
+        job_id,
+        run_id,
+        1001.0,
+        outcome="succeeded",
+        error=None,
+        next_run_at=None,
+        terminal=True,
+    )
+    assert matched is True
+
+
 async def test_web_rpc_create_requires_channel_and_session(ctrl: HeartbeatController) -> None:
     with pytest.raises(ValueError, match="channel_id is required"):
         await ctrl.create_job({"name": "x", "session_id": "s", "prompt": "p", "source": "web_rpc",
@@ -174,8 +207,7 @@ async def test_toggle_rejects_completed_job_until_max_runs_is_increased(ctrl: He
         "source": "agent_tool", "max_runs": 1,
         "schedule": {"type": "interval", "interval_seconds": 120},
     })
-    # 手动 completed
-    await ctrl._store.mark_completed(job["id"], "r1", 1000.0)
+    await _complete_job(ctrl, job["id"], "r1")
     assert (await ctrl.get_job(job["id"]))["status"] == "completed"
     with pytest.raises(ValueError, match="max_runs already reached"):
         await ctrl.toggle_job(job["id"], True)
@@ -210,7 +242,7 @@ async def test_delete_running_job_cancels_exact_run_before_physical_delete(
         "name": "x", "channel_id": "web", "session_id": "s1", "prompt": "p",
         "schedule": {"type": "interval", "interval_seconds": 120},
     })
-    await ctrl._store.mark_running(job["id"], "run-active", 1000.0)
+    await _claim_running_job(ctrl, job["id"], "run-active")
     calls: list[tuple[str, bool]] = []
 
     async def cancel_run(job_id: str, *, pause_schedule: bool = False):
@@ -235,7 +267,7 @@ async def test_delete_running_job_stops_when_exact_cancel_fails(
         "name": "x", "channel_id": "web", "session_id": "s1", "prompt": "p",
         "schedule": {"type": "interval", "interval_seconds": 120},
     })
-    await ctrl._store.mark_running(job["id"], "run-active", 1000.0)
+    await _claim_running_job(ctrl, job["id"], "run-active")
 
     async def cancel_run(job_id: str, *, pause_schedule: bool = False):
         return {"job_id": job_id, "cancel_status": "failed"}

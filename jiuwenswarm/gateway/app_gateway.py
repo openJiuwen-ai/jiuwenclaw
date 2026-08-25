@@ -1724,9 +1724,8 @@ async def _run(
     message_handler.set_cron_controller(cron_controller)
 
     # Heartbeat Store/Controller/Scheduler/Execution live in AgentServer.
-    # Gateway keeps only the stable public-interface proxy.
+    # Gateway keeps only the stable public-interface proxy wired to Web/TUI.
     heartbeat_controller = HeartbeatControllerProxy(client)
-    message_handler.set_heartbeat_controller(heartbeat_controller)
 
     full_cfg, health_check_cfg, channels_cfg = _load_gateway_runtime_config(
         message_handler

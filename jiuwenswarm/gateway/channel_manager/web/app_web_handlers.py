@@ -6051,6 +6051,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("updater.set_conf", _updater_set_conf)
     channel.register_method("health_check.get_conf", _health_check_get_conf)
     channel.register_method("health_check.set_conf", _health_check_set_conf)
+    # Deprecated aliases for clients upgrading from the pre-split probe API.
+    channel.register_method("heartbeat.get_conf", _health_check_get_conf)
+    channel.register_method("heartbeat.set_conf", _health_check_set_conf)
     channel.register_method("channel.feishu.get_conf", _channel_feishu_get_conf)
     channel.register_method("channel.feishu.set_conf", _channel_feishu_set_conf)
     channel.register_method("channel.xiaoyi.get_conf", _channel_xiaoyi_get_conf)

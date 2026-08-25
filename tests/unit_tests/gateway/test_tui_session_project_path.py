@@ -246,17 +246,13 @@ async def test_session_delete_delegates_heartbeat_lifecycle_to_agentserver() -> 
             self.requests.append(env)
             return SimpleNamespace(ok=True, payload={"session_id": "tui-session"})
 
-    class Handler:
-        def get_heartbeat_scheduler_service(self):
-            raise AssertionError("Gateway must not own the Heartbeat scheduler")
-
     channel = _TuiChannel()
     agent = Agent()
     register_cli_handlers(
         CliHandlersBindParams(
             channel=channel,
             agent_client=agent,
-            message_handler=Handler(),
+            message_handler=object(),
             path="/tui",
         )
     )

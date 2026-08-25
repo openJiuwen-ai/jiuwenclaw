@@ -2192,7 +2192,7 @@ class FeishuChannel(BaseChannel):
         if event_name == "chat.interrupt_result":
             return self._extract_preferred_text(payload.get("message")) or "[状态] 任务已中断"
 
-        if event_name == "health_check.relay":
+        if event_name in {"health_check.relay", "heartbeat.relay"}:
             return self._extract_preferred_text(payload.get("health_check"))
 
         # Gateway/Agent 响应在 payload.content，直接发送可能在 params.content

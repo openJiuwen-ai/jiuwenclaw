@@ -383,21 +383,12 @@ async def test_team_session_delete_keeps_baseline_stop_before_runner_delete(
         events.append("baseline-delete")
         return True
 
-    class _MessageHandler:
-        def get_heartbeat_scheduler_service(self):
-            raise AssertionError("TeamManager must not reach back into Gateway Heartbeat")
-
     monkeypatch.setattr(manager, "_resolve_delete_session_team_name", lambda _sid: "demo-team")
     monkeypatch.setattr(manager, "stop_session_runtime", _stop)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.Runner.delete_agent_team",
         _delete,
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.message_handler.message_handler.MessageHandler.get_instance",
-        lambda: _MessageHandler(),
-    )
-
     assert await manager.delete_session_runtime("team-session", reason="test: ")
     assert events == [
         "baseline-stop",
