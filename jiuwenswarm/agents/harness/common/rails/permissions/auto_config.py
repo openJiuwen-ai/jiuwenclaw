@@ -29,9 +29,11 @@ MANUAL_PERMISSION_MODE = "manual"
 AUTO_PERMISSION_MODE = "auto"
 _VALID_RUNTIME_MODES = {MANUAL_PERMISSION_MODE, AUTO_PERMISSION_MODE}
 _STRUCTURED_PERMISSION_RULE_MAP_KEYS = frozenset({"paths", "commands", "patterns"})
+AUTO_PERMISSION_REVIEWER_PAYLOAD_MAX_BYTES = 32 * 1024
 AUTO_PERMISSION_DEFAULT_OPTIONS = {
     "reviewer_timeout_ms": 60000,
     "reviewer_min_confidence": 0.7,
+    "reviewer_payload_max_bytes": AUTO_PERMISSION_REVIEWER_PAYLOAD_MAX_BYTES,
     "persistent_audit_enabled": False,
     "bounded_write_max_files": 3,
     "bounded_write_excluded_paths": JIUWENCLAW_PROTECTED_WRITE_PATHS,
@@ -143,7 +145,12 @@ def normalize_auto_permission_options(raw_options: Any) -> dict[str, Any]:
         if isinstance(default_value, bool):
             normalized[key] = bool(raw_value)
         elif isinstance(default_value, int) and not isinstance(default_value, bool):
-            normalized[key] = _positive_int(raw_value, default_value)
+            value = _positive_int(raw_value, default_value)
+            normalized[key] = (
+                min(value, AUTO_PERMISSION_REVIEWER_PAYLOAD_MAX_BYTES)
+                if key == "reviewer_payload_max_bytes"
+                else value
+            )
         elif isinstance(default_value, float):
             normalized[key] = _bounded_float(raw_value, default_value)
         elif key == "bounded_write_excluded_paths":

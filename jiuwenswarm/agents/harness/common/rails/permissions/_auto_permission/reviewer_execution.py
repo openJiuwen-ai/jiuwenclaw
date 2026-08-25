@@ -16,7 +16,11 @@ from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.review
     _with_host_owned_manual_review_display,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.auto_decision import DENY_LEVEL
+from jiuwenswarm.agents.harness.common.rails.permissions.artifact_path_provenance import (
+    stage_semantic_artifact_paths,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.auto_reviewer import (
+    AUTO_REVIEW_PAYLOAD_MAX_BYTES,
     ReviewerOutcome,
     build_reviewer_action_view,
 )
@@ -228,7 +232,82 @@ class AutoPermissionReviewerExecutionMixin:
             no_auto_allow_reason=route.no_auto_allow_reason,
             original_user_intent=original_user_intent,
             domain_route=domain_route,
+            reviewer_payload_max_bytes=min(
+                int(
+                    self.auto_options.get(
+                        "reviewer_payload_max_bytes",
+                        AUTO_REVIEW_PAYLOAD_MAX_BYTES,
+                    )
+                ),
+                AUTO_REVIEW_PAYLOAD_MAX_BYTES,
+            ),
+            trusted_session_artifact_paths=self._relevant_artifact_paths(
+                facts,
+                session_id,
+            ),
         )
+        if not request.payload_complete:
+            metadata = {
+                "action_summary": _reviewer_action_summary(facts),
+                "decision_source": "auto_reviewer",
+                "final_reviewer_status": "manual",
+                "manual_reason_code": request.payload_error,
+                "manual_reason_summary": (
+                    "The complete payload cannot be represented for semantic review; "
+                    "review this invocation manually."
+                    if request.payload_error == "reviewer_payload_unrepresentable"
+                    else "The complete payload exceeds the semantic reviewer capacity; "
+                    "review this invocation manually."
+                ),
+                "reviewer_called": False,
+                "reviewer_status": "manual",
+                **_reviewer_route_audit_extra(
+                    route,
+                    policy_level=policy_level,
+                    reviewer_called=False,
+                ),
+            }
+            if _is_allow_once_confirmation(user_input):
+                authorization_error = self._issue_send_file_authorization(facts)
+                if authorization_error:
+                    return PermissionHandlingResult(
+                        True,
+                        self._manual_reviewer_response(
+                            facts,
+                            reason=authorization_error,
+                            metadata={
+                                **metadata,
+                                "decision_source": "send_file_authorization",
+                                "manual_reason_code": authorization_error,
+                            },
+                            session_id=session_id,
+                            request_id=request_id,
+                            tool_call_id=tool_call_id,
+                            channel_kind=channel_kind,
+                        ),
+                        "send_file_authorization",
+                    )
+                self._emit_audit(
+                    facts,
+                    decision="allow",
+                    reason="user_allow_once_after_payload_too_large",
+                    degraded=False,
+                    extra=metadata,
+                )
+                return PermissionHandlingResult(True, None, "manual_approval")
+            return PermissionHandlingResult(
+                True,
+                self._manual_reviewer_response(
+                    facts,
+                    reason=request.payload_error,
+                    metadata=metadata,
+                    session_id=session_id,
+                    request_id=request_id,
+                    tool_call_id=tool_call_id,
+                    channel_kind=channel_kind,
+                ),
+                "auto_reviewer",
+            )
         assessment = await self.auto_reviewer.assess(request)
         effect_statuses = request.effect_statuses
         audit_extra = {
@@ -258,6 +337,7 @@ class AutoPermissionReviewerExecutionMixin:
             "reviewer_required_unknowns": (
                 request.required_unknown_acknowledgements
             ),
+            "semantic_artifact_candidate_count": len(assessment.artifact_paths),
             "user_review_hint": assessment.user_review_hint,
         }
         if assessment.fallback_reason:
@@ -315,6 +395,11 @@ class AutoPermissionReviewerExecutionMixin:
                 if _is_allow_once_confirmation(user_input)
                 else "auto_reviewer"
             )
+            if decision_source == "auto_reviewer":
+                stage_semantic_artifact_paths(
+                    runtime_ctx,
+                    assessment.artifact_paths,
+                )
             return PermissionHandlingResult(True, None, decision_source)
         if assessment.outcome == ReviewerOutcome.DENY:
             response, decision_source = self._reviewer_deny_response(

@@ -14,6 +14,10 @@ from jiuwenswarm.agents.harness.common.rails.permissions.auto_config import (
 from jiuwenswarm.agents.harness.common.rails.permissions.auto_reviewer import (
     AutoReviewer,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.artifact_path_provenance import (
+    SessionArtifactPathProvenance,
+    collect_grounding_texts,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.persistent_audit import (
     PersistentAuditWriter,
     resolve_persistent_audit_root,
@@ -52,6 +56,7 @@ class AutoPermissionLifecycleMixin:
         policy_evaluator: OpenJiuwenPolicyEvaluator | None = None,
         auto_reviewer: AutoReviewer | None = None,
         trusted_search_urls: SessionTrustedSearchUrls | None = None,
+        session_artifact_paths: SessionArtifactPathProvenance | None = None,
         persistent_audit_writer: Any | None = None,
         send_file_session_approval_store: SendFileSessionApprovalStore | None = None,
         exact_permission_persist_callback: Callable[
@@ -86,6 +91,7 @@ class AutoPermissionLifecycleMixin:
         self.auto_options = auto_options if isinstance(auto_options, dict) else {}
         self.auto_reviewer = auto_reviewer
         self.trusted_search_urls = trusted_search_urls
+        self.session_artifact_paths = session_artifact_paths
         self.persistent_audit_writer = persistent_audit_writer
         self.send_file_session_approval_store = (
             send_file_session_approval_store or SendFileSessionApprovalStore()
@@ -183,3 +189,28 @@ class AutoPermissionLifecycleMixin:
         if self.trusted_search_urls is None or not session_id:
             return ()
         return self.trusted_search_urls.sources(root_session_id=str(session_id))
+
+    def _relevant_artifact_paths(
+        self,
+        facts: Any,
+        session_id: str | None,
+    ) -> tuple[str, ...]:
+        """Return exact session artifacts referenced by the current invocation."""
+
+        if self.session_artifact_paths is None or not session_id:
+            return ()
+        if facts.tool_category == "shell" and not facts.effective_workdir:
+            return ()
+        excluded = self.auto_options.get("bounded_write_excluded_paths", ())
+        excluded_paths = excluded if isinstance(excluded, (list, tuple)) else ()
+        return self.session_artifact_paths.relevant_paths(
+            root_session_id=str(session_id),
+            workspace_root=self.workspace_root,
+            access_paths=facts.paths,
+            grounding_texts=collect_grounding_texts(
+                facts.untrusted_args,
+                command=facts.raw_command,
+            ),
+            effective_workdir=facts.effective_workdir,
+            excluded_paths=excluded_paths,
+        )

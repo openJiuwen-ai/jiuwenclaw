@@ -140,7 +140,19 @@ def reviewer_route(
     if guard == "terminal_manual":
         return _manual("terminal_manual")
 
-    structural_reason = _structural_manual_reason(facts)
+    allow_unknown_shell_accesses = bool(
+        policy == ASK_LEVEL
+        and facts.capability.category == "shell"
+        and facts.command
+        and not requires_manual_execution_provider_review(
+            facts.tool_name,
+            tool_category=facts.capability.category,
+        )
+    )
+    structural_reason = _structural_manual_reason(
+        facts,
+        allow_unknown_shell_accesses=allow_unknown_shell_accesses,
+    )
     if structural_reason:
         return _manual(structural_reason)
 
@@ -208,10 +220,18 @@ def reviewer_route(
     return _semantic()
 
 
-def _structural_manual_reason(facts: ToolDecisionFacts) -> str:
+def _structural_manual_reason(
+    facts: ToolDecisionFacts,
+    *,
+    allow_unknown_shell_accesses: bool = False,
+) -> str:
     if not facts.arguments_valid_object:
         return "arguments_not_object"
-    if facts.capability.category == "path" and not facts.accesses_known:
+    if (
+        facts.capability.category in {"path", "shell"}
+        and not facts.accesses_known
+        and not allow_unknown_shell_accesses
+    ):
         return "core_accesses_unknown"
     if facts.capability.alias_conflict:
         return "alias_conflict"
