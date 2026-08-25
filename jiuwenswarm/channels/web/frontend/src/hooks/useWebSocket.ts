@@ -1742,6 +1742,27 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     }
   }, []);
 
+  /**
+   * Heartbeat 自动轮的会话级收口：chat.final/execution.error/chat.error 三个终态事件里
+   * 都可能触发一次，但同一个 run_id 只能真正收口一次——否则一次意外的"第二次终态事件"
+   * 会把刚被 drainTaskQueueIfIdle 重新拉起的 isProcessing 又关掉，导致第二条排队消息在
+   * 第一条还没收尾时就被并发发出去。收口动作本身沿用普通轮 chat.final 兜底同款的三个
+   * 前置条件（历史加载中/Team 模式/Goal 续跑中都不动这个状态），不能只搬动作不搬护栏。
+   */
+  const heartbeatSessionCloseHandledRunIdsRef = useRef<Set<string>>(new Set());
+  const closeHeartbeatSessionState = useCallback((sessionId: string, runId: string) => {
+    if (heartbeatSessionCloseHandledRunIdsRef.current.has(runId)) return;
+    heartbeatSessionCloseHandledRunIdsRef.current.add(runId);
+    if (useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) return;
+    const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
+    if (currentMode === 'team') return;
+    const goalStillActive = useGoalStore.getState().runtimes[sessionId]?.goal?.status === 'active';
+    if (goalStillActive) return;
+    useChatStore.getState().setProcessing(sessionId, false);
+    useChatStore.getState().setThinking(sessionId, false);
+    drainTaskQueueIfIdle(sessionId);
+  }, [drainTaskQueueIfIdle]);
+
   // 统一中断接口 - pause/cancel/supplement/resume
   const interrupt = useCallback(
     async (
@@ -2631,9 +2652,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
 
         // §8 步骤3：Heartbeat 自动轮的 final 只完成相同 run_id 的 assistant 消息，
-        // 不进全局 currentStreamId 收尾、不触发 Goal 续跑判断、不排空队列——
-        // Heartbeat 不复用普通轮的整段收尾逻辑。execution.error 已在独立处理器里
-        // 按 run_id 生成可见错误并立即结束 processing（§10），不在此等待。
+        // 不进全局 currentStreamId 收尾、不触发 Goal 续跑判断——Heartbeat 不复用普通轮的
+        // 整段收尾逻辑。execution.error 已在独立处理器里按 run_id 生成可见错误并立即结束
+        // processing（§10），不在此等待。session 级 processing/thinking 收口 + 排空队列
+        // 现在统一走 closeHeartbeatSessionState（按 run_id 去重，避免多个终态事件重复收口
+        // 造成并发发送），见该函数定义处注释。
         const hbFinalAutomation = extractAutomation(payload);
         if (hbFinalAutomation) {
           const assistantMsgId = heartbeatAssistantMessageId(hbFinalAutomation.run_id);
@@ -2660,9 +2683,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           // chat.processing_status(false) 关闭 session 级 isProcessing/isThinking；
           // 这里是它丢帧时的兜底，避免输入区转圈/停止按钮卡死。只关这个 session 的
           // 状态，不碰任何消息内容，不会影响另一条普通聊天或另一条 Heartbeat run。
-          useChatStore.getState().setProcessing(sessionId, false);
-          useChatStore.getState().setThinking(sessionId, false);
-          drainTaskQueueIfIdle(sessionId);
+          closeHeartbeatSessionState(sessionId, hbFinalAutomation.run_id);
           return;
         }
 
@@ -3429,10 +3450,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const assistantMsgId = heartbeatAssistantMessageId(hbErrorAutomation.run_id);
           chatStore.updateMessage(sessionId, assistantMsgId, { isStreaming: false });
           // §2.2/§10 兜底：execution.error 已经确定这一 run 失败，不等可能不会再来的
-          // chat.final/chat.processing_status(false)，立即关闭 session 级 processing 展示。
-          chatStore.setProcessing(sessionId, false);
-          chatStore.setThinking(sessionId, false);
-          drainTaskQueueIfIdle(sessionId);
+          // chat.final/chat.processing_status(false)，立即关闭 session 级 processing 展示
+          // （统一走 closeHeartbeatSessionState，按 run_id 去重）。
+          closeHeartbeatSessionState(sessionId, hbErrorAutomation.run_id);
         }
       }),
       webClient.on('context.usage', ({ payload }) => {
@@ -3743,9 +3763,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             });
           }
           chatStore.updateMessage(sessionId, heartbeatAssistantMessageId(hbChatErrorAutomation.run_id), { isStreaming: false });
-          // §2.2 兜底：setThinking 已经在上面统一关过，这里补 setProcessing + 排空队列。
-          chatStore.setProcessing(sessionId, false);
-          drainTaskQueueIfIdle(sessionId);
+          // §2.2 兜底：setThinking 已经在上面统一关过，这里补 setProcessing + 排空队列
+          // （统一走 closeHeartbeatSessionState，按 run_id 去重）。
+          closeHeartbeatSessionState(sessionId, hbChatErrorAutomation.run_id);
           return;
         }
         useChatStore.getState().setExecutionError(sessionId, errorMsg);

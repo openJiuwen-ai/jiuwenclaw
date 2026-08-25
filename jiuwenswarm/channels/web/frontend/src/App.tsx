@@ -658,6 +658,12 @@ function AppContent() {
     }
     setToolPanelHidden(false);
     if (mode === 'team') {
+      // 真正处于 Team 模式时不动 teamAreaActiveTab：下面这段"陈旧 team tab 切回
+      // planning"的兜底只是给单 Agent 面板用的。曾经按某版交接文档建议去掉这层
+      // mode 隔离，复核后确认那条建议的前提不成立（mode 是 zustand selector，
+      // 渲染时始终最新，不存在"滞后短路"的竞态窗口），且会导致真正在 Team 模式、
+      // 停留在 team tab 的用户每次收起/展开面板都被强制踢回 planning——teamArea
+      // 组件把 'team' 当合法 tab，没有兜底。这个 early return 就是隔离本身。
       setTeamAreaExpanded(expanded);
       return;
     }
