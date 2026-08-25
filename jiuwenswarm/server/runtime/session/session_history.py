@@ -131,7 +131,9 @@ def _has_persistable_assistant_payload(
     if payload.get("tool_call") or payload.get("tool_calls"):
         return True
     # Token diagnostic rows have empty content; numbers live in extras.
-    if et in {"chat.usage_summary", "chat.usage_metadata"}:
+    # chat.llm_usage is SkillTurbo's raw event; resume rewrites it to
+    # chat.usage_metadata, but keep the original persistable as a fallback.
+    if et in {"chat.usage_summary", "chat.usage_metadata", "chat.llm_usage"}:
         return bool(
             payload.get("usage")
             or payload.get("metadata")

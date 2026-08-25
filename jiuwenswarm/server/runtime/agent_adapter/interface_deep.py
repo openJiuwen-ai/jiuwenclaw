@@ -9603,6 +9603,177 @@ class JiuWenSwarmDeepAdapter:
                 summaries.append(f"- {plan_name}: {' | '.join(parts)}")
         return summaries
 
+    @staticmethod
+    def _new_usage_accumulator() -> dict[str, Any]:
+        return {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cache_tokens": 0,
+            "input_cost": 0.0,
+            "output_cost": 0.0,
+            "total_cost": 0.0,
+        }
+
+    @staticmethod
+    def _extract_usage_metadata(payload: Any) -> dict[str, Any] | None:
+        """Pull GLM/OpenAI usage numbers out of a SkillTurbo or adapter payload."""
+        if not isinstance(payload, dict):
+            return None
+        event_type = str(payload.get("event_type") or "")
+        if event_type == "chat.usage_metadata":
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict):
+                inner = metadata.get("usage_metadata", metadata)
+                return inner if isinstance(inner, dict) else None
+            return None
+        if event_type in {"chat.llm_usage", "llm_usage"}:
+            inner = payload.get("usage_metadata")
+            return inner if isinstance(inner, dict) else None
+        return None
+
+    @staticmethod
+    def _accumulate_usage(acc: dict[str, Any], usage_meta: dict[str, Any]) -> None:
+        for token in ("input_tokens", "output_tokens", "total_tokens", "cache_tokens"):
+            acc[token] += usage_meta.get(token, 0) or 0
+        for cost in ("input_cost", "output_cost", "total_cost"):
+            acc[cost] += usage_meta.get(cost, 0.0) or 0.0
+
+    @staticmethod
+    def _rewrite_skill_turbo_usage_chunk(
+        chunk: AgentResponseChunk,
+        *,
+        session_id: str,
+    ) -> tuple[AgentResponseChunk | None, dict[str, Any] | None]:
+        """Map SkillTurbo ``chat.llm_usage`` onto the adapter's usage_metadata event.
+
+        HITL resume yields AgentResponseChunk payloads directly and never passes
+        through the DeepAgent ``type='llm_usage'`` consumer. Testers grep
+        ``chat.usage_metadata`` / ``chat.usage_summary``, not ``chat.llm_usage``.
+        """
+        payload = chunk.payload
+        usage_meta = JiuWenSwarmDeepAdapter._extract_usage_metadata(payload)
+        if usage_meta is None:
+            return None, None
+        if (
+            isinstance(payload, dict)
+            and payload.get("event_type") == "chat.usage_metadata"
+        ):
+            return chunk, usage_meta
+        return (
+            AgentResponseChunk(
+                request_id=chunk.request_id,
+                channel_id=chunk.channel_id,
+                payload={
+                    "event_type": "chat.usage_metadata",
+                    "metadata": payload,
+                    "session_id": session_id,
+                },
+                is_complete=False,
+                agent_ref=chunk.agent_ref,
+                metadata=chunk.metadata,
+            ),
+            usage_meta,
+        )
+
+    def _format_llm_usage_summary(self, usage_accumulator: dict[str, Any]) -> dict[str, Any]:
+        summary = {
+            "input_tokens": usage_accumulator["input_tokens"],
+            "output_tokens": usage_accumulator["output_tokens"],
+            "total_tokens": usage_accumulator["total_tokens"],
+        }
+        input_tokens = usage_accumulator["input_tokens"]
+        if input_tokens > 0:
+            cache_tokens = usage_accumulator["cache_tokens"]
+            summary["cache_tokens"] = cache_tokens
+            summary["cache_hit_rate"] = f"{cache_tokens / input_tokens:.1%}"
+        if usage_accumulator["input_cost"] > 0:
+            summary["input_cost"] = round(usage_accumulator["input_cost"], 6)
+        if usage_accumulator["output_cost"] > 0:
+            summary["output_cost"] = round(usage_accumulator["output_cost"], 6)
+        if usage_accumulator["total_cost"] > 0:
+            summary["total_cost"] = round(usage_accumulator["total_cost"], 6)
+        return summary
+
+    def _context_usage_fields(self, session_id: str) -> tuple[float | None, int | None]:
+        context_usage_percent: float | None = None
+        context_window_tokens: int | None = None
+        try:
+            if self._instance is not None:
+                da_usage = self._instance.get_context_usage(session_id=session_id)
+                if isinstance(da_usage, dict):
+                    raw_pct = da_usage.get("usage_percent", None)
+                    if raw_pct is not None:
+                        context_usage_percent = float(raw_pct)
+                    raw_cw = da_usage.get("context_window_tokens", None)
+                    if raw_cw is not None:
+                        context_window_tokens = int(raw_cw)
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] DeepAgent.get_context_usage in usage_summary failed",
+                exc_info=True,
+            )
+        if context_window_tokens is None:
+            try:
+                from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+                model_name = (
+                    getattr(self._model_request_config, "model_name", "") or ""
+                    if self._model_request_config else ""
+                )
+                cw_fallback = ContextUtils.resolve_context_max(model_name=model_name)
+                if cw_fallback > 0:
+                    context_window_tokens = cw_fallback
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] ContextUtils.resolve_context_max fallback failed",
+                    exc_info=True,
+                )
+        return context_usage_percent, context_window_tokens
+
+    def _log_and_make_usage_summary_chunk(
+        self,
+        *,
+        request_id: str,
+        channel_id: str,
+        session_id: str,
+        usage_accumulator: dict[str, Any],
+        perf_usage_fallback: dict[str, int] | None = None,
+    ) -> AgentResponseChunk | None:
+        if merge_perf_summary_usage_fallback(usage_accumulator, perf_usage_fallback):
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] recovered missing llm_usage from perf summary: "
+                "request_id=%s session_id=%s usage=%s",
+                request_id,
+                session_id,
+                perf_usage_fallback,
+            )
+        summary = self._format_llm_usage_summary(usage_accumulator)
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] llm_usage summary: request_id=%s session_id=%s usage=%s",
+            request_id,
+            session_id,
+            summary,
+        )
+        if usage_accumulator["total_tokens"] <= 0:
+            return None
+        payload: dict[str, Any] = {
+            "event_type": "chat.usage_summary",
+            "session_id": session_id,
+            "usage": summary,
+            "model": self._resolve_model_name(),
+        }
+        context_usage_percent, context_window_tokens = self._context_usage_fields(session_id)
+        if context_usage_percent is not None:
+            payload["usage_percent"] = context_usage_percent
+        if context_window_tokens is not None:
+            payload["context_window_tokens"] = context_window_tokens
+        return AgentResponseChunk(
+            request_id=request_id,
+            channel_id=channel_id,
+            payload=payload,
+            is_complete=False,
+        )
+
     async def _try_skill_turbo_resume(
         self,
         request: AgentRequest,
@@ -9702,6 +9873,27 @@ class JiuWenSwarmDeepAdapter:
                 resume_ctx.get("inputs", inputs),
                 raw_interactive,
             )
+            usage_accumulator = self._new_usage_accumulator()
+            usage_summary_emitted = False
+            session_id = request.session_id or "default"
+            rid = request.request_id
+            cid = request.channel_id
+
+            async def _emit_usage_summary() -> AsyncIterator[AgentResponseChunk]:
+                nonlocal usage_summary_emitted
+                if usage_summary_emitted:
+                    return
+                usage_summary_emitted = True
+                summary_chunk = self._log_and_make_usage_summary_chunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    session_id=session_id,
+                    usage_accumulator=usage_accumulator,
+                    perf_usage_fallback=snapshot_perf_summary_usage(rid),
+                )
+                if summary_chunk is not None:
+                    yield summary_chunk
+
             try:
                 await _skill_turbo_clear_resume_ctx(session)
                 try:
@@ -9720,8 +9912,24 @@ class JiuWenSwarmDeepAdapter:
                     user_input=user_input,
                     task_states=resume_ctx.get("task_states"),
                 ):
+                    rewritten, usage_meta = self._rewrite_skill_turbo_usage_chunk(
+                        chunk, session_id=session_id
+                    )
+                    if rewritten is not None and usage_meta is not None:
+                        self._accumulate_usage(usage_accumulator, usage_meta)
+                        logger.info(
+                            "[JiuWenSwarmDeepAdapter] llm_usage chunk: %s",
+                            rewritten.payload,
+                        )
+                        yield rewritten
+                        continue
+                    if getattr(chunk, "is_complete", False):
+                        async for summary_chunk in _emit_usage_summary():
+                            yield summary_chunk
                     yield chunk
             except _SkillTurboAbortError as e:
+                async for summary_chunk in _emit_usage_summary():
+                    yield summary_chunk
                 async for hitl_chunk in self._emit_skill_turbo_hitl_chunks(
                     request, e
                 ):
@@ -9731,12 +9939,17 @@ class JiuWenSwarmDeepAdapter:
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] SkillTurbo resume fallback to DeepAgent"
                 )
+                async for summary_chunk in _emit_usage_summary():
+                    yield summary_chunk
                 return
             finally:
                 _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
                 _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
                 _LLM_TRACE_ITERATION.reset(token_trace_iter)
                 _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
+
+            async for summary_chunk in _emit_usage_summary():
+                yield summary_chunk
 
         return _resume_impl()
 
@@ -15249,90 +15462,15 @@ class JiuWenSwarmDeepAdapter:
             if active_error is None and cleanup_error is not None:
                 raise cleanup_error
 
-        if merge_perf_summary_usage_fallback(
-            usage_accumulator,
-            perf_usage_fallback,
-        ):
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] recovered missing llm_usage from perf summary: "
-                "request_id=%s session_id=%s usage=%s",
-                rid,
-                session_id,
-                perf_usage_fallback,
-            )
-
-        summary = {
-            "input_tokens": usage_accumulator["input_tokens"],
-            "output_tokens": usage_accumulator["output_tokens"],
-            "total_tokens": usage_accumulator["total_tokens"],
-        }
-        input_tokens = usage_accumulator["input_tokens"]
-        if input_tokens > 0:
-            cache_tokens = usage_accumulator["cache_tokens"]
-            summary["cache_tokens"] = cache_tokens
-            summary["cache_hit_rate"] = f"{cache_tokens / input_tokens:.1%}"
-        if usage_accumulator["input_cost"] > 0:
-            summary["input_cost"] = round(usage_accumulator["input_cost"], 6)
-        if usage_accumulator["output_cost"] > 0:
-            summary["output_cost"] = round(usage_accumulator["output_cost"], 6)
-        if usage_accumulator["total_cost"] > 0:
-            summary["total_cost"] = round(usage_accumulator["total_cost"], 6)
-
-        logger.info(
-            "[JiuWenSwarmDeepAdapter] llm_usage summary: request_id=%s session_id=%s usage=%s",
-            rid,
-            session_id,
-            summary,
+        summary_chunk = self._log_and_make_usage_summary_chunk(
+            request_id=rid,
+            channel_id=cid,
+            session_id=session_id,
+            usage_accumulator=usage_accumulator,
+            perf_usage_fallback=perf_usage_fallback,
         )
-
-        # 从 DeepAgent 获取上下文窗口占用率与窗口大小
-        context_usage_percent: float | None = None
-        context_window_tokens: int | None = None
-        try:
-            if self._instance is not None:
-                da_usage = self._instance.get_context_usage(session_id=session_id)
-                if isinstance(da_usage, dict):
-                    raw_pct = da_usage.get("usage_percent", None)
-                    if raw_pct is not None:
-                        context_usage_percent = float(raw_pct)
-                    raw_cw = da_usage.get("context_window_tokens", None)
-                    if raw_cw is not None:
-                        context_window_tokens = int(raw_cw)
-        except Exception:
-            logger.debug("[JiuWenSwarmDeepAdapter] DeepAgent.get_context_usage in usage_summary failed", exc_info=True)
-
-        # 回退：DeepAgent 未返回 context_window_tokens 时，用 ContextUtils 解析模型上下文窗口上限
-        if context_window_tokens is None:
-            try:
-                from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-                model_name = (
-                    getattr(self._model_request_config, "model_name", "") or ""
-                    if self._model_request_config else ""
-                )
-                cw_fallback = ContextUtils.resolve_context_max(model_name=model_name)
-                if cw_fallback > 0:
-                    context_window_tokens = cw_fallback
-            except Exception:
-                logger.debug("[JiuWenSwarmDeepAdapter] ContextUtils.resolve_context_max fallback failed", exc_info=True)
-
-        if usage_accumulator["total_tokens"] > 0:
-            payload: dict[str, Any] = {
-                "event_type": "chat.usage_summary",
-                "session_id": session_id,
-                "usage": summary,
-                "model": self._resolve_model_name(),
-            }
-            if context_usage_percent is not None:
-                payload["usage_percent"] = context_usage_percent
-            if context_window_tokens is not None:
-                payload["context_window_tokens"] = context_window_tokens
-
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload=payload,
-                is_complete=False,
-            )
+        if summary_chunk is not None:
+            yield summary_chunk
 
         if hitl_pending_stream:
             # HITL 暂停：以 awaiting_user_input 终结帧收尾，网关出站会把该帧转成
