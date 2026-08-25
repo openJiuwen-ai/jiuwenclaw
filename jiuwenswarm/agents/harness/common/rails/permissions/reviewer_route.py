@@ -236,7 +236,10 @@ def _shell_payload_is_reviewable(
         policy_level not in {ASK_LEVEL, ALLOW_LEVEL}
         or facts.capability.category != "shell"
         or not facts.arguments_valid_object
-        or facts.capability.alias_conflict
+    ):
+        return False
+    if (
+        facts.capability.alias_conflict
         or facts.capability.facts_source != "host_static"
         or not facts.command
     ):

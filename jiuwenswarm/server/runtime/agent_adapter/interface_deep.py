@@ -2452,9 +2452,9 @@ class JiuWenSwarmDeepAdapter:
                     if (
                         key.root_session_id != target_sid
                         or key.execution_session_id != target_sid
-                        or not key.tool_call_id
-                        or key.tool_call_id in tool_call_ids
                     ):
+                        return False
+                    if not key.tool_call_id or key.tool_call_id in tool_call_ids:
                         return False
                     card = queue.get(key)
                     request = getattr(card, "request", None)

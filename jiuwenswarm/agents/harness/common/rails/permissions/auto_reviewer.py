@@ -355,14 +355,14 @@ def build_reviewer_action_view(
             "reason": domain_route.reason,
             "source": domain_route.source,
         }
-    required_unknown_acknowledgements = tuple(
-        effect_name
-        for effect_name, status in (
-            ("filesystem_effect", filesystem_status),
-            ("network_effect", network_status),
-        )
-        if status == "unknown"
-    )
+    required_unknown_effects: list[str] = []
+    for effect_name, status in (
+        ("filesystem_effect", filesystem_status),
+        ("network_effect", network_status),
+    ):
+        if status == "unknown":
+            required_unknown_effects.append(effect_name)
+    required_unknown_acknowledgements = tuple(required_unknown_effects)
     return ReviewerActionView(
         descriptor_summary=summary,
         policy_reason=str(policy_reason or ""),
