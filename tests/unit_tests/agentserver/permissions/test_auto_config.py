@@ -53,6 +53,7 @@ def test_auto_mode_preserves_disabled_boundary_and_defaults_to_ask() -> None:
     assert normalized["defaults"]["*"] == "ask"
     assert normalized["auto"]["reviewer_timeout_ms"] == 60000
     assert normalized["auto"]["reviewer_min_confidence"] == 0.7
+    assert normalized["auto"]["reviewer_payload_max_bytes"] == 32 * 1024
     assert normalized["auto"]["persistent_audit_enabled"] is False
     assert normalized["auto"]["bounded_write_max_files"] == 3
     assert (
@@ -61,6 +62,18 @@ def test_auto_mode_preserves_disabled_boundary_and_defaults_to_ask() -> None:
     )
     assert raw["enabled"] is False
     assert raw["defaults"]["*"] == "allow"
+
+
+def test_reviewer_payload_limit_can_only_be_configured_downward() -> None:
+    lowered = normalize_permissions_for_runtime(
+        {"mode": "auto", "auto": {"reviewer_payload_max_bytes": 4096}}
+    )
+    raised = normalize_permissions_for_runtime(
+        {"mode": "auto", "auto": {"reviewer_payload_max_bytes": 64 * 1024}}
+    )
+
+    assert lowered["auto"]["reviewer_payload_max_bytes"] == 4096
+    assert raised["auto"]["reviewer_payload_max_bytes"] == 32 * 1024
 
 
 @pytest.mark.parametrize(
@@ -310,6 +323,7 @@ def test_auto_mode_keeps_only_current_option_allowlist() -> None:
         "bounded_write_max_files",
         "persistent_audit_enabled",
         "reviewer_min_confidence",
+        "reviewer_payload_max_bytes",
         "reviewer_timeout_ms",
     }
     assert normalized["auto"]["bounded_write_max_files"] == 5

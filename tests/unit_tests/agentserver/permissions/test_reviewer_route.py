@@ -5,6 +5,7 @@ from __future__ import annotations
 # TEST ONLY: URL fixtures use reserved domains and are evaluated as plain policy
 # data without external network I/O.
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -114,7 +115,7 @@ def test_policy_and_guard_precedence(
     ("policy_level", "expected_source"),
     [
         ("ask", SEMANTIC_REVIEW_SOURCE),
-        ("allow", SEMANTIC_REVIEW_SOURCE),
+        ("allow", MANUAL_REVIEW_SOURCE),
         ("deny", HARD_BLOCK_SOURCE),
     ],
 )
@@ -201,6 +202,32 @@ def test_shell_parser_exception_is_manual_only(
 
     assert route.source == MANUAL_REVIEW_SOURCE
     assert route.reason == "core_accesses_unknown"
+
+
+def test_verified_shell_with_unknown_core_accesses_uses_narrow_semantic_fallback(
+    tmp_path: Path,
+) -> None:
+    facts = replace(
+        _facts("mcp_exec_command", {"command": "python -c 'print(1)'"}, tmp_path),
+        accesses_known=False,
+    )
+
+    ask_route = reviewer_route(
+        facts,
+        policy_level="ask",
+        guard_result="not_applicable",
+        workspace_root=tmp_path,
+    )
+    allow_route = reviewer_route(
+        facts,
+        policy_level="allow",
+        guard_result="not_applicable",
+        workspace_root=tmp_path,
+    )
+
+    assert ask_route.source == SEMANTIC_REVIEW_SOURCE
+    assert allow_route.source == MANUAL_REVIEW_SOURCE
+    assert allow_route.reason == "core_accesses_unknown"
 
 
 @pytest.mark.parametrize(

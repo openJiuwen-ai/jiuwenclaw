@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import jiuwenswarm.agents.harness.common.rails.permissions as permissions_package
+import jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts as facts_module
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_capabilities import (
     ToolCapability,
     install_permission_file_semantics,
@@ -127,9 +128,19 @@ def test_missing_workspace_or_unsupported_path_never_looks_empty_and_safe() -> N
 def test_shell_command_accesses_are_observations_not_complete_facts(
     tmp_path: Path,
 ) -> None:
-    facts = _facts("mcp_exec_command", {"command": "printf ok | tee out"}, tmp_path)
+    raw_command = "\n\u2003printf ok | tee out\n\u2003"
+    facts = _facts(
+        "mcp_exec_command",
+        {
+            "command": raw_command,
+            "workdir": str(tmp_path / "subdir"),
+        },
+        tmp_path,
+    )
 
     assert facts.command == "printf ok | tee out"
+    assert facts.raw_command == raw_command
+    assert facts.effective_workdir == "subdir"
     assert facts.accesses_known is False
     assert not hasattr(facts, "command_operator_kinds")
     assert not hasattr(facts, "deterministic_findings")
@@ -147,6 +158,47 @@ def test_uv_install_does_not_claim_authoritative_empty_accesses(
     assert facts.accesses_known is False
     assert facts.read_paths == ()
     assert facts.write_paths == ()
+
+
+def test_bash_effective_workdir_requires_host_frozen_workdir(tmp_path: Path) -> None:
+    nested = tmp_path / "nested"
+
+    frozen = _facts(
+        "bash",
+        {"command": "pwd", "workdir": str(nested)},
+        tmp_path,
+    )
+    default_unfrozen = _facts("bash", {"command": "pwd"}, tmp_path)
+    legacy_unfrozen = _facts(
+        "bash",
+        {"command": "pwd", "cwd": str(nested)},
+        tmp_path,
+    )
+
+    assert frozen.effective_workdir == "nested"
+    assert default_unfrozen.effective_workdir == ""
+    assert legacy_unfrozen.effective_workdir == ""
+
+
+def test_exec_access_remains_policy_write_but_not_artifact_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "analyze.py"
+    monkeypatch.setattr(
+        facts_module,
+        "extract_accesses_native",
+        lambda *_args, **_kwargs: [(script, "exec", "command")],
+    )
+
+    facts = _facts(
+        "mcp_exec_command",
+        {"command": "python analyze.py"},
+        tmp_path,
+    )
+
+    assert facts.write_paths == (script.as_posix(),)
+    assert facts.artifact_write_paths == ()
 
 
 def test_send_paths_come_only_from_send_file_guard(tmp_path: Path) -> None:

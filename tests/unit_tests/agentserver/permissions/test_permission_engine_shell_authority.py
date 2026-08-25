@@ -10,6 +10,7 @@ import pytest
 
 import jiuwenswarm.agents.harness.common.rails.permissions.auto_reviewer as auto_reviewer_module
 import jiuwenswarm.agents.harness.common.rails.permissions.reviewer_route as reviewer_route_module
+import jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts as facts_module
 from jiuwenswarm.agents.harness.common.rails.permissions.execution_provider_contract import (
     ACP_IDE_EXECUTION_TOOLS,
     EXECUTION_PROVIDER_CONTRACT_UNVERIFIED,
@@ -159,6 +160,50 @@ async def test_bound_shell_policy_ask_reaches_reviewer_without_local_grammar_gat
     candidate = reviewer_client.requests[0].descriptor_summary
     assert candidate["tool_category"] == "shell"
     assert candidate["risk_tier"] == "high"
+
+
+async def test_shell_core_parse_unavailable_reaches_reviewer(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_access_extraction(*_args, **_kwargs):
+        raise ValueError("parse_unavailable")
+
+    monkeypatch.setattr(
+        facts_module,
+        "extract_accesses_native",
+        fail_access_extraction,
+    )
+    reviewer_client = StaticReviewerClient(outcome=ReviewerOutcome.ALLOW_ONCE)
+    sys_operation, _provider = _jiuwenbox_sys_operation()
+    rail = AutoPermissionInterruptRail(
+        base_rail=FakeBaseRail(),
+        permission_config={"mode": "auto", "enabled": True},
+        workspace_root=tmp_path,
+        sandbox=replace(
+            _strong_sandbox(),
+            execution_workspace_root=tmp_path.as_posix(),
+        ),
+        sys_operation=sys_operation,
+        policy_evaluator=_ask_policy(),
+        auto_reviewer=AutoReviewer(client=reviewer_client),
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="mcp_exec_command",
+        tool_args={"command": "python -c 'print(1)'"},
+        session_id="shell-session",
+        request_id="shell-request",
+        tool_call_id="shell-call-parse-unavailable",
+    )
+
+    assert result is None
+    assert len(reviewer_client.requests) == 1
+    request = reviewer_client.requests[0]
+    assert request.payload_complete is True
+    assert request.review_evidence["reviewable_payload"]["command"] == (
+        "python -c 'print(1)'"
+    )
 
 
 async def test_shell_reviewer_timeout_is_manual_not_deterministic_allow(
