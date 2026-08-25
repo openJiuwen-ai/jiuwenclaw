@@ -16,7 +16,7 @@ class FileLayout:
     storage 只替换占位符（缺字段则 glob），不拼接 root、不查 named_files。
 
         /ws/service_default/agent_default/.checkpoint/session_map.json
-        /ws/gateway/persistent/cron_jobs/{service_id}/{agent_id}/jobs.json
+        /ws/gateway/cron/service_{service_id}/agent_{agent_id}/cron_jobs.json
         /home/user/.jiuwenswarm/config.yaml
 
     backend 在磁盘形态与协议 record（一条 JSON 可序列化 dict）之间转换：
@@ -33,7 +33,9 @@ class FileLayout:
     ``shape`` 只决定 JSON 怎么编码；YAML 与 DB 都不用它。
 
     JSON ``shape="map"``：对象 key 来自 ``key_fields[0]``（写时从 body 剥掉，读时写回）。
-    JSON ``shape="list"``：磁盘就是 record 数组，主键留在每条对象里。
+    JSON ``shape="list"``：磁盘就是 record 数组，主键留在每条 object 里。
+    ``json_document_key``（仅 JSON list）：磁盘为 ``{"version": 1, "<key>": [records]}``，
+    兼容 ``CronJobStore`` 的 ``cron_jobs.json`` 包装格式。
     YAML 不用 ``shape``：``yaml_pointer`` 取片段；有 ``key_fields`` 时同样把 mapping key 注入 record。
 
     ``key_fields`` 声明 record 主键由哪些字段组成（JSON / YAML 都用，DB 不用）：
@@ -60,6 +62,8 @@ class FileLayout:
     shape: Literal["map", "list"] = "map"  # JSON only; YAML ignores this
     yaml_pointer: str = ""  # YAML only; JSON ignores this. fragment path e.g. "/channels"
     key_fields: tuple[str, ...] = ()  # record primary key; first field is map key. empty = single document
+    # JSON list only：record 数组包在 document 对象的该字段下（如 cron ``jobs``）
+    json_document_key: str = ""
     # YAML only：片段是标量时，用该字段名包装/解包为单字段 record（如 preferred_language）
     yaml_scalar_field: str = ""
 

@@ -85,6 +85,12 @@ async def get_logging_body_in_config() -> dict[str, Any]:
     return await repo.get_body()
 
 
+def get_logging_config_section_sync() -> dict[str, Any]:
+    """同步读取 ``logging`` 段（Repository 注入时走 PersistentStore）。"""
+    body = run_awaitable(get_logging_body_in_config())
+    return dict(body) if isinstance(body, dict) else {}
+
+
 async def merge_logging_levels_in_config(updates: dict[str, Any]) -> None:
     """合并 logging 级别字段并持久化，同时热更新本进程级别。"""
     if not isinstance(updates, dict):
@@ -161,6 +167,7 @@ __all__ = [
     "delete_logging_in_config",
     "get_logging_body_in_config",
     "get_logging_config_repository",
+    "get_logging_config_section_sync",
     "merge_logging_levels_in_config",
     "replace_logging_in_config",
     "schedule_logging_config",

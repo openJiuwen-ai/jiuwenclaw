@@ -8,15 +8,12 @@ import asyncio
 import logging
 from typing import Any, ClassVar
 
-from jiuwenswarm.common.utils import (
-    resolve_cron_tenant_scope,
-    resolve_gateway_cron_jobs_path,
-)
+from jiuwenswarm.common.utils import resolve_cron_tenant_scope
 from jiuwenswarm.gateway.cron.agent_mirror import mirror_job_delete, mirror_job_upsert
 from jiuwenswarm.gateway.cron.controller import CronController
+from jiuwenswarm.gateway.cron.job_access import create_tenant_cron_store
 from jiuwenswarm.gateway.cron.models import CronTargetChannel
 from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService
-from jiuwenswarm.gateway.cron.store import CronJobStore
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +108,7 @@ class CronTenantRegistry:
             if cached is not None:
                 return cached
 
-            store = CronJobStore(path=resolve_gateway_cron_jobs_path(sid, aid))
+            store = create_tenant_cron_store(sid, aid)
             scheduler = CronSchedulerService(
                 store=store,
                 agent_client=self._agent_client,

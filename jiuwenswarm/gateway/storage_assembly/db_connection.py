@@ -43,13 +43,6 @@ def assert_replicas_db_compat() -> None:
         )
 
 
-async def _init_all_tables(handler: Any) -> None:
-    from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
-
-    table_init_mod = import_manager_ws_client_module("models.table_init")
-    await table_init_mod.init_all_tables(handler)
-
-
 class GatewayDbConnection:
     """绑定 EE GatewayDb；不注入 ``jiuwenclaw_id``。建表只在首次 ``ensure_ready`` 执行。"""
 
@@ -59,7 +52,7 @@ class GatewayDbConnection:
         self._lock = asyncio.Lock()
 
     def _bind_database(self) -> Any:
-        from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+        from jiuwenswarm.infrastructure.module_importer import import_manager_ws_client_module
 
         gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
         db = gateway_db_mod.GatewayDb.bind(None)
@@ -74,8 +67,8 @@ class GatewayDbConnection:
                 return self._handler
             assert_replicas_db_compat()
             db = self._db_obj or self._bind_database()
+            # ``Database.ensure_ready`` 已调用 ``init_all_tables``（幂等）。
             handler = await db.ensure_ready(log_prefix="gateway_storage")
-            await _init_all_tables(handler)
             self._handler = handler
             return handler
 

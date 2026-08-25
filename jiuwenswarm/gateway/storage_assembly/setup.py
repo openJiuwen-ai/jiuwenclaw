@@ -58,6 +58,7 @@ def _create_persistent(edition: str) -> PersistentStore:
         get_checkpoint_dir,
         get_config_file,
         get_user_workspace_dir,
+        resolve_gateway_cron_jobs_path_template,
     )
 
     persistent_root = get_user_workspace_dir() / "gateway" / "persistent"
@@ -68,6 +69,7 @@ def _create_persistent(edition: str) -> PersistentStore:
             persistent_root=persistent_root,
             config_file=config_file,
             session_map_file=session_map_file,
+            cron_jobs_path_template=resolve_gateway_cron_jobs_path_template(),
         ),
         on_write=_on_config_written,
     )
@@ -121,37 +123,150 @@ def resolve_storage_instance_id(cfg: dict[str, Any] | None = None) -> str:
     )
 
 
-def is_storage_repositories_enabled(cfg: dict[str, Any] | None = None) -> bool:
-    """业务写路径是否已全部切到 PersistentStore Repository。
-
-    除 SessionMap 外仍固定为 ``False``；其它域继续走旧路径
-    （``config.py`` / FileCronJobStore / EE DBHandler 等）。
-    """
-    _ = cfg
-    return False
-
-
-def is_session_map_repository_enabled(cfg: dict[str, Any] | None = None) -> bool:
-    """SessionMap 是否切到 PersistentStore Repository（其它域不受影响）。"""
+def _storage_flag(
+    cfg: dict[str, Any] | None,
+    *,
+    config_key: str,
+    env_key: str,
+    default: bool = True,
+) -> bool:
     if cfg is None:
         from jiuwenswarm.common.config import get_config
 
         cfg = get_config()
     storage = (cfg.get("gateway") or {}).get("storage") or {}
-    if "session_map_repository" in storage:
-        return bool(storage["session_map_repository"])
-    env = os.getenv("GATEWAY_SESSION_MAP_REPOSITORY", "").strip().lower()
+    if config_key in storage:
+        return bool(storage[config_key])
+    env = os.getenv(env_key, "").strip().lower()
     if env in ("0", "false", "no", "off"):
         return False
     if env in ("1", "true", "yes", "on"):
         return True
-    return True
+    return default
+
+
+def is_storage_repositories_enabled(cfg: dict[str, Any] | None = None) -> bool:
+    """channel / permissions / logging / memory / cron 是否切到 PersistentStore。"""
+    return _storage_flag(
+        cfg,
+        config_key="repositories",
+        env_key="GATEWAY_STORAGE_REPOSITORIES",
+        default=True,
+    )
+
+
+def is_session_map_repository_enabled(cfg: dict[str, Any] | None = None) -> bool:
+    """SessionMap 是否切到 PersistentStore Repository（其它域不受影响）。"""
+    return _storage_flag(
+        cfg,
+        config_key="session_map_repository",
+        env_key="GATEWAY_SESSION_MAP_REPOSITORY",
+        default=True,
+    )
+
+
+def _wire_config_and_cron_repositories(
+    store: PersistentStore,
+    cfg: dict[str, Any] | None,
+) -> None:
+    """注入 channel / permissions / logging / memory Repository 与 cron PersistentStore。"""
+    from jiuwenswarm.gateway.config.channel.access import set_channel_config_repository
+    from jiuwenswarm.gateway.config.logging.access import set_logging_config_repository
+    from jiuwenswarm.gateway.config.memory.access import set_memory_config_repository
+    from jiuwenswarm.gateway.config.permissions.access import (
+        set_permissions_config_repository,
+    )
+    from jiuwenswarm.gateway.cron.job_access import set_cron_persistent_store
+
+    edition = resolve_gateway_edition(cfg)
+    instance_id = resolve_storage_instance_id(cfg)
+    set_channel_config_repository(
+        create_channel_config_repository(
+            store, edition, instance_id=instance_id
+        )
+    )
+    set_permissions_config_repository(
+        create_permissions_config_repository(
+            store, edition, instance_id=instance_id
+        )
+    )
+    set_logging_config_repository(
+        create_logging_config_repository(
+            store, edition, instance_id=instance_id
+        )
+    )
+    set_memory_config_repository(
+        create_memory_config_repository(
+            store, edition, instance_id=instance_id
+        )
+    )
+    set_cron_persistent_store(store)
+
+
+def _clear_config_and_cron_repositories() -> None:
+    from jiuwenswarm.gateway.config.channel.access import clear_channel_config_repository
+    from jiuwenswarm.gateway.config.logging.access import clear_logging_config_repository
+    from jiuwenswarm.gateway.config.memory.access import clear_memory_config_repository
+    from jiuwenswarm.gateway.config.permissions.access import (
+        clear_permissions_config_repository,
+    )
+    from jiuwenswarm.gateway.cron.job_access import clear_cron_persistent_store
+
+    clear_channel_config_repository()
+    clear_permissions_config_repository()
+    clear_logging_config_repository()
+    clear_memory_config_repository()
+    clear_cron_persistent_store()
+
+
+async def setup_gateway_storage_repositories(
+    cfg: dict[str, Any] | None = None,
+) -> StorageContext | None:
+    """按开关装配 SessionMap + overlay/cron Repository，返回共享 ``StorageContext``。
+
+    - ``session_map_repository``：SessionMap
+    - ``repositories``：channel / permissions / logging / memory / cron
+
+    任一开启则创建 Context；全关返回 ``None``。须在 MessageHandler / CronTenantRegistry
+    创建 tenant store 之前调用。
+    """
+    session_on = is_session_map_repository_enabled(cfg)
+    repos_on = is_storage_repositories_enabled(cfg)
+    if not session_on and not repos_on:
+        return None
+    if cfg is None:
+        from jiuwenswarm.common.config import get_config
+
+        cfg = get_config()
+
+    ctx = create_gateway_storage_context(cfg)
+    store = await ctx.persistent()
+
+    if session_on:
+        from jiuwenswarm.gateway.routing.session_map_access import (
+            set_session_map_repository,
+        )
+
+        set_session_map_repository(create_session_map_repository(store))
+
+    if repos_on:
+        _wire_config_and_cron_repositories(store, cfg)
+
+    return ctx
+
+
+async def teardown_gateway_storage_repositories(ctx: StorageContext) -> None:
+    from jiuwenswarm.gateway.routing.session_map_access import clear_session_map_repository
+
+    clear_session_map_repository()
+    _clear_config_and_cron_repositories()
+    await ctx.shutdown()
 
 
 async def setup_session_map_repository(
     cfg: dict[str, Any] | None = None,
 ) -> StorageContext | None:
-    """装配 SessionMap Repository；未启用或失败时返回 ``None``。"""
+    """装配 SessionMap Repository（兼容旧入口；其它域见 ``setup_gateway_storage_repositories``）。"""
     if not is_session_map_repository_enabled(cfg):
         return None
     if cfg is None:
@@ -419,6 +534,8 @@ __all__ = [
     "is_session_map_repository_enabled",
     "is_storage_repositories_enabled",
     "resolve_storage_instance_id",
+    "setup_gateway_storage_repositories",
     "setup_session_map_repository",
+    "teardown_gateway_storage_repositories",
     "teardown_session_map_repository",
 ]

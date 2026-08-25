@@ -480,7 +480,12 @@ def migrate_legacy_user_config_if_needed() -> None:
 
 
 def _load_logging_config_from_yaml() -> dict[str, Any]:
-    """读取合并后的 logging 段（包内模板 + 用户 override）。"""
+    """读取合并后的 logging 段（包内模板 + 用户 config.yaml override）。
+
+    仅用于 import-time ``setup_logger`` / 无 Repository 时的回退。
+    PersistentStore 权威源请走 :func:`reload_logging_levels`（storage 装配后），
+    避免在 ``utils`` 导入期拉起 ``gateway`` 包造成循环导入。
+    """
     try:
         template = load_yaml_dict(resolve_shipped_template_config_path())
         override = load_yaml_dict(get_config_file())
@@ -1992,6 +1997,20 @@ def get_cron_jobs_path() -> Path:
     return get_agent_home_dir() / "cron_jobs.json"
 
 
+def resolve_gateway_cron_jobs_path_template() -> str:
+    """Absolute path template for Gateway cron PersistentStore / CronJobStore."""
+    return str(
+        (
+            get_user_workspace_dir()
+            / "gateway"
+            / "cron"
+            / "service_{service_id}"
+            / "agent_{agent_id}"
+            / "cron_jobs.json"
+        ).resolve()
+    )
+
+
 def resolve_gateway_cron_jobs_path(
     service_id: str | None = None,
     agent_id: str | None = None,
@@ -1999,13 +2018,11 @@ def resolve_gateway_cron_jobs_path(
     """Gateway per-tenant cron store: ``gateway/cron/service_{sid}/agent_{aid}/cron_jobs.json``."""
     sid = str(service_id or "default").strip() or "default"
     aid = str(agent_id or "default").strip() or "default"
-    return (
-        get_user_workspace_dir()
-        / "gateway"
-        / "cron"
-        / f"service_{sid}"
-        / f"agent_{aid}"
-        / "cron_jobs.json"
+    return Path(
+        resolve_gateway_cron_jobs_path_template().format(
+            service_id=sid,
+            agent_id=aid,
+        )
     )
 
 
@@ -3233,8 +3250,28 @@ def apply_logging_config_payload(payload: dict[str, Any] | None) -> None:
     update_log_levels(**kwargs)
 
 
-async def reload_logging_levels_from_gateway_db() -> None:
-    """从 Gateway 库加载 ``logging_config`` 并刷新**本进程**日志级别。"""
+async def reload_logging_levels() -> None:
+    """从权威存储加载 logging 配置并刷新**本进程**日志级别。
+
+    优先级：PersistentStore Repository → config.yaml（非 AgentRuntime）→ Gateway DB（企业 AgentServer）。
+    """
+    try:
+        from jiuwenswarm.gateway.config.logging.access import (
+            get_logging_body_in_config,
+            get_logging_config_repository,
+        )
+
+        if get_logging_config_repository() is not None:
+            body = await get_logging_body_in_config()
+            apply_logging_config_payload(body if body else {"op": "delete"})
+            return
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[logging_config] repository reload failed: %s",
+            exc,
+            exc_info=True,
+        )
+
     if not os.getenv("AGENT_RUNTIME", "").strip():
         update_log_levels()
         return

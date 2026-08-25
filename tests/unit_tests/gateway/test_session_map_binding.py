@@ -19,10 +19,15 @@ from jiuwenswarm.gateway.routing.session_map import (
 
 @pytest.fixture
 def checkpoint_tmp(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.routing.session_storage.get_checkpoint_dir",
-        lambda: tmp_path,
-    )
+    import sys
+
+    session_storage_mod = sys.modules["jiuwenswarm.gateway.routing.session_storage"]
+    store_path = tmp_path / "session_map.json"
+
+    def _resolve_storage() -> session_storage_mod.SessionStorage:
+        return session_storage_mod.LocalSessionStorage(store_path=store_path)
+
+    monkeypatch.setattr(SessionMap, "_resolve_storage", staticmethod(_resolve_storage))
     monkeypatch.delenv("AGENT_RUNTIME", raising=False)
     return tmp_path
 
