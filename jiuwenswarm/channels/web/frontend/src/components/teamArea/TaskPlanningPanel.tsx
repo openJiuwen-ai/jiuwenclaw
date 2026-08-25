@@ -57,6 +57,46 @@ const COLUMN_STATS: Array<{ key: TaskColumnKey; labelKey: string }> = [
   { key: 'cancelled', labelKey: 'team.planning.columns.failed' },
 ];
 
+export function ProgressBar({
+  progressPercent,
+  groupedTasks,
+}: {
+  progressPercent: number;
+  groupedTasks: Record<TaskColumnKey, SessionTeamTask[]>;
+}) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2 mb-2" data-testid="team-area-task-planning-progress">
+        <div className="flex flex-1 justify-between gap-2">
+          <div className="flex items-center gap-2.5" data-testid="team-area-task-planning-progress-stat">
+            <span className="text-xs" style={{ color: 'var(--color-task-column-label)' }} data-testid="team-area-task-planning-progress-label">{t('team.planning.metrics.progress')}</span>
+            <span className="text-sm font-semibold text-text-strong" data-testid="team-area-task-planning-progress-value">{progressPercent}%</span>
+          </div>
+          {COLUMN_STATS.map((column) => (
+            <div
+              key={column.key}
+              data-testid="team-area-task-planning-column-stat"
+              data-variant={column.key}
+              className="flex items-center gap-2.5"
+            >
+              <span className="text-xs" style={{ color: 'var(--color-task-column-label)' }} data-testid="team-area-task-planning-column-label">{t(column.labelKey)}</span>
+              <span className="text-sm font-semibold text-text-strong" data-testid="team-area-task-planning-column-count">{groupedTasks[column.key].length}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="h-1 rounded-full overflow-hidden mb-4" style={{ backgroundColor: 'var(--color-task-progress-track)' }} data-testid="team-area-task-planning-progress-track">
+        <div
+          className="h-full rounded-full transition-all duration-300"
+          style={{ width: `${progressPercent}%`, backgroundColor: 'var(--color-task-progress)' }}
+          data-testid="team-area-task-planning-progress-fill"
+        />
+      </div>
+    </>
+  );
+}
+
 export function ProgressSection({
   tasks,
   progressTasks,
@@ -111,7 +151,7 @@ export function ProgressSection({
                 <span className="text-sm leading-none pb-0.5" data-testid="team-area-task-planning-total-count">/ {totalTasks}</span>
               </div>
             </div>
-            <div className="h-2 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--color-task-progress-track)' }} data-testid="team-area-task-planning-progress-track">
+            <div className="h-1 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--color-task-progress-track)' }} data-testid="team-area-task-planning-progress-track">
               <div
                 className="h-full rounded-full"
                 style={{ width: `${progressPercent}%`, backgroundColor: 'var(--color-task-progress)' }}
@@ -151,32 +191,7 @@ export function ProgressSection({
 
   return (
     <div className="flex flex-col flex-1 min-h-0" data-testid="team-area-task-planning-progress-section">
-      <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2 mb-2" data-testid="team-area-task-planning-progress">
-        <div className="flex flex-1 justify-between gap-2">
-          <div className="flex items-center gap-2.5" data-testid="team-area-task-planning-progress-stat">
-            <span className="text-xs" style={{ color: 'var(--color-task-column-label)' }} data-testid="team-area-task-planning-progress-label">{t('team.planning.metrics.progress')}</span>
-            <span className="text-sm font-semibold text-text-strong" data-testid="team-area-task-planning-progress-value">{progressPercent}%</span>
-          </div>
-          {COLUMN_STATS.map((column) => (
-            <div
-              key={column.key}
-              data-testid="team-area-task-planning-column-stat"
-              data-variant={column.key}
-              className="flex items-center gap-2.5"
-            >
-              <span className="text-xs" style={{ color: 'var(--color-task-column-label)' }} data-testid="team-area-task-planning-column-label">{t(column.labelKey)}</span>
-              <span className="text-sm font-semibold text-text-strong" data-testid="team-area-task-planning-column-count">{groupedTasks[column.key].length}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className="h-2 rounded-full overflow-hidden mb-4" style={{ backgroundColor: 'var(--color-task-progress-track)' }} data-testid="team-area-task-planning-progress-track">
-        <div
-          className="h-full rounded-full transition-all duration-300"
-          style={{ width: `${progressPercent}%`, backgroundColor: 'var(--color-task-progress)' }}
-          data-testid="team-area-task-planning-progress-fill"
-        />
-      </div>
+      <ProgressBar progressPercent={progressPercent} groupedTasks={groupedTasks} />
       <div className="flex-1 overflow-y-auto" data-testid="team-area-task-planning-task-list">
         <CompactTaskList
           tasks={tasks}
@@ -270,6 +285,8 @@ export function TaskPlanningPanel({
     return groups;
   }, [tasks]);
 
+  const progressPercent = getTotalTaskVisualProgressPercent(progressTasks ?? tasks, now ?? Date.now());
+
   if (variant === 'compact') {
     const allTasks = tasks;
 
@@ -348,6 +365,7 @@ export function TaskPlanningPanel({
       ) : (
         <div className="flex h-full flex-col px-6 pb-6">
           {header}
+          <ProgressBar progressPercent={progressPercent} groupedTasks={groupedTasks} />
 
           <div className="min-h-0 flex-1 overflow-y-auto rounded-lg bg-secondary p-6" data-testid="team-area-task-planning-board">
             <div

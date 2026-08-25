@@ -89,11 +89,12 @@ export function useResponsivePanelResize({
 
     const prev = prevRef.current;
     const justExpanded = isTeamAreaExpanded && !prev.isTeamAreaExpanded;
+    prevRef.current = { isTeamAreaExpanded, conversationSidebarCollapsed };
 
-    const check = () => {
+    const check = (isUserAction: boolean) => {
       const s = stateRef.current;
       if (!canFitToolPanelOnly()) {
-        if (justExpanded) {
+        if (isUserAction) {
           setShouldFullscreen(true);
         } else if (s.isTeamAreaExpanded && !shouldFullscreen) {
           if (s.mode === 'team') {
@@ -110,9 +111,10 @@ export function useResponsivePanelResize({
       }
     };
 
-    check();
-    window.addEventListener('resize', check);
-    return () => window.removeEventListener('resize', check);
+    check(justExpanded);
+    const onResize = () => check(false);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
   }, [isTeamAreaExpanded, shouldFullscreen, setConversationSidebarCollapsed, setSingleAgentPanelExpanded, setTeamAreaExpanded]);
 
   useEffect(() => {

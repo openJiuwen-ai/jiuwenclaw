@@ -18,10 +18,11 @@ export const SIDEBAR_WIDTH_WIDE = 296;
 export const CHAT_MIN_WIDTH = 512;
 export const TOOL_PANEL_MIN_WIDTH = 512;
 export const DIVIDER_WIDTH = 4;
+export const ICON_RAIL_WIDTH = 72;
 
 export const panelThresholds = {
-  fitBoth: (sidebarWidth: number) => sidebarWidth + CHAT_MIN_WIDTH + DIVIDER_WIDTH + TOOL_PANEL_MIN_WIDTH,
-  fitToolPanelOnly: CHAT_MIN_WIDTH + DIVIDER_WIDTH + TOOL_PANEL_MIN_WIDTH,
+  fitBoth: (sidebarWidth: number) => ICON_RAIL_WIDTH + sidebarWidth + CHAT_MIN_WIDTH + DIVIDER_WIDTH + TOOL_PANEL_MIN_WIDTH,
+  fitToolPanelOnly: ICON_RAIL_WIDTH + CHAT_MIN_WIDTH + DIVIDER_WIDTH + TOOL_PANEL_MIN_WIDTH,
 } as const;
 
 export function getSidebarWidth(): number {

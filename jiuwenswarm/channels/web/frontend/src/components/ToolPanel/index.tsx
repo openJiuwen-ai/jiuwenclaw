@@ -8,11 +8,12 @@ import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import { useFullscreenPanel } from '../../hooks';
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
-import { FileCheck2, FileText, Info, Minimize2 } from 'lucide-react';
-import { ArtifactsPanel, useSessionArtifacts, useSessionArtifactsCount } from '../ArtifactsPanel';
+import { Info } from 'lucide-react';
+import { ArtifactExpandedPanel, useSessionArtifacts, useSessionArtifactsCount } from '../ArtifactsPanel';
 import { TeamArea, useTaskPlanningMetrics } from '../teamArea';
 import { loadTeamHistoryPanelState } from '../../features/teamHistoryPanelRestore';
 import { TaskPlanningPanel } from '../teamArea/TaskPlanningPanel';
+import { ExpandedPanelTabs, useExpandedPanelTabs } from '../teamArea/ExpandedPanelTabs';
 import { CompactTaskList } from '../teamArea/CompactTaskList';
 import { FileIcon } from '../FileIcon';
 import { CollapsibleSection } from './CollapsibleSection';
@@ -21,7 +22,6 @@ import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import { getMemberPlainName, type TabType, type TeamDetailTab } from '../teamArea/shared';
 import type { TeamTask, TeamTaskStatus } from '../../stores/sessionStore';
 import type { ProjectInfo, TodoItem, TodoStatus } from '../../types';
-import teamProcessIcon from '../../assets/team-process.svg';
 import teamIcon from '../../assets/team.svg';
 import RecentTasksIcon from '../../assets/work-mode/progress-tasks.svg?react';
 import artifactsIcon from '../../assets/artifacts.svg';
@@ -30,8 +30,6 @@ import emptyMembersIcon from '../../assets/empty-members.svg';
 import emptyPlanningIcon from '../../assets/empty-planning.svg';
 import emptyReferencesIcon from '../../assets/empty-references.svg';
 import skillIcon from '../../assets/sidebar/skill.svg';
-import MaximizeIcon from '../../assets/maximize.svg?react';
-import PanelCollapseIcon from '../../assets/panel-collapse.svg?react';
 import { CodeEnvironmentPanel } from '../../features/code-mode/CodeEnvironmentPanel';
 import { CodeReviewPanel } from '../../features/code-mode/CodeReviewPanel';
 import type { CodeReviewTarget } from '../../features/code-mode/types';
@@ -39,7 +37,6 @@ import { useCodeGitDiffWatch } from '../../features/code-mode/useCodeGitDiffWatc
 import { type SingleAgentToolTab } from '../../features/singleAgentPanelState';
 import { SubagentExpandedPanel } from '../subagent/SubagentExpandedPanel';
 import { useSubagentStore } from '../../stores/subagentStore';
-import TeamMembersIcon from '../../assets/subagent/team-members.svg?react';
 import './ToolPanel.css';
 
 /** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
@@ -160,77 +157,27 @@ function ExpandedSingleAgentArea({
         : activeTab === 'review' && reviewPanel
           ? 'review'
           : 'planning';
-  const tabs = [
-    {
-      key: 'planning',
-      label: t('team.planning.tab'),
-      icon: <img src={teamProcessIcon} width={16} height={16} aria-hidden="true" />,
+  const tabs = useExpandedPanelTabs({
+    middleTab: {
+      key: 'subagents',
+      label: t('subagent.title'),
+      icon: <img src={teamIcon} width={16} height={16} aria-hidden="true" />,
     },
-    ...(subagentCount > 0
-      ? [
-          {
-            key: 'subagents' as const,
-            label: t('subagent.title'),
-            icon: <TeamMembersIcon className="h-4 w-4" aria-hidden="true" />,
-          },
-        ]
-      : []),
-    ...(artifactsCount > 0
-      ? [
-          {
-            key: 'artifacts' as const,
-            label: t('artifacts.tab'),
-            icon: <FileText size={16} />,
-          },
-        ]
-      : []),
-    ...(reviewPanel ? [{ key: 'review' as const, label: t('codeMode.review'), icon: <FileCheck2 size={16} /> }] : []),
-  ];
+    showMiddleTab: subagentCount > 0,
+    artifactsCount,
+    reviewPanel,
+  });
 
   return (
     <div ref={fullscreenRef} data-testid="tool-panel-expanded-body" className="flex h-full flex-col overflow-hidden bg-card">
-      <div data-testid="tool-panel-expanded-header" className="single-agent-tool-tabs">
-        <div data-testid="tool-panel-expanded-tabs" className="single-agent-tool-tabs__list" role="tablist" aria-label={t('team.toolTabs')}>
-          {tabs.map(tab => (
-            <button
-              key={tab.key}
-              data-testid="tool-panel-tab"
-              data-variant={tab.key}
-              id={`${tabPanelId}-${tab.key}`}
-              type="button"
-              role="tab"
-              aria-selected={resolvedTab === tab.key}
-              aria-controls={`${tabPanelId}-panel`}
-              className={`single-agent-tool-tab ${resolvedTab === tab.key ? 'single-agent-tool-tab--active' : ''}`}
-              onClick={() => onTabChange(tab.key as SingleAgentToolTab)}
-            >
-              {tab.icon}
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            onClick={toggleFullscreen}
-            data-testid="tool-panel-maximize"
-            className="flex h-[36px] w-[36px] items-center justify-center rounded p-2 text-text hover:bg-secondary hover:text-text-muted"
-            aria-label={isFullscreen ? t('team.restore') : t('team.maximize')}
-            title={isFullscreen ? t('team.restore') : t('team.maximize')}
-          >
-            {isFullscreen ? <Minimize2 size={12} /> : <MaximizeIcon className="h-[12px] w-[12px]" aria-hidden="true" />}
-          </button>
-          <button
-            onClick={onCollapse}
-            data-testid="tool-panel-collapse"
-            className="flex h-[36px] w-[36px] items-center justify-center rounded p-2 text-text hover:bg-secondary hover:text-text-muted"
-            aria-label={t('team.collapse')}
-            title={t('team.collapse')}
-          >
-            <PanelCollapseIcon className="h-[18px] w-[18px]" aria-hidden="true" />
-          </button>
-        </div>
-      </div>
+      <ExpandedPanelTabs
+        tabs={tabs}
+        activeTab={resolvedTab}
+        onTabChange={tab => onTabChange(tab as SingleAgentToolTab)}
+        onCollapse={onCollapse}
+        onToggleFullscreen={toggleFullscreen}
+        isFullscreen={isFullscreen}
+      />
 
       <div
         data-testid="tool-panel-expanded-content"
@@ -242,15 +189,21 @@ function ExpandedSingleAgentArea({
         {resolvedTab === 'subagents' ? (
           <SubagentExpandedPanel sessionId={sessionId} />
         ) : resolvedTab === 'artifacts' ? (
-          <div data-testid="tool-panel-artifacts-pane" data-variant="artifacts" className="flex min-w-0 flex-1 overflow-hidden">
-            <ArtifactsPanel selectedArtifactId={selectedArtifactId} onSelectArtifact={onArtifactSelect} />
-          </div>
+          <ArtifactExpandedPanel selectedArtifactId={selectedArtifactId} onSelectArtifact={onArtifactSelect} />
         ) : resolvedTab === 'review' && reviewPanel ? (
           <div data-testid="tool-panel-review-pane" data-variant="review" className="flex min-w-0 flex-1 overflow-hidden">
             {reviewPanel}
           </div>
         ) : (
-          <TaskPlanningPanel variant="expanded" tasks={tasks} members={members} totalTasks={totalTasks} completedTasks={completedTasks} hideAssignee emptyIllustration={emptyIllustration} />
+          <TaskPlanningPanel
+            variant="expanded"
+            tasks={tasks}
+            members={members}
+            totalTasks={totalTasks}
+            completedTasks={completedTasks}
+            hideAssignee
+            emptyIllustration={emptyIllustration}
+          />
         )}
       </div>
     </div>

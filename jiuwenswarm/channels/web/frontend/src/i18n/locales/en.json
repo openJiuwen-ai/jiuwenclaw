@@ -163,7 +163,7 @@
     },
     "planning": {
       "tab": "Task Planning",
-      "progressTitle": "Task Progress",
+      "progressTitle": "TaskProgress",
       "token": "Token",
       "taskList": "Task List",
       "taskListAria": "{{task}} task list",

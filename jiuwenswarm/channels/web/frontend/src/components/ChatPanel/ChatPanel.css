@@ -3593,13 +3593,12 @@ overflow: hidden;
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: var(--color-text-tertiary);
+  color: var(--color-text-primary);
   cursor: pointer;
 }
 
 .share-export-btn:hover:not(:disabled) {
   background: var(--color-action-secondary);
-  color: var(--color-text-primary);
 }
 
 .share-export-btn:focus-visible {
