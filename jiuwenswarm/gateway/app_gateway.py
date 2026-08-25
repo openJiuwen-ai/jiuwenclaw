@@ -3039,15 +3039,32 @@ def main() -> None:
     web_dual_protocol = _dual_raw not in {"0", "false", "no", "off"}
 
     install_async_dump_handler("gateway")
-    asyncio.run(
-        _run(
-            agent_server_url=agent_server_url,
-            web_host=web_host,
-            web_port=web_port,
-            web_path=web_path,
-            web_dual_protocol=web_dual_protocol,
+
+    # Per-workspace singleton lock: prevents a second Gateway process from
+    # serving the same workspace (two CronSchedulerService instances over one
+    # cron_jobs.json => duplicate cron executions).
+    from jiuwenswarm.instance_manager.lock import GatewayLock
+
+    gateway_lock = GatewayLock(get_user_workspace_dir())
+    if not gateway_lock.acquire():
+        logger.error(
+            "[App] Another Gateway is already serving this workspace; "
+            "refusing duplicate instance (lock: %s)",
+            gateway_lock.lock_path,
         )
-    )
+        raise SystemExit(1)
+    try:
+        asyncio.run(
+            _run(
+                agent_server_url=agent_server_url,
+                web_host=web_host,
+                web_port=web_port,
+                web_path=web_path,
+                web_dual_protocol=web_dual_protocol,
+            )
+        )
+    finally:
+        gateway_lock.release()
 
 
 if __name__ == "__main__":

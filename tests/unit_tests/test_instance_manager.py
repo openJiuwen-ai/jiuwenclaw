@@ -94,6 +94,45 @@ def _try_acquire_lock_with_result(workspace_str: str, result_queue) -> None:
     result_queue.put(result)
 
 
+def _try_acquire_gateway_lock(workspace_str: str, result_queue) -> None:
+    """Try acquiring a GatewayLock in a subprocess (must be module-level for Windows)."""
+    from jiuwenswarm.instance_manager.lock import GatewayLock
+
+    _lock = GatewayLock(Path(workspace_str))
+    result = _lock.acquire(timeout=0.5)
+    if result:
+        _lock.release()
+    result_queue.put(result)
+
+
+def _hold_gateway_lock(
+    workspace_str: str, result_queue, hold_seconds: float = 5.0
+) -> None:
+    """Acquire a GatewayLock and hold it (module-level for Windows spawn)."""
+    from jiuwenswarm.instance_manager.lock import GatewayLock
+
+    lock = GatewayLock(Path(workspace_str))
+    ok = lock.acquire(timeout=5.0)
+    result_queue.put(ok)
+    if ok:
+        time.sleep(hold_seconds)
+        lock.release()
+
+
+def _concurrent_stale_takeover(
+    workspace_str: str, result_queue, hold_seconds: float = 3.0
+) -> None:
+    """Race two processes for a stale GatewayLock (module-level for Windows spawn)."""
+    from jiuwenswarm.instance_manager.lock import GatewayLock
+
+    lock = GatewayLock(Path(workspace_str))
+    ok = lock.acquire(timeout=1.5)
+    result_queue.put(ok)
+    if ok:
+        time.sleep(hold_seconds)
+        lock.release()
+
+
 class TestInstanceNameValidation:
     """Test instance name validation."""
 
@@ -1497,3 +1536,309 @@ class TestStartServicesFallback:
         # And pre-existing unrelated keys preserved.
         assert "API_KEY=sk-keep" in txt
         assert "MODEL_NAME=m-keep" in txt
+
+
+class TestGatewayLock:
+    """Test GatewayLock per-workspace Gateway singleton."""
+
+    @staticmethod
+    def test_acquire_and_release(tmp_path):
+        """Acquire writes our pid; release clears it but keeps the file."""
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        lock = GatewayLock(tmp_path)
+        assert lock.acquire(timeout=1.0) is True
+        assert lock.lock_path.exists()
+        data = json.loads(lock.lock_path.read_text(encoding="utf-8"))
+        assert data["pid"] == os.getpid()
+
+        lock.release()
+        # File is never unlinked (no TOCTOU unlink race), but holder is cleared.
+        assert lock.lock_path.exists()
+        data = json.loads(lock.lock_path.read_text(encoding="utf-8"))
+        assert data.get("pid", 1) == 0
+        assert GatewayLock.find_holder(tmp_path) is None
+
+    @staticmethod
+    def test_reacquire_after_release(tmp_path):
+        """A released lock can be re-acquired immediately."""
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        lock = GatewayLock(tmp_path)
+        assert lock.acquire(timeout=1.0) is True
+        lock.release()
+        assert lock.acquire(timeout=1.0) is True
+        lock.release()
+
+    @staticmethod
+    def test_second_acquire_fails_while_live(tmp_path):
+        """A lock held by a LIVE foreign process refuses a second acquire."""
+        import multiprocessing
+
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        ctx = multiprocessing.get_context("spawn")
+        result_queue = ctx.Queue()
+        holder = ctx.Process(
+            target=_hold_gateway_lock,
+            args=(str(tmp_path), result_queue, 3.0),
+        )
+        holder.start()
+        try:
+            # Wait until the child really holds the OS lock.
+            assert result_queue.get(timeout=10.0) is True
+
+            lock = GatewayLock(tmp_path)
+            assert lock.acquire(timeout=1.0) is False
+
+            # The live lock file must still point at the foreign holder.
+            data = json.loads(lock.lock_path.read_text(encoding="utf-8"))
+            assert data["pid"] != os.getpid()
+        finally:
+            holder.join(timeout=10.0)
+            if holder.is_alive():
+                holder.terminate()
+                holder.join(timeout=5.0)
+
+    @staticmethod
+    def test_concurrent_stale_takeover_single_winner(tmp_path):
+        """Exactly ONE of two racing processes takes over a stale lock.
+
+        Regression for the TOCTOU unlink race: with an OS-level lock held for
+        the Gateway lifetime, the loser can no longer delete the winner's fresh
+        lock file, so at most one Gateway can start.
+        """
+        import multiprocessing
+
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        # Seed a stale lock file (holder PID dead, no OS lock held).
+        (tmp_path / ".gateway.lock").write_text(
+            json.dumps(
+                {
+                    "pid": 999999999,
+                    "started_at": time.time(),
+                    "workspace": str(tmp_path),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        ctx = multiprocessing.get_context("spawn")
+        results: list[bool] = []
+        processes = []
+        for _ in range(2):
+            q = ctx.Queue()
+            p = ctx.Process(
+                target=_concurrent_stale_takeover,
+                args=(str(tmp_path), q, 3.0),
+            )
+            p.start()
+            processes.append((p, q))
+
+        try:
+            for p, q in processes:
+                results.append(q.get(timeout=10.0))
+            assert sum(1 for r in results if r) == 1, results
+            assert GatewayLock.find_holder(tmp_path) is not None
+        finally:
+            for p, _ in processes:
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=5.0)
+
+    @staticmethod
+    def test_self_pid_takeover(tmp_path):
+        """A lock whose pid equals our own is taken over (os.execv restart).
+
+        The gateway self-restart replaces the process image in-place via
+        os.execv, reusing the same PID; the fresh process must be allowed to
+        acquire the lock left behind by its previous image.
+        """
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        (tmp_path / ".gateway.lock").write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "started_at": time.time(),
+                    "workspace": str(tmp_path),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        lock = GatewayLock(tmp_path)
+        try:
+            assert lock.acquire(timeout=1.0) is True
+            data = json.loads(lock.lock_path.read_text(encoding="utf-8"))
+            assert data["pid"] == os.getpid()
+        finally:
+            lock.release()
+
+    @staticmethod
+    def test_takeover_when_holder_dead(tmp_path):
+        """A lock held by a DEAD pid is taken over without waiting."""
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        (tmp_path / ".gateway.lock").write_text(
+            json.dumps(
+                {
+                    "pid": 999999999,  # certainly not running
+                    "started_at": time.time(),
+                    "workspace": str(tmp_path),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        lock = GatewayLock(tmp_path)
+        try:
+            assert lock.acquire(timeout=1.0) is True
+            data = json.loads(lock.lock_path.read_text(encoding="utf-8"))
+            assert data["pid"] == os.getpid()
+        finally:
+            lock.release()
+
+    @staticmethod
+    def test_acquire_waits_for_release(tmp_path):
+        """Acquire waits (up to timeout) for a foreign live holder to exit."""
+        import multiprocessing
+
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        ctx = multiprocessing.get_context("spawn")
+        result_queue = ctx.Queue()
+        holder = ctx.Process(
+            target=_hold_gateway_lock,
+            args=(str(tmp_path), result_queue, 1.2),
+        )
+        holder.start()
+        try:
+            # Wait until the child really holds the OS lock.
+            assert result_queue.get(timeout=10.0) is True
+
+            # Child releases after 1.2s; acquire (5s budget) must eventually win.
+            lock = GatewayLock(tmp_path)
+            try:
+                assert lock.acquire(timeout=5.0) is True
+            finally:
+                lock.release()
+        finally:
+            holder.join(timeout=10.0)
+            if holder.is_alive():
+                holder.terminate()
+                holder.join(timeout=5.0)
+
+    @staticmethod
+    def test_find_holder_live_and_dead(tmp_path):
+        """find_holder reports None for dead pid or live pid without OS lock."""
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        lock_path = tmp_path / ".gateway.lock"
+        # Dead pid -> no holder.
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "pid": 999999999,
+                    "started_at": time.time(),
+                    "workspace": str(tmp_path),
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert GatewayLock.find_holder(tmp_path) is None
+
+        # Live pid but NO OS lock held (e.g. crashed Gateway) -> no holder.
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "started_at": time.time(),
+                    "workspace": str(tmp_path),
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert GatewayLock.find_holder(tmp_path) is None
+
+    @staticmethod
+    def test_find_holder_with_os_lock_held(tmp_path):
+        """find_holder returns metadata when a live Gateway holds the OS lock.
+
+        A subprocess acquires the GatewayLock (writes its PID + holds the OS
+        lock); the main process then calls find_holder and must see the holder.
+        """
+        import multiprocessing
+
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        ctx = multiprocessing.get_context("spawn")
+        result_queue = ctx.Queue()
+        holder = ctx.Process(
+            target=_hold_gateway_lock,
+            args=(str(tmp_path), result_queue, 5.0),
+        )
+        holder.start()
+        try:
+            assert result_queue.get(timeout=10.0) is True
+
+            found = GatewayLock.find_holder(tmp_path)
+            assert found is not None
+            assert found["pid"] == holder.pid
+        finally:
+            holder.join(timeout=10.0)
+            if holder.is_alive():
+                holder.terminate()
+                holder.join(timeout=5.0)
+
+    @staticmethod
+    def test_find_holder_ignores_reused_pid_when_os_lock_free(tmp_path):
+        """find_holder returns None when metadata PID is alive but OS lock is free.
+
+        Simulates a crashed Gateway whose PID was reused by an unrelated
+        process: the OS lock is released, so preflight must NOT report a
+        holder despite the stale metadata showing a live PID.
+        """
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        # Stale metadata: crashed Gateway's PID happens to match a live process.
+        (tmp_path / ".gateway.lock").write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "started_at": time.time(),
+                    "workspace": str(tmp_path),
+                }
+            ),
+            encoding="utf-8",
+        )
+        # No OS lock held (Gateway crashed and released it).
+        assert GatewayLock.find_holder(tmp_path) is None
+
+    @staticmethod
+    def test_cross_process_exclusion(tmp_path):
+        """A second PROCESS cannot acquire the same workspace lock."""
+        import multiprocessing
+
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        lock = GatewayLock(tmp_path)
+        assert lock.acquire(timeout=1.0) is True
+        try:
+            ctx = multiprocessing.get_context("spawn")
+            result_queue = ctx.Queue()
+            p = ctx.Process(
+                target=_try_acquire_gateway_lock,
+                args=(str(tmp_path), result_queue),
+            )
+            p.start()
+            p.join(timeout=10.0)
+            assert not p.is_alive()
+            if not result_queue.empty():
+                subprocess_result = result_queue.get(timeout=1.0)
+                assert subprocess_result is False, (
+                    "Second Gateway process must not acquire a held workspace lock"
+                )
+        finally:
+            lock.release()
