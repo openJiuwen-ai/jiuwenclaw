@@ -79,6 +79,33 @@ async def _cleanup_client_disconnect_session_runtime(ctx, request: AgentRequest)
         _plan_exited_sessions.discard(session_id)
 
 
+def _build_team_interrupt_response(
+    request: AgentRequest,
+    *,
+    intent: str,
+    success: bool,
+    message: str,
+) -> AgentResponse:
+    """Build a chat.interrupt_result response for the team-mode short-circuit.
+
+    Mirrors the payload shape of ``JiuWenSwarm._build_interrupt_result_response``
+    (interface.py:2086) — event_type/intent/success/message — without reaching
+    into that class's protected API from a handler module (G.CLS.11).
+    """
+    return AgentResponse(
+        request_id=request.request_id,
+        channel_id=request.channel_id,
+        ok=True,
+        payload={
+            "event_type": "chat.interrupt_result",
+            "intent": intent,
+            "success": success,
+            "message": message,
+        },
+        metadata=request.metadata,
+    )
+
+
 async def _handle_cancel(
     ctx: RequestContext,
     *,
@@ -120,14 +147,13 @@ async def _handle_cancel(
     intent = params.get("intent", "cancel")
     if is_team_params(params):
         from jiuwenswarm.agents.harness.team import get_team_manager
-        from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
         team_manager = get_team_manager(channel_id)
         sid = request.session_id or "default"
         reason = f"interrupt(intent={intent}): "
 
         if intent == "resume":
-            resp = JiuWenSwarm._build_interrupt_result_response(
+            resp = _build_team_interrupt_response(
                 request,
                 intent=intent,
                 success=True,
@@ -135,7 +161,7 @@ async def _handle_cancel(
             )
         elif intent == "pause":
             paused = await team_manager.pause_session_runtime(sid, reason=reason)
-            resp = JiuWenSwarm._build_interrupt_result_response(
+            resp = _build_team_interrupt_response(
                 request,
                 intent=intent,
                 success=paused,
@@ -143,14 +169,14 @@ async def _handle_cancel(
             )
         elif intent == "cancel":
             cancelled = await team_manager.cancel_session_runtime(sid, reason=reason)
-            resp = JiuWenSwarm._build_interrupt_result_response(
+            resp = _build_team_interrupt_response(
                 request,
                 intent=intent,
                 success=cancelled,
                 message="团队当前执行已结束" if cancelled else "当前没有可取消的团队任务",
             )
         else:
-            resp = JiuWenSwarm._build_interrupt_result_response(
+            resp = _build_team_interrupt_response(
                 request,
                 intent=intent,
                 success=False,
