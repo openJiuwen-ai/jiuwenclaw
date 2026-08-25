@@ -600,6 +600,14 @@ class MemberSkillEvolutionInput(ConstructionInput):
         default_factory=dict,
         description="Serializable evolution model config (LLM built at build time).",
     )
+    signal_trigger: bool = param_field(
+        default=True,
+        description="Passive signal scan after each invoke.",
+    )
+    review_trigger: bool = param_field(
+        default=False,
+        description="Teammates use passive signal scans, not leader review follow-ups.",
+    )
     team_skills_dir: str | None = context_field(
         attr="team_skills_dir", description="Team shared skills directory."
     )
@@ -662,6 +670,8 @@ def build_member_skill_evolution_rail(
             review_runtime=review_runtime,
             language=inp.language,
             auto_save=True,
+            signal_trigger=inp.signal_trigger,
+            review_trigger=inp.review_trigger,
             disabled_skills=merge_evolution_disabled_skills(
                 load_execution_disabled_skills()
             ),

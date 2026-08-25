@@ -428,12 +428,66 @@ def get_evolution_review_trigger_enabled(
     return fallback
 
 
+def get_evolution_signal_trigger_enabled(
+    config: dict[str, Any] | None,
+    *,
+    fallback: bool = True,
+) -> bool:
+    """Return whether passive signal-based evolution scans are enabled.
+
+    Defaults to ``True`` so deployments without an explicit switch still run
+    conversation-end signal scans (``run_evolution``). Honors
+    ``signal_trigger`` config / ``EVOLUTION_SIGNAL_TRIGGER`` env, with legacy
+    fallback to ``auto_scan`` for older deployments.
+    """
+    for env_key in ("EVOLUTION_SIGNAL_TRIGGER", "EVOLUTION_AUTO_SCAN"):
+        raw = get_local_config(env_key)
+        env_signal_trigger = _get_bool_env(None if raw is None else str(raw))
+        if env_signal_trigger is not None:
+            return env_signal_trigger
+    evolution = _get_evolution_config(config)
+    signal_trigger = evolution.get("signal_trigger")
+    if isinstance(signal_trigger, bool):
+        return signal_trigger
+    auto_scan = evolution.get("auto_scan")
+    if isinstance(auto_scan, bool):
+        return auto_scan
+    return fallback
+
+
+def get_passive_skill_evolution_triggers(
+    config: dict[str, Any] | None,
+) -> dict[str, bool]:
+    """Return trigger flags for single-agent and teammate passive evolution.
+
+    Product contract: only cluster teammates and single agents run passive
+    signal scans (``run_evolution``). Cluster leaders use ``review_trigger``
+    follow-ups via :class:`TeamSkillEvolutionRail` instead.
+    """
+    return {
+        "signal_trigger": get_evolution_signal_trigger_enabled(config),
+        "review_trigger": False,
+    }
+
+
+def get_skill_evolution_enabled(config: dict[str, Any] | None) -> bool:
+    """Return the canonical ``react.evolution.skill_evolution`` switch.
+
+    Falls back to legacy ``enabled`` for deployments that have not migrated yet.
+    """
+    evolution = _get_evolution_config(config)
+    skill_evolution = evolution.get("skill_evolution")
+    if isinstance(skill_evolution, bool):
+        return skill_evolution
+    return evolution.get("enabled") is True
+
+
 def get_evolution_enabled(config: dict[str, Any] | None) -> bool:
     """Return whether skill self-evolution is enabled.
 
-    Reads ``react.evolution.enabled`` first, then top-level ``evolution.enabled``.
+    Prefer :func:`get_skill_evolution_enabled`; kept for backward compatibility.
     """
-    return bool(_get_evolution_config(config).get("enabled"))
+    return get_skill_evolution_enabled(config)
 
 
 def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:

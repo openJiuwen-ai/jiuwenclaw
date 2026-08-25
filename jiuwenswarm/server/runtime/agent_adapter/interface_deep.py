@@ -78,7 +78,6 @@ from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload as _SkillTurboConfirmPayload
-from openjiuwen.agent_evolving.trajectory import FileTrajectoryStore
 try:
     from openjiuwen.agent_evolving.skill_self_evolution import resolve_skill_evolution_action
 except ImportError:
@@ -382,6 +381,9 @@ from jiuwenswarm.common.config import (
     get_default_models,
     get_evolution_enabled,
     get_evolution_review_trigger_enabled,
+    get_evolution_signal_trigger_enabled,
+    get_passive_skill_evolution_triggers,
+    get_skill_evolution_enabled,
     get_sandbox_endpoint,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
@@ -1245,8 +1247,10 @@ def _set_skill_evolution_triggers(
     rail: Any,
     *,
     review_trigger: bool,
+    signal_trigger: bool = True,
 ) -> None:
     rail.review_trigger = review_trigger
+    rail.signal_trigger = signal_trigger
 
 
 def _clean_heartbeat_content(content: str) -> str:
@@ -6025,10 +6029,92 @@ class JiuWenSwarmDeepAdapter:
             skill_rail = None
         return skill_rail
 
-    @staticmethod
-    def _resolve_evolution_trajectory_dir() -> Path:
-        """Resolve directory for FileTrajectoryStore (always use default)."""
-        return get_agent_evolution_trajectories_dir()
+    def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
+        """Build SkillEvolutionRail.
+
+        Product contract: while the rail is mounted, generated experiences always
+        persist (``rail.auto_save=True``). Automatic version merge after
+        persistence is gated per-skill by ``resolve_skill_evolution_action``
+        (``selfEvolution=auto`` only).
+        """
+        if not get_skill_evolution_enabled(config):
+            return None
+        from jiuwenswarm.agents.harness.observability_runtime import (
+            get_trajectory_span_processor,
+        )
+
+        try:
+            evolution_triggers = get_passive_skill_evolution_triggers(config)
+            model_name = self._default_model_name or config.get("model_name", "gpt-4")
+            skill_evolution_rail = SkillEvolutionRail(
+                skills_dir=self._resolve_skill_dirs(),
+                llm=self._model,
+                model=model_name,
+                review_runtime=EvolutionReviewRuntime(),
+                review_trigger=evolution_triggers["review_trigger"],
+                signal_trigger=evolution_triggers["signal_trigger"],
+                auto_save=True,
+                disabled_skills=merge_evolution_disabled_skills(
+                    self._skill_manager.list_execution_disabled_skills()
+                ),
+                trajectory_span_processor=get_trajectory_span_processor(),
+            )
+            self._skill_evolution_rail = skill_evolution_rail
+            logger.info("[JiuWenSwarmDeepAdapter] SkillEvolutionRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] SkillEvolutionRail create failed: %s", exc)
+            skill_evolution_rail = None
+        return skill_evolution_rail
+
+    async def _ensure_active_evolution_rails_registered(self) -> None:
+        """Configure, register, and cache single-agent skill evolution rails."""
+        if self._instance is None:
+            return
+
+        resolved_language = self._resolve_runtime_language()
+        evolution_triggers = get_passive_skill_evolution_triggers(self._config_cache)
+        if (
+            self._skill_evolution_rail is not None
+            and getattr(self._skill_evolution_rail, "_language", None) != resolved_language
+        ):
+            await self._unconfigure_active_evolution_rails()
+
+        disabled_skills = merge_evolution_disabled_skills(
+            self._skill_manager.list_execution_disabled_skills()
+            if self._skill_manager is not None
+            else []
+        )
+        from jiuwenswarm.agents.harness.observability_runtime import (
+            get_trajectory_span_processor,
+        )
+
+        await configure_skill_evolution_runtime(
+            self._instance,
+            skills_dir=self._resolve_skill_dirs(),
+            llm=self._model,
+            model=self._default_model_name
+            or self._config_cache.get("model_name", "gpt-4"),
+            review_trigger=evolution_triggers["review_trigger"],
+            signal_trigger=evolution_triggers["signal_trigger"],
+            auto_save=True,
+            disabled_skills=disabled_skills,
+            language=resolved_language,
+            trajectory_span_processor=get_trajectory_span_processor(),
+        )
+        self._refresh_active_evolution_rail_refs()
+        if self._skill_evolution_rail is not None:
+            sync_evolution_disabled_skills(self._skill_evolution_rail, disabled_skills)
+            _set_skill_evolution_triggers(
+                self._skill_evolution_rail,
+                review_trigger=evolution_triggers["review_trigger"],
+                signal_trigger=evolution_triggers["signal_trigger"],
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillEvolutionRail configured "
+                "(review_trigger=%s, signal_trigger=%s)",
+                evolution_triggers["review_trigger"],
+                evolution_triggers["signal_trigger"],
+            )
 
     async def refresh_enabled_skills_from_db(self) -> None:
         """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。
@@ -6141,83 +6227,6 @@ class JiuWenSwarmDeepAdapter:
             len(self._enabled_skills),
         )
 
-    def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
-        """Build SkillEvolutionRail.
-
-        Product contract: while the rail is mounted, generated experiences always
-        persist (``rail.auto_save=True``). Automatic version merge after
-        persistence is gated per-skill by ``resolve_skill_evolution_action``
-        (``selfEvolution=auto`` only).
-        """
-        try:
-            evolution_review_trigger = get_evolution_review_trigger_enabled(config)
-            model_name = self._default_model_name or config.get("model_name", "gpt-4")
-            trajectory_dir = self._resolve_evolution_trajectory_dir()
-            skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=self._resolve_skill_dirs(),
-                llm=self._model,
-                model=model_name,
-                review_runtime=EvolutionReviewRuntime(),
-                review_trigger=evolution_review_trigger,
-                auto_save=True,
-                disabled_skills=merge_evolution_disabled_skills(
-                    self._skill_manager.list_execution_disabled_skills()
-                ),
-                trajectory_store=FileTrajectoryStore(trajectory_dir),
-            )
-            self._skill_evolution_rail = skill_evolution_rail
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] SkillEvolutionRail create success, trajectory_dir=%s",
-                trajectory_dir,
-            )
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] SkillEvolutionRail create failed: %s", exc)
-            skill_evolution_rail = None
-        return skill_evolution_rail
-
-    async def _ensure_active_evolution_rails_registered(self) -> None:
-        """Configure, register, and cache single-agent skill evolution rails."""
-        if self._instance is None:
-            return
-
-        resolved_language = self._resolve_runtime_language()
-        evolution_review_trigger = get_evolution_review_trigger_enabled(self._config_cache)
-        if (
-            self._skill_evolution_rail is not None
-            and getattr(self._skill_evolution_rail, "_language", None) != resolved_language
-        ):
-            await self._unconfigure_active_evolution_rails()
-
-        disabled_skills = merge_evolution_disabled_skills(
-            self._skill_manager.list_execution_disabled_skills()
-            if self._skill_manager is not None
-            else []
-        )
-        trajectory_dir = self._resolve_evolution_trajectory_dir()
-        await configure_skill_evolution_runtime(
-            self._instance,
-            skills_dir=self._resolve_skill_dirs(),
-            llm=self._model,
-            model=self._default_model_name
-            or self._config_cache.get("model_name", "gpt-4"),
-            review_trigger=evolution_review_trigger,
-            auto_save=True,
-            disabled_skills=disabled_skills,
-            language=resolved_language,
-            trajectory_store=FileTrajectoryStore(trajectory_dir),
-        )
-        self._refresh_active_evolution_rail_refs()
-        if self._skill_evolution_rail is not None:
-            sync_evolution_disabled_skills(self._skill_evolution_rail, disabled_skills)
-            _set_skill_evolution_triggers(
-                self._skill_evolution_rail,
-                review_trigger=evolution_review_trigger,
-            )
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] SkillEvolutionRail configured, trajectory_dir=%s",
-                trajectory_dir,
-            )
-
     async def _unconfigure_active_evolution_rails(self) -> None:
         """Remove cached single-agent evolution rails before rebuilding them."""
         if self._instance is None:
@@ -6228,7 +6237,12 @@ class JiuWenSwarmDeepAdapter:
             for rail in (self._skill_evolution_rail, self._evolution_interrupt_rail)
             if rail is not None
         ]
-        unconfigure_skill_evolution(self._instance, team=False)
+        try:
+            unconfigure_skill_evolution(self._instance, team=False)
+        except AttributeError:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] evolution bulk unconfigure unavailable"
+            )
         unregister = getattr(self._instance, "unregister_rail", None)
         if callable(unregister):
             for rail in rails:
@@ -6285,22 +6299,29 @@ class JiuWenSwarmDeepAdapter:
 
         SkillCreateRail requires task-loop mode (enable_task_loop=True) to function
         because it uses AFTER_TASK_ITERATION event and enqueue_follow_up().
-        Config: evolution.skill_create (bool) - true to register rail with auto_trigger=true.
-        Env: SKILL_CREATE - takes precedence over config.yaml.
+        Config: ``react.evolution.skill_evolution`` enables the rail; legacy
+        ``evolution.skill_create`` remains supported for backward compatibility.
         """
         try:
-            skill_create_enabled = get_skill_create_enabled(config)
-            # Check if skill_create is explicitly enabled
+            skill_create_enabled = (
+                get_skill_evolution_enabled(config)
+                or get_skill_create_enabled(config)
+            )
             if not skill_create_enabled:
                 logger.debug("[JiuWenSwarmDeepAdapter] SkillCreateRail disabled by config")
                 return None
+
+            from jiuwenswarm.agents.harness.observability_runtime import (
+                get_trajectory_span_processor,
+            )
 
             language = config.get("language", "cn")
             skills_dirs = self._resolve_skill_dirs()
             rail = SkillCreateRail(
                 skills_dir=skills_dirs[0] if skills_dirs else str(get_agent_skills_dir()),
-                auto_trigger=True,  # When skill_create=true, auto_trigger is always true
+                auto_trigger=True,
                 language=language,
+                trajectory_span_processor=get_trajectory_span_processor(),
             )
             self._skill_create_rail = rail
             logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail created with auto_trigger=True")
@@ -7155,9 +7176,11 @@ class JiuWenSwarmDeepAdapter:
         # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, self._default_model_name)
+            evolution_triggers = get_passive_skill_evolution_triggers(config)
             _set_skill_evolution_triggers(
                 self._skill_evolution_rail,
-                review_trigger=get_evolution_review_trigger_enabled(config),
+                review_trigger=evolution_triggers["review_trigger"],
+                signal_trigger=evolution_triggers["signal_trigger"],
             )
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills
@@ -14336,6 +14359,7 @@ class JiuWenSwarmDeepAdapter:
         interaction_stream = None
         interaction_stream_abort = True
         perf_summary_status = "ok"
+        hitl_pending_stream = False
         try:
             self._runtime_cron_tool_context.remember_current_binding()
             token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())

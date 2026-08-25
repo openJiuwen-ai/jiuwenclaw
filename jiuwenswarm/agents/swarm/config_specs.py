@@ -44,6 +44,8 @@ from jiuwenswarm.common.config import (
     get_default_model_provider,
     get_evolution_auto_save_enabled,
     get_evolution_review_trigger_enabled,
+    get_evolution_signal_trigger_enabled,
+    get_passive_skill_evolution_triggers,
     get_skill_create_enabled,
 )
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
@@ -334,8 +336,11 @@ def _team_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
 
 def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the member skill-evolution rail."""
+    triggers = get_passive_skill_evolution_triggers(config)
     return {
         "evolution_model_config": _evolution_model_config(config),
+        "signal_trigger": triggers["signal_trigger"],
+        "review_trigger": triggers["review_trigger"],
     }
 
 
