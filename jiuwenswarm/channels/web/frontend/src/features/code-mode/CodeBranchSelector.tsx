@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { AlertCircle, Check, GitBranch, LoaderCircle, Plus, Search, X } from 'lucide-react';
+import { AlertCircle, Check, LoaderCircle, Plus, Search, X } from 'lucide-react';
+import CodehubBranchIcon from '../../assets/code-mode/codehub-branch.svg?react';
 import type { ProjectInfo, WebError } from '../../types';
 import { useWorkspaceStore } from '../../stores';
 import { gitClient } from './gitClient';
@@ -202,7 +203,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
           data-testid='code-mode-branch-trigger'
           data-variant='init'
         >
-          {operating ? <LoaderCircle className='code-mode-spin' size={15} /> : <GitBranch size={15} />}
+          {operating ? <LoaderCircle className='code-mode-spin' size={15} /> : <CodehubBranchIcon className='h-[15px] w-[15px]' />}
           <span>初始化 Git</span>
         </button>
       ) : (
@@ -217,7 +218,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
           data-testid='code-mode-branch-trigger'
           data-variant='switch'
         >
-          {loading || operating ? <LoaderCircle className='code-mode-spin' size={15} /> : <GitBranch size={15} />}
+          {loading || operating ? <LoaderCircle className='code-mode-spin' size={15} /> : <CodehubBranchIcon className='h-[15px] w-[15px]' />}
           <span>{currentBranch || '加载分支'}</span>
           <svg className={open ? 'code-branch__chevron is-open' : 'code-branch__chevron'} width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
@@ -245,7 +246,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
                 data-testid='code-mode-branch-option'
                 data-variant={branch}
               >
-                <GitBranch size={15} />
+                <CodehubBranchIcon className='h-[15px] w-[15px]' />
                 <span>{branch}</span>
                 {branch === currentBranch ? <Check size={16} /> : null}
               </button>

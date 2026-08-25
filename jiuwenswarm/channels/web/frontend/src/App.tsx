@@ -46,7 +46,7 @@ import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
-import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout } from './hooks';
+import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout, useResponsivePanelResize } from './hooks';
 import { webRequest } from './services/webClient';
 import { processOAuthCallback } from './utils/gitcodeOAuth';
 import { useTeamPanelState } from './features/teamPanelState';
@@ -367,13 +367,12 @@ function AppContent() {
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
   const {
+    isMobile,
     conversationSidebarCollapsed,
     setConversationSidebarCollapsed,
     conversationSidebarFloating,
     toolPanelHidden,
     setToolPanelHidden,
-    toolPanelMaximized,
-    setToolPanelMaximized,
   } = useResponsiveLayout();
 
   const [modelSetupGuideStep, setModelSetupGuideStep] = useState<ModelSetupGuideStep | null>(null);
@@ -581,12 +580,6 @@ function AppContent() {
   }, [navigate, route, setSingleAgentPanelExpanded, setTeamAreaExpanded, setHasVisitedSkills]);
 
   useEffect(() => {
-    if (!teamAreaExpanded || toolPanelHidden) {
-      setToolPanelMaximized(false);
-    }
-  }, [teamAreaExpanded, toolPanelHidden]);
-
-  useEffect(() => {
     ensureSessionRuntimes(sessionId);
     useChatStore.getState().setActiveSessionId(sessionId);
     useSubagentStore.getState().hydrateRuntime(sessionId);
@@ -646,11 +639,9 @@ function AppContent() {
       setToolPanelHidden(true);
       setTeamAreaExpanded(false);
       setSingleAgentPanelExpanded(false);
-      setToolPanelMaximized(false);
       return;
     }
     setToolPanelHidden(false);
-    setToolPanelMaximized(false);
     if (mode === 'team') {
       setTeamAreaExpanded(expanded);
       return;
@@ -841,6 +832,15 @@ function AppContent() {
   // 避免右侧面板与聊天面板平分空间导致宽度与集群模式不一致；auto_harness 走收起态分支。
   const panelExpanded = mode === 'team' ? teamAreaExpanded : singleAgentPanelExpanded;
   const isTeamAreaExpanded = mode !== 'auto_harness' && panelExpanded && toolPanelHasContent;
+
+  const { shouldFullscreen } = useResponsivePanelResize({
+    isTeamAreaExpanded,
+    conversationSidebarCollapsed,
+    setConversationSidebarCollapsed,
+    setSingleAgentPanelExpanded,
+    setTeamAreaExpanded,
+    mode,
+  });
 
   // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递
   const {
@@ -2761,12 +2761,12 @@ function AppContent() {
 
   const requestSessionNavigation = useCallback((target: Session | 'new', options?: NewConversationOptions) => {
     if (target === 'new') { enterNewConversation(mode, options); return; }
-    if (window.matchMedia('(max-width: 823px)').matches) {
+    if (isMobile) {
       setTeamAreaExpanded(false);
       setToolPanelHidden(true);
     }
     void handleRestoreSession(target.session_id, target.mode, target);
-  }, [enterNewConversation, handleRestoreSession, mode, setTeamAreaExpanded, setToolPanelHidden]);
+  }, [enterNewConversation, handleRestoreSession, isMobile, mode, setTeamAreaExpanded, setToolPanelHidden]);
 
   const handleTeamSessionsDeleted = useCallback(async (sessionIds: string[]) => {
     const deletedSessionIds = new Set(sessionIds);
@@ -2841,11 +2841,10 @@ function AppContent() {
   }, [deleteTarget, enterNewConversation, mode, request, t]);
 
   const handleNavigate = useCallback((nav: MainNavKey) => {
-    const isSmallScreen = window.matchMedia('(max-width: 823px)').matches;
     setActiveNav(nav);
     if (nav === 'chat') {
       setConversationSidebarCollapsed(false);
-      if (isSmallScreen) {
+      if (isMobile) {
         setTeamAreaExpanded(false);
         setToolPanelHidden(true);
       }
@@ -2855,7 +2854,7 @@ function AppContent() {
     }
     if (nav === 'skills') setHasVisitedSkills(true);
     if (nav === 'channels') setHasVisitedChannels(true);
-  }, [modelSetupGuideStep, setTeamAreaExpanded, setToolPanelHidden]);
+  }, [isMobile, modelSetupGuideStep, setTeamAreaExpanded, setToolPanelHidden]);
 
   const skipModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
@@ -2985,7 +2984,7 @@ function AppContent() {
     && missingSessionId === routeSessionId
     && isConversationMissing(routeSessionId, true, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
-  const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound && !toolPanelMaximized;
+  const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound && !shouldFullscreen;
   const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
 
@@ -3066,7 +3065,7 @@ function AppContent() {
                 )}
                 {/* Chat Panel - 在展开时可拖拽调整宽度 */}
                 <div
-                  className={`${showConversationNotFound || toolPanelMaximized ? 'hidden' : 'flex'} chat-layout__surface  pt-0 flex-col ${isTeamAreaExpanded ? '' : 'min-w-0'} min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
+                  className={`${showConversationNotFound || shouldFullscreen ? 'hidden' : 'flex'} chat-layout__surface  pt-0 flex-col ${isTeamAreaExpanded ? '' : 'min-w-0'} min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
                   style={isTeamAreaExpanded ? { width: `${chatPanelWidthPct}%` } : undefined}
                   data-testid="app-chat-surface"
                 >
@@ -3146,9 +3145,7 @@ function AppContent() {
                     setSingleAgentPanelExpanded={setSingleAgentPanelExpanded}
                     setSingleAgentPanelActiveTab={setSingleAgentPanelActiveTab}
                     setSingleAgentPanelSelectedArtifactId={setSingleAgentPanelSelectedArtifactId}
-                    onMaximize={() => setToolPanelMaximized(true)}
-                    onRestore={() => setToolPanelMaximized(false)}
-                    maximized={toolPanelMaximized}
+                    shouldFullscreen={shouldFullscreen}
                   />
                 )}
               </div>

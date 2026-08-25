@@ -1,0 +1,132 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { breakpoints, canFitBoth, canFitToolPanelOnly, type BreakpointKey } from '../styles/breakpoints';
+
+/* ── 基础：通用媒体查询 ── */
+
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia(query).matches;
+  });
+
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const handler = (e: MediaQueryListEvent) => setMatches(e.matches);
+    setMatches(mql.matches);
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, [query]);
+
+  return matches;
+}
+
+export function useMaxWidth(key: BreakpointKey): boolean {
+  return useMediaQuery(`(max-width: ${breakpoints[key]}px)`);
+}
+
+export function useMinWidth(key: BreakpointKey): boolean {
+  return useMediaQuery(`(min-width: ${breakpoints[key]}px)`);
+}
+
+/* ── 业务：侧边栏 / 工具面板布局状态 ── */
+
+export function useResponsiveLayout() {
+  const isMobile = useMaxWidth('sm');
+  const [conversationSidebarCollapsed, setConversationSidebarCollapsed] = useState(false);
+  const [conversationSidebarFloating, setConversationSidebarFloating] = useState(false);
+  const [toolPanelHidden, setToolPanelHidden] = useState(false);
+
+  useEffect(() => {
+    if (isMobile) {
+      setConversationSidebarCollapsed(true);
+      setConversationSidebarFloating(true);
+    } else {
+      setConversationSidebarFloating(false);
+    }
+  }, [isMobile]);
+
+  return {
+    isMobile,
+    conversationSidebarCollapsed,
+    setConversationSidebarCollapsed,
+    conversationSidebarFloating,
+    setConversationSidebarFloating,
+    toolPanelHidden,
+    setToolPanelHidden,
+  };
+}
+
+/* ── 业务：面板互斥 / 全屏判定 ── */
+
+export interface ResponsivePanelResizeParams {
+  isTeamAreaExpanded: boolean;
+  conversationSidebarCollapsed: boolean;
+  setConversationSidebarCollapsed: (collapsed: boolean) => void;
+  setSingleAgentPanelExpanded: (expanded: boolean) => void;
+  setTeamAreaExpanded: (expanded: boolean) => void;
+  mode: string;
+}
+
+export function useResponsivePanelResize({
+  isTeamAreaExpanded,
+  conversationSidebarCollapsed,
+  setConversationSidebarCollapsed,
+  setSingleAgentPanelExpanded,
+  setTeamAreaExpanded,
+  mode,
+}: ResponsivePanelResizeParams) {
+  const shouldFullscreen = useMemo(
+    () => isTeamAreaExpanded && !canFitToolPanelOnly(),
+    [isTeamAreaExpanded],
+  );
+  const stateRef = useRef({ isTeamAreaExpanded, conversationSidebarCollapsed, mode });
+  stateRef.current = { isTeamAreaExpanded, conversationSidebarCollapsed, mode };
+  const prevRef = useRef({ isTeamAreaExpanded, conversationSidebarCollapsed });
+
+  useEffect(() => {
+    if (!isTeamAreaExpanded) {
+      prevRef.current = { isTeamAreaExpanded, conversationSidebarCollapsed };
+      return;
+    }
+
+    const check = () => {
+      const s = stateRef.current;
+      if (!canFitBoth() && !s.conversationSidebarCollapsed) {
+        setConversationSidebarCollapsed(true);
+      }
+    };
+
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, [isTeamAreaExpanded, setConversationSidebarCollapsed]);
+
+  useEffect(() => {
+    if (shouldFullscreen) {
+      prevRef.current = { isTeamAreaExpanded, conversationSidebarCollapsed };
+      return;
+    }
+    if (canFitBoth()) {
+      prevRef.current = { isTeamAreaExpanded, conversationSidebarCollapsed };
+      return;
+    }
+
+    const prev = prevRef.current;
+    const teamAreaJustExpanded = isTeamAreaExpanded && !prev.isTeamAreaExpanded;
+    const sidebarJustExpanded = !conversationSidebarCollapsed && prev.conversationSidebarCollapsed;
+
+    if (teamAreaJustExpanded && !conversationSidebarCollapsed) {
+      setConversationSidebarCollapsed(true);
+    } else if (sidebarJustExpanded && isTeamAreaExpanded) {
+      if (mode === 'team') {
+        setTeamAreaExpanded(false);
+      } else {
+        setSingleAgentPanelExpanded(false);
+      }
+    }
+
+    prevRef.current = { isTeamAreaExpanded, conversationSidebarCollapsed };
+  }, [shouldFullscreen, isTeamAreaExpanded, conversationSidebarCollapsed, mode, setConversationSidebarCollapsed, setSingleAgentPanelExpanded, setTeamAreaExpanded]);
+
+  return { shouldFullscreen };
+}

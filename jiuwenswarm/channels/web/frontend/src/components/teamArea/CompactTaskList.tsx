@@ -13,6 +13,7 @@
  * - maxCollapsedCount?: 折叠态最大显示任务数（未传或 expanded 为 true 时不截断）
  * - expanded?:         是否已展开全部（默认 false）
  * - emptyText?:        空列表时显示的文本（不传则默认 t('common.noData')）
+ * - emptyIllustration?:空列表时显示的插图 URL（不传则仅显示文本）
  *
  * 使用位置：
  * - TaskPlanningPanel.tsx compact 模式（team 集群模式 / 规划·性能模式复用）
@@ -49,6 +50,7 @@ export interface CompactTaskListProps {
   maxCollapsedCount?: number;
   expanded?: boolean;
   emptyText?: string;
+  emptyIllustration?: string;
 }
 
 export function CompactTaskList({
@@ -60,13 +62,15 @@ export function CompactTaskList({
   maxCollapsedCount,
   expanded = false,
   emptyText,
+  emptyIllustration,
 }: CompactTaskListProps) {
   const { t } = useTranslation();
 
   if (tasks.length === 0) {
     return (
-      <div className="flex items-center justify-center text-center text-sm text-text-muted" style={{ height: 120 }} data-testid="team-area-task-planning-empty">
-        {emptyText ?? t('common.noData')}
+      <div className="flex flex-col items-center justify-center gap-2 text-center text-sm text-text-muted" style={{ height: 120 }} data-testid="team-area-task-planning-empty">
+        {emptyIllustration && <img src={emptyIllustration} alt="" width={48} height={48} className="shrink-0" />}
+        <span>{emptyText ?? t('common.noData')}</span>
       </div>
     );
   }

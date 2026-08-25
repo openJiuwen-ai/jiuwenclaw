@@ -46,6 +46,8 @@ type TaskPlanningPanelProps = {
   maxCollapsedCount?: number;
   /** 是否已展开全部（透传给 CompactTaskList） */
   expanded?: boolean;
+  /** 空列表时显示的插图 URL（透传给 CompactTaskList） */
+  emptyIllustration?: string;
 };
 
 const COLUMN_STATS: Array<{ key: TaskColumnKey; labelKey: string }> = [
@@ -68,6 +70,7 @@ export function ProgressSection({
   renderTaskIcon,
   maxCollapsedCount,
   expanded,
+  emptyIllustration,
 }: {
   tasks: SessionTeamTask[];
   progressTasks?: SessionTeamTask[];
@@ -81,13 +84,15 @@ export function ProgressSection({
   renderTaskIcon?: (task: SessionTeamTask) => ReactNode;
   maxCollapsedCount?: number;
   expanded?: boolean;
+  emptyIllustration?: string;
 }) {
   const { t } = useTranslation();
 
   if (tasks.length === 0) {
     return (
-      <div className="flex items-center justify-center text-center text-sm text-text-muted" style={{ height: 120 }} data-testid="team-area-task-planning-empty">
-        {t('team.noTasks')}
+      <div className="flex flex-col items-center justify-center gap-2 text-center text-sm text-text-muted" style={{ height: 120 }} data-testid="team-area-task-planning-empty">
+        {emptyIllustration && <img src={emptyIllustration} alt="" width={48} height={48} className="shrink-0" />}
+        <span>{t('team.noTasks')}</span>
       </div>
     );
   }
@@ -136,6 +141,7 @@ export function ProgressSection({
             maxCollapsedCount={maxCollapsedCount}
             expanded={expanded}
             emptyText={t('team.noTasks')}
+            emptyIllustration={emptyIllustration}
           />
         </div>
       </div>
@@ -179,6 +185,7 @@ export function ProgressSection({
           maxCollapsedCount={maxCollapsedCount}
           expanded={expanded}
           emptyText={t('team.noTasks')}
+          emptyIllustration={emptyIllustration}
         />
       </div>
     </div>
@@ -243,6 +250,7 @@ export function TaskPlanningPanel({
   renderTaskIcon,
   maxCollapsedCount,
   expanded,
+  emptyIllustration,
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
   const [view, setView] = useState<'board' | 'list'>('board');
@@ -301,6 +309,7 @@ export function TaskPlanningPanel({
           renderTaskIcon={renderTaskIcon}
           maxCollapsedCount={maxCollapsedCount}
           expanded={expanded}
+          emptyIllustration={emptyIllustration}
         />
       </div>
     );
