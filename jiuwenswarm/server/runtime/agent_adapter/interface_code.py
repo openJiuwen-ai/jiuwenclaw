@@ -18,12 +18,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from dataclasses import dataclass
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any
 
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
-from openjiuwen.core.runner import Runner
+from openjiuwen.core.runner import Runner as Runner
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
@@ -47,9 +47,9 @@ from openjiuwen.harness.workspace.workspace import Workspace
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
     _AGENT_CARD_ID,
+    _AgentProfileRailSpecs,
+    _AgentRailBuildSpec,
     _CRON_TOOL_CHANNEL_ID,
-    _RailBuildInfo,
-    _agent_def_to_subagent_config,
     _deep_agent_context_engine_config,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
@@ -62,7 +62,6 @@ from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
 from jiuwenswarm.server.runtime.agent_adapter.trusted_web_search import (
     TrustedWebFreeSearchTool,
 )
-from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
@@ -70,6 +69,7 @@ from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
     build_code_system_prompt,
 )
 from jiuwenswarm.agents.harness.code.rails import (
+    CodePlanPrePermissionGuardRail,
     CodeTaskPlanningRail,
     PlanApprovalInterruptRail,
 )
@@ -87,12 +87,11 @@ from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
 )
+from jiuwenswarm.common.mode_matrix import resolve_agent_composition_scope
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
-from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.task_loop_config import (
     resolve_task_loop_completion_timeout,
 )
-from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
     get_default_project_session_workspace_dir,
@@ -431,7 +430,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     继承 JiuWenSwarmDeepAdapter，只重写：
     - create_instance(): 统一使用 create_deep_agent()（completion_timeout 从配置读取）
-    - _build_agent_rails(): 固定 Rails (含 LspRail/ProjectMemoryRail/CodingMemoryRail) + 从 config.yaml 读取动态 Rails
+    - _build_profile_rail_specs(): 固定 Rails (含 LspRail/ProjectMemoryRail/CodingMemoryRail) + 从 config.yaml 读取动态 Rails
     - _get_tool_cards(): 从 config.yaml 读取动态 Tools
     - _build_configured_subagents(): 固定 explore_agent/plan_agent + 按配置启用 code_agent/browser_agent
     - _update_rails_for_mode(): code 模式 rail 生命周期
@@ -456,6 +455,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._lsp_rail: LspRail | None = None
         self._project_memory_rail: ProjectMemoryRail | None = None
         self._coding_memory_rail: CodingMemoryRail | None = None
+        self._code_plan_pre_permission_guard_rail: (
+            CodePlanPrePermissionGuardRail | None
+        ) = None
         self._worktree_rail: WorktreeRail | None = None
         # 单点 source-of-truth, 让 sysop_builder 的"主写入根"分支
         # (project_dir vs get_agent_workspace_dir) 落到 code-agent 这一支。
@@ -510,11 +512,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._session_instance_config = dict(config or {}) if isinstance(config, dict) else None
         self._session_instance_mode = mode
         self._session_instance_sub_mode = sub_mode
+        composition_scope = resolve_agent_composition_scope(mode, sub_mode)
 
         await self.set_checkpoint()
 
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
         config_base = get_config()
+        self._config_base_cache = config_base.copy()
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
@@ -534,6 +538,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # _agent_workspace_dir: agent 数据存储路径，始终指向系统 workspace，
         # 用于 coding_memory、todo文件等不应写入用户项目目录的数据。
         self._agent_workspace_dir = str(get_agent_workspace_dir())
+        self._permission_workspace_root = self._resolve_permission_workspace_root()
+        self._platform_trusted_root = Path(get_agent_workspace_dir()).resolve(
+            strict=False
+        )
 
         self._dreaming_mode = "code"
 
@@ -541,7 +549,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             return
 
         model = self._create_model(config_base)
-        self._prepare_browser_runtime_security(model, config_base)
         agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
 
         tool_cards = await self._get_tool_cards(self._tool_owner_id())
@@ -550,12 +557,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # 权限护栏由 openjiuwen PermissionInterruptRail + ToolPermissionHost 接管；
         # 无需初始化 jiuwenswarm 内置 PermissionEngine（已弃用）。
 
-        rails_list = self._build_agent_rails(config, config_base, mode="code")
-
         sys_operation = self._create_sys_operation()
         if sys_operation is None:
             raise RuntimeError("sys_operation is not available, maybe task is not running")
         self._sys_operation = sys_operation
+        self._prepare_browser_runtime_security(model, config_base)
+        rails_list = self._build_agent_rails(
+            config,
+            config_base,
+            mode="code",
+            composition_scope=composition_scope,
+        )
 
         configured_subagents, _should_add_general = self._build_configured_subagents(model, config, config_base)
         configured_subagents = configured_subagents or []
@@ -654,52 +666,58 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     # ─── Rails 构建 ──────────────────────────
 
-    def _build_agent_rails(
-            self,
-            config: dict[str, Any],
-            config_base: dict[str, Any],
-            *,
-            mode: str = "code",
-    ) -> list[Any]:
-        """Build rails for code mode: fixed rails + dynamic rails from config.
-
-        Code 模式固定包含 LspRail、ProjectMemoryRail、CodingMemoryRail。plan 相关
-        的 rails 同样固定挂载，不按子模式分叉。
-        """
-        # 固定 Rails — code 模式特有
-        rail_infos = [
-            _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
-            _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
-            _RailBuildInfo("_skill_retrieval_prompt_rail", self._build_skill_retrieval_prompt_rail),
-            _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
-            _RailBuildInfo("_security_rail", self._build_security_rail),
-            _RailBuildInfo("_lsp_rail", self._build_lsp_rail_via_config),
-            _RailBuildInfo("_project_memory_rail", self._build_project_memory_rail),
-            _RailBuildInfo(
-                "_permission_rail",
-                build_permission_rail,
-                {
-                    "config": config_base,
-                    "llm": self._model,
-                    "model_name": config_base.get("models", {}).get(
-                        "default", {}
-                    ).get("model_client_config", {}).get("model_name", "gpt-4"),
-                },
+    def _build_profile_rail_specs(
+        self,
+        config: dict[str, Any],
+        config_base: dict[str, Any],
+        *,
+        mode: str,
+    ) -> _AgentProfileRailSpecs:
+        """Return Code-only rail specs for the parent-owned composition."""
+        before_stream_event = [
+            _AgentRailBuildSpec("_runtime_prompt_rail", self._build_runtime_prompt_rail),
+            _AgentRailBuildSpec("_response_prompt_rail", self._build_response_prompt_rail),
+            _AgentRailBuildSpec(
+                "_skill_retrieval_prompt_rail",
+                self._build_skill_retrieval_prompt_rail,
             ),
-            _RailBuildInfo("_code_filesystem_rail", self._build_filesystem_rail),
-            _RailBuildInfo("_coding_memory_rail", self._build_coding_memory_rail),
-            _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
-            _RailBuildInfo("_code_agent_mode_rail", self._build_agent_mode_rail),
-            _RailBuildInfo("_code_ask_user_rail", self._build_structured_ask_user_rail),
-            _RailBuildInfo(
+        ]
+        before_permission = [
+            _AgentRailBuildSpec("_code_agent_mode_rail", self._build_agent_mode_rail),
+            _AgentRailBuildSpec(
+                "_code_plan_pre_permission_guard_rail",
+                self._build_plan_pre_permission_guard_rail,
+            ),
+            _AgentRailBuildSpec("_security_rail", self._build_security_rail),
+            _AgentRailBuildSpec("_lsp_rail", self._build_lsp_rail_via_config),
+            _AgentRailBuildSpec(
+                "_project_memory_rail", self._build_project_memory_rail
+            ),
+        ]
+        after_permission = [
+            _AgentRailBuildSpec("_code_filesystem_rail", self._build_filesystem_rail),
+            _AgentRailBuildSpec("_coding_memory_rail", self._build_coding_memory_rail),
+            _AgentRailBuildSpec(
+                "_memory_forbidden_rail", self._build_memory_forbidden_rail
+            ),
+            _AgentRailBuildSpec(
+                "_code_ask_user_rail", self._build_structured_ask_user_rail
+            ),
+            _AgentRailBuildSpec(
                 "_code_confirm_interrupt_rail",
                 self._build_confirm_interrupt_rail,
                 {"tool_names": ["switch_mode"]},
             ),
-            _RailBuildInfo("_context_processor_rail", self._build_context_processor_rail),
-            _RailBuildInfo("_code_task_planning_rail", self._build_code_task_planning_rail),
-            _RailBuildInfo("_code_agent_rail", self._build_code_agent_rail),
-            _RailBuildInfo("_code_plan_approval_rail", self._build_plan_approval_rail),
+            _AgentRailBuildSpec(
+                "_context_processor_rail", self._build_context_processor_rail
+            ),
+            _AgentRailBuildSpec(
+                "_code_task_planning_rail", self._build_code_task_planning_rail
+            ),
+            _AgentRailBuildSpec("_code_agent_rail", self._build_code_agent_rail),
+            _AgentRailBuildSpec(
+                "_code_plan_approval_rail", self._build_plan_approval_rail
+            ),
         ]
 
         # 动态 Rails — 从 config.yaml::modes.code.rails 读取
@@ -735,13 +753,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 )
                 continue
             attr_name = f"_dynamic_{rail_name}"
-            rail_infos.append(_RailBuildInfo(attr_name, method))
+            after_permission.append(_AgentRailBuildSpec(attr_name, method))
             logger.info(
                 "[JiuwenSwarmCodeAdapter] Dynamic rail %s queued from config",
                 rail_name,
             )
 
-        return self._instantiate_rails(rail_infos, config_base)
+        return _AgentProfileRailSpecs(
+            before_stream_event=tuple(before_stream_event),
+            before_permission=tuple(before_permission),
+            after_permission=tuple(after_permission),
+        )
 
     # ─── Code 专属 Rail 构建 ────────────────
 
@@ -781,6 +803,19 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         except Exception as exc:
             logger.warning("[JiuwenSwarmCodeAdapter] CodeAgentModeRail create failed: %s", exc)
             return None
+
+    def _build_plan_pre_permission_guard_rail(
+        self,
+    ) -> CodePlanPrePermissionGuardRail | None:
+        """Run the existing Code plan guard before Permission review."""
+
+        if self._code_agent_mode_rail is None:
+            logger.warning(
+                "[JiuwenSwarmCodeAdapter] Code plan pre-Permission guard skipped: "
+                "CodeAgentModeRail unavailable"
+            )
+            return None
+        return CodePlanPrePermissionGuardRail(self._code_agent_mode_rail)
 
     @staticmethod
     def _build_code_task_planning_rail() -> CodeTaskPlanningRail | None:
@@ -1615,7 +1650,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             self._agent_workspace_dir,
         )
 
-        rails = self._build_agent_rails(react_config, config_base, mode="code")
+        rails = self._build_agent_rails(
+            react_config,
+            config_base,
+            mode="code",
+            composition_scope="team_member",
+        )
         added_rails = sum(1 for rail in rails if _queue_rail_if_missing(agent, rail))
 
         subagents, _should_add_general = self._build_configured_subagents(model, react_config, config_base)

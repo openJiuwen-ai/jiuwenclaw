@@ -28,17 +28,21 @@ UNKNOWN_FACTS = "unknown"
 _CapabilityDefinition: TypeAlias = tuple[str, str, set[str], str, bool]
 
 _READ_PDF_FILE_SPEC = FileToolSpec("read_pdf", "pdf_path", "read")
+_LSP_FILE_SPEC = FileToolSpec("lsp", "file_path", "read")
 
 
 def install_permission_file_semantics() -> None:
     """Install JiuwenSwarm file semantics at the Permission composition boundary."""
 
-    specs = lookup_file_tool_specs(_READ_PDF_FILE_SPEC.tool_name)
-    if specs is None:
-        register_file_tool(_READ_PDF_FILE_SPEC)
-        specs = lookup_file_tool_specs(_READ_PDF_FILE_SPEC.tool_name)
-    if specs != [_READ_PDF_FILE_SPEC]:
-        raise RuntimeError("permission_file_semantics_conflict:read_pdf")
+    for spec in (_READ_PDF_FILE_SPEC, _LSP_FILE_SPEC):
+        specs = lookup_file_tool_specs(spec.tool_name)
+        if specs is None:
+            register_file_tool(spec)
+            specs = lookup_file_tool_specs(spec.tool_name)
+        if specs != [spec]:
+            raise RuntimeError(
+                f"permission_file_semantics_conflict:{spec.tool_name}"
+            )
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,7 @@ _PATH_TOOLS = {
     "glob",
     "list_dir",
     "list_files",
+    "lsp",
     "grep",
     "search_replace",
 }

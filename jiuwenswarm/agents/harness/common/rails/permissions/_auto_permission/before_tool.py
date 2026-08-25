@@ -100,6 +100,13 @@ from jiuwenswarm.server.runtime.sandbox_no_host_fallback import (
     clear_no_host_fallback,
     require_no_host_fallback,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.permission_interrupt_rail import (
+    has_pre_permission_hard_rejection,
+)
+
+_NON_PERMISSION_CONTROL_SILENT_TOOLS = frozenset(
+    {"enter_plan_mode", "exit_plan_mode", "switch_mode"}
+)
 
 
 class AutoPermissionBeforeToolMixin:
@@ -124,6 +131,8 @@ class AutoPermissionBeforeToolMixin:
         clear_send_file_execution_grant()
         clear_trusted_search_producer()
         invocation = _extract_invocation(args, kwargs)
+        if has_pre_permission_hard_rejection(invocation.ctx):
+            return None
         context_extra = getattr(invocation.ctx, "extra", None)
         if (
             isinstance(context_extra, Mapping)
@@ -506,6 +515,26 @@ class AutoPermissionBeforeToolMixin:
                 decision_source="manual_approval",
             )
 
+        if facts.tool_name == "Agent":
+            return runtime_result(
+                self._deny(
+                    facts,
+                    "custom_agent_auto_permission_unsupported",
+                    decision_source="auto_permission_scope",
+                ),
+                decision_source="auto_permission_scope",
+            )
+
+        if facts.tool_name in _NON_PERMISSION_CONTROL_SILENT_TOOLS:
+            reason = f"{facts.tool_name}_control_silent"
+            self._emit_audit(
+                facts,
+                decision=ALLOW_LEVEL,
+                reason=reason,
+                degraded=False,
+            )
+            return runtime_result(None, decision_source=reason)
+
         override_result: PermissionHandlingResult = (
             await self._consume_reviewer_override(
                 facts,
@@ -753,6 +782,34 @@ class AutoPermissionBeforeToolMixin:
                 None,
                 decision_source="policy_evaluator",
             )
+
+        if (
+            facts.tool_name == "lsp"
+            and not path_policy_requires_approval
+            and terminal_low_risk_route(facts) is not None
+        ):
+            reason = "lsp_terminal_low_risk_allow"
+            self._record_reviewer_success_metadata(
+                invocation.ctx,
+                facts,
+                tool_call_id=tool_call_id,
+                reason=reason,
+                metadata={
+                    "decision_source": "deterministic_guard",
+                    "final_reviewer_status": "deterministic_allow",
+                    "reviewer_lifecycle": "not_called",
+                    "reviewer_outcome": "allow_once",
+                    "reviewer_reason_code": reason,
+                    "reviewer_status": "deterministic_allow",
+                },
+            )
+            self._emit_audit(
+                facts,
+                decision=ALLOW_LEVEL,
+                reason=reason,
+                degraded=False,
+            )
+            return runtime_result(None, decision_source="deterministic_guard")
 
         reviewer_result: PermissionHandlingResult = await run_reviewer()
         if reviewer_result.handled:

@@ -35,6 +35,29 @@ _EXACT_PERSIST_ATTEMPT: ContextVar[_ExactPersistAttempt | None] = ContextVar(
     default=None,
 )
 
+_PRE_PERMISSION_HARD_REJECTION_KEY = "_jiuwenswarm_pre_permission_hard_rejection"
+_PRE_PERMISSION_HARD_REJECTION_SENTINEL = object()
+
+
+def mark_pre_permission_hard_rejection(ctx: AgentCallbackContext) -> None:
+    """Mark a Host-owned hard rejection that Permission must not reconsider."""
+
+    extra = getattr(ctx, "extra", None)
+    if isinstance(extra, dict) and extra.get("_skip_tool") is True:
+        extra[_PRE_PERMISSION_HARD_REJECTION_KEY] = _PRE_PERMISSION_HARD_REJECTION_SENTINEL
+
+
+def has_pre_permission_hard_rejection(ctx: AgentCallbackContext) -> bool:
+    """Return whether a genuine Host guard rejected this exact invocation."""
+
+    extra = getattr(ctx, "extra", None)
+    return bool(
+        isinstance(extra, dict)
+        and extra.get("_skip_tool") is True
+        and extra.get(_PRE_PERMISSION_HARD_REJECTION_KEY)
+        is _PRE_PERMISSION_HARD_REJECTION_SENTINEL
+    )
+
 
 class JiuwenSwarmPermissionInterruptRail(PermissionInterruptRail):
     """Permission rail that persists exact rules and marks owned interrupts."""
@@ -113,6 +136,8 @@ class JiuwenSwarmPermissionInterruptRail(PermissionInterruptRail):
         session.update_state({INTERRUPT_AUTO_CONFIRM_KEY: updated})
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        if has_pre_permission_hard_rejection(ctx):
+            return
         if root_nonpermission_resume_from_context(ctx) is not None:
             return
         try:
@@ -125,4 +150,8 @@ class JiuwenSwarmPermissionInterruptRail(PermissionInterruptRail):
             raise
 
 
-__all__ = ["JiuwenSwarmPermissionInterruptRail"]
+__all__ = [
+    "JiuwenSwarmPermissionInterruptRail",
+    "has_pre_permission_hard_rejection",
+    "mark_pre_permission_hard_rejection",
+]

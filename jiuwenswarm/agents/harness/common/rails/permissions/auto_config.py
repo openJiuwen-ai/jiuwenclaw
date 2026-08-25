@@ -62,17 +62,20 @@ def resolve_declared_auto_workspace(
 
 
 def supports_phase_auto_root(params: Mapping[str, Any]) -> bool:
-    """Return whether the request belongs to the supported independent Deep root."""
+    """Return whether the request belongs to a supported single-Agent root."""
 
     runtime_mode = str(params.get("mode") or "agent").strip().lower()
     work_mode = str(params.get("work_mode") or "").strip().lower()
-    return bool(
-        not params.get("team")
-        and not is_team_mode(runtime_mode)
-        and runtime_mode != "auto_harness"
-        and runtime_mode.split(".", 1)[0] == "agent"
-        and work_mode in {"", "work"}
-    )
+    if params.get("team") or is_team_mode(runtime_mode) or runtime_mode == "auto_harness":
+        return False
+    if runtime_mode.split(".", 1)[0] == "agent":
+        if work_mode == "code":
+            return runtime_mode in {"agent", "agent.plan"}
+        return work_mode in {"", "work"}
+    return runtime_mode in {"code", "code.normal", "code.plan"} and work_mode in {
+        "",
+        "code",
+    }
 
 
 def resolve_permission_runtime_mode(permission_config: Mapping[str, Any]) -> str:

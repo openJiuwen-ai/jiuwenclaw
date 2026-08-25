@@ -19,6 +19,9 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import PLAN_EXECUTE_CTX_KEY
+from jiuwenswarm.agents.harness.code.rails.code_plan_pre_permission_guard_rail import (
+    code_plan_guard_checked,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -118,6 +121,8 @@ class CodeAgentModeRail(AgentModeRail):
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Enforce plan-mode write blocks beyond the parent git-only guard."""
+        if code_plan_guard_checked(ctx):
+            return
         agent = self._agent
         session = ctx.session
         plan_state = agent.load_state(session).plan_mode

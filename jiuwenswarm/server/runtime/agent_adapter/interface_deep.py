@@ -421,7 +421,10 @@ from jiuwenswarm.common.utils import (
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
-from jiuwenswarm.common.mode_matrix import is_team_mode
+from jiuwenswarm.common.mode_matrix import (
+    is_team_mode,
+    resolve_agent_composition_scope,
+)
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
@@ -514,34 +517,8 @@ _AGENT_COMPOSITION_SCOPES = frozenset(
 
 
 def _resolve_agent_composition_scope(mode: str, sub_mode: str | None) -> str:
-    """Resolve one closed construction scope from Host-owned instance facts."""
-    normalized_mode = str(mode or "").strip().lower()
-    normalized_sub_mode = str(sub_mode or "").strip().lower()
-    if normalized_mode not in {"agent", "code", "team", "auto_harness"}:
-        raise RuntimeError(
-            f"agent_composition_scope_unclassified:{normalized_mode or '<empty>'}"
-        )
-    if normalized_mode == "auto_harness" and normalized_sub_mode in {
-        "",
-        "auto_harness",
-    }:
-        return "auto_harness"
-    if normalized_mode == "agent" and normalized_sub_mode == "auto_harness":
-        return "auto_harness"
-    if normalized_mode == "team" and normalized_sub_mode in {"", "plan"}:
-        return "team_root"
-    if normalized_mode == "code" and normalized_sub_mode == "team":
-        return "team_root"
-    if normalized_mode in {"agent", "code"} and normalized_sub_mode in {
-        "",
-        "normal",
-        "plan",
-        "fast",
-    }:
-        return "single_agent"
-    raise RuntimeError(
-        f"agent_composition_scope_unclassified:{normalized_mode or '<empty>'}"
-    )
+    """Compatibility wrapper for the common Host-owned scope classifier."""
+    return resolve_agent_composition_scope(mode, sub_mode)
 
 
 def get_runtime_tool_session_id() -> str | None:
