@@ -174,6 +174,16 @@ class TaskExecutionRail(DeepAgentRail):
     _TODO_DONE_STATUSES = frozenset({"completed", "cancelled"})
 
     priority = 85
+    # Do NOT inherit this rail into a general-purpose subagent. init() binds
+    # ``self._deep_agent`` to the agent handed in, and the subagent's
+    # _ensure_initialized re-runs init_rail with the *child* — rebinding the
+    # shared instance to the subagent forever (the parent never re-inits).
+    # After that _get_todo_workspace_path resolves todo.json under the child's
+    # empty sub_agents workspace, _load_todo_from_json returns [], the todo map
+    # stays empty, and no pending->in_progress transition is ever detected again
+    # — so every later parent stage's task.start stops firing (e.g. PPT stage4+
+    # missing from history.json after a general-purpose subagent ran in stage3).
+    inherit_to_subagents = False
 
     TODO_TOOLS = frozenset({
         "todo_create", "todo_get", "todo_list", "todo_modify",
