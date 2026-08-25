@@ -56,8 +56,13 @@ def _env_float(name: str, default: float, *, allow_zero: bool = False) -> float:
 
 
 def resolve_web_http_sse_timeout() -> float:
-    """Total SSE stream lifetime seconds (default 600)."""
-    return _env_float("GATEWAY_WEB_HTTP_SSE_TIMEOUT", 600.0)
+    """Total SSE stream lifetime seconds (default 0 = no cap).
+
+    Long agent turns can run for hours; a hard cap would drop a live
+    ``chat.send`` stream. Set ``GATEWAY_WEB_HTTP_SSE_TIMEOUT`` to a
+    positive value only when ops wants an explicit lifetime limit.
+    """
+    return _env_float("GATEWAY_WEB_HTTP_SSE_TIMEOUT", 0.0, allow_zero=True)
 
 
 def resolve_web_http_sse_idle_timeout() -> float:

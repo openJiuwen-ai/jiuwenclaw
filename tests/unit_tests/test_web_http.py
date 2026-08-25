@@ -279,6 +279,45 @@ def test_sse_idle_timeout_ends_stream():
     asyncio.run(_run())
 
 
+def test_sse_zero_timeout_waits_for_final():
+    async def _run():
+        peer = outbound_mod.HttpSseOutbound()
+
+        async def _emit_final() -> None:
+            await asyncio.sleep(0.2)
+            await peer.send(json.dumps({"type": "event", "event": "chat.final", "payload": {}}))
+
+        asyncio.create_task(_emit_final())
+        events = []
+        async for f in peer.iter_sse_frames("r1", timeout=0, keepalive=0.05):
+            events.append(f)
+        assert events[-1].get("event") == "chat.final"
+        assert not any(
+            e.get("event") == "chat.error"
+            and str((e.get("payload") or {}).get("error", "")) == "stream timeout"
+            for e in events
+        )
+
+    asyncio.run(_run())
+
+
+def test_sse_positive_timeout_still_ends_stream():
+    async def _run():
+        peer = outbound_mod.HttpSseOutbound()
+        events = []
+        async for f in peer.iter_sse_frames("r1", timeout=0.15, keepalive=0.05):
+            events.append(f)
+            if f.get("event") == "chat.error":
+                break
+        assert any(
+            e.get("event") == "chat.error"
+            and str((e.get("payload") or {}).get("error", "")) == "stream timeout"
+            for e in events
+        )
+
+    asyncio.run(_run())
+
+
 def test_history_json_collects_messages(app_with_mock):
     app, dispatch = app_with_mock
 
@@ -510,11 +549,15 @@ def test_resolve_web_http_timeouts_defaults_and_env(monkeypatch: pytest.MonkeyPa
     ):
         monkeypatch.delenv(key, raising=False)
     mod = _load_module("jw_web_http_timeouts_default", SERVER_PATH)
-    assert mod.resolve_web_http_sse_timeout() == 600.0
+    assert mod.resolve_web_http_sse_timeout() == 0.0
     assert mod.resolve_web_http_sse_idle_timeout() == 0.0
     assert mod.resolve_web_http_sse_keepalive() == 30.0
     assert mod.resolve_web_http_unary_timeout() == 120.0
     assert mod.resolve_web_http_history_timeout() == 60.0
+
+    monkeypatch.setenv("GATEWAY_WEB_HTTP_SSE_TIMEOUT", "0")
+    mod_zero = _load_module("jw_web_http_timeouts_zero", SERVER_PATH)
+    assert mod_zero.resolve_web_http_sse_timeout() == 0.0
 
     monkeypatch.setenv("GATEWAY_WEB_HTTP_SSE_TIMEOUT", "90")
     monkeypatch.setenv("GATEWAY_WEB_HTTP_SSE_IDLE_TIMEOUT", "45")
