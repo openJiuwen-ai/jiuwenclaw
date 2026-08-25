@@ -21,6 +21,7 @@ from openjiuwen.core.common.logging import server_logger
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService, reset_harness_packages_state
+from jiuwenswarm.agents.harness.code.rails.heartbeat.runtime import HeartbeatRailRuntime
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.server.ws_send import send_wire_payload
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
@@ -86,6 +87,7 @@ from jiuwenswarm.common.mode_matrix import (
     TEAM_PLAN_CODE_MODE,
     TEAM_PLAN_NORMAL_MODE,
     canonicalize_mode_text,
+    is_code_profile_mode,
     is_plan_mode,
     is_team_mode,
     resolve_new_canonical_mode,
@@ -105,12 +107,10 @@ from jiuwenswarm.common.config import (
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_sandbox_startup_mode_explicit,
-    remove_mcp_server_in_config,
     remove_mcp_server,
     resolve_preserve_file_sharing_mode_default,
     resolve_sandbox_policy_path,
     remove_subagent_from_config,
-    set_mcp_server_enabled_in_config,
     set_mcp_server_enabled,
     update_sandbox_endpoint,
     update_sandbox_runtime,
@@ -986,6 +986,8 @@ class AgentWebSocketServer:
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
+        self._heartbeat_runtime = HeartbeatRailRuntime(self)
+        self._agent_manager.set_heartbeat_service(self._heartbeat_runtime)
         # Gateway user-business RPCs execute in the current AgentServer's
         # injected data directory.  Register the adapters once per server;
         # request dispatch occurs before the legacy handler chain below.
@@ -1137,12 +1139,23 @@ class AgentWebSocketServer:
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
 
         async def _warmup_checkpointer() -> None:
-            try:
-                await ensure_persistent_checkpointer()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[AgentWebSocketServer] checkpointer 预热失败 (首请求将兜底重试): %s", exc
-                )
+            retry_delay = 1.0
+            while not self._heartbeat_runtime.is_available:
+                try:
+                    await ensure_persistent_checkpointer()
+                    await self._heartbeat_runtime.start()
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentWebSocketServer] Heartbeat runtime warmup failed; "
+                        "retrying in %.1fs: %s",
+                        retry_delay,
+                        exc,
+                    )
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(30.0, retry_delay * 2)
 
         self._checkpointer_warmup_task = asyncio.create_task(
             _warmup_checkpointer(), name="checkpointer-warmup"
@@ -1464,6 +1477,7 @@ class AgentWebSocketServer:
                 pass
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[AgentWebSocketServer] checkpointer warmup cancel failed: %s", exc)
+        await self._heartbeat_runtime.stop()
         # 同理取消图像模态重探任务.
         image_modality_refresh = self._image_modality_refresh_task
         self._image_modality_refresh_task = None
@@ -1513,7 +1527,12 @@ class AgentWebSocketServer:
             ack_frame = {
                 "type": "event",
                 "event": "connection.ack",
-                "payload": {"status": "ready"},
+                "payload": {
+                    "status": "ready",
+                    "heartbeat_job_owner": "agentserver",
+                    "heartbeat_job_protocol": self._heartbeat_runtime.protocol_version,
+                    "heartbeat_job_ready": self._heartbeat_runtime.is_available,
+                },
             }
             await send_wire_payload(ws, ack_frame)
             logger.info("[AgentWebSocketServer] 已发送 connection.ack: %s", remote)
@@ -1557,6 +1576,9 @@ class AgentWebSocketServer:
             try:
                 await self._agent_manager.cancel_all_inflight_work(
                     reason=f"[gateway ws closed {remote}] ",
+                    exclude_session_ids=(
+                        self._heartbeat_runtime.execution.active_session_ids()
+                    ),
                 )
             except Exception:
                 logger.exception("[AgentWebSocketServer] cancel_all_inflight_work failed")
@@ -1570,6 +1592,9 @@ class AgentWebSocketServer:
 
                 await cancel_all_team_stream_tasks_across_managers(
                     reason=f"[gateway ws closed {remote}] ",
+                    exclude_session_ids=(
+                        self._heartbeat_runtime.execution.active_session_ids()
+                    ),
                 )
             except Exception:
                 logger.exception("[AgentWebSocketServer] team stream cancel failed")
@@ -1772,6 +1797,10 @@ class AgentWebSocketServer:
                 return
 
             await self._trigger_before_chat_request_hook(request)
+
+            if request.req_method == ReqMethod.HEARTBEAT_JOB:
+                await self._handle_heartbeat_job(ws, request, send_lock)
+                return
 
             if request.req_method == ReqMethod.SESSION_LIST:
                 await self._handle_session_list(ws, request, send_lock)
@@ -2625,6 +2654,16 @@ class AgentWebSocketServer:
                 "work",
             }:
                 runtime_work_mode = stored_work_mode.strip().lower()
+            elif isinstance(stored_session_mode, str) and stored_session_mode.strip():
+                # Sessions created before work_mode became authoritative only
+                # persist the canonical execution mode. Heartbeat requests do
+                # not carry a mode override, so derive the legacy profile from
+                # that locked value instead of falling back to the channel
+                # default (Web=work, TUI=code), which could resume the same
+                # Session through the wrong adapter.
+                runtime_work_mode = (
+                    "code" if is_code_profile_mode(stored_session_mode) else "work"
+                )
         if runtime_work_mode is None:
             request_work_mode = params.get("work_mode")
             if isinstance(request_work_mode, str) and request_work_mode.strip().lower() in {
@@ -2989,10 +3028,16 @@ class AgentWebSocketServer:
             await self._record_kvc_chat_started(request)
         if foreground:
             await manager.begin_foreground_chat()
+        admitted = request.req_method in _CODE_MODE_SYNC_METHODS
+        session_id = request.session_id or "default"
+        if admitted:
+            await self._heartbeat_runtime.admission.begin_user(session_id)
         try:
             await self._handle_unary_impl(ws, request, send_lock)
             kvc_task_succeeded = True
         finally:
+            if admitted:
+                await self._heartbeat_runtime.admission.end_user(session_id)
             if foreground:
                 await manager.end_foreground_chat()
             if tracks_kvc_task:
@@ -3008,6 +3053,7 @@ class AgentWebSocketServer:
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
 
         await ensure_persistent_checkpointer()
+        await self._try_start_heartbeat_runtime()
         channel_id = request.channel_id or "default"
 
         if request.req_method == ReqMethod.INITIALIZE:
@@ -3095,14 +3141,221 @@ class AgentWebSocketServer:
             await self._record_kvc_chat_started(request)
         if foreground:
             await manager.begin_foreground_chat()
+        admitted = request.req_method in _CODE_MODE_SYNC_METHODS
+        session_id = request.session_id or "default"
+        if admitted:
+            await self._heartbeat_runtime.admission.begin_user(session_id)
         try:
             await self._handle_stream_impl(ws, request, send_lock)
             kvc_task_succeeded = True
         finally:
+            if admitted:
+                await self._heartbeat_runtime.admission.end_user(session_id)
             if foreground:
                 await manager.end_foreground_chat()
             if tracks_kvc_task:
                 self._record_kvc_chat_finished(request, succeeded=kvc_task_succeeded)
+
+    async def _handle_heartbeat_job(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Serve the stable heartbeat.job.* API from the local Rail runtime."""
+        from jiuwenswarm.agents.harness.code.rails.heartbeat.runtime import (
+            HeartbeatRuntimeUnavailableError,
+        )
+
+        params = request.params if isinstance(request.params, dict) else {}
+        action = str(params.get("action") or "").strip()
+        data = params.get("data") if isinstance(params.get("data"), dict) else {}
+        effective_user_id = str(request.user_id or "").strip()
+        if not effective_user_id and request.session_id:
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                get_session_metadata,
+            )
+
+            effective_user_id = str(
+                (get_session_metadata(request.session_id) or {}).get("user_id") or ""
+            ).strip()
+        try:
+            result = await self._heartbeat_runtime.handle_operation(
+                action,
+                data,
+                channel_id=request.channel_id or "web",
+                session_id=request.session_id or "",
+                user_id=effective_user_id,
+                source=("tui_rpc" if request.channel_id == "tui" else "web_rpc"),
+            )
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"result": result},
+                metadata=request.metadata,
+            )
+        except PermissionError as exc:
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc), "code": "FORBIDDEN"},
+                metadata=request.metadata,
+            )
+        except KeyError as exc:
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc).strip("'"), "code": "NOT_FOUND"},
+                metadata=request.metadata,
+            )
+        except ValueError as exc:
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc), "code": "BAD_REQUEST"},
+                metadata=request.metadata,
+            )
+        except HeartbeatRuntimeUnavailableError as exc:
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc), "code": "SERVICE_UNAVAILABLE"},
+                metadata=request.metadata,
+            )
+        except RuntimeError as exc:
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc), "code": "CONFLICT"},
+                metadata=request.metadata,
+            )
+        wire = encode_agent_response_for_wire(
+            response,
+            response_id=request.request_id,
+        )
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def execute_internal_heartbeat(self, request: AgentRequest) -> None:
+        """Execute a Heartbeat through the ordinary CHAT_SEND session path.
+
+        The execution task is owned by AgentServer rather than a Gateway
+        connection. Gateway delivery is best-effort; session history remains
+        authoritative when no channel is connected.
+        """
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+            ensure_persistent_checkpointer,
+        )
+
+        await ensure_persistent_checkpointer()
+        channel_id = request.channel_id or "web"
+        mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
+            request,
+            channel_id,
+        )
+        self._heartbeat_runtime.retain_agent(request.session_id or "default", agent)
+        restored_plan = await self._ensure_code_mode_state(
+            request,
+            mode,
+            sub_mode,
+            agent,
+        )
+        if restored_plan:
+            await self._push_plan_mode_exited(request)
+
+        params = request.params if isinstance(request.params, dict) else {}
+        prompt = str(params.get("content") or params.get("query") or "")
+        # Ordinary Gateway-originated CHAT_SEND emits this frame before the
+        # model stream starts. AgentServer-owned Heartbeat bypasses that path,
+        # so it must publish the same lifecycle boundary itself. Besides
+        # driving processing state, ``content`` lets Web render the persisted
+        # Heartbeat user turn before the matching run_id assistant response.
+        await self.send_push(
+            {
+                "request_id": request.request_id,
+                "channel_id": channel_id,
+                "session_id": request.session_id,
+                "payload": {
+                    "event_type": "chat.processing_status",
+                    "session_id": request.session_id,
+                    "is_processing": True,
+                    "is_complete": False,
+                    "content": prompt,
+                },
+                "is_complete": False,
+                "metadata": request.metadata,
+            }
+        )
+
+        response_stream = agent.process_message_stream(request)
+        processing_finished = False
+        try:
+            async for chunk in response_stream:
+                if chunk.agent_ref is None:
+                    chunk.agent_ref = request.agent_ref
+                # A runtime may emit another processing=true frame without
+                # content. Preserve the prompt on every start frame so clients
+                # never replace this run's visible user turn with an empty one.
+                if (
+                    isinstance(chunk.payload, dict)
+                    and chunk.payload.get("event_type") == "chat.processing_status"
+                    and bool(chunk.payload.get("is_processing"))
+                    and not str(chunk.payload.get("content") or "")
+                ):
+                    chunk.payload = {**chunk.payload, "content": prompt}
+                chunk_finishes_processing = (
+                    isinstance(chunk.payload, dict)
+                    and chunk.payload.get("event_type") == "chat.processing_status"
+                    and chunk.payload.get("is_processing") is False
+                )
+                pushed = await self.send_push(
+                    {
+                        "request_id": request.request_id,
+                        "channel_id": channel_id,
+                        "session_id": request.session_id,
+                        "payload": chunk.payload,
+                        "is_complete": chunk.is_complete,
+                        "metadata": request.metadata,
+                    }
+                )
+                if chunk_finishes_processing and pushed:
+                    processing_finished = True
+        finally:
+            try:
+                close_stream = getattr(response_stream, "aclose", None)
+                if callable(close_stream):
+                    await close_stream()
+            finally:
+                try:
+                    # The ordinary Gateway stream wrapper emits the matching
+                    # processing=false boundary when a stream ends. An
+                    # AgentServer-owned Heartbeat bypasses that wrapper, so a
+                    # fast cancel can otherwise leave Web/TUI permanently
+                    # busy after the synthetic processing=true frame above.
+                    if not processing_finished:
+                        await self.send_push(
+                            {
+                                "request_id": request.request_id,
+                                "channel_id": channel_id,
+                                "session_id": request.session_id,
+                                "payload": {
+                                    "event_type": "chat.processing_status",
+                                    "session_id": request.session_id,
+                                    "is_processing": False,
+                                    "is_complete": True,
+                                },
+                                "is_complete": False,
+                                "metadata": request.metadata,
+                            }
+                        )
+                finally:
+                    await self._check_post_process_plan_exit(request, agent)
 
     async def _handle_stream_impl(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -3112,6 +3365,7 @@ class AgentWebSocketServer:
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
 
         await ensure_persistent_checkpointer()
+        await self._try_start_heartbeat_runtime()
         channel_id = request.channel_id or "default"
         session_id = request.session_id or "default"
         current_task = asyncio.current_task()
@@ -3738,6 +3992,7 @@ class AgentWebSocketServer:
             from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
 
             await ensure_persistent_checkpointer()
+            await self._try_start_heartbeat_runtime()
             return None
         except Exception as exc:
             logger.exception(
@@ -3755,6 +4010,20 @@ class AgentWebSocketServer:
                 },
                 metadata=request.metadata,
             )
+
+    async def _try_start_heartbeat_runtime(self) -> bool:
+        """Best-effort idempotent recovery after checkpointer readiness."""
+        if self._heartbeat_runtime.is_available:
+            return True
+        try:
+            await self._heartbeat_runtime.start()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] Heartbeat runtime is not ready yet: %s",
+                exc,
+            )
+            return False
 
     @staticmethod
     def _team_binding_payload(binding: Any) -> dict[str, Any]:
@@ -4492,6 +4761,7 @@ class AgentWebSocketServer:
                     is_team_session = self._is_team_metadata_mode(metadata)
                     team_name = str(metadata.get("team_name") or "").strip()
                     channel_id = str(metadata.get("channel_id") or request.channel_id or "").strip() or None
+                    heartbeat_delete_prepared = False
                     try:
                         from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
                             mark_session_deleted,
@@ -4510,6 +4780,8 @@ class AgentWebSocketServer:
                             exc,
                         )
                     try:
+                        await self._heartbeat_runtime.begin_session_delete(target)
+                        heartbeat_delete_prepared = True
                         if is_team_session:
                             team_manager = get_team_manager(channel_id)
                             deleted = await team_manager.delete_session_runtime(
@@ -4546,6 +4818,8 @@ class AgentWebSocketServer:
                             )
                             await Runner.release(target)
                             deleted = True
+                        if deleted:
+                            shutil.rmtree(session_dir)
                     except Exception as exc:
                         logger.warning(
                             "[AgentWebSocketServer] session.delete runtime cleanup failed: session_id=%s error=%s",
@@ -4555,6 +4829,19 @@ class AgentWebSocketServer:
                         deleted = False
 
                     if not deleted:
+                        if heartbeat_delete_prepared:
+                            try:
+                                await self._heartbeat_runtime.abort_session_delete(
+                                    target,
+                                    channel_id=channel_id or "",
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "[AgentWebSocketServer] heartbeat delete rollback failed: "
+                                    "session_id=%s error=%s",
+                                    target,
+                                    exc,
+                                )
                         try:
                             from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
                                 restore_session_after_failed_delete,
@@ -4576,7 +4863,19 @@ class AgentWebSocketServer:
                             metadata=request.metadata,
                         )
                     else:
-                        shutil.rmtree(session_dir)
+                        try:
+                            await self._heartbeat_runtime.commit_session_delete(target)
+                        except Exception as exc:  # noqa: BLE001
+                            # The product Session is already gone. Resume the
+                            # scheduler so its missing-session path retries the
+                            # idempotent policy transition instead of leaving a
+                            # permanently suspended job.
+                            logger.warning(
+                                "[AgentWebSocketServer] heartbeat delete commit failed; "
+                                "session_id=%s error=%s",
+                                target,
+                                exc,
+                            )
                         _plan_exited_sessions.discard(target)
                         _plan_active_sessions.discard(target)
                         remove_session_metadata_cache(target)

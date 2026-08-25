@@ -24,6 +24,7 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     _register_web_handlers,
     _validate_wechat_numeric_params,
 )
+from jiuwenswarm.gateway.heartbeat import HeartbeatServiceUnavailableError
 
 
 class FakeWebChannel:
@@ -178,7 +179,7 @@ class FakeHeartbeatService:
     def __init__(self):
         self.config = {"every": 60.0, "target": "web"}
 
-    async def set_heartbeat_conf(self, *, every=None, target=None, active_hours=None):
+    async def set_health_check_conf(self, *, every=None, target=None, active_hours=None):
         if every is not None:
             self.config["every"] = every
         if target is not None:
@@ -186,8 +187,132 @@ class FakeHeartbeatService:
         if active_hours is not None:
             self.config["active_hours"] = active_hours
 
-    def get_heartbeat_conf(self):
+    def get_health_check_conf(self):
         return dict(self.config)
+
+
+class FakeHeartbeatController:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def get_meta(self):
+        return {"statuses": ["scheduled"]}
+
+    async def list_jobs(self, params, *, access_session_id=None, user_id=""):
+        self.calls.append(("list", dict(params), access_session_id, user_id))
+        return {"jobs": []}
+
+    async def create_job(self, params, *, user_id=""):
+        self.calls.append(("create", dict(params), user_id))
+        return dict(params, id="hb-test")
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_web_methods_use_current_names_and_session() -> None:
+    channel = FakeWebChannel()
+    controller = FakeHeartbeatController()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, heartbeat_controller=controller)
+    )
+    assert "health_check.get_conf" in channel.methods
+    assert "health_check.set_conf" in channel.methods
+    assert "health_check.get_path" not in channel.methods
+    assert "heartbeat.get_conf" not in channel.methods
+    assert "heartbeat.set_conf" not in channel.methods
+    assert "heartbeat.get_path" not in channel.methods
+    expected = {
+        "heartbeat.job.list", "heartbeat.job.meta", "heartbeat.job.get",
+        "heartbeat.job.create", "heartbeat.job.update", "heartbeat.job.delete",
+        "heartbeat.job.toggle", "heartbeat.job.preview", "heartbeat.job.run_now",
+        "heartbeat.job.cancel",
+    }
+    assert expected <= set(channel.methods)
+
+    await channel.methods["heartbeat.job.list"](
+        object(), "list-1", {}, "session-current", user_id="user-current"
+    )
+    await channel.methods["heartbeat.job.create"](
+        object(),
+        "create-1",
+        {
+            "name": "n",
+            "prompt": "p",
+            "channel_id": "other",
+            "session_id": "other-session",
+            "schedule": {"type": "interval", "interval_seconds": 120},
+        },
+        "session-current",
+        user_id="user-current",
+    )
+    assert controller.calls[0] == (
+        "list",
+        {},
+        "session-current",
+        "user-current",
+    )
+    created = controller.calls[1][1]
+    assert created["channel_id"] == "web"
+    assert created["session_id"] == "session-current"
+    assert created["source"] == "web_rpc"
+    assert controller.calls[1][2] == "user-current"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_web_reports_unavailable_and_missing_job_codes() -> None:
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["heartbeat.job.list"](
+        object(), "list-unavailable", {}, "session-current"
+    )
+    assert channel.responses[-1]["code"] == "SERVICE_UNAVAILABLE"
+
+    class Controller:
+        async def get_job(self, *_args, **_kwargs):
+            raise KeyError("missing")
+
+        async def get_meta(self, **_kwargs):
+            raise HeartbeatServiceUnavailableError("agentserver offline")
+
+    channel = FakeWebChannel()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, heartbeat_controller=Controller())
+    )
+    await channel.methods["heartbeat.job.get"](
+        object(), "get-missing", {"id": "missing"}, "session-current"
+    )
+    assert channel.responses[-1]["code"] == "NOT_FOUND"
+    await channel.methods["heartbeat.job.meta"](
+        object(), "meta-unavailable", {}, "session-current"
+    )
+    assert channel.responses[-1]["code"] == "SERVICE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_session_delete_delegates_heartbeat_lifecycle_to_agentserver() -> None:
+    class Agent:
+        server_ready = True
+
+        def __init__(self):
+            self.requests = []
+
+        async def send_request(self, env):
+            self.requests.append(env)
+            return SimpleNamespace(ok=True, payload={"session_id": "deleted"})
+
+    channel = FakeWebChannel()
+    agent = Agent()
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            agent_client=agent,
+        )
+    )
+    await channel.methods["session.delete"](
+        object(), "delete-1", {"session_id": "session-to-delete"}, "current"
+    )
+    assert agent.requests[0].method == "session.delete"
+    assert channel.responses[-1]["ok"] is True
 
 
 @pytest.mark.asyncio
@@ -770,7 +895,7 @@ async def test_openai_account_logout_wins_against_inflight_poll(
     [
         ("channel.feishu.set_conf", {"apps": [{"app_id": "app-1"}]}),
         ("channel.dingtalk.set_conf", {"enabled": False, "client_id": "client-1"}),
-        ("heartbeat.set_conf", {"every": 30, "target": "web"}),
+        ("health_check.set_conf", {"every": 30, "target": "web"}),
     ],
 )
 async def test_config_save_handlers_respond_before_agent_reload_finishes(monkeypatch, method, params):
@@ -789,8 +914,8 @@ async def test_config_save_handlers_respond_before_agent_reload_finishes(monkeyp
         lambda channel_id, subsection, conf, keep_keys: persisted.append((channel_id, conf)),
     )
     monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_heartbeat_in_config",
-        lambda payload: persisted.append(("heartbeat", dict(payload))),
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_health_check_in_config",
+        lambda payload: persisted.append(("health_check", dict(payload))),
     )
 
     _register_web_handlers(

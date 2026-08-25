@@ -289,8 +289,12 @@ class ReqMethod(Enum):
 
     HOOKS_LIST = "hooks.list"
 
-    HEARTBEAT_GET_CONF = "heartbeat.get_conf"
-    HEARTBEAT_SET_CONF = "heartbeat.set_conf"
+    # 旧探活使用 health_check 命名空间。
+    HEALTH_CHECK_GET_CONF = "health_check.get_conf"
+    HEALTH_CHECK_SET_CONF = "health_check.set_conf"
+
+    # Gateway -> AgentServer proxy for AgentServer-owned Heartbeat job operations.
+    HEARTBEAT_JOB = "heartbeat.job"
 
     # 安全防护 permissions（与 Web ``register_method`` 同名，经 E2A → AgentServer 处理；owner_scopes 仅走 Web 直连）
     PERMISSIONS_TOOLS_GET = "permissions.tools.get"
@@ -399,7 +403,9 @@ class EventType(Enum):
     TEAM_TASK = "team.task"
     TEAM_MESSAGE = "team.message"
     WORKFLOW_UPDATED = "workflow.updated"
-    HEARTBEAT_RELAY = "heartbeat.relay"
+    # 旧探活结果通过 health_check.relay 发送。
+    # 新心跳任务(heartbeat.job.*)不使用 relay 事件,结果通过普通 chat.send 进入原会话。
+    HEALTH_CHECK_RELAY = "health_check.relay"
     HISTORY_GET = "history.message"
     PROACTIVE_RECOMMENDATION = "proactive_recommendation"
 

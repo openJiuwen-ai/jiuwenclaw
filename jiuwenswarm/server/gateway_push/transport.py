@@ -13,7 +13,6 @@ class GatewayPushTransport(Protocol):
         """向 Gateway 发送一条消息，并返回是否已写入传输。"""
         ...
 
-
 class WebSocketGatewayPushTransport:
     """通过进程内 AgentWebSocketServer 单例推送（分离部署 + WebSocket 默认路径）。"""
 

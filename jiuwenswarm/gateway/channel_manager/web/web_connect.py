@@ -59,7 +59,7 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "chat.interrupt_result",
         "chat.evolution_status",
         "chat.error",
-        "heartbeat.relay",
+        "health_check.relay",
         "context.usage",
         "context.compression_state",
         "chat.ask_user_question",
@@ -708,6 +708,24 @@ class WebChannel(BaseWsChannel):
         )
 
     @staticmethod
+    def _attach_automation_metadata(
+        payload: dict[str, Any], msg: Message
+    ) -> dict[str, Any]:
+        """Expose only the public automation marker, not routing metadata."""
+        message_metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        automation = message_metadata.get("automation")
+        if not isinstance(automation, dict) or automation.get("kind") != "heartbeat":
+            return payload
+        payload_metadata = (
+            dict(payload.get("metadata"))
+            if isinstance(payload.get("metadata"), dict)
+            else {}
+        )
+        payload_metadata["automation"] = dict(automation)
+        payload["metadata"] = payload_metadata
+        return payload
+
+    @staticmethod
     def _should_backfill_request_id(event_name: str) -> bool:
         # goal.snapshot/goal.updated/execution.error 原来没有回填 request_id，导致 Web
         # 前端的事件去重逻辑只能靠内容比对，分不清"同一次操作的重复投递"和"不同操作但
@@ -716,7 +734,11 @@ class WebChannel(BaseWsChannel):
         # runtime.accepted 的 payload 本身已经带了 request_id（见
         # interface_deep.py `_yield_runtime_accepted`），调用处的 "request_id" not in
         # payload 判断会自动跳过它，不会重复赋值。
-        return event_name.startswith("chat.") or event_name.startswith("goal.") or event_name == "execution.error"
+        return (
+            event_name.startswith("chat.")
+            or event_name.startswith("goal.")
+            or event_name == "execution.error"
+        )
 
     @classmethod
     def _build_event_payload(cls, msg: Message, event_name: str) -> dict[str, Any]:
@@ -729,7 +751,7 @@ class WebChannel(BaseWsChannel):
                 needs_request_id = "request_id" not in payload and msg.id
                 if cls._should_backfill_request_id(event_name) and needs_request_id:
                     payload["request_id"] = msg.id
-                return payload
+                return cls._attach_automation_metadata(payload, msg)
 
             content = str(msg.payload.get("content", "") or "")
             if not content and not getattr(msg, "ok", True) and msg.payload.get("error"):
@@ -760,13 +782,13 @@ class WebChannel(BaseWsChannel):
                         source, msg.payload.get("proactive_type"),
                         len(str(payload.get("content", ""))), list(payload.keys()),
                     )
-            return payload
+            return cls._attach_automation_metadata(payload, msg)
 
         content = str((msg.params or {}).get("content", "") or "")
-        return {
+        return cls._attach_automation_metadata({
             "session_id": msg.session_id,
             "content": content,
-        }
+        }, msg)
 
     async def send(
         self,
@@ -788,24 +810,21 @@ class WebChannel(BaseWsChannel):
             getattr(msg, "id", ""), getattr(msg, "event_type", None), _et,
             _has_fanout, routing_target is not None, len(self.clients),
         )
-        # 维护 session busy 状态(供 /ws/git 写操作查询)。
-        # 必须在所有路由分支之前执行:集群模式下 chat.processing_status 事件携带
-        # fan_out_targets(godview 兜底),经 SessionDispatcher 走 V2 精确路由后
-        # 提前 return,不会再经过下方旧路径的 busy 更新。若只在旧路径维护,
-        # 任务结束后 _session_busy 会残留 True,撤销/重做(discard/redo)会被
-        # is_session_busy 误判为忙碌,永远报 SESSION_BUSY(前端却显示已完成)。
+        # Maintain the session busy state before any routing branch can return.
         self._track_session_busy(msg)
-        # ── 心跳 relay：临时 session_id（heartbeat_{ts}_{suffix}）不匹配任何前端连接，
-        # 按常规 session_id 路由会被当作"无连接"丢弃。心跳状态是全局的（非会话级），
+
+        # ── health_check relay：临时 session_id（health_check_{ts}_{suffix}）
+        # 不匹配任何前端连接，
+        # 按常规 session_id 路由会被当作"无连接"丢弃。探活状态是全局的（非会话级），
         # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
-        # 与 wechat 等 IM 渠道在 send() 中对 HEARTBEAT_RELAY 的专属分支对齐。
-        if msg.event_type == EventType.HEARTBEAT_RELAY:
+        # 与 wechat 等 IM 渠道在 send() 中对 HEALTH_CHECK_RELAY 的专属分支对齐。
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY:
             frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
             logger.debug(
-                "[WebChannel] heartbeat.relay broadcast to %d client(s) id=%s",
+                "[WebChannel] health_check.relay broadcast to %d client(s) id=%s",
                 len(clients), getattr(msg, "id", ""),
             )
             return
@@ -1478,6 +1497,8 @@ class WebChannel(BaseWsChannel):
             payload = {"session_id": getattr(msg, "session_id", None), "content": str(msg.payload)}
         else:
             payload = {"session_id": getattr(msg, "session_id", None), "content": ""}
+
+        payload = self._attach_automation_metadata(payload, msg)
 
         agent_ref = getattr(msg, "agent_ref", None)
         if agent_ref:

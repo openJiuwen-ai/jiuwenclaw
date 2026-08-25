@@ -1696,7 +1696,7 @@ class FeishuChannel(BaseChannel):
                 }
                 card_json = json.dumps(card, ensure_ascii=False)
                 request_id = str(msg.id or "").strip()
-                if request_id and msg.event_type != EventType.HEARTBEAT_RELAY:
+                if request_id and msg.event_type != EventType.HEALTH_CHECK_RELAY:
                     self._clear_group_progress_state(request_id)
                 await self._create_and_send_message(
                     FeishuMessageSendRequest(
@@ -1712,23 +1712,23 @@ class FeishuChannel(BaseChannel):
             skills_card_content = self._build_skills_list_card_content(payload, event_name)
             if skills_card_content:
                 request_id = str(msg.id or "").strip()
-                if request_id and msg.event_type != EventType.HEARTBEAT_RELAY:
+                if request_id and msg.event_type != EventType.HEALTH_CHECK_RELAY:
                     self._clear_group_progress_state(request_id)
                 await self._send_feishu_message(receive_id, id_type, skills_card_content, msg.id)
                 return
             if (
-                msg.event_type == EventType.HEARTBEAT_RELAY
+                msg.event_type == EventType.HEALTH_CHECK_RELAY
                 and isinstance(payload, dict)
-                and payload.get("heartbeat")
+                and payload.get("health_check")
             ):
-                content_str = str(payload.get("heartbeat"))
+                content_str = str(payload.get("health_check"))
 
             if not content_str.strip():
                 logger.warning("飞书发送：消息内容为空，跳过发送")
                 return
 
             request_id = str(msg.id or "").strip()
-            if request_id and msg.event_type != EventType.HEARTBEAT_RELAY:
+            if request_id and msg.event_type != EventType.HEALTH_CHECK_RELAY:
                 self._clear_group_progress_state(request_id)
 
             # 过滤群聊消息中的用户敏感信息
@@ -2192,8 +2192,8 @@ class FeishuChannel(BaseChannel):
         if event_name == "chat.interrupt_result":
             return self._extract_preferred_text(payload.get("message")) or "[状态] 任务已中断"
 
-        if event_name == "heartbeat.relay":
-            return self._extract_preferred_text(payload.get("heartbeat"))
+        if event_name == "health_check.relay":
+            return self._extract_preferred_text(payload.get("health_check"))
 
         # Gateway/Agent 响应在 payload.content，直接发送可能在 params.content
         content_str = (msg.params or {}).get("content") or payload.get("content") or ""
