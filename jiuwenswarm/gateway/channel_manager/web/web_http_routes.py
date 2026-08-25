@@ -59,6 +59,26 @@ _CONFIG_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     ),
 )
 
+_A2A_INGRESS_ROUTES: tuple[WebHttpMappedRoute, ...] = (
+    WebHttpMappedRoute("GET", "/a2a/ingress", "a2a.ingress.get", "a2a", "读取 A2A 入站服务状态"),
+    WebHttpMappedRoute(
+        "PATCH", "/a2a/ingress", "a2a.ingress.update", "a2a", "保存 A2A 入站配置",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/a2a/ingress:enable", "a2a.ingress.enable", "a2a", "启用 A2A 入站服务",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/a2a/ingress:disable", "a2a.ingress.disable", "a2a", "停用 A2A 入站服务",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/a2a/ingress:reload", "a2a.ingress.reload", "a2a", "重载 A2A 入站服务",
+        accept_body=True,
+    ),
+)
+
 _MODELS_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     WebHttpMappedRoute(
         "GET", "/models", "models.list",
@@ -128,6 +148,7 @@ _CRON_ROUTES: tuple[WebHttpMappedRoute, ...] = (
 
 SETTINGS_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     *_CONFIG_ROUTES,
+    *_A2A_INGRESS_ROUTES,
     *_MODELS_ROUTES,
     *_LOCALE_ROUTES,
     *_CRON_ROUTES,

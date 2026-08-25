@@ -1,0 +1,122 @@
+"""Typed configuration for the Gateway A2A ingress service."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, replace
+from enum import Enum
+from typing import Any
+
+
+class A2AIngressState(str, Enum):
+    DISABLED = "disabled"
+    STARTING = "starting"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    ERROR = "error"
+
+
+class A2AIngressError(RuntimeError):
+    """Stable error exposed by the ingress management API."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class A2AIngressConfig:
+    """Configuration retained from the existing ``A2A_SERVER_*`` contract."""
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 19100
+    rpc_path: str = "/a2a"
+    protocol_version: str = "1.0.0"
+    card_path: str = "/.well-known/agent-card.json"
+    extended_card_path: str = "/agent/authenticatedExtendedCard"
+    app_name: str = "JiuwenSwarm Gateway A2A Server"
+    app_description: str = "A2A ingress for JiuwenSwarm Gateway"
+    app_version: str = "0.1.0"
+    expose_reasoning: bool = True
+
+    def validate(self) -> "A2AIngressConfig":
+        if not self.host.strip():
+            raise A2AIngressError("A2A_CONFIG_INVALID", "A2A_SERVER_HOST cannot be empty")
+        if not 1 <= self.port <= 65535:
+            raise A2AIngressError("A2A_CONFIG_INVALID", "A2A_SERVER_PORT must be between 1 and 65535")
+        for name in ("rpc_path", "card_path", "extended_card_path"):
+            if not getattr(self, name).startswith("/"):
+                raise A2AIngressError("A2A_CONFIG_INVALID", f"{name} must start with /")
+        for name in ("protocol_version", "app_name", "app_version"):
+            if not getattr(self, name).strip():
+                raise A2AIngressError("A2A_CONFIG_INVALID", f"{name} cannot be empty")
+        return self
+
+    def with_patch(self, patch: dict[str, Any]) -> "A2AIngressConfig":
+        allowed = set(asdict(self))
+        unknown = set(patch) - allowed
+        if unknown:
+            raise A2AIngressError("A2A_CONFIG_INVALID", f"Unsupported fields: {', '.join(sorted(unknown))}")
+        values = asdict(self)
+        for name, value in patch.items():
+            if name == "port":
+                try:
+                    values[name] = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise A2AIngressError("A2A_CONFIG_INVALID", "port must be an integer") from exc
+            elif name in {"enabled", "expose_reasoning"}:
+                if not isinstance(value, bool):
+                    raise A2AIngressError("A2A_CONFIG_INVALID", f"{name} must be a boolean")
+                values[name] = value
+            elif value is None:
+                raise A2AIngressError("A2A_CONFIG_INVALID", f"{name} cannot be null")
+            else:
+                values[name] = str(value).strip()
+        return replace(self, **values).validate()
+
+    def to_channel_config(self):
+        """Create the unchanged protocol-adapter configuration."""
+        from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import (
+            A2AChannelConfig,
+        )
+
+        return A2AChannelConfig(
+            enabled=self.enabled,
+            host=self.host,
+            port=self.port,
+            rpc_path=self.rpc_path,
+            protocol_version=self.protocol_version,
+            card_path=self.card_path,
+            extended_card_path=self.extended_card_path,
+            app_name=self.app_name,
+            app_description=self.app_description,
+            app_version=self.app_version,
+            expose_reasoning=self.expose_reasoning,
+        )
+
+
+@dataclass(frozen=True)
+class A2AIngressSnapshot:
+    enabled: bool
+    state: A2AIngressState
+    desired_host: str
+    desired_port: int
+    desired_rpc_path: str
+    desired_card_path: str
+    desired_rpc_url: str
+    desired_card_url: str
+    effective_host: str | None
+    effective_port: int | None
+    effective_rpc_path: str | None
+    effective_card_path: str | None
+    effective_rpc_url: str | None
+    effective_card_url: str | None
+    exposure_warning: str | None
+    started_at: float | None
+    last_error: str | None
+    config_revision: int
+
+    def to_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["state"] = self.state.value
+        return result

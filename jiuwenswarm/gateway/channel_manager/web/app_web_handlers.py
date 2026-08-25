@@ -1425,6 +1425,7 @@ class WebHandlersBindParams:
     cron_controller: Any = None
     cron_registry: Any = None
     updater_service: UpdaterService | None = None
+    a2a_manager: Any = None
 
 
 def _attribute_session_project(
@@ -1594,6 +1595,54 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     cron_controller = bind.cron_controller
     cron_registry = bind.cron_registry or bind.cron_controller
     updater_service = bind.updater_service
+    a2a_manager = bind.a2a_manager
+
+    async def _send_a2a_snapshot(ws, req_id, operation) -> None:
+        if a2a_manager is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="A2A ingress manager is unavailable", code="A2A_BIND_FAILED"
+            )
+            return
+        try:
+            snapshot = await operation()
+        except Exception as exc:  # noqa: BLE001
+            code = str(getattr(exc, "code", "A2A_BIND_FAILED"))
+            payload = a2a_manager.snapshot().to_dict()
+            await channel.send_response(ws, req_id, ok=False, payload=payload, error=str(exc), code=code)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=snapshot.to_dict())
+
+    async def _a2a_snapshot_async(manager):
+        return manager.snapshot()
+
+    async def _a2a_ingress_get(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, lambda: _a2a_snapshot_async(a2a_manager))
+
+    async def _a2a_ingress_update(ws, req_id, params, session_id):
+        payload = params.get("config", params)
+        if not isinstance(payload, dict):
+            await channel.send_response(ws, req_id, ok=False, error="config must be an object", code="A2A_CONFIG_INVALID")
+            return
+        patch = dict(payload)
+        patch.pop("apply", None)
+        await _send_a2a_snapshot(
+            ws, req_id, lambda: a2a_manager.update(patch, apply=bool(params.get("apply", False)))
+        )
+
+    async def _a2a_ingress_enable(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, a2a_manager.enable)
+
+    async def _a2a_ingress_disable(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, a2a_manager.disable)
+
+    async def _a2a_ingress_reload(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, a2a_manager.reload)
+
+    channel.register_method("a2a.ingress.get", _a2a_ingress_get)
+    channel.register_method("a2a.ingress.update", _a2a_ingress_update)
+    channel.register_method("a2a.ingress.enable", _a2a_ingress_enable)
+    channel.register_method("a2a.ingress.disable", _a2a_ingress_disable)
+    channel.register_method("a2a.ingress.reload", _a2a_ingress_reload)
 
     from jiuwenswarm.common.schema.message import Message, EventType
 
