@@ -357,7 +357,8 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
     assert member_rail.bound_sink is registry
     assert member_rail.bound_team_id == "demo-team"
     assert member_rail.bound_member_role == "teammate"
-    assert "signal_trigger" not in member_rail.kwargs
+    assert member_rail.kwargs["signal_trigger"] is True
+    assert member_rail.kwargs["review_trigger"] is False
 
 
 @pytest.mark.parametrize(

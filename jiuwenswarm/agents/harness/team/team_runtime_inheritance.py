@@ -36,7 +36,11 @@ from jiuwenswarm.common.config import (
     get_config,
     get_evolution_auto_save_enabled,
     get_evolution_review_trigger_enabled,
+    get_passive_skill_evolution_triggers,
     get_skill_create_enabled,
+)
+from jiuwenswarm.agents.harness.observability_runtime import (
+    get_trajectory_span_processor,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
@@ -546,6 +550,7 @@ def build_skill_evolution_rail(
     try:
         llm, model_name = build_evolution_llm(config)
         review_runtime = review_runtime or EvolutionReviewRuntime()
+        evolution_triggers = get_passive_skill_evolution_triggers(config)
 
         rail = SkillEvolutionRail(
             skills_dir=skills_dir,
@@ -553,6 +558,9 @@ def build_skill_evolution_rail(
             model=model_name,
             review_runtime=review_runtime,
             auto_save=True,
+            signal_trigger=evolution_triggers["signal_trigger"],
+            review_trigger=evolution_triggers["review_trigger"],
+            trajectory_span_processor=get_trajectory_span_processor(),
             disabled_skills=merge_evolution_disabled_skills(
                 load_execution_disabled_skills()
             ),
