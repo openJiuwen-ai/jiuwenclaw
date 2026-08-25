@@ -3,6 +3,8 @@ export type SettingsSaveStatus = {
   operation: string | null;
   error: string | null;
 };
+export type SettingsSaveErrorScope = 'page' | 'caller';
+export type SettingsSaveOptions = { errorScope?: SettingsSaveErrorScope };
 type Listener = (status: SettingsSaveStatus) => void;
 
 const SAVE_SUCCESS_VISIBLE_MS = 2000;
@@ -19,7 +21,11 @@ export class SettingsSaveQueue {
     return () => this.listeners.delete(listener);
   }
   getSnapshot = (): SettingsSaveStatus => this.status;
-  enqueue<T>(operation: string, write: () => Promise<T>): Promise<T> {
+  enqueue<T>(
+    operation: string,
+    write: () => Promise<T>,
+    { errorScope = 'page' }: SettingsSaveOptions = {},
+  ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.tail = this.tail
         .catch(() => undefined)
@@ -30,7 +36,11 @@ export class SettingsSaveQueue {
             this.publish({ status: 'saved', operation, error: null });
             resolve(result);
           } catch (error) {
-            this.publish({ status: 'error', operation, error: error instanceof Error ? error.message : String(error) });
+            this.publish(
+              errorScope === 'page'
+                ? { status: 'error', operation, error: error instanceof Error ? error.message : String(error) }
+                : { status: 'idle', operation: null, error: null },
+            );
             reject(error);
           }
         });

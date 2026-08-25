@@ -12,9 +12,10 @@ import {
   type CodexDependencyInstallStatus,
   type ExternalCliConfigSaveResult,
 } from '../../../../components/ExternalCliAgentsSection';
-import { SettingRow } from '../../components';
+import { SettingRow, SettingsConfirmDialog } from '../../components';
 import type { SettingsCustomItemProps } from '../../registry/types';
 import { parseConfigBoolean } from '../../services/settingsContract';
+import { useSettingsFormDialogClose } from '../../services/useSettingsFormDialogClose';
 import { useSettingsServices } from '../../services/SettingsServicesProvider';
 import { useSettingsSource } from '../../services/SettingsSourceProvider';
 import { useUnsavedChanges } from '../../services/useUnsavedChanges';
@@ -56,6 +57,13 @@ function ProactiveLimitsDialog({
   const form = useForm({ initialValues: values });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
+  const closeBlocked = saving;
+  const { discardConfirmationOpen, requestClose, cancelDiscard, confirmDiscard } = useSettingsFormDialogClose({
+    id: 'proactive-limits-dialog',
+    form,
+    closeBlocked,
+    onClose,
+  });
   const validator = (value: unknown) =>
     /^\d+$/.test(String(value)) && Number(value) >= 1 && Number(value) <= 50
       ? undefined
@@ -74,44 +82,52 @@ function ProactiveLimitsDialog({
       setSaving(false);
     }
   };
-
   return (
-    <FormDialog
-      open
-      title={t('settingsPanel.experimental.proactiveLimits')}
-      submitting={saving}
-      confirmLabel={t('common.confirm')}
-      cancelLabel={t('common.cancel')}
-      onConfirm={() => void submit()}
-      onCancel={onClose}
-    >
-      <Form
-        form={form}
-        optionalText={t('common.optional')}
-        rules={{ daily: [{ validator }], rounds: [{ validator }] }}
-        items={[
-          {
-            name: 'daily',
-            label: t('settingsPanel.fields.proactive_recommendation_max_recommend_per_day.title'),
-            component: 'input',
-            type: 'number',
-            required: true,
-          },
-          {
-            name: 'rounds',
-            label: t('settingsPanel.fields.proactive_recommendation_max_rounds_per_tick.title'),
-            component: 'input',
-            type: 'number',
-            required: true,
-          },
-        ]}
+    <>
+      <FormDialog
+        open
+        title={t('settingsPanel.experimental.proactiveLimits')}
+        submitting={closeBlocked}
+        confirmLabel={t('common.confirm')}
+        cancelLabel={t('common.cancel')}
+        onConfirm={() => void submit()}
+        onCancel={requestClose}
+      >
+        <Form
+          form={form}
+          optionalText={t('common.optional')}
+          rules={{ daily: [{ validator }], rounds: [{ validator }] }}
+          items={[
+            {
+              name: 'daily',
+              label: t('settingsPanel.fields.proactive_recommendation_max_recommend_per_day.title'),
+              component: 'input',
+              type: 'number',
+              required: true,
+            },
+            {
+              name: 'rounds',
+              label: t('settingsPanel.fields.proactive_recommendation_max_rounds_per_tick.title'),
+              component: 'input',
+              type: 'number',
+              required: true,
+            },
+          ]}
+        />
+        {saveError ? (
+          <div className="settings-page__error" role="alert">
+            {saveError}
+          </div>
+        ) : null}
+      </FormDialog>
+      <SettingsConfirmDialog
+        open={discardConfirmationOpen}
+        title={t('settingsPanel.dialog.discardTitle')}
+        message={t('settingsPanel.dialog.discardConfirm')}
+        onConfirm={confirmDiscard}
+        onCancel={cancelDiscard}
       />
-      {saveError ? (
-        <div className="settings-page__error" role="alert">
-          {saveError}
-        </div>
-      ) : null}
-    </FormDialog>
+    </>
   );
 }
 

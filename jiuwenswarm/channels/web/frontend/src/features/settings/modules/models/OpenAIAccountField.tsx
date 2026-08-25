@@ -1,24 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Copy, ExternalLink, KeyRound, LogOut, RefreshCw } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Copy, ExternalLink, KeyRound, LogOut } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { ModelEntry } from '../../../../types';
-import { Button, Loading, Select } from '../../../../components/ui';
+import { Button } from '../../../../components/ui';
 import { OPENAI_ACCOUNT_RPC, type SettingsRequest } from '../../services/settingsContract';
+import { OPENAI_ACCOUNT_DEFAULT_API_BASE } from './modelAdapters';
 import './OpenAIAccountField.css';
 
-function SettingsBadge({
-  children,
-  tone = 'neutral',
-}: {
-  children: ReactNode;
-  tone?: 'neutral' | 'success' | 'warning';
-}) {
-  return <span className={`settings-oauth__badge settings-oauth__badge--${tone}`}>{children}</span>;
-}
-
-const SettingsButton = Button;
-
-const DEFAULT_API_BASE = 'https://chatgpt.com/backend-api/codex';
 const LOGIN_POLL_MINIMUM_MS = 15_000;
 const AUTH_REQUEST_TIMEOUT_MS = 45_000;
 const MODEL_REQUEST_TIMEOUT_MS = 75_000;
@@ -27,7 +15,10 @@ const LOGIN_START_TIMEOUT_MS = 90_000;
 type AuthStatus = {
   authenticated: boolean;
   auth_path?: string;
+  has_refresh_token?: boolean;
+  expires_at?: number | null;
   needs_refresh?: boolean;
+  error?: string | null;
   base_url?: string;
 };
 
@@ -37,6 +28,8 @@ type LoginPayload = {
   user_code: string;
   verification_uri: string;
   interval: number;
+  expires_in?: number;
+  expires_at?: number;
   auth?: AuthStatus;
 };
 
@@ -49,6 +42,8 @@ type PendingLoginPayload =
 
 type PollPayload = {
   status: 'pending' | 'authenticated' | 'expired' | 'error';
+  authenticated?: boolean;
+  expires_at?: number;
   auth?: AuthStatus;
   error?: string;
 };
@@ -59,6 +54,29 @@ type ModelsPayload = {
   auth?: AuthStatus;
 };
 
+export type OpenAIAccountController = {
+  status: AuthStatus | null;
+  login: LoginPayload | null;
+  modelOptions: string[];
+  authenticated: boolean;
+  loadingStatus: boolean;
+  loadingModels: boolean;
+  startingLogin: boolean;
+  pollingLogin: boolean;
+  loggingOut: boolean;
+  statusRetryable: boolean;
+  copied: boolean;
+  busy: boolean;
+  authError: string;
+  modelStatus: string;
+  modelStatusTone: 'neutral' | 'warning' | 'error';
+  retryStatus: () => Promise<void>;
+  refreshModels: () => Promise<void>;
+  startLogin: () => Promise<void>;
+  logout: () => Promise<void>;
+  copyCode: () => Promise<void>;
+};
+
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
@@ -67,35 +85,47 @@ function isRetriable(error: unknown): boolean {
   return error instanceof Error && (error as Error & { retriable?: boolean }).retriable === true;
 }
 
-export function OpenAIAccountSettings({
+export function useOpenAIAccountController({
+  active,
   model,
   connected,
-  disabled,
   request,
   onModelPatch,
-  onBlockingChange,
 }: {
+  active: boolean;
   model: ModelEntry;
   connected: boolean;
-  disabled: boolean;
   request: SettingsRequest;
   onModelPatch: (patch: Partial<ModelEntry>) => void;
-  onBlockingChange: (blocking: boolean) => void;
-}) {
+}): OpenAIAccountController {
   const { t } = useTranslation();
   const [status, setStatus] = useState<AuthStatus | null>(null);
   const [login, setLogin] = useState<LoginPayload | null>(null);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
-  const [loadingStatus, setLoadingStatus] = useState(true);
+  const [loadingStatus, setLoadingStatus] = useState(false);
   const [loadingModels, setLoadingModels] = useState(false);
+  const [modelsLoadedOnce, setModelsLoadedOnce] = useState(false);
   const [startingLogin, setStartingLogin] = useState(false);
   const [pollingLogin, setPollingLogin] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [statusRetryable, setStatusRetryable] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [modelsError, setModelsError] = useState('');
   const [copied, setCopied] = useState(false);
+  const activeRef = useRef(active);
+  const activeSessionRef = useRef(0);
   const modelRef = useRef(model);
   const statusRef = useRef<AuthStatus | null>(null);
+  const loginRef = useRef<LoginPayload | null>(null);
+  const pollingLoginRef = useRef(false);
+  const pollLoginOnceRef = useRef<(activeLogin: LoginPayload) => Promise<boolean>>(async () => true);
   const onModelPatchRef = useRef(onModelPatch);
+  const copiedTimerRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    activeRef.current = active;
+    activeSessionRef.current += 1;
+  }, [active]);
 
   useEffect(() => {
     modelRef.current = model;
@@ -106,172 +136,262 @@ export function OpenAIAccountSettings({
   }, [status]);
 
   useEffect(() => {
+    loginRef.current = login;
+  }, [login]);
+
+  useEffect(() => {
     onModelPatchRef.current = onModelPatch;
   }, [onModelPatch]);
 
+  useEffect(
+    () => () => {
+      if (copiedTimerRef.current !== undefined) window.clearTimeout(copiedTimerRef.current);
+    },
+    [],
+  );
+
   const applyProviderDefaults = useCallback((modelIds: string[] = [], baseUrl?: string) => {
+    if (!activeRef.current) return;
     const currentModelName = modelRef.current.model_name.trim();
     onModelPatchRef.current({
       model_provider: 'OpenAIAccount',
-      api_base: baseUrl || statusRef.current?.base_url || DEFAULT_API_BASE,
+      api_base: baseUrl || statusRef.current?.base_url || OPENAI_ACCOUNT_DEFAULT_API_BASE,
       api_key: '',
       model_name: currentModelName || modelIds[0] || '',
     });
   }, []);
 
-  const loadModels = useCallback(
-    async (baseUrl?: string) => {
-      setLoadingModels(true);
-      setError(null);
-      try {
-        const payload = await request<ModelsPayload>(
-          OPENAI_ACCOUNT_RPC.listModels,
-          {},
-          { timeoutMs: MODEL_REQUEST_TIMEOUT_MS },
-        );
-        const nextModels = Array.from(
-          new Set(
-            (payload.models ?? [])
-              .filter((name): name is string => typeof name === 'string')
-              .map((name) => name.trim())
-              .filter(Boolean),
-          ),
-        );
-        setModelOptions(nextModels);
-        if (payload.auth) setStatus(payload.auth);
-        applyProviderDefaults(nextModels, payload.base_url || baseUrl);
-        if (nextModels.length === 0) setError(t('config.openaiAccount.noModelsAvailable'));
-      } catch (loadError) {
-        setError(errorMessage(loadError, t('config.openaiAccount.modelsLoadFailed')));
-      } finally {
-        setLoadingModels(false);
+  const refreshModels = useCallback(async () => {
+    if (!activeRef.current || !connected) return;
+    const activeSession = activeSessionRef.current;
+    setModelsLoadedOnce(true);
+    setLoadingModels(true);
+    setModelsError('');
+    try {
+      const payload = await request<ModelsPayload>(
+        OPENAI_ACCOUNT_RPC.listModels,
+        {},
+        { timeoutMs: MODEL_REQUEST_TIMEOUT_MS },
+      );
+      if (!activeRef.current || activeSession !== activeSessionRef.current) return;
+      const nextModels = Array.from(
+        new Set(
+          (Array.isArray(payload.models) ? payload.models : [])
+            .filter((name): name is string => typeof name === 'string')
+            .map((name) => name.trim())
+            .filter(Boolean),
+        ),
+      );
+      setModelOptions(nextModels);
+      if (payload.auth) {
+        setStatus(payload.auth);
+        if (payload.auth.authenticated && !payload.auth.needs_refresh) setLogin(null);
       }
-    },
-    [applyProviderDefaults, request, t],
-  );
-
-  const completeAuthentication = useCallback(
-    async (nextStatus?: AuthStatus) => {
-      const resolvedStatus = nextStatus ?? statusRef.current;
-      if (resolvedStatus) setStatus(resolvedStatus);
-      setLogin(null);
-      await loadModels(resolvedStatus?.base_url);
-    },
-    [loadModels],
-  );
-
-  const pollLoginOnce = useCallback(
-    async (activeLogin: LoginPayload): Promise<boolean> => {
-      if (!connected) return true;
-      setPollingLogin(true);
-      setError(null);
-      try {
-        const payload = await request<PollPayload>(
-          OPENAI_ACCOUNT_RPC.pollLogin,
-          { login_id: activeLogin.login_id },
-          { timeoutMs: AUTH_REQUEST_TIMEOUT_MS },
-        );
-        if (payload.status === 'authenticated' || payload.auth?.authenticated) {
-          await completeAuthentication(payload.auth);
-          return true;
-        }
-        if (payload.status === 'expired') {
-          setLogin(null);
-          setError(t('config.openaiAccount.loginExpired'));
-          return true;
-        }
-        if (payload.status === 'error') {
-          setLogin(null);
-          setError(payload.error || t('config.openaiAccount.loginFailed'));
-          return true;
-        }
-        return false;
-      } catch (pollError) {
-        setError(errorMessage(pollError, t('config.openaiAccount.loginFailed')));
-        if (isRetriable(pollError)) return false;
-        setLogin(null);
-        return true;
-      } finally {
-        setPollingLogin(false);
+      applyProviderDefaults(nextModels, payload.base_url);
+      if (nextModels.length === 0) setModelsError(t('config.openaiAccount.noModelsAvailable'));
+    } catch (error) {
+      if (activeRef.current && activeSession === activeSessionRef.current) {
+        setModelsError(errorMessage(error, t('config.openaiAccount.modelsLoadFailed')));
       }
-    },
-    [completeAuthentication, connected, request, t],
-  );
+    } finally {
+      if (activeRef.current && activeSession === activeSessionRef.current) setLoadingModels(false);
+    }
+  }, [applyProviderDefaults, connected, request, t]);
 
   const restoreAuth = useCallback(async () => {
+    const activeSession = activeSessionRef.current;
     if (!connected) {
+      setStatus(null);
+      setLogin(null);
       setLoadingStatus(false);
+      setStatusRetryable(false);
       return;
     }
     setLoadingStatus(true);
-    setError(null);
+    setStatusRetryable(false);
+    setAuthError('');
     try {
       const payload = await request<PendingLoginPayload>(
         OPENAI_ACCOUNT_RPC.pendingLogin,
         {},
         { timeoutMs: AUTH_REQUEST_TIMEOUT_MS },
       );
+      if (!activeRef.current || activeSession !== activeSessionRef.current) return;
       const nextStatus = payload.auth ?? null;
       setStatus(nextStatus);
       if (payload.status === 'pending') {
         setLogin(payload);
-      } else if (nextStatus?.authenticated) {
-        await loadModels(nextStatus.base_url);
+      } else {
+        setLogin(null);
+        if (nextStatus?.authenticated) await refreshModels();
       }
-    } catch (statusError) {
-      setError(errorMessage(statusError, t('config.openaiAccount.statusFailed')));
+    } catch (error) {
+      if (activeRef.current && activeSession === activeSessionRef.current) {
+        setAuthError(errorMessage(error, t('config.openaiAccount.statusFailed')));
+        setStatusRetryable(true);
+      }
     } finally {
-      setLoadingStatus(false);
+      if (activeRef.current && activeSession === activeSessionRef.current) setLoadingStatus(false);
     }
-  }, [connected, loadModels, request, t]);
+  }, [connected, refreshModels, request, t]);
 
   useEffect(() => {
-    void restoreAuth();
-  }, [restoreAuth]);
-
-  useEffect(() => {
-    if (!login || !connected) return undefined;
-    let cancelled = false;
-    let timer: number | undefined;
-    const delay = Math.max(LOGIN_POLL_MINIMUM_MS, login.interval * 1000);
-    const run = async () => {
-      const finished = await pollLoginOnce(login);
-      if (!cancelled && !finished) timer = window.setTimeout(run, delay);
-    };
-    timer = window.setTimeout(run, delay);
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [connected, login, pollLoginOnce]);
-
-  const refreshStatus = async () => {
-    if (!connected) return;
-    if (login) {
-      await pollLoginOnce(login);
+    if (!active) {
+      setStatus(null);
+      setLogin(null);
+      setModelOptions([]);
+      setModelsLoadedOnce(false);
+      setLoadingStatus(false);
+      setLoadingModels(false);
+      setStartingLogin(false);
+      setPollingLogin(false);
+      setLoggingOut(false);
+      setStatusRetryable(false);
+      setAuthError('');
+      setModelsError('');
+      setCopied(false);
       return;
     }
-    setLoadingStatus(true);
-    setError(null);
-    try {
-      const nextStatus = await request<AuthStatus>(
-        OPENAI_ACCOUNT_RPC.status,
-        {},
-        { timeoutMs: AUTH_REQUEST_TIMEOUT_MS },
-      );
-      setStatus(nextStatus);
-      if (nextStatus.authenticated) await loadModels(nextStatus.base_url);
-    } catch (statusError) {
-      setError(errorMessage(statusError, t('config.openaiAccount.statusFailed')));
-    } finally {
-      setLoadingStatus(false);
-    }
-  };
+    void restoreAuth();
+  }, [active, restoreAuth]);
 
-  const startLogin = async () => {
-    if (!connected) return;
+  const pollLoginOnce = useCallback(
+    async (activeLogin: LoginPayload): Promise<boolean> => {
+      if (!connected || pollingLoginRef.current) return !connected;
+      const activeSession = activeSessionRef.current;
+      pollingLoginRef.current = true;
+      setPollingLogin(true);
+      setAuthError('');
+      try {
+        const payload = await request<PollPayload>(
+          OPENAI_ACCOUNT_RPC.pollLogin,
+          { login_id: activeLogin.login_id },
+          { timeoutMs: AUTH_REQUEST_TIMEOUT_MS },
+        );
+        if (!activeRef.current || activeSession !== activeSessionRef.current) return true;
+        if (payload.status === 'authenticated' || (payload.auth?.authenticated && !payload.auth.needs_refresh)) {
+          setStatus(payload.auth ?? { authenticated: true });
+          setLogin(null);
+          await refreshModels();
+          return true;
+        }
+        if (payload.status === 'expired') {
+          setLogin(null);
+          setAuthError(t('config.openaiAccount.loginExpired'));
+          return true;
+        }
+        if (payload.status === 'error') {
+          setLogin(null);
+          setAuthError(payload.error || t('config.openaiAccount.loginFailed'));
+          return true;
+        }
+        if (payload.auth) setStatus(payload.auth);
+        return false;
+      } catch (error) {
+        if (!activeRef.current || activeSession !== activeSessionRef.current) return true;
+        setAuthError(errorMessage(error, t('config.openaiAccount.loginFailed')));
+        if (isRetriable(error)) return false;
+        setLogin(null);
+        return true;
+      } finally {
+        pollingLoginRef.current = false;
+        if (activeRef.current && activeSession === activeSessionRef.current) setPollingLogin(false);
+      }
+    },
+    [connected, refreshModels, request, t],
+  );
+
+  useEffect(() => {
+    pollLoginOnceRef.current = pollLoginOnce;
+  }, [pollLoginOnce]);
+
+  useEffect(() => {
+    if (!active || !login || !connected) return undefined;
+    let cancelled = false;
+    let timer: number | undefined;
+    let resumeTimers: number[] = [];
+    let pendingPoll = false;
+    let nextPollAt = 0;
+    const delayMs = Math.max(LOGIN_POLL_MINIMUM_MS, (login.interval || 0) * 1000);
+    const canPoll = () => document.visibilityState === 'visible' && document.hasFocus();
+    const clearTimer = () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+    const clearResumeTimers = () => {
+      resumeTimers.forEach((timerId) => window.clearTimeout(timerId));
+      resumeTimers = [];
+    };
+    const scheduleNextPoll = (delay = delayMs) => {
+      clearTimer();
+      pendingPoll = false;
+      nextPollAt = Date.now() + delay;
+      timer = window.setTimeout(onPollDue, delay);
+    };
+    const runPoll = async () => {
+      clearTimer();
+      pendingPoll = false;
+      nextPollAt = 0;
+      const activeLogin = loginRef.current;
+      if (!activeLogin) return;
+      const finished = await pollLoginOnceRef.current(activeLogin);
+      if (!cancelled && !finished) scheduleNextPoll();
+    };
+    const onPollDue = () => {
+      timer = undefined;
+      nextPollAt = 0;
+      if (!canPoll()) {
+        pendingPoll = true;
+        return;
+      }
+      void runPoll();
+    };
+    const tryResumePoll = () => {
+      if (cancelled || !canPoll()) return;
+      if (pendingPoll || (timer !== undefined && nextPollAt > 0 && Date.now() >= nextPollAt)) {
+        void runPoll();
+      } else if (timer === undefined && nextPollAt > Date.now()) {
+        scheduleNextPoll(nextPollAt - Date.now());
+      }
+    };
+    const resumeWhenFocused = () => {
+      clearResumeTimers();
+      tryResumePoll();
+      [100, 500].forEach((delay) => {
+        resumeTimers.push(window.setTimeout(tryResumePoll, delay));
+      });
+    };
+    scheduleNextPoll();
+    window.addEventListener('focus', resumeWhenFocused);
+    window.addEventListener('pageshow', resumeWhenFocused);
+    document.addEventListener('focusin', resumeWhenFocused);
+    document.addEventListener('visibilitychange', resumeWhenFocused);
+    document.addEventListener('pointerdown', resumeWhenFocused);
+    document.addEventListener('keydown', resumeWhenFocused);
+    return () => {
+      cancelled = true;
+      clearTimer();
+      clearResumeTimers();
+      window.removeEventListener('focus', resumeWhenFocused);
+      window.removeEventListener('pageshow', resumeWhenFocused);
+      document.removeEventListener('focusin', resumeWhenFocused);
+      document.removeEventListener('visibilitychange', resumeWhenFocused);
+      document.removeEventListener('pointerdown', resumeWhenFocused);
+      document.removeEventListener('keydown', resumeWhenFocused);
+    };
+  }, [active, connected, login?.interval, login?.login_id]);
+
+  const startLogin = useCallback(async () => {
+    if (!connected) {
+      setAuthError(t('config.openaiAccount.needConnection'));
+      return;
+    }
     setStartingLogin(true);
-    setError(null);
+    const activeSession = activeSessionRef.current;
+    setStatusRetryable(false);
+    setAuthError('');
     setCopied(false);
     applyProviderDefaults();
     try {
@@ -280,157 +400,223 @@ export function OpenAIAccountSettings({
         {},
         { timeoutMs: LOGIN_START_TIMEOUT_MS },
       );
+      if (!activeRef.current || activeSession !== activeSessionRef.current) return;
       setLogin(payload);
       if (payload.auth) setStatus(payload.auth);
       window.open(payload.verification_uri, '_blank', 'noopener,noreferrer');
-    } catch (loginError) {
-      setError(errorMessage(loginError, t('config.openaiAccount.loginFailed')));
+    } catch (error) {
+      if (activeRef.current && activeSession === activeSessionRef.current) {
+        setAuthError(errorMessage(error, t('config.openaiAccount.loginFailed')));
+      }
     } finally {
-      setStartingLogin(false);
+      if (activeRef.current && activeSession === activeSessionRef.current) setStartingLogin(false);
     }
-  };
+  }, [applyProviderDefaults, connected, request, t]);
 
-  const logout = async () => {
+  const logout = useCallback(async () => {
     if (!connected) return;
+    const activeSession = activeSessionRef.current;
     setLoggingOut(true);
-    setError(null);
+    setStatusRetryable(false);
+    setAuthError('');
     try {
       const payload = await request<{ auth?: AuthStatus }>(
         OPENAI_ACCOUNT_RPC.logout,
         {},
         { timeoutMs: AUTH_REQUEST_TIMEOUT_MS },
       );
+      if (!activeRef.current || activeSession !== activeSessionRef.current) return;
       setStatus(payload.auth ?? null);
       setLogin(null);
       setModelOptions([]);
-    } catch (logoutError) {
-      setError(errorMessage(logoutError, t('config.openaiAccount.logoutFailed')));
+      setModelsLoadedOnce(false);
+    } catch (error) {
+      if (activeRef.current && activeSession === activeSessionRef.current) {
+        setAuthError(errorMessage(error, t('config.openaiAccount.logoutFailed')));
+      }
     } finally {
-      setLoggingOut(false);
+      if (activeRef.current && activeSession === activeSessionRef.current) setLoggingOut(false);
     }
-  };
+  }, [connected, request, t]);
 
-  const copyCode = async () => {
-    if (!login) return;
+  const copyCode = useCallback(async () => {
+    if (!login?.user_code) return;
     try {
       await navigator.clipboard.writeText(login.user_code);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      setAuthError('');
+      if (copiedTimerRef.current !== undefined) window.clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = window.setTimeout(() => {
+        setCopied(false);
+        copiedTimerRef.current = undefined;
+      }, 2000);
     } catch {
-      setError(t('config.openaiAccount.copyFailed'));
+      setCopied(false);
+      setAuthError(t('config.openaiAccount.copyFailed'));
     }
-  };
+  }, [login?.user_code, t]);
 
-  const visibleModelOptions = useMemo(
+  const normalizedModelOptions = useMemo(
     () => Array.from(new Set(modelOptions.map((name) => name.trim()).filter(Boolean))),
     [modelOptions],
   );
-  const authenticated = Boolean(status?.authenticated && !status.needs_refresh);
-  const selectedModel = visibleModelOptions.includes(model.model_name.trim()) ? model.model_name.trim() : '';
+  const currentModelName = model.model_name.trim();
+  const hasStoredAuth = Boolean(status?.authenticated);
+  const authenticated = Boolean(hasStoredAuth && !status?.needs_refresh);
+  const configuredModelUnavailable = Boolean(
+    currentModelName && !normalizedModelOptions.includes(currentModelName) && modelsLoadedOnce && !loadingModels,
+  );
+  const modelStatusTone: OpenAIAccountController['modelStatusTone'] = modelsError
+    ? 'error'
+    : configuredModelUnavailable || (!authenticated && Boolean(currentModelName))
+      ? 'warning'
+      : 'neutral';
+  const modelStatus = loadingModels
+    ? t('config.openaiAccount.loadingModels')
+    : modelsError
+      ? modelsError
+      : !authenticated
+        ? t('config.openaiAccount.needLoginForModel')
+        : configuredModelUnavailable
+          ? t('config.openaiAccount.configuredModelUnavailable', { model: currentModelName })
+          : modelsLoadedOnce
+            ? t('config.openaiAccount.modelsLoaded', { count: normalizedModelOptions.length })
+            : '';
   const localBusy = loadingStatus || loadingModels || startingLogin || pollingLogin || loggingOut;
-  const blocking = localBusy || Boolean(login);
 
-  useEffect(() => {
-    onBlockingChange(blocking);
-    return () => onBlockingChange(false);
-  }, [blocking, onBlockingChange]);
+  return {
+    status,
+    login,
+    modelOptions: normalizedModelOptions,
+    authenticated,
+    loadingStatus,
+    loadingModels,
+    startingLogin,
+    pollingLogin,
+    loggingOut,
+    statusRetryable,
+    copied,
+    busy: active && localBusy,
+    authError,
+    modelStatus,
+    modelStatusTone,
+    retryStatus: restoreAuth,
+    refreshModels,
+    startLogin,
+    logout,
+    copyCode,
+  };
+}
+
+export function OpenAIAccountSettings({
+  controller,
+  connected,
+  disabled,
+  onRequestLogout,
+}: {
+  controller: OpenAIAccountController;
+  connected: boolean;
+  disabled: boolean;
+  onRequestLogout: () => void;
+}) {
+  const { t } = useTranslation();
+  const { status, login } = controller;
+  const statusTone = controller.authenticated ? 'success' : status?.needs_refresh ? 'warning' : 'neutral';
+  const statusLabel = login
+    ? t('config.openaiAccount.waitingAuth')
+    : controller.authenticated
+      ? t('config.openaiAccount.connected')
+      : status?.needs_refresh
+        ? t('config.openaiAccount.refreshNeeded')
+        : t('config.openaiAccount.notConnected');
 
   return (
-    <section className="settings-oauth" aria-label={t('config.openaiAccount.title')}>
+    <section
+      className="settings-oauth"
+      aria-label={t('config.openaiAccount.title')}
+      data-testid="settings-openai-account"
+    >
       <div className="settings-oauth__header">
         <div className="settings-oauth__identity">
-          <span className="settings-oauth__mark" aria-hidden>
-            OpenAI
-          </span>
-          <div>
-            <strong>{t('config.openaiAccount.title')}</strong>
-            <span>
-              {status?.auth_path
-                ? t('config.openaiAccount.statusAuthPath', { path: status.auth_path })
-                : t('config.openaiAccount.description')}
+          <div className="settings-oauth__title-row">
+            <span className="settings-oauth__status" data-tone={statusTone}>
+              <i aria-hidden />
+              {statusLabel}
             </span>
           </div>
+          {status?.auth_path ? (
+            <span className="settings-oauth__auth-path" title={status.auth_path}>
+              {t('config.openaiAccount.statusAuthPath', { path: status.auth_path })}
+            </span>
+          ) : null}
         </div>
         <div className="settings-oauth__actions">
-          <SettingsBadge tone={authenticated ? 'success' : status?.needs_refresh ? 'warning' : 'neutral'}>
-            {authenticated
-              ? t('config.openaiAccount.connected')
-              : status?.needs_refresh
-                ? t('config.openaiAccount.refreshNeeded')
-                : t('config.openaiAccount.notConnected')}
-          </SettingsBadge>
-          <SettingsButton
-            variant="quiet"
-            disabled={disabled || !connected || localBusy}
-            onClick={() => void refreshStatus()}
-          >
-            {loadingStatus || pollingLogin ? <Loading size="sm" aria-label="" /> : <RefreshCw size={14} />}
-            {t('config.openaiAccount.refresh')}
-          </SettingsButton>
-          {authenticated ? (
-            <SettingsButton
+          {controller.authenticated ? (
+            <Button
               variant="quiet"
-              disabled={disabled || !connected || localBusy}
-              onClick={() => void logout()}
+              size="sm"
+              icon={<LogOut aria-hidden />}
+              disabled={disabled || !connected || controller.loggingOut}
+              onClick={onRequestLogout}
             >
-              {loggingOut ? <Loading size="sm" aria-label="" /> : <LogOut size={14} />}
               {t('config.openaiAccount.logout')}
-            </SettingsButton>
+            </Button>
           ) : (
-            <SettingsButton
+            <Button
               variant="primary"
-              disabled={disabled || !connected || localBusy || Boolean(login)}
-              onClick={() => void startLogin()}
+              size="sm"
+              icon={<KeyRound aria-hidden />}
+              loading={controller.startingLogin}
+              disabled={disabled || !connected || Boolean(login) || controller.loadingStatus}
+              onClick={() => void controller.startLogin()}
             >
-              {startingLogin ? <Loading size="sm" aria-label="" /> : <KeyRound size={14} />}
               {login ? t('config.openaiAccount.waitingAuth') : t('config.openaiAccount.connect')}
-            </SettingsButton>
+            </Button>
           )}
         </div>
       </div>
 
-      <label className="settings-oauth__model-field">
-        <span>{t('config.openaiAccount.modelSelectLabel')}</span>
-        <Select
-          aria-label={t('config.openaiAccount.modelSelectLabel')}
-          value={selectedModel}
-          disabled={disabled || !authenticated || loadingModels || visibleModelOptions.length === 0}
-          onChange={(model_name) => onModelPatch({ model_name })}
-          options={[
-            ...(!selectedModel ? [{ value: '', label: t('config.openaiAccount.modelSelectPlaceholder') }] : []),
-            ...visibleModelOptions.map((modelId) => ({ value: modelId, label: modelId })),
-          ]}
-        />
-        <small>
-          {loadingModels
-            ? t('config.openaiAccount.loadingModels')
-            : t('config.openaiAccount.modelsLoaded', { count: visibleModelOptions.length })}
-        </small>
-      </label>
-
       {login ? (
-        <div className="settings-oauth__login">
-          <div>
+        <div className="settings-oauth__login" data-testid="settings-openai-account-login-code">
+          <div className="settings-oauth__code">
             <span>{t('config.openaiAccount.authCodeLabel')}</span>
             <strong>{login.user_code}</strong>
+          </div>
+          <div className="settings-oauth__login-copy">
+            <span>{t('config.openaiAccount.waiting')}</span>
             <small>{t('config.openaiAccount.loginTimeHint')}</small>
           </div>
           <div className="settings-oauth__actions">
-            <SettingsButton onClick={() => window.open(login.verification_uri, '_blank', 'noopener,noreferrer')}>
-              <ExternalLink size={14} />
+            <Button
+              size="sm"
+              icon={<ExternalLink aria-hidden />}
+              onClick={() => window.open(login.verification_uri, '_blank', 'noopener,noreferrer')}
+            >
               {t('config.openaiAccount.openAuthPage')}
-            </SettingsButton>
-            <SettingsButton onClick={() => void copyCode()}>
-              <Copy size={14} />
-              {copied ? t('config.openaiAccount.copied') : t('config.openaiAccount.copyCode')}
-            </SettingsButton>
+            </Button>
+            <Button size="sm" icon={<Copy aria-hidden />} onClick={() => void controller.copyCode()}>
+              {controller.copied ? t('config.openaiAccount.copied') : t('config.openaiAccount.copyCode')}
+            </Button>
           </div>
         </div>
       ) : null}
 
-      {error ? (
-        <div className="settings-oauth__error" role="alert">
-          {error}
+      {controller.authError ? (
+        <div className="settings-oauth__error-row">
+          <div className="settings-oauth__error" role="alert">
+            {controller.authError}
+          </div>
+          {controller.statusRetryable ? (
+            <Button
+              variant="quiet"
+              size="sm"
+              loading={controller.loadingStatus}
+              disabled={disabled || !connected || controller.loadingStatus}
+              onClick={() => void controller.retryStatus()}
+            >
+              {t('settingsPanel.feedback.retry')}
+            </Button>
+          ) : null}
         </div>
       ) : null}
     </section>

@@ -1,7 +1,7 @@
 import { useId, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { Button, Dialog } from '../../../components/ui';
+import { Button, Dialog, type ButtonProps } from '../../../components/ui';
 import './SettingsConfirmDialog.css';
 
 type SettingsConfirmDialogProps = {
@@ -12,6 +12,7 @@ type SettingsConfirmDialogProps = {
   error?: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  confirmVariant?: ButtonProps['variant'];
   onConfirm: () => void;
   onCancel: () => void;
 };
@@ -24,6 +25,7 @@ export function SettingsConfirmDialog({
   error,
   confirmLabel,
   cancelLabel,
+  confirmVariant = 'primary',
   onConfirm,
   onCancel,
 }: SettingsConfirmDialogProps) {
@@ -58,7 +60,7 @@ export function SettingsConfirmDialog({
           <Button disabled={confirming} onClick={onCancel}>
             {cancelLabel ?? t('common.cancel')}
           </Button>
-          <Button variant="primary" loading={confirming} onClick={onConfirm}>
+          <Button variant={confirmVariant} loading={confirming} onClick={onConfirm}>
             {confirmLabel ?? t('common.confirm')}
           </Button>
         </footer>

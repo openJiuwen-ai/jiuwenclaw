@@ -4,7 +4,6 @@ import type { SettingsModuleDefinition } from '../../registry/types';
 export const browserModule: SettingsModuleDefinition = {
   id: 'browser',
   titleKey: 'settingsPanel.categories.browser',
-  descriptionKey: 'settingsPanel.moduleDescriptions.browser',
   icon: settingsNavigationIcons.browser,
   source: 'browser',
   sections: [

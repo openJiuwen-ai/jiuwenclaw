@@ -28,6 +28,7 @@ export type FormFieldRenderProps<TValue> = {
 type FormItemBase<TValues extends FormValues, TName extends keyof TValues> = {
   name: TName;
   label: ReactNode;
+  labelAction?: ReactNode;
   required?: boolean;
   helpTips?: string;
   disabled?: boolean;

@@ -8,3 +8,4 @@ export { RadioGroup, type RadioOption } from './RadioGroup/RadioGroup';
 export { HelpTips } from './HelpTips/HelpTips';
 export { Loading } from './Loading/Loading';
 export { Dialog } from './Dialog/Dialog';
+export { Tag, type TagProps, type TagVariant } from './Tag/Tag';

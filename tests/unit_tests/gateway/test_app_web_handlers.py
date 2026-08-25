@@ -766,6 +766,7 @@ async def test_models_list_returns_exact_vendor_identity(monkeypatch) -> None:
     await channel.methods["models.list"](object(), "req-models", {}, "session-1")
 
     model = channel.responses[-1]["payload"]["models"][0]
+    assert channel.responses[-1]["ok"] is True
     assert model["vendor_key"] == "alibaba"
     assert model["plan"] == "token_plan"
 

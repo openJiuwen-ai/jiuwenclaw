@@ -302,7 +302,14 @@ test('registry definition preserves the fixed six-module order and fails invalid
         titleKey: 'settings.a',
         descriptionKey: 'settings.aDescription',
         icon: item,
-        sections: [{ id: 's', items: [{ id: 'item', component: 'custom', render: item }] }],
+        sections: [
+          {
+            id: 's',
+            titleKey: 'settings.section',
+            descriptionKey: 'settings.sectionDescription',
+            items: [{ id: 'item', component: 'custom', render: item }],
+          },
+        ],
       },
     ],
   });
@@ -310,6 +317,50 @@ test('registry definition preserves the fixed six-module order and fails invalid
     () => validateSettingsI18n(localizedDefinition, (key) => key === 'settings.a'),
     /Missing settings i18n key: settings\.aDescription/,
   );
+  assert.throws(
+    () =>
+      validateSettingsI18n(localizedDefinition, (key) =>
+        ['settings.a', 'settings.aDescription', 'settings.section'].includes(key),
+      ),
+    /Missing settings i18n key: settings\.sectionDescription/,
+  );
+});
+
+test('current Settings titles omit descriptions while the shared API retains optional support', () => {
+  const descriptionKeys = [
+    'settingsPanel.moduleDescriptions',
+    'settingsPanel.models.freeModelsDescription',
+    'settingsPanel.models.primaryModelsDescription',
+    'settingsPanel.agent.skillsDescription',
+    'settingsPanel.agent.webSearchDescription',
+    'settingsPanel.agent.mediaToolsDescription',
+    'settingsPanel.agent.teamDescription',
+    'settingsPanel.experimental.externalCliAgentsDescription',
+    'settingsPanel.experimental.a2uiDescription',
+    'settingsPanel.experimental.proactiveDescription',
+  ];
+  for (const locale of [zh, en]) {
+    for (const key of descriptionKeys) assert.equal(translationAt(locale, key), undefined, `${key} must be absent`);
+  }
+
+  const registrySources = [
+    'src/features/settings/modules/general/definition.ts',
+    'src/features/settings/modules/models/definition.ts',
+    'src/features/settings/modules/agent/definition.ts',
+    'src/features/settings/modules/browser/definition.ts',
+    'src/features/settings/modules/experimental/definition.ts',
+  ];
+  for (const path of registrySources)
+    assert.doesNotMatch(source(path), /\bdescriptionKey\b/, `${path} must not expose descriptions`);
+  const registryTypes = source('src/features/settings/registry/types.ts');
+  const pageLayout = source('src/features/settings/SettingsPageLayout.tsx');
+  const section = source('src/features/settings/components/SettingsSection.tsx');
+  assert.match(registryTypes, /interface SettingsSectionDefinition[\s\S]*descriptionKey\?: I18nKey/);
+  assert.match(registryTypes, /interface SettingsModuleDefinition[\s\S]*descriptionKey\?: I18nKey/);
+  assert.match(pageLayout, /active\.module\.descriptionKey/);
+  assert.match(pageLayout, /section\.descriptionKey/);
+  assert.match(section, /description\?: ReactNode/);
+  assert.match(section, /description \? <p>\{description\}<\/p>/);
 });
 
 test('simple Settings definitions reject unknown sources and derive required i18n keys', () => {
@@ -848,6 +899,27 @@ test('Settings save queue exposes failed writes for the persistent page-level er
   });
 });
 
+test('Settings save queue keeps caller-scoped failures out of the page-level status', async () => {
+  const queue = new SettingsSaveQueue();
+
+  await assert.rejects(
+    queue.enqueue(
+      'model.add',
+      async () => {
+        throw new Error('dialog save failed');
+      },
+      { errorScope: 'caller' },
+    ),
+    /dialog save failed/,
+  );
+
+  assert.deepEqual(queue.getSnapshot(), {
+    status: 'idle',
+    operation: null,
+    error: null,
+  });
+});
+
 test('Settings request router uses exact method ownership and rejects ambiguous or unknown methods', async () => {
   const calls = [];
   const openSourceRequest = async (method) => {
@@ -907,6 +979,7 @@ test('settings contract rejects unknown keys and normalizes supported values', (
       api_base: 'https://example.test',
       api_key: 'k',
       model_provider: 'OpenAI',
+      endpoint_profile: 'openrouter',
     }),
     {
       api_base: 'https://example.test',
@@ -914,6 +987,7 @@ test('settings contract rejects unknown keys and normalizes supported values', (
       model: 'm',
       model_provider: 'OpenAI',
       reasoning_level: undefined,
+      endpoint_profile: 'openrouter',
     },
   );
   assert.equal(normalizePermissionLevel(' ASK '), 'ask');
@@ -1064,23 +1138,58 @@ test('every visible Settings control maps to an exact persistence field or RPC',
   }
 });
 
-test('reachable Settings dialog confirmations are not disabled by unchanged drafts', () => {
-  for (const path of [
-    'src/features/settings/modules/agent/AgentSettings.tsx',
-    'src/features/settings/modules/experimental/ExperimentalSettings.tsx',
+test('Settings form dialogs share the same dirty-close contract without disabling save', () => {
+  const closeHook = source('src/features/settings/services/useSettingsFormDialogClose.ts');
+  assert.match(closeHook, /const \{ hasUnsavedChanges \} = useFormState\(form\)/);
+  assert.match(closeHook, /useUnsavedChanges\(id, hasUnsavedChanges\)/);
+  assert.match(closeHook, /function requestClose\(\): void \{[\s\S]{0,220}hasUnsavedChanges[\s\S]{0,160}onClose\(\)/);
+  assert.match(closeHook, /function cancelDiscard\(\): void \{\s*setDiscardConfirmationOpen\(false\)/);
+  assert.match(
+    closeHook,
+    /function confirmDiscard\(\): void \{\s*form\.reset\(\);\s*setDiscardConfirmationOpen\(false\);\s*onClose\(\)/,
+  );
+
+  for (const { path, id } of [
+    { path: 'src/features/settings/modules/agent/AgentSettings.tsx', id: 'agent-config-dialog' },
+    { path: 'src/features/settings/modules/experimental/ExperimentalSettings.tsx', id: 'proactive-limits-dialog' },
+    { path: 'src/features/settings/modules/models/ModelDialog.tsx', id: 'model-dialog' },
   ]) {
     const module = source(path);
     assert.doesNotMatch(module, /confirmDisabled=\{!hasUnsavedChanges\}/);
-    assert.doesNotMatch(module, /useFormState/);
+    assert.match(
+      module,
+      new RegExp(`useSettingsFormDialogClose\\(\\{[\\s\\S]{0,120}id: '${id}'[\\s\\S]{0,180}onClose`),
+    );
+    assert.doesNotMatch(module, /setDiscardConfirmationOpen/);
+    assert.match(module, /<FormDialog[\s\S]{0,900}onCancel=\{requestClose\}/);
+    assert.match(
+      module,
+      /<SettingsConfirmDialog\s+open=\{discardConfirmationOpen\}[\s\S]{0,260}onConfirm=\{confirmDiscard\}\s+onCancel=\{cancelDiscard\}/,
+    );
   }
 
   const channelDialog = source('src/features/settings/modules/channels/components/ChannelConfigDialog.tsx');
   const channelFormHook = source('src/features/settings/modules/channels/useChannelForm.ts');
+  const channelController = source('src/features/settings/modules/channels/useSettingsChannelsController.ts');
   assert.match(channelDialog, /confirmDisabled=\{!isConnected\}/);
   assert.doesNotMatch(channelDialog, /confirmDisabled=\{[^}]*hasUnsavedChanges/);
   assert.match(
     channelFormHook,
     /const save = useCallback\(async \(\) => \{\s*const validation = form\.validate\(\);[\s\S]*return persistPayload\(buildPayload\(validation\.values\), savedMessage\)/s,
+  );
+  assert.match(channelController, /feishu\.form\.setFieldValue\('apps', \[\.\.\.apps, nextApp\]\)/);
+  assert.match(channelController, /setActiveDialogBaseline\(feishu\.form\.getValues\(\)\)/);
+  assert.match(
+    channelController,
+    /const hasActiveDialogChanges = activeDialogBaseline\s*\? !deepEqual\(activeController\.form\.getValues\(\), activeDialogBaseline\)\s*: activeController\.hasUnsavedChanges/,
+  );
+  assert.match(
+    channelController,
+    /function resetActiveDialog\(\): void \{\s*activeController\.reset\(\);\s*setActiveDialogBaseline\(null\)/,
+  );
+  assert.match(
+    channelController,
+    /const closeDialog = \(\) => \{[\s\S]{0,240}resetActiveDialog\(\);\s*setDialogOpen\(false\)/,
   );
 });
 
@@ -1156,10 +1265,7 @@ test('SettingRow exposes a business-agnostic subSettings slot for dependent rows
   assert.match(browserDefinition, /\{ value: true, labelKey: 'settingsPanel\.browser\.headless' \}/);
   assert.match(browserDefinition, /\{ value: 'auto', labelKey: 'browser\.browserTypeAuto' \}/);
   assert.match(browserDefinition, /\{ value: 'chrome', labelKey: 'browser\.browserTypeChrome' \}/);
-  assert.match(
-    browserDefinition,
-    /\{ value: 'msedge', labelKey: 'browser\.browserTypeEdge' \}/,
-  );
+  assert.match(browserDefinition, /\{ value: 'msedge', labelKey: 'browser\.browserTypeEdge' \}/);
   assert.match(sourceProvider, /request<Record<string, unknown>>\('path\.get'\)/);
   assert.match(sourceProvider, /request<Record<string, unknown>>\('path\.set', next/);
   assert.doesNotMatch(sourceProvider, /enabled|onlyEnabled/);
@@ -1174,30 +1280,51 @@ test('SettingRow exposes a business-agnostic subSettings slot for dependent rows
   assert.match(itemRenderer, /common\.modify/);
 });
 
-test('general connection status matches the high-fidelity badge geometry and palette', () => {
+test('Settings tags use the shared UI Tag component and semantic variants', () => {
   const settingsPageCss = source('src/features/settings/SettingsPage.css');
+  const tagSource = source('src/components/ui/Tag/Tag.tsx');
+  const tagCss = source('src/components/ui/Tag/Tag.css');
+  const uiIndex = source('src/components/ui/index.ts');
   const lightTheme = source('src/styles/themes/default/light.css');
   const generalSettings = source('src/features/settings/modules/general/GeneralSettings.tsx');
+  const modelsSettings = source('src/features/settings/modules/models/ModelsSettings.tsx');
   const settingRow = source('src/features/settings/components/SettingRow.tsx');
 
+  assert.match(generalSettings, /<Tag\s+variant=\{connectionVariant\}\s+role="status">/s);
+  assert.match(generalSettings, /const connectionVariant:\s*TagVariant/);
+  assert.match(modelsSettings, /<Tag\s+variant="success">\{t\('settingsPanel\.models\.primary'\)\}<\/Tag>/);
+  assert.match(modelsSettings, /<Tag\s+variant="info">\{t\('settingsPanel\.models\.groupDefault'\)\}<\/Tag>/);
+  assert.match(modelsSettings, /<Tag\s+variant="neutral">\{t\('settingsPanel\.models\.agentOsReadonly'\)\}<\/Tag>/);
+  assert.match(uiIndex, /export \{ Tag, type TagProps, type TagVariant \} from '\.\/Tag\/Tag'/);
+  assert.match(tagSource, /export type TagVariant = 'success' \| 'info' \| 'warning' \| 'danger' \| 'neutral'/);
   assert.match(
-    generalSettings,
-    /meta=\{\s*<span\s+className=\{`settings-general__connection settings-general__connection--\$\{connectionKey\}`\}\s+role="status"/s,
+    tagCss,
+    /\.ui-tag\s*\{[^}]*display:\s*inline-flex[^}]*justify-content:\s*center[^}]*width:\s*max-content[^}]*min-width:\s*64px[^}]*height:\s*18px[^}]*padding:\s*0 8px[^}]*font-size:\s*12px[^}]*font-weight:\s*400[^}]*line-height:\s*18px[^}]*border-radius:\s*4px/s,
   );
-  assert.doesNotMatch(generalSettings, /<Check|<CircleX/);
+  assert.match(
+    tagCss,
+    /\.ui-tag--success\s*\{[^}]*var\(--color-feedback-success-text\)[^}]*var\(--color-feedback-success-toast\)/s,
+  );
+  assert.match(tagCss, /\.ui-tag--info\s*\{[^}]*var\(--color-feedback-info\)[^}]*var\(--color-feedback-info-subtle\)/s);
+  assert.match(
+    tagCss,
+    /\.ui-tag--warning\s*\{[^}]*var\(--color-feedback-warning\)[^}]*var\(--color-feedback-warning-subtle\)/s,
+  );
+  assert.match(
+    tagCss,
+    /\.ui-tag--danger\s*\{[^}]*var\(--color-feedback-danger\)[^}]*var\(--color-feedback-danger-subtle\)/s,
+  );
+  assert.match(tagCss, /\.ui-tag--neutral\s*\{[^}]*var\(--color-text-secondary\)[^}]*var\(--color-surface-muted\)/s);
+  assert.doesNotMatch(
+    settingsPageCss,
+    /settings-page__badge|settings-general__connection|settings-model-card__group-default|settings-model-card__readonly/,
+  );
   assert.match(settingRow, /children !== undefined && children !== null/);
-  assert.match(
-    settingsPageCss,
-    /\.settings-general__connection\s*\{[^}]*width:\s*52px[^}]*height:\s*18px[^}]*padding:\s*0 8px[^}]*font-size:\s*12px[^}]*font-weight:\s*400[^}]*line-height:\s*18px[^}]*border-radius:\s*4px/s,
-  );
-  assert.match(
-    settingsPageCss,
-    /\.settings-general__connection--connected\s*\{[^}]*color:\s*var\(--color-settings-status-success-text\)[^}]*background:\s*var\(--color-feedback-success-toast\)/s,
-  );
+  assert.match(lightTheme, /--color-feedback-success:\s*#16a34a;/i);
+  assert.match(lightTheme, /--color-feedback-success-text:\s*#01802b;/i);
   assert.match(lightTheme, /--color-feedback-success-toast:\s*#d5f2dc;/i);
-  assert.match(lightTheme, /--color-settings-status-success-text:\s*#01802b;/i);
-  assert.match(lightTheme, /--color-settings-status-danger-text:\s*#bf0a1c;/i);
-  assert.match(lightTheme, /--color-settings-status-danger-surface:\s*#fce3e0;/i);
+  assert.match(lightTheme, /--color-feedback-info:\s*#2563eb;/i);
+  assert.match(lightTheme, /--color-feedback-info-subtle:\s*rgba\(59, 130, 246, 0\.08\);/i);
 });
 
 test('Settings high-fidelity visual contract remains wired to exact assets and spacing', () => {
@@ -1215,6 +1342,11 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
   const channelFormItems = source('src/features/settings/modules/channels/channelFormItems.ts');
   const channelRequirements = source('src/features/settings/modules/channels/channelRequirements.ts');
   const modelsSettings = source('src/features/settings/modules/models/ModelsSettings.tsx');
+  const modelDialog = source('src/features/settings/modules/models/ModelDialog.tsx');
+  const modelProviderSelect = source('src/features/settings/modules/models/ModelProviderSelect.tsx');
+  const modelProviderIcon = source('src/components/ModelProviderIcon/index.tsx');
+  const providerAssets = source('src/assets/providers/index.ts');
+  const settingsAssets = source('src/assets/settings/index.ts');
   const sidebar = source('src/components/SessionSidebar/index.tsx');
   const appSettingsIcon = source('src/assets/settings/app-navigation/settings.svg');
 
@@ -1242,17 +1374,69 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
     settingsPageCss,
     /\.settings-models__toast--error\s*\{[^}]*border-color:\s*var\(--color-feedback-danger\)[^}]*background:\s*var\(--color-feedback-danger-toast\)/s,
   );
+  assert.match(
+    settingsPageCss,
+    /\.settings-model-group\s*\{[^}]*border:\s*1px solid var\(--color-settings-border\)[^}]*border-radius:\s*12px[^}]*background:\s*var\(--color-surface-card\)/s,
+  );
+  assert.match(
+    settingsPageCss,
+    /\.settings-model-group__items > \.settings-model-card--grouped\s*\{[^}]*border:\s*0[^}]*border-radius:\s*0[^}]*background:\s*transparent/s,
+  );
+  assert.match(settingsPageCss, /container:\s*settings-models-list\s*\/\s*inline-size/);
+  assert.match(settingsPageCss, /\.settings-model-card__actions\s*\{[^}]*flex-wrap:\s*nowrap/s);
+  assert.match(settingsPageCss, /@container\s+settings-models-list\s*\(max-width:\s*36rem\)/);
+  assert.doesNotMatch(settingsPageCss, /@media\s*\(max-width:\s*1280px\)\s*\{[^}]*\.settings-model-card/s);
   assert.match(lightTheme, /--color-feedback-success-toast:\s*#[\da-f]{6};/i);
   assert.match(lightTheme, /--color-feedback-danger-toast:\s*#[\da-f]{6};/i);
   assert.match(settingRowCss, /min-height:\s*102px/);
   assert.match(settingRowCss, /padding:\s*24px/);
+  assert.match(settingRowCss, /container:\s*setting-row\s*\/\s*inline-size/);
+  assert.match(settingRowCss, /@container\s+setting-row\s*\(max-width:\s*30rem\)/);
+  assert.doesNotMatch(settingRowCss, /@media\s*\(max-width:\s*960px\)/);
   assert.match(formCss, /\.form-item__control\s*>\s*\.ui-select\s*\{[^}]*width:\s*100%/s);
-  assert.match(modelsSettings, /getSettingsProviderLogo16/);
-  assert.match(modelsSettings, /settings-model-provider-select__menu/);
-  assert.match(modelsSettings, /role="listbox"/);
-  assert.match(modelsSettings, /confirmDisabled=\{accountBlocking \|\| !isConnected\}/);
-  assert.doesNotMatch(modelsSettings, /confirmDisabled=\{[^}]*hasUnsavedChanges/);
-  assert.match(modelsSettings, /useFormState\(form\);\s*const values = form\.getValues\(\)/);
+  assert.match(modelProviderSelect, /getProviderLogoUrl/);
+  assert.match(modelsSettings, /logo: getModelLogoUrl\(model\)/);
+  assert.doesNotMatch(modelsSettings, /getConfiguredProviderLogoUrl/);
+  assert.match(providerAssets, /VENDOR_ICON_KEYS/);
+  assert.match(providerAssets, /\['openrouter', 'openrouter'\]/);
+  assert.match(providerAssets, /model\.is_free === true/);
+  assert.match(providerAssets, /model\.model_provider === 'OpenAIAccount'/);
+  assert.match(providerAssets, /model\.vendor_key\?\.trim\(\)/);
+  assert.match(modelProviderIcon, /return getModelLogoUrl\(model\)/);
+  assert.doesNotMatch(modelProviderIcon, /PROVIDER_SPECS|findProvider|keywordMatchesModelName/);
+  assert.match(modelProviderSelect, /getVendorLogoUrl\(selected\.preset\.vendor_key\)/);
+  assert.match(modelProviderSelect, /getVendorLogoUrl\(option\.preset\.vendor_key\)/);
+  assert.doesNotMatch(modelProviderSelect, /preset\.icon_key/);
+  assert.match(settingsAssets, /settingsCustomModelIcon/);
+  assert.equal(existsSync(new URL('src/assets/settings/providers/', root)), false);
+  const providerAssetStems = new Set();
+  for (const providerAsset of readdirSync(new URL('src/assets/providers/', root))) {
+    if (!/\.(?:png|svg)$/.test(providerAsset)) continue;
+    const stem = providerAsset.replace(/\.(?:png|svg)$/, '');
+    assert.equal(providerAssetStems.has(stem), false, `${stem} must have exactly one standard provider asset`);
+    providerAssetStems.add(stem);
+  }
+  for (const iconKey of [
+    'anthropic',
+    'deepseek',
+    'kimi',
+    'mimo',
+    'minimax',
+    'openai',
+    'openrouter',
+    'pangu',
+    'qwen',
+    'tencent-cloud',
+    'zhipu',
+  ]) {
+    assert.equal(existsSync(new URL(`src/assets/providers/${iconKey}.svg`, root)), true);
+    assert.equal(existsSync(new URL(`src/assets/providers/${iconKey}.png`, root)), false);
+  }
+  assert.match(modelProviderSelect, /settings-model-provider-select__menu/);
+  assert.match(modelProviderSelect, /role="listbox"/);
+  assert.match(modelDialog, /confirmDisabled=\{/);
+  assert.doesNotMatch(modelDialog, /confirmDisabled=\{[^}]*hasUnsavedChanges/);
+  assert.match(modelDialog, /useSettingsFormDialogClose\(\{[\s\S]{0,260}const values = form\.getValues\(\)/);
   assert.match(channelsCss, /width:\s*min\(560px,\s*calc\(100vw - 32px\)\)/);
   assert.match(
     channelsCss,
@@ -1276,10 +1460,7 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
     /\.settings-channels-panel__account-card\s*\{[^}]*min-height:\s*72px[^}]*padding:\s*12px 16px[^}]*background:\s*var\(--color-settings-card-subtle\)/s,
   );
   assert.match(channelsCss, /\.settings-channels-panel__account-logo,[^}]*width:\s*42px[^}]*height:\s*42px/s);
-  assert.match(
-    channelsCss,
-    /\.settings-channels-panel__account-copy span\s*\{[^}]*min-width:\s*64px[^}]*padding:\s*0 8px[^}]*color:\s*var\(--color-settings-status-success-text\)[^}]*background:\s*var\(--color-feedback-success-toast\)/s,
-  );
+  assert.doesNotMatch(channelsCss, /\.settings-channels-panel__account-copy span/);
   assert.match(channelsCss, /\.settings-channels-panel__account-actions\s*\{[^}]*display:\s*flex[^}]*gap:\s*8px/s);
   assert.match(
     channelsCss,
@@ -1293,6 +1474,9 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
   assert.match(channelList, /className="settings-channels-panel__channel-details"/);
   assert.match(channelList, /className="settings-channels-panel__add-configuration"/);
   assert.match(channelList, /className="settings-channels-panel__account-actions"/);
+  assert.match(channelList, /import \{ Button, Tag \} from '[^']*components\/ui'/);
+  assert.match(channelList, /<Tag variant=\{account\.configured \? 'success' : 'neutral'\}>/);
+  assert.match(channelList, /<Tag variant=\{account\.enabled \? 'success' : 'neutral'\}>/);
   assert.match(channelList, /t\('common\.modify'\)/);
   assert.match(channelList, /t\('channels\.unbind'\)/);
   assert.match(channelList, /title=\{t\(account\.enabled \? 'channels\.disable' : 'channels\.enable'\)\}/);
@@ -1361,7 +1545,7 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
   assert.match(channelController, /if \(!\(await targetController\.load\(\)\)\) return;/);
   assert.match(
     channelController,
-    /const closeDialogAfterSave = \(\) => \{\s*activeController\.reset\(\);\s*setDialogOpen\(false\);/s,
+    /const closeDialogAfterSave = \(\) => \{\s*resetActiveDialog\(\);\s*setDialogOpen\(false\);/s,
   );
 
   assert.match(sidebar, /assets\/settings\/app-navigation\/settings\.svg\?react/);

@@ -1,7 +1,7 @@
 import { Unlink } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { settingsActionIcons } from '../../../../../assets/settings';
-import { Button } from '../../../../../components/ui';
+import { Button, Tag } from '../../../../../components/ui';
 import { SettingsSection } from '../../../components';
 import { getSettingsChannelLabel } from '../channelCatalog';
 import { getSettingsChannelGuideUrl, type ChannelGuideLanguage } from '../channelGuideUrls';
@@ -113,12 +113,12 @@ export function ChannelListSection({
                           <ChannelLogo channelId={channel.channel_id} label={label} />
                           <div className="settings-channels-panel__account-copy">
                             <strong>{account.name}</strong>
-                            <span data-status={account.configured ? 'bound' : 'disabled'}>
+                            <Tag variant={account.configured ? 'success' : 'neutral'}>
                               {account.configured ? t('channels.boundSuccess') : t('channels.configurationIncomplete')}
-                            </span>
-                            <span data-status={account.enabled ? 'enabled' : 'disabled'}>
+                            </Tag>
+                            <Tag variant={account.enabled ? 'success' : 'neutral'}>
                               {account.enabled ? t('channels.status.enabled') : t('channels.status.disabled')}
-                            </span>
+                            </Tag>
                           </div>
                           <div className="settings-channels-panel__account-actions">
                             {account.configured ? (

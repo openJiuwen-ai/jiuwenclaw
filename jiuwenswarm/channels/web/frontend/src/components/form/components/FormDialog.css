@@ -1,3 +1,7 @@
+.ui-dialog.form-dialog-surface {
+  overflow: hidden;
+}
+
 .form-dialog {
   display: grid;
   max-height: inherit;
@@ -67,7 +71,8 @@
 .form-dialog__body {
   min-height: 84px;
   padding: 20px 22px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 .form-dialog__footer {
   display: flex;

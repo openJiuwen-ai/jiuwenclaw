@@ -14,6 +14,22 @@
   font-size: var(--font-size-sm);
   font-weight: 600;
 }
+.form-item__heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin-bottom: 6px;
+}
+.form-item__heading-row .form-item__heading {
+  margin-bottom: 0;
+}
+.form-item__label-action {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
 .form-item__label {
   display: inline-flex;
   align-items: center;

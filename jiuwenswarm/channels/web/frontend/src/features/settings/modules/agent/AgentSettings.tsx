@@ -2,8 +2,9 @@ import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '../../../../components/ui';
 import { Form, FormDialog, useForm } from '../../../../components/form';
-import { SettingRow } from '../../components';
+import { SettingRow, SettingsConfirmDialog } from '../../components';
 import type { SettingsCustomItemProps } from '../../registry/types';
+import { useSettingsFormDialogClose } from '../../services/useSettingsFormDialogClose';
 import { useSettingsServices } from '../../services/SettingsServicesProvider';
 import { useSettingsSource } from '../../services/SettingsSourceProvider';
 
@@ -50,6 +51,13 @@ function AgentConfigDialog({
   });
   const [submitting, setSubmitting] = useState(false);
   const [saveError, setSaveError] = useState('');
+  const closeBlocked = submitting;
+  const { discardConfirmationOpen, requestClose, cancelDiscard, confirmDiscard } = useSettingsFormDialogClose({
+    id: 'agent-config-dialog',
+    form,
+    closeBlocked,
+    onClose,
+  });
   const items = useMemo(
     () =>
       fields.map((name) => {
@@ -100,7 +108,10 @@ function AgentConfigDialog({
     setSubmitting(true);
     setSaveError('');
     try {
-      await save(Object.fromEntries(fields.map((name) => [name, String(result.values[name] ?? '').trim()])), titleKey);
+      await save(
+        Object.fromEntries(fields.map((name) => [name, String(result.values[name] ?? '').trim()])),
+        titleKey,
+      );
       onClose();
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : t('settingsPanel.feedback.saveFailed'));
@@ -108,25 +119,33 @@ function AgentConfigDialog({
       setSubmitting(false);
     }
   };
-
   return (
-    <FormDialog
-      open
-      title={t(titleKey)}
-      submitting={submitting}
-      confirmDisabled={!isConnected}
-      confirmLabel={t('common.confirm')}
-      cancelLabel={t('common.cancel')}
-      onConfirm={() => void confirm()}
-      onCancel={onClose}
-    >
-      <Form form={form} items={items} rules={rules} optionalText={t('common.optional')} />
-      {saveError ? (
-        <div className="settings-page__error" role="alert">
-          {saveError}
-        </div>
-      ) : null}
-    </FormDialog>
+    <>
+      <FormDialog
+        open
+        title={t(titleKey)}
+        submitting={closeBlocked}
+        confirmDisabled={!isConnected}
+        confirmLabel={t('common.confirm')}
+        cancelLabel={t('common.cancel')}
+        onConfirm={() => void confirm()}
+        onCancel={requestClose}
+      >
+        <Form form={form} items={items} rules={rules} optionalText={t('common.optional')} />
+        {saveError ? (
+          <div className="settings-page__error" role="alert">
+            {saveError}
+          </div>
+        ) : null}
+      </FormDialog>
+      <SettingsConfirmDialog
+        open={discardConfirmationOpen}
+        title={t('settingsPanel.dialog.discardTitle')}
+        message={t('settingsPanel.dialog.discardConfirm')}
+        onConfirm={confirmDiscard}
+        onCancel={cancelDiscard}
+      />
+    </>
   );
 }
 

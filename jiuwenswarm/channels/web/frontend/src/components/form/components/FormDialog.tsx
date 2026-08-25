@@ -11,6 +11,7 @@ export function FormDialog({
   icon,
   loading = false,
   submitting = false,
+  confirmLoading = false,
   confirmDisabled = false,
   confirmLabel,
   cancelLabel,
@@ -30,6 +31,7 @@ export function FormDialog({
   icon?: ReactNode;
   loading?: boolean;
   submitting?: boolean;
+  confirmLoading?: boolean;
   confirmDisabled?: boolean;
   confirmLabel: string;
   cancelLabel: string;
@@ -46,7 +48,13 @@ export function FormDialog({
   const { t } = useTranslation();
   const titleId = useId();
   return (
-    <Dialog open={open} titleId={titleId} className={dialogClassName} closeDisabled={submitting} onCancel={onCancel}>
+    <Dialog
+      open={open}
+      titleId={titleId}
+      className={`form-dialog-surface${dialogClassName ? ` ${dialogClassName}` : ''}`}
+      closeDisabled={submitting}
+      onCancel={onCancel}
+    >
       <div
         className={`form-dialog${className ? ` ${className}` : ''}`}
         data-testid={testIdPrefix}
@@ -96,7 +104,7 @@ export function FormDialog({
             </Button>
             <Button
               variant="primary"
-              loading={submitting}
+              loading={submitting || confirmLoading}
               disabled={confirmDisabled}
               onClick={onConfirm}
               data-testid={testIdPrefix ? `${testIdPrefix}-save-btn` : undefined}

@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next';
+import { Tag, type TagVariant } from '../../../../components/ui';
 import { SettingRow } from '../../components';
 import { useSettingsServices } from '../../services/SettingsServicesProvider';
 
@@ -11,14 +12,16 @@ export function ConnectionStatusSetting() {
       : connectionState === 'connecting' || connectionState === 'reconnecting'
         ? 'connecting'
         : 'disconnected';
+  const connectionVariant: TagVariant =
+    connectionKey === 'connected' ? 'success' : connectionKey === 'connecting' ? 'warning' : 'danger';
   return (
     <SettingRow
       title={t('settingsPanel.general.connection')}
       description={t('settingsPanel.general.connectionDescription')}
       meta={
-        <span className={`settings-general__connection settings-general__connection--${connectionKey}`} role="status">
+        <Tag variant={connectionVariant} role="status">
           {t(`settingsPanel.general.connectionStatus.${connectionKey}`)}
-        </span>
+        </Tag>
       }
     />
   );

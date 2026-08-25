@@ -1,4 +1,11 @@
-import { type ReactNode, useEffect, useId, useMemo, useSyncExternalStore } from 'react';
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useSyncExternalStore,
+} from 'react';
 import { HelpTips, Input, RadioGroup, Select, Switch, Textarea } from '../../ui';
 import type { FormItem, FormRules, FormValues } from '../types';
 import type { FormFieldOptions, FormStore } from '../core/FormStore';
@@ -24,18 +31,25 @@ function FormItemRenderer<TValues extends FormValues>({
   const field = form.getFieldState(item.name);
   const finalDisabled = disabled || Boolean(item.disabled) || field.pending;
   const label = (
-    <span className="form-item__label">
-      {item.label}
-      {showOptional && !item.required ? <span className="form-item__optional">{optionalText}</span> : null}
-      {item.helpTips ? <HelpTips content={item.helpTips} /> : null}
-    </span>
+    <label
+      className="form-item__heading"
+      htmlFor={controlId}
+      data-testid={testIdPrefix ? `${testIdPrefix}-field-label` : undefined}
+      data-variant={testIdPrefix ? String(item.name) : undefined}
+    >
+      <span className="form-item__label">
+        {item.label}
+        {showOptional && !item.required ? <span className="form-item__optional">{optionalText}</span> : null}
+        {item.helpTips ? <HelpTips content={item.helpTips} /> : null}
+      </span>
+    </label>
   );
   const onChange = (value: TValues[keyof TValues]) => {
     void form.setFieldValue(item.name, value, { trigger: 'change' });
   };
-  const onBlur = () => {
+  const onBlur = useCallback(() => {
     void form.setFieldValue(item.name, form.getFieldValue(item.name), { trigger: 'blur' });
-  };
+  }, [form, item.name]);
   let control: ReactNode;
   if (item.component === 'input')
     control = (
@@ -120,14 +134,14 @@ function FormItemRenderer<TValues extends FormValues>({
       data-testid={testIdPrefix ? `${testIdPrefix}-field` : undefined}
       data-variant={testIdPrefix ? String(item.name) : undefined}
     >
-      <label
-        className="form-item__heading"
-        htmlFor={controlId}
-        data-testid={testIdPrefix ? `${testIdPrefix}-field-label` : undefined}
-        data-variant={testIdPrefix ? String(item.name) : undefined}
-      >
-        {label}
-      </label>
+      {item.labelAction ? (
+        <div className="form-item__heading-row">
+          {label}
+          <div className="form-item__label-action">{item.labelAction}</div>
+        </div>
+      ) : (
+        label
+      )}
       <div className="form-item__control">{control}</div>
       {field.error ? (
         <div className="form-item__error" role="alert">
@@ -176,9 +190,11 @@ export function Form<TValues extends FormValues>({
     form.configure(rules, fields as Partial<Record<keyof TValues, FormFieldOptions<TValues>>>);
   }, [fields, form, rules]);
   return (
-    <div
+    <form
+      autoComplete="off"
       className={`form${className ? ` ${className}` : ''}`}
       data-testid={testIdPrefix ? `${testIdPrefix}-fields` : undefined}
+      onSubmit={(event) => event.preventDefault()}
     >
       {items.map((item) => (
         <FormItemRenderer
@@ -191,6 +207,6 @@ export function Form<TValues extends FormValues>({
           testIdPrefix={testIdPrefix}
         />
       ))}
-    </div>
+    </form>
   );
 }

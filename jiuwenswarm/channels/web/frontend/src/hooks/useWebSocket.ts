@@ -657,7 +657,6 @@ interface UseWebSocketReturn {
   clearGoal: (sessionId: string) => Promise<void>;
   refreshGoal: (sessionId: string) => Promise<void>;
   drainTaskQueueIfIdle: (sessionId: string) => void;
-  getInflightCount: () => number;
 }
 
 interface PersistMediaResponse {
@@ -978,13 +977,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const {
     setConnected,
     setAvailableTools,
-    setConnectionStats,
     updateSession,
     setContextCompressionStats,
     setTeamMemberContextCompressionStatus,
     clearTeamMemberContextCompressionStatus,
     clearAllTeamMemberContextCompressionStatus,
-  } = useSessionStore();
+  } = useSessionStore.getState();
 
   const resolveEventSessionId = useCallback(
     (payload: Record<string, unknown>): string | null => {
@@ -1641,7 +1639,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       } catch (error) {
         const webError = error as WebError;
         localSendPendingRef.current.delete(sessionId);
-        setConnectionStats({ lastError: webError.message });
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
         const errorMsg = webError.message || t('network.sendMessageFailed');
@@ -1662,7 +1659,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       request,
       resetContextCompressionTurn,
       setContextCompressionStats,
-      setConnectionStats,
       t,
     ]
   );
@@ -1700,7 +1696,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         consumePlanEntryMark(sessionId, outgoingMode);
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
         const errorMsg = webError.message || t('network.sendMessageFailed');
@@ -1713,7 +1708,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         });
       }
     },
-    [request, resetContextCompressionTurn, setConnectionStats, t]
+    [request, resetContextCompressionTurn, t]
   );
 
   // 存储sendMessage函数到ref
@@ -1821,7 +1816,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         return true;
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.interruptFailed'));
         return false;
       }
@@ -1830,7 +1824,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       closeActiveTeamLeaderMessages,
       request,
       resetContextCompressionTurn,
-      setConnectionStats,
       t,
     ]
   );
@@ -1842,11 +1835,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         await interrupt(sessionId, 'pause');
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.pauseFailed'));
       }
     },
-    [interrupt, setConnectionStats, t]
+    [interrupt, t]
   );
 
   const cancel = useCallback(
@@ -1858,11 +1850,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.cancelFailed'));
       }
     },
-    [interrupt, setConnectionStats, t]
+    [interrupt, t]
   );
 
   const supplement = useCallback(
@@ -1871,11 +1862,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         await interrupt(sessionId, 'supplement', { newInput });
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.supplementFailed'));
       }
     },
-    [interrupt, setConnectionStats, t]
+    [interrupt, t]
   );
 
   // 恢复 - 恢复暂停的任务
@@ -1886,11 +1876,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useChatStore.getState().setPaused(sessionId, false);
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.resumeFailed'));
       }
     },
-    [interrupt, setConnectionStats, t]
+    [interrupt, t]
   );
 
   // 切换模式
@@ -2048,11 +2037,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           usePlanStore.getState().setActive(sessionId, true);
         }
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.submitAnswerFailed'));
       }
     },
-    [request, setConnectionStats, t]
+    [request, t]
   );
 
   const respondActivate = useCallback(
@@ -2071,12 +2059,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...buildExtensionSendPayload(sessionId),
         });
         useHarnessStore.getState().setActivateInteraction(sessionId, null);
-      } catch (error) {
-        const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
+      } catch {
+        // Keep the activation interaction open so the user can retry.
       }
     },
-    [request, setConnectionStats]
+    [request]
   );
 
   const revealPendingContextUsage = useCallback((sessionId: string) => {
@@ -4487,7 +4474,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         await webClient.connect(connectOptions);
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || 'WebSocket connection error');
       }
     };
@@ -4499,7 +4485,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     model,
     projectDir,
     provider,
-    setConnectionStats,
   ]);
 
   useEffect(() => {
@@ -4511,11 +4496,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       setConnected(false);
       // 不再重置上下文压缩信息，保持本地存储的状态
       // setContextCompressionStats(null);
-      setConnectionStats({ state: 'closed', inflight: 0 });
     };
   }, [
-    setContextCompressionStats,
-    setConnectionStats,
     setConnected,
     clearPendingSubagentCorrelations,
   ]);
@@ -4532,7 +4514,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       void webClient.disconnect('debug mode toggled').then(() => {
         void webClient.connect(connectOptions).catch((error) => {
           const webError = error as WebError;
-          setConnectionStats({ lastError: webError.message });
           onErrorRef.current?.(webError.message || 'WebSocket reconnect error');
         });
       });
@@ -4541,7 +4522,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     return () => {
       window.removeEventListener(WS_RECONNECT_EVENT, reconnectByDebugToggle);
     };
-  }, [apiBase, apiKey, model, projectDir, provider, setConnectionStats]);
+  }, [apiBase, apiKey, model, projectDir, provider]);
 
   useEffect(() => {
     const unsub = webClient.onStateChange((state) => {
@@ -4549,11 +4530,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       const connected = state === 'ready';
       setIsConnected(connected);
       setConnected(connected);
-      setConnectionStats({
-        state,
-        inflight: webClient.getInflightCount(),
-        lastError: null,
-      });
       if (!connected && (state === 'reconnecting' || state === 'closed')) {
         streamDeltaBatcherRef.current?.flushAll();
         clearPendingSubagentCorrelations();
@@ -4575,18 +4551,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     return () => {
       unsub();
     };
-  }, [clearPendingSubagentCorrelations, setConnected, setConnectionStats]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setConnectionStats({
-        inflight: webClient.getInflightCount(),
-      });
-    }, 1000);
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [setConnectionStats]);
+  }, [clearPendingSubagentCorrelations, setConnected]);
 
   useEffect(() => {
     // 真实环境联调方案 9c：未完成目标超过 1 分钟没收到新的 goal.snapshot/goal.updated 事件，
@@ -4662,6 +4627,5 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     clearGoal,
     refreshGoal,
     drainTaskQueueIfIdle,
-    getInflightCount: () => webClient.getInflightCount(),
   };
 }

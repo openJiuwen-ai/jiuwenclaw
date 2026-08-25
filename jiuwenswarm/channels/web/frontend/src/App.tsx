@@ -606,7 +606,12 @@ function AppContent({
     void loadProjects();
   }, [initialDataLoaded, loadProjects]);
 
-  const { setCurrentSession, setAvailableModels, setMode, setTeamLeaderMemberIds } = useSessionStore();
+  const {
+    setCurrentSession,
+    setAvailableModels,
+    setMode,
+    setTeamLeaderMemberIds,
+  } = useSessionStore.getState();
   const sessions = useSessionStore((s) => s.sessions);
   const currentSession = useSessionStore((s) => s.currentSession);
   const routeSessionId = route.kind === 'chat-session' ? route.sessionId : null;

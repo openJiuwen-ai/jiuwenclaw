@@ -176,8 +176,8 @@ export function ExternalCliAgentsSection({
   };
 
   return (
-    <div className="p-3 space-y-3" data-testid="settings-panel-external-cli-agents">
-      {EXTERNAL_CLI_AGENT_KINDS.map((cliAgent) => {
+    <div className="space-y-3" data-testid="settings-panel-external-cli-agents">
+      {EXTERNAL_CLI_AGENT_KINDS.map(cliAgent => {
         const enabledKey = externalCliKey(cliAgent, 'enabled');
         const useBuiltinKey = externalCliKey(cliAgent, 'use_builtin');
         const cliPathKey = externalCliKey(cliAgent, 'cli_path');
@@ -222,7 +222,7 @@ export function ExternalCliAgentsSection({
                   type="checkbox"
                   checked={useBuiltin}
                   disabled={disabled || !enabled}
-                  onChange={(event) => onChange(useBuiltinKey, event.target.checked ? 'true' : 'false')}
+                  onChange={event => onChange(useBuiltinKey, event.target.checked ? 'true' : 'false')}
                   className="h-3.5 w-3.5 rounded border-border"
                   data-testid="settings-panel-external-cli-agent-use-builtin-input"
                   data-variant={cliAgent}
@@ -231,17 +231,13 @@ export function ExternalCliAgentsSection({
               </label>
               <button
                 type="button"
-                className="settings-button settings-button--secondary !px-2.5 !py-1 text-xs"
+                className="settings-button settings-button--secondary inline-flex shrink-0 flex-nowrap items-center gap-1.5 whitespace-nowrap !px-2.5 !py-1 text-xs"
                 disabled={disabled || !onDetect || detecting[cliAgent] || useBuiltin}
                 onClick={() => void detect(cliAgent, draftValues[cliPathKey] || '')}
                 data-testid="settings-panel-external-cli-agent-detect-btn"
                 data-variant={cliAgent}
               >
-                {detecting[cliAgent] ? (
-                  <Loader2 className="w-3.5 h-3.5 settings-spinner" />
-                ) : (
-                  <RefreshCw className="w-3.5 h-3.5" />
-                )}
+                {detecting[cliAgent] ? <Loader2 className="w-3.5 h-3.5 settings-spinner" /> : <RefreshCw className="w-3.5 h-3.5" />}
                 {t('config.externalCli.detect')}
               </button>
               {!useBuiltin ? (
@@ -250,18 +246,12 @@ export function ExternalCliAgentsSection({
                   data-testid="settings-panel-external-cli-agent-status"
                   data-variant={cliAgent}
                 >
-                  {displayResult?.status === 'ok' ? (
-                    <CheckCircle2 className="inline w-3.5 h-3.5 mr-1" />
-                  ) : (
-                    <AlertCircle className="inline w-3.5 h-3.5 mr-1" />
-                  )}
+                  {displayResult?.status === 'ok' ? <CheckCircle2 className="inline w-3.5 h-3.5 mr-1" /> : <AlertCircle className="inline w-3.5 h-3.5 mr-1" />}
                   {statusText(displayResult)}
                 </span>
               ) : null}
               {displayResult?.version ? (
-                <span className="text-xs text-text-muted">
-                  {t('config.externalCli.version', { version: displayResult.version })}
-                </span>
+                <span className="text-xs text-text-muted">{t('config.externalCli.version', { version: displayResult.version })}</span>
               ) : null}
             </div>
             <div className="flex items-center gap-2">
@@ -269,7 +259,7 @@ export function ExternalCliAgentsSection({
                 type="text"
                 value={draftValues[cliPathKey] ?? ''}
                 disabled={disabled || !enabled || useBuiltin}
-                onChange={(event) => onChange(cliPathKey, event.target.value)}
+                onChange={event => onChange(cliPathKey, event.target.value)}
                 placeholder={displayResult?.path || t('config.externalCli.cliPathPlaceholder', { agent: cliAgent })}
                 data-testid="settings-panel-external-cli-agent-cli-path-input"
                 data-variant={cliAgent}
@@ -285,11 +275,7 @@ export function ExternalCliAgentsSection({
                 data-testid="settings-panel-external-cli-agent-select-file-btn"
                 data-variant={cliAgent}
               >
-                {selecting[cliAgent] ? (
-                  <Loader2 className="w-4 h-4 settings-spinner" />
-                ) : (
-                  <FileSearch className="w-4 h-4" />
-                )}
+                {selecting[cliAgent] ? <Loader2 className="w-4 h-4 settings-spinner" /> : <FileSearch className="w-4 h-4" />}
               </button>
             </div>
             {message ? <div className="text-[11px] leading-4 text-text-muted">{message}</div> : null}

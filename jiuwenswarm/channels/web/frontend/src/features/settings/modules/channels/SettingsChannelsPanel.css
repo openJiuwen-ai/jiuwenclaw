@@ -199,25 +199,6 @@
   white-space: nowrap;
 }
 
-.settings-channels-panel__account-copy span {
-  box-sizing: border-box;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 64px;
-  padding: 0 8px;
-  color: var(--color-settings-status-success-text);
-  font-size: 12px;
-  line-height: 18px;
-  border-radius: 4px;
-  background: var(--color-feedback-success-toast);
-}
-
-.settings-channels-panel__account-copy span[data-status='disabled'] {
-  color: var(--color-settings-text-secondary);
-  background: var(--color-sidebar-nav-hover);
-}
-
 .settings-channels-panel__account-actions {
   display: flex;
   align-items: center;

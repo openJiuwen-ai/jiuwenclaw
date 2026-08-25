@@ -5,7 +5,6 @@ import { ConnectionStatusSetting } from './GeneralSettings';
 export const generalModule: SettingsModuleDefinition = {
   id: 'general',
   titleKey: 'settingsPanel.categories.general',
-  descriptionKey: 'settingsPanel.moduleDescriptions.general',
   icon: settingsNavigationIcons.general,
   source: 'locale',
   sections: [

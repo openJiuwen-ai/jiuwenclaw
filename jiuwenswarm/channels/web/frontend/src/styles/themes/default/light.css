@@ -74,6 +74,7 @@
   --color-feedback-success: #16a34a;
   --color-feedback-success-rgb: 22, 163, 74;
   --color-feedback-success-subtle: rgba(22, 163, 74, 0.1);
+  --color-feedback-success-text: #01802b;
   --color-feedback-warning: #d97706;
   --color-feedback-warning-rgb: 217, 119, 6;
   --color-feedback-warning-subtle: rgba(217, 119, 6, 0.1);
@@ -154,7 +155,6 @@
   --color-settings-text-secondary: #808080;
   --color-settings-link: #1476ff;
   --color-settings-action-border: #595959;
-  --color-settings-status-success-text: #01802b;
   --color-settings-status-danger-text: #bf0a1c;
   --color-settings-status-danger-surface: #fce3e0;
   --color-conversation-active-surface: var(--color-sidebar-nav-active);

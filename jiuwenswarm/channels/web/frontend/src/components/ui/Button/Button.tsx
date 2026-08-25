@@ -3,7 +3,7 @@ import { Loading } from '../Loading/Loading';
 import './Button.css';
 
 type ButtonBaseProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'children'> & {
-  variant?: 'primary' | 'secondary' | 'quiet' | 'danger';
+  variant?: 'primary' | 'secondary' | 'quiet' | 'warning' | 'danger';
   size?: 'sm' | 'md';
   loading?: boolean;
 };

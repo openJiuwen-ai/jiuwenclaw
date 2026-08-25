@@ -42,6 +42,16 @@
   border-color: transparent;
   background: transparent;
 }
+.ui-button--warning {
+  color: var(--color-feedback-warning);
+  border-color: var(--color-border-warning);
+  background: var(--color-feedback-warning-subtle);
+}
+.ui-button--warning:hover:not(:disabled) {
+  color: var(--color-feedback-warning-text);
+  border-color: var(--color-feedback-warning);
+  background: var(--color-feedback-warning);
+}
 .ui-button--danger {
   color: var(--color-feedback-danger);
   border-color: var(--color-border-danger);

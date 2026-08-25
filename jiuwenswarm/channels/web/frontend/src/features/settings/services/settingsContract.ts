@@ -1,7 +1,6 @@
 import type { ModelEntry } from '../../../types';
 
-export type SettingsCategory =
-  'general' | 'models' | 'agent' | 'browser' | 'channels' | 'security' | 'experimental';
+export type SettingsCategory = 'general' | 'models' | 'agent' | 'browser' | 'channels' | 'security' | 'experimental';
 
 export type SettingsRequest = <T = unknown>(
   method: string,
@@ -29,6 +28,7 @@ export type ModelValidationPayload = {
   model: string;
   model_provider: string;
   reasoning_level: string | undefined;
+  endpoint_profile?: string;
 };
 
 const envField = (
@@ -139,7 +139,7 @@ export const SETTINGS_CONFIG_FIELD_BY_KEY = new Map(SETTINGS_CONFIG_FIELDS.map((
 
 export const SETTINGS_OTHER_PERSISTENCE = [
   { id: 'language', method: 'locale.set_conf', persistence: 'config.yaml', path: 'preferred_language' },
-  { id: 'models', method: 'config.save_all', persistence: 'config.yaml', path: 'models.defaults' },
+  { id: 'models', method: 'models.replace_all', persistence: 'config.yaml', path: 'models.defaults' },
   {
     id: 'browser',
     method: 'path.set',
@@ -169,6 +169,9 @@ export const OPEN_SOURCE_SETTINGS_REQUEST_METHODS = [
   'config.validate_model',
   'locale.set_conf',
   'models.list',
+  'models.replace_all',
+  'vendors.list',
+  'vendors.fetch_models',
   'path.get',
   'path.set',
   'permissions.tools.get',
@@ -227,13 +230,15 @@ export function normalizeSettingsConfigUpdates(updates: Record<string, string>):
 }
 
 export function buildModelValidationPayload(model: ModelEntry): ModelValidationPayload {
-  return {
+  const payload: ModelValidationPayload = {
     api_base: model.api_base,
     api_key: model.api_key,
     model: model.model_name,
     model_provider: model.model_provider,
     reasoning_level: model.reasoning_level,
   };
+  if (model.endpoint_profile) payload.endpoint_profile = model.endpoint_profile;
+  return payload;
 }
 
 export async function addPermissionToolIfUnique(

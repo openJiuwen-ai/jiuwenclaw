@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useFormValue } from '../../../../components/form';
+import { deepEqual } from '../../../../components/form/core/FormStore';
+import type { FormValues } from '../../../../components/form/types';
 import { useSettingsServices } from '../../services/SettingsServicesProvider';
 import {
   buildDingtalkFormPayload,
@@ -47,6 +49,7 @@ export function useSettingsChannelsController({
   const [activeChannelId, setActiveChannelId] = useState<SettingsChannelId>('xiaoyi');
   const [activeFeishuAppIndex, setActiveFeishuAppIndex] = useState(0);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [activeDialogBaseline, setActiveDialogBaseline] = useState<FormValues | null>(null);
   const [pendingDiscardAction, setPendingDiscardAction] = useState<PendingDiscardAction | null>(null);
   const [pendingDeletion, setPendingDeletion] = useState<PendingChannelDeletion | null>(null);
 
@@ -151,6 +154,9 @@ export function useSettingsChannelsController({
 
   const controllers = { xiaoyi, feishu, dingtalk, telegram, discord, slack, whatsapp };
   const activeController = controllers[activeChannelId];
+  const hasActiveDialogChanges = activeDialogBaseline
+    ? !deepEqual(activeController.form.getValues(), activeDialogBaseline)
+    : activeController.hasUnsavedChanges;
   const feishuApps = useFormValue(feishu.form, 'apps');
   const channelEnabled = {
     xiaoyi: useFormValue(xiaoyi.form, 'enabled'),
@@ -197,8 +203,8 @@ export function useSettingsChannelsController({
   }, [dingtalk.load, discord.load, feishu.load, slack.load, telegram.load, whatsapp.load, xiaoyi.load]);
 
   useEffect(() => {
-    onHasChangesChange?.(activeController.hasUnsavedChanges);
-  }, [activeController.hasUnsavedChanges, onHasChangesChange]);
+    onHasChangesChange?.(hasActiveDialogChanges);
+  }, [hasActiveDialogChanges, onHasChangesChange]);
 
   useEffect(() => () => onHasChangesChange?.(false), [onHasChangesChange]);
 
@@ -215,10 +221,14 @@ export function useSettingsChannelsController({
           is_default: apps.length === 0,
         };
         feishu.form.setFieldValue('apps', [...apps, nextApp]);
+        setActiveDialogBaseline(feishu.form.getValues());
         setActiveFeishuAppIndex(apps.length);
       } else {
+        setActiveDialogBaseline(null);
         setActiveFeishuAppIndex(target.feishuAppIndex ?? 0);
       }
+    } else {
+      setActiveDialogBaseline(null);
     }
 
     setActiveChannelId(target.channelId);
@@ -226,7 +236,7 @@ export function useSettingsChannelsController({
   };
 
   const requestOpenTarget = (target: ChannelDialogTarget) => {
-    if (activeController.hasUnsavedChanges) {
+    if (hasActiveDialogChanges) {
       setPendingDiscardAction({ type: 'open', target });
       return;
     }
@@ -241,25 +251,30 @@ export function useSettingsChannelsController({
 
   const addFeishuConfiguration = () => requestOpenTarget({ channelId: 'feishu', addFeishuApp: true });
 
+  function resetActiveDialog(): void {
+    activeController.reset();
+    setActiveDialogBaseline(null);
+  }
+
   const closeDialog = () => {
     if (activeController.saving) return;
-    if (activeController.hasUnsavedChanges) {
+    if (hasActiveDialogChanges) {
       setPendingDiscardAction({ type: 'close' });
       return;
     }
-    activeController.reset();
+    resetActiveDialog();
     setDialogOpen(false);
   };
 
   const closeDialogAfterSave = () => {
-    activeController.reset();
+    resetActiveDialog();
     setDialogOpen(false);
   };
 
   const confirmDiscard = () => {
     const action = pendingDiscardAction;
     if (!action) return;
-    activeController.reset();
+    resetActiveDialog();
     setPendingDiscardAction(null);
     if (action.type === 'open') {
       void activateTarget(action.target);
