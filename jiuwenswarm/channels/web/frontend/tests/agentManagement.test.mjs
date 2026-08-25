@@ -181,6 +181,15 @@ test('catalog view model filters mine/search and clamps pages deterministically'
     installedBuiltin.items.map(item => item.id),
     ['builtin'],
   );
+
+  const productCatalog = buildCatalogViewModel(catalog, {
+    scope: 'catalog',
+    category: 'ProductDevelopment',
+    query: '',
+    page: 1,
+    pageSize: 12,
+  });
+  assert.deepEqual(productCatalog.items.map(item => item.id), ['b']);
 });
 
 test('canonical reducer keeps file selection and content status separate from source DTOs', () => {

@@ -9,6 +9,26 @@ export type CatalogViewModel = {
   totalPages: number;
 };
 
+const CATEGORY_ALIASES: Record<string, ReadonlySet<string>> = {
+  ProductDevelopment: new Set(['ProductDevelopment', 'Engineering']),
+  Marketing: new Set(['Marketing']),
+  Efficiency: new Set(['Efficiency']),
+  DataAnalysis: new Set(['DataAnalysis']),
+  ContentCreation: new Set(['ContentCreation', 'Design']),
+  SafetyCompliance: new Set(['SafetyCompliance']),
+  Communication: new Set(['Communication']),
+};
+
+function matchesCategory(category: string, itemCategory: string): boolean {
+  if (!category) return true;
+  const aliases = CATEGORY_ALIASES[category];
+  if (aliases) return aliases.has(itemCategory);
+  if (category === 'Other') {
+    return !Object.values(CATEGORY_ALIASES).some(values => values.has(itemCategory));
+  }
+  return itemCategory === category;
+}
+
 export function findFirstPreviewableFile(entries: DefinitionFileEntry[]): string | null {
   const preferred = entries.find(
     entry => entry.visible !== false && entry.kind === 'file' && entry.relativePath.toLowerCase().startsWith('persona/') && entry.previewable,
@@ -54,10 +74,13 @@ export function buildCatalogViewModel(
 ): CatalogViewModel {
   const query = options.query.trim().toLocaleLowerCase();
   const filtered = catalog.filter(item => {
+    if (options.scope === 'catalog' && item.source !== 'builtin') {
+      return false;
+    }
     if (options.scope === 'mine' && item.source !== 'local' && !item.installed) {
       return false;
     }
-    if (options.scope === 'catalog' && options.category && item.category !== options.category) {
+    if (options.scope === 'catalog' && !matchesCategory(options.category, item.category)) {
       return false;
     }
     if (!query) {

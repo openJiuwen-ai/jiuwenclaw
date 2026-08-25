@@ -693,6 +693,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const inputValue = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.inputValue ?? '');
   const evolutionStatus = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.evolutionStatus ?? null);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const selectedSkills = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.selectedSkills ?? []);
+  const persistSessionDraft = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.persistSession ?? false,
+  );
   const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []) as InputAreaTeamMember[];
   const currentSession = useSessionStore((s) => s.currentSession);
   const activeSession = useSessionStore((s) => {
@@ -2342,6 +2346,20 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     window.addEventListener('chat-input-insert-skill', handler);
     return () => window.removeEventListener('chat-input-insert-skill', handler);
   }, [insertSkillChip, extractPlainText]);
+  // 外部进入新会话时可以预选技能。把 canonical session state 同步成输入框
+  // 中的 chip，避免用户开始编辑后被 handleEditorInput 误判为手动移除。
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el || !activeSessionId || selectedSkills.length === 0) return;
+    const existing = new Set(
+      Array.from(el.querySelectorAll('[data-skill]'))
+        .map((node) => node.getAttribute('data-skill'))
+        .filter((name): name is string => Boolean(name)),
+    );
+    selectedSkills.forEach((skill) => {
+      if (!existing.has(skill)) insertSkillChip(skill);
+    });
+  }, [activeSessionId, insertSkillChip, selectedSkills]);
 
   // const handleVoiceStart = useCallback(() => {
   //   if (isListening) return;

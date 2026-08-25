@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Clipboard, Download, FileText, Folder } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
 import type { DefinitionFileEntry, RequestStatus } from '../../features/agentManagement';
 import { isPreviewableFile } from '../../features/agentManagement';
@@ -217,7 +218,7 @@ export function DefinitionFilePreview({
               fileContent &&
               (selectedFilePath.toLowerCase().endsWith('.md') || selectedFilePath.toLowerCase().endsWith('.mdx')) ? (
                 <article className="prose prose-sm max-w-none agent-management-markdown">
-                  <ReactMarkdown>{fileContent.content || ' '}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{fileContent.content || ' '}</ReactMarkdown>
                 </article>
               ) : null}
               {fileStatus === 'success' && fileContent && selectedFilePath.toLowerCase().endsWith('.json') ? (

@@ -61,6 +61,8 @@ export type McpOption = {
   id: string;
   name: string;
   description: string;
+  category: string;
+  integrationType: string;
   connectionState: string;
   source: string;
 };

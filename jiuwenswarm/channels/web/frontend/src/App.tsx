@@ -2015,6 +2015,7 @@ function AppContent({
     if (options.initialInputValue) {
       useChatStore.getState().setInputValue(NEW_CONVERSATION_ID, options.initialInputValue);
     }
+    options.initialSelectedSkills?.forEach((skill) => useSessionStore.getState().addSelectedSkill(NEW_CONVERSATION_ID, skill));
     // 扩展详情页"使用"按钮跳转——除了带上 demo 示例文案，还要顺带把这个扩展的会话内启用
     // 开关打开，跟 initialInputValue 走的是同一条通道。
     options.initialEnabledPlugins?.forEach((id) => useSessionStore.getState().addEnabledPlugin(NEW_CONVERSATION_ID, id));
@@ -2961,7 +2962,14 @@ function AppContent({
         )}
         {activeNav === 'agents' && (
           <div className="app-section">
-            <AgentManagementPanel onUseAgent={handleUseAgent} onUsePrompt={handleUseAgentPrompt} />
+            <AgentManagementPanel
+              onUseAgent={handleUseAgent}
+              onUsePrompt={handleUseAgentPrompt}
+              onCreateViaChat={() => requestSessionNavigation('new', {
+                initialInputValue: t('agentManagement.actions.createViaChatPrompt'),
+                initialSelectedSkills: ['skill-creator-normal'],
+              })}
+            />
           </div>
         )}
         {activeNav === 'teams' && (

@@ -1,5 +1,6 @@
 import { ArrowLeft, Send, Trash2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
 import { getAgentAvatarUrl, type AgentDetail, type DefinitionFileEntry, type RequestStatus } from '../../features/agentManagement';
 import { DefinitionFilePreview } from './DefinitionFilePreview';
@@ -112,6 +113,7 @@ export function DefinitionDetailPage({
   const avatarUrl = getAgentAvatarUrl(detail);
   const canUse = detail.installed && detail.connectionState === 'connected' && detail.enabled !== false;
   const needsConnection = detail.installed && detail.connectionState !== 'connected';
+  const canPreviewFiles = detail.source === 'local' || detail.installed;
   const skillItems = [...detail.skills, ...detail.tools, ...detail.rails];
 
   return (
@@ -212,6 +214,7 @@ export function DefinitionDetailPage({
       <div className="agent-management-detail-capabilities">
         <CapabilityList title={t('agentManagement.detail.tags')} items={detail.tags.map(tag => ({ id: tag.id, name: tag.label }))} />
         <CapabilityList title={t('agentManagement.detail.skills')} items={skillItems} />
+        <CapabilityList title={t('agentManagement.detail.mcps')} items={detail.mcps} />
       </div>
 
       {detail.suggestedPrompts.length > 0 ? (
@@ -251,9 +254,6 @@ export function DefinitionDetailPage({
           role="tab"
           aria-selected={detailTab === 'files'}
           className={detailTab === 'files' ? 'is-active' : ''}
-          disabled={!detail.installed}
-          aria-disabled={!detail.installed}
-          title={!detail.installed ? t('agentManagement.detail.filesRequiresInstall') : undefined}
           onClick={() => onTabChange('files')}
         >
           {t('agentManagement.detail.filesTab')}
@@ -261,8 +261,12 @@ export function DefinitionDetailPage({
       </div>
       {detailTab === 'content' ? (
         <article className="agent-management-detail-content prose prose-sm max-w-none">
-          <ReactMarkdown>{detail.details || t('agentManagement.detail.contentEmpty')}</ReactMarkdown>
+          {detail.details ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{detail.details}</ReactMarkdown> : null}
         </article>
+      ) : !canPreviewFiles ? (
+        <div className="agent-management-file-preview agent-management-file-preview--unavailable">
+          <div className="agent-management-file-state">{t('agentManagement.detail.filesUnavailable')}</div>
+        </div>
       ) : (
         <DefinitionFilePreview
           files={files}

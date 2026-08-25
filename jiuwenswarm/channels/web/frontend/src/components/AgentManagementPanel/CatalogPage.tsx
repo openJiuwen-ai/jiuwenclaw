@@ -60,39 +60,33 @@ export function CatalogPage({
 
   return (
     <section className="agent-management-catalog" data-testid={`agent-catalog-${scope}`}>
-      <div className={`agent-management-toolbar${isMine ? ' is-mine' : ''}`}>
-        <div className="agent-management-category-row" role="tablist" aria-label={t(isMine ? 'agentManagement.mineTabLabel' : 'agentManagement.categoryLabel')}>
-          {!isMine ? (
-            <>
+      {!isMine ? (
+        <div className="agent-management-toolbar">
+          <div className="agent-management-category-row" role="tablist" aria-label={t('agentManagement.categoryLabel')}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={!category}
+              className={`agent-management-category${!category ? ' is-active' : ''}`}
+              onClick={() => onCategoryChange('')}
+            >
+              {t('agentManagement.categoryAll')}
+            </button>
+            {CATEGORIES.map(item => (
               <button
+                key={item}
                 type="button"
                 role="tab"
-                aria-selected={!category}
-                className={`agent-management-category${!category ? ' is-active' : ''}`}
-                onClick={() => onCategoryChange('')}
+                aria-selected={category === item}
+                className={`agent-management-category${category === item ? ' is-active' : ''}`}
+                onClick={() => onCategoryChange(item)}
               >
-                {t('agentManagement.categoryAll')}
+                {t(`agentManagement.categories.${item}`, { defaultValue: item })}
               </button>
-              {CATEGORIES.map(item => (
-                <button
-                  key={item}
-                  type="button"
-                  role="tab"
-                  aria-selected={category === item}
-                  className={`agent-management-category${category === item ? ' is-active' : ''}`}
-                  onClick={() => onCategoryChange(item)}
-                >
-                  {t(`agentManagement.categories.${item}`, { defaultValue: item })}
-                </button>
-              ))}
-            </>
-          ) : (
-            <span className="agent-management-category agent-management-category--subtab is-active" role="tab" aria-selected="true">
-              {t('agentManagement.tabs.agent')}
-            </span>
-          )}
+            ))}
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {status === 'loading' ? (
         <div className={`agent-management-card-grid ${isMine ? 'is-mine' : ''}`} aria-label={t('common.loading')}>
@@ -109,9 +103,6 @@ export function CatalogPage({
         </div>
       ) : isEmpty ? (
         <div className="agent-management-state">
-          <div className="agent-management-state__icon" aria-hidden="true">
-            ⌁
-          </div>
           <p>{hasQuery ? t('agentManagement.states.noMatch') : t(isMine ? 'agentManagement.states.mineEmpty' : 'agentManagement.states.catalogEmpty')}</p>
           {isMine && !hasQuery ? (
             <button type="button" className="agent-management-button agent-management-button--primary" onClick={onCreate}>

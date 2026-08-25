@@ -1,5 +1,4 @@
-import { ChevronDown, Search, Upload } from 'lucide-react';
-import { createPortal } from 'react-dom';
+import { ChevronDown, Search } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CatalogPage, PAGE_SIZE } from './CatalogPage';
@@ -30,6 +29,7 @@ type PanelView = 'catalog' | 'mine' | 'detail' | 'create';
 type AgentManagementPanelProps = {
   onUseAgent?: (id: string) => void;
   onUsePrompt?: (id: string, prompt: string) => void;
+  onCreateViaChat?: () => void;
 };
 
 const EMPTY_DRAFT: AgentDraft = {
@@ -58,7 +58,7 @@ function deriveAgentId(name: string): string {
   return slug.length >= 3 ? slug.slice(0, 50) : `agent-${Date.now().toString(36)}`;
 }
 
-export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagementPanelProps) {
+export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat }: AgentManagementPanelProps) {
   const { t } = useTranslation();
   const client = useMemo<AgentManagementClient>(() => createAgentManagementClient(), []);
   const [state, dispatch] = useReducer(agentManagementReducer, initialAgentManagementState);
@@ -79,9 +79,6 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagemen
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
-  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
   const [mcpOptions, setMcpOptions] = useState<McpOption[]>([]);
   const [mcpStatus, setMcpStatus] = useState<RequestStatus>('idle');
   const catalogRef = useRef<AgentCatalogItem[]>([]);
@@ -196,9 +193,9 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagemen
   );
 
   const handleTabChange = (tab: 'content' | 'files') => {
-    if (tab === 'files' && state.detail?.installed !== true) return;
     setDetailTab(tab);
-    if (tab === 'files' && selectedId && state.filesStatus === 'idle') {
+    const canPreviewFiles = state.detail?.source === 'local' || state.detail?.installed === true;
+    if (tab === 'files' && canPreviewFiles && selectedId && state.filesStatus === 'idle') {
       void loadFiles(selectedId).then(files => {
         const firstPreviewableFile = files ? findFirstPreviewableFile(files) : null;
         if (firstPreviewableFile) void handleSelectFile(firstPreviewableFile);
@@ -357,11 +354,11 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagemen
   };
 
   const openCreate = () => {
+    setCreateMenuOpen(false);
     setDraft(EMPTY_DRAFT);
     setCreateError(null);
     setActionError(null);
     setActionNotice(null);
-    setCreateMenuOpen(false);
     setView('create');
     if (state.skillsStatus === 'idle') void loadSkills();
     if (mcpStatus === 'idle') void loadMcps();
@@ -385,35 +382,6 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagemen
     }
   };
 
-  const openUpload = () => {
-    setCreateMenuOpen(false);
-    setUploadFile(null);
-    setActionError(null);
-    setActionNotice(null);
-    setUploadDialogOpen(true);
-  };
-
-  const handleUpload = async () => {
-    if (!uploadFile) return;
-    setUploading(true);
-    setActionError(null);
-    setActionNotice(null);
-    try {
-      const result = await client.importAgentTemplate(uploadFile);
-      await loadCatalog();
-      setUploadDialogOpen(false);
-      setUploadFile(null);
-      setMineQuery('');
-      setMinePage(1);
-      setView('mine');
-      setActionNotice(t('agentManagement.states.uploadSuccess', { id: result.id }));
-    } catch (error) {
-      setActionError(formatActionError(error, t('agentManagement.states.uploadError')));
-    } finally {
-      setUploading(false);
-    }
-  };
-
   const goBackToCatalog = () => {
     setActionError(null);
     setActionNotice(null);
@@ -426,29 +394,6 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagemen
       <PendingConnectorModals flow={reconnectFlow} />
     </>
   );
-
-  const uploadDialog = uploadDialogOpen ? createPortal(
-    <div className="agent-management-selection-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !uploading) setUploadDialogOpen(false); }}>
-      <section className="agent-management-upload-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-upload-dialog-title">
-        <header>
-          <h2 id="agent-upload-dialog-title">{t('agentManagement.actions.createByUpload')}</h2>
-          <button type="button" onClick={() => setUploadDialogOpen(false)} aria-label={t('common.close')} disabled={uploading}>×</button>
-        </header>
-        <p>{t('agentManagement.form.uploadHint')}</p>
-        <label className="agent-management-upload-picker">
-          <Upload size={20} aria-hidden="true" />
-          <span>{uploadFile ? uploadFile.name : t('agentManagement.form.uploadPlaceholder')}</span>
-          <small>{t('agentManagement.form.uploadFormats')}</small>
-          <input type="file" accept=".zip,.tar,.tar.gz" onChange={event => setUploadFile(event.target.files?.[0] || null)} disabled={uploading} />
-        </label>
-        <footer>
-          <button type="button" className="agent-management-button agent-management-button--secondary" onClick={() => setUploadDialogOpen(false)} disabled={uploading}>{t('common.cancel')}</button>
-          <button type="button" className="agent-management-button agent-management-button--primary" onClick={handleUpload} disabled={!uploadFile || uploading}>{uploading ? t('agentManagement.actions.uploading') : t('common.confirm')}</button>
-        </footer>
-      </section>
-    </div>,
-    document.body,
-  ) : null;
 
   if (view === 'detail') {
     return (
@@ -474,6 +419,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagemen
             onTabChange={handleTabChange}
             onRetryFiles={() =>
               selectedId &&
+              (state.detail?.source === 'local' || state.detail?.installed === true) &&
               void loadFiles(selectedId).then(files => {
                 const firstPreviewableFile = files ? findFirstPreviewableFile(files) : null;
                 if (firstPreviewableFile) void handleSelectFile(firstPreviewableFile);
@@ -488,7 +434,6 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagemen
           />
         </main>
         {pendingConnectorModals}
-        {uploadDialog}
       </>
     );
   }
@@ -516,7 +461,6 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagemen
           />
         </main>
         {pendingConnectorModals}
-        {uploadDialog}
       </>
     );
   }
@@ -589,11 +533,8 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagemen
                   <button type="button" role="menuitem" onClick={openCreate}>
                     {t('agentManagement.actions.createFirst')}
                   </button>
-                  <span className="agent-management-create-menu__disabled" role="menuitem" aria-disabled="true" title={t('agentManagement.states.featureUnavailable')}>
+                  <button type="button" role="menuitem" onClick={() => { setCreateMenuOpen(false); onCreateViaChat?.(); }}>
                     {t('agentManagement.actions.createByChat')}
-                  </span>
-                  <button type="button" role="menuitem" onClick={openUpload}>
-                    {t('agentManagement.actions.createByUpload')}
                   </button>
                 </div>
               ) : null}
@@ -636,7 +577,6 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagemen
         onCreate={openCreate}
       />
       {pendingConnectorModals}
-      {uploadDialog}
     </main>
   );
 }

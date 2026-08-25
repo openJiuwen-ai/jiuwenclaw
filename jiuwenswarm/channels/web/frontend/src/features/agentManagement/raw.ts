@@ -71,6 +71,8 @@ export type RawSkillOption = {
   name?: string;
   display_name?: string;
   description?: string;
+  source?: string;
+  installed?: boolean;
 };
 
 export type RawSkillListPayload = {

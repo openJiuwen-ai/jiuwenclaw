@@ -69,16 +69,6 @@ async function enrichCatalogTags(items: ReturnType<typeof normalizeAgentTemplate
   });
 }
 
-async function encodeFile(file: File): Promise<string> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-  }
-  return btoa(binary);
-}
-
 export function createLiveAgentManagementClient(): AgentManagementClient {
   return {
     source: 'live',
@@ -125,21 +115,25 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
     async listSkillOptions() {
       try {
         const payload = await webRequest<RawSkillListPayload>('skills.list', { with_installed: true });
-        return (payload.skills || []).map(normalizeSkillOption).filter((item) => item.id.length > 0);
+        return (payload.skills || [])
+          .filter((item) => item.installed === true && item.source !== 'mcp')
+          .map(normalizeSkillOption)
+          .filter((item) => item.id.length > 0);
       } catch (error) {
         return rethrowAgentError(error);
       }
     },
     async listMcpOptions() {
       try {
-        const [builtin, local] = await Promise.all([connectorApi.list('builtin'), connectorApi.list('local')]);
-        const byName = new Map<string, typeof builtin[number]>();
-        [...builtin, ...local].forEach(item => byName.set(item.name, item));
-        return [...byName.values()]
+        const local = await connectorApi.list('local');
+        return local
+          .filter(item => item.connectionState === 'connected')
           .map(item => ({
             id: item.name,
             name: item.displayName || item.name,
             description: item.description || '',
+            category: item.category || '',
+            integrationType: item.integrationType,
             connectionState: item.connectionState,
             source: item.source,
           }))
@@ -157,19 +151,8 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
           persona: draft.persona,
           skills: draft.skillRefs,
           mcps: draft.mcpRefs,
+          quickInputs: draft.suggestedPrompts.filter(prompt => prompt.trim().length > 0),
         });
-      } catch (error) {
-        return rethrowAgentError(error);
-      }
-    },
-    async importAgentTemplate(file) {
-      try {
-        const payload = await webRequest<{ id?: string }>('agent_templates.import_upload', {
-          file_name: file.name,
-          file_content: await encodeFile(file),
-        });
-        if (!payload?.id) throw new AgentManagementError('Imported Agent id is empty', 'agent_import_empty', false);
-        return { id: payload.id };
       } catch (error) {
         return rethrowAgentError(error);
       }
