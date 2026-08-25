@@ -7,31 +7,6 @@ from openjiuwen_runtime.foundation.db.table_def import (
     TableDefinition,
 )
 
-CHANNEL_CONFIG_TABLE_DEF = TableDefinition(
-    table_name="channel_config",
-    columns=[
-        ColumnDefinition(
-            "id",
-            "integer",
-            primary_key=True,
-            autoincrement=True,
-            nullable=False,
-        ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
-        ColumnDefinition("channel_id", "string", length=64, nullable=False),
-        ColumnDefinition("channel_name", "string", length=128, nullable=False),
-        ColumnDefinition("channel_type", "string", length=32, nullable=False),
-        ColumnDefinition("bot_id", "string", length=64, nullable=False),
-        ColumnDefinition("config", "json", nullable=True),
-        ColumnDefinition("status", "string", length=32, nullable=False),
-        ColumnDefinition("created_at", "datetime", nullable=False),
-        ColumnDefinition("updated_at", "datetime", nullable=False),
-    ],
-    indexes=[
-        IndexDefinition(["jiuwenclaw_id", "channel_id"], unique=True),
-    ],
-)
-
 LOG_MASKING_RULE_TABLE_DEF = TableDefinition(
     table_name="log_masking_rule",
     columns=[
