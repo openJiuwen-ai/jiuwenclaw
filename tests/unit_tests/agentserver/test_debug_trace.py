@@ -103,6 +103,35 @@ class TestPaths:
         monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
         assert paths_mod.debug_trace_dir("code.normal") == tmp_path / ".code" / "traces"
 
+    def test_original_agent_plan_keeps_agent_dir_after_code_profile_resolution(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
+        mode = paths_mod.resolve_debug_trace_mode("code.plan", "agent.plan")
+
+        assert paths_mod.debug_trace_file(mode, "sess") == (
+            tmp_path / ".agent" / "traces" / "dump-agent-sess.txt"
+        )
+
+    def test_plain_web_agent_in_code_profile_remains_code_dump(self):
+        assert paths_mod.resolve_debug_trace_mode("code.normal", "agent") == "code.normal"
+
+    def test_explicit_code_plan_remains_code_dump(self):
+        assert paths_mod.resolve_debug_trace_mode("code.plan", "code.plan") == "code.plan"
+
+    def test_original_agent_plan_uses_agent_debug_settings(self, monkeypatch):
+        monkeypatch.setattr(
+            debug_config,
+            "_load_debug_trace_config",
+            lambda: {
+                "agent": {"enabled": True},
+                "code": {"enabled": False},
+            },
+        )
+        mode = paths_mod.resolve_debug_trace_mode("code.plan", "agent.plan")
+
+        assert resolve_debug_trace_settings(mode=mode, request_debug=False).enabled is True
+
     def test_file_names(self, monkeypatch, tmp_path):
         monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
         assert paths_mod.debug_trace_file("agent.plan", "sess").name == "dump-agent-sess.txt"
@@ -991,4 +1020,3 @@ class TestSubagentCapture:
 
         subagent_capture._ensure_observability_rail(FakeSub())
         assert added == []  # no-op when observability is off
-

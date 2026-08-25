@@ -60,6 +60,8 @@ from jiuwenswarm.common.config import (
     update_skill_retrieval_in_config,
     update_symphony_in_config,
     update_permissions_enabled_in_config,
+    update_permissions_mode_in_config,
+    get_permissions_mode_from_config,
     update_setup_guide_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
@@ -104,11 +106,9 @@ from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
 from jiuwenswarm.gateway.document_attachments import (
-    coerce_document_parse_flag,
-    parse_existing_document,
+    forbidden_formats,
     persist_and_parse_documents,
 )
-from jiuwenswarm.common.document_parser import DEFAULT_MAX_CHARS, supported_formats
 from jiuwenswarm.server.runtime.session import project_store
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     coerce_root_categories_value,
@@ -807,6 +807,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "kv_cache_release_enabled",
     "kv_cache_affinity_enabled",
     "permissions_enabled",
+    "permissions_mode",
     "memory_forbidden_enabled",
     "memory_forbidden_description",
     "a2ui_enabled",
@@ -863,7 +864,6 @@ def _validate_wechat_numeric_params(params: dict) -> str | None:
 
 _SYMPHONY_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
     "symphony_enabled": (("enabled",), "bool", False),
-    "symphony_dynamic_graph_enabled": (("evolution", "enabled"), "bool", False),
 }
 _SYMPHONY_CONFIG_KEYS = tuple(_SYMPHONY_CONFIG_SPECS.keys())
 _SKILL_RETRIEVAL_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
@@ -1671,7 +1671,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "true" if kv_cfg.get("enable_kv_cache_affinity", False) else "false"
             )
             perm_cfg = raw.get("permissions") or {}
-            payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
+            try:
+                perm_mode = get_permissions_mode_from_config()
+            except Exception:
+                if perm_cfg.get("enabled") is False:
+                    perm_mode = "full_access"
+                elif str(perm_cfg.get("permission_mode") or "").lower() == "strict":
+                    perm_mode = "strict"
+                else:
+                    perm_mode = "auto"
+            payload["permissions_mode"] = perm_mode
+            # 兼容旧前端：full_access 映射为 permissions_enabled=false
+            payload["permissions_enabled"] = "false" if perm_mode == "full_access" else "true"
             # skill_create / evolution_auto_scan: env var takes precedence, fallback to config.yaml
             evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
             skill_create_env = os.getenv("SKILL_CREATE")
@@ -1708,7 +1719,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("kv_cache_release_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
-            payload.setdefault("permissions_enabled", "false")
+            payload.setdefault("permissions_enabled", "true")
+            payload.setdefault("permissions_mode", "auto")
             payload.setdefault("setup_guide_enabled", "true")
             payload.setdefault("skill_create", "false")
             payload.setdefault("evolution_auto_scan", "false")
@@ -1906,6 +1918,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_kv_cache_affinity_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
                     update_permissions_enabled_in_config(parsed)
+                elif param_key == "permissions_mode":
+                    update_permissions_mode_in_config(str(val or "").strip())
                 elif param_key == "setup_guide_enabled":
                     update_setup_guide_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_enabled":
@@ -4790,25 +4804,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _document_persist(ws, req_id, params, session_id):
-        """Upload documents (PDF/DOCX/XLSX/ipynb/...) and parse via AutoFileParser."""
+        """Validate local document paths (blacklist); do not persist or parse content."""
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         normalized = dict(params)
-        parse = coerce_document_parse_flag(normalized.get("parse", True), default=True)
-        max_chars_raw = normalized.get("max_chars", DEFAULT_MAX_CHARS)
         try:
-            max_chars = int(max_chars_raw)
-        except (TypeError, ValueError):
-            max_chars = DEFAULT_MAX_CHARS
-        max_chars = max(1, min(max_chars, 500_000))
-        try:
-            await persist_and_parse_documents(
-                normalized,
-                session_id,
-                parse=parse,
-                max_chars=max_chars,
-            )
+            await persist_and_parse_documents(normalized)
         except Exception as exc:
             logger.exception("[document.persist] failed: %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -4822,56 +4824,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "files",
             "documents",
             "document_errors",
-            "supported_formats",
+            "forbidden_formats",
         ):
             if key in normalized:
                 payload[key] = normalized[key]
-        if "supported_formats" not in payload:
-            payload["supported_formats"] = supported_formats()
+        if "forbidden_formats" not in payload:
+            payload["forbidden_formats"] = forbidden_formats()
         await channel.send_response(ws, req_id, ok=True, payload=payload)
-
-    async def _document_parse(ws, req_id, params, session_id):
-        """Parse an already-uploaded document path with AutoFileParser (+ ipynb)."""
-        if not isinstance(params, dict):
-            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
-            return
-        path = str(params.get("path") or "").strip()
-        if not path:
-            await channel.send_response(ws, req_id, ok=False, error="path is required", code="BAD_REQUEST")
-            return
-        max_chars_raw = params.get("max_chars", DEFAULT_MAX_CHARS)
-        try:
-            max_chars = int(max_chars_raw)
-        except (TypeError, ValueError):
-            max_chars = DEFAULT_MAX_CHARS
-        max_chars = max(1, min(max_chars, 500_000))
-        try:
-            result = await parse_existing_document(
-                path,
-                session_id=session_id,
-                max_chars=max_chars,
-            )
-        except FileNotFoundError as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="NOT_FOUND")
-            return
-        except PermissionError as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
-            return
-        except ValueError as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
-            return
-        except Exception as exc:
-            logger.exception("[document.parse] failed: %s", exc)
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-            return
-        await channel.send_response(ws, req_id, ok=True, payload=result)
 
     async def _document_formats(ws, req_id, params, session_id):
         await channel.send_response(
             ws,
             req_id,
             ok=True,
-            payload={"supported_formats": supported_formats()},
+            payload={"forbidden_formats": forbidden_formats()},
         )
 
     async def _chat_resume(ws, req_id, params, session_id):
@@ -5981,7 +5947,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("chat.send", _chat_send)
     channel.register_method("media.persist", _media_persist)
     channel.register_method("document.persist", _document_persist)
-    channel.register_method("document.parse", _document_parse)
     channel.register_method("document.formats", _document_formats)
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)

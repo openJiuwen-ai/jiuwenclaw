@@ -181,7 +181,10 @@ from jiuwenswarm.agents.harness.common.memory.config import (
 )
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
-from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
+    TOOL_PERMISSION_CHANNEL_ID,
+    TOOL_PERMISSION_SESSION_ID,
+)
 from jiuwenswarm.agents.harness.common.channel_runtime_context import (
     CURRENT_CHANNEL_ID,
     CURRENT_SESSION_ID,
@@ -3793,31 +3796,51 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
     def _resolve_sys_operation(self) -> SysOperation | None:
         """Create a sys operation.
 
-        是否走沙箱由 ``config.yaml::sandbox.enabled`` 决定（同时要求
-        ``sandbox.url`` / ``sandbox.type`` 已配置）。其他 sandbox 字段
-        (``excluded_commands`` / ``files`` / ``idle_ttl_seconds`` /
-        ``idle_check_interval``) 透传给 ``create_sandbox_sysop_card``,
-        分别写入 ``launcher_config.extra_params`` 与 ``launcher_config`` 上
-        的同名字段。
+        沙箱决策结合产品权限 ``sandbox_intent`` 与 ``sandbox.enabled`` / 可用性：
 
-        注意: 每次都从 ``get_sandbox_endpoint()`` 读最新 sandbox.url/type, 因为
-        ``/sandbox enable`` 会动态写入这两个字段; yuanrong 也会填默认占位 url。
+        - ``optional``（Full Access）：尊重 ``sandbox.enabled``
+        - ``required``（Auto/Strict）：可用则必进沙箱；不可用则 Fail-Open 到宿主机并告警
 
-        副作用: 在 ``self._sys_operation_card`` 保存生成或复用的 SysOperationCard，
-        供 ``apply_sandbox_runtime_patch`` 等运行时热更使用。
+        其他 sandbox 字段 (``excluded_commands`` / ``files`` / ``idle_ttl_seconds`` /
+        ``idle_check_interval``) 透传给 ``create_sandbox_sysop_card``。
+
+        注意: 每次都从 ``get_sandbox_endpoint()`` 读最新 sandbox.url/type。
+
+        副作用: 在 ``self._sys_operation_card`` 保存生成或复用的 SysOperationCard。
         """
         try:
             endpoint = get_sandbox_endpoint()
             sandbox_url = endpoint.get("url") or None
             sandbox_type = endpoint.get("type") or None
             runtime = get_sandbox_runtime()
+            use_sandbox: bool
+            try:
+                # develop: 结合产品权限 sandbox_intent 决策。beta3 锁定的
+                # openjiuwen（0.1.16.post2）没有 resolve_sandbox，此时回退到
+                # beta3 原行为：sandbox.enabled 且 url/type 齐备才进沙箱。
+                from openjiuwen.harness.security import resolve_sandbox
+                from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
+                    get_sandbox_intent,
+                )
+
+                intent = get_sandbox_intent()
+                user_enabled = bool(runtime.get("enabled"))
+                available = bool(sandbox_url and sandbox_type)
+                resolve, warning = resolve_sandbox(
+                    intent,  # type: ignore[arg-type]
+                    enabled=user_enabled,
+                    available=available,
+                )
+                if warning:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] sandbox_intent=required but jiuwenbox unavailable; "
+                        "Fail-Open to HOST (sandbox.url/type missing or incomplete)"
+                    )
+                use_sandbox = resolve == "sandbox"
+            except ImportError:
+                use_sandbox = bool(runtime.get("enabled") and sandbox_url and sandbox_type)
             sysop_card: SysOperationCard | None
-            if runtime.get("enabled") and sandbox_url and sandbox_type:
-                # 走 ``self.`` 而不是 ``JiuWenSwarmDeepAdapter.``——_create_sandbox_
-                # sys_operation 已从 staticmethod 改成 instance method (要透传
-                # ``self._is_code_agent``), 用类名直接调会绕过 MRO 把 Code 子类
-                # 的 override (如果将来需要的话) 静默吃掉, 且 staticmethod 时代
-                # 的 caller 风格不再适用。
+            if use_sandbox:
                 sysop_card = self._create_sandbox_sys_operation(
                     sandbox_url,
                     sandbox_type,
@@ -8956,6 +8979,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         token_perm_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_cid = CURRENT_CHANNEL_ID.set((request.channel_id or "").strip())
         token_sid = CURRENT_SESSION_ID.set((request.session_id or "").strip())
+        token_perm_sid = TOOL_PERMISSION_SESSION_ID.set((request.session_id or "").strip())
         token_perm = setup_permission_context(request)
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(
@@ -9130,6 +9154,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             TOOL_PERMISSION_CHANNEL_ID.reset(token_perm_cid)
             CURRENT_CHANNEL_ID.reset(token_cid)
             CURRENT_SESSION_ID.reset(token_sid)
+            TOOL_PERMISSION_SESSION_ID.reset(token_perm_sid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
             self._unmark_session_active(session_id)
@@ -9500,6 +9525,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         token_perm_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_cid = CURRENT_CHANNEL_ID.set((request.channel_id or "").strip())
         token_sid = CURRENT_SESSION_ID.set((request.session_id or "").strip())
+        token_perm_sid = TOOL_PERMISSION_SESSION_ID.set((request.session_id or "").strip())
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
@@ -10219,6 +10245,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             TOOL_PERMISSION_CHANNEL_ID.reset(token_perm_cid)
             CURRENT_CHANNEL_ID.reset(token_cid)
             CURRENT_SESSION_ID.reset(token_sid)
+            TOOL_PERMISSION_SESSION_ID.reset(token_perm_sid)
             cleanup_permission_context(token_perm)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)

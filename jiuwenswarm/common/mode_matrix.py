@@ -96,6 +96,18 @@ def normalize_mode_text(raw_mode: Any) -> str:
     return text or "agent"
 
 
+# 用户可读别名 → 历史 canonical ID；运行时沿用历史 canonical 值。
+MODE_ALIASES: dict[str, str] = {
+    "team.code": "code.team",
+}
+
+
+def canonicalize_mode_text(raw_mode: Any) -> str:
+    """归一化 mode 文本并解析正式别名。"""
+    text = normalize_mode_text(raw_mode)
+    return MODE_ALIASES.get(text, text)
+
+
 def normalize_work_mode(raw: Any) -> str | None:
     """把任意来源的 ``work_mode`` 归一成 ``work`` / ``code``；非法时返回 None。"""
     if not isinstance(raw, str):
@@ -208,11 +220,13 @@ def resolve_request_mode(
 
 
 __all__ = [
+    "MODE_ALIASES",
     "PLAN_CANONICAL_MODES",
     "ResolvedMode",
     "TEAM_CANONICAL_MODES",
     "WEB_COMPOSABLE_MODES",
     "base_mode_without_plan",
+    "canonicalize_mode_text",
     "compose_web_mode",
     "is_plan_mode",
     "is_team_mode",
