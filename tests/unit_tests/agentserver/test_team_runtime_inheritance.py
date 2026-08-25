@@ -279,10 +279,12 @@ def test_build_skill_evolution_rail_returns_none_on_invalid_config(tmp_path):
     assert result is None
 
 
-def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
+def test_build_member_rails_wires_trajectory_span_processor_to_evolution_rails(
     tmp_path,
     monkeypatch,
 ):
+    processor = object()
+
     class _FakeTeamSkillEvolutionRail:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -293,21 +295,16 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
     class _FakeSkillEvolutionRail:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
-            self.bound_sink = None
-            self.bound_team_id = None
-            self.bound_member_role = None
             self._review_runtime = kwargs.get("review_runtime")
             self.experience_manager = SimpleNamespace(
                 experience_submission_service=object()
             )
 
-        def set_trajectory_sink(self, sink, *, team_id, member_role):
-            self.bound_sink = sink
-            self.bound_team_id = team_id
-            self.bound_member_role = member_role
-
-    registry = object()
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_runtime_inheritance.get_trajectory_span_processor",
+        lambda: processor,
+    )
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.TeamSkillEvolutionRail",
         _FakeTeamSkillEvolutionRail,
@@ -321,25 +318,19 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
         _FakeSkillEvolutionRail,
     )
 
+    workspace = TeamWorkspaceInfo(
+        root_dir=str(tmp_path / "team-workspace"),
+        skills_dir=str(tmp_path / "skills"),
+        team_id="demo-team",
+        config={"evolution": {"review_trigger": True}},
+    )
     leader_rails = build_member_rails(
         member_info=MemberInfo(role="leader"),
-        team_workspace=TeamWorkspaceInfo(
-            root_dir=str(tmp_path / "team-workspace"),
-            skills_dir=str(tmp_path / "skills"),
-            team_id="demo-team",
-            trajectory_registry=registry,
-            config={"evolution": {"review_trigger": True}},
-        ),
+        team_workspace=workspace,
     )
     member_rails = build_member_rails(
         member_info=MemberInfo(role="teammate"),
-        team_workspace=TeamWorkspaceInfo(
-            root_dir=str(tmp_path / "team-workspace"),
-            skills_dir=str(tmp_path / "skills"),
-            team_id="demo-team",
-            trajectory_registry=registry,
-            config={"evolution": {"review_trigger": True}},
-        ),
+        team_workspace=workspace,
     )
 
     leader_rail = next(
@@ -349,14 +340,11 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
         rail for rail in member_rails if isinstance(rail, _FakeSkillEvolutionRail)
     )
 
-    assert leader_rail.kwargs["trajectory_source"] is registry
-    assert leader_rail.kwargs["trajectory_sink"] is registry
+    assert leader_rail.kwargs["trajectory_span_processor"] is processor
     assert leader_rail.kwargs["member_role"] == "leader"
     assert "signal_trigger" not in leader_rail.kwargs
     assert leader_rail.kwargs["review_trigger"] is True
-    assert member_rail.bound_sink is registry
-    assert member_rail.bound_team_id == "demo-team"
-    assert member_rail.bound_member_role == "teammate"
+    assert member_rail.kwargs["trajectory_span_processor"] is processor
     assert member_rail.kwargs["signal_trigger"] is True
     assert member_rail.kwargs["review_trigger"] is False
 

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.harness.manifest import register_from_catalog
 from openjiuwen.agent_teams.rails.builtin_elements import (
     AUDIO as _OJ_AUDIO,
@@ -128,34 +127,18 @@ CODE_WORKTREE = _OJ_WORKTREE
 
 _REGISTERED = False
 
-# Per-(session_id, team_id) trajectory registries, so members of the same team
-# rebuilt in one process share evolution state while different processes / teams
-# stay isolated. Populated lazily; grows with the process's distinct teams.
-_TRAJECTORY_REGISTRIES: dict[tuple[str, str], Any] = {}
-
-
-def _trajectory_registry_for(seed: dict[str, Any]) -> Any:
-    """Return a process-local trajectory registry for the seed's team."""
-    key = (str(seed.get("session_id") or ""), str(seed.get("team_id") or ""))
-    registry = _TRAJECTORY_REGISTRIES.get(key)
-    if registry is None:
-        registry = InMemoryTrajectoryRegistry()
-        _TRAJECTORY_REGISTRIES[key] = registry
-    return registry
-
 
 def _build_swarm_context_from_seed(seed: dict[str, Any]) -> SwarmBuildContext:
     """Rebuild a :class:`SwarmBuildContext` from a serializable seed.
 
     Sources the non-serializable handles from the receiving process: ``config``
-    from this process's ``config.yaml`` and a per-team ``trajectory_registry``.
-    Registered with openjiuwen so ``from_spawn_payload`` / ``recover_from_session``
-    restore the provider build context after deserialization.
+    from this process's ``config.yaml``. Registered with openjiuwen so
+    ``from_spawn_payload`` / ``recover_from_session`` restore the provider build
+    context after deserialization.
     """
     return SwarmBuildContext.from_seed(
         seed,
         config=get_config(),
-        trajectory_registry=_trajectory_registry_for(seed),
     )
 
 

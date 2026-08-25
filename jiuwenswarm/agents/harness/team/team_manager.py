@@ -214,6 +214,7 @@ def shutdown_team_observability() -> None:
     except Exception as exc:
         logger.warning("[TeamObservability] shutdown failed: %s", exc)
 
+
 @dataclass
 class TeamRailMountContext:
     """Context needed to rebuild team rails after a hot config toggle."""
