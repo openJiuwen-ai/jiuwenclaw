@@ -103,7 +103,7 @@ async def _apply_sandbox_change(kind: str) -> None:
     """set 后的生效动作 (异步, 不阻塞 RPC 响应)."""
     try:
         if kind == "enabled":
-            from jiuwenclaw.config import get_sandbox_runtime
+            from jiuwenclaw.config import get_sandbox_runtime, get_sandbox_startup_mode
             if not bool(get_sandbox_runtime().get("enabled")):
                 removed = _teardown_registered_sandbox_sysops()
                 from jiuwenclaw.agentserver.sandbox_lifecycle import shutdown_jiuwenbox_sandboxes
@@ -112,10 +112,14 @@ async def _apply_sandbox_change(kind: str) -> None:
                     "[sandbox] enabled 变更为关闭, 已移除 %d 个残留沙箱 sysop, 释放 %d 个残留沙箱进程, 下轮 _create_sys_operation 读新值生效",
                     removed, released,
                 )
-            else:
+            elif get_sandbox_startup_mode() == "internal":
                 logger.info("[sandbox] enabled 变更为开启, 触发 box-server 启动...")
                 from jiuwenclaw.agentserver.sandbox_lifecycle import start_box_server_internal
                 await start_box_server_internal()
+            else:
+                logger.info(
+                    "[sandbox] enabled 变更为开启, startup_mode=external, 不启动 internal box-server"
+                )
             return
         if kind == "startup_mode":
             from jiuwenclaw.config import get_sandbox_startup_mode, get_sandbox_runtime

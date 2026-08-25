@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import sys
+from unittest.mock import AsyncMock
+
+import pytest
 
 import jiuwenclaw.runtime.platform as platform_module
 from jiuwenclaw.runtime.platform import is_ohos_runtime, runtime_platform, sandbox_supported
@@ -46,3 +49,22 @@ def test_sandbox_rpc_is_fail_closed_on_ohos(monkeypatch):
         "error": "JiuwenBox sandbox is not supported on HarmonyOS",
         "code": "UNSUPPORTED_PLATFORM",
     }
+
+
+@pytest.mark.asyncio
+async def test_enabling_external_sandbox_does_not_start_internal_box_server(monkeypatch):
+    from jiuwenclaw.agentserver import sandbox_config_rpc
+    from jiuwenclaw.agentserver import sandbox_lifecycle
+
+    start_internal = AsyncMock()
+    monkeypatch.setattr(sandbox_lifecycle, "start_box_server_internal", start_internal)
+    monkeypatch.setattr(
+        "jiuwenclaw.config.get_sandbox_runtime", lambda: {"enabled": True}
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.config.get_sandbox_startup_mode", lambda: "external"
+    )
+
+    await sandbox_config_rpc._apply_sandbox_change("enabled")
+
+    start_internal.assert_not_awaited()

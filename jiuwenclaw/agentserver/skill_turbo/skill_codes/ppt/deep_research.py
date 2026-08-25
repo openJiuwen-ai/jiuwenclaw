@@ -66,7 +66,7 @@ def _extract_fetch_result_items(result: Any) -> list[dict[str, Any]]:
             return [i for i in items if isinstance(i, dict)]
         if isinstance(items, dict):
             return [items]
-    if isinstance(result, str) and result.strip():
+    if isinstance(result, str) and result.strip() and not result.lstrip().startswith("[ERROR]"):
         return [{"url": "", "content": result}]
     return []
 

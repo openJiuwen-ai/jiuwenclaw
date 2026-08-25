@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -30,6 +31,21 @@ def _first(result):
     assert isinstance(result, list)
     assert result, "expected at least one result item"
     return result[0]
+
+
+def test_harness_fetch_card_matches_fetch_implementation_limits():
+    from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
+        _override_fetch_card_url_array,
+    )
+
+    card = _override_fetch_card_url_array(
+        SimpleNamespace(id="mcp_fetch_webpage", name="mcp_fetch_webpage"), "cn"
+    )
+    params = card.input_params["properties"]
+    assert params["max_chars"]["default"] == 12000
+    assert "500-50000" in params["max_chars"]["description"]
+    assert params["timeout_seconds"]["default"] == 5
+    assert "3-10" in params["timeout_seconds"]["description"]
 
 
 @pytest.mark.asyncio

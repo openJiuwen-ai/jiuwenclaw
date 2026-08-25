@@ -7736,9 +7736,44 @@ class JiuWenClawDeepAdapter:
         return result
 
     @staticmethod
-    def _validate_rebuild_skill_path(skill_path: str) -> str:
-        """Normalize RPC skill_path to an absolute resolved path."""
-        return str(Path(skill_path).expanduser().resolve())
+    def _format_allowed_skill_dirs(skill_dirs: list[Path], *, limit: int = 5) -> str:
+        """Format registered skill directories for a validation error."""
+        rendered = [str(directory) for directory in skill_dirs]
+        if len(rendered) <= limit:
+            return " | ".join(rendered)
+        return f"{' | '.join(rendered[:limit])} | ...(+{len(rendered) - limit})"
+
+    def _validate_rebuild_skill_path(self, skill_path: str) -> str:
+        """Ensure an RPC skill path stays under a registered skill directory."""
+        resolved = Path(skill_path).expanduser().resolve()
+        # Include both the adapter snapshot and the current request-bound roots.
+        # A warm adapter may still hold a workspace-only snapshot while a rollback
+        # request has bound the control-plane skill directory.
+        skill_dirs: list[Path] = []
+        seen: set[str] = set()
+        for raw in (
+            *self._registered_skill_dirs_for_rail(),
+            *(str(path) for path in resolve_agent_registered_skill_dirs()),
+        ):
+            directory = Path(raw).expanduser().resolve()
+            key = str(directory)
+            if key not in seen:
+                seen.add(key)
+                skill_dirs.append(directory)
+
+        resolved_path = str(resolved)
+        if not skill_dirs:
+            raise ValueError(
+                "技能路径不在允许目录内（未注册任何技能目录）"
+                f"resolve_path={resolved_path}"
+            )
+        if not any(resolved == directory or resolved.is_relative_to(directory) for directory in skill_dirs):
+            raise ValueError(
+                "技能路径不在允许目录内。"
+                f"resolve_path={resolved_path}；"
+                f"allowed_path={self._format_allowed_skill_dirs(skill_dirs)}"
+            )
+        return resolved_path
 
     async def handle_skills_evolution_rebuild(self, params: dict) -> dict[str, Any]:
         """RPC: skills.evolution.rebuild — generate a merged evolution version."""
