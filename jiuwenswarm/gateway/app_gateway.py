@@ -208,7 +208,8 @@ def _inject_session_work_mode(msg: Message) -> None:
     resolved_work_mode = binding.work_mode
 
     # 注意:TUI 通道的 session.create 不走 forward 路径(不在 CLI_FORWARD_REQ_METHODS),
-    # TUI 预解析在 tui_connect.py 的 _session_create 中通过 find_or_create_code_project_for_tui_params 完成。
+    # TUI 的 cwd→code project 绑定由 AgentServer 侧在 SESSION_CREATE 处理时通过
+    # find_or_create_code_project_for_tui_params 完成（经 E2A 转发后解析）。
     # 此处仅处理 WEB/ACP 通道的 work_mode 绑定注入。
 
     params["project_id"] = resolved_project_id
@@ -1881,7 +1882,7 @@ async def _run(
         path=web_path,
         dual_protocol=web_dual_protocol,
     )
-    web_channel = WebChannel(web_config, _DummyBus())
+    web_channel = WebChannel(web_config, _DummyBus(), agent_client=client)
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
     # 1. 让 ``_mark_git_watcher_dirty`` 能通过 ``channel.git_watcher_registry`` 唤醒轮询
@@ -1892,6 +1893,25 @@ async def _run(
     _git_watcher_registry = get_git_diff_watcher_registry()
     web_channel.git_watcher_registry = _git_watcher_registry
     _git_watcher_registry.set_channel(web_channel)
+
+    # Git watch 状态计算委托：diff 状态、项目解析与工作目录访问都在目标
+    # AgentServer 注入目录完成，Gateway 只做指纹比对与事件推送（方案 §10.6 C）。
+    async def _git_diff_status_fetcher(request: dict):
+        from jiuwenswarm.gateway.routing.e2a_proxy import fetch_git_diff_status
+
+        hunk_paths = request.get("hunk_paths")
+        return await fetch_git_diff_status(
+            agent_client=client,
+            project_id=request.get("project_id"),
+            session_id=request.get("session_id") or None,
+            include_files=request.get("include_files"),
+            include_hunks=request.get("include_hunks"),
+            hunk_paths=list(hunk_paths) if hunk_paths else None,
+            user_id=request.get("user_id"),
+            channel_id="web",
+        )
+
+    _git_watcher_registry.set_diff_status_fetcher(_git_diff_status_fetcher)
 
     _register_web_handlers(
         WebHandlersBindParams(

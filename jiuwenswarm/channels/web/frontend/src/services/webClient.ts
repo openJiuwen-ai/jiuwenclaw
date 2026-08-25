@@ -461,7 +461,8 @@ class WebClient {
         message.error ?? i18n.t('network.requestFailed'),
         message.code,
         message.id,
-        this.isRetriableCode(message.code)
+        this.isRetriableCode(message.code),
+        message.payload
       )
     );
   }
@@ -550,12 +551,14 @@ class WebClient {
     message: string,
     code?: string,
     requestId?: string,
-    retriable = false
+    retriable = false,
+    payload?: unknown
   ): WebError {
     const error = new Error(message) as WebError;
     error.code = code;
     error.requestId = requestId;
     error.retriable = retriable;
+    error.payload = payload;
     return error;
   }
 
@@ -626,8 +629,9 @@ export async function sendGoalStreamCommand(params: {
   action: 'set' | 'resume';
   objective?: string;
   mode?: string;
+  modelName?: string | null;
 }): Promise<void> {
-  const { sessionId, action, objective, mode } = params;
+  const { sessionId, action, objective, mode, modelName } = params;
   await webClient.sendFireAndForget(
     'command.goal',
     {
@@ -635,6 +639,7 @@ export async function sendGoalStreamCommand(params: {
       action,
       mode: mode ?? 'agent',
       ...(action === 'set' ? { objective, overwrite_confirmed: true } : {}),
+      ...(modelName ? { model_name: modelName } : {}),
     },
     { isStream: true }
   );

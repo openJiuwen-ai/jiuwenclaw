@@ -37,6 +37,38 @@ test('duplicate processing_status true with the same request_id still matches', 
   );
 });
 
+test('tool results from different tool calls in one request stay distinct', () => {
+  const firstClose = makeEventDedupKey('chat.tool_result', {
+    session_id: session,
+    event_type: 'chat.tool_result',
+    request_id: requestId,
+    tool_name: 'subagent_close',
+    tool_call_id: 'call_close_guangzhou',
+    result: "success=True data={'subagent_id': 'agent-guangzhou'}",
+  });
+  const secondClose = makeEventDedupKey('chat.tool_result', {
+    session_id: session,
+    event_type: 'chat.tool_result',
+    request_id: requestId,
+    tool_name: 'subagent_close',
+    tool_call_id: 'call_close_shenzhen',
+    result: "success=True data={'subagent_id': 'agent-shenzhen'}",
+  });
+
+  assert.notEqual(firstClose, secondClose);
+  assert.equal(
+    firstClose,
+    makeEventDedupKey('chat.tool_result', {
+      session_id: session,
+      event_type: 'chat.tool_result',
+      request_id: requestId,
+      tool_name: 'subagent_close',
+      tool_call_id: 'call_close_guangzhou',
+      result: "success=True data={'subagent_id': 'agent-guangzhou'}",
+    })
+  );
+});
+
 test('other chat events with the same request_id are unchanged', () => {
   const first = makeEventDedupKey('chat.final', {
     session_id: session,

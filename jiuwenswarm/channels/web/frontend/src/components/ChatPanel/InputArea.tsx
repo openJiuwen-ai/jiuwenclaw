@@ -15,7 +15,8 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { AtSign, CircleX, ClipboardList, FileText, Infinity as InfinityIcon, Loader2, Plus, Square, Target, X } from 'lucide-react';
+import type { TFunction } from 'i18next';
+import { AtSign, CircleX, ClipboardList, FileText, Loader2, Plus, Square, Target, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -25,7 +26,7 @@ import {
   usePlanStore,
   useSessionStore,
   useWorkspaceStore,
-  resolveEffectiveModel,
+  resolveChatModelSelection,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
@@ -43,6 +44,9 @@ import { webRequest } from '../../services/webClient';
 import { parseSlashLine, findSlashCommand } from './slashCommands/registry';
 import { getSkillAvatar } from '../../utils/skillAvatar';
 import { withUploadDocumentBlock } from '../../utils/documentMessage';
+import { ExtensionPickerPanel } from './ExtensionPickerPanel';
+import { Switch } from '../Switch';
+import { ExtensionIcon } from '../ConnectorMarket/icons';
 import {
   isLikelyAbsolutePath,
   isProjectDirectoryPickerSupported,
@@ -57,6 +61,14 @@ import {
 } from '../../features/workspace/localFilePicker';
 import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
+
+const MENU_GAP = 10;
+
+function resolveMenuDirection(anchorBottom: number, menuHeight: number) {
+  const spaceBelow = window.innerHeight - anchorBottom - MENU_GAP;
+  if (spaceBelow >= menuHeight) return 'down' as const;
+  return 'up' as const;
+}
 import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
@@ -323,7 +335,9 @@ const ATTACHMENT_ACCEPT = [
   .filter((item) => !FORBIDDEN_DOCUMENT_EXTENSIONS.has(item.toLowerCase()))
   .join(',');
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+const MAX_FILE_BYTES = 100 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_ATTACHMENT_COUNT = 20;
 const ATTACHMENT_ALERT_DURATION_MS = 3000;
 
 type AttachmentKind = 'image' | 'document';
@@ -453,12 +467,12 @@ function resolveAttachmentKind(file: File): AttachmentKind | null {
   return 'document';
 }
 
-function getImageValidationError(file: File): string | null {
+function getImageValidationError(file: File, t: TFunction): string | null {
   if (!isImageFile(file)) {
-    return `文件类型不支持：${file.name || '未命名文件'}`;
+    return t('chat.inputAttachment.unsupportedFileType', { name: file.name || t('chat.inputAttachment.unnamedFile') });
   }
-  if (file.size > MAX_IMAGE_BYTES) {
-    return `文件大小超出限制：${file.name || '未命名文件'}（最大${formatAttachmentSize(MAX_IMAGE_BYTES)}）`;
+  if (file.size > MAX_FILE_BYTES) {
+    return t('chat.inputAttachment.fileSizeExceeded', { name: file.name || t('chat.inputAttachment.unnamedFile'), limit: formatAttachmentSize(MAX_FILE_BYTES) });
   }
   return null;
 }
@@ -470,17 +484,21 @@ function clearAttachmentAlertTimers(timers: Map<string, number>): void {
 
 function getDocumentValidationError(
   file: File | undefined,
+  t: TFunction,
   options?: { filename?: string; localPath?: string },
 ): string | null {
-  const filename = options?.filename || file?.name || '未命名文件';
+  const filename = options?.filename || file?.name || t('chat.inputAttachment.unnamedFile');
+  if (file && file.size > MAX_FILE_BYTES) {
+    return t('chat.inputAttachment.fileSizeExceeded', { name: filename, limit: formatAttachmentSize(MAX_FILE_BYTES) });
+  }
   if (file && isForbiddenDocumentFile(file)) {
-    return `禁止上传该文件类型：${filename}`;
+    return t('chat.inputAttachment.forbiddenFileType', { name: filename });
   }
   if (file && !isDocumentFile(file)) {
-    return `文件类型不支持：${filename}`;
+    return t('chat.inputAttachment.unsupportedFileType', { name: filename });
   }
   if (!getLocalFilePath(file, options?.localPath)) {
-    return `无法获取本地文件路径：${filename}（请使用桌面端选择文件）`;
+    return t('chat.inputAttachment.localPathUnavailable', { name: filename });
   }
   return null;
 }
@@ -505,8 +523,8 @@ function readBinaryFileAsBase64(file: File): Promise<Pick<AttachmentDraft, 'base
   });
 }
 
-function readImageFile(file: File): Promise<Pick<AttachmentDraft, 'base64Data' | 'previewUrl'> | null> {
-  if (getImageValidationError(file)) {
+function readImageFile(file: File, t: TFunction): Promise<Pick<AttachmentDraft, 'base64Data' | 'previewUrl'> | null> {
+  if (getImageValidationError(file, t)) {
     return Promise.resolve(null);
   }
   return readBinaryFileAsBase64(file);
@@ -556,6 +574,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [attachmentAlerts, setAttachmentAlerts] = useState<AttachmentAlert[]>([]);
   const attachmentAlertTimersRef = useRef<Map<string, number>>(new Map());
   const [attachmentMenuId, setAttachmentMenuId] = useState<string | null>(null);
+  const [attachmentMenuAnchor, setAttachmentMenuAnchor] = useState<DOMRect | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [workMenuOpen, setWorkMenuOpen] = useState<'project' | null>(null);
   const [workDialogOpen, setWorkDialogOpen] = useState(false);
@@ -583,6 +602,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [attachMenuAnchor, setAttachMenuAnchor] = useState<DOMRect | null>(null);
+  // 默认下弹（这是本轮"扩展"需求里明确要的方向），但会话有消息、输入框沉到视口底部时，"+"按钮
+  // 本身已经贴近视口下边缘，下弹会把整个菜单渲染到可视区域外面、用户点了完全没反应——2026-08-18
+  // 用户报告的严重 bug。这里补上跟同文件里 modeMenu/model-selector 菜单一致的"空间不够就翻上去"
+  // 兜底逻辑，只在下方空间不够时才翻上，正常情况仍然默认下弹。
+  const [attachMenuDirection, setAttachMenuDirection] = useState<'up' | 'down'>('down');
+  const [extensionPanelOpen, setExtensionPanelOpen] = useState(false);
+  const [extensionAnchor, setExtensionAnchor] = useState<DOMRect | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   const insertSkillChipRef = useRef<(skillName: string) => void>(() => undefined);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
@@ -592,6 +618,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const modeMenuPortalRef = useRef<HTMLDivElement>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
   const attachMenuPortalRef = useRef<HTMLDivElement>(null);
+  const extensionMenuItemRef = useRef<HTMLButtonElement>(null);
+  const extensionPanelRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuOpenedByLongPressRef = useRef(false);
@@ -606,9 +634,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const inputValue = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.inputValue ?? '');
   const evolutionStatus = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.evolutionStatus ?? null);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
-  const persistSessionDraft = useSessionStore(
-    (s) => s.runtimes[activeSessionId ?? '']?.persistSession ?? false,
-  );
   const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []) as InputAreaTeamMember[];
   const currentSession = useSessionStore((s) => s.currentSession);
   const activeSession = useSessionStore((s) => {
@@ -640,13 +665,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isAutoHarnessMode = mode === 'auto_harness';
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
-  const persistSessionEnabled = activeSessionId === NEW_CONVERSATION_ID
-    ? persistSessionDraft
-    : activeSession?.persist_session === true;
-  const canUsePersistSessionMenu = isAgentMode;
-  const persistSessionLocked = Boolean(
-    activeSessionId && activeSessionId !== NEW_CONVERSATION_ID,
-  );
   /** Goal 入口是否适用于当前上下文（agent 模式 + 已接入 onSetGoal，如欢迎页新会话就不适用） */
   const canUseGoalMenu = isAgentMode && Boolean(onSetGoal);
   // 只跟 armed 挂钩：这个 tag 是"下一条消息将用于设置目标"的过渡态指示，发送后 armed 变 false
@@ -813,7 +831,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       autoSendTimeoutRef.current = setTimeout(() => {}, 100);
     },
     onError: (error) => {
-      console.error('语音识别错误:', error);
+      console.error('Speech recognition error:', error);
     },
   });
 
@@ -933,11 +951,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     }
   }, []);
 
-  const startAttachmentMenuTimer = useCallback((id: string) => {
+  const startAttachmentMenuTimer = useCallback((id: string, el: HTMLElement) => {
     stopAttachmentMenuTimer();
     attachmentMenuOpenedByLongPressRef.current = false;
     attachmentMenuTimerRef.current = setTimeout(() => {
       attachmentMenuOpenedByLongPressRef.current = true;
+      setAttachmentMenuAnchor(el.getBoundingClientRect());
       setAttachmentMenuId(id);
     }, 520);
   }, [stopAttachmentMenuTimer]);
@@ -953,13 +972,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const uploadAttachment = useCallback((attachment: AttachmentDraft) => {
     const validationError =
       attachment.kind === 'document'
-        ? getDocumentValidationError(attachment.file, {
+        ? getDocumentValidationError(attachment.file, t, {
             filename: attachment.filename,
             localPath: attachment.localPath,
           })
         : attachment.file
-          ? getImageValidationError(attachment.file)
-          : (attachment.base64Data ? null : `文件类型不支持：${attachment.filename || '未命名文件'}`);
+          ? getImageValidationError(attachment.file, t)
+          : (attachment.base64Data ? null : t('chat.inputAttachment.unsupportedFileType', { name: attachment.filename || t('chat.inputAttachment.unnamedFile') }));
     if (validationError) {
       pushAttachmentAlert(validationError);
       updateAttachment(attachment.id, { status: 'error', error: validationError });
@@ -971,7 +990,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (attachment.kind === 'document') {
       const localPath = getLocalFilePath(attachment.file, attachment.localPath);
       if (!localPath) {
-        const error = `无法获取本地文件路径：${attachment.filename || '未命名文件'}`;
+        const error = t('chat.inputAttachment.localPathUnavailable', { name: attachment.filename || t('chat.inputAttachment.unnamedFile') });
         pushAttachmentAlert(error);
         updateAttachment(attachment.id, { status: 'error', error });
         return;
@@ -1014,10 +1033,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             error: undefined,
           });
         } catch (error) {
-          console.error('文档上传失败:', error);
+          console.error('Document upload failed:', error);
           updateAttachment(attachment.id, {
             status: 'error',
-            error: '上传失败，请重试',
+            error: t('chat.inputAttachment.uploadFailed'),
           });
         }
       })();
@@ -1053,11 +1072,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             error: undefined,
           });
         } catch (error) {
-          console.error('图片上传失败:', error);
+          console.error('Image upload failed:', error);
           updateAttachment(attachment.id, {
             ...payload,
             status: 'error',
-            error: '上传失败，请重试',
+            error: t('chat.inputAttachment.uploadFailed'),
           });
         }
       })();
@@ -1065,17 +1084,17 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     }
 
     if (!attachment.file) {
-      const error = '上传失败，请重试';
+      const error = t('chat.inputAttachment.uploadFailed');
       pushAttachmentAlert(error);
       updateAttachment(attachment.id, { status: 'error', error });
       return;
     }
 
-    void readImageFile(attachment.file).then(async (payload) => {
+    void readImageFile(attachment.file, t).then(async (payload) => {
       if (!payload) {
         updateAttachment(attachment.id, {
           status: 'error',
-          error: '上传失败，请重试',
+          error: t('chat.inputAttachment.uploadFailed'),
         });
         return;
       }
@@ -1101,15 +1120,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           error: undefined,
         });
       } catch (error) {
-        console.error('图片上传失败:', error);
+        console.error('Image upload failed:', error);
         updateAttachment(attachment.id, {
           ...payload,
           status: 'error',
-          error: '上传失败，请重试',
+          error: t('chat.inputAttachment.uploadFailed'),
         });
       }
     });
-  }, [canPersistAttachments, onPersistDocuments, onPersistMedia, pushAttachmentAlert, updateAttachment]);
+  }, [canPersistAttachments, onPersistDocuments, onPersistMedia, pushAttachmentAlert, updateAttachment, t]);
 
   const retryAttachment = useCallback((attachment: AttachmentDraft) => {
     uploadAttachment(attachment);
@@ -1119,12 +1138,23 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     const selectedFiles = Array.from(files);
     if (!selectedFiles.length) return;
 
-    const drafts = selectedFiles.reduce<AttachmentDraft[]>((items, file) => {
+    const remaining = MAX_ATTACHMENT_COUNT - attachments.length;
+    if (remaining <= 0) {
+      pushAttachmentAlert(t('chat.inputAttachment.attachmentCountExceeded', { limit: MAX_ATTACHMENT_COUNT }));
+      return;
+    }
+
+    const filesToAdd = selectedFiles.slice(0, remaining);
+    if (selectedFiles.length > remaining) {
+      pushAttachmentAlert(t('chat.inputAttachment.attachmentCountPartialAdd', { limit: MAX_ATTACHMENT_COUNT, count: remaining }));
+    }
+
+    const drafts = filesToAdd.reduce<AttachmentDraft[]>((items, file) => {
       const kind = resolveAttachmentKind(file);
       if (!kind) {
         const message = isForbiddenDocumentFile(file)
-          ? `禁止上传该文件类型：${file.name || '未命名文件'}`
-          : `文件类型不支持：${file.name || '未命名文件'}`;
+          ? t('chat.inputAttachment.forbiddenFileType', { name: file.name || t('chat.inputAttachment.unnamedFile') })
+          : t('chat.inputAttachment.unsupportedFileType', { name: file.name || t('chat.inputAttachment.unnamedFile') });
         pushAttachmentAlert(message);
         return items;
       }
@@ -1140,8 +1170,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       };
       const validationError =
         kind === 'document'
-          ? getDocumentValidationError(file, { filename: base.filename, localPath })
-          : getImageValidationError(file);
+          ? getDocumentValidationError(file, t, { filename: base.filename, localPath })
+          : getImageValidationError(file, t);
       if (validationError) {
         pushAttachmentAlert(validationError);
         items.push({
@@ -1165,28 +1195,43 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       if (draft.status !== 'uploading') return;
       uploadAttachment(draft);
     });
-  }, [pushAttachmentAlert, uploadAttachment]);
+  }, [attachments, pushAttachmentAlert, uploadAttachment, t]);
 
   const appendLocalFilePicks = useCallback((picks: LocalFilePick[]) => {
     if (!picks.length) return;
 
-    const drafts = picks.reduce<AttachmentDraft[]>((items, pick) => {
+    const remaining = MAX_ATTACHMENT_COUNT - attachments.length;
+    if (remaining <= 0) {
+      pushAttachmentAlert(t('chat.inputAttachment.attachmentCountExceeded', { limit: MAX_ATTACHMENT_COUNT }));
+      return;
+    }
+
+    const picksToAdd = picks.slice(0, remaining);
+    if (picks.length > remaining) {
+      pushAttachmentAlert(t('chat.inputAttachment.attachmentCountPartialAdd', { limit: MAX_ATTACHMENT_COUNT, count: remaining }));
+    }
+
+    const drafts = picksToAdd.reduce<AttachmentDraft[]>((items, pick) => {
       if (pick.error === 'forbidden') {
-        pushAttachmentAlert(`禁止上传该文件类型：${pick.filename}`);
+        pushAttachmentAlert(t('chat.inputAttachment.forbiddenFileType', { name: pick.filename }));
         return items;
       }
       if (pick.error === 'image_too_large') {
         pushAttachmentAlert(
-          `文件大小超出限制：${pick.filename}（最大${formatAttachmentSize(MAX_IMAGE_BYTES)}）`,
+          t('chat.inputAttachment.imageSizeExceeded', { name: pick.filename, limit: formatAttachmentSize(MAX_IMAGE_BYTES) }),
         );
         return items;
       }
       if (pick.error === 'read_failed') {
-        pushAttachmentAlert(`读取文件失败：${pick.filename}`);
+        pushAttachmentAlert(t('chat.inputAttachment.readFileFailed', { name: pick.filename }));
         return items;
       }
       if (pick.kind === 'image' && !pick.base64) {
-        pushAttachmentAlert(`读取图片失败：${pick.filename}`);
+        pushAttachmentAlert(t('chat.inputAttachment.readImageFailed', { name: pick.filename }));
+        return items;
+      }
+      if (pick.size > MAX_FILE_BYTES) {
+        pushAttachmentAlert(t('chat.inputAttachment.fileSizeExceeded', { name: pick.filename, limit: formatAttachmentSize(MAX_FILE_BYTES) }));
         return items;
       }
 
@@ -1214,7 +1259,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     drafts.forEach((draft) => {
       uploadAttachment(draft);
     });
-  }, [pushAttachmentAlert, uploadAttachment]);
+  }, [attachments, pushAttachmentAlert, uploadAttachment, t]);
 
   const openAttachmentPicker = useCallback(async () => {
     if (imageInputDisabled) return;
@@ -1232,10 +1277,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     }
     const hint =
       result.reason === 'unsupported'
-        ? '当前环境无法打开本机文件选择器（请确认 jiuwenswarm 在本机运行且已重启加载最新后端）'
-        : (result.message || '打开文件选择器失败');
+        ? t('chat.inputAttachment.filePickerUnsupported')
+        : (result.message || t('chat.inputAttachment.filePickerFailed'));
     pushAttachmentAlert(hint);
-  }, [appendLocalFilePicks, imageInputDisabled, pushAttachmentAlert]);
+  }, [appendLocalFilePicks, imageInputDisabled, pushAttachmentAlert, t]);
 
   const acceptExternalLocalFilePicks = useCallback(
     (picks: LocalFilePick[]) => {
@@ -1282,9 +1327,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     const handlePointerDown = (event: PointerEvent) => {
       if (
         !attachMenuRef.current?.contains(event.target as Node) &&
-        !attachMenuPortalRef.current?.contains(event.target as Node)
+        !attachMenuPortalRef.current?.contains(event.target as Node) &&
+        !extensionPanelRef.current?.contains(event.target as Node)
       ) {
         setAttachMenuOpen(false);
+        setExtensionPanelOpen(false);
       }
     };
 
@@ -2181,6 +2228,54 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
   }, [extractPlainText]);
 
+  // 监听从 SkillPanel 发来的"跳转到聊天并插入技能"事件
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { skillName: string; prefixText?: string; suffixText?: string; secondSkillName?: string };
+      const sid = useChatStore.getState().activeSessionId;
+      if (!sid || !inputRef.current) return;
+
+      // 清空输入框并插入前缀文本（如"帮我修改这个技能"）
+      inputRef.current.textContent = detail.prefixText || '';
+      inputRef.current.focus();
+
+      // 将光标移到末尾，确保技能 chip 插入在前缀文本之后
+      const range = document.createRange();
+      range.selectNodeContents(inputRef.current);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+
+      // 先更新 store 中的 selectedSkills，再插入 chip DOM
+      useSessionStore.getState().addSelectedSkill(sid, detail.skillName);
+      insertSkillChip(detail.skillName);
+
+      // 如果有后缀文本（如"帮我修改这个技能"），追加到 chip 之后
+      if (detail.suffixText) {
+        inputRef.current.appendChild(document.createTextNode(detail.suffixText));
+        // 光标移到末尾
+        const r = document.createRange();
+        r.selectNodeContents(inputRef.current);
+        r.collapse(false);
+        const s = window.getSelection();
+        s?.removeAllRanges();
+        s?.addRange(r);
+      }
+
+      // 如果有第二个技能（如被编辑的技能），追加 chip
+      if (detail.secondSkillName) {
+        useSessionStore.getState().addSelectedSkill(sid, detail.secondSkillName);
+        insertSkillChip(detail.secondSkillName);
+      }
+
+      // 同步纯文本到 store（chip 不进入纯文本，前缀/后缀文本会保留）
+      useChatStore.getState().setInputValue(sid, extractPlainText());
+    };
+    window.addEventListener('chat-input-insert-skill', handler);
+    return () => window.removeEventListener('chat-input-insert-skill', handler);
+  }, [insertSkillChip, extractPlainText]);
+
   // const handleVoiceStart = useCallback(() => {
   //   if (isListening) return;
   //   stopAllTts();
@@ -2357,6 +2452,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         </div>
       )}
 
+      <div className="chat-input-body" data-testid="chat-panel-input-body">
       {attachments.length > 0 && (
         <div className="chat-input-attachment-panel" data-testid="chat-panel-input-attachment-panel">
           <div
@@ -2399,7 +2495,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     {attachment.status === 'uploading' ? (
                       <>
                         <Loader2 className="chat-input-attachment-spin" size={12} strokeWidth={2} />
-                        <span data-testid="chat-panel-input-attachment-status" data-variant="uploading">上传中...</span>
+                        <span data-testid="chat-panel-input-attachment-status" data-variant="uploading">{t('chat.uploading')}</span>
                       </>
                     ) : attachment.status === 'error' ? (
                       <>
@@ -2407,9 +2503,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                           className="chat-input-attachment-status-error"
                           data-testid="chat-panel-input-attachment-status"
                           data-variant="error"
-                          title={attachment.error || '上传失败'}
+                          title={attachment.error || t('chat.uploadFailed')}
                         >
-                          上传失败
+                          {t('chat.uploadFailed')}
                         </span>
                         {attachment.file && (
                           <button
@@ -2418,7 +2514,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                             data-testid="chat-panel-input-attachment-retry"
                             onClick={() => retryAttachment(attachment)}
                           >
-                            重试
+                            {t('chat.retry')}
                           </button>
                         )}
                       </>
@@ -2438,30 +2534,41 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   type="button"
                   className="chat-input-attachment-remove"
                   data-testid="chat-panel-input-attachment-remove"
-                  onPointerDown={() => startAttachmentMenuTimer(attachment.id)}
+                  onPointerDown={(e) => startAttachmentMenuTimer(attachment.id, e.currentTarget)}
                   onPointerUp={stopAttachmentMenuTimer}
                   onPointerCancel={stopAttachmentMenuTimer}
                   onPointerLeave={stopAttachmentMenuTimer}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     stopAttachmentMenuTimer();
+                    setAttachmentMenuAnchor(event.currentTarget.getBoundingClientRect());
                     setAttachmentMenuId(attachment.id);
                   }}
                   onClick={() => handleAttachmentRemoveClick(attachment.id)}
-                  title="删除，长按显示更多操作"
-                  aria-label="删除附件"
+                  title={t('chat.deleteLongPress')}
+                  aria-label={t('chat.deleteAttachment')}
                 >
                   <X size={12} strokeWidth={2} />
                 </button>
-                {attachmentMenuId === attachment.id && (
-                  <div className="chat-input-attachment-menu" role="menu" data-testid="chat-panel-input-attachment-menu">
+                {attachmentMenuId === attachment.id && attachmentMenuAnchor && createPortal(
+                  <div
+                    className="chat-input-attachment-menu"
+                    role="menu"
+                    data-testid="chat-panel-input-attachment-menu"
+                    style={{
+                      position: 'fixed',
+                      top: attachmentMenuAnchor.top,
+                      left: attachmentMenuAnchor.right + 4,
+                      zIndex: 9999,
+                    }}
+                  >
                     <button
                       type="button"
                       role="menuitem"
                       data-testid="chat-panel-input-attachment-menu-delete"
                       onClick={() => removeAttachment(attachment.id)}
                     >
-                      删除
+                      {t('chat.delete')}
                     </button>
                     <button
                       type="button"
@@ -2469,16 +2576,16 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       data-testid="chat-panel-input-attachment-menu-clear"
                       onClick={clearAttachments}
                     >
-                      清空附件
+                      {t('chat.clearAttachments')}
                     </button>
-                  </div>
+                  </div>,
+                  document.body
                 )}
               </div>
             ))}
           </div>
         </div>
       )}
-
       {composerSuggestion && !showSlashSuggestionBelow && (
         <ComposerSuggestionMenu
           suggestion={composerSuggestion}
@@ -2541,9 +2648,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               onClick={() => {
                 if (attachTriggerDisabled) return;
                 if (!attachMenuOpen && attachMenuRef.current) {
-                  setAttachMenuAnchor(attachMenuRef.current.getBoundingClientRect());
+                  const rect = attachMenuRef.current.getBoundingClientRect();
+                  setAttachMenuAnchor(rect);
+                  setAttachMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
                 }
                 setAttachMenuOpen((open) => !open);
+                setExtensionPanelOpen(false);
               }}
               disabled={attachTriggerDisabled}
               className={cx(
@@ -2563,12 +2673,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 className="chat-mode-select__menu"
                 role="menu"
                 data-testid="chat-panel-input-attach-menu"
-                style={{
-                  position: 'fixed',
-                  bottom: window.innerHeight - attachMenuAnchor.top + 10,
-                  left: attachMenuAnchor.left,
-                  zIndex: 9999,
-                }}
+                style={attachMenuDirection === 'up'
+                  ? { position: 'fixed', bottom: window.innerHeight - attachMenuAnchor.top + 10, left: attachMenuAnchor.left, zIndex: 9999 }
+                  : { position: 'fixed', top: attachMenuAnchor.bottom + 10, left: attachMenuAnchor.left, zIndex: 9999 }
+                }
               >
                 <button
                   type="button"
@@ -2588,122 +2696,149 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                   </span>
                 </button>
-                {canUseGoalMenu && (() => {
-                  // Goal 和 Plan 互斥：已有真正生效的目标/计划时都不能再选目标。已提交的目标沿用
-                  // 原提示；被"计划已生效"挡住时换一条对应文案，避免误导用户去找目标本身的问题。
-                  const goalDisabled = hasUnfinishedGoal || planCommitted;
-                  const goalDisabledTitle = hasUnfinishedGoal
-                    ? t('goal.toolbarUnavailable')
-                    : planCommitted
-                      ? t('goal.toolbarUnavailablePlan')
-                      : undefined;
-                  return (
-                    <button
-                      type="button"
-                      className="chat-mode-select__option"
-                      role="menuitem"
-                      data-testid="chat-panel-input-attach-menu-goal"
-                      disabled={goalDisabled}
-                      title={goalDisabledTitle}
-                      onClick={() => {
-                        if (goalDisabled) return;
-                        setAttachMenuOpen(false);
-                        if (activeSessionId) {
-                          // 走到这里 planCommitted 一定是 false（否则上面已 disabled），所以 planActive
-                          // 为 true 时只可能是"刚打开开关、还没发过消息"的未提交态，可以放心顶掉。
-                          if (planActive) {
-                            usePlanStore.getState().setActive(activeSessionId, false);
-                          }
-                          useGoalStore.getState().setArmed(activeSessionId, true);
-                        }
-                      }}
-                    >
-                      <span className="chat-mode-select__option-main">
-                        <span className="chat-mode-select__icon" aria-hidden="true">
-                          <Target className="w-4 h-4" />
-                        </span>
-                        <span className="chat-mode-select__label">{t('goal.toolbarTag')}</span>
-                      </span>
-                    </button>
-                  );
-                })()}
-                {canUsePersistSessionMenu && (
-                  <button
-                    type="button"
-                    className={clsx(
-                      'chat-mode-select__option',
-                      persistSessionEnabled && 'chat-mode-select__option--active',
-                    )}
-                    role="menuitemcheckbox"
-                    aria-checked={persistSessionEnabled}
-                    disabled={persistSessionLocked}
-                    title={persistSessionLocked ? t('persistSession.lockedHint') : undefined}
-                    onClick={() => {
-                      if (persistSessionLocked || !activeSessionId) return;
-                      useSessionStore
-                        .getState()
-                        .setPersistSession(activeSessionId, !persistSessionEnabled);
-                      setAttachMenuOpen(false);
-                    }}
-                  >
-                    <span className="chat-mode-select__option-main">
-                      <span className="chat-mode-select__icon" aria-hidden="true">
-                        <InfinityIcon className="w-4 h-4" />
-                      </span>
-                      <span className="chat-mode-select__label">
-                        {t('persistSession.toolbarTag')}
-                      </span>
+                <button
+                  ref={extensionMenuItemRef}
+                  type="button"
+                  className="chat-mode-select__option"
+                  role="menuitem"
+                  aria-haspopup="menu"
+                  aria-expanded={extensionPanelOpen}
+                  onClick={() => {
+                    if (!extensionPanelOpen && extensionMenuItemRef.current) {
+                      setExtensionAnchor(extensionMenuItemRef.current.getBoundingClientRect());
+                    }
+                    setExtensionPanelOpen((open) => !open);
+                  }}
+                >
+                  <span className="chat-mode-select__option-main">
+                    {/* 手绘拼图图标（ConnectorMarket/icons.tsx）在这个菜单里视觉上比旁边
+                        FileText/Target/ClipboardList 这些 lucide 图标显得更小（用户 2026-08-19
+                        反馈），单独放大到 18px。真正生效的是 CSS 里的 --lg 修饰 class（见
+                        ChatPanel.css `.chat-mode-select__icon svg { width/height: 14px }`
+                        这条共享基础规则的选择器特异度是 class+元素，Tailwind 任意值 class 在
+                        SVG 自身上加宽高属性/class 特异度更低会被它盖掉，实测确认过），不是这里
+                        ExtensionIcon 的 className。 */}
+                    <span className="chat-mode-select__icon chat-mode-select__icon--lg" aria-hidden="true">
+                      <ExtensionIcon />
                     </span>
-                    {persistSessionEnabled && (
-                      <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
-                      </svg>
-                    )}
-                  </button>
-                )}
+                    <span className="chat-mode-select__label">{t('chat.extension')}</span>
+                  </span>
+                  <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
+                  </svg>
+                </button>
+                {(canUsePlanMenu || canUseGoalMenu) && <div className="chat-mode-select__divider" role="separator" />}
                 {canUsePlanMenu && (() => {
                   // 对称地：已有未完成目标时不能选计划；对话进行中（isProcessing）时也先禁掉，
-                  // 避免在当前这轮还没结束时又叠加切一次模式。
-                  const planDisabled = hasUnfinishedGoal || isProcessing;
-                  const planDisabledTitle = hasUnfinishedGoal
+                  // 避免在当前这轮还没结束时又叠加切一次模式。这条"打开"方向的限制沿用原逻辑；
+                  // "关闭"方向只受 isProcessing 限制（跟输入框旁边现有的计划 chip 关闭按钮一致）。
+                  const planDisabledOn = hasUnfinishedGoal || isProcessing;
+                  const planDisabledOnTitle = hasUnfinishedGoal
                     ? t('plan.toolbarUnavailableGoal')
                     : isProcessing
                       ? t('plan.toolbarUnavailableProcessing')
                       : undefined;
+                  const planDisabled = planActive ? isProcessing : planDisabledOn;
+                  const planTitle = planActive
+                    ? (isProcessing ? t('plan.closeTagDisabled') : undefined)
+                    : planDisabledOnTitle;
+                  const togglePlan = (next: boolean) => {
+                    if (!activeSessionId) return;
+                    if (next) {
+                      if (planDisabledOn) return;
+                      // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
+                      // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
+                      useGoalStore.getState().setArmed(activeSessionId, false);
+                      // explicitEntry：这是用户手动打开开关，下一条 Plan 消息要带
+                      // plan_entry_source，否则会被后端的防重入闸门拦下。
+                      usePlanStore.getState().setActive(activeSessionId, true, { explicitEntry: true });
+                    } else {
+                      if (isProcessing) return;
+                      usePlanStore.getState().setActive(activeSessionId, false);
+                    }
+                    // 不关闭菜单：用户拨动开关后保持菜单打开，便于看到开关状态变化并继续操作。
+                  };
                   return (
-                    <button
-                      type="button"
-                      className="chat-mode-select__option"
+                    <div
+                      className={cx('chat-mode-select__option', planDisabled && 'chat-mode-select__option--disabled')}
                       role="menuitem"
                       data-testid="chat-panel-input-attach-menu-plan"
-                      disabled={planDisabled}
-                      title={planDisabledTitle}
+                      title={planTitle}
                       onClick={() => {
                         if (planDisabled) return;
-                        setAttachMenuOpen(false);
-                        if (activeSessionId) {
-                          // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
-                          // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
-                          useGoalStore.getState().setArmed(activeSessionId, false);
-                          // explicitEntry：这是用户手动打开开关，下一条 Plan 消息要带
-                          // plan_entry_source，否则会被后端的防重入闸门拦下。
-                          usePlanStore
-                            .getState()
-                            .setActive(activeSessionId, true, { explicitEntry: true });
-                        }
+                        togglePlan(!planActive);
                       }}
                     >
                       <span className="chat-mode-select__option-main">
                         <span className="chat-mode-select__icon" aria-hidden="true">
                           <ClipboardList className="w-4 h-4" />
                         </span>
-                        <span className="chat-mode-select__label">{t('plan.toolbarTag')}</span>
+                        <span className="chat-mode-select__label">{t('plan.toggleLabel')}</span>
                       </span>
-                    </button>
+                      <Switch checked={planActive} disabled={planDisabled} onChange={togglePlan} />
+                    </div>
+                  );
+                })()}
+                {canUseGoalMenu && (() => {
+                  // Goal 和 Plan 互斥：已有真正生效的计划时不能再选目标；"打开"方向沿用原逻辑，
+                  // "关闭"方向不受限制（跟输入框旁边现有的目标 chip 关闭按钮一致，随时可关）。
+                  const goalChecked = goalArmed || hasUnfinishedGoal;
+                  const goalDisabledOn = hasUnfinishedGoal || planCommitted;
+                  const goalDisabledOnTitle = hasUnfinishedGoal
+                    ? t('goal.toolbarUnavailable')
+                    : planCommitted
+                      ? t('goal.toolbarUnavailablePlan')
+                      : undefined;
+                  const goalDisabled = goalChecked ? false : goalDisabledOn;
+                  const goalTitle = goalChecked ? undefined : goalDisabledOnTitle;
+                  const toggleGoal = (next: boolean) => {
+                    if (!activeSessionId) return;
+                    if (next) {
+                      if (goalDisabledOn) return;
+                      // 走到这里 planCommitted 一定是 false（否则上面已 disabled），所以 planActive
+                      // 为 true 时只可能是"刚打开开关、还没发过消息"的未提交态，可以放心顶掉。
+                      if (planActive) {
+                        usePlanStore.getState().setActive(activeSessionId, false);
+                      }
+                      useGoalStore.getState().setArmed(activeSessionId, true);
+                    } else {
+                      if (currentGoal) {
+                        onClearGoal?.(activeSessionId);
+                      }
+                      useGoalStore.getState().setArmed(activeSessionId, false);
+                    }
+                    // 不关闭菜单：用户拨动开关后保持菜单打开，便于看到开关状态变化并继续操作。
+                  };
+                  return (
+                    <div
+                      className={cx('chat-mode-select__option', goalDisabled && 'chat-mode-select__option--disabled')}
+                      role="menuitem"
+                      data-testid="chat-panel-input-attach-menu-goal"
+                      title={goalTitle}
+                      onClick={() => {
+                        if (goalDisabled) return;
+                        toggleGoal(!goalChecked);
+                      }}
+                    >
+                      <span className="chat-mode-select__option-main">
+                        <span className="chat-mode-select__icon" aria-hidden="true">
+                          <Target className="w-4 h-4" />
+                        </span>
+                        <span className="chat-mode-select__label">{t('goal.toggleLabel')}</span>
+                      </span>
+                      <Switch checked={goalChecked} disabled={goalDisabled} onChange={toggleGoal} />
+                    </div>
                   );
                 })()}
               </div>,
               document.body
+            )}
+            {extensionPanelOpen && extensionAnchor && (
+              <ExtensionPickerPanel
+                anchorRect={extensionAnchor}
+                panelRef={extensionPanelRef}
+                onClose={() => setExtensionPanelOpen(false)}
+              />
             )}
           </div>
           <div
@@ -2723,9 +2858,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 if (hasHistory || isProcessing) return;
                 if (!isModeMenuOpen && modeMenuRef.current) {
                   const rect = modeMenuRef.current.getBoundingClientRect();
-                  const spaceBelow = window.innerHeight - rect.bottom;
-                  const dir = spaceBelow >= 120 ? 'down' : 'up';
-                  setMenuDirection(dir);
+                  setMenuDirection(resolveMenuDirection(rect.bottom, 160));
                   setModeMenuAnchor(rect);
                 }
                 setIsModeMenuOpen((open) => !open);
@@ -2867,40 +3000,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </div>
           )}
 
-          {persistSessionEnabled && (
-            <div
-              className={clsx(
-                'chat-goal-tag',
-                persistSessionLocked && 'chat-goal-tag--locked',
-              )}
-              title={persistSessionLocked ? t('persistSession.lockedHint') : undefined}
-            >
-              <button type="button" className="chat-mode-select__trigger" tabIndex={-1}>
-                <span className="chat-mode-select__value">
-                  <span className="chat-mode-select__icon" aria-hidden="true">
-                    <InfinityIcon className="w-4 h-4" />
-                  </span>
-                  <span className="chat-mode-select__label">
-                    {t('persistSession.toolbarTag')}
-                  </span>
-                </span>
-              </button>
-              {!persistSessionLocked && (
-                <button
-                  type="button"
-                  className="chat-goal-tag__close"
-                  title={t('persistSession.closeTag')}
-                  onClick={() => {
-                    if (!activeSessionId) return;
-                    useSessionStore.getState().setPersistSession(activeSessionId, false);
-                  }}
-                >
-                  <X size={11} strokeWidth={2.5} />
-                </button>
-              )}
-            </div>
-          )}
-
           {evolutionLabel && (
             <div className="chat-input-evolution-pill" data-testid="chat-panel-input-evolution-pill" title={evolutionLabel}>
               <span className="chat-input-evolution-pill__dot" />
@@ -2935,8 +3034,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           )} */}
 
           <ModelSelector
-            disabled={isTeamMode || isProcessing}
-            lockedToDefault={isTeamMode}
+            disabled={isProcessing || activeSessionId !== NEW_CONVERSATION_ID}
           />
 
           <button
@@ -2964,6 +3062,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             )}
           </button>
         </div>
+      </div>
       </div>
 
       {showSlashSuggestionBelow && composerSuggestion && (
@@ -2995,27 +3094,32 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             >
               <WorkIcon name="folder" className="chat-work-select__root-icon" />
               <span>{getProjectLabel(displayedProject, t('multiSession.project.chooseProjectDirectory'))}</span>
-              <svg className="chat-work-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
-              </svg>
+              {displayedProject && !isWorkContextLocked ? (
+                <span className="chat-work-select__trigger-action">
+                  <svg className="chat-work-select__chevron" width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
+                  </svg>
+                  <button
+                    type="button"
+                    className="chat-work-select__clear"
+                    data-testid="chat-panel-work-select-clear"
+                    aria-label={t('multiSession.project.clearProject')}
+                    data-tooltip={t('multiSession.project.clearProject')}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedProject(null);
+                      setWorkMenuOpen(null);
+                    }}
+                  >
+                    <WorkIcon name="close" />
+                  </button>
+                </span>
+              ) : (
+                <svg className="chat-work-select__chevron" width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
+                </svg>
+              )}
             </button>
-            {displayedProject && !isWorkContextLocked ? (
-              <span className="chat-work-select__clear-wrap" aria-hidden="false">
-                <button
-                  type="button"
-                  className="chat-work-select__clear"
-                  data-testid="chat-panel-work-select-clear"
-                  aria-label={t('multiSession.project.clearProject')}
-                  data-tooltip={t('multiSession.project.clearProject')}
-                  onClick={() => {
-                    setSelectedProject(null);
-                    setWorkMenuOpen(null);
-                  }}
-                >
-                  <WorkIcon name="close" />
-                </button>
-              </span>
-            ) : null}
             {workMenuOpen === 'project' && !isWorkContextLocked ? (
               <div className={clsx('chat-work-select__menu', hasInputProjectOptions && 'chat-work-select__menu--projects')} role="menu" data-testid="chat-panel-work-select-menu">
                 {!hasInputProjectOptions ? (
@@ -3222,6 +3326,7 @@ function ComposerSuggestionMenu({
 }) {
   const isSlash = suggestion.kind === 'slash';
   const tokenPrefix = suggestion.kind === 'role' ? '$' : '@';
+  const { t } = useTranslation();
   const commandCount = items.filter((item) => item.itemKind === 'command').length;
   const skillCount = items.filter((item) => item.itemKind === 'skill').length;
   const listRef = useRef<HTMLDivElement>(null);
@@ -3283,10 +3388,8 @@ function ComposerSuggestionMenu({
     >
       {!isSlash && (
         <div className="chat-composer-suggestion__header" data-testid="chat-panel-composer-suggestion-header">
-          <>
-            <AtSign size={14} />
-            <span>选择团队成员</span>
-          </>
+          <AtSign size={14} />
+          <span>{t('chat.selectTeamMembers')}</span>
         </div>
       )}
       <div
@@ -3297,7 +3400,11 @@ function ComposerSuggestionMenu({
       >
         {items.length === 0 ? (
           <div className="chat-composer-suggestion__empty" data-testid="chat-panel-composer-suggestion-empty">
-            {isSlash ? (loading ? '正在加载指令与技能…' : '没有匹配的指令或技能') : '暂无可选择的团队成员'}
+            {isSlash
+              ? loading
+                ? '正在加载指令与技能…'
+                : '没有匹配的指令或技能'
+              : t('chat.noTeamMembersAvailable')}
           </div>
         ) : items.map((item, index) => {
           const showSectionTitle = isSlash && (
@@ -3378,10 +3485,8 @@ function ComposerSuggestionMenu({
 
 function ModelSelector({
   disabled = false,
-  lockedToDefault = false,
 }: {
   disabled?: boolean;
-  lockedToDefault?: boolean;
 }) {
   const chatAvailableModels = useSessionStore((s) => s.chatAvailableModels);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -3410,14 +3515,12 @@ function ModelSelector({
 
   if (chatAvailableModels.length === 0) return null;
 
-  // 集群模式下 UI 禁止手动改模型（见下方 disabled/tooltip），但显示仍应优先反映
-  // 该会话实际记录的模型（如定时任务在集群模式下显式指定了非默认模型，后端也确实
-  // 按该模型执行——见 bug002 回归），而不是不管三七二十一恒显示全局默认模型；
-  // 从未指定过模型的会话 selectedModelName 本就兜底等于默认模型，行为不变。
-  // 与实际发给后端的 model_name（sessionStore.getEffectiveModelName）复用同一套解析逻辑，
-  // 避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的兜底结果（bug003）。
+  // 单 Agent 与集群（team）模式共用同一套解析，展示会话自选模型（含 metadata 恢复值），
+  // 失配时回退默认模型。与实际发给后端的 model_name（sessionStore.getEffectiveModelName）
+  // 复用同一套解析逻辑，避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的
+  // 兜底结果（bug003）。
   const selectedModel =
-    resolveEffectiveModel(chatAvailableModels, selectedModelName, defaultModelName) ??
+    resolveChatModelSelection(chatAvailableModels, selectedModelName, defaultModelName) ??
     chatAvailableModels[0];
 
   const handleSelect = (modelKey: string) => {
@@ -3439,7 +3542,7 @@ function ModelSelector({
       <button
         type="button"
         className="chat-mode-select__trigger"
-        title={t(lockedToDefault ? 'chat.modelSelector.clusterLockedTooltip' : 'chat.modelSelector.tooltip')}
+        title={t('chat.modelSelector.tooltip')}
         onClick={() => {
           if (disabled) return;
           if (!isOpen && menuRef.current) {
@@ -3617,11 +3720,11 @@ function PermissionSelector({
           title={disabled ? t('chat.configLockedHistory') : undefined}
           onClick={() => {
             if (disabled) return;
-            if (!isOpen && menuRef.current) {
-              const rect = menuRef.current.getBoundingClientRect();
-              setMenuDirection(window.innerHeight - rect.bottom >= 160 ? 'down' : 'up');
-              setMenuAnchor(rect);
-            }
+          if (!isOpen && menuRef.current) {
+            const rect = menuRef.current.getBoundingClientRect();
+            setMenuDirection(resolveMenuDirection(rect.bottom, 358));
+            setMenuAnchor(rect);
+          }
             setIsOpen((v) => !v);
           }}
           aria-haspopup="menu"
@@ -3713,6 +3816,9 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
   const [plugins, setPlugins] = useState<InputAreaInstalledPlugin[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuPortalRef = useRef<HTMLDivElement>(null);
+  const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null);
+  const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
 
   const installedSkillMap = useMemo(() => {
     const map = new Map<string, InputAreaInstalledPlugin>();
@@ -3726,6 +3832,7 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
 
   const isSkillInstalled = useCallback(
     (skill: InputAreaSkillItem): boolean =>
+      skill.installed === true ||
       installedSkillMap.has(skill.name) ||
       skill.source === 'local' ||
       skill.source === 'project',
@@ -3785,12 +3892,33 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
   useEffect(() => {
     if (!isOpen) return;
     const handlePointerDown = (event: PointerEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) {
+      if (
+        !menuRef.current?.contains(event.target as Node) &&
+        !menuPortalRef.current?.contains(event.target as Node)
+      ) {
         setIsOpen(false);
       }
     };
     document.addEventListener('pointerdown', handlePointerDown);
     return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [isOpen]);
+
+  // 滚动/缩放时重新计算菜单位置
+  useEffect(() => {
+    if (!isOpen) return;
+    const updateAnchor = () => {
+      if (menuRef.current) {
+        const rect = menuRef.current.getBoundingClientRect();
+        setMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
+        setMenuAnchor(rect);
+      }
+    };
+    window.addEventListener('scroll', updateAnchor, true);
+    window.addEventListener('resize', updateAnchor);
+    return () => {
+      window.removeEventListener('scroll', updateAnchor, true);
+      window.removeEventListener('resize', updateAnchor);
+    };
   }, [isOpen]);
 
   const handleOpenSkillsPage = useCallback(() => {
@@ -3821,7 +3949,14 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
       <button
         type="button"
         className="chat-skill-select__trigger"
-        onClick={() => setIsOpen((open) => !open)}
+        onClick={() => {
+          if (!isOpen && menuRef.current) {
+            const rect = menuRef.current.getBoundingClientRect();
+            setMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
+            setMenuAnchor(rect);
+          }
+          setIsOpen((open) => !open);
+        }}
         aria-haspopup="menu"
         aria-expanded={isOpen}
         title={t('chat.skillsToggle')}
@@ -3838,8 +3973,17 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
         </svg>
       </button>
 
-      {isOpen && (
-        <div className="chat-skill-select__menu" role="menu" data-testid="chat-panel-skill-select-menu">
+      {isOpen && menuAnchor && createPortal(
+        <div
+          ref={menuPortalRef}
+          className="chat-skill-select__menu"
+          role="menu"
+          data-testid="chat-panel-skill-select-menu"
+          style={menuDirection === 'up'
+            ? { position: 'fixed', bottom: window.innerHeight - menuAnchor.top + 10, left: menuAnchor.left, zIndex: 9999 }
+            : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
+          }
+        >
           {/* 顶部搜索框 */}
           <div className="chat-skill-select__search" data-testid="chat-panel-skill-select-search">
             <svg className="chat-skill-select__search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
@@ -3920,7 +4064,8 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
               <span>{t('chat.skillsManage')}</span>
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

@@ -545,6 +545,41 @@ class TestCrossModeCoexistence:
         assert resolve_cron_project_id(proj_dir, work_mode="code") == proj_code.project_id
 
 
+class TestTuiCodeProjectResolution:
+    @staticmethod
+    def test_registering_empty_directory_only_probes_git(project_store_dir, tmp_path, monkeypatch):
+        from jiuwenswarm.server.runtime.session import project_git
+        from jiuwenswarm.server.runtime.session.project_store import (
+            find_or_create_code_project_for_dir,
+        )
+
+        project_dir = tmp_path / "empty-project"
+        project_dir.mkdir()
+        calls = []
+
+        class FakeGitService:
+            @staticmethod
+            def probe(project):
+                calls.append(("probe", project.project_dir))
+
+            @staticmethod
+            def ensure_on_project_create(_project):
+                pytest.fail("TUI directory registration must not initialize Git")
+
+        monkeypatch.setattr(
+            project_git,
+            "get_project_git_service",
+            lambda: FakeGitService(),
+        )
+
+        project = find_or_create_code_project_for_dir(str(project_dir))
+
+        assert project is not None
+        assert project.work_mode == "code"
+        assert calls == [("probe", str(project_dir))]
+        assert not (project_dir / ".git").exists()
+
+
 # ===========================================================================
 # Project 惰性迁移:list_projects 读取时为缺/非法 work_mode 的老项目推断并写回磁盘
 # 替代原 migrate_legacy_projects_at_startup 启动迁移(Project 原无启动迁移,

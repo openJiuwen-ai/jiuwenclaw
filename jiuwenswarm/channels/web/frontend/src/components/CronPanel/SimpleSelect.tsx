@@ -41,6 +41,7 @@ export default function SimpleSelect({ value, onChange, options, placeholder = '
         type="button"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
+        data-testid="cron-simple-select-trigger"
         className="flex w-full items-center justify-between rounded-md border border-border bg-card px-3 py-1.5 text-sm outline-none hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-border"
       >
         <span className={selected && !isEmptySelection ? 'text-text' : 'text-text-muted'}>{selected ? selected.label : placeholder}</span>
@@ -64,6 +65,8 @@ export default function SimpleSelect({ value, onChange, options, placeholder = '
                   onChange(opt.value);
                   setOpen(false);
                 }}
+                data-testid="cron-simple-select-option"
+                data-variant={opt.value}
                 className={`flex w-full items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-sm transition-colors ${
                   opt.disabled
                     ? 'cursor-not-allowed text-text-muted'

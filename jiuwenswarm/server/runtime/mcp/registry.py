@@ -35,6 +35,53 @@ _INDEX_FILE = "index.json"
 _SENSITIVE_MCP_KEYS = frozenset({"headers", "env"})
 
 
+# CLI connect error codes surfaced via mcp.connect's payload ``code`` field.
+# The frontend maps each to a friendly i18n string (connectorMarket.errors.*)
+# instead of the raw error. See _classify_install_failure for the cause → code
+# mapping.
+CODE_RUNTIME_MISSING = "MCP_RUNTIME_MISSING"   # node/npm/<cli> not on PATH
+CODE_INSTALL_NETWORK = "MCP_INSTALL_NETWORK"   # init ran but registry unreachable
+CODE_CLI_INCOMPLETE = "MCP_CLI_INCOMPLETE"     # version still unparseable/low
+# Custom MCP name conflicts with builtin marketplace package dir; 
+# builtin shadows custom on connect, so reject registration and prompt user to rename.
+CODE_NAME_CONFLICT = "MCP_NAME_CONFLICT"
+
+# Network-failure substrings matched (case-insensitively) against init command
+# stderr. Covers npm's common registry/connectivity errors; the token codes are
+# locale-stable unlike the surrounding prose. Kept lowercase because the
+# match runs against the lowercased error string.
+_NETWORK_ERR_MARKERS = (
+    "etimedout", "econnrefused", "enotfound", "eai_again",
+    "econnreset", "econnaborted", "enetunreachable",
+    "registry", "network", "getaddrinfo", "socket hang up",
+)
+
+
+class CliConnectError(ValueError):
+    """A CLI MCP connect failure carrying a structured ``code`` (CODE_*) plus
+    ``runtime`` and ``install_cmd`` so the handler can surface an actionable
+    i18n hint. Subclasses ValueError for backward-compat with ``except ValueError``.
+    """
+
+    def __init__(self, code: str, message: str, *, runtime: str = "", install_cmd: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+        self.runtime = runtime
+        self.install_cmd = install_cmd
+
+
+class McpRegistryError(ValueError):
+    """A user-facing MCP registry failure carrying a structured ``code`` (CODE_*)
+    so the mcp.register_custom handler can surface an actionable i18n hint.
+    Subclasses ValueError for backward-compat with ``except ValueError``.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+
 _MCP_ROOT = "mcp"
 _PACKAGES_SUBDIR = "mcp_builtins"
 
@@ -879,6 +926,35 @@ def _entry_missing_tokens(entry: dict[str, Any], store: Any) -> set[str]:
     return found - stored
 
 
+def _classify_install_failure(n: str, inst: Any) -> CliConnectError:
+    """Map a failed CliDriver.install() onto a CliConnectError by cause:
+    binary_not_found → MCP_RUNTIME_MISSING, network stderr → MCP_INSTALL_NETWORK,
+    else → MCP_CLI_INCOMPLETE. ``runtime``/``install_cmd`` are surfaced so the
+    frontend hint can name the dependency / show the upgrade command.
+    """
+    runtime = inst.runtime or ""
+    install_cmd = inst.install_cmd or ""
+    if inst.error_kind == "binary_not_found":
+        return CliConnectError(
+            CODE_RUNTIME_MISSING,
+            f"mcp '{n}' CLI runtime '{runtime or 'unknown'}' not found on PATH; {inst.error}",
+            runtime=runtime, install_cmd=install_cmd,
+        )
+    err_lower = (inst.error or "").lower()
+    if any(marker in err_lower for marker in _NETWORK_ERR_MARKERS):
+        return CliConnectError(
+            CODE_INSTALL_NETWORK,
+            f"mcp '{n}' CLI install failed (network): {inst.error}",
+            runtime=runtime, install_cmd=install_cmd,
+        )
+    return CliConnectError(
+        CODE_CLI_INCOMPLETE,
+        f"mcp '{n}' CLI version check failed: got {inst.version!r}, "
+        f"min {inst.min_version!r}; {inst.error}",
+        runtime=runtime, install_cmd=install_cmd,
+    )
+
+
 def _connect_cli(name: str, step_index: int, *, install_only: bool = False) -> dict[str, Any]:
     """Run install + version + auth steps for a CLI MCP.
 
@@ -890,10 +966,7 @@ def _connect_cli(name: str, step_index: int, *, install_only: bool = False) -> d
     drv = CliDriver(n)
     inst = drv.install()
     if not inst.version_ok:
-        raise ValueError(
-            f"mcp '{n}' CLI version check failed: got {inst.version!r}, "
-            f"min {inst.min_version!r}; {inst.error}"
-        )
+        raise _classify_install_failure(n, inst)
     steps_total = drv.auth_steps_count()
     idx = max(0, int(step_index))
     # First-connect fast path (idx == 0): probe status before launching any
@@ -931,6 +1004,14 @@ def _connect_cli(name: str, step_index: int, *, install_only: bool = False) -> d
                 },
             }
         if not step.succeeded:
+            if step.error_kind == "binary_not_found":
+                # auth command's binary missing = CLI not properly installed.
+                raise CliConnectError(
+                    CODE_CLI_INCOMPLETE,
+                    f"mcp '{n}' auth step {idx} failed (CLI binary missing): {step.error}",
+                    runtime=inst.runtime or "",
+                    install_cmd=inst.install_cmd or "",
+                )
             raise ValueError(f"mcp '{n}' auth step {idx} failed: {step.error}")
         return _connect_cli(n, idx + 1, install_only=install_only)
     return _finalize_cli(n, inst, install_only=install_only)
@@ -1144,6 +1225,15 @@ def register_custom_mcp(name: str, config: dict[str, Any]) -> dict[str, Any]:
     n = str(name or "").strip()
     if not n:
         raise ValueError("mcp name is required")
+    # Reject names colliding with builtin marketplace dirs — 
+    # connect_mcp dispatches by dir existence, so builtins shadow customs. 
+    # Custom-vs-custom dupes are intentionally overwritten by upsert.
+    if (_packages_dir() / n).is_dir():
+        raise McpRegistryError(
+            CODE_NAME_CONFLICT,
+            f"MCP name '{n}' conflicts with a builtin marketplace package; "
+            f"choose a different name",
+        )
     raw_transport = str(config.get("transport", "")).strip().lower()
     if raw_transport not in {"stdio", "sse", "http", "streamable-http", "streamable_http"}:
         raise ValueError("transport must be one of stdio|sse|http|streamable-http")
@@ -1275,4 +1365,10 @@ __all__ = [
     "delete_custom_mcp",
     "save_mcp_credentials",
     "rollback_failed_connect",
+    "CliConnectError",
+    "McpRegistryError",
+    "CODE_RUNTIME_MISSING",
+    "CODE_INSTALL_NETWORK",
+    "CODE_CLI_INCOMPLETE",
+    "CODE_NAME_CONFLICT",
 ]

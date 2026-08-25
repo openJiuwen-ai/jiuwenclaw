@@ -6,12 +6,14 @@ import pytest
 
 from openjiuwen.core.foundation.llm import Model, ToolMessage
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
     ToolCallInputs,
 )
 from openjiuwen.core.single_agent.ability_manager import AbilityExecutionError
+from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
@@ -799,21 +801,28 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     assert [item.id for item in items] == ["session.sess1.runtime.setting"]
     rendered = agent.prompt_attachment_manager.render(items)
     assert "model-x" in rendered
+    assert "Current channel: web" in rendered
     assert "Always respond in English" not in prompt
     assert "# Browser Tool Policy" not in prompt
     assert "## Browser Subagent Rules" not in prompt
 
 
 @pytest.mark.asyncio
-async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
+async def test_browser_policy_is_injected_only_when_browser_agent_is_loaded():
     rail = JiuWenSwarmDeepAdapter._build_subagent_rail()
-    if rail is None:
-        pytest.skip("SubagentRail is unavailable with the installed openjiuwen API")
+    assert rail is not None
     rail.tools = [object()]
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
 
+    browser_agent = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser",
+    )
+    agent = SimpleNamespace(
+        deep_config=SimpleNamespace(subagents=[browser_agent])
+    )
     ctx = AgentCallbackContext(
-        agent=SimpleNamespace(),
+        agent=agent,
         inputs=None,
         session=_FakeSession(),
         extra={},
@@ -821,23 +830,23 @@ async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
     await rail.before_model_call(ctx)
 
     task_section = rail.system_prompt_builder.get_section("task_tool")
-    if task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in task_section.content["en"]
-    assert "## task_tool" not in task_section.content["en"]
+    assert task_section is not None
     assert "## Browser Subagent Rules" in task_section.content["en"]
     assert 'set `subagent_type` to `"browser_agent"`' in task_section.content["en"]
     assert not rail.system_prompt_builder.has_section("browser_tool_policy")
     assert "浏览器子智能体规则" in build_browser_task_prompt("cn")
 
-    rail.set_channel("tui")
+    agent.deep_config.subagents = [
+        SubAgentConfig(
+            agent_card=AgentCard(name="explore_agent", description="explore"),
+            system_prompt="explore",
+        )
+    ]
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
     await rail.before_model_call(ctx)
-    non_web_task_section = rail.system_prompt_builder.get_section("task_tool")
-    if non_web_task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in non_web_task_section.content["en"]
-    assert "## Browser Subagent Rules" not in non_web_task_section.content["en"]
+    unloaded_task_section = rail.system_prompt_builder.get_section("task_tool")
+    assert unloaded_task_section is not None
+    assert "## Browser Subagent Rules" not in unloaded_task_section.content["en"]
 
 
 def test_task_planning_tools_remain_enabled_without_todo_prompt_section():
@@ -1181,7 +1190,14 @@ async def test_skill_retrieval_prompt_hides_legacy_list_skill(monkeypatch):
     assert agent.ability_manager.get("list_skill") is None
     prompt = builder.build()
     assert "旧 list_skill 提示" not in prompt
-    assert "Agentic 技能检索" in prompt
+    assert "Agentic 技能检索" not in prompt
+    attachments = await agent.prompt_attachment_manager.list_by_filter(
+        session_id="sess1",
+        section="skill_retrieval",
+    )
+    assert [item.content for item in attachments] == [
+        "# Agentic 技能检索\n使用 skill_branch_explore。"
+    ]
 
     await rail.after_model_call(ctx)
 
@@ -1235,7 +1251,14 @@ async def test_skill_retrieval_prompt_hides_native_skill_prompt_after_skill_use_
     prompt = builder.build()
     assert "需要时先调用 list_skill 查看可用技能" not in prompt
     assert "# 技能" not in prompt
-    assert "Agentic 技能检索" in prompt
+    assert "Agentic 技能检索" not in prompt
+    attachments = await agent.prompt_attachment_manager.list_by_filter(
+        session_id="sess1",
+        section="skill_retrieval",
+    )
+    assert [item.content for item in attachments] == [
+        "# Agentic 技能检索\n使用 skill_branch_explore。"
+    ]
     assert [tool.name for tool in ctx.inputs.tools] == ["skill_branch_explore"]
 
 
@@ -1435,27 +1458,39 @@ async def test_deep_adapter_skill_retrieval_prompt_rail_sync_hot_toggles(monkeyp
     assert unregistered == [rail]
 
 
-def test_code_adapter_skill_retrieval_sync_respects_configured_tools(monkeypatch):
-    from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+def test_code_adapter_skill_retrieval_sync_respects_spec_snapshot():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
 
     adapter = JiuwenSwarmCodeAdapter()
-    monkeypatch.setattr(
-        interface_module,
-        "is_skill_retrieval_enabled",
-        lambda: True,
-    )
 
     assert (
         adapter._skill_retrieval_tools_enabled_for_runtime(
-            {"modes": {"code": {"tools": ["skill_toolkit"]}}}
+            {
+                "modes": {"code": {"tools": ["skill_toolkit"]}},
+                "symphony": {"skill_retrieval": {"enabled": True}},
+            }
         )
         is False
     )
     assert (
         adapter._skill_retrieval_tools_enabled_for_runtime(
-            {"modes": {"code": {"tools": ["skill_toolkit", "skill_retrieval"]}}}
+            {
+                "modes": {"code": {"tools": ["skill_toolkit", "skill_retrieval"]}},
+                "symphony": {"skill_retrieval": {"enabled": True}},
+            }
         )
         is True
+    )
+    assert (
+        adapter._skill_retrieval_tools_enabled_for_runtime(
+            {
+                "modes": {"code": {"tools": ["skill_retrieval"]}},
+                "symphony": {"skill_retrieval": {"enabled": False}},
+            }
+        )
+        is False
     )
 
 

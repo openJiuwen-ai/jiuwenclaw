@@ -33,6 +33,7 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'chat.tool_result',
   'chat.usage_summary',
   'chat.file',
+  'chat.subtask_update',
   'team.message',
   'team.member',
   'team.task',
@@ -49,6 +50,350 @@ export interface HistoryToolReplayItem {
   kind: 'tool_call' | 'tool_result';
   at: string;
   payload: Record<string, unknown>;
+}
+
+/** Merge tool replay pages before pairing calls with their results. */
+export function mergeHistoryToolReplayItems(
+  existing: HistoryToolReplayItem[],
+  incoming: HistoryToolReplayItem[],
+): HistoryToolReplayItem[] {
+  const merged = new Map<string, HistoryToolReplayItem>();
+  for (const item of [...existing, ...incoming]) {
+    merged.set(JSON.stringify(item), item);
+  }
+  return [...merged.values()];
+}
+
+export interface HistorySubagentRecovery {
+  subagent: Record<string, unknown>;
+  turns?: Array<{ task_id: string; task_description: string; started_at: number }>;
+  result?: {
+    subagent_id: string;
+    content: string;
+    output_file?: string;
+  };
+}
+
+function readQuotedToken(input: string, start: number): { value: string; next: number } | null {
+  const quote = input[start];
+  if (quote !== "'" && quote !== '"') return null;
+  let value = '';
+  for (let index = start + 1; index < input.length; index += 1) {
+    const char = input[index];
+    if (char === '\\') {
+      const escaped = input[index + 1];
+      if (escaped === undefined) return null;
+      value += escaped === 'n' ? '\n' : escaped === 'r' ? '\r' : escaped === 't' ? '\t' : escaped;
+      index += 1;
+      continue;
+    }
+    if (char === quote) return { value, next: index + 1 };
+    value += char;
+  }
+  return null;
+}
+
+function findQuotedField(raw: string, field: string): string | null {
+  const fieldPattern = new RegExp(`(?<![A-Za-z0-9_])(?:['"])?${field}(?:['"])?\\s*:`);
+  const match = fieldPattern.exec(raw);
+  if (!match) return null;
+  let index = match.index + match[0].length;
+  while (/\s/.test(raw[index] ?? '')) index += 1;
+  return readQuotedToken(raw, index)?.value ?? null;
+}
+
+function findQuotedMapping(raw: string, field: string): Record<string, string> {
+  const fieldPattern = new RegExp(`(?<![A-Za-z0-9_])(?:['"])?${field}(?:['"])?\\s*:\\s*\\{`);
+  const match = fieldPattern.exec(raw);
+  if (!match) return {};
+  let index = match.index + match[0].length;
+  const values: Record<string, string> = {};
+  while (index < raw.length) {
+    while (/\s|,/.test(raw[index] ?? '')) index += 1;
+    if (raw[index] === '}') break;
+    const key = readQuotedToken(raw, index);
+    if (!key) break;
+    index = key.next;
+    while (/\s/.test(raw[index] ?? '')) index += 1;
+    if (raw[index] !== ':') break;
+    index += 1;
+    while (/\s/.test(raw[index] ?? '')) index += 1;
+    const value = readQuotedToken(raw, index);
+    if (!value) break;
+    values[key.value] = value.value;
+    index = value.next;
+  }
+  return values;
+}
+
+function extractToolResultText(payload: Record<string, unknown>): string {
+  const nested = isRecord(payload.tool_result) ? payload.tool_result : payload;
+  return typeof nested.result === 'string' ? nested.result : '';
+}
+
+function extractHistorySubagentIds(payload: Record<string, unknown>): string[] {
+  const raw = extractToolResultText(payload);
+  const ids = new Set<string>();
+  const direct = findQuotedField(raw, 'subagent_id');
+  if (direct) ids.add(direct);
+  for (const field of ['statuses', 'results', 'output_files']) {
+    for (const id of Object.keys(findQuotedMapping(raw, field))) ids.add(id);
+  }
+  return [...ids];
+}
+
+function parseHistorySubagentWaitResult(payload: Record<string, unknown>): {
+  statuses: Record<string, string>;
+  results: Record<string, string>;
+  outputFiles: Record<string, string>;
+} {
+  const nested = isRecord(payload.tool_result) ? payload.tool_result : payload;
+  const structured = isRecord(nested.subagent_wait) ? nested.subagent_wait : null;
+  if (structured) {
+    const statuses = isRecord(structured.statuses) ? structured.statuses : {};
+    const results = isRecord(structured.results) ? structured.results : {};
+    const outputFiles = isRecord(structured.output_files) ? structured.output_files : {};
+    return {
+      statuses: Object.fromEntries(Object.entries(statuses).flatMap(([id, value]) => typeof value === 'string' ? [[id, value]] : [])),
+      results: Object.fromEntries(Object.entries(results).flatMap(([id, value]) => typeof value === 'string' ? [[id, value]] : [])),
+      outputFiles: Object.fromEntries(Object.entries(outputFiles).flatMap(([id, value]) => typeof value === 'string' ? [[id, value]] : [])),
+    };
+  }
+  const raw = extractToolResultText(payload);
+  return {
+    statuses: findQuotedMapping(raw, 'statuses'),
+    results: findQuotedMapping(raw, 'results'),
+    outputFiles: findQuotedMapping(raw, 'output_files'),
+  };
+}
+
+function normalizeRecoveredSubagentStatus(status: string): {
+  status: 'running' | 'idle' | 'closed';
+  turn_outcome: 'completed' | 'failed' | 'cancelled' | null;
+  lifecycle: 'live' | 'closed';
+  can_send_input: boolean;
+  needs_resume: boolean;
+  closed_reason: 'failed' | 'cancelled' | 'completed' | 'parent_ended' | 'manual' | 'evicted' | null;
+} | null {
+  const normalized = status.trim().toLowerCase();
+  if (normalized === 'failed' || normalized === 'errored' || normalized === 'error') {
+    return { status: 'idle', turn_outcome: 'failed', lifecycle: 'live', can_send_input: true, needs_resume: false, closed_reason: null };
+  }
+  if (normalized === 'cancelled' || normalized === 'canceled' || normalized === 'interrupted') {
+    return { status: 'idle', turn_outcome: 'cancelled', lifecycle: 'live', can_send_input: true, needs_resume: false, closed_reason: null };
+  }
+  if (normalized === 'closed') {
+    return { status: 'closed', turn_outcome: null, lifecycle: 'closed', can_send_input: false, needs_resume: true, closed_reason: 'manual' };
+  }
+  if (normalized === 'completed' || normalized === 'idle') {
+    return { status: 'idle', turn_outcome: 'completed', lifecycle: 'live', can_send_input: true, needs_resume: false, closed_reason: null };
+  }
+  if (normalized === 'running' || normalized === 'pending' || normalized === 'pending_init') {
+    return { status: 'running', turn_outcome: null, lifecycle: 'live', can_send_input: false, needs_resume: false, closed_reason: null };
+  }
+  return null;
+}
+
+/**
+ * Recover subagent roster/result hints from the parent history's structured tool records.
+ * The parent history endpoint currently filters chat.subtask_update, so this is only a
+ * discovery bridge to the independent subagent history; it never treats tool-result text
+ * as a transcript/result body except the explicit subagent_wait.results mapping.
+ */
+export function recoverSubagentToolHistory(
+  items: HistoryToolReplayItem[],
+  sessionId: string,
+): HistorySubagentRecovery[] {
+  type MutableRecovery = {
+    id: string;
+    subagentType: string;
+    displayName: string;
+    role: string;
+    taskDescription: string;
+    turns: Map<string, { task_id: string; task_description: string; started_at: number }>;
+    status: NonNullable<ReturnType<typeof normalizeRecoveredSubagentStatus>>;
+    createdAt: number;
+    updatedAt: number;
+    revision: number;
+    result?: { content: string; output_file?: string };
+  };
+
+  const records = new Map<string, MutableRecovery>();
+  const pendingSpawns: Array<{ subagentType: string; displayName: string; role: string; taskDescription: string; at: number }> = [];
+  const pendingFollowUps = new Map<string, Array<{ taskDescription: string; at: number }>>();
+  const ordered = [...items].sort((left, right) => parseTimestampToMs(left.at) - parseTimestampToMs(right.at));
+  const ensure = (id: string, at: number, metadata?: { subagentType?: string; displayName?: string; role?: string; taskDescription?: string; taskId?: string }): MutableRecovery => {
+    const existing = records.get(id);
+    if (existing) {
+      if (metadata?.subagentType) existing.subagentType = metadata.subagentType;
+      if (metadata?.displayName) existing.displayName = metadata.displayName;
+      if (metadata?.role) existing.role = metadata.role;
+      if (metadata?.taskDescription) existing.taskDescription = metadata.taskDescription;
+      if (metadata?.taskId && metadata.taskDescription) {
+        existing.turns.set(metadata.taskId, {
+          task_id: metadata.taskId,
+          task_description: metadata.taskDescription,
+          started_at: at,
+        });
+      }
+      return existing;
+    }
+    const created = {
+      id,
+      subagentType: metadata?.subagentType || 'general-purpose',
+      displayName: metadata?.displayName || metadata?.subagentType || 'general-purpose',
+      role: metadata?.role || '',
+      taskDescription: metadata?.taskDescription || '',
+      turns: new Map<string, { task_id: string; task_description: string; started_at: number }>(),
+      status: normalizeRecoveredSubagentStatus('running')!,
+      createdAt: Number.isFinite(at) ? at : 0,
+      updatedAt: Number.isFinite(at) ? at : 0,
+      revision: 0,
+    };
+    if (metadata?.taskId && metadata.taskDescription) {
+      created.turns.set(metadata.taskId, {
+        task_id: metadata.taskId,
+        task_description: metadata.taskDescription,
+        started_at: at,
+      });
+    }
+    records.set(id, created);
+    return created;
+  };
+  const update = (record: MutableRecovery, status: string, at: number) => {
+    const normalized = normalizeRecoveredSubagentStatus(status);
+    if (!normalized) {
+      records.delete(record.id);
+      return;
+    }
+    record.status = normalized;
+    record.updatedAt = Number.isFinite(at) ? at : record.updatedAt;
+    record.revision += 1;
+  };
+
+  const toolResultSucceeded = (payload: Record<string, unknown>): boolean | null => {
+    const nested = isRecord(payload.tool_result) ? payload.tool_result : payload;
+    if (typeof nested.success === 'boolean') return nested.success;
+    const raw = extractToolResultText(payload);
+    const match = /\bsuccess\s*=\s*(True|False)\b/.exec(raw);
+    if (match) return match[1] === 'True';
+    const status = (typeof nested.status === 'string' ? nested.status : findQuotedField(raw, 'status'))?.trim().toLowerCase();
+    if (!status) return null;
+    if (['error', 'failed', 'failure', 'timeout', 'timed_out'].includes(status)) return false;
+    if (['pending', 'queued', 'accepted', 'running', 'completed', 'success', 'succeeded'].includes(status)) return true;
+    return null;
+  };
+
+  for (const item of ordered) {
+    const at = parseTimestampToMs(item.at);
+    if (item.kind === 'tool_call') {
+      const call = normalizeToolCallPayload(item.payload);
+      if (!call.name.startsWith('subagent_')) continue;
+      const args = call.arguments;
+      if (call.name === 'subagent_spawn') {
+        pendingSpawns.push({
+          subagentType: typeof args.subagent_type === 'string' ? args.subagent_type : 'general-purpose',
+          displayName: typeof args.display_name === 'string' ? args.display_name.trim() : '',
+          role: typeof args.role === 'string' ? args.role.trim() : '',
+          taskDescription: typeof args.task_description === 'string' ? args.task_description : '',
+          at,
+        });
+        continue;
+      }
+      if (call.name === 'subagent_send_input') {
+        const subagentId = typeof args.subagent_id === 'string' ? args.subagent_id.trim() : '';
+        const taskDescription = typeof args.query === 'string' ? args.query.trim() : '';
+        if (subagentId && taskDescription) {
+          pendingFollowUps.set(subagentId, [
+            ...(pendingFollowUps.get(subagentId) ?? []),
+            { taskDescription, at },
+          ]);
+        }
+      }
+      // Do not optimistically change a roster from a tool call. The bfb runtime
+      // rejects close on a running subagent; only its successful tool result is
+      // authoritative for the recovered status.
+      continue;
+    }
+
+    const toolName = normalizeToolResultPayload(item.payload).toolName;
+    if (!toolName.startsWith('subagent_')) continue;
+    if (toolResultSucceeded(item.payload) !== true) continue;
+    const rawResult = extractToolResultText(item.payload);
+    if (toolName === 'subagent_spawn') {
+      const id = findQuotedField(rawResult, 'subagent_id');
+      if (!id) continue;
+      const metadata = pendingSpawns.shift();
+      const taskId = findQuotedField(rawResult, 'task_id') ?? undefined;
+      ensure(id, at, metadata ? { ...metadata, taskId } : { taskId });
+      continue;
+    }
+    if (toolName === 'subagent_wait') {
+      const wait = parseHistorySubagentWaitResult(item.payload);
+      for (const [id, status] of Object.entries(wait.statuses)) {
+        const record = ensure(id, at);
+        update(record, status, at);
+        const content = wait.results[id]?.trim();
+        if (content) {
+          record.result = {
+            content: wait.results[id],
+            ...(wait.outputFiles[id]?.trim() ? { output_file: wait.outputFiles[id].trim() } : {}),
+          };
+        }
+      }
+      continue;
+    }
+    if (toolName === 'subagent_close') {
+      const id = findQuotedField(rawResult, 'subagent_id') ?? extractHistorySubagentIds(item.payload)[0];
+      if (id) update(ensure(id, at), 'closed', at);
+      continue;
+    }
+    if (toolName === 'subagent_send_input' || toolName === 'subagent_resume') {
+      const id = findQuotedField(rawResult, 'subagent_id') ?? extractHistorySubagentIds(item.payload)[0];
+      const status = findQuotedField(rawResult, 'status');
+      if (id && status) {
+        const record = ensure(id, at);
+        update(record, status, at);
+        if (toolName === 'subagent_send_input') {
+          const followUps = pendingFollowUps.get(id) ?? [];
+          const followUp = followUps.shift();
+          if (followUps.length > 0) pendingFollowUps.set(id, followUps);
+          else pendingFollowUps.delete(id);
+          if (followUp) {
+            record.taskDescription = followUp.taskDescription;
+            record.updatedAt = Math.max(record.updatedAt, followUp.at);
+            const taskId = findQuotedField(rawResult, 'task_id');
+            if (taskId) {
+              record.turns.set(taskId, {
+                task_id: taskId,
+                task_description: followUp.taskDescription,
+                started_at: followUp.at,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return [...records.values()].map((record) => ({
+    subagent: {
+      subagent_id: record.id,
+      parent_session_id: sessionId,
+      subagent_type: record.subagentType,
+      display_name: record.displayName || record.subagentType,
+      role: record.role,
+      task_description: record.taskDescription,
+      ...record.status,
+      closed_at: record.status.status === 'closed' ? record.updatedAt : null,
+      error: record.status.turn_outcome === 'failed' ? { code: 'SUBAGENT_ERROR', message: 'Subagent turn failed' } : null,
+      created_at: record.createdAt,
+      updated_at: record.updatedAt,
+      revision: record.revision,
+    },
+    turns: [...record.turns.values()].sort((left, right) => left.started_at - right.started_at),
+    ...(record.result ? { result: { subagent_id: record.id, ...record.result } } : {}),
+  }));
 }
 
 /** 历史中随 chat.final / chat.tool_call 落盘的模型思考（reasoning_content），用于刷新后重建思考块。 */
@@ -80,6 +425,12 @@ export interface HistoryTeamReplayItem {
   };
 }
 
+export interface HistorySubagentReplayItem {
+  kind: 'updated' | 'message' | 'activity';
+  at: string;
+  payload: Record<string, unknown>;
+}
+
 type HistoryTimelineEntry =
   | { kind: 'message'; message: Message }
   | { kind: 'tool_call'; at: string; payload: Record<string, unknown> }
@@ -91,7 +442,10 @@ type HistoryTimelineEntry =
   | { kind: 'harness_message'; at: string; content: string; stage?: string }
   | { kind: 'harness_stage_result'; at: string; stage: string; status: string; error: string; messages: string[]; metrics: Record<string, unknown> }
   | { kind: 'compaction'; at: string; summary: string }
-  | { kind: 'reasoning'; at: string; text: string; updatedAt?: number };
+  | { kind: 'reasoning'; at: string; text: string; updatedAt?: number }
+  | { kind: 'subagent_update'; at: string; payload: Record<string, unknown> }
+  | { kind: 'subagent_message'; at: string; payload: Record<string, unknown> }
+  | { kind: 'subagent_activity'; at: string; payload: Record<string, unknown> };
 
 /** 历史回放出的压缩汇总：boundary 记录计数，metadata 拼 tooltip 明细行 */
 export interface HistoryCompactionReplay {
@@ -101,6 +455,7 @@ export interface HistoryCompactionReplay {
 
 interface BeginHistoryRestoreOptions {
   sessionId: string;
+  subagentId?: string;
   onReady: (messages: Message[], totalPages: number | null) => void;
   /** 与消息同一时间线顺序，用于恢复 ToolGroupDisplay */
   onToolReplay?: (items: HistoryToolReplayItem[]) => void;
@@ -108,6 +463,8 @@ interface BeginHistoryRestoreOptions {
   onHarnessReplay?: (items: HistoryHarnessReplayItem[]) => void;
   /** 与消息同一时间线顺序，用于恢复 Team 成员/任务状态 */
   onTeamReplay?: (items: HistoryTeamReplayItem[]) => void;
+  /** 恢复独立 subagent history 中的 roster/status 与 transcript */
+  onSubagentReplay?: (items: HistorySubagentReplayItem[]) => void;
   /** 与消息同一时间线顺序，用于恢复模型思考块（chat.reasoning） */
   onReasoningReplay?: (items: HistoryReasoningReplayItem[]) => void;
   /** 恢复上下文压缩汇总（context.compact_boundary），用于回显「本轮完成上下文压缩 N 次」 */
@@ -125,12 +482,14 @@ export interface HistoryRestoreHandle {
 let restoreGeneration = 0;
 const activeHistoryRequests = new Map<string, HistoryRestoreHandle>();
 
-function makeHistoryRestoreKey(sessionId: string): string {
-  return `${sessionId}:restore`;
+function makeHistoryRestoreKey(sessionId: string, subagentId?: string): string {
+  return subagentId ? `${sessionId}:subagent:${subagentId}:restore` : `${sessionId}:restore`;
 }
 
-function makeHistoryPageKey(sessionId: string, pageIdx: number): string {
-  return `${sessionId}:page:${pageIdx}`;
+function makeHistoryPageKey(sessionId: string, pageIdx: number, subagentId?: string): string {
+  return subagentId
+    ? `${sessionId}:subagent:${subagentId}:page:${pageIdx}`
+    : `${sessionId}:page:${pageIdx}`;
 }
 
 function replaceActiveHistoryRequest(key: string): void {
@@ -318,6 +677,54 @@ function buildEventPayloadForRecord(record: Record<string, unknown>): Record<str
   return base;
 }
 
+function hasMismatchedHistoryBoundary(value: unknown, sessionId: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => hasMismatchedHistoryBoundary(item, sessionId));
+  }
+  if (!isRecord(value)) return false;
+  if (['session_id', 'parent_session_id', 'sessionId', 'parentSessionId'].some((key) => {
+    const boundary = pickFirstString(value, [key]);
+    return Boolean(boundary && boundary !== sessionId);
+  })) return true;
+  return Object.values(value).some((nested) => hasMismatchedHistoryBoundary(nested, sessionId));
+}
+
+export function parseSubagentHistoryReplay(
+  record: Record<string, unknown>,
+  sessionId: string,
+  subagentId: string,
+): HistorySubagentReplayItem | null {
+  if (hasMismatchedHistoryBoundary(record, sessionId)) return null;
+
+  const eventType = typeof record.event_type === 'string' ? record.event_type.trim() : '';
+  if (normalizeHistoryRole(record.role) !== 'assistant' && eventType !== 'chat.subtask_update') return null;
+  const at = recordTimestampIso(record) ?? '';
+  const payload = buildEventPayloadForRecord(record);
+  if (eventType === 'chat.subtask_update' && typeof record.role === 'string' && payload.role == null) {
+    payload.role = record.role;
+  }
+  if (hasMismatchedHistoryBoundary(payload, sessionId)) return null;
+
+  if (eventType === 'chat.final') {
+    const finalParentSessionId = pickFirstString(payload, ['parent_session_id', 'parentSessionId']);
+    if (finalParentSessionId && finalParentSessionId !== sessionId) return null;
+    const content = typeof payload.content === 'string' ? payload.content : '';
+    return content.trim() ? { kind: 'message', at, payload } : null;
+  }
+
+  if (eventType === 'chat.subtask_update') {
+    const rosterSubagentId = pickFirstString(payload, ['subagent_id', 'subagentId']);
+    return rosterSubagentId === subagentId ? { kind: 'updated', at, payload } : null;
+  }
+
+  if (eventType !== 'chat.subagent_activity') return null;
+  const activity = isRecord(payload.subagent_activity) ? payload.subagent_activity : payload;
+  if (hasMismatchedHistoryBoundary(activity, sessionId)) return null;
+  const activitySubagentId = pickFirstString(activity, ['subagent_id', 'subagentId']);
+  if (!activitySubagentId || activitySubagentId !== subagentId) return null;
+  return { kind: 'activity', at, payload: activity };
+}
+
 function extractTeamEventRecord(record: Record<string, unknown>): Record<string, unknown> | null {
   if (isRecord(record.event)) {
     return record.event;
@@ -489,7 +896,8 @@ function formatCompactBoundarySummary(record: Record<string, unknown>): string {
 
 function parseHistoryTimelineEntry(
   record: Record<string, unknown>,
-  sessionId: string
+  sessionId: string,
+  subagentId?: string,
 ): HistoryTimelineEntry | null {
   const role = normalizeHistoryRole(record.role);
   // 无有效时间戳时用空串占位（勿用 Date.now()）；排序/工具构建侧已对空串做防护。
@@ -510,6 +918,10 @@ function parseHistoryTimelineEntry(
     const isGoalObjectiveMessage =
       isTruthyHistoryFlag(record.is_goal_objective_message) ||
       isTruthyHistoryFlag(record.isGoalObjectiveMessage);
+    const rawSkills = record.skills;
+    const skills = Array.isArray(rawSkills)
+      ? rawSkills.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+      : undefined;
     return {
       kind: 'message',
       message: {
@@ -519,6 +931,7 @@ function parseHistoryTimelineEntry(
         timestamp: at,
         ...(mediaItems.length > 0 ? { mediaItems } : {}),
         ...(isGoalObjectiveMessage ? { isGoalObjectiveMessage: true } : {}),
+        ...(skills && skills.length > 0 ? { skills } : {}),
       },
     };
   }
@@ -535,6 +948,17 @@ function parseHistoryTimelineEntry(
       return null;
     }
     eventType = 'chat.final';
+  }
+
+  if (subagentId) {
+    const replay = parseSubagentHistoryReplay(record, sessionId, subagentId);
+    if (!replay) return null;
+    const kind = replay.kind === 'updated'
+      ? 'subagent_update'
+      : replay.kind === 'activity'
+        ? 'subagent_activity'
+        : 'subagent_message';
+    return { kind, at: replay.at, payload: replay.payload };
   }
 
   if (!ALLOWED_ASSISTANT_EVENT_TYPES.has(eventType)) {
@@ -572,6 +996,10 @@ function parseHistoryTimelineEntry(
   }
 
   const payload = buildEventPayloadForRecord(record);
+
+  if (eventType === 'chat.subtask_update') {
+    return { kind: 'subagent_update', at, payload };
+  }
 
   if (eventType === 'chat.final') {
     // Goal 完成卡片落盘的是 `goal.completed:` + JSON 信封，不是展示文本。
@@ -773,6 +1201,7 @@ interface MaterializedHistoryTimeline {
   toolReplay: HistoryToolReplayItem[];
   harnessReplay: HistoryHarnessReplayItem[];
   teamReplay: HistoryTeamReplayItem[];
+  subagentReplay: HistorySubagentReplayItem[];
   reasoningReplay: HistoryReasoningReplayItem[];
 }
 
@@ -839,6 +1268,7 @@ function materializeHistoryTimeline(
   const toolReplay: HistoryToolReplayItem[] = [];
   const harnessReplay: HistoryHarnessReplayItem[] = [];
   const teamReplay: HistoryTeamReplayItem[] = [];
+  const subagentReplay: HistorySubagentReplayItem[] = [];
   const reasoningReplay: HistoryReasoningReplayItem[] = [];
 
   for (const e of entries) {
@@ -894,6 +1324,18 @@ function materializeHistoryTimeline(
       teamReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
       continue;
     }
+    if (e.kind === 'subagent_update' || e.kind === 'subagent_message' || e.kind === 'subagent_activity') {
+      subagentReplay.push({
+        kind: e.kind === 'subagent_update'
+          ? 'updated'
+          : e.kind === 'subagent_activity'
+            ? 'activity'
+            : 'message',
+        at: e.at,
+        payload: e.payload,
+      });
+      continue;
+    }
     if (e.kind === 'reasoning') {
       reasoningReplay.push({ at: e.at, text: e.text, updatedAt: e.updatedAt });
       continue;
@@ -905,7 +1347,7 @@ function materializeHistoryTimeline(
     toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
   }
 
-  return { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay };
+  return { messages, toolReplay, harnessReplay, teamReplay, subagentReplay, reasoningReplay };
 }
 
 /**
@@ -1068,17 +1510,20 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
       toolName: n.toolName,
       result: n.result,
       success: n.success,
+      ...(n.pending ? { pending: true as const } : {}),
       toolCallId: n.toolCallId,
       summary: n.summary,
       skillTree: n.skillTree,
       ...(n.timedOut ? { timedOut: true as const } : {}),
       ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
     };
-    const resultStatus: ToolExecution['status'] = n.timedOut
-      ? 'timeout'
-      : n.success
-        ? 'completed'
-        : 'error';
+    const resultStatus: ToolExecution['status'] = n.pending
+      ? 'pending'
+      : n.timedOut
+        ? 'timeout'
+        : n.success
+          ? 'completed'
+          : 'error';
     const parsed = parseTimestampToMs(item.at);
     const atIso = Number.isFinite(parsed) ? timestampMsToIso(parsed) : undefined;
     if (!existing) {
@@ -1154,14 +1599,24 @@ function isHistoryBatchEnd(payload: Record<string, unknown>): boolean {
  * 仅处理属于当前 `history.get` 会话的帧，避免多标签/乱序下的串台。
  * 无 `session_id` 时：丢弃数据行；仍接受明确的结束帧（兼容未注入 id 的旧链路）。
  */
-function shouldProcessHistoryPayload(
+export function shouldProcessHistoryPayload(
   payload: Record<string, unknown>,
   expectedSessionId: string,
   expectedPageIdx?: number,
-  allowLegacyNoSession = false
+  allowLegacyNoSession = false,
+  expectedSubagentId?: string,
 ): boolean {
-  const sid = typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
+  if (hasMismatchedHistoryBoundary(payload, expectedSessionId)) return false;
+  const sid = pickFirstString(payload, ['session_id', 'sessionId']) ?? '';
   if (sid && sid !== expectedSessionId) {
+    return false;
+  }
+  const subagentId = pickFirstString(payload, ['subagent_id', 'subagentId']) ?? '';
+  if (expectedSubagentId) {
+    if (subagentId !== expectedSubagentId) {
+      return false;
+    }
+  } else if (subagentId) {
     return false;
   }
   if (expectedPageIdx !== undefined && payload.page_idx !== expectedPageIdx) {
@@ -1174,7 +1629,7 @@ function shouldProcessHistoryPayload(
 }
 
 export function beginHistoryRestore(options: BeginHistoryRestoreOptions): HistoryRestoreHandle {
-  const requestKey = makeHistoryRestoreKey(options.sessionId);
+  const requestKey = makeHistoryRestoreKey(options.sessionId, options.subagentId);
   const releaseLiveEvents = webClient.suspendSessionEvents(options.sessionId);
   replaceActiveHistoryRequest(requestKey);
 
@@ -1194,7 +1649,13 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
 
     const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId, undefined, activeHistoryRequests.size === 1)) {
+    if (!shouldProcessHistoryPayload(
+      payload,
+      options.sessionId,
+      undefined,
+      activeHistoryRequests.size === 1,
+      options.subagentId,
+    )) {
       return;
     }
 
@@ -1214,7 +1675,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
       if (!full) {
         return;
       }
-      const entry = parseHistoryTimelineEntry(full, options.sessionId);
+      const entry = parseHistoryTimelineEntry(full, options.sessionId, options.subagentId);
       if (entry) {
         entries.unshift(entry);
       }
@@ -1257,13 +1718,13 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     finalized = true;
     reassembler.flush();
 
-    const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
+    const { messages, toolReplay, harnessReplay, teamReplay, subagentReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
 
     stopListening();
 
     try {
-      if (messages.length === 0 && toolReplay.length === 0 && harnessReplay.length === 0 && teamReplay.length === 0) {
+      if (messages.length === 0 && toolReplay.length === 0 && harnessReplay.length === 0 && teamReplay.length === 0 && subagentReplay.length === 0) {
         options.onEmpty?.(totalPages);
         return;
       }
@@ -1277,7 +1738,10 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
       if (teamReplay.length > 0) {
         options.onTeamReplay?.(teamReplay);
       }
-      if (reasoningReplay.length > 0) {
+      if (subagentReplay.length > 0) {
+      options.onSubagentReplay?.(subagentReplay);
+    }
+    if (reasoningReplay.length > 0) {
         options.onReasoningReplay?.(reasoningReplay);
       }
       const compactionCount = entries.reduce((n, e) => (e.kind === 'compaction' ? n + 1 : n), 0);
@@ -1309,6 +1773,7 @@ export interface FetchHistoryPageResult {
   toolReplay: HistoryToolReplayItem[];
   harnessReplay: HistoryHarnessReplayItem[];
   teamReplay: HistoryTeamReplayItem[];
+  subagentReplay: HistorySubagentReplayItem[];
   reasoningReplay: HistoryReasoningReplayItem[];
   totalPages: number | null;
 }
@@ -1316,8 +1781,10 @@ export interface FetchHistoryPageResult {
 export interface FetchHistoryPageOptions {
   sessionId: string;
   pageIdx: number;
+  subagentId?: string;
   onReady: (result: FetchHistoryPageResult) => void;
   onEmpty?: (totalPages: number | null) => void;
+  onTimeout?: () => void;
   onError?: (message: string) => void;
 }
 
@@ -1326,7 +1793,7 @@ export interface FetchHistoryPageOptions {
  * 调用方需在订阅建立后再发 `history.get`（含对应 `page_idx`）。
  */
 export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryRestoreHandle {
-  const requestKey = makeHistoryPageKey(options.sessionId, options.pageIdx);
+  const requestKey = makeHistoryPageKey(options.sessionId, options.pageIdx, options.subagentId);
   replaceActiveHistoryRequest(requestKey);
 
   const generation = restoreGeneration + 1;
@@ -1336,6 +1803,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   let totalPages: number | null = null;
   let disposed = false;
   let finalized = false;
+  let timedOut = false;
   let restoreTimer: ReturnType<typeof setTimeout> | null = null;
   const reassembler = new HistoryRecordReassembler();
 
@@ -1345,7 +1813,13 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     }
 
     const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.pageIdx, activeHistoryRequests.size === 1)) {
+    if (!shouldProcessHistoryPayload(
+      payload,
+      options.sessionId,
+      options.pageIdx,
+      activeHistoryRequests.size === 1,
+      options.subagentId,
+    )) {
       return;
     }
 
@@ -1365,7 +1839,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
       if (!full) {
         return;
       }
-      const entry = parseHistoryTimelineEntry(full, options.sessionId);
+      const entry = parseHistoryTimelineEntry(full, options.sessionId, options.subagentId);
       if (entry) {
         entries.unshift(entry);
       }
@@ -1403,16 +1877,22 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     finalized = true;
     reassembler.flush();
 
-    const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
+    if (timedOut) {
+      dispose();
+      options.onTimeout?.();
+      return;
+    }
+
+    const { messages, toolReplay, harnessReplay, teamReplay, subagentReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
 
     dispose();
 
-    if (messages.length === 0 && toolReplay.length === 0 && harnessReplay.length === 0 && teamReplay.length === 0) {
+    if (messages.length === 0 && toolReplay.length === 0 && harnessReplay.length === 0 && teamReplay.length === 0 && subagentReplay.length === 0) {
       options.onEmpty?.(totalPages);
       return;
     }
-    options.onReady({ messages, toolReplay, harnessReplay, teamReplay, reasoningReplay, totalPages });
+    options.onReady({ messages, toolReplay, harnessReplay, teamReplay, subagentReplay, reasoningReplay, totalPages });
   }
 
   const handle: HistoryRestoreHandle = { generation, dispose };
@@ -1420,6 +1900,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   // 同 beginHistoryRestore：兜底超时，避免分页 history.get 流卡死。
   restoreTimer = setTimeout(() => {
     if (disposed || finalized) return;
+    timedOut = true;
     finalize();
   }, HISTORY_RESTORE_TIMEOUT_MS);
   return handle;

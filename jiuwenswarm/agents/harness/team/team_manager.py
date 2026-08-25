@@ -738,9 +738,11 @@ class TeamManager:
         project_dir: str | None = None,
         trusted_dirs: list[str] | None = None,
         request_id: str | None = None,
+        user_id: str | None = None,
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
         requested_model_name: str | None = None,
+        agent_group_name: str | None = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
 
@@ -756,6 +758,7 @@ class TeamManager:
             request_id: Originating request id, if any.
             channel_id: Raw channel id from the request, if any.
             request_metadata: Request metadata mapping.
+            agent_group_name: Optional AgentGroup package bound to the session.
 
         Returns:
             The enriched ``TeamAgentSpec`` ready to build (``build_context`` set;
@@ -780,8 +783,10 @@ class TeamManager:
             project_dir=project_dir,
             trusted_dirs=trusted_dirs,
             request_id=request_id,
+            user_id=user_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
+            agent_group_name=agent_group_name,
         )
         return spec
 
@@ -1149,6 +1154,10 @@ class TeamManager:
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
+            agent_group_name=str(
+                (request_metadata or {}).get("agent_group_name") or ""
+            ).strip()
+            or None,
         )
 
         logger.info("[TeamManager] TeamAgentSpec ready: team_name=%s", spec.team_name)
@@ -1297,6 +1306,9 @@ class TeamManager:
     def find_team_skill_rail_for_request(self, request_id: str) -> Any | None:
         """Find the TeamSkillEvolutionRail that owns a pending approval with this request_id."""
         for rail in self._team_skill_rails.values():
+            owns_request = getattr(rail, "owns_approval_request", None)
+            if callable(owns_request) and owns_request(request_id):
+                return rail
             if request_id in getattr(rail, "_pending_approval_snapshots", {}):
                 return rail
             if request_id in getattr(rail, "_pending_governance", {}):

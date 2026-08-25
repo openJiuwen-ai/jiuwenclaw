@@ -28,16 +28,19 @@ class MailMergeTool(Tool):
                             "type": "string",
                             "description": "数据源文件路径（.xlsx或.csv）",
                         },
-                        "output_subdir": {
+                        "output_dir": {
                             "type": "string",
-                            "description": "输出子目录名，默认为 mail_merge_output",
+                            "description": (
+                                "产物输出目录的绝对路径。传当前项目目录；"
+                                "用户指定了保存位置时用用户指定的目录。"
+                            ),
                         },
                         "filename_pattern": {
                             "type": "string",
                             "description": "输出文件名模式，如{{name}}_合同，默认用序号",
                         },
                     },
-                    "required": ["template_path", "data_path"],
+                    "required": ["template_path", "data_path", "output_dir"],
                 },
             )
         )
@@ -45,9 +48,7 @@ class MailMergeTool(Tool):
     async def invoke(self, inputs, **kwargs):
         template_path = inputs.get("template_path", "")
         data_path = inputs.get("data_path", "")
-        output_subdir = inputs.get(
-            "output_subdir", "mail_merge_output"
-        )
+        output_dir = inputs.get("output_dir", "")
         filename_pattern = inputs.get("filename_pattern", "")
 
         if not template_path or not os.path.isfile(template_path):
@@ -60,10 +61,13 @@ class MailMergeTool(Tool):
                 "success": False,
                 "error": f"数据源文件不存在: {data_path}",
             }
+        if not output_dir:
+            return {
+                "success": False,
+                "error": "缺少 output_dir：请传入当前项目目录的绝对路径",
+            }
 
-        from openjiuwen.core.sys_operation.cwd import get_cwd
-
-        base_dir = Path(get_cwd()) / output_subdir
+        base_dir = Path(output_dir).expanduser()
         base_dir.mkdir(parents=True, exist_ok=True)
 
         try:

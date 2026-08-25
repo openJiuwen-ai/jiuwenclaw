@@ -5,6 +5,7 @@ import svgr from 'vite-plugin-svgr'
 import { spawnSync } from 'child_process'
 import { createHash } from 'node:crypto'
 import { createHmac, timingSafeEqual } from 'node:crypto'
+import https from 'node:https'
 import type { ServerResponse } from 'http'
 import path from 'path'
 import fs from 'fs'
@@ -460,6 +461,32 @@ function devFileContentApi(): Plugin {
   return {
     name: 'dev-file-content-api',
     configureServer(server) {
+      // GitCode API 代理（手动实现，支持 GET/POST）
+      server.middlewares.use('/gitcode-api', (req, res) => {
+        const proxyPath = (req.url || '').replace(/^\/gitcode-api/, '');
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          const body = Buffer.concat(chunks);
+          const proxyReq = https.request({
+            method: req.method,
+            hostname: 'gitcode.com',
+            path: proxyPath,
+            headers: { ...req.headers, host: 'gitcode.com' },
+          }, (proxyRes) => {
+            res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+            proxyRes.pipe(res);
+          });
+          proxyReq.on('error', (err: Error) => {
+            console.error('[vite] gitcode-api proxy error:', err.message);
+            res.writeHead(502, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          });
+          if (body.length > 0) proxyReq.write(body);
+          proxyReq.end();
+        });
+      });
+
       server.middlewares.use('/share-api/snapshot', (req, res) => {
         const writeJson = (statusCode: number, payload: unknown) => {
           res.statusCode = statusCode
@@ -1020,12 +1047,19 @@ export default defineConfig({
     },
   },
   server: {
+    host: true,
+    allowedHosts: ['jiuwenswarm.local'],
     port: frontendPort,
     strictPort: true,
     proxy: {
       '/api': {
         target: webTarget,
         changeOrigin: true,
+      },
+      '/skillhub-api': {
+        target: 'http://localhost:9002',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/skillhub-api/, '/api/v1'),
       },
       '/ws': {
         target: webTarget,

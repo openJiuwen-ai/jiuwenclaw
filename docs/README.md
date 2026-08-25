@@ -180,8 +180,8 @@
     </tr>
     <tr>
       <td width="22%"><strong>TUI 模式</strong></td>
-      <td width="28%"><a href="zh/SLASH_COMMAND_ARCHITECTURE.md">Slash 命令架构</a> / <a href="zh/Slash命令表.md">Slash 命令速查</a> / <a href="zh/模式系统.md">模式系统</a> / <a href="zh/TUI使用SwarmFlow指南.md">SwarmFlow（TUI）</a></td>
-      <td width="50%">支持 TUI 终端中的 Slash 命令体系、常用命令速查、PLAN / AGENT / CODE / TEAM 模式切换，以及 SwarmFlow 开关、运行树查看与 HITL 回复。</td>
+      <td width="28%"><a href="zh/SLASH_COMMAND_ARCHITECTURE.md">Slash 命令架构</a> / <a href="zh/Slash命令表.md">Slash 命令速查</a> / <a href="zh/模式系统.md">模式系统</a> / <a href="zh/TUI使用SwarmFlow指南.md">SwarmFlow（TUI）</a> / <a href="zh/自动修复PR.md">自动修复 PR</a></td>
+      <td width="50%">支持 TUI 终端中的 Slash 命令体系、常用命令速查、PLAN / AGENT / CODE / TEAM 模式切换，SwarmFlow 开关、运行树查看与 HITL 回复，以及 <code>/autofix-pr</code> 自动修复 PR 直至检查通过。</td>
     </tr>
     <tr>
       <th colspan="3" align="left" bgcolor="#f3f4f6"><h3>📄 附录</h3></th>

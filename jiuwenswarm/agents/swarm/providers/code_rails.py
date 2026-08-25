@@ -35,8 +35,8 @@ from openjiuwen.harness.prompts import resolve_language
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.common.mode_matrix import (
-    TEAM_PLAN_NORMAL_MODE,
     is_code_profile_mode,
+    is_team_mode,
     is_team_plan_mode,
 )
 from jiuwenswarm.common.utils import get_agent_workspace_dir
@@ -62,16 +62,14 @@ CODING_MEMORY_EXTRAS_KEY = "_coding_memory_rail"
 _TEAM_PLAN_EXIT_NOTIFICATION_EN = """\
 <system-reminder>
 The user approved the team plan. Continue as the Team Leader inside the
-team runtime. Do not implement directly as a single code agent. Start the
-approved team workflow with team tools such as build_team, create_task,
-spawn_teammate, and send_message.
+team runtime. Do not implement directly as a single agent. Organize the team,
+delegate the approved work, and coordinate the members through completion.
 </system-reminder>"""
 
 _TEAM_PLAN_EXIT_NOTIFICATION_CN = """\
 <system-reminder>
 用户已批准团队计划。请继续作为 Team Leader 工作，不要由 Leader 独自完成全部任务。
-立即使用 build_team、create_task、spawn_teammate、send_message 等 Team 工具启动并分派
-已批准的团队工作流。
+立即按已批准的计划组织团队协作、分派工作并推动成员完成交付。
 </system-reminder>"""
 
 
@@ -100,7 +98,7 @@ def code_runtime_language(ctx: SwarmBuildContext) -> str:
 
 def structured_ask_user_language(ctx: SwarmBuildContext) -> str:
     """Resolve the StructuredAskUserRail language for team/code profiles."""
-    if ctx.role == "leader" and (ctx.mode == "team" or is_team_plan_mode(ctx.mode)):
+    if ctx.role == "leader" and (is_team_mode(ctx.mode) or is_team_plan_mode(ctx.mode)):
         return resolve_language((ctx.config or {}).get("preferred_language", "zh"))
     return code_runtime_language(ctx)
 
@@ -351,7 +349,11 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
 def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
     """Build one profile-aware plan rail for code or normal Team Plan contexts."""
     try:
-        if ctx.mode == TEAM_PLAN_NORMAL_MODE and ctx.role == "leader":
+        if (
+            is_team_plan_mode(ctx.mode)
+            and not is_code_profile_mode(ctx.mode)
+            and ctx.role == "leader"
+        ):
             from jiuwenswarm.agents.harness.work.rails.work_agent_mode_rail import (
                 WorkAgentModeRail,
             )
@@ -375,8 +377,9 @@ def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any
             CodeAgentModeRail,
         )
         from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
-            _ENTER_PLAN_MODE_INSTRUCTIONS_EN,
+            _CODE_PLAN_ALLOWED_TOOLS,
             _PLAN_MODE_SYSTEM_NOTE,
+            _code_enter_plan_instructions,
         )
 
         exit_notification = (
@@ -385,21 +388,9 @@ def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any
             else None
         )
         return CodeAgentModeRail(
-            allowed_tools=[
-                "enter_plan_mode",
-                "exit_plan_mode",
-                "ask_user",
-                "task_tool",
-                "read_file",
-                "grep",
-                "list_files",
-                "glob",
-                "bash",
-                "write_file",
-                "edit_file",
-            ],
+            allowed_tools=list(_CODE_PLAN_ALLOWED_TOOLS),
             plan_mode_system_note=_PLAN_MODE_SYSTEM_NOTE,
-            enter_plan_instructions=_ENTER_PLAN_MODE_INSTRUCTIONS_EN,
+            enter_plan_instructions=_code_enter_plan_instructions(ctx.config),
             exit_plan_notification=exit_notification,
         )
     except Exception as exc:
