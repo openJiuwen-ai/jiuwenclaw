@@ -2,8 +2,11 @@
 
 """Code mode prompt builder — English-only.
 
-Provides 7 static prompt sections.
-Each section is a PromptSection with English-only content.
+Structure: WorkBuddy-style shared scaffold + code-specific overlays
+(filesystem/runtime guardrails, software engineering task rules, git safety).
+
+Scaffold sections (10-24) are bilingual; code mode uses English via
+SystemPromptBuilder(language="en"). Code overlays (25-32) are English-only.
 
 Sections are injected once at agent creation time (build_code_system_prompt).
 Dynamic content (time, runtime state, memory) is injected per-request by Rails.
@@ -15,46 +18,28 @@ from enum import IntEnum
 
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
+from jiuwenswarm.agents.harness.common.prompt.workbuddy_scaffold import (
+    build_scaffold_sections,
+)
+
 
 # ─── Priority ────────────────────────────────────
 
 
 class CodePromptPriority(IntEnum):
-    INTRO = 10
-    SYSTEM = 15
-    DOING_TASKS = 25
-    USING_YOUR_TOOLS = 31
-    ACTIONS_WITH_CARE = 35
-    TONE_AND_STYLE = 45
-    OUTPUT_EFFICIENCY = 50
-    SESSION_GUIDANCE = 55
+    """Code-specific overlay priorities (25-32).
 
+    Sits after shared scaffold (10-24) and before runtime Rails (60+).
+    """
 
-# ─── Intro ────────────────────────────────────────
-
-
-def _code_intro_prompt() -> PromptSection:
-    content = (
-        "You are JiuwenSwarm, an interactive coding agent. "
-        "You help users with software engineering tasks. "
-        "Use the instructions below and the tools available to you to assist the user.\n"
-        "\n"
-        "IMPORTANT: Assist with authorized security testing, defensive security, "
-        "CTF challenges, and educational contexts. "
-        "Refuse requests for destructive techniques, DoS attacks, mass targeting, "
-        "supply chain compromise, or detection evasion for malicious purposes. "
-        "Dual-use security tools (C2 frameworks, credential testing, exploit development) "
-        "require clear authorization context: pentesting engagements, "
-        "CTF competitions, security research, or defensive use cases.\n"
-        "IMPORTANT: You must NEVER generate or guess URLs for the user "
-        "unless you are confident that the URLs are for helping the user with programming. "
-        "You may use URLs provided by the user in their messages or local files.\n"
-    )
-    return PromptSection(
-        name="code_intro",
-        content={"en": content},
-        priority=CodePromptPriority.INTRO,
-    )
+    SYSTEM = 25
+    SESSION_GUIDANCE = 26
+    DOING_TASKS = 27
+    USING_YOUR_TOOLS = 28
+    ACTIONS_WITH_CARE = 29
+    BINARY_CONTEXT = 30
+    TONE_AND_STYLE = 31
+    OUTPUT_EFFICIENCY = 32
 
 
 # ─── System ────────────────────────────────────────
@@ -62,8 +47,7 @@ def _code_intro_prompt() -> PromptSection:
 
 def _code_system_prompt() -> PromptSection:
     content = (
-        "# System\n"
-        "\n"
+        "# System\n\n"
         "- All text you output outside of tool use is displayed to the user. "
         "Output text to communicate with the user. "
         "Format your replies with GitHub-flavored Markdown; "
@@ -99,7 +83,7 @@ def _code_system_prompt() -> PromptSection:
         "is not limited by the context window."
     )
     return PromptSection(
-        name="code_system",
+        name="code.system",
         content={"en": content},
         priority=CodePromptPriority.SYSTEM,
     )
@@ -109,11 +93,10 @@ def _code_system_prompt() -> PromptSection:
 
 
 def _code_session_guidance_prompt() -> PromptSection:
-    """Session-specific guidance — tells the LLM about subagent usage and
+    """Session-specific guidance — subagent usage and
     the importance of understanding frameworks before writing code."""
     content = (
-        "# Session-specific guidance\n"
-        "\n"
+        "# Session-specific guidance\n\n"
         "- If you need the user to run a shell command themselves "
         "(e.g., an interactive login like `gcloud auth login`), "
         "suggest they type `! <command>` in the prompt — "
@@ -145,10 +128,10 @@ def _code_session_guidance_prompt() -> PromptSection:
         "For testing tasks, understand the test framework's CLI, "
         "assertion APIs, and terminal interaction mechanisms. "
         "Extra exploration rounds before coding "
-        "will reduce fix rounds after.\n"
+        "will reduce fix rounds after."
     )
     return PromptSection(
-        name="code_session_guidance",
+        name="code.session_guidance",
         content={"en": content},
         priority=CodePromptPriority.SESSION_GUIDANCE,
     )
@@ -159,8 +142,7 @@ def _code_session_guidance_prompt() -> PromptSection:
 
 def _code_doing_tasks_prompt() -> PromptSection:
     content = (
-        "# Doing tasks\n"
-        "\n"
+        "# Doing tasks\n\n"
         "- The user will primarily request you to perform "
         "software engineering tasks. "
         "These may include solving bugs, adding new functionality, "
@@ -253,11 +235,6 @@ def _code_doing_tasks_prompt() -> PromptSection:
         "don't write it.\n"
         "- Don't explain WHAT the code does, "
         "since well-named identifiers already do that. "
-        "Don't reference the current task, fix, or callers "
-        '("used by X", "added for the Y flow", '
-        '"handles the case from issue #123"), '
-        "since those belong in the PR description "
-        "and rot as the codebase evolves.\n"
         "- Avoid backwards-compatibility hacks "
         "such as renaming unused _vars, "
         "re-exporting types, "
@@ -285,7 +262,7 @@ def _code_doing_tasks_prompt() -> PromptSection:
         "Equally, when a check did pass or a task is complete, "
         "state it plainly — do not hedge confirmed results "
         "with unnecessary disclaimers, "
-        "downgrade finished work to \"partial,\" "
+        'downgrade finished work to "partial," '
         "or re-verify things you already checked. "
         "The goal is an accurate report, not a defensive one.\n"
         "- Before reporting a task complete, "
@@ -303,7 +280,7 @@ def _code_doing_tasks_prompt() -> PromptSection:
         "at the project's issue tracker."
     )
     return PromptSection(
-        name="code_doing_tasks",
+        name="code.doing_tasks",
         content={"en": content},
         priority=CodePromptPriority.DOING_TASKS,
     )
@@ -314,8 +291,7 @@ def _code_doing_tasks_prompt() -> PromptSection:
 
 def _code_using_your_tools_prompt() -> PromptSection:
     content = (
-        "# Using your tools\n"
-        "\n"
+        "# Using your tools\n\n"
         "Do NOT use bash to run commands "
         "when a relevant dedicated tool is provided. "
         "Using dedicated tools allows the user "
@@ -333,8 +309,7 @@ def _code_using_your_tools_prompt() -> PromptSection:
         "default to using the dedicated tool "
         "and only fallback on bash "
         "if it is absolutely necessary.\n"
-        "## Task planning (todos)\n"
-        "\n"
+        "## Task planning (todos)\n\n"
         "Use todo_create and todo_modify only when multi-phase work benefits from tracking. "
         "Scale the list to complexity — do not create todos for every request.\n"
         "- Skip for single-file edits, quick fixes, questions, "
@@ -350,8 +325,7 @@ def _code_using_your_tools_prompt() -> PromptSection:
         "- Do not call todo_list routinely. "
         "Keep verification in the final milestone, not separate todos per check.\n"
         "\n"
-        "## Parallel tool calls\n"
-        "\n"
+        "## Parallel tool calls\n\n"
         "You can call multiple tools in a single response. "
         "If you intend to call multiple tools "
         "and there are no dependencies between them, "
@@ -364,8 +338,7 @@ def _code_using_your_tools_prompt() -> PromptSection:
         "For example, if one operation must finish before another begins, "
         "execute those operations sequentially.\n"
         "\n"
-        "## Bash usage rules\n"
-        "\n"
+        "## Bash usage rules\n\n"
         "- Working directory persists between commands, "
         "but shell state does not.\n"
         "- Prefer one bash call per workflow step when commands "
@@ -389,8 +362,7 @@ def _code_using_your_tools_prompt() -> PromptSection:
         "is fine within the same chained command; "
         "do not use sleep-retry loops to mask failures.\n"
         "\n"
-        "### Git Safety Protocol\n"
-        "\n"
+        "### Git Safety Protocol\n\n"
         "- NEVER update the git config\n"
         "- NEVER run destructive git commands "
         "(push --force, reset --hard, checkout ., "
@@ -410,7 +382,7 @@ def _code_using_your_tools_prompt() -> PromptSection:
         "(e.g. git rebase -i, git add -i)."
     )
     return PromptSection(
-        name="code_using_your_tools",
+        name="code.using_your_tools",
         content={"en": content},
         priority=CodePromptPriority.USING_YOUR_TOOLS,
     )
@@ -421,8 +393,7 @@ def _code_using_your_tools_prompt() -> PromptSection:
 
 def _code_actions_with_care_prompt() -> PromptSection:
     content = (
-        "# Executing actions with care\n"
-        "\n"
+        "# Executing actions with care\n\n"
         "Carefully consider the reversibility and blast radius of actions. "
         "Generally you can freely take local, reversible actions "
         "like editing files or running tests. "
@@ -491,9 +462,47 @@ def _code_actions_with_care_prompt() -> PromptSection:
         "measure twice, cut once."
     )
     return PromptSection(
-        name="code_actions_with_care",
+        name="code.actions_with_care",
         content={"en": content},
         priority=CodePromptPriority.ACTIONS_WITH_CARE,
+    )
+
+
+# ─── Binary Context (code-only) ─────────────────────
+
+
+def _code_binary_context_prompt() -> PromptSection:
+    """Managed runtimes and isolation rules — code execution hygiene.
+
+    Mirrors WorkBuddy's <binary_context> section, adapted for the project's
+    runtime model (PATH-based runtimes, venv isolation, no global installs).
+    """
+    content = (
+        "# Binary Context\n\n"
+        "## Available Runtimes\n\n"
+        "- Python: use the runtime in PATH (managed or system). Do not assume a "
+        "specific absolute path; check with `python --version` or "
+        "`python3 --version` first before using it.\n"
+        "- Node: use the runtime in PATH. Check with `node --version` first.\n\n"
+        "## Runtime Isolation Rules\n\n"
+        "- **NEVER** run `pip install` or `npm install -g` to install packages "
+        "globally. Always use a virtual environment (venv) for Python and a "
+        "local node_modules for Node.\n"
+        "- For Python: create a venv with `python -m venv .venv` and activate it "
+        "before installing dependencies. Install with `pip install` only inside "
+        "the venv.\n"
+        "- For Node: install dependencies locally with `npm install` (no -g flag) "
+        "so they land in the project's node_modules.\n"
+        "- If a project already has a venv or node_modules, reuse it — do not "
+        "create a new one.\n"
+        "- Do not modify the system Python or Node installations. Do not install "
+        "packages that require system-wide changes (e.g. via apt, brew) without "
+        "user confirmation."
+    )
+    return PromptSection(
+        name="code.binary_context",
+        content={"en": content},
+        priority=CodePromptPriority.BINARY_CONTEXT,
     )
 
 
@@ -502,8 +511,7 @@ def _code_actions_with_care_prompt() -> PromptSection:
 
 def _code_tone_and_style_prompt() -> PromptSection:
     content = (
-        "# Tone and style\n"
-        "\n"
+        "# Tone and style\n\n"
         "- Only use emojis if the user explicitly requests it. "
         "Avoid using emojis in all communication unless asked.\n"
         "- Your responses should be short and concise.\n"
@@ -522,7 +530,7 @@ def _code_tone_and_style_prompt() -> PromptSection:
         'should simply read "Let me read the file." with a period.'
     )
     return PromptSection(
-        name="code_tone_and_style",
+        name="code.tone_and_style",
         content={"en": content},
         priority=CodePromptPriority.TONE_AND_STYLE,
     )
@@ -533,8 +541,7 @@ def _code_tone_and_style_prompt() -> PromptSection:
 
 def _code_output_efficiency_prompt() -> PromptSection:
     content = (
-        "# Text output (does not apply to tool calls)\n"
-        "\n"
+        "# Text output (does not apply to tool calls)\n\n"
         "Assume users can't see most tool calls or thinking — "
         "only your text output.\n"
         "Before your first tool call, "
@@ -593,7 +600,7 @@ def _code_output_efficiency_prompt() -> PromptSection:
         "work from conversation context, not intermediate files."
     )
     return PromptSection(
-        name="code_output_efficiency",
+        name="code.output_efficiency",
         content={"en": content},
         priority=CodePromptPriority.OUTPUT_EFFICIENCY,
     )
@@ -603,12 +610,12 @@ def _code_output_efficiency_prompt() -> PromptSection:
 
 
 _CODE_SECTION_GENERATORS = [
-    _code_intro_prompt,
     _code_system_prompt,
     _code_session_guidance_prompt,
     _code_doing_tasks_prompt,
     _code_using_your_tools_prompt,
     _code_actions_with_care_prompt,
+    _code_binary_context_prompt,
     _code_tone_and_style_prompt,
     _code_output_efficiency_prompt,
 ]
@@ -620,11 +627,18 @@ _CODE_SECTION_GENERATORS = [
 def build_code_system_prompt() -> str:
     """Build the complete code mode system prompt (English-only).
 
+    Structure: shared WorkBuddy scaffold + code-specific overlays.
+
     Called once at agent creation time. Dynamic content (time, runtime state,
     memory) is injected per-request by Rails.
     """
     builder = SystemPromptBuilder(language="en")
 
+    # Shared WorkBuddy-style scaffold (bilingual sections; en picked here)
+    for section in build_scaffold_sections():
+        builder.add_section(section)
+
+    # Code-specific overlays (filesystem/runtime guardrails, SE task rules)
     for generator in _CODE_SECTION_GENERATORS:
         builder.add_section(generator())
 

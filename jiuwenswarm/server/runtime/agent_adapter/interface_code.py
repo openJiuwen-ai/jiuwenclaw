@@ -203,6 +203,7 @@ _RAIL_BUILD_NAMES: dict[str, str] = {
     "SkillUseRail": "_build_skill_rail_via_config",
     "HeartbeatRail": "_build_heartbeat_rail",
     "AvatarPromptRail": "_build_avatar_rail",
+    "IdentityContextRail": "_build_identity_context_rail",
     "TaskPlanningRail": "_build_task_planning_rail",
     "SubagentRail": "_build_subagent_rail",
     "ContextAssembleRail": "_build_context_assemble_rail",
@@ -606,6 +607,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _RailBuildInfo("_code_filesystem_rail", self._build_filesystem_rail),
             _RailBuildInfo("_coding_memory_rail", self._build_coding_memory_rail),
             _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
+            _RailBuildInfo(
+                "_identity_context_rail",
+                lambda: self._build_identity_context_rail(
+                    self._resolve_runtime_language()
+                ),
+            ),
             _RailBuildInfo("_code_agent_mode_rail", self._build_agent_mode_rail),
             _RailBuildInfo("_code_ask_user_rail", self._build_structured_ask_user_rail),
             _RailBuildInfo(
