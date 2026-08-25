@@ -173,8 +173,9 @@ class LoggingConfigProcessStack:
             self.web_port,
             self.gateway_port,
             jiuwenclaw_id=self.jiuwenclaw_id,
-            manager_ws_url=f"ws://127.0.0.1:{self.manager_ws_port}",
-            manager_ws_client_enabled=True,
+            manager_http_url=f"http://127.0.0.1:{self.manager_rest_port}",
+            manager_config_public_host="127.0.0.1",
+            manager_config_receiver_enabled=True,
         )
         self.gateway_proc = start_process(
             [sys.executable, "-m", "jiuwenswarm.gateway.app_gateway", "--port", str(self.web_port)],

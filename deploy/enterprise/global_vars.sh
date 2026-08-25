@@ -108,6 +108,8 @@ declare -A DEPLOY_VARS=(
     ["DEPLOYMENT_MODE"]="standalone"
     ["GATEWAY_HTTP_PORT"]="19001"
     ["GATEWAY_WS_PORT"]="19000"
+    # Manager → Gateway 配置同步 HTTP（manager_config_receiver）
+    ["GATEWAY_CONFIG_HTTP_PORT"]="8775"
     ["ENABLE_EXTERNAL_OBS"]="false"
     ["ENABLE_EXTERNAL_NFS"]="false"
     ["ENABLE_EXTERNAL_PVC"]="false"
