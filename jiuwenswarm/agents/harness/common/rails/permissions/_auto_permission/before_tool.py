@@ -11,6 +11,10 @@ from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.artifa
     has_user_file_delivery_prohibition,
     is_file_delivery_action,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.artifact_path_provenance import (
+    clear_artifact_candidate_state,
+    publish_artifact_candidate_state,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
     file_delivery_constraint_text,
     original_user_intent as resolve_original_user_intent,
@@ -131,6 +135,7 @@ class AutoPermissionBeforeToolMixin:
         clear_send_file_execution_grant()
         clear_trusted_search_producer()
         invocation = _extract_invocation(args, kwargs)
+        clear_artifact_candidate_state(invocation.ctx)
         if has_pre_permission_hard_rejection(invocation.ctx):
             return None
         context_extra = getattr(invocation.ctx, "extra", None)
@@ -156,7 +161,11 @@ class AutoPermissionBeforeToolMixin:
         )
         invocation = _repair_invocation_args_for_execution(invocation)
         invocation, command_contract_error = (
-            _normalize_command_invocation_for_execution(invocation, kwargs)
+            _normalize_command_invocation_for_execution(
+                invocation,
+                kwargs,
+                permission_workspace_root=self.workspace_root,
+            )
         )
         normalized_args = normalize_invocation_tool_args(
             invocation.tool_name,
@@ -263,6 +272,35 @@ class AutoPermissionBeforeToolMixin:
                 facts=facts,
                 decision_source=decision_source,
             )
+            if (
+                self.session_artifact_paths is not None
+                and classify_permission_result(result) == "allow"
+                and not (
+                    facts.tool_name == "bash"
+                    and bool(facts.untrusted_args.get("run_in_background", False))
+                )
+                and (
+                    facts.tool_category != "shell"
+                    or bool(facts.effective_workdir)
+                )
+            ):
+                publish_artifact_candidate_state(
+                    invocation.ctx,
+                    session_id=session_id,
+                    tool_name=facts.tool_name,
+                    tool_call_id=tool_call_id,
+                    workspace_root=self.workspace_root,
+                    host_write_paths=facts.artifact_write_paths,
+                    untrusted_args=facts.untrusted_args,
+                    command=facts.raw_command,
+                    include_semantic=(
+                        decision_source == "auto_reviewer"
+                    ),
+                    effective_workdir=facts.effective_workdir,
+                    facts=facts,
+                )
+            else:
+                clear_artifact_candidate_state(invocation.ctx)
             if (
                 invocation_resume is not None
                 and decision_source == "manual_approval"

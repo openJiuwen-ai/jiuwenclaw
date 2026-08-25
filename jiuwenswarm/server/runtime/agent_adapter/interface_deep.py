@@ -228,6 +228,9 @@ from jiuwenswarm.agents.harness.common.rails.permissions.tool_invocation_key imp
 from jiuwenswarm.agents.harness.common.rails.permissions.trusted_search_urls import (  # noqa: E402
     SessionTrustedSearchUrls,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.artifact_path_provenance import (  # noqa: E402
+    SessionArtifactPathProvenance,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.auto_config import (  # noqa: E402
     is_auto_permission_enabled,
     is_permission_boundary_enabled,
@@ -1382,6 +1385,7 @@ class JiuWenSwarmDeepAdapter:
         self._root_permission_dispatch_lock = asyncio.Lock()
         self._root_permission_handoff: _RootPermissionDispatchHandoff | None = None
         self._trusted_search_urls = SessionTrustedSearchUrls()
+        self._session_artifact_paths = SessionArtifactPathProvenance()
         self._root_permission_queue_rail: RootPermissionQueueRail | None = None
         self._root_permission_completion_rail: RootPermissionCompletionRail | None = (
             None
@@ -1583,6 +1587,7 @@ class JiuWenSwarmDeepAdapter:
         self._is_session_scoped_adapter = True
         self._parent_session_id = session_id
         self._trusted_search_urls.bind_session(session_id)
+        self._session_artifact_paths.bind_session(session_id)
 
     def _resolve_permission_workspace_root(self) -> Path:
         """Return the session-stable primary root used by Auto Permission."""
@@ -6285,6 +6290,12 @@ class JiuWenSwarmDeepAdapter:
                     and self._enable_auto_permission
                     else None
                 ),
+                session_artifact_paths=(
+                    self._session_artifact_paths
+                    if self._is_session_scoped_adapter
+                    and self._enable_auto_permission
+                    else None
+                ),
             )
             return permission_rail
 
@@ -6517,6 +6528,7 @@ class JiuWenSwarmDeepAdapter:
             permissions_changed_notifier=self._permissions_changed_notifier,
             browser_runtime_security_profile=staged_browser_profile,
             trusted_search_urls=self._trusted_search_urls,
+            session_artifact_paths=self._session_artifact_paths,
         )
         if candidate is None:
             raise RuntimeError("permission_rail_candidate_unavailable")
@@ -8200,6 +8212,7 @@ class JiuWenSwarmDeepAdapter:
                     exc,
                 )
             self._trusted_search_urls.dispose()
+            self._session_artifact_paths.dispose()
         self._teardown_agent_owned_tools()
         self._release_sys_operations()
         # 取消未到期的延时重索引 task，避免 adapter cleanup 后仍有孤儿 task

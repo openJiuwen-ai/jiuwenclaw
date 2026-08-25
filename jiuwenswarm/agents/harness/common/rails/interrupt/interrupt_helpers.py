@@ -120,6 +120,7 @@ def build_permission_rail(
     permissions_changed_notifier: Callable[[], None] | None = None,
     browser_runtime_security_profile: Any = None,
     trusted_search_urls: Any = None,
+    session_artifact_paths: Any = None,
 ) -> Any | None:
     """Build openjiuwen PermissionInterruptRail for tool permission checks.
 
@@ -571,6 +572,7 @@ def build_permission_rail(
                 exact_permission_persist_callback=_persist_exact_allow_rule,
                 browser_runtime_security_profile=browser_runtime_security_profile,
                 trusted_search_urls=trusted_search_urls,
+                session_artifact_paths=session_artifact_paths,
             )
             permission_rail.set_trusted_dirs(None)
 
