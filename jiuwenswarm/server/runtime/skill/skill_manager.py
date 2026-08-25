@@ -1579,7 +1579,10 @@ class SkillManager:
                 "error_code": "skill_index_not_needed",
                 "effective_strategy": "small_full",
                 "build_status": status["build_status"],
-                "detail": "The complete Skill metadata snapshot fits below the configured threshold; no taxonomy build is needed.",
+                "detail": (
+                    "The complete Skill metadata snapshot fits below the configured "
+                    "threshold; no taxonomy build is needed."
+                ),
             }
 
         raw_force = (params or {}).get("force", False)

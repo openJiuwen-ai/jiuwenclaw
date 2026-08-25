@@ -1606,6 +1606,71 @@ class JiuWenSwarmDeepAdapter:
                 exc_info=True,
             )
 
+    def skill_retrieval_status_fields(self) -> dict[str, Any]:
+        """Return the child adapter fields exposed to session status callers."""
+        return {
+            "enabled": bool(self._skill_retrieval_session_enabled),
+            "model_name": self._skill_retrieval_context_model_name,
+        }
+
+    def skill_retrieval_model_profile_matches(
+        self,
+        requested_model_name: str | None,
+    ) -> bool:
+        """Whether this child can retain its frozen model retrieval profile."""
+        return self._skill_retrieval_model_profile_matches(requested_model_name)
+
+    def restore_skill_retrieval_session(
+        self,
+        profile: dict[str, Any] | None,
+        initial_mcp_names: set[str],
+        requested_model_name: str | None,
+    ) -> None:
+        """Restore immutable Skill and MCP inputs before child construction."""
+        self._pending_skill_scan_mcp_names = set(initial_mcp_names)
+        self._initial_skill_scan_mcp_names = frozenset(initial_mcp_names)
+        self._restored_skill_retrieval_profile = profile
+        if profile is not None:
+            self._skill_retrieval_context_model_name = str(
+                profile.get("model_name") or ""
+            )
+            try:
+                restored_window = int(profile.get("context_window_tokens") or 0)
+            except (TypeError, ValueError):
+                restored_window = 0
+            self._skill_retrieval_context_window_tokens = (
+                restored_window if restored_window > 0 else None
+            )
+        self._set_initial_skill_retrieval_model(
+            profile.get("requested_model_name")
+            if profile is not None
+            else requested_model_name
+        )
+
+    def mark_session_mcp_reconcile_started(self) -> None:
+        """Claim this child for the session's immutable first MCP snapshot."""
+        self._session_mcp_reconcile_started = True
+
+    def persist_skill_retrieval_session_profile(self) -> None:
+        """Persist this child's frozen Skill retrieval profile sidecar."""
+        self._persist_skill_retrieval_session_profile()
+
+    def clear_pending_skill_scan_mcp_names(
+        self,
+        pending_scan_names: set[str],
+    ) -> None:
+        """Consume construction-time MCP scan hints before a rail refresh."""
+        pending_holder = self._pending_skill_scan_mcp_names
+        if isinstance(pending_holder, set):
+            pending_holder.difference_update(pending_scan_names)
+        else:
+            self._pending_skill_scan_mcp_names = set()
+
+    def discard_transient_skill_retrieval_session_profile(self) -> None:
+        """Discard an optimistic sidecar unless it came from stored state."""
+        if self._restored_skill_retrieval_profile is None:
+            self._discard_skill_retrieval_session_profile()
+
     def _new_session_scoped_adapter(self, session_id: str) -> "JiuWenSwarmDeepAdapter":
         """Create a child adapter that owns one DeepAgent for a single session."""
         adapter = type(self)()
@@ -1913,8 +1978,7 @@ class JiuWenSwarmDeepAdapter:
             {
                 "profile_scope": "session",
                 "session_id": self._session_adapter_key(session_id),
-                "enabled": bool(adapter._skill_retrieval_session_enabled),
-                "model_name": adapter._skill_retrieval_context_model_name,
+                **adapter.skill_retrieval_status_fields(),
             }
         )
         return profile
@@ -2184,7 +2248,7 @@ class JiuWenSwarmDeepAdapter:
                     )
                     and (
                         frozen_mcp_scan_names != requested_mcp_scan_names
-                        or not existing._skill_retrieval_model_profile_matches(
+                        or not existing.skill_retrieval_model_profile_matches(
                             model_name
                         )
                     )
@@ -2211,7 +2275,7 @@ class JiuWenSwarmDeepAdapter:
                     # session lock is still held. Concurrent sends may reconcile
                     # live MCPs later, but cannot dispose the child underneath
                     # this first caller.
-                    existing._session_mcp_reconcile_started = True
+                    existing.mark_session_mcp_reconcile_started()
                 await self._reload_session_adapter_if_stale(sid, existing)
                 self._touch_session_adapter(sid)
                 return existing
@@ -2227,43 +2291,11 @@ class JiuWenSwarmDeepAdapter:
                 if restored_profile is not None
                 else set(requested_mcp_scan_names or ())
             )
-            adapter._pending_skill_scan_mcp_names = set(restored_mcp_names)
-            adapter._initial_skill_scan_mcp_names = frozenset(restored_mcp_names)
-            adapter._restored_skill_retrieval_profile = restored_profile
-            if restored_profile is not None:
-                adapter._skill_retrieval_context_model_name = str(
-                    restored_profile.get("model_name") or ""
-                )
-                try:
-                    restored_window = int(
-                        restored_profile.get("context_window_tokens") or 0
-                    )
-                except (TypeError, ValueError):
-                    restored_window = 0
-                adapter._skill_retrieval_context_window_tokens = (
-                    restored_window if restored_window > 0 else None
-                )
-            set_initial_retrieval_model = getattr(
-                adapter,
-                "_set_initial_skill_retrieval_model",
-                None,
+            adapter.restore_skill_retrieval_session(
+                restored_profile,
+                restored_mcp_names,
+                model_name,
             )
-            if callable(set_initial_retrieval_model):
-                set_initial_retrieval_model(
-                    restored_profile.get("requested_model_name")
-                    if restored_profile is not None
-                    else model_name
-                )
-            else:
-                setattr(
-                    adapter,
-                    "_initial_skill_retrieval_model_name",
-                    str(
-                        restored_profile.get("requested_model_name")
-                        if restored_profile is not None
-                        else model_name or ""
-                    ).strip(),
-                )
             config = (
                 dict(self._session_instance_config)
                 if isinstance(self._session_instance_config, dict)
@@ -2276,7 +2308,7 @@ class JiuWenSwarmDeepAdapter:
                 sub_mode=self._session_instance_sub_mode,
                 **self._session_instance_extra_create_kwargs(),
             )
-            adapter._persist_skill_retrieval_session_profile()
+            adapter.persist_skill_retrieval_session_profile()
             instance_ready_at = time.monotonic()
 
             await adapter.start_interaction(session_id=sid)
@@ -2311,7 +2343,7 @@ class JiuWenSwarmDeepAdapter:
                     exc,
                 )
             if requested_mcp_scan_names is not None or restored_profile is not None:
-                adapter._session_mcp_reconcile_started = True
+                adapter.mark_session_mcp_reconcile_started()
             self._touch_session_adapter(sid)
             # Cold-start cost of a session's first turn, split so a slow one can
             # be attributed to agent assembly vs. interaction startup.
@@ -3712,11 +3744,7 @@ class JiuWenSwarmDeepAdapter:
         # after real registration/unregistration has established the live set.
         # If registration failed, refreshing now also removes the optimistic
         # bundled Skill roots from the ordinary SkillUseRail.
-        pending_holder = getattr(child, "_pending_skill_scan_mcp_names", None)
-        if isinstance(pending_holder, set):
-            pending_holder.difference_update(pending_scan_names)
-        else:
-            child._pending_skill_scan_mcp_names = set()
+        child.clear_pending_skill_scan_mcp_names(pending_scan_names)
 
         # A cli/skill MCP's bundled skills surface via _skill_scan_dirs (filtered
         # by _session_selected_mcp), not register_mcp_by_name (no server entry).
@@ -3729,14 +3757,12 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] refresh_skill_rails after "
                     "reconcile failed: %s", exc,
                 )
-        restored_profile = getattr(child, "_restored_skill_retrieval_profile", None)
-        if failed_names and restored_profile is None:
-            # The construction-time MCP hint may have put unavailable bundled
-            # Skills in the immutable appendix. Keep the live-session freeze,
-            # but never make that first-session optimistic snapshot permanent.
-            # A restored profile predates this transient registration failure
-            # and remains the logical session's authoritative frozen state.
-            child._discard_skill_retrieval_session_profile()
+        if failed_names:
+            # A construction-time MCP hint may put unavailable bundled Skills in
+            # the immutable appendix. Keep the live-session freeze, but do not
+            # persist that optimistic snapshot after a transient registration
+            # failure. A restored profile remains the authoritative state.
+            child.discard_transient_skill_retrieval_session_profile()
 
     def _start_mcp_prewarm(self) -> None:
         """后台预热 connected MCP 的进程级连接缓存（仅 web root adapter）。
@@ -4407,8 +4433,8 @@ class JiuWenSwarmDeepAdapter:
         self._persist_skill_retrieval_session_profile()
         return toolkit
 
+    @staticmethod
     def _resolve_skill_retrieval_session_enabled(
-        self,
         config_base: dict[str, Any] | None = None,
     ) -> bool:
         return is_skill_retrieval_enabled(config_base)

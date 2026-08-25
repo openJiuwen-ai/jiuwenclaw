@@ -81,12 +81,11 @@ def _snapshot_from_profile(
         estimated_tokens = int(raw.get("estimated_candidate_tokens"))
         budget_tokens = int(raw.get("candidate_budget_tokens"))
         omitted_count = int(raw.get("omitted_branch_count") or 0)
-        if (
-            mode not in {"small", "large-flat", "indexed", "indexed-stale"}
-            or index_state not in {"missing", "fresh", "stale"}
-            or min(total_count, estimated_tokens, omitted_count) < 0
-            or budget_tokens < 1
-        ):
+        if mode not in {"small", "large-flat", "indexed", "indexed-stale"}:
+            return None
+        if index_state not in {"missing", "fresh", "stale"}:
+            return None
+        if min(total_count, estimated_tokens, omitted_count) < 0 or budget_tokens < 1:
             return None
         return SkillPromptSnapshot(
             mode=mode,
@@ -120,12 +119,13 @@ def is_valid_skill_retrieval_session_profile(
         return False
     if profile.get("enabled") is False:
         return True
-    if (
-        not isinstance(profile.get("index_enabled"), bool)
-        or not isinstance(profile.get("selection_cards"), Mapping)
-        or _settings_from_profile(profile) is None
-        or _snapshot_from_profile(profile) is None
-    ):
+    if not isinstance(profile.get("index_enabled"), bool):
+        return False
+    if not isinstance(profile.get("selection_cards"), Mapping):
+        return False
+    if _settings_from_profile(profile) is None:
+        return False
+    if _snapshot_from_profile(profile) is None:
         return False
     raw_index_snapshot = profile.get("index_snapshot")
     if raw_index_snapshot is None:
@@ -137,21 +137,23 @@ def is_valid_skill_retrieval_session_profile(
     return snapshot.fingerprint == str(profile.get("pinned_index_revision") or "")
 
 
+def _manager_items(manager: Any, method_name: str) -> list[Any]:
+    method = getattr(manager, method_name, None)
+    if not callable(method):
+        return []
+    try:
+        items = method()
+    except Exception:
+        return []
+    return items if isinstance(items, list) else []
+
+
 def skill_sources_from_manager(manager: Any) -> dict[str, str]:
     """Project JiuwenSwarm's local/plugin provenance into core records."""
 
     sources: dict[str, str] = {}
     for method_name in ("get_local_skills", "get_installed_plugins"):
-        method = getattr(manager, method_name, None)
-        if not callable(method):
-            continue
-        try:
-            items = method()
-        except Exception:
-            continue
-        if not isinstance(items, list):
-            continue
-        for item in items:
+        for item in _manager_items(manager, method_name):
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "").strip()
@@ -482,12 +484,11 @@ class SkillRetrievalToolkit:
             incremental_notice_max_chars=(self._settings.incremental_notice_max_chars),
         )
         self._auto_build_result: dict[str, Any] | None = None
-        if (
-            auto_build_index
-            and is_skill_retrieval_enabled(self._config_base)
-            and self._index_enabled
-            and self._candidate_scale == "large"
-        ):
+        should_auto_build = auto_build_index and is_skill_retrieval_enabled(
+            self._config_base
+        )
+        should_auto_build = should_auto_build and self._index_enabled
+        if should_auto_build and self._candidate_scale == "large":
             # Session-selected MCP-bundled Skills participate in the frozen
             # 1% decision and the live SkillFS, but they are not stable global
             # inventory.  Judge shared-index freshness against the dedicated

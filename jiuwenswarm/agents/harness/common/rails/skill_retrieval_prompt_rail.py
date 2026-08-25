@@ -271,10 +271,7 @@ class SkillRetrievalPromptRail(DeepAgentRail):
         _ = ctx
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        if (
-            not self._session_enabled
-            or getattr(ctx, "exception", None) is not None
-        ):
+        if not self._session_enabled or getattr(ctx, "exception", None) is not None:
             return
         inputs = getattr(ctx, "inputs", None)
         tool_name = str(
@@ -393,9 +390,10 @@ class SkillRetrievalPromptRail(DeepAgentRail):
 
     def _prompt_snapshot(self) -> SkillPromptSnapshot:
         if self._frozen_prompt_snapshot is None:
+            toolkit = self._toolkit()
             self._frozen_prompt_snapshot = (
                 toolkit.frozen_prompt_snapshot
-                if (toolkit := self._toolkit()) is not None
+                if toolkit is not None
                 else self._prompt_skillfs.prompt_snapshot()
                 if self._prompt_skillfs is not None
                 else self._empty_prompt_snapshot()
