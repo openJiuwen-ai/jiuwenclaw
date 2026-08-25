@@ -191,7 +191,7 @@ class AgentOSFileTransferError(RuntimeError):
 
 
 # Upload: relative path (+ optional dir prefix) → ``/home/agentos/<relative>``.
-# Download / list: absolute path under ``/home/agentos``.
+# Download / list / mkdir: absolute path under ``/home/agentos``.
 
 
 def _normalize_upload_dir_prefix(dir_prefix: str) -> str:
@@ -861,6 +861,43 @@ class AgentOSRouterClient(AgentServerClient):
                 normalized_dir,
                 recursive=bool(recursive),
                 max_depth=int(max_depth),
+                auth_headers=build_auth_headers_from_mapping(auth_headers),
+            )
+        except YuanrongAgentFileError as exc:
+            raise AgentOSFileTransferError(str(exc), code=exc.error_code) from exc
+        finally:
+            if runtime_key is not None:
+                await self._agent_manager.release(runtime_key)
+
+    async def mkdir_container_dir(
+        self,
+        *,
+        user_id: str,
+        path: str,
+        mode: str | None = None,
+        recursive: bool = False,
+        agent_type: str | None = None,
+        session_id: str = "",
+        instance_id: str | None = None,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Create a directory inside the user's agent container."""
+        normalized_path = normalize_agent_file_download_path(path)
+        if "\x00" in normalized_path:
+            raise AgentOSFileTransferError("path must not contain NUL", code="BAD_REQUEST")
+        resolved_instance_id, runtime_key = await self._resolve_file_runtime(
+            user_id=user_id,
+            agent_type=agent_type,
+            session_id=session_id,
+            instance_id=instance_id,
+            acquire=True,
+        )
+        try:
+            return await self._yuanrong.mkdir_agent_dir(
+                resolved_instance_id,
+                normalized_path,
+                mode=mode,
+                recursive=bool(recursive),
                 auth_headers=build_auth_headers_from_mapping(auth_headers),
             )
         except YuanrongAgentFileError as exc:
