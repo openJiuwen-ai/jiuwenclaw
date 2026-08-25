@@ -6,6 +6,16 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any
 
+from openjiuwen.core.runner import Runner
+from openjiuwen.harness.tools.subagent.subagent_tools import (
+    SubagentCloseTool,
+    SubagentListTool,
+    SubagentResumeTool,
+    SubagentSendInputTool,
+    SubagentSpawnTool,
+    SubagentWaitTool,
+)
+
 from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.artifact_authorization import (
     _send_file_execution_grant_for_allow,
     has_user_file_delivery_prohibition,
@@ -32,6 +42,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.invoca
 from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.models import (
     PROHIBITED_FILE_DELIVERY_REASON,
     PermissionHandlingResult,
+    ToolInvocation,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.reviewer_audit import (
     _contains_retired_task_scope_confirmation,
@@ -87,6 +98,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue_r
     tool_invocation_key_from_context,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts import (
+    DecisionRoute,
     build_tool_decision_facts,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.trusted_search_urls import (
@@ -100,6 +112,36 @@ from jiuwenswarm.server.runtime.sandbox_no_host_fallback import (
     clear_no_host_fallback,
     require_no_host_fallback,
 )
+
+_SUBAGENT_RUNTIME_CONTROL_TYPES = {
+    "subagent_close": SubagentCloseTool,
+    "subagent_list": SubagentListTool,
+    "subagent_resume": SubagentResumeTool,
+    "subagent_send_input": SubagentSendInputTool,
+    "subagent_spawn": SubagentSpawnTool,
+    "subagent_wait": SubagentWaitTool,
+}
+
+
+def _trusted_subagent_runtime_control_binding(invocation: ToolInvocation) -> bool:
+    """Prove the current executable binding is the root-owned SDK tool."""
+    expected_type = _SUBAGENT_RUNTIME_CONTROL_TYPES.get(invocation.tool_name)
+    if expected_type is None:
+        return False
+    try:
+        callback_agent = invocation.ctx.agent
+        manager = callback_agent.ability_manager
+        card = manager.get(invocation.tool_name)
+        resource = Runner.resource_mgr.get_tool(card.id, session=None)
+        outer_agent = resource._parent_agent
+        return bool(
+            type(resource) is expected_type
+            and resource.card is card
+            and outer_agent.react_agent is callback_agent
+            and outer_agent.ability_manager is manager
+        )
+    except Exception:  # Provenance lookup must fail closed to the normal policy path.
+        return False
 
 
 class AutoPermissionBeforeToolMixin:
@@ -338,6 +380,10 @@ class AutoPermissionBeforeToolMixin:
             facts.tool_name,
             tool_category=facts.tool_category,
         )
+        subagent_runtime_control_verified = bool(
+            facts.capability.operation_family == "subagent_runtime_control"
+            and _trusted_subagent_runtime_control_binding(invocation)
+        )
 
         if trusted_send_resolution is not None:
             if (
@@ -472,6 +518,15 @@ class AutoPermissionBeforeToolMixin:
             return runtime_result(
                 self._deny_domain_route(facts, domain_route),
                 decision_source="domain_policy",
+            )
+        if (
+            facts.capability.operation_family == "subagent_runtime_control"
+            and not subagent_runtime_control_verified
+        ):
+            domain_route = DecisionRoute(
+                ASK_LEVEL,
+                "subagent_runtime_control_binding_unverified",
+                "manual_only",
             )
 
         if _is_rejection_confirmation(user_input):
@@ -646,15 +701,22 @@ class AutoPermissionBeforeToolMixin:
                 )
 
         if _is_allow_once_confirmation(user_input):
-            (
-                allow_once_requires_reviewer,
-                allow_once_terminal_result,
-            ) = self._allow_once_reviewer_gate_decision(
-                facts,
-                policy_level=policy_evaluation.level,
-                original_user_intent=original_user_intent,
-                domain_route=domain_route,
-            )
+            if (
+                facts.capability.operation_family == "subagent_runtime_control"
+                and not subagent_runtime_control_verified
+            ):
+                allow_once_requires_reviewer = False
+                allow_once_terminal_result = None
+            else:
+                (
+                    allow_once_requires_reviewer,
+                    allow_once_terminal_result,
+                ) = self._allow_once_reviewer_gate_decision(
+                    facts,
+                    policy_level=policy_evaluation.level,
+                    original_user_intent=original_user_intent,
+                    domain_route=domain_route,
+                )
             if allow_once_terminal_result is not None:
                 return runtime_result(
                     allow_once_terminal_result,
@@ -679,7 +741,10 @@ class AutoPermissionBeforeToolMixin:
                     explicit_send_authorization=True,
                 )
 
-        if terminal_internal_route(facts) is not None:
+        if terminal_internal_route(
+            facts,
+            subagent_runtime_control_verified=subagent_runtime_control_verified,
+        ) is not None:
             self._record_reviewer_success_metadata(
                 invocation.ctx,
                 facts,
