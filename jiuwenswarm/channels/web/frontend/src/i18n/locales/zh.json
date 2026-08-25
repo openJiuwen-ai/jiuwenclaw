@@ -755,6 +755,9 @@
     "approvalInputPlaceholder": "填写修改意见后点击「下一步」；留空点击「跳过」"
   },
   "persistSession": {
+    "toolbarTag": "永续会话",
+    "closeTag": "取消永续会话",
+    "lockedHint": "永续会话已在创建时锁定，当前会话中不可更改",
     "textRequired": "请在 /persist 后输入任务内容"
   },
   "goal": {
@@ -2169,6 +2172,9 @@
       "tagLabel": "领域标签（可选）",
       "tagPlaceholder": "请选择领域标签",
       "removeTag": "移除领域标签 {{name}}",
+      "customTagPlaceholder": "输入自定义领域标签",
+      "addCustomTag": "添加",
+      "removeCustomTag": "移除自定义领域标签 {{name}}",
       "tagOptions": {
         "codeDelivery": "代码交付",
         "codeReview": "代码审查",

@@ -73,6 +73,7 @@ export type AgentDraft = {
   description: string;
   persona: string;
   tagIds: string[];
+  customTags: string[];
   skillRefs: string[];
   mcpRefs: string[];
   suggestedPrompts: string[];

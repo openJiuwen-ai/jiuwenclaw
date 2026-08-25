@@ -2967,7 +2967,7 @@ function AppContent({
               onUsePrompt={handleUseAgentPrompt}
               onCreateViaChat={() => requestSessionNavigation('new', {
                 initialInputValue: t('agentManagement.actions.createViaChatPrompt'),
-                initialSelectedSkills: ['skill-creator-normal'],
+                initialSelectedSkills: ['agent-creator'],
               })}
             />
           </div>

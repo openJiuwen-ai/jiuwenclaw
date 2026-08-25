@@ -1334,6 +1334,8 @@
 
 .agent-management-tag--selected {
   appearance: none;
+  display: inline-flex;
+  align-items: center;
   border: 0;
   gap: 8px;
   background: var(--color-action-secondary);
@@ -1342,6 +1344,21 @@
   font-size: 14px;
   padding: 2px 6px;
   font: inherit;
+}
+
+.agent-management-tag--selected > button {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
 }
 
 .agent-management-tag--selected:hover {
@@ -1371,6 +1388,8 @@
   border-radius: var(--radius-md);
   background: var(--color-surface-card);
   box-shadow: var(--effect-shadow-md);
+  max-height: min(320px, 50vh);
+  overflow-y: auto;
   padding: 6px;
 }
 
@@ -1398,6 +1417,35 @@
 .agent-management-tag-picker__options button svg {
   flex: 0 0 auto;
   color: var(--color-text-link);
+}
+
+.agent-management-tag-picker__custom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-top: 1px solid var(--color-border-default);
+  margin-top: 4px;
+  padding: 8px 4px 2px;
+}
+
+.agent-management-tag-picker__custom input {
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 32px;
+}
+
+.agent-management-tag-picker__custom button {
+  flex: 0 0 auto;
+  justify-content: center;
+  gap: 4px;
+  background: var(--color-action-secondary);
+  padding: 7px 9px;
+  font-size: 13px;
+}
+
+.agent-management-tag-picker__custom button:disabled {
+  color: var(--color-text-placeholder);
+  cursor: not-allowed;
 }
 
 .agent-management-form-grid input,

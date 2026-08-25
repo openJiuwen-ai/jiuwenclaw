@@ -16,7 +16,7 @@
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AtSign, Bot, ChevronRight, CircleX, ClipboardList, FileText, Infinity as InfinityIcon, Loader2, Plus, Search, Square, Target, X } from 'lucide-react';
+import { AtSign, ChevronRight, CircleX, ClipboardList, FileText, Infinity as InfinityIcon, Loader2, Plus, Search, Square, Target, X } from 'lucide-react';
 import { MoreHorizontal } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
@@ -63,6 +63,7 @@ import {
 } from '../../features/workspace/localFilePicker';
 import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
+import AgentDesignIcon from '../../assets/智能体.svg?react';
 
 const MENU_GAP = 10;
 
@@ -2790,10 +2791,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   aria-expanded={agentPickerOpen}
                   onClick={() => setAgentPickerOpen((open) => !open)}
                 >
-                  <span className="chat-mode-select__option-main">
-                    <span className="chat-mode-select__icon" aria-hidden="true">
-                      <Bot className="w-4 h-4" />
-                    </span>
+                    <span className="chat-mode-select__option-main">
+                      <span className="chat-mode-select__icon" aria-hidden="true">
+                      <AgentDesignIcon aria-hidden="true" />
+                      </span>
                     <span className="chat-mode-select__label">{t('chat.agent')}</span>
                   </span>
                   <ChevronRight className="chat-agent-picker-trigger__chevron" size={15} aria-hidden="true" />
@@ -2848,7 +2849,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                               <span className="chat-agent-picker__avatar" aria-hidden="true">
                                 {avatarUrl ? <img src={avatarUrl} alt="" /> : item.displayName.slice(0, 1)}
                               </span>
-                              <span className="chat-agent-picker__item-name">{item.displayName}</span>
+                              <span className="chat-agent-picker__item-copy">
+                                <span className="chat-agent-picker__item-name">{item.displayName}</span>
+                                {item.description ? <span className="chat-agent-picker__item-description">{item.description}</span> : null}
+                              </span>
                               {isSelected ? <span className="chat-agent-picker__check" aria-hidden="true">✓</span> : null}
                             </button>
                           );

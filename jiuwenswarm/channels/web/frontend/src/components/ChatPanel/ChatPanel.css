@@ -1991,6 +1991,7 @@ overflow: hidden;
 }
 
 .chat-agent-picker__item {
+  position: relative;
   display: flex;
   width: 100%;
   min-height: 40px;
@@ -2041,6 +2042,34 @@ overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
+}
+
+.chat-agent-picker__item-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+
+.chat-agent-picker__item-description {
+  display: -webkit-box;
+  max-height: 0;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  opacity: 0;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  transition: max-height 120ms ease, opacity 120ms ease;
+}
+
+.chat-agent-picker__item:hover .chat-agent-picker__item-description,
+.chat-agent-picker__item:focus-visible .chat-agent-picker__item-description {
+  max-height: 32px;
+  opacity: 1;
 }
 
 .chat-agent-picker__check {

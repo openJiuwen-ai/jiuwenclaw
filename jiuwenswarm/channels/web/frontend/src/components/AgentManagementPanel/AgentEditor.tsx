@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { AgentDraft, McpOption, RequestStatus, SkillOption } from '../../features/agentManagement';
+import { AGENT_TAG_OPTIONS } from '../../features/agentManagement/tagOptions';
 
 type AgentEditorProps = {
   draft: AgentDraft;
@@ -19,16 +20,6 @@ type AgentEditorProps = {
   onCancel: () => void;
   onSave: () => void;
 };
-
-const TAG_OPTIONS = [
-  { id: 'product-development', labelKey: 'agentManagement.categories.ProductDevelopment' },
-  { id: 'marketing', labelKey: 'agentManagement.categories.Marketing' },
-  { id: 'efficiency', labelKey: 'agentManagement.categories.Efficiency' },
-  { id: 'data-analysis', labelKey: 'agentManagement.categories.DataAnalysis' },
-  { id: 'content-creation', labelKey: 'agentManagement.categories.ContentCreation' },
-  { id: 'safety-compliance', labelKey: 'agentManagement.categories.SafetyCompliance' },
-  { id: 'communication', labelKey: 'agentManagement.categories.Communication' },
-] as const;
 
 const MCP_TYPE_OPTIONS = [
   ['stdio-mcp', 'connectorMarket.detail.integrationType.stdioMcp'],
@@ -61,6 +52,7 @@ export function AgentEditor({
   const [mcpDialogOpen, setMcpDialogOpen] = useState(false);
   const [skillQuery, setSkillQuery] = useState('');
   const [mcpQuery, setMcpQuery] = useState('');
+  const [customTagInput, setCustomTagInput] = useState('');
   const [mcpType, setMcpType] = useState('');
   const [mcpTypeOpen, setMcpTypeOpen] = useState(false);
   const [mcpTab, setMcpTab] = useState<'mine' | 'market'>('market');
@@ -122,6 +114,17 @@ export function AgentEditor({
   const toggleTag = (tagId: string) => {
     const tagIds = draft.tagIds.includes(tagId) ? draft.tagIds.filter(item => item !== tagId) : [...draft.tagIds, tagId];
     update({ tagIds });
+  };
+
+  const addCustomTag = () => {
+    const value = customTagInput.trim();
+    if (!value || draft.customTags.includes(value)) return;
+    update({ customTags: [...draft.customTags, value] });
+    setCustomTagInput('');
+  };
+
+  const removeCustomTag = (tag: string) => {
+    update({ customTags: draft.customTags.filter(item => item !== tag) });
   };
 
   const openSkillDialog = () => {
@@ -202,42 +205,67 @@ export function AgentEditor({
           <div className="agent-management-form-field--wide agent-management-form-field--tag-picker" ref={tagPickerRef}>
             <span>{t('agentManagement.form.tagLabel')}</span>
             <div className="agent-management-tag-picker">
-              <button
-                type="button"
+              <div
                 className="agent-management-tag-picker__trigger"
+                role="button"
+                tabIndex={0}
                 aria-expanded={tagMenuOpen}
                 aria-haspopup="listbox"
                 onClick={() => setTagMenuOpen(open => !open)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    setTagMenuOpen(open => !open);
+                  }
+                }}
               >
                 <span className="agent-management-tag-picker__values">
-                  {draft.tagIds.length > 0 ? (
-                    draft.tagIds.map(tagId => {
-                      const option = TAG_OPTIONS.find(item => item.id === tagId);
-                      return option ? (
+                  {draft.tagIds.length > 0 || draft.customTags.length > 0 ? (
+                    <>
+                    {draft.tagIds.map(tagId => {
+                      const option = AGENT_TAG_OPTIONS.find(item => item.id === tagId);
+                      if (!option) return null;
+                      return (
+                        <span key={tagId} className="agent-management-tag agent-management-tag--selected">
+                          <span>{t(option.labelKey)}</span>
+                          <button
+                            type="button"
+                            aria-label={t('agentManagement.form.removeTag', { name: t(option.labelKey) })}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleTag(tagId);
+                            }}
+                          >
+                            <span aria-hidden="true">×</span>
+                          </button>
+                        </span>
+                      );
+                    })}
+                    {draft.customTags.map(tag => (
+                      <span key={tag} className="agent-management-tag agent-management-tag--selected">
+                        <span>{tag}</span>
                         <button
-                          key={tagId}
                           type="button"
-                          className="agent-management-tag agent-management-tag--selected"
-                          aria-label={t('agentManagement.form.removeTag', { name: t(option.labelKey) })}
+                          aria-label={t('agentManagement.form.removeCustomTag', { name: tag })}
                           onClick={(event) => {
                             event.stopPropagation();
-                            toggleTag(tagId);
+                            removeCustomTag(tag);
                           }}
                         >
-                          {t(option.labelKey)}
                           <span aria-hidden="true">×</span>
                         </button>
-                      ) : null;
-                    })
+                      </span>
+                    ))}
+                    </>
                   ) : (
                     <span className="agent-management-form-placeholder">{t('agentManagement.form.tagPlaceholder')}</span>
                   )}
                 </span>
                 <span className="agent-management-tag-picker__chevron" aria-hidden="true">⌄</span>
-              </button>
+              </div>
               {tagMenuOpen ? (
                 <div className="agent-management-tag-picker__options" role="listbox" aria-label={t('agentManagement.form.tagLabel')}>
-                  {TAG_OPTIONS.map(option => {
+                  {AGENT_TAG_OPTIONS.map(option => {
                     const selected = draft.tagIds.includes(option.id);
                     return (
                       <button
@@ -253,6 +281,24 @@ export function AgentEditor({
                       </button>
                     );
                   })}
+                  <div className="agent-management-tag-picker__custom">
+                    <input
+                      value={customTagInput}
+                      onChange={event => setCustomTagInput(event.target.value)}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          addCustomTag();
+                        }
+                      }}
+                      placeholder={t('agentManagement.form.customTagPlaceholder')}
+                      aria-label={t('agentManagement.form.customTagPlaceholder')}
+                    />
+                    <button type="button" onClick={addCustomTag} disabled={!customTagInput.trim()}>
+                      <Plus size={14} aria-hidden="true" />
+                      {t('agentManagement.form.addCustomTag')}
+                    </button>
+                  </div>
                 </div>
               ) : null}
             </div>

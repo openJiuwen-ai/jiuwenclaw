@@ -2,6 +2,7 @@ import { connectorApi } from '../../services/connectorApi';
 import { webRequest } from '../../services/webClient';
 import { AgentInstallPendingError, AgentManagementError, type AgentManagementClient } from './port';
 import { getAgentManagementLocale } from './locale';
+import { resolveAgentTagPayload } from './tagOptions';
 import {
   normalizeAgentFileContent,
   normalizeAgentFileTree,
@@ -149,6 +150,7 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
           name: draft.name,
           description: draft.description,
           persona: draft.persona,
+          tags: resolveAgentTagPayload(draft.tagIds, draft.customTags),
           skills: draft.skillRefs,
           mcps: draft.mcpRefs,
           quickInputs: draft.suggestedPrompts.filter(prompt => prompt.trim().length > 0),

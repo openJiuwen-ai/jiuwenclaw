@@ -38,6 +38,7 @@ const EMPTY_DRAFT: AgentDraft = {
   description: '',
   persona: '',
   tagIds: [],
+  customTags: [],
   skillRefs: [],
   mcpRefs: [],
   suggestedPrompts: [],

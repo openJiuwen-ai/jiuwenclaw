@@ -770,6 +770,9 @@
     "approvalInputPlaceholder": "Add revision notes then click Next; leave empty and click Skip"
   },
   "persistSession": {
+    "toolbarTag": "Persist Session",
+    "closeTag": "Turn off Persist Session",
+    "lockedHint": "Persist Session was locked when this session was created and cannot be changed",
     "textRequired": "Enter a task after /persist"
   },
   "goal": {
@@ -2184,6 +2187,9 @@
       "tagLabel": "Domain tags (optional)",
       "tagPlaceholder": "Choose strength tags",
       "removeTag": "Remove domain tag {{name}}",
+      "customTagPlaceholder": "Enter a custom domain tag",
+      "addCustomTag": "Add",
+      "removeCustomTag": "Remove custom domain tag {{name}}",
       "tagOptions": {
         "codeDelivery": "Code Delivery",
         "codeReview": "Code Review",
