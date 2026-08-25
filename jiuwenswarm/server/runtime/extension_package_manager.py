@@ -146,17 +146,6 @@ def _marketplace_index(entries: list[dict]) -> dict[str, dict]:
     return out
 
 
-def _read_readme_details(pkg_dir: Path) -> str:
-    """Return README.md text, or empty string."""
-    readme = pkg_dir / "README.md"
-    if not readme.is_file():
-        return ""
-    try:
-        return readme.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return ""
-
-
 def _parse_skill_frontmatter(skill_md: Path) -> dict[str, Any]:
     """Parse SKILL.md YAML frontmatter for name/description (best-effort)."""
     try:
@@ -456,7 +445,7 @@ def _build_show_card(
         "source": resolved_source,
         "avatar": avatar if isinstance(avatar, str) else "",
         "version": version if isinstance(version, str) else "",
-        "details": _read_readme_details(pkg_dir),
+        "details": manifest.get("description") if isinstance(manifest.get("description"), str) else "",
         "tags": tags if isinstance(tags, list) else [],
         "skills": _map_skills(pkg_dir, manifest),
         "tools": _map_class_entries(manifest, "tools"),
@@ -971,6 +960,52 @@ def _require_mcp_names(params: dict) -> list[str]:
     return names
 
 
+def _require_quick_inputs(params: dict) -> list[dict[str, str]]:
+    """Validate and localize optional Agent quick inputs for the manifest."""
+    quick_inputs = params.get("quickInputs")
+    if quick_inputs is None:
+        return []
+    if not isinstance(quick_inputs, list):
+        raise ValueError("missing or invalid quickInputs")
+    entries: list[dict[str, str]] = []
+    for item in quick_inputs:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("invalid quick input: empty")
+        prompt = item.strip()
+        entries.append({"zh": prompt, "en": prompt})
+    return entries
+
+
+def _require_tags(params: dict) -> list[dict[str, str]]:
+    """Validate optional bilingual Agent tags and remove duplicates."""
+    tags = params.get("tags")
+    if tags is None:
+        return []
+    if not isinstance(tags, list):
+        raise ValueError("missing or invalid tags")
+    entries: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in tags:
+        if not isinstance(item, dict):
+            raise ValueError("invalid tag")
+        zh = item.get("zh")
+        en = item.get("en")
+        if (
+            not isinstance(zh, str)
+            or not zh.strip()
+            or not isinstance(en, str)
+            or not en.strip()
+        ):
+            raise ValueError("invalid tag: zh/en must be non-empty strings")
+        entry = {"zh": zh.strip(), "en": en.strip()}
+        key = (entry["zh"], entry["en"])
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(entry)
+    return entries
+
+
 def _assert_package_id_available(
     package_id: str,
     *,
@@ -1458,6 +1493,8 @@ def create_agent_template(params: dict) -> None:
     persona = _require_nonempty_str(params, "persona")
     skill_names = _require_skill_names(params)
     mcp_names = _require_mcp_names(params)
+    quick_inputs = _require_quick_inputs(params)
+    tags = _require_tags(params)
 
     local_root = _local_root(_AGENT_TEMPLATE_KIND)
     built_in_root = _built_in_root(_AGENT_TEMPLATE_KIND)
@@ -1488,6 +1525,10 @@ def create_agent_template(params: dict) -> None:
         }
         if mcp_names:
             manifest["mcps"] = [{"connector": n} for n in mcp_names]
+        if quick_inputs:
+            manifest["quick_inputs"] = quick_inputs
+        if tags:
+            manifest["tags"] = tags
         _write_json(pkg_dir / "manifest.json", manifest)
     except Exception:
         if pkg_dir.exists():
