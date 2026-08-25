@@ -115,6 +115,7 @@ def test_officeclaw_e2a_tenant_ids_reach_extract_ids():
     assert service_id == "default"
     assert workspace_key == "default"
 
+
 def test_e2a_to_agent_request_roundtrip():
     msg = Message(
         id="r2",
@@ -134,6 +135,37 @@ def test_e2a_to_agent_request_roundtrip():
     assert req.channel_id == "wecom"
     assert req.req_method == ReqMethod.CHAT_SEND
     assert req.metadata == {"wecom_req_id": "abc"}
+
+
+def test_web_transport_scope_is_bound_to_agent_params():
+    env = E2AEnvelope.from_dict(
+        {
+            "request_id": "web-scope",
+            "channel_id": "web",
+            "session_id": "s1",
+            "user_id": "resolved-user",
+            "method": "chat.send",
+            "params": {
+                "content": "hello",
+                "user_id": "payload-user",
+                "group_id": "payload-group",
+            },
+            "metadata": {
+                "query": {
+                    "user_id": ["query-user"],
+                    "group_id": ["group-1"],
+                    "bot_id": ["bot-1"],
+                }
+            },
+        }
+    )
+
+    req = e2a_to_agent_request(env)
+
+    assert req.params["user_id"] == "resolved-user"
+    assert req.params["group_id"] == "group-1"
+    assert req.params["bot_id"] == "bot-1"
+    assert req.params["content"] == "hello"
 
 
 def test_message_to_e2a_or_fallback_preserves_user_id():

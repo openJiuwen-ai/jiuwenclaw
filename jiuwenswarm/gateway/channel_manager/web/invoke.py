@@ -8,9 +8,15 @@ import inspect
 import logging
 from typing import Any
 
+from jiuwenswarm.common.request_identity import bind_web_routing_identity
 from jiuwenswarm.common.schema.message import Message
 
 logger = logging.getLogger(__name__)
+
+# These methods are handled inside Gateway and therefore do not pass through
+# AgentServer's E2A normalization. Bind the same routing identity that HTTP
+# mapped routes already expose so WebSocket and HTTP have identical behavior.
+_LOCAL_ROUTING_IDENTITY_PREFIXES = ("cron.", "skills.enterprise.")
 
 
 async def dispatch_web_request(
@@ -35,11 +41,23 @@ async def dispatch_web_request(
     )
 
     handler = channel.rpc.method_handlers.get(method)
+    handler_params = params
+    if method.startswith(_LOCAL_ROUTING_IDENTITY_PREFIXES):
+        handler_params = bind_web_routing_identity(
+            params,
+            user_message.metadata,
+            override=True,
+        )
     handler_already_called = False
     if method in _HANDLER_BEFORE_CALLBACK_METHODS and handler is not None:
         handler_already_called = await channel.rpc.invoke_method_handler(
             _MethodHandlerInvocation(
-                outbound, method, request_id, params, session_id, handler,
+                outbound,
+                method,
+                request_id,
+                handler_params,
+                session_id,
+                handler,
             ),
         )
         if not handler_already_called:
@@ -65,7 +83,12 @@ async def dispatch_web_request(
     if handler is not None:
         await channel.rpc.invoke_method_handler(
             _MethodHandlerInvocation(
-                outbound, method, request_id, params, session_id, handler,
+                outbound,
+                method,
+                request_id,
+                handler_params,
+                session_id,
+                handler,
             ),
         )
     else:
