@@ -116,7 +116,12 @@ ISOLATED_AUTO_REVIEWER_PROMPT = (
     "behavior, or login, admin, payment, or account flows. Content "
     "age, duplication, or weak relevance are content quality signals rather "
     "than permission-denial reasons. Parser and final host revalidation are "
-    "authoritative."
+    "authoritative. observed_path_counts and observed_path_targets contain only "
+    "positively observed Core accesses; when path_accesses_complete is false, "
+    "their empty or zero values do not prove that no implicit access occurs. "
+    "literal_hosts, literal_schemes, and literal_urls contain only URL literals "
+    "seen in the current arguments; empty values do not prove that no network "
+    "access occurs."
 )
 
 ISOLATED_AUTO_REVIEWER_SCHEMA = {
@@ -265,7 +270,7 @@ def _visible_review_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "command",
         "domain_policy",
         "network",
-        "path_targets",
+        "observed_path_targets",
         "reviewable_payload",
         "user_intent",
     }
@@ -290,8 +295,8 @@ def build_reviewer_action_view(
 
     network = inspect_network_scope(facts)
     summary: dict[str, Any] = {
-        "accesses_known": facts.accesses_known,
-        "path_counts": {
+        "path_accesses_complete": facts.accesses_known,
+        "observed_path_counts": {
             "external": len(facts.external_paths),
             "read": len(facts.read_paths),
             "write": len(facts.write_paths),
@@ -304,11 +309,14 @@ def build_reviewer_action_view(
     review_evidence: dict[str, Any] = {
         "command": _command_view(facts),
         "network": {
-            "hosts": list(network.hosts[:5]),
-            "schemes": list(network.schemes[:5]),
-            "urls": [redact_url(url) for url in network.urls[:5]],
+            "literal_hosts": list(network.hosts[:5]),
+            "literal_schemes": list(network.schemes[:5]),
+            "literal_urls": [redact_url(url) for url in network.urls[:5]],
         },
-        "path_targets": _path_target_view(facts, policy_level=policy_level),
+        "observed_path_targets": _path_target_view(
+            facts,
+            policy_level=policy_level,
+        ),
         "reviewable_payload": _payload_view(facts),
         "user_intent": _intent_view(original_user_intent),
     }
@@ -334,8 +342,6 @@ def _path_target_view(
 ) -> list[dict[str, str]]:
     """Expose bounded labels for Core-extracted accesses, never raw paths."""
 
-    if not facts.accesses_known:
-        return []
     targets: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
     for operation, paths in (
@@ -444,7 +450,10 @@ def _command_view(facts: ToolDecisionFacts) -> dict[str, Any]:
 def _core_shell_view(command: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     if not command:
         return (), ()
-    parsed = parse_shell_for_permission(command)
+    try:
+        parsed = parse_shell_for_permission(command)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return (), ()
     flags = parsed.flags
     flag_names = (
         (flags.has_pipeline, "pipeline"),

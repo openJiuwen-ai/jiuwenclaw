@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+import jiuwenswarm.agents.harness.common.rails.permissions.auto_reviewer as auto_reviewer_module
 from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission import (
     reviewer_metadata as reviewer_metadata_module,
 )
@@ -349,7 +350,7 @@ async def test_auto_reviewer_discards_manual_fields_from_allow_once(
         ("send_file_to_user", {"path": "ignored"}, "read", "result.xlsx"),
     ],
 )
-def test_reviewer_path_targets_use_only_core_extracted_accesses(
+def test_reviewer_observed_path_targets_use_only_core_extracted_accesses(
     tmp_path: Path,
     tool_name: str,
     tool_args: dict[str, str],
@@ -378,7 +379,7 @@ def test_reviewer_path_targets_use_only_core_extracted_accesses(
         domain_route=None,
     ).to_json_dict()
 
-    assert request["review_evidence"]["path_targets"] == [
+    assert request["review_evidence"]["observed_path_targets"] == [
         {
             "operation": expected_operation,
             "scope": "workspace",
@@ -394,7 +395,7 @@ def test_reviewer_path_targets_use_only_core_extracted_accesses(
     "relative_path",
     [".env", ".ssh/id_rsa", "secrets/api_token.txt"],
 )
-def test_reviewer_path_targets_redact_sensitive_workspace_names(
+def test_reviewer_observed_path_targets_redact_sensitive_workspace_names(
     tmp_path: Path,
     relative_path: str,
 ) -> None:
@@ -414,7 +415,7 @@ def test_reviewer_path_targets_redact_sensitive_workspace_names(
         domain_route=None,
     ).to_json_dict()
 
-    assert request["review_evidence"]["path_targets"] == [
+    assert request["review_evidence"]["observed_path_targets"] == [
         {
             "operation": "read",
             "scope": "workspace",
@@ -425,7 +426,7 @@ def test_reviewer_path_targets_redact_sensitive_workspace_names(
     assert relative_path not in serialized
 
 
-def test_reviewer_path_targets_redact_system_path_and_keep_scope_neutral(
+def test_reviewer_observed_path_targets_redact_system_path_and_keep_scope_neutral(
     tmp_path: Path,
 ) -> None:
     facts = build_facts(
@@ -444,7 +445,7 @@ def test_reviewer_path_targets_redact_system_path_and_keep_scope_neutral(
         domain_route=None,
     ).to_json_dict()
 
-    assert request["review_evidence"]["path_targets"] == [
+    assert request["review_evidence"]["observed_path_targets"] == [
         {
             "operation": "read",
             "scope": "nonworkspace_unclassified",
@@ -492,7 +493,7 @@ def test_engine_restriction_precedes_platform_scope(
         domain_route=None,
     ).to_json_dict()
 
-    assert request["review_evidence"]["path_targets"] == [
+    assert request["review_evidence"]["observed_path_targets"] == [
         {"operation": "read", "scope": expected_scope, "target": "[redacted_target]"}
     ]
     assert str(platform) not in json.dumps(request, ensure_ascii=False)
@@ -520,12 +521,12 @@ def test_reviewer_never_resolves_relative_access_against_process_cwd(
         domain_route=None,
     ).to_json_dict()
 
-    assert request["review_evidence"]["path_targets"] == [
+    assert request["review_evidence"]["observed_path_targets"] == [
         {"operation": "read", "scope": "unknown", "target": "SKILL.md"}
     ]
 
 
-def test_reviewer_path_targets_stay_empty_for_unknown_accesses(
+def test_reviewer_observed_path_targets_stay_empty_without_observations(
     tmp_path: Path,
 ) -> None:
     facts = build_facts("read_file", {"path": ""}, workspace_root=tmp_path)
@@ -540,7 +541,110 @@ def test_reviewer_path_targets_stay_empty_for_unknown_accesses(
         domain_route=None,
     ).to_json_dict()
 
-    assert request["review_evidence"]["path_targets"] == []
+    assert request["review_evidence"]["observed_path_targets"] == []
+
+
+def test_shell_payload_marks_uv_install_accesses_as_incomplete(
+    tmp_path: Path,
+) -> None:
+    facts = build_facts(
+        "mcp_exec_command",
+        {"command": "uv pip install -e ."},
+        workspace_root=tmp_path,
+    )
+
+    request = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    ).to_json_dict()
+
+    assert request["descriptor_summary"]["path_accesses_complete"] is False
+    assert request["descriptor_summary"]["observed_path_counts"] == {
+        "external": 0,
+        "read": 0,
+        "write": 0,
+    }
+    assert request["review_evidence"]["observed_path_targets"] == []
+    assert request["review_evidence"]["network"] == {
+        "literal_hosts": [],
+        "literal_schemes": [],
+        "literal_urls": [],
+    }
+    serialized = json.dumps(request, ensure_ascii=False)
+    for retired in (
+        '"accesses_known"',
+        '"path_counts"',
+        '"path_targets"',
+        '"hosts"',
+        '"schemes"',
+        '"urls"',
+    ):
+        assert retired not in serialized
+
+
+def test_shell_payload_labels_explicit_url_as_literal(tmp_path: Path) -> None:
+    url = "https://packages.example.invalid/simple"
+    facts = build_facts(
+        "mcp_exec_command",
+        {"command": f"curl {url}"},
+        workspace_root=tmp_path,
+    )
+
+    request = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    ).to_json_dict()
+
+    assert request["review_evidence"]["network"] == {
+        "literal_hosts": ["packages.example.invalid"],
+        "literal_schemes": ["https"],
+        "literal_urls": [url],
+    }
+
+
+def test_shell_display_parser_exception_keeps_raw_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_parser_error(_command: str) -> None:
+        raise RuntimeError("parser failed")
+
+    monkeypatch.setattr(
+        auto_reviewer_module,
+        "parse_shell_for_permission",
+        raise_parser_error,
+    )
+    facts = build_facts(
+        "mcp_exec_command",
+        {"command": "ls"},
+        workspace_root=tmp_path,
+    )
+
+    request = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("manual", "deny"),
+        no_auto_allow_reason="core_accesses_unknown",
+        original_user_intent=None,
+        domain_route=None,
+    ).to_json_dict()
+
+    assert request["review_evidence"]["command"] == {
+        "operators": [],
+        "programs": [],
+        "summary": "ls",
+    }
 
 
 async def test_auto_reviewer_serializes_concurrent_client_calls(

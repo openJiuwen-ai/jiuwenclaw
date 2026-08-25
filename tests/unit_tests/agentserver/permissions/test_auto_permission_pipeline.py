@@ -561,7 +561,58 @@ async def test_auto_manual_session_choice_reuses_core_state_before_reviewer(
     assert reviewer.requests == []
 
 
-async def test_session_auto_confirm_cannot_bypass_unknown_manual_ceiling(tmp_path) -> None:
+async def test_shell_never_stores_or_consumes_session_auto_confirm(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    rail, policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+    _install_core_auto_confirm_contract(base)
+    session = _Session()
+    args = {"command": "ls"}
+    ctx = _runtime_ctx(session, tool_name="mcp_exec_command", tool_args=args)
+    monkeypatch.setattr(
+        override_module,
+        "root_permission_resume_from_context",
+        lambda _ctx: SimpleNamespace(card=SimpleNamespace(auto_manual=True)),
+    )
+    invocation = before_tool_module._extract_invocation((ctx,), {})
+    facts = build_tool_decision_facts(
+        "mcp_exec_command",
+        args,
+        workspace_root=tmp_path,
+        original_args_were_valid_object=True,
+    )
+
+    first = await rail._consume_reviewer_override(
+        facts,
+        invocation=invocation,
+        user_input={"approved": True, "auto_confirm": True, "feedback": ""},
+        domain_route=None,
+    )
+
+    assert first.handled is True
+    assert facts.accesses_known is False
+    assert session.get_state(INTERRUPT_AUTO_CONFIRM_KEY) in (None, {})
+
+    session.update_state({INTERRUPT_AUTO_CONFIRM_KEY: {"mcp_exec_command": True}})
+    monkeypatch.setattr(
+        override_module,
+        "root_permission_resume_from_context",
+        lambda _ctx: None,
+    )
+    result = await rail.before_tool_call(ctx)
+
+    assert result is None
+    assert len(policy.calls) == 1
+    assert len(reviewer.requests) == 1
+
+
+async def test_session_auto_confirm_cannot_bypass_unknown_manual_ceiling(
+    tmp_path,
+) -> None:
     rail, policy, reviewer, base = _rail(
         tmp_path,
         PolicyEvaluation(level="ask", reason="default_ask"),

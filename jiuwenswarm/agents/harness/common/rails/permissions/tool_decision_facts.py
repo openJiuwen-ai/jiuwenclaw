@@ -20,7 +20,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions.tool_capabilities impor
 
 @dataclass(frozen=True, slots=True)
 class ToolDecisionFacts:
-    """Authoritative facts only; argument values remain untrusted."""
+    """Host facts; ``accesses_known`` means path accesses are complete."""
 
     capability: ToolCapability
     untrusted_args: Mapping[str, Any]
@@ -163,7 +163,9 @@ def _core_accesses(
         normalized = path.as_posix()
         if normalized not in target:
             target.append(normalized)
-    known = capability.category == "shell" or bool(reads or writes)
+    # Core's L1 shell extraction reports only positively observed accesses. It
+    # does not claim to enumerate effects performed by the invoked programs.
+    known = capability.category == "path" and bool(reads or writes)
     return tuple(reads), tuple(writes), known
 
 

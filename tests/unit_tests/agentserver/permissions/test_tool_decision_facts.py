@@ -124,13 +124,29 @@ def test_missing_workspace_or_unsupported_path_never_looks_empty_and_safe() -> N
     assert unsupported.accesses_known is False
 
 
-def test_shell_command_is_carried_but_not_locally_parsed(tmp_path: Path) -> None:
+def test_shell_command_accesses_are_observations_not_complete_facts(
+    tmp_path: Path,
+) -> None:
     facts = _facts("mcp_exec_command", {"command": "printf ok | tee out"}, tmp_path)
 
     assert facts.command == "printf ok | tee out"
-    assert facts.accesses_known is True
+    assert facts.accesses_known is False
     assert not hasattr(facts, "command_operator_kinds")
     assert not hasattr(facts, "deterministic_findings")
+
+
+def test_uv_install_does_not_claim_authoritative_empty_accesses(
+    tmp_path: Path,
+) -> None:
+    facts = _facts(
+        "mcp_exec_command",
+        {"command": "uv pip install -e ."},
+        tmp_path,
+    )
+
+    assert facts.accesses_known is False
+    assert facts.read_paths == ()
+    assert facts.write_paths == ()
 
 
 def test_send_paths_come_only_from_send_file_guard(tmp_path: Path) -> None:
