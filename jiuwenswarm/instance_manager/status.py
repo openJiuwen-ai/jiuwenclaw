@@ -462,16 +462,16 @@ def _has_live_group_witness(pid_data: Dict[str, object], pid: int) -> bool:
                 continue
             process = psutil.Process(witness_pid)
             cmdline = process.cmdline()
-            if (
-                abs(process.create_time() - create_time) < 3.0
-                and os.getpgid(witness_pid) == pid
-                and os.getsid(witness_pid) == pid
-                and any(
-                    cmdline[index:index + 2] == ["-m", module]
-                    for index in range(len(cmdline) - 1)
-                )
-                and _command_has_exact_dotenv(cmdline, witness.get("dotenv"))
+            if abs(process.create_time() - create_time) >= 3.0:
+                continue
+            if os.getpgid(witness_pid) != pid or os.getsid(witness_pid) != pid:
+                continue
+            if not any(
+                cmdline[index:index + 2] == ["-m", module]
+                for index in range(len(cmdline) - 1)
             ):
+                continue
+            if _command_has_exact_dotenv(cmdline, witness.get("dotenv")):
                 return True
     except (OSError, psutil.Error):
         return False
@@ -487,12 +487,11 @@ def _listener_pids(config: InstanceConfig) -> list[int]:
         pids: set[int] = set()
         for conn in psutil.net_connections(kind="inet"):
             laddr = getattr(conn, "laddr", None)
-            if (
-                conn.status == "LISTEN"
-                and laddr
-                and getattr(laddr, "port", None) in ports
-                and conn.pid
-            ):
+            if conn.status != "LISTEN" or not laddr:
+                continue
+            if getattr(laddr, "port", None) not in ports:
+                continue
+            if conn.pid:
                 pids.add(conn.pid)
         return sorted(pids)
     except Exception as exc:  # platform permissions can prevent inspection

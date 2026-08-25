@@ -17,6 +17,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -2041,6 +2042,22 @@ class TestIssue2788SafeStop:
         ]
         with patch.dict(sys.modules, {"psutil": fake_psutil}):
             assert status_mod._listener_matches_instance(5000, config, 4242) is False
+
+    @staticmethod
+    def test_listener_pids_keeps_only_configured_listeners(tmp_path):
+        from jiuwenswarm.instance_manager import status as status_mod
+        import sys
+
+        config = InstanceConfig("manager", tmp_path, {"gateway": 20001})
+        fake_psutil = MagicMock()
+        fake_psutil.net_connections.return_value = [
+            SimpleNamespace(status="LISTEN", laddr=SimpleNamespace(port=20001), pid=5000),
+            SimpleNamespace(status="LISTEN", laddr=SimpleNamespace(port=20002), pid=5001),
+            SimpleNamespace(status="ESTABLISHED", laddr=SimpleNamespace(port=20001), pid=5002),
+            SimpleNamespace(status="LISTEN", laddr=None, pid=5003),
+        ]
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            assert status_mod._listener_pids(config) == [5000]
 
     @staticmethod
     def test_stop_and_restart_propagate_cleanup_failure(tmp_path):
