@@ -771,9 +771,6 @@ class TaskExecutionRail(DeepAgentRail):
         model would have produced via ``todo_modify`` are emitted. No new event
         types.
         """
-        if ctx.session is None:
-            return
-        session_id = ctx.session.get_session_id()
         # Snapshot pre-flush state so the diff sees the transition
         self._todo_map_before_tool = dict(self._todo_map)
 
@@ -787,6 +784,18 @@ class TaskExecutionRail(DeepAgentRail):
         if not overrides:
             return
 
+        if ctx.session is None:
+            # Incomplete todos remain but we have no session to persist or
+            # verify under, so we cannot confirm anything landed. Fail closed:
+            # raise so before_tool_call falls back to _apply_skill_complete_block
+            # instead of letting skill_complete through on an unverified state.
+            raise RuntimeError(
+                "skill_complete auto-flush cannot proceed: incomplete todos "
+                "remain but ctx.session is None (cannot persist or verify); "
+                "failing closed"
+            )
+        session_id = ctx.session.get_session_id()
+
         modify_tool = self._resolve_todo_modify_tool()
         lock_manager = (
             getattr(modify_tool, "_lock_manager", None)
@@ -797,26 +806,27 @@ class TaskExecutionRail(DeepAgentRail):
         if lock_manager is not None:
             # Hold the session lock across persist + verify so a concurrent
             # todo_modify cannot interleave a stale-snapshot write that reverts
-            # the flush (lost update). asyncio.Lock is non-reentrant, so we do
-            # raw stdlib I/O here rather than calling the tool's
-            # load_todos/save_todos (which would re-acquire and deadlock).
+            # the flush (lost update). The registered todo_modify (Compatible
+            # todo_modify shim) likewise holds this lock across its whole RMW,
+            # so the two are mutually exclusive end-to-end. asyncio.Lock is
+            # non-reentrant, so we do raw stdlib I/O here rather than calling
+            # the tool's load_todos/save_todos (which would re-acquire and
+            # deadlock); both touch the same on-disk td.json.
             async with lock_manager.operation(session_id):
                 self._persist_todo_statuses(session_id, overrides)
                 self._verify_no_incomplete_after_flush(session_id)
         else:
             # Shared lock unreachable (ability_manager/Runner not ready, or
-            # todo_modify not registered). Persist + verify anyway; the
-            # post-write verify still fails closed on a reverted state. The
-            # mutual-exclusion window vs a concurrent todo_modify is not closed
-            # on this path, so log it for observability.
-            logger.warning(
-                "[TaskExecutionRail] shared todo lock unavailable; "
-                "auto-flush proceeding without mutual exclusion "
-                "(session=%s)",
-                session_id,
+            # todo_modify not registered). Without the lock the auto-flush RMW
+            # is NOT mutually exclusive with a concurrent todo_modify, so a
+            # stale-snapshot save could revert the flush (lost update). Fail
+            # closed: raise so before_tool_call falls back to
+            # _apply_skill_complete_block instead of letting skill_complete
+            # through on an unverifiable state.
+            raise RuntimeError(
+                "skill_complete auto-flush cannot obtain the shared todo "
+                f"session lock (session={session_id}); failing closed"
             )
-            self._persist_todo_statuses(session_id, overrides)
-            self._verify_no_incomplete_after_flush(session_id)
 
         # Reuse the existing diff+emit pipeline (reads the task-list file,
         # emits events) — outside the lock to avoid blocking todo_modify

@@ -4,12 +4,24 @@
 
 from __future__ import annotations
 
+import contextvars
+import json
+import os
 from typing import Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.harness.schema.task import TodoItem, TodoStatus
 from openjiuwen.harness.tools.todo import TodoModifyTool as _OpenJiuWenTodoModifyTool
+
+# Task-local flag: when set, the current coroutine already holds the session
+# lock for an atomic read-modify-write, so load_todos/save_todos must use the
+# lock-free file helpers instead of re-acquiring it (asyncio.Lock is
+# non-reentrant → deadlock). Used by CompatibleTodoModifyTool.invoke to make
+# the whole RMW share one critical section with skill_complete auto-flush.
+_IN_LOCKED_RMW: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "todo_modify_in_locked_rmw", default=False
+)
 
 
 class CompatibleTodoModifyTool(_OpenJiuWenTodoModifyTool):
@@ -20,7 +32,86 @@ class CompatibleTodoModifyTool(_OpenJiuWenTodoModifyTool):
     ``{"action": "delete", "ids": [...]}``. The upstream tool rejects that
     status, leaving the task pending. This shim preserves the canonical behavior
     while treating those update statuses as delete/cancel operations.
+
+    Additionally makes the whole read-modify-write atomic: the upstream
+    ``invoke`` does ``load_todos`` (acquires+releases the session lock) then
+    ``save_todos`` (re-acquires), so a concurrent writer — notably the
+    TaskExecutionRail ``skill_complete`` auto-flush — can persist between our
+    load and save, then our stale-snapshot save reverts it (lost update). We
+    wrap the entire RMW in one ``lock_manager.operation(session_id)`` and route
+    the inner load/save through lock-free helpers (gated by _IN_LOCKED_RMW) so
+    the base dispatch logic is reused without re-acquiring the lock.
     """
+
+    async def invoke(self, inputs: Input, **kwargs) -> Output:  # type: ignore[override]
+        session = kwargs.get("session", None)
+        session_id = (
+            session.get_session_id()
+            if session and hasattr(session, "get_session_id")
+            else None
+        )
+        if session_id is None:
+            raise build_error(
+                StatusCode.TOOL_TODOS_INVOKE_FAILED,
+                reason="Session ID is required",
+            )
+        # Hold the session lock across load+modify+save so the whole RMW is
+        # mutually exclusive with any other todo_* writer sharing this lock
+        # manager (skill_complete auto-flush, concurrent todo_modify).
+        async with self._lock_manager.operation(session_id):
+            token = _IN_LOCKED_RMW.set(True)
+            try:
+                return await super().invoke(inputs, **kwargs)
+            finally:
+                _IN_LOCKED_RMW.reset(token)
+
+    async def load_todos(self, session_id: str) -> list[TodoItem]:  # type: ignore[override]
+        if _IN_LOCKED_RMW.get():
+            return await self._load_todos_unlocked(session_id)
+        return await super().load_todos(session_id)
+
+    async def save_todos(  # type: ignore[override]
+        self, session_id: str, todos: list[TodoItem]
+    ) -> None:
+        if _IN_LOCKED_RMW.get():
+            await self._save_todos_unlocked(session_id, todos)
+            return
+        await super().save_todos(session_id, todos)
+
+    async def _load_todos_unlocked(self, session_id: str) -> list[TodoItem]:
+        """Lock-free mirror of TodoTool.load_todos; the session lock is already
+        held by our atomic invoke. Kept in sync with the upstream I/O path."""
+        file_path = self._get_file_path(session_id)
+        abs_path = os.path.abspath(file_path)
+        if not os.path.isfile(abs_path):
+            raise build_error(
+                StatusCode.TOOL_TODOS_LOAD_FAILED,
+                reason=f"Todo file not found: {abs_path}",
+            )
+        read_res = await self.fs.read_file(abs_path, mode="text")
+        if read_res.code != 0:
+            raise build_error(
+                StatusCode.TOOL_TODOS_LOAD_FAILED,
+                reason="Failed to load todo list, because read_file fail",
+            )
+        data = json.loads(read_res.data.content)
+        return [TodoItem.from_dict(item) for item in data]
+
+    async def _save_todos_unlocked(
+        self, session_id: str, todos: list[TodoItem]
+    ) -> None:
+        """Lock-free mirror of TodoTool.save_todos; the session lock is already
+        held by our atomic invoke. Kept in sync with the upstream I/O path."""
+        file_path = self._get_file_path(session_id)
+        abs_path = os.path.abspath(file_path)
+        data = [todo.to_dict() for todo in todos]
+        json_content = json.dumps(data, ensure_ascii=False, indent=2)
+        write_res = await self.fs.write_file(abs_path, json_content, mode="text")
+        if write_res.code != 0:
+            raise build_error(
+                StatusCode.TOOL_TODOS_SAVE_FAILED,
+                reason="Failed to save todo list, because write_file fail",
+            )
 
     async def _update_todos(
         self,
