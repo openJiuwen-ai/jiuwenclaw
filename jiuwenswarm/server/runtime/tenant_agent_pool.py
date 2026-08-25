@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.utils import AsyncLRUCache, get_multi_tenant_user_workspace_dir
+from jiuwenswarm.common.mcp_config import invalidate_office_claw_mcp_schema_cache
 from jiuwenswarm.server.runtime.reload_result import (
     ReloadAggregateResult,
     log_agent_config_hot_reload,
@@ -685,6 +686,15 @@ class TenantAgentPool:
                         for aid in agent_ids
                     ],
                 }
+
+            # A new catalog revision may reflect a rebuilt MCP bundle or a
+            # changed excluded-tool set; drop the process-local schema cache
+            # so the next discovery re-reads the (now possibly different)
+            # static schema. The cache key also embeds build-file size+mtime_ns,
+            # so this invalidate is belt-and-suspenders against stale entries
+            # left behind when the key itself changes.
+            if self._last_sync_revision.get(service_id) not in (None, revision):
+                invalidate_office_claw_mcp_schema_cache()
 
             incoming_specs: dict[str, Any] = {}
             for entry in agents_payload:
