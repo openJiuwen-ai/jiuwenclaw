@@ -1,0 +1,10 @@
+{
+  "api": {
+    "timeout": 5000
+  },
+  "headers": {},
+  "skillId": "ai-security",
+  "requestFrom": "openclaw",
+  "textSource": "question",
+  "action": "SKILL_SCAN"
+}

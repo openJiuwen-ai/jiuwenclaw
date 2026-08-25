@@ -1,0 +1,19 @@
+{
+  "description": "严重命令 - 直接拦截",
+  "level": "block",
+  "commands": [
+    "\\brm\\b\\s+-[\\w]*[rf][\\w]*\\s+/(?:\\s|;|$)",
+    "\\brm\\b\\s+-[\\w]*[rf][\\w]*\\s+/(?:boot|sys|proc|dev)\\b",
+    "\\bmkfs(?:\\.[\\w-]+)?\\b",
+    "\\bdd\\b\\s+.*\\b(?:if|of)=/dev/",
+    "\\bshred\\b",
+    "\\bchmod\\b\\s+(?:-[\\w]*R[\\w]*\\s+)?777\\s+/etc\\b",
+    "\\bchmod\\b\\s+[augoa]*[+-=][rwxXst]*s[rwxXst]*\\b",
+    "\\bnc\\b[^;|>&\\n]*\\s+-e\\b",
+    "\\bbash\\b\\s+-[\\w]*i[\\w]*\\b",
+    "\\bsudo\\b\\s+su\\b",
+    ">(?:\\s|>>|\\|)*(/\\w+)?/etc/passwd\\b",
+    ">(?:\\s|>>|\\|)*(/\\w+)?/etc/shadow\\b",
+    "\\b(?:reboot|shutdown)\\b"
+  ]
+}
