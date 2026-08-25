@@ -3490,8 +3490,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const prompt = typeof payload.content === 'string' ? payload.content : '';
           const existing = useChatStore.getState().getRuntime(sessionId)?.messages.find((m) => m.id === userMsgId);
           if (existing) {
-            // 同一 run 重复帧：只在内容变化时更新，避免覆盖 delta 期间可能的补投
-            if (existing.content !== prompt) {
+            // 同一 run 重复帧：只在内容非空且发生变化时更新，避免空 content 的重复/延迟帧
+            // 覆盖掉已经正确显示的提示词（§2.1：空 content 不能覆盖此前已经显示的非空提示词）。
+            if (prompt && existing.content !== prompt) {
               useChatStore.getState().updateMessage(sessionId, userMsgId, { content: prompt });
             }
           } else {
