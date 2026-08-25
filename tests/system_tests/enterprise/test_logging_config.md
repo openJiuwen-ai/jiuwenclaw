@@ -159,7 +159,7 @@ sequenceDiagram
     participant PD as ProcessDeployController
     participant Launcher as agentserver_launcher.py
     participant AS as app_agentserver
-    participant Utils as reload_logging_levels_from_gateway_db
+    participant Utils as reload_logging_levels
     participant GDB as jiuwenswarm.db
 
     Test->>WC: WS chat.send
@@ -188,7 +188,7 @@ sequenceDiagram
 | 消息队列 | `jiuwenclaw/gateway/message_handler.py` → `handle_message` / `process_stream` |
 | Process deploy | `runtime_management_extension/runtime_management_client.py` |
 | 子进程入口 | `tests/system_tests/enterprise/agentserver_launcher.py` |
-| 冷加载 | `jiuwenclaw/app_agentserver.py` → `reload_logging_levels_from_gateway_db` |
+| 冷加载 | `jiuwenclaw/app_agentserver.py` → `reload_logging_levels` |
 
 **说明**：`chat.send` 不直接拉起子进程；是 MessageHandler 经 Runtime `Access.send_message` 在**无可用 Agent 实例**时触发 deploy。
 
@@ -206,7 +206,7 @@ sequenceDiagram
     participant Stack as restart_gateway
     participant OldGW as 旧 Gateway
     participant NewGW as 新 app_gateway
-    participant Utils as reload_logging_levels_from_gateway_db
+    participant Utils as reload_logging_levels
     participant GDB as jiuwenswarm.db
     participant StdLog as gateway/gateway.log
     participant ChLog as channel.log
@@ -234,7 +234,7 @@ sequenceDiagram
 |------|------|
 | 重启封装 | `test_logging_config_process_e2e.py` → `restart_gateway` / `start_gateway` |
 | 优雅停止 | `e2e_helpers.py` → `stop_gateway_gracefully` |
-| 冷加载触发 | `jiuwenclaw/app_gateway.py` → `_run()` 内 `reload_logging_levels_from_gateway_db` |
+| 冷加载触发 | `jiuwenclaw/app_gateway.py` → `_run()` 内 `reload_logging_levels` |
 
 ---
 

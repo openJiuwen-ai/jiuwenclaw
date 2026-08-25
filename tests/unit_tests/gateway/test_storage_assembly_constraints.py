@@ -75,36 +75,30 @@ def test_enterprise_context_uses_redis(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_ready_inits_tables_once(
+async def test_ensure_ready_delegates_to_gateway_db_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("GATEWAY_REPLICAS", "1")
     monkeypatch.setenv("GATEWAY_DB_TYPE", "sqlite")
-    inits: list[object] = []
+    calls: list[str] = []
     handler = object()
 
     class _FakeDb:
         async def ensure_ready(self, log_prefix: str = "") -> object:
+            calls.append(log_prefix)
             return handler
 
         async def close(self) -> None:
             return None
 
-    async def _fake_init(ready_handler: object) -> None:
-        inits.append(ready_handler)
-
     conn = GatewayDbConnection()
     monkeypatch.setattr(conn, "_bind_database", lambda: _FakeDb())
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.storage_assembly.db_connection._init_all_tables",
-        _fake_init,
-    )
 
     first = await conn.ensure_ready()
     second = await conn.ensure_ready()
     assert first is handler
     assert second is handler
-    assert inits == [handler]
+    assert calls == ["gateway_storage"]
 
 
 @pytest.mark.asyncio
@@ -125,26 +119,20 @@ async def test_ensure_ready_replicas_forbid_sqlite(
 async def test_close_allows_init_again(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GATEWAY_REPLICAS", "1")
     monkeypatch.setenv("GATEWAY_DB_TYPE", "sqlite")
-    inits: list[object] = []
+    calls: list[str] = []
     handler = object()
 
     class _FakeDb:
         async def ensure_ready(self, log_prefix: str = "") -> object:
+            calls.append(log_prefix)
             return handler
 
         async def close(self) -> None:
             return None
 
-    async def _fake_init(ready_handler: object) -> None:
-        inits.append(ready_handler)
-
     conn = GatewayDbConnection()
     monkeypatch.setattr(conn, "_bind_database", lambda: _FakeDb())
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.storage_assembly.db_connection._init_all_tables",
-        _fake_init,
-    )
     await conn.ensure_ready()
     await conn.close()
     await conn.ensure_ready()
-    assert len(inits) == 2
+    assert calls == ["gateway_storage", "gateway_storage"]

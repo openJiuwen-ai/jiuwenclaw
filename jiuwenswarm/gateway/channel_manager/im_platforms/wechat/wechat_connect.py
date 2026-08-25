@@ -1209,12 +1209,14 @@ class WechatChannel(BaseChannel):
 
         # 持久化 last_user_id 和 context_token 供 cron/心跳推送使用
         try:
-            from jiuwenswarm.common.config import update_channel_in_config
+            from jiuwenswarm.gateway.config.channel.access import (
+                update_channel_in_config,
+            )
 
             updates: dict[str, str] = {"last_user_id": user_id}
             if context_token:
                 updates["last_context_token"] = context_token
-            update_channel_in_config("wechat", updates)
+            await update_channel_in_config("wechat", updates)
         except Exception as exc:
             logger.warning("persist channel config failed: %s", exc)
 

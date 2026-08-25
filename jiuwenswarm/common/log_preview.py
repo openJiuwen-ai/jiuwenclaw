@@ -36,9 +36,11 @@ def _preview_user_content_enabled() -> bool:
     if env_value is not None:
         return env_value.strip().lower() not in _FALSE_VALUES
     try:
-        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.gateway.config.logging.access import (
+            get_logging_config_section_sync,
+        )
 
-        logging_config = get_config().get("logging")
+        logging_config = get_logging_config_section_sync()
     except Exception:
         return True
     if not isinstance(logging_config, dict):

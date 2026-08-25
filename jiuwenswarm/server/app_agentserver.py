@@ -296,10 +296,10 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
 
     if os.getenv("AGENT_RUNTIME", "").strip():
         try:
-            from jiuwenswarm.common.utils import reload_logging_levels_from_gateway_db
+            from jiuwenswarm.common.utils import reload_logging_levels
 
-            await reload_logging_levels_from_gateway_db()
-            logger.info("[AgentServer] logging levels loaded from Gateway DB (if any)")
+            await reload_logging_levels()
+            logger.info("[AgentServer] logging levels reloaded from config store (if any)")
         except Exception:  # noqa: BLE001
             logger.warning("[AgentServer] logging_config cold load skipped", exc_info=True)
 
