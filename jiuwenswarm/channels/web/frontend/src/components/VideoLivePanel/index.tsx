@@ -296,6 +296,7 @@ export function VideoLivePanel() {
         const action = await webRequest<AgentAction>('video.agent', {
           question: transcript,
           realtime_answer: realtimeAnswer,
+          frame_data_url: framesRef.current.at(-1)?.data_url || '',
           current_task: MINICPM_CURRENT_TASK_MONITORING_ENABLED ? currentTaskRef.current : '',
           recent_chat: recentChatForRouter(),
           search_session_id: searchSessionRef.current,
@@ -909,6 +910,7 @@ export function VideoLivePanel() {
       const action = await webRequest<AgentAction>('video.agent', {
         question: text,
         realtime_answer: realtimeAnswerAtTurn,
+        frame_data_url: framesRef.current.at(-1)?.data_url || '',
         current_task: MINICPM_CURRENT_TASK_MONITORING_ENABLED ? currentTaskRef.current : '',
         recent_chat: recentChatForRouter(),
         search_session_id: searchSessionRef.current,

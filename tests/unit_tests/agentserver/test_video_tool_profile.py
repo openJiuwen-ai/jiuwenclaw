@@ -14,7 +14,7 @@ from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
 
 @pytest.mark.asyncio
-async def test_video_tool_channel_creates_dedicated_core_agent_profile(monkeypatch) -> None:
+async def test_video_tool_channel_uses_full_core_agent_profile(monkeypatch) -> None:
     manager = AgentManager()
     created = []
     sentinel = SimpleNamespace()
@@ -33,14 +33,11 @@ async def test_video_tool_channel_creates_dedicated_core_agent_profile(monkeypat
     assert agent_key == VIDEO_TOOL_CHANNEL_ID
     assert mode == "agent"
     assert sub_mode is None
-    assert config == {
-        "agent_name": "video_readonly_tool_agent",
-        "tool_profile": VIDEO_READONLY_TOOL_PROFILE,
-    }
+    assert config == {}
 
 
 @pytest.mark.asyncio
-async def test_video_readonly_core_agent_exposes_only_readonly_web_tools(monkeypatch) -> None:
+async def test_explicit_legacy_video_readonly_profile_exposes_only_web_tools(monkeypatch) -> None:
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance_overrides = {"tool_profile": VIDEO_READONLY_TOOL_PROFILE}
     registered = []

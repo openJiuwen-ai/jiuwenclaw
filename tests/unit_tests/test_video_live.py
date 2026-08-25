@@ -5,6 +5,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 import io
 import json
+from pathlib import Path
 import struct
 from types import SimpleNamespace
 import wave
@@ -1507,7 +1508,7 @@ async def test_agent_search_returns_job_before_background_result(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_video_search_uses_restricted_core_agent_rpc(monkeypatch) -> None:
+async def test_video_search_uses_full_core_agent_rpc(monkeypatch) -> None:
     channel = FakeChannel()
     requests = []
 
@@ -1574,7 +1575,7 @@ async def test_video_search_uses_restricted_core_agent_rpc(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_video_search_returns_failure_when_restricted_core_agent_fails(monkeypatch) -> None:
+async def test_video_search_returns_failure_when_core_agent_fails(monkeypatch) -> None:
     channel = FakeChannel()
     task_logs = []
 
@@ -1620,7 +1621,9 @@ async def test_video_search_returns_failure_when_restricted_core_agent_fails(mon
 
 
 @pytest.mark.asyncio
-async def test_joyai_delegation_uses_same_restricted_core_agent_rpc(monkeypatch) -> None:
+async def test_joyai_delegation_sends_trigger_frame_to_full_core_agent(
+    monkeypatch, tmp_path
+) -> None:
     channel = FakeChannel()
     requests = []
 
@@ -1651,6 +1654,10 @@ async def test_joyai_delegation_uses_same_restricted_core_agent_rpc(monkeypatch)
     monkeypatch.setattr(video_live, "_request_joyai_frame", fake_request)
     monkeypatch.setattr(video_live, "_append_joyai_log", lambda event: None)
     monkeypatch.setattr(video_live, "_append_video_task_log", lambda event: None)
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.media_attachments.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
 
     await channel.handlers["video.joyai.frame"](
         object(),
@@ -1676,6 +1683,13 @@ async def test_joyai_delegation_uses_same_restricted_core_agent_rpc(monkeypatch)
     assert requests[0].params["video_question"] == "介绍一下这个品牌"
     assert requests[0].params["video_query"] == "农夫山泉品牌资料"
     assert requests[0].params["video_visual_context"] == "画面中的品牌是农夫山泉，我来查询它的资料。"
+    uploaded_image = requests[0].params["files"]["uploaded_images"][0]
+    uploaded_path = Path(uploaded_image["path"])
+    assert uploaded_path.read_bytes() == b"fake"
+    assert uploaded_path.parent.parent.name == requests[0].session_id
+    assert requests[0].params["media_items"][0]["path"] == str(uploaded_path)
+    assert "base64Data" not in requests[0].params["media_items"][0]
+    assert "图片理解工具" in requests[0].params["query"]
     assert any(event == "video.search.completed" for event, _ in channel.events)
 
 

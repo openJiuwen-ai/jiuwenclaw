@@ -16,10 +16,6 @@ from weakref import WeakValueDictionary
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config, get_default_models
-from jiuwenswarm.common.video_tool_profile import (
-    VIDEO_READONLY_TOOL_PROFILE,
-    VIDEO_TOOL_CHANNEL_ID,
-)
 
 if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -745,11 +741,6 @@ class AgentManager:
             config = {}
             if project_key:
                 config["project_dir"] = project_key
-            if channel_key == VIDEO_TOOL_CHANNEL_ID:
-                config.update({
-                    "agent_name": "video_readonly_tool_agent",
-                    "tool_profile": VIDEO_READONLY_TOOL_PROFILE,
-                })
             if channel_key == "acp":
                 config = {
                     **config,

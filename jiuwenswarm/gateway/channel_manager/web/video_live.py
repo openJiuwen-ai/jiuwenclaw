@@ -21,6 +21,7 @@ import uuid
 import httpx
 
 from jiuwenswarm.common.video_tool_profile import VIDEO_TOOL_CHANNEL_ID
+from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
 
 
 _MAX_AUDIO_CHARS = 2_000_000
@@ -48,6 +49,11 @@ _JOYAI_USER_KNOWLEDGE_GUARD = (
 )
 _ALLOWED_AUDIO_MIME_TYPES = {"audio/webm", "audio/ogg", "audio/wav", "audio/mp4", "audio/mpeg"}
 _ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+_IMAGE_FILENAME_SUFFIXES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
 _LOG_WRITE_LOCK = threading.Lock()
 
 
@@ -178,6 +184,23 @@ def _is_allowed_image_data_url(value: str) -> bool:
         return False
     parts = header[5:].lower().split(";")
     return parts[0] in _ALLOWED_IMAGE_MIME_TYPES and "base64" in parts[1:]
+
+
+def _frame_media_item(frame_data_url: str) -> dict[str, str] | None:
+    """Convert one validated video frame into the browser media-item schema."""
+    if not _is_allowed_image_data_url(frame_data_url):
+        return None
+    header, _, encoded = frame_data_url.partition(",")
+    mime_type = header[5:].split(";", 1)[0].lower()
+    suffix = _IMAGE_FILENAME_SUFFIXES.get(mime_type)
+    if not suffix or not encoded:
+        return None
+    return {
+        "type": "image",
+        "filename": f"video-search-frame{suffix}",
+        "mimeType": mime_type,
+        "base64Data": encoded,
+    }
 
 
 def _video_model_config() -> tuple[str, str, str]:
@@ -818,15 +841,16 @@ async def _synthesize_speech(text: str) -> tuple[bytes, str, str]:
     return response.content, "audio/mpeg", model
 
 
-async def _execute_restricted_core_agent(
+async def _execute_core_agent(
     agent_client: Any,
     *,
     question: str,
     query: str,
     visual_context: str,
     search_session_id: str,
+    frame_data_url: str = "",
 ) -> dict[str, Any]:
-    """Run one read-only video tool job through the standard Core Agent API."""
+    """Run one video research job through the standard, full Core Agent API."""
     from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
     from jiuwenswarm.common.schema.message import ReqMethod
 
@@ -834,30 +858,36 @@ async def _execute_restricted_core_agent(
     if client is None:
         raise RuntimeError("AgentServer client is unavailable")
     request_id = f"video-core-{uuid.uuid4().hex}"
+    core_session_id = f"video-tool-{uuid.uuid4().hex}"
     prompt = (
         f"用户问题：{question or query}\n"
         f"建议搜索线索：{query or question}\n"
         f"Realtime视觉模型提供的画面线索：{visual_context or '无'}\n\n"
-        "请使用可用的只读网络工具核实并回答用户问题。视觉模型提供的内容只用于解析画面中的实体，"
-        "外部事实必须以搜索和网页正文为依据。"
+        "请使用可用工具完成任务。请求附带当前视频帧时，如果问题涉及画面中的实体、文字或指代，"
+        "先使用图片理解工具核对画面，再生成准确搜索词；外部事实必须以搜索和网页正文为依据。"
     )
+    params: dict[str, Any] = {
+        "query": prompt,
+        "content": prompt,
+        "mode": "agent",
+        "work_mode": "work",
+        "source": "video_tool",
+        "log_as_user": False,
+        "video_question": question,
+        "video_query": query,
+        "video_visual_context": visual_context,
+        "search_session_id": search_session_id,
+    }
+    media_item = _frame_media_item(frame_data_url)
+    if media_item is not None:
+        params["media_items"] = [media_item]
+        normalize_chat_media_attachments(params, core_session_id)
     env = e2a_from_agent_fields(
         request_id=request_id,
         channel_id=VIDEO_TOOL_CHANNEL_ID,
-        session_id=f"video-tool-{uuid.uuid4().hex}",
+        session_id=core_session_id,
         req_method=ReqMethod.CHAT_SEND,
-        params={
-            "query": prompt,
-            "content": prompt,
-            "mode": "agent",
-            "work_mode": "work",
-            "source": "video_tool",
-            "log_as_user": False,
-            "video_question": question,
-            "video_query": query,
-            "video_visual_context": visual_context,
-            "search_session_id": search_session_id,
-        },
+        params=params,
         is_stream=False,
         timestamp=time.time(),
     )
@@ -892,6 +922,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
         question: str,
         query: str,
         visual_context: str,
+        frame_data_url: str,
     ) -> None:
         started_at = time.perf_counter()
         base_payload = {
@@ -900,6 +931,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
             "question": question,
             "query": query,
             "engine": "Jiuwen Core Agent",
+            "has_frame": bool(frame_data_url),
         }
         search_jobs[job_id] = {**base_payload, "status": "running"}
         await _send_search_event(ws, "video.search.started", {
@@ -912,16 +944,17 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
         })
         try:
             async with search_semaphore:
-                core_result = await _execute_restricted_core_agent(
+                core_result = await _execute_core_agent(
                     agent_client,
                     question=question,
                     query=query,
                     visual_context=visual_context,
                     search_session_id=search_session_id,
+                    frame_data_url=frame_data_url,
                 )
                 answer = core_result["answer"]
                 await asyncio.to_thread(_append_video_task_log, {
-                    "stage": "restricted_core_agent_completed",
+                    "stage": "core_agent_completed",
                     **base_payload,
                     "tools_used": core_result.get("tools_used", []),
                     "model": core_result.get("model", ""),
@@ -965,6 +998,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
         query: str,
         search_session_id: str,
         visual_context: str = "",
+        frame_data_url: str = "",
     ) -> dict[str, Any]:
         job_id = uuid.uuid4().hex
         search_job = {
@@ -991,6 +1025,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
             question=question,
             query=query,
             visual_context=visual_context,
+            frame_data_url=frame_data_url,
         ))
         search_tasks.add(task)
         task.add_done_callback(search_tasks.discard)
@@ -1199,6 +1234,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
                     query=delegation,
                     search_session_id=search_session_id,
                     visual_context=str(result.get("response") or ""),
+                    frame_data_url=frame_data_url,
                 )
             tools_used.append("jiuwen_research")
         result["tools_used"] = tools_used
@@ -1579,6 +1615,11 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
     async def _video_agent(ws, req_id, params, session_id):
         del session_id
         question = str(params.get("question") or "").strip() if isinstance(params, dict) else ""
+        frame_data_url = (
+            str(params.get("frame_data_url") or "").strip()
+            if isinstance(params, dict)
+            else ""
+        )
         realtime_answer = (
             str(params.get("realtime_answer") or params.get("visual_answer") or "").strip()
             if isinstance(params, dict)
@@ -1590,6 +1631,14 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
         if not question or len(question) > 500:
             await channel.send_response(
                 ws, req_id, ok=False, error="question must contain 1-500 characters", code="BAD_REQUEST"
+            )
+            return
+        if frame_data_url and (
+            len(frame_data_url) > _MAX_JOYAI_FRAME_CHARS
+            or not _is_allowed_image_data_url(frame_data_url)
+        ):
+            await channel.send_response(
+                ws, req_id, ok=False, error="frame_data_url is invalid", code="BAD_REQUEST"
             )
             return
         try:
@@ -1623,6 +1672,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
                 query=query,
                 search_session_id=search_session_id,
                 visual_context=realtime_answer,
+                frame_data_url=frame_data_url,
             )
             answer = ""
 
