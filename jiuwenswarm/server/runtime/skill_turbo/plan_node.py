@@ -82,6 +82,10 @@ class PlanNode(ABC):
         self._should_skip_subplan_execute: (
             Callable[[PlanNode, dict[str, Any]], Awaitable[bool]] | None
         ) = None
+        # HITL resume：in_progress 的二层 stage 重入时不广播「开始执行」横幅
+        self._should_suppress_subplan_start_banner: (
+            Callable[[PlanNode, dict[str, Any]], Awaitable[bool]] | None
+        ) = None
 
     def _update_subplans_depth(self) -> None:
         """递归更新所有子节点的深度。
@@ -111,6 +115,9 @@ class PlanNode(ABC):
         should_skip_subplan_execute: (
             Callable[[PlanNode, dict[str, Any]], Awaitable[bool]] | None
         ) = None,
+        should_suppress_subplan_start_banner: (
+            Callable[[PlanNode, dict[str, Any]], Awaitable[bool]] | None
+        ) = None,
     ) -> None:
         self._has_tool_callback = has_tool
         self._call_tool_callback = use_tool
@@ -123,6 +130,7 @@ class PlanNode(ABC):
         self._before_subplan_execute = before_subplan_execute
         self._after_subplan_execute = after_subplan_execute
         self._should_skip_subplan_execute = should_skip_subplan_execute
+        self._should_suppress_subplan_start_banner = should_suppress_subplan_start_banner
         for node in self.sub_plans:
             node.set_runtime_callbacks(
                 has_tool=has_tool,
@@ -136,6 +144,7 @@ class PlanNode(ABC):
                 before_subplan_execute=before_subplan_execute,
                 after_subplan_execute=after_subplan_execute,
                 should_skip_subplan_execute=should_skip_subplan_execute,
+                should_suppress_subplan_start_banner=should_suppress_subplan_start_banner,
             )
 
     def log(self, level: str, message: str, *args: Any) -> None:
@@ -368,15 +377,33 @@ class PlanNode(ABC):
             "resume_skip": True,
         }
 
+    async def should_skip_subplan(
+        self,
+        subplan: "PlanNode",
+        inputs: dict[str, Any],
+    ) -> bool:
+        """HITL resume 重放时，编排层可查询是否应静默跳过该二层 stage。"""
+        if self._should_skip_subplan_execute is None:
+            return False
+        return await self._should_skip_subplan_execute(subplan, inputs)
+
+    async def should_suppress_subplan_start_banner(
+        self,
+        subplan: "PlanNode",
+        inputs: dict[str, Any],
+    ) -> bool:
+        """HITL resume 重放时，编排层可查询是否抑制「开始执行」进度横幅。"""
+        if self._should_suppress_subplan_start_banner is None:
+            return False
+        return await self._should_suppress_subplan_start_banner(subplan, inputs)
+
     async def _maybe_skip_subplan_execute(
         self,
         subplan: "PlanNode",
         inputs: dict[str, Any],
     ) -> dict[str, Any] | None:
         """若回调判定应跳过真实执行，触发 after 并返回 skip result；否则返回 None。"""
-        if self._should_skip_subplan_execute is None:
-            return None
-        if not await self._should_skip_subplan_execute(subplan, inputs):
+        if not await self.should_skip_subplan(subplan, inputs):
             return None
         result = self._resume_skip_result(subplan)
         if self._after_subplan_execute is not None:

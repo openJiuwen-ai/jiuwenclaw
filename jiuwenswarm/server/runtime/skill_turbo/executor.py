@@ -2733,6 +2733,38 @@ class SkillTurboExecutor:
         )
         return True
 
+    async def _should_suppress_subplan_start_banner(
+        self,
+        subplan: PlanNode,
+        inputs: dict[str, Any],
+    ) -> bool:
+        """HITL resume 重放时，抑制二层 stage 的「开始执行」进度横幅。
+
+        completed stage 已由 ``_should_skip_subplan_execute`` 静默跳过；
+        in_progress stage 仍需重入（命中 ask_user tool_call_id），但不应再刷横幅。
+        """
+        del inputs
+        if not self._resume_replay:
+            return False
+        if subplan.depth != 1:
+            return False
+        task_states = self._live_task_states()
+        if not task_states:
+            return False
+        found = self._find_task_state_by_plan_name(subplan.plan_name, task_states)
+        if found is None:
+            return False
+        _task_id, task_state = found
+        if task_state.get("status") != "in_progress":
+            return False
+        logger.info(
+            "[SkillTurboExecutor] suppress start banner for in-progress stage "
+            "(HITL resume replay): plan_name=%s task_id=%s",
+            subplan.plan_name,
+            _task_id,
+        )
+        return True
+
     async def _before_subplan_execute(
         self, subplan: PlanNode, inputs: dict[str, Any]
     ) -> None:
@@ -3244,6 +3276,7 @@ class SkillTurboExecutor:
             before_subplan_execute=self._before_subplan_execute,
             after_subplan_execute=self._after_subplan_execute,
             should_skip_subplan_execute=self._should_skip_subplan_execute,
+            should_suppress_subplan_start_banner=self._should_suppress_subplan_start_banner,
         )
 
     @staticmethod
