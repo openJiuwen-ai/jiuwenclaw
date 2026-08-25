@@ -10,6 +10,7 @@ import contextlib
 import logging
 import os
 import signal
+import socket
 import sys
 import time
 import shutil
@@ -26,6 +27,25 @@ _PR_SET_PDEATHSIG = 1
 
 _WIN_PROXY_DEFAULT_PORT_START = 60080
 _WIN_PROXY_DEFAULT_PORT_END = 60089
+
+
+def _probe_win_proxy_ports_free(
+    port_start: int = _WIN_PROXY_DEFAULT_PORT_START,
+    port_end: int = _WIN_PROXY_DEFAULT_PORT_END,
+) -> bool:
+    """try-bind 探测 win_proxy 端口范围是否全部可占用."""
+    if sys.platform != "win32":
+        return True
+    for port in range(port_start, port_end + 1):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            probe.close()
+            return False
+        probe.close()
+    return True
 
 
 def _get_powershell() -> str:
@@ -332,7 +352,13 @@ class JiuwenBoxRunner:
                 await self._stop_no_lock()
 
             if sys.platform == "win32":
-                _cleanup_stale_win_proxy_ports()
+                # 先用 try-bind 探测 (<10ms); 仅当某端口被占用 (即真有孤儿进程) 才
+                # 走 _cleanup_stale_win_proxy_ports 的 PowerShell 扫描清理 (~40s).
+                if not _probe_win_proxy_ports_free():
+                    logger.info(
+                        "[JiuwenBoxRunner] win_proxy 端口探测发现占用, 走残留进程清理",
+                    )
+                    _cleanup_stale_win_proxy_ports()
 
             self.host = host
             self.port = port

@@ -662,7 +662,7 @@ def install_wfp_filters(
 
     Args:
         sandbox_user_sid: jbx-sandbox 用户 SID 字符串.
-        permit_port_start/end: Permit filter 放行的 loopback 端口范围.
+        permit_port_start/end: 保留兼容签名; loopback 全端口放行后不再按端口范围生成 filter.
     """
     _require_windows()
     fwpu = _get_fwpuclnt()
@@ -694,29 +694,28 @@ def install_wfp_filters(
                     f"JiuwenBox-Block-{fkey}",
                 )
 
-            # --- Permit filters (V4 + V6) for loopback + port range ---
-            for layer, base_key in (
+            # --- Permit filters (V4 + V6) for loopback: 任意端口 ---
+            # 放行 jbx-sandbox 到 127.0.0.1/::1 的所有端口, 让沙箱内本地服务
+            # (render server 等) 可用任意端口, 包括 getPort() 随机端口.
+            # 外网出站仍由 Block 拦截, 只能经 win_proxy (127.0.0.1:60080) 出去.
+            for layer, permit_key in (
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V4, const.JBX_FILTER_PERMIT_KEY_V4),
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V6, const.JBX_FILTER_PERMIT_KEY_V6),
             ):
-                is_v4 = (layer == const.FWPM_LAYER_ALE_AUTH_CONNECT_V4)
-                for port in range(permit_port_start, permit_port_end + 1):
-                    user_cond, user_ka = _build_ale_user_condition(sandbox_user_sid)
-                    keeps.append(user_ka)
-                    if is_v4:
-                        lb_cond, lb_ka = build_loopback_v4_condition()
-                    else:
-                        lb_cond, lb_ka = _build_loopback_v6_condition()
-                    keeps.append(lb_ka)
-                    port_cond = _build_port_eq_condition(port)
-                    port_key = _permit_filter_guid_str(base_key, port)
-                    _add_filter(
-                        engine, port_key, layer, sublayer_key,
-                        [user_cond, lb_cond, port_cond],
-                        const.FWP_ACTION_PERMIT,
-                        const.FWP_WEIGHT_PERMIT,
-                        f"JiuwenBox-Permit-Loopback-{base_key}-{port}",
-                    )
+                user_cond, user_ka = _build_ale_user_condition(sandbox_user_sid)
+                keeps.append(user_ka)
+                if layer == const.FWPM_LAYER_ALE_AUTH_CONNECT_V4:
+                    lb_cond, lb_ka = build_loopback_v4_condition()
+                else:
+                    lb_cond, lb_ka = _build_loopback_v6_condition()
+                keeps.append(lb_ka)
+                _add_filter(
+                    engine, permit_key, layer, sublayer_key,
+                    [user_cond, lb_cond],
+                    const.FWP_ACTION_PERMIT,
+                    const.FWP_WEIGHT_PERMIT,
+                    f"JiuwenBox-Permit-Loopback-{permit_key}",
+                )
 
             fwpu.FwpmTransactionCommit0(engine)
         except Exception:
@@ -725,8 +724,8 @@ def install_wfp_filters(
     finally:
         fwpu.FwpmEngineClose0(engine)
     logger.info(
-        "WFP filter set 安装完成: sid=%s permit_port=%d-%d",
-        sandbox_user_sid, permit_port_start, permit_port_end,
+        "WFP filter set 安装完成: sid=%s loopback 全端口放行 (permit_port 参数已废弃)",
+        sandbox_user_sid,
     )
 
 

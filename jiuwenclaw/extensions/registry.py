@@ -255,7 +255,7 @@ class ExtensionRegistry:
         unregister_callback_sync(self.callback_framework, event, handler)
 
     async def trigger(self, event: str, context: Any | None = None, **kwargs: Any) -> None:
-        """触发事件。约定由调用方传入的 context 承载回调副作用"""
+        """触发事件。约定由调用方传入的 context 承载回调副作用。"""
         if context is None and not kwargs:
             await self.callback_framework.trigger(event)
         elif context is not None:

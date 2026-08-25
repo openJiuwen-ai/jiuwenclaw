@@ -735,10 +735,38 @@ class ToolManager:
                     cfg.get("url", ""),
                     bool(cfg.get("auth_headers") or cfg.get("auth_query_params")),
                 )
-                # 远程 MCP 连接失败（含 core 已转为 Error 的 cancel）时跳过该 server，
-                # 不中断同请求内其它 MCP；真 CancelledError 不在 Exception 内，会继续上抛。
+                # 远程 MCP 连接失败时跳过该 server，不中断同请求内其它 MCP。
+                #
+                # anyio TaskGroup 在 MCP 连接失败时会通过 cancel()+uncancel() 取消宿主
+                # task，产生的 CancelledError 不属于 Exception（Python 3.8+），无法被
+                # 下方 except Exception 捕获。add_mcp_server 的隔离逻辑依赖
+                # connect_task.cancelled() 判断，但 anyio 的 uncancel() 会使该值返回
+                # False，导致隔离失效、CancelledError 泄漏到 run_stream_task。
+                #
+                # 此处增加 except asyncio.CancelledError 兜底：用 outer_cancelling
+                # （当前 task 的 cancelling() 计数）区分内外取消：
+                #   - outer_cancelling=0 → anyio 内部取消（uncancel 已归零）→ 隔离，跳过
+                #   - outer_cancelling>0 → 外层真取消（用户 interrupt / WS 断连）→ 重新抛出
                 try:
                     await _add_mcp_server_and_ability(agent, mcp_cfg, tag=server_name)
+                except asyncio.CancelledError:
+                    _current = asyncio.current_task()
+                    _outer_cancelling = bool(_current and _current.cancelling())
+                    if _outer_cancelling:
+                        # 外层真取消，必须继续上浮
+                        raise
+                    # anyio 内部取消（MCP 连接失败触发），转为 Error 隔离
+                    logger.warning(
+                        "[ToolManager] MCP 服务器注册被取消（anyio 内部），跳过: "
+                        "name=%s url=%s",
+                        server_name,
+                        cfg.get("url", "?"),
+                    )
+                    failed.append({
+                        "name": server_name,
+                        "error": "MCP 连接被取消（anyio TaskGroup 内部取消）",
+                    })
+                    continue
                 except Exception as e:
                     logger.error(
                         "[ToolManager] MCP 服务器注册失败，跳过: name=%s error=%s",

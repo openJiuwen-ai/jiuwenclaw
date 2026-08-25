@@ -51,6 +51,26 @@ def _unique_urls(urls: list[str]) -> list[str]:
     return ordered
 
 
+def _extract_fetch_result_items(result: Any) -> list[dict[str, Any]]:
+    """Normalize a fetch_webpage tool result into a list of per-URL item dicts.
+
+    fetch_webpage now returns a bare list of per-URL items; older callers may
+    still receive ``{"results": [...]}`` or a plain string, so we keep tolerant
+    fallbacks.
+    """
+    if isinstance(result, list):
+        return [i for i in result if isinstance(i, dict)]
+    if isinstance(result, dict):
+        items = result.get("results")
+        if isinstance(items, list):
+            return [i for i in items if isinstance(i, dict)]
+        if isinstance(items, dict):
+            return [items]
+    if isinstance(result, str) and result.strip():
+        return [{"url": "", "content": result}]
+    return []
+
+
 def _extract_urls(text: str) -> list[str]:
     if not text:
         return []
@@ -1173,38 +1193,41 @@ class PageWorkerNode(PlanNode):
                 if url not in existing_top_urls:
                     top_sources.append({"url": url})
 
-        fetch_tasks = []
         fetch_urls: list[str] = []
         for source in top_sources:
             url = source.get("url", "")
-            if not url:
-                continue
-            fetch_tasks.append(
-                self.call_tool(
-                    "fetch_webpage",
-                    url=url,
-                    max_chars=8000,
-                    timeout_seconds=8,
-                )
-            )
-            fetch_urls.append(url)
+            if url and url not in fetch_urls:
+                fetch_urls.append(url)
 
-        if not fetch_tasks:
+        if not fetch_urls:
             return []
 
-        results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+        try:
+            result = await self.call_tool(
+                "fetch_webpage",
+                url=fetch_urls,
+                max_chars=8000,
+                timeout_seconds=8,
+            )
+        except Exception as exc:
+            if isinstance(exc, AbortError):
+                raise
+            logger.warning("[P6.1] WebFetch 批量抓取失败 urls=%s: %s", fetch_urls, exc)
+            return []
+
+        items = _extract_fetch_result_items(result)
 
         extractions: list[dict[str, Any]] = []
-        for url, result in zip(fetch_urls, results):
-            if isinstance(result, Exception):
-                logger.warning("[P6.1] WebFetch 失败 url=%s: %s", url[:80], result)
+        for item in items:
+            url = str(item.get("url", "")).strip()
+            error = item.get("error")
+            if error:
+                logger.warning("[P6.1] WebFetch 失败 url=%s: %s", url[:80], error)
                 continue
-            if isinstance(result, str) and result.startswith("[ERROR]"):
+            content = str(item.get("content", "") or "")
+            if not content:
                 continue
-            extractions.append({
-                "url": url,
-                "content": str(result),
-            })
+            extractions.append({"url": url, "content": content})
 
         return extractions
 
