@@ -30,6 +30,7 @@ from jiuwenswarm.server.handlers._shared import (
     resolve_request_project_dir,
 )
 from jiuwenswarm.server.handlers.team import _create_generated_team_binding
+from jiuwenswarm.server.utils.utils import is_team_params
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,65 @@ async def _handle_cancel(
     """
     request = ctx.request
     channel_id = request.channel_id or "default"
+
+    # Team-mode short-circuit: the team run is owned by TeamManager
+    # (team_manager._stream_tasks, team_helpers.py register_stream_task),
+    # NOT agent_manager. agent_manager.get_agent_nowait returns None for
+    # team mode (no agent registered), so the generic
+    # agent.process_message -> _process_interrupt -> _process_team_interrupt
+    # chain (chat.py:166, interface.py:2048/2107) is never reached and the
+    # team run driver keeps streaming after a stop click (verified
+    # 2026-08-24: 19:08 cancel did not stop round1; only team.session.reset
+    # did at 19:20, via the same _cleanup_runtime_locals primitive).
+    # Route team-mode interrupts straight to team_manager primitives,
+    # mirroring _process_team_interrupt (interface.py:2124-2168) so the
+    # behaviour matches the canonical (but unreachable) agent path. Non-team
+    # and all agent/chat logic below is untouched.
+    params = request.params if isinstance(request.params, dict) else {}
+    intent = params.get("intent", "cancel")
+    if is_team_params(params):
+        from jiuwenswarm.agents.harness.team import get_team_manager
+        from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+
+        team_manager = get_team_manager(channel_id)
+        sid = request.session_id or "default"
+        reason = f"interrupt(intent={intent}): "
+
+        if intent == "resume":
+            resp = JiuWenSwarm._build_interrupt_result_response(
+                request,
+                intent=intent,
+                success=True,
+                message="团队暂停后，直接发送下一条消息即可继续。",
+            )
+        elif intent == "pause":
+            paused = await team_manager.pause_session_runtime(sid, reason=reason)
+            resp = JiuWenSwarm._build_interrupt_result_response(
+                request,
+                intent=intent,
+                success=paused,
+                message="团队已暂停" if paused else "当前没有可暂停的团队任务",
+            )
+        elif intent == "cancel":
+            cancelled = await team_manager.cancel_session_runtime(sid, reason=reason)
+            resp = JiuWenSwarm._build_interrupt_result_response(
+                request,
+                intent=intent,
+                success=cancelled,
+                message="团队当前执行已结束" if cancelled else "当前没有可取消的团队任务",
+            )
+        else:
+            resp = JiuWenSwarm._build_interrupt_result_response(
+                request,
+                intent=intent,
+                success=False,
+                message=f"团队模式暂不支持中断意图: {intent}",
+            )
+
+        if send_response:
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            await ctx.sink.send_wire(wire)
+        return resp
 
     # 1. 尝试按 params 中的 mode 查找已有 agent
     project_dir = resolve_request_project_dir(request)
