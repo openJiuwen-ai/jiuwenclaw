@@ -495,6 +495,7 @@ export function ToolPanel({
               setTeamAreaSelectedMemberId('');
             }}
             reviewPanel={codeReviewPanel}
+            shouldFullscreen={shouldFullscreen}
           />
         </div>
       </div>

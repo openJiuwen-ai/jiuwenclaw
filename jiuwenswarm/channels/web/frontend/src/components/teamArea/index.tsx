@@ -101,6 +101,7 @@ function ExpandedTeamArea({
   onArtifactSelect,
   onCollapse,
   reviewPanel,
+  shouldFullscreen,
 }: {
   members: TeamMember[];
   historyMessages?: Message[];
@@ -114,11 +115,20 @@ function ExpandedTeamArea({
   onArtifactSelect?: (artifactId: string) => void;
   onCollapse?: () => void;
   reviewPanel?: ReactNode;
+  shouldFullscreen?: boolean;
 }) {
   const { t } = useTranslation();
   const { completedTasks, progressTasks, teamTasks, totalTasks, now } = useTaskPlanningMetrics();
   const artifactsCount = useSessionArtifactsCount();
-  const { ref: fullscreenRef, isFullscreen, toggle: toggleFullscreen } = useFullscreenPanel<HTMLDivElement>();
+  const { ref: fullscreenRef, isFullscreen, toggle: toggleFullscreen, enter: enterFullscreen, exit: exitFullscreen } = useFullscreenPanel<HTMLDivElement>();
+
+  useEffect(() => {
+    if (shouldFullscreen) {
+      enterFullscreen();
+    } else {
+      exitFullscreen();
+    }
+  }, [shouldFullscreen, enterFullscreen, exitFullscreen]);
   const resolvedTab = (activeTab === 'artifacts' && artifactsCount === 0) || (activeTab === 'review' && !reviewPanel) ? 'planning' : activeTab;
 
   const selectedMember = useMemo(() => {
@@ -203,6 +213,7 @@ export function TeamArea(props: TeamAreaProps) {
         onArtifactSelect={props.onArtifactSelect}
         onCollapse={props.onCollapse}
         reviewPanel={reviewPanel}
+        shouldFullscreen={props.shouldFullscreen}
       />
     );
   }
