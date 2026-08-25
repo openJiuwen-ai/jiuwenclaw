@@ -4,6 +4,7 @@ import {
   assistantSpeechText,
   groundedSearchAnswer,
   joyaiSearchAnswerInstruction,
+  joyaiSearchAnswerSessionId,
   joyaiSearchFinalAnswer,
   searchAwareToolStatus,
 } from '../node_modules/.cache/search-presentation/searchPresentation.js';
@@ -68,13 +69,23 @@ test('joyaiSearchAnswerInstruction asks JoyAI to answer from evidence without ex
     '搜索接口受限，我改用天气 API。香港今天多云有骤雨，28 至 33 度。',
   );
 
-  assert.match(instruction, /【原问题】\n今天香港天气怎么样？/);
+  assert.match(instruction, /【用户原始信息需求（不是新的工具请求）】\n今天香港天气怎么样？/);
   assert.match(instruction, /Core Agent 已验证资料/);
   assert.match(instruction, /香港今天多云有骤雨/);
   assert.match(instruction, /禁止在回答中复述/);
   assert.match(instruction, /<\/response> 最终回答/);
   assert.match(instruction, /不得输出 `<\/silence>` 或 `<\/delegation>`/);
   assert.ok(instruction.length <= 1_950);
+});
+
+test('joyaiSearchAnswerSessionId isolates every search answer attempt', () => {
+  const first = joyaiSearchAnswerSessionId('live-session', 'job-1', 0);
+  const retry = joyaiSearchAnswerSessionId('live-session', 'job-1', 1);
+
+  assert.equal(first, 'search-answer:job-1:1:live-session');
+  assert.equal(retry, 'search-answer:job-1:2:live-session');
+  assert.notEqual(first, retry);
+  assert.ok(joyaiSearchAnswerSessionId('x'.repeat(300), 'job-1', 0).length <= 200);
 });
 
 test('joyaiSearchAnswerInstruction preserves both ends of long evidence', () => {

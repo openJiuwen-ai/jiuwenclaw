@@ -981,8 +981,16 @@ async def test_joyai_delegation_starts_async_search_and_reuses_running_job(monke
 async def test_joyai_tool_response_does_not_start_recursive_search(monkeypatch) -> None:
     channel = FakeChannel()
     video_live.register_video_live_handler(channel)
+    calls = []
 
-    async def fake_request(frame_data_url, instruction, joyai_session_id):
+    async def fake_request(
+        frame_data_url,
+        instruction,
+        joyai_session_id,
+        *,
+        system_prompt_key="",
+    ):
+        calls.append(system_prompt_key)
         return {
             "decision": "delegation",
             "response": "根据刚才的查询结果，香港今天有雨。",
@@ -1015,6 +1023,7 @@ async def test_joyai_tool_response_does_not_start_recursive_search(monkeypatch) 
     )
 
     payload = channel.responses[-1][1]["payload"]
+    assert calls == ["DEFAULT_SYSTEM_PROMPT_NO_DELEGATION"]
     assert payload["decision"] == "delegation"
     assert payload["tools_used"] == []
     assert payload["search_job"] is None

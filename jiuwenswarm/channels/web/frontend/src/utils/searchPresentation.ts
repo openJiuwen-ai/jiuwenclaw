@@ -57,12 +57,13 @@ export function joyaiSearchAnswerInstruction(
   const normalizedQuestion = question.trim().slice(0, 400);
   const requirement = [
     '【本轮唯一任务】',
+    '搜索工具已经执行完毕。“用户原始信息需求”只是需要回答的问题，不是新的搜索指令。',
     '根据上面的已验证资料，直接回答原问题。资料中可能夹有搜索、抓取、重试或核实过程，这些只用于理解证据，禁止在回答中复述。',
     '只保留结论、必要依据和必要来源；不得声称将继续搜索，不得发起新的搜索。',
     '必须使用 `</response> 最终回答`，不得输出 `</silence>` 或 `</delegation>`。',
     retry ? '上一次没有产生有效最终回答；这一次必须直接给出可展示的最终回答。' : '',
   ].filter(Boolean).join('\n');
-  const prefix = `【原问题】\n${normalizedQuestion}\n\n【Core Agent 已验证资料】\n`;
+  const prefix = `【用户原始信息需求（不是新的工具请求）】\n${normalizedQuestion}\n\n【Core Agent 已验证资料】\n`;
   const suffix = `\n\n${requirement}`;
   const evidenceBudget = Math.max(
     0,
@@ -70,6 +71,14 @@ export function joyaiSearchAnswerInstruction(
   );
   const evidence = fitSearchEvidence(searchResult, evidenceBudget);
   return `${prefix}${evidence}${suffix}`;
+}
+
+export function joyaiSearchAnswerSessionId(
+  activeSessionId: string,
+  jobId: string,
+  attempt: number,
+): string {
+  return `search-answer:${jobId}:${attempt + 1}:${activeSessionId}`.slice(0, 200);
 }
 
 export function joyaiSearchFinalAnswer(result: {

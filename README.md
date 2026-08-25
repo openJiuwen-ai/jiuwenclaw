@@ -1,336 +1,228 @@
-# JiuwenSwarm JoyAI 视频直播部署指南
+<p align="center">
+  <img src="docs/assets/images/logo.svg" alt="JiuwenSwarm Logo" width="160" />
+</p>
 
-本文介绍如何从 Git 仓库克隆代码、配置模型并启动带有视频直播功能的 JiuwenSwarm。本文以源码部署为主，适用于 Windows、macOS 和 Linux。
+<h1 align="center">JiuwenSwarm</h1>
 
-> 仓库包含 JiuwenSwarm 和 JoyAI 适配层，不包含 JoyAI 模型权重及其推理服务。部署者需要自行准备可访问的模型端点，或取得已有模型服务器的访问权限。
+<p align="center">
+  <strong>Understands Your Intent, Evolves Autonomously — Swarm Collaboration for Complex Tasks</strong>
+</p>
+<p align="center">
+  <a href="README.md">English</a>
+  ·
+  <a href="README_CN.md">Chinese</a>
+  ·
+  <a href="docs/README_EN.md">Docs (EN)</a>
+  ·
+  <a href="docs/README.md">Docs</a>
+  ·
+  <a href="https://openjiuwen.com/en/">Website</a>
+  ·
+  <a href="https://swarmskills.openjiuwen.com/">Swarm Skills Hub</a>
+  ·
+  <a href="https://gitcode.com/openJiuwen/jiuwenswarm">GitCode</a>
+</p>
 
-## 1. 部署结构
+<p align="center">
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="License" />
+  </a>
+  <a href="https://github.com/openJiuwen-ai/jiuwenswarm/releases">
+    <img src="https://img.shields.io/pypi/v/jiuwenswarm.svg" alt="Release" />
+  </a>
+  <img src="https://img.shields.io/badge/python-%E2%89%A53.11-blue.svg" alt="Python Version" />
+  <img src="https://img.shields.io/badge/os-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20HarmonyOS-lightgrey.svg" alt="OS Support" />
+</p>
 
-完整的视频直播功能至少包含以下组件：
+[JiuwenSwarm_Introduction.mp4](docs/assets/videos/JiuwenSwarm_Introduction.mp4)
 
-```text
-浏览器
-  ├─ JiuwenSwarm Web UI（默认 5173）
-  └─ 摄像头、屏幕和麦克风
+**JiuwenSwarm** is an Agent system that makes multi-agent collaboration truly work. Designed for developers and teams who need to automate complex tasks, it helps users drive multi-agent collaboration, Skill self-evolution, and tool invocation through natural language — delivering end-to-end from intent to result. It runs on a single machine or across a cluster, and you can reach it from a browser, a terminal, or the chat apps you already use.
 
-JiuwenSwarm
-  ├─ Gateway（默认 19001）
-  ├─ Web 服务（默认 19000）
-  ├─ AgentServer（默认 18092）
-  └─ 视频直播适配层
+### Why JiuwenSwarm
 
-JoyAI 模型服务
-  ├─ 视觉 Chat Completions
-  ├─ ASR WebSocket
-  └─ TTS WebSocket
-```
+| Capability                      | Value                                                                                                                                                     |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Multi-Agent Collaboration       | The Leader decomposes a complex task and assembles teams, multi agents specialize and negotiate dynamically.                                              |
+| Distributed Agent Swarm         | Leader and Teammates deploy across processes and machines, coordinating at scale.                                                                         |
+| Swarmflow                       | Deterministic multi-stage workflows via Python scripts: the Leader hands off between stage agents; supports **HITL** (`human` / `human_session`), **team token budget**, and TUI **`/swarmflows`** run-tree monitoring. |
+| Skill Self-Evolution            | Automatically detects error signals and user dissatisfaction, then optimizes Skill definitions                                                            |
+| Skill Hub Sharing               | Capability assets are built once and reused everywhere, search, install, remix, and publish Skills through the Swarm Skills Hub                           |
+| Auto Harness                    | Evaluation drive end-to-end optimization of the Harness itself, which learns and improves in practice with no model-weight training                       |
+| AI Infrastructure Compatibility | Compatible with Huawei Cloud MaaS and other mainstream platforms, OpenAI-compatible APIs, and local models                                                |
+| Tool Permissions & Security     | Every step is under your control, tools require approval before execution, file access goes through a whitelist, and sensitive operations are intercepted |
 
-普通对话、搜索 Agent 和视频直播的控制路由还需要一个 OpenAI 兼容的主模型。视频模型不能替代这一配置。
+## Install
 
-## 2. 环境要求
+### Desktop
 
-| 依赖 | 要求 |
-| --- | --- |
-| Python | `>=3.11,<3.14`，推荐 3.11 |
-| Node.js | 18 或更高版本 |
-| Git | 建议使用最新稳定版 |
-| uv | Python 环境和依赖管理 |
-| 浏览器 | Chrome/Edge 107 或更高版本 |
-| OpenSSH | 仅远端模型或 SSH 隧道场景需要 |
+One-click install, no environment setup — the quickest way to try JiuwenSwarm.
 
-检查版本：
+| Platform  | Download                                                          | Notes                                         |
+| --------- | ----------------------------------------------------------------- | --------------------------------------------- |
+| Windows   | [Download Windows Version](https://openjiuwen.com/en/jiuwenswarm) | For Windows 10 / 11                           |
+| macOS     | [Download macOS Version](https://openjiuwen.com/en/jiuwenswarm)   | For Intel / Apple Silicon                     |
+| HarmonyOS | [Try now](https://openjiuwen.com/en/jiuwenswarm)                  | HarmonyOS PC, installed via the official site |
+
+Download and follow the installer prompts to get started.
+
+On Linux, install via [Command Line](#pip) or [from source](#from-source) below.
+
+### Command Line
 
 ```bash
-python --version
-node --version
-npm --version
-git --version
-uv --version
+# Install JiuwenSwarm
+pip install jiuwenswarm
+
+# Use China mirror (recommended)
+pip install jiuwenswarm -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# Initialize JiuwenSwarm (first-time setup)
+jiuwenswarm-init
+
+# Start JiuwenSwarm
+jiuwenswarm-start
 ```
 
-没有安装 `uv` 时：
+After launching, visit http://localhost:5173 to open the frontend.
 
-```powershell
-# Windows PowerShell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
+To use TUI (terminal interface), open a new terminal after starting JiuwenSwarm:
 
 ```bash
-# macOS / Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# Install JiuwenSwarm-tui
+pip install jiuwenswarm-tui
+
+# Use China mirror (recommended)
+pip install jiuwenswarm-tui -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# Start JiuwenSwarm-tui
+jiuwenswarm-tui
 ```
 
-## 3. 克隆代码
-
-在功能仍位于 `Xiangyu` 分支时：
+### From Source
 
 ```bash
-git clone --branch Xiangyu --single-branch https://github.com/zuiho-kai/jiuwenswarm.git
+git clone https://github.com/openJiuwen-ai/jiuwenswarm.git
 cd jiuwenswarm
+uv venv
+uv pip install -e .
 ```
 
-功能合入主分支后，应将 `Xiangyu` 替换为实际发布分支。
+> For detailed installation instructions, see: [Install Guide](docs/en/InstallGuide.md)
 
-## 4. 安装依赖并初始化
+## Quick Start
 
-在仓库根目录执行：
+### Configure Model
 
-```bash
-uv venv --python=3.11
-uv sync
-uv run jiuwenswarm-init
+JiuwenSwarm supports multiple model platforms: Huawei Cloud MaaS, OpenAI, DeepSeek, DashScope, SiliconFlow, OpenRouter and other OpenAI-compatible APIs, as well as local model deployment.
+
+A default model is the one piece of configuration you cannot skip. Set it in the web UI under **More → Configuration**, or edit `~/.jiuwenswarm/config/config.yaml` directly. The file is created on your first `jiuwenswarm-start`, and saving it reloads the config without a restart.
+
+For example, with DeepSeek：
+
+```yaml
+model_name: deepseek-v4-flash
+api_base: https://api.deepseek.com
+api_key: sk-your-api-key
+model_provider: OpenAI
 ```
 
-前端依赖由 `debug` 启动流程自动安装。也可以提前安装：
+### Start a Conversation
 
-```bash
-cd jiuwenswarm/channels/web/frontend
-npm install
-cd ../../../..
-```
+The workbench has two spaces, switched from the top-left selector: **Work**, for office, collaboration, and general tasks, and **Code**, for viewing and modifying code in a project directory .
 
-初始化后，默认实例配置位于：
+Each conversation runs in one of two execution modes, picked from the selector in the chat input area:
 
-- Windows：`%USERPROFILE%\.jiuwenswarm\config\.env`
-- macOS/Linux：`~/.jiuwenswarm/config/.env`
+| Mode         | What it does                                                                            | Use it for                                              |
+| ------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Agent mode   | Single agent handles tasks independently, supports task planning and dynamic adjustment | Most daily tasks, Q&A, code generation, etc.            |
+| Cluster mode | Multi-agent collaboration mode, with a Leader orchestrating multiple specialized agents | Large, complex tasks that need multi-role collaboration |
 
-不要把 `.env`、API Key 或 SSH 私钥提交到 Git。
+**Cluster Mode** (default)
 
-## 5. 配置主模型和搜索
-
-编辑 `~/.jiuwenswarm/config/.env`，先配置主模型：
-
-```dotenv
-API_BASE=https://api.example.com/v1
-API_KEY=替换为实际密钥
-MODEL_NAME=Qwen/Qwen3.5-9B
-MODEL_PROVIDER=OpenAI
-
-# 视频直播搜索使用 Jiuwen Core Agent 的只读工具：free_search、fetch_webpage。
-FREE_SEARCH_DDG_ENABLED=true
-FREE_SEARCH_BING_ENABLED=false
-```
-
-主模型需要支持 OpenAI 兼容的 `/chat/completions`。如果使用本地服务且不校验密钥，也应填写服务接受的占位值，例如 `EMPTY`。
-
-免费搜索需要部署机器能够访问 DuckDuckGo。网络受限时可配置代理：
-
-```dotenv
-FREE_SEARCH_PROXY_URL=http://127.0.0.1:7890
-FREE_SEARCH_SSL_VERIFY=true
-```
-
-生产环境不应为了绕过证书问题长期设置 `FREE_SEARCH_SSL_VERIFY=false`。
-
-## 6. 配置 JoyAI
-
-JoyAI 使用视觉 Chat Completions，并通过独立 WebSocket 提供 ASR 和 TTS：
-
-```dotenv
-VIDEO_LIVE_MODE=joyai
-JOYAI_API_BASE=http://127.0.0.1:8070/v1
-JOYAI_API_KEY=替换为实际密钥或EMPTY
-JOYAI_MODEL_NAME=jdopensource/JoyAI-VL-Interaction
-JOYAI_VOICE_PROVIDER=native
-JOYAI_ASR_WS_URL=ws://127.0.0.1:8994/ws/asr
-JOYAI_TTS_WS_URL=ws://127.0.0.1:8992/ws/tts
-```
-
-`JOYAI_API_BASE` 必须提供 OpenAI 兼容的 `/chat/completions`。不要只配置 `VIDEO_API_BASE`，JoyAI 不会自动复用 `VIDEO_*`。
-
-远端服务的端口以实际部署为准。下面是一个同时映射视觉适配器、直连模型、ASR 和 TTS 的示例：
-
-```bash
-ssh -p <SSH端口> -N -T \
-  -o ExitOnForwardFailure=yes \
-  -o ServerAliveInterval=30 \
-  -L 8070:127.0.0.1:8070 \
-  -L 8099:127.0.0.1:7060 \
-  -L 8992:127.0.0.1:8992 \
-  -L 8994:127.0.0.1:8994 \
-  <用户>@<模型服务器>
-```
-
-如果没有 JoyAI 原生语音服务，可以改用 OpenAI 兼容 ASR/TTS：
-
-```dotenv
-JOYAI_VOICE_PROVIDER=openai
-
-ASR_API_BASE=https://api.example.com/v1
-ASR_API_KEY=替换为实际密钥
-ASR_MODEL_NAME=whisper-large-v3
-ASR_API_MODE=transcription
-
-TTS_API_BASE=https://api.example.com/v1
-TTS_API_KEY=替换为实际密钥
-TTS_MODEL_NAME=实际TTS模型
-TTS_VOICE=实际音色
-```
-
-ASR 服务若通过 `/chat/completions` 接收音频而非 `/audio/transcriptions`，将 `ASR_API_MODE` 改为 `chat`。
-
-## 7. 启动服务
-
-首次部署或前端代码有变化时，在仓库根目录执行：
-
-```bash
-uv run jiuwenswarm-start debug
-```
-
-该命令会完成：
-
-1. 安装前端依赖；
-2. 构建最新前端；
-3. 同步 Python 依赖；
-4. 后台启动 AgentServer、Gateway、Web 和前端服务。
-
-只修改 Python 代码且已有前端构建时，可以使用：
-
-```bash
-uv run jiuwenswarm-start debug --skip-build
-```
-
-打开：
+Example input:
 
 ```text
-http://127.0.0.1:5173
+Conduct an in-depth research on the new energy vehicle industry and generate an analysis report.
 ```
 
-停止服务：
+**Agent Mode**
 
-```bash
-uv run jiuwenswarm-stop
+Example input:
+
+```text
+Check today's weather in Beijing, and recommend 3 books about artificial intelligence.
 ```
 
-查看默认实例状态：
+In IM channels and the TUI, the `/mode` command switches between finer-grained sub-modes (`agent.plan`, `agent.fast`, `code.normal`, `code.team`, `team`). See [Modes](https://github.com/openJiuwen-ai/jiuwenswarm/blob/develop/docs/en/Modes.md).
 
-```bash
-uv run jiuwenswarm-start --status default
-```
+By default, tools ask for approval before they run. If you would rather not confirm every step, adjust the policy in [Tool Permissions & Security](https://github.com/openJiuwen-ai/jiuwenswarm/blob/develop/docs/en/ToolPermissionsSecurity.md).
 
-如果 `5173` 被占用，启动器会选择另一组端口。应以启动输出中的实际地址为准。
+> For detailed operation guide, see: [Quick Start](docs/en/Quickstart.md)
 
-## 8. 部署验证
+## Channels
 
-### 8.1 检查 JiuwenSwarm
+Enable a channel from the **Web UI**, or in `config.yaml` with `enabled: true` and the credentials for that platform, and you can talk to the same agent from an app you already have open.
 
-```powershell
-# Windows
-Test-NetConnection 127.0.0.1 -Port 5173
-Test-NetConnection 127.0.0.1 -Port 19001
-Test-NetConnection 127.0.0.1 -Port 18092
-```
+| Region        | Channels                                                                                                                                                                                                                                                   |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| China         | [Xiaoyi](docs/en/ChinaChannels.md#xiaoyi), [Feishu](docs/en/ChinaChannels.md#feishu-lark), [DingTalk](docs/en/ChinaChannels.md#dingtalk), [WeCom](docs/en/ChinaChannels.md#wecom-wechat-work), [Personal WeChat](docs/en/ChinaChannels.md#personal-wechat) |
+| International | [Telegram](docs/en/InternationalChannels.md#telegram), [Discord](docs/en/InternationalChannels.md#discord), [Slack](docs/en/InternationalChannels.md#slack), [WhatsApp](docs/en/InternationalChannels.md#whatsapp)                                         |
 
-```bash
-# macOS / Linux
-curl -I http://127.0.0.1:5173
-```
+Capabilities differ per platform. Xiaoyi and WhatsApp are private chat only; Feishu, WeCom, DingTalk, Telegram, Discord, and Slack also work in groups, usually by @mentioning the bot. Feishu and WeCom additionally support the Digital Avatar feature. See [Channels](docs/en/Channels.md).
 
-### 8.2 检查模型端口
 
-```powershell
-Test-NetConnection 127.0.0.1 -Port 8070
-Test-NetConnection 127.0.0.1 -Port 8992
-Test-NetConnection 127.0.0.1 -Port 8994
-Invoke-RestMethod http://127.0.0.1:8070/v1/models
-```
 
-`Test-NetConnection` 只证明端口正在监听，不证明协议正确。最终还需要在浏览器中完成一次端到端验证。
+## Documentation
 
-### 8.3 浏览器端到端检查
+Full index: [Documentation](docs/README_EN.md)
 
-1. 打开 JiuwenSwarm Web UI。
-2. 进入“视频直播”。
-3. 选择摄像头、视频文件或共享屏幕。
-4. 点击启动，允许摄像头和麦克风权限。
-5. 提问一个必须观察当前画面的问题。
-6. 确认文字和语音均正常返回。
-7. 提出“持续翻译画面中的英文”等任务，确认“当前任务”更新。
-8. 提问一个需要外部信息的问题，确认搜索状态出现并最终返回摘要答案。
-9. 在模型回答时说出新指令，确认旧音频停止且新指令被识别。
+- Install and first run: [Install Guide](docs/en/InstallGuide.md) · [Quick Start](docs/en/Quickstart.md)
+- The Web UI layout: [Page Overview](docs/en/Page-Overview.md)
+- Configure providers: [Configuration](docs/en/Configuration.md)
+- Build and evolve capabilities: [Skills](docs/en/Skills.md) · [Skill Self-Evolution](docs/en/SkillSelfEvolution.md)
+- Multi-agent and cluster: [Agent Team](docs/en/AgentTeam.md) · [Distributed Team](docs/en/DistributedTeam.md)
+- Memory: [Memory](docs/en/Memory.md) · [Task Memory](docs/en/TaskMemory.md) · [Coding Memory](docs/en/CodingMemory.md)
+- Automation: [Scheduled Tasks](docs/en/ScheduledTasks.md)
+- Terminal: [Quick Start (TUI)](docs/en/Quickstart_tui.md) · [Slash Commands](docs/en/SlashCommands.md) · [SwarmFlow (TUI)](docs/en/TUISwarmFlowGuide.md)
+- Extend and integrate: [MCP Configuration](docs/en/MCPConfiguration.md) · [A2A](docs/en/A2A.md) · [E2A Protocol](docs/en/E2A-protocol.md)
 
-## 9. 日志
+## Latest Updates
 
-运行日志默认位于 `~/.jiuwenswarm/logs/`。视频直播重点查看：
+- **2026-08-06** — `v0.2.4.beta3`  Focuses on cutting cold-start latency in the Agent instance launch path.
+- **2026-07-28** — `v0.2.4.beta2` Improves the scheduling mechanism for tasks and refines front-end interaction logic.
+- **2026-07-24** — `v0.2.4.beta1` Builds out the Code work-mode system and its front-end support: workspace selection and switching, and code-diff display.
+- **2026-07-14** — `v0.2.3` The collaboration capabilities in cluster mode have been enhanced, with new features such as browser sub-agent isolation and support for online sessions within the same session; image attachments and multimodal conversations; Skill-Omni turns visual knowledge into reusable multimodal Skills, with a usage-experience loop improving skill dispatch; new TUI commands (/keybindings, /simplify, /review, /security-review, /btw); stability fixes..
 
-| 文件 | 内容 |
-| --- | --- |
-| `realtime-interrupt.jsonl` | 打断、VAD 和会话状态事件 |
-| `video-task-routing.jsonl` | 当前任务、工具路由、搜索和 TTS 事件 |
-| `asr-results.jsonl` | 每次 ASR 请求及识别结果 |
-| `joyai-video.jsonl` | JoyAI 请求、原始动作、延迟和模型结果 |
+Full notes for every version are on [GitHub Releases](https://github.com/openJiuwen-ai/jiuwenswarm/releases).
 
-Windows 实时查看示例：
+## FAQ
 
-```powershell
-Get-Content "$HOME\.jiuwenswarm\logs\video-task-routing.jsonl" -Wait -Tail 50
-```
+For solutions to common issues, see: [FAQ](docs/en/FAQ.md).
 
-macOS/Linux：
+## Contributing
 
-```bash
-tail -f ~/.jiuwenswarm/logs/video-task-routing.jsonl
-```
+We welcome developers to contribute to JiuwenSwarm. You can contribute in the following ways:
 
-## 10. 常见问题
+- Report bugs, feature requests, or usage issues: [Issues](https://github.com/openJiuwen-ai/jiuwenswarm/issues)
+- Submit code, documentation, or examples: [Pull Requests](https://github.com/openJiuwen-ai/jiuwenswarm/pulls)
+- Share Skills: [Swarm Skills Hub](https://swarmskills.openjiuwen.com/)
 
-### 页面仍是旧版本
+Read the [Contributing Guide](docs/en/Contributing.md) first for the debugging workflow, code style, and commit conventions. The contribution map is on the [openJiuwen contribution page](https://openjiuwen.com/en/contribute).
 
-确认使用源码目录执行过：
+### Contributors
 
-```bash
-uv run jiuwenswarm-stop
-uv run jiuwenswarm-start debug
-```
+Thanks to all developers who have contributed to JiuwenSwarm: [View Contributor List](https://github.com/openJiuwen-ai/jiuwenswarm/graphs/contributors)
 
-然后强制刷新浏览器。仅运行旧的全局 `jiuwenswarm-start` 可能会启动已安装版本，而不是刚克隆的源码。
+## Community
 
-### JoyAI frame request failed
+| Channel          | Purpose                                                      | Link                                                          |
+| ---------------- | ------------------------------------------------------------ | ------------------------------------------------------------- |
+| Website          | Product info, updates, and ecosystem                         | [Visit Website](https://openjiuwen.com/en/)                   |
+| SIG              | Technical roadmap, engineering practices, ecosystem building | [Join SIG](https://openjiuwen.com/en/community/sig-center)    |
+| Swarm Skills Hub | Browse, publish, and reuse JiuwenSwarm Skills                | [Visit Swarm Skills Hub](https://swarmskills.openjiuwen.com/) |
 
-检查 `JOYAI_API_BASE`、`JOYAI_MODEL_NAME` 和 `/chat/completions` 响应。`/health` 成功并不代表 Chat Completions 可用。
+## License
 
-### 只有文字，没有语音
+This project is licensed under [Apache License 2.0](LICENSE).
 
-检查 `video-task-routing.jsonl` 中是否有：
-
-- `tts_stream_requested`
-- `tts_stream_first_chunk`
-- `tts_stream_completed`
-- `tts_stream_cancelled`
-- `joyai_tts_suppressed_for_barge_in`
-
-若出现 `tts_stream_cancelled`，继续查看 `asr-results.jsonl`，判断是否被用户插话、环境声或回声触发。
-
-### 搜索不工作
-
-确认主模型 `API_BASE/API_KEY/MODEL_NAME` 可用，并启用了至少一个搜索来源。视频搜索由 Jiuwen Core Agent 执行；视频模型本身不会直接抓取网页。
-
-### 摄像头或麦克风权限不可用
-
-浏览器媒体权限要求安全上下文。本机 `http://127.0.0.1` 可以使用；跨机器访问应部署 HTTPS。检查浏览器站点权限和系统输入设备设置。
-
-## 11. 更新部署
-
-```bash
-git switch Xiangyu
-git pull --ff-only
-uv run jiuwenswarm-stop
-uv sync
-uv run jiuwenswarm-start debug
-```
-
-不要使用会覆盖本地配置的命令。模型密钥保存在用户目录 `.env` 中，正常拉取代码不会修改它。
-
-## 12. 最小验收标准
-
-部署完成至少应满足：
-
-- Web UI 可以打开；
-- 普通主对话可用；
-- 视频来源可以打开且帧数持续增长；
-- 视频模型会依据当前画面回答，而不是复用旧画面；
-- 麦克风输入、ASR、文字回答和语音播放可用；
-- 用户插话能够中断语音；
-- 当前任务可以被识别并持续执行；
-- Jiuwen Core Agent 搜索成功时能返回简洁、带依据的最终回答；
-- 搜索失败时明确显示失败，不伪造搜索结果。
+This product serves solely as a workflow orchestration tool and does not embed any AI model capabilities. When users integrate AI models for specific business scenarios, they shall bear full responsibility for compliance obligations under the EU AI Act and other relevant regulatory frameworks.

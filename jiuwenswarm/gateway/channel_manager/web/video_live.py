@@ -36,6 +36,7 @@ _JOYAI_TTS_INSTRUCTIONS = (
 _JOYAI_TTS_TEMPERATURE = 0.2
 _JOYAI_ACTION_TEMPERATURE = 0.0
 _JOYAI_SYSTEM_PROMPT_KEY = "DEFAULT_SYSTEM_PROMPT_EN"
+_JOYAI_TOOL_SYSTEM_PROMPT_KEY = "DEFAULT_SYSTEM_PROMPT_NO_DELEGATION"
 _JOYAI_USER_KNOWLEDGE_GUARD = (
     "【本轮动作约束】你必须自行选择官方动作。只依据当前或近期清晰画面、用户明确提供的信息和已确认的工具结果回答。"
     "天气、新闻、价格、公司或品牌背景等外部或时效事实需要搜索核实，不得凭记忆猜测。"
@@ -349,6 +350,7 @@ async def _request_joyai_completion(
     *,
     max_tokens: int,
     frame_time_range: str = "",
+    system_prompt_key: str = "",
 ) -> dict[str, Any]:
     api_base, api_key, model = _joyai_model_config()
     if not api_base or not model:
@@ -378,7 +380,7 @@ async def _request_joyai_completion(
         payload["extra_body"] = {"frame_time_range": frame_time_range}
     headers = {
         "x-streaming-session": joyai_session_id,
-        "x-system-prompt-key": os.environ.get(
+        "x-system-prompt-key": system_prompt_key.strip() or os.environ.get(
             "JOYAI_SYSTEM_PROMPT_KEY", _JOYAI_SYSTEM_PROMPT_KEY
         ).strip() or _JOYAI_SYSTEM_PROMPT_KEY,
     }
@@ -421,6 +423,8 @@ async def _request_joyai_frame(
     instruction: str,
     joyai_session_id: str,
     frame_time_range: str = "",
+    *,
+    system_prompt_key: str = "",
 ) -> dict[str, Any]:
     instruction = instruction.strip()
     completion = await _request_joyai_completion(
@@ -429,6 +433,7 @@ async def _request_joyai_frame(
         joyai_session_id,
         max_tokens=512 if instruction else 128,
         frame_time_range=frame_time_range,
+        system_prompt_key=system_prompt_key,
     )
     return {
         **_parse_joyai_action(completion["raw_content"]),
@@ -1195,7 +1200,13 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
             request_args = [frame_data_url, model_instruction, upstream_session_id]
             if frame_time_range:
                 request_args.append(frame_time_range)
-            result = await _request_joyai_frame(*request_args)
+            if request_kind == "tool":
+                result = await _request_joyai_frame(
+                    *request_args,
+                    system_prompt_key=_JOYAI_TOOL_SYSTEM_PROMPT_KEY,
+                )
+            else:
+                result = await _request_joyai_frame(*request_args)
         except Exception as exc:  # noqa: BLE001
             error = str(exc) or "JoyAI frame request failed"
             error_code = (

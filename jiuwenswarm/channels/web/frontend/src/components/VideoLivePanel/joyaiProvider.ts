@@ -7,6 +7,7 @@ import {
 import {
   assistantSpeechText,
   joyaiSearchAnswerInstruction,
+  joyaiSearchAnswerSessionId,
   joyaiSearchFinalAnswer,
 } from '../../utils/searchPresentation';
 import {
@@ -226,6 +227,7 @@ export class JoyAIProvider {
               commitResponse: false,
               requestKind: 'tool',
               required: true,
+              joyaiSessionId: joyaiSearchAnswerSessionId(sessionId, jobId, attempt),
             },
           );
           lastDecision = joyaiResult?.decision || '';

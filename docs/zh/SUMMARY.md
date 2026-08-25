@@ -1,7 +1,7 @@
 # Summary
 
 - [安装指南](安装指南.md)
-- [JoyAI 视频直播部署指南](../../README.md)
+- [视频直播：JoyAI 配置与使用](视频直播.md)
 - [快速开始](Quickstart.md)
 - [快速开始(TUI)](Quickstart_tui.md)
 - [TUI 使用指南](TUI使用指南.md)
