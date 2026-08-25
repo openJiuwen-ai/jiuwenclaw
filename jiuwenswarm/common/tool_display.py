@@ -40,7 +40,8 @@ _VERB_BY_TOOL: dict[str, str] = {
     "sandbox_run_command": "执行",
     "run_python": "运行代码", "python": "运行代码", "execute_python": "运行代码",
     "run_code": "运行代码", "execute_code": "运行代码", "code_interpreter": "运行代码", "code": "运行代码",
-    "todo_create": "创建待办", "todo_modify": "更新待办", "todo_list": "查看待办", "todo_get": "读取待办",
+    "todo_create": "创建待办", "todo_insert": "插入待办", "todo_complete": "完成待办",
+    "todo_remove": "移除待办", "todo_modify": "更新待办", "todo_list": "查看待办", "todo_get": "读取待办",
     "skill_tool": "查看技能",
     # team tools often omit call_goal
     "spawn_member": "创建成员", "spawn_teammate": "创建成员",
@@ -53,7 +54,9 @@ _FILE_VERBS = frozenset(["写入", "读取", "编辑", "删除", "移动", "重�
 _QUERY_VERBS = frozenset(["搜索", "查找", "联网搜索"])
 _COMMAND_VERBS = frozenset(["执行", "运行代码"])
 _SKILL_VERBS = frozenset(["查看技能"])
-_TODO_VERBS = frozenset(["创建待办", "更新待办", "查看待办", "读取待办"])
+_TODO_VERBS = frozenset([
+    "创建待办", "插入待办", "完成待办", "移除待办", "更新待办", "查看待办", "读取待办",
+])
 
 _FILE_ARG_KEYS = (
     "target_file", "file_path", "filepath", "filePath", "path",
@@ -200,7 +203,65 @@ def _format_message_to(to_value: Any) -> str:
     return ""
 
 
-def build_tool_display_name(name: str, arguments: Any) -> str:
+def _todo_task_items(args: Mapping[str, Any]) -> list[str]:
+    """从 todo 工具参数提取任务描述列表（兼容 list / JSON 字符串 / 纯文本）。"""
+    tasks = args.get("tasks")
+    if isinstance(tasks, list):
+        return [str(t).strip() for t in tasks if str(t).strip()]
+    if isinstance(tasks, str) and tasks.strip():
+        try:
+            parsed = json.loads(tasks)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, list):
+            return [str(t).strip() for t in parsed if str(t).strip()]
+        return [tasks.strip()]
+    return []
+
+
+def _todo_display(verb: str, args: Mapping[str, Any], task_text: str = "") -> str:
+    """todo 工具展示名：尽量带上具体任务内容，避免「创建待办 2」「第3项」这类难懂文案。
+
+    Args:
+        task_text: 由调用点反查 todo.md 后传入的、与 idx 对应的任务描述。
+            - 完成/移除待办：有 task_text 时用任务内容，无则退回动词。
+            - 创建/插入待办：args 已含 tasks，task_text 不参与。
+            - 更新待办：args 已含 action，task_text 不参与。
+    """
+    text = task_text.strip() if isinstance(task_text, str) else ""
+    if verb == "创建待办":
+        items = _todo_task_items(args)
+        if items:
+            label = _truncate(items[0], 40)
+            if len(items) > 1:
+                label = f"{label} 等{len(items)}项"
+            return f"{verb}：{label}"
+        return verb
+    if verb == "插入待办":
+        items = _todo_task_items(args)
+        if not items:
+            return verb
+        label = _truncate(items[0], 40)
+        if len(items) > 1:
+            label = f"{label} 等{len(items)}项"
+        return f"{verb}：{label}"
+    if verb == "完成待办":
+        result = str(args.get("result") or "").strip()
+        if not text:
+            return verb
+        suffix = f"（{_truncate(result, 30)}）" if result else ""
+        return f"{verb}：{_truncate(text, 40)}{suffix}"
+    if verb == "移除待办":
+        return f"{verb}：{_truncate(text, 40)}" if text else verb
+    if verb == "更新待办":
+        action = str(args.get("action") or "").strip()
+        if action:
+            return f"{verb}：{action}"
+        return f"{verb}：{_truncate(text, 40)}" if text else verb
+    return verb  # 查看待办 / 读取待办：无参数，仅动词
+
+
+def build_tool_display_name(name: str, arguments: Any, *, task_text: str = "") -> str:
     """规则兜底：根据工具名+参数组可读展示名；无法可靠组出时返回空串。"""
     if not name:
         return ""
@@ -264,17 +325,8 @@ def build_tool_display_name(name: str, arguments: Any) -> str:
         return f"{verb} {_truncate(command, 40)}"
     if verb in _SKILL_VERBS and skill:
         return f"{verb} {skill}"
-    if verb == "创建待办":
-        tasks = args.get("tasks")
-        count = len(tasks) if isinstance(tasks, list) else 0
-        return f"{verb} {count}" if count else verb
-    if verb == "更新待办":
-        action = args.get("action")
-        if isinstance(action, str) and action.strip():
-            return f"{verb} {action.strip()}"
-        return verb
     if verb in _TODO_VERBS:
-        return verb
+        return _todo_display(verb, args, task_text=task_text)
 
     fallback = (
         _basename(file) if file
