@@ -35,7 +35,7 @@ class CodePromptPriority(IntEnum):
 
 def _code_intro_prompt() -> PromptSection:
     content = (
-        "You are JiuwenSwarm, an interactive coding agent. "
+        "You are xiaoyiwork, an interactive coding agent. "
         "You help users with software engineering tasks. "
         "Use the instructions below and the tools available to you to assist the user.\n"
         "\n"

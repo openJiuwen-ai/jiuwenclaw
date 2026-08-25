@@ -93,7 +93,9 @@ from jiuwenswarm.common.utils import (
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 from jiuwenswarm.common.work_mode import (
     DEFAULT_PROJECT_ID_CODE,
+    DEFAULT_PROJECT_ID_DESIGN,
     DEFAULT_PROJECT_ID_WORK,
+    DEFAULT_DESIGN_WORK_MODE,
     DEFAULT_TUI_WORK_MODE,
     DEFAULT_WEB_WORK_MODE,
     SUPPORTED_WORK_MODES,
@@ -1378,6 +1380,7 @@ def _attribute_session_project(
     仅按 ``session.project_id`` 匹配可见项目;不命中(含无 project_id 的存量会话)
     按会话自身的 ``work_mode`` 归入对应默认项目:
       - ``work_mode == "code"`` → ``"default_code"``
+      - ``work_mode == "design"`` → ``"default_design"``
       - 其他(含 ``"work"`` / 空 / 非法) → ``"default"``
 
     存量会话的 project_dir → project_id 解析由启动迁移完成。
@@ -1390,10 +1393,13 @@ def _attribute_session_project(
     if sp_id and sp_id in visible_by_id:
         return sp_id
     # 按会话 work_mode 分桶默认项目,使 code 模式孤立会话归 default_code,
-    # work 模式孤立会话归 default,与 project.list 默认项目拆分一致
+    # design 模式孤立会话归 default_design,work 模式孤立会话归 default,
+    # 与 project.list 默认项目拆分一致
     s_work_mode = str(meta.get("work_mode") or "")
     if s_work_mode == "code":
         return DEFAULT_PROJECT_ID_CODE
+    if s_work_mode == "design":
+        return DEFAULT_PROJECT_ID_DESIGN
     return DEFAULT_PROJECT_ID_WORK
 
 
@@ -1420,7 +1426,12 @@ def _project_info_payload(
     }
     git_payload = {**git_defaults, **dict(git)} if isinstance(git, dict) and git else git_defaults
     if default_id is not None:
-        work_mode = DEFAULT_TUI_WORK_MODE if default_id == DEFAULT_PROJECT_ID_CODE else DEFAULT_WEB_WORK_MODE
+        if default_id == DEFAULT_PROJECT_ID_CODE:
+            work_mode = DEFAULT_TUI_WORK_MODE
+        elif default_id == DEFAULT_PROJECT_ID_DESIGN:
+            work_mode = DEFAULT_DESIGN_WORK_MODE
+        else:
+            work_mode = DEFAULT_WEB_WORK_MODE
         return {
             "project_id": default_id,
             "name": "默认项目",
@@ -2967,8 +2978,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         filter: ``"all"``(默认) / ``"pinned"`` / ``"unpinned"``
         include_hidden: 是否包含已软删除(``hidden:true``)项目,默认 ``false``。
             仅 ``"all"`` / ``"unpinned"`` 生效;``"pinned"`` 模式自动排除隐藏项目。
-        work_mode: 可选,按工作模式过滤(``"code"`` / ``"work"``),不传则返回全部模式。
-            默认项目按 work_mode 拆分:``default``(work)+ ``default_code``(code)。
+        work_mode: 可选,按工作模式过滤(``"code"`` / ``"design"`` / ``"work"``),不传则返回全部模式。
+            默认项目按 work_mode 拆分:``default``(work)+ ``default_code``(code)+ ``default_design``(design)。
 
         统计口径: ``session_count`` / ``last_message_at`` / ``last_user_message_at``
         仅统计该项目的非置顶**普通**会话(``cron_id`` 为空)。置顶会话与 cron 会话
@@ -2980,7 +2991,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if filter_val not in ("all", "pinned", "unpinned"):
             filter_val = "all"
         include_hidden = bool(params.get("include_hidden", False))
-        # work_mode 过滤: "code" / "work" / 不传(全部)
+        # work_mode 过滤: "code" / "design" / "work" / 不传(全部)
         raw_work_mode = params.get("work_mode")
         work_mode_filter: str | None = None
         if isinstance(raw_work_mode, str) and raw_work_mode.strip():
@@ -2990,7 +3001,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             else:
                 await channel.send_response(
                     ws, req_id, ok=False,
-                    error=f"invalid work_mode: {wmf!r}, must be 'code' or 'work'",
+                    error=f"invalid work_mode: {wmf!r}, must be 'code', 'design' or 'work'",
                     code="BAD_REQUEST",
                 )
                 return
@@ -3065,6 +3076,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             default_ids.append(DEFAULT_PROJECT_ID_WORK)
         if not work_mode_filter or work_mode_filter == DEFAULT_TUI_WORK_MODE:
             default_ids.append(DEFAULT_PROJECT_ID_CODE)
+        if not work_mode_filter or work_mode_filter == DEFAULT_DESIGN_WORK_MODE:
+            default_ids.append(DEFAULT_PROJECT_ID_DESIGN)
         default_items = [_build_project_info(None, default_id=did) for did in default_ids]
 
         if filter_val == "pinned":
@@ -3287,7 +3300,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         ``project_dir`` 为可选:传则指定工作目录绝对路径;不传或空串则在默认工作区
         (``~/.jiuwenswarm/agent/workspace/{work|code}``)下按项目名自动新建文件夹作为工作目录。
-        ``work_mode`` 为可选:``"code"`` / ``"work"``,默认按通道推断(Web→work,TUI→code)。
+        ``work_mode`` 为可选:``"code"`` / ``"design"`` / ``"work"``,默认按通道推断(Web→work,TUI→code)。
         项目名含文件系统非法字符(``<>:"/\\|?*`` 等)时返回 ``BAD_REQUEST``。
         自动恢复: 若 ``project_dir`` 命中已隐藏(``hidden:true``)**且同 work_mode**的项目,置
         ``hidden:false`` 并按传入 ``name`` 更新展示名,其下会话因 ``project_dir``
@@ -5699,8 +5712,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     # 避免 default 过滤返回 default_code 的 job（反之亦然）。
                     # 兼容未迁移的老 job(work_mode 为空或非法):按 channel_id 推断
                     # 兜底 work_mode,避免迁移失败场景下 default_code 过滤漏掉老 job。
-                    target_wm = DEFAULT_TUI_WORK_MODE if filter_pid == DEFAULT_PROJECT_ID_CODE \
+                    target_wm = (
+                        DEFAULT_TUI_WORK_MODE if filter_pid == DEFAULT_PROJECT_ID_CODE
+                        else DEFAULT_DESIGN_WORK_MODE if filter_pid == DEFAULT_PROJECT_ID_DESIGN
                         else DEFAULT_WEB_WORK_MODE
+                    )
                     filtered = []
                     for j in jobs:
                         j_pid = j.get("project_id")

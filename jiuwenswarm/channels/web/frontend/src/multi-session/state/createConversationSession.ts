@@ -38,7 +38,7 @@ export interface CreateConversationSessionOptions {
 }
 
 function normalizeWorkMode(value: unknown): WorkMode | undefined {
-  return value === 'work' || value === 'code' ? value : undefined;
+  return value === 'work' || value === 'code' || value === 'design' ? value : undefined;
 }
 
 function errorCode(error: unknown): string | undefined {

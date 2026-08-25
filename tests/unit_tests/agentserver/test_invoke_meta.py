@@ -19,6 +19,12 @@ from jiuwenswarm.agents.harness.common.tools.invoke_meta.external_tool_registry 
     load_external_tools,
 )
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.invoke_tool import InvokeTool
+from jiuwenswarm.agents.harness.common.tools.invoke_meta.plugin_skill_catalog import (
+    extract_seedance_query_state,
+    extract_seedance_task_id,
+    normalize_plugin_skill_args,
+    want_seedance_wait,
+)
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.workspace_context import (
     set_effective_request_workspace_dir,
 )
@@ -64,6 +70,26 @@ def tools_workspace(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return tmp_path
+
+
+def test_normalize_seedream_pro_size_and_drops_max_images():
+    out, err = normalize_plugin_skill_args(
+        "SeedreamPro4Skill",
+        {"size": "1024x1024", "max_images": 4, "prompt": "logo"},
+    )
+    assert err is None
+    assert out["size"] == "1K"
+    assert "max_images" not in out
+
+
+def test_normalize_seedream_lite_keeps_max_images():
+    out, err = normalize_plugin_skill_args(
+        "seedreamLite4Skill",
+        {"size": "2048x2048", "max_images": "3", "prompt": "cats"},
+    )
+    assert err is None
+    assert out["size"] == "2K"
+    assert out["max_images"] == 3
 
 
 @pytest.mark.asyncio
@@ -198,6 +224,91 @@ async def test_invoke_rejects_seedream_without_prompt(monkeypatch):
     )
     assert result.get("success") is False
     assert "prompt" in result.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_invoke_nested_function_name_without_wrapper(monkeypatch):
+    """Skill-doc inner args only: arguments.functionName present, top-level omitted."""
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    captured: dict[str, Any] = {}
+
+    mock_invoke = AsyncMock(
+        return_value={"success": True, "content": '{"items":["https://x"]}'}
+    )
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            captured["spec"] = spec
+            captured["arguments"] = arguments
+            return await mock_invoke(spec, arguments, **kwargs)
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "arguments": {
+                    "bundleName": "com.atomicservice.5765880207845681341",
+                    "functionName": "SeedreamPro4Skill",
+                    "max_images": 4,
+                    "prompt": "Trendy logo design for Gen Z beauty brand 'LUMI'.",
+                    "size": "1024x1024",
+                }
+            }
+        )
+
+    assert result.get("success") is True
+    spec = captured["spec"]
+    assert isinstance(spec, ExternalToolSpec)
+    assert spec.plugin_id == "com.atomicservice.5765880207845681341"
+    assert spec.tool_name == "SeedreamPro4Skill"
+    assert captured["arguments"]["prompt"].startswith("Trendy logo")
+    assert captured["arguments"]["functionName"] == "SeedreamPro4Skill"
+    assert captured["arguments"]["size"] == "1K"
+    assert "max_images" not in captured["arguments"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_rejects_invalid_seedream_size(monkeypatch):
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "PluginSkillExecTool",
+            "arguments": {
+                "functionName": "SeedreamPro4Skill",
+                "bundleName": "com.atomicservice.5765880207845681341",
+                "prompt": "a dog",
+                "size": "4K",
+            },
+        }
+    )
+    assert result.get("success") is False
+    assert "1K" in result.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_invoke_lite_rejects_bad_max_images(monkeypatch):
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "PluginSkillExecTool",
+            "arguments": {
+                "functionName": "seedreamLite4Skill",
+                "bundleName": "com.atomicservice.5765880207845681341",
+                "prompt": "a dog",
+                "max_images": 99,
+            },
+        }
+    )
+    assert result.get("success") is False
+    assert "max_images" in result.get("error", "")
 
 
 @pytest.mark.asyncio
@@ -475,3 +586,146 @@ def test_needs_insecure_ssl_for_test_host_and_ip():
     assert _needs_insecure_ssl("wss://10.33.87.20:18449/agent-runtime-service-ws/v1/mcp/run")
     assert not _needs_insecure_ssl("wss://example.com/v1/mcp/run")
     assert not _needs_insecure_ssl("ws://127.0.0.1:19690")
+
+
+def test_extract_seedance_task_id_from_json_content():
+    assert extract_seedance_task_id({"content": '{"task_id":"cgt-1"}'}) == "cgt-1"
+    assert extract_seedance_task_id({"content": {"id": "cgt-2"}}) == "cgt-2"
+
+
+def test_extract_seedance_query_state():
+    status, url = extract_seedance_query_state(
+        {
+            "content": json.dumps(
+                {"status": "succeeded", "content": {"video_url": "https://cdn.example/a.mp4"}}
+            )
+        }
+    )
+    assert status == "succeeded"
+    assert url == "https://cdn.example/a.mp4"
+
+
+def test_want_seedance_wait_defaults_true():
+    assert want_seedance_wait({}) is True
+    assert want_seedance_wait({"wait": False}) is False
+    assert want_seedance_wait({"wait": "false"}) is False
+
+
+def _seedance_task_args(**extra: Any) -> dict[str, Any]:
+    args: dict[str, Any] = {
+        "functionName": "seedanceMiniTask",
+        "bundleName": "com.atomicservice.5765880207845681341",
+        "content": [{"type": "text", "text": "一只在月光下奔跑的狐狸"}],
+        "duration": 10,
+    }
+    args.update(extra)
+    return args
+
+
+@pytest.mark.asyncio
+async def test_invoke_seedance_auto_polls_until_video_url(monkeypatch):
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("SEEDANCE_POLL_INTERVAL", "0")
+    monkeypatch.setenv("SEEDANCE_POLL_TIMEOUT", "30")
+    names: list[str] = []
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            names.append(spec.tool_name)
+            if spec.tool_name == "seedanceMiniTask":
+                return {"success": True, "content": json.dumps({"task_id": "cgt-1"})}
+            query_count = names.count("seedanceMiniTaskQuery")
+            if query_count == 1:
+                return {"success": True, "content": json.dumps({"status": "running"})}
+            return {
+                "success": True,
+                "content": json.dumps(
+                    {
+                        "status": "succeeded",
+                        "content": {"video_url": "https://cdn.example/a.mp4"},
+                    }
+                ),
+            }
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {"functionName": "PluginSkillExecTool", "arguments": _seedance_task_args()}
+        )
+
+    assert result.get("success") is True
+    assert result.get("task_id") == "cgt-1"
+    assert result.get("video_url") == "https://cdn.example/a.mp4"
+    assert names[0] == "seedanceMiniTask"
+    assert names.count("seedanceMiniTaskQuery") >= 2
+
+
+@pytest.mark.asyncio
+async def test_invoke_seedance_wait_false_skips_poll(monkeypatch):
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    names: list[str] = []
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            names.append(spec.tool_name)
+            assert "wait" not in arguments
+            return {"success": True, "content": json.dumps({"task_id": "cgt-9"})}
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": _seedance_task_args(wait=False),
+            }
+        )
+
+    assert result.get("success") is True
+    assert names == ["seedanceMiniTask"]
+    assert "cgt-9" in str(result.get("content", ""))
+
+
+def test_design_system_prompt_includes_video_workflow():
+    from jiuwenswarm.agents.harness.design.prompt.design_prompt_builder import (
+        build_design_system_prompt,
+    )
+
+    prompt = build_design_system_prompt()
+    assert "seedance-video-gen" in prompt
+    assert "分镜" in prompt
+    assert "invoke" in prompt.lower() or "`invoke`" in prompt
+
+
+def test_saas_video_case_prompt_asks_for_finished_clip():
+    constants = (
+        Path(__file__).resolve().parents[4]
+        / "claw_desktop"
+        / "src"
+        / "renderer"
+        / "src"
+        / "pages"
+        / "home"
+        / "design"
+        / "constants.ts"
+    )
+    if not constants.is_file():
+        pytest.skip("claw_desktop constants.ts not in workspace")
+    text = constants.read_text(encoding="utf-8")
+    saas = '为某 SaaS 产品生成 10 秒产品演示视频'
+    assert saas in text
+    assert "必须调用视频生成能力产出成片" in text
+    assert "60 秒短视频分镜脚本" not in text
+    assert "要求交付：分镜表" not in text
+

@@ -51,6 +51,7 @@ _PLAN_EXIT_MODES: dict[str, str] = {
     "agent.plan": "agent",
     "code.plan": "code.normal",
     "team.plan": "code.team",
+    "design.plan": "design",
 }
 
 # (mode, work_mode) -> (manager_mode, sub_mode, canonical_mode)
@@ -59,6 +60,8 @@ _WEB_MODE_TABLE: dict[tuple[str, str], tuple[str, str | None, str]] = {
     (WEB_PLAN_AGENT, "work"): ("agent", "plan", "agent.plan"),
     (WEB_BASE_AGENT, "code"): ("code", "normal", "code.normal"),
     (WEB_PLAN_AGENT, "code"): ("code", "plan", "code.plan"),
+    (WEB_BASE_AGENT, "design"): ("design", None, "design"),
+    (WEB_PLAN_AGENT, "design"): ("design", "plan", "design.plan"),
 }
 
 
@@ -70,10 +73,11 @@ class ResolvedMode:
         manager_mode: AgentManager / adapter 选型用的一级模式。
         sub_mode: 子模式（``normal`` / ``plan`` / ``team`` / None）。
         canonical_mode: 写回 ``params["mode"]`` 的规范值。
-        work_mode: 归一化后的 ``work`` / ``code``；历史请求为 None。
+        work_mode: 归一化后的 ``work`` / ``code`` / ``design``；历史请求为 None。
         is_plan: 本次请求是否要求处于 plan。
-        is_team: 本次请求是否集群模式。
+        is_team: 本次请求是否为集群模式。
         is_code_profile: 是否使用 CodeAdapter / code 团队 profile。
+        is_design_profile: 是否使用 design profile（创意设计模式）。
         normal_mode: 退出 plan 后应回到的 canonical 模式。
         from_web_composition: 是否由 Web 的 mode + work_mode 组合而来。
     """
@@ -85,6 +89,7 @@ class ResolvedMode:
     is_plan: bool
     is_team: bool
     is_code_profile: bool
+    is_design_profile: bool
     normal_mode: str
     from_web_composition: bool
 
@@ -97,7 +102,7 @@ def normalize_mode_text(raw_mode: Any) -> str:
 
 
 def normalize_work_mode(raw: Any) -> str | None:
-    """把任意来源的 ``work_mode`` 归一成 ``work`` / ``code``；非法时返回 None。"""
+    """把任意来源的 ``work_mode`` 归一成 ``work`` / ``code`` / ``design``；非法时返回 None。"""
     if not isinstance(raw, str):
         return None
     value = raw.strip().lower()
@@ -187,6 +192,7 @@ def resolve_request_mode(
                 is_plan=canonical_mode in PLAN_CANONICAL_MODES,
                 is_team=canonical_mode in TEAM_CANONICAL_MODES,
                 is_code_profile=work_mode == "code",
+                is_design_profile=work_mode == "design",
                 normal_mode=base_mode_without_plan(canonical_mode),
                 from_web_composition=True,
             )
@@ -202,6 +208,7 @@ def resolve_request_mode(
         is_plan=canonical_mode in PLAN_CANONICAL_MODES,
         is_team=canonical_mode in TEAM_CANONICAL_MODES,
         is_code_profile=manager_mode == "code",
+        is_design_profile=manager_mode == "design",
         normal_mode=base_mode_without_plan(canonical_mode),
         from_web_composition=False,
     )
