@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +16,65 @@ from jiuwenswarm.perf.events import LlmPerfEvent, TaskPerfEvent, ToolPerfEvent
 from jiuwenswarm.perf.extract import tool_status_from_result
 from jiuwenswarm.perf.stats import ms_to_s, percentile_s
 from jiuwenswarm.perf.writer import append_request_summary, request_summaries_file
+
+
+def test_perf_usage_snapshot_recovers_tokens_when_stream_usage_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.perf import interface_hooks
+
+    accumulator = SimpleNamespace(
+        input_tokens=42_462,
+        output_tokens=355,
+        cache_read_tokens=1_024,
+    )
+    collector = SimpleNamespace(get_accumulator=lambda request_id: accumulator)
+    monkeypatch.setattr(interface_hooks, "get_perf_collector", lambda: collector)
+
+    snapshot = interface_hooks.snapshot_perf_summary_usage("req-interrupted")
+    stream_usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cache_tokens": 0,
+    }
+
+    recovered = interface_hooks.merge_perf_summary_usage_fallback(
+        stream_usage,
+        snapshot,
+    )
+
+    assert recovered is True
+    assert stream_usage == {
+        "input_tokens": 42_462,
+        "output_tokens": 355,
+        "total_tokens": 42_817,
+        "cache_tokens": 1_024,
+    }
+
+
+def test_perf_usage_fallback_does_not_duplicate_complete_stream_usage() -> None:
+    from jiuwenswarm.perf.interface_hooks import merge_perf_summary_usage_fallback
+
+    stream_usage = {
+        "input_tokens": 1_000,
+        "output_tokens": 100,
+        "total_tokens": 1_100,
+        "cache_tokens": 200,
+    }
+
+    recovered = merge_perf_summary_usage_fallback(
+        stream_usage,
+        {
+            "input_tokens": 1_000,
+            "output_tokens": 100,
+            "total_tokens": 1_100,
+            "cache_tokens": 200,
+        },
+    )
+
+    assert recovered is False
+    assert stream_usage["total_tokens"] == 1_100
 
 
 def test_request_summary_rail_imports_required_symbols() -> None:

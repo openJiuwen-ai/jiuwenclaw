@@ -405,8 +405,10 @@ from jiuwenswarm.perf.interface_hooks import (
     finalize_perf_summary_request,
     mark_request_first_answer,
     mark_request_first_byte,
+    merge_perf_summary_usage_fallback,
     maybe_mark_answer_first_byte,
     set_perf_summary_context,
+    snapshot_perf_summary_usage,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
@@ -6359,7 +6361,7 @@ class JiuWenSwarmDeepAdapter:
 
             react_cfg = config if config is not None else self._config_cache
             rail_kwargs = resolve_task_planning_rail_kwargs(react_cfg)
-            task_planning_rail = TaskPlanningRail(**rail_kwargs)
+            task_planning_rail = ConcurrentSafeTaskPlanningRail(**rail_kwargs)
             logger.info(
                 "[JiuWenSwarmDeepAdapter] TaskPlanningRail create success "
                 "enable_progress_repeat=%s list_tool_call_interval=%s",
@@ -14161,6 +14163,7 @@ class JiuWenSwarmDeepAdapter:
         session_active = False
         session_task_registered = False
         perf_context_initialized = False
+        perf_usage_fallback: dict[str, int] | None = None
         initialization_complete = False
         stream_consumer_cancelled = False
         image_files_token = None
@@ -14987,6 +14990,8 @@ class JiuWenSwarmDeepAdapter:
         finally:
             active_error = sys.exc_info()[1]
             cleanup_error: BaseException | None = None
+            if perf_context_initialized:
+                perf_usage_fallback = snapshot_perf_summary_usage(request.request_id)
             if interaction_stream is not None:
                 try:
                     await interaction_stream.close(
@@ -15124,6 +15129,18 @@ class JiuWenSwarmDeepAdapter:
                     )
             if active_error is None and cleanup_error is not None:
                 raise cleanup_error
+
+        if merge_perf_summary_usage_fallback(
+            usage_accumulator,
+            perf_usage_fallback,
+        ):
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] recovered missing llm_usage from perf summary: "
+                "request_id=%s session_id=%s usage=%s",
+                rid,
+                session_id,
+                perf_usage_fallback,
+            )
 
         summary = {
             "input_tokens": usage_accumulator["input_tokens"],

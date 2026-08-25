@@ -1,7 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
@@ -98,6 +98,61 @@ def test_progressive_legacy_eager_config_exposes_registered_ask_user_tool():
         "read_file",
         "ask_user",
     ]
+
+
+def test_deep_adapter_builds_usage_reporting_task_planning_rail():
+    from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
+        ConcurrentSafeTaskPlanningRail,
+    )
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    adapter = JiuWenSwarmDeepAdapter()
+    rail = adapter._build_task_planning_rail({})  # pylint: disable=protected-access
+
+    assert isinstance(rail, ConcurrentSafeTaskPlanningRail)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_task_planning_rail_uses_session_api_and_preserves_terminal_todos():
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+    from openjiuwen.harness.schema.task import TaskPlan, TodoItem, TodoStatus
+    from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
+        ConcurrentSafeTaskPlanningRail,
+    )
+
+    persisted_todos = [
+        TodoItem(id="complete-me", content="Complete me", status=TodoStatus.IN_PROGRESS),
+        TodoItem(id="cancelled", content="Stay cancelled", status=TodoStatus.CANCELLED),
+    ]
+    tool = Mock()
+    tool.load_todos = AsyncMock(return_value=persisted_todos)
+    tool.save_todos = AsyncMock()
+
+    rail = ConcurrentSafeTaskPlanningRail()
+    rail._find_todo_tool = Mock(return_value=tool)  # pylint: disable=protected-access
+
+    state = Mock(
+        task_plan=TaskPlan(
+            tasks=[
+                TodoItem(id="complete-me", content="Complete me", status=TodoStatus.COMPLETED),
+                TodoItem(id="cancelled", content="Stay cancelled", status=TodoStatus.IN_PROGRESS),
+            ]
+        )
+    )
+    session = Mock()
+    session.get_session_id.return_value = "session-1"
+    agent = Mock()
+    agent.load_state.return_value = state
+    ctx = AgentCallbackContext(agent=agent, session=session)
+
+    await rail._sync_todos_from_plan(ctx)  # pylint: disable=protected-access
+
+    tool.load_todos.assert_awaited_once_with("session-1")
+    tool.save_todos.assert_awaited_once_with("session-1", persisted_todos)
+    assert persisted_todos[0].status == TodoStatus.COMPLETED
+    assert persisted_todos[1].status == TodoStatus.CANCELLED
 
 
 @pytest.mark.parametrize(

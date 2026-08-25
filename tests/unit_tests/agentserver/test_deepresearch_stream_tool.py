@@ -2027,6 +2027,21 @@ async def test_no_terminal_marker_returns_bounded_stderr_tail():
 
 
 @pytest.mark.asyncio
+async def test_long_child_stderr_preserves_the_final_exception():
+    stderr = ("startup noise\n" * 3_000) + "Traceback: final root cause"
+    proc = _Proc([], stderr=stderr.encode())
+    patches = _stream_patches(proc)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        outcome = json.loads(await dt.deepresearch_stream._func(action="start", query="q"))
+
+    assert outcome["error_code"] == "terminal_marker_missing"
+    assert len(outcome["stderr_tail"]) <= dt.DEEPRESEARCH_STDERR_OUTCOME_MAX_CHARS
+    assert outcome["stderr_tail"].endswith("Traceback: final root cause")
+
+
+@pytest.mark.asyncio
 async def test_resume_positional_argument_order_is_preserved():
     proc = _Proc([json.dumps({"__deepsearch_status__": "error", "error": "done"})])
     patches = _stream_patches(proc)
