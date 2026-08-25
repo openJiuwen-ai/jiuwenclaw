@@ -124,8 +124,12 @@ reset_free_search_runtime_flags()
 from jiuwenswarm.agents.harness.common.tools.bash_tool_safety import (
     install_shell_tool_safety_hooks,
 )
+from jiuwenswarm.agents.harness.common.tools.connector_host_exec import (
+    install_connector_host_exec_hooks,
+)
 
 install_shell_tool_safety_hooks()
+install_connector_host_exec_hooks()
 
 # 兼容 SSE-only 网关：让非流式 invoke()（subagent / 心跳等）能解析 text/event-stream 响应
 from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch

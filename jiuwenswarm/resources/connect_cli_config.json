@@ -1,0 +1,16 @@
+{
+  "connectors": [
+    {
+      "id": "dingtalk",
+      "commands": ["dws"]
+    },
+    {
+      "id": "feishu",
+      "commands": ["lark-cli"]
+    },
+    {
+      "id": "wecom",
+      "commands": ["wecom-cli"]
+    }
+  ]
+}

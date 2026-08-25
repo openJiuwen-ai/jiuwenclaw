@@ -121,6 +121,7 @@ from jiuwenswarm.common.config import (
     upsert_subagent_in_config,
 )
 from jiuwenswarm.server.sandbox.jiuwenbox_runner import JiuwenBoxRunner
+from jiuwenswarm.common.connectors import is_connector_exclude_glob
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.security.ws_origin import (
     extract_handshake_request,
@@ -6609,6 +6610,11 @@ class AgentWebSocketServer:
             raise ValueError(
                 f"excluded_commands does not contain {pattern!r}; "
                 "nothing to remove"
+            )
+        if is_connector_exclude_glob(pattern):
+            raise ValueError(
+                f"{pattern!r} is a built-in connector bypass "
+                "and cannot be removed; connector commands always run on the host"
             )
         patterns = [p for p in existing if p != pattern]
         runtime = update_sandbox_runtime({"excluded_commands": patterns})
