@@ -1,0 +1,362 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Unit tests for invoke_meta (local CloudWsRelay → /ws/link)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client import (
+    CloudPluginClient,
+)
+from jiuwenswarm.agents.harness.common.tools.invoke_meta.external_tool_registry import (
+    ExternalToolSpec,
+    load_external_tools,
+)
+from jiuwenswarm.agents.harness.common.tools.invoke_meta.invoke_tool import InvokeTool
+from jiuwenswarm.agents.harness.common.tools.invoke_meta.workspace_context import (
+    set_effective_request_workspace_dir,
+)
+
+
+@pytest.fixture()
+def tools_workspace(tmp_path: Path) -> Path:
+    tools_dir = tmp_path / "skill" / "references" / "tools"
+    tools_dir.mkdir(parents=True)
+    (tools_dir / "com.demo.plugin__echo_tool.json").write_text(
+        json.dumps(
+            {
+                "pluginId": "com.demo.plugin",
+                "toolName": "echo_tool",
+                "description": "echo",
+                "protocol": "REST",
+                "pluginType": "Cloud",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tools_dir / "com.demo.device__device_tool.json").write_text(
+        json.dumps(
+            {
+                "pluginId": "com.demo.device",
+                "toolName": "device_tool",
+                "pluginType": "Device",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+@pytest.mark.asyncio
+async def test_invoke_requires_function_name():
+    tool = InvokeTool()
+    result = await tool.invoke({"arguments": {}})
+    assert result["success"] is False
+    assert "functionName" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_agent_missing_agent_id():
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "agent_as_a_tool",
+            "arguments": {"query": "hello"},
+        }
+    )
+    assert result["success"] is False
+    assert "agentId" in result["error"]
+
+
+def test_load_external_tools(tools_workspace: Path):
+    registry = load_external_tools(tools_workspace)
+    assert ("com.demo.plugin", "echo_tool") in registry
+    assert registry[("com.demo.plugin", "echo_tool")].plugin_type == "Cloud"
+    assert ("com.demo.device", "device_tool") in registry
+
+
+@pytest.mark.asyncio
+async def test_invoke_device_plugin_rejected(tools_workspace: Path, monkeypatch):
+    set_effective_request_workspace_dir(str(tools_workspace))
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "device_tool",
+            "arguments": {"bundleName": "com.demo.device"},
+        }
+    )
+    assert result.get("success") is False
+    assert "Device" in result.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_invoke_plugin_routes_to_cloud_client(tools_workspace: Path, monkeypatch):
+    set_effective_request_workspace_dir(str(tools_workspace))
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+
+    mock_invoke = AsyncMock(
+        return_value={
+            "success": True,
+            "content": "ok",
+            "pluginId": "com.demo.plugin",
+            "toolName": "echo_tool",
+        }
+    )
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        invoke = mock_invoke
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "echo_tool",
+                "arguments": {"bundleName": "com.demo.plugin", "text": "hi"},
+            }
+        )
+
+    assert result.get("success") is True
+    assert result.get("content") == "ok"
+    mock_invoke.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_invoke_rejects_invented_bundle(monkeypatch):
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "PluginSkillExecTool",
+            "arguments": {
+                "functionName": "generate",
+                "bundleName": "image-generation",
+                "prompt": "a dog",
+            },
+        }
+    )
+    assert result.get("success") is False
+    err = result.get("error", "")
+    assert "不支持" in err or "seedreamLite4Skill" in err
+
+
+@pytest.mark.asyncio
+async def test_invoke_rejects_wrong_bundle_for_seedream(monkeypatch):
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "PluginSkillExecTool",
+            "arguments": {
+                "functionName": "seedreamLite4Skill",
+                "bundleName": "xiaoyi",
+                "prompt": "a dog",
+            },
+        }
+    )
+    assert result.get("success") is False
+    assert "com.atomicservice.5765880207845681341" in result.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_invoke_rejects_seedream_without_prompt(monkeypatch):
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "PluginSkillExecTool",
+            "arguments": {
+                "functionName": "seedreamLite4Skill",
+                "bundleName": "com.atomicservice.5765880207845681341",
+            },
+        }
+    )
+    assert result.get("success") is False
+    assert "prompt" in result.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_invoke_plugin_skill_exec_tool_unwraps(monkeypatch):
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    captured: dict[str, Any] = {}
+
+    mock_invoke = AsyncMock(
+        return_value={"success": True, "content": '{"items":["https://x"]}'}
+    )
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            captured["spec"] = spec
+            captured["arguments"] = arguments
+            return await mock_invoke(spec, arguments, **kwargs)
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": {
+                    "functionName": "seedreamLite4Skill",
+                    "bundleName": "com.atomicservice.5765880207845681341",
+                    "prompt": "a dog",
+                },
+            }
+        )
+
+    assert result.get("success") is True
+    spec = captured["spec"]
+    assert isinstance(spec, ExternalToolSpec)
+    assert spec.plugin_id == "com.atomicservice.5765880207845681341"
+    assert spec.tool_name == "seedreamLite4Skill"
+
+
+@pytest.mark.asyncio
+async def test_invoke_agent_missing_runtime_baseurl(monkeypatch):
+    monkeypatch.delenv("AGENT_RUNTIME_BASEURL", raising=False)
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "agent_as_a_tool",
+            "arguments": {"agentId": "demo", "query": "hello"},
+        }
+    )
+    assert result.get("success") is False
+    assert "AGENT_RUNTIME_BASEURL" in result.get("error", "")
+
+
+@pytest.mark.asyncio
+async def test_invoke_agent_routes_to_runtime(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_BASEURL", "https://useraccess.example")
+
+    async def _fake_run(inputs: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        assert inputs["agentId"] == "demo"
+        return {"result": "agent-ok", "success": True}
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.invoke_tool.invoke_remote_agent",
+        _fake_run,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "agent_as_a_tool",
+                "arguments": {"agentId": "demo", "query": "hello"},
+            }
+        )
+
+    assert result.get("success") is True
+    assert result.get("result") == "agent-ok"
+
+
+def test_build_request_body_aligns_skills_request(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_UID", "uid-1")
+    monkeypatch.setenv("AGENT_RUNTIME_DEVICE_ID", "dev-1")
+    spec = ExternalToolSpec(
+        plugin_id="com.atomicservice.5765880207845681341",
+        tool_name="seedreamLite4Skill",
+        description="",
+        protocol="WS",
+        plugin_type="Cloud",
+    )
+    body = CloudPluginClient._build_request_body(
+        spec,
+        {
+            "bundleName": "com.atomicservice.5765880207845681341",
+            "functionName": "seedreamLite4Skill",
+            "prompt": "一只柯基",
+        },
+        context=None,
+        session_id="sess-1",
+    )
+    assert body["bundleName"] == "com.atomicservice.5765880207845681341"
+    assert body["functionName"] == "seedreamLite4Skill"
+    assert body["skillName"] == ""
+    assert body["turnContinue"] is False
+    assert body["progressToken"] == ""
+    assert body["arguments"]["prompt"] == "一只柯基"
+    assert body["arguments"]["bundleName"] == body["bundleName"]
+    assert "extraInfo" in body
+    assert body["extraInfo"]["session"]["sessionId"] == "sess-1"
+    assert body["extraInfo"]["context"]["userInfo"]["uid"] == "uid-1"
+    assert body["extraInfo"]["context"]["deviceInfo"]["x-device-id"] == "dev-1"
+
+
+def test_is_final_frame_stream_type_final():
+    frame = {
+        "event": "text",
+        "content": json.dumps(
+            {
+                "items": ["https://example.com/a.jpg"],
+                "streamInfo": {"streamType": "final", "textType": "plainText"},
+            }
+        ),
+    }
+    assert CloudPluginClient._is_final_frame(frame) is True
+    assert CloudPluginClient._is_final_frame({"event": "finish"}) is True
+    assert CloudPluginClient._is_final_frame({"event": "text", "content": "{}"}) is False
+
+
+def test_build_local_relay_headers_prefer_env(monkeypatch):
+    monkeypatch.setenv("CLAW_XIAOYI_AK", "ak-env")
+    monkeypatch.setenv("CLAW_XIAOYI_SK", "sk-env")
+    monkeypatch.setenv("CLAW_XIAOYI_AGENT_ID", "ag-env")
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime._xiaoyi_channel",
+        lambda: {},
+    )
+    from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
+        build_local_relay_headers,
+    )
+
+    headers = build_local_relay_headers()
+    assert headers["x-relay-role"] == "plugin"
+    assert headers["x-access-key"] == "ak-env"
+    assert headers["x-agent-id"] == "ag-env"
+    assert "x-sign" in headers
+    assert "x-ts" in headers
+
+
+def test_build_local_relay_headers_include_role(monkeypatch):
+    monkeypatch.delenv("CLAW_XIAOYI_AK", raising=False)
+    monkeypatch.delenv("CLAW_XIAOYI_SK", raising=False)
+    monkeypatch.delenv("CLAW_XIAOYI_AGENT_ID", raising=False)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime._xiaoyi_channel",
+        lambda: {"ak": "ak1", "sk": "sk1", "agent_id": "ag1"},
+    )
+    from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
+        build_local_relay_headers,
+    )
+
+    headers = build_local_relay_headers()
+    assert headers["x-relay-role"] == "plugin"
+    assert headers["x-access-key"] == "ak1"
+    assert headers["x-agent-id"] == "ag1"
+    assert "x-sign" in headers
+    assert "x-ts" in headers
