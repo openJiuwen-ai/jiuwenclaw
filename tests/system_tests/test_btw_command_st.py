@@ -206,7 +206,9 @@ async def test_btw_command_system_roundtrip(
             }
             await ws.send(json.dumps(req_btw, ensure_ascii=False))
 
-            btw_res = await _recv_until_response(ws, "req-btw-st", timeout=15)
+            # CI 慢机上首次 /btw 会触发 ensure_instance 懒构建根 DeepAgent（含
+            # 模型实例化）再走模型调用，15s 预算过紧；与其他等待统一用 60s。
+            btw_res = await _recv_until_response(ws, "req-btw-st", timeout=60)
             # Verify response frame structure
             assert btw_res["type"] == "res"
             assert btw_res["id"] == "req-btw-st"
