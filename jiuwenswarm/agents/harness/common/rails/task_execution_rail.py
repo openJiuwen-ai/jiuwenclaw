@@ -9,7 +9,9 @@ so downstream tool/artifact events can be attributed to the active task.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -287,17 +289,19 @@ class TaskExecutionRail(DeepAgentRail):
 
         if tool_name in self.SKILL_COMPLETE_TOOLS:
             if self._has_incomplete_todos(self._todo_map):
-                tc = ctx.inputs.tool_call
-                tool_call_id = str(getattr(tc, "id", "") or "")
-                msg = (
-                    "[SKILL_COMPLETE_BLOCKED] todo.json 中仍有未完成任务，"
-                    "请先用 todo_modify 将全部已完成项标为 completed。"
-                )
-                ctx.extra["_skip_tool"] = True
-                ctx.inputs.tool_result = msg
-                ctx.inputs.tool_msg = ToolMessage(
-                    content=msg, tool_call_id=tool_call_id,
-                )
+                if self._skill_complete_auto_flush_enabled():
+                    try:
+                        await self._flush_incomplete_todos_on_skill_complete(ctx)
+                    except Exception as exc:
+                        logger.warning(
+                            "[TaskExecutionRail] skill_complete "
+                            "auto-flush failed, falling back to block: %s",
+                            exc,
+                            exc_info=True,
+                        )
+                        self._apply_skill_complete_block(ctx)
+                else:
+                    self._apply_skill_complete_block(ctx)
             return
 
         self._bind_context_to_in_progress_task()
@@ -577,6 +581,138 @@ class TaskExecutionRail(DeepAgentRail):
             not in TaskExecutionRail._TODO_DONE_STATUSES
             for task in todo_map.values()
         )
+
+    # ------------------------------------------------------------------
+    # skill_complete auto-flush
+    # ------------------------------------------------------------------
+
+    def _apply_skill_complete_block(self, ctx: AgentCallbackContext) -> None:
+        """Legacy fallback: block skill_complete when todos are incomplete.
+
+        Sends the model a [SKILL_COMPLETE_BLOCKED] message asking it to call
+        todo_modify first. Preserved verbatim so auto-flush failures or the
+        disabled-flag path behave exactly like today.
+        """
+        tc = ctx.inputs.tool_call
+        tool_call_id = str(getattr(tc, "id", "") or "")
+        msg = (
+            "[SKILL_COMPLETE_BLOCKED] todo.json 中仍有未完成任务，"
+            "请先用 todo_modify 将全部已完成项标为 completed。"
+        )
+        ctx.extra["_skip_tool"] = True
+        ctx.inputs.tool_result = msg
+        ctx.inputs.tool_msg = ToolMessage(
+            content=msg, tool_call_id=tool_call_id,
+        )
+
+    @staticmethod
+    def _skill_complete_auto_flush_enabled() -> bool:
+        """Whether skill_complete auto-flushes incomplete todos instead of
+        bouncing to the model.
+
+        Env var ``SKILL_COMPLETE_AUTO_FLUSH`` (default "1" / enabled). Set to
+        "0"/"false"/"no"/"off" to revert to the legacy block behavior. Reading
+        an env var (rather than threading config through interface_deep.py)
+        keeps this change local to a single file and matches the repo's env
+        convention (TODO_PROGRESS_REPEAT, JIUWENCLAW_EARLY_CHECKPOINT).
+        """
+        raw = os.environ.get("SKILL_COMPLETE_AUTO_FLUSH", "1")
+        return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+    def _persist_todo_statuses(
+        self,
+        session_id: str,
+        overrides: dict[str, str],
+    ) -> None:
+        """Atomically update item statuses in the persisted task-list file.
+
+        Only the ``status`` field of items whose id appears in ``overrides``
+        is changed; all other fields and all other items are preserved. The
+        write is atomic (tmp file + os.replace) so a crash cannot leave a
+        half-written file. id resolution matches
+        _build_map_from_todo_items: item.get("id", str(index)).
+        """
+        todo_path = self._get_todo_workspace_path(session_id)
+        if todo_path is None or not todo_path.exists():
+            return
+        with open(todo_path, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        if not isinstance(items, list):
+            return
+
+        changed = False
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            tid = item.get("id", str(index))
+            if tid in overrides:
+                item["status"] = overrides[tid]
+                changed = True
+        if not changed:
+            return
+
+        todo_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path_str = tempfile.mkstemp(
+            prefix=".todo-flush-",
+            suffix=".tmp",
+            dir=str(todo_path.parent),
+        )
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                json.dump(items, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path_str, str(todo_path))
+        except Exception:
+            try:
+                os.unlink(tmp_path_str)
+            except OSError:
+                pass
+            raise
+
+    @staticmethod
+    def _flush_target_status(incomplete_status: str) -> str:
+        """Map an incomplete item status to its flush target. Extensible policy.
+
+        Everything flushes to "completed" because the shared diff emitter
+        (_sync_todo_and_emit_transitions) handles ->completed transitions
+        (in_progress->completed => task.complete; pending->completed =>
+        task.start then task.complete).
+        """
+        return "completed"
+
+    async def _flush_incomplete_todos_on_skill_complete(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Auto-finalize incomplete todos so skill_complete proceeds without
+        a model round.
+
+        Reuses the shared _sync_todo_and_emit_transitions pipeline: persist the
+        flushed statuses to the task-list file, snapshot the pre-flush map, then let
+        the existing diff+emit logic produce the same task.start/complete/
+        update events the model would have produced via todo_modify. No new
+        event types. Raises on persistence failure so the caller can fall back
+        to the block.
+        """
+        if ctx.session is None:
+            return
+        session_id = ctx.session.get_session_id()
+        # Snapshot pre-flush state so the diff sees the transition
+        self._todo_map_before_tool = dict(self._todo_map)
+
+        overrides: dict[str, str] = {}
+        for task_id, task in self._todo_map.items():
+            status = str(task.get("status", "pending")).lower()
+            if status in self._TODO_DONE_STATUSES:
+                continue
+            overrides[task_id] = self._flush_target_status(status)
+
+        if not overrides:
+            return
+
+        # Persist first so _sync_todo_and_emit_transitions reloads the new state
+        self._persist_todo_statuses(session_id, overrides)
+
+        # Reuse the existing diff+emit pipeline (reads the task-list file, emits events)
+        await self._sync_todo_and_emit_transitions(ctx)
 
     # ------------------------------------------------------------------
     # State transition detection + event emission
