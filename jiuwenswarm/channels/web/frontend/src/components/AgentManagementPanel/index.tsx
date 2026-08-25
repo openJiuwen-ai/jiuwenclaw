@@ -8,6 +8,7 @@ import { PendingConnectorModals, usePendingConnectorFlow } from '../ConnectorMar
 import { useConnectorStore } from '../../stores/connectorStore';
 import {
   AgentInstallPendingError,
+  AgentManagementError,
   createAgentManagementClient,
   type AgentCatalogItem,
   type AgentDraft,
@@ -50,8 +51,16 @@ function getErrorMessage(error: unknown, fallback: string): string {
 
 function getFriendlyErrorMessage(error: unknown, fallback: string, translate: (key: string, options?: Record<string, unknown>) => string): string {
   const message = typeof error === 'string' ? error : getErrorMessage(error, fallback);
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code || '')
+    : '';
+  if (code === 'agent_detail_empty') return translate('agentManagement.states.detailError');
   const connector = /^connector not connected:\s*(.+)$/i.exec(message.trim())?.[1];
-  return connector ? translate('agentManagement.states.connectorUnavailableNamed', { connector }) : message;
+  if (connector) return translate('agentManagement.states.connectorUnavailableNamed', { connector });
+  if (error instanceof AgentManagementError) {
+    return fallback;
+  }
+  return message;
 }
 
 function deriveAgentId(name: string): string {
@@ -115,9 +124,9 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
       dispatch({ type: 'catalog.loaded', catalog });
     } catch (error) {
       if (revision !== catalogRevisionRef.current) return;
-      dispatch({ type: 'catalog.error', message: getErrorMessage(error, t('agentManagement.states.loadError')) });
+      dispatch({ type: 'catalog.error', message: formatActionError(error, t('agentManagement.states.loadError')) });
     }
-  }, [client, t]);
+  }, [client, formatActionError, t]);
 
   const loadSkills = useCallback(async () => {
     dispatch({ type: 'skills.loading' });
@@ -169,10 +178,10 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
         });
       } catch (error) {
         if (revision !== detailRevisionRef.current) return;
-        dispatch({ type: 'detail.error', message: getErrorMessage(error, t('agentManagement.states.detailError')) });
+        dispatch({ type: 'detail.error', message: formatActionError(error, t('agentManagement.states.detailError')) });
       }
     },
-    [client, t, view],
+    [client, formatActionError, t, view],
   );
 
   const loadFiles = useCallback(
@@ -186,11 +195,11 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
         return files;
       } catch (error) {
         if (revision !== filesRevisionRef.current) return null;
-        dispatch({ type: 'files.error', message: getErrorMessage(error, t('agentManagement.files.loadError')) });
+        dispatch({ type: 'files.error', message: formatActionError(error, t('agentManagement.files.loadError')) });
         return null;
       }
     },
-    [client, t],
+    [client, formatActionError, t],
   );
 
   const handleTabChange = (tab: 'content' | 'files') => {
@@ -217,7 +226,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
       dispatch({ type: 'file.loaded', content });
     } catch (error) {
       if (revision !== fileRevisionRef.current) return;
-      dispatch({ type: 'file.error', message: getErrorMessage(error, t('agentManagement.files.readError')) });
+      dispatch({ type: 'file.error', message: formatActionError(error, t('agentManagement.files.readError')) });
     }
   };
 
@@ -377,7 +386,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
       setMinePage(1);
       setView('mine');
     } catch (error) {
-      setCreateError(getErrorMessage(error, t('agentManagement.form.saveError')));
+      setCreateError(formatActionError(error, t('agentManagement.form.saveError')));
     } finally {
       setSaving(false);
     }

@@ -68,3 +68,7 @@ export function buildDefinitionSelectionPayload(intent: AgentSelectionIntent): R
   }
   return {};
 }
+
+export function buildDefinitionSelectionPayloadForMode(mode: string | undefined, intent: AgentSelectionIntent): Record<string, string> {
+  return mode === 'agent' ? buildDefinitionSelectionPayload(intent) : {};
+}

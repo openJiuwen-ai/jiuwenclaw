@@ -63,7 +63,7 @@ import {
 } from '../../features/workspace/localFilePicker';
 import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
-import AgentDesignIcon from '../../assets/智能体.svg?react';
+import AgentPickerIcon from '../../assets/agent-picker.svg?react';
 
 const MENU_GAP = 10;
 
@@ -593,6 +593,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [agentPickerQuery, setAgentPickerQuery] = useState('');
+  const [agentTooltip, setAgentTooltip] = useState<{ id: string; description: string; top: number; left: number } | null>(null);
   const [agentOptions, setAgentOptions] = useState<AgentCatalogItem[]>([]);
   const [agentOptionsStatus, setAgentOptionsStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const agentManagementClient = useMemo(() => createAgentManagementClient(), []);
@@ -644,7 +645,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const selectedAgentId = useSessionStore((s) => {
-    const intent = s.runtimes[activeSessionId ?? '']?.agentSelectionIntent;
+    const runtime = s.runtimes[activeSessionId ?? ''];
+    if (runtime?.mode !== 'agent') return null;
+    const intent = runtime.agentSelectionIntent;
     return intent?.kind === 'select' ? intent.id : null;
   });
   const setAgentSelectionIntent = useSessionStore((s) => s.setAgentSelectionIntent);
@@ -687,6 +690,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (attachMenuOpen) return;
     setAgentPickerOpen(false);
     setAgentPickerQuery('');
+    setAgentTooltip(null);
   }, [attachMenuOpen]);
   const isPaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isPaused ?? false);
   const queuePaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.queuePaused ?? false);
@@ -2792,8 +2796,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   onClick={() => setAgentPickerOpen((open) => !open)}
                 >
                     <span className="chat-mode-select__option-main">
-                      <span className="chat-mode-select__icon" aria-hidden="true">
-                      <AgentDesignIcon aria-hidden="true" />
+                      <span className="chat-mode-select__icon chat-mode-select__icon--agent-picker" aria-hidden="true">
+                      <AgentPickerIcon aria-hidden="true" />
                       </span>
                     <span className="chat-mode-select__label">{t('chat.agent')}</span>
                   </span>
@@ -2839,6 +2843,33 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                               className={clsx('chat-agent-picker__item', isSelected && 'is-selected')}
                               role="menuitemradio"
                               aria-checked={isSelected}
+                              aria-describedby={agentTooltip?.id === item.id ? 'chat-agent-picker-tooltip' : undefined}
+                              onMouseEnter={(event) => {
+                                if (!item.description) return;
+                                const rect = event.currentTarget.getBoundingClientRect();
+                                const tooltipWidth = 240;
+                                const left = rect.right + 8 + tooltipWidth <= window.innerWidth
+                                  ? rect.right + 8
+                                  : Math.max(8, rect.left - tooltipWidth - 8);
+                                setAgentTooltip({
+                                  id: item.id,
+                                  description: item.description,
+                                  top: Math.min(rect.top, Math.max(8, window.innerHeight - 80)),
+                                  left,
+                                });
+                              }}
+                              onMouseLeave={() => setAgentTooltip(null)}
+                              onFocus={(event) => {
+                                if (!item.description) return;
+                                const rect = event.currentTarget.getBoundingClientRect();
+                                setAgentTooltip({
+                                  id: item.id,
+                                  description: item.description,
+                                  top: Math.min(rect.top, Math.max(8, window.innerHeight - 80)),
+                                  left: Math.max(8, rect.left - 248),
+                                });
+                              }}
+                              onBlur={() => setAgentTooltip(null)}
                               onClick={() => {
                                 if (!activeSessionId) return;
                                 useSessionStore.getState().setMode(activeSessionId, 'agent');
@@ -2849,10 +2880,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                               <span className="chat-agent-picker__avatar" aria-hidden="true">
                                 {avatarUrl ? <img src={avatarUrl} alt="" /> : item.displayName.slice(0, 1)}
                               </span>
-                              <span className="chat-agent-picker__item-copy">
-                                <span className="chat-agent-picker__item-name">{item.displayName}</span>
-                                {item.description ? <span className="chat-agent-picker__item-description">{item.description}</span> : null}
-                              </span>
+                              <span className="chat-agent-picker__item-name">{item.displayName}</span>
                               {isSelected ? <span className="chat-agent-picker__check" aria-hidden="true">✓</span> : null}
                             </button>
                           );
@@ -2873,6 +2901,16 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     </div>
                   </div>
                 )}
+                {agentTooltip ? (
+                  <div
+                    id="chat-agent-picker-tooltip"
+                    className="chat-agent-picker__tooltip"
+                    role="tooltip"
+                    style={{ top: agentTooltip.top, left: agentTooltip.left }}
+                  >
+                    {agentTooltip.description}
+                  </div>
+                ) : null}
                 {canUseGoalMenu && (
                   <button
                     type="button"

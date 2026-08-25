@@ -1366,10 +1366,31 @@
 }
 
 .agent-management-tag-picker__chevron {
-  flex: 0 0 auto;
   color: var(--color-text-secondary);
-  font-size: 18px;
-  line-height: 18px;
+}
+
+.agent-management-tag-picker__toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-management-tag-picker__toggle:hover {
+  background: var(--color-action-secondary);
+}
+
+.agent-management-tag-picker__toggle:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 1px;
 }
 
 .agent-management-form-placeholder {

@@ -631,6 +631,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setMode: (sessionId, mode) => {
     const normalizedMode = normalizeAgentMode(mode);
     saveModeToStorage(normalizedMode);
+    if (normalizedMode !== 'agent') {
+      saveAgentSelectionIntent(sessionId, { kind: 'clear' });
+    }
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;

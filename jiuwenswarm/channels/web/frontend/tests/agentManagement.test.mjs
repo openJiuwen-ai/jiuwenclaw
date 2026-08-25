@@ -8,8 +8,9 @@ import {
   normalizeAgentTemplateListItem,
   normalizeAgentFileTree,
 } from '../node_modules/.cache/agent-management/adapter.js';
-import { buildDefinitionSelectionPayload } from '../node_modules/.cache/agent-management/port.js';
+import { buildDefinitionSelectionPayload, buildDefinitionSelectionPayloadForMode } from '../node_modules/.cache/agent-management/port.js';
 import { agentManagementReducer, initialAgentManagementState } from '../node_modules/.cache/agent-management/state.js';
+import { resolveAgentTagPayload } from '../node_modules/.cache/agent-management/tagOptions.js';
 import { buildCatalogViewModel, findFirstPreviewableFile, mergeAgentDetailWithCatalog } from '../node_modules/.cache/agent-management/viewModel.js';
 
 test('normalizes interface source variants and bilingual display fields', () => {
@@ -151,6 +152,22 @@ test('selection payload preserves keep, clear and select semantics', () => {
   assert.deepEqual(buildDefinitionSelectionPayload({ kind: 'select', id: 'content-creator' }), {
     agent_template_name: 'content-creator',
   });
+});
+
+test('selection payload is restricted to ordinary Agent mode', () => {
+  assert.deepEqual(buildDefinitionSelectionPayloadForMode('agent', { kind: 'select', id: 'content-creator' }), {
+    agent_template_name: 'content-creator',
+  });
+  assert.deepEqual(buildDefinitionSelectionPayloadForMode('team', { kind: 'select', id: 'content-creator' }), {});
+  assert.deepEqual(buildDefinitionSelectionPayloadForMode('auto_harness', { kind: 'clear' }), {});
+});
+
+test('custom tags keep fixed and user-entered labels in create order', () => {
+  assert.deepEqual(resolveAgentTagPayload(['product-development'], ['行业研究', '数据产品']), [
+    { zh: '产品研发', en: 'Product Development' },
+    { zh: '行业研究', en: '行业研究' },
+    { zh: '数据产品', en: '数据产品' },
+  ]);
 });
 
 test('catalog view model filters mine/search and clamps pages deterministically', () => {

@@ -51,9 +51,15 @@ export function DefinitionCard({ item, scope, busy, onOpen, onUse, onReconnect, 
             </span>
             {scope === 'mine' ? (
               <span className="agent-management-card__meta">
-                <span className="agent-management-tag">
-                  {t(`agentManagement.categories.${item.category}`, { defaultValue: item.category || t('agentManagement.categoryOther') })}
-                </span>
+                {item.tags.length > 0 ? item.tags.map(tag => (
+                  <span key={tag.id} className="agent-management-tag">
+                    {tag.label}
+                  </span>
+                )) : (
+                  <span className="agent-management-tag">
+                    {t(`agentManagement.categories.${item.category}`, { defaultValue: item.category || t('agentManagement.categoryOther') })}
+                  </span>
+                )}
               </span>
             ) : item.tags.length > 0 ? (
               <span className="agent-management-card__meta">

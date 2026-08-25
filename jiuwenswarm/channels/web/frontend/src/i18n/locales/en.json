@@ -2186,6 +2186,7 @@
       "descriptionPlaceholder": "Describe what this Agent is good at",
       "tagLabel": "Domain tags (optional)",
       "tagPlaceholder": "Choose strength tags",
+      "toggleTags": "Expand or collapse domain tags",
       "removeTag": "Remove domain tag {{name}}",
       "customTagPlaceholder": "Enter a custom domain tag",
       "addCustomTag": "Add",

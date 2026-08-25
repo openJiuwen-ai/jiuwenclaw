@@ -61,6 +61,10 @@ export function AgentEditor({
   const tagPickerRef = useRef<HTMLDivElement>(null);
   const personaSurfaceRef = useRef<HTMLDivElement>(null);
   const mcpTypeRef = useRef<HTMLDivElement>(null);
+  const skillDialogRef = useRef<HTMLElement>(null);
+  const mcpDialogRef = useRef<HTMLElement>(null);
+  const skillDialogTriggerRef = useRef<HTMLButtonElement>(null);
+  const mcpDialogTriggerRef = useRef<HTMLButtonElement>(null);
 
   const errors = useMemo(
     () => ({
@@ -108,6 +112,42 @@ export function AgentEditor({
     document.addEventListener('pointerdown', handlePointerDown);
     return () => document.removeEventListener('pointerdown', handlePointerDown);
   }, [mcpTypeOpen]);
+
+  useEffect(() => {
+    if (!skillDialogOpen && !mcpDialogOpen) return;
+    const dialog = skillDialogOpen ? skillDialogRef.current : mcpDialogRef.current;
+    const restoreTarget = skillDialogOpen ? skillDialogTriggerRef.current : mcpDialogTriggerRef.current;
+    if (!dialog) return;
+    const focusableSelector = 'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const focusFirst = () => dialog.querySelector<HTMLElement>(focusableSelector)?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (skillDialogOpen) setSkillDialogOpen(false);
+        else setMcpDialogOpen(false);
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    const focusTimer = window.setTimeout(focusFirst, 0);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      window.clearTimeout(focusTimer);
+      restoreTarget?.focus();
+    };
+  }, [mcpDialogOpen, skillDialogOpen]);
 
   const update = (patch: Partial<AgentDraft>) => onChange({ ...draft, ...patch });
 
@@ -207,16 +247,9 @@ export function AgentEditor({
             <div className="agent-management-tag-picker">
               <div
                 className="agent-management-tag-picker__trigger"
-                role="button"
-                tabIndex={0}
-                aria-expanded={tagMenuOpen}
-                aria-haspopup="listbox"
-                onClick={() => setTagMenuOpen(open => !open)}
-                onKeyDown={event => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    setTagMenuOpen(open => !open);
-                  }
+                onClick={event => {
+                  if ((event.target as HTMLElement).closest('button')) return;
+                  setTagMenuOpen(open => !open);
                 }}
               >
                 <span className="agent-management-tag-picker__values">
@@ -261,7 +294,19 @@ export function AgentEditor({
                     <span className="agent-management-form-placeholder">{t('agentManagement.form.tagPlaceholder')}</span>
                   )}
                 </span>
-                <span className="agent-management-tag-picker__chevron" aria-hidden="true">⌄</span>
+                <button
+                  type="button"
+                  className="agent-management-tag-picker__toggle"
+                  aria-label={t('agentManagement.form.toggleTags')}
+                  aria-expanded={tagMenuOpen}
+                  aria-haspopup="listbox"
+                  onClick={event => {
+                    event.stopPropagation();
+                    setTagMenuOpen(open => !open);
+                  }}
+                >
+                  <ChevronDown className="agent-management-tag-picker__chevron" size={16} aria-hidden="true" />
+                </button>
               </div>
               {tagMenuOpen ? (
                 <div className="agent-management-tag-picker__options" role="listbox" aria-label={t('agentManagement.form.tagLabel')}>
@@ -348,7 +393,7 @@ export function AgentEditor({
             </button>
             <div><h2>{t('agentManagement.form.mcpLabel')}</h2></div>
           </div>
-          <button type="button" className="agent-management-inline-action" onClick={openMcpDialog}><Plus size={14} aria-hidden="true" />{t('agentManagement.form.addMcp')}</button>
+          <button ref={mcpDialogTriggerRef} type="button" className="agent-management-inline-action" onClick={openMcpDialog}><Plus size={14} aria-hidden="true" />{t('agentManagement.form.addMcp')}</button>
         </div>
         {mcpOpen ? (
           selectedMcps.length > 0 ? (
@@ -375,7 +420,7 @@ export function AgentEditor({
             </button>
             <div><h2>{t('agentManagement.form.skillsLabel')}</h2></div>
           </div>
-          <button type="button" className="agent-management-inline-action" onClick={openSkillDialog}><Plus size={14} aria-hidden="true" />{t('agentManagement.form.addSkill')}</button>
+          <button ref={skillDialogTriggerRef} type="button" className="agent-management-inline-action" onClick={openSkillDialog}><Plus size={14} aria-hidden="true" />{t('agentManagement.form.addSkill')}</button>
         </div>
         {skillsOpen ? (
           <>
@@ -428,7 +473,7 @@ export function AgentEditor({
 
       {skillDialogOpen ? createPortal(
         <div className="agent-management-selection-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSkillDialogOpen(false); }}>
-          <section className="agent-management-selection-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-skill-dialog-title">
+          <section ref={skillDialogRef} className="agent-management-selection-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-skill-dialog-title">
             <header><h2 id="agent-skill-dialog-title">{t('agentManagement.form.selectSkill')}</h2><button type="button" onClick={() => setSkillDialogOpen(false)} aria-label={t('common.cancel')}><X size={16} aria-hidden="true" /></button></header>
             <div className="agent-management-selection-tabs" role="tablist" aria-label={t('agentManagement.form.selectSkill')}>
               <button type="button" className="agent-management-selection-tab is-active" role="tab" aria-selected="true">{t('agentManagement.form.mySkills')}</button>
@@ -455,7 +500,7 @@ export function AgentEditor({
 
       {mcpDialogOpen ? createPortal(
         <div className="agent-management-selection-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setMcpDialogOpen(false); }}>
-          <section className="agent-management-selection-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-mcp-dialog-title">
+          <section ref={mcpDialogRef} className="agent-management-selection-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-mcp-dialog-title">
             <header><h2 id="agent-mcp-dialog-title">{t('agentManagement.form.selectMcp')}</h2><button type="button" onClick={() => setMcpDialogOpen(false)} aria-label={t('common.cancel')}><X size={16} aria-hidden="true" /></button></header>
             <div className="agent-management-selection-tabs" role="tablist" aria-label={t('agentManagement.form.selectMcp')}>
               <button type="button" className={`agent-management-selection-tab${mcpTab === 'mine' ? ' is-active' : ''}`} role="tab" aria-selected={mcpTab === 'mine'} onClick={() => setMcpTab('mine')}>{t('agentManagement.form.myMcp')}</button>

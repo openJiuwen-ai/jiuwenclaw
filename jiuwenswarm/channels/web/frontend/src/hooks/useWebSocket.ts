@@ -99,7 +99,7 @@ import {
   normalizeSubagentWaitResults,
   normalizeSubagentStatusEvent,
 } from '../features/subagent/subagentNormalizer';
-import { buildDefinitionSelectionPayload } from '../features/agentManagement/port';
+import { buildDefinitionSelectionPayloadForMode } from '../features/agentManagement/port';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -1521,6 +1521,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       const sessionRuntime = useSessionStore.getState().getRuntime(sessionId);
       const selectedSkills = sessionRuntime?.selectedSkills ?? [];
       const agentSelectionIntent = sessionRuntime?.agentSelectionIntent ?? { kind: 'keep' as const };
+      const agentSelectionPayload = buildDefinitionSelectionPayloadForMode(currentMode, agentSelectionIntent);
       // 插件/MCP 是"+"菜单"扩展"面板里的会话级开关，和 selectedSkills 不同——不随发送清空，
       // 持续带在本会话之后每一条消息里，直到用户在面板里手动关闭开关（见 sessionStore.ts
       // SessionRuntime.enabledPlugins/enabledMcps 头部注释）。插件（plugin_names）后端还没有
@@ -1627,7 +1628,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(selectedModel ? { model_name: selectedModel } : {}),
           ...workContext,
           skills: selectedSkills,
-          ...buildDefinitionSelectionPayload(agentSelectionIntent),
+          ...agentSelectionPayload,
           // plugin_names/mcp 的组装+字段语义说明见 utils/enabledExtensions.ts 的
           // buildExtensionSendPayload 头注释（plugin_names 恒传含空数组，mcp 只在非空时才带）。
           ...extensionPayload,
@@ -1689,6 +1690,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
       try {
         const outgoingMode = resolveOutgoingMode(sessionId, currentMode);
+        const agentSelectionPayload = buildDefinitionSelectionPayloadForMode(
+          currentMode,
+          currentSessionState.getRuntime(sessionId)?.agentSelectionIntent ?? { kind: 'keep' },
+        );
         await request('chat.send', {
           session_id: sessionId,
           content,
@@ -1696,7 +1701,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(selectedModel ? { model_name: selectedModel } : {}),
           ...workContext,
           ...buildExtensionSendPayload(sessionId),
-          ...buildDefinitionSelectionPayload(currentSessionState.getRuntime(sessionId)?.agentSelectionIntent ?? { kind: 'keep' }),
+          ...agentSelectionPayload,
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
         });
         consumePlanEntryMark(sessionId, outgoingMode);
@@ -1975,9 +1980,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         ) {
           // Plan 审批的 resume 必须带回 Plan wire mode，否则后端会把这次回答
           // 当成普通模式请求，进而把会话踢出 Plan。
-          const resolvedResumeMode = resolveOutgoingMode(
-            sessionId,
-            resolveInterruptResumeMode(sessionId)
+          const resumeMode = resolveInterruptResumeMode(sessionId);
+          const resolvedResumeMode = resolveOutgoingMode(sessionId, resumeMode);
+          const agentSelectionPayload = buildDefinitionSelectionPayloadForMode(
+            resumeMode,
+            useSessionStore.getState().getRuntime(sessionId)?.agentSelectionIntent ?? { kind: 'keep' },
           );
           // 必须在请求发出**之前**登记：本次请求的 mode 已经定格在
           // resolvedResumeMode 里，不再看 Plan 开关；而后端很可能在 await 挂起期间
@@ -1996,7 +2003,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ...getSessionWorkContext(sessionId),
             request_id: requestId,
             answers: answers,
-            ...buildDefinitionSelectionPayload(useSessionStore.getState().getRuntime(sessionId)?.agentSelectionIntent ?? { kind: 'keep' }),
+            ...agentSelectionPayload,
             ...sourcePayload,
             ...structuredPlanPayload,
             ...approvalSchemaPayload,
@@ -2017,7 +2024,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             content: '',
             mode: 'auto_harness',
             ...getSessionWorkContext(sessionId),
-            ...buildDefinitionSelectionPayload(useSessionStore.getState().getRuntime(sessionId)?.agentSelectionIntent ?? { kind: 'keep' }),
             activate_response: {
               interaction_id: interactionId,
               action,

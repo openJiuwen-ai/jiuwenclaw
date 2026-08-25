@@ -1756,6 +1756,11 @@ overflow: hidden;
   height: 18px;
 }
 
+.chat-mode-select__icon.chat-mode-select__icon--agent-picker svg {
+  width: 14px;
+  height: 16px;
+}
+
 .chat-mode-select__label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2044,32 +2049,19 @@ overflow: hidden;
   font-size: 12px;
 }
 
-.chat-agent-picker__item-copy {
-  display: flex;
-  min-width: 0;
-  flex: 1 1 auto;
-  flex-direction: column;
-  justify-content: center;
-  gap: 2px;
-}
-
-.chat-agent-picker__item-description {
-  display: -webkit-box;
-  max-height: 0;
-  overflow: hidden;
-  color: var(--color-text-secondary);
-  font-size: 11px;
-  line-height: 16px;
-  opacity: 0;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  transition: max-height 120ms ease, opacity 120ms ease;
-}
-
-.chat-agent-picker__item:hover .chat-agent-picker__item-description,
-.chat-agent-picker__item:focus-visible .chat-agent-picker__item-description {
-  max-height: 32px;
-  opacity: 1;
+.chat-agent-picker__tooltip {
+  position: fixed;
+  z-index: 10000;
+  width: 240px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-md);
+  color: var(--color-text-primary);
+  padding: 8px 10px;
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .chat-agent-picker__check {

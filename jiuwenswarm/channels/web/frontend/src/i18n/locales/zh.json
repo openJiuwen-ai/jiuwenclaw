@@ -2171,6 +2171,7 @@
       "descriptionPlaceholder": "说明这个智能体擅长什么",
       "tagLabel": "领域标签（可选）",
       "tagPlaceholder": "请选择领域标签",
+      "toggleTags": "展开或收起领域标签",
       "removeTag": "移除领域标签 {{name}}",
       "customTagPlaceholder": "输入自定义领域标签",
       "addCustomTag": "添加",
