@@ -187,6 +187,115 @@ def test_rejects_non_authoritative_cwd_field(
     assert error == "command_workdir_contract_invalid"
 
 
+def test_freezes_legacy_bash_cwd_into_actual_workdir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _runtime_paths(tmp_path)
+    legacy_cwd = paths.workspace_root / "nested"
+    tool_call = SimpleNamespace(
+        name="bash",
+        arguments={"command": "pwd", "cwd": str(legacy_cwd)},
+    )
+    inputs = SimpleNamespace(
+        tool_call=tool_call,
+        tool_name="bash",
+        tool_args=tool_call.arguments,
+    )
+    invocation = ToolInvocation(
+        ctx=SimpleNamespace(inputs=inputs),
+        tool_call=tool_call,
+        tool_name="bash",
+        tool_args=tool_call.arguments,
+    )
+    kwargs = {"tool_args": invocation.tool_args}
+    monkeypatch.setattr(
+        invocation_context,
+        "current_command_runtime_paths",
+        lambda **_kwargs: paths,
+    )
+
+    frozen, error = invocation_context._normalize_command_invocation_for_execution(
+        invocation,
+        kwargs,
+        permission_workspace_root=paths.workspace_root,
+    )
+
+    expected = {"command": "pwd", "workdir": str(legacy_cwd)}
+    assert error == ""
+    assert frozen.tool_args == expected
+    assert tool_call.arguments == expected
+    assert inputs.tool_args == expected
+    assert kwargs["tool_args"] == expected
+
+
+def test_freezes_default_bash_workdir_from_host_runtime_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _runtime_paths(tmp_path)
+    tool_call = SimpleNamespace(name="bash", arguments={"command": "pwd"})
+    invocation = ToolInvocation(
+        ctx=SimpleNamespace(inputs=None),
+        tool_call=tool_call,
+        tool_name="bash",
+        tool_args=tool_call.arguments,
+    )
+    monkeypatch.setattr(
+        invocation_context,
+        "current_command_runtime_paths",
+        lambda **_kwargs: paths,
+    )
+
+    frozen, error = invocation_context._normalize_command_invocation_for_execution(
+        invocation,
+        {},
+        permission_workspace_root=paths.workspace_root,
+    )
+
+    assert error == ""
+    assert frozen.tool_args == {
+        "command": "pwd",
+        "workdir": str(paths.current_cwd),
+    }
+
+
+@pytest.mark.parametrize("workdir", ["../../outside", 42])
+def test_unresolved_bash_workdir_is_not_frozen_or_trusted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    workdir: object,
+) -> None:
+    paths = _runtime_paths(tmp_path)
+    invocation = ToolInvocation(
+        ctx=SimpleNamespace(inputs=None),
+        tool_call=SimpleNamespace(arguments={}),
+        tool_name="bash",
+        tool_args={"command": "pwd", "workdir": workdir},
+    )
+    monkeypatch.setattr(
+        invocation_context,
+        "current_command_runtime_paths",
+        lambda **_kwargs: paths,
+    )
+
+    frozen, error = invocation_context._normalize_command_invocation_for_execution(
+        invocation,
+        {},
+        permission_workspace_root=paths.workspace_root,
+    )
+
+    assert frozen is invocation
+    assert error == ""
+    facts = build_tool_decision_facts(
+        "bash",
+        frozen.tool_args,
+        workspace_root=paths.workspace_root,
+        original_args_were_valid_object=True,
+    )
+    assert facts.effective_workdir == ""
+
+
 def test_writeback_failure_does_not_publish_frozen_args(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
