@@ -212,6 +212,7 @@ class ReqMethod(Enum):
     SKILLS_TEAMSKILLS_HUB_VALIDATE = "skills.teamskillshub.validate"
     SKILLS_TEAMSKILLS_HUB_PACK = "skills.teamskillshub.pack"
     SKILLS_TEAMSKILLS_HUB_SEARCH = "skills.teamskillshub.search"
+    SKILLS_SWARMSKILLS_HUB_RECOMMEND = "skills.swarmskillshub.recommend"
     SKILLS_TEAMSKILLS_HUB_INSTALL = "skills.teamskillshub.install"
     SKILLS_TEAMSKILLS_HUB_PUBLISH = "skills.teamskillshub.publish"
     SKILLS_TEAMSKILLS_HUB_DELETE = "skills.teamskillshub.delete"
