@@ -85,6 +85,7 @@ REQUIRED_REVIEWER_FIELDS = frozenset(
 )
 OPTIONAL_REVIEWER_FIELDS = frozenset(
     {
+        "acknowledged_unknowns",
         "manual_reason_code",
         "manual_reason_summary",
         "user_review_hint",
@@ -116,12 +117,13 @@ ISOLATED_AUTO_REVIEWER_PROMPT = (
     "behavior, or login, admin, payment, or account flows. Content "
     "age, duplication, or weak relevance are content quality signals rather "
     "than permission-denial reasons. Parser and final host revalidation are "
-    "authoritative. observed_path_counts and observed_path_targets contain only "
-    "positively observed Core accesses; when path_accesses_complete is false, "
-    "their empty or zero values do not prove that no implicit access occurs. "
-    "literal_hosts, literal_schemes, and literal_urls contain only URL literals "
-    "seen in the current arguments; empty values do not prove that no network "
-    "access occurs."
+    "authoritative. Host-generated filesystem_effect.status and "
+    "network_effect.status describe whether each effect is known or unknown. "
+    "observed counts, targets, and URL literals are positive observations only; "
+    "zero or empty observations never change an unknown effect to known. For "
+    "allow_once, copy every request.required_unknown_acknowledgements entry "
+    "exactly once into acknowledged_unknowns. Never describe an unknown effect "
+    "as absent."
 )
 
 ISOLATED_AUTO_REVIEWER_SCHEMA = {
@@ -129,6 +131,10 @@ ISOLATED_AUTO_REVIEWER_SCHEMA = {
     "confidence": "number between 0 and 1",
     "reason_code": "short machine-readable string",
     "rationale": "short explanation",
+    "acknowledged_unknowns": (
+        "required for allow_once when request requires acknowledgements; "
+        "array containing each required code exactly once"
+    ),
     "manual_reason_code": "required for manual",
     "manual_reason_summary": "required for manual",
     "user_review_hint": "required for manual",
@@ -250,8 +256,21 @@ class ReviewerActionView:
     descriptor_summary: Mapping[str, Any]
     policy_reason: str
     review_evidence: Mapping[str, Any]
+    required_unknown_acknowledgements: tuple[str, ...] = ()
     allowed_outcomes: tuple[str, ...] = ALLOWABLE_REVIEWER_OUTCOMES
     no_auto_allow_reason: str = ""
+
+    @property
+    def effect_statuses(self) -> dict[str, str]:
+        """Return the Host-owned effect status projected into this request."""
+        statuses: dict[str, str] = {}
+        for effect_name in ("filesystem_effect", "network_effect"):
+            effect = self.descriptor_summary.get(effect_name)
+            if isinstance(effect, Mapping):
+                status = str(effect.get("status") or "").strip().lower()
+                if status in {"known", "unknown"}:
+                    statuses[effect_name] = status
+        return statuses
 
     def to_json_dict(self) -> dict[str, Any]:
         """Return the only current-call evidence visible to the model."""
@@ -261,6 +280,9 @@ class ReviewerActionView:
             "no_auto_allow_reason": self.no_auto_allow_reason,
             "phase_scope": "takeover",
             "policy_reason": self.policy_reason,
+            "required_unknown_acknowledgements": list(
+                self.required_unknown_acknowledgements
+            ),
             "review_evidence": _visible_review_evidence(self.review_evidence),
         }
 
@@ -294,12 +316,19 @@ def build_reviewer_action_view(
     """Project one bounded current-call view without Host identity or raw args."""
 
     network = inspect_network_scope(facts)
+    filesystem_status = "known" if facts.accesses_known else "unknown"
+    network_status = "unknown" if facts.capability.high_flex else "known"
     summary: dict[str, Any] = {
-        "path_accesses_complete": facts.accesses_known,
-        "observed_path_counts": {
-            "external": len(facts.external_paths),
-            "read": len(facts.read_paths),
-            "write": len(facts.write_paths),
+        "filesystem_effect": {
+            "status": filesystem_status,
+            "observed_path_counts": {
+                "external": len(facts.external_paths),
+                "read": len(facts.read_paths),
+                "write": len(facts.write_paths),
+            },
+        },
+        "network_effect": {
+            "status": network_status,
         },
         "risk_tier": facts.capability.risk_tier,
         "side_effects": sorted(facts.capability.static_side_effects),
@@ -326,10 +355,19 @@ def build_reviewer_action_view(
             "reason": domain_route.reason,
             "source": domain_route.source,
         }
+    required_unknown_acknowledgements = tuple(
+        effect_name
+        for effect_name, status in (
+            ("filesystem_effect", filesystem_status),
+            ("network_effect", network_status),
+        )
+        if status == "unknown"
+    )
     return ReviewerActionView(
         descriptor_summary=summary,
         policy_reason=str(policy_reason or ""),
         review_evidence=review_evidence,
+        required_unknown_acknowledgements=required_unknown_acknowledgements,
         allowed_outcomes=allowed_outcomes,
         no_auto_allow_reason=str(no_auto_allow_reason or ""),
     )
@@ -532,6 +570,7 @@ class AutoReviewAssessment:
     status: str
     reason_code: str
     reason_summary: str
+    acknowledged_unknowns: tuple[str, ...] = ()
     fallback_reason: str = ""
     manual_reason_code: str = ""
     manual_reason_summary: str = ""
@@ -628,6 +667,26 @@ class AutoReviewer:
                 requested_outcome=outcome,
             )
 
+        acknowledged_unknowns: tuple[str, ...] = ()
+        if outcome == ReviewerOutcome.ALLOW_ONCE:
+            raw_acknowledgements = payload.get("acknowledged_unknowns")
+            if request.required_unknown_acknowledgements:
+                parsed_acknowledgements = _parse_unknown_acknowledgements(
+                    raw_acknowledgements
+                )
+                if parsed_acknowledgements is None or not _acknowledgements_match(
+                    parsed_acknowledgements,
+                    request.required_unknown_acknowledgements,
+                ):
+                    return self._manual("unacknowledged_unknown_effects")
+                acknowledged_unknowns = parsed_acknowledgements
+            elif raw_acknowledgements is not None:
+                parsed_acknowledgements = _parse_unknown_acknowledgements(
+                    raw_acknowledgements
+                )
+                if parsed_acknowledgements is None or parsed_acknowledgements:
+                    return self._manual("unacknowledged_unknown_effects")
+
         reason_code = _sanitize_reason_code(payload["reason_code"])
         reason_summary = _sanitize_reason_summary(payload["rationale"])
         if outcome == ReviewerOutcome.MANUAL and not all(
@@ -654,6 +713,7 @@ class AutoReviewer:
             status={ReviewerOutcome.ALLOW_ONCE: "approved", ReviewerOutcome.DENY: "denied"}.get(outcome, "manual"),
             reason_code=reason_code,
             reason_summary=reason_summary,
+            acknowledged_unknowns=acknowledged_unknowns,
             manual_reason_code=manual_reason_code,
             manual_reason_summary=manual_reason_summary,
             user_review_hint=user_review_hint,
@@ -781,6 +841,29 @@ def _parse_confidence(raw_confidence: Any) -> float | None:
     if 0.0 <= confidence <= 1.0:
         return confidence
     return None
+
+
+def _parse_unknown_acknowledgements(
+    raw_acknowledgements: Any,
+) -> tuple[str, ...] | None:
+    if not isinstance(raw_acknowledgements, list):
+        return None
+    acknowledgements: list[str] = []
+    for raw_code in raw_acknowledgements:
+        if not isinstance(raw_code, str):
+            return None
+        code = raw_code.strip()
+        if not code:
+            return None
+        acknowledgements.append(code)
+    return tuple(acknowledgements)
+
+
+def _acknowledgements_match(
+    actual: tuple[str, ...],
+    required: tuple[str, ...],
+) -> bool:
+    return len(actual) == len(required) and set(actual) == set(required)
 
 
 def _sanitize_reason_code(raw_reason_code: Any) -> str:

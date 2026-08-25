@@ -62,6 +62,40 @@ def test_persistent_audit_keeps_compact_route_provenance(tmp_path: Path) -> None
     assert record["decision_source"] == "auto_reviewer"
 
 
+def test_persistent_audit_keeps_host_effect_uncertainty(tmp_path: Path) -> None:
+    writer = PersistentAuditWriter(data_root=tmp_path / "data")
+    result = writer.write(
+        _facts(tmp_path),
+        decision="allow",
+        reason="reviewer_allow_once",
+        degraded=False,
+        extra={
+            "filesystem_effect_status": "unknown",
+            "network_effect_status": "unknown",
+            "reviewer_acknowledged_unknowns": (
+                "filesystem_effect",
+                "network_effect",
+            ),
+            "reviewer_required_unknowns": (
+                "filesystem_effect",
+                "network_effect",
+            ),
+        },
+    )
+
+    record = json.loads(result.path.read_text(encoding="utf-8"))
+    assert record["filesystem_effect_status"] == "unknown"
+    assert record["network_effect_status"] == "unknown"
+    assert record["reviewer_acknowledged_unknowns"] == [
+        "filesystem_effect",
+        "network_effect",
+    ]
+    assert record["reviewer_required_unknowns"] == [
+        "filesystem_effect",
+        "network_effect",
+    ]
+
+
 def test_persistent_audit_redacts_free_text(tmp_path: Path) -> None:
     writer = PersistentAuditWriter(data_root=tmp_path / "data")
     secret_path = tmp_path / ".env"
