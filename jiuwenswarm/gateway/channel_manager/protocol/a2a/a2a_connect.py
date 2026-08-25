@@ -26,8 +26,12 @@ except ImportError:
 A2A_THOUGHT_METADATA_KEY = "jiuwen_thought"
 
 
+class A2ADependencyMissingError(RuntimeError):
+    """Raised when the optional A2A SDK extra is unavailable."""
+
+
 def _raise_missing_a2a_sdk(exc: ImportError) -> None:
-    raise RuntimeError(
+    raise A2ADependencyMissingError(
         "A2A server is enabled but optional dependency `a2a-sdk[http-server]>=1.0.0` "
         "is not installed. Install with `pip install -e \".[a2a]\"` or `uv sync --extra a2a`."
     ) from exc
@@ -285,7 +289,7 @@ class A2AChannel(BaseChannel):
         if self._running:
             return
         if not self.config.enabled:
-            logger.info("[A2AChannel] disabled by config")
+            logger.info("a2a.ingress disabled by config")
             return
 
         try:
@@ -352,7 +356,7 @@ class A2AChannel(BaseChannel):
                 raise exc
         self._running = True
         logger.info(
-            "[A2AChannel] started: http://%s:%s%s",
+            "a2a.ingress started: http://%s:%s%s",
             self.config.host,
             self.config.port,
             self.config.rpc_path,
@@ -366,7 +370,7 @@ class A2AChannel(BaseChannel):
             try:
                 await self._server_task
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[A2AChannel] shutdown with error: %s", exc)
+                logger.warning("a2a.ingress shutdown with error: %s", exc)
         self._uvicorn_server = None
         self._server_task = None
         for pending in list(self._pending.values()):
@@ -385,7 +389,7 @@ class A2AChannel(BaseChannel):
                 )
             )
         self._pending.clear()
-        logger.info("[A2AChannel] stopped")
+        logger.info("a2a.ingress stopped")
 
     async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
         pending = self._pending.get(str(msg.id))
