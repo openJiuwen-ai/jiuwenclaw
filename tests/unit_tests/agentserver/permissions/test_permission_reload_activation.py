@@ -246,6 +246,28 @@ async def test_reload_uses_exact_activation_boundary_and_clean_projection(
 
 
 @pytest.mark.asyncio
+async def test_code_single_agent_reload_uses_shared_auto_permission_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _ReloadRuntime()
+    adapter = _new_adapter(runtime, permission_rail=None, auto_enabled=False)
+    adapter._session_instance_mode = "code"
+    adapter._session_instance_sub_mode = "normal"
+    candidates: list[_PermissionRail] = []
+
+    await _reload(
+        monkeypatch,
+        adapter,
+        _config(enabled=True, mode="auto"),
+        candidates=candidates,
+    )
+
+    assert adapter._enable_auto_permission is True
+    assert isinstance(adapter._permission_rail, _AutoRail)
+    assert len(candidates) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("instance_mode", "instance_sub_mode", "enabled", "expected_type"),
     [

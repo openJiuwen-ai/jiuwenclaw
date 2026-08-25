@@ -25,6 +25,9 @@ from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts import (
     build_tool_decision_facts,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_capabilities import (
+    install_permission_file_semantics,
+)
 
 
 def _facts(tool_name: str, args: dict[str, object], root: Path, **kwargs: object):
@@ -57,6 +60,62 @@ def test_generic_mcp_uri_risks_are_evidence_not_terminal_authority(tmp_path: Pat
 def test_core_known_workspace_read_can_be_terminal_low_risk(tmp_path: Path) -> None:
     facts = _facts("read_file", {"path": "README.md"}, tmp_path)
     assert terminal_low_risk_route(facts) is not None
+
+
+def test_valid_workspace_lsp_can_be_terminal_low_risk(tmp_path: Path) -> None:
+    install_permission_file_semantics()
+    facts = _facts(
+        "lsp",
+        {
+            "operation": "goToDefinition",
+            "file_path": "src/main.py",
+            "line": 1,
+            "character": 1,
+        },
+        tmp_path,
+    )
+
+    assert terminal_low_risk_route(facts) is not None
+
+
+@pytest.mark.parametrize(
+    "tool_args",
+    [
+        {"operation": "unknown", "file_path": "src/main.py", "line": 1},
+        {"operation": "goToDefinition", "file_path": "src/main.py"},
+        {
+            "operation": "goToDefinition",
+            "file_path": "src/main.py",
+            "line": "first",
+        },
+        {"operation": "workspaceSymbol", "file_path": "", "query": "main"},
+    ],
+)
+def test_invalid_or_unbounded_lsp_is_not_terminal_low_risk(
+    tmp_path: Path,
+    tool_args: dict[str, object],
+) -> None:
+    install_permission_file_semantics()
+    facts = _facts("lsp", tool_args, tmp_path)
+
+    assert terminal_low_risk_route(facts) is None
+
+
+def test_external_lsp_path_is_not_terminal_low_risk_without_engine_hint(
+    tmp_path: Path,
+) -> None:
+    install_permission_file_semantics()
+    external_path = (tmp_path.parent / "outside.py").as_posix()
+    facts = _facts(
+        "lsp",
+        {
+            "operation": "documentSymbol",
+            "file_path": external_path,
+        },
+        tmp_path,
+    )
+
+    assert terminal_low_risk_route(facts) is None
 
 
 def test_unknown_path_and_shell_are_never_promoted(tmp_path: Path) -> None:

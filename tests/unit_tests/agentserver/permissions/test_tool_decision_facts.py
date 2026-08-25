@@ -63,6 +63,33 @@ def test_read_pdf_uses_core_file_access_extraction(tmp_path: Path) -> None:
     assert missing.read_paths == ()
 
 
+def test_lsp_uses_core_file_access_extraction(tmp_path: Path) -> None:
+    install_permission_file_semantics()
+    source_path = tmp_path / "src" / "main.py"
+    facts = _facts(
+        "lsp",
+        {
+            "operation": "goToDefinition",
+            "file_path": str(source_path),
+            "line": 1,
+            "character": 1,
+        },
+        tmp_path,
+    )
+
+    assert facts.accesses_known is True
+    assert facts.read_paths == (source_path.as_posix(),)
+    assert facts.write_paths == ()
+
+    workspace_symbol = _facts(
+        "lsp",
+        {"operation": "workspaceSymbol", "file_path": "", "query": "main"},
+        tmp_path,
+    )
+    assert workspace_symbol.accesses_known is False
+    assert workspace_symbol.read_paths == ()
+
+
 def test_engine_external_paths_are_consumed_not_recomputed(tmp_path: Path) -> None:
     external = (tmp_path.parent / "outside.txt").as_posix()
     facts = _facts(

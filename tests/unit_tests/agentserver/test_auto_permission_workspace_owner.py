@@ -126,8 +126,11 @@ def auto_config(monkeypatch):
     [
         ({"mode": "agent", "work_mode": "work"}, True),
         ({"mode": "agent.plan", "work_mode": "work"}, True),
-        ({"mode": "agent", "work_mode": "code"}, False),
-        ({"mode": "code.normal"}, False),
+        ({"mode": "agent", "work_mode": "code"}, True),
+        ({"mode": "agent.plan", "work_mode": "code"}, True),
+        ({"mode": "code.normal"}, True),
+        ({"mode": "code.plan"}, True),
+        ({"mode": "code.team"}, False),
         ({"mode": "team"}, False),
         ({"mode": "auto_harness"}, False),
     ],
@@ -448,9 +451,7 @@ async def test_existing_auto_owner_survives_transition_to_manual(
     ("params", "expected_mode"),
     [
         ({"mode": "team"}, "team"),
-        ({"mode": "code.normal"}, "code"),
         ({"mode": "auto_harness"}, "auto_harness"),
-        ({"mode": "agent", "work_mode": "code"}, "code"),
     ],
 )
 async def test_existing_auto_owner_does_not_capture_excluded_mode(
@@ -482,7 +483,7 @@ def test_session_owner_accepts_equivalent_or_omitted_root(tmp_path) -> None:
     )
 
 
-@pytest.mark.parametrize("mode", ["team", "code.normal", "auto_harness"])
+@pytest.mark.parametrize("mode", ["team", "code.team", "auto_harness"])
 def test_session_owner_ignores_workspace_changes_for_excluded_mode(
     tmp_path,
     mode: str,

@@ -38,6 +38,9 @@ from jiuwenswarm.agents.harness.common.rails.permissions.openjiuwen_contract imp
 from jiuwenswarm.agents.harness.common.rails.permissions.policy_eval import (
     PolicyEvaluation,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.permission_interrupt_rail import (
+    mark_pre_permission_hard_rejection,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue import (
     RootPermissionQueue,
 )
@@ -48,6 +51,9 @@ from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue_r
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.session_deny import (
     SessionDenyStore,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_capabilities import (
+    install_permission_file_semantics,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts import (
     build_tool_decision_facts,
@@ -82,6 +88,39 @@ def _rail(
         session_deny_store=session_denies,
     )
     return rail, policy, reviewer, base
+
+
+def _real_lsp_rail(
+    tmp_path,
+    *,
+    workspace_level: str,
+    file_guard_enabled: bool = True,
+):
+    rail = build_permission_rail(
+        {
+            "permissions": {
+                "enabled": True,
+                "schema": "tiered_policy",
+                "mode": "auto",
+                "defaults": {"*": "ask"},
+                "tools": {"lsp": "ask"},
+                "file_guard": {
+                    "enabled": file_guard_enabled,
+                    "defaults": {"read": "ask", "write": "ask", "exec": "ask"},
+                    "workspace": {
+                        "read": workspace_level,
+                        "write": workspace_level,
+                        "exec": "ask",
+                    },
+                },
+            }
+        },
+        enable_auto_permission=True,
+        workspace_root=tmp_path,
+    )
+    reviewer = StaticReviewerClient(outcome=ReviewerOutcome.ALLOW_ONCE)
+    rail.auto_reviewer = AutoReviewer(client=reviewer)
+    return rail, reviewer
 
 
 async def test_task_tool_ask_is_control_silent_after_engine(tmp_path) -> None:
@@ -124,6 +163,50 @@ async def test_real_engine_deny_precedes_task_tool_control_silent(tmp_path) -> N
     assert classify_permission_result(result) == "denied"
 
 
+@pytest.mark.parametrize(
+    "tool_name", ["enter_plan_mode", "exit_plan_mode", "switch_mode"]
+)
+async def test_code_control_tools_are_silent_before_allow_capable_paths(
+    tmp_path,
+    tool_name: str,
+) -> None:
+    rail, policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+
+    result = await rail.before_tool_call(
+        tool_name=tool_name,
+        tool_args={},
+        session_id="session-a",
+        user_input={"approved": True, "auto_confirm": True},
+    )
+
+    assert result is None
+    assert len(policy.calls) == 1
+    assert reviewer.requests == []
+    assert base.calls == []
+
+
+async def test_custom_agent_deny_precedes_all_allow_capable_paths(tmp_path) -> None:
+    rail, policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="allow", reason="configured_allow"),
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="Agent",
+        tool_args={"subagent_type": "reviewer", "background": True},
+        session_id="session-a",
+        user_input={"approved": True, "auto_confirm": True},
+    )
+
+    assert classify_permission_result(result) == "denied"
+    assert len(policy.calls) == 1
+    assert reviewer.requests == []
+    assert base.calls == []
+
+
 async def test_engine_fail_closed_has_zero_reviewer_or_base_effect(tmp_path) -> None:
     rail, policy, reviewer, base = _rail(
         tmp_path,
@@ -142,6 +225,112 @@ async def test_engine_fail_closed_has_zero_reviewer_or_base_effect(tmp_path) -> 
 
     assert classify_permission_result(result) == "interrupt"
     assert len(policy.calls) == 1
+    assert reviewer.requests == []
+    assert base.calls == []
+
+
+async def test_lsp_workspace_read_bypasses_reviewer_and_manual_base(tmp_path) -> None:
+    rail, reviewer = _real_lsp_rail(tmp_path, workspace_level="allow")
+    session = _Session()
+    ctx = _runtime_ctx(
+        session,
+        tool_name="lsp",
+        tool_args={
+            "operation": "goToDefinition",
+            "file_path": "src/main.py",
+            "line": 1,
+            "character": 1,
+        },
+    )
+
+    result = await rail.before_tool_call(ctx)
+
+    assert result is None
+    assert reviewer.requests == []
+    assert "deterministic_allow" in repr(ctx.extra)
+    assert "reviewer_lifecycle" in repr(ctx.extra)
+
+
+async def test_invalid_lsp_input_does_not_use_fast_path(tmp_path) -> None:
+    install_permission_file_semantics()
+    rail, policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="lsp",
+        tool_args={
+            "operation": "goToDefinition",
+            "file_path": "src/main.py",
+        },
+        session_id="session-a",
+    )
+
+    assert result is None
+    assert len(policy.calls) == 1
+    assert len(reviewer.requests) == 1
+    assert base.calls == []
+
+
+async def test_lsp_file_guard_ask_does_not_use_fast_path(tmp_path) -> None:
+    source_path = (tmp_path / "src" / "main.py").as_posix()
+    rail, reviewer = _real_lsp_rail(tmp_path, workspace_level="ask")
+
+    result = await rail.before_tool_call(
+        tool_name="lsp",
+        tool_args={
+            "operation": "documentSymbol",
+            "file_path": source_path,
+        },
+        session_id="session-a",
+    )
+
+    assert result is None
+    assert len(reviewer.requests) == 1
+
+
+async def test_lsp_external_path_cannot_fast_allow_when_file_guard_disabled(
+    tmp_path,
+) -> None:
+    rail, reviewer = _real_lsp_rail(
+        tmp_path,
+        workspace_level="allow",
+        file_guard_enabled=False,
+    )
+    ctx = _runtime_ctx(
+        _Session(),
+        tool_name="lsp",
+        tool_args={
+            "operation": "documentSymbol",
+            "file_path": (tmp_path.parent / "outside.py").as_posix(),
+        },
+    )
+
+    result = await rail.before_tool_call(ctx)
+
+    assert result is None
+    assert len(reviewer.requests) == 1
+    assert "deterministic_allow" not in repr(ctx.extra)
+
+
+async def test_pre_permission_hard_rejection_skips_auto_permission(tmp_path) -> None:
+    rail, policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="allow", reason="configured_allow"),
+    )
+    ctx = _runtime_ctx(
+        _Session(),
+        tool_name="bash",
+        tool_args={"command": "mkdir src/generated"},
+    )
+    ctx.extra["_skip_tool"] = True
+    mark_pre_permission_hard_rejection(ctx)
+
+    result = await rail.before_tool_call(ctx)
+
+    assert result is None
+    assert policy.calls == []
     assert reviewer.requests == []
     assert base.calls == []
 
