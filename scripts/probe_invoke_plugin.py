@@ -7,8 +7,8 @@ Two targets:
           ws://127.0.0.1:19690   — CloudPluginClient 直连本地 CloudWsRelay
           不拼接路径。桌面小艺 Work 需已启动。
 
-  mcp-run (agent-runtime-service 单接口对照)
-          {base}/agent-runtime-service/v1/mcp/run
+  mcp-run (agent-runtime-service-ws 单接口对照)
+          {base}/agent-runtime-service-ws/v1/mcp/run
           base 来自 --base / AGENT_RUNTIME_MCP_RUN / AGENT_RUNTIME_BASEURL。
           若环境变量本身已含 /mcp/run，则不再拼接。
 
@@ -42,7 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT.parent
 sys.path.insert(0, str(ROOT))
 
-_MCP_RUN_PATH = "/agent-runtime-service/v1/mcp/run"
+_MCP_RUN_PATH = "/agent-runtime-service-ws/v1/mcp/run"
 _DEFAULT_RELAY = "ws://127.0.0.1:19690"
 _ATOMIC_BUNDLE = "com.atomicservice.5765880207845681341"
 _DEFAULT_PROMPT = "一只柯基在滑板上"
@@ -378,7 +378,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target",
         choices=("relay", "mcp-run"),
         default="relay",
-        help="relay=本地中转（产品路径）；mcp-run=拼接 /agent-runtime-service/v1/mcp/run",
+        help="relay=本地中转；mcp-run=拼接 /agent-runtime-service-ws/v1/mcp/run",
     )
     parser.add_argument("--url", default="", help="完整 WS/HTTP URL；mcp-run 下若无 /mcp/run 会拼接")
     parser.add_argument("--base", default="", help="仅 mcp-run：host/base，拼出 v1/mcp/run")

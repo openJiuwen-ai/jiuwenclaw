@@ -339,22 +339,24 @@ acp_agents:
 #     max_iterations: 300
 #
 agents:
-  # 统一元工具 invoke：经桌面 CloudWsRelay 复用 /ws/link 调云插件 skill（默认关闭）
+  # 统一元工具 invoke：云插件直连 mcp/run，或经桌面 CloudWsRelay 复用 /ws/link（默认关闭）
   # 环境变量：
+  #   AGENT_RUNTIME_MCP_RUN       — 直连完整插件 WS URL（优先于本机中转，不拼接路径）
+  #                                  例：wss://host:18449/agent-runtime-service-ws/v1/mcp/run
   #   XIAOYI_RELAY_WS_URL          — 本机中转（缺省 ws://127.0.0.1:19690；桌面 spawn 注入）
   #   AGENT_RUNTIME_BASEURL       — agent_as_a_tool 分支（可选）
-  #   AGENT_RUNTIME_MCP_RUN       — 遗留：完整插件 WS URL（不拼接路径；默认不用）
+  #   AGENT_RUNTIME_UID           — 数字业务 uid（握手 x-uid 与 extraInfo.userInfo.uid）
+  #   OA_API_KEY / OA_REQUEST_FROM / OA_SANDBOX_ID / OA_HAG_TRACE_ID — mcp/run OA 头
   #   AGENT_RUNTIME_WS_TIMEOUT    — 插件等待超时秒数（缺省 120）
-  # 单接口探针（不走 LLM，需小艺 Work 打开）：python scripts/probe_invoke_plugin.py --dry-run
-  #   产品路径：--target relay
-  #   对照拼接：--target mcp-run --base wss://host:port  →  {base}/agent-runtime-service/v1/mcp/run
-  # 不依赖小艺 Work、直连云端文生图：python scripts/standalone_invoke_image.py --dry-run
-  #   需要 INVOKE_UID（数字 uid）+ INVOKE_UAT 或 INVOKE_BUSINESS_CREDENTIAL
+  # 单接口探针（不走 LLM）：python scripts/probe_invoke_plugin.py --dry-run
+  #   产品本机中转：--target relay（需小艺 Work）
+  #   直连 mcp/run：--target mcp-run --url wss://host:18449/agent-runtime-service-ws/v1/mcp/run
   # 云端能力以 skills/ 文档为准（白名单校验，禁止臆造 bundleName）：
   #   生图  seedreamLite4Skill|SeedreamPro4Skill + bundleName=com.atomicservice.5765880207845681341
   #   生视频 seedanceMiniTask|seedanceMiniTaskQuery + 同上 bundleName
   #   图像理解 imageUnderStandStream + bundleName=xiaoyi
-  # 请求/返回体见 skills/request.txt、skills/response.txt；鉴权由桌面 relay 握手承担
+  # 请求/返回体见 skills/request.txt、skills/response.txt
+  # mcp/run 鉴权为 OA 头；本机中转鉴权由桌面 relay 握手承担
   invoke_tool:
     enabled: false
 

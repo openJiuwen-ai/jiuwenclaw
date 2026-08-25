@@ -27,6 +27,32 @@ CLOUD_PLUGIN_ERRORS = {
 }
 
 
+def _needs_insecure_ssl(url: str) -> bool:
+    """Skip TLS verify for test-domain WSS and raw IP (IP address mismatch)."""
+    import re
+    from urllib.parse import urlparse
+
+    if not (url or "").startswith("wss://"):
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host):
+        return True
+    if ":" in host.strip("[]"):
+        return True
+    return host == "hwcloudtest.cn" or host.endswith(".hwcloudtest.cn")
+
+
+def _insecure_ssl():
+    import ssl
+
+    ctx = ssl._create_unverified_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 @dataclass
 class CloudPluginContext:
     """端侧上下文信息（DM 传入）。"""
@@ -538,7 +564,8 @@ class CloudPluginClient(AgentRuntimeClient):
         )
 
         headers = build_runtime_headers(
-            extra={"x-plugin-session-id": self.plugin_session_id}
+            extra={"x-plugin-session-id": self.plugin_session_id},
+            url=self._base_url,
         )
         if extra:
             headers.update(extra)
@@ -557,6 +584,8 @@ class CloudPluginClient(AgentRuntimeClient):
                 connect_kwargs["additional_headers"] = headers
             else:
                 connect_kwargs["extra_headers"] = headers
+        if _needs_insecure_ssl(self._base_url):
+            connect_kwargs["ssl"] = _insecure_ssl()
         return connect_kwargs
 
     async def _connect_with_retry(

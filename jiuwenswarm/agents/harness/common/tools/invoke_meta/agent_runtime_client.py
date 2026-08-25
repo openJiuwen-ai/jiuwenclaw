@@ -67,7 +67,7 @@ class AgentRuntimeClient:
             build_runtime_headers,
         )
 
-        headers = build_runtime_headers()
+        headers = build_runtime_headers(url=self._base_url)
         if self._default_headers:
             headers.update(self._default_headers)
         if extra:

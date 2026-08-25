@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unit tests for invoke_meta (local CloudWsRelay → /ws/link)."""
+"""Unit tests for invoke_meta (mcp/run OA path + local CloudWsRelay)."""
 
 from __future__ import annotations
 
@@ -22,6 +22,11 @@ from jiuwenswarm.agents.harness.common.tools.invoke_meta.invoke_tool import Invo
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.workspace_context import (
     set_effective_request_workspace_dir,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_mcp_run_env(monkeypatch):
+    monkeypatch.delenv("AGENT_RUNTIME_MCP_RUN", raising=False)
 
 
 @pytest.fixture()
@@ -365,3 +370,108 @@ def test_build_local_relay_headers_include_role(monkeypatch):
     assert headers["x-agent-id"] == "ag1"
     assert "x-sign" in headers
     assert "x-ts" in headers
+
+
+def test_mcp_run_url_preferred_over_relay(monkeypatch):
+    from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
+        is_mcp_run_url,
+        resolve_plugin_runtime_url,
+    )
+
+    mcp = "wss://lfhagmirror.hwcloudtest.cn:18449/agent-runtime-service-ws/v1/mcp/run"
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", mcp)
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://127.0.0.1:19690")
+    resolved = resolve_plugin_runtime_url()
+    assert resolved == mcp
+    assert is_mcp_run_url(resolved)
+    assert "/agent-runtime-service/v1/mcp/run" not in resolved
+    assert "/agent-runtime-service-ws/v1/mcp/run" in resolved
+
+
+def test_relay_url_when_mcp_run_unset(monkeypatch):
+    from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
+        is_mcp_run_url,
+        resolve_plugin_runtime_url,
+    )
+
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://127.0.0.1:19690")
+    resolved = resolve_plugin_runtime_url()
+    assert resolved == "ws://127.0.0.1:19690"
+    assert not is_mcp_run_url(resolved)
+
+
+def test_mcp_run_oa_headers(monkeypatch):
+    monkeypatch.setenv(
+        "AGENT_RUNTIME_MCP_RUN",
+        "wss://host:18449/agent-runtime-service-ws/v1/mcp/run",
+    )
+    monkeypatch.setenv("AGENT_RUNTIME_UID", "30086000686785686")
+    monkeypatch.setenv("OA_API_KEY", "test-key")
+    monkeypatch.setenv("OA_REQUEST_FROM", "jiuwenclaw")
+    from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
+        build_runtime_headers,
+    )
+
+    headers = build_runtime_headers(extra={"x-plugin-session-id": "pluginabc"})
+    assert headers["x-api-key"] == "test-key"
+    assert headers["x-uid"] == "30086000686785686"
+    assert headers["x-plugin-session-id"] == "pluginabc"
+    assert headers["x-request-from"] == "jiuwenclaw"
+    assert "x-relay-role" not in headers
+    assert "x-access-key" not in headers
+
+
+def test_relay_headers_still_local_auth(monkeypatch):
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://127.0.0.1:19690")
+    monkeypatch.setenv("CLAW_XIAOYI_AK", "ak-env")
+    monkeypatch.setenv("CLAW_XIAOYI_SK", "sk-env")
+    monkeypatch.setenv("CLAW_XIAOYI_AGENT_ID", "ag-env")
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime._xiaoyi_channel",
+        lambda: {},
+    )
+    from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
+        build_runtime_headers,
+    )
+
+    headers = build_runtime_headers(url="ws://127.0.0.1:19690")
+    assert headers["x-relay-role"] == "plugin"
+    assert headers["x-access-key"] == "ak-env"
+    assert "x-api-key" not in headers
+
+
+def test_mcp_run_extra_info_uses_request_txt_device(monkeypatch):
+    monkeypatch.setenv(
+        "AGENT_RUNTIME_MCP_RUN",
+        "wss://host:18449/agent-runtime-service-ws/v1/mcp/run",
+    )
+    monkeypatch.setenv("AGENT_RUNTIME_UID", "30086000686785686")
+    monkeypatch.delenv("AGENT_RUNTIME_DEVICE_ID", raising=False)
+    monkeypatch.delenv("X_DEVICE_ID", raising=False)
+    monkeypatch.delenv("CLAW_DEVICE_HOSTNAME", raising=False)
+    monkeypatch.delenv("CLAW_DEVICE_SANDBOX_SYSTEM", raising=False)
+    from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
+        build_plugin_skill_extra_info,
+    )
+
+    extra = build_plugin_skill_extra_info(session_id="sess-mcp")
+    device = extra["context"]["deviceInfo"]
+    assert extra["context"]["userInfo"]["uid"] == "30086000686785686"
+    assert extra["session"]["sessionId"] == "sess-mcp"
+    assert device["deviceName"] == "HAD-W32"
+    assert device["ohosApiVersion"] == 26
+    assert device["x-device-type"] == "2in1"
+    assert device["sysVersion"].startswith("OpenHarmony")
+
+
+def test_needs_insecure_ssl_for_test_host_and_ip():
+    from jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client import (
+        _needs_insecure_ssl,
+    )
+
+    assert _needs_insecure_ssl(
+        "wss://lfhagmirror.hwcloudtest.cn:18449/agent-runtime-service-ws/v1/mcp/run"
+    )
+    assert _needs_insecure_ssl("wss://10.33.87.20:18449/agent-runtime-service-ws/v1/mcp/run")
+    assert not _needs_insecure_ssl("wss://example.com/v1/mcp/run")
+    assert not _needs_insecure_ssl("ws://127.0.0.1:19690")

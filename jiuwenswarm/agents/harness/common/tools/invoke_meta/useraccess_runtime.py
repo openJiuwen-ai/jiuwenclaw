@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Local CloudWsRelay entry for invoke plugin skills (same /ws/link as xiaoyi)."""
+"""Plugin invoke transport: direct mcp/run (test.py) or local CloudWsRelay."""
 
 from __future__ import annotations
 
@@ -17,20 +17,39 @@ logger = logging.getLogger(__name__)
 # Desktop CloudWsRelay local port (claw_desktop JIUWEN_XIAOYI_RELAY_PORT).
 _DEFAULT_RELAY_WS = "ws://127.0.0.1:19690"
 _RELAY_URL_ENVS = ("XIAOYI_RELAY_WS_URL", "CLAW_XIAOYI_RELAY_WS_URL", "USERACCESS_PLUGIN_WS_URL")
-# Legacy direct UserAccess URL (optional override; prefer local relay).
-_LEGACY_PLUGIN_URL_ENVS = ("AGENT_RUNTIME_MCP_RUN",)
+# Direct plugin WS (test.py): full URL, do not concatenate.
+# Example: wss://host:18449/agent-runtime-service-ws/v1/mcp/run
+_MCP_RUN_ENV = "AGENT_RUNTIME_MCP_RUN"
 _AGENT_BASE_ENV = "AGENT_RUNTIME_BASEURL"
 _UID_ENV = "AGENT_RUNTIME_UID"
 _DEVICE_ID_ENVS = ("AGENT_RUNTIME_DEVICE_ID", "X_DEVICE_ID")
 
+# skills/request.txt HarmonyOS deviceInfo when mcp/run has no desktop getDeviceInfo.
+_REQUEST_TXT_DEVICE_INFO: dict[str, Any] = {
+    "deviceName": "HAD-W32",
+    "ohosApiVersion": 26,
+    "romVersion": "HAD-W24 7.0.0.38(ENTC293E19R2P1log)",
+    "sysVersion": "OpenHarmony-7.0.0.38(Beta2)",
+    "x-device-id": "25847210-0e59-81f6-89f8-44adafe6bad1",
+    "x-device-type": "2in1",
+}
+
+
+def is_mcp_run_url(url: str) -> bool:
+    """True when URL is the Runtime mcp/run WS (including agent-runtime-service-ws)."""
+    return "/mcp/run" in (url or "").rstrip("/")
+
 
 def resolve_plugin_runtime_url() -> str:
-    """Prefer local CloudWsRelay; fall back to legacy direct plugin WS URL."""
+    """Prefer AGENT_RUNTIME_MCP_RUN (full URL, no path concat) over local CloudWsRelay.
+
+    Desktop injects XIAOYI_RELAY_WS_URL=ws://127.0.0.1:19690; that must not hide an
+    explicit mcp/run URL used by the verified test.py path.
+    """
+    mcp = (os.environ.get(_MCP_RUN_ENV) or "").strip()
+    if mcp:
+        return mcp
     for key in _RELAY_URL_ENVS:
-        value = (os.environ.get(key) or "").strip()
-        if value:
-            return value
-    for key in _LEGACY_PLUGIN_URL_ENVS:
         value = (os.environ.get(key) or "").strip()
         if value:
             return value
@@ -88,6 +107,25 @@ def resolve_device_sandbox_system() -> str:
     return (os.environ.get("CLAW_DEVICE_SANDBOX_SYSTEM") or "").strip()
 
 
+def build_oa_plugin_headers(*, plugin_session_id: str = "", extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Handshake headers for direct mcp/run (aligned with test.py / jiuwenclaw OA)."""
+    uid = resolve_runtime_uid()
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "x-request-from": (os.environ.get("OA_REQUEST_FROM") or "jiuwenclaw").strip(),
+        "x-sandbox-id": (os.environ.get("OA_SANDBOX_ID") or "rytest").strip(),
+        "x-api-key": (os.environ.get("OA_API_KEY") or "").strip(),
+        "x-hag-trace-id": (os.environ.get("OA_HAG_TRACE_ID") or "rytest001").strip(),
+    }
+    if uid:
+        headers["x-uid"] = uid
+    if plugin_session_id:
+        headers["x-plugin-session-id"] = plugin_session_id
+    if extra:
+        headers.update({k: v for k, v in extra.items() if v})
+    return headers
+
+
 def build_local_relay_headers(*, extra: dict[str, str] | None = None) -> dict[str, str]:
     """Headers for AgentServer → CloudWsRelay (localAuth + x-relay-role=plugin)."""
     xiaoyi = _xiaoyi_channel()
@@ -129,11 +167,17 @@ def build_local_relay_headers(*, extra: dict[str, str] | None = None) -> dict[st
     return headers
 
 
-def build_runtime_headers(*, extra: dict[str, str] | None = None) -> dict[str, str]:
+def build_runtime_headers(*, extra: dict[str, str] | None = None, url: str | None = None) -> dict[str, str]:
     """Handshake headers for plugin invoke.
 
-    Local relay path uses localAuth (not businessCredential — that stays in desktop relay).
+    mcp/run uses OA headers (test.py); local relay uses localAuth.
     """
+    resolved = (url or "").strip() or resolve_plugin_runtime_url()
+    plugin_session_id = ""
+    if extra:
+        plugin_session_id = str(extra.get("x-plugin-session-id") or "")
+    if is_mcp_run_url(resolved):
+        return build_oa_plugin_headers(plugin_session_id=plugin_session_id, extra=extra)
     return build_local_relay_headers(extra=extra)
 
 
@@ -144,8 +188,9 @@ def build_plugin_skill_extra_info(
 ) -> dict[str, Any]:
     """Build extraInfo aligned with skills/request.txt.
 
-    deviceInfo 优先用桌面 getDeviceInfo 注入的环境变量（与 CloudWsRelay / model-proxy 同源）：
-    AGENT_RUNTIME_DEVICE_ID / CLAW_DEVICE_HOSTNAME / CLAW_DEVICE_SANDBOX_SYSTEM。
+    uid 与握手 x-uid 同源（AGENT_RUNTIME_UID / 渠道 uid）。
+    mcp/run 且无桌面 getDeviceInfo 时，deviceInfo 用 request.txt 鸿蒙缺省；
+    本机 relay 仍映射 CLAW_DEVICE_HOSTNAME / CLAW_DEVICE_SANDBOX_SYSTEM。
     """
     uid = resolve_runtime_uid()
     device_id = resolve_runtime_device_id()
@@ -177,17 +222,26 @@ def build_plugin_skill_extra_info(
     except Exception:  # noqa: BLE001
         pass
 
-    # PC 端映射：hostname→deviceName，sandboxSystem→x-device-type/sysVersion（非鸿蒙字段，与样例同结构）
+    use_request_txt_device = is_mcp_run_url(resolve_plugin_runtime_url()) and not (
+        hostname or sandbox_system or device_id
+    )
+    if use_request_txt_device:
+        device_info: dict[str, Any] = dict(_REQUEST_TXT_DEVICE_INFO)
+        session_device_id = str(device_info.get("x-device-id") or "")
+    else:
+        device_info = {
+            "deviceName": hostname or "sandbox_pc",
+            "ohosApiVersion": 0,
+            "romVersion": "",
+            "sysVersion": sandbox_system or "",
+            "x-device-id": device_id,
+            "x-device-type": sandbox_system or "pc",
+        }
+        session_device_id = device_id
+
     return {
         "context": {
-            "deviceInfo": {
-                "deviceName": hostname or "sandbox_pc",
-                "ohosApiVersion": 0,
-                "romVersion": "",
-                "sysVersion": sandbox_system or "",
-                "x-device-id": device_id,
-                "x-device-type": sandbox_system or "pc",
-            },
+            "deviceInfo": device_info,
             "userInfo": {
                 "uid": uid,
             },
@@ -195,7 +249,7 @@ def build_plugin_skill_extra_info(
         "session": {
             "sessionId": str(resolved_session),
             "interactionId": int(interaction_id or 0),
-            "deviceId": device_id,
+            "deviceId": session_device_id,
         },
     }
 
@@ -252,8 +306,10 @@ def missing_agent_baseurl_error() -> dict[str, Any]:
 __all__ = [
     "build_cloud_plugin_context",
     "build_local_relay_headers",
+    "build_oa_plugin_headers",
     "build_plugin_skill_extra_info",
     "build_runtime_headers",
+    "is_mcp_run_url",
     "missing_agent_baseurl_error",
     "missing_plugin_url_error",
     "resolve_agent_runtime_baseurl",
