@@ -107,7 +107,7 @@ def _ensure_enterprise_config_loader() -> tuple[Any, Any, Any]:
     ):
         return _load_effective_enterprise_config, _service_config_slot, _extension_config_slot
 
-    from jiuwenclaw.infrastructure.module_importer import (
+    from jiuwenswarm.infrastructure.module_importer import (
         import_manager_ws_client_module,
     )
 
@@ -147,7 +147,7 @@ async def load_effective_service_config_for_request(request: AgentRequest) -> An
 async def load_all_service_configs() -> list[dict[str, Any]]:
     """查询当前 ``jiuwenclaw_id`` 下全量 ``service_config_template``（enabled=True）。"""
     try:
-        from jiuwenclaw.infrastructure.module_importer import (
+        from jiuwenswarm.infrastructure.module_importer import (
             import_manager_ws_client_module,
         )
 
@@ -199,7 +199,7 @@ def _coalesce_loaded_invoke_ids(
         if raw_ws and str(raw_ws).strip():
             workspace_dir = str(raw_ws).strip()
 
-    from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+    from jiuwenswarm.infrastructure.module_importer import import_manager_ws_client_module
 
     loader_mod = import_manager_ws_client_module("core.enterprise_config.loader")
     ctx = loader_mod.routing_context_from_request(request)

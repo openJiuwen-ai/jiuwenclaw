@@ -26,7 +26,9 @@ from jiuwenswarm.gateway.storage_assembly.setup import (
     is_session_map_repository_enabled,
     is_storage_repositories_enabled,
     resolve_storage_instance_id,
+    setup_gateway_storage_repositories,
     setup_session_map_repository,
+    teardown_gateway_storage_repositories,
     teardown_session_map_repository,
 )
 
@@ -50,7 +52,9 @@ __all__ = [
     "is_session_map_repository_enabled",
     "is_storage_repositories_enabled",
     "resolve_storage_instance_id",
+    "setup_gateway_storage_repositories",
     "setup_session_map_repository",
+    "teardown_gateway_storage_repositories",
     "teardown_session_map_repository",
     "wire_manager_ws_table_store",
 ]

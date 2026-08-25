@@ -175,14 +175,18 @@ class TestSessionMapWithStorage:
     @staticmethod
     def test_session_map_set_and_find(storage_dir, monkeypatch):
         """set_session_id / find_session_id 应读写 Session 并持久化。"""
+        import sys
+
         from jiuwenswarm.gateway.routing.session_map import SessionMap, SessionMapScope
         from jiuwenswarm.gateway.routing.session_storage import LocalSessionStorage
 
         store_path = storage_dir / "session_map_default.json"
-        monkeypatch.setattr(
-            "jiuwenswarm.gateway.routing.session_map.LocalSessionStorage",
-            lambda: LocalSessionStorage(store_path=store_path),
-        )
+        session_storage_mod = sys.modules["jiuwenswarm.gateway.routing.session_storage"]
+
+        def _resolve_storage() -> session_storage_mod.SessionStorage:
+            return session_storage_mod.LocalSessionStorage(store_path=store_path)
+
+        monkeypatch.setattr(SessionMap, "_resolve_storage", staticmethod(_resolve_storage))
         monkeypatch.delenv("AGENT_RUNTIME", raising=False)
 
         sm = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
@@ -222,7 +226,7 @@ class TestSessionMapWithStorage:
 
 
 # ---------------------------------------------------------------------------
-# RedisSessionStorage / failover reload
+# RedisSessionStorage
 # ---------------------------------------------------------------------------
 
 class _AsyncDictRedis:
@@ -270,7 +274,10 @@ class _TestRedisSessionStorage:
         )
 
     def has_identity_key(self, identity_key: str) -> bool:
-        return bool(self._inner._redis and self._inner._redis.peek(self._inner._redis_key(identity_key)))
+        return bool(
+            self._inner._redis
+            and self._inner._redis.peek(self._inner._redis_key(identity_key))
+        )
 
     def get(self, identity_key: str):
         return self._inner.get(identity_key)
@@ -304,8 +311,8 @@ async def test_redis_session_storage_fetches_existing_session_without_local_cach
     assert test_storage.get_all()[identity_key].session_id == raw_session["session_id"]
 
 
-def test_session_map_reload_after_failover() -> None:
-    """PRIMARY writes Redis; STANDBY promotion sees same Session via reload()."""
+def test_session_map_reload_with_redis_storage() -> None:
+    """Injected RedisSessionStorage: reload refreshes in-memory cache from Redis."""
     from jiuwenswarm.gateway.routing.session_map import SessionMap, SessionMapScope
 
     shared_redis = _AsyncDictRedis()
@@ -321,57 +328,6 @@ def test_session_map_reload_after_failover() -> None:
 
     map_b = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
     map_b._storage = storage_b  # type: ignore[assignment]
-    # get() 可直读 Redis；reload 用于全量刷新内存缓存（晋升 PRIMARY）
     map_b.reload()
     assert map_b.find_session_id("feishu", "chat-1", "bot-1", "user-1") == sid
     assert "feishu::chat-1::bot-1" in map_b._storage.get_all()
-
-
-def test_message_handler_reload_session_map() -> None:
-    from typing import cast
-
-    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
-    from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
-    from jiuwenswarm.gateway.routing.session_map import SessionMap, SessionMapScope
-    from jiuwenswarm.common.schema.message import Message, ReqMethod
-
-    shared_redis = _AsyncDictRedis()
-    MessageHandler._instance = None
-
-    handler = MessageHandler(cast(AgentServerClient, object()))
-    storage = _TestRedisSessionStorage(shared_redis, "gateway-1")
-    sm = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
-    sm._storage = storage  # type: ignore[assignment]
-    handler._session_map = sm
-
-    sid = "feishu::chat-1::bot-1::abc123::def456"
-    sm.set_session_id("feishu", "chat-1", "bot-1", "user-1", sid)
-
-    MessageHandler._instance = None
-    promoted = MessageHandler(cast(AgentServerClient, object()))
-    storage2 = _TestRedisSessionStorage(shared_redis, "gateway-1")
-    sm2 = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
-    sm2._storage = storage2  # type: ignore[assignment]
-    promoted._session_map = sm2
-    promoted._session_map_channel_types = frozenset({"feishu_enterprise"})
-    promoted._control_channel_types = {"feishu", "feishu_enterprise"}
-
-    promoted.reload_session_map()
-    msg = Message(
-        id="req-1",
-        type="req",
-        channel_id="feishu_enterprise",
-        session_id="external-chat-1",
-        params={"query": "hi"},
-        timestamp=123.0,
-        ok=True,
-        req_method=ReqMethod.CHAT_SEND,
-        provider="feishu",
-        chat_id="chat-1",
-        bot_id="bot-1",
-        user_id="user-1",
-    )
-    promoted._apply_channel_state(msg)
-    assert msg.session_id == sid
-
-    MessageHandler._instance = None

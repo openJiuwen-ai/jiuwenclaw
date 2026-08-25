@@ -335,13 +335,19 @@ async def test_config_save_handlers_respond_before_agent_reload_finishes(monkeyp
     heartbeat_service = FakeHeartbeatService()
     persisted: list[tuple[str, dict]] = []
 
+    async def _record_channel(channel_id, conf):
+        persisted.append((channel_id, dict(conf)))
+
+    async def _record_subsection(channel_id, subsection, conf, keep_keys):
+        persisted.append((channel_id, conf))
+
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_channel_in_config",
-        lambda channel_id, conf: persisted.append((channel_id, dict(conf))),
+        _record_channel,
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_channel_subsection_with_cleanup",
-        lambda channel_id, subsection, conf, keep_keys: persisted.append((channel_id, conf)),
+        _record_subsection,
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_heartbeat_in_config",
@@ -1408,9 +1414,12 @@ async def test_channel_feishu_set_conf_apps_mode(monkeypatch):
     cm = FakeChannelManager()
     recorded_subsection: list[tuple] = []
 
+    async def _record_subsection(cid, sub, conf, keep_keys):
+        recorded_subsection.append((cid, sub, conf, keep_keys))
+
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_channel_subsection_with_cleanup",
-        lambda cid, sub, conf, keep_keys: recorded_subsection.append((cid, sub, conf, keep_keys)),
+        _record_subsection,
     )
 
     _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
@@ -1458,9 +1467,12 @@ async def test_channel_xiaoyi_set_conf_apps_mode(monkeypatch):
     cm = FakeChannelManager()
     recorded_subsection: list[tuple] = []
 
+    async def _record_subsection(cid, sub, conf, keep_keys):
+        recorded_subsection.append((cid, sub, conf, keep_keys))
+
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_channel_subsection_with_cleanup",
-        lambda cid, sub, conf, keep_keys: recorded_subsection.append((cid, sub, conf, keep_keys)),
+        _record_subsection,
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._clear_agent_config_cache",
@@ -1509,9 +1521,12 @@ async def test_channel_feishu_set_conf_apps_empty_list(monkeypatch):
     cm = FakeChannelManager()
     recorded_subsection: list[tuple] = []
 
+    async def _record_subsection(cid, sub, conf, keep_keys):
+        recorded_subsection.append((cid, sub, conf, keep_keys))
+
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_channel_subsection_with_cleanup",
-        lambda cid, sub, conf, keep_keys: recorded_subsection.append((cid, sub, conf, keep_keys)),
+        _record_subsection,
     )
 
     _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
@@ -1624,9 +1639,13 @@ async def test_channel_wechat_set_conf_accepts_valid_numeric(monkeypatch):
     """合法数值 → 保存成功并落入 channel manager。"""
     channel = FakeWebChannel()
     cm = FakeChannelManager()
+
+    async def _noop_update_channel(channel_id, conf):
+        return None
+
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_channel_in_config",
-        lambda channel_id, conf: None,
+        _noop_update_channel,
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._clear_agent_config_cache",

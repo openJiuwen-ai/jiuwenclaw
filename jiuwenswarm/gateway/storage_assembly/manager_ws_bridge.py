@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 def wire_manager_ws_table_store(ctx: StorageContext) -> None:
     """在 Gateway 启动时注册 persistent store 为 Manager WS 写库入口。"""
-    from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+    from jiuwenswarm.infrastructure.module_importer import import_manager_ws_client_module
 
     access = import_manager_ws_client_module("infrastructure.table_store_access")
     access.set_table_store_provider(ctx.persistent)
@@ -19,7 +19,7 @@ def wire_manager_ws_table_store(ctx: StorageContext) -> None:
 
 def clear_manager_ws_table_store() -> None:
     """测试或 shutdown 时解除注入。"""
-    from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+    from jiuwenswarm.infrastructure.module_importer import import_manager_ws_client_module
 
     access = import_manager_ws_client_module("infrastructure.table_store_access")
     access.clear_table_store_provider()

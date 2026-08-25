@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
 from jiuwenswarm.common.utils import logger
-from jiuwenswarm.extensions.redis.redis_runtime import get_declared_deployment_mode
 from jiuwenswarm.gateway.routing.session_storage import (
     LocalSessionStorage,
-    RedisSessionStorage,
     SessionStorage,
 )
 
@@ -129,10 +126,7 @@ def _session_to_json_dict(sess: Session) -> dict[str, Any]:
 class SessionMap:
     """Map stable identity (per config scope) -> :class:`Session` (agent ``session_id`` + invoke ids).
 
-    支持两种部署模式:
-    - standalone (单机模式): 所有读写走本地文件
-    - active-standby (主备模式，且 AGENT_RUNTIME 开启): 所有读写走 Redis
-
+    存储：Repository 已注入时走 PersistentStore；否则走 ``LocalSessionStorage``（``.checkpoint/session_map.json``）。
     不在 Gateway 侧分配 session_id；由 AgentServer ``session.create`` 创建后经 ``set_session_id`` 写入。
     """
 
@@ -155,12 +149,6 @@ class SessionMap:
                 read_through=session_map_read_through_enabled(),
             )
 
-        # 未注入 Repository 时走旧路径
-        if (
-            os.getenv("AGENT_RUNTIME", "").strip()
-            and get_declared_deployment_mode() == "active-standby"
-        ):
-            return RedisSessionStorage()
         return LocalSessionStorage()
 
     def get_identity_key(
@@ -243,5 +231,5 @@ class SessionMap:
             self._storage.set(key, sess)
 
     def reload(self) -> None:
-        """Reload all sessions from storage backend (called when promoted to PRIMARY)."""
+        """从存储后端重新加载（如本地缓存需刷新时）。"""
         self._storage.load()

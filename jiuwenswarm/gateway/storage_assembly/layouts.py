@@ -137,12 +137,21 @@ _YAML_ONLY_SECTIONS: dict[str, _YamlSectionSpec] = {
 
 _JSON_AND_DB_STORES: dict[str, _JsonAndDbSpec] = {
     "session_map": ("session_map.json", "map", ("identity_key",)),
-    "cron_job": (
-        "cron_jobs/{service_id}/{agent_id}/jobs.json",
-        "list",
-        ("id",),
-    ),
 }
+
+
+def _legacy_gateway_cron_job_layout(path_template: str | None) -> StoreLayout:
+    """Gateway cron：沿用 ``gateway/cron/service_*/agent_*/cron_jobs.json`` 与 CronJobStore 包装格式。"""
+    file: FileLayout | None = None
+    if path_template is not None:
+        file = FileLayout(
+            path=path_template,
+            format="json",
+            shape="list",
+            key_fields=("id",),
+            json_document_key="jobs",
+        )
+    return StoreLayout(file=file, db=DbLayout(table="cron_job"))
 
 
 def _build_layouts(
@@ -150,6 +159,7 @@ def _build_layouts(
     persistent_root: Path | None,
     config_file: Path | None,
     session_map_file: Path | None = None,
+    cron_jobs_path_template: str | None = None,
 ) -> dict[str, StoreLayout]:
     """按形态工厂组装全部业务 name → StoreLayout。"""
     from jiuwenswarm.gateway.config.enterprise.catalog import (
@@ -157,6 +167,8 @@ def _build_layouts(
     )
 
     layouts: dict[str, StoreLayout] = {}
+
+    layouts["cron_job"] = _legacy_gateway_cron_job_layout(cron_jobs_path_template)
 
     for name, (rel, shape, key_fields) in _JSON_AND_DB_STORES.items():
         if name == "session_map":
@@ -215,11 +227,13 @@ def build_gateway_store_registry(
     persistent_root: Path | None = None,
     config_file: Path | None = None,
     session_map_file: Path | None = None,
+    cron_jobs_path_template: str | None = None,
 ) -> StoreRegistry:
     """装配 name 对应的落盘布局。
 
     personal 传入绝对 ``persistent_root`` / ``config_file``；
     ``session_map_file`` 默认与 ``LocalSessionStorage`` 相同（``.checkpoint/session_map.json``），
+    ``cron_jobs_path_template`` 默认与 ``resolve_gateway_cron_jobs_path`` 相同，
     由 ``setup._create_persistent`` 注入。
     enterprise 可不传（file 为空，YAML-only name 不注册，只挂 DB）。
     """
@@ -229,6 +243,7 @@ def build_gateway_store_registry(
             persistent_root=persistent_root,
             config_file=config_file,
             session_map_file=session_map_file,
+            cron_jobs_path_template=cron_jobs_path_template,
         )
     )
     return registry

@@ -1628,16 +1628,45 @@ async def _run_with_telemetry(
     try:
         from jiuwenswarm.gateway.storage_assembly.setup import (
             is_session_map_repository_enabled,
-            setup_session_map_repository,
+            is_storage_repositories_enabled,
+            setup_gateway_storage_repositories,
         )
 
-        if is_session_map_repository_enabled(full_cfg):
-            gateway_storage_ctx = await setup_session_map_repository(full_cfg)
+        if is_session_map_repository_enabled(full_cfg) or is_storage_repositories_enabled(
+            full_cfg
+        ):
+            gateway_storage_ctx = await setup_gateway_storage_repositories(full_cfg)
             if gateway_storage_ctx is not None:
-                logger.info("[App] SessionMap wired to PersistentStore repository")
+                wired: list[str] = []
+                if is_session_map_repository_enabled(full_cfg):
+                    wired.append("session_map")
+                if is_storage_repositories_enabled(full_cfg):
+                    wired.extend(
+                        (
+                            "channel",
+                            "permissions",
+                            "logging",
+                            "memory",
+                            "cron",
+                        )
+                    )
+                logger.info(
+                    "[App] PersistentStore repositories wired: %s",
+                    ", ".join(wired),
+                )
+                if is_storage_repositories_enabled(full_cfg):
+                    try:
+                        from jiuwenswarm.common.utils import reload_logging_levels
+
+                        await reload_logging_levels()
+                    except Exception as log_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[App] logging repository reload failed: %s",
+                            log_exc,
+                        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "[App] SessionMap repository setup failed, using legacy storage: %s",
+            "[App] storage repository setup failed, using legacy storage: %s",
             exc,
         )
         gateway_storage_ctx = None
@@ -2718,7 +2747,6 @@ async def _run_with_telemetry(
 
             async def _on_leader_role_change(role: Role) -> None:
                 if role == Role.PRIMARY:
-                    message_handler.reload_session_map()
                     await cron_controller.reload_scheduler()
                     cron_controller.set_scheduler_active(True)
                 else:
@@ -2921,13 +2949,13 @@ async def _run_with_telemetry(
         if gateway_storage_ctx is not None:
             try:
                 from jiuwenswarm.gateway.storage_assembly.setup import (
-                    teardown_session_map_repository,
+                    teardown_gateway_storage_repositories,
                 )
 
-                await teardown_session_map_repository(gateway_storage_ctx)
+                await teardown_gateway_storage_repositories(gateway_storage_ctx)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[App] SessionMap repository teardown failed: %s",
+                    "[App] storage repository teardown failed: %s",
                     exc,
                 )
 
