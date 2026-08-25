@@ -471,13 +471,22 @@ def _instance_process_metadata(
     import psutil
 
     launcher_pid = os.getpid()
-    try:
-        pgid = os.getpgid(launcher_pid)
-        sid = os.getsid(launcher_pid)
-        dedicated_session = pgid == launcher_pid and sid == launcher_pid
-    except OSError:
+    getpgid = getattr(os, "getpgid", None)
+    getsid = getattr(os, "getsid", None)
+    if getpgid is None or getsid is None:
+        # Windows has no POSIX process-group/session APIs.  The schema v2
+        # record remains useful there for PID birth-time validation, while
+        # stop uses the Windows taskkill process-tree path.
         pgid = sid = None
         dedicated_session = False
+    else:
+        try:
+            pgid = getpgid(launcher_pid)
+            sid = getsid(launcher_pid)
+            dedicated_session = pgid == launcher_pid and sid == launcher_pid
+        except OSError:
+            pgid = sid = None
+            dedicated_session = False
 
     witnesses: list[dict[str, object]] = []
     for name, process in processes.items():

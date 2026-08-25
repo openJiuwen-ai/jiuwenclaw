@@ -2088,6 +2088,22 @@ class TestIssue2788SafeStop:
             assert start_services._launcher_create_time() == 123.5
 
     @staticmethod
+    def test_windows_metadata_skips_posix_process_group_calls():
+        from jiuwenswarm import start_services
+
+        # Windows does not expose these POSIX APIs.  A named launch must still
+        # produce a v2 record instead of raising AttributeError.
+        with patch.object(start_services.os, "getpgid", None, create=True), \
+             patch.object(start_services.os, "getsid", None, create=True):
+            metadata = start_services._instance_process_metadata({}, 123.5)
+
+        assert metadata["schema_version"] == 2
+        assert metadata["launcher"] == {"pid": os.getpid(), "create_time": 123.5}
+        assert metadata["pgid"] is None
+        assert metadata["sid"] is None
+        assert metadata["dedicated_session"] is False
+
+    @staticmethod
     def test_named_launcher_writes_process_birth_time_to_pid_file(tmp_path):
         from jiuwenswarm import start_services
 
