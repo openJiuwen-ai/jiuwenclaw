@@ -9,6 +9,10 @@ import { useTranslation } from 'react-i18next';
 import { ChevronRight, Loader2, Music2 } from 'lucide-react';
 import MoreIcon from '../../assets/work-mode/more-rimless.svg?react';
 import NewConversationIcon from '../../assets/new_conversation.svg?react';
+import UpImgIcon from '../../assets/upImg.svg?react';
+import TipIcon from '../../assets/tip.svg?react';
+import UpFileIcon from '../../assets/upFile.svg?react';
+import LinkIcon from '../../assets/link.svg?react';
 import { webRequest } from "../../services/webClient";
 import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
@@ -2509,8 +2513,8 @@ export function SkillPanel({
           </div>
         </div>
 
-        <div className="mt-4 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-8" style={{ paddingLeft: '224px', paddingRight: '224px' }}>
+        <div className="mt-4 w-full flex items-center justify-between gap-2">
+          <div className="flex-shrink-0 flex items-center gap-8" style={{ paddingLeft: '224px' }}>
             <button
               onClick={() => setActiveTab("marketplace")}
               className={`py-2 text-sm border-b-2 ${
@@ -2545,7 +2549,7 @@ export function SkillPanel({
               {t('skills.tabs.skillGraph')}
             </button>
           </div>
-          <div className="flex items-center gap-3" style={{ paddingRight: '224px' }}>
+          <div className="flex items-center gap-3 ml-auto" style={{ paddingRight: '224px', width:'796px', justifyContent: 'flex-end' }}>
             {activeTab === "my" && (
               <>
                 {/* 已发布/未发布筛选 */}
@@ -2633,7 +2637,7 @@ export function SkillPanel({
               </>
             )}
             {(activeTab === "my" || activeTab === "marketplace") && (
-              <div className="relative" style={{ width: '360px' }}>
+              <div className="relative flex-1 min-w-0" style={{ maxWidth: '360px' }}>
                 <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z" />
                 </svg>
@@ -4088,10 +4092,7 @@ export function SkillPanel({
                 className="flex items-start gap-1.5 rounded-[8px] px-3 py-2 text-xs text-text"
                 style={{ backgroundColor: '#DEECFF', width: '502px' }}
               >
-                <svg className="w-3.5 h-3.5 shrink-0 mt-0.5 text-[#1476FF]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  <circle cx="12" cy="12" r="10" />
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4M12 16h.01" />
-                </svg>
+                <TipIcon className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                 <span className="leading-4">{t('skills.uploadSkillModal.notice')}</span>
               </div>
             </div>
@@ -4110,9 +4111,7 @@ export function SkillPanel({
                 className="flex flex-col items-center justify-center gap-2 rounded-[12px] border border-dashed border-border cursor-pointer hover:bg-[#EEEEEE]"
                 style={{ width: '502px', height: '160px', backgroundColor: '#F5F5F5' }}
               >
-                <svg className="w-10 h-10 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-                </svg>
+                <UpFileIcon className="w-10 h-10 text-text-muted" />
                 <span className="text-sm text-text-muted">
                   {uploadSkillPath.trim()
                     ? uploadSkillPath
@@ -4420,10 +4419,7 @@ export function SkillPanel({
                 className="mx-6 mb-2 flex items-center gap-1.5 rounded-[6px] px-3 text-xs text-text flex-shrink-0"
                 style={{ backgroundColor: '#DEECFF', height: '34px' }}
               >
-                <svg className="w-3.5 h-3.5 shrink-0 text-[#1476FF]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  <circle cx="12" cy="12" r="10" />
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4M12 16h.01" />
-                </svg>
+                <TipIcon className="w-3.5 h-3.5 shrink-0" />
                 <span>{t('skills.publishForm.noticeText')}</span>
                 <a
                   href={t('skills.publishForm.noticeUrl')}
@@ -4432,9 +4428,7 @@ export function SkillPanel({
                   className="flex items-center gap-0.5 text-[#1476FF] hover:underline"
                 >
                   {t('skills.publishForm.noticeView')}
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M14 5h5v5M19 5l-9 9M19 14v5a1 1 0 01-1 1H6a1 1 0 01-1-1V7a1 1 0 011-1h5" />
-                  </svg>
+                  <LinkIcon className="w-3 h-3" />
                 </a>
                 <button
                   type="button"
@@ -4550,9 +4544,7 @@ export function SkillPanel({
                   className="flex items-center justify-center rounded-[6px] border border-dashed border-border bg-secondary/30 cursor-pointer hover:bg-secondary/50"
                   style={{ width: '100px', height: '100px' }}
                 >
-                  <svg className="w-8 h-8 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 3.75h16.5a1.5 1.5 0 011.5 1.5v13.5a1.5 1.5 0 01-1.5 1.5H3.75a1.5 1.5 0 01-1.5-1.5V5.25a1.5 1.5 0 011.5-1.5z" />
-                  </svg>
+                  <UpImgIcon className="w-8 h-8 text-text-muted" />
                 </div>
                 <span className="block mt-1.5 text-xs text-text-muted">
                   {t('skills.publishForm.skillIconHint')}
