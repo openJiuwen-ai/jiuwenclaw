@@ -623,7 +623,7 @@ class TaskExecutionRail(DeepAgentRail):
         self,
         session_id: str,
         overrides: dict[str, str],
-    ) -> None:
+    ) -> int:
         """Atomically update item statuses in the persisted task-list file.
 
         Only the ``status`` field of items whose id appears in ``overrides``
@@ -631,25 +631,38 @@ class TaskExecutionRail(DeepAgentRail):
         write is atomic (tmp file + os.replace) so a crash cannot leave a
         half-written file. id resolution matches
         _build_map_from_todo_items: item.get("id", str(index)).
+
+        Returns the number of overrides that matched a task item. Raises
+        RuntimeError when the file is missing/not a JSON list, or when fewer
+        overrides matched than requested (stale in-memory task map vs. the
+        on-disk file). Callers MUST treat a raise as "the flush did not fully
+        land" and fail closed (fall back to _apply_skill_complete_block)
+        instead of letting skill_complete through on an unverified state.
         """
         todo_path = self._get_todo_workspace_path(session_id)
         if todo_path is None or not todo_path.exists():
-            return
+            raise RuntimeError(
+                f"todo.json not found at {todo_path!r}; cannot auto-flush"
+            )
         with open(todo_path, "r", encoding="utf-8") as f:
             items = json.load(f)
         if not isinstance(items, list):
-            return
+            raise RuntimeError("todo.json is not a JSON list; cannot auto-flush")
 
-        changed = False
+        changed = 0
         for index, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
             tid = item.get("id", str(index))
             if tid in overrides:
                 item["status"] = overrides[tid]
-                changed = True
-        if not changed:
-            return
+                changed += 1
+        if changed != len(overrides):
+            raise RuntimeError(
+                f"auto-flush matched {changed}/{len(overrides)} todo ids; "
+                "in-memory todo map is stale relative to todo.json — "
+                "failing closed"
+            )
 
         todo_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_fd, tmp_path_str = tempfile.mkstemp(
@@ -667,6 +680,7 @@ class TaskExecutionRail(DeepAgentRail):
             except OSError:
                 pass
             raise
+        return changed
 
     @staticmethod
     def _flush_target_status(incomplete_status: str) -> str:
@@ -679,18 +693,84 @@ class TaskExecutionRail(DeepAgentRail):
         """
         return "completed"
 
+    def _resolve_todo_modify_tool(self) -> Any | None:
+        """Return the registered ``todo_modify`` tool so we can share its lock.
+
+        Mirrors ``JiuWenSwarmDeepAdapter._cancel_pending_todos``: resolve the
+        tool card from the deep agent's ``ability_manager``, then the live
+        tool instance via ``Runner.resource_mgr``. That instance carries the
+        shared ``TodoLockManager`` the model's own ``todo_modify`` calls use,
+        so a read-modify-write guarded by its ``operation(session_id)`` is
+        mutually exclusive with a concurrent ``todo_modify`` — closing the
+        lost-update window that ``os.replace`` alone cannot (parallel_tool_calls
+        can emit ``todo_modify`` + ``skill_complete`` in the same turn).
+
+        Returns None when the tool/runner is unreachable (cold path, tests);
+        callers fall back to an unlocked-but-still-verified flush.
+        """
+        da = self._deep_agent
+        if da is None:
+            return None
+        ability_manager = getattr(da, "ability_manager", None)
+        if ability_manager is None:
+            return None
+        try:
+            from openjiuwen.core.runner import Runner
+
+            tool_card = ability_manager.get("todo_modify")
+            if tool_card is None:
+                return None
+            return Runner.resource_mgr.get_tool(tool_card.id)
+        except Exception:
+            logger.debug(
+                "[TaskExecutionRail] resolve todo_modify tool failed",
+                exc_info=True,
+            )
+            return None
+
+    def _verify_no_incomplete_after_flush(self, session_id: str) -> None:
+        """Reload the persisted task-list and assert no incomplete items remain.
+
+        Fail-closed gate: any incomplete item seen after persist (a stale id
+        map that skipped some overrides, or a concurrent writer that re-added
+        a pending/in_progress item before we released the lock) surfaces as a
+        raise so the caller falls back to ``_apply_skill_complete_block``
+        instead of letting ``skill_complete`` proceed on an unverified state.
+        """
+        reloaded = self._build_map_from_todo_items(
+            self._load_todo_from_json(session_id)
+        )
+        if self._has_incomplete_todos(reloaded):
+            incomplete = [
+                tid
+                for tid, task in reloaded.items()
+                if str(task.get("status", "pending")).lower()
+                not in self._TODO_DONE_STATUSES
+            ]
+            raise RuntimeError(
+                "skill_complete auto-flush left incomplete todos after "
+                f"persist: {incomplete} (session={session_id}); failing closed"
+            )
+
     async def _flush_incomplete_todos_on_skill_complete(
         self, ctx: AgentCallbackContext
     ) -> None:
         """Auto-finalize incomplete todos so skill_complete proceeds without
         a model round.
 
-        Reuses the shared _sync_todo_and_emit_transitions pipeline: persist the
-        flushed statuses to the task-list file, snapshot the pre-flush map, then let
-        the existing diff+emit logic produce the same task.start/complete/
-        update events the model would have produced via todo_modify. No new
-        event types. Raises on persistence failure so the caller can fall back
-        to the block.
+        Reuses the shared ``TodoLockManager`` from the registered
+        ``todo_modify`` tool so the read-modify-write is mutually exclusive
+        with a concurrent ``todo_modify`` (parallel_tool_calls can issue both
+        in one turn; without the lock, the two write paths would race and
+        ``os.replace`` only prevents half-files, not lost updates). Under the
+        lock we persist the flushed statuses, reload, and FAIL CLOSED: if any
+        incomplete task remains (persistence miss, stale id map, or a
+        concurrent writer) we raise so ``before_tool_call`` falls back to
+        ``_apply_skill_complete_block`` instead of letting skill_complete
+        through. The subsequent ``_sync_todo_and_emit_transitions`` reuses the
+        existing diff+emit pipeline so the same task.start/complete events the
+        model would have produced via ``todo_modify`` are emitted. No new event
+        types.
         """
         if ctx.session is None:
             return
@@ -708,10 +788,40 @@ class TaskExecutionRail(DeepAgentRail):
         if not overrides:
             return
 
-        # Persist first so _sync_todo_and_emit_transitions reloads the new state
-        self._persist_todo_statuses(session_id, overrides)
+        modify_tool = self._resolve_todo_modify_tool()
+        lock_manager = (
+            getattr(modify_tool, "_lock_manager", None)
+            if modify_tool is not None
+            else None
+        )
 
-        # Reuse the existing diff+emit pipeline (reads the task-list file, emits events)
+        if lock_manager is not None:
+            # Hold the session lock across persist + verify so a concurrent
+            # todo_modify cannot interleave a stale-snapshot write that reverts
+            # the flush (lost update). asyncio.Lock is non-reentrant, so we do
+            # raw stdlib I/O here rather than calling the tool's
+            # load_todos/save_todos (which would re-acquire and deadlock).
+            async with lock_manager.operation(session_id):
+                self._persist_todo_statuses(session_id, overrides)
+                self._verify_no_incomplete_after_flush(session_id)
+        else:
+            # Shared lock unreachable (ability_manager/Runner not ready, or
+            # todo_modify not registered). Persist + verify anyway; the
+            # post-write verify still fails closed on a reverted state. The
+            # mutual-exclusion window vs a concurrent todo_modify is not closed
+            # on this path, so log it for observability.
+            logger.warning(
+                "[TaskExecutionRail] shared todo lock unavailable; "
+                "auto-flush proceeding without mutual exclusion "
+                "(session=%s)",
+                session_id,
+            )
+            self._persist_todo_statuses(session_id, overrides)
+            self._verify_no_incomplete_after_flush(session_id)
+
+        # Reuse the existing diff+emit pipeline (reads the task-list file,
+        # emits events) — outside the lock to avoid blocking todo_modify
+        # during stream writes.
         await self._sync_todo_and_emit_transitions(ctx)
 
     # ------------------------------------------------------------------
