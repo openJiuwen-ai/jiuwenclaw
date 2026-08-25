@@ -741,12 +741,11 @@ class TaskExecutionRail(DeepAgentRail):
             self._load_todo_from_json(session_id)
         )
         if self._has_incomplete_todos(reloaded):
-            incomplete = [
-                tid
-                for tid, task in reloaded.items()
-                if str(task.get("status", "pending")).lower()
-                not in self._TODO_DONE_STATUSES
-            ]
+            incomplete: list[str] = []
+            for tid, task in reloaded.items():
+                status = str(task.get("status", "pending")).lower()
+                if status not in self._TODO_DONE_STATUSES:
+                    incomplete.append(tid)
             raise RuntimeError(
                 "skill_complete auto-flush left incomplete todos after "
                 f"persist: {incomplete} (session={session_id}); failing closed"
