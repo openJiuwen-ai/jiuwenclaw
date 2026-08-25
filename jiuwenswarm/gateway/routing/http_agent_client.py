@@ -152,10 +152,23 @@ class HttpSseAgentServerClient(AgentServerClient):
     def server_ready(self) -> bool:
         return self._server_ready
 
-    def _ensure_connected(self) -> httpx.AsyncClient:
-        if self._http is None or not self._running or not self._api_root:
-            raise RuntimeError("未连接 AgentServer HTTP，请先调用 connect(uri)")
+    def _ensure_http(self) -> httpx.AsyncClient:
+        if self._http is None:
+            self._http = httpx.AsyncClient(
+                timeout=httpx.Timeout(self._timeout_s, connect=_CONNECT_TIMEOUT_SECONDS),
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                follow_redirects=False,
+                trust_env=False,
+            )
+            self._owns_http = True
         return self._http
+
+    def _resolve_api_root(self, base_url: str | None) -> str:
+        if base_url:
+            return normalize_agent_http_base(base_url)
+        if not self._running or not self._api_root:
+            raise RuntimeError("未连接 AgentServer HTTP，请先调用 connect(uri)")
+        return self._api_root
 
     async def connect(self, uri: str) -> None:
         if self._running:
@@ -168,12 +181,7 @@ class HttpSseAgentServerClient(AgentServerClient):
             )
         self._base_url = uri.rstrip("/")
         self._api_root = normalize_agent_http_base(uri)
-        if self._http is None:
-            self._http = httpx.AsyncClient(
-                timeout=httpx.Timeout(self._timeout_s, connect=_CONNECT_TIMEOUT_SECONDS),
-                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-            )
-            self._owns_http = True
+        self._ensure_http()
         health_url = f"{self._api_root}/health"
         logger.info("[HttpSseAgentServerClient] 正在连接: %s", health_url)
         response = await self._http.get(health_url, headers={"Accept": "application/json"})
@@ -213,10 +221,13 @@ class HttpSseAgentServerClient(AgentServerClient):
         self._api_root = None
         logger.info("[HttpSseAgentServerClient] 已断开")
 
-    async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
-        http = self._ensure_connected()
+    async def send_request(
+        self, envelope: E2AEnvelope, *, base_url: str | None = None
+    ) -> AgentResponse:
+        http = self._ensure_http()
+        api_root = self._resolve_api_root(base_url)
         envelope.is_stream = False
-        assembled = assemble_rest_request(envelope, base_url=self._api_root or "")
+        assembled = assemble_rest_request(envelope, base_url=api_root)
         channel_id = str(envelope.channel or "web")
         rid = str(envelope.request_id or "")
         logger.info(
@@ -234,17 +245,19 @@ class HttpSseAgentServerClient(AgentServerClient):
             json=assembled.json_body,
             params=assembled.query,
         )
+        _raise_for_pod_http_error(response, base_url=base_url)
         payload = _response_json(response, request_id=rid)
         return http_unary_to_agent_response(
             payload, channel_id=channel_id, request_id=rid
         )
 
     async def send_request_stream(
-        self, envelope: E2AEnvelope
+        self, envelope: E2AEnvelope, *, base_url: str | None = None
     ) -> AsyncIterator[AgentResponseChunk]:
-        http = self._ensure_connected()
+        http = self._ensure_http()
+        api_root = self._resolve_api_root(base_url)
         envelope.is_stream = True
-        assembled = assemble_rest_request(envelope, base_url=self._api_root or "")
+        assembled = assemble_rest_request(envelope, base_url=api_root)
         channel_id = str(envelope.channel or "web")
         rid = str(envelope.request_id or "")
         logger.info(
@@ -264,6 +277,7 @@ class HttpSseAgentServerClient(AgentServerClient):
             params=assembled.query,
             timeout=timeout,
         ) as response:
+            _raise_for_pod_http_error(response, base_url=base_url)
             if response.status_code >= 400:
                 body = await response.aread()
                 payload = _bytes_json(body, request_id=rid)
@@ -301,7 +315,7 @@ class HttpSseAgentServerClient(AgentServerClient):
                 return
             url = f"{api_root}/events/stream"
             try:
-                http = self._ensure_connected()
+                http = self._ensure_http()
                 timeout = httpx.Timeout(None, connect=_CONNECT_TIMEOUT_SECONDS)
                 async with http.stream("GET", url, timeout=timeout) as response:
                     response.raise_for_status()
@@ -332,6 +346,16 @@ class HttpSseAgentServerClient(AgentServerClient):
                     _PUSH_RETRY_SECONDS,
                 )
             await asyncio.sleep(_PUSH_RETRY_SECONDS)
+
+
+def _raise_for_pod_http_error(
+    response: httpx.Response, *, base_url: str | None
+) -> None:
+    """企业按次指定 Pod 时，5xx/429 抛给编排换 Pod；开源钉死那台仍转成 ok=False。"""
+    if not base_url:
+        return
+    if response.status_code >= 500 or response.status_code == 429:
+        response.raise_for_status()
 
 
 def _response_json(response: httpx.Response, *, request_id: str) -> dict[str, Any]:

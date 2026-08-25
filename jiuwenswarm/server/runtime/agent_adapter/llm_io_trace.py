@@ -221,6 +221,29 @@ def format_llm_assistant_for_trace(obj: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
+def _resolve_trace_ids(session_id: str, request_id: str) -> tuple[str, str]:
+    """从 session 注册表获取最新 request_id。
+
+    supervisor task 的 ContextVar 在 task 创建时冻结，后续请求的
+    request_id 无法通过 ContextVar 传播，session 注册表弥补这一缺口。
+    """
+    if session_id:
+        try:
+            from jiuwenswarm.perf.context import get_request_context
+
+            ctx = get_request_context(session_id=session_id)
+            if ctx is not None:
+                rid = str(ctx.get("request_id") or "")
+                if rid:
+                    return session_id, rid
+        except Exception:
+            logger.debug(
+                "[llm_trace] session registry fallback failed",
+                exc_info=True,
+            )
+    return session_id, request_id
+
+
 def _trace_header(
     *,
     session_id: str,
@@ -230,6 +253,7 @@ def _trace_header(
     event: str,
     event_id: str = "",
 ) -> str:
+    session_id, request_id = _resolve_trace_ids(session_id, request_id)
     it = "" if iteration is None else str(iteration)
     eid = event_id or _current_event_id()
     event_id_str = f"{eid!r}" if eid else ""
@@ -442,6 +466,7 @@ def _tool_trace_header(
     event: str,
 ) -> str:
     """工具调用 trace 行头部，复用 LLM_IO_TRACE 前缀以便统一日志解析。"""
+    session_id, request_id = _resolve_trace_ids(session_id, request_id)
     it = "" if iteration is None else str(iteration)
     eid = _current_tool_event_id()
     event_id_str = f"{eid!r}" if eid else ""
