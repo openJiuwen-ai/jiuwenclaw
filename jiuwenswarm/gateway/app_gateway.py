@@ -1713,7 +1713,14 @@ async def _run_with_telemetry(
     _cleanup_task = start_background_cleanup()
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
-    channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
+    from jiuwenswarm.gateway.channel_config_overlay import channel_config_overlay_enabled
+
+    _channel_db_overlay = channel_config_overlay_enabled()
+    # active-standby：channel_config DB；standalone / distributed：yaml 直传。
+    if _channel_db_overlay:
+        channel_manager = ChannelManager(message_handler, config={})
+    else:
+        channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
     # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
     message_handler.set_channel_manager(channel_manager)
     updater_service = UpdaterService()
@@ -2679,7 +2686,41 @@ async def _run_with_telemetry(
         )
 
     channel_manager.set_config_callback(_apply_channel_config)
-    await channel_manager.set_config(initial_channels_conf)
+    if _channel_db_overlay:
+        from jiuwenswarm.gateway.channel_config_overlay import (
+            ChannelConfigChange,
+            apply_channel_change_to_runtime,
+            apply_channel_config_db_overlay,
+            register_channel_config_reload,
+        )
+
+        async def _reload_channels_from_db(
+            change: ChannelConfigChange | None = None,
+        ) -> None:
+            """REST 写库后：优先用变更增量 patch；无变更信息时回退全量读 DB。"""
+            try:
+                if change is not None:
+                    current = channel_manager.get_channels_config()
+                    channels = apply_channel_change_to_runtime(current, change)
+                    logger.info(
+                        "[App] channels patched incrementally op=%s channel_id=%s",
+                        change.op,
+                        change.row.get("channel_id"),
+                    )
+                else:
+                    channels, _ = await apply_channel_config_db_overlay()
+                    logger.info("[App] channels reloaded from channel_config DB (full)")
+                await channel_manager.set_config(channels)
+            except Exception:  # noqa: BLE001
+                logger.exception("[App] channel_config reload failed")
+
+        await register_channel_config_reload(_reload_channels_from_db)
+        channels_for_runtime, applied = await apply_channel_config_db_overlay()
+        if applied:
+            logger.info("[App] initial channels loaded from channel_config DB (db-only)")
+        await channel_manager.set_config(channels_for_runtime)
+    else:
+        await channel_manager.set_config(initial_channels_conf)
     _schedule_agent_prewarm_sync(
         "agent-prewarm-sync-after-startup",
         delay_seconds=3.0,
@@ -2721,6 +2762,15 @@ async def _run_with_telemetry(
                     message_handler.reload_session_map()
                     await cron_controller.reload_scheduler()
                     cron_controller.set_scheduler_active(True)
+                    # STANDBY 期间可能错过 Manager config.push；升主时全量 reload 补齐。
+                    if _channel_db_overlay:
+                        logger.info(
+                            "[App] PRIMARY elected, reload channels from channel_config DB"
+                        )
+                        try:
+                            await _reload_channels_from_db(None)
+                        except Exception:  # noqa: BLE001
+                            logger.exception("[App] reload channels on promotion failed")
                 else:
                     cron_controller.set_scheduler_active(False)
 

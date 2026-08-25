@@ -9,11 +9,11 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw.gateway.channel_config_reload import (
+from jiuwenswarm.gateway.channel_config_reload import (
     channel_config_reload_change_for_row,
     maybe_trigger_channel_config_reload,
 )
-from jiuwenclaw.gateway.channel_config_overlay import ChannelConfigChange
+from jiuwenswarm.gateway.channel_config_overlay import ChannelConfigChange
 
 from ...infrastructure.utils import format_ts, get_jiuwenclaw_id, utc_now
 from ...models.application_config_models import CHANNEL_CONFIG_TABLE_DEF
