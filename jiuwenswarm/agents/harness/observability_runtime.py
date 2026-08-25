@@ -5,8 +5,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import logging
 import threading
 from typing import Any
+
+from jiuwenswarm.common.openjiuwen_rail_compat import filter_unsupported_kwargs
+
+logger = logging.getLogger(__name__)
 
 _RUNTIMES = frozenset({"agent", "team"})
 _ACTIVE_RUNTIMES: set[str] = set()
@@ -16,18 +21,33 @@ _DEMAND_LOCK = threading.RLock()
 # runtime acquires a demand; those callers retain ownership of its lifecycle.
 _PROVIDER_OWNED = False
 _TRAJECTORY_SPAN_PROCESSOR: Any | None = None
+_TRAJECTORY_UNAVAILABLE = False
 
 
 def get_trajectory_span_processor() -> Any:
-    """Return the trajectory processor shared by all JiuwenClaw runtimes."""
-    global _TRAJECTORY_SPAN_PROCESSOR
+    """Return the trajectory processor shared by all JiuwenClaw runtimes.
+
+    Returns ``None`` when the installed openjiuwen SDK does not ship
+    ``TrajectorySpanProcessor``. Callers treat that as optional capture.
+    """
+    global _TRAJECTORY_SPAN_PROCESSOR, _TRAJECTORY_UNAVAILABLE
     with _DEMAND_LOCK:
+        if _TRAJECTORY_UNAVAILABLE:
+            return None
         if _TRAJECTORY_SPAN_PROCESSOR is not None:
             return _TRAJECTORY_SPAN_PROCESSOR
 
-        from openjiuwen.agent_evolving.trajectory.processor import (
-            TrajectorySpanProcessor,
-        )
+        try:
+            from openjiuwen.agent_evolving.trajectory.processor import (
+                TrajectorySpanProcessor,
+            )
+        except ModuleNotFoundError:
+            _TRAJECTORY_UNAVAILABLE = True
+            logger.warning(
+                "openjiuwen trajectory processor is unavailable; "
+                "evolution span capture is disabled"
+            )
+            return None
 
         _TRAJECTORY_SPAN_PROCESSOR = TrajectorySpanProcessor()
         return _TRAJECTORY_SPAN_PROCESSOR
@@ -84,10 +104,17 @@ def acquire_observability_demand(
         from openjiuwen.agent_teams.observability import init_observability
 
         provider_existed = is_initialized()
-        init_observability(
-            observability_config,
-            additional_span_processors=(get_trajectory_span_processor(),),
-        )
+        processor = get_trajectory_span_processor()
+        extra_processors = (processor,) if processor is not None else ()
+        init_kwargs = {"additional_span_processors": extra_processors}
+        compatible_kwargs = filter_unsupported_kwargs(init_observability, init_kwargs)
+        dropped = set(init_kwargs) - set(compatible_kwargs)
+        if dropped:
+            logger.warning(
+                "openjiuwen init_observability does not accept %s; skipping",
+                ", ".join(sorted(dropped)),
+            )
+        init_observability(observability_config, **compatible_kwargs)
         if not is_initialized():
             raise RuntimeError(
                 f"{runtime} observability initialization did not create a provider"
@@ -118,7 +145,8 @@ def release_observability_demand(runtime: str) -> None:
 
 def reset_observability_demands() -> None:
     """Reset demand bookkeeping for isolated tests."""
-    global _PROVIDER_OWNED
+    global _PROVIDER_OWNED, _TRAJECTORY_UNAVAILABLE
     with _DEMAND_LOCK:
         _ACTIVE_RUNTIMES.clear()
         _PROVIDER_OWNED = False
+        _TRAJECTORY_UNAVAILABLE = False

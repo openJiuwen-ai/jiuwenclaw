@@ -479,7 +479,7 @@ def get_skill_evolution_enabled(config: dict[str, Any] | None) -> bool:
     skill_evolution = evolution.get("skill_evolution")
     if isinstance(skill_evolution, bool):
         return skill_evolution
-    return evolution.get("enabled") is True
+    return bool(evolution.get("enabled"))
 
 
 def get_evolution_enabled(config: dict[str, Any] | None) -> bool:

@@ -620,11 +620,13 @@ class TestAgentObservabilityForce:
         self._reset()
         calls = {"init": 0, "shutdown": 0}
         monkeypatch.setattr(ao, "get_config", lambda: {"agent_observability": {"enabled": False}})
-        monkeypatch.setattr(obs, "is_initialized", lambda: False)
+        state = {"initialized": False}
+        monkeypatch.setattr(obs, "is_initialized", lambda: state["initialized"])
         monkeypatch.setattr(obs, "ObservabilityConfig", lambda **kw: kw)
 
-        def fake_init(_cfg):
+        def fake_init(_cfg, **_kwargs):
             calls["init"] += 1
+            state["initialized"] = True
 
         monkeypatch.setattr(obs, "init_observability", fake_init)
         monkeypatch.setattr(

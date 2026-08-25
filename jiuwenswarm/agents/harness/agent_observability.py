@@ -315,6 +315,7 @@ def shutdown_agent_observability() -> None:
     except Exception as exc:
         logger.warning("[AgentObservability] shutdown failed: %s", exc)
 
+
 # ── Per-run root span ───────────────────────────────────────────
 # openjiuwen's OtelCallbackHandler skips LLM/tool span creation when no parent
 # span exists (``get_team_span`` / ``get_current_agent_span`` both None — see

@@ -42,6 +42,70 @@ def test_trajectory_processor_is_shared_across_runtimes(monkeypatch):
     assert second is first
 
 
+def test_trajectory_processor_returns_none_when_sdk_module_missing(monkeypatch):
+    import builtins
+
+    monkeypatch.setattr(observability_runtime, "_TRAJECTORY_SPAN_PROCESSOR", None)
+    monkeypatch.setattr(observability_runtime, "_TRAJECTORY_UNAVAILABLE", False)
+    real_import = builtins.__import__
+
+    def _import(name, globals=None, locals=None, fromlist=(), level=0):
+        if "agent_evolving.trajectory.processor" in name:
+            raise ModuleNotFoundError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+
+    assert observability_runtime.get_trajectory_span_processor() is None
+    assert observability_runtime.get_trajectory_span_processor() is None
+    assert observability_runtime._TRAJECTORY_UNAVAILABLE is True
+
+
+def test_acquire_observability_skips_missing_trajectory_processor(monkeypatch):
+    calls = []
+    monkeypatch.setattr(observability_runtime, "_TRAJECTORY_SPAN_PROCESSOR", None)
+    monkeypatch.setattr(observability_runtime, "_TRAJECTORY_UNAVAILABLE", True)
+    state = {"initialized": False}
+    monkeypatch.setattr(observability, "is_initialized", lambda: state["initialized"])
+    monkeypatch.setattr(
+        observability,
+        "init_observability",
+        lambda _config, **kwargs: (
+            calls.append(kwargs),
+            state.__setitem__("initialized", True),
+        ),
+    )
+
+    observability_runtime.acquire_observability_demand(
+        "agent",
+        observability_config=object(),
+    )
+
+    assert calls[0]["additional_span_processors"] == ()
+
+
+def test_acquire_observability_drops_unsupported_span_processor_kwarg(monkeypatch):
+    calls = []
+    monkeypatch.setattr(observability_runtime, "_TRAJECTORY_SPAN_PROCESSOR", object())
+    monkeypatch.setattr(observability_runtime, "_TRAJECTORY_UNAVAILABLE", False)
+    state = {"initialized": False}
+    monkeypatch.setattr(observability, "is_initialized", lambda: state["initialized"])
+
+    def _init(_config, *, span_exporter_override=None):
+        del span_exporter_override
+        calls.append(True)
+        state["initialized"] = True
+
+    monkeypatch.setattr(observability, "init_observability", _init)
+
+    observability_runtime.acquire_observability_demand(
+        "agent",
+        observability_config=object(),
+    )
+
+    assert calls == [True]
+
+
 def test_agent_evolution_enables_observability_without_manual_switch(monkeypatch):
     requests = []
     monkeypatch.setattr(
