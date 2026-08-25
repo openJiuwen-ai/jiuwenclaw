@@ -103,10 +103,15 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
     models = config.get("models", {})
     if isinstance(models, dict):
         for entry in models.values():
-            if isinstance(entry, dict):
-                mcc = entry.get("model_client_config")
-                if isinstance(mcc, dict) and "custom_headers" in mcc:
-                    mcc["custom_headers"] = _parse_custom_headers(mcc["custom_headers"])
+            # models.defaults 等列表型键：逐条目走同一归一化
+            # （此前只处理 dict 值，defaults 列表里的 custom_headers 空串漏网，
+            #  会在 TeamAgentSpec 校验期抛出 dict_type 错误）
+            candidates = entry if isinstance(entry, list) else [entry]
+            for item in candidates:
+                if isinstance(item, dict):
+                    mcc = item.get("model_client_config")
+                    if isinstance(mcc, dict) and "custom_headers" in mcc:
+                        mcc["custom_headers"] = _parse_custom_headers(mcc["custom_headers"])
 
     react = config.get("react", {})
     if isinstance(react, dict):

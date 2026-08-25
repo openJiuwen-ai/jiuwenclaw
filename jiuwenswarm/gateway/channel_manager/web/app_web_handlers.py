@@ -3108,6 +3108,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "model": str(meta.get("model", "")),
             "work_mode": str(meta.get("work_mode") or DEFAULT_WEB_WORK_MODE),
             "expert_id": str(meta.get("expert_id", "")),
+            # 专家团：会话团队态判定的权威源（默认 "agent" 保持存量兼容）
+            "expert_type": str(meta.get("expert_type", "agent")),
+            # 粘性留痕：曾绑过团（卸载后仍 "team"），供前端切换弹窗跨重启判定
+            "was_expert_type": str(meta.get("was_expert_type", "")),
+            # 最近绑定记录（卸载后保留）：退团归档成员面板的 roster 解析源
+            "last_expert_id": str(meta.get("last_expert_id", "")),
         }
 
     async def _project_get_sessions(ws, req_id, params, session_id):

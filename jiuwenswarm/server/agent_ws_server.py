@@ -4222,6 +4222,22 @@ class AgentWebSocketServer:
                                     team_name,
                                     exc,
                                 )
+                            # 级联清理团队 DB 目录（team_home），防磁盘缓慢累积
+                            if team_name:
+                                try:
+                                    from jiuwenswarm.server.runtime.expert.expert_service import (
+                                        cleanup_expert_group_team_db,
+                                    )
+
+                                    cleanup_expert_group_team_db(team_name)
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.warning(
+                                        "[AgentWebSocketServer] team DB cleanup failed: "
+                                        "session_id=%s team_name=%s error=%s",
+                                        target,
+                                        team_name,
+                                        exc,
+                                    )
                         resp = AgentResponse(
                             request_id=request.request_id,
                             channel_id=request.channel_id,
@@ -8338,6 +8354,47 @@ class AgentWebSocketServer:
             params["project_dir"] = project_dir
             params["work_mode"] = final_work_mode
 
+            # 专家团判型：session.create 携带团包 expert_id 时即 fetch+校验
+            # 判型，mode 收敛为 team，绑定字段随 init metadata 一次写全，避免
+            # "create 后未 load 就 chat" 的半绑态。失败即拒绝 create，不写脏状态。
+            expert_id_param = str(params.get("expert_id") or "").strip()
+            expert_binding: dict[str, str] = {}
+            if expert_id_param:
+                from jiuwenswarm.server.runtime.expert import expert_service as _expert_svc
+                from jiuwenswarm.server.runtime.expert import expert_store as _expert_store
+
+                try:
+                    _pkg_type, _pkg_dir, _pkg_warnings = (
+                        await _expert_svc.fetch_and_classify_expert(expert_id_param)
+                    )
+                except (
+                    _expert_store.ExpertNotFound,
+                    _expert_store.ExpertRepoUnavailable,
+                    _expert_store.InvalidExpertPackage,
+                ) as exc:
+                    _code = {
+                        "ExpertNotFound": "NOT_FOUND",
+                        "ExpertRepoUnavailable": "REPO_UNAVAILABLE",
+                        "InvalidExpertPackage": "INVALID_PACKAGE",
+                    }[type(exc).__name__]
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload={"error": str(exc), "code": _code},
+                    )
+                    wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                    async with send_lock:
+                        await send_wire_payload(ws, wire)
+                    return
+                if _pkg_type == "team":
+                    expert_binding = {
+                        "expert_type": "team",
+                        "team_template_id": _expert_svc.resolve_expert_group_template_id(),
+                    }
+                    canonical_mode = "team"
+                    params["mode"] = "team"
+
             is_swarm = bool(params.get("is_swarm")) or canonical_mode in {
                 "team",
                 "team.plan",
@@ -8424,7 +8481,14 @@ class AgentWebSocketServer:
                     project_id=project_id,
                     work_mode=final_work_mode,
                     cron_id=str(params.get("cron_id") or "").strip(),
-                    expert_id=str(params.get("expert_id") or "").strip(),
+                    expert_id=expert_id_param,
+                    expert_type=expert_binding.get("expert_type", "agent"),
+                    team_name=(
+                        _expert_svc.build_expert_group_team_name(expert_id_param, session_id)
+                        if expert_binding
+                        else ""
+                    ),
+                    team_template_id=expert_binding.get("team_template_id", ""),
                     channel_metadata=channel_metadata,
                 )
                 if not external_tui_session:

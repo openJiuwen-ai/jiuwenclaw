@@ -66,6 +66,7 @@ PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
 SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
 TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
+TEAM_MEMBER_IDENTITY = "swarm.team_member_identity"
 
 
 def _workspace_root(ctx: SwarmBuildContext) -> str | None:
@@ -342,6 +343,66 @@ def _build_team_workspace_report_path_rail(
     )
 
 
+class TeamMemberIdentityInput(ConstructionInput):
+    """Construction inputs for the team member identity rail.
+
+    全部经 param_field 传入(随 TeamAgentSpec 序列化,冷恢复/分布式重建不丢);
+    非专家团(装配期未渲染身份文本)identity_text 为空,provider 返回 None 不挂载。
+    """
+
+    role: str = param_field(
+        default="",
+        description="Member role (leader / teammate),决定身份块称谓(主理人/成员)。",
+    )
+    display_name: str = param_field(
+        default="",
+        description="Member display name(团包模板 agent_card.name)。",
+    )
+    group_display: str = param_field(
+        default="",
+        description="专家团显示名(团包 manifest)。",
+    )
+    identity_text: dict[str, str] = param_field(
+        default_factory=dict,
+        description="装配期渲染好的身份块({cn, en} 双份);空则不挂载。",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_MEMBER_IDENTITY,
+    description="Injects the member's expert-group identity as a standalone "
+                "PromptSection (P:10); skipped when no identity text was rendered.",
+    input_model=TeamMemberIdentityInput,
+)
+def _build_team_member_identity_rail(
+        params: dict[str, Any],
+        context: SwarmBuildContext,
+) -> Any:
+    """Build the team member identity rail when identity text was rendered.
+
+    专家团主理人/成员身份注入(design/team/08):团包 persona 拍平进 Team 层
+    prompt 后落在 team_extra(P:17)杂项槽位;本 rail 把身份块提到独立
+    section(P:10),与单专家 identity section 锚定同构。
+
+    Returns:
+        A ``TeamMemberIdentityRail``, or ``None`` for non-expert-group teams.
+    """
+    from jiuwenswarm.agents.harness.team.rails.team_member_identity_rail import (
+        TeamMemberIdentityRail,
+    )
+
+    inp = TeamMemberIdentityInput.resolve(params, context)
+    if not inp.identity_text:
+        return None
+    return TeamMemberIdentityRail(
+        role=inp.role,
+        display_name=inp.display_name,
+        group_display=inp.group_display,
+        identity_text=inp.identity_text,
+    )
+
+
 class ContextProcessorInput(ConstructionInput):
     """Construction inputs for the context-compression rail."""
 
@@ -434,6 +495,7 @@ __all__ = [
     "SYMPHONY_ORCHESTRATION_PROMPT",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
+    "TEAM_MEMBER_IDENTITY",
 ]
 
 
