@@ -2,10 +2,10 @@
 
 """MCP skill installer.
 
-Copies the bundled skills of a marketplace MCP (form C, CLI-based) into the
-workspace runtime skills directory and flips their enabled flag via
-``SkillManager.set_skill_enabled``. Idempotent: re-installing overwrites in
-place and keeps the enabled state.
+Copies a marketplace MCP's bundled skills (form C CLI / form D skill-only)
+into ``<workspace>/mcp/skills/<name>/``. Skills surface to the agent via
+``connected_mcp_skill_dirs`` (state.json) + SkillUseRail directory scanning —
+no SkillManager enabled-flag toggle. Idempotent.
 
 Marketplace skill layouts vary, so discovery handles two shapes:
   * nested:  ``skills/<skill>/(SKILL.md|*.md)`` -> one skill per subdir.
@@ -155,9 +155,6 @@ def install_mcp_skills(name: str) -> dict[str, Any]:
     dest_root = _mcp_skills_dir(n)
     dest_root.mkdir(parents=True, exist_ok=True)
 
-    from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
-
-    mgr = SkillManager()
     for src, skill_name in skills:
         dest = dest_root / skill_name
         try:

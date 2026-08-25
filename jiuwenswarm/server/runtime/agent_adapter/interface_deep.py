@@ -3576,7 +3576,26 @@ class JiuWenSwarmDeepAdapter:
             await self._unregister_mcp_server(server_id)
 
         for server_name in to_add:
-            await self._register_mcp_server(desired_by_name[server_name], tag=tag)
+            # Isolate per-MCP failures (same as the init path above): a bad MCP
+            # degrades to disconnected, the rest still register.
+            try:
+                await self._register_mcp_server(desired_by_name[server_name], tag=tag)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] MCP '%s' register failed on "
+                    "reload, marking disconnected: %s",
+                    server_name, exc,
+                )
+                try:
+                    from jiuwenswarm.server.runtime.mcp.state_store import (
+                        set_mcp_state,
+                    )
+                    set_mcp_state(server_name, state="disconnected")
+                except Exception as degr_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[JiuWenSwarmDeepAdapter] state degrade for '%s' failed: %s",
+                        server_name, degr_exc,
+                    )
 
         for server_name in to_check:
             server_id, current_cfg = current_by_name[server_name]
@@ -3602,7 +3621,25 @@ class JiuWenSwarmDeepAdapter:
             ):
                 continue
             await self._unregister_mcp_server(server_id)
-            await self._register_mcp_server(desired_cfg, tag=tag)
+            # Same per-MCP isolation as to_add above.
+            try:
+                await self._register_mcp_server(desired_cfg, tag=tag)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] MCP '%s' re-register failed on "
+                    "reload, marking disconnected: %s",
+                    server_name, exc,
+                )
+                try:
+                    from jiuwenswarm.server.runtime.mcp.state_store import (
+                        set_mcp_state,
+                    )
+                    set_mcp_state(server_name, state="disconnected")
+                except Exception as degr_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[JiuWenSwarmDeepAdapter] state degrade for '%s' failed: %s",
+                        server_name, degr_exc,
+                    )
 
     @staticmethod
     def _build_vision_model_config(
