@@ -1,18 +1,20 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Camera, FileVideo, LoaderCircle, Mic, Monitor, Send, Square, Video, X } from 'lucide-react';
 import { webClient, webRequest } from '../../services/webClient';
-import {
-  advanceMeaningfulVideoAgentVersion,
-  collectVideoAgentTurns,
-  VideoAgentSegment,
-} from '../../utils/videoAgentSegments';
 import { RealtimeVideoFrameScheduler } from '../../utils/realtimeVideoFrameScheduler';
+import { fetchTtsAudio, playAudioBase64, sanitizeTtsText, stopGlobalAudio } from '../../utils/tts';
+import {
+  evaluateVoiceTranscriptRoute,
+  VoiceTranscriptRouteStamp,
+  VoiceTranscriptSource,
+} from '../../utils/videoAgentSegments';
 import {
   isVideoSourceReady,
   waitForFirstVideoFrame,
 } from '../../utils/realtimeVideoSourceReadiness';
 import { JoyAIProvider } from './joyaiProvider';
 import { createRealtimeProvider, RealtimeDuplexSession } from './realtimeProvider';
+import { MINICPM_CURRENT_TASK_MONITORING_ENABLED } from '../../utils/realtimeDuplex';
 import {
   AgentAction,
   ChatContextItem,
@@ -37,16 +39,19 @@ interface ScreenSource {
 const FRAME_INTERVAL_MS = 500;
 const MAX_FRAMES = 6;
 const MAX_SCREENS = 4;
-const MAX_FRAME_WIDTH = 1024;
+const MAX_FRAME_WIDTH = 768;
 const SCREEN_PREVIEW_FRAME_RATE = 5;
-const FRAME_JPEG_QUALITY = 0.8;
-const AGENT_DEBOUNCE_MS = 700;
+const FRAME_JPEG_QUALITY = 0.72;
 
 function cleanAssistantText(text: string): string {
   return text
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<\/?think>/gi, '')
     .trim();
+}
+
+function isUsefulTranscript(text: string): boolean {
+  return text.replace(/[^\p{L}\p{N}]/gu, '').length >= 2;
 }
 
 export function VideoLivePanel() {
@@ -60,26 +65,25 @@ export function VideoLivePanel() {
   const framesRef = useRef<CapturedFrame[]>([]);
   const duplexRef = useRef<RealtimeDuplexSession | null>(null);
   const joyaiProviderRef = useRef<JoyAIProvider | null>(null);
+  const answerRef = useRef('');
   const currentTaskRef = useRef('');
   const recentChatRef = useRef<ChatContextItem[]>([]);
+  const displayChatRef = useRef<ChatContextItem[]>([]);
+  const displayTurnOrderRef = useRef<Map<string, number>>(new Map());
   const startingRealtimeRef = useRef<Promise<void> | null>(null);
-  const handledAgentTurnsRef = useRef<Set<string>>(new Set());
-  const agentSegmentsRef = useRef<VideoAgentSegment[]>([]);
-  const agentSegmentOrderRef = useRef(0);
-  const agentDebounceTimerRef = useRef<number | null>(null);
   const agentRequestVersionRef = useRef(0);
   const latestMeaningfulAgentVersionRef = useRef(0);
   const chatSequenceRef = useRef(0);
   const pendingTranscriptionsRef = useRef(0);
   const streamingAnswerRef = useRef('');
   const streamingToolJobIdRef = useRef<string | undefined>(undefined);
-  const streamingAnswerTurnIdRef = useRef<string | undefined>(undefined);
   const deferredAssistantAnswersRef = useRef<Array<{ text: string; toolJobId?: string }>>([]);
-  const assistantAnswersByTurnRef = useRef<Map<string, string>>(new Map());
   const searchSessionRef = useRef('');
   const searchJobsRef = useRef<Map<string, SearchJobState>>(new Map());
   const pollingSearchJobsRef = useRef<Set<string>>(new Set());
   const acceptedSearchJobIdsRef = useRef<Set<string>>(new Set());
+  const lastVoiceTranscriptRouteRef = useRef<VoiceTranscriptRouteStamp | null>(null);
+  const searchSpeechGenerationRef = useRef(0);
 
   const [source, setSource] = useState<VideoSource>(null);
   const [sourceName, setSourceName] = useState('');
@@ -114,25 +118,25 @@ export function VideoLivePanel() {
   };
 
   const resetVisualContext = () => {
-    handledAgentTurnsRef.current.clear();
-    agentSegmentsRef.current = [];
+    answerRef.current = '';
     agentRequestVersionRef.current += 1;
     latestMeaningfulAgentVersionRef.current = agentRequestVersionRef.current;
     chatSequenceRef.current = 0;
     pendingTranscriptionsRef.current = 0;
     streamingAnswerRef.current = '';
     streamingToolJobIdRef.current = undefined;
-    streamingAnswerTurnIdRef.current = undefined;
     deferredAssistantAnswersRef.current = [];
-    assistantAnswersByTurnRef.current.clear();
     searchSessionRef.current = '';
     searchJobsRef.current.clear();
     pollingSearchJobsRef.current.clear();
     acceptedSearchJobIdsRef.current.clear();
+    lastVoiceTranscriptRouteRef.current = null;
+    searchSpeechGenerationRef.current += 1;
+    stopGlobalAudio();
     currentTaskRef.current = '';
     recentChatRef.current = [];
-    if (agentDebounceTimerRef.current !== null) window.clearTimeout(agentDebounceTimerRef.current);
-    agentDebounceTimerRef.current = null;
+    displayChatRef.current = [];
+    displayTurnOrderRef.current.clear();
     setAnswer('');
     setChatHistory([]);
     setStreamingAnswer('');
@@ -143,33 +147,41 @@ export function VideoLivePanel() {
   const appendChat = (role: ChatContextItem['role'], text: string) => {
     const normalized = text.trim();
     if (!normalized) return;
-    const previous = recentChatRef.current.at(-1);
-    if (previous?.role === role && previous.text === normalized) return;
-    recentChatRef.current = [
-      ...recentChatRef.current,
-      { id: ++chatSequenceRef.current, role, text: normalized },
-    ].slice(-12);
-    setChatHistory(recentChatRef.current);
+    const item = { id: ++chatSequenceRef.current, role, text: normalized };
+    recentChatRef.current = [...recentChatRef.current, item].slice(-12);
+    displayChatRef.current = [...displayChatRef.current, item].slice(-12);
+    setChatHistory(displayChatRef.current);
+  };
+
+  const insertDisplayTranscript = (text: string, id: number) => {
+    const normalized = text.trim();
+    if (!isUsefulTranscript(normalized)) return;
+    const matching = displayChatRef.current.filter((item) => item.role === 'user'
+      && Math.abs(item.id - id) === 1
+      && (normalized.includes(item.text) || item.text.includes(normalized)));
+    const effectiveId = matching.reduce((earliest, item) => Math.min(earliest, item.id), id);
+    const longestText = matching.reduce(
+      (longest, item) => item.text.length > longest.length ? item.text : longest,
+      normalized,
+    );
+    const matchingIds = new Set(matching.map((item) => item.id));
+    const item: ChatContextItem = { id: effectiveId, role: 'user', text: longestText };
+    displayChatRef.current = [
+      ...displayChatRef.current.filter((existing) => !matchingIds.has(existing.id)),
+      item,
+    ].sort((left, right) => left.id - right.id).slice(-12);
+    setChatHistory(displayChatRef.current);
   };
 
   const commitAssistantAnswer = (
     text: string,
     toolJobId?: string,
-    turnId?: string,
   ) => {
     const normalized = cleanAssistantText(text);
     if (!normalized) return;
-    if (turnId) {
-      assistantAnswersByTurnRef.current.set(turnId, normalized);
-      while (assistantAnswersByTurnRef.current.size > 16) {
-        const oldest = assistantAnswersByTurnRef.current.keys().next().value;
-        if (!oldest) break;
-        assistantAnswersByTurnRef.current.delete(oldest);
-      }
-    }
+    answerRef.current = normalized;
     streamingAnswerRef.current = '';
     streamingToolJobIdRef.current = undefined;
-    streamingAnswerTurnIdRef.current = undefined;
     setStreamingAnswer('');
     setIsAwaitingVoiceTranscript(false);
     setAnswer(normalized);
@@ -193,6 +205,7 @@ export function VideoLivePanel() {
   };
 
   const applyCurrentTask = (task: string) => {
+    if (!MINICPM_CURRENT_TASK_MONITORING_ENABLED && duplexRef.current) return;
     const normalized = task.trim();
     if (normalized === currentTaskRef.current) return;
     const previousTask = currentTaskRef.current;
@@ -272,6 +285,50 @@ export function VideoLivePanel() {
     .map((item) => `${item.role === 'user' ? '用户' : item.role === 'assistant' ? 'Realtime助手' : '工具'}：${item.text}`)
     .join('\n');
 
+  const handleFinalRealtimeUserText = (text: string, realtimeAnswer = answerRef.current) => {
+    const transcript = text.trim();
+    if (!isUsefulTranscript(transcript)) return;
+    const version = ++agentRequestVersionRef.current;
+    latestMeaningfulAgentVersionRef.current = version;
+    appendChat('user', transcript);
+    void (async () => {
+      try {
+        const action = await webRequest<AgentAction>('video.agent', {
+          question: transcript,
+          realtime_answer: realtimeAnswer,
+          current_task: MINICPM_CURRENT_TASK_MONITORING_ENABLED ? currentTaskRef.current : '',
+          recent_chat: recentChatForRouter(),
+          search_session_id: searchSessionRef.current,
+        }, { timeoutMs: 45_000 });
+        if (version === latestMeaningfulAgentVersionRef.current
+          && MINICPM_CURRENT_TASK_MONITORING_ENABLED
+          && (action.current_task || action.tools_used?.includes('stop_current_task'))) {
+          applyCurrentTask(action.current_task || '');
+        }
+        rememberSearchJob(action.search_job);
+      } catch {
+        setToolStatus('意图识别失败，Full-duplex 对话仍可继续');
+      }
+    })();
+  };
+
+  const routeFinalVoiceTranscript = (text: string, source: VoiceTranscriptSource) => {
+    const decision = evaluateVoiceTranscriptRoute(
+      lastVoiceTranscriptRouteRef.current,
+      text,
+      source,
+    );
+    lastVoiceTranscriptRouteRef.current = decision.stamp;
+    if (!decision.route) {
+      reportRealtimeEvent('voice_transcript_route_duplicate_ignored', {
+        source,
+        transcript: text.trim(),
+      });
+      return;
+    }
+    handleFinalRealtimeUserText(text);
+  };
+
   const acceptCompletedSearch = (payload: SearchJobPayload) => {
     if (!payload.job_id || payload.search_session_id !== searchSessionRef.current) return;
     if (acceptedSearchJobIdsRef.current.has(payload.job_id)) {
@@ -339,16 +396,6 @@ export function VideoLivePanel() {
       status: 'failed',
     });
     setToolStatus(`${payload.engine || '九问搜索 Agent'}失败：${payload.error || '请重试'}`);
-  };
-
-  const waitForRealtimeTurnAnswer = async (turnId: string, timeoutMs = 20_000): Promise<string> => {
-    const deadline = Date.now() + timeoutMs;
-    while (!assistantAnswersByTurnRef.current.has(turnId) && Date.now() < deadline) {
-      await new Promise((resolve) => window.setTimeout(resolve, 50));
-    }
-    const answerForTurn = assistantAnswersByTurnRef.current.get(turnId) || '';
-    assistantAnswersByTurnRef.current.delete(turnId);
-    return answerForTurn;
   };
 
   useEffect(() => {
@@ -728,109 +775,41 @@ export function VideoLivePanel() {
           const frame = videoFrames.take(framesRef.current);
           return frame?.data_url.split(',', 2)[1] || null;
         },
-        onAssistantText: (text, final, toolJobId, turnId) => {
+        onAssistantText: (text, final, toolJobId) => {
           const visibleText = cleanAssistantText(text);
           if (!visibleText) return;
+          searchSpeechGenerationRef.current += 1;
+          stopGlobalAudio();
           if (!final) {
             streamingAnswerRef.current = visibleText;
             streamingToolJobIdRef.current = toolJobId;
-            streamingAnswerTurnIdRef.current = turnId;
             setStreamingAnswer(visibleText);
           } else {
-            commitAssistantAnswer(visibleText, toolJobId, turnId);
+            commitAssistantAnswer(visibleText, toolJobId);
           }
         },
-        onUserTurnStarted: () => {
-          agentRequestVersionRef.current += 1;
-          const interruptedAnswer = streamingAnswerRef.current;
-          if (interruptedAnswer) {
-            commitAssistantAnswer(
-              interruptedAnswer,
-              streamingToolJobIdRef.current,
-              streamingAnswerTurnIdRef.current,
-            );
-          } else {
-            streamingToolJobIdRef.current = undefined;
-            streamingAnswerTurnIdRef.current = undefined;
-            setStreamingAnswer('');
-          }
+        onUserText: (text, final) => {
+          if (final) routeFinalVoiceTranscript(text, 'native');
+        },
+        onUserTurnStarted: (turnId) => {
+          searchSpeechGenerationRef.current += 1;
+          stopGlobalAudio();
+          displayTurnOrderRef.current.set(turnId, ++chatSequenceRef.current);
         },
         onUserTurnAudio: (audioDataUrl, turnId) => {
-          if (handledAgentTurnsRef.current.has(turnId)) return;
-          handledAgentTurnsRef.current.add(turnId);
-          if (agentDebounceTimerRef.current !== null) {
-            window.clearTimeout(agentDebounceTimerRef.current);
-            agentDebounceTimerRef.current = null;
-          }
-          if (handledAgentTurnsRef.current.size > 8) {
-            const oldest = handledAgentTurnsRef.current.values().next().value;
-            if (oldest) handledAgentTurnsRef.current.delete(oldest);
-          }
-          const segmentOrder = ++agentSegmentOrderRef.current;
-          const requestVersionAtTurn = agentRequestVersionRef.current;
-          pendingTranscriptionsRef.current += 1;
-          setIsAwaitingVoiceTranscript(true);
+          const displayOrder = displayTurnOrderRef.current.get(turnId) || ++chatSequenceRef.current;
+          displayTurnOrderRef.current.delete(turnId);
           void (async () => {
-            let transcriptDisplayed = false;
             try {
               const asr = await webRequest<{ transcript?: string }>('video.transcribe', {
                 audio_data_url: audioDataUrl,
               }, { timeoutMs: 45_000 });
-              const transcript = asr.transcript?.trim();
-              if (!transcript) return;
-              latestMeaningfulAgentVersionRef.current = advanceMeaningfulVideoAgentVersion(
-                latestMeaningfulAgentVersionRef.current,
-                requestVersionAtTurn,
-                transcript,
-              );
-              appendChat('user', transcript);
-              transcriptDisplayed = true;
-              setIsAwaitingVoiceTranscript(false);
-              const realtimeAnswer = await waitForRealtimeTurnAnswer(turnId);
-              agentSegmentsRef.current.push({
-                order: segmentOrder,
-                text: transcript,
-                realtimeAnswer,
-                requestVersion: requestVersionAtTurn,
-              });
+              if (duplexRef.current !== session) return;
+              const transcript = asr.transcript?.trim() || '';
+              routeFinalVoiceTranscript(transcript, 'local');
+              insertDisplayTranscript(transcript, displayOrder);
             } catch {
-              // Realtime 主链不因辅助工具失败而中断。
-            } finally {
-              if (!transcriptDisplayed) setIsAwaitingVoiceTranscript(false);
-              pendingTranscriptionsRef.current = Math.max(0, pendingTranscriptionsRef.current - 1);
-              if (pendingTranscriptionsRef.current === 0) {
-                if (agentDebounceTimerRef.current !== null) window.clearTimeout(agentDebounceTimerRef.current);
-                agentDebounceTimerRef.current = window.setTimeout(() => {
-                  agentDebounceTimerRef.current = null;
-                  const turns = collectVideoAgentTurns(agentSegmentsRef.current);
-                  agentSegmentsRef.current = [];
-                  if (turns.length === 0) {
-                    flushDeferredAssistantAnswers();
-                    return;
-                  }
-                  flushDeferredAssistantAnswers();
-                  turns.forEach(({ version, question: turnQuestion, realtimeAnswer }) => {
-                    void (async () => {
-                      try {
-                        const action = await webRequest<AgentAction>('video.agent', {
-                          question: turnQuestion,
-                          realtime_answer: realtimeAnswer,
-                          current_task: currentTaskRef.current,
-                          recent_chat: recentChatForRouter(),
-                          search_session_id: searchSessionRef.current,
-                        }, { timeoutMs: 45_000 });
-                        const isLatestTurn = version === latestMeaningfulAgentVersionRef.current;
-                        if (isLatestTurn && (action.current_task || action.tools_used?.includes('stop_current_task'))) {
-                          applyCurrentTask(action.current_task || '');
-                        }
-                        rememberSearchJob(action.search_job);
-                      } catch {
-                        setToolStatus('意图识别失败，Full-duplex 对话仍可继续');
-                      }
-                    })();
-                  });
-                }, AGENT_DEBOUNCE_MS);
-              }
+              // The Realtime answer remains usable when display-only ASR fails.
             }
           })();
         },
@@ -848,14 +827,33 @@ export function VideoLivePanel() {
         },
         onError: setError,
         onToolResultDispatched: () => {
-          setToolStatus('搜索结果已交给模型，正在组织回答…');
+          setToolStatus('');
+        },
+        onToolResultReady: (toolResult) => {
+          commitAssistantAnswer(toolResult.result, toolResult.jobId);
+          reportRealtimeEvent('search_result_answered', {
+            job_id: toolResult.jobId,
+            realtime_answer: toolResult.result,
+            source: 'research_agent_direct',
+          });
+          const generation = ++searchSpeechGenerationRef.current;
+          const spokenText = sanitizeTtsText(toolResult.result);
+          if (!spokenText) return;
+          void (async () => {
+            const tts = await fetchTtsAudio(spokenText);
+            if (generation !== searchSpeechGenerationRef.current || !tts?.audio_base64) return;
+            await playAudioBase64(tts.audio_base64, tts.audio_mime || 'audio/mpeg');
+          })();
         },
         onDiagnostic: (event) => {
           void webRequest('video.realtime.telemetry', event, { timeoutMs: 5_000 }).catch(() => undefined);
         },
       }, () => reportRealtimeEvent('realtime_start_unsupported_browser'));
       duplexRef.current = session;
-      session.updateContext(currentTaskRef.current, recentChatRef.current);
+      session.updateContext(
+        MINICPM_CURRENT_TASK_MONITORING_ENABLED ? currentTaskRef.current : '',
+        recentChatRef.current,
+      );
       await session.start();
     } catch (realtimeError) {
       const wasJoyAI = Boolean(joyaiProviderRef.current?.active);
@@ -898,6 +896,7 @@ export function VideoLivePanel() {
     if (!duplexRef.current && !joyaiProviderRef.current?.active) return;
     const version = ++agentRequestVersionRef.current;
     latestMeaningfulAgentVersionRef.current = version;
+    const realtimeAnswerAtTurn = answerRef.current;
     try {
       appendChat('user', text);
       setQuestion('');
@@ -906,18 +905,20 @@ export function VideoLivePanel() {
         if (!result) throw new Error('文字输入未进入 JoyAI 会话');
         return;
       }
-      const turnId = await duplexRef.current?.sendTextTurn(text);
-      if (!turnId) throw new Error('文字输入未进入 Full-duplex 会话');
-      const realtimeAnswer = await waitForRealtimeTurnAnswer(turnId);
+      const accepted = await duplexRef.current?.sendTextTurn(text);
       const action = await webRequest<AgentAction>('video.agent', {
         question: text,
-        realtime_answer: realtimeAnswer,
-        current_task: currentTaskRef.current,
+        realtime_answer: realtimeAnswerAtTurn,
+        current_task: MINICPM_CURRENT_TASK_MONITORING_ENABLED ? currentTaskRef.current : '',
         recent_chat: recentChatForRouter(),
         search_session_id: searchSessionRef.current,
       }, { timeoutMs: 45_000 });
-      if (version !== latestMeaningfulAgentVersionRef.current) return;
-      if (action.current_task || action.tools_used?.includes('stop_current_task')) {
+      if (!accepted && !action.search_job) {
+        throw new Error('当前 MiniCPM 原生 Full-duplex 仅支持语音输入；文字输入只能发起搜索');
+      }
+      if (version === latestMeaningfulAgentVersionRef.current
+        && MINICPM_CURRENT_TASK_MONITORING_ENABLED
+        && (action.current_task || action.tools_used?.includes('stop_current_task'))) {
         applyCurrentTask(action.current_task || '');
       }
       rememberSearchJob(action.search_job);
@@ -1049,10 +1050,12 @@ export function VideoLivePanel() {
             <div className="video-live__metrics"><span>{isRealtimeStarting ? 'CONNECTING' : isRecording ? 'FULL-DUPLEX' : 'IDLE'}</span></div>
           </div>
 
-          <div className="video-live__prompt-banner">
-            <span>当前任务</span>
-            {currentTask || (isRecording ? '持续监听中，可随时插话' : '开启 Full-duplex 后持续监听')}
-          </div>
+          {MINICPM_CURRENT_TASK_MONITORING_ENABLED && (
+            <div className="video-live__prompt-banner">
+              <span>当前任务</span>
+              {currentTask || (isRecording ? '持续监听中，可随时插话' : '开启 Full-duplex 后持续监听')}
+            </div>
+          )}
 
           <div className="video-live__answer">
             {chatHistory.length > 0 || streamingAnswer ? (

@@ -20,6 +20,8 @@ import uuid
 
 import httpx
 
+from jiuwenswarm.common.video_tool_profile import VIDEO_TOOL_CHANNEL_ID
+
 
 _MAX_AUDIO_CHARS = 2_000_000
 _MAX_TTS_TEXT_CHARS = 800
@@ -31,12 +33,28 @@ _JOYAI_TTS_INSTRUCTIONS = (
     "around 1.2x normal speed, while keeping pronunciation clear and natural."
 )
 _JOYAI_TTS_TEMPERATURE = 0.2
-_JOYAI_ACTION_TEMPERATURE = 0.7
-_JOYAI_ACTION_TOP_P = 0.9
+_JOYAI_ACTION_TEMPERATURE = 0.0
 _JOYAI_SYSTEM_PROMPT_KEY = "DEFAULT_SYSTEM_PROMPT_EN"
+_JOYAI_USER_KNOWLEDGE_GUARD = (
+    "【本轮动作约束】你必须自行选择官方动作。只依据当前或近期清晰画面、用户明确提供的信息和已确认的工具结果回答。"
+    "天气、新闻、价格、公司或品牌背景等外部或时效事实需要搜索核实，不得凭记忆猜测。"
+    "当且仅当搜索对象已经明确且需要外部核实时，必须在本次推理中一次性输出完整的 Delegate 动作："
+    "</response> 简短说明 </delegation> 包含明确对象和查询事项的可独立执行搜索请求。"
+    "Delegate 是不可拆分的原子动作；只说‘需要搜索’、‘我来查询’或其他搜索承诺却没有在同一输出中给出 </delegation>，均为无效动作。"
+    "不得先 Speak、再等待下一帧补发 Delegate，也不得用 </delegation> 询问‘这是什么’、‘哪个品牌’或‘请提供对象’。"
+    "若画面和会话历史都无法确认搜索所需的关键对象，只选择 Speak，说明缺少的信息并请用户调整画面或补充，不要 Delegate。"
+    "利用当前画面和会话历史解析‘这个品牌’、‘这个人’、‘这里’等指代。若先前因对象不明而追问，用户或后续清晰画面一旦补齐对象，"
+    "立即结合先前搜索意图输出一个完整 Delegate 动作，不要只承诺搜索。纯视觉问答无需搜索。"
+)
 _ALLOWED_AUDIO_MIME_TYPES = {"audio/webm", "audio/ogg", "audio/wav", "audio/mp4", "audio/mpeg"}
 _ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _LOG_WRITE_LOCK = threading.Lock()
+
+
+class _JoyAIRateLimitError(RuntimeError):
+    """JoyAI rejected a request because its rolling token quota was exhausted."""
+
+
 _AGENT_ROUTER_SYSTEM_PROMPT = (
     "你是视频直播会话的意图路由器。输入包含用户原话、Realtime模型已经对用户说出的自然语言回答和已有任务。"
     "你只判断是否需要执行后台控制动作，必须返回JSON对象，不要重复回答用户。"
@@ -60,8 +78,6 @@ _AGENT_ROUTER_SYSTEM_PROMPT = (
     "必须优先采用Realtime回答中从画面识别出的具体品牌、人物、地点、物品或文字，"
     "用它补全‘这个’、‘这个牌子’、‘这家公司’、‘它’等指代，并纠正用户原话中明显的ASR同音误识别。"
     "不得在Realtime回答已经给出明确实体时仍搜索未解析的指代或错误ASR词。"
-    "例如用户原话为‘搜索空间水瓶这个牌子’，Realtime回答为‘瓶身品牌是农夫山泉’，"
-    "则query必须包含‘农夫山泉’，不能包含‘空间水瓶’或‘这个牌子’。"
     "普通的一次性视觉问答、闲聊和不需要后续画面的指令返回none。"
     "持续任务只根据用户原话判断，画面回答不能把一次性问题变成持续任务。已有任务的迟到语音分片或简单复述返回none。"
 )
@@ -207,6 +223,14 @@ def _video_live_mode() -> str:
     return "joyai" if mode == "joyai" else "realtime"
 
 
+def _uses_joyai_voice_channel() -> bool:
+    """Return whether JoyAI mode should use its native ASR/TTS WebSockets."""
+    if _video_live_mode() != "joyai":
+        return False
+    provider = os.environ.get("JOYAI_VOICE_PROVIDER", "native").strip().casefold()
+    return provider not in {"openai", "openai_compatible", "siliconflow"}
+
+
 def _realtime_public_url() -> str:
     explicit = os.environ.get("VIDEO_REALTIME_PUBLIC_URL", "").strip()
     if explicit:
@@ -285,6 +309,16 @@ def _parse_joyai_action(raw_content: str) -> dict[str, str]:
     return {"decision": "response", "response": raw, "delegation": ""}
 
 
+def _ground_joyai_user_instruction(instruction: str) -> str:
+    """Add per-turn grounding rules without changing monitor or tool turns."""
+    instruction = str(instruction or "").strip()
+    if not instruction:
+        return ""
+    # Put the action protocol last: JoyAI follows end-of-turn constraints more
+    # reliably than an equivalent prefix before the user's question.
+    return f"【用户原话】{instruction}\n\n{_JOYAI_USER_KNOWLEDGE_GUARD}"
+
+
 async def _request_joyai_completion(
     frame_data_url: str,
     prompt: str,
@@ -315,7 +349,6 @@ async def _request_joyai_completion(
         }],
         "max_tokens": max_tokens,
         "temperature": _JOYAI_ACTION_TEMPERATURE,
-        "top_p": _JOYAI_ACTION_TOP_P,
         "stream": False,
     }
     if frame_time_range:
@@ -338,6 +371,8 @@ async def _request_joyai_completion(
         )
     if response.status_code >= 400:
         detail = response.text.strip()[:1_000]
+        if response.status_code == 429:
+            raise _JoyAIRateLimitError(f"JoyAI 请求失败 (429): {detail}")
         raise RuntimeError(f"JoyAI 请求失败 ({response.status_code}): {detail}")
     try:
         data = response.json()
@@ -369,7 +404,7 @@ async def _request_joyai_frame(
         frame_data_url,
         instruction,
         joyai_session_id,
-        max_tokens=512,
+        max_tokens=512 if instruction else 128,
         frame_time_range=frame_time_range,
     )
     return {
@@ -489,6 +524,15 @@ def _joyai_asr_text(message: Any) -> str:
     return str(first.get("text") or "").strip() if isinstance(first, dict) else ""
 
 
+def _is_joyai_asr_result(message: Any) -> bool:
+    if not isinstance(message, dict):
+        return False
+    response = message.get("asr_response")
+    if not isinstance(response, dict):
+        response = message
+    return isinstance(response.get("recognition_result"), dict)
+
+
 async def _transcribe_joyai_channel(data_url: str) -> str:
     import websockets
     from websockets.exceptions import ConnectionClosedOK
@@ -533,10 +577,15 @@ async def _transcribe_joyai_channel(data_url: str) -> str:
                     error = event.get("error") if isinstance(event, dict) else None
                     if error:
                         raise RuntimeError(f"JoyAI ASR 服务错误: {error}")
+                    code = event.get("code") if isinstance(event, dict) else None
+                    if code not in (None, 0, "0"):
+                        message = str(event.get("msg") or "unknown error")
+                        raise RuntimeError(f"JoyAI ASR 服务错误 ({code}): {message}")
                     text = _joyai_asr_text(event)
+                    if _is_joyai_asr_result(event):
+                        return _clean_model_text(text)
                     if text:
                         last_text = text
-                        return _clean_model_text(text)
                 return _clean_model_text(last_text)
         except ConnectionClosedOK as exc:
             if attempt == 0:
@@ -633,7 +682,7 @@ async def _synthesize_joyai_channel(text: str) -> tuple[bytes, str, str]:
 
 
 async def _transcribe_audio(audio_inputs: list[tuple[str, str]]) -> str:
-    if _video_live_mode() == "joyai":
+    if _uses_joyai_voice_channel():
         if not audio_inputs:
             return ""
         transcripts = [
@@ -741,7 +790,7 @@ async def _agent_answer(
 
 
 async def _synthesize_speech(text: str) -> tuple[bytes, str, str]:
-    if _video_live_mode() == "joyai":
+    if _uses_joyai_voice_channel():
         return await _synthesize_joyai_channel(text)
 
     api_base, api_key, model, voice = _tts_model_config()
@@ -769,7 +818,7 @@ async def _synthesize_speech(text: str) -> tuple[bytes, str, str]:
     return response.content, "audio/mpeg", model
 
 
-async def _execute_official_research(
+async def _execute_restricted_core_agent(
     agent_client: Any,
     *,
     question: str,
@@ -777,21 +826,36 @@ async def _execute_official_research(
     visual_context: str,
     search_session_id: str,
 ) -> dict[str, Any]:
-    """Call the AgentServer's official ResearchAgent through a unary E2A RPC."""
+    """Run one read-only video tool job through the standard Core Agent API."""
     from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
     from jiuwenswarm.common.schema.message import ReqMethod
 
     client = agent_client.get("value") if isinstance(agent_client, dict) else agent_client
     if client is None:
         raise RuntimeError("AgentServer client is unavailable")
+    request_id = f"video-core-{uuid.uuid4().hex}"
+    prompt = (
+        f"用户问题：{question or query}\n"
+        f"建议搜索线索：{query or question}\n"
+        f"Realtime视觉模型提供的画面线索：{visual_context or '无'}\n\n"
+        "请使用可用的只读网络工具核实并回答用户问题。视觉模型提供的内容只用于解析画面中的实体，"
+        "外部事实必须以搜索和网页正文为依据。"
+    )
     env = e2a_from_agent_fields(
-        request_id=f"video-research-{uuid.uuid4().hex}",
-        channel_id="web",
-        req_method=ReqMethod.VIDEO_RESEARCH,
+        request_id=request_id,
+        channel_id=VIDEO_TOOL_CHANNEL_ID,
+        session_id=f"video-tool-{uuid.uuid4().hex}",
+        req_method=ReqMethod.CHAT_SEND,
         params={
-            "question": question,
-            "query": query,
-            "visual_context": visual_context,
+            "query": prompt,
+            "content": prompt,
+            "mode": "agent",
+            "work_mode": "work",
+            "source": "video_tool",
+            "log_as_user": False,
+            "video_question": question,
+            "video_query": query,
+            "video_visual_context": visual_context,
             "search_session_id": search_session_id,
         },
         is_stream=False,
@@ -800,10 +864,10 @@ async def _execute_official_research(
     response = await client.send_request(env)
     payload = response.payload if isinstance(response.payload, dict) else {}
     if not response.ok:
-        raise RuntimeError(str(payload.get("error") or "official ResearchAgent failed"))
-    answer = str(payload.get("answer") or "").strip()
+        raise RuntimeError(str(payload.get("error") or "Jiuwen Core Agent failed"))
+    answer = str(payload.get("content") or payload.get("answer") or "").strip()
     if not answer:
-        raise RuntimeError("official ResearchAgent returned empty output")
+        raise RuntimeError("Jiuwen Core Agent returned empty output")
     return {**payload, "answer": answer}
 
 
@@ -835,7 +899,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
             "search_session_id": search_session_id,
             "question": question,
             "query": query,
-            "engine": "Jiuwen ResearchAgent",
+            "engine": "Jiuwen Core Agent",
         }
         search_jobs[job_id] = {**base_payload, "status": "running"}
         await _send_search_event(ws, "video.search.started", {
@@ -848,25 +912,23 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
         })
         try:
             async with search_semaphore:
-                official_result = await _execute_official_research(
+                core_result = await _execute_restricted_core_agent(
                     agent_client,
                     question=question,
                     query=query,
                     visual_context=visual_context,
                     search_session_id=search_session_id,
                 )
-                answer = official_result["answer"]
+                answer = core_result["answer"]
                 await asyncio.to_thread(_append_video_task_log, {
-                    "stage": "official_research_completed",
+                    "stage": "restricted_core_agent_completed",
                     **base_payload,
-                    "sources": official_result.get("sources", []),
-                    "tools_used": official_result.get("tools_used", []),
-                    "model": official_result.get("model", ""),
-                    "original_answer_chars": official_result.get("original_answer_chars", 0),
-                    "answer_chars": official_result.get("answer_chars", 0),
+                    "tools_used": core_result.get("tools_used", []),
+                    "model": core_result.get("model", ""),
+                    "answer_chars": len(answer),
                 })
             if not answer:
-                raise RuntimeError("official ResearchAgent returned empty output")
+                raise RuntimeError("Jiuwen Core Agent returned empty output")
             latency_ms = round((time.perf_counter() - started_at) * 1000)
             completed_payload = {
                 **base_payload,
@@ -881,7 +943,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
             })
             await _send_search_event(ws, "video.search.completed", completed_payload)
         except Exception as exc:  # noqa: BLE001
-            error = str(exc).strip() or "official ResearchAgent failed"
+            error = str(exc).strip() or "Jiuwen Core Agent failed"
             latency_ms = round((time.perf_counter() - started_at) * 1000)
             failed_payload = {
                 **base_payload,
@@ -1090,19 +1152,30 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
         }
         await asyncio.to_thread(_append_joyai_log, {**request_log, "stage": "requested"})
         try:
-            request_args = [frame_data_url, instruction, upstream_session_id]
+            model_instruction = (
+                _ground_joyai_user_instruction(instruction)
+                if request_kind == "user"
+                else instruction
+            )
+            request_args = [frame_data_url, model_instruction, upstream_session_id]
             if frame_time_range:
                 request_args.append(frame_time_range)
             result = await _request_joyai_frame(*request_args)
         except Exception as exc:  # noqa: BLE001
             error = str(exc) or "JoyAI frame request failed"
+            error_code = (
+                "JOYAI_RATE_LIMIT"
+                if isinstance(exc, _JoyAIRateLimitError)
+                else "JOYAI_ERROR"
+            )
             await asyncio.to_thread(_append_joyai_log, {
                 **request_log,
                 "stage": "failed",
                 "error": error,
+                "error_code": error_code,
             })
             await channel.send_response(
-                ws, req_id, ok=False, error=error, code="JOYAI_ERROR"
+                ws, req_id, ok=False, error=error, code=error_code
             )
             return
 
@@ -1161,7 +1234,8 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
                 "previous_task", "current_task",
                 "source", "frame_count", "model", "url", "code", "message",
                 "client_build", "task", "job_id", "search_session_id", "question",
-                "query", "result", "realtime_answer", "turn_id",
+                "query", "result", "realtime_answer", "turn_id", "attempt",
+                "decision", "response_chars",
             }
             and isinstance(value, (str, int, float, bool))
         }
@@ -1362,10 +1436,10 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
                 ws, req_id, ok=False, error="stream_id is invalid", code="BAD_REQUEST"
             )
             return
-        if _video_live_mode() != "joyai":
+        if not _uses_joyai_voice_channel():
             await channel.send_response(
                 ws, req_id, ok=False,
-                error="streaming TTS is only available in JoyAI mode",
+                error="streaming TTS is unavailable for the configured voice provider",
                 code="TTS_STREAM_UNAVAILABLE",
             )
             return

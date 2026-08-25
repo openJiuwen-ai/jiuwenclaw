@@ -8,6 +8,7 @@ test('native duplex uploads audio after websocket open and supports voice-only i
   const sent = [];
   const intervals = [];
   const worklets = [];
+  const socketUrls = [];
 
   class FakeAudioContext {
     constructor(options = {}) {
@@ -31,7 +32,8 @@ test('native duplex uploads audio after websocket open and supports voice-only i
 
   class FakeWebSocket {
     static OPEN = 1;
-    constructor() {
+    constructor(url) {
+      socketUrls.push(url);
       this.readyState = 0;
       queueMicrotask(() => {
         this.readyState = FakeWebSocket.OPEN;
@@ -70,6 +72,7 @@ test('native duplex uploads audio after websocket open and supports voice-only i
   const callbacks = (videoFrame) => ({
     getVideoFrame: () => videoFrame,
     onAssistantText() {},
+    onUserText() {},
     onUserTurnStarted() {},
     onUserTurnAudio() {},
     onState() {},
@@ -84,16 +87,24 @@ test('native duplex uploads audio after websocket open and supports voice-only i
     }, callbacks('jpeg'));
 
     await session.start();
-    assert.deepEqual(sent[0], {
+    const nativeUrl = new URL(socketUrls[0]);
+    assert.equal(nativeUrl.searchParams.get('duplex'), '1');
+    assert.equal(nativeUrl.searchParams.has('model'), false);
+    assert.equal(nativeUrl.searchParams.has('minicpmo45_native_duplex'), false);
+    assert.equal(nativeUrl.searchParams.has('autostart'), false);
+    const { instructions, ...sessionConfig } = sent[0].session;
+    assert.deepEqual({ ...sent[0], session: sessionConfig }, {
       type: 'session.update',
       session: {
         modalities: ['audio', 'text'],
         voice: 'default',
         ref_audio: 'data:audio/wav;base64,',
-        instructions: 'Streaming Omni Conversation.',
         extra_body: { auto_response: true, minicpmo45_native_duplex: true },
       },
     });
+    assert.match(instructions, /^Streaming Omni Conversation\.\n/);
+    assert.match(instructions, /我目前不知道，需要搜索确认/);
+    assert.match(instructions, /香港今天天气/);
 
     worklets[1].port.onmessage({ data: new Int16Array(3_200).buffer });
     intervals[0]();

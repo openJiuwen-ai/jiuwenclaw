@@ -11,6 +11,31 @@ export interface VideoAgentTurn {
   realtimeAnswer: string;
 }
 
+export type VoiceTranscriptSource = 'native' | 'local';
+
+export interface VoiceTranscriptRouteStamp {
+  key: string;
+  source: VoiceTranscriptSource;
+  routedAt: number;
+}
+
+export function evaluateVoiceTranscriptRoute(
+  previous: VoiceTranscriptRouteStamp | null,
+  transcript: string,
+  source: VoiceTranscriptSource,
+  routedAt = Date.now(),
+): { route: boolean; stamp: VoiceTranscriptRouteStamp } {
+  const key = transcript.normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  const stamp = { key, source, routedAt };
+  const crossSourceDuplicate = Boolean(
+    key
+    && previous?.key === key
+    && previous.source !== source
+    && routedAt - previous.routedAt <= 15_000,
+  );
+  return { route: Boolean(key) && !crossSourceDuplicate, stamp };
+}
+
 function isUsefulTranscript(text: string): boolean {
   return text.replace(/[^\p{L}\p{N}]/gu, '').length >= 2;
 }

@@ -19,6 +19,12 @@ from jiuwenswarm.common import config as common_config
 from jiuwenswarm.gateway.channel_manager.web import video_live, web_connect
 
 
+@pytest.fixture(autouse=True)
+def _isolate_video_mode_environment(monkeypatch) -> None:
+    for name in ("VIDEO_LIVE_MODE", "JOYAI_VOICE_PROVIDER", "ASR_API_MODE"):
+        monkeypatch.delenv(name, raising=False)
+
+
 class FakeChannel:
     def __init__(self) -> None:
         self.handlers = {}
@@ -154,6 +160,56 @@ async def test_joyai_channel_asr_retries_normal_close_before_result(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_joyai_channel_asr_accepts_empty_final_result(monkeypatch) -> None:
+    pcm = struct.pack("<4h", 100, -100, 200, -200)
+    audio = base64.b64encode(_test_wav(pcm)).decode()
+    socket = _FakeVoiceSocket([json.dumps({
+        "code": 0,
+        "asr_response": {
+            "recognition_result": {"hypothesis": [{"text": ""}]}
+        },
+    })])
+    connect_calls = []
+
+    def connect(*args, **kwargs):
+        connect_calls.append((args, kwargs))
+        return socket
+
+    monkeypatch.setenv("JOYAI_ASR_WS_URL", "ws://asr.example/ws/asr")
+    monkeypatch.setattr(websockets, "connect", connect)
+
+    result = await video_live._transcribe_joyai_channel(
+        f"data:audio/wav;base64,{audio}"
+    )
+
+    assert result == ""
+    assert len(connect_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_joyai_channel_asr_reports_service_error_code(monkeypatch) -> None:
+    pcm = struct.pack("<4h", 100, -100, 200, -200)
+    audio = base64.b64encode(_test_wav(pcm)).decode()
+    socket = _FakeVoiceSocket([json.dumps({
+        "code": 500,
+        "msg": "transcription failed",
+        "asr_response": {
+            "recognition_result": {"hypothesis": [{"text": ""}]}
+        },
+    })])
+    monkeypatch.setenv("JOYAI_ASR_WS_URL", "ws://asr.example/ws/asr")
+    monkeypatch.setattr(websockets, "connect", lambda *args, **kwargs: socket)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"JoyAI ASR 服务错误 \(500\): transcription failed",
+    ):
+        await video_live._transcribe_joyai_channel(
+            f"data:audio/wav;base64,{audio}"
+        )
+
+
+@pytest.mark.asyncio
 async def test_joyai_channel_tts_collects_pcm_and_returns_wav(monkeypatch) -> None:
     pcm = struct.pack("<4h", 1, 2, 3, 4)
     socket = _FakeVoiceSocket([
@@ -189,6 +245,15 @@ def test_video_live_mode_is_explicit_and_defaults_to_realtime(monkeypatch) -> No
 
     monkeypatch.setenv("VIDEO_LIVE_MODE", "unknown")
     assert video_live._video_live_mode() == "realtime"
+
+
+def test_joyai_voice_provider_can_use_openai_compatible_endpoints(monkeypatch) -> None:
+    monkeypatch.setenv("VIDEO_LIVE_MODE", "joyai")
+    monkeypatch.delenv("JOYAI_VOICE_PROVIDER", raising=False)
+    assert video_live._uses_joyai_voice_channel()
+
+    monkeypatch.setenv("JOYAI_VOICE_PROVIDER", "openai")
+    assert not video_live._uses_joyai_voice_channel()
 
 
 @pytest.mark.asyncio
@@ -305,8 +370,8 @@ async def test_request_joyai_frame_uses_stateful_chat_completion(monkeypatch) ->
     assert request_text["text"] == "持续观察，有重要变化时回应"
     assert request["json"]["messages"][0]["content"][1]["type"] == "image_url"
     assert request["json"]["max_tokens"] == 512
-    assert request["json"]["temperature"] == 0.7
-    assert request["json"]["top_p"] == 0.9
+    assert request["json"]["temperature"] == 0.0
+    assert "top_p" not in request["json"]
     assert request["json"]["extra_body"] == {
         "frame_time_range": "1.0 seconds ~ 2.0 seconds"
     }
@@ -367,6 +432,7 @@ async def test_request_joyai_frame_without_instruction_sends_image_only(monkeypa
         "type": "image_url",
         "image_url": {"url": "data:image/jpeg;base64,ZmFrZQ=="},
     }]
+    assert request["json"]["max_tokens"] == 128
     assert "extra_body" not in request["json"]
     assert result["decision"] == "silence"
 
@@ -429,6 +495,8 @@ async def test_transcribe_audio_uses_audio_endpoint_for_sensevoice(monkeypatch) 
             return None
 
     monkeypatch.setattr(openai, "AsyncOpenAI", FakeClient)
+    monkeypatch.setenv("VIDEO_LIVE_MODE", "joyai")
+    monkeypatch.setenv("JOYAI_VOICE_PROVIDER", "openai")
     monkeypatch.setattr(
         video_live,
         "_model_config",
@@ -443,6 +511,60 @@ async def test_transcribe_audio_uses_audio_endpoint_for_sensevoice(monkeypatch) 
     assert transcript == "你好 世界"
     assert calls[0]["model"] == "FunAudioLLM/SenseVoiceSmall"
     assert calls[0]["file"] == ("microphone-1.wav", b"fake", "audio/wav")
+
+
+@pytest.mark.asyncio
+async def test_synthesize_speech_uses_openai_tts_in_joyai_mode(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        content = b"mp3-audio"
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            calls.append({"client": kwargs})
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, **kwargs):
+            calls.append({"url": url, **kwargs})
+            return FakeResponse()
+
+    monkeypatch.setenv("VIDEO_LIVE_MODE", "joyai")
+    monkeypatch.setenv("JOYAI_VOICE_PROVIDER", "openai")
+    monkeypatch.setattr(video_live.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        video_live,
+        "_tts_model_config",
+        lambda: (
+            "https://api.siliconflow.cn/v1",
+            "secret-key",
+            "FunAudioLLM/CosyVoice2-0.5B",
+            "FunAudioLLM/CosyVoice2-0.5B:anna",
+        ),
+    )
+
+    audio, mime, model = await video_live._synthesize_speech("你好")
+
+    request = calls[1]
+    assert request["url"] == "https://api.siliconflow.cn/v1/audio/speech"
+    assert request["headers"] == {"Authorization": "Bearer secret-key"}
+    assert request["json"] == {
+        "model": "FunAudioLLM/CosyVoice2-0.5B",
+        "input": "你好",
+        "response_format": "mp3",
+        "voice": "FunAudioLLM/CosyVoice2-0.5B:anna",
+    }
+    assert (audio, mime, model) == (
+        b"mp3-audio",
+        "audio/mpeg",
+        "FunAudioLLM/CosyVoice2-0.5B",
+    )
 
 
 @pytest.mark.asyncio
@@ -600,6 +722,39 @@ async def test_joyai_frame_handler_returns_action_and_writes_metadata_only(monke
 
 
 @pytest.mark.asyncio
+async def test_joyai_frame_handler_exposes_rate_limit_code(monkeypatch) -> None:
+    channel = FakeChannel()
+    video_live.register_video_live_handler(channel)
+    logs = []
+
+    async def fake_request(*args):
+        del args
+        raise video_live._JoyAIRateLimitError(
+            'JoyAI 请求失败 (429): {"cause":"tokens limit for minute"}'
+        )
+
+    monkeypatch.setattr(video_live, "_request_joyai_frame", fake_request)
+    monkeypatch.setattr(video_live, "_append_joyai_log", logs.append)
+
+    await channel.handlers["video.joyai.frame"](
+        object(),
+        "joyai-rate-limit",
+        {
+            "frame_data_url": "data:image/jpeg;base64,ZmFrZQ==",
+            "request_kind": "monitor",
+            "joyai_session_id": "joyai-session-rate-limit",
+        },
+        "web-session",
+    )
+
+    response = channel.responses[-1][1]
+    assert response["ok"] is False
+    assert response["code"] == "JOYAI_RATE_LIMIT"
+    assert logs[-1]["stage"] == "failed"
+    assert logs[-1]["error_code"] == "JOYAI_RATE_LIMIT"
+
+
+@pytest.mark.asyncio
 async def test_joyai_user_instruction_preserves_native_silence(monkeypatch) -> None:
     channel = FakeChannel()
     video_live.register_video_live_handler(channel)
@@ -636,9 +791,15 @@ async def test_joyai_user_instruction_preserves_native_silence(monkeypatch) -> N
     )
 
     assert calls == [(
-        "每当画面出现瓶子时介绍它的样子。",
+        video_live._ground_joyai_user_instruction("每当画面出现瓶子时介绍它的样子。"),
         "joyai-session-user",
     )]
+    grounded_instruction = calls[0][0]
+    assert "我目前不知道，需要搜索确认" not in grounded_instruction
+    assert "Delegate 是不可拆分的原子动作" in grounded_instruction
+    assert "</delegation>" in grounded_instruction
+    assert grounded_instruction.startswith("【用户原话】每当画面出现瓶子时介绍它的样子。")
+    assert grounded_instruction.endswith("纯视觉问答无需搜索。")
     payload = channel.responses[-1][1]["payload"]
     assert payload["decision"] == "silence"
     assert payload["response"] == ""
@@ -681,6 +842,22 @@ async def test_joyai_monitor_silence_is_not_retried(monkeypatch) -> None:
 
     assert calls == ["joyai-session-monitor"]
     assert channel.responses[-1][1]["payload"]["decision"] == "silence"
+
+
+def test_ground_joyai_user_instruction_preserves_empty_frame_turn() -> None:
+    assert video_live._ground_joyai_user_instruction("") == ""
+
+
+def test_ground_joyai_user_instruction_defers_unresolved_search_and_resumes_it() -> None:
+    prompt = video_live._ground_joyai_user_instruction("搜索一下这个牌子的资料")
+
+    assert "一次性输出完整的 Delegate 动作" in prompt
+    assert "Delegate 是不可拆分的原子动作" in prompt
+    assert "不得先 Speak、再等待下一帧补发 Delegate" in prompt
+    assert "一旦补齐对象" in prompt
+    assert "立即结合先前搜索意图输出一个完整 Delegate 动作" in prompt
+    assert "我目前不知道，需要搜索确认" not in prompt
+    assert "先输出" not in prompt
 
 
 @pytest.mark.asyncio
@@ -787,7 +964,9 @@ async def test_joyai_delegation_starts_async_search_and_reuses_running_job(monke
     assert second["search_job"]["reused"] is True
     await asyncio.sleep(0)
     assert len(research_requests) == 1
-    assert research_requests[0].params["query"] == "JD.com current stock price"
+    assert research_requests[0].method == "chat.send"
+    assert research_requests[0].channel == "video_tool"
+    assert research_requests[0].params["video_query"] == "JD.com current stock price"
 
     release_search.set()
     for _ in range(100):
@@ -1181,6 +1360,7 @@ async def test_agent_router_receives_user_realtime_answer_and_current_task(monke
             return None
 
     monkeypatch.setattr(openai, "AsyncOpenAI", FakeClient)
+    monkeypatch.setattr(video_live, "_video_live_mode", lambda: "realtime")
     monkeypatch.setattr(
         video_live,
         "_model_config",
@@ -1204,7 +1384,6 @@ async def test_agent_router_receives_user_realtime_answer_and_current_task(monke
     system_prompt = calls[0]["messages"][0]["content"]
     assert "必须优先采用Realtime回答中从画面识别出的具体品牌" in system_prompt
     assert "纠正用户原话中明显的ASR同音误识别" in system_prompt
-    assert "query必须包含‘农夫山泉’" in system_prompt
     assert task == "持续翻译画面中的英文"
     assert tools == ["set_current_task"]
     assert router_logs == [{
@@ -1233,6 +1412,7 @@ async def test_agent_router_uses_jiuwen_research_action(monkeypatch) -> None:
             return None
 
     monkeypatch.setattr(openai, "AsyncOpenAI", FakeClient)
+    monkeypatch.setattr(video_live, "_video_live_mode", lambda: "realtime")
     monkeypatch.setattr(
         video_live,
         "_model_config",
@@ -1255,12 +1435,14 @@ async def test_agent_search_returns_job_before_background_result(monkeypatch) ->
 
     class FakeAgentClient:
         async def send_request(self, envelope):
-            assert envelope.params["question"] == "介绍一下这家公司"
-            assert envelope.params["query"] == "Luckin Coffee company profile"
+            assert envelope.method == "chat.send"
+            assert envelope.channel == "video_tool"
+            assert envelope.params["video_question"] == "介绍一下这家公司"
+            assert envelope.params["video_query"] == "Luckin Coffee company profile"
             await release_search.wait()
             return SimpleNamespace(
                 ok=True,
-                payload={"answer": "瑞幸咖啡的官方资料。", "sources": []},
+                payload={"content": "瑞幸咖啡的官方资料。"},
             )
 
     video_live.register_video_live_handler(channel, agent_client=FakeAgentClient())
@@ -1269,6 +1451,7 @@ async def test_agent_search_returns_job_before_background_result(monkeypatch) ->
         return "Luckin Coffee company profile", "", ["jiuwen_research"]
 
     monkeypatch.setattr(video_live, "_agent_answer", fake_agent)
+    monkeypatch.setattr(video_live, "_video_live_mode", lambda: "realtime")
     monkeypatch.setattr(video_live, "_append_video_task_log", lambda event: None)
 
     await channel.handlers["video.agent"](
@@ -1324,7 +1507,7 @@ async def test_agent_search_returns_job_before_background_result(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_video_search_uses_official_research_agent_rpc(monkeypatch) -> None:
+async def test_video_search_uses_restricted_core_agent_rpc(monkeypatch) -> None:
     channel = FakeChannel()
     requests = []
 
@@ -1334,9 +1517,8 @@ async def test_video_search_uses_official_research_agent_rpc(monkeypatch) -> Non
             return SimpleNamespace(
                 ok=True,
                 payload={
-                    "answer": "瑞幸咖啡是中国咖啡连锁品牌。https://example.com/luckin",
-                    "sources": ["https://example.com/luckin"],
-                    "tools_used": ["mcp_free_search", "mcp_fetch_webpage"],
+                    "content": "瑞幸咖啡是中国咖啡连锁品牌。https://example.com/luckin",
+                    "tools_used": ["free_search", "fetch_webpage"],
                     "model": "default",
                 },
             )
@@ -1370,23 +1552,29 @@ async def test_video_search_uses_official_research_agent_rpc(monkeypatch) -> Non
 
     assert len(requests) == 1
     envelope = requests[0]
-    assert envelope.method == "video.research"
-    assert envelope.params == {
-        "question": "介绍一下这个牌子",
-        "query": "Luckin Coffee company profile",
-        "visual_context": "瓶身品牌是 Luckin Coffee。",
-        "search_session_id": "realtime-session-official",
-    }
+    assert envelope.method == "chat.send"
+    assert envelope.channel == "video_tool"
+    assert envelope.session_id.startswith("video-tool-")
+    assert envelope.params["mode"] == "agent"
+    assert envelope.params["work_mode"] == "work"
+    assert envelope.params["source"] == "video_tool"
+    assert envelope.params["log_as_user"] is False
+    assert envelope.params["video_question"] == "介绍一下这个牌子"
+    assert envelope.params["video_query"] == "Luckin Coffee company profile"
+    assert envelope.params["video_visual_context"] == "瓶身品牌是 Luckin Coffee。"
+    assert "Luckin Coffee company profile" in envelope.params["query"]
+    assert envelope.params["content"] == envelope.params["query"]
+    assert envelope.params["search_session_id"] == "realtime-session-official"
     completed = next(
         payload for event, payload in channel.events if event == "video.search.completed"
     )
     assert completed["job_id"] == job["id"]
-    assert completed["engine"] == "Jiuwen ResearchAgent"
+    assert completed["engine"] == "Jiuwen Core Agent"
     assert "瑞幸咖啡" in completed["result"]
 
 
 @pytest.mark.asyncio
-async def test_video_search_returns_failure_when_official_research_fails(monkeypatch) -> None:
+async def test_video_search_returns_failure_when_restricted_core_agent_fails(monkeypatch) -> None:
     channel = FakeChannel()
     task_logs = []
 
@@ -1425,14 +1613,14 @@ async def test_video_search_returns_failure_when_official_research_fails(monkeyp
     failed = next(
         payload for event, payload in channel.events if event == "video.search.failed"
     )
-    assert failed["engine"] == "Jiuwen ResearchAgent"
+    assert failed["engine"] == "Jiuwen Core Agent"
     assert failed["error"] == "Max iterations reached without completion"
     assert not any(event == "video.search.completed" for event, _ in channel.events)
     assert any(item["stage"] == "search_failed" for item in task_logs)
 
 
 @pytest.mark.asyncio
-async def test_joyai_delegation_uses_same_official_research_agent_rpc(monkeypatch) -> None:
+async def test_joyai_delegation_uses_same_restricted_core_agent_rpc(monkeypatch) -> None:
     channel = FakeChannel()
     requests = []
 
@@ -1441,7 +1629,7 @@ async def test_joyai_delegation_uses_same_official_research_agent_rpc(monkeypatc
             requests.append(envelope)
             return SimpleNamespace(
                 ok=True,
-                payload={"answer": "农夫山泉品牌资料", "sources": []},
+                payload={"content": "农夫山泉品牌资料"},
             )
 
     video_live.register_video_live_handler(channel, agent_client=FakeAgentClient())
@@ -1483,10 +1671,11 @@ async def test_joyai_delegation_uses_same_official_research_agent_rpc(monkeypatc
         await asyncio.sleep(0.01)
 
     assert len(requests) == 1
-    assert requests[0].method == "video.research"
-    assert requests[0].params["question"] == "介绍一下这个品牌"
-    assert requests[0].params["query"] == "农夫山泉品牌资料"
-    assert requests[0].params["visual_context"] == "画面中的品牌是农夫山泉，我来查询它的资料。"
+    assert requests[0].method == "chat.send"
+    assert requests[0].channel == "video_tool"
+    assert requests[0].params["video_question"] == "介绍一下这个品牌"
+    assert requests[0].params["video_query"] == "农夫山泉品牌资料"
+    assert requests[0].params["video_visual_context"] == "画面中的品牌是农夫山泉，我来查询它的资料。"
     assert any(event == "video.search.completed" for event, _ in channel.events)
 
 
@@ -1519,6 +1708,7 @@ async def test_tts_stream_handler_pushes_pcm_before_completion(monkeypatch) -> N
     task_logs = []
     monkeypatch.setattr(video_live, "_append_video_task_log", task_logs.append)
     monkeypatch.setattr(video_live, "_video_live_mode", lambda: "joyai")
+    monkeypatch.setenv("JOYAI_VOICE_PROVIDER", "native")
     pcm_chunks = [struct.pack("<2h", 1, 2), struct.pack("<2h", 3, 4)]
 
     async def fake_stream(text, on_chunk):
@@ -1561,11 +1751,37 @@ async def test_tts_stream_handler_pushes_pcm_before_completion(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_tts_stream_handler_rejects_openai_voice_provider(monkeypatch) -> None:
+    channel = FakeChannel()
+    video_live.register_video_live_handler(channel)
+    monkeypatch.setattr(video_live, "_video_live_mode", lambda: "joyai")
+    monkeypatch.setenv("JOYAI_VOICE_PROVIDER", "openai")
+
+    async def fail_stream(text, on_chunk):
+        del text, on_chunk
+        raise AssertionError("OpenAI-compatible TTS must not use the JoyAI stream")
+
+    monkeypatch.setattr(video_live, "_stream_joyai_channel_pcm", fail_stream)
+    await channel.handlers["tts.stream.start"](
+        object(),
+        "stream-request",
+        {"text": "回退到普通语音合成", "stream_id": "stream-openai"},
+        "session",
+    )
+
+    response = channel.responses[-1][1]
+    assert response["ok"] is False
+    assert response["code"] == "TTS_STREAM_UNAVAILABLE"
+    assert channel.events == []
+
+
+@pytest.mark.asyncio
 async def test_tts_stream_cancel_stops_background_generation(monkeypatch) -> None:
     channel = FakeChannel()
     video_live.register_video_live_handler(channel)
     monkeypatch.setattr(video_live, "_append_video_task_log", lambda event: None)
     monkeypatch.setattr(video_live, "_video_live_mode", lambda: "joyai")
+    monkeypatch.setenv("JOYAI_VOICE_PROVIDER", "native")
     started = asyncio.Event()
 
     async def blocked_stream(text, on_chunk):

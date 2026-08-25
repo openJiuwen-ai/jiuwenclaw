@@ -1,6 +1,6 @@
 const TARGET_RATE = 16_000;
 const LISTENING_SPEECH_MS = 220;
-const END_OF_TURN_SILENCE_MS = 800;
+const END_OF_TURN_SILENCE_MS = 600;
 const CANDIDATE_SILENCE_MS = 240;
 const PRE_ROLL_MS = 300;
 const MAX_TURN_MS = 20_000;
@@ -23,6 +23,27 @@ export function canPlayJoyAIResponse(
   userSpeechActive: boolean,
 ): boolean {
   return !userSpeechActive && responseGeneration === currentGeneration;
+}
+
+export class JoyAITtsInterruptionState {
+  private pending: { text: string; speechEpoch: number } | null = null;
+
+  capture(text: string, speechEpoch: number): void {
+    const candidate = text.trim();
+    this.pending = candidate ? { text: candidate, speechEpoch } : null;
+  }
+
+  discard(speechEpoch?: number): void {
+    if (speechEpoch !== undefined && this.pending?.speechEpoch !== speechEpoch) return;
+    this.pending = null;
+  }
+
+  takeAfterRejectedTurn(speechEpoch: number, transcript?: string): string {
+    if (this.pending?.speechEpoch !== speechEpoch) return '';
+    const pending = this.pending;
+    this.pending = null;
+    return transcript?.trim() ? '' : pending.text;
+  }
 }
 
 export function resamplePcm16(

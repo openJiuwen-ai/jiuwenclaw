@@ -4,7 +4,36 @@ import test from 'node:test';
 import {
   advanceMeaningfulVideoAgentVersion,
   collectVideoAgentTurns,
+  evaluateVoiceTranscriptRoute,
 } from '../node_modules/.cache/video-agent-segments/videoAgentSegments.js';
+
+test('routes local ASR when MiniCPM does not emit a native transcript', () => {
+  const decision = evaluateVoiceTranscriptRoute(null, '今天香港天气怎么样？', 'local', 1_000);
+
+  assert.equal(decision.route, true);
+  assert.equal(decision.stamp.key, '今天香港天气怎么样');
+});
+
+test('deduplicates native and local transcripts for one voice turn', () => {
+  const native = evaluateVoiceTranscriptRoute(null, '今天香港天气怎么样？', 'native', 1_000);
+  const local = evaluateVoiceTranscriptRoute(
+    native.stamp,
+    '今天香港天气怎么样。',
+    'local',
+    2_000,
+  );
+
+  assert.equal(native.route, true);
+  assert.equal(local.route, false);
+});
+
+test('does not suppress a deliberate repeated request from the same ASR source', () => {
+  const first = evaluateVoiceTranscriptRoute(null, '搜索香港天气', 'local', 1_000);
+  const second = evaluateVoiceTranscriptRoute(first.stamp, '搜索香港天气', 'local', 2_000);
+
+  assert.equal(first.route, true);
+  assert.equal(second.route, true);
+});
 
 test('empty ASR activity does not supersede the latest meaningful user turn', () => {
   let latestMeaningfulVersion = advanceMeaningfulVideoAgentVersion(0, 1, '当我喝水时提醒我小心');

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   canPlayJoyAIResponse,
+  JoyAITtsInterruptionState,
   JoyAIVoiceSession,
 } from '../node_modules/.cache/joyai-voice/joyaiVoice.js';
 
@@ -117,6 +118,31 @@ test('response audio is gated by user speech and request generation', () => {
   assert.equal(canPlayJoyAIResponse(4, 4, false), true);
   assert.equal(canPlayJoyAIResponse(4, 4, true), false);
   assert.equal(canPlayJoyAIResponse(3, 4, false), false);
+});
+
+test('interrupted TTS resumes only when ASR rejects the same speech turn', () => {
+  const interruption = new JoyAITtsInterruptionState();
+  interruption.capture('需要恢复的回答', 4);
+
+  assert.equal(interruption.takeAfterRejectedTurn(3, ''), '');
+  assert.equal(interruption.takeAfterRejectedTurn(4, ''), '需要恢复的回答');
+  assert.equal(interruption.takeAfterRejectedTurn(4, ''), '');
+});
+
+test('a meaningful instruction permanently discards interrupted TTS', () => {
+  const interruption = new JoyAITtsInterruptionState();
+  interruption.capture('旧回答', 7);
+
+  assert.equal(interruption.takeAfterRejectedTurn(7, '请搜索香港天气'), '');
+  assert.equal(interruption.takeAfterRejectedTurn(7, ''), '');
+});
+
+test('a newer speech turn cannot be cleared by an older ASR result', () => {
+  const interruption = new JoyAITtsInterruptionState();
+  interruption.capture('较新的回答', 9);
+
+  interruption.discard(8);
+  assert.equal(interruption.takeAfterRejectedTurn(9, '   '), '较新的回答');
 });
 
 test('speak resolves only after playback ends', async () => {

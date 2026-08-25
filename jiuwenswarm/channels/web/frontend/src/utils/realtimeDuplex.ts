@@ -13,38 +13,50 @@ export interface RealtimeToolResult {
 export interface RealtimeDuplexCallbacks {
   getVideoFrame: () => string | null;
   onAssistantText: (text: string, final: boolean, toolJobId?: string, turnId?: string) => void;
+  onUserText: (text: string, final: boolean) => void;
   onUserTurnStarted: (turnId: string) => void;
   onUserTurnAudio: (wavDataUrl: string, turnId: string) => void;
   onState: (state: 'connecting' | 'listening' | 'speaking' | 'closed') => void;
   onError: (message: string) => void;
   onDiagnostic?: (event: Record<string, unknown>) => void;
   onToolResultDispatched?: (jobId: string) => void;
+  onToolResultReady?: (toolResult: RealtimeToolResult) => void;
 }
 
 const INPUT_RATE = 16_000;
 const OUTPUT_RATE = 24_000;
 const SEND_INTERVAL_MS = 200;
 const USER_TURN_SILENCE_MS = 1_200;
+const USER_TURN_PREROLL_MS = 1_000;
 const ACTIVE_TASK_REMINDER_INTERVAL_MS = 5_000;
-const REALTIME_CLIENT_BUILD = 'openai-realtime-protocol-v10';
+const REALTIME_CLIENT_BUILD = 'target-native-duplex-v1';
 const LISTENING_SPEECH_MS = 240;
 const INITIAL_PLAYBACK_BUFFER_MS = 400;
 const OFFICIAL_OMNI_INSTRUCTIONS = 'Streaming Omni Conversation.';
 type PlaybackLane = 'normal' | 'urgent';
-const BASE_INSTRUCTIONS = [
-  '你是九问实时视觉助手。',
-  '始终结合当前会话中的近期聊天、近期画面和最新画面回答；最新画面优先，不得把已经消失的物体当成仍在画面中。',
-  '只把当前可见画面、当前可辨语音、用户明确提供的信息和九问工具结果作为事实依据。画面模糊、文字不完整、对象无法确认时，明确说明无法确认或请用户调整画面，不得猜测品牌、文字、人物、数量或状态。',
-  '天气、新闻、价格、公司背景、人物资料、地点信息及其他需要外部知识或时效性的事实，在收到[异步工具结果]前不得给出实质结论；只能简短说明正在查询。不要依据模型记忆生成一个听起来合理的答案。',
-  '收到九问检索摘要后，只回答摘要正文能够直接支持的内容。摘要表示材料不足、存在冲突或无法确认时，必须保留该不确定性，不得自行补齐结论。',
+
+// Keep the task implementation available while the target MiniCPM flow is evaluated.
+export const MINICPM_CURRENT_TASK_MONITORING_ENABLED = false;
+
+const CURRENT_TASK_INSTRUCTIONS = [
   '当前任务是需要持续执行的视觉任务。任务不为“无”时，持续观察画面、维护进度，并仅在任务规定的时机主动说话；没有新进展时保持倾听。',
   '所有当前任务提醒都按紧急事件处理：条件满足时只输出一句独立提醒，不要夹带正在处理的普通对话或搜索回答。',
   '不要因为每帧画面而重复回答。持续出现的同一事件只介入一次；消失后再次出现视为新事件，可以再次介入。一个动作只在完整周期结束后计数。',
   '用户可以随时询问进度、修改、暂停或取消当前任务。回答使用自然、简洁的中文。',
   '用户提出新任务时只确认开始观察，不得把任务描述中的目标当成已经发生；只有目标在[当前任务]中且最新画面确认满足时才提醒。',
-  '简单询问当前画面中清晰可见的物体或品牌是什么时可直接识别回答；用户询问公司介绍、背景资料、天气、新闻、价格或其他外部事实时，只简短说“我帮你查一下”，系统会接续九问搜索结果。',
+];
+const BASE_INSTRUCTIONS = [
+  '你是九问实时视觉助手。',
+  '始终结合当前会话中的近期聊天、近期画面和最新画面回答；最新画面优先，不得把已经消失的物体当成仍在画面中。',
+  '只把当前可见画面、当前可辨语音、用户明确提供的信息和九问工具结果作为事实依据。画面模糊、文字不完整、对象无法确认时，明确说明无法确认或请用户调整画面，不得猜测品牌、文字、人物、数量或状态。',
+  '天气、新闻、价格、公司背景、人物资料、地点信息及其他需要外部知识或时效性的事实，当前画面和用户输入不是足够证据。在收到[异步工具结果]前，必须明确回答“我目前不知道，需要搜索确认”，不得给出任何实质结论，不得用模型记忆或常识补全答案。',
+  '例如用户询问“香港今天天气如何”时，未收到支持该地点和日期的[异步工具结果]前，不得说晴、阴、雨、温度、湿度或其他具体天气信息。',
+  '收到九问检索摘要后，只回答摘要正文能够直接支持的内容。摘要表示材料不足、存在冲突或无法确认时，必须保留该不确定性，不得自行补齐结论。',
+  ...(MINICPM_CURRENT_TASK_MONITORING_ENABLED ? CURRENT_TASK_INSTRUCTIONS : []),
+  '简单询问当前画面中清晰可见的物体或品牌是什么时可直接识别回答；用户询问公司介绍、背景资料、天气、新闻、价格或其他外部事实时，只说当前不知道并需要搜索确认，系统会接续九问搜索结果。',
   '用户要求持续观察、搜索外部信息或停止当前任务时，使用自然语言明确说明你理解的操作和对象；不要输出JSON、工具标签或内部控制格式。',
 ].join('\n');
+const SESSION_INSTRUCTIONS = `${OFFICIAL_OMNI_INSTRUCTIONS}\n${BASE_INSTRUCTIONS}`;
 
 function readableError(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -104,8 +116,6 @@ export class RealtimeDuplexSession {
   private lastSentContext = '';
   private sessionReady = false;
   private responseId: string | null = null;
-  private injectionQueue: Promise<void> = Promise.resolve();
-  private pendingTextInputs: Array<{ text: string; turnId: string; isFresh: () => boolean }> = [];
   private pendingTaskControl: string | null = null;
   private pendingToolResults: RealtimeToolResult[] = [];
   private acceptedToolResultIds = new Set<string>();
@@ -124,9 +134,7 @@ export class RealtimeDuplexSession {
   private userActivityActive = false;
   private turnHasUserActivity = false;
   private assistantTranscript = '';
-  private pendingUserTurnId: string | null = null;
   private activeUserTurnId: string | null = null;
-  private activeAssistantTurnId: string | null = null;
   private turnSequence = 0;
   private pendingResponseLane: PlaybackLane | null = null;
   private activeResponseLane: PlaybackLane = 'normal';
@@ -138,9 +146,10 @@ export class RealtimeDuplexSession {
   ) {}
 
   updateContext(currentTask: string, recentChat: ReadonlyArray<{ role: string; text: string }>): void {
-    const normalizedTask = currentTask.trim();
+    const requestedTask = currentTask.trim();
+    const normalizedTask = MINICPM_CURRENT_TASK_MONITORING_ENABLED ? requestedTask : '';
     const taskChanged = normalizedTask !== this.activeTask;
-    if (taskChanged) {
+    if (MINICPM_CURRENT_TASK_MONITORING_ENABLED && taskChanged) {
       this.lastTaskReminderAt = 0;
       this.pendingTaskControl = normalizedTask
         ? [
@@ -167,7 +176,9 @@ export class RealtimeDuplexSession {
       .join('\n');
     this.contextInstructions = [
       BASE_INSTRUCTIONS,
-      `[当前任务]\n${normalizedTask || '无'}`,
+      ...(MINICPM_CURRENT_TASK_MONITORING_ENABLED
+        ? [`[当前任务]\n${normalizedTask || '无'}`]
+        : []),
       `[当前聊天]\n${chat || '无'}`,
       '[近期画面与当前画面]\n由当前 Realtime 视频流持续提供；按时间理解动作和变化，以最新帧为准。',
     ].join('\n\n');
@@ -184,11 +195,29 @@ export class RealtimeDuplexSession {
         this.playbackGeneration += 1;
         this.playbackOperation = Promise.resolve();
         this.queuedDrainResponseId = null;
+        if (data.responseId && data.playedMs) {
+          this.send({
+            type: 'playback.ack',
+            response_id: data.responseId,
+            item_id: `item_${data.responseId}`,
+            played_ms: data.playedMs,
+            committed_ms: data.playedMs,
+          });
+        }
         this.assistantPlaying = false;
         return;
       }
       if (data.type !== 'drained') return;
       if (this.queuedDrainResponseId === data.responseId) this.queuedDrainResponseId = null;
+      if (data.responseId && data.playedMs) {
+        this.send({
+          type: 'playback.ack',
+          response_id: data.responseId,
+          item_id: `item_${data.responseId}`,
+          played_ms: data.playedMs,
+          committed_ms: data.playedMs,
+        });
+      }
       this.assistantPlaying = false;
       this.sendContextUpdate();
       if (!this.responseActive) this.callbacks.onState('listening');
@@ -224,12 +253,7 @@ export class RealtimeDuplexSession {
         if (!this.userActivityActive && this.userSpeechMs >= LISTENING_SPEECH_MS) {
           this.userActivityActive = true;
           this.turnHasUserActivity = true;
-          // ASR only receives this utterance, not up to 20 seconds of old
-          // silence or assistant playback that encourages hallucinations.
-          this.turnAudio = this.turnAudio.slice(-1);
-          this.turnSamples = this.turnAudio.reduce((total, chunk) => total + chunk.length, 0);
           this.activeUserTurnId = this.newTurnId('voice');
-          this.pendingUserTurnId = this.activeUserTurnId;
           this.callbacks.onUserTurnStarted(this.activeUserTurnId);
           this.emitDiagnostic('realtime_user_turn_started', {
             turn_id: this.activeUserTurnId,
@@ -268,7 +292,6 @@ export class RealtimeDuplexSession {
     this.playbackContext = null;
     this.pending = [];
     this.pendingSamples = 0;
-    this.pendingTextInputs = [];
     this.pendingTaskControl = null;
     this.pendingToolResults = [];
     this.acceptedToolResultIds.clear();
@@ -280,8 +303,6 @@ export class RealtimeDuplexSession {
     this.sessionReady = false;
     this.lastSentContext = '';
     this.responseActive = false;
-    this.pendingUserTurnId = null;
-    this.activeAssistantTurnId = null;
     this.activeUserTurnId = null;
     this.pendingResponseLane = null;
     this.activeResponseLane = 'normal';
@@ -295,28 +316,12 @@ export class RealtimeDuplexSession {
     this.callbacks.onState('closed');
   }
 
-  async sendTextTurn(text: string, isFresh: () => boolean = () => true): Promise<string | null> {
+  async sendTextTurn(text: string, isFresh: () => boolean = () => true): Promise<boolean> {
     const normalized = text.trim();
-    if (!normalized || !isFresh()) return null;
-    const turnId = this.newTurnId('text');
+    if (!normalized || !isFresh()) return false;
     this.lastInteractiveInputAt = Date.now();
-    const queued = this.injectionQueue.then(async () => {
-      const deadline = Date.now() + 45_000;
-      while ((this.responseActive || this.assistantPlaying) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        if (!isFresh()) return null;
-      }
-      if (this.responseActive || this.assistantPlaying) return null;
-      if (!isFresh()) return null;
-      this.pendingTextInputs.push({
-        text: `<|im_start|>user\n${normalized}<|im_end|>\n`,
-        turnId,
-        isFresh,
-      });
-      return turnId;
-    });
-    this.injectionQueue = queued.then(() => undefined, () => undefined);
-    return await queued;
+    this.emitDiagnostic('native_text_input_router_only', { text: normalized });
+    return false;
   }
 
   enqueueToolResult(toolResult: RealtimeToolResult): boolean {
@@ -351,9 +356,6 @@ export class RealtimeDuplexSession {
     return new Promise((resolve, reject) => {
       const url = new URL(this.config.url);
       url.searchParams.set('duplex', '1');
-      url.searchParams.set('model', this.config.model);
-      url.searchParams.set('minicpmo45_native_duplex', '1');
-      url.searchParams.set('autostart', '0');
       const socket = new WebSocket(url);
       this.socket = socket;
       let initSent = false;
@@ -385,7 +387,7 @@ export class RealtimeDuplexSession {
             modalities: ['audio', 'text'],
             voice: 'default',
             ref_audio: this.config.refAudio,
-            instructions: OFFICIAL_OMNI_INSTRUCTIONS,
+            instructions: SESSION_INSTRUCTIONS,
             extra_body: {
               auto_response: true,
               minicpmo45_native_duplex: true,
@@ -482,9 +484,13 @@ export class RealtimeDuplexSession {
     }
     this.turnAudio.push(outgoing.slice());
     this.turnSamples += outgoing.length;
-    while (this.turnSamples > INPUT_RATE * 20 && this.turnAudio.length > 1) {
+    const retainedTurnSamples = this.turnHasUserActivity
+      ? INPUT_RATE * 20
+      : INPUT_RATE * USER_TURN_PREROLL_MS / 1_000;
+    while (this.turnSamples > retainedTurnSamples && this.turnAudio.length > 1) {
       this.turnSamples -= this.turnAudio.shift()?.length || 0;
     }
+    this.dispatchQueuedTextInput();
     this.sendAudio(outgoing, true);
     if (this.turnHasUserActivity && !this.userActivityActive && this.userSilenceMs >= USER_TURN_SILENCE_MS) {
       this.dispatchUserTurn(this.activeUserTurnId || this.newTurnId('voice'));
@@ -508,35 +514,34 @@ export class RealtimeDuplexSession {
   }
 
   private sendAudio(pcm: Int16Array, includeVideo: boolean): void {
-    const contextUpdated = this.sendContextUpdate();
-    let dispatchedToolJobId = '';
     const input: Record<string, unknown> = {
       type: 'input_audio_buffer.append',
       audio: bytesToBase64(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength)),
       format: 'pcm16',
       sample_rate_hz: INPUT_RATE,
-      max_slice_nums: 1,
     };
-    while (this.pendingTextInputs.length && !this.pendingTextInputs[0].isFresh()) {
-      this.pendingTextInputs.shift();
+    if (includeVideo) {
+      const frame = this.callbacks.getVideoFrame();
+      if (frame) input.video_frames = [frame];
     }
-    const pendingText = this.pendingTextInputs.shift();
-    if (pendingText) {
-      input.text = pendingText.text;
-      input.force_speak = true;
-      this.pendingUserTurnId = pendingText.turnId;
-      this.pendingResponseLane = 'normal';
-    } else if (this.pendingTaskControl) {
-      input.text = this.pendingTaskControl;
+    this.send(input);
+  }
+
+  private dispatchQueuedTextInput(): void {
+    const contextUpdated = this.sendContextUpdate();
+    let text = '';
+    if (MINICPM_CURRENT_TASK_MONITORING_ENABLED && this.pendingTaskControl) {
+      text = this.pendingTaskControl;
       this.pendingTaskControl = null;
       this.emitDiagnostic('realtime_task_control_dispatched', {
         has_active_task: this.hasActiveTask,
       });
-    } else if (!contextUpdated && this.activeTask && !this.responseActive
+    } else if (MINICPM_CURRENT_TASK_MONITORING_ENABLED
+      && !contextUpdated && this.activeTask && !this.responseActive
       && !this.userActivityActive
       && !this.turnHasUserActivity
       && Date.now() - this.lastTaskReminderAt >= ACTIVE_TASK_REMINDER_INTERVAL_MS) {
-      input.text = [
+      text = [
         '<|im_start|>user',
         `[紧急当前任务检查]\n${this.activeTask}`,
         '立即检查本次输入的最新画面；条件满足或有新进展时，输出一句独立、简洁的任务提醒，否则保持倾听。不要回答其他对话，不要复述任务。',
@@ -558,39 +563,20 @@ export class RealtimeDuplexSession {
       && Date.now() - this.lastInteractiveInputAt >= 2_500) {
       const toolResult = this.pendingToolResults.shift();
       if (toolResult) {
-        input.text = [
-          '<|im_start|>user',
-          '[异步工具结果]',
-          `原始问题：${toolResult.question}`,
-          `搜索结果：\n${toolResult.result}`,
-          '请严格根据九问主对话模型生成的检索摘要回答上述原始问题，不得补充摘要之外的事实。',
-          '摘要没有覆盖问题、证据不足、来源冲突或写明无法确认时，如实说明当前无法确认，不得用常识、记忆或猜测补全。',
-          '本轮只回答搜索问题，不执行、不提及也不夹带[当前任务]中的提醒；当前任务由独立的紧急检查轮次处理。',
-          '引用只需自然说明来源，不要朗读完整URL。该问题可能来自较早的对话，不要把它与之后的问题混淆。',
-          '<|im_end|>\n',
-        ].join('\n');
-        input.force_speak = true;
-        this.pendingResponseLane = 'normal';
-        dispatchedToolJobId = toolResult.jobId;
-        this.activeToolJobId = toolResult.jobId;
+        this.emitDiagnostic('search_result_dispatched', {
+          job_id: toolResult.jobId,
+        });
+        this.callbacks.onToolResultDispatched?.(toolResult.jobId);
+        this.callbacks.onToolResultReady?.(toolResult);
       }
     }
-    if (includeVideo) {
-      const frame = this.callbacks.getVideoFrame();
-      if (frame) input.video_frames = [frame];
-    }
-    this.send(input);
-    if (dispatchedToolJobId) {
-      this.emitDiagnostic('search_result_dispatched', {
-        job_id: dispatchedToolJobId,
-      });
-      this.callbacks.onToolResultDispatched?.(dispatchedToolJobId);
-    }
+    if (!text) return;
+    this.send({ type: 'input.text.append', text });
   }
 
   private activateResponseLane(responseId: string | null): PlaybackLane {
     const lane = this.pendingResponseLane
-      || (this.activeToolJobId || this.pendingUserTurnId ? 'normal' : this.hasActiveTask ? 'urgent' : 'normal');
+      || (this.activeToolJobId ? 'normal' : this.hasActiveTask ? 'urgent' : 'normal');
     this.pendingResponseLane = null;
     this.activeResponseLane = lane;
     if (responseId) {
@@ -629,7 +615,6 @@ export class RealtimeDuplexSession {
           this.assistantTranscript,
           false,
           this.activeToolJobId || undefined,
-          this.activeAssistantTurnId || undefined,
         );
       } else if (kind === 'audio') {
         this.beginOfficialTurn(eventResponseId);
@@ -654,7 +639,6 @@ export class RealtimeDuplexSession {
         this.userActivityActive = false;
         this.assistantTranscript = '';
       }
-      this.bindAssistantTurn();
       this.callbacks.onState('speaking');
     } else if (type === 'audio.cancelled' || type === 'response.audio.cancelled') {
       if (!eventResponseId || eventResponseId === this.responseId) {
@@ -683,12 +667,15 @@ export class RealtimeDuplexSession {
         this.assistantTranscript,
         false,
         this.activeToolJobId || undefined,
-        this.activeAssistantTurnId || undefined,
       );
     } else if (type === 'response.audio_transcript.done'
       || type === 'response.output_audio_transcript.done') {
       this.assistantTranscript = String(event.transcript || this.assistantTranscript);
       this.finishAssistantText();
+    } else if (type === 'conversation.item.input_audio_transcription.delta') {
+      this.callbacks.onUserText(String(event.delta || ''), false);
+    } else if (type === 'conversation.item.input_audio_transcription.completed') {
+      this.callbacks.onUserText(String(event.transcript || ''), true);
     } else if (type === 'error') {
       this.callbacks.onError(readableError(event.error || event));
     }
@@ -699,7 +686,6 @@ export class RealtimeDuplexSession {
     this.activateResponseLane(responseId);
     this.responseActive = true;
     this.assistantTranscript = '';
-    this.bindAssistantTurn();
     this.callbacks.onState('speaking');
   }
 
@@ -714,7 +700,6 @@ export class RealtimeDuplexSession {
       });
       this.activeToolJobId = null;
     }
-    this.activeAssistantTurnId = null;
     if (wasSpeaking) this.enqueuePlaybackDrain(this.responseId);
     this.pendingResponseLane = null;
     this.activeResponseLane = 'normal';
@@ -723,12 +708,10 @@ export class RealtimeDuplexSession {
   private finishAssistantText(): void {
     const text = this.assistantTranscript;
     const toolJobId = this.activeToolJobId || undefined;
-    const turnId = this.activeAssistantTurnId || undefined;
-    this.callbacks.onAssistantText(text, true, toolJobId, turnId);
+    this.callbacks.onAssistantText(text, true, toolJobId);
     this.emitDiagnostic('realtime_answer_final', {
       realtime_answer: text,
       ...(toolJobId ? { job_id: toolJobId } : {}),
-      ...(turnId ? { turn_id: turnId } : {}),
     });
     if (toolJobId) {
       this.emitDiagnostic('search_result_answered', {
@@ -738,7 +721,6 @@ export class RealtimeDuplexSession {
     }
     this.assistantTranscript = '';
     this.activeToolJobId = null;
-    this.activeAssistantTurnId = null;
   }
 
   private enqueueAudioDelta(
@@ -827,12 +809,6 @@ export class RealtimeDuplexSession {
     if (!this.turnHasUserActivity || this.turnSamples < INPUT_RATE / 2) return;
     this.turnHasUserActivity = false;
     this.callbacks.onUserTurnAudio(this.takeTurnAudio(), turnId);
-  }
-
-  private bindAssistantTurn(): void {
-    if (this.activeToolJobId || this.activeAssistantTurnId || !this.pendingUserTurnId) return;
-    this.activeAssistantTurnId = this.pendingUserTurnId;
-    this.pendingUserTurnId = null;
   }
 
   private newTurnId(prefix: string): string {
