@@ -95,6 +95,11 @@ export interface Message {
    * 历史事实，不是当前 Goal 状态的派生值。
    */
   isGoalObjectiveMessage?: boolean;
+  isCommandOutput?: boolean;
+  /** 斜杠命令结果的结构化元数据；避免渲染层依赖 content 的换行分隔。 */
+  commandName?: string;
+  commandInput?: string;
+  commandOutput?: string;
 }
 
 export interface ToolCall {

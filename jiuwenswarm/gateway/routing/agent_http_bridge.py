@@ -1,8 +1,10 @@
 """Gateway → 目标 AgentServer 的受认证 HTTP bridge 客户端（Phase 2）。
 
-下载端点由 AgentServer 在 WS 端口上拦截（``agent_ws_server._process_request``），
-上传端点监听 localhost（``agent_ws_server._AgentHttpUploadHandler``）。本模块为
-Gateway 侧多个调用方（Web 静态服务 ``app_web``、IM 附件落盘钩子、Web
+下载端点由 AgentServer 在 WS 端口上拦截（``agent_ws_server._process_request``）。
+上传端点在 AgentOS 部署时由路由/扩展层注入 ``JIUWENSWARM_AGENT_UPLOAD_HTTP_BASE``
+环境变量提供；单机模式下 AgentServer 不启动独立 HTTP 上传监听器，``media.persist``
+大图在 Gateway 侧直接写入共享用户目录（见 ``app_web_handlers._persist_media_locally``）。
+本模块为 Gateway 侧多个调用方（Web 静态服务 ``app_web``、IM 附件落盘钩子、Web
 ``media.persist`` 大图分流）提供统一的基址解析与上传执行，避免各处重复推导。
 
 传输取舍（方案 §10.5）：大文件走受认证 HTTP bridge（Gateway 仅鉴权转发、
@@ -74,9 +76,10 @@ def resolve_agent_http_base() -> str:
 def resolve_agent_upload_base() -> str:
     """返回目标 AgentServer 的上传 HTTP 端点基址。
 
-    AgentServer 上传端点监听 ``JIUWENSWARM_AGENT_UPLOAD_HTTP_BASE``、
-    ``JIUWENSWARM_AGENT_HTTP_PORT`` 或 ``WS 端口 + 1``
-    （``agent_ws_server._start_http_upload_server``）。下载/WS 的
+    AgentOS 部署时由路由/扩展层注入 ``JIUWENSWARM_AGENT_UPLOAD_HTTP_BASE``
+    或 ``JIUWENSWARM_AGENT_HTTP_PORT`` 环境变量；未注入时按 WS 端口 + 1 推导
+    （该推导值仅对已启动独立上传监听器的部署有效，单机模式不会监听该端口，
+    调用方应改走本地共享目录写入而非 HTTP 上传）。下载/WS 的
     ``JIUWENSWARM_AGENT_HTTP_BASE`` 不能复用为上传基址；上传监听器恒绑定
     localhost，故端口推导沿用 WS 端口但 host 固定 ``127.0.0.1``。
     """

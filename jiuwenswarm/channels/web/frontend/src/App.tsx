@@ -385,6 +385,8 @@ function AppContent() {
   const [missingSessionId, setMissingSessionId] = useState<string | null>(null);
   const startupUpdateCheckRef = useRef(false);
   const modelSetupGuideEvaluatedRef = useRef(false);
+  /** OAuth 回调恢复导航后标记，防止 fetchConfig 等后续逻辑覆盖 activeNav */
+  const oauthNavRestoredRef = useRef(false);
   /** 从 SkillNet 等入口跳转配置页时，首次展开对应配置分组（如第三方服务） */
   const [configInitialExpandGroup, setConfigInitialExpandGroup] = useState<string | null>(null);
 
@@ -396,6 +398,14 @@ function AppContent() {
   useEffect(() => {
     processOAuthCallback()
       .finally(() => {
+        // 备份：OAuth 回调完成后再次确认导航（通常路由 effect 已设置）
+        const nav = sessionStorage.getItem('oauth_redirect_nav');
+        if (nav) {
+          sessionStorage.removeItem('oauth_redirect_nav');
+          oauthNavRestoredRef.current = true;
+          setActiveNav(nav as MainNavKey);
+          if (nav === 'skills') setHasVisitedSkills(true);
+        }
         // 无论成功或失败都派发事件，SkillPanel 根据有无 oauth_error 决定显示错误或开抽屉
         window.dispatchEvent(new CustomEvent('oauth-callback-complete'));
       });
@@ -538,12 +548,22 @@ function AppContent() {
   } = useSingleAgentPanelState();
 
   useEffect(() => {
+    const oauthNav = sessionStorage.getItem('oauth_redirect_nav');
+    const targetNav = (oauthNav || 'chat') as MainNavKey;
+    if (oauthNav === 'skills') setHasVisitedSkills(true);
     if (route.kind === 'chat-session') {
       sessionIdRef.current = route.sessionId;
       setSessionId(route.sessionId);
-      setActiveNav('chat');
+      setActiveNav(targetNav);
     } else if (route.kind === 'chat-new') {
-      if (window.location.pathname !== '/chat/new') navigate({ kind: 'chat-new' }, { replace: true });
+      if (window.location.pathname !== '/chat/new') {
+        if (oauthNav) {
+          // OAuth 重定向：用 replaceState 改 URL 但不触发 route 变化，避免 effect 重跑覆盖 activeNav
+          window.history.replaceState(null, '', '/chat/new');
+        } else {
+          navigate({ kind: 'chat-new' }, { replace: true });
+        }
+      }
       pendingNewConversationRef.current = true;
       if (preserveSelectedProjectOnChatNewRef.current) {
         preserveSelectedProjectOnChatNewRef.current = false;
@@ -552,11 +572,13 @@ function AppContent() {
       }
       sessionIdRef.current = 'new';
       setSessionId('new');
-      setActiveNav('chat');
-      setTeamAreaExpanded(false);
-      setSingleAgentPanelExpanded(false);
+      setActiveNav(targetNav);
+      if (!oauthNav) {
+        setTeamAreaExpanded(false);
+        setSingleAgentPanelExpanded(false);
+      }
     }
-  }, [navigate, route, setSingleAgentPanelExpanded, setTeamAreaExpanded]);
+  }, [navigate, route, setSingleAgentPanelExpanded, setTeamAreaExpanded, setHasVisitedSkills]);
 
   useEffect(() => {
     if (!teamAreaExpanded || toolPanelHidden) {
@@ -1391,9 +1413,9 @@ function AppContent() {
       setConfigError(null);
       if (!modelSetupGuideEvaluatedRef.current) {
         modelSetupGuideEvaluatedRef.current = true;
-        if (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled)) {
-        setActiveNav('chat');
-        setModelSetupGuideManual(false);
+        if (!oauthNavRestoredRef.current && (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled))) {
+          setActiveNav('chat');
+          setModelSetupGuideManual(false);
           setModelSetupGuideStep(0);
         }
       }
@@ -2418,6 +2440,8 @@ function AppContent() {
             explicitEntry: usePlanStore
               .getState()
               .hasPendingExplicitEntry(NEW_CONVERSATION_ID),
+            entrySource:
+              usePlanStore.getState().getPendingEntrySource(NEW_CONVERSATION_ID) ?? undefined,
           });
         }
         usePlanStore.getState().removeRuntime(NEW_CONVERSATION_ID);

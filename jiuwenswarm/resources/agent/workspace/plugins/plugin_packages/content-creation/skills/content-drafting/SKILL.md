@@ -34,7 +34,7 @@ description: 从零散提纲、访谈记录、笔记或旧稿启动新内容：�
 
 ## Tool 协作
 
-- **document_exporter**：用户要求导出或保存成品文档时调用。传入标题、章节（heading + level + content）、引用和元数据。章节内容中的 Mermaid 代码块、SVG 和 Markdown 表格原样保留。短文本（< 500 字）不需要导出，直接在对话中交付即可。
+- **document_exporter**：用户要求导出或保存成品文档时调用。传入标题、章节（heading + level + content）、引用、元数据，以及必填的 `output_dir`。章节内容中的 Mermaid 代码块、SVG 和 Markdown 表格原样保留。短文本（< 500 字）不需要导出，直接在对话中交付即可。
 - **citation_formatter**：用户需要标准化引用时调用。传入引用条目和目标格式（gbt7714、apa、mla 或 inline）。起草阶段通常不需要调用——引用补充属于增强阶段。
 - **调用顺序**：先完成正文写作 → 需要引用时调 citation_formatter → 用户要求导出时调 document_exporter。
 

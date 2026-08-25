@@ -37,7 +37,7 @@ description: 审阅和收口文稿：逐段给出修改反馈和可替换修订�
 
 ## Tool 协作
 
-- **document_exporter**：用户要求导出、保存或交付成品文稿时调用。传入标题、章节（heading + level + content）、引用和元数据。仅在用户明确要求文件输出时调用——不未经用户同意自动导出，因为用户可能还想继续修改。导出后，将文件路径和统计作为 `machine_receipt_present` 质量发现报告。
+- **document_exporter**：用户要求导出、保存或交付成品文稿时调用。传入标题、章节（heading + level + content）、引用、元数据，以及必填的 `output_dir`。仅在用户明确要求文件输出时调用——不未经用户同意自动导出，因为用户可能还想继续修改。导出后，将 `path` / `size_bytes` 和统计作为 `machine_receipt_present` 质量发现报告。
 - **何时不调用**：审阅和修改反馈阶段不需要调用 document_exporter——只有用户明确说"导出""保存""交付"时才调用。
 - **调用顺序**：先完成逐段审阅和修订 → 用户确认修改方向 → 用户要求导出时调 document_exporter。
 

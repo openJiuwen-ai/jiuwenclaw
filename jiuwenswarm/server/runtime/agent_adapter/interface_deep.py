@@ -1484,28 +1484,28 @@ class JiuWenSwarmDeepAdapter:
         )
 
     async def _ensure_chat_extensions(self, request: AgentRequest) -> AgentResponse | None:
-        """Apply agent_template / plugin equipment for the upcoming turn."""
-        params = request.params if isinstance(request.params, dict) else {}
+        """Apply agent_template / plugin equipment for the upcoming turn.
+        """
+        params = dict(request.params) if isinstance(request.params, dict) else {}
         mode = str(params.get("mode") or "").strip() or "agent"
         if mode in self._SKIP_EXTENSION_MODES or is_team_mode(mode):
             return None
 
-        has_at = "agent_template_name" in params
-        has_pl = "plugin_names" in params
-        if not has_at and not has_pl:
-            return None
+        params.setdefault("agent_template_name", "")
+        params.setdefault("plugin_names", [])
 
-        marketplace_error = self._marketplace_equipment_gate(
-            params, has_at, has_pl
-        )
+        # Rule1: extension packages must be installed
+        marketplace_error = self._marketplace_equipment_gate(params)
         if marketplace_error is not None:
             return self._equipment_error_response(request, marketplace_error)
 
-        connector_error = self._connector_equipment_gate(params, has_at, has_pl)
+        # Rule2: extension packages must be connected(particularly, connectors are declared)
+        connector_error = self._connector_equipment_gate(params)
         if connector_error is not None:
             return self._equipment_error_response(request, connector_error)
 
-        would_change, reason = self._equipment_would_change(params, has_at, has_pl)
+        # Rule3: can only load package at fresh turn(no running agent / goal attached)
+        would_change, reason = self._equipment_would_change(params)
         if would_change:
             attach_goal = self._wants_attach_goal(params)
             if attach_goal or self._is_session_live(request.session_id):
@@ -1514,64 +1514,43 @@ class JiuWenSwarmDeepAdapter:
                 )
 
         try:
-            await self._unload_plugins_for_request(params, has_pl)
-            await self._unload_agent_template_for_request(params, has_at)
-            await self._load_agent_template_for_request(
-                params, has_at, request
-            )
-            await self._load_plugins_for_request(
-                params, has_pl, request
-            )
+            await self._unload_plugins_for_request(params)
+            await self._unload_agent_template_for_request(params)
+            await self._load_agent_template_for_request(params)
+            await self._load_plugins_for_request(params)
         except (ValueError, RuntimeError) as exc:
             return self._equipment_error_response(request, str(exc))
         return None
 
     @staticmethod
-    def _marketplace_equipment_gate(
-        params: dict,
-        has_at: bool,
-        has_pl: bool,
-    ) -> str | None:
+    def _marketplace_equipment_gate(params: dict) -> str | None:
         """Hard-reject non-empty equipment that marketplace does not allow.
-
-        ``""`` / ``[]`` / missing fields skip this check (unload / no-op paths).
         """
-        if has_at:
-            v = params.get("agent_template_name")
-            if isinstance(v, str) and v != "":
-                if not equipment.is_agent_template_installed(v):
-                    return f"agent_template not installed: {v}"
-        if has_pl:
-            v = params.get("plugin_names")
-            if isinstance(v, list):
-                for item in v:
-                    if not isinstance(item, str) or item == "":
-                        continue
-                    if not equipment.is_plugin_allowed(item):
-                        return f"plugin not installed: {item}"
+        v = params.get("agent_template_name")
+        if isinstance(v, str) and v != "":
+            if not equipment.is_agent_template_installed(v):
+                return f"agent_template not installed: {v}"
+        v = params.get("plugin_names")
+        if isinstance(v, list):
+            for item in v:
+                if not isinstance(item, str) or item == "":
+                    continue
+                if not equipment.is_plugin_allowed(item):
+                    return f"plugin not installed: {item}"
         return None
 
     @staticmethod
-    def _connector_equipment_gate(
-        params: dict,
-        has_at: bool,
-        has_pl: bool,
-    ) -> str | None:
+    def _connector_equipment_gate(params: dict) -> str | None:
         """Hard-reject when declared connectors are not connected (read-only).
-
-        Runs after marketplace gate. Does not initiate auth; points users to
-        the MCP management page to reconnect.
         """
         agent_id = None
         plugin_ids: list[str] = []
-        if has_at:
-            v = params.get("agent_template_name")
-            if isinstance(v, str) and v != "":
-                agent_id = v
-        if has_pl:
-            v = params.get("plugin_names")
-            if isinstance(v, list):
-                plugin_ids = [item for item in v if isinstance(item, str) and item != ""]
+        v = params.get("agent_template_name")
+        if isinstance(v, str) and v != "":
+            agent_id = v
+        v = params.get("plugin_names")
+        if isinstance(v, list):
+            plugin_ids = [item for item in v if isinstance(item, str) and item != ""]
         pending = equipment.unready_connectors(
             equipment.collect_connectors_for_packages(
                 agent_template_id=agent_id,
@@ -1585,31 +1564,24 @@ class JiuWenSwarmDeepAdapter:
             "reconnect from the MCP management page"
         )
 
-    def _equipment_would_change(
-        self, params: dict, has_at: bool, has_pl: bool
-    ) -> tuple[bool, str]:
+    def _equipment_would_change(self, params: dict) -> tuple[bool, str]:
         """Return whether passed equipment fields differ from the session handle."""
-        if has_at:
-            v = params["agent_template_name"]
-            if not isinstance(v, str):
-                return True, "agent_template_name illegal type"
-            current = self._loaded_agent_template[0] if self._loaded_agent_template else None
-            if v != current:
-                return True, f"agent_template_name {current!r}→{v!r}"
-        if has_pl:
-            v = params["plugin_names"]
-            if not isinstance(v, list):
-                return True, "plugin_names illegal type"
-            loaded = set(self._loaded_plugins)
-            desired = set(v)
-            if loaded != desired:
-                return True, "plugin set changed"
+        v = params["agent_template_name"]
+        if not isinstance(v, str):
+            return True, "agent_template_name illegal type"
+        # None (not loaded) and "" (cleared) are the same empty state.
+        current = self._loaded_agent_template[0] if self._loaded_agent_template else ""
+        if v != current:
+            return True, f"agent_template_name {current!r}→{v!r}"
+        v = params["plugin_names"]
+        if not isinstance(v, list):
+            return True, "plugin_names illegal type"
+        if set(self._loaded_plugins) != set(v):
+            return True, "plugin set changed"
         return False, ""
 
-    async def _unload_agent_template_for_request(self, params: dict, has_at: bool) -> None:
+    async def _unload_agent_template_for_request(self, params: dict) -> None:
         """Unload the current expert when switching, clearing, or version drifts."""
-        if not has_at:
-            return
         v = params["agent_template_name"]
         if not isinstance(v, str):
             return
@@ -1659,15 +1631,8 @@ class JiuWenSwarmDeepAdapter:
             if adapter is not self:
                 await adapter.unload_equipment_if_loaded(kind, pid)
 
-    async def _load_agent_template_for_request(
-        self,
-        params: dict,
-        has_at: bool,
-        request: AgentRequest,
-    ) -> None:
+    async def _load_agent_template_for_request(self, params: dict) -> None:
         """Load the expert when name or manifest.version differs from the handle."""
-        if not has_at:
-            return
         v = params["agent_template_name"]
         if not isinstance(v, str):
             raise ValueError(f"agent_template_name must be str, got {type(v).__name__}")
@@ -1687,10 +1652,8 @@ class JiuWenSwarmDeepAdapter:
         record = await self._instance.load_agent_template(str(pkg_dir))
         self._loaded_agent_template = (v, record, desired_version)
 
-    async def _unload_plugins_for_request(self, params: dict, has_pl: bool) -> None:
+    async def _unload_plugins_for_request(self, params: dict) -> None:
         """Unload plugins removed from the set or whose manifest.version drifted."""
-        if not has_pl:
-            return
         v = params["plugin_names"]
         if not isinstance(v, list):
             return
@@ -1706,19 +1669,15 @@ class JiuWenSwarmDeepAdapter:
             if loaded_version != desired_version:
                 to_unload.append(name)
         for name in to_unload:
-            entry = self._loaded_plugins.pop(name, None)
-            if entry is not None and self._instance is not None:
+            entry = self._loaded_plugins.get(name)
+            if entry is None:
+                continue
+            if self._instance is not None:
                 await self._instance.unload_extension(entry[0])
+            self._loaded_plugins.pop(name, None)
 
-    async def _load_plugins_for_request(
-        self,
-        params: dict,
-        has_pl: bool,
-        request: AgentRequest,
-    ) -> None:
+    async def _load_plugins_for_request(self, params: dict) -> None:
         """Load desired plugins missing from the handle or with a new version."""
-        if not has_pl:
-            return
         v = params["plugin_names"]
         if not isinstance(v, list):
             raise ValueError(f"plugin_names must be list, got {type(v).__name__}")
@@ -5639,19 +5598,16 @@ class JiuWenSwarmDeepAdapter:
             task_planning_rail = None
         return task_planning_rail
 
+    @staticmethod
     def _build_subagent_rail(
-        self,
         config_base: dict[str, Any] | None = None,
     ) -> SubagentRail | None:
         """Build SubagentRail for subagent delegation."""
         try:
-            subagent_rail = BrowserTaskPromptRail(
-                enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
-            )
+            subagent_rail = BrowserTaskPromptRail()
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SubagentRail create success "
-                "(subagent_runtime=%s)",
-                self._resolve_enable_subagent_runtime(config_base),
+                "(load-aware browser policy)",
             )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
@@ -6001,6 +5957,25 @@ class JiuWenSwarmDeepAdapter:
         # the roots reflect the live connection state — disconnected MCPs drop
         # out — and stays in sync with _build_skill_rail's init-time roots.
         skills_dirs = self._skill_scan_dirs()
+        # Keep hot-bound plugin/template skill roots. _skill_scan_dirs() only
+        # knows workspace + session MCP; package dirs live on deep_config.skills
+        # after _bind_skill. Append them so MCP refresh does not drop them, and
+        # workspace still wins on duplicate names.
+        instance = getattr(self, "_instance", None)
+        bound = getattr(getattr(instance, "deep_config", None), "skills", None)
+        if bound:
+            seen = {str(Path(item).expanduser().resolve()) for item in skills_dirs if item}
+            extra: list[str] = []
+            for raw in [bound] if isinstance(bound, str) else list(bound):
+                text = str(raw or "").strip()
+                if not text:
+                    continue
+                resolved = str(Path(text).expanduser().resolve())
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                extra.append(text)
+            skills_dirs = [*skills_dirs, *extra]
         if self._skill_rail is not None:
             # Update the rail's scan roots before reload so it picks up newly
             # connected (and drops disconnected) MCP skill dirs.
@@ -8009,8 +7984,6 @@ class JiuWenSwarmDeepAdapter:
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
         if self._response_prompt_rail:
             self._response_prompt_rail.set_channel(resolved_channel)
-        if isinstance(self._subagent_rail, BrowserTaskPromptRail):
-            self._subagent_rail.set_channel(resolved_channel)
         # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
         # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
         # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。

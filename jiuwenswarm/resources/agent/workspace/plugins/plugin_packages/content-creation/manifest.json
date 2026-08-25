@@ -1,20 +1,20 @@
 {
   "version": "1.0.0",
-  "packageType": "plugin",
-  "id": "content-creation-assistant",
+  "package_type": "plugin",
+  "id": "content-creation",
   "name": "内容创作辅助插件",
   "description": "协助撰写高质量内容，覆盖起草、增强、审阅三大阶段七个场景",
-  "displayName": {
-    "en": "Content Creation Assistant Plugin",
+  "display_name": {
+    "en": "Content Creation Plugin",
     "zh": "内容创作辅助插件"
   },
-  "displayDescription": {
-    "en": "Full-chain content creation assistant covering drafting, enhancement, and review across seven scenes.",
+  "display_description": {
+    "en": "Full-chain content creation covering drafting, enhancement, and review across seven scenes.",
     "zh": "从材料启动到成稿收口的全链路内容创作辅助，覆盖起草、增强、审阅三大阶段七个场景。"
   },
   "category": "Design",
-  "source": "local",
-  "defaultInitInput": {
+  "source": "builtin",
+  "default_init_input": {
     "zh": "帮我分析以下材料，判断文档类型，搭建结构并写出开篇正文",
     "en": "Analyze the following materials, determine document type, build structure, and write the opening passage"
   },
@@ -32,7 +32,7 @@
       "zh": "内容审阅"
     }
   ],
-  "quickInputs": [
+  "quick_inputs": [
     {
       "en": "Analyze the following materials, determine document type, build structure, and write the opening passage",
       "zh": "帮我分析以下材料，判断文档类型，搭建结构并写出开篇正文"
@@ -64,11 +64,11 @@
     {
       "file": "tools/document_exporter.py",
       "class": "DocumentExporter",
-      "displayName": {
+      "display_name": {
         "en": "Document Exporter",
         "zh": "文档导出器"
       },
-      "displayDescription": {
+      "display_description": {
         "en": "Export structured documents with TOC, citation list, and metadata to formatted Markdown files.",
         "zh": "将结构化文档导出为带目录、引用列表和元数据的格式化 Markdown 文件。"
       }
@@ -76,11 +76,11 @@
     {
       "file": "tools/citation_formatter.py",
       "class": "CitationFormatter",
-      "displayName": {
+      "display_name": {
         "en": "Citation Formatter",
         "zh": "引用格式化器"
       },
-      "displayDescription": {
+      "display_description": {
         "en": "Format citation entries according to GB/T 7714, APA, MLA, or simple inline styles.",
         "zh": "按 GB/T 7714、APA、MLA 或简洁行内格式标准化引用条目。"
       }

@@ -76,7 +76,7 @@ class _CronToolsCronBackend(CronToolBackend):
         )
         chat_type = str(metadata.get("chat_type") or "").strip() or None
         # 钉钉入站用 conversation_type(1/2)，需映射到 cron 的 group/p2p，供推送路由使用。
-        # create_job 以 route.session_id 落盘，这里必须写入 delivery binding，
+        # create_job 把 route.session_id 随转发 payload 传给 Gateway 落库，这里必须写入 delivery binding，
         # 不能把 Gateway 内部 dingtalk_… 会话 ID 当成钉钉 staffId。
         if channel_id == "dingtalk" or channel_id.startswith("dingtalk:"):
             if not chat_type:
@@ -279,7 +279,7 @@ class _CronToolsCronBackend(CronToolBackend):
         return {"queued": True}
 
     async def ensure_scheduler_started(self) -> None:
-        """确保scheduler已启动，如果未启动则异步启动"""
+        """兼容性 no-op：AgentServer 不再启动调度器（Phase 4 单源收敛）。"""
         await self._cron_tools.ensure_scheduler()
 
     @staticmethod
@@ -443,7 +443,7 @@ def _extract_legacy_params(
         if "deleteAfterRun" in data:
             out["delete_after_run"] = bool(data.get("deleteAfterRun"))
         # model_name：透传（新版格式可挂在顶层，也可能随 payload 传入），
-        # 供 CronTools.create_job 落盘；未显式传时由调用方继承会话模型。
+        # 供 CronTools.create_job 随 payload 转发 Gateway 落库；未显式传时由调用方继承会话模型。
         model_name_raw = data.get("model_name") or payload_block.get("model_name")
         if model_name_raw is not None and str(model_name_raw).strip():
             out["model_name"] = str(model_name_raw).strip()
@@ -666,7 +666,7 @@ class CronRuntimeBridge:
         return backend
 
     def ensure_scheduler_started(self) -> None:
-        """确保scheduler已启动，如果未启动则异步启动"""
+        """兼容性 no-op：AgentServer 不再启动调度器（Phase 4 单源收敛）。"""
         backend = self.get_backend()
         if backend is None:
             return

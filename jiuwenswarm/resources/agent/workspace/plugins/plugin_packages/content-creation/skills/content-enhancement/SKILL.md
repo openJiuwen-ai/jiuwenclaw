@@ -35,7 +35,7 @@ description: 为已有正文增强内容质量：补充资料调研与引用、�
 
 - **citation_formatter**：补充引用时调用。传入引用条目（author、title、year、source_type 等）和目标格式（gbt7714、apa、mla 或 inline）。工具返回标准化格式化引用字符串。始终确保引用条目来自用户提供的材料或标注为 `verification_pending`——不编造引用数据喂给工具，因为虚构的引用来源会误导读者。
 - **何时不调用**：用户只要求"指出哪里需要引用"但不要求格式化时，直接在正文中标注待核验即可，不需要调用工具。
-- **调用顺序**：先识别缺口并写出引用段落 → 需要格式化时调 citation_formatter → 格式化结果传给 document_exporter（如用户要求导出）。
+- **调用顺序**：先识别缺口并写出引用段落 → 需要格式化时调 citation_formatter → 用户要求导出时调 document_exporter。
 
 ## 通用底线
 

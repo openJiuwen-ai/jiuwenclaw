@@ -15,7 +15,8 @@
     "and": "and",
     "modify": "Modify",
     "delete": "Delete",
-    "expandMore": "Show {{count}} more"
+    "expandMore": "Show {{count}} more",
+    "processing": "Processing…"
   },
   "a2ui": {
     "generating": "Generating A2UI interface...",
@@ -1721,7 +1722,21 @@
       "placeholderSha256": "64-digit lowercase hex displayed after packaging",
       "noticeText": "The skill will be published to JiuwenHub.",
       "noticeView": "View",
-      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill"
+      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill",
+      "errorNameTooLong": "Name cannot exceed {{max}} characters",
+      "errorInvalidName": "Name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens",
+      "errorInvalidVersion": "Version format should be x.y.z (e.g. 1.0.0)",
+      "errorDisplayNameTooLong": "Display name cannot exceed {{max}} characters",
+      "pathNotFound": "Unable to determine skill directory",
+      "forceOverwrite": "Force overwrite (overwrite existing plugin when version exists)"
+    },
+    "oauthLogin": {
+      "title": "Login to Publish Skill",
+      "description": "You need to login to publish skills to SkillHub",
+      "gitcodeLogin": "Login with GitCode",
+      "githubLogin": "Login with GitHub",
+      "notConfigured": "GitCode OAuth is not configured. Set VITE_GITCODE_OAUTH_CLIENT_ID and VITE_GITCODE_OAUTH_CLIENT_SECRET in .env.local",
+      "githubNotConfigured": "GitHub OAuth is not configured. Set VITE_GITHUB_OAUTH_CLIENT_ID in .env.local"
     },
     "uploadSkillModal": {
       "title": "Upload Skill",
@@ -2181,12 +2196,20 @@
     "installPrompt": "Enter plugin spec (plugin@marketplace)",
     "importPrompt": "Enter a local skill path on the server (SKILL.md or directory)",
     "uninstallConfirm": "Uninstall {{pluginName}}?",
+    "overwriteConfirm": "Overwrite existing?",
     "messages": {
       "installing": "Installing: {{name}}...",
       "installed": "Installed: {{spec}}",
       "imported": "Imported: {{name}}",
       "uninstalled": "Uninstalled: {{pluginName}}",
-      "skillNetInstalled": "Installed: {{name}}"
+      "skillNetInstalled": "Installed: {{name}}",
+      "knowledgeSkillCreated": "Knowledge-to-skill completed",
+      "knowledgeSkillCreating": "Processing knowledge-to-skill…",
+      "knowledgeSkillCreatingCount": "Processing knowledge-to-skill… ({{count}} tasks)",
+      "packFailed": "Packaging failed",
+      "downloadFailed": "Failed to download package file",
+      "published": "Skill {{name}} published successfully",
+      "publishFailed": "Publishing failed"
     },
     "errors": {
       "installFailed": "Install failed",

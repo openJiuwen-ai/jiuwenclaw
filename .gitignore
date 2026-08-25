@@ -39,6 +39,8 @@ pnpm-debug.log*
 # Environment files
 .env
 .env_personal
+.env.local
+.env.*.local
 !.env.example
 
 # Apple code signing & notarization secrets — NEVER commit (contains private keys!)

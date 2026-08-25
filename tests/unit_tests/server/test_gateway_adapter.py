@@ -272,7 +272,7 @@ class TestSessionAdapter:
         """查询模式返回当前色值；非法色值拒绝（白名单与 TUI 一致）。"""
         monkeypatch.setattr(
             "jiuwenswarm.server.runtime.gateway_adapter.session_adapter.get_session_metadata",
-            lambda sid: {"accent_color": "blue"},
+            lambda sid, cache_bust=False: {"accent_color": "blue"},
         )
         resp = await SessionAdapter().handle(
             _request(ReqMethod.SESSION_COLOR_SET, {"session_id": "sess-1"})
@@ -947,7 +947,7 @@ async def test_config_adapter_keeps_browser_config_in_agentserver_directory(monk
     """path.* must use the current AgentServer config, never Gateway config."""
     from jiuwenswarm.common import config as config_module
 
-    current = {"browser": {"chrome_path": "/agent/chrome", "headless": False}}
+    current = {"browser": {"chrome_path": "/agent/chrome", "browser_type": "msedge", "headless": False}}
     updates: list[dict] = []
     monkeypatch.setattr(config_module, "get_config", lambda: current)
     monkeypatch.setattr(config_module, "update_browser_in_config", lambda payload: updates.append(payload))
@@ -955,13 +955,54 @@ async def test_config_adapter_keeps_browser_config_in_agentserver_directory(monk
 
     got = await adapter.handle(_request(ReqMethod.PATH_GET))
     changed = await adapter.handle(
-        _request(ReqMethod.PATH_SET, {"chrome_path": "/agent/new-chrome", "headless": True})
+        _request(ReqMethod.PATH_SET, {"chrome_path": "/agent/new-chrome", "browser_type": "chrome", "headless": True})
     )
 
-    assert got.payload == {"chrome_path": "/agent/chrome", "headless": False}
-    assert updates == [{"chrome_path": "/agent/new-chrome", "headless": True}]
+    assert got.payload == {"chrome_path": "/agent/chrome", "browser_type": "msedge", "headless": False}
+    assert updates == [{"chrome_path": "/agent/new-chrome", "browser_type": "chrome", "headless": True}]
     assert changed.metadata["config_changed"] is True
     assert changed.metadata["browser_runtime_restart"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_adapter_resolves_platform_browser_path_for_runtime_restart(monkeypatch) -> None:
+    """PATH_GET must return the concrete binary used to identify an active runtime."""
+    from jiuwenswarm.common import config as config_module
+
+    current = {
+        "browser": {
+            "chrome_path": {"default": "  /agent/chrome  "},
+            "browser_type": "chrome",
+            "headless": True,
+        }
+    }
+    monkeypatch.setattr(config_module, "get_config", lambda: current)
+
+    response = await ConfigAdapter().handle(_request(ReqMethod.PATH_GET))
+
+    assert response.payload == {
+        "chrome_path": "/agent/chrome",
+        "browser_type": "chrome",
+        "headless": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_config_adapter_resolves_env_browser_path_for_runtime_restart(monkeypatch) -> None:
+    """PATH_GET must match the env-expanded binary used by the runtime."""
+    from jiuwenswarm.common import config as config_module
+
+    monkeypatch.setenv("JIUWEN_TEST_CHROME", "/agent/chrome")
+    monkeypatch.setattr(
+        config_module,
+        "get_config",
+        lambda: {"browser": {"chrome_path": "${JIUWEN_TEST_CHROME}"}},
+    )
+
+    response = await ConfigAdapter().handle(_request(ReqMethod.PATH_GET))
+
+    assert response.payload["chrome_path"] == "/agent/chrome"
+
 
 class TestBuildErrorResponse:
     def test_build_error_response(self) -> None:

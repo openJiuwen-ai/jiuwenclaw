@@ -262,6 +262,8 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "skills.toggle",
         "skills.install",
         "skills.import_local",
+        "skills.import_upload",
+        "skills.create_from_knowledge",
         "skills.marketplace.add",
         "skills.marketplace.remove",
         "skills.marketplace.toggle",
@@ -282,6 +284,7 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "skills.teamskillshub.install",
         "skills.teamskillshub.publish",
         "skills.teamskillshub.delete",
+        "skills.swarmskillshub.detail",
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
@@ -296,11 +299,13 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "agent_templates.file.list",
         "agent_templates.file.read",
         "agent_templates.create",
+        "agent_templates.import_local",
         "agent_templates.install",
         "agent_templates.uninstall",
         "plugin_packages.list",
         "plugin_packages.show",
         "plugin_packages.create",
+        "plugin_packages.import_local",
         "plugin_packages.install",
         "plugin_packages.uninstall",
         "permissions.tools.get",
@@ -373,6 +378,8 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "skills.toggle",
         "skills.install",
         "skills.import_local",
+        "skills.import_upload",
+        "skills.create_from_knowledge",
         "skills.marketplace.add",
         "skills.marketplace.remove",
         "skills.marketplace.toggle",
@@ -393,6 +400,7 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "skills.teamskillshub.install",
         "skills.teamskillshub.publish",
         "skills.teamskillshub.delete",
+        "skills.swarmskillshub.detail",
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
@@ -407,11 +415,13 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "agent_templates.file.list",
         "agent_templates.file.read",
         "agent_templates.create",
+        "agent_templates.import_local",
         "agent_templates.install",
         "agent_templates.uninstall",
         "plugin_packages.list",
         "plugin_packages.show",
         "plugin_packages.create",
+        "plugin_packages.import_local",
         "plugin_packages.install",
         "plugin_packages.uninstall",
         "permissions.tools.get",
@@ -2413,7 +2423,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 real_client = _resolve_agent_client(agent_client)
                 try:
                     if real_client is None:
-                        raise RuntimeError("AgentServer is unavailable")
+                        await channel.send_response(
+                            ws, req_id, ok=False,
+                            error="AgentServer is unavailable",
+                            code="SERVICE_UNAVAILABLE",
+                        )
+                        return
                     env = e2a_from_agent_fields(
                         request_id=req_id,
                         channel_id="tui",
@@ -3442,8 +3457,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     # ── Memory RPC handlers ────────────────────────────────────────────
     # Phase 3: memory data and its workspace path belong to the target
     # AgentServer.  Gateway/TUI only preserves the RPC protocol and forwards
-    # the authenticated routing user_id; it never resolves a local workspace
-    # or falls back to deployment-side memory files.
+    # the authenticated routing user_id.  In legacy single-user mode the
+    # e2a_proxy transparently falls back to the in-process MemoryAdapter
+    # (shared ~/.jiuwenswarm); AgentOS mode returns a retryable error when
+    # the target AgentServer is unreachable.
     def _register_memory_proxy(method_name, req_method):
         async def _handler(ws, req_id, params, session_id, user_id=None) -> None:
             """TUI memory 管理转发：与其余用户业务入口统一走 e2a_proxy 薄代理

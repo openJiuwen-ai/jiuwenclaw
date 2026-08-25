@@ -5850,15 +5850,25 @@ class AgentWebSocketServer:
             channel_id = request.channel_id or "default"
             mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
             agent_mode = _agent_manager_mode_for_request(mode)
-            agent = await self._agent_manager.get_agent(
+            # 同 command.btw：先按 session_id 找承载会话的 agent，按 mode 兜底会命中影子 agent。
+            agent = self._agent_manager.get_agent_for_session_nowait(
                 channel_id=channel_id,
-                mode=agent_mode,
-                project_dir=resolve_request_project_dir(request),
-                sub_mode=sub_mode,
+                session_id=session_id,
             )
+            if agent is None:
+                agent = await self._agent_manager.get_agent(
+                    channel_id=channel_id,
+                    mode=agent_mode,
+                    project_dir=resolve_request_project_dir(request),
+                    sub_mode=sub_mode,
+                )
 
             if agent is None:
                 raise ValueError("Failed to get agent")
+
+            # /compact 同 /btw：非 chat 通道 RPC 需先 ensure_instance 懒构建根 DeepAgent，
+            # 否则 self._instance 为 None 时 compress_context 会直接 noop（误报"无需压缩"）。
+            await agent.ensure_instance()
 
             result_data = await agent.compress_context(session_id=session_id, return_state=True)
 
@@ -6123,6 +6133,11 @@ class AgentWebSocketServer:
 
             if agent is None:
                 raise ValueError("Failed to get agent")
+
+            # /btw 是非 chat 通道 RPC：根适配器默认只作路由/模板，模型在 create_instance
+            # 时被 _skip_own_instance_build 跳过、self._model 为 None。先 ensure_instance 懒构建
+            # 根 DeepAgent（含模型），否则 _call_model_for_recap 报 "[oneshot] no model instance available"。
+            await agent.ensure_instance()
 
             result_data = await agent.generate_btw_answer(
                 session_id=session_id,
