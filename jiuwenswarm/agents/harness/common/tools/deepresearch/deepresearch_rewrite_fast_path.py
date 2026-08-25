@@ -8,7 +8,7 @@ import math
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 import json_repair
 
@@ -93,8 +93,8 @@ _SUCCESS_MESSAGE = (
     "如需继续改写，可直接选择下一处内容。"
 )
 _DELIVERY_FAILURE_MESSAGE = "改写版本已成功保留，但报告文件交付失败。"
-_MODEL_CALL_TIMEOUT_SECONDS = 180.0
-_TOTAL_TIMEOUT_SECONDS = 360.0
+_MODEL_CALL_TIMEOUT_SECONDS = 600.0
+_TOTAL_TIMEOUT_SECONDS = 600.0
 _REQUEST_JSON_MAX_BYTES = 1024 * 1024
 _TOOL_JSON_MAX_BYTES = 4 * 1024 * 1024
 _PROMPT_JSON_MAX_BYTES = 4 * 1024 * 1024
@@ -557,6 +557,7 @@ async def run_rewrite_fast_path(
     prepare_invoke: Callable[..., Awaitable[object]],
     model_invoke: Callable[..., Awaitable[object]],
     commit_invoke: Callable[..., Awaitable[object]],
+    model_call_kwargs: Mapping[str, Any] | None = None,
     model_call_timeout_seconds: float = _MODEL_CALL_TIMEOUT_SECONDS,
     total_timeout_seconds: float = _TOTAL_TIMEOUT_SECONDS,
 ) -> RewriteFastPathResult | None:
@@ -665,7 +666,9 @@ async def run_rewrite_fast_path(
     ]
 
     model_started = time.perf_counter()
-    model_kwargs = {"temperature": 0.2} if request.action == "polish" else {}
+    model_kwargs = dict(model_call_kwargs or {})
+    if request.action == "polish":
+        model_kwargs["temperature"] = 0.2
     usage_metadata = None
     model_calls = 0
     structured_result = None

@@ -12396,12 +12396,18 @@ class JiuWenSwarmDeepAdapter:
         query: object,
     ) -> RewriteFastPathResult | None:
         from jiuwenswarm.agents.harness.common.tools.deepresearch import rewrite_tools
+        from jiuwenswarm.common.thinking.adapter import adapt_thinking
+        from jiuwenswarm.common.thinking.types import thaw_llm_call_kwargs
 
+        model_call_kwargs = thaw_llm_call_kwargs(
+            adapt_thinking("off", model=self._model).llm_call_kwargs
+        )
         return await run_rewrite_fast_path(
             query,
             model_invoke=self._model.invoke,
             prepare_invoke=rewrite_tools.deepresearch_prepare_rewrite._func,  # pylint: disable=protected-access
             commit_invoke=rewrite_tools.deepresearch_commit_rewrite._func,  # pylint: disable=protected-access
+            model_call_kwargs=model_call_kwargs,
         )
 
     @staticmethod

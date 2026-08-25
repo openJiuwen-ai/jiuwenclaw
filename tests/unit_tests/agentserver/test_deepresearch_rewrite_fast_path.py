@@ -64,6 +64,11 @@ def test_parse_rewrite_envelope_ignores_plain_message():
     assert parse_rewrite_envelope("请润色这段文字") is None
 
 
+def test_rewrite_fast_path_defaults_allow_ten_minutes_for_long_selections():
+    assert fast_path_module._MODEL_CALL_TIMEOUT_SECONDS == 600.0
+    assert fast_path_module._TOTAL_TIMEOUT_SECONDS == 600.0
+
+
 def test_parse_rewrite_envelope_bounds_input_before_regex(monkeypatch):
     monkeypatch.setattr(fast_path_module, "_REQUEST_JSON_MAX_BYTES", 32)
 
@@ -849,6 +854,28 @@ async def test_run_rewrite_fast_path_maps_model_exception_without_committing():
     assert result.message == "rewrite model call failed"
     assert result.model_calls == 1
     commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_rewrite_fast_path_forwards_model_call_kwargs():
+    model = AsyncMock(
+        return_value=SimpleNamespace(content=_json_result(_STRUCTURED_RESULT))
+    )
+
+    result = await run_rewrite_fast_path(
+        _query(),
+        prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
+        model_invoke=model,
+        commit_invoke=AsyncMock(return_value=_json_result({"status": "completed"})),
+        model_call_kwargs={"extra_body": {"thinking": {"type": "disabled"}}},
+    )
+
+    assert result is not None
+    assert result.status == "completed"
+    assert model.await_args.kwargs == {
+        "temperature": 0.2,
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
 
 
 @pytest.mark.asyncio
