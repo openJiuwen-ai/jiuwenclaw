@@ -3953,6 +3953,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "pin_order": int(meta.get("pin_order", 0)),
             "project_dir": str(meta.get("project_dir", "")),
             "project_id": str(meta.get("project_id", "")),
+            "persist_session": meta.get("persist_session") is True,
             "cron_id": str(meta.get("cron_id", "")),
             "last_user_message_at": lum if isinstance(lum, (int, float)) and not isinstance(lum, bool) else None,
             "model": str(meta.get("model", "")),
