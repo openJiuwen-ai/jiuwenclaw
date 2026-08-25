@@ -9676,7 +9676,8 @@ class JiuWenSwarmDeepAdapter:
             usage_meta,
         )
 
-    def _format_llm_usage_summary(self, usage_accumulator: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _format_llm_usage_summary(usage_accumulator: dict[str, Any]) -> dict[str, Any]:
         summary = {
             "input_tokens": usage_accumulator["input_tokens"],
             "output_tokens": usage_accumulator["output_tokens"],
