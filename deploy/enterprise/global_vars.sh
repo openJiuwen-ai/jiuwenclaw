@@ -113,6 +113,7 @@ declare -A DEPLOY_VARS=(
     ["ENABLE_EXTERNAL_PVC"]="false"
     ["ENABLE_EXTERNAL_RABBITMQ"]="false"
     ["ENABLE_EXTERNAL_REDIS"]="false"
+    ["ENABLE_USER_WEB_EMBEDDING"]="false"
     ["FLUENT_BIT_NAME"]="fluent-bit"
     ["FLUENT_BIT_IMAGE"]="fluent/fluent-bit:3.0.0"
     ["FUNC_SVC_NAME"]="0@jiuwen@clawtest"
