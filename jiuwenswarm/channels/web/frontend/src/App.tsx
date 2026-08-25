@@ -17,6 +17,7 @@ import { ConfigPanel } from './components/ConfigPanel';
 import { ChannelsPanel } from './components/ChannelsPanel';
 import { BrowserPanel } from './components/BrowserPanel';
 import { UpdatePanel } from './components/UpdatePanel';
+import { A2AIngressPanel } from './components/A2AIngressPanel';
 import { ExtensionsHubPanel } from './components/ExtensionsHubPanel';
 import {
   ShareImageDocument,
@@ -100,7 +101,7 @@ function shouldPreviewModelSetupGuide(): boolean {
   return PREVIEW_MODEL_SETUP_GUIDE;
 }
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel' | 'a2aingress';
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -2412,6 +2413,11 @@ function AppContent() {
         {activeNav === 'browserpanel' && (
           <div className="app-section">
             <BrowserPanel isConnected={isConnected} request={request} />
+          </div>
+        )}
+        {activeNav === 'a2aingress' && (
+          <div className="app-section">
+            <A2AIngressPanel isConnected={isConnected} request={request} />
           </div>
         )}
         {FEATURE_APP_UPDATER_UI && activeNav === 'updatepanel' && (

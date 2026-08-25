@@ -1,0 +1,156 @@
+export type A2AIngressState = 'disabled' | 'starting' | 'running' | 'stopping' | 'error';
+
+export interface A2AIngressSnapshot {
+  enabled: boolean;
+  state: A2AIngressState;
+  desired_host: string;
+  desired_port: number;
+  desired_rpc_path: string;
+  desired_card_path: string;
+  desired_extended_card_path: string;
+  desired_protocol_version: string;
+  desired_app_name: string;
+  desired_app_description: string;
+  desired_app_version: string;
+  desired_expose_reasoning: boolean;
+  desired_rpc_url: string;
+  desired_card_url: string;
+  effective_host: string | null;
+  effective_port: number | null;
+  effective_rpc_path: string | null;
+  effective_card_path: string | null;
+  effective_rpc_url: string | null;
+  effective_card_url: string | null;
+  exposure_warning: string | null;
+  started_at: number | null;
+  last_error: string | null;
+  config_revision: number;
+}
+
+export interface A2AIngressDraft {
+  host: string;
+  port: string;
+  rpc_path: string;
+  protocol_version: string;
+  card_path: string;
+  extended_card_path: string;
+  app_name: string;
+  app_description: string;
+  app_version: string;
+  expose_reasoning: boolean;
+}
+
+const DEFAULT_DRAFT: A2AIngressDraft = {
+  host: '127.0.0.1',
+  port: '19100',
+  rpc_path: '/a2a',
+  protocol_version: '1.0.0',
+  card_path: '/.well-known/agent-card.json',
+  extended_card_path: '/agent/authenticatedExtendedCard',
+  app_name: 'JiuwenSwarm Gateway A2A Server',
+  app_description: 'A2A ingress for JiuwenSwarm Gateway',
+  app_version: '0.1.0',
+  expose_reasoning: true,
+};
+
+function asString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
+}
+function asNumber(value: unknown, fallback = 0): number {
+  if (value === null || value === undefined || value === '') return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+export function normalizeA2AIngressSnapshot(value: unknown): A2AIngressSnapshot | null {
+  if (!value || typeof value !== 'object') return null;
+  const payload = value as Record<string, unknown>;
+  const state = asString(payload.state);
+  if (!['disabled', 'starting', 'running', 'stopping', 'error'].includes(state)) return null;
+  return {
+    enabled: payload.enabled === true,
+    state: state as A2AIngressState,
+    desired_host: asString(payload.desired_host, DEFAULT_DRAFT.host),
+    desired_port: asNumber(payload.desired_port, Number(DEFAULT_DRAFT.port)),
+    desired_rpc_path: asString(payload.desired_rpc_path, DEFAULT_DRAFT.rpc_path),
+    desired_card_path: asString(payload.desired_card_path, DEFAULT_DRAFT.card_path),
+    desired_extended_card_path: asString(payload.desired_extended_card_path, DEFAULT_DRAFT.extended_card_path),
+    desired_protocol_version: asString(payload.desired_protocol_version, DEFAULT_DRAFT.protocol_version),
+    desired_app_name: asString(payload.desired_app_name, DEFAULT_DRAFT.app_name),
+    desired_app_description: asString(payload.desired_app_description, DEFAULT_DRAFT.app_description),
+    desired_app_version: asString(payload.desired_app_version, DEFAULT_DRAFT.app_version),
+    desired_expose_reasoning: payload.desired_expose_reasoning !== false,
+    desired_rpc_url: asString(payload.desired_rpc_url),
+    desired_card_url: asString(payload.desired_card_url),
+    effective_host: typeof payload.effective_host === 'string' ? payload.effective_host : null,
+    effective_port: typeof payload.effective_port === 'number' ? payload.effective_port : null,
+    effective_rpc_path: typeof payload.effective_rpc_path === 'string' ? payload.effective_rpc_path : null,
+    effective_card_path: typeof payload.effective_card_path === 'string' ? payload.effective_card_path : null,
+    effective_rpc_url: typeof payload.effective_rpc_url === 'string' ? payload.effective_rpc_url : null,
+    effective_card_url: typeof payload.effective_card_url === 'string' ? payload.effective_card_url : null,
+    exposure_warning: typeof payload.exposure_warning === 'string' ? payload.exposure_warning : null,
+    started_at: typeof payload.started_at === 'number' ? payload.started_at : null,
+    last_error: typeof payload.last_error === 'string' ? payload.last_error : null,
+    config_revision: asNumber(payload.config_revision),
+  };
+}
+
+export function draftFromA2AIngressSnapshot(snapshot: A2AIngressSnapshot): A2AIngressDraft {
+  return {
+    host: snapshot.desired_host,
+    port: String(snapshot.desired_port),
+    rpc_path: snapshot.desired_rpc_path,
+    protocol_version: snapshot.desired_protocol_version,
+    card_path: snapshot.desired_card_path,
+    extended_card_path: snapshot.desired_extended_card_path,
+    app_name: snapshot.desired_app_name,
+    app_description: snapshot.desired_app_description,
+    app_version: snapshot.desired_app_version,
+    expose_reasoning: snapshot.desired_expose_reasoning,
+  };
+}
+
+export function validateA2AIngressDraft(draft: A2AIngressDraft): string | null {
+  if (!draft.host.trim()) return 'host';
+  const port = Number(draft.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return 'port';
+  for (const field of ['rpc_path', 'card_path', 'extended_card_path'] as const) if (!draft[field].trim().startsWith('/')) return field;
+  for (const field of ['protocol_version', 'app_name', 'app_version'] as const) if (!draft[field].trim()) return field;
+  return null;
+}
+
+export function toA2AIngressPatch(draft: A2AIngressDraft): Record<string, string | number | boolean> {
+  return {
+    host: draft.host.trim(),
+    port: Number(draft.port),
+    rpc_path: draft.rpc_path.trim(),
+    protocol_version: draft.protocol_version.trim(),
+    card_path: draft.card_path.trim(),
+    extended_card_path: draft.extended_card_path.trim(),
+    app_name: draft.app_name.trim(),
+    app_description: draft.app_description.trim(),
+    app_version: draft.app_version.trim(),
+    expose_reasoning: draft.expose_reasoning,
+  };
+}
+
+export function isA2AIngressTransitioning(state: A2AIngressState | undefined): boolean {
+  return state === 'starting' || state === 'stopping';
+}
+
+export function canOperateA2AIngress(
+  snapshot: A2AIngressSnapshot | null,
+  isConnected: boolean,
+  isBusy: boolean,
+  isDirty: boolean,
+  operation: 'enable' | 'disable' | 'reload',
+): boolean {
+  if (!snapshot || !isConnected || isBusy || isDirty) return false;
+  if (operation === 'enable') return snapshot.state !== 'running';
+  if (operation === 'disable') return snapshot.state !== 'disabled';
+  return snapshot.enabled;
+}
+
+export function shouldAcceptA2AIngressResponse(responseGeneration: number, currentGeneration: number): boolean {
+  return responseGeneration === currentGeneration;
+}

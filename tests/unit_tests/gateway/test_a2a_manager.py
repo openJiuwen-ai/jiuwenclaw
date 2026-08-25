@@ -299,6 +299,9 @@ async def test_update_apply_false_separates_desired_and_effective_addresses():
     assert snapshot.effective_port == 19100
     assert snapshot.desired_rpc_url.endswith(":19123/a2a")
     assert snapshot.effective_rpc_url.endswith(":19100/a2a")
+    assert snapshot.desired_protocol_version == "1.0.0"
+    assert snapshot.desired_app_name == "JiuwenSwarm Gateway A2A Server"
+    assert snapshot.desired_expose_reasoning is True
 
 
 @pytest.mark.asyncio
