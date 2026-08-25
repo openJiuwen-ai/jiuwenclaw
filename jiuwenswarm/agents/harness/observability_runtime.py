@@ -23,6 +23,7 @@ def build_observability_config(
     service_name: str,
     default_exporter: str = "otlp_grpc",
     default_endpoint: str = "http://localhost:4317",
+    default_backend: str = "langfuse",
     traces_dir: str,
 ) -> Any:
     """Build the SDK config for one runtime without initializing the provider."""
@@ -33,7 +34,9 @@ def build_observability_config(
         service_name=config.get("service_name", service_name),
         exporter=config.get("exporter", default_exporter),
         endpoint=config.get("endpoint", default_endpoint),
+        backend=config.get("backend", default_backend),
         sample_rate=config.get("sample_rate", 1.0),
+        max_attributes=config.get("max_attributes", 200),
         attribute_value_max_length=config.get("attribute_value_max_length", 10240),
         redact_prompts=config.get("redact_prompts", False),
         redact_completions=config.get("redact_completions", False),

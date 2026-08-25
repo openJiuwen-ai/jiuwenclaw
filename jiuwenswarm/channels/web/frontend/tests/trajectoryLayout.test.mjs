@@ -9,7 +9,7 @@ import {
   clampRawInspectorHeight,
   rawInspectorHeightBounds,
   rawInspectorKeyboardHeight,
-  resolveTrajectoryHostLayout,
+  shouldInsetTrajectoryForFloatingTasks,
 } from '../node_modules/.cache/trajectory-layout/trajectoryLayout.js';
 
 test('raw inspector height is clamped to its fixed minimum and container-relative maximum', () => {
@@ -30,17 +30,25 @@ test('raw inspector separator supports keyboard resizing and ignores unrelated k
   assert.equal(rawInspectorKeyboardHeight(125, 'ArrowDown', 600), 120);
 });
 
-test('sidebar suppression applies only to the single-Agent trajectory view', () => {
-  assert.deepEqual(
-    resolveTrajectoryHostLayout('agent', 'trajectory', true, true, true),
-    { hideSessions: true, hideTasks: true, effectiveTeamAreaExpanded: false },
+test('trajectory reserves space only for a visible collapsed floating task panel', () => {
+  assert.equal(
+    shouldInsetTrajectoryForFloatingTasks('agent', 'trajectory', true, false, false),
+    true,
   );
-  assert.deepEqual(
-    resolveTrajectoryHostLayout('agent', 'chat', true, true, true),
-    { hideSessions: false, hideTasks: false, effectiveTeamAreaExpanded: true },
+  assert.equal(
+    shouldInsetTrajectoryForFloatingTasks('agent', 'trajectory', true, true, false),
+    false,
   );
-  assert.deepEqual(
-    resolveTrajectoryHostLayout('team', 'trajectory', true, true, true),
-    { hideSessions: false, hideTasks: false, effectiveTeamAreaExpanded: true },
+  assert.equal(
+    shouldInsetTrajectoryForFloatingTasks('agent', 'trajectory', true, false, true),
+    false,
+  );
+  assert.equal(
+    shouldInsetTrajectoryForFloatingTasks('agent', 'chat', true, false, false),
+    false,
+  );
+  assert.equal(
+    shouldInsetTrajectoryForFloatingTasks('team', 'trajectory', true, false, false),
+    false,
   );
 });

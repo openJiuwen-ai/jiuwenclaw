@@ -262,7 +262,7 @@ async def _run(host: str, port: int) -> None:
         port=port
     )
     await server.start()
-    logger.info(
+logger.info(
         "[AgentServer] port listening: ws://%s:%s (elapsed %.2fs)",
         host,
         port,
@@ -309,6 +309,10 @@ async def _run(host: str, port: int) -> None:
         name="zen-free-models-warmup",
     )
 
+    from jiuwenswarm.observability.gateway_hints import trajectory_gateway_hint_bridge
+
+    trajectory_gateway_hint_bridge.bind(asyncio.get_running_loop(), server.send_push)
+
     # ---------- ProactiveEngine 初始化 ----------
     # 适配逻辑（建专用 agent + 触发主 agent 回调）封装在 proactive_adapter，
     # app_agentserver 只调 init_proactive_engine。
@@ -351,6 +355,7 @@ async def _run(host: str, port: int) -> None:
         pass
     finally:
         logger.info("[AgentServer] stopping…")
+        await trajectory_gateway_hint_bridge.unbind()
         if teammate_bootstrap_task is not None:
             teammate_bootstrap_task.cancel()
             try:

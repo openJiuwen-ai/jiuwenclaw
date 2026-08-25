@@ -598,13 +598,16 @@ def _capture_agent_run_close(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 async def test_stream_error_answer_aborts_active_round_without_debug_logger(monkeypatch):
     adapter = _adapter_ready_for_followup_execution(monkeypatch)
     closed_with: list[bool] = []
+    opened_run_spans: list[dict] = []
     closed_run_spans: list[dict] = []
 
     from openjiuwen.harness import observability as harness_observability
     from jiuwenswarm.agents.harness import agent_observability as swarm_agent_observability
 
     monkeypatch.setattr(
-        harness_observability, "open_agent_run_span", lambda **_kwargs: None
+        harness_observability,
+        "open_agent_run_span",
+        lambda **kwargs: opened_run_spans.append(kwargs),
     )
     monkeypatch.setattr(
         harness_observability,
@@ -657,6 +660,7 @@ async def test_stream_error_answer_aborts_active_round_without_debug_logger(monk
     } in payloads
     assert not any(payload.get("event_type") == "chat.final" for payload in payloads)
     assert closed_with == [True]
+    assert opened_run_spans[0]["mode"] == "agent.work.plan"
     assert len(closed_run_spans) == 1
     assert closed_run_spans[0]["exception"] is None
     assert closed_run_spans[0]["error_type"] == "answer_error"
@@ -668,6 +672,7 @@ async def test_stream_error_answer_aborts_active_round_without_debug_logger(monk
 @pytest.mark.anyio
 async def test_non_stream_error_answer_closes_root_with_structured_failure(monkeypatch):
     adapter = _adapter_ready_for_followup_execution(monkeypatch)
+    opened_run_spans: list[dict] = []
     closed_run_spans: list[dict] = []
     seen_inputs: list[dict] = []
 
@@ -675,7 +680,9 @@ async def test_non_stream_error_answer_closes_root_with_structured_failure(monke
     from jiuwenswarm.agents.harness import agent_observability as swarm_agent_observability
 
     monkeypatch.setattr(
-        harness_observability, "open_agent_run_span", lambda **_kwargs: None
+        harness_observability,
+        "open_agent_run_span",
+        lambda **kwargs: opened_run_spans.append(kwargs),
     )
     monkeypatch.setattr(
         harness_observability,
@@ -708,6 +715,7 @@ async def test_non_stream_error_answer_closes_root_with_structured_failure(monke
 
     assert response.ok is False
     assert response.payload == {"error": "provider rejected request"}
+    assert opened_run_spans[0]["mode"] == "agent.work.plan"
     assert len(closed_run_spans) == 1
     assert closed_run_spans[0]["exception"] is None
     assert closed_run_spans[0]["error_type"] == "answer_error"

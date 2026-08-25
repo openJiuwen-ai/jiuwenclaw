@@ -8,14 +8,119 @@ import {
   collectHeadRefreshWindow,
   collectRevisionRefreshWindow,
   createTrajectoryOperationCoordinator,
+  createTrajectoryTraceHintCoordinator,
   createTrajectoryWindowState,
   resetTrajectoryWindowState,
+  sameTrajectoryUsageMap,
   selectSummariesNeedingLoad,
+  shouldCatchUpAfterTrajectoryTerminalEvent,
   stageTrajectoryTracePages,
   trajectoryContentMode,
 } from '../node_modules/.cache/trajectory-window/trajectoryWindow.mjs';
+
+test('unchanged cumulative usage does not require another trajectory publish', () => {
+  const previous = new Map([
+    ['trace-a\0inference-1', { input: 10, cacheRead: 2, output: 3, reasoning: 1, total: 13 }],
+  ]);
+  const same = new Map([
+    ['trace-a\0inference-1', { input: 10, cacheRead: 2, output: 3, reasoning: 1, total: 13 }],
+  ]);
+  const changed = new Map([
+    ['trace-a\0inference-1', { input: 10, cacheRead: 2, output: 4, reasoning: 1, total: 14 }],
+  ]);
+
+  assert.equal(sameTrajectoryUsageMap(previous, same), true);
+  assert.equal(sameTrajectoryUsageMap(previous, changed), false);
+  assert.equal(sameTrajectoryUsageMap(previous, new Map()), false);
+});
+
+test('one hint flight chases the highest revision that arrives while loading', async () => {
+  const coordinator = createTrajectoryTraceHintCoordinator();
+  const batches = [];
+  let releaseFirstBatch;
+  const firstBatch = new Promise(resolve => {
+    releaseFirstBatch = resolve;
+  });
+  coordinator.enqueue('a'.repeat(32), 10);
+  const flight = coordinator.drain(async (hints) => {
+    batches.push([...hints]);
+    if (batches.length === 1) await firstBatch;
+  });
+
+  coordinator.enqueue('a'.repeat(32), 11);
+  coordinator.enqueue('a'.repeat(32), 13);
+  coordinator.enqueue('b'.repeat(32), 2);
+  const sharedFlight = coordinator.drain(async () => {
+    assert.fail('a second loader must not create a concurrent flight');
+  });
+  assert.equal(sharedFlight, flight);
+
+  releaseFirstBatch();
+  await flight;
+  assert.deepEqual(batches, [
+    [['a'.repeat(32), 10]],
+    [['a'.repeat(32), 13], ['b'.repeat(32), 2]],
+  ]);
+});
+
+test('a drained hint coordinator accepts a later independent flight', async () => {
+  const coordinator = createTrajectoryTraceHintCoordinator();
+  const batches = [];
+  coordinator.enqueue('c'.repeat(32), 1);
+  await coordinator.drain(async hints => batches.push([...hints]));
+  coordinator.enqueue('c'.repeat(32), 2);
+  await coordinator.drain(async hints => batches.push([...hints]));
+
+  assert.deepEqual(batches, [
+    [['c'.repeat(32), 1]],
+    [['c'.repeat(32), 2]],
+  ]);
+});
+
+test('a paced hint flight bounds pulls while retaining the newest watermark', async () => {
+  const coordinator = createTrajectoryTraceHintCoordinator();
+  const batches = [];
+  const paceWaiters = [];
+  coordinator.enqueue('d'.repeat(32), 1);
+  const flight = coordinator.drain(
+    async hints => {
+      batches.push([...hints]);
+      if (batches.length === 1) {
+        coordinator.enqueue('d'.repeat(32), 2);
+        coordinator.enqueue('d'.repeat(32), 9);
+      }
+    },
+    () => new Promise(resolve => paceWaiters.push(resolve)),
+  );
+
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(batches, [[['d'.repeat(32), 1]]]);
+  assert.equal(paceWaiters.length, 1);
+  paceWaiters.shift()();
+  await flight;
+  assert.deepEqual(batches, [
+    [['d'.repeat(32), 1]],
+    [['d'.repeat(32), 9]],
+  ]);
+});
+
+test('a failed hint batch is requeued for the next recovery drain', async () => {
+  const coordinator = createTrajectoryTraceHintCoordinator();
+  coordinator.enqueue('e'.repeat(32), 7);
+  await assert.rejects(
+    coordinator.drain(async () => {
+      throw new Error('temporary detail failure');
+    }),
+    /temporary detail failure/,
+  );
+
+  const recovered = [];
+  await coordinator.drain(async hints => recovered.push([...hints]));
+  assert.deepEqual(recovered, [[['e'.repeat(32), 7]]]);
+});
 import {
   getTrajectoryArchive,
+  getTrajectorySessionUsage,
   getTrajectoryTrace,
   listTrajectoryTraceRevisions,
   listTrajectoryTraces,
@@ -30,6 +135,34 @@ import { liveElapsedSeconds } from '../node_modules/.cache/trajectory-window/rec
 
 const SESSION_ID = 'session-1';
 const STORE_EPOCH = 'epoch-1';
+
+test('session terminal events catch up missed trajectory hints without treating start as terminal', () => {
+  assert.equal(shouldCatchUpAfterTrajectoryTerminalEvent(
+    'chat.processing_status',
+    { session_id: SESSION_ID, is_processing: false },
+    SESSION_ID,
+  ), true);
+  assert.equal(shouldCatchUpAfterTrajectoryTerminalEvent(
+    'chat.processing_status',
+    { session_id: SESSION_ID, is_processing: true },
+    SESSION_ID,
+  ), false);
+  assert.equal(shouldCatchUpAfterTrajectoryTerminalEvent(
+    'chat.final',
+    { session_id: SESSION_ID },
+    SESSION_ID,
+  ), true);
+  assert.equal(shouldCatchUpAfterTrajectoryTerminalEvent(
+    'harness.session_finished',
+    { payload: { event: { session_id: SESSION_ID } } },
+    SESSION_ID,
+  ), true);
+  assert.equal(shouldCatchUpAfterTrajectoryTerminalEvent(
+    'chat.error',
+    { session_id: 'another-session' },
+    SESSION_ID,
+  ), false);
+});
 
 function hexId(value, width) {
   return value.toString(16).padStart(width, '0');
@@ -371,6 +504,42 @@ test('trajectory client consumes opaque list and revision cursors', async () => 
       requestedUrls[1],
       /\/revisions\?after_revision=opaque\+cursor%2Fwith\+symbols&limit=100$/,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('trajectory client reads session cumulative usage by physical request identity', async () => {
+  const originalFetch = globalThis.fetch;
+  const traceId = 'a'.repeat(32);
+  try {
+    globalThis.fetch = async input => {
+      assert.match(String(input), /\/sessions\/session-1\/usage$/);
+      return new Response(JSON.stringify({
+        schema_version: 1,
+        session_id: SESSION_ID,
+        store_epoch: STORE_EPOCH,
+        scope: 'session',
+        items: [{
+          trace_id: traceId,
+          inference_id: 'inference-1',
+          subject_id: 'main',
+          start_time_unix_nano: '10',
+          usage: { input: 2, output: 1, total: 3 },
+          cumulative_usage: { input: 5, output: 3, total: 8 },
+        }],
+      }), { status: 200 });
+    };
+
+    const usage = await getTrajectorySessionUsage(SESSION_ID);
+
+    assert.equal(usage.scope, 'session');
+    assert.equal(usage.items[0].trace_id, traceId);
+    assert.deepEqual(usage.items[0].cumulative_usage, {
+      input: 5,
+      output: 3,
+      total: 8,
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -919,6 +1088,90 @@ test('a later detail-page failure leaves the current bucket untouched', async ()
   assert.equal(current.revision, 10);
   assert.deepEqual([...current.records.keys()], [identity]);
   assert.deepEqual([...current.rawRecords.keys()], [identity]);
+});
+
+test('progressive detail publish exposes only consumed page revisions before a later failure', async () => {
+  const existing = projectedRecord(20);
+  const identity = `${existing.trace_id}:${existing.span_id}`;
+  const current = {
+    revision: 20,
+    records: new Map([[identity, existing.otlp]]),
+    rawRecords: new Map([[identity, existing]]),
+  };
+  const published = [];
+  let calls = 0;
+  const controller = new AbortController();
+
+  await assert.rejects(
+    stageTrajectoryTracePages(
+      current,
+      controller.signal,
+      async () => {
+        calls += 1;
+        if (calls === 1) {
+          return detailPage({
+            revision: 30,
+            records: [projectedRecord(21)],
+            hasMore: true,
+            nextSinceRevision: 21,
+          });
+        }
+        throw new Error('page two failed after visible progress');
+      },
+      progress => published.push(progress),
+    ),
+    /page two failed after visible progress/,
+  );
+
+  assert.equal(published.length, 1);
+  assert.equal(published[0].bucket.revision, 21);
+  assert.equal(published[0].bucket.records.size, 2);
+  assert.notEqual(published[0].bucket.revision, 30);
+  assert.equal(current.revision, 20);
+});
+
+test('progressive detail publish advances each page cursor and reaches target only at the final page', async () => {
+  const published = [];
+  let calls = 0;
+  const controller = new AbortController();
+  const staged = await stageTrajectoryTracePages(
+    undefined,
+    controller.signal,
+    async (sinceRevision) => {
+      calls += 1;
+      if (calls === 1) {
+        assert.equal(sinceRevision, 0);
+        return detailPage({
+          revision: 3,
+          records: [projectedRecord(1)],
+          hasMore: true,
+          nextSinceRevision: 1,
+        });
+      }
+      if (calls === 2) {
+        assert.equal(sinceRevision, 1);
+        return detailPage({
+          revision: 3,
+          records: [projectedRecord(2)],
+          hasMore: true,
+          nextSinceRevision: 2,
+        });
+      }
+      assert.equal(sinceRevision, 2);
+      return detailPage({
+        revision: 3,
+        records: [projectedRecord(3)],
+        hasMore: false,
+        nextSinceRevision: 3,
+      });
+    },
+    progress => published.push(progress),
+  );
+
+  assert.ok(staged);
+  assert.deepEqual(published.map(progress => progress.bucket.revision), [1, 2, 3]);
+  assert.deepEqual(published.map(progress => progress.bucket.records.size), [1, 2, 3]);
+  assert.equal(staged, published[2]);
 });
 
 test('aborting after a staged detail page never returns a publishable bucket', async () => {

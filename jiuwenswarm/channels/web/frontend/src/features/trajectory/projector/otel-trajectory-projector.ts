@@ -7,8 +7,18 @@ import {
   readStringAttribute,
 } from '../semconv/attributes.ts'
 import {
-  GEN_AI_OPERATIONS, STANDARD_ATTRIBUTES,
+  GEN_AI_OPERATIONS, OPENJIUWEN_ATTRIBUTES, STANDARD_ATTRIBUTES,
 } from '../semconv/constants.ts'
+import {
+  createTrajectoryV2Reducer,
+  isTrajectoryV2Record,
+  reduceTrajectoryV2,
+} from './trajectory-v2-reducer.ts'
+import type {
+  TrajectoryV2EventProjection,
+  TrajectoryV2Reducer,
+} from './trajectory-v2-reducer.ts'
+export { createTrajectoryV2Reducer, reduceTrajectoryV2 } from './trajectory-v2-reducer.ts'
 import type {
   NormalizedTrajectoryAttributes, NormalizedTrajectoryStreamEvent,
 } from './attribute-resolver.ts'
@@ -20,10 +30,12 @@ import type {
 } from '../shared/otlp.ts'
 import type {
   TrajectoryPromptSnapshot,
+  TrajectoryDiagnostic,
   TrajectoryRecordedFacts,
   TrajectoryRequest,
   TrajectoryRequestConfig,
   TrajectorySnapshot,
+  TrajectorySystemMessage,
   TrajectoryToolSchema,
   TrajectoryTurnModel,
   TrajectoryUsage,
@@ -39,6 +51,7 @@ interface ProjectedSpan {
   parentSpanId: string | undefined
   request: OtlpExportTraceServiceRequest
   sourceSequence: number | undefined
+  identityRequestNumber: number | undefined
   requestNumber: number | undefined
   streamEvents: readonly NormalizedTrajectoryStreamEvent[]
   span: OtlpSpan
@@ -46,10 +59,13 @@ interface ProjectedSpan {
   traceId: string
   turn: number
   lifecycle: 'running' | 'completed' | 'error'
+  owningRequestRecordId?: string
 }
 
 export interface TrajectoryProjectionOptions {
   lifecycleByRecordId?: ReadonlyMap<string, 'running' | 'completed' | 'error'>
+  sessionCumulativeUsageByRequestIdentity?: ReadonlyMap<string, TrajectoryUsage>
+  v2Reducer?: TrajectoryV2Reducer
 }
 
 interface StructuredPart {
@@ -65,6 +81,7 @@ interface StructuredMessage {
   inputIndex?: number
   inputKind?: 'prompt_attachment'
   parts: readonly StructuredPart[]
+  promptAttachmentHistoryMode?: 'snapshot' | 'delta'
   role: string
 }
 
@@ -81,7 +98,14 @@ interface MutableTurn {
 
 interface InferenceInputProjection {
   messages: readonly StructuredMessage[]
-  prompt: TrajectoryPromptSnapshot | undefined
+  prompts: readonly PromptCellProjection[]
+}
+
+interface PromptCellProjection {
+  prompt: TrajectoryPromptSnapshot
+  previous?: TrajectoryPromptSnapshot
+  systemMessageIndex?: number
+  text: string
 }
 
 interface ToolResultFact {
@@ -171,11 +195,12 @@ function cellIndex(span: ProjectedSpan, suffix: string): number {
 }
 
 function requestRecordIdentity(span: ProjectedSpan): string | undefined {
+  if (span.owningRequestRecordId !== undefined) return span.owningRequestRecordId
   if (span.attributes.inferenceId !== undefined) {
     return `${span.traceId}:inference:${span.attributes.inferenceId}`
   }
-  if (span.requestNumber !== undefined) {
-    return `${span.traceId}:request:${span.requestNumber}`
+  if (span.identityRequestNumber !== undefined) {
+    return `${span.traceId}:request:${span.identityRequestNumber}`
   }
   return isInference(span) ? `${span.traceId}:${span.span.spanId}:request` : undefined
 }
@@ -224,7 +249,16 @@ function structuredMessages(value: unknown): readonly StructuredMessage[] {
   return value.flatMap((candidate): StructuredMessage[] => {
     const message = object(candidate)
     if (message === undefined || typeof message.role !== 'string') return []
-    return [{ role: message.role, parts: structuredParts(message.parts) }]
+    const openjiuwen = object(message.openjiuwen)
+    const historyMode = openjiuwen?.kind === 'prompt_attachment_history'
+      && (openjiuwen.mode === 'snapshot' || openjiuwen.mode === 'delta')
+      ? openjiuwen.mode
+      : undefined
+    return [{
+      role: message.role,
+      parts: structuredParts(message.parts),
+      ...(historyMode === undefined ? {} : { promptAttachmentHistoryMode: historyMode }),
+    }]
   })
 }
 
@@ -427,13 +461,61 @@ function toolSchemas(value: unknown): readonly TrajectoryToolSchema[] {
 
 function promptSnapshot(attributes: NormalizedTrajectoryAttributes): TrajectoryPromptSnapshot | undefined {
   const instructions = structuredParts(attributes.systemInstructions)
+  const requestSystemMessages: TrajectorySystemMessage[] = []
+  let promptAttachmentSlot: number | undefined
+  structuredMessages(attributes.requestMessages).forEach((message, index) => {
+    if (message.role !== 'system') return
+    const content = message.parts
+      .flatMap(part => part.content === undefined ? [] : [part.content])
+      .join('\n')
+    const historyMode = message.promptAttachmentHistoryMode
+      ?? promptAttachmentHistoryModeFromContent(content)
+    if (historyMode === 'snapshot') {
+      promptAttachmentSlot ??= index
+    }
+    if (historyMode === 'delta' && promptAttachmentSlot !== undefined) {
+      const slotIndex = requestSystemMessages.findIndex(candidate => (
+        candidate.index === promptAttachmentSlot
+      ))
+      const replacement = { index: promptAttachmentSlot, content }
+      if (slotIndex === -1) requestSystemMessages.push(replacement)
+      else requestSystemMessages[slotIndex] = replacement
+      return
+    }
+    requestSystemMessages.push({ index, content })
+  })
+  const systemMessages = requestSystemMessages.length > 0
+    ? requestSystemMessages
+    : instructions.length === 0
+      ? []
+      : [{
+          index: 0,
+          content: instructions
+            .flatMap(part => part.content === undefined ? [] : [part.content])
+            .join('\n\n'),
+        }]
   const tools = toolSchemas(attributes.toolDefinitions)
-  if (instructions.length === 0 && tools.length === 0) return undefined
+  if (systemMessages.length === 0 && tools.length === 0) return undefined
   return {
     config: requestConfig(attributes),
-    system: instructions.flatMap(part => part.content === undefined ? [] : [part.content]).join('\n\n'),
+    system: systemMessages.map(message => message.content).join('\n\n'),
+    systemMessages,
     tools,
   }
+}
+
+function promptAttachmentHistoryModeFromContent(
+  content: string,
+): 'snapshot' | 'delta' | undefined {
+  if (
+    content.startsWith('以下动态上下文当前有效')
+    || content.startsWith('The following dynamic context is currently active.')
+  ) return 'snapshot'
+  if (
+    content.startsWith('以下动态上下文已经变化')
+    || content.startsWith('The following dynamic context has changed.')
+  ) return 'delta'
+  return undefined
 }
 
 function usage(attributes: NormalizedTrajectoryAttributes): TrajectoryUsage {
@@ -450,25 +532,6 @@ function usage(attributes: NormalizedTrajectoryAttributes): TrajectoryUsage {
     ...(output === undefined ? {} : { output }),
     ...(reasoning === undefined ? {} : { reasoning }),
     ...(total === undefined ? {} : { total }),
-  }
-}
-
-function addUsage(total: TrajectoryUsage, next: TrajectoryUsage): TrajectoryUsage {
-  const sum = (left: number | undefined, right: number | undefined): number | undefined =>
-    left === undefined && right === undefined ? undefined : (left ?? 0) + (right ?? 0)
-  const input = sum(total.input, next.input)
-  const cacheRead = sum(total.cacheRead, next.cacheRead)
-  const cacheWrite = sum(total.cacheWrite, next.cacheWrite)
-  const output = sum(total.output, next.output)
-  const reasoning = sum(total.reasoning, next.reasoning)
-  const grandTotal = sum(total.total, next.total)
-  return {
-    ...(input === undefined ? {} : { input }),
-    ...(cacheRead === undefined ? {} : { cacheRead }),
-    ...(cacheWrite === undefined ? {} : { cacheWrite }),
-    ...(output === undefined ? {} : { output }),
-    ...(reasoning === undefined ? {} : { reasoning }),
-    ...(grandTotal === undefined ? {} : { total: grandTotal }),
   }
 }
 
@@ -526,11 +589,17 @@ function recordKind(span: ProjectedSpan): string | undefined {
 function isInference(span: ProjectedSpan): boolean {
   const kind = recordKind(span)
   if (kind !== undefined) return kind === 'inference'
-  const name = knownOperation(span)
-  if (name !== undefined) return name === GEN_AI_OPERATIONS.chat
-    || name === GEN_AI_OPERATIONS.generateContent
-    || name === GEN_AI_OPERATIONS.textCompletion
-  return span.attributes.langfuseObservationType === 'generation'
+  const operationName = operation(span)
+  if (operationName !== undefined) return operationName === GEN_AI_OPERATIONS.chat
+    || operationName === GEN_AI_OPERATIONS.generateContent
+    || operationName === GEN_AI_OPERATIONS.textCompletion
+  const observationType = span.attributes.langfuseObservationType
+  if (observationType !== undefined) return observationType === 'generation'
+  return span.span.name === 'llm.call' && (
+    span.attributes.inferenceId !== undefined
+      || span.attributes.inputMessages !== undefined
+      || span.attributes.outputMessages !== undefined
+  )
 }
 
 function isTool(span: ProjectedSpan): boolean {
@@ -540,6 +609,42 @@ function isTool(span: ProjectedSpan): boolean {
   if (name !== undefined) return name === GEN_AI_OPERATIONS.executeTool
   if (span.attributes.langfuseObservationType === 'tool') return true
   return span.span.name.startsWith('tool.') || span.span.name.startsWith('execute_tool')
+}
+
+function isRoutedAskUserResult(
+  span: ProjectedSpan,
+  root: ProjectedSpan | undefined,
+): boolean {
+  const attributes = span.attributes
+  const conversationId = attributes.conversationId
+  const subjectId = attributes.executionSubjectId
+  const subjectKind = attributes.executionSubjectKind
+  const subjectSessionId = attributes.executionSubjectSessionId
+  const mainSubject = subjectId === 'main'
+    && subjectKind === 'main_agent'
+    && subjectSessionId === conversationId
+  const subagentSubject = subjectKind === 'subagent'
+    && attributes.executionSubjectParentId !== undefined
+    && subjectSessionId !== undefined
+    && conversationId !== undefined
+    && (subjectSessionId === conversationId
+      || subjectSessionId.startsWith(`${conversationId}_sub_`))
+  const rootAttributes = root?.attributes
+  const sameRootOwner = rootAttributes !== undefined
+    && rootAttributes.conversationId === conversationId
+    && rootAttributes.executionSubjectId === subjectId
+    && rootAttributes.executionSubjectKind === subjectKind
+    && rootAttributes.executionSubjectSessionId === subjectSessionId
+  return attributes.toolAuthoritative === true
+    && span.attributes.toolName === 'ask_user'
+    && attributes.toolCallId !== undefined
+    && attributes.toolCallResult !== undefined
+    && conversationId !== undefined
+    && subjectId !== undefined
+    && attributes.requestId !== undefined
+    && positiveSafeInteger(attributes.turnNumber) !== undefined
+    && (mainSubject || subagentSubject)
+    && sameRootOwner
 }
 
 function isCompaction(span: ProjectedSpan): boolean {
@@ -569,17 +674,24 @@ function inputCells(
   projection: InferenceInputProjection,
 ): TrajectoryCell[] {
   const cells: TrajectoryCell[] = []
-  const prompt = projection.prompt
-  if (prompt !== undefined) {
-    const text = prompt.system !== ''
-      ? prompt.system
-      : `${prompt.tools.length} tool definition${prompt.tools.length === 1 ? '' : 's'}`
+  for (const promptProjection of projection.prompts) {
     cells.push({
-      ...spanCellBase(span, 'system'),
+      ...spanCellBase(
+        span,
+        promptProjection.systemMessageIndex === undefined
+          ? 'system:tools'
+          : `system:${promptProjection.systemMessageIndex}`,
+      ),
       timeSeconds: null,
       kind: 'system',
-      text,
-      promptDetail: prompt,
+      text: promptProjection.text,
+      promptDetail: promptProjection.prompt,
+      ...(promptProjection.systemMessageIndex === undefined
+        ? {}
+        : { promptSystemMessageIndex: promptProjection.systemMessageIndex }),
+      ...(promptProjection.previous === undefined
+        ? {}
+        : { previousPromptDetail: promptProjection.previous }),
     })
   }
   projection.messages.forEach((message, index) => {
@@ -698,6 +810,7 @@ function toolCell(
   return {
     ...spanCellBase(span, 'tool'),
     kind: nested ? 'subtool' : 'tool',
+    ...(requestRecordIdentity(span) === undefined ? { requestless: true } : {}),
     text: inputText === undefined ? name : `${name} · ${inputText.replace(/\s+/g, ' ').slice(0, 160)}`,
     callId,
     ...(inputText === undefined ? {} : { inputDetail: inputText }),
@@ -808,8 +921,33 @@ function provenanceAttachmentIndexes(
   return new Set(indexes)
 }
 
-function behaviorSessionKey(span: ProjectedSpan): string {
-  return span.attributes.conversationId ?? `trace:${span.traceId}`
+function spanIdentity(span: ProjectedSpan): string {
+  return `${span.traceId}\u0000${span.span.spanId}`
+}
+
+function behaviorLineage(
+  span: ProjectedSpan,
+  spanByIdentity: ReadonlyMap<string, ProjectedSpan>,
+): readonly string[] {
+  const lineage: string[] = []
+  const visited = new Set<string>()
+  let parentSpanId = span.parentSpanId
+  while (parentSpanId !== undefined) {
+    const identity = `${span.traceId}\u0000${parentSpanId}`
+    if (visited.has(identity)) break
+    visited.add(identity)
+    const parent = spanByIdentity.get(identity)
+    if (parent === undefined) break
+    if (isTool(parent)) lineage.push(parent.span.spanId)
+    parentSpanId = parent.parentSpanId
+  }
+  return lineage.reverse()
+}
+
+function behaviorSessionKey(span: ProjectedSpan, lineage: readonly string[]): string {
+  const conversation = span.attributes.conversationId ?? `trace:${span.traceId}`
+  const subject = span.attributes.executionSubjectId ?? 'legacy-main'
+  return `${conversation}\u0000${subject}\u0000${lineage.join('/')}`
 }
 
 function compareInferenceBehavior(left: ProjectedSpan, right: ProjectedSpan): number {
@@ -818,6 +956,53 @@ function compareInferenceBehavior(left: ProjectedSpan, right: ProjectedSpan): nu
     || (left.sourceSequence ?? 0) - (right.sourceSequence ?? 0)
     || left.traceId.localeCompare(right.traceId)
     || left.span.spanId.localeCompare(right.span.spanId)
+}
+
+function comparePhysicalInference(left: ProjectedSpan, right: ProjectedSpan): number {
+  return compareBigint(left.startTimeUnixNano, right.startTimeUnixNano)
+    || left.traceId.localeCompare(right.traceId)
+    || left.span.spanId.localeCompare(right.span.spanId)
+}
+
+function executionSubjectKey(span: ProjectedSpan): string {
+  const session = span.attributes.conversationId ?? 'legacy-session'
+  const subject = span.attributes.executionSubjectId ?? 'legacy-main'
+  return `${session}\u0000${subject}`
+}
+
+function assignSubjectRequestNumbers(spans: readonly ProjectedSpan[]): ProjectedSpan[] {
+  const inferenceGroups = new Map<string, ProjectedSpan[]>()
+  for (const span of spans) {
+    if (!isInference(span)) continue
+    const key = executionSubjectKey(span)
+    const group = inferenceGroups.get(key) ?? []
+    group.push(span)
+    inferenceGroups.set(key, group)
+  }
+  const displayNumberByIdentity = new Map<string, number>()
+  for (const group of inferenceGroups.values()) {
+    const ordered = [...group].sort(comparePhysicalInference)
+    const explicitNumbers = ordered.map(span => (
+      positiveSafeInteger(span.attributes.executionSubjectRequestNumber)
+    ))
+    const hasCompleteMonotonicSequence = explicitNumbers.every((number, index) => (
+      number === index + 1
+    ))
+    for (const [index, span] of ordered.entries()) {
+      // A partially upgraded or malformed subject must be rebuilt as one
+      // chronological sequence. Mixing explicit and inferred values can
+      // otherwise create duplicates or gaps while a live archive is loading.
+      const number = hasCompleteMonotonicSequence
+        ? explicitNumbers[index] as number
+        : index + 1
+      displayNumberByIdentity.set(spanIdentity(span), number)
+    }
+  }
+  return spans.map(span => (
+    !isInference(span)
+      ? span
+      : { ...span, requestNumber: displayNumberByIdentity.get(spanIdentity(span)) ?? 1 }
+  ))
 }
 
 function consumePriorOutput(
@@ -916,24 +1101,87 @@ function outputReplayMatches(
 }
 
 function promptBehaviorIdentity(prompt: TrajectoryPromptSnapshot): string {
-  return structuralIdentity({ system: prompt.system, tools: prompt.tools })
+  return structuralIdentity({ systemMessages: prompt.systemMessages, tools: prompt.tools })
 }
 
-function projectInferenceInputs(spans: readonly ProjectedSpan[]): {
+function promptCellProjections(
+  prompt: TrajectoryPromptSnapshot | undefined,
+  previous: TrajectoryPromptSnapshot | undefined,
+): readonly PromptCellProjection[] {
+  if (prompt === undefined) return []
+  if (previous === undefined) {
+    if (prompt.systemMessages.length > 0) {
+      return prompt.systemMessages.map(message => ({
+        prompt,
+        systemMessageIndex: message.index,
+        text: message.content,
+      }))
+    }
+    return [{
+      prompt,
+      text: `${prompt.tools.length} tool definition${prompt.tools.length === 1 ? '' : 's'}`,
+    }]
+  }
+  if (promptBehaviorIdentity(prompt) === promptBehaviorIdentity(previous)) return []
+
+  const beforeByIndex = new Map(previous.systemMessages.map(message => [message.index, message]))
+  const afterByIndex = new Map(prompt.systemMessages.map(message => [message.index, message]))
+  const indexes = [...new Set([...beforeByIndex.keys(), ...afterByIndex.keys()])]
+    .sort((left, right) => left - right)
+  const changed = indexes.flatMap((index): PromptCellProjection[] => {
+    const before = beforeByIndex.get(index)
+    const after = afterByIndex.get(index)
+    if (before?.content === after?.content) return []
+    return [{
+      prompt,
+      previous,
+      systemMessageIndex: index,
+      text: after?.content ?? 'System message removed',
+    }]
+  })
+  if (structuralIdentity(previous.tools) !== structuralIdentity(prompt.tools)) {
+    changed.push({
+      prompt,
+      previous,
+      text: `${prompt.tools.length} tool definition${prompt.tools.length === 1 ? '' : 's'}`,
+    })
+  }
+  return changed
+}
+
+function projectInferenceInputs(
+  spans: readonly ProjectedSpan[],
+  v2RequestIds: ReadonlySet<string>,
+): {
   inputsBySpanId: ReadonlyMap<string, InferenceInputProjection>
   toolResultById: ReadonlyMap<string, ToolResultFact>
   toolResultBySpanId: ReadonlyMap<string, ToolResultFact>
+  diagnostics: readonly TrajectoryDiagnostic[]
 } {
   const inputsBySpanId = new Map<string, InferenceInputProjection>()
   const previousInputsBySession = new Map<string, readonly IndexedMessage[]>()
-  const previousPromptBySession = new Map<string, string>()
+  const previousPromptBySession = new Map<string, TrajectoryPromptSnapshot>()
   const previousOutputsBySession = new Map<string, readonly StructuredMessage[]>()
   const toolResults: ToolResultFact[] = []
+  const diagnostics: TrajectoryDiagnostic[] = []
+  const spanByIdentity = new Map(spans.map(span => [spanIdentity(span), span]))
 
   for (const span of spans.filter(isInference).sort(compareInferenceBehavior)) {
-    const sessionKey = behaviorSessionKey(span)
+    const lineage = behaviorLineage(span, spanByIdentity)
+    const sessionKey = behaviorSessionKey(span, lineage)
+    const parentSessionKey = lineage.length === 0
+      ? undefined
+      : behaviorSessionKey(span, lineage.slice(0, -1))
     const currentInputs = structuredMessages(span.attributes.inputMessages)
-    const previousInputs = previousInputsBySession.get(sessionKey) ?? []
+    const handledByV2 = span.attributes.requestId !== undefined
+      && v2RequestIds.has(span.attributes.requestId)
+    if (handledByV2) {
+      inputsBySpanId.set(span.span.spanId, { messages: [], prompts: [] })
+      previousOutputsBySession.set(sessionKey, structuredMessages(span.attributes.outputMessages))
+      continue
+    }
+    const previousInputs = previousInputsBySession.get(sessionKey)
+      ?? (parentSessionKey === undefined ? [] : previousInputsBySession.get(parentSessionKey) ?? [])
     const attachmentIndexes = provenanceAttachmentIndexes(span.attributes.inputMessageProvenance)
     const attachmentIndexSet = new Set(currentInputs.flatMap((message, index): number[] => {
       const attachment = attachmentIndexes === undefined
@@ -945,7 +1193,10 @@ function projectInferenceInputs(spans: readonly ProjectedSpan[]): {
       attachmentIndexSet.has(inputIndex) ? [] : [{ inputIndex, message }]
     ))
     const insertedIndexes = lcsInsertedInputIndexes(previousInputs, currentOrdinary)
-    const replayableOutputs = [...(previousOutputsBySession.get(sessionKey) ?? [])]
+    const replayableOutputs = [...(
+      previousOutputsBySession.get(sessionKey)
+      ?? (parentSessionKey === undefined ? [] : previousOutputsBySession.get(parentSessionKey) ?? [])
+    )]
     const messages = currentInputs.flatMap((message, index): StructuredMessage[] => {
       const attachment = attachmentIndexSet.has(index)
       if (!insertedIndexes.has(index) && !attachment) return []
@@ -971,13 +1222,13 @@ function projectInferenceInputs(spans: readonly ProjectedSpan[]): {
       }]
     })
     const prompt = promptSnapshot(span.attributes)
-    const promptIdentity = prompt === undefined ? undefined : promptBehaviorIdentity(prompt)
     const previousPrompt = previousPromptBySession.get(sessionKey)
+      ?? (parentSessionKey === undefined ? undefined : previousPromptBySession.get(parentSessionKey))
     inputsBySpanId.set(span.span.spanId, {
       messages,
-      prompt: promptIdentity === undefined || promptIdentity === previousPrompt ? undefined : prompt,
+      prompts: promptCellProjections(prompt, previousPrompt),
     })
-    if (promptIdentity !== undefined) previousPromptBySession.set(sessionKey, promptIdentity)
+    if (prompt !== undefined) previousPromptBySession.set(sessionKey, prompt)
     previousInputsBySession.set(sessionKey, currentOrdinary)
     const outputs = structuredMessages(span.attributes.outputMessages)
     previousOutputsBySession.set(sessionKey, outputs)
@@ -1012,7 +1263,7 @@ function projectInferenceInputs(spans: readonly ProjectedSpan[]): {
       consumedByTrace.set(span.traceId, consumed)
     }
   }
-  return { inputsBySpanId, toolResultById, toolResultBySpanId }
+  return { inputsBySpanId, toolResultById, toolResultBySpanId, diagnostics }
 }
 
 function compactionCell(span: ProjectedSpan, inference: ProjectedSpan | undefined): TrajectoryCell {
@@ -1039,6 +1290,7 @@ function requestFor(
   span: ProjectedSpan,
   purpose: 'assistant' | 'compaction',
   rootAttributes: NormalizedTrajectoryAttributes | undefined,
+  sessionCumulativeUsageByRequestIdentity: ReadonlyMap<string, TrajectoryUsage> | undefined,
 ): TrajectoryRequest {
   const requestNumber = span.requestNumber ?? 1
   const step = positiveSafeInteger(span.attributes.stepNumber) ?? 1
@@ -1062,10 +1314,15 @@ function requestFor(
     requestConfig: requestConfig(span.attributes),
     recordedFacts: facts,
     usage: usageValue,
+    cumulativeUsage: span.attributes.inferenceId === undefined
+      ? undefined
+      : sessionCumulativeUsageByRequestIdentity?.get(
+          `${span.traceId}\u0000${span.attributes.inferenceId}`,
+        ),
   }
   const defined = Object.fromEntries(Object.entries(base).filter(([, value]) => value !== undefined))
   return purpose === 'compaction'
-    ? { ...defined, purpose, turn: null, step: 0 } as TrajectoryRequest
+    ? { ...defined, purpose, turn: span.turn, step } as TrajectoryRequest
     : { ...defined, purpose, turn: span.turn, step } as TrajectoryRequest
 }
 
@@ -1109,18 +1366,77 @@ function normalize(
         : BigInt(span.endTimeUnixNano),
       explicitTurn: positiveSafeInteger(attributes.turnNumber),
       sourceSequence: nonNegativeSafeInteger(attributes.sourceSequence),
-      requestNumber: positiveSafeInteger(attributes.requestNumber),
+      identityRequestNumber: positiveSafeInteger(attributes.requestNumber),
+      requestNumber: undefined,
       streamEvents: normalizeTrajectoryStreamEvents(span.events),
       lifecycle,
     }
   })).sort(compareSpans)
-  const currentByTrace = new Map<string, number>()
+  const numbered = assignSubjectRequestNumbers(spans)
+  return assignRequestOwnership(numbered)
+}
+
+function sameStep(left: ProjectedSpan, right: ProjectedSpan): boolean {
+  if (left.traceId !== right.traceId) return false
+  if (left.attributes.stepId !== undefined || right.attributes.stepId !== undefined) {
+    return left.attributes.stepId !== undefined
+      && left.attributes.stepId === right.attributes.stepId
+  }
+  const leftStep = positiveSafeInteger(left.attributes.stepNumber)
+  const rightStep = positiveSafeInteger(right.attributes.stepNumber)
+  return leftStep !== undefined && leftStep === rightStep
+}
+
+function inferenceRequestIdentity(span: ProjectedSpan): string {
+  if (span.attributes.inferenceId !== undefined) {
+    return `${span.traceId}:inference:${span.attributes.inferenceId}`
+  }
+  if (span.identityRequestNumber !== undefined) {
+    return `${span.traceId}:request:${span.identityRequestNumber}`
+  }
+  return `${span.traceId}:${span.span.spanId}:request`
+}
+
+function assignRequestOwnership(spans: readonly ProjectedSpan[]): ProjectedSpan[] {
+  const spanByIdentity = new Map(spans.map(span => [spanIdentity(span), span]))
+  const inferenceById = new Map(spans.filter(isInference).flatMap((span): Array<[string, ProjectedSpan]> => (
+    span.attributes.inferenceId === undefined
+      ? []
+      : [[`${span.traceId}\u0000${span.attributes.inferenceId}`, span]]
+  )))
+  const inferences = spans.filter(isInference)
   return spans.map((span) => {
-    if (!isInference(span)) return span
-    const current = currentByTrace.get(span.traceId) ?? 0
-    const requestNumber = span.requestNumber ?? current + 1
-    currentByTrace.set(span.traceId, Math.max(current, requestNumber))
-    return { ...span, requestNumber }
+    if (!isTool(span)) return span
+    if (span.attributes.inferenceId !== undefined) {
+      const inference = inferenceById.get(`${span.traceId}\u0000${span.attributes.inferenceId}`)
+      return {
+        ...span,
+        owningRequestRecordId: inference === undefined
+          ? `${span.traceId}:inference:${span.attributes.inferenceId}`
+          : inferenceRequestIdentity(inference),
+      }
+    }
+    const visited = new Set<string>()
+    let parentSpanId = span.parentSpanId
+    while (parentSpanId !== undefined) {
+      const identity = `${span.traceId}\u0000${parentSpanId}`
+      if (visited.has(identity)) break
+      visited.add(identity)
+      const parent = spanByIdentity.get(identity)
+      if (parent === undefined) break
+      if (isInference(parent)) {
+        return { ...span, owningRequestRecordId: inferenceRequestIdentity(parent) }
+      }
+      parentSpanId = parent.parentSpanId
+    }
+    const candidates = inferences.filter(inference => (
+      sameStep(inference, span)
+      && inference.startTimeUnixNano <= span.startTimeUnixNano
+    )).sort(compareInferenceBehavior)
+    const inference = candidates.at(-1)
+    return inference === undefined
+      ? span
+      : { ...span, owningRequestRecordId: inferenceRequestIdentity(inference) }
   })
 }
 
@@ -1133,13 +1449,111 @@ function group(turn: MutableTurn, step: number): MutableGroup {
 }
 
 function finalizeRequests(requests: readonly TrajectoryRequest[]): TrajectoryRequest[] {
-  let cumulative: TrajectoryUsage = {}
   return [...requests]
     .sort((left, right) => (left.startedAt ?? 0) - (right.startedAt ?? 0) || left.number - right.number)
-    .map((request) => {
-      cumulative = addUsage(cumulative, request.usage ?? {})
-      return { ...request, cumulativeUsage: cumulative }
-    })
+}
+
+function requestBehaviorPhase(cell: TrajectoryCell): number {
+  if (cell.kind === 'system' || cell.kind === 'user' || cell.kind === 'context') return 0
+  if (cell.kind === 'message') return 1
+  if (cell.kind === 'tool' || cell.kind === 'subtool') return 2
+  return 3
+}
+
+function legacyKindOrder(cell: TrajectoryCell): number {
+  if (cell.kind === 'system') return 0
+  if (cell.kind === 'user' || cell.kind === 'context') return 1
+  if (cell.kind === 'message') return 2
+  if (cell.kind === 'tool' || cell.kind === 'subtool') return 3
+  return 4
+}
+
+function isSchemaV2BehaviorCell(cell: TrajectoryCell): boolean {
+  const source = object(cell.messageSource)
+  return source?.kind === 'trajectory_context_delta'
+    || source?.kind === 'trajectory_compaction'
+    || source?.kind === 'trajectory_compaction_request'
+}
+
+function isSchemaV2CompactionCell(cell: TrajectoryCell): boolean {
+  const source = object(cell.messageSource)
+  return source?.kind === 'trajectory_compaction'
+}
+
+function requestInputSource(cell: TrajectoryCell): Record<string, unknown> | undefined {
+  const source = object(cell.messageSource)
+  return source?.kind === 'trajectory_context_delta' ? source : undefined
+}
+
+function preModelPreparationOrder(cell: TrajectoryCell): number | undefined {
+  const source = requestInputSource(cell)
+  if (cell.kind === 'system' && source?.transitionKind === 'epoch_baseline') return 0
+  if (cell.kind === 'user' && source !== undefined) return 1
+  if (cell.requestless === true && (cell.kind === 'tool' || cell.kind === 'subtool')) return 2
+  if (source !== undefined && (cell.kind === 'system' || cell.kind === 'context')) return 3
+  return undefined
+}
+
+function compareTrajectoryCells(left: TrajectoryCell, right: TrajectoryCell): number {
+  const leftPreparationOrder = preModelPreparationOrder(left)
+  const rightPreparationOrder = preModelPreparationOrder(right)
+  if ((leftPreparationOrder === 2 || rightPreparationOrder === 2)
+    && leftPreparationOrder !== undefined
+    && rightPreparationOrder !== undefined) {
+    const preparationOrder = leftPreparationOrder - rightPreparationOrder
+    if (preparationOrder !== 0) return preparationOrder
+  }
+  if (isSchemaV2BehaviorCell(left)
+    && isSchemaV2BehaviorCell(right)
+    && left.behaviorOrder !== undefined
+    && right.behaviorOrder !== undefined) {
+    const eventOrder = left.behaviorOrder - right.behaviorOrder
+    if (eventOrder !== 0) return eventOrder
+  }
+  const sameRequest = left.requestRecordId !== undefined
+    && left.requestRecordId === right.requestRecordId
+  if (sameRequest) {
+    // Compaction occurs inside a long physical request, between ordinary
+    // assistant/tool cells and the output context checkpoint. Phase-first
+    // ordering would always push it behind every USER/MESSAGE/TOOL and creates
+    // a non-transitive cycle with schema-v2 sequence ordering. Its recorded
+    // event time is therefore the primary cross-source position.
+    if (isSchemaV2CompactionCell(left) || isSchemaV2CompactionCell(right)) {
+      const physicalOrder = (left.startedAt ?? 0) - (right.startedAt ?? 0)
+      if (physicalOrder !== 0) return physicalOrder
+      if (left.behaviorOrder !== undefined && right.behaviorOrder !== undefined) {
+        const logicalOrder = left.behaviorOrder - right.behaviorOrder
+        if (logicalOrder !== 0) return logicalOrder
+      }
+    }
+    if (isSchemaV2BehaviorCell(left)
+      && isSchemaV2BehaviorCell(right)
+      && left.behaviorOrder !== undefined
+      && right.behaviorOrder !== undefined) {
+      const eventOrder = left.behaviorOrder - right.behaviorOrder
+      if (eventOrder !== 0) return eventOrder
+    }
+    const phase = requestBehaviorPhase(left) - requestBehaviorPhase(right)
+    if (phase !== 0) return phase
+    if (left.behaviorOrder !== undefined && right.behaviorOrder !== undefined) {
+      const logicalOrder = left.behaviorOrder - right.behaviorOrder
+      if (logicalOrder !== 0) return logicalOrder
+    }
+    if (left.behaviorOrder === undefined && right.behaviorOrder === undefined) {
+      const kindOrder = legacyKindOrder(left) - legacyKindOrder(right)
+      if (kindOrder !== 0) return kindOrder
+    }
+  }
+  const leftStart = left.startedAt ?? 0
+  const rightStart = right.startedAt ?? 0
+  if (leftStart !== rightStart) return leftStart - rightStart
+  if (left.behaviorOrder !== undefined && right.behaviorOrder !== undefined) {
+    const logicalOrder = left.behaviorOrder - right.behaviorOrder
+    if (logicalOrder !== 0) return logicalOrder
+  }
+  const kindOrder = legacyKindOrder(left) - legacyKindOrder(right)
+  if (kindOrder !== 0) return kindOrder
+  return 0
 }
 
 /** Fold one bounded OTLP record window into the trajectory UI's closed read model. */
@@ -1147,11 +1561,26 @@ export function projectOtelTrajectory(
   records: readonly OtlpExportTraceServiceRequest[],
   options: TrajectoryProjectionOptions = {},
 ): TrajectorySnapshot {
-  const spans = normalize(records, options)
+  const v2Records = records.filter(isTrajectoryV2Record)
+  const legacyRecords = records.filter(record => !isTrajectoryV2Record(record))
+  const v2Reduction = options.v2Reducer?.apply(v2Records) ?? reduceTrajectoryV2(v2Records)
+  const currentV2SubjectIds = new Set(v2Records.flatMap((record): string[] => {
+    const subjectId = readStringAttribute(
+      exactAttributeMap(soleSpan(record).attributes),
+      OPENJIUWEN_ATTRIBUTES.trajectorySubjectId,
+    )
+    return subjectId === undefined ? [] : [subjectId]
+  }))
+  const v2Subjects = [...v2Reduction.subjects.values()].filter(subject => (
+    currentV2SubjectIds.has(subject.subjectId)
+  ))
+  const v2RequestIds = new Set(v2Subjects.flatMap(subject => [...subject.handledRequestIds]))
+  const spans = normalize(legacyRecords, options)
   const mutableTurns = new Map<number, MutableTurn>()
   const requests: TrajectoryRequest[] = []
-  const inputProjection = projectInferenceInputs(spans)
+  const inputProjection = projectInferenceInputs(spans, v2RequestIds)
   const toolSpanIds = new Set(spans.filter(isTool).map(span => span.span.spanId))
+  const toolBySpanId = new Map(spans.filter(isTool).map(span => [span.span.spanId, span]))
   const authoritativeToolCallIds = new Set(spans
     .filter(span => isTool(span) && span.attributes.toolAuthoritative === true)
     .flatMap(span => span.attributes.toolCallId === undefined
@@ -1173,6 +1602,12 @@ export function projectOtelTrajectory(
   const compactionInferences = new Map<number, ProjectedSpan>()
   const compactions = new Map<number, ProjectedSpan>()
   const toolSchemaByTurnAndName = new Map<string, string>()
+  const inferenceById = new Map(spans.filter(isInference).flatMap((span): Array<[
+    string,
+    ProjectedSpan,
+  ]> => span.attributes.inferenceId === undefined
+    ? []
+    : [[`${span.traceId}\u0000${span.attributes.inferenceId}`, span]]))
 
   for (const span of spans.filter(isInference)) {
     for (const schema of toolSchemas(span.attributes.toolDefinitions)) {
@@ -1188,17 +1623,48 @@ export function projectOtelTrajectory(
       const purpose = span.attributes.requestPurpose
       if (purpose === 'compaction') {
         compactionInferences.set(span.turn, span)
-        requests.push(requestFor(span, 'compaction', rootByTrace.get(span.traceId)?.attributes))
+        requests.push(requestFor(
+          span,
+          'compaction',
+          rootByTrace.get(span.traceId)?.attributes,
+          options.sessionCumulativeUsageByRequestIdentity,
+        ))
         continue
       }
       const target = group(turn, step)
       const inputs = inputProjection.inputsBySpanId.get(span.span.spanId)
-        ?? { messages: [], prompt: undefined }
+        ?? { messages: [], prompts: [] }
       target.cells.push(...inputCells(span, inputs), assistantCell(span))
-      requests.push(requestFor(span, 'assistant', rootByTrace.get(span.traceId)?.attributes))
+      requests.push(requestFor(
+        span,
+        'assistant',
+        rootByTrace.get(span.traceId)?.attributes,
+        options.sessionCumulativeUsageByRequestIdentity,
+      ))
       continue
     }
     if (isTool(span)) {
+      const parentTool = span.parentSpanId === undefined
+        ? undefined
+        : toolBySpanId.get(span.parentSpanId)
+      const duplicateMcpLifecycle = span.attributes.toolAuthoritative !== true
+        && parentTool?.attributes.toolAuthoritative === true
+        && (parentTool.attributes.openJiuwenToolType ?? parentTool.attributes.toolType) === 'mcp'
+        && parentTool.attributes.toolResourceId !== undefined
+        && parentTool.attributes.toolResourceId === span.attributes.toolResourceId
+      if (duplicateMcpLifecycle) continue
+      if (
+        span.attributes.toolAuthoritative === true
+        && span.attributes.toolCallId !== undefined
+        && span.owningRequestRecordId === undefined
+        && !isRoutedAskUserResult(span, rootByTrace.get(span.traceId))
+      ) {
+        // A schema-v1 agent tool call must belong to a physical model
+        // request.  Root-level late callbacks have no such owner; rendering
+        // them as Main Agent activity would let a cancelled conversation's
+        // subagent leak into whichever run root happened to be alive next.
+        continue
+      }
       if (
         span.attributes.toolAuthoritative !== true
         && span.attributes.toolCallId !== undefined
@@ -1219,24 +1685,68 @@ export function projectOtelTrajectory(
     if (isCompaction(span)) compactions.set(span.turn, span)
   }
 
+  const v2CompactionEvents: TrajectoryV2EventProjection[] = []
+  for (const event of v2Subjects.flatMap(subject => [...subject.events])) {
+    if (event.turn === null) {
+      v2CompactionEvents.push(event)
+      continue
+    }
+    const anchorInferenceId = event.cells.at(-1)?.physicalInferenceId
+    const inference = anchorInferenceId === undefined
+      ? undefined
+      : inferenceById.get(`${event.traceId}\u0000${anchorInferenceId}`)
+    const eventTurn = inference?.turn ?? event.turn
+    const eventStep = inference === undefined
+      ? event.step
+      : positiveSafeInteger(inference.attributes.stepNumber) ?? event.step
+    const inferencePrompt = inference === undefined
+      ? undefined
+      : promptSnapshot(inference.attributes)
+    const turn = mutableTurns.get(eventTurn) ?? { turn: eventTurn, groups: new Map() }
+    mutableTurns.set(eventTurn, turn)
+    group(turn, eventStep).cells.push(...event.cells.map((cell) => {
+      const physicalInferenceId = cell.physicalInferenceId
+      const cellInference = physicalInferenceId === undefined
+        ? undefined
+        : inferenceById.get(`${event.traceId}\u0000${physicalInferenceId}`)
+      return {
+        ...cell,
+      ...(cell.promptDetail === undefined || inferencePrompt === undefined
+        ? {}
+        : {
+            promptDetail: {
+              ...cell.promptDetail,
+              config: inferencePrompt.config,
+              tools: inferencePrompt.tools,
+            },
+            ...(cell.previousPromptDetail === undefined
+              ? {}
+              : {
+                  previousPromptDetail: {
+                    ...cell.previousPromptDetail,
+                    config: inferencePrompt.config,
+                    tools: inferencePrompt.tools,
+                  },
+                }),
+          }),
+        ...(physicalInferenceId === undefined
+          ? {}
+          : {
+              requestRecordId: cellInference === undefined
+                ? `${event.traceId}:inference:${physicalInferenceId}`
+                : inferenceRequestIdentity(cellInference),
+            }),
+      }
+    }))
+  }
+
   const turns: TrajectoryTurnModel[] = []
   for (const turn of [...mutableTurns.values()].sort((left, right) => left.turn - right.turn)) {
     const groups = [...turn.groups.entries()]
       .sort((left, right) => left[0] - right[0])
       .map(([, value]) => ({
         ...value,
-        cells: [...value.cells].sort((left, right) => {
-          const leftStart = left.startedAt ?? 0
-          const rightStart = right.startedAt ?? 0
-          const kindOrder = (cell: TrajectoryCell): number => {
-            if (cell.kind === 'system') return 0
-            if (cell.kind === 'user' || cell.kind === 'context') return 1
-            if (cell.kind === 'message') return 2
-            if (cell.kind === 'tool') return 3
-            return 4
-          }
-          return leftStart - rightStart || kindOrder(left) - kindOrder(right)
-        }),
+        cells: [...value.cells].sort(compareTrajectoryCells),
       }))
       .filter(value => value.cells.length > 0)
     if (groups.length > 0) turns.push({ turn: turn.turn, groups })
@@ -1251,10 +1761,26 @@ export function projectOtelTrajectory(
       })
     }
   }
+  for (const event of v2CompactionEvents) {
+    if (event.cells.length === 0) continue
+    turns.push({
+      turn: null,
+      groups: [{ title: 'Compaction', cells: [...event.cells] }],
+    })
+  }
+
+  const diagnostics = [
+    ...v2Reduction.diagnostics.filter(item => (
+      item.subjectId === undefined || currentV2SubjectIds.has(item.subjectId)
+    )),
+    ...v2Subjects.flatMap(subject => [...subject.diagnostics]),
+    ...inputProjection.diagnostics,
+  ]
 
   return {
     turns,
     requests: finalizeRequests(requests),
+    ...(diagnostics.length === 0 ? {} : { diagnostics }),
   }
 }
 
@@ -1265,8 +1791,10 @@ export interface TrajectoryProjector {
 
 /** Stateless projector suitable for an HTTP polling or incremental trace store. */
 export class OtelGenAiTrajectoryProjector implements TrajectoryProjector {
+  private readonly v2Reducer = createTrajectoryV2Reducer()
+
   /** Project the current bounded record window. */
   project(records: readonly OtlpExportTraceServiceRequest[]): TrajectorySnapshot {
-    return projectOtelTrajectory(records)
+    return projectOtelTrajectory(records, { v2Reducer: this.v2Reducer })
   }
 }

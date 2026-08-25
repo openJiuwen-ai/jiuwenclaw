@@ -111,6 +111,7 @@ def sync_agent_observability(*, force: bool = False) -> None:
         obs_cfg = build_observability_config(
             cfg,
             service_name="jiuwenswarm-agent",
+            default_backend="otlp",
             traces_dir=traces_dir,
         )
         provider_existed = acquire_observability(obs_cfg)

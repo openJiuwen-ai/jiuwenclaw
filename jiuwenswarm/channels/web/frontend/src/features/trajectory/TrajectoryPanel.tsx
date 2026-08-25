@@ -3,6 +3,7 @@
 /** Session-scoped transport host for the migrated trajectory explorer. */
 
 import {
+  memo,
   useCallback,
   useEffect,
   useId,
@@ -15,14 +16,17 @@ import {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { webClient } from '../../services/webClient';
-import { saveBlob } from '../../utils/desktopSave';
+import { saveBlobWithResult } from '../../utils/desktopSave';
 import { TrajectoryExplorer } from './client/TrajectoryExplorer';
 import { JsonTree } from './primitives/JsonTree';
 import { projectOtelTrajectory } from './projector/otel-trajectory-projector';
+import { createTrajectoryV2Reducer } from './projector/trajectory-v2-reducer';
 import type { OtlpExportTraceServiceRequest } from './shared/otlp';
+import type { TrajectoryDiagnostic, TrajectoryUsage } from './trajectory/model';
 import {
   getTrajectoryRawRecord,
   getTrajectoryArchive,
+  getTrajectorySessionUsage,
   getTrajectoryTrace,
   listTrajectoryTraceRevisions,
   listTrajectoryTraces,
@@ -41,13 +45,18 @@ import {
   collectHeadRefreshWindow,
   collectRevisionRefreshWindow,
   createTrajectoryOperationCoordinator,
+  createTrajectoryTraceHintCoordinator,
   createTrajectoryWindowState,
   detailRecordIdentity,
   resetTrajectoryWindowState,
+  sameTrajectoryUsageMap,
   selectSummariesNeedingLoad,
+  shouldCatchUpAfterTrajectoryTerminalEvent,
   spansOf,
   stageTrajectoryTracePages,
   trajectoryContentMode,
+  type StagedTrajectoryTrace,
+  type TrajectoryTerminalEventName,
 } from './trajectoryWindow';
 import {
   RAW_INSPECTOR_DEFAULT_HEIGHT,
@@ -55,12 +64,18 @@ import {
   rawInspectorHeightBounds,
   rawInspectorKeyboardHeight,
 } from './trajectoryLayout';
+import {
+  createTrajectorySubjectViewCache,
+  groupTrajectorySubjects,
+  MAIN_TRAJECTORY_SUBJECT_ID,
+} from './trajectorySubjects';
 import css from './TrajectoryPanel.module.css';
 import './client/theme.css';
 
 const INITIAL_TRACE_LIMIT = 30;
 const DETAIL_LIMIT = 1000;
 const DETAIL_CONCURRENCY = 6;
+const LIVE_HINT_PULL_INTERVAL_MS = 80;
 const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 
 interface TraceUpdatedPayload {
@@ -83,10 +98,25 @@ export interface TrajectoryPanelProps {
   sessionId: string;
 }
 
+interface InitialLoadProgress {
+  loaded: number;
+  total: number;
+}
+
 function recordLabel(record: OtlpExportTraceServiceRequest): string {
   const span = spansOf(record)[0];
   if (span === undefined) return 'OTLP record';
   return `${span.name} · ${span.traceId.slice(0, 8)}/${span.spanId.slice(0, 8)}`;
+}
+
+function aggregateDiagnostics(
+  diagnostics: readonly TrajectoryDiagnostic[],
+): readonly { code: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const diagnostic of diagnostics) {
+    counts.set(diagnostic.code, (counts.get(diagnostic.code) ?? 0) + 1);
+  }
+  return [...counts].map(([code, count]) => ({ code, count }));
 }
 
 function detailRecordLabel(record: TrajectoryDetailRecord): string {
@@ -105,11 +135,33 @@ function errorMessage(error: unknown, chinese: boolean): string {
   if (error instanceof TrajectoryApiError && error.code === 'TRAJECTORY_DISABLED') {
     return chinese ? '轨迹观测当前未启用。' : 'Trajectory observability is disabled.';
   }
+  if (error instanceof TrajectoryApiError && error.code === 'UNSUPPORTED_SESSION_MODE') {
+    return chinese ? '当前会话暂时无法加载轨迹。' : 'Trajectory is temporarily unavailable for this session.';
+  }
   if (error instanceof Error && error.message) return error.message;
   return chinese ? '轨迹数据加载失败。' : 'Failed to load trajectory data.';
 }
 
-export function TrajectoryPanel({
+interface PublishedTrajectoryWindow {
+  readonly records: OtlpExportTraceServiceRequest[];
+  readonly rawRecords: TrajectoryDetailRecord[];
+  readonly lifecycleByRecordId: ReadonlyMap<string, 'running' | 'completed' | 'error'>;
+  readonly sessionCumulativeUsageByRequestIdentity: ReadonlyMap<string, TrajectoryUsage>;
+}
+
+const EMPTY_PUBLISHED_WINDOW: PublishedTrajectoryWindow = {
+  records: [],
+  rawRecords: [],
+  lifecycleByRecordId: new Map(),
+  sessionCumulativeUsageByRequestIdentity: new Map(),
+};
+
+/**
+ * Tool-panel visibility and other App chrome state must not rebuild the
+ * session projection. The panel owns its own transport updates; parent-only
+ * layout changes should only resize the already rendered surface.
+ */
+export const TrajectoryPanel = memo(function TrajectoryPanel({
   active,
   sessionId,
 }: TrajectoryPanelProps) {
@@ -120,25 +172,38 @@ export function TrajectoryPanel({
   const loadedSessionRef = useRef<string | null>(null);
   const requestControllerRef = useRef<AbortController | null>(null);
   const refreshPromiseRef = useRef<Promise<void> | null>(null);
+  const terminalCatchUpPromiseRef = useRef<Promise<void> | null>(null);
+  const terminalCatchUpAgainRef = useRef(false);
+  const terminalSettleTimerRef = useRef<number | null>(null);
   const rebuildPromiseRef = useRef<Promise<boolean> | null>(null);
-  const hintFrameRef = useRef<number | null>(null);
-  const pendingHintsRef = useRef(new Map<string, number>());
+  const hintFlushScheduledRef = useRef(false);
+  const hintCoordinatorRef = useRef(createTrajectoryTraceHintCoordinator());
+  const activeRef = useRef(active);
+  const deferredPublishRef = useRef(false);
+  const initialLoadProgressRef = useRef<({ generation: number } & InitialLoadProgress) | null>(null);
+  activeRef.current = active;
   const bodyRef = useRef<HTMLDivElement>(null);
   const rawResizeDragRef = useRef<RawInspectorResizeDrag | null>(null);
   const rawContentId = useId();
   const archiveInputRef = useRef<HTMLInputElement>(null);
-  const [records, setRecords] = useState<OtlpExportTraceServiceRequest[]>([]);
-  const [rawRecords, setRawRecords] = useState<TrajectoryDetailRecord[]>([]);
-  const [lifecycleByRecordId, setLifecycleByRecordId] = useState(
-    new Map<string, 'running' | 'completed' | 'error'>(),
+  const rawSelectionBySubjectRef = useRef(new Map<string, string>());
+  const subjectViewCacheRef = useRef(
+    createTrajectorySubjectViewCache<ReturnType<typeof projectOtelTrajectory>>(),
   );
-  const [traceCount, setTraceCount] = useState(0);
+  const trajectoryV2ReducerRef = useRef(createTrajectoryV2Reducer());
+  const sessionCumulativeUsageRef = useRef(new Map<string, TrajectoryUsage>());
+  const [publishedWindow, setPublishedWindow] = useState<PublishedTrajectoryWindow>(
+    EMPTY_PUBLISHED_WINDOW,
+  );
+  const [selectedSubjectId, setSelectedSubjectId] = useState(MAIN_TRAJECTORY_SUBJECT_ID);
   const [hasEarlier, setHasEarlier] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [initialLoadProgress, setInitialLoadProgress] = useState<InitialLoadProgress | null>(null);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [replayArchive, setReplayArchive] = useState<TrajectoryArchive | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiveNotice, setArchiveNotice] = useState<string | null>(null);
   const [invalidRecordSeen, setInvalidRecordSeen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rawSelection, setRawSelection] = useState('');
@@ -151,6 +216,7 @@ export function TrajectoryPanel({
 
   const copy = useMemo(() => chinese ? {
     loading: '正在加载轨迹…',
+    loadingProgress: (loaded: number, total: number) => `正在加载轨迹 ${loaded} / ${total}`,
     emptyTitle: '暂无轨迹',
     emptyText: '运行一次单 Agent 对话后，这里会展示模型、推理和工具调用轨迹。',
     newTitle: '尚未创建会话',
@@ -162,8 +228,17 @@ export function TrajectoryPanel({
     exitReplay: '退出复现',
     replay: (sourceSession: string) => `只读复现 · ${sourceSession}`,
     archiveTooLarge: '轨迹归档超过 128 MB，无法在浏览器中导入。',
+    exportBrowserStarted: '轨迹归档下载已开始；请在浏览器下载列表确认文件。',
+    exportBrowserSaved: '轨迹归档已保存到本地。',
+    exportDesktopSaved: '轨迹归档已保存到本地。',
+    exportCancelled: '已取消轨迹导出。',
+    exportFailed: '轨迹导出失败，请检查浏览器下载权限，或等待桌面保存桥接就绪后重试。',
+    subjectTabs: '执行主体',
+    subjectParent: (parentId: string) => `父主体 ${parentId}`,
+    subjectSession: (subjectSessionId: string) => `执行会话 ${subjectSessionId}`,
     summary: (traces: number, spans: number) => `${traces} 条 trace · ${spans} 个 OTel Span`,
     invalid: '· 存在无法投影的原始记录',
+    diagnostic: (code: string) => `轨迹数据不完整（${code}），已保留最近一次有效视图。`,
     raw: (count: number) => `原始 OTel 记录 (${count})`,
     rawLabel: '选择原始 OTel 记录',
     rawLoad: '按需加载原始记录',
@@ -191,6 +266,7 @@ export function TrajectoryPanel({
     },
   } : {
     loading: 'Loading trajectory…',
+    loadingProgress: (loaded: number, total: number) => `Loading trajectory ${loaded} / ${total}`,
     emptyTitle: 'No trajectory yet',
     emptyText: 'Run a single-Agent conversation to see model, reasoning, and tool traces here.',
     newTitle: 'No conversation yet',
@@ -202,8 +278,17 @@ export function TrajectoryPanel({
     exitReplay: 'Exit replay',
     replay: (sourceSession: string) => `Read-only replay · ${sourceSession}`,
     archiveTooLarge: 'The trajectory archive exceeds the 128 MB browser import limit.',
+    exportBrowserStarted: 'Trajectory archive download started; confirm it in the browser downloads list.',
+    exportBrowserSaved: 'Trajectory archive saved locally.',
+    exportDesktopSaved: 'Trajectory archive saved locally.',
+    exportCancelled: 'Trajectory export was cancelled.',
+    exportFailed: 'Trajectory export failed. Check browser download permissions or retry after the desktop save bridge is ready.',
+    subjectTabs: 'Execution subjects',
+    subjectParent: (parentId: string) => `Parent ${parentId}`,
+    subjectSession: (subjectSessionId: string) => `Execution session ${subjectSessionId}`,
     summary: (traces: number, spans: number) => `${traces} traces · ${spans} OTel spans`,
     invalid: '· Some raw records could not be projected',
+    diagnostic: (code: string) => `Trajectory data is incomplete (${code}); the last valid view was retained.`,
     raw: (count: number) => `Raw OTel records (${count})`,
     rawLabel: 'Select a raw OTel record',
     rawLoad: 'Load raw record on demand',
@@ -219,38 +304,72 @@ export function TrajectoryPanel({
 
   const publish = useCallback((generation: number) => {
     if (!operationCoordinatorRef.current.isCurrent(generation)) return;
+    if (!activeRef.current) {
+      deferredPublishRef.current = true;
+      return;
+    }
+    deferredPublishRef.current = false;
     const nextRecords = [...windowStateRef.current.buckets.values()].flatMap(bucket => (
       [...bucket.records.values()]
     ));
     const nextRawRecords = [...windowStateRef.current.buckets.values()].flatMap(bucket => (
       [...bucket.rawRecords.values()]
     ));
-    setRecords(nextRecords);
-    setRawRecords(nextRawRecords);
-    setLifecycleByRecordId(new Map(
-      [...windowStateRef.current.buckets.values()].flatMap(bucket => (
-        [...(bucket.versions ?? [])].map(([identity, version]) => (
-          [identity, version.lifecycle] as const
-        ))
-      )),
-    ));
-    setTraceCount(windowStateRef.current.buckets.size);
+    setPublishedWindow({
+      records: nextRecords,
+      rawRecords: nextRawRecords,
+      lifecycleByRecordId: new Map(
+        [...windowStateRef.current.buckets.values()].flatMap(bucket => (
+          [...(bucket.versions ?? [])].map(([identity, version]) => (
+            [identity, version.lifecycle] as const
+          ))
+        )),
+      ),
+      sessionCumulativeUsageByRequestIdentity: new Map(sessionCumulativeUsageRef.current),
+    });
   }, []);
+
+  const refreshSessionUsage = useCallback(async (
+    signal: AbortSignal,
+    generation: number,
+  ) => {
+    const usage = await getTrajectorySessionUsage(sessionId, { signal });
+    if (signal.aborted || !operationCoordinatorRef.current.isCurrent(generation)) return;
+    const expectedEpoch = windowStateRef.current.storeEpoch;
+    if (expectedEpoch !== null && usage.store_epoch !== expectedEpoch) return;
+    const nextUsage = new Map(usage.items.map(item => (
+      [`${item.trace_id}\u0000${item.inference_id}`, item.cumulative_usage]
+    )));
+    if (sameTrajectoryUsageMap(sessionCumulativeUsageRef.current, nextUsage)) return;
+    sessionCumulativeUsageRef.current = nextUsage;
+    subjectViewCacheRef.current.clear();
+    publish(generation);
+  }, [publish, sessionId]);
 
   const clearPublishedWindow = useCallback(() => {
     resetTrajectoryWindowState(windowStateRef.current);
-    setRecords([]);
-    setRawRecords([]);
-    setLifecycleByRecordId(new Map());
-    setTraceCount(0);
+    deferredPublishRef.current = false;
+    subjectViewCacheRef.current.clear();
+    trajectoryV2ReducerRef.current.clear();
+    sessionCumulativeUsageRef.current.clear();
+    setPublishedWindow(EMPTY_PUBLISHED_WINDOW);
+    initialLoadProgressRef.current = null;
+    setInitialLoadProgress(null);
+    setSelectedSubjectId(MAIN_TRAJECTORY_SUBJECT_ID);
     setHasEarlier(false);
     setInvalidRecordSeen(false);
     setError(null);
     setRawSelection('');
+    rawSelectionBySubjectRef.current.clear();
     setFetchedRaw(null);
     setRawLoading(false);
     setRawError(null);
   }, []);
+
+  useEffect(() => {
+    if (!active || !deferredPublishRef.current) return;
+    publish(operationCoordinatorRef.current.currentGeneration());
+  }, [active, publish]);
 
   const loadTrace = useCallback(async (
     traceId: string,
@@ -261,6 +380,32 @@ export function TrajectoryPanel({
     if (!operationCoordinatorRef.current.isCurrent(generation)) return;
     const current = windowStateRef.current.buckets.get(traceId);
     if (current !== undefined && current.revision >= targetRevision) return;
+    const publishPage = (staged: StagedTrajectoryTrace) => {
+      if (signal.aborted || !operationCoordinatorRef.current.isCurrent(generation)) return;
+      const latest = windowStateRef.current.buckets.get(traceId);
+      // A consumed revision uniquely identifies the trace state visible to
+      // this coalesced detail feed. Equal or older concurrent pages cannot add
+      // facts and would only trigger another full presentation publish.
+      if (latest !== undefined && latest.revision >= staged.bucket.revision) return;
+      windowStateRef.current.buckets.set(traceId, staged.bucket);
+      if (staged.invalidRecordSeen) setInvalidRecordSeen(true);
+      const loadProgress = initialLoadProgressRef.current;
+      if (loadProgress !== null && loadProgress.generation === generation) {
+        const loaded = Math.min(
+          loadProgress.total,
+          [...windowStateRef.current.buckets.values()].reduce(
+            (count, bucket) => count + bucket.rawRecords.size,
+            0,
+          ),
+        );
+        if (loaded !== loadProgress.loaded) {
+          const nextProgress = { ...loadProgress, loaded };
+          initialLoadProgressRef.current = nextProgress;
+          setInitialLoadProgress({ loaded, total: loadProgress.total });
+        }
+      }
+      publish(generation);
+    };
     const staged = await stageTrajectoryTracePages(
       current,
       signal,
@@ -269,17 +414,13 @@ export function TrajectoryPanel({
         sinceRevision,
         limit: DETAIL_LIMIT,
       }),
+      publishPage,
     );
     if (staged === null
       || signal.aborted
       || !operationCoordinatorRef.current.isCurrent(generation)) return;
-    const latest = windowStateRef.current.buckets.get(traceId);
-    if (latest !== current
-      && latest !== undefined
-      && latest.revision > staged.bucket.revision) return;
-    windowStateRef.current.buckets.set(traceId, staged.bucket);
-    if (staged.invalidRecordSeen) setInvalidRecordSeen(true);
-  }, [sessionId]);
+    setError(null);
+  }, [publish, sessionId]);
 
   const loadSummaries = useCallback(async (
     summaries: readonly TrajectoryTraceSummary[],
@@ -296,9 +437,8 @@ export function TrajectoryPanel({
       )));
       if (signal.aborted
         || !operationCoordinatorRef.current.isCurrent(generation)) return;
-      publish(generation);
     }
-  }, [loadTrace, publish]);
+  }, [loadTrace]);
 
   const rebuildFromHead = useCallback((signal: AbortSignal): Promise<boolean> => {
     if (rebuildPromiseRef.current !== null) return rebuildPromiseRef.current;
@@ -314,6 +454,9 @@ export function TrajectoryPanel({
           limit: INITIAL_TRACE_LIMIT,
         });
         if (signal.aborted || !coordinator.isCurrent(generation)) return false;
+        const total = page.items.reduce((count, summary) => count + summary.span_count, 0);
+        initialLoadProgressRef.current = { generation, loaded: 0, total };
+        setInitialLoadProgress({ loaded: 0, total });
         await loadSummaries(page.items, signal, generation);
         if (signal.aborted || !coordinator.isCurrent(generation)) return false;
         const windowState = windowStateRef.current;
@@ -321,6 +464,8 @@ export function TrajectoryPanel({
         windowState.pageCursor = page.next_cursor;
         windowState.revisionCursor = page.revision_cursor;
         windowState.listWindowInitialized = true;
+        await refreshSessionUsage(signal, generation);
+        if (signal.aborted || !coordinator.isCurrent(generation)) return false;
         setHasEarlier(page.next_cursor !== null);
         setError(null);
         return true;
@@ -330,7 +475,11 @@ export function TrajectoryPanel({
         }
         return false;
       } finally {
-        if (coordinator.isCurrent(generation)) setLoading(false);
+        if (coordinator.isCurrent(generation)) {
+          initialLoadProgressRef.current = null;
+          setInitialLoadProgress(null);
+          setLoading(false);
+        }
       }
     })();
     rebuildPromiseRef.current = operation;
@@ -338,10 +487,10 @@ export function TrajectoryPanel({
       if (rebuildPromiseRef.current === operation) rebuildPromiseRef.current = null;
     });
     return operation;
-  }, [chinese, clearPublishedWindow, loadSummaries, sessionId]);
+  }, [chinese, clearPublishedWindow, loadSummaries, refreshSessionUsage, sessionId]);
 
   const refreshLatest = useCallback(async () => {
-    if (!active || sessionId === 'new' || requestControllerRef.current?.signal.aborted) return;
+    if (sessionId === 'new' || requestControllerRef.current?.signal.aborted) return;
     if (refreshPromiseRef.current !== null) return refreshPromiseRef.current;
     const signal = requestControllerRef.current?.signal;
     if (signal === undefined) return;
@@ -405,6 +554,8 @@ export function TrajectoryPanel({
         if (signal.aborted
           || !coordinator.isCurrent(generation)
           || windowStateRef.current.storeEpoch !== expectedStoreEpoch) return;
+        await refreshSessionUsage(signal, generation);
+        if (signal.aborted || !coordinator.isCurrent(generation)) return;
         if (!windowStateRef.current.listWindowInitialized || loadedRevisions.size === 0) {
           windowStateRef.current.pageCursor = headWindow.firstPageNextCursor;
           windowStateRef.current.listWindowInitialized = true;
@@ -424,45 +575,70 @@ export function TrajectoryPanel({
         refreshPromiseRef.current = null;
       }
     }
-  }, [active, chinese, loadSummaries, rebuildFromHead, sessionId]);
+  }, [chinese, loadSummaries, rebuildFromHead, refreshSessionUsage, sessionId]);
+
+  const catchUpAfterTerminalEvent = useCallback((): Promise<void> => {
+    terminalCatchUpAgainRef.current = true;
+    if (terminalCatchUpPromiseRef.current !== null) {
+      return terminalCatchUpPromiseRef.current;
+    }
+    const operation = (async () => {
+      while (terminalCatchUpAgainRef.current) {
+        terminalCatchUpAgainRef.current = false;
+        const inFlight = refreshPromiseRef.current;
+        if (inFlight !== null) await inFlight;
+        await refreshLatest();
+      }
+    })();
+    terminalCatchUpPromiseRef.current = operation;
+    void operation.finally(() => {
+      if (terminalCatchUpPromiseRef.current === operation) {
+        terminalCatchUpPromiseRef.current = null;
+      }
+    });
+    return operation;
+  }, [refreshLatest]);
 
   const flushTraceHints = useCallback(async () => {
     const signal = requestControllerRef.current?.signal;
-    if (!active || signal === undefined || signal.aborted) return;
-    const hints = [...pendingHintsRef.current];
-    pendingHintsRef.current.clear();
-    if (hints.length === 0) return;
+    if (signal === undefined || signal.aborted) return;
     const coordinator = operationCoordinatorRef.current;
     const generation = coordinator.currentGeneration();
-    await Promise.all(hints.map(([traceId, revision]) => loadTrace(
-      traceId,
-      revision,
-      signal,
-      generation,
-    )));
-    if (signal.aborted || !coordinator.isCurrent(generation)) return;
-    publish(generation);
-  }, [active, loadTrace, publish]);
+    await hintCoordinatorRef.current.drain(async (hints) => {
+      await Promise.all([...hints].map(([traceId, revision]) => loadTrace(
+        traceId,
+        revision,
+        signal,
+        generation,
+      )));
+      await refreshSessionUsage(signal, generation);
+    }, () => new Promise<void>((resolve) => {
+      window.setTimeout(resolve, LIVE_HINT_PULL_INTERVAL_MS);
+    }));
+  }, [loadTrace, refreshSessionUsage]);
 
   useEffect(() => {
     requestControllerRef.current?.abort();
     refreshPromiseRef.current = null;
+    terminalCatchUpPromiseRef.current = null;
+    terminalCatchUpAgainRef.current = false;
+    if (terminalSettleTimerRef.current !== null) {
+      window.clearTimeout(terminalSettleTimerRef.current);
+      terminalSettleTimerRef.current = null;
+    }
     rebuildPromiseRef.current = null;
     operationCoordinatorRef.current.invalidate(() => setLoadingEarlier(false));
     const controller = new AbortController();
     requestControllerRef.current = controller;
     setRawLoading(false);
-    pendingHintsRef.current.clear();
-    if (hintFrameRef.current !== null) {
-      window.cancelAnimationFrame(hintFrameRef.current);
-      hintFrameRef.current = null;
-    }
+    hintCoordinatorRef.current = createTrajectoryTraceHintCoordinator();
+    hintFlushScheduledRef.current = false;
     const sessionChanged = loadedSessionRef.current !== sessionId;
     if (sessionChanged) {
       loadedSessionRef.current = sessionId;
       clearPublishedWindow();
     }
-    if (!active || sessionId === 'new') {
+    if (sessionId === 'new') {
       setLoading(false);
       return () => controller.abort();
     }
@@ -477,10 +653,10 @@ export function TrajectoryPanel({
       if (refreshPromiseRef.current === operation) refreshPromiseRef.current = null;
     });
     return () => controller.abort();
-  }, [active, clearPublishedWindow, rebuildFromHead, refreshLatest, sessionId]);
+  }, [clearPublishedWindow, rebuildFromHead, refreshLatest, sessionId]);
 
   useEffect(() => {
-    if (!active || sessionId === 'new' || replayArchive !== null) return undefined;
+    if (sessionId === 'new' || replayArchive !== null) return undefined;
     const unsubscribe = webClient.on<TraceUpdatedPayload>('trace.updated', (event) => {
       if (event.payload.session_id !== sessionId) return;
       const traceId = event.payload.trace_id;
@@ -506,12 +682,17 @@ export function TrajectoryPanel({
         void refreshLatest();
         return;
       }
-      const prior = pendingHintsRef.current.get(traceId) ?? -1;
-      if (revision > prior) pendingHintsRef.current.set(traceId, revision);
-      if (hintFrameRef.current !== null) return;
-      hintFrameRef.current = window.requestAnimationFrame(() => {
-        hintFrameRef.current = null;
-        void flushTraceHints();
+      hintCoordinatorRef.current.enqueue(traceId, revision);
+      if (hintFlushScheduledRef.current) return;
+      hintFlushScheduledRef.current = true;
+      queueMicrotask(() => {
+        hintFlushScheduledRef.current = false;
+        void flushTraceHints().catch(() => {
+          // Detail hints are only watermarks. A transient detail fetch must not
+          // strand the highest revision; the coordinator requeues it and the
+          // revision feed repairs the view without waiting for chat completion.
+          void refreshLatest();
+        });
       });
     });
     let previousConnectionState = webClient.getState();
@@ -521,20 +702,44 @@ export function TrajectoryPanel({
       }
       previousConnectionState = nextConnectionState;
     });
+    const terminalEventNames: TrajectoryTerminalEventName[] = [
+      'chat.final',
+      'chat.processing_status',
+      'chat.error',
+      'execution.error',
+      'harness.session_finished',
+    ];
+    const unsubscribeTerminalEvents = terminalEventNames.map(eventName => (
+      webClient.on<Record<string, unknown>>(eventName, (event) => {
+        if (!shouldCatchUpAfterTrajectoryTerminalEvent(
+          eventName,
+          event.payload,
+          sessionId,
+        )) return;
+        if (terminalSettleTimerRef.current !== null) {
+          window.clearTimeout(terminalSettleTimerRef.current);
+        }
+        terminalSettleTimerRef.current = window.setTimeout(() => {
+          terminalSettleTimerRef.current = null;
+          void catchUpAfterTerminalEvent();
+        }, 300);
+      })
+    ));
     return () => {
       unsubscribe();
       unsubscribeState();
-      if (hintFrameRef.current !== null) {
-        window.cancelAnimationFrame(hintFrameRef.current);
-        hintFrameRef.current = null;
+      unsubscribeTerminalEvents.forEach(unsubscribeTerminal => unsubscribeTerminal());
+      if (terminalSettleTimerRef.current !== null) {
+        window.clearTimeout(terminalSettleTimerRef.current);
+        terminalSettleTimerRef.current = null;
       }
-      pendingHintsRef.current.clear();
+      hintFlushScheduledRef.current = false;
     };
-  }, [active, flushTraceHints, rebuildFromHead, refreshLatest, replayArchive, sessionId]);
+  }, [catchUpAfterTerminalEvent, flushTraceHints, rebuildFromHead, refreshLatest, replayArchive, sessionId]);
 
   const loadEarlier = useCallback((): Promise<boolean> => {
     const signal = requestControllerRef.current?.signal;
-    if (!active || replayArchive !== null || signal === undefined || signal.aborted) {
+    if (replayArchive !== null || signal === undefined || signal.aborted) {
       return Promise.resolve(false);
     }
     const coordinator = operationCoordinatorRef.current;
@@ -578,17 +783,62 @@ export function TrajectoryPanel({
         return false;
       }
     }, setLoadingEarlier);
-  }, [active, chinese, loadSummaries, rebuildFromHead, replayArchive, sessionId]);
+  }, [chinese, loadSummaries, rebuildFromHead, replayArchive, sessionId]);
 
   const replayView = useMemo(
     () => replayArchive === null ? null : trajectoryArchiveView(replayArchive),
     [replayArchive],
   );
-  const displayedRecords = replayView?.records ?? records;
-  const displayedRawRecords = replayView?.rawRecords ?? rawRecords;
-  const displayedLifecycle = replayView?.lifecycleByRecordId ?? lifecycleByRecordId;
-  const displayedTraceCount = replayView?.traceCount ?? traceCount;
+  const allDisplayedRecords = replayView?.records ?? publishedWindow.records;
+  const allDisplayedRawRecords = replayView?.rawRecords ?? publishedWindow.rawRecords;
+  const allDisplayedLifecycle = replayView?.lifecycleByRecordId
+    ?? publishedWindow.lifecycleByRecordId;
   const displayedInvalidRecordSeen = replayView?.invalidRecordSeen ?? invalidRecordSeen;
+  const subjectView = useMemo(() => subjectViewCacheRef.current.update(
+    groupTrajectorySubjects(
+      allDisplayedRecords,
+      allDisplayedRawRecords,
+      allDisplayedLifecycle,
+      replayArchive?.session_id ?? sessionId,
+    ),
+    group => projectOtelTrajectory(group.records, {
+      lifecycleByRecordId: group.lifecycleByRecordId,
+      sessionCumulativeUsageByRequestIdentity:
+        replayArchive === null
+          ? publishedWindow.sessionCumulativeUsageByRequestIdentity
+          : new Map(),
+      ...(replayArchive === null ? { v2Reducer: trajectoryV2ReducerRef.current } : {}),
+    }),
+  ), [
+    allDisplayedLifecycle,
+    allDisplayedRawRecords,
+    allDisplayedRecords,
+    publishedWindow.sessionCumulativeUsageByRequestIdentity,
+    replayArchive?.session_id,
+    sessionId,
+  ]);
+  const subjectGroups = subjectView.groups;
+  const selectedSubjectGroup = subjectGroups.byId.get(selectedSubjectId)
+    ?? subjectGroups.byId.get(MAIN_TRAJECTORY_SUBJECT_ID)
+    ?? subjectGroups.groups[0];
+  const displayedRecords = selectedSubjectGroup?.records ?? [];
+  const displayedRawRecords = selectedSubjectGroup?.rawRecords ?? [];
+  const displayedTraceCount = selectedSubjectGroup?.traceCount ?? 0;
+  const subjectSnapshots = subjectView.snapshots;
+  const selectedSubjectSnapshot = selectedSubjectGroup === undefined
+    ? undefined
+    : subjectSnapshots.get(selectedSubjectGroup.subject.id);
+
+  const selectSubject = useCallback((subjectId: string) => {
+    rawSelectionBySubjectRef.current.set(selectedSubjectId, rawSelection);
+    setSelectedSubjectId(subjectId);
+    setRawSelection(rawSelectionBySubjectRef.current.get(subjectId) ?? '');
+  }, [rawSelection, selectedSubjectId]);
+
+  useEffect(() => {
+    if (subjectGroups.byId.has(selectedSubjectId)) return;
+    selectSubject(MAIN_TRAJECTORY_SUBJECT_ID);
+  }, [selectSubject, selectedSubjectId, subjectGroups]);
 
   useEffect(() => {
     if (displayedRawRecords.length === 0) {
@@ -602,9 +852,10 @@ export function TrajectoryPanel({
     if (!identities.includes(rawSelection)) {
       const nextSelection = identities[0] ?? '';
       windowStateRef.current.rawSelection = nextSelection;
+      rawSelectionBySubjectRef.current.set(selectedSubjectId, nextSelection);
       setRawSelection(nextSelection);
     }
-  }, [displayedRawRecords, rawSelection]);
+  }, [displayedRawRecords, rawSelection, selectedSubjectId]);
 
   useEffect(() => {
     setFetchedRaw(null);
@@ -612,9 +863,6 @@ export function TrajectoryPanel({
     setRawLoading(false);
   }, [rawSelection, replayArchive, sessionId]);
 
-  const snapshot = useMemo(() => projectOtelTrajectory(displayedRecords, {
-    lifecycleByRecordId: displayedLifecycle,
-  }), [displayedLifecycle, displayedRecords]);
   const rawRecord = useMemo(
     () => displayedRawRecords.find(record => detailRecordIdentity(record) === rawSelection),
     [displayedRawRecords, rawSelection],
@@ -661,6 +909,7 @@ export function TrajectoryPanel({
     if (replayArchive === null && (signal === undefined || signal.aborted)) return;
     setExporting(true);
     setArchiveError(null);
+    setArchiveNotice(null);
     try {
       const archive = replayArchive ?? parseTrajectoryArchive(
         await getTrajectoryArchive(sessionId, { signal }),
@@ -669,8 +918,18 @@ export function TrajectoryPanel({
       const blob = new Blob([`${JSON.stringify(archive, null, 2)}\n`], {
         type: 'application/json;charset=utf-8',
       });
-      const outcome = await saveBlob(blob, `trajectory-${safeSession}.json`);
-      if (outcome === 'failed') throw new Error('Trajectory archive could not be saved');
+      const result = await saveBlobWithResult(
+        blob,
+        `trajectory-${safeSession}.archive.json`,
+      );
+      if (result.outcome === 'failed') throw new Error(copy.exportFailed);
+      setArchiveNotice(result.outcome === 'cancelled'
+        ? copy.exportCancelled
+        : result.transport === 'desktop'
+          ? copy.exportDesktopSaved
+          : result.transport === 'browser-file-picker'
+            ? copy.exportBrowserSaved
+            : copy.exportBrowserStarted);
     } catch (exportError) {
       if (!(exportError instanceof DOMException && exportError.name === 'AbortError')) {
         setArchiveError(errorMessage(exportError, chinese));
@@ -678,17 +937,19 @@ export function TrajectoryPanel({
     } finally {
       setExporting(false);
     }
-  }, [chinese, exporting, replayArchive, sessionId]);
+  }, [chinese, copy, exporting, replayArchive, sessionId]);
 
   const importArchive = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
     if (file === undefined) return;
     setArchiveError(null);
+    setArchiveNotice(null);
     try {
       if (file.size > MAX_ARCHIVE_BYTES) throw new Error(copy.archiveTooLarge);
       const archive = parseTrajectoryArchive(await file.text());
       setReplayArchive(archive);
+      setSelectedSubjectId(MAIN_TRAJECTORY_SUBJECT_ID);
       setRawSelection('');
       setFetchedRaw(null);
       setRawError(null);
@@ -700,7 +961,9 @@ export function TrajectoryPanel({
   const exitReplay = useCallback(() => {
     const transition = exitTrajectoryReplay(replayArchive);
     setReplayArchive(transition.archive);
+    setSelectedSubjectId(MAIN_TRAJECTORY_SUBJECT_ID);
     setArchiveError(null);
+    setArchiveNotice(null);
     setRawSelection('');
     if (transition.catchUpLiveRevision) void refreshLatest();
   }, [refreshLatest, replayArchive]);
@@ -824,6 +1087,7 @@ export function TrajectoryPanel({
               onChange={(event) => {
                 const nextSelection = event.currentTarget.value;
                 windowStateRef.current.rawSelection = nextSelection;
+                rawSelectionBySubjectRef.current.set(selectedSubjectId, nextSelection);
                 setRawSelection(nextSelection);
               }}
             >
@@ -907,31 +1171,61 @@ export function TrajectoryPanel({
   } else {
     content = (
       <>
+        {aggregateDiagnostics(selectedSubjectSnapshot?.diagnostics ?? []).map((diagnostic) => (
+          <p
+            className={`${css.rawNotice} ${css.errorText}`}
+            key={diagnostic.code}
+          >
+            {copy.diagnostic(diagnostic.code)}{diagnostic.count > 1 ? ` × ${diagnostic.count}` : ''}
+          </p>
+        ))}
         {error !== null && replayArchive === null && displayedRecords.length === 0 ? (
           <p className={`${css.rawNotice} ${css.errorText}`}>{error}</p>
         ) : null}
         {displayedRecords.length === 0 ? (
           <div className={css.state}><p className={css.stateText}>{copy.rawOnly}</p></div>
-        ) : (
-          <TrajectoryExplorer
-            snapshot={snapshot}
-            loading={replayArchive === null ? loading : false}
-            loadingEarlier={replayArchive === null ? loadingEarlier : false}
-            hasEarlier={replayArchive === null ? hasEarlier : false}
-            loadEarlier={loadEarlier}
-            error={replayArchive === null ? error : null}
-            messages={copy.toolbar}
-            colorMode="light"
-            className={css.explorer}
-          />
-        )}
+        ) : null}
+        <div className={`${css.subjectExplorers} ${
+          displayedRecords.length === 0 ? css.subjectExplorersHidden : ''
+        }`}>
+          {subjectGroups.groups.map((group) => {
+            const selected = group.subject.id === selectedSubjectGroup?.subject.id;
+            const subjectSnapshot = subjectSnapshots.get(group.subject.id);
+            if (subjectSnapshot === undefined || group.records.length === 0) return null;
+            return (
+              <div
+                key={group.subject.id}
+                className={`${css.subjectExplorer} ${selected ? '' : css.subjectExplorerHidden}`}
+                aria-hidden={!selected}
+                data-trajectory-subject-explorer={group.subject.id}
+              >
+                <TrajectoryExplorer
+                  active={active && selected}
+                  snapshot={subjectSnapshot}
+                  loading={selected && replayArchive === null ? loading : false}
+                  loadingEarlier={selected && replayArchive === null ? loadingEarlier : false}
+                  hasEarlier={selected && replayArchive === null ? hasEarlier : false}
+                  loadEarlier={loadEarlier}
+                  error={selected && replayArchive === null ? error : null}
+                  messages={copy.toolbar}
+                  colorMode="light"
+                  className={css.explorer}
+                />
+              </div>
+            );
+          })}
+        </div>
         {rawInspector}
       </>
     );
   }
 
   return (
-    <section className={css.root} aria-label={chinese ? '轨迹' : 'Trajectory'}>
+    <section
+      className={css.root}
+      aria-label={chinese ? '轨迹' : 'Trajectory'}
+      data-active={active ? 'true' : 'false'}
+    >
       <header className={css.header}>
         <div className={css.summary}>
           {replayArchive === null
@@ -980,7 +1274,76 @@ export function TrajectoryPanel({
       {archiveError === null ? null : (
         <p className={`${css.archiveError} ${css.errorText}`} role="alert">{archiveError}</p>
       )}
+      {archiveNotice === null ? null : (
+        <p className={css.archiveNotice} role="status">{archiveNotice}</p>
+      )}
+      {replayArchive === null && loading ? (
+        <div className={css.loadProgress} role="status" aria-live="polite">
+          <div className={css.loadProgressLabel}>
+            {initialLoadProgress === null
+              ? copy.loading
+              : copy.loadingProgress(initialLoadProgress.loaded, initialLoadProgress.total)}
+          </div>
+          <div
+            className={css.loadProgressTrack}
+            role="progressbar"
+            aria-label={copy.loading}
+            {...(initialLoadProgress === null
+              ? {}
+              : {
+                  'aria-valuemin': 0,
+                  'aria-valuemax': initialLoadProgress.total,
+                  'aria-valuenow': initialLoadProgress.loaded,
+                })}
+          >
+            <span
+              className={`${css.loadProgressFill} ${
+                initialLoadProgress === null ? css.loadProgressFillIndeterminate : ''
+              }`}
+              style={initialLoadProgress === null
+                ? undefined
+                : {
+                    width: `${initialLoadProgress.total === 0
+                      ? 100
+                      : Math.min(100, (initialLoadProgress.loaded / initialLoadProgress.total) * 100)}%`,
+                  }}
+            />
+          </div>
+        </div>
+      ) : null}
+      {subjectGroups.groups.length > 1 ? (
+        <div className={css.subjectBar}>
+          <div className={css.subjectTabs} role="tablist" aria-label={copy.subjectTabs}>
+            {subjectGroups.groups.map(group => (
+              <button
+                key={group.subject.id}
+                type="button"
+                role="tab"
+                aria-selected={group.subject.id === selectedSubjectGroup?.subject.id}
+                className={`${css.subjectTab} ${
+                  group.subject.id === selectedSubjectGroup?.subject.id ? css.subjectTabActive : ''
+                }`}
+                title={group.subject.id}
+                onClick={() => selectSubject(group.subject.id)}
+                data-subject-id={group.subject.id}
+              >
+                {group.label}
+              </button>
+            ))}
+          </div>
+          {selectedSubjectGroup?.subject.kind === 'subagent' ? (
+            <div className={css.subjectMeta}>
+              {selectedSubjectGroup.subject.parentId === null
+                ? null
+                : <span>{copy.subjectParent(selectedSubjectGroup.subject.parentId)}</span>}
+              {selectedSubjectGroup.subject.sessionId === null
+                ? null
+                : <span>{copy.subjectSession(selectedSubjectGroup.subject.sessionId)}</span>}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div ref={bodyRef} className={css.body}>{content}</div>
     </section>
   );
-}
+});

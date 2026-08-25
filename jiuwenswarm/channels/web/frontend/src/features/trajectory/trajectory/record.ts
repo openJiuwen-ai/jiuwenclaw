@@ -45,6 +45,8 @@ export interface TrajectoryCell {
   recordId?: string
   /** Physical model request owning this row; several requests may share one Step. */
   requestRecordId?: string
+  /** Schema-v2 physical inference identity, resolved without temporal inference. */
+  physicalInferenceId?: string
   kind: TrajectoryCellKind
   /** Explicit lifecycle; payload capture policy never determines completion. */
   status?: 'complete' | 'running' | 'error'
@@ -52,14 +54,24 @@ export interface TrajectoryCell {
   previewMarkdown?: string
   opensTurn?: boolean
   sourceSeq?: number
+  /** Stable logical position inside one request when wall-clock timestamps overlap. */
+  behaviorOrder?: number
   messageSource?: unknown
   /** Original one-Span OTLP export request for the generic OTel inspector. */
   traceDetail?: unknown
   requestOnly?: boolean
+  /** Behavior event that must not create a synthetic Request boundary. */
+  requestless?: boolean
   inputDetail?: string
+  /** Previous content for a same-slot USER/CONTEXT replacement. */
+  previousInputDetail?: string
   promptDetail?: TrajectoryPromptSnapshot
   previousPromptDetail?: TrajectoryPromptSnapshot
+  /** Real request-message slot represented by this SYSTEM row. */
+  promptSystemMessageIndex?: number
   outputDetail?: string
+  /** Structured schema-v2 compaction payload shown independently from Markdown output. */
+  compactionDetail?: Readonly<Record<string, unknown>>
   thinkingDetail?: string
   sourceBlocks?: readonly TrajectorySourceBlock[]
   outputBlocks?: readonly TrajectorySourceBlock[]

@@ -524,7 +524,7 @@ agent_observability:
 # ============================================================
 trajectory_ui:
   enabled: true                     # 启用“对话 / 轨迹”数据链路
-  db_path: ""                       # 空值默认 ~/.jiuwenswarm/.trace/trajectory.sqlite3
+  db_path: ""                       # Session database root; defaults to ~/.jiuwenswarm/.trace/sessions
   retention_days: 7                 # SQLite 轨迹保留天数
   queue_size: 4096                  # Agent 主线程非阻塞写入队列上限
   batch_size: 64                    # writer 单事务最大记录数

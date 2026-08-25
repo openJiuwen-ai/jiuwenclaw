@@ -133,7 +133,9 @@ import {
   SingleAgentSurface,
   type ChatSurfaceView,
 } from './features/trajectory/SingleAgentSurface';
-import { resolveTrajectoryHostLayout } from './features/trajectory/trajectoryLayout';
+import {
+  shouldInsetTrajectoryForFloatingTasks,
+} from './features/trajectory/trajectoryLayout';
 import './App.css';
 
 const LazyTrajectoryPanel = lazy(async () => {
@@ -291,8 +293,6 @@ function AppContent({
   });
   const [chatSurfaceViews, setChatSurfaceViews] = useState<Record<string, ChatSurfaceView>>({});
   const [trajectoryUiRequested, setTrajectoryUiRequested] = useState(false);
-  const [trajectorySessionsCollapsed, setTrajectorySessionsCollapsed] = useState(false);
-  const [trajectoryTasksCollapsed, setTrajectoryTasksCollapsed] = useState(false);
 
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);
@@ -836,16 +836,14 @@ function AppContent({
     mode,
   });
   const trajectoryTaskPanelAvailable = toolPanelHasContent || isRestoringTeamHistory;
-  const trajectoryHostLayout = resolveTrajectoryHostLayout(
+  const effectiveTeamAreaExpanded = isTeamAreaExpanded;
+  const insetTrajectoryFloatingTasks = shouldInsetTrajectoryForFloatingTasks(
     mode,
     chatSurfaceView,
-    trajectorySessionsCollapsed,
-    trajectoryTasksCollapsed,
+    trajectoryTaskPanelAvailable,
+    toolPanelHidden,
     isTeamAreaExpanded,
   );
-  const hideTrajectorySessions = trajectoryHostLayout.hideSessions;
-  const hideTrajectoryTasks = trajectoryHostLayout.hideTasks;
-  const effectiveTeamAreaExpanded = trajectoryHostLayout.effectiveTeamAreaExpanded;
 
   // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递
   const {
@@ -2989,20 +2987,20 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {activeNav === 'chat' && (
           <>
             <div className="chat-layout flex-1 flex min-h-0 overflow-hidden">
-              {hideTrajectorySessions ? null : (
-                <ConversationSidebar
-                  activeSessionId={sessionId === NEW_CONVERSATION_ID ? null : sessionId}
-                  onNew={(options) => requestSessionNavigation('new', options)}
-                  onSelect={requestSessionNavigation}
-                  onDelete={(session) => { setDialogError(null); setDeleteTarget(session); }}
-                  onOpenCron={() => handleNavigate('cron')}
-                  isCronActive={false}
-                  collapsed={conversationSidebarCollapsed}
-                  floating={conversationSidebarFloating}
-                  onToggleCollapse={() => setConversationSidebarCollapsed((v) => !v)}
-                />
-              )}
-              <div className="chat-workspace flex-1 flex min-h-0 overflow-hidden">
+              <ConversationSidebar
+                activeSessionId={sessionId === NEW_CONVERSATION_ID ? null : sessionId}
+                onNew={(options) => requestSessionNavigation('new', options)}
+                onSelect={requestSessionNavigation}
+                onDelete={(session) => { setDialogError(null); setDeleteTarget(session); }}
+                onOpenCron={() => handleNavigate('cron')}
+                isCronActive={false}
+                collapsed={conversationSidebarCollapsed}
+                floating={conversationSidebarFloating}
+                onToggleCollapse={() => setConversationSidebarCollapsed((v) => !v)}
+              />
+              <div
+                className={`chat-workspace flex-1 flex min-h-0 overflow-hidden ${insetTrajectoryFloatingTasks ? 'chat-workspace--trajectory-floating-tools' : ''}`}
+              >
                 {showConversationNotFound && (
                   <div className="flex-1 flex flex-col items-center justify-center gap-4" data-testid="app-conversation-not-found">
                     <h1 className="text-lg font-semibold text-text" data-testid="app-conversation-not-found-title">{t('multiSession.notFound.title')}</h1>
@@ -3076,48 +3074,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                       </Suspense>
                     )}
                     trajectoryLabel={t('trajectory.tabs.trajectory')}
-                    trajectoryControls={(
-                      <>
-                        <button
-                          type="button"
-                          className="chat-surface-layout-control"
-                          aria-pressed={trajectorySessionsCollapsed}
-                          aria-label={trajectorySessionsCollapsed
-                            ? t('trajectory.layout.showSessions')
-                            : t('trajectory.layout.hideSessions')}
-                          title={trajectorySessionsCollapsed
-                            ? t('trajectory.layout.showSessions')
-                            : t('trajectory.layout.hideSessions')}
-                          data-tooltip={trajectorySessionsCollapsed
-                            ? t('trajectory.layout.showSessions')
-                            : t('trajectory.layout.hideSessions')}
-                          onClick={() => setTrajectorySessionsCollapsed(collapsed => !collapsed)}
-                          data-testid="trajectory-toggle-sessions"
-                        >
-                          <span aria-hidden="true">{trajectorySessionsCollapsed ? '›' : '‹'}</span>
-                        </button>
-                        {trajectoryTaskPanelAvailable ? (
-                          <button
-                            type="button"
-                            className="chat-surface-layout-control"
-                            aria-pressed={trajectoryTasksCollapsed}
-                            aria-label={trajectoryTasksCollapsed
-                              ? t('trajectory.layout.showTasks')
-                              : t('trajectory.layout.hideTasks')}
-                            title={trajectoryTasksCollapsed
-                              ? t('trajectory.layout.showTasks')
-                              : t('trajectory.layout.hideTasks')}
-                            data-tooltip={trajectoryTasksCollapsed
-                              ? t('trajectory.layout.showTasks')
-                              : t('trajectory.layout.hideTasks')}
-                            onClick={() => setTrajectoryTasksCollapsed(collapsed => !collapsed)}
-                            data-testid="trajectory-toggle-tasks"
-                          >
-                            <span aria-hidden="true">{trajectoryTasksCollapsed ? '‹' : '›'}</span>
-                          </button>
-                        ) : null}
-                      </>
-                    )}
+                    showNavigation={sessionId !== NEW_CONVERSATION_ID}
                     trajectoryRequested={trajectoryUiRequested}
                   />
                 </div>
@@ -3140,7 +3097,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 )}
 
                 {/* Tool Panel / Expanded Team Panel */}
-{!toolPanelHidden && trajectoryTaskPanelAvailable && !hideTrajectoryTasks && !showConversationNotFound && !heartbeatPanelOpen && (
+                {!toolPanelHidden && trajectoryTaskPanelAvailable && !showConversationNotFound && !heartbeatPanelOpen && (
                   <ToolPanel
                     sessionId={sessionId}
                     project={sessionProject}

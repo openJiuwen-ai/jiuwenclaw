@@ -113,7 +113,12 @@ TEAM_CANONICAL_MODES: frozenset[str] = frozenset(
 # UI. This is deliberately an allowlist: future modes must opt in explicitly
 # instead of becoming readable merely because they are not known Team modes.
 SINGLE_AGENT_CANONICAL_MODES: frozenset[str] = frozenset(
-    {"agent", "agent.fast", "agent.plan", "code", "code.normal", "code.plan"}
+    {
+        NEW_AGENT_WORK_NORMAL,
+        NEW_AGENT_WORK_PLAN,
+        NEW_AGENT_CODE_NORMAL,
+        NEW_AGENT_CODE_PLAN,
+    }
 )
 
 # 所有表示"正处于 plan"的 canonical 模式。

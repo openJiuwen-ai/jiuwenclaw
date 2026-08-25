@@ -15,8 +15,8 @@ export interface SingleAgentSurfaceProps {
   tabListLabel: string;
   trajectory: ReactNode;
   trajectoryLabel: string;
-  trajectoryControls?: ReactNode;
   trajectoryRequested: boolean;
+  showNavigation?: boolean;
 }
 
 /**
@@ -31,16 +31,20 @@ export function SingleAgentSurface({
   onViewChange,
   tabListLabel,
   trajectory,
-  trajectoryControls,
   trajectoryLabel,
   trajectoryRequested,
+  showNavigation = true,
 }: SingleAgentSurfaceProps) {
   const agentMode = mode === 'agent';
-  const resolvedView: ChatSurfaceView = agentMode ? activeView : 'chat';
+  const navigationVisible = agentMode && showNavigation;
+  const resolvedView: ChatSurfaceView = navigationVisible ? activeView : 'chat';
 
   return (
-    <>
-      {agentMode ? (
+    <div
+      className={`single-agent-surface single-agent-surface--${resolvedView} ${navigationVisible ? 'single-agent-surface--navigation' : ''}`}
+      data-testid="single-agent-surface"
+    >
+      {navigationVisible ? (
         <div className="chat-surface-toolbar">
           <div
             className="chat-surface-tabs"
@@ -69,11 +73,6 @@ export function SingleAgentSurface({
               {trajectoryLabel}
             </button>
           </div>
-          {resolvedView === 'trajectory' && trajectoryControls !== undefined ? (
-            <div className="chat-surface-layout-controls" data-testid="trajectory-layout-controls">
-              {trajectoryControls}
-            </div>
-          ) : null}
         </div>
       ) : null}
       <div
@@ -83,7 +82,7 @@ export function SingleAgentSurface({
       >
         {chat}
       </div>
-      {agentMode && trajectoryRequested ? (
+      {navigationVisible && trajectoryRequested ? (
         <div
           className={`chat-surface-view flex-1 min-h-0 ${resolvedView === 'trajectory' ? '' : 'chat-surface-view--hidden'}`}
           aria-hidden={resolvedView !== 'trajectory'}
@@ -92,6 +91,6 @@ export function SingleAgentSurface({
           {trajectory}
         </div>
       ) : null}
-    </>
+    </div>
   );
 }

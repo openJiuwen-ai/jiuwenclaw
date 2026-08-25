@@ -3,7 +3,7 @@
 /** Standalone trajectory explorer assembled from the DSH presentation components. */
 
 import {
-  useCallback, useEffect, useMemo, useState, type CSSProperties,
+  memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties,
 } from 'react'
 import type {
   TrajectoryRequest, TrajectorySnapshot, TrajectoryTurnModel,
@@ -35,6 +35,8 @@ interface ExplorerStyle extends CSSProperties {
 
 /** Ordinary React props; no Cordis, Session, slot, or locale service is required. */
 export interface TrajectoryExplorerProps {
+  /** Whether this mounted explorer is currently visible and may run its live clock. */
+  active?: boolean
   /** Atomic read model produced by an OTel projector or a static fixture. */
   snapshot?: TrajectorySnapshot
   /** Static grouped records; ignored when `snapshot` is supplied. */
@@ -97,7 +99,8 @@ function searchIndexes(
 }
 
 /** Render the full toolbar, overview timeline, virtual ledger, and inspector. */
-export function TrajectoryExplorer({
+export const TrajectoryExplorer = memo(function TrajectoryExplorer({
+  active = true,
   snapshot,
   turns: staticTurns = [],
   requests: staticRequests,
@@ -122,7 +125,7 @@ export function TrajectoryExplorer({
   )), [turns])
   const [liveNowMilliseconds, setLiveNowMilliseconds] = useState(() => Date.now())
   useEffect(() => {
-    if (!hasRunningCells) return undefined
+    if (!active || !hasRunningCells) return undefined
     const update = () => setLiveNowMilliseconds(Date.now())
     update()
     const interval = window.setInterval(update, 250)
@@ -134,7 +137,7 @@ export function TrajectoryExplorer({
       window.clearInterval(interval)
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [hasRunningCells])
+  }, [active, hasRunningCells])
   const [actualDuration, setActualDuration] = useState(false)
   const [actualTime, setActualTime] = useState(false)
   const [collapsedTurns, setCollapsedTurns] = useState<ReadonlySet<number>>(EMPTY_TURN_IDS)
@@ -146,6 +149,17 @@ export function TrajectoryExplorer({
   const [selectedTimelineIndex, setSelectedTimelineIndex] = useState<number | null>(null)
   const [recordSelection, setRecordSelection] = useState<{ readonly index: number } | null>(null)
   const [recordFocus, setRecordFocus] = useState<{ readonly index: number } | null>(null)
+  const [scrollToEndSignal, setScrollToEndSignal] = useState(0)
+  const wasActiveRef = useRef(false)
+  // Whenever the explorer becomes visible (first mount while active, a chat ->
+  // trajectory tab switch, or a subject tab change), ask the ledger to jump to
+  // the newest record. The ref starts false so an initially-active explorer
+  // still requests the tail on first render.
+  useEffect(() => {
+    const becameActive = active && !wasActiveRef.current
+    wasActiveRef.current = active
+    if (becameActive) setScrollToEndSignal(value => value + 1)
+  }, [active])
   const t = useMemo(
     () => translate ?? trajectoryTranslator(messages),
     [messages, translate],
@@ -280,6 +294,7 @@ export function TrajectoryExplorer({
       <div className={css.ledger}>
         <TrajectoryTable
           turns={turns}
+          scrollToEndSignal={scrollToEndSignal}
           {...(requests === undefined ? {} : { requestNumbers: requests })}
           {...(streamingCells === undefined ? {} : { streamingCells })}
           timelineFocusIndexes={timelineFocusIndexes}
@@ -310,4 +325,4 @@ export function TrajectoryExplorer({
       </div>
     </TrajectoryThemeProvider>
   )
-}
+})

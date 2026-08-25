@@ -30,6 +30,7 @@ def _settings(
     *,
     queue_size: int = 16,
     batch_size: int = 8,
+    flush_interval_ms: int = 10,
 ) -> TrajectoryStoreSettings:
     return TrajectoryStoreSettings(
         enabled=True,
@@ -37,7 +38,7 @@ def _settings(
         retention_days=7,
         queue_size=queue_size,
         batch_size=batch_size,
-        flush_interval_ms=10,
+        flush_interval_ms=flush_interval_ms,
         poll_interval_ms=2000,
     )
 
@@ -79,7 +80,7 @@ def _record(*, span_id: str = _SPAN_ID) -> SimpleNamespace:
         session_id="session-1",
         request_id="request-1",
         run_id="run-1",
-        agent_mode="agent",
+        agent_mode="agent.work.normal",
         schema_version="1",
     )
 
@@ -127,6 +128,17 @@ class _BusyThenSuccessfulStore(_BlockingStore):
         self.attempts += 1
         if self.attempts <= self.failures:
             raise sqlite3.OperationalError("database is locked")
+        return WriteBatchResult(inserted=len(records), conflicts=0, updates=())
+
+
+class _RecordingStore(_BlockingStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.batches: list[tuple[TraceRecordData, ...]] = []
+
+    def write_records(self, records: Sequence[TraceRecordData]) -> WriteBatchResult:
+        self.batches.append(tuple(records))
+        self.write_started.set()
         return WriteBatchResult(inserted=len(records), conflicts=0, updates=())
 
 
@@ -198,6 +210,22 @@ def test_sink_drops_without_blocking_when_not_started(tmp_path: Path) -> None:
     test_logger.info("inactive sink rejected record without queueing")
 
 
+def test_sink_rejects_subject_session_owned_by_another_chat(tmp_path: Path) -> None:
+    sink = TrajectoryRecordSink(_settings(tmp_path / "trajectory.sqlite3"))
+    record = _record()
+    record.execution_subject_session_id = "session-previous_sub_general_deadbeef"
+
+    sink.start()
+    try:
+        sink.consume(record)
+        stats = sink.stats()
+        assert stats.accepted == 0
+        assert stats.failed == 1
+        assert stats.queued == 0
+    finally:
+        assert sink.close(timeout=5) is True
+
+
 def test_sink_queue_full_drops_without_blocking(tmp_path: Path) -> None:
     store = _BlockingStore()
     sink = TrajectoryRecordSink(
@@ -243,12 +271,37 @@ def test_sink_coalesces_pending_live_snapshots_by_identity(tmp_path: Path) -> No
             sink.consume_snapshot(_snapshot(revision))
         stats_while_blocked = sink.stats()
         assert stats_while_blocked.queued == 1
-        assert stats_while_blocked.coalesced == 8
+        assert stats_while_blocked.coalesced >= 8
     finally:
         store.release_write.set()
         assert sink.close(timeout=5) is True
     assert sink.stats().dropped_final == 0
     test_logger.info("live snapshot flood retained only the newest pending identity")
+
+
+def test_sink_debounces_snapshot_flood_before_sqlite_write(tmp_path: Path) -> None:
+    store = _RecordingStore()
+    sink = TrajectoryRecordSink(
+        _settings(
+            tmp_path / "trajectory.sqlite3",
+            batch_size=8,
+            flush_interval_ms=100,
+        ),
+        store=store,
+    )
+    sink.start()
+    try:
+        for revision in range(1, 51):
+            sink.consume_snapshot(_snapshot(revision))
+        assert store.write_started.wait(timeout=2)
+    finally:
+        assert sink.close(timeout=5) is True
+
+    assert len(store.batches) == 1
+    assert len(store.batches[0]) == 1
+    assert store.batches[0][0].record_revision == 50
+    assert sink.stats().coalesced == 49
+    test_logger.info("snapshot debounce persisted one latest revision from a burst")
 
 
 def test_sink_rejects_invalid_raw_type_without_raising(tmp_path: Path) -> None:

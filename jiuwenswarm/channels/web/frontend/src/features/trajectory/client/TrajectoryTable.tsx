@@ -37,7 +37,7 @@ import {
   groupTrajectoryVirtualRows, trajectoryVirtualRecordKey,
 } from '../trajectory/virtual-rows.ts'
 import type { TrajectoryVirtualRow } from '../trajectory/virtual-rows.ts'
-import { trajectoryPreviewText } from '../trajectory/preview.ts'
+import { trajectoryDisplayText, trajectoryPreviewText } from '../trajectory/preview.ts'
 import css from './TrajectoryTable.module.css'
 
 const BOTTOM_FOLLOW_THRESHOLD_PX = 2
@@ -165,6 +165,7 @@ function useStableVirtualRowStructure(
 }
 
 type DetailTab =
+  | 'system-message'
   | 'system-prompt'
   | 'tools'
   | 'overview'
@@ -224,10 +225,6 @@ const DEFAULT_TOOL_REQUEST_OFFSET = 56
 const SYSTEM_PROMPT_TABS: readonly DetailTabItem[] = [
   { id: 'system-prompt', label: 'System Prompt' },
   { id: 'tools', label: 'Tools' },
-]
-const SYSTEM_UPDATE_TABS: readonly DetailTabItem[] = [
-  { id: 'diff', label: 'Diff' },
-  ...SYSTEM_PROMPT_TABS,
 ]
 const REQUEST_TABS: readonly DetailTabItem[] = [
   { id: 'overview', label: 'Summary' },
@@ -379,6 +376,8 @@ export interface TrajectoryTableProps {
   recordSelection?: { readonly index: number } | null
   /** One externally requested record focus without changing inspector selection. */
   recordFocus?: { readonly index: number } | null
+  /** Monotonic counter; each change scrolls the ledger to the newest record. */
+  scrollToEndSignal?: number
   /** Whether the initial history tail is still loading. */
   historyLoading?: boolean
   /** Whether one older history page request is pending anywhere. */
@@ -478,6 +477,7 @@ function recordRequestKey(record: TableRecord): string {
 function indexRequestBoundaries(records: readonly TableRecord[]): ReadonlyMap<string, number> {
   const boundaries = new Map<string, number>()
   for (const record of records) {
+    if (record.cell.requestless === true) continue
     const key = recordRequestKey(record)
     if (boundaries.has(key)) continue
     if (requestStep(record.group) === undefined) {
@@ -763,7 +763,7 @@ function RequestUsagePanel({
         <UsageRows usage={usage} />
       </section>
       <section className={css.usageGroup}>
-        <h4 className={css.usageHeading}>Window cumulative</h4>
+        <h4 className={css.usageHeading}>Session cumulative</h4>
         <UsageRows usage={cumulative} />
       </section>
     </div>
@@ -901,20 +901,38 @@ function detailTabs(record: TableRecord): readonly DetailTabItem[] {
     ? []
     : [{ id: 'otel', label: 'OTel' } as const]
   if (record.cell.kind === 'system') {
-    const promptTabs = record.cell.previousPromptDetail === undefined
+    const promptTabs = record.cell.promptSystemMessageIndex === undefined
+      && record.cell.promptDetail !== undefined
       ? SYSTEM_PROMPT_TABS
-      : SYSTEM_UPDATE_TABS
-    return [...promptTabs, ...otel]
+      : [
+          { id: 'system-message', label: 'System Message' } as const,
+          ...(record.cell.promptDetail === undefined
+            ? []
+            : [
+                { id: 'system-prompt', label: 'Full Prompt' } as const,
+                { id: 'tools', label: 'Tools' } as const,
+              ]),
+        ]
+    const tabs = record.cell.previousPromptDetail === undefined
+      ? promptTabs
+      : [{ id: 'diff', label: 'Diff' } as const, ...promptTabs]
+    return [...tabs, ...otel]
   }
   if (record.cell.kind === 'compacted') {
     return [
       { id: 'overview', label: 'Summary' },
       { id: 'raw', label: 'Raw Output' },
+      ...(record.cell.compactionDetail === undefined
+        ? []
+        : [{ id: 'facts', label: 'Facts' } as const]),
       ...otel,
     ]
   }
   if (isMarkdownRecord(record)) {
     return [
+      ...(record.cell.kind === 'context' && record.cell.previousInputDetail !== undefined
+        ? [{ id: 'diff', label: 'Diff' } as const]
+        : []),
       { id: 'overview', label: 'Summary' },
       { id: 'rendered', label: 'Preview' },
       { id: 'raw', label: 'Raw' },
@@ -937,9 +955,7 @@ function detailTabs(record: TableRecord): readonly DetailTabItem[] {
 function recordDisplayText(cell: TrajectoryCellProps): string {
   if (isToolCallOnly(cell)) return ''
   if (cell.previewMarkdown !== undefined) {
-    const preview = trajectoryPreviewText(cell.previewMarkdown)
-    if (cell.text === '') return preview
-    return preview === '' ? cell.text : `${cell.text} · ${preview}`
+    return trajectoryDisplayText(cell.text, cell.previewMarkdown)
   }
   if (cell.text !== '') return cell.text
   const markdown = cell.kind === 'user' || cell.kind === 'context'
@@ -1306,19 +1322,27 @@ function PromptDiffSection({
 function SystemPromptDiff({
   before,
   after,
+  systemMessageIndex,
 }: {
   before: TrajectoryPromptSnapshot
   after: TrajectoryPromptSnapshot
+  systemMessageIndex?: number
 }) {
+  const systemBefore = systemMessageIndex === undefined
+    ? before.system
+    : before.systemMessages.find(message => message.index === systemMessageIndex)?.content ?? ''
+  const systemAfter = systemMessageIndex === undefined
+    ? after.system
+    : after.systemMessages.find(message => message.index === systemMessageIndex)?.content ?? ''
   const toolsBefore = JSON.stringify(before.tools, null, 2)
   const toolsAfter = JSON.stringify(after.tools, null, 2)
   return (
     <div className={css.promptDiffSections}>
-      {before.system !== after.system && (
+      {systemBefore !== systemAfter && (
         <PromptDiffSection
           title="System Prompt"
-          before={before.system}
-          after={after.system}
+          before={systemBefore}
+          after={systemAfter}
         />
       )}
       {toolsBefore !== toolsAfter && (
@@ -1712,6 +1736,7 @@ export function TrajectoryTable({
   onRecordSelect,
   recordSelection = null,
   recordFocus = null,
+  scrollToEndSignal = 0,
   historyLoading = false,
   olderHistoryLoading = false,
   historyStartSeq,
@@ -1863,6 +1888,16 @@ export function TrajectoryTable({
   const selectedPreviousPrompt = selected?.cell.kind === 'system'
     ? selected.cell.previousPromptDetail
     : undefined
+  const selectedPromptSystemMessageIndex = selected?.cell.kind === 'system'
+    ? selected.cell.promptSystemMessageIndex
+    : undefined
+  const selectedPromptText = selected?.cell.kind === 'system'
+    ? selected.cell.text
+    : undefined
+  const selectedPreviousContextText = selected?.cell.kind === 'context'
+    ? selected.cell.previousInputDetail
+    : undefined
+  const systemSelected = selected?.cell.kind === 'system'
   const promptSelected = selectedPrompt !== undefined
   const selectedState = selected === undefined ? undefined : stateOf(selected)
   const selectedRequestRecordTemplates = useMemo(() => selectedRequest === null
@@ -1928,8 +1963,7 @@ export function TrajectoryTable({
           : { total: selectedRequestAssistant.cell.total }),
       }
   )
-  const selectedRequestCumulativeUsage =
-    selectedRequestInfo?.cumulativeUsage ?? selectedRequestUsage
+  const selectedRequestCumulativeUsage = selectedRequestInfo?.cumulativeUsage
   const selectedRequestOptions = selectedRequestInfo?.requestConfig
   const selectedRequestFacts = selectedRequestInfo?.recordedFacts
   const activeTurn = selectedRequest === null ? selected?.turn : selectedRequest.turn
@@ -2217,6 +2251,19 @@ export function TrajectoryTable({
     virtualRowStructure,
     virtualizationEnabled,
   ])
+  // Host-requested jump to the newest record (e.g. every time the trajectory
+  // view becomes visible again). Reuses the tail-follow state so records that
+  // stream in after the signal still keep the view pinned to the bottom.
+  useEffect(() => {
+    if (scrollToEndSignal === 0) return
+    const pane = tablePaneRef.current
+    if (pane === null) return
+    followsTableTail.current = true
+    tableScrollInitialized.current = true
+    setTableScrollReady(true)
+    if (virtualizationEnabled) rowVirtualizer.scrollToEnd({ behavior: 'auto' })
+    else pane.scrollTop = pane.scrollHeight
+  }, [rowVirtualizer, scrollToEndSignal, virtualizationEnabled])
 
   const olderBusy = olderHistoryLoading || olderLoading
   const showInitialLoading = historyLoading || !tableScrollReady
@@ -2471,7 +2518,9 @@ export function TrajectoryTable({
                             >
                               <span
                                 className={`${css.kindTag} ${
-                                  record.cell.kind === 'system'
+                                  record.cell.isError
+                                    ? css.errorKindTag
+                                    : record.cell.kind === 'system'
                                     ? css.systemNeutral
                                     : record.cell.kind === 'context'
                                       ? css.contextGreen
@@ -2881,7 +2930,29 @@ export function TrajectoryTable({
               <SystemPromptDiff
                 before={selectedPreviousPrompt}
                 after={selectedPrompt}
+                systemMessageIndex={selectedPromptSystemMessageIndex}
               />
+            )}
+            {!promptSelected
+              && selected?.cell.kind === 'context'
+              && selectedPreviousContextText !== undefined
+              && activeTab === 'diff' && (
+              <div className={css.promptDiffSections}>
+                <PromptDiffSection
+                  title="Context Message"
+                  before={selectedPreviousContextText}
+                  after={selected.cell.inputDetail ?? selected.cell.text}
+                />
+              </div>
+            )}
+            {systemSelected && activeTab === 'system-message' && (
+              selectedPromptText === ''
+                ? <p className={css.noPayload}>No content in this system message</p>
+                : (
+                  <div className={`${css.markdownPayload} ${css.systemPrompt}`}>
+                    <MarkdownText text={selectedPromptText ?? ''} />
+                  </div>
+                )
             )}
             {promptSelected && activeTab === 'system-prompt' && (
               selectedPrompt.system === ''
@@ -3098,6 +3169,16 @@ export function TrajectoryTable({
                 thinkingExpanded={thinkingExpanded}
                 onThinkingExpandedChange={setThinkingExpanded}
                 onOpenCall={openCallSummary}
+              />
+            )}
+            {!promptSelected
+              && selected?.cell.kind === 'compacted'
+              && selected.cell.compactionDetail !== undefined
+              && activeTab === 'facts' && (
+              <JsonTree
+                data={selected.cell.compactionDetail}
+                label="Compaction facts JSON"
+                className={css.jsonPayload}
               />
             )}
             {!promptSelected && selected !== undefined && activeTab === 'source' && (

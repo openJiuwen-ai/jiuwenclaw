@@ -1,3 +1,5 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 import time
 
 from jiuwenswarm.server.runtime.session import session_history
@@ -198,6 +200,46 @@ def test_append_history_persists_tool_result(tmp_path, monkeypatch):
     assert tool_result_record["event_type"] == "chat.tool_result"
     assert tool_result_record["tool_call_id"] == "call_abc"
     assert tool_result_record["tool_name"] == "list_files"
+
+
+def test_subagent_history_mode_does_not_replace_parent_session_mode(
+    tmp_path,
+    monkeypatch,
+):
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+    metadata_updates = []
+    monkeypatch.setattr(
+        session_metadata,
+        "update_session_metadata",
+        lambda **kwargs: metadata_updates.append(kwargs),
+    )
+
+    session_history.append_history_record(
+        session_id="parent-session",
+        subagent_id="subagent-1",
+        request_id="subagent-1:1",
+        channel_id="subagent",
+        role="assistant",
+        event_type="chat.final",
+        content="subagent result",
+        timestamp=1.0,
+        mode="subagent",
+    )
+
+    deadline = time.time() + 5
+    records = []
+    while time.time() < deadline:
+        records = session_history.load_history_records(
+            "parent-session",
+            subagent_id="subagent-1",
+        )
+        if records:
+            break
+        time.sleep(0.05)
+    assert records[0]["mode"] == "subagent"
+    assert metadata_updates[0]["mode"] is None
 
 
 def test_request_completion_is_persisted_after_prior_history(tmp_path, monkeypatch):

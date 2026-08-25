@@ -57,7 +57,10 @@ class TrajectoryHttpService:
         metadata_loader: SessionMetadataLoader | None = None,
     ) -> None:
         self.settings = settings
-        self.reader = reader or AsyncTrajectoryReader(settings.database_path)
+        self.reader = reader or AsyncTrajectoryReader(
+            settings.database_path,
+            session_scoped=True,
+        )
         self._metadata_loader = metadata_loader or _load_session_metadata
 
     async def list_traces(
@@ -147,6 +150,31 @@ class TrajectoryHttpService:
             f'attachment; filename="trajectory-{session_id}.archive.json"'
         )
         return response
+
+    async def get_session_usage(self, session_id: str) -> Response:
+        """Return session-complete request usage partitioned by execution subject."""
+        error = self._validate_access(session_id)
+        if error is not None:
+            return error
+        try:
+            items, store_epoch = await self.reader.get_session_request_usage(session_id)
+        except Exception:
+            logger.exception(
+                "Trajectory session-usage query failed: session_id=%s",
+                session_id,
+            )
+            return _error_response(
+                "trajectory query failed",
+                "TRAJECTORY_QUERY_FAILED",
+                500,
+            )
+        return _json_response({
+            "schema_version": 1,
+            "session_id": session_id,
+            "store_epoch": store_epoch,
+            "scope": "session",
+            "items": items,
+        })
 
     async def list_revisions(
         self,
@@ -478,6 +506,18 @@ def attach_trajectory_routes(
         if origin_error is not None:
             return origin_error
         return await service.export_archive(session_id)
+
+    @app.get(f"{TRAJECTORY_API_PREFIX}/sessions/{{session_id}}/usage")
+    async def get_trajectory_session_usage(
+        session_id: str,
+        request: Request,
+    ) -> Response:
+        """Read session-complete cumulative request usage."""
+        request.state.trajectory_route_handled = True
+        origin_error = _validate_http_origin(request)
+        if origin_error is not None:
+            return origin_error
+        return await service.get_session_usage(session_id)
 
     @app.get(f"{TRAJECTORY_API_PREFIX}/sessions/{{session_id}}/traces/{{trace_id}}")
     async def get_trajectory_trace(

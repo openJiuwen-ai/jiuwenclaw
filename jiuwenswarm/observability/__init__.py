@@ -10,7 +10,10 @@ from jiuwenswarm.observability.models import (
     TraceSinkStats,
     WriteBatchResult,
 )
-from jiuwenswarm.observability.sink import TrajectoryRecordSink
+from jiuwenswarm.observability.sink import (
+    TrajectoryRecordSink,
+    TrajectorySessionSinkRouter,
+)
 from jiuwenswarm.observability.runtime import (
     get_trajectory_runtime_sink,
     shutdown_trajectory_runtime,
@@ -26,6 +29,7 @@ __all__ = [
     "TraceRecordData",
     "TraceSinkStats",
     "TrajectoryRecordSink",
+    "TrajectorySessionSinkRouter",
     "TrajectoryStore",
     "TrajectoryStoreSettings",
     "WriteBatchResult",

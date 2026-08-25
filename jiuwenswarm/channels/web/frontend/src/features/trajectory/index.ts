@@ -18,6 +18,17 @@ export {
 } from './projector/otel-trajectory-projector.ts'
 export type { TrajectoryProjector } from './projector/otel-trajectory-projector.ts'
 export {
+  createTrajectoryV2Reducer,
+  isTrajectoryV2Record,
+  reduceTrajectoryV2,
+} from './projector/trajectory-v2-reducer.ts'
+export type {
+  TrajectoryV2EventProjection,
+  TrajectoryV2Reducer,
+  TrajectoryV2Reduction,
+  TrajectoryV2SubjectProjection,
+} from './projector/trajectory-v2-reducer.ts'
+export {
   normalizeTrajectoryAttributes,
   normalizeTrajectoryStreamEvents,
 } from './projector/attribute-resolver.ts'
@@ -40,6 +51,7 @@ export type {
 } from './shared/otlp.ts'
 export type {
   TrajectoryGroupModel,
+  TrajectoryDiagnostic,
   TrajectoryPromptSnapshot,
   TrajectoryRecordedFacts,
   TrajectoryRequest,

@@ -12,24 +12,31 @@ from jiuwenswarm.observability.config import (
     TrajectoryStoreSettings,
     load_trajectory_store_settings,
 )
-from jiuwenswarm.observability.sink import CommitCallback, TrajectoryRecordSink
+from jiuwenswarm.observability.gateway_hints import trajectory_gateway_hint_bridge
+from jiuwenswarm.observability.session_delete import (
+    set_trajectory_session_delete_backend,
+)
+from jiuwenswarm.observability.sink import (
+    CommitCallback,
+    TrajectorySessionSinkRouter,
+)
 from jiuwenswarm.observability.updates import trajectory_update_broker
 
 logger = logging.getLogger(__name__)
 
 
 class _SpanRecordProcessorLike(Protocol):
-    def register_consumer(self, consumer: TrajectoryRecordSink) -> None:
+    def register_consumer(self, consumer: TrajectorySessionSinkRouter) -> None:
         """Register one sink by object identity."""
         ...
 
-    def unregister_consumer(self, consumer: TrajectoryRecordSink) -> None:
+    def unregister_consumer(self, consumer: TrajectorySessionSinkRouter) -> None:
         """Unregister one sink by object identity."""
         ...
 
 
 _runtime_lock = threading.RLock()
-_runtime_sink: TrajectoryRecordSink | None = None
+_runtime_sink: TrajectorySessionSinkRouter | None = None
 _runtime_processor: _SpanRecordProcessorLike | None = None
 _runtime_settings: TrajectoryStoreSettings | None = None
 
@@ -38,7 +45,7 @@ def sync_trajectory_runtime(
     settings: TrajectoryStoreSettings | None = None,
     *,
     on_commit: CommitCallback | None = None,
-) -> TrajectoryRecordSink | None:
+) -> TrajectorySessionSinkRouter | None:
     """Synchronize the AgentServer sink with the current trajectory settings."""
     resolved = settings or load_trajectory_store_settings()
     if not resolved.enabled:
@@ -51,7 +58,7 @@ def start_trajectory_runtime(
     settings: TrajectoryStoreSettings | None = None,
     *,
     on_commit: CommitCallback | None = None,
-) -> TrajectoryRecordSink | None:
+) -> TrajectorySessionSinkRouter | None:
     """Start and register the process-wide sink once.
 
     The sink is ready before it is exposed to Core. A settings change performs
@@ -89,6 +96,7 @@ def start_trajectory_runtime(
             except Exception:
                 logger.exception("Trajectory runtime startup cleanup failed")
             raise
+        set_trajectory_session_delete_backend(sink)
         _runtime_sink = sink
         _runtime_processor = processor
         _runtime_settings = resolved
@@ -106,7 +114,7 @@ def shutdown_trajectory_runtime(*, timeout: float = 15.0) -> bool:
         return _shutdown_locked(timeout=timeout)
 
 
-def get_trajectory_runtime_sink() -> TrajectoryRecordSink | None:
+def get_trajectory_runtime_sink() -> TrajectorySessionSinkRouter | None:
     """Return the active process-local sink for diagnostics."""
     with _runtime_lock:
         return _runtime_sink
@@ -144,6 +152,7 @@ def _shutdown_locked(*, timeout: float = 15.0) -> bool:
             stopped = False
 
     if unregistered and stopped:
+        set_trajectory_session_delete_backend(None)
         _runtime_sink = None
         _runtime_processor = None
         _runtime_settings = None
@@ -156,13 +165,14 @@ def _create_sink(
     settings: TrajectoryStoreSettings,
     *,
     on_commit: CommitCallback | None,
-) -> TrajectoryRecordSink:
-    return TrajectoryRecordSink(settings, on_commit=on_commit)
+) -> TrajectorySessionSinkRouter:
+    return TrajectorySessionSinkRouter(settings, on_commit=on_commit)
 
 
 def _combined_commit_callback(on_commit: CommitCallback | None) -> CommitCallback:
     def _publish(updates) -> None:
         trajectory_update_broker.publish(updates)
+        trajectory_gateway_hint_bridge.publish(updates)
         if on_commit is not None:
             on_commit(updates)
 

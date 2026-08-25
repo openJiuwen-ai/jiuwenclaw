@@ -4,6 +4,7 @@
 
 import { getApiBase } from '../../utils/env';
 import type { OtlpExportTraceServiceRequest } from './shared/otlp';
+import type { TrajectoryUsage } from './trajectory/model';
 
 export interface TrajectoryTraceSummary {
   trace_id: string;
@@ -35,6 +36,23 @@ export interface TrajectoryRevisionListResponse {
   next_cursor: string;
   watermark: string;
   has_more: boolean;
+}
+
+export interface TrajectorySessionUsageItem {
+  trace_id: string;
+  inference_id: string;
+  subject_id: string;
+  start_time_unix_nano: string;
+  usage: TrajectoryUsage;
+  cumulative_usage: TrajectoryUsage;
+}
+
+export interface TrajectorySessionUsageResponse {
+  schema_version: 1;
+  session_id: string;
+  store_epoch: string;
+  scope: 'session';
+  items: TrajectorySessionUsageItem[];
 }
 
 export interface TrajectoryDetailRecord {
@@ -146,6 +164,55 @@ function validStoreEpoch(value: unknown): value is string {
   return typeof value === 'string'
     && value.trim().length > 0
     && value.length <= 512;
+}
+
+function validUsage(value: unknown): value is TrajectoryUsage {
+  if (!object(value)) return false;
+  return ['input', 'cacheRead', 'cacheWrite', 'output', 'reasoning', 'total'].every((key) => {
+    const item = value[key];
+    return item === undefined || (Number.isSafeInteger(item) && Number(item) >= 0);
+  });
+}
+
+function validSessionUsageItem(value: unknown): value is TrajectorySessionUsageItem {
+  if (!object(value)) return false;
+  return typeof value.trace_id === 'string'
+    && /^[0-9a-f]{32}$/.test(value.trace_id)
+    && typeof value.inference_id === 'string'
+    && value.inference_id.trim().length > 0
+    && typeof value.subject_id === 'string'
+    && value.subject_id.trim().length > 0
+    && typeof value.start_time_unix_nano === 'string'
+    && /^\d+$/.test(value.start_time_unix_nano)
+    && validUsage(value.usage)
+    && validUsage(value.cumulative_usage);
+}
+
+export async function getTrajectorySessionUsage(
+  sessionId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<TrajectorySessionUsageResponse> {
+  const response = await fetch(trajectoryUrl(
+    `/api/trajectory/sessions/${encodeURIComponent(sessionId)}/usage`,
+  ), {
+    cache: 'no-store',
+    signal: options.signal,
+  });
+  const payload = await readResponse(response);
+  if (!object(payload)
+    || payload.schema_version !== 1
+    || payload.session_id !== sessionId
+    || !validStoreEpoch(payload.store_epoch)
+    || payload.scope !== 'session'
+    || !Array.isArray(payload.items)
+    || !payload.items.every(validSessionUsageItem)) {
+    throw new TrajectoryApiError(
+      'Trajectory session usage response is invalid',
+      502,
+      'INVALID_RESPONSE',
+    );
+  }
+  return payload as unknown as TrajectorySessionUsageResponse;
 }
 
 export async function listTrajectoryTraces(

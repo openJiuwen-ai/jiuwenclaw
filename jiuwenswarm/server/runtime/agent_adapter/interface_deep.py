@@ -6603,20 +6603,27 @@ class JiuWenSwarmDeepAdapter:
             task_planning_rail = None
         return task_planning_rail
 
-    @staticmethod
     def _build_subagent_rail(
+        self,
         config_base: dict[str, Any] | None = None,
     ) -> SubagentRail | None:
-        """Build SubagentRail for subagent delegation."""
+        """Build SubagentRail for subagent delegation.
+
+        The rail is supplied by the adapter, so ``create_deep_agent()`` skips
+        its own default SubagentRail (``_already_provided`` matches subclasses).
+        That makes this the only place the ``react.subagent_runtime.enabled``
+        switch can reach the rail — without it the runtime tools silently fall
+        back to ``task_tool``.
+        """
+        enable_runtime = self._resolve_enable_subagent_runtime(config_base)
         try:
-            runtime_enabled = is_subagent_runtime_enabled(config_base)
             subagent_rail = BrowserTaskPromptRail(
-                enable_subagent_runtime=runtime_enabled,
+                enable_subagent_runtime=enable_runtime,
             )
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SubagentRail create success "
-                "(subagent_runtime=%s)",
-                runtime_enabled,
+                "(load-aware browser policy, subagent_runtime=%s)",
+                enable_runtime,
             )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
@@ -11671,15 +11678,14 @@ class JiuWenSwarmDeepAdapter:
             # config before running, and open a root span so OtelCallbackHandler
             # has a parent for LLM/tool spans (see streaming path for details).
             sync_agent_observability()
-            from jiuwenswarm.server.runtime.debug_trace.paths import (
-                resolve_debug_trace_mode,
+            _trajectory_mode = deprecate_mode(
+                request.params.get("mode")
+                if isinstance(request.params, dict)
+                else mode
             )
-
             _run_span = open_agent_run_span(
                 session_id=session_id,
-                mode=resolve_debug_trace_mode(
-                    mode, getattr(request, "_original_mode", None)
-                ),
+                mode=_trajectory_mode,
                 request_id=request.request_id,
                 run_id=request.request_id,
                 turn_id=request.request_id,
@@ -12380,9 +12386,14 @@ class JiuWenSwarmDeepAdapter:
             # Sync single-agent / coding-agent observability with current config
             # before running.
             sync_agent_observability(force=_dbg_settings.otel_enabled)
+            _trajectory_mode = deprecate_mode(
+                request.params.get("mode")
+                if isinstance(request.params, dict)
+                else _debug_trace_mode
+            )
             _run_span = open_agent_run_span(
                 session_id=session_id,
-                mode=_debug_trace_mode,
+                mode=_trajectory_mode,
                 request_id=request.request_id,
                 run_id=request.request_id,
                 turn_id=request.request_id,

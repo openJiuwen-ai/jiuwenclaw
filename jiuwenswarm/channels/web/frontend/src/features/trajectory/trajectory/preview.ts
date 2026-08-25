@@ -6,7 +6,7 @@
  * under the repository MIT license.
  */
 
-import { extractMarkdownPlainText } from '../primitives/index.ts'
+import { extractMarkdownPlainText } from '../primitives/markdown/plain-text.ts'
 
 const PREVIEW_SOURCE_CHARACTERS = 2_048
 const PREVIEW_OUTPUT_CHARACTERS = 512
@@ -23,4 +23,15 @@ export function trajectoryPreviewText(text: string): string {
   return source.length < text.length || preview.length < compact.length
     ? `${preview}…`
     : preview
+}
+
+/**
+ * Combine a record label with its Markdown preview without echoing the same
+ * assistant output twice when the label is the retained source text.
+ */
+export function trajectoryDisplayText(text: string, markdown: string): string {
+  const preview = trajectoryPreviewText(markdown)
+  if (text === '') return preview
+  if (preview === '') return text
+  return trajectoryPreviewText(text) === preview ? text : `${text} · ${preview}`
 }

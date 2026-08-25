@@ -49,6 +49,7 @@ _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
 
 _STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
 _STREAM_COALESCE_MAX_FRAMES = 32
+_TRAJECTORY_HINT_COALESCE_SECONDS = 0.016
 
 _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
     {
@@ -161,6 +162,8 @@ class WebChannel(BaseWsChannel):
         self._trajectory_event_loop: asyncio.AbstractEventLoop | None = None
         self._trajectory_listener_registered = False
         self._trajectory_update_listener = self._on_trajectory_updates
+        self._trajectory_pending_updates: dict[tuple[str, str], Any] = {}
+        self._trajectory_send_task: asyncio.Task[None] | None = None
 
     @staticmethod
     def _coalescible_stream_frame(
@@ -687,6 +690,11 @@ class WebChannel(BaseWsChannel):
 
             trajectory_update_broker.unregister(self._trajectory_update_listener)
             self._trajectory_listener_registered = False
+        send_task = self._trajectory_send_task
+        if send_task is not None and not send_task.done():
+            send_task.cancel()
+        self._trajectory_send_task = None
+        self._trajectory_pending_updates.clear()
         self._trajectory_event_loop = None
 
     def _on_trajectory_updates(self, updates: tuple[Any, ...]) -> None:
@@ -697,8 +705,44 @@ class WebChannel(BaseWsChannel):
         loop.call_soon_threadsafe(self._schedule_trajectory_updates, updates)
 
     def _schedule_trajectory_updates(self, updates: tuple[Any, ...]) -> None:
-        """Schedule one event-loop task for committed trajectory hints."""
-        asyncio.create_task(self._send_trajectory_updates(updates))
+        """Coalesce high-frequency Span revisions before WebSocket fan-out.
+
+        Streaming model spans can commit hundreds of revisions per second. A
+        task per commit lets stale ``running`` hints queue ahead of the final
+        record on the same socket, so the trajectory can look open after chat
+        completion. Keep only the highest committed revision for each
+        session/trace during one browser frame and drain it from a single task.
+        The HTTP revision feed remains the recoverable source of truth.
+        """
+        for update in updates:
+            session_id = str(getattr(update, "session_id", "") or "").strip()
+            trace_id = str(getattr(update, "trace_id", "") or "").strip()
+            if not session_id or not trace_id:
+                continue
+            key = (session_id, trace_id)
+            current = self._trajectory_pending_updates.get(key)
+            revision = int(getattr(update, "revision", 0))
+            current_revision = (
+                int(getattr(current, "revision", 0)) if current is not None else -1
+            )
+            if revision >= current_revision:
+                self._trajectory_pending_updates[key] = update
+        task = self._trajectory_send_task
+        if self._trajectory_pending_updates and (task is None or task.done()):
+            self._trajectory_send_task = asyncio.create_task(
+                self._drain_trajectory_updates()
+            )
+
+    async def _drain_trajectory_updates(self) -> None:
+        """Drain coalesced hints without allowing concurrent sender backlogs."""
+        try:
+            while self._trajectory_pending_updates:
+                await asyncio.sleep(_TRAJECTORY_HINT_COALESCE_SECONDS)
+                updates = tuple(self._trajectory_pending_updates.values())
+                self._trajectory_pending_updates.clear()
+                await self._send_trajectory_updates(updates)
+        finally:
+            self._trajectory_send_task = None
 
     async def _send_trajectory_updates(self, updates: tuple[Any, ...]) -> None:
         """Send trace.updated only to connections registered for each session."""

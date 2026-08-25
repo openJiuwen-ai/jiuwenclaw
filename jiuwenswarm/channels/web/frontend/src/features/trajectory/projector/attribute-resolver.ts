@@ -72,8 +72,16 @@ export interface NormalizedTrajectoryAttributes {
   agentName?: string
   agentVersion?: string
   agentDescription?: string
+  executionSubjectId?: string
+  executionSubjectKind?: string
+  executionSubjectParentId?: string
+  executionSubjectSessionId?: string
+  executionSubjectRequestNumber?: bigint
+  requestMessages?: unknown
+  requestMessagesComplete?: boolean
   systemInstructions?: unknown
   inputMessages?: unknown
+  inputMessagesComplete?: boolean
   inputMessageProvenance?: unknown
   outputMessages?: unknown
   toolDefinitions?: unknown
@@ -123,6 +131,7 @@ type MutableNormalized = Omit<NormalizedTrajectoryAttributes, 'sources'> & {
 interface Resolved<T> {
   key: string
   value: T
+  complete?: boolean
 }
 
 interface NormalizedPart {
@@ -137,6 +146,10 @@ interface NormalizedPart {
 interface NormalizedMessage {
   role: string
   parts: readonly NormalizedPart[]
+  openjiuwen?: {
+    kind: 'prompt_attachment_history'
+    mode: 'snapshot' | 'delta'
+  }
 }
 
 const LEGACY = {
@@ -153,12 +166,6 @@ const LEGACY = {
   toolCallArguments: 'gen_ai.tool.input',
   toolCallResult: 'gen_ai.tool.output',
   toolCalls: 'gen_ai.tool_calls',
-  promptScalar: 'gen_ai.prompt',
-  completionScalar: 'gen_ai.completion',
-  promptPrefix: 'gen_ai.prompt',
-  completionPrefix: 'gen_ai.completion',
-  langfusePromptPrefix: 'langfuse.gen_ai.prompt',
-  langfuseCompletionPrefix: 'langfuse.gen_ai.completion',
   langfuseInput: 'langfuse.observation.input',
   langfuseOutput: 'langfuse.observation.output',
   langfuseObservationType: 'langfuse.observation.type',
@@ -362,6 +369,44 @@ function normalizedToolCall(value: unknown): NormalizedPart | undefined {
   }
 }
 
+function canonicalValue(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalValue).join(',')}]`
+  const valueObject = object(value)
+  if (valueObject === undefined) return JSON.stringify(value) ?? String(value)
+  return `{${Object.keys(valueObject).sort().map(key => (
+    `${JSON.stringify(key)}:${canonicalValue(valueObject[key])}`
+  )).join(',')}}`
+}
+
+function sameToolCall(left: NormalizedPart, right: NormalizedPart): boolean {
+  if (left.type !== 'tool_call' || right.type !== 'tool_call') return false
+  if (left.id !== undefined || right.id !== undefined) {
+    return left.id !== undefined && left.id === right.id
+  }
+  return left.name !== undefined
+    && left.name === right.name
+    && canonicalValue(left.arguments) === canonicalValue(right.arguments)
+}
+
+function mergeToolCallRepresentations(
+  primaryParts: readonly NormalizedPart[],
+  aliasCalls: readonly NormalizedPart[],
+): NormalizedPart[] {
+  const consumedPrimaryCalls = new Set<number>()
+  const merged = [...primaryParts]
+  for (const call of aliasCalls) {
+    const primaryIndex = primaryParts.findIndex((part, index) => (
+      !consumedPrimaryCalls.has(index) && sameToolCall(part, call)
+    ))
+    if (primaryIndex >= 0) {
+      consumedPrimaryCalls.add(primaryIndex)
+      continue
+    }
+    merged.push(call)
+  }
+  return merged
+}
+
 function normalizedContentParts(value: unknown, reasoning: boolean): NormalizedPart[] {
   if (typeof value === 'string') return [{ type: reasoning ? 'reasoning' : 'text', content: value }]
   if (!Array.isArray(value)) {
@@ -410,15 +455,30 @@ function normalizedMessage(value: unknown, defaultRole: string): NormalizedMessa
   const role = typeof message.role === 'string' ? message.role : defaultRole
   const reasoning = message.is_reasoning === true || role === 'reasoning'
   const rawParts = message.parts ?? message.content ?? message.text
-  const parts = normalizedContentParts(rawParts, reasoning)
+  let parts = normalizedContentParts(rawParts, reasoning)
   const calls = message.tool_calls ?? message.toolCalls
   if (Array.isArray(calls)) {
-    for (const call of calls) {
+    const aliasCalls = calls.flatMap((call): NormalizedPart[] => {
       const normalized = normalizedToolCall(call)
-      if (normalized !== undefined) parts.push(normalized)
-    }
+      return normalized === undefined ? [] : [normalized]
+    })
+    parts = mergeToolCallRepresentations(parts, aliasCalls)
   }
-  return { role: role === 'reasoning' ? 'assistant' : role, parts }
+  const openjiuwen = object(message.openjiuwen)
+  const promptAttachmentHistory = openjiuwen?.kind === 'prompt_attachment_history'
+    && (openjiuwen.mode === 'snapshot' || openjiuwen.mode === 'delta')
+    ? {
+        kind: openjiuwen.kind,
+        mode: openjiuwen.mode,
+      } as const
+    : undefined
+  return {
+    role: role === 'reasoning' ? 'assistant' : role,
+    parts,
+    ...(promptAttachmentHistory === undefined
+      ? {}
+      : { openjiuwen: promptAttachmentHistory }),
+  }
 }
 
 function normalizedMessages(value: unknown, defaultRole: string): readonly NormalizedMessage[] {
@@ -486,7 +546,7 @@ function indexedMessages(
   attributes: OtlpAttributeMap,
   prefix: string,
   defaultRole: string,
-): readonly NormalizedMessage[] | undefined {
+): { messages: readonly NormalizedMessage[]; complete: boolean } | undefined {
   const indexes = new Set<number>()
   const expression = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.(\\d+)\\.`)
   for (const key of attributes.keys()) {
@@ -512,7 +572,12 @@ function indexedMessages(
     }
     messages.push({ role: role === 'reasoning' ? 'assistant' : role, parts })
   }
-  return messages
+  const orderedIndexes = [...indexes].sort((left, right) => left - right)
+  return {
+    messages,
+    complete: orderedIndexes[0] === 0
+      && orderedIndexes.every((index, position) => index === position),
+  }
 }
 
 function resolveMessages(
@@ -527,11 +592,13 @@ function resolveMessages(
     const value = attributes.get(key)
     if (value === undefined) continue
     const messages = normalizedStructuredMessages(flexibleValue(value), defaultRole)
-    if (messages !== undefined) return { key, value: messages }
+    if (messages !== undefined) return { key, value: messages, complete: true }
   }
   for (const prefix of indexedPrefixes) {
     const indexed = indexedMessages(attributes, prefix, defaultRole)
-    if (indexed !== undefined) return { key: `${prefix}.*`, value: indexed }
+    if (indexed !== undefined) {
+      return { key: `${prefix}.*`, value: indexed.messages, complete: indexed.complete }
+    }
   }
   const observation = resolveFlexible(attributes, [observationKey])
   if (observation !== undefined) {
@@ -587,6 +654,36 @@ function systemFromMessages(value: unknown): readonly NormalizedPart[] | undefin
   })
   return systemParts.length === 0 ? undefined : systemParts
 }
+
+/**
+ * Rebuild the full request as one ordered message list.
+ *
+ * The standard attributes split the request in two: the instructions given
+ * outside the chat history, and the history itself. Views that reason about
+ * where a message sat -- which system turn is the prompt-attachment snapshot,
+ * above all -- need them back in one sequence, instructions first.
+ */
+function composedRequestMessages(
+  attributes: OtlpAttributeMap,
+): Resolved<unknown> | undefined {
+  const rawInput = attributes.get(STANDARD_ATTRIBUTES.inputMessages)
+  if (rawInput === undefined) return undefined
+  const history = normalizedStructuredMessages(flexibleValue(rawInput), 'user')
+  if (history === undefined) return undefined
+
+  const instructions = resolveStructuredParts(attributes, [
+    STANDARD_ATTRIBUTES.systemInstructions,
+  ])
+  const leading = instructions === undefined
+    ? []
+    : [{ role: 'system', parts: instructions.value }]
+  return {
+    key: STANDARD_ATTRIBUTES.inputMessages,
+    value: [...leading, ...history],
+    complete: true,
+  }
+}
+
 
 function withoutSystemMessages(value: unknown): unknown {
   if (!Array.isArray(value)) return value
@@ -802,15 +899,36 @@ export function normalizeTrajectoryAttributes(
   assign(target, 'agentDescription', resolveString(raw, [
     STANDARD_ATTRIBUTES.agentDescription,
   ]))
+  assign(target, 'executionSubjectId', resolveString(raw, [
+    OPENJIUWEN_ATTRIBUTES.executionSubjectId,
+  ]))
+  assign(target, 'executionSubjectKind', resolveString(raw, [
+    OPENJIUWEN_ATTRIBUTES.executionSubjectKind,
+  ]))
+  assign(target, 'executionSubjectParentId', resolveString(raw, [
+    OPENJIUWEN_ATTRIBUTES.executionSubjectParentId,
+  ]))
+  assign(target, 'executionSubjectSessionId', resolveString(raw, [
+    OPENJIUWEN_ATTRIBUTES.executionSubjectSessionId,
+  ]))
+  assign(target, 'executionSubjectRequestNumber', resolvePositiveInt64(raw, [
+    OPENJIUWEN_ATTRIBUTES.executionSubjectRequestNumber,
+  ]))
+
+  const requestMessages = composedRequestMessages(raw)
+  assign(target, 'requestMessages', requestMessages)
+  if (requestMessages !== undefined) {
+    target.requestMessagesComplete = requestMessages.complete ?? true
+  }
 
   const inputMessages = resolveMessages(
     raw,
     [
       STANDARD_ATTRIBUTES.inputMessages,
     ],
-    [LEGACY.promptPrefix, LEGACY.langfusePromptPrefix],
+    [],
     LEGACY.langfuseInput,
-    [LEGACY.promptScalar],
+    [],
     'user',
   )
   if (inputMessages !== undefined) {
@@ -828,6 +946,7 @@ export function normalizeTrajectoryAttributes(
       key: inputMessages.key,
       value: withoutSystemMessages(inputMessages.value),
     })
+    target.inputMessagesComplete = inputMessages.complete ?? true
   } else {
     assign(target, 'systemInstructions', resolveStructuredParts(raw, [
       STANDARD_ATTRIBUTES.systemInstructions,
@@ -842,21 +961,22 @@ export function normalizeTrajectoryAttributes(
     [
       STANDARD_ATTRIBUTES.outputMessages,
     ],
-    [LEGACY.completionPrefix, LEGACY.langfuseCompletionPrefix],
+    [],
     LEGACY.langfuseOutput,
-    [LEGACY.completionScalar],
+    [],
     'assistant',
   )
   if (outputMessages !== undefined) {
     const calls = resolveFlexible(raw, [LEGACY.toolCalls])
-    const messages = normalizedMessages(outputMessages.value, 'assistant').map((message, index) => {
-      if (index !== 0 || calls === undefined || !Array.isArray(calls.value)) return message
-      const parts = [...message.parts]
-      for (const call of calls.value) {
+    const aliasCalls = calls === undefined || !Array.isArray(calls.value)
+      ? []
+      : calls.value.flatMap((call): NormalizedPart[] => {
         const normalized = normalizedToolCall(call)
-        if (normalized !== undefined) parts.push(normalized)
-      }
-      return { ...message, parts }
+        return normalized === undefined ? [] : [normalized]
+      })
+    const messages = normalizedMessages(outputMessages.value, 'assistant').map((message, index) => {
+      if (index !== 0 || aliasCalls.length === 0) return message
+      return { ...message, parts: mergeToolCallRepresentations(message.parts, aliasCalls) }
     })
     assign(target, 'outputMessages', { key: outputMessages.key, value: messages })
   }
@@ -879,6 +999,7 @@ export function normalizeTrajectoryAttributes(
   ]))
   assign(target, 'toolResourceId', resolveString(raw, [
     OPENJIUWEN_ATTRIBUTES.toolResourceId,
+    STANDARD_ATTRIBUTES.toolId,
   ]))
   assign(target, 'openJiuwenToolType', resolveString(raw, [
     OPENJIUWEN_ATTRIBUTES.toolType,

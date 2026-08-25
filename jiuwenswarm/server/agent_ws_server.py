@@ -4955,6 +4955,7 @@ class AgentWebSocketServer:
                     team_name = str(metadata.get("team_name") or "").strip()
                     channel_id = str(metadata.get("channel_id") or request.channel_id or "").strip() or None
                     heartbeat_delete_prepared = False
+                    trajectory_delete_prepared = False
                     try:
                         from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
                             mark_session_deleted,
@@ -4973,6 +4974,13 @@ class AgentWebSocketServer:
                             exc,
                         )
                     try:
+                        if not is_team_session:
+                            from jiuwenswarm.observability.session_delete import (
+                                begin_trajectory_session_delete,
+                            )
+
+                            begin_trajectory_session_delete(target)
+                            trajectory_delete_prepared = True
                         await self._heartbeat_runtime.begin_session_delete(target)
                         heartbeat_delete_prepared = True
                         if is_team_session:
@@ -5022,6 +5030,20 @@ class AgentWebSocketServer:
                         deleted = False
 
                     if not deleted:
+                        if trajectory_delete_prepared:
+                            try:
+                                from jiuwenswarm.observability.session_delete import (
+                                    abort_trajectory_session_delete,
+                                )
+
+                                abort_trajectory_session_delete(target)
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "[AgentWebSocketServer] trajectory delete rollback failed: "
+                                    "session_id=%s error=%s",
+                                    target,
+                                    exc,
+                                )
                         if heartbeat_delete_prepared:
                             try:
                                 await self._heartbeat_runtime.abort_session_delete(
@@ -5056,6 +5078,20 @@ class AgentWebSocketServer:
                             metadata=request.metadata,
                         )
                     else:
+                        if trajectory_delete_prepared:
+                            try:
+                                from jiuwenswarm.observability.session_delete import (
+                                    commit_trajectory_session_delete,
+                                )
+
+                                commit_trajectory_session_delete(target)
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "[AgentWebSocketServer] trajectory delete commit failed; "
+                                    "session_id=%s error=%s",
+                                    target,
+                                    exc,
+                                )
                         try:
                             await self._heartbeat_runtime.commit_session_delete(target)
                         except Exception as exc:  # noqa: BLE001
@@ -6376,6 +6412,18 @@ class AgentWebSocketServer:
             await send_wire_payload(ws, wire)
 
     async def _handle_command_compact(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        # 提前 import 观测 span 工具（同 interface_deep 处理）：原 import 若放 try 内，
+        # 中途异常会让 finally 的 close_agent_run_span 因名字未绑定抛 UnboundLocalError。
+        from openjiuwen.harness.observability import (  # noqa: E402
+            close_agent_run_span,
+            open_agent_run_span,
+        )
+
+        from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
+            sync_agent_observability,
+        )
+        _run_span: Any = None
+        summary = ""
         try:
             session_id = request.session_id or "default"
             params = request.params or {}
@@ -6403,73 +6451,92 @@ class AgentWebSocketServer:
             # 否则 self._instance 为 None 时 compress_context 会直接 noop（误报"无需压缩"）。
             await agent.ensure_instance()
 
-            result_data = await agent.compress_context(session_id=session_id, return_state=True)
-
-            result = result_data.get("result")
-            stats = result_data.get("stats")
-            state = result_data.get("state") if isinstance(result_data.get("state"), dict) else {}
-            summary = str(
-                result_data.get("compact_summary")
-                or state.get("compact_summary")
-                or result_data.get("summary")
-                or ""
-            ).strip()
-
-            if result == "compressed" and stats:
-                before_tokens = stats.get("raw_total_tokens", 0)
-                after_tokens = stats.get("total_tokens", 0)
-                if before_tokens > 0:
-                    rate = round((before_tokens - after_tokens) / before_tokens * 100, 1)
-                else:
-                    rate = 0
-                stats_summary = (
-                    f"\u2713 Context compacted: {after_tokens / 1000:.1f}K/"
-                    f"{before_tokens / 1000:.1f}K tokens ({rate:.1f}% saved)"
-                )
-
-                if summary:
-                    append_compact_history_records(
-                        session_id=session_id,
-                        request_id=request.request_id,
-                        channel_id=channel_id,
-                        summary=summary,
-                        timestamp=_dt.datetime.now().timestamp(),
-                        trigger="manual",
-                        stats=stats,
-                        mode=params.get("mode", "agent"),
-                    )
-                    compression_state_payload: dict[str, Any] = {
-                        **state,
-                        "event_type": "context.compression_state",
-                        "status": state.get("status") or "completed",
-                        "phase": state.get("phase") or "active_compress",
-                        "processor": state.get("processor") or _extract_compact_summary_processor(summary),
-                        "before": state.get("before") or {"tokens": before_tokens},
-                        "after": state.get("after") or {"tokens": after_tokens},
-                        "saved": state.get("saved") or {
-                            "tokens": before_tokens - after_tokens,
-                            "percent": rate,
-                        },
-                        "summary": stats_summary,
-                        "compact_summary": summary,
-                    }
-                    await self.send_push({
-                        "channel_id": channel_id,
-                        "session_id": session_id,
-                        "payload": compression_state_payload,
-                    })
-
-            resp = AgentResponse(
+            # 手动压缩发生在 agent turn 之外，本无录制中的 root span，compaction.completed
+            # 轨迹事件会因 ContextCompressionObservabilityBridge 找不到 parent 而被丢弃。
+            # 与 chat 流式路径一致，先同步 observability 再开一个 run root span（session-keyed
+            # registry），使压缩状态回调能解析到 parent，事件进入轨迹 v2 展示。
+            sync_agent_observability()
+            _run_span = open_agent_run_span(
+                session_id=session_id,
+                mode=params.get("mode", "agent"),
                 request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=True,
-                payload={
-                    "result": result,
-                    "stats": stats,
-                    **({"summary": summary} if summary else {}),
-                    **({"compact_summary": summary} if summary else {}),
-                },
+                run_id=request.request_id,
+                turn_id=request.request_id,
             )
+            try:
+                result_data = await agent.compress_context(session_id=session_id, return_state=True)
+
+                result = result_data.get("result")
+                stats = result_data.get("stats")
+                state = result_data.get("state") if isinstance(result_data.get("state"), dict) else {}
+                summary = str(
+                    result_data.get("compact_summary")
+                    or state.get("compact_summary")
+                    or result_data.get("summary")
+                    or ""
+                ).strip()
+
+                if result == "compressed" and stats:
+                    before_tokens = stats.get("raw_total_tokens", 0)
+                    after_tokens = stats.get("total_tokens", 0)
+                    if before_tokens > 0:
+                        rate = round((before_tokens - after_tokens) / before_tokens * 100, 1)
+                    else:
+                        rate = 0
+                    stats_summary = (
+                        f"\u2713 Context compacted: {after_tokens / 1000:.1f}K/"
+                        f"{before_tokens / 1000:.1f}K tokens ({rate:.1f}% saved)"
+                    )
+
+                    if summary:
+                        append_compact_history_records(
+                            session_id=session_id,
+                            request_id=request.request_id,
+                            channel_id=channel_id,
+                            summary=summary,
+                            timestamp=_dt.datetime.now().timestamp(),
+                            trigger="manual",
+                            stats=stats,
+                            mode=params.get("mode", "agent"),
+                        )
+                        compression_state_payload: dict[str, Any] = {
+                            **state,
+                            "event_type": "context.compression_state",
+                            "status": state.get("status") or "completed",
+                            "phase": state.get("phase") or "active_compress",
+                            "processor": state.get("processor") or _extract_compact_summary_processor(summary),
+                            "before": state.get("before") or {"tokens": before_tokens},
+                            "after": state.get("after") or {"tokens": after_tokens},
+                            "saved": state.get("saved") or {
+                                "tokens": before_tokens - after_tokens,
+                                "percent": rate,
+                            },
+                            "summary": stats_summary,
+                            "compact_summary": summary,
+                        }
+                        await self.send_push({
+                            "channel_id": channel_id,
+                            "session_id": session_id,
+                            "payload": compression_state_payload,
+                        })
+
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={
+                        "result": result,
+                        "stats": stats,
+                        **({"summary": summary} if summary else {}),
+                        **({"compact_summary": summary} if summary else {}),
+                    },
+                )
+            finally:
+                close_agent_run_span(
+                    _run_span,
+                    session_id=session_id,
+                    output=summary,
+                )
         except Exception as e:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] command.compact failed: %s", e)
             resp = AgentResponse(

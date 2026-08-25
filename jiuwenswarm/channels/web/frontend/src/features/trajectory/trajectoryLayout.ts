@@ -12,27 +12,18 @@ export interface RawInspectorHeightBounds {
   max: number;
 }
 
-export interface TrajectoryHostLayout {
-  effectiveTeamAreaExpanded: boolean;
-  hideSessions: boolean;
-  hideTasks: boolean;
-}
-
-export function resolveTrajectoryHostLayout(
+export function shouldInsetTrajectoryForFloatingTasks(
   mode: string,
   activeView: string,
-  sessionsCollapsed: boolean,
-  tasksCollapsed: boolean,
-  teamAreaExpanded: boolean,
-): TrajectoryHostLayout {
-  const trajectoryActive = mode === 'agent' && activeView === 'trajectory';
-  const hideSessions = trajectoryActive && sessionsCollapsed;
-  const hideTasks = trajectoryActive && tasksCollapsed;
-  return {
-    effectiveTeamAreaExpanded: teamAreaExpanded && !hideTasks,
-    hideSessions,
-    hideTasks,
-  };
+  taskPanelAvailable: boolean,
+  taskPanelHidden: boolean,
+  taskPanelExpanded: boolean,
+): boolean {
+  return mode === 'agent'
+    && activeView === 'trajectory'
+    && taskPanelAvailable
+    && !taskPanelHidden
+    && !taskPanelExpanded;
 }
 
 export function rawInspectorHeightBounds(containerHeight: number): RawInspectorHeightBounds {

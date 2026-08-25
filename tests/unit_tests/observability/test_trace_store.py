@@ -82,7 +82,7 @@ def _core_record(
     session_id: str | None = "session-1",
     request_id: str | None = "request-1",
     run_id: str | None = "run-1",
-    agent_mode: str | None = "agent",
+    agent_mode: str | None = "agent.work.normal",
     start_time: int = 100,
     end_time: int = 200,
     raw_json: bytes | None = None,
@@ -112,15 +112,20 @@ def _stored_record(**overrides: object) -> TraceRecordData:
     return TraceRecordData.from_core_record(_core_record(**overrides))
 
 
-def _snapshot_record(revision: int, *, name: str) -> TraceRecordData:
-    raw_json = _raw_record(_TRACE_ID, _ROOT_SPAN_ID, name=name).replace(
+def _snapshot_record_for(
+    span_id: str,
+    revision: int,
+    *,
+    name: str,
+) -> TraceRecordData:
+    raw_json = _raw_record(_TRACE_ID, span_id, name=name).replace(
         b',"endTimeUnixNano":"200"',
         b"",
     )
     snapshot = SimpleNamespace(
         raw_json=raw_json,
         trace_id=_TRACE_ID,
-        span_id=_ROOT_SPAN_ID,
+        span_id=span_id,
         parent_span_id=None,
         start_time_unix_nano=100,
         observed_time_unix_nano=100 + revision,
@@ -129,11 +134,15 @@ def _snapshot_record(revision: int, *, name: str) -> TraceRecordData:
         session_id="session-1",
         request_id="request-1",
         run_id="run-1",
-        agent_mode="agent",
+        agent_mode="agent.work.normal",
         schema_version="1",
         lifecycle="running",
     )
     return TraceRecordData.from_core_snapshot(snapshot)
+
+
+def _snapshot_record(revision: int, *, name: str) -> TraceRecordData:
+    return _snapshot_record_for(_ROOT_SPAN_ID, revision, name=name)
 
 
 def _detail_span_id(record: dict[str, Any]) -> str:
@@ -217,6 +226,14 @@ async def test_live_revisions_finalize_in_place_and_reject_late_running(
             """,
             (_TRACE_ID, _ROOT_SPAN_ID),
         ).fetchone()
+        journal_payload_bytes = connection.execute(
+            """
+            SELECT COALESCE(SUM(LENGTH(raw_json)), 0) AS payload_bytes
+            FROM trajectory_changes
+            WHERE trace_id = ? AND span_id = ?
+            """,
+            (_TRACE_ID, _ROOT_SPAN_ID),
+        ).fetchone()
     finally:
         store.close()
 
@@ -229,6 +246,8 @@ async def test_live_revisions_finalize_in_place_and_reject_late_running(
     assert current["lifecycle"] == "final"
     assert bytes(current["raw_json"]) == final_record.raw_json
     assert change_count is not None and int(change_count["count"]) == 3
+    assert journal_payload_bytes is not None
+    assert int(journal_payload_bytes["payload_bytes"]) == 0
 
     detail = await AsyncTrajectoryReader(database_path).get_trace_records(
         "session-1",
@@ -237,11 +256,7 @@ async def test_live_revisions_finalize_in_place_and_reject_late_running(
         limit=100,
     )
     assert detail is not None
-    assert [record["lifecycle"] for record in detail["records"]] == [
-        "running",
-        "running",
-        "final",
-    ]
+    assert [record["lifecycle"] for record in detail["records"]] == ["final"]
     assert {record["record_id"] for record in detail["records"]} == {
         f"{_TRACE_ID}:{_ROOT_SPAN_ID}"
     }
@@ -250,7 +265,115 @@ async def test_live_revisions_finalize_in_place_and_reject_late_running(
         _TRACE_ID,
         _ROOT_SPAN_ID,
     ) == final_record.raw_json
-    test_logger.info("running revisions atomically converged on one authoritative final identity")
+    assert detail["next_since_revision"] == detail["revision"]
+    test_logger.info("detail sync returned only the authoritative final identity")
+
+
+@pytest.mark.asyncio
+async def test_detail_delta_coalesces_missed_revisions_but_keeps_live_progress(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "trajectory.sqlite3"
+    store = TrajectoryStore(database_path)
+    store.initialize()
+    try:
+        store.write_records([_snapshot_record(1, name="running-1")])
+    finally:
+        store.close()
+
+    reader = AsyncTrajectoryReader(database_path)
+    running = await reader.get_trace_records(
+        "session-1",
+        _TRACE_ID,
+        since_revision=0,
+        limit=100,
+    )
+    assert running is not None
+    assert [record["lifecycle"] for record in running["records"]] == ["running"]
+
+    store.initialize()
+    try:
+        store.write_records([_snapshot_record(2, name="running-2")])
+        final_record = _stored_record(
+            raw_json=_raw_record(_TRACE_ID, _ROOT_SPAN_ID, name="final"),
+        )
+        store.write_records([final_record])
+    finally:
+        store.close()
+
+    final = await reader.get_trace_records(
+        "session-1",
+        _TRACE_ID,
+        since_revision=running["next_since_revision"],
+        limit=100,
+    )
+    assert final is not None
+    assert len(final["records"]) == 1
+    assert final["records"][0]["lifecycle"] == "final"
+    assert final["records"][0]["record_revision"] == 1
+    assert final["next_since_revision"] == final["revision"]
+    test_logger.info("missed running snapshots collapsed while live and final states remained visible")
+
+
+@pytest.mark.asyncio
+async def test_detail_delta_does_not_skip_concurrent_updates_across_pages(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "trajectory.sqlite3"
+    store = TrajectoryStore(database_path)
+    store.initialize()
+    try:
+        store.write_records([
+            _snapshot_record_for(_ROOT_SPAN_ID, 1, name="root-running-1"),
+            _snapshot_record_for(_CHILD_SPAN_ID, 1, name="child-running-1"),
+        ])
+    finally:
+        store.close()
+
+    reader = AsyncTrajectoryReader(database_path)
+    first_page = await reader.get_trace_records(
+        "session-1",
+        _TRACE_ID,
+        since_revision=0,
+        limit=1,
+    )
+    assert first_page is not None
+    assert first_page["has_more"] is True
+    assert [_detail_span_id(record) for record in first_page["records"]] == [
+        _ROOT_SPAN_ID
+    ]
+
+    store.initialize()
+    try:
+        store.write_records([
+            _snapshot_record_for(_ROOT_SPAN_ID, 2, name="root-running-2"),
+            _snapshot_record_for(_CHILD_SPAN_ID, 2, name="child-running-2"),
+        ])
+    finally:
+        store.close()
+
+    cursor = first_page["next_since_revision"]
+    observed: list[tuple[str, int]] = []
+    while True:
+        page = await reader.get_trace_records(
+            "session-1",
+            _TRACE_ID,
+            since_revision=cursor,
+            limit=1,
+        )
+        assert page is not None
+        observed.extend(
+            (_detail_span_id(record), int(record["record_revision"]))
+            for record in page["records"]
+        )
+        assert page["next_since_revision"] > cursor
+        cursor = page["next_since_revision"]
+        if not page["has_more"]:
+            assert cursor == page["revision"]
+            break
+
+    assert observed == [(_ROOT_SPAN_ID, 2), (_CHILD_SPAN_ID, 2)]
+    test_logger.info("concurrent updates to returned and pending identities converged without skips")
 
 
 @pytest.mark.asyncio
@@ -696,7 +819,7 @@ async def test_reader_rejects_team_unknown_and_mixed_mode_traces(
                 _stored_record(
                     trace_id=mixed_trace_id,
                     span_id="1" * 16,
-                    agent_mode="agent",
+                    agent_mode="agent.work.normal",
                     raw_json=_raw_record(mixed_trace_id, "1" * 16),
                 ),
                 _stored_record(
@@ -1520,7 +1643,9 @@ async def test_global_eligibility_keeps_record_paths_session_isolated(
 
 
 @pytest.mark.asyncio
-async def test_reverse_eligibility_change_rotates_epoch(tmp_path: Path) -> None:
+async def test_newly_eligible_trace_preserves_epoch_and_updates_revision_feed(
+    tmp_path: Path,
+) -> None:
     database_path = tmp_path / "trajectory.sqlite3"
     unknown_span_id = "5" * 16
     known_span_id = "6" * 16
@@ -1558,7 +1683,7 @@ async def test_reverse_eligibility_change_rotates_epoch(tmp_path: Path) -> None:
             [
                 _stored_record(
                     span_id=known_span_id,
-                    agent_mode="agent",
+                    agent_mode="agent.work.normal",
                     raw_json=_raw_record(_TRACE_ID, known_span_id),
                 )
             ]
@@ -1567,7 +1692,7 @@ async def test_reverse_eligibility_change_rotates_epoch(tmp_path: Path) -> None:
     finally:
         store.close()
 
-    assert new_epoch != old_epoch
+    assert new_epoch == old_epoch
     visible_items, _cursor = await reader.list_traces(
         "session-1", limit=30, cursor=None
     )
@@ -1575,9 +1700,12 @@ async def test_reverse_eligibility_change_rotates_epoch(tmp_path: Path) -> None:
     revisions = await reader.list_trace_revisions(
         "session-1", after_revision=old_cursor, limit=30
     )
-    assert revisions[4] is True
-    assert revisions[5] == new_epoch
-    test_logger.info("ineligible-to-eligible reconciliation rotated the store epoch")
+    assert len(revisions[0]) == 1
+    assert revisions[0][0]["trace_id"] == _TRACE_ID
+    assert revisions[0][0]["span_count"] == 2
+    assert revisions[4] is False
+    assert revisions[5] == old_epoch
+    test_logger.info("newly eligible trace stayed on the incremental revision feed")
 
 
 @pytest.mark.asyncio

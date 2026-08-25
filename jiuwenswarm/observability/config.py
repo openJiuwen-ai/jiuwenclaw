@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ DEFAULT_FLUSH_INTERVAL_MS = 200
 DEFAULT_RETENTION_DAYS = 7
 DEFAULT_POLL_INTERVAL_MS = 2000
 DEFAULT_DETAIL_MAX_BYTES = 4 * 1024 * 1024
+DEFAULT_SESSION_DATABASE_DIRECTORY = "sessions"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,11 +62,31 @@ def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:
 def _resolve_database_path(value: Any, workspace: Path) -> Path:
     raw_path = str(value or "").strip()
     if not raw_path:
-        return workspace / ".trace" / "trajectory.sqlite3"
+        return workspace / ".trace" / DEFAULT_SESSION_DATABASE_DIRECTORY
     configured = Path(raw_path).expanduser()
     if configured.is_absolute():
         return configured
     return workspace / configured
+
+
+def session_database_path(database_root: Path, session_id: str) -> Path:
+    """Return the traversal-safe SQLite path owned by one session.
+
+    Args:
+        database_root: Root directory containing all session databases.
+        session_id: Stable session identifier used only as hash input.
+
+    Returns:
+        A platform-independent path containing no user-controlled component.
+
+    Raises:
+        ValueError: If the session identifier is empty or padded.
+    """
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id or normalized_session_id != session_id:
+        raise ValueError("session_id must be a non-empty normalized string")
+    digest = hashlib.sha256(normalized_session_id.encode("utf-8")).hexdigest()
+    return Path(database_root) / digest[:2] / f"{digest}.sqlite3"
 
 
 def load_trajectory_store_settings(
@@ -114,6 +136,8 @@ def load_trajectory_store_settings(
 
 __all__ = [
     "DEFAULT_DETAIL_MAX_BYTES",
+    "DEFAULT_SESSION_DATABASE_DIRECTORY",
     "TrajectoryStoreSettings",
     "load_trajectory_store_settings",
+    "session_database_path",
 ]

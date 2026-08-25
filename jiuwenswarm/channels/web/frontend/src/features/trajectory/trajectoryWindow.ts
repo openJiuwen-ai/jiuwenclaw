@@ -6,6 +6,7 @@ import type {
   OtlpExportTraceServiceRequest,
   OtlpSpan,
 } from './shared/otlp';
+import type { TrajectoryUsage } from './trajectory/model';
 import type {
   TrajectoryDetailRecord,
   TrajectoryRevisionListResponse,
@@ -67,12 +68,61 @@ export interface TrajectoryOperationCoordinator {
   ) => Promise<boolean>;
 }
 
+export interface TrajectoryTraceHintCoordinator {
+  enqueue: (traceId: string, revision: number) => void;
+  drain: (
+    loadBatch: (hints: ReadonlyMap<string, number>) => Promise<void>,
+    pace?: () => Promise<void>,
+  ) => Promise<void>;
+}
+
 export interface StagedTrajectoryTrace {
   bucket: TrajectoryTraceBucket;
   invalidRecordSeen: boolean;
 }
 
 export type TrajectoryContentMode = 'new' | 'loading' | 'blocking-error' | 'empty' | 'data';
+
+export type TrajectoryTerminalEventName =
+  | 'chat.final'
+  | 'chat.processing_status'
+  | 'chat.error'
+  | 'execution.error'
+  | 'harness.session_finished';
+
+function sameUsage(left: TrajectoryUsage, right: TrajectoryUsage): boolean {
+  return left.input === right.input
+    && left.cacheRead === right.cacheRead
+    && left.cacheWrite === right.cacheWrite
+    && left.output === right.output
+    && left.reasoning === right.reasoning
+    && left.total === right.total;
+}
+
+/** Report whether a cumulative-usage refresh changes any projected request fact. */
+export function sameTrajectoryUsageMap(
+  left: ReadonlyMap<string, TrajectoryUsage>,
+  right: ReadonlyMap<string, TrajectoryUsage>,
+): boolean {
+  return left.size === right.size
+    && [...left].every(([identity, usage]) => {
+      const candidate = right.get(identity);
+      return candidate !== undefined && sameUsage(usage, candidate);
+    });
+}
+
+function trajectoryEventSessionId(payload: Record<string, unknown>): string | null {
+  if (typeof payload.session_id === 'string' && payload.session_id.trim()) {
+    return payload.session_id;
+  }
+  for (const key of ['payload', 'event'] as const) {
+    const nested = payload[key];
+    if (typeof nested !== 'object' || nested === null || Array.isArray(nested)) continue;
+    const nestedSessionId = trajectoryEventSessionId(nested as Record<string, unknown>);
+    if (nestedSessionId !== null) return nestedSessionId;
+  }
+  return null;
+}
 
 type TraceListPageLoader = (
   cursor: string | null,
@@ -89,6 +139,8 @@ type TraceDetailPageLoader = (
   signal: AbortSignal,
 ) => Promise<TrajectoryTraceDetailResponse>;
 
+type TraceDetailPagePublisher = (staged: StagedTrajectoryTrace) => void;
+
 function invalidPagination(message: string): Error {
   const error = new Error(message);
   error.name = 'TrajectoryPaginationError';
@@ -104,6 +156,19 @@ export function createTrajectoryWindowState(): TrajectoryWindowState {
     listWindowInitialized: false,
     rawSelection: '',
   };
+}
+
+/** Recognize session terminal events that must repair a missed trajectory hint. */
+export function shouldCatchUpAfterTrajectoryTerminalEvent(
+  eventName: TrajectoryTerminalEventName,
+  payload: Record<string, unknown>,
+  sessionId: string,
+): boolean {
+  if (trajectoryEventSessionId(payload) !== sessionId) return false;
+  if (eventName === 'chat.processing_status') {
+    return payload.is_processing === false;
+  }
+  return true;
 }
 
 export function resetTrajectoryWindowState(state: TrajectoryWindowState): void {
@@ -157,6 +222,45 @@ export function createTrajectoryOperationCoordinator(): TrajectoryOperationCoord
       return promise;
     },
   };
+}
+
+/** Coalesce trace hints while making one flight chase every later watermark. */
+export function createTrajectoryTraceHintCoordinator(): TrajectoryTraceHintCoordinator {
+  const pending = new Map<string, number>();
+  let flight: Promise<void> | null = null;
+
+  const enqueue = (traceId: string, revision: number): void => {
+    const prior = pending.get(traceId) ?? -1;
+    if (revision > prior) pending.set(traceId, revision);
+  };
+  const drain = (
+    loadBatch: (hints: ReadonlyMap<string, number>) => Promise<void>,
+    pace?: () => Promise<void>,
+  ): Promise<void> => {
+    if (flight !== null) return flight;
+    const operation = (async () => {
+      let firstBatch = true;
+      while (pending.size > 0) {
+        if (!firstBatch && pace !== undefined) await pace();
+        const hints = new Map(pending);
+        pending.clear();
+        try {
+          await loadBatch(hints);
+        } catch (error) {
+          for (const [traceId, revision] of hints) enqueue(traceId, revision);
+          throw error;
+        }
+        firstBatch = false;
+      }
+    })();
+    flight = operation;
+    const clearFlight = () => {
+      if (flight === operation) flight = null;
+    };
+    void operation.then(clearFlight, clearFlight);
+    return operation;
+  };
+  return { enqueue, drain };
 }
 
 export function spansOf(record: OtlpExportTraceServiceRequest): OtlpSpan[] {
@@ -365,6 +469,7 @@ export async function stageTrajectoryTracePages(
   current: TrajectoryTraceBucket | undefined,
   signal: AbortSignal,
   loadPage: TraceDetailPageLoader,
+  publishPage?: TraceDetailPagePublisher,
 ): Promise<StagedTrajectoryTrace | null> {
   let sinceRevision = current?.revision ?? 0;
   let stagedRecords = new Map<string, OtlpExportTraceServiceRequest>(
@@ -396,22 +501,26 @@ export async function stageTrajectoryTracePages(
     stagedRawRecords = applied.bucket.rawRecords;
     stagedVersions = applied.bucket.versions ?? new Map();
     invalidRecordSeen = invalidRecordSeen || applied.invalidRecordSeen;
-    stagedRevision = detail.revision;
-    if (!detail.has_more) break;
-    if (detail.next_since_revision <= sinceRevision) {
+    const consumedRevision = detail.has_more
+      ? detail.next_since_revision
+      : detail.revision;
+    if (detail.has_more && consumedRevision <= sinceRevision) {
       throw invalidPagination('Trajectory detail pagination did not advance');
     }
-    sinceRevision = detail.next_since_revision;
+    stagedRevision = consumedRevision;
+    const progress = {
+      bucket: {
+        revision: stagedRevision,
+        records: stagedRecords,
+        rawRecords: stagedRawRecords,
+        versions: stagedVersions,
+      },
+      invalidRecordSeen,
+    };
+    publishPage?.(progress);
+    if (!detail.has_more) return progress;
+    sinceRevision = consumedRevision;
   }
-  return {
-    bucket: {
-      revision: stagedRevision,
-      records: stagedRecords,
-      rawRecords: stagedRawRecords,
-      versions: stagedVersions,
-    },
-    invalidRecordSeen,
-  };
 }
 
 export function trajectoryContentMode(input: {

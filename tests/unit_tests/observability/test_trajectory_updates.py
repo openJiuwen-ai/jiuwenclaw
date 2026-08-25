@@ -89,3 +89,52 @@ async def test_webchannel_routes_trace_update_to_matching_session_only() -> None
         "lifecycle": "final",
     }
     test_logger.info("trace update hint stayed scoped to its session")
+
+
+@pytest.mark.asyncio
+async def test_webchannel_coalesces_running_backlog_into_latest_final_hint(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.web_connect."
+        "_TRAJECTORY_HINT_COALESCE_SECONDS",
+        0,
+    )
+    channel = WebChannel.__new__(WebChannel)
+    channel._trajectory_pending_updates = {}
+    channel._trajectory_send_task = None
+    sent: list[tuple[CommittedTraceUpdate, ...]] = []
+
+    async def _send(updates) -> None:
+        sent.append(tuple(updates))
+
+    channel._send_trajectory_updates = _send
+    running = CommittedTraceUpdate(
+        session_id="session-1",
+        trace_id="3" * 32,
+        revision=100,
+        lifecycle="running",
+    )
+    stale = CommittedTraceUpdate(
+        session_id="session-1",
+        trace_id="3" * 32,
+        revision=99,
+        lifecycle="running",
+    )
+    final = CommittedTraceUpdate(
+        session_id="session-1",
+        trace_id="3" * 32,
+        revision=101,
+        lifecycle="final",
+    )
+
+    channel._schedule_trajectory_updates((running,))
+    channel._schedule_trajectory_updates((stale, final))
+    task = channel._trajectory_send_task
+    assert task is not None
+    await task
+
+    assert sent == [(final,)]
+    assert channel._trajectory_pending_updates == {}
+    assert channel._trajectory_send_task is None
+    test_logger.info("latest final hint absorbed the queued running backlog")

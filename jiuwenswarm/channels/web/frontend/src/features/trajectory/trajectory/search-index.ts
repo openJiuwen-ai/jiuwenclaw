@@ -9,7 +9,7 @@
 import type { TrajectoryTurnModel } from './model.ts'
 import type { TrajectoryCellProps } from './record.ts'
 import { trajectoryRecordId } from './record.ts'
-import { trajectoryPreviewText } from './preview.ts'
+import { trajectoryDisplayText, trajectoryPreviewText } from './preview.ts'
 
 interface SearchEntry {
   readonly sources: readonly string[]
@@ -31,9 +31,7 @@ function sameSources(left: readonly string[], right: readonly string[]): boolean
 
 function markdownPreview(cell: TrajectoryCellProps): string {
   if (cell.previewMarkdown === undefined) return ''
-  const preview = trajectoryPreviewText(cell.previewMarkdown)
-  if (cell.text === '') return preview
-  return preview === '' ? cell.text : `${cell.text} · ${preview}`
+  return trajectoryDisplayText(cell.text, cell.previewMarkdown)
 }
 
 function resultPreview(cell: TrajectoryCellProps): string {

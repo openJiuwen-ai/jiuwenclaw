@@ -2106,6 +2106,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
+            # BrowserTaskPromptRail 已改为 load-aware（按 deep_config.subagents 里是否挂载
+            # browser_agent 决定是否追加浏览器策略），不再需要按请求注入 channel。
         eternal_conversation_rail = getattr(self, "_eternal_conversation_rail", None)
         if eternal_conversation_rail is not None:
             self._eternal_conversation_enabled = runtime_config.eternal_conversation_enabled

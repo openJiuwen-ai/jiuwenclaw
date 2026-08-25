@@ -17,6 +17,9 @@ from jiuwenswarm.observability.config import TrajectoryStoreSettings
 from jiuwenswarm.observability.sink import TrajectoryRecordSink
 from jiuwenswarm.observability.store import AsyncTrajectoryReader
 from openjiuwen.extensions.observability.span_record_processor import SpanRecordProcessor
+from openjiuwen.extensions.observability.trajectory_events import (
+    emit_context_window_commit,
+)
 
 
 def _settings(database_path: Path) -> TrajectoryStoreSettings:
@@ -108,7 +111,7 @@ async def test_core_processor_delivers_child_then_complete_root_without_reencodi
                 "openjiuwen.session.id": session_id,
                 "openjiuwen.request.id": request_id,
                 "openjiuwen.run.id": request_id,
-                "openjiuwen.agent.mode": "agent",
+                "openjiuwen.agent.mode": "agent.work.normal",
             },
         )
         child = tracer.start_span(
@@ -182,7 +185,7 @@ async def test_core_snapshot_is_visible_before_end_and_finalizes_same_identity(
             "gen_ai.conversation.id": session_id,
             "openjiuwen.request.id": "request-live",
             "openjiuwen.run.id": "run-live",
-            "openjiuwen.agent.mode": "agent",
+            "openjiuwen.agent.mode": "agent.work.normal",
         }
         root = tracer.start_span(
             "agent.agent.session-core-swarm-live",
@@ -254,6 +257,84 @@ async def test_core_snapshot_is_visible_before_end_and_finalizes_same_identity(
             child.end()
         if root is not None:
             root.end()
+        processor.unregister_consumer(sink)
+        assert sink.close(timeout=5) is True
+        provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_native_context_event_is_queryable_before_parent_request_ends(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "trajectory-native-event.sqlite3"
+    sink = TrajectoryRecordSink(_settings(database_path))
+    processor = SpanRecordProcessor()
+    provider = TracerProvider()
+    provider.add_span_processor(processor)
+    tracer = provider.get_tracer("tests.core-swarm-native-event")
+    reader = AsyncTrajectoryReader(database_path)
+
+    session_id = "session-native-event"
+    parent = None
+    sink.start()
+    processor.register_consumer(sink)
+    try:
+        parent = tracer.start_span(
+            "llm.call",
+            attributes={
+                "openjiuwen.trace.schema_version": "2",
+                "openjiuwen.session.id": session_id,
+                "gen_ai.conversation.id": session_id,
+                "openjiuwen.request.id": "request-native-event",
+                "openjiuwen.run.id": "run-native-event",
+                "openjiuwen.agent.mode": "agent.work.normal",
+                "openjiuwen.execution.subject.id": "main",
+                "openjiuwen.execution.subject.kind": "main_agent",
+                "openjiuwen.execution.subject.session_id": session_id,
+                "openjiuwen.turn.number": 1,
+                "openjiuwen.step.number": 1,
+            },
+        )
+        event = emit_context_window_commit(
+            tracer=tracer,
+            llm_span=parent,
+            messages=[
+                {
+                    "message_id": "user-1",
+                    "role": "user",
+                    "content": "hello",
+                    "metadata": {"context_message_id": "user-1"},
+                }
+            ],
+            request_purpose="agent",
+        )
+        assert event is not None
+
+        trace_id = f"{parent.get_span_context().trace_id:032x}"
+        event_span_id = f"{event.get_span_context().span_id:016x}"
+        record = await _wait_for_record(
+            reader,
+            session_id,
+            trace_id,
+            event_span_id,
+            lifecycle="final",
+            minimum_revision=2,
+        )
+
+        span = _span(record)
+        assert _attribute(span, "openjiuwen.trajectory.schema_version") == "2"
+        assert (
+            _attribute(span, "openjiuwen.trajectory.event_kind")
+            == "context.window.commit"
+        )
+        assert _attribute(span, "openjiuwen.execution.subject.id") == "main"
+        payload = json.loads(_attribute(span, "openjiuwen.trajectory.payload"))
+        assert payload["complete"] is True
+        assert payload["messages"][0]["message_id"] == "user-1"
+        assert payload["delta"][0]["op"] == "insert"
+    finally:
+        if parent is not None:
+            parent.end()
         processor.unregister_consumer(sink)
         assert sink.close(timeout=5) is True
         provider.shutdown()

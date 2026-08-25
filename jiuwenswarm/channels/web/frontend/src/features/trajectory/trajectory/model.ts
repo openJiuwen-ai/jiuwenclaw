@@ -71,10 +71,17 @@ export interface TrajectoryToolSchema {
   parameters: object | unknown[]
 }
 
+/** One real system message slot in the model request, preserving boundaries. */
+export interface TrajectorySystemMessage {
+  index: number
+  content: string
+}
+
 /** Effective prompt state displayed by SYSTEM records. */
 export interface TrajectoryPromptSnapshot {
   config: TrajectoryRequestConfig
   system: string
+  systemMessages: readonly TrajectorySystemMessage[]
   tools: readonly TrajectoryToolSchema[]
 }
 
@@ -127,7 +134,7 @@ interface TrajectoryRequestBase {
 /** One purpose-discriminated request paired with its display number. */
 export type TrajectoryRequest = TrajectoryRequestBase & (
   | { purpose?: 'assistant'; turn: number; step: number }
-  | { purpose: 'compaction'; turn: number | null; step: 0 }
+  | { purpose: 'compaction'; turn: number; step: number }
 )
 
 /** Snapshot consumed atomically by `TrajectoryExplorer`. */
@@ -135,4 +142,14 @@ export interface TrajectorySnapshot {
   turns: readonly TrajectoryTurnModel[]
   requests?: readonly TrajectoryRequest[]
   streamingCells?: readonly TrajectoryCell[]
+  diagnostics?: readonly TrajectoryDiagnostic[]
+}
+
+/** Non-fatal projection issue that preserves the last valid trajectory view. */
+export interface TrajectoryDiagnostic {
+  code: string
+  message: string
+  subjectId?: string
+  eventId?: string
+  sequence?: number
 }

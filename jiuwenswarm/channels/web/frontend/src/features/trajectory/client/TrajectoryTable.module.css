@@ -751,6 +751,16 @@
   );
 }
 
+.errorKindTag {
+  color: var(--dsw-alias-state-error-primary);
+  background: var(--dsw-alias-state-error-secondary);
+  background: color-mix(
+    in srgb,
+    var(--dsw-alias-state-error-primary) 12%,
+    var(--dsw-alias-bg-layer-1)
+  );
+}
+
 .contentText {
   display: block;
   min-width: 0;

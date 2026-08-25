@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -19,7 +20,10 @@ from typing import Any
 import aiosqlite
 
 from jiuwenswarm.common.mode_matrix import SINGLE_AGENT_CANONICAL_MODES
-from jiuwenswarm.observability.config import DEFAULT_DETAIL_MAX_BYTES
+from jiuwenswarm.observability.config import (
+    DEFAULT_DETAIL_MAX_BYTES,
+    session_database_path,
+)
 from jiuwenswarm.observability.models import (
     CommittedTraceUpdate,
     TraceRecordData,
@@ -339,12 +343,13 @@ class TrajectoryStore:
 
             changed_trace_ids.update(self._reconcile_orphans(connection, records))
             eligibility_after = self._trace_eligibility(connection, incoming_trace_ids)
-            eligibility_changed = any(
+            visible_trace_removed = any(
                 eligibility_before[trace_id][0]
-                and eligibility_before[trace_id][1] != eligibility_after[trace_id][1]
+                and eligibility_before[trace_id][1]
+                and not eligibility_after[trace_id][1]
                 for trace_id in incoming_trace_ids
             )
-            if eligibility_changed:
+            if visible_trace_removed:
                 self._rotate_store_epoch(connection)
             else:
                 self._sync_max_ingest_seq(connection)
@@ -411,7 +416,12 @@ class TrajectoryStore:
                 record.source,
                 record.created_at,
                 int(resolved_has_error),
-                sqlite3.Binary(record.raw_json),
+                # The change journal is a revision index, not a second payload
+                # store. Detail reads load the complete snapshot from
+                # trajectory_current_records, while final archives use
+                # otlp_span_records. Keeping the full BLOB here multiplied
+                # every streaming revision into unbounded write amplification.
+                sqlite3.Binary(b""),
                 record.raw_sha256,
                 record.update_kind,
             ),
@@ -572,7 +582,7 @@ class TrajectoryStore:
                     row["source"],
                     created_at,
                     row["has_error"],
-                    row["raw_json"],
+                    sqlite3.Binary(b""),
                     row["raw_sha256"],
                 ),
             )
@@ -950,10 +960,67 @@ class TrajectoryStore:
 
 
 class AsyncTrajectoryReader:
-    """Gateway-side read-only view over the shared trajectory database."""
+    """Gateway-side read-only view over trajectory SQLite databases."""
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(self, database_path: Path, *, session_scoped: bool = False) -> None:
         self.database_path = Path(database_path)
+        self.session_scoped = session_scoped
+        self._usage_locks: dict[str, asyncio.Lock] = {}
+        self._usage_cache: dict[str, dict[str, Any]] = {}
+
+    async def get_session_request_usage(
+        self,
+        session_id: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Return session-complete cumulative usage partitioned by execution subject."""
+        usage_lock = self._usage_locks.setdefault(session_id, asyncio.Lock())
+        async with usage_lock:
+            connection = await self._connect(session_id)
+            if connection is None:
+                return [], _ABSENT_STORE_EPOCH
+            try:
+                await connection.execute("BEGIN")
+                store_epoch = await _read_store_epoch(connection)
+                watermark = await _session_revision_watermark(connection, session_id)
+                cache = self._usage_cache.get(session_id)
+                cache_valid = (
+                    cache is not None
+                    and cache["store_epoch"] == store_epoch
+                    and int(cache["watermark"]) <= watermark
+                )
+                after_revision = int(cache["watermark"]) if cache_valid else 0
+                facts = dict(cache["facts"]) if cache_valid else {}
+                async with connection.execute(
+                    """
+                    SELECT trace_id,
+                           start_time_unix_nano,
+                           change_seq,
+                           raw_json
+                    FROM trajectory_current_records
+                    WHERE session_id = ? AND change_seq > ?
+                    ORDER BY change_seq ASC
+                    """,
+                    (session_id, after_revision),
+                ) as statement:
+                    rows = await statement.fetchall()
+                for row in rows:
+                    fact = _request_usage_fact(
+                        bytes(row["raw_json"]),
+                        trace_id=str(row["trace_id"]),
+                        start_time_unix_nano=int(row["start_time_unix_nano"]),
+                    )
+                    if fact is None:
+                        continue
+                    facts[(fact["trace_id"], fact["inference_id"])] = fact
+                self._usage_cache[session_id] = {
+                    "store_epoch": store_epoch,
+                    "watermark": watermark,
+                    "facts": facts,
+                }
+            finally:
+                await connection.rollback()
+                await connection.close()
+        return _cumulative_request_usage(tuple(facts.values())), store_epoch
 
     async def list_traces(
         self,
@@ -977,7 +1044,7 @@ class AsyncTrajectoryReader:
         session_id: str,
     ) -> tuple[list[dict[str, Any]], str, int]:
         """Read every current record for one session from one SQLite snapshot."""
-        connection = await self._connect()
+        connection = await self._connect(session_id)
         if connection is None:
             return [], _ABSENT_STORE_EPOCH, 0
         try:
@@ -1033,7 +1100,7 @@ class AsyncTrajectoryReader:
     ) -> tuple[list[dict[str, Any]], str | None, str, str]:
         """List summaries and a polling baseline from one SQLite snapshot."""
         cursor_value = decode_trace_cursor(cursor) if cursor else None
-        connection = await self._connect()
+        connection = await self._connect(session_id)
         if connection is None:
             store_epoch = _ABSENT_STORE_EPOCH
             if cursor_value is not None:
@@ -1166,7 +1233,7 @@ class AsyncTrajectoryReader:
             after_ingest_seq,
             through_ingest_seq,
         ) = decode_revision_cursor(after_revision)
-        connection = await self._connect()
+        connection = await self._connect(session_id)
         if connection is None:
             store_epoch = _ABSENT_STORE_EPOCH
             stable_cursor = encode_revision_cursor(session_id, store_epoch, 0)
@@ -1275,7 +1342,7 @@ class AsyncTrajectoryReader:
         max_bytes: int = DEFAULT_DETAIL_MAX_BYTES,
     ) -> dict[str, Any] | None:
         """Read a complete or incremental page for one trace."""
-        connection = await self._connect()
+        connection = await self._connect(session_id)
         if connection is None:
             return None
         try:
@@ -1305,6 +1372,11 @@ class AsyncTrajectoryReader:
                 since_revision > 0 and since_revision < first_revision
             )
             effective_since = 0 if reset else since_revision
+            # Detail is a coalesced current-state delta, not a replay of every
+            # journal revision. Every current record is a complete upsert
+            # snapshot. Any future operation that removes one identity without
+            # rotating store_epoch must add a durable tombstone before this
+            # query can support it safely.
             async with connection.execute(
                 """
                 SELECT change_seq AS ingest_seq,
@@ -1312,10 +1384,10 @@ class AsyncTrajectoryReader:
                        span_id,
                        record_revision,
                        lifecycle,
-                       operation,
+                       'upsert' AS operation,
                        observed_time_unix_nano,
                        LENGTH(raw_json) AS raw_size_bytes
-                FROM trajectory_changes
+                FROM trajectory_current_records
                 WHERE session_id = ?
                   AND trace_id = ?
                   AND change_seq > ?
@@ -1354,11 +1426,11 @@ class AsyncTrajectoryReader:
                            span_id,
                            record_revision,
                            lifecycle,
-                           operation,
+                           'upsert' AS operation,
                            observed_time_unix_nano,
                            LENGTH(raw_json) AS raw_size_bytes,
                            raw_json
-                    FROM trajectory_changes
+                    FROM trajectory_current_records
                     WHERE session_id = ?
                       AND trace_id = ?
                       AND change_seq > ?
@@ -1405,7 +1477,7 @@ class AsyncTrajectoryReader:
         span_id: str,
     ) -> bytes | None:
         """Return exact raw bytes when the identity belongs to the session."""
-        connection = await self._connect()
+        connection = await self._connect(session_id)
         if connection is None:
             return None
         try:
@@ -1432,11 +1504,14 @@ class AsyncTrajectoryReader:
             await connection.close()
         return bytes(row["raw_json"]) if row is not None else None
 
-    async def _connect(self) -> aiosqlite.Connection | None:
-        if not self.database_path.is_file():
+    async def _connect(self, session_id: str) -> aiosqlite.Connection | None:
+        database_path = self.database_path
+        if self.session_scoped:
+            database_path = session_database_path(database_path, session_id)
+        if not database_path.is_file():
             return None
         connection = await aiosqlite.connect(
-            f"{self.database_path.resolve().as_uri()}?mode=ro",
+            f"{database_path.resolve().as_uri()}?mode=ro",
             timeout=_BUSY_TIMEOUT_MS / 1000,
             uri=True,
         )
@@ -1795,6 +1870,109 @@ def _record_has_error(raw_json: bytes) -> bool:
                 }:
                     return True
     return False
+
+
+def _otlp_attribute_value(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return None
+    for key in (
+        "stringValue",
+        "intValue",
+        "doubleValue",
+        "boolValue",
+    ):
+        if key in value:
+            return value[key]
+    return None
+
+
+def _request_usage_fact(
+    raw_json: bytes,
+    *,
+    trace_id: str,
+    start_time_unix_nano: int,
+) -> dict[str, Any] | None:
+    try:
+        payload = _strict_otlp_payload(raw_json)
+    except Exception:
+        return None
+    spans = []
+    for resource_span in payload.get("resourceSpans", []):
+        if not isinstance(resource_span, dict):
+            continue
+        for scope_span in resource_span.get("scopeSpans", []):
+            if isinstance(scope_span, dict):
+                spans.extend(scope_span.get("spans", []))
+    if len(spans) != 1 or not isinstance(spans[0], dict):
+        return None
+    if spans[0].get("name") != "llm.call":
+        return None
+    attributes = {
+        str(attribute.get("key")): _otlp_attribute_value(attribute.get("value"))
+        for attribute in spans[0].get("attributes", [])
+        if isinstance(attribute, dict) and isinstance(attribute.get("key"), str)
+    }
+    inference_id = str(attributes.get("openjiuwen.inference.id") or "").strip()
+    if not inference_id:
+        return None
+    subject_id = str(attributes.get("openjiuwen.execution.subject.id") or "main").strip()
+    usage_keys = {
+        "input": ("gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens"),
+        "cacheRead": ("gen_ai.usage.cache_read.input_tokens", "gen_ai.usage.cache_tokens"),
+        "cacheWrite": ("gen_ai.usage.cache_creation.input_tokens",),
+        "output": ("gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens"),
+        "reasoning": ("gen_ai.usage.reasoning.output_tokens", "gen_ai.usage.reasoning_tokens"),
+        "total": ("gen_ai.usage.total_tokens",),
+    }
+    usage: dict[str, int] = {}
+    for output_key, attribute_keys in usage_keys.items():
+        raw_value = next(
+            (
+                attributes[key]
+                for key in attribute_keys
+                if attributes.get(key) is not None
+            ),
+            None,
+        )
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if 0 <= value <= _MAX_SQLITE_INTEGER:
+            usage[output_key] = value
+    return {
+        "trace_id": trace_id,
+        "inference_id": inference_id,
+        "subject_id": subject_id or "main",
+        "start_time_unix_nano": start_time_unix_nano,
+        "usage": usage,
+    }
+
+
+def _cumulative_request_usage(
+    facts: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cumulative_by_subject: dict[str, dict[str, int]] = {}
+    result: list[dict[str, Any]] = []
+    for fact in sorted(
+        facts,
+        key=lambda item: (
+            str(item["subject_id"]),
+            int(item["start_time_unix_nano"]),
+            str(item["trace_id"]),
+            str(item["inference_id"]),
+        ),
+    ):
+        subject_id = str(fact["subject_id"])
+        cumulative = cumulative_by_subject.setdefault(subject_id, {})
+        for key, value in dict(fact["usage"]).items():
+            cumulative[key] = cumulative.get(key, 0) + int(value)
+        result.append({
+            **fact,
+            "start_time_unix_nano": str(fact["start_time_unix_nano"]),
+            "cumulative_usage": dict(cumulative),
+        })
+    return result
 
 
 def _trace_summary_from_row(row: aiosqlite.Row) -> dict[str, Any]:
