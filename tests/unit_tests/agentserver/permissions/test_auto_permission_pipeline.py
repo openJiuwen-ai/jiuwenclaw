@@ -22,6 +22,7 @@ from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
     ToolCallInputs,
 )
+from openjiuwen.harness.tools.subagent.subagent_tools import build_subagent_tools
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     build_permission_rail,
 )
@@ -100,6 +101,167 @@ async def test_task_tool_ask_is_control_silent_after_engine(tmp_path) -> None:
     assert len(policy.calls) == 1
     assert reviewer.requests == []
     assert base.calls == []
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_args"),
+    [
+        (
+            "subagent_spawn",
+            {"agent_name": "general-purpose", "task_description": "inspect this task"},
+        ),
+        ("subagent_wait", {"subagent_ids": ["sub-a", "sub-b"]}),
+        ("subagent_list", {}),
+        ("subagent_send_input", {"subagent_id": "sub-a", "query": "continue"}),
+        ("subagent_close", {"subagent_id": "sub-a"}),
+        ("subagent_resume", {"subagent_id": "sub-a"}),
+    ],
+)
+async def test_subagent_runtime_control_ask_uses_internal_fast_path(
+    tmp_path,
+    monkeypatch,
+    tool_name: str,
+    tool_args: dict[str, object],
+) -> None:
+    rail, policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+    ctx, _resource = _runtime_control_ctx(monkeypatch, tool_name, tool_args)
+
+    result = await rail.before_tool_call(ctx)
+
+    assert result is None
+    assert len(policy.calls) == 1
+    assert reviewer.requests == []
+    assert base.calls == []
+
+
+async def test_subagent_runtime_same_id_shadow_does_not_use_internal_fast_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    rail, policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+    ctx, resource = _runtime_control_ctx(
+        monkeypatch,
+        "subagent_list",
+        {},
+    )
+    shadow = SimpleNamespace(
+        card=resource.card,
+        _parent_agent=resource._parent_agent,
+    )
+    monkeypatch.setattr(
+        before_tool_module,
+        "Runner",
+        SimpleNamespace(
+            resource_mgr=SimpleNamespace(get_tool=lambda *_args, **_kwargs: shadow)
+        ),
+    )
+
+    with pytest.raises(AbortError):
+        await rail.before_tool_call(ctx)
+
+    assert len(policy.calls) == 1
+    assert reviewer.requests == []
+    assert base.calls == []
+
+
+@pytest.mark.parametrize("binding_failure", ["card_identity", "agent_bridge"])
+async def test_subagent_runtime_unverified_sdk_binding_requires_manual_approval(
+    tmp_path,
+    monkeypatch,
+    binding_failure: str,
+) -> None:
+    rail, policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+    ctx, resource = _runtime_control_ctx(monkeypatch, "subagent_list", {})
+    if binding_failure == "card_identity":
+        resource._card = SimpleNamespace(
+            name="subagent_list",
+            id="subagent_list_root",
+        )
+    else:
+        resource._parent_agent.react_agent = SimpleNamespace()
+
+    with pytest.raises(AbortError):
+        await rail.before_tool_call(ctx)
+
+    assert len(policy.calls) == 1
+    assert reviewer.requests == []
+    assert base.calls == []
+
+
+async def test_subagent_runtime_missing_callback_context_requires_manual_approval(
+    tmp_path,
+) -> None:
+    rail, policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="subagent_list",
+        tool_args={},
+        session_id="session-a",
+    )
+
+    assert classify_permission_result(result) == "interrupt"
+    assert len(policy.calls) == 1
+    assert reviewer.requests == []
+    assert base.calls == []
+
+
+async def test_subagent_runtime_manual_approval_resumes_unverified_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    rail, policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+    ctx, resource = _runtime_control_ctx(monkeypatch, "subagent_list", {})
+    resource._parent_agent.react_agent = SimpleNamespace()
+
+    result = await rail.before_tool_call(
+        ctx,
+        user_input={"approved": True, "auto_confirm": False},
+    )
+
+    assert result is None
+    assert len(policy.calls) == 1
+    assert reviewer.requests == []
+    assert base.calls == []
+
+
+async def test_real_engine_deny_precedes_subagent_runtime_fast_path(tmp_path) -> None:
+    rail = build_permission_rail(
+        {
+            "permissions": {
+                "enabled": True,
+                "mode": "auto",
+                "tools": {"subagent_spawn": "deny"},
+            }
+        },
+        enable_auto_permission=True,
+        workspace_root=tmp_path,
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="subagent_spawn",
+        tool_args={
+            "agent_name": "general-purpose",
+            "task_description": "inspect this task",
+        },
+        session_id="session-a",
+    )
+
+    assert classify_permission_result(result) == "denied"
 
 
 async def test_real_engine_deny_precedes_task_tool_control_silent(tmp_path) -> None:
@@ -255,6 +417,69 @@ def _runtime_ctx(
         session=session,
         extra={},
     )
+
+
+def _runtime_control_ctx(
+    monkeypatch,
+    tool_name: str,
+    tool_args: dict[str, object],
+) -> tuple[AgentCallbackContext, object]:
+    session = _Session()
+    ctx = _runtime_ctx(session, tool_name=tool_name, tool_args=tool_args)
+    callback_agent = ctx.agent
+    outer_agent = SimpleNamespace()
+    resource = next(
+        tool for tool in build_subagent_tools(outer_agent) if tool.card.name == tool_name
+    )
+    card = resource.card
+    manager = SimpleNamespace(get=lambda name: card if name == tool_name else None)
+    callback_agent.ability_manager = manager
+    outer_agent.react_agent = callback_agent
+    outer_agent.ability_manager = manager
+
+    def get_raw_tool(tool_id, *, session):
+        assert tool_id == card.id
+        assert session is None
+        return resource
+
+    monkeypatch.setattr(
+        before_tool_module,
+        "Runner",
+        SimpleNamespace(
+            resource_mgr=SimpleNamespace(get_tool=get_raw_tool)
+        ),
+    )
+    return ctx, resource
+
+
+def test_subagent_runtime_binding_rejects_card_identity_mismatch(monkeypatch) -> None:
+    ctx, resource = _runtime_control_ctx(monkeypatch, "subagent_list", {})
+    resource._card = SimpleNamespace(name="subagent_list", id="subagent_list_root")
+    invocation = before_tool_module._extract_invocation((ctx,), {})
+
+    assert before_tool_module._trusted_subagent_runtime_control_binding(
+        invocation
+    ) is False
+
+
+def test_subagent_runtime_binding_rejects_wrong_inner_outer_bridge(
+    monkeypatch,
+) -> None:
+    ctx, resource = _runtime_control_ctx(monkeypatch, "subagent_list", {})
+    resource._parent_agent.react_agent = SimpleNamespace()
+    invocation = before_tool_module._extract_invocation((ctx,), {})
+
+    assert before_tool_module._trusted_subagent_runtime_control_binding(
+        invocation
+    ) is False
+
+
+def test_subagent_runtime_binding_rejects_missing_callback_context() -> None:
+    invocation = SimpleNamespace(ctx=None, tool_name="subagent_list")
+
+    assert before_tool_module._trusted_subagent_runtime_control_binding(
+        invocation
+    ) is False
 
 
 def _install_core_auto_confirm_contract(base: FakeBaseRail) -> None:
