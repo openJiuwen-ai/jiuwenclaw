@@ -9,6 +9,11 @@ gen_web_file() {
 
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
 
+    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ]; then
+        local nodeport_name="${DEPLOY_VARS["WEB_NAME"]}-nodeport"
+        yq eval 'select(.metadata.name != "'"${nodeport_name}"'")' -i "${file}"
+    fi
+
     if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}" == "true" ]; then
         obs_url="${DEPLOY_VARS["OBS_URL"]}"
     fi
@@ -48,7 +53,9 @@ gen_web_file() {
 
 render_web_files() {
     render_secret_configmap
-    ensure_available_port "WEB_NODE_PORT"
+    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" != "true" ]; then
+        ensure_available_port "WEB_NODE_PORT"
+    fi
     gen_web_file
 }
 
@@ -60,7 +67,12 @@ deploy_web() {
     ensure_secret_configmap
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
-    success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
+    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ]; then
+        delete_k8s_resource "service" "${name}-nodeport" "${namespace}"
+        success "User Web is available through Manager Web; standalone NodePort is disabled"
+    else
+        success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
+    fi
 }
 
 uninstall_web() {
@@ -69,6 +81,7 @@ uninstall_web() {
     local file="${CONFIG["WEB_FILE"]}"
 
     exec_cmd kubectl delete -f ${file} --ignore-not-found=true
+    delete_k8s_resource "service" "${name}-nodeport" "${namespace}"
     wait_pod_terminated "${name}" "${namespace}"
     uninstall_secret_configmap
 }
