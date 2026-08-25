@@ -1305,13 +1305,21 @@ def _strip_html_fence(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+# 匹配含 ppt-slide 的 div 开始标签（兼容单双引号）。
+_PPT_SLIDE_DIV_RE = re.compile(
+    r"<div[^>]*\bclass\s*=\s*(?:\"[^\"]*\bppt-slide\b[^\"]*\"|'[^']*\bppt-slide\b[^']*')",
+    re.IGNORECASE,
+)
+
+
 def _is_valid_html(text: str) -> bool:
     if not text or len(text) < 200:
         return False
     lower = text.lower()
     if "<html" not in lower and "<!doctype html" not in lower:
         return False
-    if "ppt-slide" not in lower:
+    # pptx-craft：每页 HTML 有且仅有一个 .ppt-slide；多 slide 不得截断冒充成功
+    if len(_PPT_SLIDE_DIV_RE.findall(text)) != 1:
         return False
     # 检测内容安全过滤截断：LLM 输出被安全过滤器中断时会嵌入审查消息
     if "sensitive information" in lower or "try a new topic" in lower:
@@ -1568,11 +1576,6 @@ def _strip_visible_page_markers(html_text: str) -> str:
     return normalized
 
 
-# 匹配含 ppt-slide 的 div 开始标签（兼容单双引号）。
-_PPT_SLIDE_DIV_RE = re.compile(
-    r"<div[^>]*\bclass\s*=\s*(?:\"[^\"]*\bppt-slide\b[^\"]*\"|'[^']*\bppt-slide\b[^']*')",
-    re.IGNORECASE,
-)
 _DIV_TAG_RE = re.compile(r"<div\b[^>]*>|</div\s*>", re.IGNORECASE)
 _PAGE_NUMBER_POSITION_CSS = {
     "bottom-right": "right:30px;bottom:16px;text-align:right;",
@@ -1658,39 +1661,6 @@ def _apply_visible_page_number_policy(
             policy.format_kind,
         )
     return normalized
-
-
-def _truncate_to_single_slide(html: str) -> str:
-    """如果 HTML 包含多个 ppt-slide 容器，截取第一个并保留 HTML 骨架。
-
-    LLM 偶尔会忽略单页约束，将全部页面写入一个 HTML 文件。
-    此函数检测到多 slide 时截取第一个，丢弃其余，并补全闭合标签。
-    """
-    matches = list(_PPT_SLIDE_DIV_RE.finditer(html))
-    if len(matches) <= 1:
-        return html
-
-    # 从第二个 ppt-slide div 往前找 <div 起始位置
-    second_match = matches[1]
-    div_start = html.rfind("<div", 0, second_match.start())
-    if div_start == -1:
-        div_start = second_match.start()
-
-    # 还需要往回找注释标记（如 <!-- P2 ... -->）
-    comment_pos = html.rfind("<!--", 0, div_start)
-    cut_pos = min(comment_pos, div_start) if comment_pos != -1 else div_start
-
-    truncated = html[:cut_pos].rstrip()
-    # 补全闭合标签
-    if "</body>" not in truncated.lower():
-        truncated += "\n</body>\n</html>\n"
-
-    logger.warning(
-        "[P8.1] 检测到 %d 个 ppt-slide 容器，已截取第一个 slide，丢弃其余 %d 个",
-        len(matches),
-        len(matches) - 1,
-    )
-    return truncated
 
 
 # 匹配 <h1>/<h2> 中「第X页」占位符（X 为数字或中文数字）
@@ -2765,7 +2735,10 @@ _REWRITE_ACTIONS = {
         "必须带 flex-1 min-h-0（或 flex-[N] min-h-0），"
         "标准写法 div.flex-1.min-h-0.flex.flex-col > div#chart-1.w-full.h-full"
     ),
-    "invalid_html": "输出完整合法 HTML 文档，须含闭合 </body></html>，禁止截断或夹杂解释文字",
+    "invalid_html": (
+        "输出完整合法 HTML 文档，须含闭合 </body></html>，"
+        "且仅含 1 个 .ppt-slide 容器，禁止多页拼进同一文件、截断或夹杂解释文字"
+    ),
     "invalid_dom": "修复 DOM：消除畸形片段，确保 <main> 位于 .ppt-slide 内",
     "unfilled_placeholders": "填完所有 {{...}} / PAGE_* 占位符，禁止残留未替换标记",
     "seed_not_modified": "必须基于预铺模板填入本页标题、正文与页脚，禁止原样返回 seed",
@@ -3424,10 +3397,11 @@ class PageWorkerNode(PlanNode):
                 "`references/styles/{style_id}/agenda-template.html` 预铺，LLM 仅替换 `{{}}` "
                 "占位符；残留占位符判失败；不走整页自由生成\n"
                 "2. 其余页：用该页 outline 片段 + research 片段 + 风格规范 + 视觉与布局硬约束构造 prompt，"
-                "调 LLM 生成 HTML；剥 ```html 包裹 → 校验（含 <!DOCTYPE> + ppt-slide 容器）→ write_file 落盘\n"
-                "   - 失败按 gen_retry_round 重试（仅本页）\n"
+                "调 LLM 生成 HTML；剥 ```html 包裹 → 校验（含 <!DOCTYPE> + 恰好 1 个 ppt-slide）"
+                "→ write_file 落盘\n"
+                "   - 多 ppt-slide / 非法 HTML：本轮失败，按 gen_retry_round 重试（仅本页）\n"
                 "   - 重试后仍失败 → 进 missing_pages\n"
-                "3. 成功页只保留一个 ppt-slide 容器并直接落盘；生成后不再调用 LLM 核查、搜索或整页重写\n"
+                "3. 校验通过的单 ppt-slide 页直接落盘；生成后不再调用 LLM 核查、搜索或整页重写\n"
                 "\n"
                 "### 失败兜底\n"
                 "- 生成 LLM 调用 raise / 返回空 / HTML 校验失败：进 missing_pages\n"
@@ -3587,9 +3561,6 @@ class PageWorkerNode(PlanNode):
                 break
         if not html:
             return {"missing": True, "low_density": False, "report": {}}
-
-        # 防御：LLM 偶尔忽略单页约束，生成多个 slide，截取第一个
-        html = _truncate_to_single_slide(html)
 
         ok = await self._write_file(path, html)
         if not ok:
