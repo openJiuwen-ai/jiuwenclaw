@@ -113,10 +113,12 @@ async def _apply_sandbox_change(kind: str) -> None:
                     removed, released,
                 )
             else:
-                logger.info("[sandbox] enabled 变更为开启, 下轮 _create_sys_operation 读新值生效")
+                logger.info("[sandbox] enabled 变更为开启, 触发 box-server 启动...")
+                from jiuwenclaw.agentserver.sandbox_lifecycle import start_box_server_internal
+                await start_box_server_internal()
             return
         if kind == "startup_mode":
-            from jiuwenclaw.config import get_sandbox_startup_mode
+            from jiuwenclaw.config import get_sandbox_startup_mode, get_sandbox_runtime
             from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
 
             runner = JiuwenBoxRunner.instance()
@@ -126,7 +128,19 @@ async def _apply_sandbox_change(kind: str) -> None:
                     "[sandbox] startup_mode=external, 停掉 agent-server 拉起的 box-server"
                 )
                 await runner.stop()
-            # internal 时下次 _bootstrap_internal_jiuwenbox 拉起; 这里不主动拉.
+            elif mode == "internal":
+                # internal 但 box-server 未运行: 主动拉起 (例如之前 enabled=false 时没拉)
+                if not runner.owns_process or runner.process is None:  # noqa: SLF001
+                    if bool(get_sandbox_runtime().get("enabled")):
+                        logger.info(
+                            "[sandbox] startup_mode=internal 且 enabled=true, 触发 box-server 启动"
+                        )
+                        from jiuwenclaw.agentserver.sandbox_lifecycle import start_box_server_internal
+                        await start_box_server_internal()
+                    else:
+                        logger.info(
+                            "[sandbox] startup_mode=internal 但 sandbox.enabled=false, 跳过启动"
+                        )
             return
         if kind in ("files", "network"):
             from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner

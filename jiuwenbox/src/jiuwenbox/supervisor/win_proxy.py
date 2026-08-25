@@ -66,7 +66,11 @@ class EgressFilter:
 
     @staticmethod
     def _domain_matches(pattern: str, host: str) -> bool:
-        """通配符域名匹配: '*.example.com' 匹配 'a.example.com' / 'example.com'?."""
+        """通配符/裸域名匹配 (黑名单白名单对称使用).
+
+        - '*.example.com' 匹配 'a.example.com' / 'example.com' (主域+任意子域).
+        - 'example.com' (裸域名) 同样匹配主域+任意子域, 等价 '*.example.com'.
+        """
         if not pattern or not host:
             return False
         pat = pattern.lower().strip()
@@ -74,7 +78,8 @@ class EgressFilter:
         if pat.startswith("*."):
             base = pat[2:]
             return host == base or host.endswith("." + base)
-        return pat == host
+        # 裸域名: 主域 + 任意子域
+        return host == pat or host.endswith("." + pat)
 
     @staticmethod
     def _ip_in_networks(ip_str: str, nets: list) -> bool:
@@ -86,18 +91,33 @@ class EgressFilter:
 
     def allow(self, host: str, port: int) -> tuple[bool, str]:
         """判定是否放行 (host, port). 返回 (allowed, reason)."""
+        logger.debug(
+            "[TRACE][EgressFilter.allow] host=%s port=%d disable_all=%s "
+            "blocked_domains=%s allowed_domains=%s default=%s",
+            host, port, self.disable_all,
+            self._blocked_domains, self._allowed_domains, self.egress.default,
+        )
         if self.disable_all:
+            logger.debug("[TRACE][EgressFilter.allow] 拒绝: disable_all host=%s", host)
             return False, "network disabled (disable_all)"
         if not host:
+            logger.debug("[TRACE][EgressFilter.allow] 拒绝: empty host")
             return False, "empty host"
 
         # 1. 域名 deny 优先.
         for pat in self._blocked_domains:
             if self._domain_matches(pat, host):
+                logger.debug(
+                    "[TRACE][EgressFilter.allow] 拒绝: domain blocked host=%s pat=%s",
+                    host, pat,
+                )
                 return False, f"domain blocked by {pat}"
 
         # 2. 端口 deny.
         if port in self._blocked_ports:
+            logger.debug(
+                "[TRACE][EgressFilter.allow] 拒绝: port blocked port=%d", port,
+            )
             return False, f"port {port} blocked"
 
         # 3. IP deny (域名先解析).
@@ -113,7 +133,15 @@ class EgressFilter:
                 )
                 for info in infos:
                     resolved_ips.append(info[4][0])
+                logger.debug(
+                    "[TRACE][EgressFilter.allow] DNS 解析 host=%s -> %s",
+                    host, resolved_ips,
+                )
             except socket.gaierror:
+                logger.debug(
+                    "[TRACE][EgressFilter.allow] DNS 解析失败 host=%s, "
+                    "has_allow_rules=%s", host, self._has_allow_rules(),
+                )
                 if self._has_allow_rules():
                     return False, f"unresolvable domain {host} with allow-rules present"
                 return self.egress.default != "deny", "unresolvable domain, default"
@@ -123,6 +151,10 @@ class EgressFilter:
         # 3a. blocked_ips 命中 -> 拒绝.
         for ip in ips_to_check:
             if self._ip_in_networks(ip, self._blocked_ips):
+                logger.info(
+                    "[TRACE][EgressFilter.allow] 拒绝: ip blocked ip=%s host=%s",
+                    ip, host,
+                )
                 return False, f"ip {ip} blocked"
 
         # 4. allow 判定.
@@ -146,11 +178,27 @@ class EgressFilter:
             if port_in_allow:
                 reasons.append("port")
             if reasons:
+                logger.debug(
+                    "[TRACE][EgressFilter.allow] 放行: explicitly allowed host=%s port=%d (%s)",
+                    host, port, "+".join(reasons),
+                )
                 return True, f"explicitly allowed ({'+'.join(reasons)})"
+            logger.debug(
+                "[TRACE][EgressFilter.allow] 拒绝: not in any allow rule host=%s port=%d",
+                host, port,
+            )
             return False, f"{host}:{port} not in any allow rule"
 
         if self.egress.default == "deny":
+            logger.info(
+                "[TRACE][EgressFilter.allow] 拒绝: default deny host=%s port=%d",
+                host, port,
+            )
             return False, "default deny (no allow rules)"
+        logger.debug(
+            "[TRACE][EgressFilter.allow] 放行: default allow host=%s port=%d",
+            host, port,
+        )
         return True, "default allow"
 
     def _has_allow_rules(self) -> bool:
@@ -226,11 +274,13 @@ async def handle_http_connect(
 
     first_line 形如 ``b'CONNECT host:port HTTP/1.1'``.
     """
+    logger.debug("[TRACE][handle_http_connect] 进入 CONNECT handler first_line=%r", first_line)
     try:
         try:
             line = first_line.decode("latin-1").strip()
             parts = line.split()
             if len(parts) < 2 or parts[0].upper() != "CONNECT":
+                logger.info("[TRACE][handle_http_connect] 非 CONNECT 请求, 返回 400 line=%s", line)
                 client_writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
                 await client_writer.drain()
                 return
@@ -245,7 +295,12 @@ async def handle_http_connect(
             await client_writer.drain()
             return
 
+        logger.debug("[TRACE][handle_http_connect] CONNECT host=%s port=%d", host, port)
         allowed, reason = egress_filter.allow(host, port)
+        logger.debug(
+            "[TRACE][handle_http_connect] allow() 结果 allowed=%s reason=%s host=%s port=%d",
+            allowed, reason, host, port,
+        )
         if not allowed:
             logger.info("HTTP CONNECT 拒绝 %s:%d (%s)", host, port, reason)
             client_writer.write(
@@ -293,12 +348,13 @@ async def handle_socks5(
     egress_filter: EgressFilter,
 ) -> None:
     """处理 SOCKS5 请求 (RFC 1928)."""
+    logger.debug("[TRACE][handle_socks5] 进入 SOCKS5 handler")
     try:
-        # 握手: 版本 + 方法数 + 方法列表.
         header = await asyncio.wait_for(
             client_reader.readexactly(2), timeout=_HANDSHAKE_TIMEOUT,
         )
         if header[0] != 0x05:  # SOCKS 版本
+            logger.info("[TRACE][handle_socks5] 非 SOCKS5 版本 0x%02x", header[0])
             return
         nmethods = header[1]
         await client_reader.readexactly(nmethods)
@@ -331,7 +387,12 @@ async def handle_socks5(
         port_bytes = await client_reader.readexactly(2)
         port = int.from_bytes(port_bytes, "big")
 
+        logger.debug("[TRACE][handle_socks5] SOCKS5 CONNECT host=%s port=%d", host, port)
         allowed, reason = egress_filter.allow(host, port)
+        logger.debug(
+            "[TRACE][handle_socks5] allow() 结果 allowed=%s reason=%s host=%s port=%d",
+            allowed, reason, host, port,
+        )
         if not allowed:
             logger.info("SOCKS5 拒绝 %s:%d (%s)", host, port, reason)
             client_writer.write(b"\x05\x02\x00\x01\x00\x00\x00\x00\x00\x00")
@@ -365,9 +426,18 @@ async def _handle_client(
     egress_filter: EgressFilter,
 ) -> None:
     """根据首字节判断是 HTTP CONNECT 还是 SOCKS5, 分派到对应 handler."""
+    _peer = "?"
+    try:
+        _peer = client_writer.get_extra_info("peername", "?")
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("[TRACE][win_proxy] 新连接进入 _handle_client peer=%s", _peer)
     try:
         first = await asyncio.wait_for(
             client_reader.readexactly(1), timeout=_HANDSHAKE_TIMEOUT,
+        )
+        logger.info(
+            "[TRACE][win_proxy] 首字节=0x%02x peer=%s", first[0], _peer,
         )
         if first == b"C":  # "CONNECT..." 起头.
             rest = await asyncio.wait_for(
@@ -379,6 +449,10 @@ async def _handle_client(
         elif first == b"\x05":  # SOCKS5 版本字节.
             await handle_socks5(client_reader, client_writer, egress_filter)
         else:
+            logger.info(
+                "[TRACE][win_proxy] 未知协议首字节 0x%02x, 返回 400 peer=%s",
+                first[0], _peer,
+            )
             client_writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
             await client_writer.drain()
     except (asyncio.IncompleteReadError, OSError) as exc:
@@ -437,7 +511,8 @@ async def serve_windows_proxy(  # pylint: disable=huawei-too-many-arguments
     egress_filter = EgressFilter(egress, ingress, disable_all=disable_all)
     # 只绑 port_range_start (60080) 一个端口.
     # HTTP_PROXY 始终指向 port_range_start, 其他端口绑了也没用.
-    # 60081-60089 释放给沙箱内 render server 等本地服务用.
+    # loopback 任意端口由 WFP Permit 放行 (见 win_wfp.install_wfp_filters),
+    # 沙箱内 render server 等本地服务可用任意端口, 不经 win_proxy 审查.
     tasks = [
         asyncio.create_task(
             _serve_port(port_range_start, egress_filter, stop_event),

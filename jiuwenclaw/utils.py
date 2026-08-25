@@ -34,6 +34,7 @@ import json
 import logging
 import mimetypes
 import os
+import queue as _queue
 import re
 import shutil
 import sys
@@ -43,7 +44,7 @@ import contextlib
 from collections import OrderedDict
 from collections.abc import Hashable
 from dataclasses import dataclass, field
-from logging.handlers import BaseRotatingHandler
+from logging.handlers import BaseRotatingHandler, QueueHandler, QueueListener
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, Literal, Optional
@@ -2799,10 +2800,10 @@ def _resolve_output_switches() -> Dict[str, bool]:
                     result['console_enabled'] = console_enabled
         except (FileNotFoundError, yaml.YAMLError, PermissionError) as e:
             # 具体的配置文件相关异常，记录日志后使用默认值
-            logger.debug(f"无法从 config.yaml 加载 console_enabled 配置，使用默认值: {e}")
+            logger.debug("无法从 config.yaml 加载 console_enabled 配置，使用默认值: %s", e)
         except Exception as e:
             # 其他未预期的异常，记录警告日志后使用默认值
-            logger.warning(f"加载 console_enabled 配置时发生未预期错误: {e}，使用默认值")
+            logger.warning("加载 console_enabled 配置时发生未预期错误: %s，使用默认值", e)
 
     # 2. 文件开关（file_enabled）
     env_file = os.getenv("JIUWENCLAW_LOG_FILE_ENABLED")
@@ -2814,8 +2815,9 @@ def _resolve_output_switches() -> Dict[str, bool]:
             result['file_enabled'] = False
         else:
             logger.warning(
-                f"无效的文件开关环境变量: '{env_file}', "
-                f"期望 'true'/'false'（或 '1'/'0'、'yes'/'no'、'on'/'off'），使用默认值 'true'"
+                "无效的文件开关环境变量: '%s', "
+                "期望 'true'/'false'（或 '1'/'0'、'yes'/'no'、'on'/'off'），使用默认值 'true'",
+                env_file,
             )
     else:
         # 从 config.yaml 加载
@@ -2827,12 +2829,18 @@ def _resolve_output_switches() -> Dict[str, bool]:
                     result['file_enabled'] = file_enabled
         except (FileNotFoundError, yaml.YAMLError, PermissionError) as e:
             # 具体的配置文件相关异常，记录日志后使用默认值
-            logger.debug(f"无法从 config.yaml 加载 file_enabled 配置，使用默认值: {e}")
+            logger.debug("无法从 config.yaml 加载 file_enabled 配置，使用默认值: %s", e)
         except Exception as e:
             # 其他未预期的异常，记录警告日志后使用默认值
-            logger.warning(f"加载 file_enabled 配置时发生未预期错误: {e}，使用默认值")
+            logger.warning("加载 file_enabled 配置时发生未预期错误: %s，使用默认值", e)
 
     return result
+
+
+_log_queue: _queue.SimpleQueue | None = None
+_log_listener: QueueListener | None = None
+# respect_handler_level 是 Python 3.12+ 才有的参数，模块级缓存避免每次 setup_logger 重复检查
+_SUPPORTS_RESPECT_HANDLER_LEVEL: bool = sys.version_info >= (3, 12)
 
 
 def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
@@ -2874,6 +2882,17 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     for handler in root.handlers[:]:
         handler.close()
         root.removeHandler(handler)
+
+    # 停止旧的 QueueListener（支持重复调用 setup_logger）
+    global _log_queue, _log_listener
+    if _log_listener is not None:
+        _log_listener.stop()
+        # 关闭 QueueListener 上的目标 handler（文件句柄等），避免 ResourceWarning
+        for _old_h in _log_listener.handlers:
+            _old_h.close()
+        _log_listener = None
+    _log_queue = _queue.SimpleQueue()
+    _listener_targets: list[logging.Handler] = []
 
     # 解析JSON子配置段
     json_config = _resolve_json_config() if log_format in ('json', 'dual') else {}
@@ -2957,7 +2976,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
 
         if name_filter is not None:
             h.addFilter(name_filter)
-        root.addHandler(h)
+        _listener_targets.append(h)
 
     # 根据format配置输出文件策略
     if log_format == 'text':
@@ -3021,7 +3040,22 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         # 控制台也添加 IdentityFieldFilter
         stream_handler.addFilter(IdentityFieldFilter())
         stream_handler.addFilter(privacy_filter)
-        root.addHandler(stream_handler)
+        _listener_targets.append(stream_handler)
+
+    # 用 QueueHandler 包装所有 handler，避免文件 I/O 和 _sanitize_log_text 阻塞事件循环
+    if _listener_targets:
+        _qh = QueueHandler(_log_queue)
+        _qh.setLevel(logging.NOTSET)
+        root.addHandler(_qh)
+        if _SUPPORTS_RESPECT_HANDLER_LEVEL:
+            # Python 3.12+：QueueListener 原生支持级别过滤
+            _log_listener = QueueListener(_log_queue, *_listener_targets, respect_handler_level=True)
+        else:
+            # Python 3.11 fallback：给每个 handler 加 Filter 模拟级别过滤
+            for _h in _listener_targets:
+                _h.addFilter(lambda _r, _h=_h: _r.levelno >= _h.level)
+            _log_listener = QueueListener(_log_queue, *_listener_targets)
+        _log_listener.start()
 
     try:
         from jiuwenclaw.interface_resp import ensure_interface_logger

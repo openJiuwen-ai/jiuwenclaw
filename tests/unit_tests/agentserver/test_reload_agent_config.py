@@ -979,9 +979,15 @@ async def test_reload_yaml_sandbox_invalid_enabled_raises():
     adapter = _DeepAdapterReloadHarness.build(working=False)
     adapter.configure_for_force_apply_test()
 
+    # reload_agent_config 从 get_config() 而非 config_base 参数读 sandbox
+    # (避免 agent_manager 重放旧 _latest_config_base 覆盖前台 RPC sandbox 值),
+    # 故非法 enabled 必须放进 get_config 返回值才能触达 _sandbox_yaml_to_env_overlay 校验.
     with patch(
         "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
-        return_value={"react": {"agent_name": "a"}},
+        return_value={
+            "react": {"agent_name": "a"},
+            "sandbox": {"enabled": "maybe"},
+        },
     ), patch(
         "jiuwenclaw.agentserver.deep_agent.interface_deep.memory_cache_fingerprint",
         return_value="mfp",
@@ -1754,7 +1760,9 @@ async def test_reload_finishes_post_configure_work_after_unregister_failures():
     adapter._apply_model_to_react_agent.assert_called_once_with(adapter._model)
     adapter._refresh_fork_agent_executor_model.assert_called_once_with()
     adapter._maybe_recreate_sys_operation.assert_called_once_with()
-    adapter._handle_memory_rail_by_config.assert_awaited_once_with("agent.plan")
+    adapter._handle_memory_rail_by_config.assert_awaited_once_with(
+        "agent.plan", {"react": {"agent_name": "a"}, "models": {"default": {}}}
+    )
     adapter._handle_external_memory_rail_by_config.assert_awaited_once()
     adapter._apply_registered_skill_dirs_to_runtime_rails.assert_called_once_with()
     assert adapter._memory_engine_snapshot == "builtin"

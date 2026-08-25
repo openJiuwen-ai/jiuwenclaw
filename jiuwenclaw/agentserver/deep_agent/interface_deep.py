@@ -1772,6 +1772,10 @@ class JiuWenClawDeepAdapter:
 
             research_agent_cfg = subagents_cfg.get("research_agent")
             if self._is_subagent_enabled(research_agent_cfg):
+                from jiuwenclaw.agentserver.tools.web_search.content_cache import (
+                    get_agent_cache_registry,
+                )
+
                 subagents.append(
                     build_research_agent_config(
                         model,
@@ -1784,6 +1788,9 @@ class JiuWenClawDeepAdapter:
                         tools=build_jiuwen_harness_named_web_tools(
                             agent_id="research_agent",
                             language=resolved_language,
+                            cache=get_agent_cache_registry().get_cache_sync(
+                                "research_agent",
+                            ),
                         ),
                     )
                 )
@@ -1983,7 +1990,7 @@ class JiuWenClawDeepAdapter:
         已配置 key 且 ``_audio_model_config`` 完整时注册全部 harness 音频工具；否则仅保留
         ``audio_metadata``（ACRCloud，仍依赖 ``ACR_*`` 环境变量在运行时识别曲库）。
         """
-        config_base = get_config()
+        config_base = self._latest_config_base if isinstance(self._latest_config_base, dict) else get_config()
         sid, aid = self._env_ns_ids()
         if not dedicated_multimodal_model_configured(
             config_base,
@@ -2673,6 +2680,105 @@ class JiuWenClawDeepAdapter:
             if self._is_placeholder_model_name(str(applied_name or "")):
                 applied_name = self._resolve_evolution_model_name()
             self._skill_evolution_rail.update_llm(model, str(applied_name))
+
+    def _sync_sysop_to_react_agent(self) -> None:
+        """把重建后的 sys_operation 同步到同 session 已活着的 ReActAgent。
+
+        调用时机: reload_agent_config 里 self._instance.configure(deep_cfg)
+        之后, 且 self._sys_operation 已被 _maybe_recreate_sys_operation 重建.
+        """
+        react_agent = getattr(self._instance, '_react_agent', None)
+        if react_agent is None:
+            return
+        new_sysop = getattr(self, '_sys_operation', None)
+        if new_sysop is None:
+            return
+        new_id = getattr(new_sysop, 'id', None)
+        if not new_id:
+            return
+        cur_config = getattr(react_agent, '_config', None)
+        if cur_config is None:
+            return
+        old_id = getattr(cur_config, 'sys_operation_id', None)
+        if old_id == new_id:
+            return
+        # model_copy() 拿一份独立副本, 避免直接改 _config 影响其他引用;
+        # 调 configure() 让 ReActAgent 按 sys_operation_id 变化重建 context_engine.
+        try:
+            new_config = cur_config.model_copy()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenClawDeepAdapter] sync sysop to react_agent: "
+                "model_copy failed: %s", exc,
+            )
+            return
+        new_config.sys_operation_id = new_id
+        try:
+            react_agent.configure(new_config)
+            logger.info(
+                "[JiuWenClawDeepAdapter] react_agent sysop synced on reload: "
+                "old_id=%s new_id=%s",
+                old_id, new_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenClawDeepAdapter] sync sysop to react_agent: "
+                "configure failed: %s", exc,
+            )
+        # BashTool/ReadFileTool/CodeTool 等在构造时把 sysop 存到 self._operation,
+        # 之后永不更新. _hot_reconfigure -> _hot_reload_tools 按 card.id 匹配,
+        # id 相同就跳过, ability_manager 里的工具实例仍持有旧 SANDBOX sysop.
+        # 必须遍历 DeepAgent 已注册的 rails, 更新其 sys_operation 并 uninit+init
+        # 重建工具实例, 否则同 session 继续 chat 时 BashTool 仍走旧沙箱 sysop.
+        self._reinit_rail_tools_with_new_sysop(new_sysop)
+
+    def _reinit_rail_tools_with_new_sysop(self, new_sysop: Any) -> None:
+        """重建已注册 rail 持有的工具实例, 确保 sysop为最新.
+
+        仅处理持有 sys_operation 且在 init() 里构造工具的 rail
+        (FileSystemRail / SysOperationRail 等). 对这类 rail:
+        1. set_sys_operation(new_sysop) 更新 rail.sys_operation
+        2. uninit(agent) 从 ability_manager / resource_mgr 清理旧工具
+        3. init(agent) 用新 sysop 重新构造并注册工具
+
+        其余 rail (SkillUseRail / MemoryRail 等) 不在此处理, 避免误清.
+        """
+        deep_agent = self._instance
+        if deep_agent is None:
+            return
+        react_agent = getattr(deep_agent, '_react_agent', None)
+        if react_agent is None:
+            return
+        registered_rails = getattr(deep_agent, '_registered_rails', None) or []
+        reinit_targets: list[Any] = []
+        for rail in registered_rails:
+            # 只重建明确持有 sys_operation 的 fs/shell/code 工具 rail.
+            # 用类名匹配, 兼容 SysOperationRail / FileSystemRail 等.
+            cls_name = type(rail).__name__
+            if cls_name in ("FileSystemRail", "SysOperationRail"):
+                reinit_targets.append(rail)
+        if not reinit_targets:
+            return
+        for rail in reinit_targets:
+            try:
+                set_sysop = getattr(rail, 'set_sys_operation', None)
+                if callable(set_sysop):
+                    set_sysop(new_sysop)
+                uninit = getattr(rail, 'uninit', None)
+                if callable(uninit):
+                    uninit(react_agent)
+                init = getattr(rail, 'init', None)
+                if callable(init):
+                    init(react_agent)
+                logger.info(
+                    "[JiuWenClawDeepAdapter] rail %s re-init with new sysop id=%s",
+                    type(rail).__name__, getattr(new_sysop, 'id', None),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] rail %s re-init failed: %s",
+                    type(rail).__name__, exc,
+                )
 
     @staticmethod
     def _resolve_skill_mode(config: dict[str, Any]) -> str:
@@ -4035,9 +4141,15 @@ class JiuWenClawDeepAdapter:
         """Get tool cards with session-qualified resource_mgr registration."""
         tool_cards = []
 
+        from jiuwenclaw.agentserver.tools.web_search.content_cache import (
+            get_agent_cache_registry,
+        )
+
+        content_cache = await get_agent_cache_registry().get_cache(agent_card_id)
         web_tools = build_jiuwen_harness_named_web_tools(
             agent_id=agent_card_id,
             language=self._resolve_runtime_language(),
+            cache=content_cache,
         )
         self._register_runtime_tools(list(web_tools), agent_card_id)
         tool_cards.extend(t.card for t in web_tools)
@@ -4801,9 +4913,12 @@ class JiuWenClawDeepAdapter:
 
             # 把 config_base['sandbox'] 的 url/type/enabled 翻译为 env overlay key,
             # 让 _create_sys_operation 经 get_sandbox_endpoint/get_sandbox_runtime 读到。
+            # 注意: 始终从 get_config() 读取 sandbox 配置, 而非 config_base 参数,
+            # 避免 agent_manager 重放时传入旧 _latest_config_base 覆盖前台 RPC 设置的 sandbox 值。
+            current_config = get_config()
             sandbox_yaml = (
-                config_base.get("sandbox") or {}
-                if isinstance(config_base, dict) else {}
+                current_config.get("sandbox") or {}
+                if isinstance(current_config, dict) else {}
             )
             sandbox_overlay = _sandbox_yaml_to_env_overlay(sandbox_yaml)
             if sandbox_overlay:
@@ -4901,6 +5016,10 @@ class JiuWenClawDeepAdapter:
                 card for card in (self._tool_cards or [])
                 if card.name not in disabled_names
             ]
+
+            # sandbox 配置可能随 reload 变更；按指纹重建 _sys_operation 让新 url/type/enabled 生效。
+            self._maybe_recreate_sys_operation()
+
             deep_cfg = self._make_deep_agent_config(
                 model=model,
                 config=config,
@@ -4908,8 +5027,6 @@ class JiuWenClawDeepAdapter:
                 tool_cards=filtered_tool_cards,
                 rails=rails_list,
             )
-
-            #  诊断日志：观察 Agent.configure() 收到的 rails_list
             logger.info(
                 "[JiuWenClawDeepAdapter]  DIAGNOSTIC: 准备调用 Agent.configure() "
                 "| rails_count=%d "
@@ -4920,6 +5037,9 @@ class JiuWenClawDeepAdapter:
             )
 
             self._instance.configure(deep_cfg)
+            # DeepAgent.configure() 走 _hot_reconfigure, 需要手工同步, 否则同 session 继续 chat 时
+            # ReActAgent 仍持有旧 sysop id (已被 remove), 表现为无权限.
+            self._sync_sysop_to_react_agent()
             if self._last_runtime_mode == "code":
                 await self._reload_code_mode_memory_rails(config_base)
             rail_cache_attrs = (
@@ -4955,10 +5075,6 @@ class JiuWenClawDeepAdapter:
             self._apply_model_to_react_agent(self._model)
             self._refresh_fork_agent_executor_model()
 
-            # sandbox 配置可能随 reload 变更；按指纹重建 _sys_operation 让新 url/type/enabled 生效。
-            # 必须在 overlay_token 释放前调用，否则 get_sandbox_endpoint 读不到 env overlay。
-            self._maybe_recreate_sys_operation()
-
             reload_mode = self._last_runtime_mode or "agent.plan"
             engine_changed = (
                 self._memory_engine_snapshot is not None
@@ -4974,7 +5090,7 @@ class JiuWenClawDeepAdapter:
                     )
                 self._memory_rail = None
 
-            await self._handle_memory_rail_by_config(reload_mode)
+            await self._handle_memory_rail_by_config(reload_mode, config_base)
             await self._handle_external_memory_rail_by_config(config_base)
             self._apply_registered_skill_dirs_to_runtime_rails()
             self._memory_engine_snapshot = get_memory_engine(config_base)
@@ -5912,7 +6028,8 @@ class JiuWenClawDeepAdapter:
         # 2. 记忆完全禁用（enable_memory=False + group_digital_avatar=True + avatar_mode=True）：移除所有记忆工具（读取和写入）
         _all_memory_tools = ("write_memory", "edit_memory", "read_memory", "memory_search",
                              "memory_get", "memory_index")
-        if not is_builtin_memory_allowed(get_config()):
+        _cfg = self._latest_config_base if isinstance(self._latest_config_base, dict) else get_config()
+        if not is_builtin_memory_allowed(_cfg):
             for tool_name in _all_memory_tools:
                 try:
                     self._instance.ability_manager.remove(tool_name)
@@ -5955,9 +6072,10 @@ class JiuWenClawDeepAdapter:
                         pass
             # 非群聊数字分身且记忆启用时，恢复写入工具
             else:
-                if is_builtin_memory_allowed(get_config()):
+                _cfg2 = self._latest_config_base if isinstance(self._latest_config_base, dict) else get_config()
+                if is_builtin_memory_allowed(_cfg2):
                     try:
-                        _mem_mode = get_memory_mode(get_config())
+                        _mem_mode = get_memory_mode(_cfg2)
                         if _mem_mode == "wiki":
                             for tool in get_decorated_tools():
                                 name = getattr(getattr(tool, "card", None), "name", "")
@@ -7618,45 +7736,9 @@ class JiuWenClawDeepAdapter:
         return result
 
     @staticmethod
-    def _format_allowed_skill_dirs(skill_dirs: list[Path], *, limit: int = 5) -> str:
-        """Format registered skill dirs for error messages (truncate when long)."""
-        rendered = [str(d) for d in skill_dirs]
-        if len(rendered) <= limit:
-            return " | ".join(rendered)
-        head = " | ".join(rendered[:limit])
-        return f"{head} | ...(+{len(rendered) - limit})"
-
-    def _validate_rebuild_skill_path(self, skill_path: str) -> str:
-        """Ensure RPC skill_path resolves under a registered skills directory."""
-        resolved = Path(skill_path).expanduser().resolve()
-        # Union adapter snapshot with live resolve (session-bound / shared env).
-        # Disk-only rollback may bind the control-plane skill root for one request
-        # while a warm agent still holds a stale workspace-only snapshot.
-        skill_dirs: list[Path] = []
-        seen: set[str] = set()
-        for raw in (
-            *self._registered_skill_dirs_for_rail(),
-            *(str(p) for p in resolve_agent_registered_skill_dirs()),
-        ):
-            path = Path(raw).expanduser().resolve()
-            key = str(path)
-            if key in seen:
-                continue
-            seen.add(key)
-            skill_dirs.append(path)
-        resolve_path = str(resolved)
-        if not skill_dirs:
-            raise ValueError(
-                "技能路径不在允许目录内（未注册任何技能目录）"
-                f"resolve_path={resolve_path}"
-            )
-        if not any(resolved == d or resolved.is_relative_to(d) for d in skill_dirs):
-            allowed_path = self._format_allowed_skill_dirs(skill_dirs)
-            raise ValueError(
-                "技能路径不在允许目录内。"
-                f"resolve_path={resolve_path}；allowed_path={allowed_path}"
-            )
-        return resolve_path
+    def _validate_rebuild_skill_path(skill_path: str) -> str:
+        """Normalize RPC skill_path to an absolute resolved path."""
+        return str(Path(skill_path).expanduser().resolve())
 
     async def handle_skills_evolution_rebuild(self, params: dict) -> dict[str, Any]:
         """RPC: skills.evolution.rebuild — generate a merged evolution version."""
@@ -10985,8 +11067,8 @@ class JiuWenClawDeepAdapter:
                 "iterate decorated tools failed: %s", exc,
             )
 
-    async def _handle_memory_rail_by_config(self, mode: str):
-        config = get_config()
+    async def _handle_memory_rail_by_config(self, mode: str, config_base: dict[str, Any] | None = None):
+        config = config_base if isinstance(config_base, dict) else get_config()
         memory_mode = get_memory_mode(config)
 
         if memory_mode == "wiki":

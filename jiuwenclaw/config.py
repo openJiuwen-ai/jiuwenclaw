@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Any, Optional
 from ruamel.yaml import YAML
 import yaml
-from jiuwenclaw.local_env_config import get_bound_agent_env_ns, get_local_config, is_task_env_overlay_bound
+from jiuwenclaw.local_env_config import (
+    get_bound_agent_env_ns,
+    get_local_config,
+    get_task_env_overlay,
+    is_task_env_overlay_bound,
+)
 
 
 from jiuwenclaw.utils import (
@@ -68,7 +73,7 @@ def get_merged_config_dict() -> dict[str, Any]:
 # ``None`` key = unbound ContextVar (typically default tip / process-shared reads).
 # Expired by TTL or ``clear_config_cache()``. Tip mutations clear the affected slot.
 _ConfigNsKey = tuple[str, str] | None
-_resolved_config_by_ns: dict[_ConfigNsKey, tuple[float, dict[str, Any]]] = {}
+_resolved_config_by_ns: dict[Any, tuple[float, dict[str, Any], int]] = {}
 _CONFIG_CACHE_TTL_SECONDS: float = 20.0
 _config_lock = threading.Lock()
 _config_version: int = 0
@@ -81,11 +86,15 @@ def get_config():
     ``bind_agent_env_ns``) with a TTL of ``_CONFIG_CACHE_TTL_SECONDS``
     (default 20s). Unbound callers share a separate ``None`` slot.
 
-    When a task env overlay is bound (seal), the cache is bypassed so the
-    overlay is always reflected.
-
+    When a task env overlay is bound, the cache key includes a content
+    hash of the overlay dict so that different overlay env vars get
+    different cache entries while the same overlay content reuses the
+    cached result. This avoids the id() reuse problem where a GC'd
+    overlay's memory address is reused by a new overlay with different
+    env vars, which would cause a stale-config cache hit.
     The cache is invalidated by ``clear_config_cache()`` (config reload /
-    set_config / yaml write, and tip mutations for the affected ns).
+    set_config / yaml write, and tip mutations for the affected ns)
+    via a ``_config_version`` check.
 
     **WARNING**: The returned dict is a shared reference. Callers MUST NOT
     mutate it (including nested dicts/lists), as changes will affect all
@@ -94,26 +103,44 @@ def get_config():
     """
     global _config_version
     ns: _ConfigNsKey = get_bound_agent_env_ns()
-    skip_cache = is_task_env_overlay_bound()
+    overlay = get_task_env_overlay()
     now = time.monotonic()
 
-    if not skip_cache:
-        with _config_lock:
-            entry = _resolved_config_by_ns.get(ns)
-            if entry is not None and (now - entry[0]) < _CONFIG_CACHE_TTL_SECONDS:
-                return entry[1]
-            read_version = _config_version
+    # Cache key: ns for no-overlay, (ns, content_hash) for overlay-bound.
+    # Content hash avoids id() reuse collision when overlay dict is GC'd.
+    if overlay is None:
+        cache_key = ns
     else:
-        read_version = -1
+        cache_key = (ns, hash(tuple(sorted(
+            (str(k), str(v)) for k, v in overlay.items()
+        ))))
 
-    # Slow path: cache miss / expired / overlay seal (lock released during I/O)
+    with _config_lock:
+        entry = _resolved_config_by_ns.get(cache_key)
+        if entry is not None:
+            entry_time, entry_config, entry_version = entry
+            if (now - entry_time) < _CONFIG_CACHE_TTL_SECONDS and entry_version == _config_version:
+                return entry_config
+            # 过期或 version 不匹配：删除条目，防止 overlay 条目无限累积
+            del _resolved_config_by_ns[cache_key]
+        read_version = _config_version
+
+    # Slow path: cache miss / expired / version mismatch (lock released during I/O)
     config_base = get_merged_config_dict()
     new_cache = resolve_env_vars(config_base)
 
-    if not skip_cache:
-        with _config_lock:
-            if _config_version == read_version:
-                _resolved_config_by_ns[ns] = (time.monotonic(), new_cache)
+    with _config_lock:
+        if _config_version == read_version:
+            _resolved_config_by_ns[cache_key] = (time.monotonic(), new_cache, _config_version)
+            # 惰性 GC：仅当条目数超过阈值时清理，避免高并发下每次 miss 都 O(n) 持锁
+            if len(_resolved_config_by_ns) > 50:
+                _cleanup_now = time.monotonic()
+                _expired_keys = [
+                    k for k, (t, _, v) in _resolved_config_by_ns.items()
+                    if (_cleanup_now - t) >= _CONFIG_CACHE_TTL_SECONDS or v != _config_version
+                ]
+                for k in _expired_keys:
+                    del _resolved_config_by_ns[k]
 
     return new_cache
 
@@ -127,6 +154,7 @@ def clear_config_cache(
     With no args: clear all ns slots (yaml write / full reload).
     With ``service_id`` / ``agent_id``: clear that slot only (tip mutation).
     Clearing ``default``/``default`` also clears the unbound (``None``) slot.
+    Also clears overlay-keyed entries for the affected ns.
     """
     global _config_version
     with _config_lock:
@@ -138,9 +166,23 @@ def clear_config_cache(
 
         sid = normalize_env_ns_id(service_id, default="default")
         aid = normalize_env_ns_id(agent_id, default="default")
-        _resolved_config_by_ns.pop((sid, aid), None)
+        ns_key = (sid, aid)
+        # Clear ns key and any overlay keys (ns_key, overlay_id)
+        _resolved_config_by_ns.pop(ns_key, None)
+        keys_to_remove = [
+            k for k in _resolved_config_by_ns
+            if isinstance(k, tuple) and len(k) == 2 and k[0] == ns_key
+        ]
+        for k in keys_to_remove:
+            _resolved_config_by_ns.pop(k, None)
         if sid == "default" and aid == "default":
             _resolved_config_by_ns.pop(None, None)
+            keys_to_remove = [
+                k for k in _resolved_config_by_ns
+                if isinstance(k, tuple) and len(k) == 2 and k[0] is None
+            ]
+            for k in keys_to_remove:
+                _resolved_config_by_ns.pop(k, None)
 
 
 def get_config_raw():
@@ -2231,6 +2273,31 @@ def upsert_subagent_in_config(name: str, enabled: bool = True) -> None:
     if target not in subagents or not isinstance(subagents[target], dict):
         subagents[target] = {}
     subagents[target]["enabled"] = bool(enabled)
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+
+
+def batch_upsert_subagents_in_config(
+    names: list[str], *, enabled: bool = True
+) -> None:
+    """批量在 react.subagents 中添加或更新多个 agent 的启用状态。
+
+    与 upsert_subagent_in_config 语义相同，但只做一次 load + dump，
+    避免 N 次 round-trip 阻塞事件循环。
+    """
+    targets = [str(n or "").strip() for n in names if str(n or "").strip()]
+    if not targets:
+        return
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "react" not in data or not isinstance(data["react"], dict):
+        data["react"] = {}
+    react = data["react"]
+    if "subagents" not in react or not isinstance(react["subagents"], dict):
+        react["subagents"] = {}
+    subagents = react["subagents"]
+    for target in targets:
+        if target not in subagents or not isinstance(subagents[target], dict):
+            subagents[target] = {}
+        subagents[target]["enabled"] = bool(enabled)
     _dump_yaml_round_trip(_current_config_yaml_path(), data)
 
 
