@@ -88,6 +88,17 @@ class UploadForm(BaseModel):
     agent_type: str | None = None
 
 
+class MkdirQuery(BaseModel):
+    """Query bundle for ``POST /file-api/mkdir``."""
+
+    path: str = ""
+    session_id: str = ""
+    user_id: str | None = None
+    agent_type: str | None = None
+    mode: str | None = None
+    recursive: bool = False
+
+
 def _status_for_transfer_code(code: str) -> int:
     normalized = str(code or "").strip().upper()
     if normalized in {
@@ -733,6 +744,48 @@ def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
             return _error_json(error=str(exc), code="INTERNAL_ERROR", status_code=500)
         return JSONResponse({"ok": True})
 
+    @app.post(f"{prefix}/mkdir")
+    async def mkdir_dir(
+        request: Request,
+        params: Annotated[MkdirQuery, Query()],
+    ) -> JSONResponse:
+        uid = _resolve_user_id(request, params.user_id)
+        if not uid:
+            return _error_json(error="user_id is required", code="BAD_REQUEST", status_code=400)
+        path = str(params.path or "").strip()
+        if not path:
+            return _error_json(error="missing_path", code="BAD_REQUEST", status_code=400)
+
+        sid = str(params.session_id or "").strip()
+        _bind_file_api_session(request, sid)
+        agent_type = params.agent_type if isinstance(params.agent_type, str) else None
+        mode = str(params.mode).strip() if params.mode is not None else None
+        try:
+            result = await client.mkdir_container_dir(
+                user_id=uid,
+                path=path,
+                mode=mode or None,
+                recursive=bool(params.recursive),
+                agent_type=agent_type,
+                session_id=sid,
+                auth_headers=_auth_headers_from_request(request),
+            )
+        except AgentOSFileTransferError as exc:
+            return _error_json(error=str(exc), code=exc.code)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[file-api/mkdir] failed: %s", exc)
+            return _error_json(error=str(exc), code="INTERNAL_ERROR", status_code=500)
+        created = result.get("created")
+        if created is None:
+            created = True
+        return JSONResponse(
+            {
+                "success": True,
+                "path": str(result.get("path") or path),
+                "created": bool(created),
+            }
+        )
+
     logger.info(
-        "WebChannel /file-api enabled: upload, raw-file, file-content, list-files, list-markdown",
+        "WebChannel /file-api enabled: upload, raw-file, file-content, list-files, list-markdown, mkdir",
     )
