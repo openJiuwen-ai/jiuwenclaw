@@ -1756,11 +1756,6 @@ overflow: hidden;
   height: 18px;
 }
 
-.chat-mode-select__icon.chat-mode-select__icon--agent-picker svg {
-  width: 14px;
-  height: 16px;
-}
-
 .chat-mode-select__label {
   overflow: hidden;
   text-overflow: ellipsis;

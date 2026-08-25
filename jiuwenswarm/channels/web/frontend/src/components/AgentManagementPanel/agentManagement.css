@@ -1781,7 +1781,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  border-bottom: 1px solid var(--color-border-strong);
+  border-bottom: 0;
   padding: 16px 24px;
 }
 
@@ -2069,7 +2069,8 @@
   color: var(--color-text-secondary);
   padding: 2px 0;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 16px;
 }
 
 .agent-management-inline-action:hover {

@@ -63,7 +63,7 @@ import {
 } from '../../features/workspace/localFilePicker';
 import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
-import AgentPickerIcon from '../../assets/agent-picker.svg?react';
+import AgentPickerIcon from '../../assets/智能体.svg?react';
 
 const MENU_GAP = 10;
 
@@ -731,6 +731,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isAgentMode = mode === 'agent';
   const isTeamMode = mode === 'team';
   const isAutoHarnessMode = mode === 'auto_harness';
+
+  useEffect(() => {
+    if (!isTeamMode) return;
+    setAgentPickerOpen(false);
+    setAgentPickerQuery('');
+    setAgentTooltip(null);
+  }, [isTeamMode]);
+
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
   const persistSessionEnabled = activeSessionId === NEW_CONVERSATION_ID
@@ -2787,6 +2795,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                   </span>
                 </button>
+                {!isTeamMode && <>
                 <button
                   type="button"
                   className="chat-mode-select__option chat-agent-picker-trigger"
@@ -2796,7 +2805,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   onClick={() => setAgentPickerOpen((open) => !open)}
                 >
                     <span className="chat-mode-select__option-main">
-                      <span className="chat-mode-select__icon chat-mode-select__icon--agent-picker" aria-hidden="true">
+                      <span className="chat-mode-select__icon" aria-hidden="true">
                       <AgentPickerIcon aria-hidden="true" />
                       </span>
                     <span className="chat-mode-select__label">{t('chat.agent')}</span>
@@ -2911,6 +2920,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     {agentTooltip.description}
                   </div>
                 ) : null}
+                </>}
                 {canUseGoalMenu && (
                   <button
                     type="button"
