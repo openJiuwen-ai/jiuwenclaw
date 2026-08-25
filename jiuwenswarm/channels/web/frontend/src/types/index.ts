@@ -16,8 +16,6 @@ export interface Session {
   title: string;
   project_id: string;
   project_dir: string;
-  /** Session 创建时锁定；true 表示启用 Persist Session，创建后不可修改。 */
-  persist_session?: boolean;
   work_mode?: import('../features/workspace/projectTypes').WorkMode;
   pinned?: boolean;
   pin_order?: number;

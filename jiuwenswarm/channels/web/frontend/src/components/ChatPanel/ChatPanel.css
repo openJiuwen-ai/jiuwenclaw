@@ -1459,10 +1459,6 @@ overflow: hidden;
   padding-right: 28px;
 }
 
-.chat-goal-tag--locked:hover .chat-mode-select__trigger {
-  padding-right: 12px;
-}
-
 .chat-goal-tag__close {
   position: absolute;
   right: 8px;

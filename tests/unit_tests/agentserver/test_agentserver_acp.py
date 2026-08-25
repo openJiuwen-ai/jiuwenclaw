@@ -801,74 +801,12 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
-                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
             "ok": True,
         }
     ]
-
-
-@pytest.mark.asyncio
-async def test_handle_session_create_locks_persist_session(monkeypatch, tmp_path):
-    server = AgentWebSocketServerHarness()
-    fake_manager = FakeAgentManager(session_id="persist_session_001")
-    server.set_agent_manager_for_test(fake_manager)
-    fake_ws = FakeWebSocket()
-    sessions_root = tmp_path / "sessions"
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        fake_encode_agent_response_for_wire,
-    )
-    patch_session_roots(monkeypatch, sessions_root)
-    request = AgentRequest(
-        request_id="create-persist-session",
-        channel_id="web",
-        req_method=ReqMethod.SESSION_CREATE,
-        params={"create_token": "persist-token", "persist_session": True},
-    )
-
-    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
-
-    assert fake_manager.claim_session_calls[0]["persist_session"] is True
-    assert fake_ws.sent[0]["payload"]["persist_session"] is True
-    metadata = json.loads(
-        (sessions_root / "persist_session_001" / "metadata.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert metadata["persist_session"] is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("invalid_value", [1, "true", None, {}])
-async def test_handle_session_create_requires_boolean_persist_session(
-    monkeypatch, tmp_path, invalid_value
-):
-    server = AgentWebSocketServerHarness()
-    fake_manager = FakeAgentManager(session_id="must-not-create")
-    server.set_agent_manager_for_test(fake_manager)
-    fake_ws = FakeWebSocket()
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        fake_encode_agent_response_for_wire,
-    )
-    patch_session_roots(monkeypatch, tmp_path / "sessions")
-    request = AgentRequest(
-        request_id="create-invalid-persist",
-        channel_id="web",
-        req_method=ReqMethod.SESSION_CREATE,
-        params={"create_token": "invalid-token", "persist_session": invalid_value},
-    )
-
-    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
-
-    assert fake_manager.claim_session_calls == []
-    assert fake_ws.sent[0]["ok"] is False
-    assert fake_ws.sent[0]["payload"]["error"] == "persist_session must be a boolean"
 
 
 @pytest.mark.asyncio
@@ -1021,42 +959,6 @@ async def test_handle_tui_explicit_session_create_is_idempotent_and_bypasses_pre
         assert response["ok"] is True
         assert response["payload"]["session_id"] == "tui_external_idempotent"
         assert response["payload"]["prewarm_status"] == "bypassed"
-
-
-@pytest.mark.asyncio
-async def test_handle_tui_existing_session_rejects_persist_session_change(
-    monkeypatch, tmp_path
-):
-    server = AgentWebSocketServerHarness()
-    fake_manager = FakeAgentManager(session_id="must-not-be-used")
-    server.set_agent_manager_for_test(fake_manager)
-    sessions_root = tmp_path / "sessions"
-    patch_session_roots(monkeypatch, sessions_root)
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        fake_encode_agent_response_for_wire,
-    )
-    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
-
-    init_session_metadata(
-        session_id="tui_persist_locked",
-        channel_id="tui",
-        persist_session=True,
-    )
-    fake_ws = FakeWebSocket()
-    request = AgentRequest(
-        request_id="register-persist-mismatch",
-        channel_id="tui",
-        req_method=ReqMethod.SESSION_CREATE,
-        params={"session_id": "tui_persist_locked", "persist_session": False},
-    )
-
-    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
-
-    assert fake_ws.sent[0]["ok"] is False
-    assert fake_ws.sent[0]["payload"]["code"] == "CONFLICT"
-    assert fake_manager.claim_session_calls == []
 
 
 @pytest.mark.asyncio
@@ -1317,7 +1219,6 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
                 "projectId": "proj_code",
                 "projectDir": code_project.project_dir,
                 "workMode": "code",
-                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
@@ -1385,7 +1286,6 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
-                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
@@ -1455,7 +1355,6 @@ async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_p
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
-                "persist_session": False,
                 "prewarm_hit": False,
                 "prewarm_status": "bypassed",
             },

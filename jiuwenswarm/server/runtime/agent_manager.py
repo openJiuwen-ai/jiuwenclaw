@@ -647,7 +647,6 @@ class AgentManager:
         project_dir: str | None,
         work_mode: str,
         is_swarm: bool,
-        persist_session: bool = False,
         prewarm_eligible: bool = True,
         create_token: str | None = None,
     ):
@@ -659,10 +658,7 @@ class AgentManager:
             work_mode=work_mode,
             is_swarm=is_swarm,
         )
-        # persist_session 不属于 WarmKey：同一预热 Agent 可服务开启或关闭的
-        # Session，避免为布尔开关复制预热槽。但它属于 session.create 的幂等
-        # 身份，同一 create_token 不允许用不同值重试。
-        create_signature = (key, bool(prewarm_eligible), bool(persist_session))
+        create_signature = (key, bool(prewarm_eligible))
         token_key = (key.channel_id, token)
         async with self._session_create_token_lock:
             if token:
