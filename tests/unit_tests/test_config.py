@@ -304,6 +304,43 @@ class TestGetConfigNsCache:
             reset_agent_env_ns(tok)
 
     @staticmethod
+    def test_tip_mutation_keeps_other_namespace_cache_hot(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """A targeted clear must not evict unrelated tenant/agent cache entries."""
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text(
+            "react:\n  model_client_config:\n    api_key: ${API_KEY}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenclaw.utils.get_config_file", lambda: cfg_path)
+        monkeypatch.setattr("jiuwenclaw.config.get_config_file", lambda: cfg_path)
+        monkeypatch.setattr(
+            "jiuwenclaw.config.resolve_template_config_path", lambda: cfg_path
+        )
+        clear_config_cache()
+        apply_env_overrides_to_active(
+            {"API_KEY": "office"}, service_id="default", agent_id="office"
+        )
+        apply_env_overrides_to_active(
+            {"API_KEY": "assistant"}, service_id="default", agent_id="assistant"
+        )
+
+        office_token = bind_agent_env_ns("default", "office")
+        try:
+            assert get_config()["react"]["model_client_config"]["api_key"] == "office"
+        finally:
+            reset_agent_env_ns(office_token)
+
+        assistant_token = bind_agent_env_ns("default", "assistant")
+        try:
+            assistant_before = get_config()
+            clear_config_cache("default", "office")
+            assert get_config() is assistant_before
+        finally:
+            reset_agent_env_ns(assistant_token)
+
+    @staticmethod
     def test_overlay_bypasses_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         cfg_path = tmp_path / "config.yaml"
         cfg_path.write_text(

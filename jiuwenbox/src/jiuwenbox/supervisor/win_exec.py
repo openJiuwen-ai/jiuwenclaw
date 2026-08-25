@@ -1619,9 +1619,9 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
                         break
                     if not chunk:
                         break
-                    out_buf.extend(chunk)
-                    if len(out_buf) > MAX_STDOUT_BYTES:
-                        out_buf = out_buf[:MAX_STDOUT_BYTES]
+                    remaining = max(0, MAX_STDOUT_BYTES - len(out_buf))
+                    if remaining:
+                        out_buf.extend(chunk[:remaining])
             except Exception as exc:  # noqa: BLE001
                 _drain_exc.append(exc)
 

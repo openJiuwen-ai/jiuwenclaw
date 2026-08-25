@@ -431,12 +431,12 @@ async def _handle_client(
         _peer = client_writer.get_extra_info("peername", "?")
     except Exception:  # noqa: BLE001
         pass
-    logger.info("[TRACE][win_proxy] 新连接进入 _handle_client peer=%s", _peer)
+    logger.debug("[TRACE][win_proxy] 新连接进入 _handle_client peer=%s", _peer)
     try:
         first = await asyncio.wait_for(
             client_reader.readexactly(1), timeout=_HANDSHAKE_TIMEOUT,
         )
-        logger.info(
+        logger.debug(
             "[TRACE][win_proxy] 首字节=0x%02x peer=%s", first[0], _peer,
         )
         if first == b"C":  # "CONNECT..." 起头.
@@ -449,7 +449,7 @@ async def _handle_client(
         elif first == b"\x05":  # SOCKS5 版本字节.
             await handle_socks5(client_reader, client_writer, egress_filter)
         else:
-            logger.info(
+            logger.debug(
                 "[TRACE][win_proxy] 未知协议首字节 0x%02x, 返回 400 peer=%s",
                 first[0], _peer,
             )

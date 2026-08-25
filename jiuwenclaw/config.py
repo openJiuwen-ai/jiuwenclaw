@@ -73,10 +73,13 @@ def get_merged_config_dict() -> dict[str, Any]:
 # ``None`` key = unbound ContextVar (typically default tip / process-shared reads).
 # Expired by TTL or ``clear_config_cache()``. Tip mutations clear the affected slot.
 _ConfigNsKey = tuple[str, str] | None
-_resolved_config_by_ns: dict[Any, tuple[float, dict[str, Any], int]] = {}
+_resolved_config_by_ns: dict[Any, tuple[float, dict[str, Any], int, int]] = {}
 _CONFIG_CACHE_TTL_SECONDS: float = 20.0
 _config_lock = threading.Lock()
 _config_version: int = 0
+# Targeted tip mutations must invalidate only their namespace, while still
+# preventing an in-flight read from repopulating that namespace with stale data.
+_config_ns_versions: dict[_ConfigNsKey, int] = {}
 
 
 def get_config():
@@ -94,7 +97,8 @@ def get_config():
     env vars, which would cause a stale-config cache hit.
     The cache is invalidated by ``clear_config_cache()`` (config reload /
     set_config / yaml write, and tip mutations for the affected ns)
-    via a ``_config_version`` check.
+    via a global generation for full reloads and a namespace generation for
+    targeted tip mutations.
 
     **WARNING**: The returned dict is a shared reference. Callers MUST NOT
     mutate it (including nested dicts/lists), as changes will affect all
@@ -117,27 +121,44 @@ def get_config():
 
     with _config_lock:
         entry = _resolved_config_by_ns.get(cache_key)
+        ns_version = _config_ns_versions.get(ns, 0)
         if entry is not None:
-            entry_time, entry_config, entry_version = entry
-            if (now - entry_time) < _CONFIG_CACHE_TTL_SECONDS and entry_version == _config_version:
+            entry_time, entry_config, entry_version, entry_ns_version = entry
+            if (
+                (now - entry_time) < _CONFIG_CACHE_TTL_SECONDS
+                and entry_version == _config_version
+                and entry_ns_version == ns_version
+            ):
                 return entry_config
             # 过期或 version 不匹配：删除条目，防止 overlay 条目无限累积
             del _resolved_config_by_ns[cache_key]
-        read_version = _config_version
+        read_version = (_config_version, ns_version)
 
     # Slow path: cache miss / expired / version mismatch (lock released during I/O)
     config_base = get_merged_config_dict()
     new_cache = resolve_env_vars(config_base)
 
     with _config_lock:
-        if _config_version == read_version:
-            _resolved_config_by_ns[cache_key] = (time.monotonic(), new_cache, _config_version)
+        if read_version == (_config_version, _config_ns_versions.get(ns, 0)):
+            _resolved_config_by_ns[cache_key] = (
+                time.monotonic(),
+                new_cache,
+                _config_version,
+                _config_ns_versions.get(ns, 0),
+            )
             # 惰性 GC：仅当条目数超过阈值时清理，避免高并发下每次 miss 都 O(n) 持锁
             if len(_resolved_config_by_ns) > 50:
                 _cleanup_now = time.monotonic()
                 _expired_keys = [
-                    k for k, (t, _, v) in _resolved_config_by_ns.items()
-                    if (_cleanup_now - t) >= _CONFIG_CACHE_TTL_SECONDS or v != _config_version
+                    k for k, (t, _, v, ns_v) in _resolved_config_by_ns.items()
+                    if (
+                        (_cleanup_now - t) >= _CONFIG_CACHE_TTL_SECONDS
+                        or v != _config_version
+                        or ns_v != _config_ns_versions.get(
+                            k[0] if isinstance(k, tuple) and len(k) == 2 and isinstance(k[0], tuple) else k,
+                            0,
+                        )
+                    )
                 ]
                 for k in _expired_keys:
                     del _resolved_config_by_ns[k]
@@ -158,15 +179,17 @@ def clear_config_cache(
     """
     global _config_version
     with _config_lock:
-        _config_version += 1
         if service_id is None and agent_id is None:
+            _config_version += 1
             _resolved_config_by_ns.clear()
+            _config_ns_versions.clear()
             return
         from jiuwenclaw.local_env_config import normalize_env_ns_id
 
         sid = normalize_env_ns_id(service_id, default="default")
         aid = normalize_env_ns_id(agent_id, default="default")
         ns_key = (sid, aid)
+        _config_ns_versions[ns_key] = _config_ns_versions.get(ns_key, 0) + 1
         # Clear ns key and any overlay keys (ns_key, overlay_id)
         _resolved_config_by_ns.pop(ns_key, None)
         keys_to_remove = [
@@ -176,6 +199,7 @@ def clear_config_cache(
         for k in keys_to_remove:
             _resolved_config_by_ns.pop(k, None)
         if sid == "default" and aid == "default":
+            _config_ns_versions[None] = _config_ns_versions.get(None, 0) + 1
             _resolved_config_by_ns.pop(None, None)
             keys_to_remove = [
                 k for k in _resolved_config_by_ns

@@ -29,22 +29,22 @@ def _override_fetch_card_url_array(base_card: ToolCard, lang: str) -> ToolCard:
         "cn": (
             "抓取网页文本，返回列表，每个元素含一个 URL 的状态码、标题和正文。"
             "可一次传入多个 URL 并行抓取。通常配合 web_search 使用：先搜索，"
-            "再抓取前几个结果页。可设置 max_chars=0 关闭截断，"
-            "也可调大 timeout_seconds 处理慢站点。"
+            "再抓取前几个结果页。max_chars 支持 500-50000，"
+            "timeout_seconds 支持 3-10 秒。"
         ),
         "en": (
             "Fetch webpage text and return a list; each item holds status, title and plain "
             "text of one URL. Accepts multiple URLs at once for parallel fetch. "
-            "Usually used after web_search. Set max_chars=0 to disable clipping "
-            "and use a larger timeout_seconds for slow pages."
+            "Usually used after web_search. max_chars accepts 500-50000 and "
+            "timeout_seconds accepts 3-10 seconds."
         ),
     }[lang]
     input_params = {
         "type": "object",
         "properties": {
             "url": {"type": "array", "items": {"type": "string"}, "description": ud},
-            "max_chars": {"type": "integer", "description": "返回内容最大字符数；设为 0 表示不截断。", "default": 20000},
-            "timeout_seconds": {"type": "integer", "description": "请求超时时间（秒）；慢站点可适当调大。", "default": 45},
+            "max_chars": {"type": "integer", "description": "每个 URL 返回内容最大字符数（500-50000）。", "default": 12000},
+            "timeout_seconds": {"type": "integer", "description": "请求超时时间（秒，3-10）。", "default": 5},
         },
         "required": ["url"],
     }

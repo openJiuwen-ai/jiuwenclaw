@@ -47,6 +47,35 @@ class DeepAdapterHarness(JiuWenClawDeepAdapter):
         return self._build_skill_evolution_rail(config)
 
 
+def test_rebuild_skill_path_rejects_paths_outside_registered_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """The rebuild RPC may only operate on registered skill directories."""
+    allowed_dir = tmp_path / "skills"
+    allowed_skill = allowed_dir / "demo-skill" / "SKILL.md"
+    allowed_skill.parent.mkdir(parents=True)
+    allowed_skill.write_text("# demo", encoding="utf-8")
+    outside_skill = tmp_path / "outside" / "SKILL.md"
+    outside_skill.parent.mkdir()
+    outside_skill.write_text("# outside", encoding="utf-8")
+
+    adapter = object.__new__(JiuWenClawDeepAdapter)
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_registered_skill_dirs_for_rail",
+        lambda _self: [str(allowed_dir)],
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_agent_registered_skill_dirs",
+        lambda: [allowed_dir],
+    )
+
+    assert adapter._validate_rebuild_skill_path(str(allowed_skill)) == str(allowed_skill.resolve())
+    with pytest.raises(ValueError, match="技能路径不在允许目录内"):
+        adapter._validate_rebuild_skill_path(str(outside_skill))
+
+
 @pytest.fixture
 def adapter():
     """Create a test adapter instance."""
