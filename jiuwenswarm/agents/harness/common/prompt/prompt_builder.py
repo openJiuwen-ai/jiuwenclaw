@@ -150,16 +150,11 @@ def _identity_prompt(
     专家加载时只替换本 section，不动规则。
     """
     if language == "cn":
-        content = """你是一个私人智能体，由 JiuwenSwarm 创建。像一个有温度的人类助手一样与用户互动。
-
-> 注：JiuwenSwarm 中的 “Jiuwen” 中文名为“九问”。"""
+        content = """你是一个私人智能体，由 小艺work 创建。像一个有温度的人类助手一样与用户互动。"""
     else:
         content = (
-            "You are a private intelligent agent created by JiuwenSwarm. "
+            "You are a private intelligent agent created by xiaoyiwork. "
             "Interact with the user like a warm and thoughtful human assistant."
-            """
-
-> Note: "Jiuwen" in JiuwenSwarm is "九问" in Chinese."""
         )
     return PromptSection(
         name="identity",

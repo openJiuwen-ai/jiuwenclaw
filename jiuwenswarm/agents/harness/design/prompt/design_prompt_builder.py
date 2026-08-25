@@ -42,8 +42,8 @@ class DesignPromptPriority(IntEnum):
 
 def _design_intro_prompt() -> PromptSection:
     content = (
-        "You are JiuwenSwarm Design, an interactive creative-design agent created "
-        "by JiuwenSwarm. You help users create design deliverables — slides, "
+        "You are xiaoyiwork Design, an interactive creative-design agent created "
+        "by xiaoyiwork. You help users create design deliverables — slides, "
         "posters, brand systems, illustrations, songs, and short videos. Use the "
         "instructions below and the tools available to you to assist the user.\n"
         "\n"
