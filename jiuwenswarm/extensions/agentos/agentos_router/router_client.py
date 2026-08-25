@@ -143,6 +143,15 @@ _AGENT_NETWORK_ERROR_TEXT_TOKENS = (
     "connection reset",
 )
 
+# 断连清理的有限重试：断连后先等 disconnect_cleanup_timeout_seconds，再按固定
+# 间隔最多重试几次，覆盖「chat 尾部 release / 延迟 cancel 的 interrupt 与
+# 「断连+timeout」同秒到期」等短暂竞态；超限后交回 600s idle reaper 兜底。
+_DISCONNECT_CLEANUP_RETRY_INTERVAL_SECONDS = 1.0
+_DISCONNECT_CLEANUP_MAX_ATTEMPTS = 3
+# pop_if_idle 的固定 idle 宽限（秒）：真正的安全守卫是连接数==0 + task_count==0
+# + READY，宽限只需覆盖 release 的 touch 落地竞态，秒级即可。
+_DISCONNECT_CLEANUP_IDLE_GRACE_SECONDS = 1.0
+
 
 def _is_agent_network_error(exc: BaseException) -> bool:
     """True when *exc* indicates an AgentServer network-layer failure.
@@ -574,64 +583,75 @@ class AgentOSRouterClient(AgentServerClient):
     async def _delayed_cleanup(self, user_id: str) -> None:
         """连接断开后，若用户仍无连接且 agent 真的空闲，删除其 jiuwenswarm agent。
 
-        和 :meth:`_reap_idle_once` 走同一条 pop_if_idle 路径（status=READY、
-        task_count==0、last_active_at 距今超过本超时），避免在 in-flight 的
-        chat/SSH 还未释放时强制 kill。超时时长由
-        ``disconnect_cleanup_timeout_seconds`` 配置，<= 0 表示关闭该路径。
+        和 :meth:`_reap_idle_once` 走同一条 pop_if_idle 路径（READY、
+        task_count==0、空闲超过宽限），避免在 in-flight 的 chat/SSH 还未释放时
+        强制 kill。超时时长由 ``disconnect_cleanup_timeout_seconds`` 配置，<= 0
+        表示关闭该路径。
+
+        断连后先等 ``timeout``，再以固定间隔做有限次尝试，每次尝试都重新检查连接数与空闲状态。
+        由于此流程涉及到的计时竞态条件过于复杂，暂时不做每个场景的精准处理。
+        超限放弃后交回 600s idle reaper 兜底。
         """
         timeout = self._disconnect_cleanup_timeout_seconds
         try:
             await asyncio.sleep(timeout)
         except asyncio.CancelledError:
             return
-        # 二次检查：用户可能已重连
-        if self._agent_manager.get_user_connection_count(user_id) > 0:
-            return
-        try:
-            runtimes = await self._agent_manager.list_user_agents(user_id)
-        except Exception:
-            logger.exception(
-                "[AgentOS] cleanup.list.fail user_id=%s",
-                user_id,
-            )
-            return
-        for runtime in runtimes:
-            if runtime.info.agent_type != BUILTIN_AGENT_TYPE:
-                continue
-            key_values: dict[str, Any] | None = None
-            session_id = str(runtime.info.metadata.get("session_id") or "")
-            sandbox_id = str(runtime.info.sandbox_id or "")
-            if "session_id" in self._agent_manager.key_fields:
-                if session_id:
-                    key_values = {"session_id": session_id}
+
+        for attempt in range(1, _DISCONNECT_CLEANUP_MAX_ATTEMPTS + 1):
+            # 二次检查：用户可能已重连（重连时上层也会 cancel 本任务）
+            if self._agent_manager.get_user_connection_count(user_id) > 0:
+                return
             try:
-                # 走 pop_if_idle：task_count>0 / 非 READY / 未达空闲阈值时
-                # 直接返回 False，确保不会误杀活动中的 agent。
-                deleted = await self.delete_agent(
-                    user_id,
-                    runtime.info.agent_type,
-                    key_values=key_values,
-                    idle_timeout_seconds=timeout,
-                )
+                runtimes = await self._agent_manager.list_user_agents(user_id)
             except Exception:
-                logger.exception(
-                    "[AgentOS] cleanup.delete.fail user_id=%s agent_type=%s sandbox_id=%s",
-                    user_id,
-                    runtime.info.agent_type,
-                    sandbox_id,
-                )
-                continue
-            if deleted:
-                log_agentos(
-                    logger,
-                    logging.INFO,
-                    "cleanup.delete",
-                    user_id=user_id,
-                    session_id=session_id,
-                    sandbox_id=sandbox_id,
-                    agent_type=runtime.info.agent_type,
-                    instance=sandbox_id,
-                )
+                logger.exception("[AgentOS] cleanup.list.fail user_id=%s", user_id)
+                return
+
+            pending = False
+            for runtime in runtimes:
+                if runtime.info.agent_type != BUILTIN_AGENT_TYPE:
+                    continue
+                key_values: dict[str, Any] | None = None
+                session_id = str(runtime.info.metadata.get("session_id") or "")
+                sandbox_id = str(runtime.info.sandbox_id or "")
+                if "session_id" in self._agent_manager.key_fields:
+                    if session_id:
+                        key_values = {"session_id": session_id}
+                if runtime.task_count > 0:
+                    # in-flight 请求持有（chat.interrupt 延迟 cancel 等）：
+                    # 等它 release 后再评估，本轮先标记继续重试。
+                    pending = True
+                    continue
+                try:
+                    # pop_if_idle 做最终守卫：task_count>0 / 非 READY / 空闲
+                    # 不满宽限时返回 False，不会误杀活动中的 agent。
+                    deleted = await self.delete_agent(user_id, runtime.info.agent_type, key_values=key_values,
+                                                      idle_timeout_seconds=_DISCONNECT_CLEANUP_IDLE_GRACE_SECONDS)
+                except Exception:
+                    logger.exception("[AgentOS] cleanup.delete.fail user_id=%s agent_type=%s sandbox_id=%s",
+                                     user_id, runtime.info.agent_type, sandbox_id)
+                    pending = True
+                    continue
+                if deleted:
+                    log_agentos(logger, logging.INFO, "cleanup.delete", user_id=user_id, session_id=session_id,
+                                sandbox_id=sandbox_id, agent_type=runtime.info.agent_type, instance=sandbox_id)
+                else:
+                    # pop_if_idle 仍拒绝（busy / 非 READY / idle 不足）：重试。
+                    pending = True
+
+            if not pending:
+                return
+            if attempt >= _DISCONNECT_CLEANUP_MAX_ATTEMPTS:
+                log_agentos(logger, logging.WARNING, "cleanup.retry.budget_exhausted", user_id=user_id,
+                            attempts=attempt)
+                return
+            log_agentos(logger, logging.INFO, "cleanup.retry", user_id=user_id, attempt=attempt,
+                        wait_s=_DISCONNECT_CLEANUP_RETRY_INTERVAL_SECONDS)
+            try:
+                await asyncio.sleep(_DISCONNECT_CLEANUP_RETRY_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                return
 
     def _schedule_connect_warmup(self, user_id: str) -> None:
         """Fire-and-forget builtin sandbox + instance WS warmup for one user."""
