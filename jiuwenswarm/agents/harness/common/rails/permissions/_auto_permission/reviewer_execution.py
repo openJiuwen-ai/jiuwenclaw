@@ -57,6 +57,7 @@ class AutoPermissionReviewerExecutionMixin:
         user_input: Any,
         original_user_intent: OriginalUserIntentEvidence | None,
         domain_route: DecisionRoute | None,
+        model_purpose_claim: str = "",
         guard_result: str = "not_applicable",
         channel_kind: str = "web",
         runtime_ctx: Any | None = None,
@@ -232,6 +233,7 @@ class AutoPermissionReviewerExecutionMixin:
             no_auto_allow_reason=route.no_auto_allow_reason,
             original_user_intent=original_user_intent,
             domain_route=domain_route,
+            model_purpose_claim=model_purpose_claim,
             reviewer_payload_max_bytes=min(
                 int(
                     self.auto_options.get(

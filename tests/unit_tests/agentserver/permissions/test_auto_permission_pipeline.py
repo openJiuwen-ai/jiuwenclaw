@@ -71,6 +71,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions.tool_capabilities impor
     install_permission_file_semantics,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts import (
+    DecisionRoute,
     build_tool_decision_facts,
 )
 from jiuwenswarm.agents.harness.common.tools.command_runtime import CommandRuntimePaths
@@ -158,6 +159,90 @@ async def test_task_tool_ask_is_control_silent_after_engine(tmp_path) -> None:
     assert base.calls == []
 
 
+async def test_domain_reviewer_receives_model_purpose_claim(tmp_path) -> None:
+    rail, _policy, reviewer, _base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+    facts = build_tool_decision_facts(
+        "skill_tool",
+        {"skill_name": "hot-news-pptx"},
+        workspace_root=tmp_path,
+        original_args_were_valid_object=True,
+    )
+    route = DecisionRoute(
+        level="ask",
+        reason="domain_policy_skill_readonly",
+        source="semantic_reviewer",
+    )
+
+    result = await rail._handle_domain_route(
+        facts,
+        domain_route=route,
+        policy_level="ask",
+        session_id="session-a",
+        request_id="request-a",
+        tool_call_id="call-a",
+        now=0.0,
+        user_input=None,
+        original_user_intent=None,
+        model_purpose_claim="read the requested skill",
+    )
+
+    assert result.handled is True
+    assert reviewer.requests[-1].review_evidence["model_purpose_claim"] == (
+        "read the requested skill"
+    )
+
+
+async def test_purpose_claim_uses_host_invocation_after_send_resolution(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rail, _policy, reviewer, _base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+    host_args = {
+        "description": "host-owned purpose",
+        "abs_file_path_list": [str(tmp_path / "report.csv")],
+        "target_channels": ["web"],
+    }
+    observed: list[dict[str, object]] = []
+    real_resolver = before_tool_module.resolve_model_purpose_claim
+
+    def replace_with_host(_args, _kwargs, invocation):
+        return SimpleNamespace(
+            invocation=replace(invocation, tool_args=host_args),
+            identity=None,
+            error="send_file_authorization_context_missing",
+        )
+
+    def record_claim(arguments):
+        observed.append(dict(arguments))
+        return real_resolver(arguments)
+
+    monkeypatch.setattr(
+        before_tool_module,
+        "_resolve_trusted_send_identity",
+        replace_with_host,
+    )
+    monkeypatch.setattr(
+        before_tool_module,
+        "resolve_model_purpose_claim",
+        record_claim,
+    )
+
+    await rail.before_tool_call(
+        tool_name="send_file_to_user",
+        tool_args={"description": "compatibility purpose"},
+        session_id="session-a",
+    )
+
+    assert observed == [host_args]
+    assert reviewer.requests == []
+
+
 async def test_semantic_artifact_round_trip_becomes_later_reviewer_evidence(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -195,6 +280,8 @@ async def test_semantic_artifact_round_trip_becomes_later_reviewer_evidence(
         tool_name="mcp_exec_command",
         tool_args={
             "command": "python -c \"open('report.csv','w').write('ok')\"",
+            "description": "  create the requested report  ",
+            "call_goal": "ignored fallback",
             "workdir": str(tmp_path),
         },
     )
@@ -218,6 +305,13 @@ async def test_semantic_artifact_round_trip_becomes_later_reviewer_evidence(
         reset_root_decision_context(intent_token)
 
     assert result is None
+    assert reviewer.requests[-1].review_evidence["model_purpose_claim"] == (
+        "  create the requested report  "
+    )
+    assert create_ctx.inputs.tool_call.arguments["description"] == (
+        "  create the requested report  "
+    )
+    assert "call_goal" not in create_ctx.inputs.tool_call.arguments
     output = tmp_path / "report.csv"
     output.write_text("ok", encoding="utf-8")
     create_ctx.inputs.tool_result = json.dumps({"exit_code": 0})
@@ -228,7 +322,11 @@ async def test_semantic_artifact_round_trip_becomes_later_reviewer_evidence(
     inspect_ctx = _runtime_ctx(
         session,
         tool_name="mcp_exec_command",
-        tool_args={"command": "wc -l report.csv", "workdir": str(tmp_path)},
+        tool_args={
+            "command": "wc -l report.csv",
+            "call_goal": "inspect the generated report",
+            "workdir": str(tmp_path),
+        },
     )
     intent_token = bind_root_decision_context(
         RootDecisionContext(
@@ -250,6 +348,9 @@ async def test_semantic_artifact_round_trip_becomes_later_reviewer_evidence(
         reset_root_decision_context(intent_token)
 
     assert second_result is None
+    assert reviewer.requests[-1].review_evidence["model_purpose_claim"] == (
+        "inspect the generated report"
+    )
     assert reviewer.requests[-1].review_evidence[
         "trusted_session_artifact_paths"
     ] == ["report.csv"]

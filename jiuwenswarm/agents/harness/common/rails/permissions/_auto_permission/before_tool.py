@@ -107,6 +107,7 @@ from jiuwenswarm.server.runtime.sandbox_no_host_fallback import (
 from jiuwenswarm.agents.harness.common.rails.permissions.permission_interrupt_rail import (
     has_pre_permission_hard_rejection,
 )
+from jiuwenswarm.common.tool_display import resolve_model_purpose_claim
 
 _NON_PERMISSION_CONTROL_SILENT_TOOLS = frozenset(
     {"enter_plan_mode", "exit_plan_mode", "switch_mode"}
@@ -156,6 +157,7 @@ class AutoPermissionBeforeToolMixin:
         )
         if trusted_send_resolution is not None:
             invocation = trusted_send_resolution.invocation
+        model_purpose_claim = resolve_model_purpose_claim(invocation.tool_args)
         original_args_were_valid_object = _args_were_valid_json_object(
             invocation.tool_args
         )
@@ -601,6 +603,7 @@ class AutoPermissionBeforeToolMixin:
                 user_input=user_input,
                 original_user_intent=original_user_intent,
                 domain_route=None,
+                model_purpose_claim=model_purpose_claim,
                 channel_kind=channel_kind,
                 runtime_ctx=invocation.ctx,
             )
@@ -791,6 +794,7 @@ class AutoPermissionBeforeToolMixin:
                 now=now,
                 user_input=user_input,
                 original_user_intent=original_user_intent,
+                model_purpose_claim=model_purpose_claim,
                 channel_kind=channel_kind,
                 runtime_ctx=invocation.ctx,
             )
