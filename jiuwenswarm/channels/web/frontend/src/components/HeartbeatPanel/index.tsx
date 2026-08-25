@@ -14,7 +14,7 @@ import type {
   HeartbeatTaskUI,
 } from '../../types/heartbeat';
 import { summarizeHeartbeatSchedule } from './heartbeatScheduleConvert';
-import { heartbeatRunNowMessageKey, heartbeatCancelMessageKey, heartbeatLastRunStatusLabelKey } from './heartbeatStatusText';
+import { heartbeatRunNowMessageKey, heartbeatCancelMessageKey, heartbeatLastRunStatusLabelKey, canHeartbeatRunNow } from './heartbeatStatusText';
 import HeartbeatStatusBadge from './HeartbeatStatusBadge';
 import HeartbeatTaskDrawer, {
   emptyHeartbeatTaskForm,
@@ -469,7 +469,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                       )}
                       <button
                         type="button"
-                        disabled={actingJobId === job.id || job.status === 'completed' || job.status === 'expired'}
+                        disabled={actingJobId === job.id || !canHeartbeatRunNow(job.enabled, job.status)}
                         onClick={() => void handleRunNow(job)}
                         className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
                       >

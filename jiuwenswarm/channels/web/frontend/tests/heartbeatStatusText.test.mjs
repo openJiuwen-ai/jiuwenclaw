@@ -7,6 +7,7 @@ import {
   heartbeatRunNowMessageKey,
   heartbeatCancelMessageKey,
   heartbeatLastRunStatusLabelKey,
+  canHeartbeatRunNow,
 } from '../node_modules/.cache/heartbeat-status-text/components/HeartbeatPanel/heartbeatStatusText.js';
 
 test('heartbeatStatusVariant maps every backend status to a display variant', () => {
@@ -58,4 +59,19 @@ test('heartbeatLastRunStatusLabelKey returns null for null input, key otherwise'
   assert.equal(heartbeatLastRunStatusLabelKey(null), null);
   assert.equal(heartbeatLastRunStatusLabelKey('failed'), 'heartbeat.runState.failed');
   assert.equal(heartbeatLastRunStatusLabelKey('skipped'), 'heartbeat.runState.skipped');
+});
+
+test('canHeartbeatRunNow: only enabled+scheduled allows run_now', () => {
+  assert.equal(canHeartbeatRunNow(true, 'scheduled'), true);
+});
+
+test('canHeartbeatRunNow: disabled statuses are all rejected', () => {
+  assert.equal(canHeartbeatRunNow(true, 'running'), false);
+  assert.equal(canHeartbeatRunNow(true, 'completed'), false);
+  assert.equal(canHeartbeatRunNow(true, 'expired'), false);
+  assert.equal(canHeartbeatRunNow(true, 'disabled'), false);
+});
+
+test('canHeartbeatRunNow: enabled=false always rejected even if status is scheduled', () => {
+  assert.equal(canHeartbeatRunNow(false, 'scheduled'), false);
 });

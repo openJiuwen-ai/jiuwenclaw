@@ -24,6 +24,16 @@ export function heartbeatStatusLabelKey(status: HeartbeatJobStatus): string {
   return `heartbeat.status.${heartbeatStatusVariant(status)}`;
 }
 
+/**
+ * "立即运行"按钮是否可点：只有 enabled 且服务端状态为 scheduled 时才允许，
+ * running/disabled/completed/expired 一律禁用（见接口交接文档 §2.3）。
+ * actingJobId 命中（面板正在发起别的操作）不在这里判断——那是局部 UI 状态，
+ * 由调用方自己在这个结果基础上再 && 一层。
+ */
+export function canHeartbeatRunNow(enabled: boolean, status: HeartbeatJobStatus): boolean {
+  return enabled && status === 'scheduled';
+}
+
 const KNOWN_RUN_NOW_REJECT_REASONS = [
   'session_missing',
   'session_busy',
