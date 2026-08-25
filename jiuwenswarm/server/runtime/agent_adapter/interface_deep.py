@@ -9689,6 +9689,14 @@ class JiuWenSwarmDeepAdapter:
             )
             from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
                 apply_interactive_ask_to_inputs,
+                resolve_resume_interactive_ask,
+            )
+            # 入站 answers payload 一般不携带 interactive_ask；此时从中断点
+            # resume_ctx 恢复中断前的引导模式状态，避免 resume 后被强制
+            # 设为 False、把带 preview 的内容确认类 ask_user 误判为 skipped，
+            # 或让引导模式管线在 resume 阶段退化为非引导。
+            raw_interactive = resolve_resume_interactive_ask(
+                raw_interactive, resume_ctx.get("inputs")
             )
             resume_inputs = apply_interactive_ask_to_inputs(
                 resume_ctx.get("inputs", inputs),
