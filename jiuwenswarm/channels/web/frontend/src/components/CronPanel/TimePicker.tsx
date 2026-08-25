@@ -35,10 +35,11 @@ export default function TimePicker({ value, onChange, placeholder, className = '
   }
 
   return (
-    <div className={`relative ${className}`} ref={rootRef}>
+    <div className={`relative ${className}`} ref={rootRef} data-testid="cron-time-picker">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        data-testid="cron-time-picker-trigger"
         className="flex w-full flex-nowrap items-center justify-between gap-1 rounded-md border border-border bg-card px-3 py-1.5 text-sm outline-none hover:border-border-strong"
       >
         <span className={`truncate ${value ? 'text-text' : 'text-text-muted'}`}>{value || placeholder}</span>
@@ -56,6 +57,8 @@ export default function TimePicker({ value, onChange, placeholder, className = '
                   type="button"
                   disabled={disabled}
                   onClick={() => pick(hh, m || '00')}
+                  data-testid="cron-time-picker-hour"
+                  data-variant={hh}
                   className={`block w-full px-3 py-1.5 text-left text-sm ${
                     disabled
                       ? 'cursor-not-allowed text-text-muted/50'
@@ -77,6 +80,8 @@ export default function TimePicker({ value, onChange, placeholder, className = '
                   type="button"
                   disabled={disabled}
                   onClick={() => pick(h || '00', mm)}
+                  data-testid="cron-time-picker-minute"
+                  data-variant={mm}
                   className={`block w-full px-3 py-1.5 text-left text-sm ${
                     disabled
                       ? 'cursor-not-allowed text-text-muted/50'

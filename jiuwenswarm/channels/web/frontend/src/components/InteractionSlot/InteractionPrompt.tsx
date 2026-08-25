@@ -251,24 +251,25 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
   if (!current) return null;
 
   return (
-    <div className="ix-prompt" role="dialog" aria-label={t('interactionPrompt.title')}>
-      <div className="ix-prompt__head">
-        <div className="ix-prompt__title">
-          <FileText size={15} strokeWidth={2} className="ix-prompt__title-icon" />
-          <span>{current.header || t('interactionPrompt.title')}</span>
+    <div className="ix-prompt" role="dialog" aria-label={t('interactionPrompt.title')} data-testid="interaction-slot-ix-prompt">
+      <div className="ix-prompt__head" data-testid="interaction-slot-ix-head">
+        <div className="ix-prompt__title" data-testid="interaction-slot-ix-title">
+          <FileText size={15} strokeWidth={2} className="ix-prompt__title-icon" data-testid="interaction-slot-ix-title-icon" />
+          <span data-testid="interaction-slot-ix-title-text">{current.header || t('interactionPrompt.title')}</span>
         </div>
         {total > 1 && (
-          <div className="ix-prompt__pager">
+          <div className="ix-prompt__pager" data-testid="interaction-slot-ix-pager">
             <button
               type="button"
               className="ix-prompt__pager-btn"
               onClick={goPrev}
               disabled={page === 0}
               aria-label={t('interactionPrompt.prev')}
+              data-testid="interaction-slot-ix-pager-prev"
             >
               <ChevronLeft size={16} strokeWidth={2} />
             </button>
-            <span className="ix-prompt__pager-label">
+            <span className="ix-prompt__pager-label" data-testid="interaction-slot-ix-pager-label">
               {page + 1}/{total}
             </span>
             <button
@@ -277,6 +278,7 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
               onClick={goNextPage}
               disabled={page >= reached || page >= total - 1}
               aria-label={t('interactionPrompt.next')}
+              data-testid="interaction-slot-ix-pager-next"
             >
               <ChevronRight size={16} strokeWidth={2} />
             </button>
@@ -284,12 +286,16 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
         )}
       </div>
 
-      <div className="ix-prompt__body">
-        <div className="ix-prompt__question chat-text">
+      <div className="ix-prompt__body" data-testid="interaction-slot-ix-body">
+        <div className="ix-prompt__question chat-text" data-testid="interaction-slot-ix-question">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{current.question}</ReactMarkdown>
         </div>
 
-        <div className={`ix-prompt__group${isMulti ? ' ix-prompt__group--multi' : ''}`}>
+        <div
+          className={`ix-prompt__group${isMulti ? ' ix-prompt__group--multi' : ''}`}
+          data-testid="interaction-slot-ix-options"
+          data-variant={isMulti ? 'multi' : undefined}
+        >
           {normalOptions.map((option) => {
             const value = option.value || option.label;
             const selected = st.selected.includes(value) || st.selected.includes(option.label);
@@ -300,12 +306,14 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
                 className={`ix-option${selected ? ' ix-option--selected' : ''}`}
                 onClick={() => toggleOption(value)}
                 disabled={submitting}
+                data-testid="interaction-slot-ix-option"
+                data-variant={option.label}
               >
                 <span className={`ix-option__mark ix-option__mark--${isMulti ? 'check' : 'radio'}`} />
                 <span className="ix-option__text">
-                  <span className="ix-option__label">{option.label}</span>
+                  <span className="ix-option__label" data-testid="interaction-slot-ix-option-label">{option.label}</span>
                   {option.description && (
-                    <span className="ix-option__desc">{option.description}</span>
+                    <span className="ix-option__desc" data-testid="interaction-slot-ix-option-desc">{option.description}</span>
                   )}
                 </span>
               </button>
@@ -319,10 +327,11 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
               className={`ix-option${st.customActive ? ' ix-option--selected' : ''}`}
               onClick={selectCustom}
               disabled={submitting}
+              data-testid="interaction-slot-ix-option-custom"
             >
               <span className="ix-option__mark ix-option__mark--radio" />
               <span className="ix-option__text">
-                <span className="ix-option__label">{t('interactionPrompt.customOption')}</span>
+                <span className="ix-option__label" data-testid="interaction-slot-ix-option-custom-label">{t('interactionPrompt.customOption')}</span>
               </span>
             </button>
           )}
@@ -336,17 +345,19 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
               onChange={(e) => setCustomText(e.target.value)}
               rows={2}
               disabled={submitting}
+              data-testid="interaction-slot-ix-custom-input"
             />
           )}
         </div>
       </div>
 
-      <div className="ix-prompt__foot">
+      <div className="ix-prompt__foot" data-testid="interaction-slot-ix-foot">
         <button
           type="button"
           className="ix-btn ix-btn--ghost"
           onClick={handleCancel}
           disabled={submitting}
+          data-testid="interaction-slot-ix-cancel-button"
         >
           {t('interactionPrompt.cancel')}
         </button>
@@ -355,6 +366,7 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
           className="ix-btn ix-btn--ghost"
           onClick={handleSkip}
           disabled={submitting}
+          data-testid="interaction-slot-ix-skip-button"
         >
           {t('interactionPrompt.skip')}
         </button>
@@ -363,6 +375,8 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
           className="ix-btn ix-btn--primary"
           onClick={handleNextOrConfirm}
           disabled={submitting || incompleteCustom}
+          data-testid="interaction-slot-ix-confirm-button"
+          data-variant={isLast ? 'confirm' : 'next'}
         >
           {isLast ? t('interactionPrompt.confirm') : t('interactionPrompt.nextStep')}
         </button>

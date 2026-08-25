@@ -56,6 +56,11 @@
       <td width="50%">新手快速启动配置、基础对话流程与常用操作。</td>
     </tr>
     <tr>
+      <td width="22%"><strong>视频直播</strong></td>
+      <td width="28%"><a href="zh/视频直播.md">JoyAI 配置与使用</a></td>
+      <td width="50%">配置 JoyAI 视觉、ASR/TTS、持续任务、打断与异步搜索。</td>
+    </tr>
+    <tr>
       <td width="22%"><strong>页面概览</strong></td>
       <td width="28%"><a href="zh/页面概览.md">页面概览</a></td>
       <td width="50%">Web 端界面布局、核心区域与功能入口。</td>
@@ -66,6 +71,11 @@
       <td width="50%">Web 对话入口，支持消息发送、新建会话以及规划 / 性能 / 集群模式切换。</td>
     </tr>
     <tr>
+      <td width="22%"><strong>任务规划</strong></td>
+      <td width="28%"><a href="zh/任务规划.md">任务规划</a></td>
+      <td width="50%">任务拆解、规划与执行管理，支持 TodoToolkit 工具进行任务跟踪。</td>
+    </tr>
+    <tr>
       <td width="22%"><strong>智能体</strong></td>
       <td width="28%"><a href="zh/智能体.md">智能体</a></td>
       <td width="50%">不同角色智能体、工作区创建与管理流程。</td>
@@ -74,6 +84,11 @@
       <td width="22%"><strong>会话</strong></td>
       <td width="28%"><a href="zh/会话.md">会话</a></td>
       <td width="50%">Session 信息管理、历史聊天记录查看与恢复、会话历史删除。</td>
+    </tr>
+    <tr>
+      <td width="22%"><strong>命令行指令</strong></td>
+      <td width="28%"><a href="zh/命令行指令.md">命令行指令</a></td>
+      <td width="50%">受控通道指令与命令行操作指南。</td>
     </tr>
     <tr>
       <td width="22%"><strong>定时任务</strong></td>
@@ -129,6 +144,16 @@
       <td width="50%">超长上下文处理、会话压缩与上下文卸载机制。</td>
     </tr>
     <tr>
+      <td width="22%"><strong>单机多实例运行</strong></td>
+      <td width="28%"><a href="zh/单机多实例运行.md">单机多实例运行</a></td>
+      <td width="50%">在同一台机器上运行多个 JiuwenSwarm 实例的部署场景与配置。</td>
+    </tr>
+    <tr>
+      <td width="22%"><strong>A2UI</strong></td>
+      <td width="28%"><a href="zh/A2UI.md">A2UI</a></td>
+      <td width="50%">Agent to UI 生成式界面协议，支持动态界面生成与交互。</td>
+    </tr>
+    <tr>
       <td width="22%"><strong>Skill 自演进</strong></td>
       <td width="28%"><a href="zh/Skill自演进.md">Skill 自演进</a></td>
       <td width="50%">技能迭代、自我优化与能力沉淀机制。</td>
@@ -160,8 +185,8 @@
     </tr>
     <tr>
       <td width="22%"><strong>TUI 模式</strong></td>
-      <td width="28%"><a href="zh/SLASH_COMMAND_ARCHITECTURE.md">Slash 命令架构</a> / <a href="zh/Slash命令表.md">Slash 命令速查</a> / <a href="zh/模式系统.md">模式系统</a> / <a href="zh/TUI使用SwarmFlow指南.md">SwarmFlow（TUI）</a></td>
-      <td width="50%">支持 TUI 终端中的 Slash 命令体系、常用命令速查、PLAN / AGENT / CODE / TEAM 模式切换，以及 SwarmFlow 开关、运行树查看与 HITL 回复。</td>
+      <td width="28%"><a href="zh/SLASH_COMMAND_ARCHITECTURE.md">Slash 命令架构</a> / <a href="zh/Slash命令表.md">Slash 命令速查</a> / <a href="zh/模式系统.md">模式系统</a> / <a href="zh/TUI使用SwarmFlow指南.md">SwarmFlow（TUI）</a> / <a href="zh/自动修复PR.md">自动修复 PR</a></td>
+      <td width="50%">支持 TUI 终端中的 Slash 命令体系、常用命令速查、PLAN / AGENT / CODE / TEAM 模式切换，SwarmFlow 开关、运行树查看与 HITL 回复，以及 <code>/autofix-pr</code> 自动修复 PR 直至检查通过。</td>
     </tr>
     <tr>
       <th colspan="3" align="left" bgcolor="#f3f4f6"><h3>📄 附录</h3></th>

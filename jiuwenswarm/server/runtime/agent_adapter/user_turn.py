@@ -31,11 +31,6 @@ TEAM_USER_TURN_KEY = "_user_turn"
 # Channels whose turns are system-driven rather than typed by a person.
 _SYSTEM_CHANNELS = frozenset({"cron", "heartbeat"})
 
-_STATUSLINE_INSTRUCTIONS = {
-    "zh": "\n\n你必须按照以下指令配置状态栏：\n",
-    "en": "\n\nYou must follow these instructions to configure the status line:\n",
-}
-
 
 @dataclass(frozen=True)
 class UserTurn:
@@ -88,22 +83,18 @@ class UserTurn:
             return self.text
 
         content = self.text
-        statusline_prompt = ""
         if isinstance(content, str):
             # /statusline <prompt> is a prompt-type command (mirrors Claude Code);
-            # it never goes through /skills.
-            statusline_prompt, statusline_content = _handle_statusline_prompt_command(content)
-            if statusline_prompt:
-                content = statusline_content
+            # it never goes through /skills. The rewritten content instructs
+            # the parent to invoke the dedicated built-in subagent.
+            statusline_dispatch, _description = _handle_statusline_prompt_command(content)
+            if statusline_dispatch:
+                content = statusline_dispatch
 
         envelope = self._build_envelope(content)
         rendered = self._interaction_prefix() + _lead_in(self.channel, self.language)
         rendered += json.dumps(envelope, ensure_ascii=False)
-        if not statusline_prompt:
-            return rendered
-
-        instructions = _STATUSLINE_INSTRUCTIONS.get(self.language, _STATUSLINE_INSTRUCTIONS["en"])
-        return rendered + instructions + statusline_prompt
+        return rendered
 
     def _build_envelope(self, content: Any) -> dict[str, Any]:
         """Assemble the JSON envelope body for ``content``."""
@@ -127,6 +118,7 @@ class UserTurn:
         if self.trusted_dirs:
             envelope["trusted_dirs"] = json.dumps(self.trusted_dirs, ensure_ascii=False)
         envelope.update(self._sender_fields())
+        envelope.update(self._skill_scene_fields())
         return envelope
 
     def _resolve_skills(self, content: Any) -> list[str]:
@@ -157,6 +149,22 @@ class UserTurn:
         sender_name = str(self.metadata.get("sender_name") or "").strip()
         if sender_name:
             fields["sender"] = sender_name
+        return fields
+
+    def _skill_scene_fields(self) -> dict[str, str]:
+        """Return create/edit skill scene fields from request metadata."""
+        if not self.metadata:
+            return {}
+        fields: dict[str, str] = {}
+        scene = str(self.metadata.get("scene") or "").strip()
+        if scene:
+            fields["scene"] = scene
+        target_skill = str(self.metadata.get("target_skill") or "").strip()
+        if target_skill:
+            fields["target_skill"] = target_skill
+        target_skill_type = str(self.metadata.get("target_skill_type") or "").strip()
+        if target_skill_type:
+            fields["target_skill_type"] = target_skill_type
         return fields
 
     def _interaction_prefix(self) -> str:

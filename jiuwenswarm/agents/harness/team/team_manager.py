@@ -11,11 +11,9 @@ import re
 import time
 import weakref
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
@@ -55,7 +53,6 @@ from jiuwenswarm.agents.harness.team.distributed_runtime import (
 from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenswarm.agents.harness.team import kv_cache_hooks
 from jiuwenswarm.agents.harness.team.remote_member_bootstrap import release_a2x_reservations_for_session
-from jiuwenswarm.agents.harness.team.team_skill_links import sync_skill_dir_links
 from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
@@ -70,7 +67,11 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     build_member_rails,
     get_default_model_name,
 )
-from jiuwenswarm.common.utils import get_agent_skills_dir
+from jiuwenswarm.agents.harness.observability_runtime import (
+    acquire_observability_demand,
+    build_observability_config,
+    release_observability_demand,
+)
 from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
 logger = logging.getLogger(__name__)
@@ -125,52 +126,53 @@ def sync_team_observability() -> None:
     * disabled → enabled : ``init_observability()``
     * enabled → disabled : ``shutdown_observability()``
     * unchanged          : no-op
+
+    Evolution also requests the provider when the explicit switch is disabled.
     """
     global _observability_active
-    cfg = get_config().get("team_observability", {}) or {}
-    want_enabled = bool(cfg.get("enabled", False))
+    config = get_config()
+    cfg = config.get("team_observability", {}) or {}
+    evolution_requested = get_skill_evolution_enabled(config)
+    want_enabled = bool(cfg.get("enabled", False)) or evolution_requested
 
-    if want_enabled and not _observability_active:
-        try:
-            from openjiuwen.agent_teams.observability import (
-                ObservabilityConfig,
-                init_observability,
-                is_initialized,
-            )
-            if is_initialized():
-                _observability_active = True
-                return
-            obs_cfg = ObservabilityConfig(
-                enabled=True,
-                service_name=cfg.get("service_name", "jiuwenswarm"),
-                exporter=cfg.get("exporter", "otlp_grpc"),
-                endpoint=cfg.get("endpoint", "http://localhost:4317"),
-                sample_rate=cfg.get("sample_rate", 1.0),
-                attribute_value_max_length=cfg.get("attribute_value_max_length", 10240),
-                redact_prompts=cfg.get("redact_prompts", False),
-                redact_completions=cfg.get("redact_completions", False),
-                langfuse_public_key=cfg.get("langfuse_public_key", ""),
-                langfuse_secret_key=cfg.get("langfuse_secret_key", ""),
-                traces_dir=cfg.get("traces_dir") or str(get_user_workspace_dir() / ".trace"),
-                file_retention_days=cfg.get("file_retention_days", 7),
-            )
-            init_observability(obs_cfg)
-            _observability_active = True
-            if obs_cfg.exporter == "file":
+    if not want_enabled:
+        if _observability_active:
+            shutdown_team_observability()
+        return
+
+    try:
+        traces_dir = str(cfg.get("traces_dir") or get_user_workspace_dir() / ".trace")
+        obs_cfg = build_observability_config(
+            cfg,
+            service_name="jiuwenswarm",
+            traces_dir=traces_dir,
+        )
+        provider_existed = acquire_observability_demand(
+            "team",
+            observability_config=obs_cfg,
+        )
+        was_active = _observability_active
+        _observability_active = True
+        if not was_active and not provider_existed:
+            if cfg.get("exporter", "otlp_grpc") == "file":
                 logger.info(
                     "[TeamObservability] enabled: exporter=%s traces_dir=%s",
-                    obs_cfg.exporter, obs_cfg.traces_dir,
+                    cfg.get("exporter", "otlp_grpc"),
+                    traces_dir,
                 )
             else:
                 logger.info(
                     "[TeamObservability] enabled: exporter=%s endpoint=%s",
-                    obs_cfg.exporter, obs_cfg.endpoint,
+                    cfg.get("exporter", "otlp_grpc"),
+                    cfg.get("endpoint", "http://localhost:4317"),
                 )
-        except Exception as exc:
-            logger.warning("[TeamObservability] init failed: %s", exc)
-
-    elif not want_enabled and _observability_active:
-        shutdown_team_observability()
+    except Exception as exc:
+        _observability_active = False
+        if evolution_requested:
+            raise RuntimeError(
+                "Team evolution observability initialization failed"
+            ) from exc
+        logger.warning("[TeamObservability] init failed: %s", exc)
 
 
 def shutdown_team_observability() -> None:
@@ -179,8 +181,7 @@ def shutdown_team_observability() -> None:
     if not _observability_active:
         return
     try:
-        from openjiuwen.agent_teams.observability import shutdown_observability
-        shutdown_observability()
+        release_observability_demand("team")
         _observability_active = False
         logger.info("[TeamObservability] disabled")
     except Exception as exc:
@@ -206,10 +207,11 @@ def _make_team_rail_mount_context(
     member_name: str | None = None,
     model_name: str | None = None,
     root_dir: str | None = None,
+    project_dir: str | None = None,
     skills_dir: str | None = None,
     team_id: str | None = "",
     config: dict[str, Any] | None = None,
-    trajectory_registry: Any | None = None,
+    trajectory_span_processor: Any | None = None,
 ) -> TeamRailMountContext:
     """Build the shared rail context used by swarm and legacy rail mounts."""
     card = getattr(agent, "card", None)
@@ -229,10 +231,11 @@ def _make_team_rail_mount_context(
         runtime=RuntimeInfo(channel=channel, language=language),
         team_workspace=TeamWorkspaceInfo(
             root_dir=root_dir,
+            project_dir=project_dir,
             skills_dir=skills_dir,
             team_id=team_id,
             config=config,
-            trajectory_registry=trajectory_registry,
+            trajectory_span_processor=trajectory_span_processor,
         ),
     )
 
@@ -316,8 +319,6 @@ class TeamManager:
         self._team_evolution_watchers: dict[str, asyncio.Task] = {}
         # session_id → runtime_ready requested a watcher before the rail registered
         self._pending_team_evolution_watcher_sessions: set[str] = set()
-        # session_id -> team workspace skills directory used as the shared link view.
-        self._team_shared_skill_link_targets: dict[str, Path] = {}
         # session_id → workflow handler instance
         self._workflow_handlers: dict[str, Any] = {}
         # session_id → True once a team-building event (team.member,
@@ -737,9 +738,11 @@ class TeamManager:
         project_dir: str | None = None,
         trusted_dirs: list[str] | None = None,
         request_id: str | None = None,
+        user_id: str | None = None,
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
         requested_model_name: str | None = None,
+        agent_group_name: str | None = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
 
@@ -755,6 +758,7 @@ class TeamManager:
             request_id: Originating request id, if any.
             channel_id: Raw channel id from the request, if any.
             request_metadata: Request metadata mapping.
+            agent_group_name: Optional AgentGroup package bound to the session.
 
         Returns:
             The enriched ``TeamAgentSpec`` ready to build (``build_context`` set;
@@ -779,8 +783,10 @@ class TeamManager:
             project_dir=project_dir,
             trusted_dirs=trusted_dirs,
             request_id=request_id,
+            user_id=user_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
+            agent_group_name=agent_group_name,
         )
         return spec
 
@@ -872,18 +878,14 @@ class TeamManager:
         one active session per channel.
         """
         normalized_previous = str(previous_session_id or "").strip()
-        pre_signaled_session_ids: set[str] = set()
         if normalized_previous and normalized_previous != target_session_id:
-            await self.offload_session_kv_cache(
-                normalized_previous,
-                reason=f"{reason}session-switch",
-            )
+            # Product foreground/task facts own KVC offload.  A navigation
+            # event must not offload a Team that is still running.
             await self.stop_paused_session_runtime(
                 normalized_previous,
                 reason=f"{reason}session-switch: ",
                 offload=False,
             )
-            pre_signaled_session_ids.add(normalized_previous)
 
         if not self._is_distributed_mode(get_config()):
             logger.info(
@@ -897,7 +899,6 @@ class TeamManager:
             await self._stop_stale_distributed_sessions(
                 target_session_id,
                 reason=reason,
-                pre_signaled_session_ids=pre_signaled_session_ids,
             )
 
     async def offload_session_kv_cache(self, session_id: str, reason: str = "") -> bool:
@@ -923,7 +924,6 @@ class TeamManager:
         target_session_id: str,
         *,
         reason: str,
-        pre_signaled_session_ids: set[str] | None = None,
     ) -> None:
         """Stop active or pending distributed sessions except the target."""
         stale_sessions = [
@@ -945,13 +945,7 @@ class TeamManager:
             list(dict.fromkeys(stale_sessions)),
         )
 
-        already_signaled = pre_signaled_session_ids or set()
         for stale_session_id in dict.fromkeys(stale_sessions):
-            if stale_session_id not in already_signaled:
-                await self.offload_session_kv_cache(
-                    stale_session_id,
-                    reason=f"{reason}session-switch",
-                )
             await self.stop_session_runtime(
                 stale_session_id,
                 reason=reason,
@@ -1120,74 +1114,6 @@ class TeamManager:
             post_start_log_every_sec=_PG_POST_START_LOG_EVERY_SEC,
         )
 
-    @staticmethod
-    def _initialize_team_shared_skill_links(spec: TeamAgentSpec) -> None:
-        """Initialize team shared skill links from the global skill root."""
-        global_skills_dir = get_agent_skills_dir()
-        if not global_skills_dir.exists():
-            logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
-            return
-
-        # Resolve team workspace path
-        ws_config = spec.workspace
-        ws_path = ws_config.root_path if ws_config and ws_config.root_path else None
-        if not ws_path:
-            ws_path = str(team_home(spec.team_name) / "team-workspace")
-
-        team_shared_skills_dir = Path(ws_path) / "skills"
-
-        team_shared_skills_dir.mkdir(parents=True, exist_ok=True)
-        sync_skill_dir_links(global_skills_dir, team_shared_skills_dir)
-
-        logger.info("[TeamManager] Initialized team shared skill links: %s", team_shared_skills_dir)
-
-    @staticmethod
-    def _resolve_team_shared_skills_dir(spec: TeamAgentSpec) -> Path:
-        ws_config = spec.workspace
-        ws_path = ws_config.root_path if ws_config and ws_config.root_path else None
-        if not ws_path:
-            ws_path = str(team_home(spec.team_name) / "team-workspace")
-        return Path(ws_path) / "skills"
-
-    @staticmethod
-    def ensure_team_shared_skills_initialized(spec: TeamAgentSpec) -> None:
-        """Ensure team shared skills are available in the team workspace."""
-        TeamManager._initialize_team_shared_skill_links(spec)
-
-    def ensure_team_shared_skills_ready_for_session(self, session_id: str, spec: TeamAgentSpec) -> None:
-        """Ensure team shared skills are initialized and registered for refresh."""
-        self.ensure_team_shared_skills_initialized(spec)
-        self.register_team_shared_skill_link_target(
-            session_id,
-            self._resolve_team_shared_skills_dir(spec),
-        )
-
-    def register_team_shared_skill_link_target(self, session_id: str, target: Path) -> None:
-        """Register the team shared skills directory for link refresh."""
-        self._team_shared_skill_link_targets[session_id] = target
-
-    def refresh_team_shared_skill_links(self, session_id: str) -> bool:
-        """Refresh team shared skill links from global skills."""
-        target = self._team_shared_skill_link_targets.get(session_id)
-        if target is None:
-            logger.debug("[TeamManager] no team shared skill link target for session_id=%s", session_id)
-            return False
-        global_skills_dir = get_agent_skills_dir()
-        if not global_skills_dir.exists():
-            logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
-            return False
-        sync_skill_dir_links(global_skills_dir, target)
-        logger.info("[TeamManager] Refreshed team shared skill links: session_id=%s target=%s", session_id, target)
-        return True
-
-    def refresh_all_team_shared_skill_links(self) -> int:
-        """Refresh every registered team shared skill link view."""
-        refreshed = 0
-        for session_id in list(self._team_shared_skill_link_targets):
-            if self.refresh_team_shared_skill_links(session_id):
-                refreshed += 1
-        return refreshed
-
     async def create_team(
         self,
         session_id: str,
@@ -1228,6 +1154,10 @@ class TeamManager:
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
+            agent_group_name=str(
+                (request_metadata or {}).get("agent_group_name") or ""
+            ).strip()
+            or None,
         )
 
         logger.info("[TeamManager] TeamAgentSpec ready: team_name=%s", spec.team_name)
@@ -1238,8 +1168,9 @@ class TeamManager:
             team_agent = spec.build()
             team_agent.channel_id = channel_id  # 记录 channel，供 _destroy_other_sessions 按 channel 隔离
             self._team_agents[session_id] = team_agent
-            # After build, initialize team shared skill links.
-            self.ensure_team_shared_skills_ready_for_session(session_id, spec)
+            # The team-level Skill visibility document is seeded by
+            # ``TeamWorkspaceManager.initialize`` — the single writer for team
+            # scope — when the team workspace comes up. Nothing to do here.
 
             if self._is_distributed_mode(config_base):
                 try:
@@ -1375,6 +1306,9 @@ class TeamManager:
     def find_team_skill_rail_for_request(self, request_id: str) -> Any | None:
         """Find the TeamSkillEvolutionRail that owns a pending approval with this request_id."""
         for rail in self._team_skill_rails.values():
+            owns_request = getattr(rail, "owns_approval_request", None)
+            if callable(owns_request) and owns_request(request_id):
+                return rail
             if request_id in getattr(rail, "_pending_approval_snapshots", {}):
                 return rail
             if request_id in getattr(rail, "_pending_governance", {}):
@@ -1432,6 +1366,52 @@ class TeamManager:
         if entry not in rails:
             rails.append(entry)
 
+    async def reload_team_skill_views(self, session_id: str | None = None) -> int:
+        """Re-scan the shared Skill library for live team members.
+
+        Skills live in exactly one physical library and each member is narrowed
+        by its ``skills-visibility.json`` document, so a library or metadata
+        change needs no fan-out: the only stale thing is each running member's
+        in-memory Skill rail. ``SkillUseRail`` would notice on its own at the
+        next model call through its snapshot signature; reloading here makes the
+        change land immediately instead.
+
+        Only members tracked as live rail owners are reachable, which today
+        means members that mounted an evolution rail. Members without one still
+        pick the change up through the snapshot signature.
+
+        Args:
+            session_id: Restrict the reload to one session; ``None`` reloads
+                every tracked session.
+
+        Returns:
+            Number of Skill rails reloaded across the visited agents.
+        """
+        from jiuwenswarm.agents.harness.team.rails.team_skill_library_reload_rail import (
+            reload_agent_skill_views,
+        )
+
+        if session_id is None:
+            sessions = list(self._team_live_rails)
+        else:
+            sessions = [session_id]
+
+        visited: set[int] = set()
+        reloaded = 0
+        for current_session in sessions:
+            for agent, _rail in list(self._team_live_rails.get(current_session, [])):
+                if agent is None or id(agent) in visited:
+                    continue
+                visited.add(id(agent))
+                reloaded += await reload_agent_skill_views(agent)
+        logger.info(
+            "[TeamManager] reloaded team skill views: session_id=%s agents=%d rails=%d",
+            session_id,
+            len(visited),
+            reloaded,
+        )
+        return reloaded
+
     def _clear_team_rail_registries(self, session_id: str) -> None:
         self._team_skill_rails.pop(session_id, None)
         self._team_member_skill_evolution_rails.pop(session_id, None)
@@ -1440,7 +1420,6 @@ class TeamManager:
         self._team_evolution_enabled.pop(session_id, None)
         self._team_member_rail_contexts.pop(session_id, None)
         self._team_live_rails.pop(session_id, None)
-        self._team_shared_skill_link_targets.pop(session_id, None)
 
     def _clear_terminal_session_markers(self, session_id: str) -> None:
         """Release process-wide markers only for non-resumable teardown."""
@@ -2573,12 +2552,16 @@ def find_team_skill_rail_across_managers(request_id: str) -> Any | None:
     return get_team_manager().find_team_skill_rail_for_request(request_id)
 
 
-def refresh_team_shared_skill_links_across_managers(session_id: str | None = None) -> bool:
-    """Refresh team shared skill links on the singleton manager."""
-    tm = get_team_manager()
-    if session_id is None:
-        return tm.refresh_all_team_shared_skill_links() > 0
-    return tm.refresh_team_shared_skill_links(session_id)
+async def reload_team_skill_views_across_managers(session_id: str | None = None) -> int:
+    """Reload live team Skill views on the singleton manager.
+
+    Args:
+        session_id: Restrict the reload to one session; ``None`` reloads all.
+
+    Returns:
+        Number of Skill rails reloaded.
+    """
+    return await get_team_manager().reload_team_skill_views(session_id)
 
 
 async def cancel_all_team_stream_tasks_across_managers(reason: str = "") -> None:

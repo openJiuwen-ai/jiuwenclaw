@@ -1,0 +1,83 @@
+{
+  "version": "1.0.0",
+  "package_type": "plugin",
+  "id": "coding-guard",
+  "name": "编程防护",
+  "description": "编程任务安全护栏：先扫描再结论，运行时拦截危险写删与密钥泄露，四级决策可解释。",
+  "display_name": {
+    "en": "Coding Guard",
+    "zh": "编程防护"
+  },
+  "display_description": {
+    "en": "Scan-first coding guardrail: one policy for advisory scan and runtime intercept, with allow/warn/confirm/block decisions.",
+    "zh": "为代码与文件提供执行前安全护栏：先扫描再结论，运行时按四级决策拦截危险写删与密钥泄露。"
+  },
+  "category": "Engineering",
+  "source": "builtin",
+  "default_init_input": {
+    "zh": "扫描并评估这段代码、命令或文件的执行风险，给出风险等级、可执行性与处置建议。",
+    "en": "Scan and assess the execution risk of this code, command or file; report risk level, executability and what to do."
+  },
+  "tags": [
+    {
+      "en": "Risk Scan",
+      "zh": "风险扫描"
+    },
+    {
+      "en": "Secret Protection",
+      "zh": "密钥防护"
+    },
+    {
+      "en": "Execution Guard",
+      "zh": "执行护栏"
+    }
+  ],
+  "quick_inputs": [
+    {
+      "zh": "扫描并评估这段代码、命令或文件的执行风险，给出风险等级、可执行性与处置建议。",
+      "en": "Scan and assess the execution risk of this code, command or file; report risk level, executability and what to do."
+    },
+    {
+      "zh": "检查工作区文件是否安全，标出密钥和危险命令后再给结论。",
+      "en": "Check this workspace file for secrets and dangerous commands, then give a conclusion."
+    },
+    {
+      "zh": "我要写入或删除文件，请先评估风险，确认没有命中密钥文件或高危命令。",
+      "en": "I am about to write or delete files; assess the risk first and confirm no credential files or high-risk commands are hit."
+    }
+  ],
+  "skills": [
+    {
+      "dir": "./skills/pre-execution-review",
+      "mode": "all"
+    }
+  ],
+  "tools": [
+    {
+      "file": "./tools/risk_scan_tool.py",
+      "class": "RiskScanTool",
+      "display_name": {
+        "en": "Risk Scan",
+        "zh": "风险扫描"
+      },
+      "display_description": {
+        "en": "Scan pasted text or a workspace file; return risk_level, decision, executability and findings.",
+        "zh": "扫描粘贴文本或工作区文件，返回风险等级、四级决策、可执行性与逐条命中项。"
+      }
+    }
+  ],
+  "rails": [
+    {
+      "file": "./rails/execution_guard_rail.py",
+      "class": "ExecutionGuardRail",
+      "display_name": {
+        "en": "Execution Guard",
+        "zh": "执行护栏"
+      },
+      "display_description": {
+        "en": "Runtime intercept: block skips the tool, confirm asks the user, warn proceeds with an attributed reason.",
+        "zh": "运行时拦截：block 跳过工具，confirm 征求确认，warn 放行并回传带来源的原因。"
+      }
+    }
+  ]
+}

@@ -15,12 +15,17 @@ from dataclasses import replace
 import json
 import logging
 import re
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
 
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
+    SKILLS_REBUILD_SILENT,
+)
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     AgentAdapter,
     create_adapter,
@@ -33,13 +38,19 @@ from jiuwenswarm.server.runtime.session.session_history import (
     collapse_file_content_blocks,
 )
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
+from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
+    STATUSLINE_SETUP_SYSTEM_PROMPT,
+    build_statusline_setup_dispatch,
+)
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
-from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager, SkillRpcError
+from jiuwenswarm.server.runtime.skill.archive_store import ARCHIVE_DIRNAME
 from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_EXECUTE_OPTION_VALUES,
     PLAN_REMINDER_ORIGINAL_QUERY_KEY,
+    PLAN_REVISE_OPTION_VALUES,
     PLAN_SKIP_OPTION_VALUES,
     plan_skip_feedback,
 )
@@ -58,9 +69,11 @@ from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import (
+    configure_skill_library,
     get_agent_home_dir,
     get_agent_workspace_dir,
     get_env_file,
+    migrate_team_skill_views,
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import (
@@ -68,6 +81,7 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     finalize_assistant_response_if_a2ui,
 )
 from jiuwenswarm.server.runtime.a2ui.runtime.finalizer import should_finalize_a2ui_content
+from jiuwenswarm.server.runtime import extension_package_manager as package_manager
 from jiuwenswarm.agents.harness.common.auto_memory import (
     _execute_auto_memory_extraction,
 )
@@ -79,6 +93,33 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 
 class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
+
+
+def compute_chat_send_mcp_needed(params: dict[str, Any] | None) -> list[str]:
+    """``params.mcp`` ∪ connectors from ``agent_template_name`` / ``plugin_names``.
+
+    Always returns a list (never ``None``). ``reconcile_session_mcp`` still
+    filters/strips names. Absent/``[]`` ``mcp`` no longer drops connectors
+    declared by this turn's equipment params.
+    """
+    p = params if isinstance(params, dict) else {}
+    mcp = p.get("mcp")
+    connectors = package_manager.collect_connectors_for_packages(
+        agent_template_id=p.get("agent_template_name"),
+        plugin_ids=p.get("plugin_names") if isinstance(p.get("plugin_names"), list) else None,
+        skip_missing=True,
+    )
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in (mcp if isinstance(mcp, list) else []) + connectors:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
 
 
 def _schedule_symphony_session_feedback(
@@ -242,6 +283,12 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
                 files["uploaded_images"] = image_items
         if files:
             extra["files"] = files
+
+    raw_skills = params.get("skills")
+    if isinstance(raw_skills, list):
+        skills = [s.strip() for s in raw_skills if isinstance(s, str) and s.strip()]
+        if skills:
+            extra["skills"] = skills
 
     return extra or None
 
@@ -546,6 +593,10 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_LIST: "handle_skills_list",
     ReqMethod.SKILLS_INSTALLED: "handle_skills_installed",
     ReqMethod.SKILLS_GET: "handle_skills_get",
+    ReqMethod.SKILLS_VERSIONS_LIST: "handle_skills_versions_list",
+    ReqMethod.SKILLS_FILES_LIST: "handle_skills_files_list",
+    ReqMethod.SKILLS_FILES_GET: "handle_skills_files_get",
+    ReqMethod.SKILLS_REBUILD: "handle_skills_rebuild",
     ReqMethod.SKILLS_TOGGLE: "handle_skills_toggle",
     ReqMethod.SKILLS_MARKETPLACE_LIST: "handle_skills_marketplace_list",
     ReqMethod.SKILLS_INSTALL: "handle_skills_install",
@@ -571,6 +622,7 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_TEAMSKILLS_HUB_INSTALL: "handle_skills_team_skills_hub_install",
     ReqMethod.SKILLS_TEAMSKILLS_HUB_PUBLISH: "handle_skills_team_skills_hub_publish",
     ReqMethod.SKILLS_TEAMSKILLS_HUB_DELETE: "handle_skills_team_skills_hub_delete",
+    ReqMethod.SKILLS_SWARMSKILLS_HUB_DETAIL: "handle_skills_swarm_skills_hub_detail",
     ReqMethod.SKILLS_RETRIEVAL_STATUS: "handle_skills_retrieval_status",
     ReqMethod.SKILLS_RETRIEVAL_INDEX_BUILD: "handle_skills_retrieval_index_build",
     ReqMethod.SKILLS_RETRIEVAL_INDEX_CANCEL: "handle_skills_retrieval_index_cancel",
@@ -583,7 +635,20 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_STATUS: "handle_skills_evolution_status",
     ReqMethod.SKILLS_EVOLUTION_GET: "handle_skills_evolution_get",
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
+    ReqMethod.SKILLS_VISIBILITY_GET: "handle_skills_visibility_get",
+    ReqMethod.SKILLS_VISIBILITY_SET: "handle_skills_visibility_set",
+    ReqMethod.SKILLS_VISIBILITY_UPDATE: "handle_skills_visibility_update",
 }
+
+# Handlers that persist a Skill visibility document; every one of them must
+# trigger a rail refresh so a grant or a revocation takes effect on the next
+# turn. The read-only ``get`` deliberately stays out.
+_SKILL_VISIBILITY_WRITE_HANDLERS: frozenset[str] = frozenset(
+    {
+        "handle_skills_visibility_set",
+        "handle_skills_visibility_update",
+    }
+)
 
 _PLUGIN_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.PLUGINS_LIST: "handle_plugins_list",
@@ -594,12 +659,30 @@ _PLUGIN_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.PLUGINS_RELOAD: "handle_plugins_reload",
 }
 
+# Catalog + lifecycle: method → package_manager callable.
+_PACKAGE_ROUTES: dict[ReqMethod, str] = {
+    ReqMethod.AGENT_TEMPLATES_LIST: "list_agent_templates",
+    ReqMethod.AGENT_TEMPLATES_SHOW: "show_agent_template",
+    ReqMethod.AGENT_TEMPLATES_FILE_LIST: "list_agent_template_files",
+    ReqMethod.AGENT_TEMPLATES_FILE_READ: "read_agent_template_file",
+    ReqMethod.AGENT_TEMPLATES_CREATE: "create_agent_template",
+    ReqMethod.AGENT_TEMPLATES_IMPORT_LOCAL: "import_agent_template",
+    ReqMethod.AGENT_TEMPLATES_INSTALL: "install_agent_template",
+    ReqMethod.AGENT_TEMPLATES_UNINSTALL: "uninstall_agent_template",
+    ReqMethod.PLUGIN_PACKAGES_LIST: "list_plugin_packages",
+    ReqMethod.PLUGIN_PACKAGES_SHOW: "show_plugin_package",
+    ReqMethod.PLUGIN_PACKAGES_CREATE: "create_plugin_package",
+    ReqMethod.PLUGIN_PACKAGES_IMPORT_LOCAL: "import_plugin_package",
+    ReqMethod.PLUGIN_PACKAGES_INSTALL: "install_plugin_package",
+    ReqMethod.PLUGIN_PACKAGES_UNINSTALL: "uninstall_plugin_package",
+}
+
 _SKILL_COMMAND_REGEX = re.compile(
     r"^/skills use\s+(?P<skill_names>[^,]+)\s*,\s*(?P<query>.*)$"
 )
 
 # /statusline prompt-type 模式：
-# 用户输入 "/statusline <描述>" → 直接注入 statusline-setup 指令到 prompt
+# 用户输入 "/statusline <描述>" → 让父代理调用内置 statusline-setup 子代理
 # 排除已知子命令（set, padding, clear, help, json）——这些由 TUI 前端本地处理，
 # 但如果消息经过 Gateway 传到 AgentServer，后端也需要区分。
 _STATUSLINE_KNOWN_SUBCOMMANDS = {"set", "padding", "clear", "help", "json", "get"}
@@ -607,133 +690,10 @@ _STATUSLINE_PROMPT_REGEX = re.compile(
     r"^/statusline\s+(?P<description>.+)$"
 )
 
-# 不调用 /skills，直接把指令文本嵌入 prompt
-_STATUSLINE_SETUP_PROMPT = """\
-You are a status line setup agent. Your job is to configure the user's TUI status line \
-by generating a shell command and writing it to the config file so the bottom bar \
-updates immediately.
-
-This is NOT about writing Python scripts or creating files — it's about writing a \
-**shell command** that runs every 2 seconds and whose stdout becomes the status bar text.
-
-## How the Status Line Works
-
-1. The TUI runs the configured shell command every 2 seconds
-2. Each time, it pipes a JSON object with session info as stdin to the command
-3. The command's stdout is displayed at the bottom of the TUI screen
-4. Config is stored in ~/.jiuwenswarm-tui/config.json under the "statusLine" field
-
-The shell command can do anything a normal shell command can — read JSON fields, \
-run git, check files, call system utilities, etc. The JSON input is just one \
-convenient data source, not a constraint.
-
-## Three Command Styles
-
-**Style A: Pure JSON fields** — for session info (model, tokens, mode, etc.)
-```
-input=$(cat); field1=$(echo "$input" | jq -r '.field1 // "default"'); \
-echo "label:$field1"
-```
-
-**Style B: Pure shell utilities** — for system info (git branch, disk, \
-time, etc.) — no `input=$(cat)` needed
-```
-branch=$(git branch --show-current 2>/dev/null || echo "?"); \
-time=$(date +%H:%M:%S); echo "$branch | $time"
-```
-
-**Style C: Mixed** — JSON fields + shell utilities (most common)
-```
-input=$(cat); model=$(echo "$input" | jq -r '.model // "?"'); \
-branch=$(git branch --show-current 2>/dev/null || echo "?"); \
-echo "$model | git:$branch"
-```
-
-## JSON Input Field Reference
-
-The command receives this JSON via stdin every 2 seconds:
-
-| Field | Description |
-|-------|-------------|
-| session_id | Current session ID |
-| session_name | Session title (set via /rename) |
-| cwd | Current working directory |
-| mode | Current mode (agent / code.normal / code.team / team) |
-| model | Current model name |
-| provider | Model provider |
-| version | jiuwenswarm version |
-| connection | Connection state (idle / connecting / connected / reconnecting / auth_failed) |
-| is_processing | Is agent currently processing |
-| last_error | Most recent error message or null |
-| evolution_status | Evolution state (idle / running) |
-| active_subtask_count | Number of active subtasks |
-| todo_count | Number of todo items |
-| trusted_dirs | Trusted directory paths (array) |
-| usage.total_input_tokens | Session total input tokens |
-| usage.total_output_tokens | Session total output tokens |
-| usage.total_tokens | Session total tokens |
-| context_window.context_window_size | Max context window tokens |
-| context_window.used_percentage | Context used percentage (0-100) |
-| context_window.remaining_percentage | Context remaining percentage (0-100) |
-
-Common non-JSON shell approaches: git branch --show-current, \
-df -h, date, hostname -s, whoami, etc.
-
-## How to Apply the Config
-
-DO NOT use `python -c "..."` one-liners — they break on Windows due \
-to quoting and escaping issues. Instead, write a Python script file \
-and then execute it. This is the ONLY reliable way on Windows.
-
-Step 1: Write a Python script file (e.g. /tmp/update_statusline.py) \
-that merges the new statusLine into the config:
-```python
-import json, os
-d = os.path.expanduser('~/.jiuwenswarm-tui')
-os.makedirs(d, exist_ok=True)
-p = os.path.join(d, 'config.json')
-if not os.path.exists(p):
-    with open(p, 'w') as f:
-        f.write('{}\\n')
-with open(p) as f:
-    c = json.load(f)
-c['statusLine'] = {
-    'type': 'command',
-    'command': 'YOUR_COMMAND_HERE',
-    'padding': 0
-}
-with open(p, 'w') as f:
-    json.dump(c, f, indent=2)
-    f.write('\\n')
-print('StatusLine configured')
-```
-
-Step 2: Execute the script:
-```bash
-python /tmp/update_statusline.py
-```
-
-IMPORTANT: The TUI polls config.json every 2 seconds, so the status \
-bar updates automatically within 2 seconds after you write the config. \
-No restart needed.
-
-Guidelines:
-- Only write to ~/.jiuwenswarm-tui/config.json — never overwrite \
-  system files
-- Always merge with existing config — preserve trustedDirs, theme, etc.
-- Never hardcode secrets or API keys in the command
-- The statusLine command runs in bash (sh -c) context, NOT in \
-  PowerShell — so `$(cat)`, `$var`, `jq`, `echo` etc. are all \
-  standard bash/sh syntax
-- Commands should handle failures gracefully: use 2>/dev/null, \
-  || echo "fallback"
-- On Windows, $(cat) is automatically patched to read from a temp \
-  file by the TUI
-- DO NOT use `python -c` one-liners for config updates — they \
-  break on Windows. Always write a .py script file and execute it.
-- DO NOT read config.json with `cat` — use Python os.path.expanduser \
-  instead, as `~` may not resolve correctly in some shell environments
-"""
+# Backward-compatible alias for tests and callers that imported the old name.
+# The text is now the dedicated subagent's system prompt, not a suffix appended
+# to every parent-agent user turn.
+_STATUSLINE_SETUP_PROMPT = STATUSLINE_SETUP_SYSTEM_PROMPT
 
 
 def _handle_skills_use_slash_command(query: str) -> Tuple[list, str]:
@@ -756,17 +716,14 @@ def _handle_skills_use_slash_command(query: str) -> Tuple[list, str]:
 def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
     """处理 /statusline <prompt>
 
-    不调用 /skills 命令，不依赖 SkillUseRail，
-    直接把 statusline-setup 指令文本嵌入 user prompt。
-
-    _handle_statusline_prompt_command() → 返回 (statusline_prompt, description)
-    build_user_prompt() 把 statusline_prompt 嵌入到 user prompt 后面
+    不调用 /skills 命令。返回一条让父代理通过 ``task_tool`` 调用内置
+    ``statusline-setup`` 子代理的调度指令。
 
     Args:
         query: 用户原始输入（含 "/statusline" 前缀）
 
     Returns:
-        (statusline_prompt, description) — 注入的 prompt 文本和提取的描述
+        (dispatch_prompt, description) — 子代理调度指令和提取的描述
         如果不是 /statusline prompt 模式，返回 ("", query)
     """
     stripped = query.strip()
@@ -782,7 +739,7 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
             return "", query
         if description:
             # 把用户的描述转化为让 Agent 自动配置状态栏的 prompt
-            return _STATUSLINE_SETUP_PROMPT, description
+            return build_statusline_setup_dispatch(description), description
 
     # /statusline 无参数 → 不是 prompt 模式（TUI 应已拦截处理 help）
     return "", query
@@ -841,12 +798,41 @@ class JiuWenSwarm:
     STREAM_QUEUE_MAXSIZE = 64
 
     def __init__(self) -> None:
+        self._prepare_skill_library()
         self._adapter: AgentAdapter | None = None
+        # PersonalContext Rail follows the Host runtime switch.  Keep the
+        # latest snapshot on the facade so a lazily-created adapter inherits
+        # the current state before its first rail synchronization.
+        self._personal_context_runtime_enabled: bool = False
         self._sdk_name: str | None = None
         self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
         self._session_manager = SessionManager()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
+
+    @staticmethod
+    def _prepare_skill_library() -> None:
+        """Pin the single Skill library and retire legacy per-workspace views.
+
+        Runs before any adapter, team or rail is built so legacy view directories
+        are gone by the time anything reads a team workspace. Correctness no
+        longer depends on that ordering: the migration seeds its allow lists at
+        ``AUTHORITY_MIGRATION``, which outranks the config seeds written during
+        assembly whichever one lands first. The agent-teams home still has to be
+        pinned before the scan, otherwise it would look under openJiuWen's own
+        default root instead of this instance's workspace.
+
+        Single-agent mode is untouched by all of this: it reads the same library
+        directory it always did and owns no visibility document.
+        """
+        try:
+            from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+
+            configure_agent_teams_home()
+            configure_skill_library()
+            migrate_team_skill_views()
+        except Exception as exc:
+            logger.warning("[JiuWenSwarm] skill library preparation failed: %s", exc)
 
     def _get_skilldev_service(self):
         """懒初始化并返回 SkillDevService 实例.
@@ -889,11 +875,41 @@ class JiuWenSwarm:
             self._adapter = create_adapter(self._sdk_name, mode=mode)
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
+            setter = getattr(
+                self._adapter, "set_personal_context_runtime_enabled", None
+            )
+            if callable(setter):
+                setter(self._personal_context_runtime_enabled)
             self._skill_manager.set_skillnet_install_complete_hook(
                 self._on_skillnet_install_complete
             )
             logger.info("[JiuWenSwarm] Initialized adapter: sdk=%s, mode=%s", self._sdk_name, mode)
         return self._adapter
+
+    def set_personal_context_runtime_enabled(self, enabled: bool) -> None:
+        """Store and forward the PersonalContext Host runtime switch."""
+
+        self._personal_context_runtime_enabled = bool(enabled)
+        adapter = self._adapter
+        setter = (
+            getattr(adapter, "set_personal_context_runtime_enabled", None)
+            if adapter is not None
+            else None
+        )
+        if callable(setter):
+            setter(self._personal_context_runtime_enabled)
+
+    async def refresh_personal_context_rail(self) -> None:
+        """Refresh the PersonalContext Rail without creating an Agent."""
+
+        adapter = self._adapter
+        refresher = (
+            getattr(adapter, "refresh_personal_context_rail", None)
+            if adapter is not None
+            else None
+        )
+        if callable(refresher):
+            await refresher()
 
     @staticmethod
     def _adapter_mode_for_request(request: AgentRequest) -> str:
@@ -935,19 +951,28 @@ class JiuWenSwarm:
                 busy_checker=lambda: sm.has_active_tasks(),))
 
     async def _on_skillnet_install_complete(self) -> None:
-        """Reload the agent and refresh active team shared skill links after async install."""
+        """Reload the agent and refresh live team skill rails after async install."""
         await self.create_instance()
-        self._refresh_team_shared_skill_links()
+        await self._reload_team_skill_rails()
 
     @staticmethod
-    def _refresh_team_shared_skill_links(session_id: str | None = None) -> None:
-        """Refresh team shared skill links after the global skill root changes."""
-        try:
-            from jiuwenswarm.agents.harness.team import refresh_team_shared_skill_links_across_managers
+    async def _reload_team_skill_rails(session_id: str | None = None) -> None:
+        """Re-scan the shared Skill library for live team members.
 
-            refresh_team_shared_skill_links_across_managers(session_id)
+        Replaces the old shared-link refresh: teams no longer own a mirrored
+        ``skills/`` directory, so nothing has to be re-linked. What still needs
+        a nudge is each running member's in-memory Skill rail, which otherwise
+        keeps serving the library listing from before the change.
+
+        Args:
+            session_id: Restrict the reload to one session; None reloads all.
+        """
+        try:
+            from jiuwenswarm.agents.harness.team import reload_team_skill_views_across_managers
+
+            await reload_team_skill_views_across_managers(session_id)
         except Exception as exc:
-            logger.warning("[JiuWenSwarm] team shared skill link refresh failed: %s", exc)
+            logger.warning("[JiuWenSwarm] team skill view reload failed: %s", exc)
 
     async def _refresh_skill_rails_after_change(self) -> None:
         """轻量刷新 skill rail，避免 uninstall 后全量重建 agent 实例.
@@ -1028,6 +1053,12 @@ class JiuWenSwarm:
         query = params.get("query")
         if query is None or query == "":
             query = params.get("content", "")
+        if (query is None or query == "") and isinstance(params, dict):
+            message = params.get("message")
+            if isinstance(message, str):
+                query = message
+            elif message is not None:
+                query = message
         # /debug 请求级指令：仅 agent/code 在此剥离前缀；team 自行从
         # ``turn.text`` 解析 /debug（见 team_helpers），故此处对 team 不剥离。
         _request_debug = False
@@ -1055,7 +1086,11 @@ class JiuWenSwarm:
         raw_skills = params.get("skills")
         if isinstance(raw_skills, list):
             skills = [s.strip() for s in raw_skills if isinstance(s, str) and s.strip()] or None
-        metadata = request.metadata or {}
+        metadata = dict(request.metadata or {}) if isinstance(request.metadata, dict) else {}
+        # params.metadata.scene / target_skill 并入 prompt 上下文
+        param_metadata = params.get("metadata") if isinstance(params, dict) else None
+        if isinstance(param_metadata, dict):
+            metadata = {**metadata, **param_metadata}
         param_project_dir = params.get("project_dir")
         metadata_project_dir = metadata.get("project_dir") if isinstance(metadata, dict) else None
         project_dir = (
@@ -1090,7 +1125,7 @@ class JiuWenSwarm:
             files=params.get("files", {}) or {},
             trusted_dirs=trusted_dirs,
             skills=skills,
-            metadata=request.metadata,
+            metadata=metadata,
         )
 
         if isinstance(query, InteractiveInput):
@@ -1115,14 +1150,14 @@ class JiuWenSwarm:
                     final_query = turn.render()
             else:
                 final_query = turn.render()
-                # 调试日志：确认 /statusline prompt 注入是否生效
+                # 调试日志：确认 /statusline 是否已改写为内置子代理调度
                 if isinstance(query, str) and "/statusline" in query:
                     logger.info(
                         "[_build_inputs][STATUSLINE] 原始 query=%s, 最终 prompt 长度=%d, "
-                        "包含 statusline-setup 指令=%s",
+                        "包含 statusline-setup 调度=%s",
                         query[:200],
                         len(final_query) if isinstance(final_query, str) else 0,
-                        "status line setup agent" in final_query if isinstance(final_query, str) else False,
+                        "statusline-setup" in final_query if isinstance(final_query, str) else False,
                     )
 
         inputs: dict[str, Any] = {
@@ -1457,6 +1492,16 @@ class JiuWenSwarm:
                 or plan_skip_feedback(get_config().get("preferred_language")),
                 "plan_skip": True,
             }
+        elif value in PLAN_REVISE_OPTION_VALUES:
+            # Web 的"下一步"：不退出 plan，按修改意见续跑。``plan_revise`` 是额外键，
+            # ConfirmPayload 会忽略它；rail 只在看到它时才给假回执包修订前缀。
+            # TUI 仍发 ``reject``，不会进这个分支。
+            confirm_payload = {
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input or "用户希望继续规划",
+                "plan_revise": True,
+            }
         elif value in ("reject", "拒绝", "Reject", "继续规划", "其他意见"):
             feedback = custom_input or (
                 "用户希望继续规划" if value in ("Keep planning", "继续规划", "其他意见") else "用户拒绝"
@@ -1512,7 +1557,17 @@ class JiuWenSwarm:
         handler_name = _SKILL_ROUTES[request.req_method]
         handler = getattr(self._skill_manager, handler_name)
         try:
-            payload = await handler(request.params)
+            params = dict(request.params) if isinstance(request.params, dict) else {}
+            if handler_name in (
+                "handle_skills_import_local",
+                "handle_skills_get",
+                "handle_skills_files_get",
+            ):
+                # download_token / 正文图片 token 校验需要绑定当前会话 sid
+                params["_session_id"] = str(request.session_id or "").strip()
+                if handler_name == "handle_skills_files_get" and not params.get("session_id"):
+                    params["session_id"] = params["_session_id"]
+            payload = await handler(params)
             _reload_after_skills = handler_name in [
                 "handle_skills_install",
                 "handle_skills_import_local",
@@ -1525,20 +1580,50 @@ class JiuWenSwarm:
                 _reload_after_skills = False
             if _reload_after_skills:
                 await self.create_instance()
-                self._refresh_team_shared_skill_links(request.session_id)
+                await self._reload_team_skill_rails(request.session_id)
             elif handler_name == "handle_skills_uninstall" and payload.get("success"):
                 # 卸载只需轻量刷新 skill rail，不需要全量重建 agent 实例。
                 # SkillUseRail 会通过文件系统签名检测到目录删除并自动刷新，
                 # 这里主动调用 reload_skills() 确保立即生效，避免延迟到下一次模型调用。
                 await self._refresh_skill_rails_after_change()
-                self._refresh_team_shared_skill_links(request.session_id)
+                await self._reload_team_skill_rails(request.session_id)
+            elif handler_name in _SKILL_VISIBILITY_WRITE_HANDLERS and payload.get("success"):
+                # 可见性只改 metadata，库内容没变：agent 无需重建，只要让各
+                # skill rail 重新读一次 metadata，授权/撤权即刻生效。
+                await self._refresh_skill_rails_after_change()
+                await self._reload_team_skill_rails(request.session_id)
+            elif handler_name == "handle_skills_evolution_save" and payload.get("success"):
+                await self._refresh_skill_rails_after_change()
+            elif handler_name == "handle_skills_rebuild" and self._is_skills_rebuild_followup(
+                payload
+            ):
+                # 与 /evolve_rebuild 同 prompt+Agent，但 RPC 内同步静默跑完，不经 Gateway chat.send
+                try:
+                    await self._run_skills_rebuild_followup(request, payload)
+                except SkillRpcError:
+                    raise
+                except Exception as exc:
+                    logger.exception(
+                        "[JiuWenSwarm] skills.rebuild 静默 Agent 失败: request_id=%s skill=%s",
+                        request.request_id,
+                        payload.get("skill_name"),
+                    )
+                    raise SkillRpcError(
+                        "SKILL_REBUILD_FAILED",
+                        f"rebuild Agent 失败: {exc}",
+                    ) from exc
+                payload = {"success": True}
         except Exception as exc:
             logger.error("[JiuWenSwarm] skills 请求处理失败: %s", exc)
+            err_payload: dict = {"error": str(exc), "message": str(exc)}
+            code = getattr(exc, "code", None)
+            if isinstance(code, str) and code.strip():
+                err_payload["code"] = code.strip()
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload=err_payload,
                 metadata=request.metadata,
             )
         return AgentResponse(
@@ -1548,6 +1633,108 @@ class JiuWenSwarm:
             payload=payload,
             metadata=request.metadata,
         )
+
+    @staticmethod
+    def _is_skills_rebuild_followup(payload: Any) -> bool:
+        """判断 skills.rebuild 响应是否需要静默 follow-up."""
+        if not isinstance(payload, dict):
+            return False
+        return payload.get("result_type") == "followup" and bool(payload.get("success"))
+
+    async def _run_skills_rebuild_followup(
+        self,
+        request: AgentRequest,
+        payload: dict[str, Any],
+    ) -> None:
+        """同步静默执行 rebuild Agent follow-up，并按版本目标同步 workspace / 版本副本.
+
+        不经外层 process_message_stream（避免写用户会话 history / 推 UI），
+        直接走 adapter.process_message_stream_impl，并使用临时 session 隔离 checkpointer。
+        """
+        followup = str(payload.get("followup_prompt") or "").strip()
+        if not followup:
+            raise SkillRpcError("SKILL_REBUILD_FAILED", "evolve_rebuild follow-up prompt 为空")
+
+        target = payload.get("rebuild_target") if isinstance(payload.get("rebuild_target"), dict) else {}
+        skill_dir_raw = str(target.get("skill_dir") or "").strip()
+        content_root_raw = str(target.get("content_root") or "").strip()
+        swap_workspace = bool(target.get("swap_workspace"))
+        is_default = bool(target.get("is_default"))
+        skill_dir = Path(skill_dir_raw) if skill_dir_raw else None
+        content_root = Path(content_root_raw) if content_root_raw else None
+        should_write_back = is_default or swap_workspace
+
+        workspace_backup: Path | None = None
+        try:
+            if swap_workspace and skill_dir is not None and content_root is not None:
+                # 非默认版本：临时把版本 mid-state 放到 workspace，供 Agent 按 skill 名改写
+                workspace_backup = Path(tempfile.mkdtemp(prefix="skill-rebuild-ws-bak-"))
+                for child in list(skill_dir.iterdir()):
+                    if child.name == ARCHIVE_DIRNAME:
+                        continue
+                    dest = workspace_backup / child.name
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.copytree(child, dest)
+                    elif child.is_file():
+                        shutil.copy2(child, dest)
+                self._skill_manager.sync_workspace_from_version_content(skill_dir, content_root)
+
+            params = dict(request.params) if isinstance(request.params, dict) else {}
+            params["query"] = followup
+            params["log_as_user"] = False
+            params.setdefault("mode", params.get("mode") or "agent")
+
+            metadata = dict(request.metadata) if isinstance(request.metadata, dict) else {}
+            metadata["skills_rebuild_silent"] = True
+
+            rebuild_session_id = f"skills-rebuild:{request.request_id}"
+            chat_request = AgentRequest(
+                request_id=f"{request.request_id}-rebuild-followup",
+                channel_id=request.channel_id,
+                session_id=rebuild_session_id,
+                chat_id=request.chat_id,
+                req_method=ReqMethod.CHAT_SEND,
+                params=params,
+                is_stream=True,
+                timestamp=request.timestamp,
+                metadata=metadata,
+            )
+            adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(chat_request))
+            inputs, _, _ = self._build_inputs(chat_request)
+            silent_token = SKILLS_REBUILD_SILENT.set(True)
+            try:
+                async for _chunk in adapter.process_message_stream_impl(chat_request, inputs):
+                    pass
+            finally:
+                SKILLS_REBUILD_SILENT.reset(silent_token)
+
+            if skill_dir is not None and content_root is not None and should_write_back:
+                # Agent 改写 workspace 后回写目标版本副本
+                self._skill_manager.copy_workspace_business_to_version(skill_dir, content_root)
+                version = target.get("version")
+                if isinstance(version, str) and version.strip():
+                    from jiuwenswarm.server.runtime.skill.archive_store import touch_version_metadata
+
+                    touch_version_metadata(skill_dir, version.strip())
+            await self._refresh_skill_rails_after_change()
+        finally:
+            if workspace_backup is not None and skill_dir is not None:
+                try:
+                    for child in list(skill_dir.iterdir()):
+                        if child.name == ARCHIVE_DIRNAME:
+                            continue
+                        if child.is_dir() and not child.is_symlink():
+                            shutil.rmtree(child, ignore_errors=True)
+                        else:
+                            child.unlink(missing_ok=True)
+                    for child in workspace_backup.iterdir():
+                        dest = skill_dir / child.name
+                        if child.is_dir() and not child.is_symlink():
+                            shutil.copytree(child, dest)
+                        elif child.is_file():
+                            shutil.copy2(child, dest)
+                finally:
+                    shutil.rmtree(workspace_backup, ignore_errors=True)
 
     async def _handle_plugins_request(self, request: AgentRequest) -> AgentResponse | None:
         """处理 Plugin 相关请求，返回 None 表示不是 Plugin 请求."""
@@ -1568,6 +1755,102 @@ class JiuWenSwarm:
                 await self.create_instance()
         except Exception as exc:
             logger.error("[JiuWenSwarm] plugins 请求处理失败: %s", exc)
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+                metadata=request.metadata,
+            )
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
+    async def _handle_package_catalog_request(self, request: AgentRequest) -> AgentResponse | None:
+        """Route catalog / lifecycle ReqMethods to package_manager and wrap AgentResponse."""
+        method = request.req_method
+        if method not in _PACKAGE_ROUTES:
+            return None
+        params = request.params if isinstance(request.params, dict) else {}
+        # Frontend contract uses `id`; accept legacy `name` as alias.
+        name = params.get("id") if params.get("id") not in (None, "") else params.get("name")
+        try:
+            if method == ReqMethod.AGENT_TEMPLATES_LIST:
+                payload: dict[str, Any] = {
+                    "templates": package_manager.list_agent_templates(params)
+                }
+            elif method == ReqMethod.AGENT_TEMPLATES_SHOW:
+                card = package_manager.show_agent_template(str(name or ""))
+                if card is None:
+                    raise ValueError(f"agent_template not found: {name!r}")
+                payload = {"template": card}
+            elif method == ReqMethod.AGENT_TEMPLATES_FILE_LIST:
+                payload = {
+                    "tree": package_manager.list_agent_template_files(str(name or ""))
+                }
+            elif method == ReqMethod.AGENT_TEMPLATES_FILE_READ:
+                payload = package_manager.read_agent_template_file(
+                    str(name or ""), str(params.get("path", ""))
+                )
+            elif method == ReqMethod.PLUGIN_PACKAGES_LIST:
+                payload = {"packages": package_manager.list_plugin_packages(params)}
+            elif method == ReqMethod.PLUGIN_PACKAGES_SHOW:
+                card = package_manager.show_plugin_package(str(name or ""))
+                if card is None:
+                    raise ValueError(f"plugin not found: {name!r}")
+                payload = {"package": card}
+            elif method == ReqMethod.AGENT_TEMPLATES_INSTALL:
+                ok, payload = package_manager.install_equipment_gated(
+                    "agent_templates", params
+                )
+                if not ok:
+                    return AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload=payload,
+                        metadata=request.metadata,
+                    )
+            elif method == ReqMethod.PLUGIN_PACKAGES_INSTALL:
+                ok, payload = package_manager.install_equipment_gated(
+                    "plugin_packages", params
+                )
+                if not ok:
+                    return AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload=payload,
+                        metadata=request.metadata,
+                    )
+            elif method == ReqMethod.AGENT_TEMPLATES_UNINSTALL:
+                unload_live = getattr(self, "_unload_live_equipment", None)
+                if unload_live is not None:
+                    await unload_live("agent_templates", str(name or ""))
+                payload = package_manager.uninstall_equipment_with_notice(
+                    "agent_templates", params
+                )
+            elif method == ReqMethod.PLUGIN_PACKAGES_UNINSTALL:
+                unload_live = getattr(self, "_unload_live_equipment", None)
+                if unload_live is not None:
+                    await unload_live("plugin_packages", str(name or ""))
+                payload = package_manager.uninstall_equipment_with_notice(
+                    "plugin_packages", params
+                )
+            elif method == ReqMethod.AGENT_TEMPLATES_IMPORT_LOCAL:
+                payload = package_manager.import_agent_template(params)
+            elif method == ReqMethod.PLUGIN_PACKAGES_IMPORT_LOCAL:
+                payload = package_manager.import_plugin_package(params)
+            else:
+                # lifecycle: create → ok + {}
+                getattr(package_manager, _PACKAGE_ROUTES[method])(params)
+                payload = {}
+        except Exception as exc:
+            logger.warning("[extension_package_manager] request %s failed: %s", method, exc)
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -1893,6 +2176,10 @@ class JiuWenSwarm:
         if plugins_response is not None:
             return plugins_response
 
+        package_catalog_response = await self._handle_package_catalog_request(request)
+        if package_catalog_response is not None:
+            return package_catalog_response
+
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
 
         heartbeat_response = await adapter.handle_heartbeat(request)
@@ -1950,6 +2237,15 @@ class JiuWenSwarm:
         except Exception:
             _schedule_feedback_once("error")
             raise
+
+        # Session-level MCP enable: reconcile to explicit mcp ∪ equipment
+        # connectors before the agent runs. Always pass a list (never None):
+        # empty clears selection when neither side contributes names.
+        params = request.params if isinstance(request.params, dict) else {}
+        await self.reconcile_session_mcp(
+            request.session_id,
+            compute_chat_send_mcp_needed(params),
+        )
 
         # cloud memory: before chat hook
         if memory_mode == "cloud":
@@ -2133,6 +2429,7 @@ class JiuWenSwarm:
         for stateless_handler in (
             self._handle_skills_request,
             self._handle_plugins_request,
+            self._handle_package_catalog_request,
         ):
             stateless_response = await stateless_handler(request)
             if stateless_response is not None:
@@ -2234,6 +2531,15 @@ class JiuWenSwarm:
         except Exception:
             _schedule_feedback_once("error")
             raise
+
+        # Session-level MCP enable: reconcile to explicit mcp ∪ equipment
+        # connectors before the agent runs. Always pass a list (never None):
+        # empty clears selection when neither side contributes names.
+        params = request.params if isinstance(request.params, dict) else {}
+        await self.reconcile_session_mcp(
+            request.session_id,
+            compute_chat_send_mcp_needed(params),
+        )
 
         # Team 模式：把整个 turn 交给 team_helpers。它先用 turn.text（用户原
         # 文）解析 /debug、$member 与 slash，再用同一个 render() 投递，因此
@@ -3211,6 +3517,111 @@ class JiuWenSwarm:
             return None
         return getter(session_id)
 
+    async def ensure_live_session_instance(self, session_id: str | None):
+        """Start the session-scoped adapter if needed and return its DeepAgent.
+
+        Used by plan-mode sync so the first turn writes ``plan_mode`` onto the
+        same Session the upcoming ``chat.send`` will invoke, not a throwaway.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return None
+        starter = getattr(adapter, "ensure_live_session_instance", None)
+        if starter is None:
+            return self.get_live_session_instance(session_id)
+        return await starter(session_id)
+
+    # --- Phase-2: targeted single-MCP control (forwarded to the deep adapter) ---
+    async def apply_mcp_change(self, name: str, action: str, *, enabled: bool = True) -> bool:
+        """Apply a single-MCP change without a full config reload.
+
+        action ∈ {"add", "remove", "toggle"}.
+        - add: register the MCP (spawn stdio / connect SSE-HTTP)
+        - remove: unregister (disconnect)
+        - toggle: enable=register / disable=unregister
+
+        Returns True if the adapter applied it. The adapter reads the merged
+        get_mcp_servers() list (config.yaml + state.json), so a state.json
+        write done just before this call is visible.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return False
+        if action == "add" or (action == "toggle" and enabled):
+            return bool(await adapter.register_mcp_by_name(name))
+        if action == "remove" or (action == "toggle" and not enabled):
+            return bool(await adapter.unregister_mcp_by_name(name))
+        return False
+
+    async def reconcile_session_mcp(
+        self, session_id: str | None, needed: list[str] | None
+    ) -> None:
+        """Reconcile this session's MCP set to ``needed`` (idempotent diff).
+
+        Session-level enable driven by chat.send: callers should pass the union
+        of ``params.mcp`` and connectors from ``agent_template_name`` /
+        ``plugin_names`` (see ``compute_chat_send_mcp_needed``). ``None`` /
+        ``[]`` both clear the session's selection. See
+        ``JiuWenSwarmDeepAdapter.reconcile_session_mcp`` for the diff logic.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return
+        reconcile = getattr(adapter, "reconcile_session_mcp", None)
+        if reconcile is None:
+            # Adapter doesn't support session-level MCP (e.g. a stub/mock
+            # adapter) — session-level enable is a no-op for it.
+            return
+        await reconcile(session_id, needed)
+
+    def sync_mcp_credentials(self) -> bool:
+        """Sync connected MCPs' tokens into os.environ (skill scripts).
+
+        Forwarded to the deep adapter. os.environ is process-global, so a
+        single live agent's sync covers the whole process; called from the
+        connect/disconnect handlers after a state.json write. Returns False
+        when no adapter is live yet (cold-start race) so the caller can fall
+        through to another live agent.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return False
+        sync = getattr(adapter, "_sync_mcp_credentials_environment", None)
+        if sync is None:
+            return False
+        return bool(sync())
+
+    def clear_mcp_credentials(self, name: str) -> bool:
+        """Clear a disconnected MCP's token env vars.
+
+        Returns False when no adapter is live yet so the caller can fall
+        through to another live agent.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return False
+        clear = getattr(adapter, "_clear_mcp_credentials_environment", None)
+        if clear is None:
+            return False
+        clear(name)
+        return True
+
+    async def refresh_skill_rails(self) -> None:
+        """Reload SkillUseRail so newly installed/uninstalled MCP bundled
+        skills surface to the agent without a full reload.
+
+        Called from the connect/disconnect handlers after skill_installer
+        copies/removes skill dirs. Without this the agent's SkillUseRail keeps
+        its cached skill set and the MCP's skills stay invisible even though
+        the files are on disk.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return
+        refresh = getattr(adapter, "refresh_skill_rails", None)
+        if refresh is not None:
+            await refresh()
+
     async def apply_package_change_to_session_adapters(
         self,
         operation: str,
@@ -3225,6 +3636,18 @@ class JiuWenSwarm:
         if method is None:
             return
         await method(operation, config_path)
+
+    async def _unload_live_equipment(self, kind: str, package_id: str) -> None:
+        """Unload a catalog package from live session adapters before delete.
+
+        Missing adapter is a no-op (nothing loaded). Unload errors propagate
+        so uninstall does not delete the package.
+        """
+        adapter = getattr(self, "_adapter", None)
+        unload = getattr(adapter, "unload_equipment_if_loaded", None)
+        if unload is None:
+            return
+        await unload(kind, package_id)
 
     async def compress_context(
             self,
@@ -3271,13 +3694,18 @@ class JiuWenSwarm:
             raise ValueError("Agent adapter not available")
         return await adapter.get_context_usage(session_id=session_id)
 
-    async def generate_recap(self, session_id: str) -> dict[str, Any]:
+    async def generate_recap(
+        self,
+        session_id: str,
+        current_mode: str | None = None,
+    ) -> dict[str, Any]:
         """生成会话快速回顾（read-only，不修改对话历史）。
 
         取最近30条消息 → fast model → 1-2句摘要。
 
         Args:
             session_id: 会话ID
+            current_mode: 触发 recap 时的 canonical runtime mode。
 
         Returns:
             包含 recap 结果的字典:
@@ -3288,7 +3716,10 @@ class JiuWenSwarm:
         adapter = self._adapter
         if adapter is None:
             raise ValueError("Agent adapter not available")
-        return await adapter.generate_recap(session_id=session_id)
+        return await adapter.generate_recap(
+            session_id=session_id,
+            current_mode=current_mode,
+        )
 
     async def compact_partial(
         self,

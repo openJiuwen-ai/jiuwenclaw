@@ -1664,7 +1664,7 @@ async def test_joyai_delegation_sends_trigger_frame_to_full_core_agent(
     monkeypatch.setattr(video_live, "_append_joyai_log", lambda event: None)
     monkeypatch.setattr(video_live, "_append_video_task_log", lambda event: None)
     monkeypatch.setattr(
-        "jiuwenswarm.gateway.media_attachments.get_agent_sessions_dir",
+        "jiuwenswarm.server.runtime.attachments.media_attachments.get_agent_sessions_dir",
         lambda: tmp_path,
     )
 
@@ -1753,10 +1753,11 @@ async def test_tts_stream_handler_pushes_pcm_before_completion(monkeypatch) -> N
         "stream_id": "stream-1",
         "sample_rate": 24_000,
     }
-    for _ in range(20):
-        if any(event == "video.tts.done" for event, _ in channel.events):
-            break
-        await asyncio.sleep(0)
+    async def wait_for_done_event() -> None:
+        while not any(event == "video.tts.done" for event, _ in channel.events):
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(wait_for_done_event(), timeout=1)
 
     chunks = [
         base64.b64decode(payload["audio_base64"])
@@ -1828,10 +1829,11 @@ async def test_tts_stream_cancel_stops_background_generation(monkeypatch) -> Non
         {"stream_id": "stream-cancel"},
         "session",
     )
-    for _ in range(20):
-        if any(event == "video.tts.cancelled" for event, _ in channel.events):
-            break
-        await asyncio.sleep(0)
+    async def wait_for_cancelled_event() -> None:
+        while not any(event == "video.tts.cancelled" for event, _ in channel.events):
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(wait_for_cancelled_event(), timeout=1)
 
     assert channel.responses[-1][1]["payload"]["cancelled"] is True
     assert channel.events[-1] == (

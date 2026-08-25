@@ -109,6 +109,38 @@ async def test_prepare_chat_normalizes_agent_request_for_code_workspace() -> Non
 
 
 @pytest.mark.asyncio
+async def test_prepare_chat_uses_locked_persist_session_metadata() -> None:
+    agent = MagicMock()
+    manager = MagicMock()
+    manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
+    request = _chat_request(
+        "sess_persist_locked",
+        mode="agent",
+        extra_params={
+            "persist_session": False,
+            "eternal_conversation_enabled": False,
+        },
+    )
+    metadata = {"work_mode": "work", "persist_session": True}
+
+    with patch(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        return_value=metadata,
+    ), patch.object(
+        agent_ws_server_module,
+        "_sync_chat_request_metadata",
+        return_value="",
+    ):
+        await server._prepare_code_mode_chat_turn(request, "web")
+
+    assert "persist_session" not in request.params
+    assert request.params["eternal_conversation_enabled"] is True
+
+
+@pytest.mark.asyncio
 async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
     """The session-locked project dir reaches TeamSpec request metadata.
 

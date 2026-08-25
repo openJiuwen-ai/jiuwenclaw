@@ -396,4 +396,9 @@ Agent → 网关 → 客户端的**每一条**出站记录（含流式多帧）�
 ## 变更记录
 
 - v0.2.4b3：`agent.fast` 与 `agent.plan` 模式合并为 `agent` 模式，新增 `work_mode` 字段；Web 模式下 `agent.plan` + `work_mode` 会开启硬规划模式。
+---
 
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

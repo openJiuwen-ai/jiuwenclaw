@@ -158,23 +158,23 @@ export function ExtensionsPanel({ isConnected }: ExtensionsPanelProps) {
   );
 
   return (
-    <div className="extensions-panel">
-      <div className="extensions-panel__title">
+    <div className="extensions-panel" data-testid="extensions-panel">
+      <div className="extensions-panel__title" data-testid="extensions-panel-title">
         {t('extensions.title')}
       </div>
-      <p className="extensions-panel__description">
+      <p className="extensions-panel__description" data-testid="extensions-panel-description">
         {t('extensions.description')}
       </p>
 
       {error && (
-        <div className="extensions-panel__error">
+        <div className="extensions-panel__error" data-testid="extensions-panel-error">
           {error}
         </div>
       )}
 
       {/* 导入区域 */}
-      <div className="extensions-panel__import-section">
-        <h3 className="extensions-panel__import-title">
+      <div className="extensions-panel__import-section" data-testid="extensions-panel-import">
+        <h3 className="extensions-panel__import-title" data-testid="extensions-panel-import-title">
           {t('extensions.importTitle')}
         </h3>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -192,31 +192,33 @@ export function ExtensionsPanel({ isConnected }: ExtensionsPanelProps) {
                 border: '1px solid var(--color-extension-input-border)',
                 fontSize: '14px',
               }}
+              data-testid="extensions-panel-import-path-input"
             />
             <button
               onClick={handleImport}
               disabled={loading || !isConnected || !folderPath.trim()}
               className="extensions-panel__import-button"
+              data-testid="extensions-panel-import-btn"
             >
               {loading ? t('extensions.importing') : t('extensions.importButton')}
             </button>
           </div>
-          <span className="extensions-panel__import-hint">
+          <span className="extensions-panel__import-hint" data-testid="extensions-panel-import-hint">
             {t('extensions.importHint')}
           </span>
         </div>
       </div>
 
       {/* 扩展列表 */}
-      <div className="extensions-panel__list">
+      <div className="extensions-panel__list" data-testid="extensions-panel-list">
         {loading && extensions.length === 0 && (
-          <div className="extensions-panel__loading">
+          <div className="extensions-panel__loading" data-testid="extensions-panel-list-loading">
             {t('common.loading')}
           </div>
         )}
 
         {!loading && extensions.length === 0 && (
-          <div className="extensions-panel__empty">
+          <div className="extensions-panel__empty" data-testid="extensions-panel-list-empty">
             {t('extensions.noExtensions')}
           </div>
         )}
@@ -224,26 +226,26 @@ export function ExtensionsPanel({ isConnected }: ExtensionsPanelProps) {
         {extensions.length > 0 && (
           <div>
             {extensions.map((ext) => (
-              <div key={ext.name} className="extensions-panel__item">
-                <div className="extensions-panel__item-content">
-                  <div className="extensions-panel__item-header">
-                    <span className="extensions-panel__item-name">
+              <div key={ext.name} className="extensions-panel__item" data-testid="extensions-panel-item" data-variant={ext.name}>
+                <div className="extensions-panel__item-content" data-testid="extensions-panel-item-content" data-variant={ext.name}>
+                  <div className="extensions-panel__item-header" data-testid="extensions-panel-item-header" data-variant={ext.name}>
+                    <span className="extensions-panel__item-name" data-testid="extensions-panel-item-name" data-variant={ext.name}>
                       {ext.name}
                     </span>
-                    <span className="extensions-panel__item-class">
+                    <span className="extensions-panel__item-class" data-testid="extensions-panel-item-class" data-variant={ext.name}>
                       {ext.class_name}
                     </span>
                   </div>
                   {ext.description && (
-                    <p className="extensions-panel__item-description">
+                    <p className="extensions-panel__item-description" data-testid="extensions-panel-item-description" data-variant={ext.name}>
                       {ext.description}
                     </p>
                   )}
                 </div>
 
-                <div className="extensions-panel__item-actions">
+                <div className="extensions-panel__item-actions" data-testid="extensions-panel-item-actions" data-variant={ext.name}>
                   {/* 启用/禁用切换 */}
-                  <label className="extensions-panel__toggle">
+                  <label className="extensions-panel__toggle" data-testid="extensions-panel-item-toggle" data-variant={ext.name}>
                     <input
                       type="checkbox"
                       checked={ext.enabled}
@@ -252,6 +254,7 @@ export function ExtensionsPanel({ isConnected }: ExtensionsPanelProps) {
                       }
                       disabled={loading || !isConnected}
                       className="extensions-panel__toggle-input"
+                      data-testid="extensions-panel-item-toggle-input"
                     />
                     <div
                       className={`extensions-panel__toggle-track ${
@@ -267,6 +270,8 @@ export function ExtensionsPanel({ isConnected }: ExtensionsPanelProps) {
                     onClick={() => handleDelete(ext.name)}
                     disabled={loading || !isConnected}
                     className="extensions-panel__delete-button"
+                    data-testid="extensions-panel-item-delete-btn"
+                    data-variant={ext.name}
                   >
                     {t('extensions.deleteButton')}
                   </button>
@@ -278,14 +283,14 @@ export function ExtensionsPanel({ isConnected }: ExtensionsPanelProps) {
       </div>
 
       {/* 帮助提示 */}
-      <div className="extensions-panel__help">
-        <h4 className="extensions-panel__help-title">
+      <div className="extensions-panel__help" data-testid="extensions-panel-help">
+        <h4 className="extensions-panel__help-title" data-testid="extensions-panel-help-title">
           {t('extensions.helpTitle')}
         </h4>
-        <ul className="extensions-panel__help-list">
-          <li>{t('extensions.help0')}</li>
-          <li>{t('extensions.help1')}</li>
-          <li>{t('extensions.help2')}</li>
+        <ul className="extensions-panel__help-list" data-testid="extensions-panel-help-list">
+          <li data-testid="extensions-panel-help-item" data-variant="0">{t('extensions.help0')}</li>
+          <li data-testid="extensions-panel-help-item" data-variant="1">{t('extensions.help1')}</li>
+          <li data-testid="extensions-panel-help-item" data-variant="2">{t('extensions.help2')}</li>
         </ul>
       </div>
     </div>

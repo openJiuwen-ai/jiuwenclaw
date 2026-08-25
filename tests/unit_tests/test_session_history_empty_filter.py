@@ -115,6 +115,22 @@ def test_has_persistable_assistant_payload_tool_result_falsy_values_rejected():
     ) is False
 
 
+def test_has_persistable_assistant_payload_subagent_activity():
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.subagent_activity",
+        extra={
+            "subagent_activity": {
+                "subagent_id": "sub-a",
+                "task_id": "turn-1",
+                "seq": 1,
+                "kind": "thinking",
+                "summary": "planning",
+            }
+        },
+    ) is True
+
+
 def test_has_persistable_assistant_payload_processing_status_still_rejected():
     assert session_history._has_persistable_assistant_payload(
         content_text="",

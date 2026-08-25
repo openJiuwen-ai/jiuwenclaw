@@ -1883,17 +1883,39 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     const value = app[field];
     if (typeof value === 'boolean') {
       return (
-        <tr key={String(field)} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-          <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{String(field)}</td>
-          <td className="px-4 py-2.5 align-middle">
+        <tr
+          key={String(field)}
+          className="border-t border-border first:border-t-0 even:bg-secondary/10"
+          data-testid="channels-panel-feishu-app-field"
+          data-variant={String(field)}
+        >
+          <td
+            className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+            data-testid="channels-panel-feishu-app-field-label"
+            data-variant={String(field)}
+          >{String(field)}</td>
+          <td
+            className="px-4 py-2.5 align-middle"
+            data-testid="channels-panel-feishu-app-field-toggle"
+            data-variant={String(field)}
+          >
             {renderToggle(value, () => handleFeishuAppFieldChange(appIndex, field, !value as FeishuAppDraft[typeof field]))}
           </td>
         </tr>
       );
     }
     return (
-      <tr key={String(field)} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-        <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{String(field)}</td>
+      <tr
+        key={String(field)}
+        className="border-t border-border first:border-t-0 even:bg-secondary/10"
+        data-testid="channels-panel-feishu-app-field"
+        data-variant={String(field)}
+      >
+        <td
+          className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+          data-testid="channels-panel-feishu-app-field-label"
+          data-variant={String(field)}
+        >{String(field)}</td>
         <td className="px-4 py-2.5 break-all text-[13px] align-middle">
           <div className="relative">
             <input
@@ -1904,6 +1926,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
               className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
                 isSensitiveField(field) ? 'pr-10' : ''
               }`}
+              data-testid="channels-panel-feishu-app-field-input"
+              data-variant={String(field)}
             />
             {isSensitiveField(field) ? (
               <button
@@ -1912,6 +1936,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 className="channels-panel__visibility-toggle"
                 aria-label={visibleFields[visibilityKey] ? t('channels.hideValue') : t('channels.showValue')}
                 title={visibleFields[visibilityKey] ? t('channels.hideValue') : t('channels.showValue')}
+                data-testid="channels-panel-feishu-app-field-visibility-toggle"
+                data-variant={String(field)}
               >
                 <VisibilityIcon visible={Boolean(visibleFields[visibilityKey])} />
               </button>
@@ -1927,17 +1953,39 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     const value = app[field];
     if (typeof value === 'boolean') {
       return (
-        <tr key={String(field)} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-          <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{String(field)}</td>
-          <td className="px-4 py-2.5 align-middle">
+        <tr
+          key={String(field)}
+          className="border-t border-border first:border-t-0 even:bg-secondary/10"
+          data-testid="channels-panel-channel-config-field"
+          data-variant={String(field)}
+        >
+          <td
+            className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+            data-testid="channels-panel-channel-config-field-label"
+            data-variant={String(field)}
+          >{String(field)}</td>
+          <td
+            className="px-4 py-2.5 align-middle"
+            data-testid="channels-panel-channel-config-field-toggle"
+            data-variant={String(field)}
+          >
             {renderToggle(value, () => handleXiaoyiFieldChange(field, !value as XiaoyiAppDraft[typeof field]))}
           </td>
         </tr>
       );
     }
     return (
-      <tr key={String(field)} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-        <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{String(field)}</td>
+      <tr
+        key={String(field)}
+        className="border-t border-border first:border-t-0 even:bg-secondary/10"
+        data-testid="channels-panel-channel-config-field"
+        data-variant={String(field)}
+      >
+        <td
+          className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+          data-testid="channels-panel-channel-config-field-label"
+          data-variant={String(field)}
+        >{String(field)}</td>
         <td className="px-4 py-2.5 break-all text-[13px] align-middle">
           <div className="relative">
             <input
@@ -1948,6 +1996,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
               className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
                 isSensitiveXiaoyiField(field) ? 'pr-10' : ''
               }`}
+              data-testid="channels-panel-channel-config-field-input"
+              data-variant={String(field)}
             />
             {isSensitiveXiaoyiField(field) ? (
               <button
@@ -1956,6 +2006,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 className="channels-panel__visibility-toggle"
                 aria-label={xiaoyiVisibleFields[visibilityKey] ? t('channels.hideValue') : t('channels.showValue')}
                 title={xiaoyiVisibleFields[visibilityKey] ? t('channels.hideValue') : t('channels.showValue')}
+                data-testid="channels-panel-channel-config-field-visibility-toggle"
+                data-variant={String(field)}
               >
                 <VisibilityIcon visible={Boolean(xiaoyiVisibleFields[visibilityKey])} />
               </button>
@@ -1986,19 +2038,31 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
   };
 
   const renderFeishuAppsEditor = () => (
-    <div className="space-y-3">
+    <div className="space-y-3" data-testid="channels-panel-feishu-apps">
       {feishuDraftApps.map((app, index) => {
         const expanded = expandedFeishuAppIndex === index;
         const identifier = app.app_id.trim() || t('channels.feishuApps.appIdNotConfigured');
+        const appVariant = app.app_id.trim() || String(index);
         return (
-          <div key={`feishu-app-${index}`} className="rounded-xl border border-border bg-card overflow-hidden">
-            <div className="flex items-center gap-3 px-4 py-3">
+          <div
+            key={`feishu-app-${index}`}
+            className="rounded-xl border border-border bg-card overflow-hidden"
+            data-testid="channels-panel-feishu-app"
+            data-variant={appVariant}
+          >
+            <div
+              className="flex items-center gap-3 px-4 py-3"
+              data-testid="channels-panel-feishu-app-header"
+              data-variant={appVariant}
+            >
               <button
                 type="button"
                 onClick={() => setExpandedFeishuAppIndex(expanded ? -1 : index)}
                 className="inline-flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-secondary hover:text-text"
                 aria-label={expanded ? t('channels.feishuApps.collapseConfig') : t('channels.feishuApps.expandConfig')}
                 title={expanded ? t('channels.feishuApps.collapseConfig') : t('channels.feishuApps.expandConfig')}
+                data-testid="channels-panel-feishu-app-toggle"
+                data-variant={appVariant}
               >
                 <ChevronRight className={`h-4 w-4  ${expanded ? 'rotate-90' : ''}`} />
               </button>
@@ -2008,9 +2072,15 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 onChange={(e) => handleFeishuAppFieldChange(index, 'name', e.target.value)}
                 className="min-w-[160px] flex-1 rounded-md border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-accent"
                 placeholder={t('channels.feishuApps.appNamePlaceholder')}
+                data-testid="channels-panel-feishu-app-name-input"
+                data-variant={appVariant}
               />
               {app.is_default ? (
-                <span className="rounded-full border border-accent bg-accent-subtle px-2.5 py-1 text-xs text-accent">
+                <span
+                  className="rounded-full border border-accent bg-accent-subtle px-2.5 py-1 text-xs text-accent"
+                  data-testid="channels-panel-feishu-app-default-badge"
+                  data-variant={appVariant}
+                >
                   {t('channels.feishuApps.defaultBadge')}
                 </span>
               ) : null}
@@ -2021,17 +2091,25 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                   className="rounded-full border border-accent/50 bg-accent-subtle px-2.5 py-1 text-xs font-medium text-accent hover:border-accent hover:bg-accent/15"
                   aria-label={t('channels.feishuApps.setDefaultAria')}
                   title={t('channels.feishuApps.setDefaultAria')}
+                  data-testid="channels-panel-feishu-app-set-default-btn"
+                  data-variant={appVariant}
                 >
                   {t('channels.feishuApps.setDefault')}
                 </button>
               ) : null}
-              <span className="mono max-w-[220px] truncate rounded-md border border-border bg-secondary px-2.5 py-1 text-xs text-text-muted">
+              <span
+                className="mono max-w-[220px] truncate rounded-md border border-border bg-secondary px-2.5 py-1 text-xs text-text-muted"
+                data-testid="channels-panel-feishu-app-id"
+                data-variant={appVariant}
+              >
                 {identifier}
               </span>
               <span
                 className={`rounded-full border px-2.5 py-1 text-xs font-medium ${
                   app.enabled ? 'border-ok bg-ok-subtle text-ok' : 'border-border bg-secondary text-text-muted'
                 }`}
+                data-testid="channels-panel-feishu-app-status"
+                data-variant={appVariant}
               >
                 {app.enabled ? t('channels.status.enabled') : t('channels.status.disabled')}
               </span>
@@ -2042,13 +2120,23 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border text-text-muted hover:bg-danger-subtle hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
                 aria-label={t('channels.feishuApps.deleteApp')}
                 title={t('channels.feishuApps.deleteApp')}
+                data-testid="channels-panel-feishu-app-delete-btn"
+                data-variant={appVariant}
               >
                 <Trash2 className="h-4 w-4" />
               </button>
             </div>
             {expanded ? (
-              <div className="border-t border-border bg-bg/30">
-                <table className="w-full text-sm">
+              <div
+                className="border-t border-border bg-bg/30"
+                data-testid="channels-panel-feishu-app-detail"
+                data-variant={appVariant}
+              >
+                <table
+                  className="w-full text-sm"
+                  data-testid="channels-panel-feishu-app-fields"
+                  data-variant={appVariant}
+                >
                   <tbody>
                     {(['enabled', 'enable_streaming', 'app_id', 'app_secret', 'encrypt_key', 'verification_token', 'group_digital_avatar'] as const).map(
                       (field) => renderFeishuAppField(app, index, field),
@@ -2064,6 +2152,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
         type="button"
         onClick={handleAddFeishuApp}
         className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-3 text-sm text-text-muted hover:border-accent hover:bg-accent-subtle hover:text-accent"
+        data-testid="channels-panel-feishu-app-add-btn"
       >
         <Plus className="h-4 w-4" />
         {t('channels.feishuApps.addApp')}
@@ -2091,7 +2180,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
             </button>
           </div>
         ) : null}
-        <table className="w-full text-sm">
+        <table className="w-full text-sm" data-testid="channels-panel-channel-config-fields" data-variant="xiaoyi">
           <tbody>
             {(['enabled', 'enable_streaming', 'ak', 'sk', 'agent_id', 'api_id'] as const).map((field) =>
               renderXiaoyiField(xiaoyiDraft, field),
@@ -2150,7 +2239,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
   }, [configErrorNotice]);
 
   return (
-    <div className="flex-1 min-h-0 relative">
+    <div className="flex-1 min-h-0 relative" data-testid="channels-panel">
       <WechatQrModal
         open={wechatQrModalOpen}
         onClose={() => setWechatQrModalOpen(false)}
@@ -2166,37 +2255,53 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
         onConfirm={() => void runWechatUnbind()}
         confirming={wechatUnbinding}
       />
-      <div className="card w-full h-full flex flex-col">
+      <div className="card w-full h-full flex flex-col" data-testid="channels-panel-card">
         {configErrorNotice ? (
-          <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20">
-            <div className="bg-danger text-text-inverse px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+          <div
+            className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20"
+            data-testid="channels-panel-error-toast"
+          >
+            <div
+              className="bg-danger text-text-inverse px-4 py-2 rounded-lg shadow-lg animate-rise text-sm"
+              data-testid="channels-panel-error-toast-message"
+            >
               {configErrorNotice}
             </div>
           </div>
         ) : null}
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
-            <h2 className="text-lg font-semibold">{t('channels.title')}</h2>
-            <p className="text-sm text-text-muted mt-1">{t('channels.subtitle')}</p>
+            <h2 className="text-lg font-semibold" data-testid="channels-panel-title">{t('channels.title')}</h2>
+            <p className="text-sm text-text-muted mt-1" data-testid="channels-panel-subtitle">{t('channels.subtitle')}</p>
           </div>
           <div className="flex items-center gap-2" />
         </div>
 
         {error ? (
-          <div className="border border-[var(--color-border-danger)] bg-danger-subtle rounded-lg p-4 text-sm text-danger flex items-center justify-between">
-            <span>{t('channels.fetchFailed')}: {error}</span>
-            <button onClick={() => void fetchChannels()} className="btn !px-3 !py-1.5">
+          <div
+            className="border border-[var(--color-border-danger)] bg-danger-subtle rounded-lg p-4 text-sm text-danger flex items-center justify-between"
+            data-testid="channels-panel-fetch-error"
+          >
+            <span data-testid="channels-panel-fetch-error-message">{t('channels.fetchFailed')}: {error}</span>
+            <button
+              onClick={() => void fetchChannels()}
+              className="btn !px-3 !py-1.5"
+              data-testid="channels-panel-fetch-error-retry-btn"
+            >
               {t('channels.retry')}
             </button>
           </div>
         ) : (
-          <div className="flex-1 min-h-0 grid grid-cols-[minmax(0,3fr)_minmax(0,7fr)] gap-4">
-            <section className="min-w-[260px] rounded-xl border border-border bg-card/70 backdrop-blur-sm shadow-sm flex flex-col min-h-0 overflow-hidden">
-              <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+          <div className="flex-1 min-h-0 grid grid-cols-[minmax(0,3fr)_minmax(0,7fr)] gap-4" data-testid="channels-panel-layout">
+            <section
+              className="min-w-[260px] rounded-xl border border-border bg-card/70 backdrop-blur-sm shadow-sm flex flex-col min-h-0 overflow-hidden"
+              data-testid="channels-panel-list"
+            >
+              <div className="px-4 py-3 bg-secondary/30 border-b border-border" data-testid="channels-panel-list-header">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <h3 className="text-sm font-medium text-text">{t('channels.listTitle')}</h3>
-                    <p className="text-xs text-text-muted mt-1 mono">
+                    <h3 className="text-sm font-medium text-text" data-testid="channels-panel-list-title">{t('channels.listTitle')}</h3>
+                    <p className="text-xs text-text-muted mt-1 mono" data-testid="channels-panel-list-meta">
                       {t('channels.listMeta', { status: statusText, time: formatTime(lastUpdatedAt, i18n.language) })}
                     </p>
                   </div>
@@ -2205,6 +2310,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     onClick={() => void fetchChannels()}
                     className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                     disabled={loadState === 'loading'}
+                    data-testid="channels-panel-list-refresh-btn"
                   >
                     {loadState === 'loading' ? t('common.refreshing') : t('common.refresh')}
                   </button>
@@ -2212,12 +2318,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
               </div>
               <div className="overflow-auto flex-1 min-h-0 p-3">
                 {loadState === 'loading' ? (
-                  <div className="space-y-2">
+                  <div className="space-y-2" data-testid="channels-panel-list-skeleton">
                     <div className="h-10 rounded-lg border border-border bg-secondary/40" />
                     <div className="h-10 rounded-lg border border-border bg-secondary/30" />
                   </div>
                 ) : (
-                  <div className="space-y-2">
+                  <div className="space-y-2" data-testid="channels-panel-channel-list">
                     {channels.map((channel, index) => {
                       const isAdapting = ADAPTING_CHANNEL_IDS.has(channel.channel_id);
                       const label = getChannelLabel(t, channel.channel_id);
@@ -2234,15 +2340,29 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                 ? 'border-accent bg-accent-subtle text-text'
                                 : 'border-border bg-card text-text hover:bg-bg-hover'
                           }`}
+                          data-testid="channels-panel-channel"
+                          data-variant={channel.channel_id}
                         >
                           <div className="flex items-center justify-between gap-3 w-full">
                             <div className="flex items-center gap-3 min-w-0 flex-1">
-                              <span className="text-xs px-2.5 py-1 rounded-full border border-border bg-secondary text-text-muted font-medium flex-shrink-0">
+                              <span
+                                className="text-xs px-2.5 py-1 rounded-full border border-border bg-secondary text-text-muted font-medium flex-shrink-0"
+                                data-testid="channels-panel-channel-index"
+                                data-variant={channel.channel_id}
+                              >
                                 #{index + 1}
                               </span>
                               <ChannelLogo channel={channel} label={label} />
-                              <span className="text-sm font-medium text-text flex-1 min-w-0 truncate">{label}</span>
-                              <span className="mono text-xs px-2.5 py-1 rounded-md border border-border bg-secondary text-text-muted flex-shrink-0">
+                              <span
+                                className="text-sm font-medium text-text flex-1 min-w-0 truncate"
+                                data-testid="channels-panel-channel-label"
+                                data-variant={channel.channel_id}
+                              >{label}</span>
+                              <span
+                                className="mono text-xs px-2.5 py-1 rounded-md border border-border bg-secondary text-text-muted flex-shrink-0"
+                                data-testid="channels-panel-channel-id"
+                                data-variant={channel.channel_id}
+                              >
                                 {channel.channel_id}
                               </span>
                             </div>
@@ -2254,6 +2374,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     ? 'text-ok border-ok bg-ok-subtle'
                                     : 'text-text-muted border-border bg-secondary'
                               }`}
+                              data-testid="channels-panel-channel-status"
+                              data-variant={channel.channel_id}
                             >
                               {isAdapting ? t('channels.status.adapting') : channel.enabled ? t('channels.status.enabled') : t('channels.status.disabled')}
                             </span>
@@ -2268,31 +2390,67 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
 
             <section className="min-h-0 flex">
                 {activeChannelId === 'web' ? (
-                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                  <div
+                    className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col"
+                    data-testid="channels-panel-channel-config"
+                    data-variant="web"
+                  >
+                    <div
+                      className="px-4 py-3 bg-secondary/30 border-b border-border"
+                      data-testid="channels-panel-channel-config-header"
+                      data-variant="web"
+                    >
                       <div className="flex items-center gap-3">
                         <ChannelHeaderLogo channelId="web" label={getChannelLabel(t, 'web')} />
                         <div>
-                          <h4 className="text-sm font-medium text-text">{t('channels.config.webTitle')}</h4>
-                          <p className="text-xs text-text-muted mt-1">{t('channels.config.webSubtitle')}</p>
+                          <h4
+                            className="text-sm font-medium text-text"
+                            data-testid="channels-panel-channel-config-title"
+                            data-variant="web"
+                          >{t('channels.config.webTitle')}</h4>
+                          <p
+                            className="text-xs text-text-muted mt-1"
+                            data-testid="channels-panel-channel-config-subtitle"
+                            data-variant="web"
+                          >{t('channels.config.webSubtitle')}</p>
                         </div>
                       </div>
                     </div>
-                    <div className="p-4 text-sm text-text-muted flex-1 overflow-auto flex items-center justify-center text-center">
+                    <div
+                      className="p-4 text-sm text-text-muted flex-1 overflow-auto flex items-center justify-center text-center"
+                      data-testid="channels-panel-channel-config-empty"
+                      data-variant="web"
+                    >
                       {t('channels.config.webEmpty')}
                     </div>
                   </div>
                 ) : null}
 
                 {activeChannelId === 'xiaoyi' ? (
-                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                  <div
+                    className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col"
+                    data-testid="channels-panel-channel-config"
+                    data-variant="xiaoyi"
+                  >
+                    <div
+                      className="px-4 py-3 bg-secondary/30 border-b border-border"
+                      data-testid="channels-panel-channel-config-header"
+                      data-variant="xiaoyi"
+                    >
                       <div className="flex items-center justify-between gap-4">
                         <div className="flex items-center gap-3">
                           <ChannelHeaderLogo channelId="xiaoyi" label={getChannelLabel(t, 'xiaoyi')} />
                           <div>
-                            <h4 className="text-sm font-medium text-text">{t('channels.config.xiaoyiTitle')}</h4>
-                            <p className="text-xs text-text-muted mt-1">{t('channels.config.xiaoyiSubtitle')}</p>
+                            <h4
+                              className="text-sm font-medium text-text"
+                              data-testid="channels-panel-channel-config-title"
+                              data-variant="xiaoyi"
+                            >{t('channels.config.xiaoyiTitle')}</h4>
+                            <p
+                              className="text-xs text-text-muted mt-1"
+                              data-testid="channels-panel-channel-config-subtitle"
+                              data-variant="xiaoyi"
+                            >{t('channels.config.xiaoyiSubtitle')}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -2301,6 +2459,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void fetchXiaoyiConfig()}
                             disabled={xiaoyiSaving || isConfigRefreshing}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-refresh-btn"
+                            data-variant="xiaoyi"
                           >
                             {xiaoyiLoading ? t('common.refreshing') : t('common.refresh')}
                           </button>
@@ -2309,6 +2469,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={handleCancelXiaoyiConfig}
                             disabled={!hasXiaoyiConfigChanges || xiaoyiSaving}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-cancel-btn"
+                            data-variant="xiaoyi"
                           >
                             {t('common.cancel')}
                           </button>
@@ -2317,6 +2479,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void handleSaveXiaoyiConfig()}
                             disabled={!hasXiaoyiConfigChanges || xiaoyiSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-save-btn"
+                            data-variant="xiaoyi"
                           >
                             {xiaoyiSaving ? t('common.saving') : t('common.save')}
                           </button>
@@ -2325,14 +2489,22 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {xiaoyiSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div
+                        className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok"
+                        data-testid="channels-panel-channel-config-success"
+                        data-variant="xiaoyi"
+                      >
                         {xiaoyiSuccess}
                       </div>
                     ) : null}
 
                     <div className="p-4 pt-3 flex-1 overflow-auto">
                       {xiaoyiLoading ? (
-                        <div className="text-sm text-text-muted">{t('channels.loading.xiaoyi')}</div>
+                        <div
+                          className="text-sm text-text-muted"
+                          data-testid="channels-panel-channel-config-loading"
+                          data-variant="xiaoyi"
+                        >{t('channels.loading.xiaoyi')}</div>
                       ) : (
                         renderXiaoyiConfigEditor()
                       )}
@@ -2341,14 +2513,30 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 ) : null}
 
                 {activeChannelId === 'dingtalk' ? (
-                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                  <div
+                    className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col"
+                    data-testid="channels-panel-channel-config"
+                    data-variant="dingtalk"
+                  >
+                    <div
+                      className="px-4 py-3 bg-secondary/30 border-b border-border"
+                      data-testid="channels-panel-channel-config-header"
+                      data-variant="dingtalk"
+                    >
                       <div className="flex items-center justify-between gap-4">
                         <div className="flex items-center gap-3">
                           <ChannelHeaderLogo channelId="dingtalk" label={getChannelLabel(t, 'dingtalk')} />
                           <div>
-                            <h4 className="text-sm font-medium text-text">{t('channels.config.dingtalkTitle')}</h4>
-                            <p className="text-xs text-text-muted mt-1">{t('channels.config.dingtalkSubtitle')}</p>
+                            <h4
+                              className="text-sm font-medium text-text"
+                              data-testid="channels-panel-channel-config-title"
+                              data-variant="dingtalk"
+                            >{t('channels.config.dingtalkTitle')}</h4>
+                            <p
+                              className="text-xs text-text-muted mt-1"
+                              data-testid="channels-panel-channel-config-subtitle"
+                              data-variant="dingtalk"
+                            >{t('channels.config.dingtalkSubtitle')}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -2357,6 +2545,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void fetchDingtalkConfig()}
                             disabled={dingtalkSaving || isConfigRefreshing}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-refresh-btn"
+                            data-variant="dingtalk"
                           >
                             {dingtalkLoading ? t('common.refreshing') : t('common.refresh')}
                           </button>
@@ -2365,6 +2555,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={handleCancelDingtalkConfig}
                             disabled={!hasDingtalkConfigChanges || dingtalkSaving}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-cancel-btn"
+                            data-variant="dingtalk"
                           >
                             {t('common.cancel')}
                           </button>
@@ -2373,6 +2565,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void handleSaveDingtalkConfig()}
                             disabled={!hasDingtalkConfigChanges || dingtalkSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-save-btn"
+                            data-variant="dingtalk"
                           >
                             {dingtalkSaving ? t('common.saving') : t('common.save')}
                           </button>
@@ -2381,20 +2575,40 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {dingtalkSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div
+                        className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok"
+                        data-testid="channels-panel-channel-config-success"
+                        data-variant="dingtalk"
+                      >
                         {dingtalkSuccess}
                       </div>
                     ) : null}
 
                     <div className="p-4 pt-3 flex-1 overflow-auto">
                       {dingtalkLoading ? (
-                        <div className="text-sm text-text-muted">{t('channels.loading.dingtalk')}</div>
+                        <div
+                          className="text-sm text-text-muted"
+                          data-testid="channels-panel-channel-config-loading"
+                          data-variant="dingtalk"
+                        >{t('channels.loading.dingtalk')}</div>
                       ) : (
-                        <table className="w-full text-sm">
+                        <table className="w-full text-sm" data-testid="channels-panel-channel-config-fields" data-variant="dingtalk">
                           <tbody>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enabled</td>
-                              <td className="px-4 py-2.5 align-middle">
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="enabled"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="enabled"
+                              >enabled</td>
+                              <td
+                                className="px-4 py-2.5 align-middle"
+                                data-testid="channels-panel-channel-config-field-toggle"
+                                data-variant="enabled"
+                              >
                                 <button
                                   type="button"
                                   role="switch"
@@ -2413,8 +2627,17 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                               </td>
                             </tr>
                             {(['client_id', 'client_secret'] as const).map((field) => (
-                              <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
+                              <tr
+                                key={field}
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant={field}
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant={field}
+                                >{field}</td>
                                 <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                   <div className="relative">
                                     <input
@@ -2425,6 +2648,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                       className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
                                         isSensitiveDingtalkField(field) ? 'pr-10' : ''
                                       }`}
+                                      data-testid="channels-panel-channel-config-field-input"
+                                      data-variant={field}
                                     />
                                     {isSensitiveDingtalkField(field) ? (
                                       <button
@@ -2433,6 +2658,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                         className="channels-panel__visibility-toggle"
                                         aria-label={dingtalkVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
                                         title={dingtalkVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
+                                        data-testid="channels-panel-channel-config-field-visibility-toggle"
+                                        data-variant={field}
                                       >
                                         <VisibilityIcon visible={Boolean(dingtalkVisibleFields[field])} />
                                       </button>
@@ -2441,8 +2668,16 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                 </td>
                               </tr>
                             ))}
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">allow_from</td>
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="allow_from"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="allow_from"
+                              >allow_from</td>
                               <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                 <textarea
                                   value={dingtalkDraft.allow_from}
@@ -2450,6 +2685,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   placeholder={t('channels.placeholders.employeeIds')}
                                   rows={4}
                                   className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                  data-testid="channels-panel-channel-config-field-textarea"
+                                  data-variant="allow_from"
                                 />
                               </td>
                             </tr>
@@ -2461,14 +2698,30 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 ) : null}
 
                 {activeChannelId === 'feishu' ? (
-                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                  <div
+                    className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col"
+                    data-testid="channels-panel-channel-config"
+                    data-variant="feishu"
+                  >
+                    <div
+                      className="px-4 py-3 bg-secondary/30 border-b border-border"
+                      data-testid="channels-panel-channel-config-header"
+                      data-variant="feishu"
+                    >
                       <div className="flex items-center justify-between gap-4">
                         <div className="flex items-center gap-3">
                           <ChannelHeaderLogo channelId="feishu" label={getChannelLabel(t, 'feishu')} />
                           <div>
-                            <h4 className="text-sm font-medium text-text">{t('channels.config.feishuTitle')}</h4>
-                            <p className="text-xs text-text-muted mt-1">{t('channels.config.feishuSubtitle')}</p>
+                            <h4
+                              className="text-sm font-medium text-text"
+                              data-testid="channels-panel-channel-config-title"
+                              data-variant="feishu"
+                            >{t('channels.config.feishuTitle')}</h4>
+                            <p
+                              className="text-xs text-text-muted mt-1"
+                              data-testid="channels-panel-channel-config-subtitle"
+                              data-variant="feishu"
+                            >{t('channels.config.feishuSubtitle')}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -2477,6 +2730,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void fetchFeishuConfig()}
                             disabled={saving || isConfigRefreshing}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-refresh-btn"
+                            data-variant="feishu"
                           >
                             {feishuLoading ? t('common.refreshing') : t('common.refresh')}
                           </button>
@@ -2485,6 +2740,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={handleCancelConfig}
                             disabled={!hasConfigChanges || saving}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-cancel-btn"
+                            data-variant="feishu"
                           >
                             {t('common.cancel')}
                           </button>
@@ -2493,6 +2750,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void handleSaveConfig()}
                             disabled={!hasConfigChanges || saving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-save-btn"
+                            data-variant="feishu"
                           >
                             {saving ? t('common.saving') : t('common.save')}
                           </button>
@@ -2501,14 +2760,22 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {success ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div
+                        className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok"
+                        data-testid="channels-panel-channel-config-success"
+                        data-variant="feishu"
+                      >
                         {success}
                       </div>
                     ) : null}
 
                     <div className="p-4 pt-3 flex-1 overflow-auto">
                       {feishuLoading ? (
-                        <div className="text-sm text-text-muted">{t('channels.loading.feishu')}</div>
+                        <div
+                          className="text-sm text-text-muted"
+                          data-testid="channels-panel-channel-config-loading"
+                          data-variant="feishu"
+                        >{t('channels.loading.feishu')}</div>
                       ) : (
                         renderFeishuAppsEditor()
                       )}
@@ -2711,7 +2978,11 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
 
                       {/* 数字分身权限编辑器 — 放在 table 外部 */}
                       {draft.group_digital_avatar && (
-                        <div className="mt-4 px-4 py-3 border-t border-border">
+                        <div
+                          className="mt-4 px-4 py-3 border-t border-border"
+                          data-testid="channels-panel-feishu-avatar-perm"
+                          data-variant="feishu"
+                        >
                           <h5 className="text-xs font-medium text-text-muted mb-2">{t("ownerScopes.toolPermissions")}</h5>
                           <AvatarPermEditor channelId="feishu" userId={draft.my_user_id} />
                         </div>
@@ -2721,14 +2992,30 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 ) : null}
 
                 {activeChannelId === 'telegram' ? (
-                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                  <div
+                    className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col"
+                    data-testid="channels-panel-channel-config"
+                    data-variant="telegram"
+                  >
+                    <div
+                      className="px-4 py-3 bg-secondary/30 border-b border-border"
+                      data-testid="channels-panel-channel-config-header"
+                      data-variant="telegram"
+                    >
                       <div className="flex items-center justify-between gap-4">
                         <div className="flex items-center gap-3">
                           <ChannelHeaderLogo channelId="telegram" label={getChannelLabel(t, 'telegram')} />
                           <div>
-                            <h4 className="text-sm font-medium text-text">{t('channels.config.telegramTitle')}</h4>
-                            <p className="text-xs text-text-muted mt-1">{t('channels.config.telegramSubtitle')}</p>
+                            <h4
+                              className="text-sm font-medium text-text"
+                              data-testid="channels-panel-channel-config-title"
+                              data-variant="telegram"
+                            >{t('channels.config.telegramTitle')}</h4>
+                            <p
+                              className="text-xs text-text-muted mt-1"
+                              data-testid="channels-panel-channel-config-subtitle"
+                              data-variant="telegram"
+                            >{t('channels.config.telegramSubtitle')}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -2737,6 +3024,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void fetchTelegramConfig()}
                             disabled={telegramSaving || isConfigRefreshing}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-refresh-btn"
+                            data-variant="telegram"
                           >
                             {telegramLoading ? t('common.refreshing') : t('common.refresh')}
                           </button>
@@ -2745,6 +3034,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={handleCancelTelegramConfig}
                             disabled={!hasTelegramConfigChanges || telegramSaving}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-cancel-btn"
+                            data-variant="telegram"
                           >
                             {t('common.cancel')}
                           </button>
@@ -2753,6 +3044,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void handleSaveTelegramConfig()}
                             disabled={!hasTelegramConfigChanges || telegramSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-save-btn"
+                            data-variant="telegram"
                           >
                             {telegramSaving ? t('common.saving') : t('common.save')}
                           </button>
@@ -2761,20 +3054,40 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {telegramSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div
+                        className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok"
+                        data-testid="channels-panel-channel-config-success"
+                        data-variant="telegram"
+                      >
                         {telegramSuccess}
                       </div>
                     ) : null}
 
                     <div className="p-4 pt-3 flex-1 overflow-auto">
                       {telegramLoading ? (
-                        <div className="text-sm text-text-muted">{t('channels.loading.telegram')}</div>
+                        <div
+                          className="text-sm text-text-muted"
+                          data-testid="channels-panel-channel-config-loading"
+                          data-variant="telegram"
+                        >{t('channels.loading.telegram')}</div>
                       ) : (
-                        <table className="w-full text-sm">
+                        <table className="w-full text-sm" data-testid="channels-panel-channel-config-fields" data-variant="telegram">
                           <tbody>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enabled</td>
-                              <td className="px-4 py-2.5 align-middle">
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="enabled"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="enabled"
+                              >enabled</td>
+                              <td
+                                className="px-4 py-2.5 align-middle"
+                                data-testid="channels-panel-channel-config-field-toggle"
+                                data-variant="enabled"
+                              >
                                 <button
                                   type="button"
                                   role="switch"
@@ -2792,8 +3105,16 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                 </button>
                               </td>
                             </tr>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">bot_token</td>
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="bot_token"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="bot_token"
+                              >bot_token</td>
                               <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                 <div className="relative">
                                   <input
@@ -2802,6 +3123,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     onChange={(e) => handleTelegramFieldChange('bot_token', e.target.value)}
                                     placeholder={t('channels.placeholders.telegramBotToken')}
                                     className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent pr-10"
+                                    data-testid="channels-panel-channel-config-field-input"
+                                    data-variant="bot_token"
                                   />
                                   <button
                                     type="button"
@@ -2809,14 +3132,24 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     className="channels-panel__visibility-toggle"
                                     aria-label={telegramVisibleFields['bot_token'] ? t('channels.hideValue') : t('channels.showValue')}
                                     title={telegramVisibleFields['bot_token'] ? t('channels.hideValue') : t('channels.showValue')}
+                                    data-testid="channels-panel-channel-config-field-visibility-toggle"
+                                    data-variant="bot_token"
                                   >
                                     <VisibilityIcon visible={Boolean(telegramVisibleFields['bot_token'])} />
                                   </button>
                                 </div>
                               </td>
                             </tr>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">allow_from</td>
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="allow_from"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="allow_from"
+                              >allow_from</td>
                               <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                 <textarea
                                   value={telegramDraft.allow_from}
@@ -2824,16 +3157,28 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   placeholder={t('channels.placeholders.telegramUserIds')}
                                   rows={4}
                                   className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                  data-testid="channels-panel-channel-config-field-textarea"
+                                  data-variant="allow_from"
                                 />
                               </td>
                             </tr>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">parse_mode</td>
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="parse_mode"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="parse_mode"
+                              >parse_mode</td>
                               <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                 <select
                                   value={telegramDraft.parse_mode}
                                   onChange={(e) => handleTelegramFieldChange('parse_mode', e.target.value)}
                                   className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                                  data-testid="channels-panel-channel-config-field-input"
+                                  data-variant="parse_mode"
                                 >
                                   <option value="Markdown">Markdown</option>
                                   <option value="HTML">HTML</option>
@@ -2841,13 +3186,23 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                 </select>
                               </td>
                             </tr>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">group_chat_mode</td>
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="group_chat_mode"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="group_chat_mode"
+                              >group_chat_mode</td>
                               <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                 <select
                                   value={telegramDraft.group_chat_mode}
                                   onChange={(e) => handleTelegramFieldChange('group_chat_mode', e.target.value)}
                                   className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                                  data-testid="channels-panel-channel-config-field-input"
+                                  data-variant="group_chat_mode"
                                 >
                                   <option value="mention">Only respond to @mentions (mention)</option>
                                   <option value="reply">Only respond to replies (reply)</option>
@@ -2864,14 +3219,30 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 ) : null}
 
                 {activeChannelId === 'discord' ? (
-                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                  <div
+                    className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col"
+                    data-testid="channels-panel-channel-config"
+                    data-variant="discord"
+                  >
+                    <div
+                      className="px-4 py-3 bg-secondary/30 border-b border-border"
+                      data-testid="channels-panel-channel-config-header"
+                      data-variant="discord"
+                    >
                       <div className="flex items-center justify-between gap-4">
                         <div className="flex items-center gap-3">
                           <ChannelHeaderLogo channelId="discord" label={getChannelLabel(t, 'discord')} />
                           <div>
-                            <h4 className="text-sm font-medium text-text">{t('channels.config.discordTitle')}</h4>
-                            <p className="text-xs text-text-muted mt-1">{t('channels.config.discordSubtitle')}</p>
+                            <h4
+                              className="text-sm font-medium text-text"
+                              data-testid="channels-panel-channel-config-title"
+                              data-variant="discord"
+                            >{t('channels.config.discordTitle')}</h4>
+                            <p
+                              className="text-xs text-text-muted mt-1"
+                              data-testid="channels-panel-channel-config-subtitle"
+                              data-variant="discord"
+                            >{t('channels.config.discordSubtitle')}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -2880,6 +3251,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void fetchDiscordConfig()}
                             disabled={discordSaving || isConfigRefreshing}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-refresh-btn"
+                            data-variant="discord"
                           >
                             {discordLoading ? t('common.refreshing') : t('common.refresh')}
                           </button>
@@ -2888,6 +3261,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={handleCancelDiscordConfig}
                             disabled={!hasDiscordConfigChanges || discordSaving}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-cancel-btn"
+                            data-variant="discord"
                           >
                             {t('common.cancel')}
                           </button>
@@ -2896,6 +3271,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void handleSaveDiscordConfig()}
                             disabled={!hasDiscordConfigChanges || discordSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-save-btn"
+                            data-variant="discord"
                           >
                             {discordSaving ? t('common.saving') : t('common.save')}
                           </button>
@@ -2904,24 +3281,44 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {discordSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div
+                        className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok"
+                        data-testid="channels-panel-channel-config-success"
+                        data-variant="discord"
+                      >
                         {discordSuccess}
                       </div>
                     ) : null}
 
                     <div className="p-4 pt-3 flex-1 overflow-auto">
                       {discordLoading ? (
-                        <div className="text-sm text-text-muted">{t('channels.loading.discord')}</div>
+                        <div
+                          className="text-sm text-text-muted"
+                          data-testid="channels-panel-channel-config-loading"
+                          data-variant="discord"
+                        >{t('channels.loading.discord')}</div>
                       ) : (
                         <>
                           <div className="mb-3 rounded-md border border-border bg-secondary/20 px-3 py-2 text-xs text-text-muted">
                             {t('channels.config.discordHint')}
                           </div>
-                          <table className="w-full text-sm">
+                          <table className="w-full text-sm" data-testid="channels-panel-channel-config-fields" data-variant="discord">
                             <tbody>
-                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enabled</td>
-                                <td className="px-4 py-2.5 align-middle">
+                              <tr
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant="enabled"
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant="enabled"
+                                >enabled</td>
+                                <td
+                                  className="px-4 py-2.5 align-middle"
+                                  data-testid="channels-panel-channel-config-field-toggle"
+                                  data-variant="enabled"
+                                >
                                   <button
                                     type="button"
                                     role="switch"
@@ -2939,9 +3336,21 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   </button>
                                 </td>
                               </tr>
-                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">block_dm</td>
-                                <td className="px-4 py-2.5 align-middle">
+                              <tr
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant="block_dm"
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant="block_dm"
+                                >block_dm</td>
+                                <td
+                                  className="px-4 py-2.5 align-middle"
+                                  data-testid="channels-panel-channel-config-field-toggle"
+                                  data-variant="block_dm"
+                                >
                                   <button
                                     type="button"
                                     role="switch"
@@ -2960,8 +3369,17 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                 </td>
                               </tr>
                               {(['bot_token', 'application_id', 'guild_id', 'channel_id'] as const).map((field) => (
-                                <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                  <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
+                                <tr
+                                  key={field}
+                                  className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                  data-testid="channels-panel-channel-config-field"
+                                  data-variant={field}
+                                >
+                                  <td
+                                    className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                    data-testid="channels-panel-channel-config-field-label"
+                                    data-variant={field}
+                                  >{field}</td>
                                   <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                     <div className="relative">
                                       <input
@@ -2978,6 +3396,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                         className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
                                           isSensitiveDiscordField(field) ? 'pr-10' : ''
                                         }`}
+                                        data-testid="channels-panel-channel-config-field-input"
+                                        data-variant={field}
                                       />
                                       {isSensitiveDiscordField(field) ? (
                                         <button
@@ -2986,6 +3406,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                           className="channels-panel__visibility-toggle"
                                           aria-label={discordVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
                                           title={discordVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
+                                          data-testid="channels-panel-channel-config-field-visibility-toggle"
+                                          data-variant={field}
                                         >
                                           <VisibilityIcon visible={Boolean(discordVisibleFields[field])} />
                                         </button>
@@ -2994,8 +3416,16 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   </td>
                                 </tr>
                               ))}
-                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">allow_from</td>
+                              <tr
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant="allow_from"
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant="allow_from"
+                                >allow_from</td>
                                 <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                   <textarea
                                     value={discordDraft.allow_from}
@@ -3003,6 +3433,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     placeholder={t('channels.placeholders.ids')}
                                     rows={4}
                                     className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                    data-testid="channels-panel-channel-config-field-textarea"
+                                    data-variant="allow_from"
                                   />
                                 </td>
                               </tr>
@@ -3015,14 +3447,30 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 ) : null}
 
                 {activeChannelId === 'slack' ? (
-                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                  <div
+                    className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col"
+                    data-testid="channels-panel-channel-config"
+                    data-variant="slack"
+                  >
+                    <div
+                      className="px-4 py-3 bg-secondary/30 border-b border-border"
+                      data-testid="channels-panel-channel-config-header"
+                      data-variant="slack"
+                    >
                       <div className="flex items-center justify-between gap-4">
                         <div className="flex items-center gap-3">
                           <ChannelHeaderLogo channelId="slack" label={getChannelLabel(t, 'slack')} />
                           <div>
-                            <h4 className="text-sm font-medium text-text">{t('channels.config.slackTitle')}</h4>
-                            <p className="text-xs text-text-muted mt-1">{t('channels.config.slackSubtitle')}</p>
+                            <h4
+                              className="text-sm font-medium text-text"
+                              data-testid="channels-panel-channel-config-title"
+                              data-variant="slack"
+                            >{t('channels.config.slackTitle')}</h4>
+                            <p
+                              className="text-xs text-text-muted mt-1"
+                              data-testid="channels-panel-channel-config-subtitle"
+                              data-variant="slack"
+                            >{t('channels.config.slackSubtitle')}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -3031,6 +3479,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void fetchSlackConfig()}
                             disabled={slackSaving || isConfigRefreshing}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-refresh-btn"
+                            data-variant="slack"
                           >
                             {slackLoading ? t('common.refreshing') : t('common.refresh')}
                           </button>
@@ -3039,6 +3489,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={handleCancelSlackConfig}
                             disabled={!hasSlackConfigChanges || slackSaving}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-cancel-btn"
+                            data-variant="slack"
                           >
                             {t('common.cancel')}
                           </button>
@@ -3047,6 +3499,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void handleSaveSlackConfig()}
                             disabled={!hasSlackConfigChanges || slackSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-save-btn"
+                            data-variant="slack"
                           >
                             {slackSaving ? t('common.saving') : t('common.save')}
                           </button>
@@ -3055,24 +3509,44 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {slackSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div
+                        className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok"
+                        data-testid="channels-panel-channel-config-success"
+                        data-variant="slack"
+                      >
                         {slackSuccess}
                       </div>
                     ) : null}
 
                     <div className="p-4 pt-3 flex-1 overflow-auto">
                       {slackLoading ? (
-                        <div className="text-sm text-text-muted">{t('channels.loading.slack')}</div>
+                        <div
+                          className="text-sm text-text-muted"
+                          data-testid="channels-panel-channel-config-loading"
+                          data-variant="slack"
+                        >{t('channels.loading.slack')}</div>
                       ) : (
                         <>
                           <div className="mb-3 rounded-md border border-border bg-secondary/20 px-3 py-2 text-xs text-text-muted">
                             {t('channels.config.slackHint')}
                           </div>
-                          <table className="w-full text-sm">
+                          <table className="w-full text-sm" data-testid="channels-panel-channel-config-fields" data-variant="slack">
                             <tbody>
-                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enabled</td>
-                                <td className="px-4 py-2.5 align-middle">
+                              <tr
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant="enabled"
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant="enabled"
+                                >enabled</td>
+                                <td
+                                  className="px-4 py-2.5 align-middle"
+                                  data-testid="channels-panel-channel-config-field-toggle"
+                                  data-variant="enabled"
+                                >
                                   <button
                                     type="button"
                                     role="switch"
@@ -3090,11 +3564,23 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   </button>
                                 </td>
                               </tr>
-                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">
+                              <tr
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant="reply_in_thread"
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant="reply_in_thread"
+                                >
                                   reply_in_thread
                                 </td>
-                                <td className="px-4 py-2.5 align-middle">
+                                <td
+                                  className="px-4 py-2.5 align-middle"
+                                  data-testid="channels-panel-channel-config-field-toggle"
+                                  data-variant="reply_in_thread"
+                                >
                                   <button
                                     type="button"
                                     role="switch"
@@ -3115,8 +3601,17 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                 </td>
                               </tr>
                               {(['bot_token', 'app_token', 'default_channel_id'] as const).map((field) => (
-                                <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                  <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
+                                <tr
+                                  key={field}
+                                  className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                  data-testid="channels-panel-channel-config-field"
+                                  data-variant={field}
+                                >
+                                  <td
+                                    className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                    data-testid="channels-panel-channel-config-field-label"
+                                    data-variant={field}
+                                  >{field}</td>
                                   <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                     <div className="relative">
                                       <input
@@ -3133,6 +3628,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                         className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
                                           isSensitiveSlackField(field) ? 'pr-10' : ''
                                         }`}
+                                        data-testid="channels-panel-channel-config-field-input"
+                                        data-variant={field}
                                       />
                                       {isSensitiveSlackField(field) ? (
                                         <button
@@ -3141,6 +3638,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                           className="channels-panel__visibility-toggle"
                                           aria-label={slackVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
                                           title={slackVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
+                                          data-testid="channels-panel-channel-config-field-visibility-toggle"
+                                          data-variant={field}
                                         >
                                           <VisibilityIcon visible={Boolean(slackVisibleFields[field])} />
                                         </button>
@@ -3149,8 +3648,16 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   </td>
                                 </tr>
                               ))}
-                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">allow_from</td>
+                              <tr
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant="allow_from"
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant="allow_from"
+                                >allow_from</td>
                                 <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                   <textarea
                                     value={slackDraft.allow_from}
@@ -3158,11 +3665,21 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     placeholder={t('channels.placeholders.slackUserIds')}
                                     rows={4}
                                     className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                    data-testid="channels-panel-channel-config-field-textarea"
+                                    data-variant="allow_from"
                                   />
                                 </td>
                               </tr>
-                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">
+                              <tr
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant="allowed_channel_ids"
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant="allowed_channel_ids"
+                                >
                                   allowed_channel_ids
                                 </td>
                                 <td className="px-4 py-2.5 break-all text-[13px] align-middle">
@@ -3172,6 +3689,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     placeholder={t('channels.placeholders.slackChannelIds')}
                                     rows={4}
                                     className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                    data-testid="channels-panel-channel-config-field-textarea"
+                                    data-variant="allowed_channel_ids"
                                   />
                                 </td>
                               </tr>
@@ -3184,14 +3703,30 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 ) : null}
 
                 {activeChannelId === 'whatsapp' ? (
-                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                  <div
+                    className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col"
+                    data-testid="channels-panel-channel-config"
+                    data-variant="whatsapp"
+                  >
+                    <div
+                      className="px-4 py-3 bg-secondary/30 border-b border-border"
+                      data-testid="channels-panel-channel-config-header"
+                      data-variant="whatsapp"
+                    >
                       <div className="flex items-center justify-between gap-4">
                         <div className="flex items-center gap-3">
                           <ChannelHeaderLogo channelId="whatsapp" label={getChannelLabel(t, 'whatsapp')} />
                           <div>
-                            <h4 className="text-sm font-medium text-text">{t('channels.config.whatsappTitle')}</h4>
-                            <p className="text-xs text-text-muted mt-1">{t('channels.config.whatsappSubtitle')}</p>
+                            <h4
+                              className="text-sm font-medium text-text"
+                              data-testid="channels-panel-channel-config-title"
+                              data-variant="whatsapp"
+                            >{t('channels.config.whatsappTitle')}</h4>
+                            <p
+                              className="text-xs text-text-muted mt-1"
+                              data-testid="channels-panel-channel-config-subtitle"
+                              data-variant="whatsapp"
+                            >{t('channels.config.whatsappSubtitle')}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -3200,6 +3735,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void fetchWhatsAppConfig()}
                             disabled={whatsappSaving || isConfigRefreshing}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-refresh-btn"
+                            data-variant="whatsapp"
                           >
                             {whatsappLoading ? t('common.refreshing') : t('common.refresh')}
                           </button>
@@ -3208,6 +3745,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={handleCancelWhatsAppConfig}
                             disabled={!hasWhatsAppConfigChanges || whatsappSaving}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-cancel-btn"
+                            data-variant="whatsapp"
                           >
                             {t('common.cancel')}
                           </button>
@@ -3216,6 +3755,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void handleSaveWhatsAppConfig()}
                             disabled={!hasWhatsAppConfigChanges || whatsappSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-save-btn"
+                            data-variant="whatsapp"
                           >
                             {whatsappSaving ? t('common.saving') : t('common.save')}
                           </button>
@@ -3224,20 +3765,40 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {whatsappSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div
+                        className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok"
+                        data-testid="channels-panel-channel-config-success"
+                        data-variant="whatsapp"
+                      >
                         {whatsappSuccess}
                       </div>
                     ) : null}
 
                     <div className="p-4 pt-3 flex-1 overflow-auto">
                       {whatsappLoading ? (
-                        <div className="text-sm text-text-muted">{t('channels.loading.whatsapp')}</div>
+                        <div
+                          className="text-sm text-text-muted"
+                          data-testid="channels-panel-channel-config-loading"
+                          data-variant="whatsapp"
+                        >{t('channels.loading.whatsapp')}</div>
                       ) : (
-                        <table className="w-full text-sm">
+                        <table className="w-full text-sm" data-testid="channels-panel-channel-config-fields" data-variant="whatsapp">
                           <tbody>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enabled</td>
-                              <td className="px-4 py-2.5 align-middle">
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="enabled"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="enabled"
+                              >enabled</td>
+                              <td
+                                className="px-4 py-2.5 align-middle"
+                                data-testid="channels-panel-channel-config-field-toggle"
+                                data-variant="enabled"
+                              >
                                 <button
                                   type="button"
                                   role="switch"
@@ -3256,8 +3817,17 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                               </td>
                             </tr>
                             {(['bridge_ws_url', 'default_jid', 'bridge_command', 'bridge_workdir'] as const).map((field) => (
-                              <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
+                              <tr
+                                key={field}
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant={field}
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant={field}
+                                >{field}</td>
                                 <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                   <input
                                     type="text"
@@ -3265,12 +3835,22 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     onChange={(e) => handleWhatsAppFieldChange(field, e.target.value)}
                                     placeholder={t('channels.placeholders.configValue')}
                                     className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                                    data-testid="channels-panel-channel-config-field-input"
+                                    data-variant={field}
                                   />
                                 </td>
                               </tr>
                             ))}
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">allow_from</td>
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="allow_from"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="allow_from"
+                              >allow_from</td>
                               <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                 <textarea
                                   value={whatsappDraft.allow_from}
@@ -3278,12 +3858,26 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   placeholder={t('channels.placeholders.whatsappJids')}
                                   rows={4}
                                   className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                  data-testid="channels-panel-channel-config-field-textarea"
+                                  data-variant="allow_from"
                                 />
                               </td>
                             </tr>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enable_streaming</td>
-                              <td className="px-4 py-2.5 align-middle">
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="enable_streaming"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="enable_streaming"
+                              >enable_streaming</td>
+                              <td
+                                className="px-4 py-2.5 align-middle"
+                                data-testid="channels-panel-channel-config-field-toggle"
+                                data-variant="enable_streaming"
+                              >
                                 <button
                                   type="button"
                                   role="switch"
@@ -3301,9 +3895,21 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                 </button>
                               </td>
                             </tr>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">auto_start_bridge</td>
-                              <td className="px-4 py-2.5 align-middle">
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="auto_start_bridge"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="auto_start_bridge"
+                              >auto_start_bridge</td>
+                              <td
+                                className="px-4 py-2.5 align-middle"
+                                data-testid="channels-panel-channel-config-field-toggle"
+                                data-variant="auto_start_bridge"
+                              >
                                 <button
                                   type="button"
                                   role="switch"
@@ -3329,14 +3935,30 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 ) : null}
 
                 {(activeChannelId as string) === 'wechat' ? (
-                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                  <div
+                    className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col"
+                    data-testid="channels-panel-channel-config"
+                    data-variant="wechat"
+                  >
+                    <div
+                      className="px-4 py-3 bg-secondary/30 border-b border-border"
+                      data-testid="channels-panel-channel-config-header"
+                      data-variant="wechat"
+                    >
                       <div className="flex items-center justify-between gap-4">
                         <div className="flex items-center gap-3">
                           <ChannelHeaderLogo channelId={'wechat' as SupportedChannelId} label={getChannelLabel(t, 'wechat' as SupportedChannelId)} />
                           <div>
-                            <h4 className="text-sm font-medium text-text">{t('channels.config.wechatTitle')}</h4>
-                            <p className="text-xs text-text-muted mt-1">{t('channels.config.wechatSubtitle')}</p>
+                            <h4
+                              className="text-sm font-medium text-text"
+                              data-testid="channels-panel-channel-config-title"
+                              data-variant="wechat"
+                            >{t('channels.config.wechatTitle')}</h4>
+                            <p
+                              className="text-xs text-text-muted mt-1"
+                              data-testid="channels-panel-channel-config-subtitle"
+                              data-variant="wechat"
+                            >{t('channels.config.wechatSubtitle')}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2 flex-wrap">
@@ -3345,6 +3967,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void fetchWechatConfig()}
                             disabled={wechatSaving || wechatUnbinding || isConfigRefreshing}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-refresh-btn"
+                            data-variant="wechat"
                           >
                             {wechatLoading ? t('common.refreshing') : t('common.refresh')}
                           </button>
@@ -3364,6 +3988,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={handleCancelWechatConfig}
                             disabled={!hasWechatConfigChanges || wechatSaving || wechatUnbinding}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-cancel-btn"
+                            data-variant="wechat"
                           >
                             {t('common.cancel')}
                           </button>
@@ -3372,6 +3998,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void handleSaveWechatConfig()}
                             disabled={!hasWechatConfigChanges || wechatSaving || wechatUnbinding || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-save-btn"
+                            data-variant="wechat"
                           >
                             {wechatSaving ? t('common.saving') : t('common.save')}
                           </button>
@@ -3380,25 +4008,48 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {wechatSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div
+                        className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok"
+                        data-testid="channels-panel-channel-config-success"
+                        data-variant="wechat"
+                      >
                         {wechatSuccess}
                       </div>
                     ) : null}
                     {wechatDraft.enabled && !wechatDraft.bot_token.trim() ? (
-                      <div className="mx-4 mt-4 rounded-md border border-border bg-secondary/30 px-3 py-2 text-sm text-text-muted">
+                      <div
+                        className="mx-4 mt-4 rounded-md border border-border bg-secondary/30 px-3 py-2 text-sm text-text-muted"
+                        data-testid="channels-panel-wechat-auto-login-hint"
+                      >
                         {t('channels.notices.wechatAutoLogin')}
                       </div>
                     ) : null}
 
                     <div className="p-4 pt-3 flex-1 overflow-auto">
                       {wechatLoading ? (
-                        <div className="text-sm text-text-muted">{t('channels.loading.wechat')}</div>
+                        <div
+                          className="text-sm text-text-muted"
+                          data-testid="channels-panel-channel-config-loading"
+                          data-variant="wechat"
+                        >{t('channels.loading.wechat')}</div>
                       ) : (
-                        <table className="w-full text-sm">
+                        <table className="w-full text-sm" data-testid="channels-panel-channel-config-fields" data-variant="wechat">
                           <tbody>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enabled</td>
-                              <td className="px-4 py-2.5 align-middle">
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="enabled"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="enabled"
+                              >enabled</td>
+                              <td
+                                className="px-4 py-2.5 align-middle"
+                                data-testid="channels-panel-channel-config-field-toggle"
+                                data-variant="enabled"
+                              >
                                 <button
                                   type="button"
                                   role="switch"
@@ -3417,8 +4068,15 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                               </td>
                             </tr>
 
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">ilink_bot_id</td>
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-wechat-ilink-bot-id"
+                            >
+                                <td
+                                  className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant="ilink_bot_id"
+                                >ilink_bot_id</td>
                                 <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                   <input
                                     type="text"
@@ -3426,26 +4084,51 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     readOnly
                                     placeholder={t('channels.placeholders.configValue')}
                                     className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none cursor-not-allowed opacity-60"
+                                    data-testid="channels-panel-channel-config-field-input"
+                                    data-variant="ilink_bot_id"
                                   />
                                 </td>
                               </tr>
 
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">allow_from</td>
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="allow_from"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="allow_from"
+                              >allow_from</td>
                               <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                 <textarea
                                   value={wechatDraft.allow_from}
                                   onChange={(e) => handleWechatFieldChange('allow_from', e.target.value)}
                                   placeholder={t('channels.placeholders.allowFrom')}
                                   className="w-full min-h-[86px] resize-y rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                                  data-testid="channels-panel-channel-config-field-textarea"
+                                  data-variant="allow_from"
                                 />
                               </td>
                             </tr>
 
                             {(['auto_login', 'enable_streaming'] as const).map((field) => (
-                              <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
-                                <td className="px-4 py-2.5 align-middle">
+                              <tr
+                                key={field}
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant={field}
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant={field}
+                                >{field}</td>
+                                <td
+                                  className="px-4 py-2.5 align-middle"
+                                  data-testid="channels-panel-channel-config-field-toggle"
+                                  data-variant={field}
+                                >
                                   <button
                                     type="button"
                                     role="switch"
@@ -3473,8 +4156,17 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                 'backoff_max_sec',
                               ] as const
                             ).map((field) => (
-                              <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
+                              <tr
+                                key={field}
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant={field}
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant={field}
+                                >{field}</td>
                                 <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                   <input
                                     type="number"
@@ -3485,6 +4177,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     onChange={(e) => handleWechatFieldChange(field, Number(e.target.value) || 0)}
                                     placeholder={t('channels.placeholders.configValue')}
                                     className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                                    data-testid="channels-panel-channel-config-field-input"
+                                    data-variant={field}
                                   />
                                 </td>
                               </tr>
@@ -3497,14 +4191,30 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 ) : null}
 
                 {(activeChannelId as string) === 'wecom' ? (
-                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                  <div
+                    className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col"
+                    data-testid="channels-panel-channel-config"
+                    data-variant="wecom"
+                  >
+                    <div
+                      className="px-4 py-3 bg-secondary/30 border-b border-border"
+                      data-testid="channels-panel-channel-config-header"
+                      data-variant="wecom"
+                    >
                       <div className="flex items-center justify-between gap-4">
                         <div className="flex items-center gap-3">
                           <ChannelHeaderLogo channelId={'wecom' as SupportedChannelId} label={getChannelLabel(t, 'wecom' as SupportedChannelId)} />
                           <div>
-                            <h4 className="text-sm font-medium text-text">{t('channels.config.wecomTitle')}</h4>
-                            <p className="text-xs text-text-muted mt-1">{t('channels.config.wecomSubtitle')}</p>
+                            <h4
+                              className="text-sm font-medium text-text"
+                              data-testid="channels-panel-channel-config-title"
+                              data-variant="wecom"
+                            >{t('channels.config.wecomTitle')}</h4>
+                            <p
+                              className="text-xs text-text-muted mt-1"
+                              data-testid="channels-panel-channel-config-subtitle"
+                              data-variant="wecom"
+                            >{t('channels.config.wecomSubtitle')}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -3513,6 +4223,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void fetchWecomConfig()}
                             disabled={wecomSaving || isConfigRefreshing}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-refresh-btn"
+                            data-variant="wecom"
                           >
                             {wecomLoading ? t('common.refreshing') : t('common.refresh')}
                           </button>
@@ -3521,6 +4233,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={handleCancelWecomConfig}
                             disabled={!hasWecomConfigChanges || wecomSaving}
                             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-cancel-btn"
+                            data-variant="wecom"
                           >
                             {t('common.cancel')}
                           </button>
@@ -3529,6 +4243,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             onClick={() => void handleSaveWecomConfig()}
                             disabled={!hasWecomConfigChanges || wecomSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="channels-panel-channel-config-save-btn"
+                            data-variant="wecom"
                           >
                             {wecomSaving ? t('common.saving') : t('common.save')}
                           </button>
@@ -3537,20 +4253,40 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {wecomSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div
+                        className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok"
+                        data-testid="channels-panel-channel-config-success"
+                        data-variant="wecom"
+                      >
                         {wecomSuccess}
                       </div>
                     ) : null}
 
                     <div className="p-4 pt-3 flex-1 overflow-auto">
                       {wecomLoading ? (
-                        <div className="text-sm text-text-muted">{t('channels.loading.wecom')}</div>
+                        <div
+                          className="text-sm text-text-muted"
+                          data-testid="channels-panel-channel-config-loading"
+                          data-variant="wecom"
+                        >{t('channels.loading.wecom')}</div>
                       ) : (
-                        <table className="w-full text-sm">
+                        <table className="w-full text-sm" data-testid="channels-panel-channel-config-fields" data-variant="wecom">
                           <tbody>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enabled</td>
-                              <td className="px-4 py-2.5 align-middle">
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="enabled"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="enabled"
+                              >enabled</td>
+                              <td
+                                className="px-4 py-2.5 align-middle"
+                                data-testid="channels-panel-channel-config-field-toggle"
+                                data-variant="enabled"
+                              >
                                 <button
                                   type="button"
                                   role="switch"
@@ -3569,8 +4305,17 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                               </td>
                             </tr>
                             {(['bot_id', 'secret'] as const).map((field) => (
-                              <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
+                              <tr
+                                key={field}
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant={field}
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant={field}
+                                >{field}</td>
                                 <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                   <div className="relative">
                                     <input
@@ -3581,6 +4326,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                       className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
                                         isSensitiveWecomField(field) ? 'pr-10' : ''
                                       }`}
+                                      data-testid="channels-panel-channel-config-field-input"
+                                      data-variant={field}
                                     />
                                     {isSensitiveWecomField(field) ? (
                                       <button
@@ -3589,6 +4336,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                         className="channels-panel__visibility-toggle"
                                         aria-label={wecomVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
                                         title={wecomVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
+                                        data-testid="channels-panel-channel-config-field-visibility-toggle"
+                                        data-variant={field}
                                       >
                                         <VisibilityIcon visible={Boolean(wecomVisibleFields[field])} />
                                       </button>
@@ -3597,8 +4346,16 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                 </td>
                               </tr>
                             ))}
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">default_chat_id</td>
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="default_chat_id"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="default_chat_id"
+                              >default_chat_id</td>
                               <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                 <input
                                   type="text"
@@ -3606,12 +4363,22 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   onChange={(e) => handleWecomFieldChange('default_chat_id', e.target.value)}
                                   placeholder={t('channels.placeholders.wecomDefaultChatId')}
                                   className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                                  data-testid="channels-panel-channel-config-field-input"
+                                  data-variant="default_chat_id"
                                 />
                                 <p className="mt-1 text-xs text-text-muted">{t('channels.placeholders.wecomDefaultChatIdHint')}</p>
                               </td>
                             </tr>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">allow_from</td>
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="allow_from"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="allow_from"
+                              >allow_from</td>
                               <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                 <textarea
                                   value={wecomDraft.allow_from}
@@ -3619,12 +4386,26 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   placeholder={t('channels.placeholders.ids')}
                                   rows={4}
                                   className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                  data-testid="channels-panel-channel-config-field-textarea"
+                                  data-variant="allow_from"
                                 />
                               </td>
                             </tr>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">group_digital_avatar</td>
-                              <td className="px-4 py-2.5 align-middle">
+                            <tr
+                              className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                              data-testid="channels-panel-channel-config-field"
+                              data-variant="group_digital_avatar"
+                            >
+                              <td
+                                className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                data-testid="channels-panel-channel-config-field-label"
+                                data-variant="group_digital_avatar"
+                              >group_digital_avatar</td>
+                              <td
+                                className="px-4 py-2.5 align-middle"
+                                data-testid="channels-panel-channel-config-field-toggle"
+                                data-variant="group_digital_avatar"
+                              >
                                 <button
                                   type="button"
                                   role="switch"
@@ -3644,8 +4425,15 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                             </tr>
                             {wecomDraft.group_digital_avatar && (
                               <>
-                                <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                  <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">my_user_id</td>
+                                <tr
+                                  className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                  data-testid="channels-panel-wecom-my-user-id"
+                                >
+                                  <td
+                                    className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                    data-testid="channels-panel-channel-config-field-label"
+                                    data-variant="my_user_id"
+                                  >my_user_id</td>
                                   <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                     <input
                                       type="text"
@@ -3653,11 +4441,20 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                       onChange={(e) => handleWecomFieldChange('my_user_id', e.target.value)}
                                       placeholder={t('channels.placeholders.configValue')}
                                       className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                                      data-testid="channels-panel-channel-config-field-input"
+                                      data-variant="my_user_id"
                                     />
                                   </td>
                                 </tr>
-                                <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                  <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">bot_name</td>
+                                <tr
+                                  className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                  data-testid="channels-panel-wecom-bot-name"
+                                >
+                                  <td
+                                    className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                    data-testid="channels-panel-channel-config-field-label"
+                                    data-variant="bot_name"
+                                  >bot_name</td>
                                   <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                                     <input
                                       type="text"
@@ -3665,12 +4462,25 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                       onChange={(e) => handleWecomFieldChange('bot_name', e.target.value)}
                                       placeholder={t('channels.placeholders.configValue')}
                                       className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                                      data-testid="channels-panel-channel-config-field-input"
+                                      data-variant="bot_name"
                                     />
                                   </td>
                                 </tr>
-                                <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                  <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enable_memory</td>
-                                  <td className="px-4 py-2.5 align-middle">
+                                <tr
+                                  className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                  data-testid="channels-panel-wecom-enable-memory"
+                                >
+                                  <td
+                                    className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                    data-testid="channels-panel-channel-config-field-label"
+                                    data-variant="enable_memory"
+                                  >enable_memory</td>
+                                  <td
+                                    className="px-4 py-2.5 align-middle"
+                                    data-testid="channels-panel-channel-config-field-toggle"
+                                    data-variant="enable_memory"
+                                  >
                                     <button
                                       type="button"
                                       role="switch"
@@ -3689,7 +4499,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   </td>
                                 </tr>
                                 <tr className="border-t border-border first:border-t-0">
-                                  <td colSpan={2} className="px-4 py-3">
+                                  <td
+                                    colSpan={2}
+                                    className="px-4 py-3"
+                                    data-testid="channels-panel-wecom-avatar-perm"
+                                    data-variant="wecom"
+                                  >
                                     <p className="text-xs font-medium text-text-muted mb-2">{t('ownerScopes.toolPermissions')}</p>
                                     <AvatarPermEditor channelId="wecom" userId={wecomDraft.my_user_id} />
                                   </td>

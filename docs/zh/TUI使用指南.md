@@ -772,3 +772,9 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 - [MCP配置](MCP配置.md)
 - [配置信息](配置信息.md)
 - [Claude Code CLI 参考（结构参考）](https://code.claude.com/docs/zh-CN/cli-reference)
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

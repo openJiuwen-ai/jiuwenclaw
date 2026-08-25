@@ -103,6 +103,35 @@ class TestPaths:
         monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
         assert paths_mod.debug_trace_dir("code.normal") == tmp_path / ".code" / "traces"
 
+    def test_original_agent_plan_keeps_agent_dir_after_code_profile_resolution(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
+        mode = paths_mod.resolve_debug_trace_mode("code.plan", "agent.plan")
+
+        assert paths_mod.debug_trace_file(mode, "sess") == (
+            tmp_path / ".agent" / "traces" / "dump-agent-sess.txt"
+        )
+
+    def test_plain_web_agent_in_code_profile_remains_code_dump(self):
+        assert paths_mod.resolve_debug_trace_mode("code.normal", "agent") == "code.normal"
+
+    def test_explicit_code_plan_remains_code_dump(self):
+        assert paths_mod.resolve_debug_trace_mode("code.plan", "code.plan") == "code.plan"
+
+    def test_original_agent_plan_uses_agent_debug_settings(self, monkeypatch):
+        monkeypatch.setattr(
+            debug_config,
+            "_load_debug_trace_config",
+            lambda: {
+                "agent": {"enabled": True},
+                "code": {"enabled": False},
+            },
+        )
+        mode = paths_mod.resolve_debug_trace_mode("code.plan", "agent.plan")
+
+        assert resolve_debug_trace_settings(mode=mode, request_debug=False).enabled is True
+
     def test_file_names(self, monkeypatch, tmp_path):
         monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
         assert paths_mod.debug_trace_file("agent.plan", "sess").name == "dump-agent-sess.txt"
@@ -253,6 +282,34 @@ class TestDebugTraceLoggerFeed:
         out = _read(lg)
         assert "category=context_usage" in out
         assert "input_tokens=100" in out and "model_name=GLM-5.2" in out
+
+
+    def test_answer_chunk_dropped_when_model_output_off(self, tmp_path):
+        # include_model_output=False must suppress the trailing `answer`
+        # chunk too — it re-sends the whole reply and is classified as
+        # text, so without this guard the reply leaks into the dump as a
+        # category=text JSON blob even though llm_output was suppressed.
+        s = debug_config.DebugTraceSettings(
+            mode="code.normal",
+            enabled=True,
+            dump_enabled=True,
+            otel_enabled=False,
+            include_model_output=False,
+        )
+        lg = DebugTraceLogger(
+            file_path=tmp_path / "dump.txt",
+            mode="code.normal",
+            session_id="sess",
+            request_id="req-1",
+            settings=s,
+        )
+        lg.start_run()
+        lg.feed(_chunk("llm_output", {"content": "streamed reply"}))
+        lg.feed(_chunk("answer", {"content": "streamed reply"}))
+        lg.end_run(status="ok")
+        out = _read(lg)
+        assert "streamed reply" not in out
+        assert "category=text" not in out
 
 
 # ── session registry (cross-task logger recovery) ──────────────────────────
@@ -807,7 +864,6 @@ class TestAgentObservabilityForce:
     def _reset(self):
         import jiuwenswarm.agents.harness.agent_observability as ao
         ao._agent_observability_active = False
-        ao._agent_owns_provider = False
         ao._force_ever_enabled = False
 
     def test_force_inits_and_sticky_blocks_teardown(self, monkeypatch):
@@ -815,12 +871,14 @@ class TestAgentObservabilityForce:
         import openjiuwen.agent_teams.observability as obs
         self._reset()
         calls = {"init": 0, "shutdown": 0}
+        initialized = {"value": False}
         monkeypatch.setattr(ao, "get_config", lambda: {"agent_observability": {"enabled": False}})
-        monkeypatch.setattr(obs, "is_initialized", lambda: False)
+        monkeypatch.setattr(obs, "is_initialized", lambda: initialized["value"])
         monkeypatch.setattr(obs, "ObservabilityConfig", lambda **kw: kw)
 
-        def fake_init(_cfg):
+        def fake_init(_cfg, **_kwargs):
             calls["init"] += 1
+            initialized["value"] = True
 
         monkeypatch.setattr(obs, "init_observability", fake_init)
         monkeypatch.setattr(
@@ -843,7 +901,6 @@ class TestAgentObservabilityForce:
         calls = {"shutdown": 0}
         # simulate a config-gated active provider (force never used)
         ao._agent_observability_active = True
-        ao._agent_owns_provider = True
         ao._force_ever_enabled = False
         monkeypatch.setattr(ao, "get_config", lambda: {"agent_observability": {"enabled": False}})
         monkeypatch.setattr(
@@ -1205,4 +1262,3 @@ class TestSubagentCapture:
 
         subagent_capture.attach_subagent_observability(FakeSub())
         assert added == []  # no-op when observability is off
-

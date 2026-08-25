@@ -232,6 +232,7 @@ react:
   evolution:
     skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
     auto_save: false           # true = 自演进审批无需用户点击自动通过
+    review_feedback_min_confidence: 0.7
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
@@ -637,8 +638,8 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm
   release_api_url: ""
-  asset_name_pattern: "JiuwenSwarm-setup-{version}.exe"
-  sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
+  # Windows/macOS use .exe/.dmg; multiple candidates prefer a unique WorkSwarm name.
+  asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
   timeout_seconds: 20
 
 extensions:

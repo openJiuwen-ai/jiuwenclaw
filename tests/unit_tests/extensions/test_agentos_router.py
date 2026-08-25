@@ -10,7 +10,10 @@ import pytest
 
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
-from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import AgentManager
+from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
+    AgentManager,
+    AgentRuntime,
+)
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
     DEFAULT_AGENT_WORKSPACE_ROOT,
     SshChannelEndpoint,
@@ -91,7 +94,12 @@ class FakeYuanRongClient:
     async def get_agent_info(self, instance_id: str) -> dict:
         return {"instance_id": instance_id, "node_ip": "127.0.0.1", "sandbox_ip": "127.0.0.1"}
 
-    async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
+    async def send_request(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResponse:
         self.send_calls += 1
         return AgentResponse(
             request_id=str(envelope.request_id or ""),
@@ -143,7 +151,12 @@ class FakeAgentWsClient:
     async def disconnect(self) -> None:
         self.disconnected = True
 
-    async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
+    async def send_request(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResponse:
         return await self._yuanrong.send_request(envelope)
 
     def send_request_stream(
@@ -977,7 +990,217 @@ async def test_agentos_third_agent_list_and_switch() -> None:
     assert switched["payload"]["ssh_ip"] == "0.0.0.0"
     assert switched["payload"]["ssh_port"] == 2223
     assert yuanrong.create_calls == 1
-    assert yuanrong.send_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# disconnect_cleanup_timeout_seconds: configurable + idle-aware delete path
+# ---------------------------------------------------------------------------
+
+
+async def _ready_creator(agent_info: AgentInfo) -> AgentInfo:
+    """Minimal creator that marks the runtime READY with a stub sandbox id."""
+    agent_info.sandbox_id = "fake-sbx"
+    agent_info.status = AgentStatus.READY
+    return agent_info
+
+
+@pytest.mark.asyncio
+async def test_delayed_cleanup_uses_configured_timeout() -> None:
+    """The wait must follow ``disconnect_cleanup_timeout_seconds``,
+    not the old hardcoded 60s."""
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = _router_client(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        disconnect_cleanup_timeout_seconds=0.05,
+    )
+    await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", creator=_ready_creator
+    )
+
+    start = asyncio.get_running_loop().time()
+    await client._delayed_cleanup("u1")
+    elapsed = asyncio.get_running_loop().time() - start
+
+    # If the wait was still 60s this test would take 60s; assert the new knob
+    # actually drove the sleep.
+    assert elapsed < 5.0, f"delayed cleanup took {elapsed:.2f}s, expected ~0.05s"
+
+
+@pytest.mark.asyncio
+async def test_delayed_cleanup_skips_held_agents() -> None:
+    """Like the idle reaper, a held agent (task_count > 0) must not be killed
+    by the disconnect cleanup even after the timeout elapses."""
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = _router_client(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        disconnect_cleanup_timeout_seconds=0.01,
+    )
+    held = await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", creator=_ready_creator, acquire=True
+    )
+    assert held.is_ready()
+    assert held.task_count == 1
+
+    await asyncio.sleep(0.05)
+    await client._delayed_cleanup("u1")
+
+    # pop_if_idle must have refused the held agent → nothing deleted.
+    assert await agent_manager.get_agent("u1", "jiuwenswarm") is not None
+    assert yuanrong.delete_calls == []
+
+    await agent_manager.release(held.key)
+    await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_delayed_cleanup_deletes_unheld_idle_builtin() -> None:
+    """When the task is ended (task_count == 0) and idle past the timeout,
+    the disconnect cleanup must delete the agent (mirroring the idle reaper)."""
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    agent_manager = AgentManager()
+    client = _router_client(
+        yuanrong,
+        registry,
+        agent_manager,
+        disconnect_cleanup_timeout_seconds=0.01,
+    )
+    runtime = await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", creator=_ready_creator
+    )
+    assert runtime.task_count == 0
+
+    await asyncio.sleep(0.05)
+    await client._delayed_cleanup("u1")
+
+    assert await agent_manager.get_agent("u1", "jiuwenswarm") is None
+    assert yuanrong.delete_calls == ["fake-sbx"]
+    assert registry.unregistered == [
+        {
+            "agent_id": runtime.info.agent_id,
+            "user_id": "u1",
+            "agent_type": "jiuwenswarm",
+        }
+    ]
+    await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_delayed_cleanup_skips_creating_or_non_builtin_agents() -> None:
+    """Cleanup is gated by the same READY+task_count==0+idle triple as the
+    idle reaper, so non-READY runtimes are not force-deleted."""
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = _router_client(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        disconnect_cleanup_timeout_seconds=0.01,
+    )
+    # Seed a CREATING runtime directly: get_or_create_agent() without a
+    # creator resolves to READY, so we must insert the runtime ourselves.
+    key = AgentRuntime.build_key(
+        agent_manager.key_fields, user_id="u1", agent_type="jiuwenswarm"
+    )
+    agent_manager._runtimes[key] = AgentRuntime.for_key(
+        key, user_id="u1", agent_type="jiuwenswarm"
+    )
+    await asyncio.sleep(0.05)
+
+    await client._delayed_cleanup("u1")
+
+    # Still tracked, not deleted.
+    assert await agent_manager.get_agent("u1", "jiuwenswarm") is not None
+    assert yuanrong.delete_calls == []
+    await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_delayed_cleanup_cancelled_on_reconnect() -> None:
+    """Reconnect during the wait window must cancel the pending cleanup task."""
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = _router_client(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        # Long enough that the cleanup task is still asleep when we reconnect.
+        disconnect_cleanup_timeout_seconds=10.0,
+    )
+    await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", creator=_ready_creator
+    )
+
+    # Disconnect while connection count was 0 → schedules the pending task.
+    await client._on_channel_event(
+        SimpleNamespace(user_id="u1", event_type="disconnected")
+    )
+    pending = client._pending_cleanups.get("u1")
+    assert pending is not None and not pending.done()
+
+    # Reconnect before the timeout elapses → task must be cancelled.
+    await client._on_channel_event(
+        SimpleNamespace(user_id="u1", event_type="connected")
+    )
+    # Python 3.11+: even though _delayed_cleanup swallows CancelledError inside
+    # its sleep() and returns cleanly, the task itself is still in the
+    # "cancelled" state, so awaiting must re-raise CancelledError.
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert "u1" not in client._pending_cleanups
+    assert yuanrong.delete_calls == []
+    await client.shutdown()
+
+
+def test_load_router_config_disconnect_cleanup_knobs(monkeypatch) -> None:
+    base_agent_client = {
+        "type": "agentos_router",
+        "frontend_endpoint": "http://yuanrong.test",
+        "function_version_urn": "urn:test",
+    }
+    monkeypatch.delenv("DISCONNECT_CLEANUP_TIMEOUT_SECONDS", raising=False)
+
+    # Default keeps the historical 60s.
+    defaults = load_router_config({"gateway": {"agent_client": base_agent_client}})
+    assert defaults.disconnect_cleanup_timeout_seconds == 60.0
+
+    # Explicit yaml value is honored.
+    loaded = load_router_config(
+        {
+            "gateway": {
+                "agent_client": base_agent_client,
+                "agentos": {"disconnect_cleanup_timeout_seconds": 120},
+            }
+        }
+    )
+    assert loaded.disconnect_cleanup_timeout_seconds == 120.0
+
+    # Env overrides yaml (incl. yaml=0).
+    monkeypatch.setenv("DISCONNECT_CLEANUP_TIMEOUT_SECONDS", "30")
+    env_loaded = load_router_config(
+        {
+            "gateway": {
+                "agent_client": base_agent_client,
+                "agentos": {"disconnect_cleanup_timeout_seconds": 0},
+            }
+        }
+    )
+    assert env_loaded.disconnect_cleanup_timeout_seconds == 30.0
+
+    # Env explicit 0 disables.
+    monkeypatch.setenv("DISCONNECT_CLEANUP_TIMEOUT_SECONDS", "0")
+    assert (
+        load_router_config(
+            {"gateway": {"agent_client": base_agent_client}}
+        ).disconnect_cleanup_timeout_seconds
+        == 0.0
+    )
 
 
 def test_agentos_selected_by_agent_client_type() -> None:

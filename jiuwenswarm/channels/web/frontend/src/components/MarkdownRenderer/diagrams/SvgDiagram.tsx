@@ -24,7 +24,6 @@ export function SvgDiagram({ code, complete, isStreaming }: SvgDiagramProps): JS
   const status = useMemo(() => getSvgMarkupStatus(preview, complete, isStreaming), [complete, isStreaming, preview]);
   const imageViewDisabled = preview === null;
   const viewMode: DiagramViewMode = imageViewDisabled ? 'code' : requestedViewMode;
-  const canExport = status === 'ready';
   const previewMarkup = preview?.markup ?? code;
 
   useEffect(() => {
@@ -43,15 +42,12 @@ export function SvgDiagram({ code, complete, isStreaming }: SvgDiagramProps): JS
       feedbackPosition="start"
       exportConfig={{
         sourceCode: code,
-        sourceFilename: 'diagram.svg',
-        sourceMimeType: 'image/svg+xml;charset=utf-8',
         renderedSvg: previewMarkup,
         imageFilename: 'diagram.png',
-        downloadEnabled: canExport,
       }}
     >
       {viewMode === 'image' ? (
-        <div className="svg-diagram__canvas" aria-busy={status === 'streaming'}>
+        <div className="svg-diagram__canvas" aria-busy={status === 'streaming'} data-testid="markdown-svg-canvas">
           <iframe
             ref={previewRef}
             className="svg-diagram__frame"
@@ -59,11 +55,12 @@ export function SvgDiagram({ code, complete, isStreaming }: SvgDiagramProps): JS
             title={t('svg.previewTitle')}
             sandbox={UNTRUSTED_STATIC_PREVIEW_SANDBOX}
             srcDoc={SVG_PREVIEW_DOCUMENT}
+            data-testid="markdown-svg-frame"
             onLoad={() => updateSvgPreview(previewRef.current, previewMarkup)}
           />
         </div>
       ) : (
-        <div className="svg-diagram__code-view">
+        <div className="svg-diagram__code-view" data-testid="markdown-svg-code-view">
           <pre>
             <code>{code}</code>
           </pre>

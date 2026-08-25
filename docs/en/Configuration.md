@@ -222,15 +222,16 @@ Self-evolution controls the automatic improvement of JiuwenSwarm's Skills.
 
 ![Self-Evolution Configuration Example](../assets/images/config_self_evolve.png)
 
-### Toggles
+### Configuration
 
-The frontend shows the following options under **Self-Evolution Configuration**:
+Common self-evolution settings are listed below:
 
-| Switch | Config key | Default | Purpose |
+| Setting | Config key | Default | Purpose |
 | --- | --- | --- | --- |
 | **Enable Skills Self-Evolution** | `react.evolution.skill_evolution` | `false` | Controls automatic Skill creation and evolution together. When off, the related Rails, tools, prompts, watchers, and `/evolve` commands are unavailable |
+| **Minimum Reviewer Feedback confidence** | `react.evolution.review_feedback_min_confidence` | `0.7` | Process only Reviewer Feedback attributions that meet this confidence threshold |
 
-> 💡 **Note**: `react.evolution.auto_save` remains an advanced YAML-only approval setting and is not shown in the frontend. Explicit use of the general `skill-creator` or `swarmskill-creator` capability is independent from this automatic self-evolution switch.
+> 💡 **Note**: `react.evolution.auto_save` remains an advanced YAML-only approval setting and is not shown in the frontend. With `auto_save=false`, Reviewer Feedback-driven Team Skill updates require approval. Explicit use of the general `skill-creator` or `swarmskill-creator` capability is independent from this automatic self-evolution switch.
 
 > 📖 For details on the self-evolution mechanism, see [Skill Self-Evolution](SkillSelfEvolution.md).
 
@@ -352,7 +353,7 @@ The system automatically identifies and filters the following types of sensitive
 
 ## 9. Skill Symphony and Skill Retrieval Configuration
 
-Symphony settings control two related capabilities: **Skill Retrieval** finds candidate skills from installed skills, and **Skill Orchestration** uses the skill score to organize candidates into a confirmable, executable skill chain.
+Symphony settings control two related capabilities: **Skill Retrieval** finds candidate skills from installed skills, and **Skill Orchestration** uses the skill graph to organize candidates into a confirmable, executable skill chain.
 
 ### 9.1 Frontend switches
 
@@ -361,11 +362,11 @@ The configuration panel exposes two related switches:
 | Switch | Config key | Default | Purpose |
 | --- | --- | --- | --- |
 | **Enable Skill Retrieval** | `symphony.skill_retrieval.enabled` | `false` | Registers skill-tree retrieval tools such as `skill_branch_explore`, `skill_branch_peek`, and `skill_index_build` |
-| **Enable Skill Symphony** | `symphony.enabled` | `false` | Registers skill score and orchestration tools such as `symphony_read_graph`, `symphony_refresh_graph`, and `symphony_compose_graph` |
+| **Enable Skill Symphony** | `symphony.enabled` | `false` | Registers skill graph and orchestration tools such as `symphony_read_graph`, `symphony_refresh_graph`, and `symphony_compose_graph` |
 
-The two switches are independent. Skill Retrieval answers "how to find candidate skills"; Skill Symphony answers "how to orchestrate candidate skills into a route". If only Skill Retrieval is enabled, the system only gets skill-tree retrieval. If only Skill Symphony is enabled, the system can read and refresh the skill score, but candidate skills do not automatically come from Skill Retrieval.
+The two switches are independent. Skill Retrieval answers "how to find candidate skills"; Skill Symphony answers "how to orchestrate candidate skills into a route". If only Skill Retrieval is enabled, the system only gets skill-tree retrieval. If only Skill Symphony is enabled, the system can read and refresh the skill graph, but candidate skills do not automatically come from Skill Retrieval.
 
-### 9.2 Skill index and skill score
+### 9.2 Skill index and skill graph
 
 Related pages are under **Skills** in the left sidebar:
 
@@ -398,13 +399,13 @@ settings are mapped by the JiuwenSwarm Adapter to agent-core's
 | `symphony.fingerprint.extraction.workers` | `4` | Fingerprint extraction concurrency mapped to agent-core `FingerprintService` |
 | `symphony.fingerprint.extraction.batch_size` | `2` | Fingerprint extraction batch size mapped to agent-core `FingerprintService` |
 | `symphony.fingerprint.extraction.body_limit` | Empty | Body length limit mapped to agent-core `FingerprintService`; empty means the runtime default is used |
-| `symphony.build.workers` | `4` | Skill score build concurrency |
-| `symphony.build.batch_size` | `16` | Skill score build batch size |
+| `symphony.build.workers` | `4` | Skill graph build concurrency |
+| `symphony.build.batch_size` | `16` | Skill graph build batch size |
 | `symphony.build.require_consensus` | `false` | Whether multiple judgments must agree before accepting a relationship |
-| `symphony.build.min_edge_confidence` | `0.1` | Minimum edge confidence written into the skill score |
+| `symphony.build.min_edge_confidence` | `0.1` | Minimum edge confidence written into the skill graph |
 | `symphony.orchestration.mode` | `fast` | Orchestration mode. The current runtime uses the fast orchestration path |
 | `symphony.orchestration.max_depth` | `4` | Maximum skill-chain search depth |
-| `symphony.orchestration.min_edge_confidence` | `0.3` | Minimum skill-score edge confidence preferred by orchestration |
+| `symphony.orchestration.min_edge_confidence` | `0.3` | Minimum skill-graph edge confidence preferred by orchestration |
 | `symphony.skill_retrieval.artifact_root` | Empty string | Skill index artifact directory; empty means the default workspace is used; can be supplied by `SYMPHONY_SKILL_RETRIEVAL_ROOT` |
 | `symphony.skill_retrieval.build.branching_factor` | `128` | Skill-tree split-threshold base; controls how coarse or fine the tree is |
 | `symphony.skill_retrieval.build.max_depth` | `6` | Maximum skill-tree depth |
@@ -422,7 +423,7 @@ settings are mapped by the JiuwenSwarm Adapter to agent-core's
 | `symphony.skill_retrieval.retrieve.flatten_tree` | `false` | Whether retrieval flattens the skill tree |
 | `symphony.skill_retrieval.retrieve.max_exposure_depth` | `1` | Maximum tree depth exposed by one `skill_branch_explore` call |
 
-> 📖 For details about Skill Retrieval, the skill score, and Skill Orchestration, see [Symphony: Skill Retrieval, Orchestration, and Dispatch](symphony.md).
+> 📖 For details about Skill Retrieval, the skill graph, and Skill Orchestration, see [Symphony: Skill Retrieval, Orchestration, and Dispatch](symphony.md).
 
 ---
 

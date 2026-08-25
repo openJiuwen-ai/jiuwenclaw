@@ -32,8 +32,10 @@ from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_EXECUTE_CTX_KEY,
     PLAN_EXECUTE_PAYLOAD_KEY,
+    PLAN_REVISE_PAYLOAD_KEY,
     PLAN_SKIP_PAYLOAD_KEY,
     PLAN_SKIP_TURN_OUTPUT,
+    wrap_plan_revision_feedback,
 )
 
 if TYPE_CHECKING:
@@ -241,6 +243,18 @@ class PlanApprovalInterruptRail(ConfirmInterruptRail):
         plan_execute = bool(
             isinstance(user_input, dict) and user_input.get(PLAN_EXECUTE_PAYLOAD_KEY)
         )
+        plan_revise = bool(
+            isinstance(user_input, dict) and user_input.get(PLAN_REVISE_PAYLOAD_KEY)
+        )
+        # 只包 Web「下一步」。TUI reject 没有 plan_revise，假回执保持原文。
+        if plan_revise:
+            user_input = {
+                **user_input,
+                "feedback": wrap_plan_revision_feedback(
+                    str(user_input.get("feedback") or ""),
+                    self._detect_language(),
+                ),
+            }
 
         # Resume — delegate to parent (handles ConfirmPayload.approved)
         decision = await super().resolve_interrupt(

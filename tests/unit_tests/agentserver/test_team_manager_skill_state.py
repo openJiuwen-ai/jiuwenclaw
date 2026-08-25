@@ -2,17 +2,12 @@
 
 """Unit tests for team member skill views."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
-from jiuwenswarm.common.coding_memory_paths import (
-    resolve_project_coding_memory_dir,
-)
 
 
-
-def test_configure_code_team_member_uses_agent_workspace_coding_memory_path(monkeypatch, tmp_path):
-    """code.team members should keep coding memory out of member cwd."""
+def test_configure_code_team_member_does_not_mount_coding_memory_workspace_node(monkeypatch, tmp_path):
+    """code.team members keep Coding Memory out of the materialized workspace tree."""
     from jiuwenswarm.server.runtime.agent_adapter import interface_code
 
     global_workspace = tmp_path / "global_agent_workspace"
@@ -102,15 +97,4 @@ def test_configure_code_team_member_uses_agent_workspace_coding_memory_path(monk
         role="counter",
     )
 
-    coding_memory_storage_path = Path(
-        resolve_project_coding_memory_dir(
-            agent_workspace_dir=str(global_workspace),
-            project_dir=str(parent_project),
-        )
-    )
-    coding_memory_path = Path(workspace.directories[0]["path"])
-    assert coding_memory_path.is_absolute() is True
-    assert coding_memory_path == coding_memory_storage_path
-    assert coding_memory_storage_path.parent == global_workspace / "coding_memory"
-    assert coding_memory_storage_path.name.startswith("project-")
-    assert coding_memory_storage_path != member_workspace / "coding_memory"
+    assert workspace.directories == []

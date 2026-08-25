@@ -55,6 +55,14 @@ export interface WebError extends Error {
   code?: string;
   requestId?: string;
   retriable?: boolean;
+  /**
+   * 失败响应的 payload 原样透传（此前 webClient.resolvePending 只取 message.error 拼成
+   * Error，payload 整个丢弃）。专家与插件装备-前端接口_v2.md §1.6.3 的 install 两阶段流程
+   * 需要从**失败**响应里读 `payload.pending_connectors`（不同于 MCP connect 那套"不同状态都
+   * ok:true、用 payload.type 判断"的约定，装备 install 的半途失败就是 ok:false），没有这个字段
+   * 这条数据链路完全接不上。可选字段，不影响现有只读 error.message 的调用方。
+   */
+  payload?: unknown;
 }
 
 export interface ConnectionAckPayload {
@@ -114,6 +122,8 @@ export interface SubtaskUpdatePayload {
   task_id: string;
   description: string;
   status: SubtaskStatus;
+  /** Legacy progress-bar status mapped from runtime running/idle/closed. */
+  legacy_status?: SubtaskStatus;
   index: number;
   total: number;
   tool_name?: string;

@@ -1,0 +1,345 @@
+import { AlertCircle, ChevronRight, CircleEllipsis, Lightbulb, ListTodo, Search, SquareTerminal, Wrench } from 'lucide-react';
+import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import ProcessingIcon from '../../assets/subagent/processing.svg?react';
+import { getSubagentStatusLabelKey } from '../../features/subagent/subagentStatusPresentation';
+import { extractSubagentTasks, finalizeSubagentTasks, getSubagentActivityPreview, groupSubagentActivities, type SubagentActivityGroup } from '../../features/subagent/subagentActivityPresentation';
+import { selectSubagentActivities, selectSubagentHistoryRestoring, selectSubagentResult, selectSubagentTurns, selectSubagents, useSubagentStore } from '../../stores/subagentStore';
+import type { SubagentActivity, SubagentActivityKind, SubagentTurn } from '../../types/subagent';
+import { MemberTaskListBar, MemberTaskListItems, type MemberTaskListItem } from '../teamArea/MemberTaskList';
+import { formatTime } from '../teamArea/shared';
+import { MarkdownRenderer } from '../MarkdownRenderer';
+import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { SubagentStatusIcon } from './SubagentStatusIcon';
+import './Subagent.css';
+
+function ActivityIcon({ activity }: { activity: SubagentActivity }) {
+  const className = 'h-4 w-4 shrink-0';
+  const toolName = activity.tool_name?.toLowerCase() ?? '';
+
+  if (activity.kind === 'thinking') {
+    return <Lightbulb className={className} aria-hidden="true" />;
+  }
+  if (activity.kind === 'error' || activity.ok === false) {
+    return <AlertCircle className={`${className} text-danger`} aria-hidden="true" />;
+  }
+  if (activity.kind === 'truncated') {
+    return <CircleEllipsis className={className} aria-hidden="true" />;
+  }
+  if (toolName.includes('search') || toolName.includes('fetch') || toolName.includes('web')) {
+    return <Search className={className} aria-hidden="true" />;
+  }
+  if (toolName.includes('bash') || toolName.includes('terminal') || toolName.includes('shell')) {
+    return <SquareTerminal className={className} aria-hidden="true" />;
+  }
+  if (toolName.includes('todo')) {
+    return <ListTodo className={className} aria-hidden="true" />;
+  }
+  return <Wrench className={className} aria-hidden="true" />;
+}
+
+function activityLabel(kind: SubagentActivityKind, t: (key: string) => string): string {
+  const labels: Record<SubagentActivityKind, string> = {
+    thinking: t('subagent.activity.thinking'),
+    tool_call: t('subagent.activity.toolCall'),
+    tool_result: t('subagent.activity.toolResult'),
+    error: t('subagent.activity.error'),
+    truncated: t('subagent.activity.truncated'),
+  };
+  return labels[kind];
+}
+
+function activityToolLabel(toolName: string | null | undefined, t: (key: string) => string): string | null {
+  const normalized = toolName?.trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized.includes('search') || normalized.includes('fetch') || normalized.includes('web')) {
+    return t('subagent.activity.tools.search');
+  }
+  if (normalized.includes('bash') || normalized.includes('terminal') || normalized.includes('shell')) {
+    return t('subagent.activity.tools.terminal');
+  }
+  if (normalized.includes('todo')) {
+    return t('subagent.activity.tools.todo');
+  }
+  return toolName?.trim() || normalized;
+}
+
+type ActivityDetailRow = [label: string, value: string];
+
+function buildActivityDetailRows(group: SubagentActivityGroup, t: (key: string) => string): ActivityDetailRow[] {
+  const activity = group.activity;
+  const latestActivity = group.activities[group.activities.length - 1] ?? activity;
+  const rows: ActivityDetailRow[] = [
+    [t('subagent.activity.fields.type'), activityLabel(activity.kind, t)],
+    [t('subagent.activity.fields.time'), formatTime(latestActivity.at_ms) || '-'],
+  ];
+
+  if (activity.tool_name) {
+    rows.push([t('subagent.activity.fields.tool'), activity.tool_name]);
+  }
+
+  if (activity.kind === 'tool_call') {
+    rows.push([t('subagent.activity.fields.call'), activity.summary || '-']);
+  } else if (activity.kind === 'tool_result') {
+    rows.push([t('subagent.activity.fields.result'), activity.summary || '-']);
+  } else {
+    rows.push([t('subagent.activity.fields.content'), group.summary || '-']);
+  }
+
+  if (activity.ok !== undefined) {
+    rows.push([
+      t('subagent.activity.fields.status'),
+      activity.ok ? t('subagent.activity.ok') : t('subagent.activity.error'),
+    ]);
+  }
+  if (activity.dropped !== undefined) {
+    rows.push([t('subagent.activity.fields.dropped'), String(activity.dropped)]);
+  }
+
+  return rows;
+}
+
+function ActivityRow({ group, isLast, isSubagentRunning }: { group: SubagentActivityGroup; isLast: boolean; isSubagentRunning: boolean }) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const activity = group.activity;
+  const latestActivity = group.activities[group.activities.length - 1] ?? activity;
+  const isThinking = activity.kind === 'thinking';
+  const isRunning = isLast && isSubagentRunning && (latestActivity.kind === 'thinking' || latestActivity.kind === 'tool_call');
+  const label = isThinking
+    ? t('subagent.activity.thinking')
+    : activityToolLabel(activity.tool_name, t) ?? activityLabel(activity.kind, t);
+  const summary = getSubagentActivityPreview(group);
+  const timestamp = formatTime(latestActivity.at_ms);
+  const detailRows = buildActivityDetailRows(group, t);
+  const detailsId = `subagent-activity-details-${activity.activity_id}`;
+
+  return (
+    <li className="subagent-activity-row">
+      <div className="subagent-activity-row__icon" aria-hidden="true">
+        <ActivityIcon activity={activity} />
+      </div>
+      <div className="subagent-activity-row__body">
+        <span className="subagent-activity-row__label">{label}</span>
+        {summary && summary !== label ? <span className="subagent-activity-row__summary"> | {summary}</span> : null}
+        {activity.dropped ? <span className="subagent-activity-row__dropped"> +{activity.dropped}</span> : null}
+      </div>
+      {timestamp ? <span className="subagent-activity-row__timestamp">{timestamp}</span> : null}
+      <button
+        type="button"
+        className="subagent-activity-row__toggle"
+        aria-expanded={expanded}
+        aria-controls={detailsId}
+        aria-label={t(expanded ? 'subagent.activity.collapse' : 'subagent.activity.expand')}
+        onClick={() => setExpanded(value => !value)}
+      >
+        {isRunning ? (
+          <ProcessingIcon className="subagent-activity-row__processing shrink-0 text-muted animate-spin" aria-label={t('subagent.running')} role="img" />
+        ) : (
+          <ChevronRight className={`subagent-activity-row__chevron ${expanded ? 'subagent-activity-row__chevron--expanded' : ''}`} aria-hidden="true" />
+        )}
+      </button>
+      {expanded ? (
+        <div id={detailsId} className="subagent-activity-row__detail">
+          <div className="subagent-activity-row__detail-rows">
+            {detailRows.map(([detailLabel, detailValue]) => (
+              <div key={detailLabel} className="subagent-activity-row__detail-row">
+                <span className="subagent-activity-row__detail-label">{detailLabel}</span>
+                <span className="subagent-activity-row__detail-value">{detailValue}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
+function SubagentDetail({ sessionId, subagentId }: { sessionId: string; subagentId: string }) {
+  const { t } = useTranslation();
+  const [tasksExpanded, setTasksExpanded] = useState(false);
+  const runtime = useSubagentStore(state => state.runtimes[sessionId]);
+  const activities = selectSubagentActivities(runtime, subagentId);
+  const historyRestoring = selectSubagentHistoryRestoring(runtime, subagentId);
+  const result = selectSubagentResult(runtime, subagentId);
+  const turns = selectSubagentTurns(runtime, subagentId);
+  const subagent = runtime?.subagentsById[subagentId];
+
+  if (!subagent) {
+    return <div className="subagent-detail__state" role="status">{t('subagent.empty')}</div>;
+  }
+
+  const taskDescription = subagent.task_description?.trim() || subagent.display_name;
+  const hasFailed = subagent.closed_reason === 'failed' || subagent.turn_outcome === 'failed';
+  const taskSectionId = `subagent-tasks-${subagentId}`;
+  const visibleTurns: SubagentTurn[] = turns.length > 0
+    ? turns
+    : [{
+      task_id: '__legacy__',
+      task_description: taskDescription,
+      started_at: subagent.created_at,
+      ...(result ? { result } : {}),
+    }];
+  const hasTurnResult = visibleTurns.some(turn => Boolean(turn.result?.content?.trim()));
+  const legacyFallbackResult = !historyRestoring && !hasTurnResult ? result : undefined;
+  const latestTurnId = visibleTurns[visibleTurns.length - 1]?.task_id;
+  const tasks = finalizeSubagentTasks(
+    extractSubagentTasks(activities),
+    subagent.turn_outcome === 'completed' && visibleTurns.some(turn => Boolean(turn.result?.content?.trim())),
+    subagent.updated_at,
+  );
+  const taskListItems: MemberTaskListItem[] = tasks.map(task => ({
+    id: task.id,
+    title: task.content,
+    detail: task.detail,
+    status: task.status,
+    raw: task.raw,
+    statusHistory: task.statusHistory,
+  }));
+
+  return (
+    <div className="subagent-detail">
+      <div className="subagent-detail__scroll">
+        <div className="subagent-detail__heading">
+          <div className="flex min-w-0 items-center gap-2">
+            <h2 className="truncate text-sm font-semibold text-text">{subagent.display_name}</h2>
+            {subagent.role ? <span className="truncate text-sm text-text-muted"> | {subagent.role}</span> : null}
+            {subagent.status === 'closed' ? <span className="subagent-closed-badge">{t('subagent.closed')}</span> : null}
+          </div>
+          {subagent.status !== 'closed' || hasFailed || subagent.closed_reason === 'evicted' ? (
+            <SubagentStatusIcon status={subagent.status} closedReason={subagent.closed_reason} turnOutcome={subagent.turn_outcome} />
+          ) : null}
+        </div>
+
+        {hasFailed && subagent.error ? (
+          <div className="subagent-error-note" role="alert">
+            {subagent.error.message}
+          </div>
+        ) : null}
+
+        <div className="subagent-conversation" aria-live="polite">
+          {visibleTurns.map(turn => {
+            const turnActivities = turn.task_id === '__legacy__'
+              ? activities
+              : activities.filter(activity => activity.task_id === turn.task_id);
+            const activityGroups = groupSubagentActivities(turnActivities);
+            const turnResult = (historyRestoring && turn.result?.source === 'wait' ? undefined : turn.result)
+              ?? (!historyRestoring && visibleTurns.length === 1 ? result : undefined)
+              ?? (turn.task_id === latestTurnId ? legacyFallbackResult : undefined);
+            const waitingForHistory = historyRestoring && turnResult == null;
+            return (
+              <section className="subagent-turn" key={turn.task_id}>
+                {turn.task_description.trim() ? (
+                  <div className="subagent-assignment">
+                    <MarkdownRenderer content={turn.task_description} className="chat-text chat-markdown subagent-markdown" />
+                  </div>
+                ) : null}
+
+                <div className="subagent-identity">
+                  <TeamMemberAvatar member={subagent.subagent_id} alt={subagent.display_name} className="h-8 w-8 rounded-xl" imageClassName="rounded-xl" />
+                  <div className="subagent-message__name">{subagent.display_name}</div>
+                </div>
+
+                <div className="subagent-activity-section">
+                  {turnActivities.length > 0 ? (
+                    <ol className="subagent-activity-list" aria-label={t('subagent.activityTitle')}>
+                      {activityGroups.map((group, index) => (
+                        <ActivityRow
+                          key={group.activity.activity_id}
+                          group={group}
+                          isLast={index === activityGroups.length - 1}
+                          isSubagentRunning={subagent.status === 'running' && turn.task_id === latestTurnId}
+                        />
+                      ))}
+                    </ol>
+                  ) : null}
+                </div>
+
+                {waitingForHistory ? (
+                  <div className="subagent-history-loading" role="status" aria-live="polite">
+                    {t('subagent.historyLoading')}
+                  </div>
+                ) : null}
+
+                {turnResult?.content?.trim() ? (
+                  <div className="subagent-message">
+                    <div className="subagent-message__body">
+                      <MarkdownRenderer content={turnResult.content} className="chat-text chat-markdown subagent-markdown subagent-message__content" />
+                    </div>
+                  </div>
+                ) : null}
+              </section>
+            );
+          })}
+          {activities.length === 0 && !visibleTurns.some(turn => turn.result?.content?.trim()) ? (
+            <div className="subagent-detail__state">{t('subagent.activityEmpty')}</div>
+          ) : null}
+        </div>
+
+      </div>
+
+      <div className="subagent-detail__footer">
+        <MemberTaskListBar
+          tasks={taskListItems}
+          expanded={tasksExpanded}
+          onToggle={() => setTasksExpanded(value => !value)}
+        />
+        {tasksExpanded ? (
+          <div id={taskSectionId} className="max-h-[200px] overflow-y-auto px-5 pb-4">
+            <MemberTaskListItems tasks={taskListItems} emptyLabel="subagent.tasksEmpty" />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export function SubagentExpandedPanel({ sessionId }: { sessionId: string }) {
+  const { t } = useTranslation();
+  const runtime = useSubagentStore(state => state.runtimes[sessionId]);
+  const setSelectedSubagent = useSubagentStore(state => state.setSelectedSubagent);
+  const subagents = selectSubagents(runtime);
+  const activeCount = subagents.filter(subagent => subagent.status === 'running').length;
+  const selectedId = runtime?.selectedSubagentId ?? subagents[0]?.subagent_id ?? null;
+
+  if (!runtime || !selectedId) {
+    return <div className="subagent-detail__state" role="status">{t('subagent.empty')}</div>;
+  }
+
+  return (
+    <div className="subagent-expanded-panel">
+      <aside className="subagent-expanded-panel__list" aria-label={t('subagent.title')}>
+        <div className="subagent-expanded-panel__list-heading">
+          <span className="text-sm font-semibold text-text">{t('subagent.activeListTitle', { count: activeCount })}</span>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable">
+          {subagents.map(subagent => {
+            const statusLabel = t(getSubagentStatusLabelKey(subagent.status, subagent.closed_reason, subagent.turn_outcome));
+            return (
+              <button
+                type="button"
+                key={subagent.subagent_id}
+                className={`subagent-expanded-row ${subagent.subagent_id === selectedId ? 'subagent-expanded-row--selected' : ''}`}
+                onClick={() => setSelectedSubagent(sessionId, subagent.subagent_id)}
+                aria-pressed={subagent.subagent_id === selectedId}
+                aria-label={t('subagent.selectWithStatus', { name: subagent.display_name, status: statusLabel })}
+              >
+                <TeamMemberAvatar member={subagent.subagent_id} alt={subagent.display_name} className="h-8 w-8 rounded-xl" imageClassName="rounded-xl" />
+                  <span className="min-w-0 flex-1 text-left">
+                    <span className="block truncate text-sm font-semibold text-text">{subagent.display_name}</span>
+                  {(subagent.role || subagent.task_description) ? (
+                    <span className="block truncate text-xs text-text-muted">{subagent.role || subagent.task_description}</span>
+                  ) : null}
+                </span>
+                <SubagentStatusIcon status={subagent.status} closedReason={subagent.closed_reason} turnOutcome={subagent.turn_outcome} />
+              </button>
+            );
+          })}
+        </div>
+      </aside>
+      <section className="min-w-0 flex-1 overflow-hidden">
+        <SubagentDetail key={selectedId} sessionId={sessionId} subagentId={selectedId} />
+      </section>
+    </div>
+  );
+}

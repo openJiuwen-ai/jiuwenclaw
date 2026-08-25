@@ -8,8 +8,11 @@ import { useState, useCallback, useEffect, useRef, memo } from 'react';
 import type { ReactNode } from 'react';
 import {
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Info,
+  MessageCircle,
   Square,
   Target,
   Volume2,
@@ -21,6 +24,7 @@ import {
   FileDownloadItem,
   ContextCompressionRuntime,
   ContextCompressionSummary,
+  WebError,
 } from '../../types';
 import { StreamingContent } from './StreamingContent';
 import { ToolCallDisplay } from './ToolCallDisplay';
@@ -40,8 +44,23 @@ import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
 import { fileArtifactId } from '../ArtifactsPanel';
 import { openArtifactPanel } from '../../features/teamPanelState';
+import { openSingleAgentPanel } from '../../features/singleAgentPanelState';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
 import { FileIcon } from '../FileIcon';
+import { webRequest } from '../../services/webClient';
+import { useChatStore } from '../../stores/chatStore';
+import { useSessionStore } from '../../stores/sessionStore';
+import { extractTokenFromDownloadUrl } from '../../utils/fileDownloadDedup';
+
+function openArtifactPanelForActiveMode(selectedArtifactId: string): void {
+  const sessionId = useChatStore.getState().activeSessionId;
+  const mode = useSessionStore.getState().runtimes[sessionId ?? '']?.mode ?? 'agent';
+  if (mode === 'team' || mode === 'auto_harness') {
+    openArtifactPanel(selectedArtifactId);
+    return;
+  }
+  openSingleAgentPanel('artifacts', selectedArtifactId);
+}
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -61,6 +80,108 @@ export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   );
 });
 
+function BtwCommandCard({
+  command,
+  output,
+}: {
+  command: string;
+  output: string;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const [answerCopied, setAnswerCopied] = useState(false);
+  const question = command.replace(/^\/btw(?:\s+|$)/i, '').trim();
+
+  const copyAnswer = useCallback(async () => {
+    if (!output) return;
+    try {
+      await navigator.clipboard.writeText(output);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = output;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+    setAnswerCopied(true);
+    window.setTimeout(() => setAnswerCopied(false), 2000);
+  }, [output]);
+
+  return (
+    <section className="chat-btw-card animate-fade-in" data-testid="chat-panel-btw-card">
+      <button
+        type="button"
+        className="chat-btw-card__header"
+        aria-expanded={expanded}
+        data-testid="chat-panel-btw-card-toggle"
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <span className="chat-btw-card__icon" aria-hidden="true">
+          <MessageCircle size={16} strokeWidth={2} />
+        </span>
+        <span className="chat-btw-card__heading">
+          <span className="chat-btw-card__badge">BTW</span>
+          <span className="chat-btw-card__title">侧问</span>
+        </span>
+        <span className="chat-btw-card__scope">快速侧问，不打断主对话（基于当前上下文）</span>
+        <span className="chat-btw-card__chevron" aria-hidden="true">
+          {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="chat-btw-card__body" data-testid="chat-panel-btw-card-body">
+          {question && (
+            <div className="chat-btw-card__question">
+              <span className="chat-btw-card__section-label">问题</span>
+              <span className="chat-btw-card__question-text">{question}</span>
+            </div>
+          )}
+          <div className="chat-btw-card__answer">
+            <div className="chat-btw-card__answer-header">
+              <span className="chat-btw-card__section-label">回答</span>
+              <button
+                type="button"
+                className="chat-btw-card__copy"
+                onClick={() => void copyAnswer()}
+                disabled={!output}
+                data-testid="chat-panel-btw-card-copy"
+              >
+                {answerCopied ? <Check size={14} strokeWidth={2.2} /> : <Copy size={14} />}
+                <span>{answerCopied ? '已复制' : '复制'}</span>
+              </button>
+            </div>
+            {output ? (
+              <MarkdownMessageBody
+                content={output}
+                className="chat-btw-card__answer-content"
+                testId="chat-panel-btw-card-answer"
+              />
+            ) : (
+              <span className="chat-btw-card__empty">暂无回答</span>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CompactCommandDivider({ output }: { output: string }) {
+  return (
+    <div
+      className="chat-compact-divider animate-fade-in"
+      data-testid="chat-panel-compact-divider"
+    >
+      <span className="chat-compact-divider__line" aria-hidden="true" />
+      <span className="chat-compact-divider__label">{output}</span>
+      <span className="chat-compact-divider__line" aria-hidden="true" />
+    </div>
+  );
+}
+
 export function TeamMemberMessageFrame({
   member,
   showAvatar = true,
@@ -73,12 +194,12 @@ export function TeamMemberMessageFrame({
   contentClassName?: string;
 }) {
   return (
-    <div className="team-member-message animate-fade-in">
+    <div className="team-member-message animate-fade-in" data-testid="chat-panel-team-member-message">
       {/* 始终占住头像列，避免 showAvatar 在多轮/折叠间切换时整列塌掉看起来像「头像消失」。 */}
-      <div className="team-member-message__header" aria-hidden={!showAvatar}>
+      <div className="team-member-message__header" aria-hidden={!showAvatar} data-testid="chat-panel-team-member-message-header">
         {showAvatar ? <TeamMemberAvatar member={member} /> : null}
       </div>
-      <div className={clsx('team-member-message__body', contentClassName)}>
+      <div className={clsx('team-member-message__body', contentClassName)} data-testid="chat-panel-team-member-message-body">
         {children}
       </div>
     </div>
@@ -110,17 +231,16 @@ function TeamLeaderPlainTextMessage({
       {fileItems && fileItems.length > 0 && (
         <FileDownloadList
           files={fileItems}
-          className="w-full md:w-1/2"
-          onPreview={(index) => openArtifactPanel(fileArtifactId(fileItems[index]))}
+          className="chat-message-file-list"
+          onPreview={(index) => openArtifactPanelForActiveMode(fileArtifactId(fileItems[index]))}
         />
       )}
-      <div className="team-member-message__plain">
+      <div className="team-member-message__plain" data-testid="chat-panel-team-leader-message-plain">
         <A2UIMessageContent
           content={content}
           messageId={messageId}
           isStreaming={isStreaming}
           disableInteraction={disableA2UIInteraction}
-          testId="team-leader-message-body"
         />
       </div>
     </TeamMemberMessageFrame>
@@ -149,12 +269,16 @@ export function ContextCompressionLines({
     .join('\n');
 
   return (
-    <div className="context-compression-lines">
+    <div className="context-compression-lines" data-testid="chat-panel-context-compression-lines">
       {showRuntime && (
-        <div className={clsx(
-          'mt-2 flex items-center gap-1.5 text-xs',
-          isFailed ? 'text-danger' : 'text-text-muted'
-        )}>
+        <div
+          className={clsx(
+            'mt-2 flex items-center gap-1.5 text-xs',
+            isFailed ? 'text-danger' : 'text-text-muted'
+          )}
+          data-testid="chat-panel-context-compression-runtime"
+          data-variant={isRunning ? 'running' : isFailed ? 'failed' : 'done'}
+        >
           <span className={clsx(isRunning && 'context-compression-running-text')}>
             {isRunning
               ? contextCompressionRunningText(t, runtime?.processor, runtime?.summary ?? '')
@@ -166,6 +290,7 @@ export function ContextCompressionLines({
         <div
           className="mt-2 flex items-center gap-1.5 text-xs text-text-muted"
           title={detailText || undefined}
+          data-testid="chat-panel-context-compression-summary"
         >
           <Info className="h-3.5 w-3.5" strokeWidth={1.8} />
           <span>
@@ -189,7 +314,12 @@ function renderRichContent(content: string): ReactNode[] {
       parts.push(content.slice(lastIndex, match.index));
     }
     parts.push(
-      <span key={`skill-${key++}`} className="chat-message-skill-chip">
+      <span
+        key={`skill-${key++}`}
+        className="chat-message-skill-chip"
+        data-testid="chat-panel-message-skill-chip"
+        data-variant={match[1]}
+      >
         <span className="chat-message-skill-chip__icon" aria-hidden="true" />
         <span className="chat-message-skill-chip__label">{match[1]}</span>
       </span>
@@ -251,6 +381,10 @@ export const MessageItem = memo(function MessageItem({
     mediaItems,
     fileItems,
     isGoalObjectiveMessage,
+    isCommandOutput,
+    commandName,
+    commandInput,
+    commandOutput,
   } = message;
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
@@ -373,9 +507,23 @@ export const MessageItem = memo(function MessageItem({
     });
   }, [stopGeneratedAudio, stop]);
 
-  // 主动推荐消息 - 使用特殊卡片样式
+  // 主动推荐消息 - 使用特殊卡片样式。外层沿用正常 agent 回复的布局（avatar 占位
+  // + gap + chat-bubble-wrapper），使卡片左右边缘与回复正文气泡对齐，避免卡片
+  // 左缘超出回复列。
   if (message.isProactiveRecommendation) {
-    return <ProactiveRecommendationCard message={message} />;
+    const withAssistantAvatar = enableAssistantAvatar;
+    return (
+      <div className={clsx('flex animate-rise justify-start', withAssistantAvatar && 'assistant-row')} data-testid="chat-panel-proactive-row">
+        {withAssistantAvatar && (
+          <div className="assistant-row__avatar" aria-hidden={!showAvatar} data-testid="chat-panel-proactive-avatar">
+            {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
+          </div>
+        )}
+        <div className="chat-bubble-wrapper max-w-[82%] min-w-0 flex-1" data-testid="chat-panel-proactive-bubble-wrapper">
+          <ProactiveRecommendationCard message={message} />
+        </div>
+      </div>
+    );
   }
 
   // 工具调用/结果消息
@@ -400,6 +548,33 @@ export const MessageItem = memo(function MessageItem({
 
   // 系统消息
   if (role === 'system') {
+    // slash 命令输出按命令类型路由：BTW 使用侧问卡片，compact 使用时间线分隔条，
+    // 其余命令退回通用文本；isCommandOutput 标记不会影响其他 system 消息。
+    if (isCommandOutput) {
+      const newlineIdx = content.indexOf('\n');
+      const command = commandInput ?? (newlineIdx >= 0 ? content.slice(0, newlineIdx) : content);
+      const output = commandOutput ?? (newlineIdx >= 0 ? content.slice(newlineIdx + 1).trim() : '');
+      const normalizedCommandName = commandName || command.match(/^\/([\w-]+)/)?.[1]?.toLowerCase();
+
+      if (normalizedCommandName === 'btw') {
+        return <BtwCommandCard command={command} output={output} />;
+      }
+
+      if (normalizedCommandName === 'compact') {
+        return <CompactCommandDivider output={output} />;
+      }
+
+      return (
+        <div className="flex justify-center my-2 animate-fade-in">
+          <div className="w-[85%] max-w-[44rem] px-2 py-0.5 text-xs leading-5 text-left text-text-muted">
+            <span className="font-mono">{command}</span>
+            {output && (
+              <span className="mt-0.5 block whitespace-pre-wrap break-words">{output}</span>
+            )}
+          </div>
+        </div>
+      );
+    }
  	     // 检查是否为 chat.session_result 事件
  	     if (content && content.startsWith('chat.session_result:')) {
  	       console.log('chat.session_result event:', content);
@@ -410,10 +585,11 @@ export const MessageItem = memo(function MessageItem({
  	         const { description, result } = sessionData;
  	         
  	         return (
- 	           <div className="chat-tool-card animate-rise">
+ 	           <div className="chat-tool-card animate-rise" data-testid="chat-panel-session-result-card">
  	             <div
  	               className="cursor-pointer"
  	               onClick={() => setIsExpanded(!isExpanded)}
+	               data-testid="chat-panel-session-result-card-header"
  	             >
  	               <div className="flex items-center gap-2">
  	                 <span className="w-5 h-5 rounded bg-accent-2-subtle text-accent-2 flex items-center justify-center text-sm">
@@ -421,7 +597,7 @@ export const MessageItem = memo(function MessageItem({
  	                     <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V19.5a2.25 2.25 0 002.25 2.25h.75m0-3h-3.75m0 0h-3.75m0 0H9m1.5 3h3.75m-3.75 0H9m1.5 3h3.75m-3.75 0H9m1.5 3h3.75m-3.75 0H9" />
  	                   </svg>
  	                 </span>
- 	                 <span className="font-mono text-sm font-medium text-text">
+ 	                 <span className="font-mono text-sm font-medium text-text" data-testid="chat-panel-session-result-card-title">
  	                   会话任务：【{description || '未知任务'}】已完成
  	                 </span>
  	                 <span className="text-text-muted text-sm">
@@ -430,9 +606,9 @@ export const MessageItem = memo(function MessageItem({
  	               </div>
  	             </div>
  	             {isExpanded && (
- 	               <div className="mt-2 p-2 rounded-md bg-card border border-border">
+ 	               <div className="mt-2 p-2 rounded-md bg-card border border-border" data-testid="chat-panel-session-result-card-details">
  	                 {description && (
- 	                   <div className="mb-2">
+ 	                   <div className="mb-2" data-testid="chat-panel-session-result-card-description">
  	                     <div className="font-mono text-xs text-text-muted mb-1">Description:</div>
  	                     <pre className="font-mono text-sm text-text overflow-x-auto whitespace-pre-wrap">
  	                       {description}
@@ -440,7 +616,7 @@ export const MessageItem = memo(function MessageItem({
  	                   </div>
  	                 )}
  	                 {result && (
- 	                   <div>
+ 	                   <div data-testid="chat-panel-session-result-card-result">
  	                     <div className="font-mono text-xs text-text-muted mb-1">Result:</div>
  	                     <pre className="font-mono text-sm text-text overflow-x-auto whitespace-pre-wrap max-h-60">
  	                       {result}
@@ -454,7 +630,7 @@ export const MessageItem = memo(function MessageItem({
  	       } catch (e) {
  	         // 如果解析失败，显示原始内容
  	         return (
- 	           <div className="flex justify-center my-4 animate-fade-in">
+ 	           <div className="flex justify-center my-4 animate-fade-in" data-testid="chat-panel-session-result-fallback">
  	             <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
  	               {content}
  	             </div>
@@ -485,21 +661,21 @@ export const MessageItem = memo(function MessageItem({
 	               member={event.fromMember}
 	               showAvatar={showAvatar}
 	             >
-	               <div className="team-member-message__card">
-	                 <div className="team-member-message__content">
+	               <div className="team-member-message__card" data-testid="chat-panel-team-event-card">
+	                 <div className="team-member-message__content" data-testid="chat-panel-team-event-card-content">
 	                   {event.isP2P && event.toMember && (
-	                     <span className="team-event-group-chip team-event-group-chip--p2p">
+	                     <span className="team-event-group-chip team-event-group-chip--p2p" data-testid="chat-panel-team-event-chip-p2p">
 	                       @{event.toMember}
 	                     </span>
 	                   )}
 	                   {event.isBroadcast && (
-	                     <span className="team-event-group-chip team-event-group-chip--broadcast">
+	                     <span className="team-event-group-chip team-event-group-chip--broadcast" data-testid="chat-panel-team-event-chip-broadcast">
 	                       {t('chat.teamBroadcastTarget')}
 	                     </span>
 	                   )}
 	                   <MarkdownMessageBody
 	                     content={event.content}
-	                     className="team-message-markdown team-message-markdown--inline"
+	                     className="team-message-markdown team-message-markdown--inline" data-testid="chat-panel-team-event-card-body"
 	                   />
 	                 </div>
 	               </div>
@@ -507,7 +683,7 @@ export const MessageItem = memo(function MessageItem({
 	           );
 	       }
 	       return (
-	         <div className="flex justify-center my-4 animate-fade-in">
+	         <div className="flex justify-center my-4 animate-fade-in" data-testid="chat-panel-team-event-fallback">
 	           <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
 	             {content}
 	           </div>
@@ -544,7 +720,7 @@ export const MessageItem = memo(function MessageItem({
 	     }
 	     
     return (
-      <div className="flex justify-center my-4 animate-fade-in">
+      <div className="flex justify-center my-4 animate-fade-in" data-testid="chat-panel-system-message-bubble">
         <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
           {content}
         </div>
@@ -570,20 +746,28 @@ export const MessageItem = memo(function MessageItem({
   const withAssistantAvatar = !isUser && enableAssistantAvatar;
 
   return (
-    <div className={clsx(
+    <div
+    data-testid="chat-panel-message-row"
+    className={clsx(
       'flex animate-rise',
       isUser ? 'justify-end' : 'justify-start',
       withAssistantAvatar && 'assistant-row'
     )}>
       {withAssistantAvatar && (
         // 始终保留头像占位，与 team 布局一致，避免连续气泡时整列消失。
-        <div className="assistant-row__avatar" aria-hidden={!showAvatar}>
+        <div className="assistant-row__avatar" aria-hidden={!showAvatar} data-testid="chat-panel-assistant-row-avatar">
           {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
         </div>
       )}
-      <div className="chat-bubble-wrapper max-w-[82%] min-w-0">
+      <div
+        className={clsx(
+          'chat-bubble-wrapper max-w-[82%] min-w-0',
+          !isUser && visibleFileItems && 'chat-bubble-wrapper--with-files'
+        )}
+        data-testid="chat-panel-bubble-wrapper"
+      >
         {!isUser && (
-          <div className="hidden" data-testid="thinking-summary" aria-hidden="true" />
+          <div className="hidden" data-testid="chat-panel-thinking-summary" aria-hidden="true" />
         )}
 
         {isUser && visibleMediaItems && (
@@ -598,7 +782,9 @@ export const MessageItem = memo(function MessageItem({
               !isUser && !isStreaming && 'markdown',
               isStreaming && 'streaming'
             )}
-            data-testid={!isUser ? 'thinking-panel' : undefined}
+            data-testid="chat-panel-message-bubble"
+            data-variant={isUser ? 'user' : 'assistant'}
+            data-state={isStreaming ? 'streaming' : 'final'}
           >
             {isStreaming ? (
               isUser ? (
@@ -610,14 +796,13 @@ export const MessageItem = memo(function MessageItem({
                   messageId={id}
                   isStreaming={true}
                   disableInteraction={disableA2UIInteraction}
-                  testId="thinking-body"
                 />
               )
             ) : (
               <>
                 {isUser ? (
                   hasDisplayText ? (
-                    <div className="chat-text">
+                    <div className="chat-text" data-testid="chat-panel-message-text">
                       <span className="whitespace-pre-wrap">{renderRichContent(displayContent)}</span>
                     </div>
                   ) : null
@@ -627,7 +812,6 @@ export const MessageItem = memo(function MessageItem({
                     content={content}
                     messageId={id}
                     disableInteraction={disableA2UIInteraction}
-                    testId="thinking-body"
                   />
                 )}
                 {!isUser && visibleMediaItems && (
@@ -636,7 +820,8 @@ export const MessageItem = memo(function MessageItem({
                 {visibleFileItems && (
                   <FileDownloadList
                     files={visibleFileItems}
-                    onPreview={(index) => openArtifactPanel(fileArtifactId(visibleFileItems[index]))}
+                    className="chat-message-file-list"
+                    onPreview={(index) => openArtifactPanelForActiveMode(fileArtifactId(visibleFileItems[index]))}
                   />
                 )}
               </>
@@ -646,7 +831,7 @@ export const MessageItem = memo(function MessageItem({
 
         {/* Token usage summary */}
         {!isUser && !isStreaming && message.usageSummary && message.usageSummary.total_tokens > 0 && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-text-muted mt-1 mb-0.5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-text-muted mt-1 mb-0.5" data-testid="chat-panel-message-usage-summary">
             <span>
               {message.usageSummary.input_tokens.toLocaleString()} in /{' '}
               {message.usageSummary.output_tokens.toLocaleString()} out /{' '}
@@ -664,28 +849,30 @@ export const MessageItem = memo(function MessageItem({
 
         {!isStreaming && !hideMeta && (
           <div
+            data-testid="chat-panel-message-meta"
             className={clsx(
               'flex items-center gap-3 text-sm mt-2 text-text-muted',
               isUser ? 'justify-end' : 'justify-start'
             )}
           >
-            <span>{formatTimestamp(timestamp)}</span>
+            <span data-testid="chat-panel-message-timestamp">{formatTimestamp(timestamp)}</span>
 
             {isUser && isGoalObjectiveMessage && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs text-text-muted">
+              <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs text-text-muted" data-testid="chat-panel-message-goal-badge">
                 <Target className="w-3 h-3" strokeWidth={2} />
                 {t('goal.badge')}
               </span>
             )}
 
             {showCopy && (
-              <div className="relative">
+              <div className="relative" data-testid="chat-panel-message-copy">
                 {copied && (
-                  <span className="animate-fade-in absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-xs text-text shadow-md">
+                  <span className="animate-fade-in absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-xs text-text shadow-md" data-testid="chat-panel-message-copied-tip">
                     {t('chatUi.copied')}
                   </span>
                 )}
                 <button
+                  data-testid="chat-panel-message-copy-btn"
                   onClick={handleCopy}
                   className={clsx(
                     'p-1.5 rounded-md ',
@@ -704,6 +891,8 @@ export const MessageItem = memo(function MessageItem({
 
             {showTTS && (
               <button
+                data-testid="chat-panel-message-tts-btn"
+                data-variant={isPlaying ? 'playing' : 'idle'}
                 onClick={handleSpeak}
                 className={clsx(
                   'p-1.5 rounded-md ',
@@ -736,6 +925,60 @@ function formatFileSize(bytes: number | undefined): string {
   return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/** 识别可保存的 Skill 包：`.skill` / `.zip` / `.skill.zip` */
+function isSkillPackageFile(file: FileDownloadItem): boolean {
+  const candidates = [file.name, file.path].filter(Boolean) as string[];
+  for (const candidate of candidates) {
+    const base = candidate.replace(/\\/g, '/').split('/').pop()?.toLowerCase() || '';
+    if (
+      base.endsWith('.skill.zip') ||
+      base.endsWith('.skill') ||
+      base.endsWith('.zip')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function skillPackageDisplayName(file: FileDownloadItem): string {
+  const raw = (file.name || file.path || '').replace(/\\/g, '/').split('/').pop() || '';
+  return raw.replace(/(\.skill)?\.zip$/i, '').replace(/\.skill$/i, '') || raw || 'skill';
+}
+
+function resolveFileDownloadToken(file: FileDownloadItem): string | undefined {
+  const direct = file.download_token?.trim();
+  if (direct) return direct;
+  return extractTokenFromDownloadUrl(file.download_url)?.trim() || undefined;
+}
+
+function isImportOverwriteRequired(error: unknown): boolean {
+  const code = (error as WebError | undefined)?.code;
+  if (code === 'SKILL_IMPORT_OVERWRITE_REQUIRED' || code === 'SKILL_ALREADY_EXISTS') {
+    return true;
+  }
+  const msg = error instanceof Error ? error.message : String(error);
+  return msg.includes('已存在') || msg.includes('force=true') || msg.includes('IMPORT_OVERWRITE');
+}
+
+const SAVED_SKILLS_KEY = 'saved_skill_tokens';
+
+function persistSavedToken(token: string) {
+  try {
+    const raw = localStorage.getItem(SAVED_SKILLS_KEY);
+    const set = raw ? new Set<string>(JSON.parse(raw)) : new Set<string>();
+    set.add(token);
+    localStorage.setItem(SAVED_SKILLS_KEY, JSON.stringify([...set]));
+  } catch { /* ignore */ }
+}
+
+function getSavedSkillTokens(): Set<string> {
+  try {
+    const raw = localStorage.getItem(SAVED_SKILLS_KEY);
+    return raw ? new Set<string>(JSON.parse(raw)) : new Set<string>();
+  } catch { return new Set<string>(); }
+}
+
 function getFileExtension(name: string): string {
   const parts = name.split('.');
   if (parts.length < 2) return '';
@@ -753,10 +996,15 @@ function FileDownloadList({
 }) {
   const { t } = useTranslation();
   const [expiredSet, setExpiredSet] = useState<Set<number>>(new Set());
+  const [savingIndex, setSavingIndex] = useState<number | null>(null);
+  const [savedIndex, setSavedIndex] = useState<Set<number>>(new Set());
+  const [saveSuccessIndex, setSaveSuccessIndex] = useState<number | null>(null);
+  const sessionId = useChatStore((s) => s.activeSessionId);
 
   useEffect(() => {
     let cancelled = false;
     files.forEach((file, index) => {
+      if (!file.download_url) return;
       fetch(file.download_url, { method: 'HEAD' })
         .then((res) => {
           if (!cancelled && !res.ok) {
@@ -772,13 +1020,23 @@ function FileDownloadList({
     return () => { cancelled = true; };
   }, [files]);
 
-  const handleDownload = async (file: FileDownloadItem, index: number) => {
-    if (expiredSet.has(index)) return;
+  // 挂载时从 localStorage 恢复已保存的技能索引
+  useEffect(() => {
+    const savedTokens = getSavedSkillTokens();
+    if (savedTokens.size === 0) return;
+    const restored = new Set<number>();
+    files.forEach((file, index) => {
+      const token = resolveFileDownloadToken(file);
+      if (token && savedTokens.has(token)) restored.add(index);
+    });
+    if (restored.size > 0) setSavedIndex(restored);
+  }, [files]);
 
-    // 检查是否在 PyWebView 桌面环境中
+  const handleDownload = async (file: FileDownloadItem, index: number) => {
+    if (expiredSet.has(index) || !file.download_url) return;
+
     const pywebviewApi = (window as Window & { pywebview?: { api?: { download_file?: (url: string, filename: string) => DesktopSaveApiResult } } }).pywebview?.api;
     if (pywebviewApi?.download_file) {
-      // 桌面端：通过 webview API 下载
       const outcome = await executeDesktopSave(() =>
         pywebviewApi.download_file!(file.download_url, file.name || 'download')
       );
@@ -787,7 +1045,6 @@ function FileDownloadList({
       }
       return;
     }
-    // 浏览器模式：使用标准 <a> 标签下载
     const link = document.createElement('a');
     link.href = file.download_url;
     link.download = file.name || '';
@@ -796,14 +1053,68 @@ function FileDownloadList({
     document.body.removeChild(link);
   };
 
+  const handleSaveSkill = async (file: FileDownloadItem, index: number) => {
+    if (expiredSet.has(index) || savingIndex !== null || savedIndex.has(index)) return;
+    const downloadToken = resolveFileDownloadToken(file);
+    if (!downloadToken) return;
+    if (!sessionId) {
+      window.alert('当前无活跃会话，无法保存 Skill');
+      return;
+    }
+
+    const importParams = (force: boolean) => ({
+      download_token: downloadToken,
+      force,
+      session_id: sessionId,
+    });
+
+    setSavingIndex(index);
+    try {
+      await webRequest('skills.import_local', importParams(false));
+      persistSavedToken(downloadToken);
+      setSavedIndex((prev) => new Set(prev).add(index));
+      setSaveSuccessIndex(index);
+      setTimeout(() => setSaveSuccessIndex(null), 2000);
+    } catch (error) {
+      if (isImportOverwriteRequired(error)) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        const overwrite = window.confirm(`${errorMsg}\n是否覆盖保存？`);
+        if (!overwrite) return;
+        try {
+          await webRequest('skills.import_local', importParams(true));
+          persistSavedToken(downloadToken);
+          setSavedIndex((prev) => new Set(prev).add(index));
+          setSaveSuccessIndex(index);
+          setTimeout(() => setSaveSuccessIndex(null), 2000);
+        } catch (err2) {
+          console.error('skills.import_local force error:', err2);
+          window.alert(err2 instanceof Error ? err2.message : String(err2));
+        }
+      } else {
+        console.error('skills.import_local error:', error);
+        window.alert(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      setSavingIndex(null);
+    }
+  };
+
   return (
-    <div className={clsx('mt-2 space-y-2', className)}>
+    <div data-testid="chat-panel-file-download-list"
+    className={clsx('mt-2 space-y-2', className)}>
       {files.map((file, index) => {
         const ext = getFileExtension(file.name);
         const expired = expiredSet.has(index);
+        const isSkill = isSkillPackageFile(file);
+        const displayName = isSkill ? skillPackageDisplayName(file) : file.name;
+        const downloadToken = resolveFileDownloadToken(file);
+        const isSaving = savingIndex === index;
+        const isSaved = savedIndex.has(index);
         return (
           <div
             key={`${file.name}-${index}`}
+            data-testid="chat-panel-file-download-item"
+            data-variant={file.name}
             className={clsx(
               'flex items-center gap-3 rounded-lg border px-3 py-2.5  ',
               expired
@@ -819,57 +1130,96 @@ function FileDownloadList({
           >
             <button
               type="button"
+              data-testid="chat-panel-file-download-preview"
               className="flex min-w-0 flex-1 items-center gap-3 text-left"
               disabled={expired || !onPreview}
               onClick={(event) => {
                 event.stopPropagation();
                 onPreview?.(index);
               }}
-              title={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
-              aria-label={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
+              title={onPreview ? t('artifacts.openPreview', { name: displayName }) : undefined}
+              aria-label={onPreview ? t('artifacts.openPreview', { name: displayName }) : undefined}
             >
-              <FileIcon fileName={file.name} size={40} className="flex-shrink-0 select-none" />
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-text leading-snug truncate">{file.name}</div>
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none">
-                    {ext || 'FILE'}
-                  </span>
-                  <span className="text-xs text-text-muted">{formatFileSize(file.size)}</span>
+              {isSkill ? (
+                <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-accent-subtle flex items-center justify-center">
+                  <svg className="w-5 h-5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+                  </svg>
+                </div>
+              ) : (
+                <FileIcon fileName={file.name} size={40} className="flex-shrink-0 select-none" />
+              )}
+              <div className="flex-1 min-w-0" data-testid="chat-panel-file-download-info">
+                <div className="text-sm font-medium text-text leading-snug truncate" data-testid="chat-panel-file-download-name">{displayName}</div>
+                <div className="flex items-center gap-1.5 mt-0.5" data-testid="chat-panel-file-download-meta">
+                  {!isSkill && (
+                    <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none" data-testid="chat-panel-file-download-ext">
+                      {ext || 'FILE'}
+                    </span>
+                  )}
+                  <span className="text-xs text-text-muted" data-testid="chat-panel-file-download-size">{formatFileSize(file.size)}</span>
                   {expired && (
-                    <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none">
+                    <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none" data-testid="chat-panel-file-download-expired">
                       {t('chatUi.fileExpired')}
                     </span>
                   )}
                 </div>
               </div>
             </button>
-            <button
-              type="button"
-              className={clsx(
-                'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center  ',
-                expired
-                  ? 'text-text-muted/40'
-                  : 'text-text-muted hover:text-accent hover:bg-accent-subtle'
-              )}
-              disabled={expired}
-              onClick={(event) => {
-                event.stopPropagation();
-                void handleDownload(file, index);
-              }}
-              title={t('artifacts.download')}
-              aria-label={t('artifacts.download')}
-            >
-              {expired ? (
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
-                </svg>
-              ) : (
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                </svg>
-              )}
-            </button>
+            {isSkill ? (
+              <div className="flex-shrink-0 flex items-center gap-2">
+                {saveSuccessIndex === index && (
+                  <span className="text-xs font-medium text-green-600 whitespace-nowrap">保存成功</span>
+                )}
+                <button
+                  type="button"
+                  className={clsx(
+                    'flex-shrink-0 px-3 h-8 rounded-lg flex items-center justify-center text-sm font-medium transition-colors',
+                    expired || isSaved
+                      ? 'text-text-muted/40 cursor-not-allowed'
+                      : isSaving
+                        ? 'text-text-muted cursor-wait'
+                        : 'text-accent hover:bg-accent-subtle'
+                  )}
+                  disabled={expired || isSaving || isSaved || !downloadToken}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void handleSaveSkill(file, index);
+                  }}
+                  title={isSaved ? '已保存' : '保存'}
+                >
+                  {isSaving ? '保存中...' : isSaved ? '已保存' : '保存'}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                data-testid="chat-panel-file-download-btn"
+                className={clsx(
+                  'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center  ',
+                  expired
+                    ? 'text-text-muted/40'
+                    : 'text-text-muted hover:text-accent hover:bg-accent-subtle'
+                )}
+                disabled={expired}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void handleDownload(file, index);
+                }}
+                title={t('artifacts.download')}
+                aria-label={t('artifacts.download')}
+              >
+                {expired ? (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                )}
+              </button>
+            )}
           </div>
         );
       })}

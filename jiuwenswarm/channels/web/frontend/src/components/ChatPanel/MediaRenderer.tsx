@@ -68,6 +68,8 @@ function FileCard({ item }: { item: MediaItem }) {
     return (
       <a
         className="chat-msg-file-card"
+        data-testid="chat-panel-msg-file-card"
+        data-variant={filename}
         href={src}
         download={filename}
         title={filename}
@@ -78,7 +80,7 @@ function FileCard({ item }: { item: MediaItem }) {
   }
 
   return (
-    <div className="chat-msg-file-card" title={filename}>
+    <div className="chat-msg-file-card" data-testid="chat-panel-msg-file-card" data-variant={filename} title={filename}>
       {body}
     </div>
   );
@@ -107,10 +109,11 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
   }, [open]);
 
   return (
-    <div className="chat-msg-file-more" ref={rootRef}>
+    <div className="chat-msg-file-more" data-testid="chat-panel-msg-file-more" ref={rootRef}>
       <button
         type="button"
         className="chat-msg-file-more__btn"
+        data-testid="chat-panel-msg-file-more-btn"
         aria-expanded={open}
         aria-haspopup="menu"
         onClick={() => setOpen((prev) => !prev)}
@@ -118,7 +121,7 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
         +{items.length}
       </button>
       {open && (
-        <div className="chat-msg-file-more__menu" role="menu">
+        <div className="chat-msg-file-more__menu" data-testid="chat-panel-msg-file-more-menu" role="menu">
           {items.map((item, index) => {
             const filename = item.filename || 'file';
             const src = mediaSrc(item);
@@ -140,6 +143,8 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
                 <a
                   key={`${filename}-${index}`}
                   className="chat-msg-file-more__item"
+                  data-testid="chat-panel-msg-file-more-item"
+                  data-variant={filename}
                   href={src}
                   download={filename}
                   role="menuitem"
@@ -150,7 +155,7 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
               );
             }
             return (
-              <div key={`${filename}-${index}`} className="chat-msg-file-more__item" role="menuitem">
+              <div key={`${filename}-${index}`} className="chat-msg-file-more__item" data-testid="chat-panel-msg-file-more-item" data-variant={filename} role="menuitem">
                 {content}
               </div>
             );
@@ -173,7 +178,7 @@ function FileAttachmentBar({
   const overflow = items.slice(VISIBLE_FILE_COUNT);
 
   return (
-    <div className={`chat-msg-file-row chat-msg-file-row--${align}`}>
+    <div className={`chat-msg-file-row chat-msg-file-row--${align}`} data-testid="chat-panel-msg-file-row">
       {visible.map((item, index) => (
         <FileCard key={`${item.filename}-${index}`} item={item} />
       ))}
@@ -193,13 +198,13 @@ function MediaItemView({ item }: { item: MediaItem }) {
   switch (item.type) {
     case 'audio':
       return (
-        <audio controls className="w-full">
+        <audio controls className="w-full" data-testid="chat-panel-msg-media-item" data-variant="audio">
           <source src={src} type={mimeType} />
         </audio>
       );
     case 'video':
       return (
-        <video controls className="chat-msg-media-image">
+        <video controls className="chat-msg-media-image" data-testid="chat-panel-msg-media-item" data-variant="video">
           <source src={src} type={mimeType} />
         </video>
       );
@@ -217,10 +222,10 @@ export function MediaRenderer({ items, align = 'end', variant = 'inline' }: Medi
   const richItems = items.filter((item) => !isCardItem(item));
 
   return (
-    <div className={variant === 'above' ? 'chat-msg-attachments chat-msg-attachments--above' : 'chat-msg-attachments'}>
+    <div className={variant === 'above' ? 'chat-msg-attachments chat-msg-attachments--above' : 'chat-msg-attachments'} data-testid="chat-panel-msg-attachments">
       {cardItems.length > 0 && <FileAttachmentBar items={cardItems} align={align} />}
       {richItems.length > 0 && (
-        <div className={`chat-msg-media-rich chat-msg-media-rich--${align}`}>
+        <div className={`chat-msg-media-rich chat-msg-media-rich--${align}`} data-testid="chat-panel-msg-media-rich">
           {richItems.map((item, index) => (
             <MediaItemView key={`${item.filename}-${index}`} item={item} />
           ))}

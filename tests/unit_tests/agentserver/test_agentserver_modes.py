@@ -1311,7 +1311,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(adapter, "_build_heartbeat_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_circuit_breaker_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_avatar_rail", lambda: None)
-    monkeypatch.setattr(adapter, "_build_subagent_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_subagent_rail", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_build_skill_rail", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_build_skill_retrieval_prompt_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_symphony_orchestration_rail", lambda: orchestration_rail)
@@ -2115,7 +2115,7 @@ def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
     assert {
         "create_instance_mode": "code",
         "sub_mode": "team",
-        "config": {},
+        "config": {"channel_id": "tui"},
     } in calls
 
 
@@ -2169,7 +2169,7 @@ def test_agent_manager_creates_deep_adapter_for_team_plan_alias(monkeypatch):
     assert {
         "create_instance_mode": "team",
         "sub_mode": "plan",
-        "config": {},
+        "config": {"channel_id": "tui"},
     } in calls
 
 

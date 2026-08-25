@@ -1,6 +1,12 @@
 # 前端显示语言：zh（中文）/ en（英文），与 Web 界面语言切换同步
 preferred_language: zh
 
+# Agent 模式是否启用渐进式工具暴露（tool_search + deferred 工具）
+# true：只向模型暴露 direct 工具和 tool_search，其他工具按需搜索；
+# false：不挂载 ProgressiveToolRail，未显式声明 exposure 的工具按 direct 暴露。
+# ToolCard 自己显式声明的 exposure 优先级更高。
+progressive_tool_enabled: false
+
 # Web 首次模型配置引导；用户确认完成后会自动关闭，可通过侧栏问号再次打开
 setup_guide:
   enabled: true
@@ -233,6 +239,8 @@ proactive_recommendation:
   max_rounds_per_tick: 20                # 每次 Tick 读取最近几轮对话
 
 models:
+  # 开启后实时拉取可用的免费模型，注意免费模型可能有限流、限窗口大小等限制。
+  enable_free_models: true
   defaults:
     - model_client_config:
         api_base: ${API_BASE}
@@ -290,6 +298,31 @@ models:
         timeout: 1800
       model_config_obj:
         temperature: 0.95
+  # ---- AgentOS 模型（备份切换用，不参与主对话）----
+  # 列表结构，可配多个备份模型，凭证直接填在 YAML，无环境变量。
+  # 每个元素一个模型；model_name 为空 = 该条未配置，跳过不入缓存。
+  # 填入后通过 models.list 可见、可按名切换，但不带 is_default，
+  # 绝不抢主对话，仅在被显式选中时使用。
+  # 可配多条备份模型。填写约束：(model_name, api_base, api_key) 三元组唯一，
+  # 即不存在完全相同的两条；同名（base 或 key 不同）可共存，靠缓存
+  # {model_name}#{index} 区分。
+  # max_tokens：输入侧上下文窗口上限，映射到 core 的 ContextEngineConfig.context_window_tokens
+  #   （上下文压缩阈值，不发往厂商）。仅作用于选中的 agentos 条目，不影响 defaults：
+  #   build_model_from_entry 会把它的值挪到 ModelRequestConfig 的 extra 键
+  #   _agentos_ctx_window（随选中 Model 带入缓存），并从输出侧 kwargs 里 pop 掉，
+  #   绝不作为输出 token 上限发往厂商。_deep_agent_context_engine_config 从选中
+  #   Model 读该 extra 做覆盖，因此同名条目也能精确"选中哪个用哪个的 max_tokens"。
+  agentos:
+    - model_client_config:
+        api_base: ""
+        api_key: ""
+        model_name: ""
+        client_provider: ""
+        verify_ssl: true
+        timeout: 1800
+      model_config_obj:
+        temperature: 0.95
+        max_tokens: 131072
 
 # 外接 ACP Agent（stdio），供工具 acp_chat 使用。按需取消注释并填写；command/args 可指向任意兼容 ACP 的包（与 VS Code formulahendry.acp-client 预置列表一致）。
 acp_agents:
@@ -407,7 +440,7 @@ team_observability:
 #
 # 注意：OTel 一个进程只允许一个全局 TracerProvider。若本进程内 team 与
 # agent 可观测性同时开启，先初始化的一方生效，另一方复用同一个 provider
-#（其 exporter/endpoint 会被忽略）。代码层面用 ownership 标记保证
+#（其 exporter/endpoint 会被忽略）。代码层面用 demand 状态保证
 # 关闭时不会误拆对方依赖的 provider。
 #
 # 前置条件（otlp 模式）：启动 OTel Collector + Langfuse。
@@ -468,12 +501,17 @@ debug_trace:
 react:
   agent_name: main_agent
   enable_task_loop: true
+  # 单轮任务循环等待上限（秒）；null 表示不限时，避免长任务被静默截断
+  completion_timeout: null
   max_iterations: 100
   model_name: ${MODEL_NAME}
   skill_mode: all
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent: code.team 路径通过此 key 门控（单 agent 路径仍由 browser runtime 开关决定）
   subagents:
+    statusline-setup:
+      enabled: true
+      max_iterations: 15
     general_agent:
       enabled: true
     code_agent:
@@ -486,6 +524,10 @@ react:
       enabled: true
       # Browser Agent 独立轮次预算；未配置时默认 100。
       # max_iterations: 100
+  # 常驻 subagent 运行时。开启后 task_tool 被 subagent_spawn/wait/list/
+  # send_input/close/resume 六个工具替换（两者互斥）。默认开启。
+  subagent_runtime:
+    enabled: true
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
@@ -550,6 +592,7 @@ react:
   evolution:
     skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
     auto_save: false           # true = 自演进审批无需用户点击自动通过
+    review_feedback_min_confidence: 0.7
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
@@ -639,7 +682,7 @@ gateway:
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
       client_keys_dir: "/root/.ssh"
-    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
+    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8090}
     timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
     # Web/TUI token 鉴权总开关；默认关闭。true 时创建 AgentOSAuthenticator 校验连接。
     auth_enabled: false
@@ -1064,10 +1107,8 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm 
   release_api_url: ""
-  asset_name_pattern_windows: "JiuwenSwarm-setup-{version}.exe"
-  asset_name_pattern_macos: "JiuwenSwarm-{version}.dmg"
+  # Windows/macOS use .exe/.dmg; multiple candidates prefer a unique WorkSwarm name.
   asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
-  sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
   timeout_seconds: 20
   pypi_mirror: "https://mirrors.aliyun.com/pypi"
 
@@ -1279,9 +1320,6 @@ modes:
       # SwarmFlow agent calls with options.isolation="worktree".
       worktree:
         enabled: true
-
-      # Team-specific permission control.
-      enable_permissions: false
 
       leader:
         member_name: team-leader

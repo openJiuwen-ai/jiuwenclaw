@@ -1,21 +1,31 @@
 import { forwardRef, useMemo } from 'react';
-import { toPng } from 'html-to-image';
+import { applyStyle } from 'html-to-image/es/apply-style';
+import { cloneNode as cloneHtmlNode } from 'html-to-image/es/clone-node';
+import { embedImages } from 'html-to-image/es/embed-images';
+import { embedWebFonts } from 'html-to-image/es/embed-webfonts';
+import type { Options as HtmlToImageOptions } from 'html-to-image/es/types';
 import { useTranslation } from 'react-i18next';
 import { ChatTimelineList } from '../components/ChatPanel/MessageList';
 import { MarkdownMessageBody } from '../components/ChatPanel/MessageItem';
 import { TeamMemberAvatar } from '../components/TeamMemberAvatar';
 import { getMemberDisplayName } from '../components/teamArea/shared';
-import {
-  formatTeamEventTime,
-  parseTeamEventMessage,
-  type ParsedTeamEvent,
-} from '../components/ChatPanel/teamEventUtils';
+import { formatTeamEventTime, parseTeamEventMessage, type ParsedTeamEvent } from '../components/ChatPanel/teamEventUtils';
 import { isUserMember } from '../utils/teamMemberAvatar';
 import { parseHistoryJsonFileToTimelinePreview } from './historyRestore';
 import { parseTeamHistoryPanelRecords } from './teamHistoryPanelRestore';
 import { isA2UIClientEventContent } from './a2ui/a2uiContent';
 import { getSvgNaturalHeight, getSvgNaturalWidth } from '../utils/svgDimensions';
 import { generateUuidV4 } from '../utils/uuid';
+import {
+  ReusableShareImageClone,
+  SHARE_IMAGE_PIXEL_RATIO,
+  SHARE_IMAGE_WIDTH,
+  cloneShareImageTreeInBlocks,
+  getShareImageOutputDimensions,
+  getShareImageTileSourceHeight,
+  shouldIncludeShareImageCloneNode,
+} from './shareImageRaster';
+import { PNG_SIGNATURE, StreamingPngEncoder, buildPngChunk } from './streamingPng';
 import './shareImageExport.css';
 
 export interface ShareImageMetadata {
@@ -39,11 +49,124 @@ interface GroupMessage {
   timestampMs: number;
 }
 
-const SHARE_IMAGE_WIDTH = 750;
-const SHARE_IMAGE_PIXEL_RATIO = 3;
 const OPENJIUWEN_WEBSITE_URL = 'https://openjiuwen.com';
 const JIUWENSWARM_REPO_URL = 'https://gitcode.com/openJiuwen/jiuwenswarm';
 const TRANSPARENT_IMAGE_DATA_URL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+
+function yieldToBrowser(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+async function prepareShareImageClone(node: HTMLElement, options: HtmlToImageOptions): Promise<ReusableShareImageClone> {
+  const includeContentNode = (candidate: HTMLElement): boolean =>
+    shouldIncludeShareImageCloneNode(candidate) && (!options.filter || options.filter(candidate));
+  const clone = await cloneShareImageTreeInBlocks(
+    node,
+    async (source, excludedBlocks) => {
+      const clonedNode = await cloneHtmlNode(
+        source,
+        {
+          ...options,
+          filter: candidate => !excludedBlocks.has(candidate) && includeContentNode(candidate),
+        },
+        true,
+      );
+      if (!(clonedNode instanceof HTMLElement)) {
+        throw new Error('share_image_clone_failed');
+      }
+      return clonedNode;
+    },
+    yieldToBrowser,
+  );
+
+  await embedWebFonts(clone, options);
+  await embedImages(clone, options);
+  applyStyle(clone, options);
+  clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+  return new ReusableShareImageClone(node, clone);
+}
+
+function createShareImageMarkup(preparedClone: ReusableShareImageClone, sourceY: number, sourceHeight: number): string {
+  const clone = preparedClone.prepareTile(sourceY, sourceHeight);
+  return new XMLSerializer().serializeToString(clone);
+}
+
+async function loadShareImageSvg(svg: string): Promise<HTMLImageElement> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+      } else {
+        reject(new Error('share_image_svg_data_url_failed'));
+      }
+    };
+    reader.onerror = () => reject(new Error('share_image_svg_data_url_failed'));
+    reader.onabort = () => reject(new Error('share_image_svg_data_url_failed'));
+    reader.readAsDataURL(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
+  });
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('share_image_svg_decode_failed'));
+    image.src = dataUrl;
+  });
+}
+
+function createShareImageTileSvg(markup: string, width: number, sourceY: number, sourceHeight: number): string {
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${sourceHeight}" viewBox="0 0 ${width} ${sourceHeight}">`,
+    `<foreignObject x="0" y="0" width="100%" height="100%" externalResourcesRequired="true">`,
+    `<div xmlns="http://www.w3.org/1999/xhtml" style="position:relative;width:${width}px;height:${sourceHeight}px;overflow:hidden">`,
+    `<div style="width:${width}px;transform:translateY(${-sourceY}px);transform-origin:top left">`,
+    markup,
+    '</div></div></foreignObject></svg>',
+  ].join('');
+}
+
+async function rasterizeShareImage(node: HTMLElement, options: HtmlToImageOptions, width: number, height: number, backgroundColor: string): Promise<Blob> {
+  if (width !== SHARE_IMAGE_WIDTH) {
+    throw new Error('share_image_invalid_width');
+  }
+  const [outputWidth, outputHeight] = getShareImageOutputDimensions(height);
+  const tileSourceHeight = getShareImageTileSourceHeight();
+  const encoder = new StreamingPngEncoder(outputWidth, outputHeight);
+  let preparedClone: ReusableShareImageClone | null = null;
+
+  try {
+    preparedClone = await prepareShareImageClone(node, options);
+    const canvas = document.createElement('canvas');
+    canvas.width = outputWidth;
+    canvas.height = tileSourceHeight * SHARE_IMAGE_PIXEL_RATIO;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) {
+      throw new Error('share_image_canvas_context_unavailable');
+    }
+
+    for (let sourceY = 0; sourceY < height; sourceY += tileSourceHeight) {
+      const sourceHeight = Math.min(tileSourceHeight, height - sourceY);
+      const renderedHeight = sourceHeight * SHARE_IMAGE_PIXEL_RATIO;
+      if (canvas.height !== renderedHeight) {
+        canvas.height = renderedHeight;
+      }
+      context.fillStyle = backgroundColor;
+      context.fillRect(0, 0, outputWidth, renderedHeight);
+
+      const markup = createShareImageMarkup(preparedClone, sourceY, sourceHeight);
+      const image = await loadShareImageSvg(createShareImageTileSvg(markup, width, sourceY, sourceHeight));
+      context.drawImage(image, 0, 0, outputWidth, renderedHeight);
+      const rgba = context.getImageData(0, 0, outputWidth, renderedHeight).data;
+      await encoder.appendRgbaRows(rgba, renderedHeight);
+      await nextFrame();
+    }
+    return encoder.finish([buildAigcITextChunk()]);
+  } catch (error) {
+    await encoder.abort(error);
+    throw error;
+  } finally {
+    preparedClone?.restore();
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -54,7 +177,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * These messages are internal interaction events and should not be included in exports.
  */
 function filterA2UIClientEvents(messages: unknown[]): unknown[] {
-  return messages.filter((msg) => {
+  return messages.filter(msg => {
     if (!isRecord(msg)) return true;
     if (msg.role === 'user' && isA2UIClientEventContent(msg.content)) return false;
     return true;
@@ -64,7 +187,7 @@ function filterA2UIClientEvents(messages: unknown[]): unknown[] {
 function normalizeMode(records: unknown[]): string {
   const modes = records
     .filter(isRecord)
-    .map((record) => typeof record.mode === 'string' ? record.mode.trim().toLowerCase() : '')
+    .map(record => (typeof record.mode === 'string' ? record.mode.trim().toLowerCase() : ''))
     .filter(Boolean);
   return modes.includes('team') ? 'team' : modes[0] || 'agent';
 }
@@ -113,141 +236,122 @@ function GroupChatMessage({ item }: { item: GroupMessage }) {
 
   return (
     <article className={`share-image-group-message ${isUser ? 'is-user' : ''}`}>
-      {!isUser && (
-        <TeamMemberAvatar
-          member={event.fromMember}
-          className="share-image-group-message__avatar"
-        />
-      )}
+      {!isUser && <TeamMemberAvatar member={event.fromMember} className="share-image-group-message__avatar" />}
       <div className="share-image-group-message__main">
         <div className="share-image-group-message__meta">
           <span className="share-image-group-message__member">{displayName}</span>
           {timeText && <span className="share-image-group-message__time">{timeText}</span>}
         </div>
         <div className="share-image-group-message__bubble">
-          {event.isP2P && event.toMember && (
-            <span className="share-image-group-message__chip">@{getMemberDisplayName(event.toMember)}</span>
-          )}
-          {event.isBroadcast && (
-            <span className="share-image-group-message__chip">{t('share.everyone')}</span>
-          )}
-          <MarkdownMessageBody
-            content={event.content}
-            className="share-image-group-message__body"
-          />
+          {event.isP2P && event.toMember && <span className="share-image-group-message__chip">@{getMemberDisplayName(event.toMember)}</span>}
+          {event.isBroadcast && <span className="share-image-group-message__chip">{t('share.everyone')}</span>}
+          <MarkdownMessageBody content={event.content} className="share-image-group-message__body" />
         </div>
       </div>
-      {isUser && (
-        <TeamMemberAvatar
-          member={event.fromMember}
-          className="share-image-group-message__avatar"
-        />
-      )}
+      {isUser && <TeamMemberAvatar member={event.fromMember} className="share-image-group-message__avatar" />}
     </article>
   );
 }
 
-export const ShareImageDocument = forwardRef<HTMLDivElement, ShareImageDocumentProps>(
-  function ShareImageDocument({ snapshot }, ref) {
-    const { t } = useTranslation();
-    const data = useMemo(() => {
-      if (!snapshot) {
-        return null;
-      }
-      const preview = parseHistoryJsonFileToTimelinePreview(snapshot.records, snapshot.session_id);
-      // Filter out A2UI client event messages from exports
-      const filteredMessages = filterA2UIClientEvents(preview.messages) as typeof preview.messages;
-      return {
-        mode: normalizeMode(snapshot.records),
-        messages: filteredMessages,
-        executions: preview.executions,
-        reasoningSegments: preview.reasoningSegments,
-        groupMessages: collectGroupMessages(snapshot),
-      };
-    }, [snapshot]);
-
-    if (!snapshot || !data) {
-      return <div ref={ref} className="share-image-document" />;
+export const ShareImageDocument = forwardRef<HTMLDivElement, ShareImageDocumentProps>(function ShareImageDocument({ snapshot }, ref) {
+  const { t } = useTranslation();
+  const data = useMemo(() => {
+    if (!snapshot) {
+      return null;
     }
+    const preview = parseHistoryJsonFileToTimelinePreview(snapshot.records, snapshot.session_id);
+    // Filter out A2UI client event messages from exports
+    const filteredMessages = filterA2UIClientEvents(preview.messages) as typeof preview.messages;
+    return {
+      mode: normalizeMode(snapshot.records),
+      messages: filteredMessages,
+      executions: preview.executions,
+      reasoningSegments: preview.reasoningSegments,
+      groupMessages: collectGroupMessages(snapshot),
+    };
+  }, [snapshot]);
 
-    const title = snapshot.metadata?.title?.trim() || snapshot.session_id;
-    const exportedAt = readableDate(snapshot.metadata?.exported_at);
-    const hasConversation = data.messages.length > 0;
-    const isTeamMode = data.mode === 'team';
-    const hasGroupMessages = data.groupMessages.length > 0;
-    const aiNotice = t('share.aiNotice');
+  if (!snapshot || !data) {
+    return <div ref={ref} className="share-image-document" />;
+  }
 
-    return (
-      <div ref={ref} className="share-image-document">
-        <header className="share-image-header">
-          <div className="share-image-masthead">
-            <div className="share-image-brand">
-              <img src="/logo.svg" alt="" className="share-image-brand__logo" />
-              <div className="share-image-brand__name">JiuwenSwarm</div>
-            </div>
+  const title = snapshot.metadata?.title?.trim() || snapshot.session_id;
+  const exportedAt = readableDate(snapshot.metadata?.exported_at);
+  const hasConversation = data.messages.length > 0;
+  const isTeamMode = data.mode === 'team';
+  const hasGroupMessages = data.groupMessages.length > 0;
+  const aiNotice = t('share.aiNotice');
+
+  return (
+    <div ref={ref} className="share-image-document">
+      <header className="share-image-header">
+        <div className="share-image-masthead">
+          <div className="share-image-brand">
+            <img src="/logo.svg" alt="" className="share-image-brand__logo" />
+            <div className="share-image-brand__name">WorkSwarm</div>
           </div>
-        </header>
+        </div>
+      </header>
 
-        <main className="share-image-content">
-          <div className="share-image-content-header">
-            <h1>{title}</h1>
-            <div className="share-image-meta">
-              <span>{snapshot.session_id}</span>
-              {exportedAt && <span>{exportedAt}</span>}
-            </div>
+      <main className="share-image-content">
+        <div className="share-image-content-header">
+          <h1>{title}</h1>
+          <div className="share-image-meta">
+            <span>{snapshot.session_id}</span>
+            {exportedAt && <span>{exportedAt}</span>}
           </div>
+        </div>
 
-          <section className="share-image-section">
-            <div className="share-image-section__label">{t('share.mainConversation')}</div>
-            {hasConversation ? (
-              <ChatTimelineList
-                messages={data.messages}
-                executions={data.executions}
-                reasoningSegments={data.reasoningSegments}
-                staticTimeline
-                mode={data.mode}
-                disableA2UIInteraction={true}
-              />
+        <section className="share-image-section">
+          <div className="share-image-section__label">{t('share.mainConversation')}</div>
+          {hasConversation ? (
+            <ChatTimelineList
+              messages={data.messages}
+              executions={data.executions}
+              reasoningSegments={data.reasoningSegments}
+              staticTimeline
+              mode={data.mode}
+              disableA2UIInteraction={true}
+            />
+          ) : (
+            <div className="share-image-empty">{t('share.noMainConversation')}</div>
+          )}
+        </section>
+
+        {isTeamMode && (
+          <section className="share-image-section share-image-section--group">
+            <div className="share-image-section__label">{t('share.groupChat')}</div>
+            {hasGroupMessages ? (
+              <div className="share-image-group-list">
+                {data.groupMessages.map(item => (
+                  <GroupChatMessage key={item.event.messageId} item={item} />
+                ))}
+              </div>
             ) : (
-              <div className="share-image-empty">{t('share.noMainConversation')}</div>
+              <div className="share-image-empty">{t('share.noGroupChat')}</div>
             )}
           </section>
+        )}
+      </main>
 
-          {isTeamMode && (
-            <section className="share-image-section share-image-section--group">
-              <div className="share-image-section__label">{t('share.groupChat')}</div>
-              {hasGroupMessages ? (
-                <div className="share-image-group-list">
-                  {data.groupMessages.map((item) => (
-                    <GroupChatMessage key={item.event.messageId} item={item} />
-                  ))}
-                </div>
-              ) : (
-                <div className="share-image-empty">{t('share.noGroupChat')}</div>
-              )}
-            </section>
-          )}
-        </main>
-
-        <footer className="share-image-footer">
-          <div className="share-image-footer__note">{aiNotice}</div>
-          <div className="share-image-links">
-            <div className="share-image-link">
-              <span>{t('share.website', { url: OPENJIUWEN_WEBSITE_URL })}</span>
-            </div>
-            <div className="share-image-link-divider" />
-            <div className="share-image-link">
-              <span>{t('share.repository', { url: JIUWENSWARM_REPO_URL })}</span>
-            </div>
+      <footer className="share-image-footer">
+        <div className="share-image-footer__note">{aiNotice}</div>
+        <div className="share-image-links">
+          <div className="share-image-link">
+            <span>{t('share.website', { url: OPENJIUWEN_WEBSITE_URL })}</span>
           </div>
-        </footer>
-      </div>
-    );
-  }
-);
+          <div className="share-image-link-divider" />
+          <div className="share-image-link">
+            <span>{t('share.repository', { url: JIUWENSWARM_REPO_URL })}</span>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+});
 
 function nextFrame(): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise(resolve => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   });
 }
@@ -279,7 +383,7 @@ async function waitForImage(image: HTMLImageElement): Promise<boolean> {
     await image.decode();
     return image.naturalWidth > 0;
   }
-  return new Promise<boolean>((resolve) => {
+  return new Promise<boolean>(resolve => {
     image.addEventListener('load', () => resolve(image.naturalWidth > 0), { once: true });
     image.addEventListener('error', () => resolve(false), { once: true });
   });
@@ -289,23 +393,25 @@ async function prepareImagesForExport(node: HTMLElement): Promise<() => void> {
   const images = Array.from(node.querySelectorAll('img'));
   const snapshots: ImageSnapshot[] = [];
 
-  await Promise.all(images.map(async (image) => {
-    try {
-      if (await waitForImage(image)) {
-        return;
+  await Promise.all(
+    images.map(async image => {
+      try {
+        if (await waitForImage(image)) {
+          return;
+        }
+      } catch {
+        // Ignore broken or undecodable images in share export. A2UI Image can
+        // intentionally contain an invalid URL to demonstrate fallback UI.
       }
-    } catch {
-      // Ignore broken or undecodable images in share export. A2UI Image can
-      // intentionally contain an invalid URL to demonstrate fallback UI.
-    }
 
-    replaceBrokenImageForExport(image, snapshots);
-    try {
-      await waitForImage(image);
-    } catch {
-      // The transparent data URL should decode, but keep export tolerant.
-    }
-  }));
+      replaceBrokenImageForExport(image, snapshots);
+      try {
+        await waitForImage(image);
+      } catch {
+        // The transparent data URL should decode, but keep export tolerant.
+      }
+    }),
+  );
 
   return () => {
     for (const snapshot of snapshots) {
@@ -390,8 +496,7 @@ async function waitForMermaidDiagrams(node: HTMLElement): Promise<void> {
   }
 
   function allRenderedDiagramsHaveSvg(): boolean {
-    return Array.from(node.querySelectorAll('[data-mermaid-status="rendered"]'))
-      .every((diagram) => diagram.querySelector('svg'));
+    return Array.from(node.querySelectorAll('[data-mermaid-status="rendered"]')).every(diagram => diagram.querySelector('svg'));
   }
 
   function isReady(): boolean {
@@ -429,7 +534,7 @@ async function waitForMermaidDiagrams(node: HTMLElement): Promise<void> {
   });
 }
 
-export async function exportShareImageNode(node: HTMLElement): Promise<string> {
+export async function exportShareImageNode(node: HTMLElement): Promise<Blob> {
   await document.fonts?.ready;
   const restoreImages = await prepareImagesForExport(node);
   let restoreMermaidDiagrams = (): void => {};
@@ -438,21 +543,19 @@ export async function exportShareImageNode(node: HTMLElement): Promise<string> {
     await nextFrame();
 
     // Scale down wide Mermaid diagrams so they are not clipped in the exported
-    // image. toPng reads the DOM synchronously, so the restore callback must be
-    // called after the render completes.
+    // image. The export DOM must remain mounted until the SVG markup is built.
     restoreMermaidDiagrams = fitMermaidDiagramsForExport(node);
     await nextFrame();
 
     const backgroundColor = window.getComputedStyle(node).backgroundColor;
-    const dataUrl = await toPng(node, {
+    const height = node.scrollHeight;
+    const options: HtmlToImageOptions = {
       cacheBust: true,
-      pixelRatio: SHARE_IMAGE_PIXEL_RATIO,
       width: SHARE_IMAGE_WIDTH,
-      height: node.scrollHeight,
+      height,
       backgroundColor,
-    });
-    // Inject implicit AIGC label (GB 45438-2025) into PNG file metadata.
-    return injectAigcPngMetadata(dataUrl);
+    };
+    return rasterizeShareImage(node, options, SHARE_IMAGE_WIDTH, height, backgroundColor);
   } finally {
     restoreMermaidDiagrams();
     restoreImages();
@@ -460,31 +563,6 @@ export async function exportShareImageNode(node: HTMLElement): Promise<string> {
 }
 
 const AIGC_TEXT_ENCODER = new TextEncoder();
-
-/** PNG 8-byte signature, used to verify the data URL really is a PNG. */
-const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-
-function buildCrc32Table(): Uint32Array {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) {
-      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
-    table[n] = c >>> 0;
-  }
-  return table;
-}
-
-const CRC32_TABLE = buildCrc32Table();
-
-function crc32(bytes: Uint8Array): number {
-  let crc = 0xffffffff;
-  for (let i = 0; i < bytes.length; i++) {
-    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
 
 const EMPTY_MD5 = '';
 
@@ -500,7 +578,7 @@ const EMPTY_MD5 = '';
  * Alibaba's docs use), since some platforms reject empty reserved fields.
  */
 function buildAigcLabel(): { xmp: string } {
-  const producer = 'JiuwenSwarm';
+  const producer = 'WorkSwarm';
   const produceId = generateUuidV4();
   const payload = {
     Label: '1',
@@ -536,48 +614,14 @@ function buildAigcLabel(): { xmp: string } {
   return { xmp };
 }
 
-/** Decode a data URL (base64) into raw PNG bytes. Returns null if not PNG. */
-function decodePngDataUrl(dataUrl: string): Uint8Array | null {
-  const comma = dataUrl.indexOf(',');
-  if (comma < 0) return null;
-  const base64 = dataUrl.slice(comma + 1);
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
+/** Decode a PNG blob into raw bytes. Returns null if the signature is invalid. */
+async function decodePngBlob(blob: Blob): Promise<Uint8Array | null> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
   if (bytes.length < 8) return null;
   for (let i = 0; i < 8; i++) {
     if (bytes[i] !== PNG_SIGNATURE[i]) return null;
   }
   return bytes;
-}
-
-/** Encode raw bytes back into a PNG data URL (base64). */
-function encodePngDataUrl(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const end = Math.min(i + chunkSize, bytes.length);
-    binary += String.fromCharCode(...bytes.subarray(i, end));
-  }
-  return `data:image/png;base64,${btoa(binary)}`;
-}
-
-function buildPngChunk(type: string, chunkData: Uint8Array): Uint8Array {
-  const typeBytes = AIGC_TEXT_ENCODER.encode(type);
-  const crcInput = new Uint8Array(typeBytes.length + chunkData.length);
-  crcInput.set(typeBytes, 0);
-  crcInput.set(chunkData, typeBytes.length);
-  const crc = crc32(crcInput);
-
-  const chunk = new Uint8Array(4 + 4 + chunkData.length + 4);
-  const view = new DataView(chunk.buffer);
-  view.setUint32(0, chunkData.length); // big-endian data length
-  chunk.set(typeBytes, 4);
-  chunk.set(chunkData, 8);
-  view.setUint32(8 + chunkData.length, crc);
-  return chunk;
 }
 
 function insertChunkAfterIhdr(png: Uint8Array, chunk: Uint8Array): Uint8Array {
@@ -606,9 +650,7 @@ function buildITextChunk(keyword: string, text: string): Uint8Array {
   // canonical layout (their reader expects the text to begin with a NUL),
   // so emit one extra leading zero byte before the text. This matches the
   // byte layout that the platform accepts; verified by A/B upload.
-  const chunkData = new Uint8Array(
-    keywordBytes.length + 6 + textBytes.length,
-  );
+  const chunkData = new Uint8Array(keywordBytes.length + 6 + textBytes.length);
   let offset = 0;
   chunkData.set(keywordBytes, offset);
   offset += keywordBytes.length;
@@ -622,12 +664,16 @@ function buildITextChunk(keyword: string, text: string): Uint8Array {
   return buildPngChunk('iTXt', chunkData);
 }
 
-export function injectAigcPngMetadata(dataUrl: string): string {
-  const png = decodePngDataUrl(dataUrl);
-  if (!png) {
-    return dataUrl;
-  }
+function buildAigcITextChunk(): Uint8Array {
   const { xmp } = buildAigcLabel();
-  const out = insertChunkAfterIhdr(png, buildITextChunk('XML:com.adobe.xmp', xmp));
-  return encodePngDataUrl(out);
+  return buildITextChunk('XML:com.adobe.xmp', xmp);
+}
+
+export async function injectAigcPngMetadata(blob: Blob): Promise<Blob> {
+  const png = await decodePngBlob(blob);
+  if (!png) {
+    return blob;
+  }
+  const out = insertChunkAfterIhdr(png, buildAigcITextChunk());
+  return new Blob([out.buffer as ArrayBuffer], { type: 'image/png' });
 }

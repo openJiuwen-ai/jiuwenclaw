@@ -95,6 +95,11 @@ export interface Message {
    * 历史事实，不是当前 Goal 状态的派生值。
    */
   isGoalObjectiveMessage?: boolean;
+  isCommandOutput?: boolean;
+  /** 斜杠命令结果的结构化元数据；避免渲染层依赖 content 的换行分隔。 */
+  commandName?: string;
+  commandInput?: string;
+  commandOutput?: string;
 }
 
 export interface ToolCall {
@@ -113,6 +118,8 @@ export interface ToolResult {
   success: boolean;
   toolCallId?: string;
   summary?: string;  // 结果摘要
+  /** 后台任务已接受但仍在运行，不应被渲染为成功或失败终态。 */
+  pending?: boolean;
   /** 历史/实时结果显式标记为超时（与 success=false 一起用于展示「执行失败」） */
   timedOut?: boolean;
   // agentic search（symphony 技能检索）下发的技能树路径，用于内联回放路径流转

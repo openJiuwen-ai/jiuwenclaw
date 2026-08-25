@@ -138,7 +138,7 @@ def _make_fake_runtime() -> MagicMock:
 
 # ─── DeepAdapter (agent mode): only research_agent + browser_agent ──────
 
-def test_deep_adapter_subagents_defaults_to_none_when_unconfigured(
+def test_deep_adapter_keeps_builtin_statusline_agent_when_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = _TestableJiuWenSwarmDeepAdapter()
@@ -148,14 +148,16 @@ def test_deep_adapter_subagents_defaults_to_none_when_unconfigured(
         "_browser_runtime_enabled",
         staticmethod(lambda: False),
     )
-    # DeepAdapter: no subagents configured, no browser → None
+    # The built-in setup agent is available even in an older config that has no
+    # explicit subagents section.
     subagents, _ = adapter.build_configured_subagents(
         model,
         {"max_iterations": 8},
         {},
     )
 
-    assert subagents is None
+    assert subagents is not None
+    assert [item.agent_card.name for item in subagents] == ["statusline-setup"]
 
 
 def test_browser_runtime_environment_tracks_mode_and_chrome_path(
@@ -216,7 +218,10 @@ def test_deep_adapter_subagents_includes_browser_by_default_when_runtime_enabled
     )
 
     assert subagents is not None
-    assert [item["name"] for item in subagents] == ["browser_agent"]
+    assert [
+        item.agent_card.name if hasattr(item, "agent_card") else item["name"]
+        for item in subagents
+    ] == ["statusline-setup", "browser_agent"]
     assert (
         subagents[-1]["kwargs"]["max_iterations"]
         == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
@@ -260,9 +265,17 @@ def test_deep_adapter_subagents_only_includes_explicitly_enabled_agents(
     )
 
     assert subagents is not None
-    assert [item["name"] for item in subagents] == ["research_agent", "browser_agent"]
-    assert subagents[0]["kwargs"]["max_iterations"] == 5
-    assert subagents[1]["kwargs"]["max_iterations"] == 7
+    names = [
+        item.agent_card.name if hasattr(item, "agent_card") else item["name"]
+        for item in subagents
+    ]
+    assert names == [
+        "statusline-setup",
+        "research_agent",
+        "browser_agent",
+    ]
+    assert subagents[1]["kwargs"]["max_iterations"] == 5
+    assert subagents[2]["kwargs"]["max_iterations"] == 7
 
 
 def test_deep_adapter_subagents_skips_browser_without_runtime(
@@ -279,8 +292,8 @@ def test_deep_adapter_subagents_skips_browser_without_runtime(
     browser_builder = MagicMock()
     monkeypatch.setattr(deep_interface_module, "build_browser_agent_config", browser_builder)
 
-    # When browser runtime is disabled and no other subagents are configured,
-    # the result should be None
+    # The browser is skipped, while the default-enabled status-line setup
+    # subagent remains available.
     subagents, _ = adapter.build_configured_subagents(
         model,
         {
@@ -291,7 +304,8 @@ def test_deep_adapter_subagents_skips_browser_without_runtime(
         {},
     )
 
-    assert subagents is None
+    assert subagents is not None
+    assert [item.agent_card.name for item in subagents] == ["statusline-setup"]
     browser_builder.assert_not_called()
 
 

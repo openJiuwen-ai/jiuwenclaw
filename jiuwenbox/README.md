@@ -88,7 +88,7 @@ After installing the wheel, start with the bundled default policy:
 ```bash
 sudo ./.venv/bin/jiuwenbox-server
 # or
-sudo ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+sudo ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host <HTTP_IP_ADDRESS> --port <PORT> --log-level debug
 ```
 
 To use a different policy or port, set `JIUWENBOX_POLICY_PATH` to an **absolute**
@@ -97,7 +97,7 @@ path (or, from a dev tree, `src/jiuwenbox/configs/<name>.yaml`):
 ```bash
 sudo env \
   JIUWENBOX_POLICY_PATH="/absolute/path/to/policy.yaml" \
-  ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 9000 --log-level debug
+  ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host <HTTP_IP_ADDRESS> --port <PORT> --log-level debug
 ```
 
 ### Docker Start
@@ -126,7 +126,7 @@ conflicts.
 Listen address is controlled by a single env var:
 
 ```bash
-JIUWENBOX_LISTEN=http://0.0.0.0:8321               # default
+JIUWENBOX_LISTEN=http://<HTTP_IP_ADDRESS>:<PORT>               # default
 JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock  # switch to UDS (absolute path required)
 ```
 
@@ -167,7 +167,7 @@ jiuwenbox --base-url unix:///tmp/jiuwenbox-sock/jiuwenbox.sock health
 JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox sandbox ls
 
 # pytest in dual transport mode (operator launches the matching server first)
-pytest tests/integration --server-endpoint=http://127.0.0.1:8321
+pytest tests/integration --server-endpoint=http://<HTTP_IP_ADDRESS>:<PORT>
 pytest tests/integration --server-endpoint=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock
 ```
 
@@ -175,7 +175,7 @@ UDS-related env vars:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `JIUWENBOX_LISTEN` | `http://0.0.0.0:8321` | Management API listen URI; accepts `http://host:port` or `unix:///abs/socket/path`. |
+| `JIUWENBOX_LISTEN` | `http://<HTTP_IP_ADDRESS>:<PORT>` | Management API listen URI; accepts `http://host:port` or `unix:///abs/socket/path`. |
 | `JIUWENBOX_UDS_MODE` | `0666` | UDS socket file permissions (octal string). The Docker default is permissive so a non-root host user can connect; for multi-tenant / hardened deployments set `0660` and pass `docker run --user $(id -u):$(id -g)`. |
 | `JIUWENBOX_UDS_HOST_DIR` | `/tmp/jiuwenbox-sock` | Host directory bind-mounted by `run_docker.sh` to expose the socket. |
 | `JIUWENBOX_UDS_CONTAINER_DIR` | `/run/jiuwenbox` | Container-side mount point; must match the directory in `JIUWENBOX_LISTEN`'s socket path. |
@@ -197,7 +197,7 @@ JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN jiuwenbox-server
 export JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN
 jiuwenbox health
 
-curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://127.0.0.1:8321/health
+curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://<HTTP_IP_ADDRESS>:<PORT>/health
 ```
 
 | Variable / flag | Notes |
@@ -540,8 +540,8 @@ network:
     allowed_domains: []
     blocked_domains: []
     allowed_ips:
-      - "127.0.0.1/32"
-      - "::1/128"
+      - "<HTTP_IP_ADDRESS>/<MASK>"
+      - "::1/<MASK>"
     blocked_ips: []
     allowed_ports:
       - 443
@@ -553,8 +553,8 @@ network:
     allowed_domains: []
     blocked_domains: []
     allowed_ips:
-      - "127.0.0.1/32"
-      - "::1/128"
+      - "<HTTP_IP_ADDRESS>/<MASK>"
+      - "::1/<MASK>"
     blocked_ips: []
     allowed_ports: []
     blocked_ports:
@@ -570,7 +570,7 @@ jiuwenswarm decides **whether the sandbox is on, which jiuwenbox to talk to, whe
 ```yaml
 sandbox:
   # -- Endpoint & type --
-  url: "http://127.0.0.1:8321"      # jiuwenbox HTTP endpoint; TCP uses http://, UDS uses unix:///abs/socket/path
+  url: "http://<HTTP_IP_ADDRESS>:<PORT>"      # jiuwenbox HTTP endpoint; TCP uses http://, UDS uses unix:///abs/socket/path
   type: "jiuwenbox"                 # sandbox provider name; currently only "jiuwenbox"
 
   # -- Startup & policy --
@@ -591,7 +591,7 @@ Field reference:
 
 | Field | Values | Default | Notes |
 | --- | --- | --- | --- |
-| `sandbox.url` | URL string | `http://127.0.0.1:8321` | jiuwenbox management API endpoint. TCP: `http://host:port`; UDS: `unix:///abs/socket/path` (mirrors `JIUWENBOX_LISTEN`). |
+| `sandbox.url` | URL string | `http://<HTTP_IP_ADDRESS>:<PORT>` | jiuwenbox management API endpoint. TCP: `http://host:port`; UDS: `unix:///abs/socket/path` (mirrors `JIUWENBOX_LISTEN`). |
 | `sandbox.type` | string | `jiuwenbox` | Sandbox provider name. Currently jiuwenswarm only wires up `jiuwenbox`. |
 | `sandbox.startup_mode` | `internal` / `external` | `internal` | `internal`: agent-server spawns `jiuwenbox-server` at boot and persists the effective `url` (auto-picks a free port if the configured one is busy). `external`: agent-server never touches jiuwenbox; you must start it yourself per the top of this README. |
 | `sandbox.policy_file` | filename or path | `code-agent-policy.yaml` | Bare filename → resolved relative to `jiuwenbox/configs/`; otherwise expanded (`~`, `$VAR`) and used verbatim. **Only honored under `startup_mode=internal`**; in `external` mode the policy is chosen by whoever started jiuwenbox-server (via `JIUWENBOX_DEFAULT_POLICY_PATH`). |
@@ -608,7 +608,7 @@ Good for local development and single-host deployments. Drop this into `config.y
 
 ```yaml
 sandbox:
-  url: "http://127.0.0.1:8321"
+  url: "http://<HTTP_IP_ADDRESS>:<PORT>"
   type: "jiuwenbox"
   startup_mode: "internal"
   policy_file: "code-agent-policy.yaml"   # picked up from jiuwenbox/configs/
@@ -627,7 +627,7 @@ Good when jiuwenbox lives on a different host / container, or when jiuwenswarm s
 
 ```yaml
 sandbox:
-  url: "http://10.0.0.5:8321"   # or unix:///run/jiuwenbox/jiuwenbox.sock
+  url: "http://<HTTP_IP_ADDRESS>:<PORT>"   # example; replace with your host or unix:///run/jiuwenbox/jiuwenbox.sock
   type: "jiuwenbox"
   startup_mode: "external"
   enabled: true
@@ -650,7 +650,7 @@ returns the result.
 
 ```bash
 JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
-python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+python -m uvicorn jiuwenbox.server.app:app --host <HTTP_IP_ADDRESS> --port <PORT> --log-level debug
 ```
 
 ### OpenCode configuration
@@ -669,13 +669,13 @@ python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-leve
 
 ### External IP deployment
 
-When JiuwenBox is deployed on an external IP (not `localhost` / `127.0.0.1`),
+When JiuwenBox is deployed on an external IP (not `localhost` / `<HTTP_IP_ADDRESS>`),
 set `JIUWENBOX_MCP_ALLOWED_HOSTS` to allow the client host:
 
 ```bash
-JIUWENBOX_MCP_ALLOWED_HOSTS=10.0.0.5,10.0.0.5:8321 \
+JIUWENBOX_MCP_ALLOWED_HOSTS=<HTTP_IP_ADDRESS>,<HTTP_IP_ADDRESS>:<PORT> \
 JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
-python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+python -m uvicorn jiuwenbox.server.app:app --host <HTTP_IP_ADDRESS> --port <PORT> --log-level debug
 ```
 
 ### Notes
@@ -743,43 +743,43 @@ inference_privacy_proxies:
 
 ### Configuration Example
 
-`Note: The network endpoints https://api.openai.com and http://192.168.1.100:9000 are examples only`
+`Note: The network endpoints https://api.openai.com and http://<IP_ADDRESS>:9000 are examples only`
 
 #### Policy YAML Example
 
 ```yaml
 inference_privacy_proxies:
 
-  listen_host: "127.0.0.1"
+  listen_host: "<HTTP_IP_ADDRESS>"
   listen_port: 8080
   
   routes:
     - path_prefix: "openai"
       target_endpoint: "https://api.openai.com"
-      api_key: "sk_sandbox_managed_openai_key"
+      api_key: "${OPENAI_API_KEY}"
    - path_prefix: "custom"
-      target_endpoint: "http://192.168.1.100:9000"
-      api_key: "sk_sandbox_managed_custom_key"
+      target_endpoint: "http://<HTTP_IP_ADDRESS>:<PORT>"  # example only; replace with your endpoint
+      api_key: "${CUSTOM_LLM_API_KEY}"
 ```
 
-For edge servers, use `listen_host: "0.0.0.0"` to accept connections from all interfaces.
+For edge servers, use `listen_host: "<HTTP_IP_ADDRESS>"` to accept connections from all interfaces.
 
 #### Forwarding Example
 
 ```text
-Client request:  POST http://127.0.0.1:8322/openai/v1/chat/completions -H "Authorization: Bearer sk_fake_key"
-Proxy forwards:  POST https://api.openai.com/v1/chat/completions       -H "Authorization: Bearer sk_sandbox_managed_openai_key"
+Client request:  POST http://<HTTP_IP_ADDRESS>:<PORT>/openai/v1/chat/completions -H "Authorization: Bearer sk_fake_key"
+Proxy forwards:  POST https://api.openai.com/v1/chat/completions       -H "Authorization: Bearer <your-api-key>"
 
-Client request:  POST http://127.0.0.1:8322/custom/v1/chat/completions -H "Authorization: Bearer sk_fake_key"
-Proxy forwards:  POST http://192.168.1.100:9000/v1/chat/completions    -H "Authorization: Bearer sk_sandbox_managed_custom_key"
+Client request:  POST http://<HTTP_IP_ADDRESS>:<PORT>/custom/v1/chat/completions -H "Authorization: Bearer sk_fake_key"
+Proxy forwards:  POST http://<HTTP_IP_ADDRESS>:<PORT>/v1/chat/completions    -H "Authorization: Bearer <your-api-key>"
 ```
 
 #### jiuwenswarm Configuration Example
 
 | Config    | Old Value                     | New Value                          |
 | --------- | ----------------------------- | ---------------------------------- |
-| api_base  | http://192.168.1.100:9000/v1/ | http://127.0.0.1:8322/custom/v1/   |
-| api_key   | sk_sandbox_managed_custom_key | sk_fake_key                        |
+| api_base  | http://<HTTP_IP_ADDRESS>:<PORT>/v1/ | http://<HTTP_IP_ADDRESS>:<PORT>/custom/v1/   |
+| api_key   | <your-api-key> | sk_fake_key                        |
 
 ## Run Integration Tests
 
@@ -790,13 +790,13 @@ jiuwenbox CLI. Use `--server-endpoint=URI` to switch between transports;
 flag to maintain in sync:
 
 ```bash
-# TCP (default, equivalent to --server-endpoint=http://127.0.0.1:8321; the
+# TCP (default, equivalent to --server-endpoint=http://<HTTP_IP_ADDRESS>:<PORT>; the
 # server should be launched with default-policy.yaml as its security policy)
 ./tests/test.sh default
 
 # Custom TCP listener (a bare host:port gets http:// prepended automatically)
-./tests/test.sh default --server-endpoint=http://127.0.0.1:18321
-./tests/test.sh default --server-endpoint=127.0.0.1:18321
+./tests/test.sh default --server-endpoint=http://<HTTP_IP_ADDRESS>:<PORT>
+./tests/test.sh default --server-endpoint=<HTTP_IP_ADDRESS>:<PORT>
 
 # UDS: pass the absolute socket path as a unix:// URL
 ./tests/test.sh default --server-endpoint=unix:///tmp/jiuwenbox.sock
@@ -804,14 +804,14 @@ flag to maintain in sync:
 ```
 
 `test.sh` does **not** start the server; launch jiuwenbox first on the
-selected transport (TCP with `JIUWENBOX_LISTEN=http://0.0.0.0:8321` or a
+selected transport (TCP with `JIUWENBOX_LISTEN=http://<HTTP_IP_ADDRESS>:<PORT>` or a
 custom port, UDS with `JIUWENBOX_LISTEN=unix:///...`).
 
 Run specific test cases:
 
 ```bash
-python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_allows_external_http_requests -s --server-endpoint 127.0.0.1:8321
-python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocked_ip_rejects_egress -s --server-endpoint 127.0.0.1:8321
+python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_allows_external_http_requests -s --server-endpoint <HTTP_IP_ADDRESS>:<PORT>
+python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocked_ip_rejects_egress -s --server-endpoint <HTTP_IP_ADDRESS>:<PORT>
 ```
 
 ### MCP Integration Tests
@@ -822,7 +822,7 @@ python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforc
 
 ```bash
 # TCP
-python3 -m pytest tests/integration/test_mcp_default.py -v --server-endpoint 127.0.0.1:8321
+python3 -m pytest tests/integration/test_mcp_default.py -v --server-endpoint <HTTP_IP_ADDRESS>:<PORT>
 
 # UDS
 python3 -m pytest tests/integration/test_mcp_default.py -v --server-endpoint=unix:///tmp/jiuwenbox.sock
@@ -837,7 +837,7 @@ command failure propagation, timeout clamping, and concurrent sessions.
 Run the office-workload performance suite:
 
 ```bash
-./tests/test.sh performance --server-endpoint 127.0.0.1:8321
+./tests/test.sh performance --server-endpoint <HTTP_IP_ADDRESS>:<PORT>
 ```
 
 Tune sandbox count, per-sandbox concurrency, and per-task loop count:
@@ -847,7 +847,7 @@ Tune sandbox count, per-sandbox concurrency, and per-task loop count:
   --sandbox-count 2 \
   --concurrency 16 \
   --loop 8 \
-  --server-endpoint 127.0.0.1:8321
+  --server-endpoint <HTTP_IP_ADDRESS>:<PORT>
 ```
 
 The script maps these arguments to environment variables used by the performance
@@ -906,7 +906,7 @@ jiuwenbox sandbox rm "$ID" --yes
 jiuwenbox policy get "$ID"
 
 # Proxies
-jiuwenbox proxy create --prefix /openai --target https://api.openai.com --api-key sk-xxx
+jiuwenbox proxy create --prefix /openai --target https://api.openai.com --api-key "$OPENAI_API_KEY"
 jiuwenbox proxy logs openai --lines 50
 ```
 
@@ -914,7 +914,7 @@ Global flags:
 
 | Flag | Default | Env var | Description |
 | --- | --- | --- | --- |
-| `--base-url` | `http://127.0.0.1:8321` | `JIUWENBOX_URL` | Server endpoint. Accepts `http://host:port` or `unix:///abs/socket/path` |
+| `--base-url` | `http://<HTTP_IP_ADDRESS>:<PORT>` | `JIUWENBOX_URL` | Server endpoint. Accepts `http://host:port` or `unix:///abs/socket/path` |
 | `--api-token` | _unset_ | `JIUWENBOX_API_TOKEN` | Bearer token; required when the server has auth enabled |
 | `--timeout` | `30` | `JIUWENBOX_TIMEOUT` | HTTP timeout seconds |
 | `--verbose / -v` | off | – | Debug logging on stderr |

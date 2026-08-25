@@ -55,16 +55,15 @@ class SwarmSymphonyService:
         skills_root = config.paths.skills_root
         graph_dir = config.paths.graph_dir
         await self._repair_interrupted_build_state(graph_dir)
-        try:
-            llm_config = LLMConfig.from_default_model()
-        except (RuntimeError, ValueError):
-            llm_config = None
 
         def status() -> dict[str, Any]:
             payload = graph_status(
                 skills_root,
                 graph_dir,
-                llm_config=llm_config,
+                # Freshness follows the model identity captured by the published
+                # graph. The current default model is an online planning concern
+                # and must not make that graph stale merely because it changed.
+                llm_config=None,
                 symphony_config=config,
             ).to_dict()
             payload.update(_build_log_payload(graph_dir))
@@ -796,13 +795,19 @@ def _build_progress(entries: list[dict[str, Any]]) -> dict[str, Any]:
         status = "error"
     elif stage == "update.cancelled":
         status = "cancelled"
+    current = latest.get("current")
+    total = latest.get("total")
+    if stage == "graph.resolve.progress":
+        candidate_counts = _graph_resolve_candidate_counts(latest)
+        if candidate_counts is not None:
+            current, total = candidate_counts
     return {
         "stage": stage,
         "label": str(latest.get("label") or _BUILD_STAGE_LABELS.get(stage, stage)),
         "percent": _build_stage_percent(stage, latest, entries=entries),
         "status": status,
-        "current": latest.get("current"),
-        "total": latest.get("total"),
+        "current": current,
+        "total": total,
         "ts": latest.get("ts"),
     }
 
@@ -909,6 +914,20 @@ def _graph_resolve_percent(
 ) -> int:
     """Advance relation progress only after a matcher batch has completed."""
 
+    candidate_progress = [
+        counts
+        for candidate in entries
+        if candidate.get("stage") == "graph.resolve.progress"
+        if (counts := _graph_resolve_candidate_counts(candidate)) is not None
+    ]
+    if candidate_progress:
+        current, total = max(candidate_progress, key=lambda item: item[0] / item[1])
+        return _progress_between(
+            {"current": current, "total": total},
+            start=72,
+            end=84,
+        )
+
     completed: list[tuple[int, int]] = []
     for candidate in entries:
         if candidate.get("stage") != "graph.resolve.progress":
@@ -931,6 +950,17 @@ def _graph_resolve_percent(
         start=72,
         end=84,
     )
+
+
+def _graph_resolve_candidate_counts(entry: dict[str, Any]) -> tuple[int, int] | None:
+    try:
+        current = int(entry.get("completed_candidate_count") or 0)
+        total = int(entry.get("total_candidate_count") or 0)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    return max(0, min(current, total)), total
 
 
 def _progress_between(entry: dict[str, Any], *, start: int, end: int) -> int:

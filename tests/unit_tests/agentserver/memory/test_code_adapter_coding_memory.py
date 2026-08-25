@@ -4,15 +4,62 @@
 
 from types import SimpleNamespace
 
-from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
 from jiuwenswarm.server.runtime.agent_adapter import interface_code
 
 
-def test_configure_code_team_member_uses_same_fallback_for_workspace_and_rail(
+def test_coding_memory_rail_uses_spec_snapshot_and_rebuilds_on_embed_change(
     monkeypatch,
     tmp_path,
 ):
-    """The workspace node and rail must share one fallback project identity."""
+    persisted_config = {
+        "modes": {"code": {"memory": {"enabled": False}}},
+        "embed": {"embed_model": "persisted"},
+    }
+    monkeypatch.setattr(interface_code, "get_config", lambda: persisted_config)
+
+    observed_configs = []
+
+    def fake_create_coding_memory_rail(*, project_dir, agent_workspace_dir, config):
+        del project_dir, agent_workspace_dir
+        observed_configs.append(config)
+        return object()
+
+    monkeypatch.setattr(
+        interface_code,
+        "create_coding_memory_rail",
+        fake_create_coding_memory_rail,
+    )
+
+    adapter = interface_code.JiuwenSwarmCodeAdapter()
+    adapter._project_dir = str(tmp_path)
+    adapter._workspace_dir = str(tmp_path)
+    adapter._agent_workspace_dir = str(tmp_path / "agent")
+    first_snapshot = {
+        "modes": {"code": {"memory": {"enabled": True}}},
+        "embed": {"embed_model": "first"},
+    }
+    second_snapshot = {
+        "modes": {"code": {"memory": {"enabled": True}}},
+        "embed": {"embed_model": "second"},
+    }
+
+    with adapter._code_spec_config_scope(first_snapshot):
+        first = adapter._build_coding_memory_rail()
+    with adapter._code_spec_config_scope(first_snapshot):
+        reused = adapter._build_coding_memory_rail()
+    with adapter._code_spec_config_scope(second_snapshot):
+        rebuilt = adapter._build_coding_memory_rail()
+
+    assert first is reused
+    assert rebuilt is not first
+    assert observed_configs == [first_snapshot, second_snapshot]
+
+
+def test_configure_code_team_member_uses_fallback_for_rail_without_workspace_node(
+    monkeypatch,
+    tmp_path,
+):
+    """Coding Memory keeps the fallback project identity without a workspace node."""
     global_workspace = tmp_path / "global_agent_workspace"
     fallback_workspace = tmp_path / "fallback_project_workspace"
     observed_project_dirs = {}
@@ -61,6 +108,7 @@ def test_configure_code_team_member_uses_same_fallback_for_workspace_and_rail(
 
     def fake_create_coding_memory_rail(*, project_dir, agent_workspace_dir, config):
         observed_project_dirs["rail"] = project_dir
+        observed_project_dirs["agent_workspace"] = agent_workspace_dir
         return object()
 
     def build_only_coding_memory_rail(self, react_config, config_base, *, mode):
@@ -110,9 +158,6 @@ def test_configure_code_team_member_uses_same_fallback_for_workspace_and_rail(
     adapter.configure_team_member_agent(agent)
 
     expected_project_dir = str(fallback_workspace)
-    expected_memory_path = resolve_project_coding_memory_dir(
-        agent_workspace_dir=str(global_workspace),
-        project_dir=expected_project_dir,
-    )
     assert observed_project_dirs["rail"] == expected_project_dir
-    assert observed_project_dirs["workspace_path"] == expected_memory_path
+    assert observed_project_dirs["agent_workspace"] == str(global_workspace)
+    assert "workspace_path" not in observed_project_dirs

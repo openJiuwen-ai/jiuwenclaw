@@ -21,7 +21,9 @@ import uuid
 import httpx
 
 from jiuwenswarm.common.video_tool_profile import VIDEO_TOOL_CHANNEL_ID
-from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
+from jiuwenswarm.server.runtime.attachments.media_attachments import (
+    normalize_chat_media_attachments,
+)
 
 
 _MAX_AUDIO_CHARS = 2_000_000

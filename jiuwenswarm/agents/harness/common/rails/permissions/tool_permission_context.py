@@ -17,5 +17,11 @@ TOOL_PERMISSION_CHANNEL_ID: contextvars.ContextVar[str] = contextvars.ContextVar
 )
 
 
-__all__ = ["TOOL_PERMISSION_CHANNEL_ID"]
+# skills.rebuild 静默 follow-up：无 UI 审批，权限轨需自动放行。
+SKILLS_REBUILD_SILENT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "jiuwenswarm_skills_rebuild_silent",
+    default=False,
+)
 
+
+__all__ = ["SKILLS_REBUILD_SILENT", "TOOL_PERMISSION_CHANNEL_ID"]

@@ -497,6 +497,38 @@ def test_make_deep_agent_config_keeps_read_image_multimodal_without_vision_model
     assert deep_cfg.enable_read_image_multimodal is None
 
 
+@pytest.mark.parametrize(
+    ("configured_timeout", "expected_timeout"),
+    [(None, None), (7200, 7200.0)],
+)
+def test_make_deep_agent_config_resolves_completion_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_timeout: float | None,
+    expected_timeout: float | None,
+) -> None:
+    adapter = JiuWenSwarmDeepAdapter()
+    config_base = _make_config("teamleader")
+    config_base["react"].pop("completion_timeout", None)
+    if configured_timeout is not None:
+        config_base["react"]["completion_timeout"] = configured_timeout
+    monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
+
+    with patch.object(
+        interface_module.JiuWenSwarmDeepAdapter,
+        "_build_configured_subagents",
+        return_value=(None, False),
+    ):
+        deep_cfg = adapter._make_deep_agent_config(
+            model=object(),
+            config=config_base["react"],
+            agent_card=MagicMock(),
+            tool_cards=[],
+            rails=[],
+        )
+
+    assert deep_cfg.completion_timeout == expected_timeout
+
+
 def test_make_deep_agent_config_disables_read_image_multimodal_with_vision_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

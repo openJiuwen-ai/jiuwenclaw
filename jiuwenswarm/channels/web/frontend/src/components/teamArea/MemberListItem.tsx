@@ -41,6 +41,8 @@ export function MemberListItem({
     <button
       type="button"
       onClick={onClick}
+      data-testid="team-area-member-item"
+      data-variant={member.member_id}
       className={`flex w-full items-center gap-3 rounded-md text-left  ${
         compact ? 'p-2' : 'p-3'
       } ${
@@ -49,7 +51,7 @@ export function MemberListItem({
           : 'border border-transparent hover:bg-secondary'
       }`}
     >
-      <div className="relative shrink-0">
+      <div className="relative shrink-0" data-testid="team-area-member-item-avatar">
         <TeamMemberAvatar
           member={member.member_id}
           alt={displayName}
@@ -59,14 +61,17 @@ export function MemberListItem({
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className={`${compact ? 'text-xs' : 'text-sm'} truncate font-medium text-text`}>
+          <span
+            className={`${compact ? 'text-xs' : 'text-sm'} truncate font-medium text-text`}
+            data-testid="team-area-member-item-name"
+          >
             {displayName}
           </span>
         </div>
         {/* 第二行固定给 member_id：display name 由 leader 起，同队重名很常见
             （三个"通用协作专员"），而 @ 时要敲的正是 id。形态与输入框的 @ 下拉
             一致，两处对得上。主行因此用不消歧的纯展示名，避免和这里重复。 */}
-        <div className="mt-0.5 truncate text-xs text-text-muted">
+        <div className="mt-0.5 truncate text-xs text-text-muted" data-testid="team-area-member-item-id">
           @{member.member_id}
         </div>
       </div>
@@ -109,7 +114,10 @@ export function MemberListItem({
               transform="rotate(-90 16 16)"
             />
           </svg>
-          <span className="absolute inset-0 flex items-center justify-center text-[10px] font-medium text-text">
+          <span
+            className="absolute inset-0 flex items-center justify-center text-[10px] font-medium text-text"
+            data-testid="team-area-member-item-progress-count"
+          >
             {taskProgress.completed}/{taskProgress.total}
           </span>
         </div>

@@ -7,6 +7,28 @@
 
 from typing import TypedDict, NotRequired
 
+# ── ``plan_entry_source`` 字面量契约常量 ──
+# 这些字面量是前后端共享的硬契约：
+# - 后端 ``AgentWebSocketServer._is_explicit_plan_entry_request`` 只认这些字面量
+#   （通过 ``_PLAN_ENTRY_SOURCES`` 间接引用本常量）；
+# - TUI ``app-state.ts`` ``pendingPlanEntrySource`` 与 Web 前端
+#   ``useWebSocket.ts`` ``resolvePlanEntryPayload`` 序列化成 ``plan_entry_source``
+#   字段，必须使用同名字面量。
+# 改动这些取值前先跑 ``tests/unit_tests/test_plan_entry_source_contract.py``。
+PLAN_ENTRY_SOURCE_SLASH_COMMAND = "slash_command"
+"""TUI 的 ``/plan`` 命令产出的 entry source。"""
+
+PLAN_ENTRY_SOURCE_PLAN_TOGGLE = "plan_toggle"
+"""Web 用户手动打开 Plan 开关的那一条消息产出的 entry source。"""
+
+PLAN_ENTRY_SOURCES: frozenset[str] = frozenset(
+    {
+        PLAN_ENTRY_SOURCE_SLASH_COMMAND,
+        PLAN_ENTRY_SOURCE_PLAN_TOGGLE,
+    }
+)
+"""``plan_entry_source`` 字段的合法取值集合（防重入闸门只认这几种）。"""
+
 
 class ChatSendParams(TypedDict, total=False):
     """chat.send 参数契约（TypedDict，供类型标注与文档）。
@@ -19,10 +41,16 @@ class ChatSendParams(TypedDict, total=False):
     - mode: 运行模式（agent.plan / agent.fast / code.normal / team 等）
     - attachments: 附件列表（@file 等）
     - files: 文件更新字典（传统字段，逐步迁出到 attachments）
+    - agent_template_name: 当前会话期望专家名；缺失保持，非空 load/切换，"" 卸载当前专家。
+    - agent_group_name: 首次 Team 构建时选择的专家团包；会话建立后不可切换。
+    - plugin_names: 当前会话期望插件名全集；缺失保持，list[str] 差量同步，[] 卸载全部插件。
     """
 
     content: str
     """用户消息正文（主字段）。保留 /skill 等标记原样，不剥离。"""
+
+    message: NotRequired[str]
+    """创建/修改 Skill 等场景的约定字段，与 content 等价。"""
 
     query: str
     """DEPRECATED: 历史双发字段，当前与 content 同值。
@@ -37,6 +65,13 @@ class ChatSendParams(TypedDict, total=False):
     - 语义：当前为 prompt 提示（塞入 user_message_context["skills_to_use"]），
             模型可见但非强制。真正强制生效需 A3 阶段（SkillSelectionRail）。
     - 空列表或缺失：不指定 skill，agent 自主判断。
+    - 创建/修改 Skill：固定传 ``["skill-creator"]``（所有 Skill Creator 的统一入口）。
+    """
+
+    metadata: NotRequired[dict]
+    """请求级元数据。创建/修改 Skill 时含 ``scene``（create_skill|edit_skill）、
+    可选 ``target_skill``，以及编辑场景可选 ``target_skill_type``
+    （``skill`` / ``swarm_skill`` / ``multimodal_skill``）。
     """
 
     mode: NotRequired[str]
@@ -63,8 +98,24 @@ class ChatSendParams(TypedDict, total=False):
     supports_user_interaction: NotRequired[bool]
     """客户端是否能处理 ask_user 等用户交互。缺省为 True，兼容现有客户端。"""
 
+    eternal_conversation_enabled: NotRequired[bool]
+    """DEPRECATED：旧 Session 的一次性迁移字段。
+
+    新客户端必须在 ``session.create`` 发送 ``persist_session``；本字段不能覆盖
+    已初始化 Session 的权威值。
+    """
+
     plan_entry_source: NotRequired[str]
-    """plan 模式入口来源（internal use）。"""
+    """plan 模式入口来源（internal use）。
+
+    合法取值见模块级常量 :data:`PLAN_ENTRY_SOURCES`：
+    ``PLAN_ENTRY_SOURCE_SLASH_COMMAND``（TUI ``/plan``）或
+    ``PLAN_ENTRY_SOURCE_PLAN_TOGGLE``（Web 手动打开开关）。
+    前端（TUI ``app-state.ts`` / Web ``useWebSocket.ts``）与后端
+    ``AgentWebSocketServer._is_explicit_plan_entry_request`` 必须引用同名字面量，
+    否则防重入闸门失效。详见
+    ``tests/unit_tests/test_plan_entry_source_contract.py``。
+    """
 
     answers: NotRequired[list]
     """用户交互问答（interrupt resume 场景）。"""
@@ -116,3 +167,12 @@ class ChatSendParams(TypedDict, total=False):
 
     cron: NotRequired[dict]
     """定时任务信息（由 Gateway cron scheduler 注入）。"""
+
+    agent_template_name: NotRequired[str]
+    """Desired expert package name for this turn ("" clears)."""
+
+    agent_group_name: NotRequired[str]
+    """AgentGroup package selected for the Team session (non-empty, immutable)."""
+
+    plugin_names: NotRequired[list[str]]
+    """Desired plugin package names for this turn ([] clears all)."""

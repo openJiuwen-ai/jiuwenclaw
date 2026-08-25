@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import { Copy, Download, Ellipsis, ImageDown } from 'lucide-react';
+import { Copy, Ellipsis, ImageDown } from 'lucide-react';
 import { useEffect, useRef, useState, type HTMLAttributes, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { type DiagramExportConfig, useDiagramExportActions } from './useDiagramExportActions';
@@ -104,18 +104,20 @@ function DiagramMoreMenu({ title, items }: DiagramMoreMenuProps): JSX.Element {
   }, [open]);
 
   return (
-    <div className="diagram-more" ref={rootRef}>
+    <div className="diagram-more" ref={rootRef} data-testid="markdown-diagram-more">
       <ToolbarButton title={title} ariaHasPopup="menu" ariaExpanded={open} onClick={() => setOpen(current => !current)}>
         <Ellipsis size={17} />
       </ToolbarButton>
       {open && (
-        <div className="diagram-menu" role="menu">
+        <div className="diagram-menu" role="menu" data-testid="markdown-diagram-menu">
           {items.map(item => (
             <button
               key={item.id}
               type="button"
               className="diagram-menu__item"
               role="menuitem"
+              data-testid="markdown-diagram-menu-item"
+              data-variant={item.id}
               disabled={item.disabled}
               onClick={() => {
                 setOpen(false);
@@ -146,16 +148,9 @@ export function DiagramViewer({
   ...rootProps
 }: DiagramViewerProps): JSX.Element {
   const { t } = useTranslation();
-  const { feedback, copyCode, downloadSource, downloadImage } = useDiagramExportActions(exportConfig);
+  const { feedback, copyCode, downloadImage } = useDiagramExportActions(exportConfig);
   const downloadsDisabled = exportConfig.downloadEnabled === false;
   const menuItems: DiagramMenuItem[] = [
-    {
-      id: 'download-source',
-      icon: <Download size={17} />,
-      label: t('diagram.downloadSource'),
-      disabled: downloadsDisabled,
-      onSelect: () => void downloadSource(),
-    },
     {
       id: 'download-image',
       icon: <ImageDown size={17} />,
@@ -172,16 +167,16 @@ export function DiagramViewer({
   ];
 
   const feedbackStatus = feedback && (
-    <span className="diagram-toolbar-status" role="status" aria-live="polite">
+    <span className="diagram-toolbar-status" role="status" aria-live="polite" data-testid="markdown-diagram-feedback">
       {feedback}
     </span>
   );
 
   return (
-    <div {...rootProps} className={clsx('diagram-container', className)} data-markdown-block="wide">
-      <div className="diagram-container__toolbar">
-        <div className="diagram-toolbar-start">
-          <div className="diagram-view-toggle">
+    <div {...rootProps} className={clsx('diagram-container', className)} data-markdown-block="wide" data-testid="markdown-diagram">
+      <div className="diagram-container__toolbar" data-testid="markdown-diagram-toolbar">
+        <div className="diagram-toolbar-start" data-testid="markdown-diagram-toolbar-start">
+          <div className="diagram-view-toggle" data-testid="markdown-diagram-view-toggle">
             <TogglePill active={viewMode === 'image'} disabled={imageViewDisabled} onClick={() => onViewModeChange('image')}>
               {t('diagram.image')}
             </TogglePill>
@@ -193,6 +188,7 @@ export function DiagramViewer({
             <span
               role="status"
               aria-live="polite"
+              data-testid="markdown-diagram-status"
               className={clsx('diagram-toolbar-status', {
                 'diagram-toolbar-status--error': statusTone === 'danger',
                 'diagram-toolbar-status--warning': statusTone === 'warning',
@@ -203,7 +199,7 @@ export function DiagramViewer({
           )}
           {feedbackPosition === 'start' && feedbackStatus}
         </div>
-        <div className="diagram-toolbar-actions">
+        <div className="diagram-toolbar-actions" data-testid="markdown-diagram-toolbar-actions">
           {feedbackPosition === 'end' && feedbackStatus}
           {toolbarActions.map(action => (
             <ToolbarButton key={action.id} title={action.title} onClick={action.onClick}>

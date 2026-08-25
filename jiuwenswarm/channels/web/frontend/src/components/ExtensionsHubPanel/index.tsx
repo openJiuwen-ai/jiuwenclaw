@@ -54,26 +54,28 @@ export function ExtensionsHubPanel({ sessionId, isConnected }: ExtensionsHubPane
   const visibleTabs = tabs.filter((tab) => !tab.hidden);
 
   return (
-    <div className="extensions-hub-panel">
+    <div className="extensions-hub-panel" data-testid="extensions-hub-panel">
       {/* Tab Header - only show when multiple tabs visible */}
-      <div className="extensions-hub-panel__header">
-        <div className="extensions-hub-panel__tabs">
+      <div className="extensions-hub-panel__header" data-testid="extensions-hub-panel-header">
+        <div className="extensions-hub-panel__tabs" data-testid="extensions-hub-panel-tabs">
           {visibleTabs.map((tab) => (
             <button
               type="button"
               key={tab.key}
               onClick={() => setActiveTab(tab.key)}
               className={`extensions-hub-panel__tab ${activeTab === tab.key ? 'extensions-hub-panel__tab--active' : ''}`}
+              data-testid="extensions-hub-panel-tab"
+              data-variant={tab.key}
             >
               {tab.icon}
-              <span>{tab.label}</span>
+              <span data-testid="extensions-hub-panel-tab-label" data-variant={tab.key}>{tab.label}</span>
             </button>
           ))}
         </div>
       </div>
 
       {/* Tab Content */}
-      <div className="extensions-hub-panel__content">
+      <div className="extensions-hub-panel__content" data-testid="extensions-hub-panel-content">
         {activeTab === 'rails' && (
           <ExtensionsPanel isConnected={isConnected} />
         )}

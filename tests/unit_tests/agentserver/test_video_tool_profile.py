@@ -33,7 +33,7 @@ async def test_video_tool_channel_uses_full_core_agent_profile(monkeypatch) -> N
     assert agent_key == VIDEO_TOOL_CHANNEL_ID
     assert mode == "agent"
     assert sub_mode is None
-    assert config == {}
+    assert config == {"channel_id": VIDEO_TOOL_CHANNEL_ID}
 
 
 @pytest.mark.asyncio

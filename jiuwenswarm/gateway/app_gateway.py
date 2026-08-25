@@ -48,6 +48,7 @@ from jiuwenswarm.common.security.ws_origin import get_header_value
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
+    ensure_default_builtin_skills,
     get_cron_jobs_path,
     get_env_file,
     get_root_dir,
@@ -64,9 +65,20 @@ _config_file = _workspace_dir / "config" / "config.yaml"
 _new_workspace = _workspace_dir / "agent" / "workspace"
 _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 
-# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
-if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
+# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration),
+# or if the preset MCP package dir isn't seated yet (an install predating the
+# mcp_builtins zip-seed feature would otherwise skip an already-initialized
+# workspace, leaving mcp_builtins absent and mcp.list empty).
+_mcp_builtins_dir = _new_workspace / "mcp" / "mcp_builtins"
+config_missing = not _config_file.exists()
+workspace_migration_needed = _old_workspace.exists() and not _new_workspace.exists()
+mcp_builtins_missing = not _mcp_builtins_dir.is_dir()
+
+if config_missing or workspace_migration_needed or mcp_builtins_missing:
     prepare_workspace(overwrite=False)
+
+# 幂等地补齐默认内置技能（对已有工作区也生效，新增默认技能时自动安装）
+ensure_default_builtin_skills()
 
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():
@@ -196,7 +208,8 @@ def _inject_session_work_mode(msg: Message) -> None:
     resolved_work_mode = binding.work_mode
 
     # 注意:TUI 通道的 session.create 不走 forward 路径(不在 CLI_FORWARD_REQ_METHODS),
-    # TUI 预解析在 tui_connect.py 的 _session_create 中通过 find_or_create_code_project_for_tui_params 完成。
+    # TUI 的 cwd→code project 绑定由 AgentServer 侧在 SESSION_CREATE 处理时通过
+    # find_or_create_code_project_for_tui_params 完成（经 E2A 转发后解析）。
     # 此处仅处理 WEB/ACP 通道的 work_mode 绑定注入。
 
     params["project_id"] = resolved_project_id
@@ -1507,6 +1520,7 @@ async def _run(
         web_host: str,
         web_port: int,
         web_path: str,
+        web_dual_protocol: bool = True,
 ) -> None:
     from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChannel, A2AChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect import DingTalkChannel, \
@@ -1861,8 +1875,14 @@ async def _run(
 
     web_channel = None
     tui_channel = None
-    web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
-    web_channel = WebChannel(web_config, _DummyBus())
+    web_config = WebChannelConfig(
+        enabled=True,
+        host=web_host,
+        port=web_port,
+        path=web_path,
+        dual_protocol=web_dual_protocol,
+    )
+    web_channel = WebChannel(web_config, _DummyBus(), agent_client=client)
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
     # 1. 让 ``_mark_git_watcher_dirty`` 能通过 ``channel.git_watcher_registry`` 唤醒轮询
@@ -1873,6 +1893,25 @@ async def _run(
     _git_watcher_registry = get_git_diff_watcher_registry()
     web_channel.git_watcher_registry = _git_watcher_registry
     _git_watcher_registry.set_channel(web_channel)
+
+    # Git watch 状态计算委托：diff 状态、项目解析与工作目录访问都在目标
+    # AgentServer 注入目录完成，Gateway 只做指纹比对与事件推送（方案 §10.6 C）。
+    async def _git_diff_status_fetcher(request: dict):
+        from jiuwenswarm.gateway.routing.e2a_proxy import fetch_git_diff_status
+
+        hunk_paths = request.get("hunk_paths")
+        return await fetch_git_diff_status(
+            agent_client=client,
+            project_id=request.get("project_id"),
+            session_id=request.get("session_id") or None,
+            include_files=request.get("include_files"),
+            include_hunks=request.get("include_hunks"),
+            hunk_paths=list(hunk_paths) if hunk_paths else None,
+            user_id=request.get("user_id"),
+            channel_id="web",
+        )
+
+    _git_watcher_registry.set_diff_status_fetcher(_git_diff_status_fetcher)
 
     _register_web_handlers(
         WebHandlersBindParams(
@@ -2709,6 +2748,36 @@ async def _run(
         name="agent-prewarm-periodic-sync",
     )
 
+    # ---------- Opencode Zen 免费模型预热 ----------
+    # Gateway 进程独立拉取 Zen 免费模型到内存缓存（_models_list 在此进程处理，
+    # 与 AgentServer 内存不共享，故各自预热）。失败留空，不阻断启动。
+    try:
+        from jiuwenswarm.server.runtime.opencode_zen import (
+            warm_zen_free_models,
+            set_main_event_loop,
+            register_models_ready_callback,
+        )
+        # 注册 event loop，供后台重试线程通过 call_soon_threadsafe 调度回调
+        set_main_event_loop(asyncio.get_running_loop())
+
+        # 注册回调：后台重试成功后广播 models.updated 事件，前端自动刷新模型列表
+        async def _on_zen_models_ready():
+            try:
+                web_channel = channel_manager.get_channel("web")
+                if web_channel:
+                    await web_channel.broadcast_event("models.updated", {})
+                    logger.info("[App] broadcasted models.updated: zen free models ready")
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[App] broadcast models.updated failed: %s", e)
+
+        def _models_ready_cb():
+            asyncio.create_task(_on_zen_models_ready())
+
+        register_models_ready_callback(_models_ready_cb)
+        await warm_zen_free_models(reason="gateway-startup")
+    except Exception as e:  # noqa: BLE001 - 兜底
+        logger.warning("[App] zen free models warm failed (non-fatal): %s", e)
+
     await channel_manager.start_dispatch()
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
     # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。
@@ -2966,16 +3035,36 @@ def main() -> None:
     web_host = args.host or os.getenv("WEB_HOST", "127.0.0.1")
     web_port = args.port or int(os.getenv("WEB_PORT", "19000"))
     web_path = args.web_path or os.getenv("WEB_PATH", "/ws")
+    _dual_raw = os.getenv("WEB_DUAL_PROTOCOL", "1").strip().lower()
+    web_dual_protocol = _dual_raw not in {"0", "false", "no", "off"}
 
     install_async_dump_handler("gateway")
-    asyncio.run(
-        _run(
-            agent_server_url=agent_server_url,
-            web_host=web_host,
-            web_port=web_port,
-            web_path=web_path,
+
+    # Per-workspace singleton lock: prevents a second Gateway process from
+    # serving the same workspace (two CronSchedulerService instances over one
+    # cron_jobs.json => duplicate cron executions).
+    from jiuwenswarm.instance_manager.lock import GatewayLock
+
+    gateway_lock = GatewayLock(get_user_workspace_dir())
+    if not gateway_lock.acquire():
+        logger.error(
+            "[App] Another Gateway is already serving this workspace; "
+            "refusing duplicate instance (lock: %s)",
+            gateway_lock.lock_path,
         )
-    )
+        raise SystemExit(1)
+    try:
+        asyncio.run(
+            _run(
+                agent_server_url=agent_server_url,
+                web_host=web_host,
+                web_port=web_port,
+                web_path=web_path,
+                web_dual_protocol=web_dual_protocol,
+            )
+        )
+    finally:
+        gateway_lock.release()
 
 
 if __name__ == "__main__":

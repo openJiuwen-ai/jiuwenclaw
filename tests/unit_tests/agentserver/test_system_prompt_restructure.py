@@ -1,13 +1,19 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.core.foundation.llm import Model
+from openjiuwen.core.foundation.llm import Model, ToolMessage
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
+    ModelCallInputs,
     ToolCallInputs,
 )
+from openjiuwen.core.single_agent.ability_manager import AbilityExecutionError
+from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
@@ -32,6 +38,9 @@ from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import Respons
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyOrchestrationRail,
+)
+from jiuwenswarm.agents.harness.common.tools.symphony_toolkits import (
+    SymphonyToolkit,
 )
 
 
@@ -141,7 +150,7 @@ def _tool_call_ctx(
         name=tool_name,
         arguments=dict(args),
     )
-    return SimpleNamespace(
+    ctx = SimpleNamespace(
         inputs=ToolCallInputs(
             tool_call=tool_call,
             tool_name=tool_name,
@@ -151,6 +160,9 @@ def _tool_call_ctx(
         extra={} if extra is None else extra,
         exception=None,
     )
+    ctx.force_finished = []
+    ctx.request_force_finish = ctx.force_finished.append
+    return ctx
 
 
 def test_build_agent_identity_prompt_contains_stable_identity_and_task_strategy():
@@ -161,7 +173,7 @@ def test_build_agent_identity_prompt_contains_stable_identity_and_task_strategy(
     assert "# JiuwenSwarm 内部数据" not in prompt
     assert "## 输出文件放置规范" not in prompt
     assert "## 文件发送" not in prompt
-    assert "## Symphony Orchestration" not in prompt
+    assert "## Skill Orchestration Contract" not in prompt
     assert "`symphony_compose_graph`" not in prompt
     assert "# 消息说明" not in prompt
 
@@ -228,9 +240,9 @@ async def test_symphony_orchestration_rail_respects_config_snapshot():
 
     enabled_prompt = enabled_builder.build()
     disabled_prompt = disabled_builder.build()
-    assert "## Symphony Orchestration" in enabled_prompt
+    assert "## Skill Orchestration Contract" in enabled_prompt
     assert "`symphony_compose_graph`" in enabled_prompt
-    assert "## Symphony Orchestration" not in disabled_prompt
+    assert "## Skill Orchestration Contract" not in disabled_prompt
     assert "`symphony_compose_graph`" not in disabled_prompt
 
 
@@ -258,11 +270,234 @@ async def test_symphony_orchestration_rail_injects_when_tool_visible(
     await rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "## Symphony Orchestration" in prompt
+    assert "## Skill Orchestration Contract" in prompt
     assert "`symphony_compose_graph`" in prompt
     assert "exact identifiers or names" in prompt
-    assert "Do not omit this field" in prompt
-    assert "skill_branch_explore" not in prompt
+    assert "when ANY of these conditions is true" in prompt
+    assert "two or more specialized capabilities" in prompt
+    assert "identified, inspected, selected, invoked, or recommended" in prompt
+    assert "Calling `skill_branch_explore` creates a mandatory orchestration follow-up" in prompt
+    assert "never pass every Skill returned by exploration" in prompt
+    assert "still call `symphony_compose_graph`" in prompt
+    assert "none of the three trigger conditions is true" in prompt
+    assert "Symphony" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "operation", "language", "expected_content"),
+    [
+        (
+            "symphony_compose_graph",
+            "plan",
+            "cn",
+            "技能较多时，技能图谱构建时间可能较长，本次会话内构建已超时。请前往「我的技能」>「技能图谱」，点击「增量构建」并等待构建完成；完成后请重新发送任务。为避免再次超时，本轮不会重复调用图谱构建。",
+        ),
+        (
+            "symphony_refresh_graph",
+            "refresh_graph",
+            "en",
+            "With many skills, building the Skill Graph can take a while",
+        ),
+    ],
+)
+async def test_symphony_timeout_is_terminal_manual_build_result(
+    tool_name,
+    operation,
+    language,
+    expected_content,
+    monkeypatch,
+):
+    async def blocking_handler(*args, **kwargs):
+        del args, kwargs
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.symphony_toolkits.load_symphony_config",
+        lambda config=None: SimpleNamespace(enabled=True),
+    )
+    monkeypatch.setattr(
+        SymphonyToolkit,
+        "_resolve_timeout_s",
+        staticmethod(lambda default_s=1800.0: 0.01),
+    )
+    toolkit = SymphonyToolkit(
+        SimpleNamespace(plan=blocking_handler, refresh_graph=blocking_handler)
+    )
+    raw_timeout_result = (
+        await toolkit.plan("compose")
+        if tool_name == "symphony_compose_graph"
+        else await toolkit.refresh_graph()
+    )
+    builder = SystemPromptBuilder(language=language)
+    agent = _FakeAgent(builder)
+    rail = SymphonyOrchestrationRail()
+    rail.init(agent)
+    ctx = _tool_call_ctx(
+        tool_name,
+        {"query": "compose"},
+        result=raw_timeout_result,
+    )
+
+    await rail.after_tool_call(ctx)
+
+    result = ctx.inputs.tool_result
+    assert result["direct_display"] is True
+    assert result["continue_after_display"] is False
+    assert result["followup_action"] == "manual_graph_build"
+    assert result["content"] == expected_content or expected_content in result["content"]
+    assert result["operation"] == operation
+    assert result["timeout_s"] == 0.01
+    assert ctx.extra["symphony_graph_build_timeout"] is True
+    assert ctx.force_finished == [
+        {"output": result["content"], "result_type": "answer"}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "operation", "timeout_s"),
+    [
+        ("symphony_compose_graph", "plan", 3600.0),
+        ("symphony_refresh_graph", "refresh_graph", 3600.0),
+    ],
+)
+async def test_symphony_outer_timeout_forces_manual_build(
+    tool_name,
+    operation,
+    timeout_s,
+):
+    rail = SymphonyOrchestrationRail()
+    ctx = _tool_call_ctx(tool_name, {})
+    timeout = TimeoutError("hard timeout")
+    ctx.exception = AbilityExecutionError(
+        status=StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+        msg=f"Tool '{tool_name}' timed out after {timeout_s}s",
+        cause=timeout,
+        tool_message=ToolMessage(
+            content=f"Tool '{tool_name}' timed out after {timeout_s}s",
+            tool_call_id="timeout-call",
+        ),
+    )
+
+    await rail.on_tool_exception(ctx)
+
+    result = ctx.inputs.tool_result
+    assert result["operation"] == operation
+    assert result["timeout_s"] == timeout_s
+    assert result["followup_action"] == "manual_graph_build"
+    assert result["continue_after_display"] is False
+    assert ctx.force_finished
+    assert isinstance(ctx.exception, AbilityExecutionError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exception",
+    [
+        TimeoutError("raw timeout"),
+        AbilityExecutionError(
+            status=StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+            msg="Tool execution error: current failure",
+            cause=RuntimeError("wrapper"),
+            tool_message=ToolMessage(
+                content="Tool 'symphony_compose_graph' timed out after 3600.0s",
+                tool_call_id="timeout-call",
+            ),
+        ),
+        AbilityExecutionError(
+            status=StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+            msg="wrong tool timeout",
+            cause=TimeoutError("hard timeout"),
+            tool_message=ToolMessage(
+                content="Tool 'symphony_refresh_graph' timed out after 3600.0s",
+                tool_call_id="timeout-call",
+            ),
+        ),
+    ],
+)
+async def test_symphony_outer_timeout_rejects_non_ability_manager_shapes(exception):
+    if isinstance(exception, AbilityExecutionError) and isinstance(
+        exception.__cause__, RuntimeError
+    ):
+        exception.__cause__.__cause__ = TimeoutError("nested timeout")
+    rail = SymphonyOrchestrationRail()
+    ctx = _tool_call_ctx("symphony_compose_graph", {})
+    ctx.exception = exception
+
+    await rail.on_tool_exception(ctx)
+
+    assert ctx.inputs.tool_result["success"] is True
+    assert ctx.force_finished == []
+
+
+@pytest.mark.asyncio
+async def test_symphony_timeout_removes_graph_tools_and_orchestration_prompt():
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    rail = SymphonyOrchestrationRail(
+        config_base={"symphony": {"enabled": True}},
+    )
+    rail.init(agent)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(
+            tools=[
+                {"function": {"name": "symphony_compose_graph"}},
+                SimpleNamespace(name="symphony_refresh_graph"),
+                SimpleNamespace(name="other_tool"),
+            ]
+        ),
+        session=_FakeSession(),
+        extra={},
+    )
+
+    timed_out_tool_ctx = _tool_call_ctx(
+        "symphony_compose_graph",
+        {"query": "compose"},
+        extra=ctx.extra,
+        result={"success": False, "reason": "graph_build_timeout"},
+    )
+    await rail.after_tool_call(timed_out_tool_ctx)
+
+    await rail.before_model_call(ctx)
+
+    assert [rail._model_tool_name(tool) for tool in ctx.inputs.tools] == ["other_tool"]
+    assert "## Skill Orchestration Contract" not in builder.build()
+
+    next_invoke_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(
+            tools=[
+                SimpleNamespace(name="symphony_compose_graph"),
+                SimpleNamespace(name="symphony_refresh_graph"),
+            ]
+        ),
+        session=_FakeSession(),
+        extra={},
+    )
+    await rail.before_model_call(next_invoke_ctx)
+
+    assert [rail._model_tool_name(tool) for tool in next_invoke_ctx.inputs.tools] == [
+        "symphony_compose_graph",
+        "symphony_refresh_graph",
+    ]
+    assert "## Skill Orchestration Contract" in builder.build()
+
+
+@pytest.mark.asyncio
+async def test_symphony_non_timeout_failure_does_not_force_finish():
+    rail = SymphonyOrchestrationRail()
+    ctx = _tool_call_ctx("symphony_compose_graph", {})
+    ctx.exception = AbilityExecutionError(
+        status=StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+        msg="service unavailable",
+    )
+
+    await rail.on_tool_exception(ctx)
+
+    assert ctx.inputs.tool_result["success"] is True
+    assert ctx.force_finished == []
 
 
 @pytest.mark.asyncio
@@ -424,7 +659,7 @@ async def test_symphony_orchestration_rail_clears_when_disabled(
     rail.init(agent)
     await rail.before_model_call(ctx)
 
-    assert "## Symphony Orchestration" not in builder.build()
+    assert "## Skill Orchestration Contract" not in builder.build()
 
 
 def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
@@ -566,21 +801,28 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     assert [item.id for item in items] == ["session.sess1.runtime.setting"]
     rendered = agent.prompt_attachment_manager.render(items)
     assert "model-x" in rendered
+    assert "Current channel: web" in rendered
     assert "Always respond in English" not in prompt
     assert "# Browser Tool Policy" not in prompt
     assert "## Browser Subagent Rules" not in prompt
 
 
 @pytest.mark.asyncio
-async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
+async def test_browser_policy_is_injected_only_when_browser_agent_is_loaded():
     rail = JiuWenSwarmDeepAdapter._build_subagent_rail()
-    if rail is None:
-        pytest.skip("SubagentRail is unavailable with the installed openjiuwen API")
+    assert rail is not None
     rail.tools = [object()]
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
 
+    browser_agent = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser",
+    )
+    agent = SimpleNamespace(
+        deep_config=SimpleNamespace(subagents=[browser_agent])
+    )
     ctx = AgentCallbackContext(
-        agent=SimpleNamespace(),
+        agent=agent,
         inputs=None,
         session=_FakeSession(),
         extra={},
@@ -588,23 +830,23 @@ async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
     await rail.before_model_call(ctx)
 
     task_section = rail.system_prompt_builder.get_section("task_tool")
-    if task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in task_section.content["en"]
-    assert "## task_tool" not in task_section.content["en"]
+    assert task_section is not None
     assert "## Browser Subagent Rules" in task_section.content["en"]
     assert 'set `subagent_type` to `"browser_agent"`' in task_section.content["en"]
     assert not rail.system_prompt_builder.has_section("browser_tool_policy")
     assert "浏览器子智能体规则" in build_browser_task_prompt("cn")
 
-    rail.set_channel("tui")
+    agent.deep_config.subagents = [
+        SubAgentConfig(
+            agent_card=AgentCard(name="explore_agent", description="explore"),
+            system_prompt="explore",
+        )
+    ]
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
     await rail.before_model_call(ctx)
-    non_web_task_section = rail.system_prompt_builder.get_section("task_tool")
-    if non_web_task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in non_web_task_section.content["en"]
-    assert "## Browser Subagent Rules" not in non_web_task_section.content["en"]
+    unloaded_task_section = rail.system_prompt_builder.get_section("task_tool")
+    assert unloaded_task_section is not None
+    assert "## Browser Subagent Rules" not in unloaded_task_section.content["en"]
 
 
 def test_task_planning_tools_remain_enabled_without_todo_prompt_section():
@@ -948,7 +1190,14 @@ async def test_skill_retrieval_prompt_hides_legacy_list_skill(monkeypatch):
     assert agent.ability_manager.get("list_skill") is None
     prompt = builder.build()
     assert "旧 list_skill 提示" not in prompt
-    assert "Agentic 技能检索" in prompt
+    assert "Agentic 技能检索" not in prompt
+    attachments = await agent.prompt_attachment_manager.list_by_filter(
+        session_id="sess1",
+        section="skill_retrieval",
+    )
+    assert [item.content for item in attachments] == [
+        "# Agentic 技能检索\n使用 skill_branch_explore。"
+    ]
 
     await rail.after_model_call(ctx)
 
@@ -1002,7 +1251,14 @@ async def test_skill_retrieval_prompt_hides_native_skill_prompt_after_skill_use_
     prompt = builder.build()
     assert "需要时先调用 list_skill 查看可用技能" not in prompt
     assert "# 技能" not in prompt
-    assert "Agentic 技能检索" in prompt
+    assert "Agentic 技能检索" not in prompt
+    attachments = await agent.prompt_attachment_manager.list_by_filter(
+        session_id="sess1",
+        section="skill_retrieval",
+    )
+    assert [item.content for item in attachments] == [
+        "# Agentic 技能检索\n使用 skill_branch_explore。"
+    ]
     assert [tool.name for tool in ctx.inputs.tools] == ["skill_branch_explore"]
 
 
@@ -1202,27 +1458,39 @@ async def test_deep_adapter_skill_retrieval_prompt_rail_sync_hot_toggles(monkeyp
     assert unregistered == [rail]
 
 
-def test_code_adapter_skill_retrieval_sync_respects_configured_tools(monkeypatch):
-    from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+def test_code_adapter_skill_retrieval_sync_respects_spec_snapshot():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
 
     adapter = JiuwenSwarmCodeAdapter()
-    monkeypatch.setattr(
-        interface_module,
-        "is_skill_retrieval_enabled",
-        lambda: True,
-    )
 
     assert (
         adapter._skill_retrieval_tools_enabled_for_runtime(
-            {"modes": {"code": {"tools": ["skill_toolkit"]}}}
+            {
+                "modes": {"code": {"tools": ["skill_toolkit"]}},
+                "symphony": {"skill_retrieval": {"enabled": True}},
+            }
         )
         is False
     )
     assert (
         adapter._skill_retrieval_tools_enabled_for_runtime(
-            {"modes": {"code": {"tools": ["skill_toolkit", "skill_retrieval"]}}}
+            {
+                "modes": {"code": {"tools": ["skill_toolkit", "skill_retrieval"]}},
+                "symphony": {"skill_retrieval": {"enabled": True}},
+            }
         )
         is True
+    )
+    assert (
+        adapter._skill_retrieval_tools_enabled_for_runtime(
+            {
+                "modes": {"code": {"tools": ["skill_retrieval"]}},
+                "symphony": {"skill_retrieval": {"enabled": False}},
+            }
+        )
+        is False
     )
 
 
@@ -1312,7 +1580,10 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
     ):
         subagents, _ = adapter.build_configured_subagents(model, config)
 
-    assert subagents == ["research_spec", "browser_spec"]
+    assert [
+        item.agent_card.name if hasattr(item, "agent_card") else item
+        for item in subagents
+    ] == ["statusline-setup", "research_spec", "browser_spec"]
     # sys_operation is forwarded so the subagent shares the parent's filesystem
     # boundary; this bare adapter has none configured.
     mock_research.assert_called_once_with(
@@ -1351,8 +1622,12 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
     ):
         subagents, _ = adapter.build_configured_subagents(model, config)
 
-    # DeepAdapter: no research_agent configured, browser enabled
-    assert subagents == ["browser_spec"]
+    # DeepAdapter: no research_agent configured; built-in status-line setup and
+    # browser remain available.
+    assert [
+        item.agent_card.name if hasattr(item, "agent_card") else item
+        for item in subagents
+    ] == ["statusline-setup", "browser_spec"]
     mock_research.assert_not_called()
     mock_browser.assert_called_once_with(
         model,
