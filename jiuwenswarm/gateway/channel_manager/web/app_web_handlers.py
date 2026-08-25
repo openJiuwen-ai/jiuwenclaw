@@ -98,6 +98,7 @@ from jiuwenswarm.common.reasoning_injector import (
     build_reasoning_model_request_kwargs,
     core_has_context_window_field,
 )
+from jiuwenswarm.common.context_window import resolve_context_window_tokens
 from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
 from jiuwenswarm.common.utils import (
     get_env_file,
@@ -3084,25 +3085,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             models = get_default_models(config)
             result = []
             active_model = ""
-            # 显式配置的上下文窗口上限（react.context_engine_config.context_window_tokens）
-            # 优先级高于按模型名解析，与 AgentServer 侧 ContextEngine 行为保持一致
-            cec = (config.get("react", {}) or {}).get("context_engine_config", {}) or {}
-            cw_override = cec.get("context_window_tokens")
-            if not (isinstance(cw_override, int) and cw_override > 0):
-                cw_override = None
             for idx, entry in enumerate(models):
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
                 is_default = entry.get("is_default", False)
                 model_name = mcc.get("model_name", "")
-                context_window_tokens = 0
                 try:
-                    from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-                    context_window_tokens = ContextUtils.resolve_context_max(
+                    context_window_tokens = resolve_context_window_tokens(
                         model_name=model_name,
-                        fallback_context_window_tokens=cw_override,
+                        context_engine_config=(config.get("react", {}) or {}),
+                        model_config_obj=mco,
                     )
                 except Exception:
+                    context_window_tokens = 0
                     logger.debug(
                         "Failed to resolve context_window_tokens for model %s",
                         model_name,

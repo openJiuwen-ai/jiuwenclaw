@@ -251,6 +251,7 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerConfig,
 )
 from jiuwenswarm.common.config import get_model_names
+from jiuwenswarm.common.context_window import parse_positive_int, resolve_context_window_tokens
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.stage_timer import StageTimer
@@ -990,18 +991,29 @@ def _deep_agent_context_engine_config(
     仅承接 ContextEngine 自身配置；KV cache affinity 由独立
     ``react.kv_cache_affinity_config`` 管理。
 
-    context_window（模型支持的上下文总长度）现由 ``_build_model_from_entry`` 放进
-    core 的 ``ModelRequestConfig``（而非本函数承接的 ``ContextEngineConfig``），供
-    core 人员取值。本函数不再做 agentos per-model 覆盖：旧的"从选中 Model 的
-    ``_agentos_ctx_window`` 属性 / config 反查 max_tokens，喂给
-    ``context_window_tokens`` 压缩阈值"的桥接已拆除。
-    ``context_window_tokens`` 回到全局 ``react.context_engine_config`` 值或 core
-    按模型名解析 / 兜底，与 defaults 行为一致。
+    context_window（模型支持的上下文总长度）由 ``_build_model_from_entry`` 放进
+    core 的 ``ModelRequestConfig``，再由 ReActAgent 注入当前 ContextEngine 的模型级
+    元数据。本函数只承接全局覆盖和显式模型映射；最终优先级为全局值 > 当前 AgentOS
+    模型值 > 显式映射 > core 按模型名解析 / 兜底。
     """
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
     cec = cec if isinstance(cec, dict) else {}
-    cw_tokens = parse_int(cec.get("context_window_tokens"), None)
+    cw_tokens = parse_positive_int(cec.get("context_window_tokens"))
+    model_context_windows = cec.get("model_context_window_tokens")
+    if isinstance(model_context_windows, dict):
+        valid_model_context_windows = {}
+        for model_name, raw_window in model_context_windows.items():
+            if not isinstance(model_name, str):
+                continue
+            parsed_window = parse_positive_int(raw_window)
+            if parsed_window is not None:
+                valid_model_context_windows[model_name] = parsed_window
+        model_context_windows = valid_model_context_windows
+        if not model_context_windows:
+            model_context_windows = None
+    else:
+        model_context_windows = None
 
     recall = cec.get("compression_recall_config")
     recall = recall if isinstance(recall, dict) else {}
@@ -1013,6 +1025,7 @@ def _deep_agent_context_engine_config(
             ),
             # 显式设置的上下文窗口上限；非法值回退 None（由 agent-core 按模型解析）
             "context_window_tokens": cw_tokens,
+            "model_context_window_tokens": model_context_windows,
             # 上下文压缩 debug 落盘开关；目录缺省时由 agent-core 按
             # OPENJIUWEN_CONTEXT_DEBUG_DIR / workspace 默认路径解析
             "enable_context_debug": bool(cec.get("enable_context_debug", False)),
@@ -1330,6 +1343,7 @@ class JiuWenSwarmDeepAdapter:
         self._model: Model | None = None
         self._model_client_config: ModelClientConfig | None = None
         self._model_request_config: ModelRequestConfig | None = None
+        self._selected_model_context_window_tokens: int | None = None
         self._config_base_cache: dict[str, Any] | None = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
@@ -4305,6 +4319,11 @@ class JiuWenSwarmDeepAdapter:
         self._model = self._model_cache[default_name]
         self._model_client_config = self._model.model_client_config
         self._model_request_config = self._model.model_config
+        self._selected_model_context_window_tokens = getattr(
+            self._model_request_config,
+            "context_window",
+            None,
+        )
         self._last_models_config_fingerprint = new_fp
         return self._model
 
@@ -4581,6 +4600,17 @@ class JiuWenSwarmDeepAdapter:
             config.model_name = model.model_config.model_name
             config.model_client_config = model.model_client_config
             config.model_config_obj = model.model_config
+        self._selected_model_context_window_tokens = getattr(
+            model.model_config,
+            "context_window",
+            None,
+        )
+        update_model_context = getattr(self._instance, "update_model_context", None)
+        if callable(update_model_context):
+            update_model_context(
+                model_name=model.model_config.model_name,
+                context_window_tokens=self._selected_model_context_window_tokens,
+            )
         self._model_request_config = model.model_config
 
     @staticmethod
@@ -12437,18 +12467,14 @@ class JiuWenSwarmDeepAdapter:
         # 回退：DeepAgent 未返回 context_window_tokens 时，用 ContextUtils 解析模型上下文窗口上限
         if context_window_tokens is None:
             try:
-                from openjiuwen.core.context_engine.context.context_utils import ContextUtils
                 model_name = (
                     getattr(self._model_request_config, "model_name", "") or ""
                     if self._model_request_config else ""
                 )
-                # 与 ContextEngine 一致：显式配置的 context_window_tokens 优先于按模型名解析
-                cw_override = _deep_agent_context_engine_config(
-                    self._config_cache,
-                ).context_window_tokens
-                cw_fallback = ContextUtils.resolve_context_max(
+                cw_fallback = resolve_context_window_tokens(
                     model_name=model_name,
-                    fallback_context_window_tokens=cw_override,
+                    context_engine_config=self._config_cache,
+                    model_context_window_override=self._selected_model_context_window_tokens,
                 )
                 if cw_fallback > 0:
                     context_window_tokens = cw_fallback
@@ -13240,12 +13266,15 @@ class JiuWenSwarmDeepAdapter:
             occupancy_rate = usage.get("usage_percent", 0)
         except Exception as exc:
             logger.debug("[JiuWenSwarmDeepAdapter] DeepAgent.get_context_usage failed: %s", exc)
-            from openjiuwen.core.context_engine.context.context_utils import ContextUtils
             model_name = (
                 getattr(self._model_request_config, "model_name", "") or ""
                 if self._model_request_config else ""
             )
-            context_window_limit = ContextUtils.resolve_context_max(model_name=model_name)
+            context_window_limit = resolve_context_window_tokens(
+                model_name=model_name,
+                context_engine_config=self._config_cache,
+                model_context_window_override=self._selected_model_context_window_tokens,
+            )
             if context_window_limit > 0:
                 occupancy_rate = round(total_tokens / context_window_limit * 100, 1)
 
