@@ -3279,7 +3279,13 @@ function AppContent() {
         {activeNav === 'connectorMarket' && (
           <div className="app-section">
             <ConnectorMarketPanel
-              onCreateViaChat={() => requestSessionNavigation('new')}
+              onCreateViaChat={() => window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
+                detail: {
+                  skillName: 'plugin-creator',
+                  suffixText: t('connectorMarket.chatPrompts.createPlugin'),
+                  metadata: { scene: 'create_plugin' },
+                },
+              }))}
               onUseExample={(initialInputValue, mcpName) =>
                 requestSessionNavigation('new', { initialInputValue, initialEnabledMcps: [mcpName] })
               }

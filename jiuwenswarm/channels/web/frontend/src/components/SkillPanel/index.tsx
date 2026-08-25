@@ -16,7 +16,7 @@ import { ClawHubSearchModal } from "../../features/ClawHubSearchModal";
 import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
 import { getSkillAvatar } from "../../utils/skillAvatar";
-import { computeMySkills } from "../../utils/mySkills";
+import { computeMySkills, filterEnabledMySkills } from "../../utils/mySkills";
 import {
   getStoredOAuthToken,
   getStoredOAuthProvider,
@@ -2246,15 +2246,13 @@ export function SkillPanel({
     [fetchSkills, handleBackToList, t, withSession]
   );
 
-  const isSkillInstalled = (skill: SkillItem): boolean => {
-    return installedSkillMap.has(skill.name) || skill.source === "local" || skill.source === "project";
-  };
-
+  // 2026-08-25：改用 utils/mySkills.ts 的共享 isSkillInstalled/filterEnabledMySkills，跟"手动创建
+  // 插件"的"添加技能"弹窗（CreatePluginPage.tsx）共用同一份"已启用"判定规则，见该文件头注释。
   const getMySkillsFiltered = useCallback(() => {
     let filtered = visibleSkills;
     switch (mySkillsSubTab) {
       case "enabled":
-        filtered = filtered.filter(s => isSkillInstalled(s) && s.enabled !== false);
+        filtered = filterEnabledMySkills(visibleSkills, installedSkillNames);
         break;
       case "disabled":
         filtered = filtered.filter(s => s.enabled === false);
@@ -2269,7 +2267,7 @@ export function SkillPanel({
       filtered = filtered.filter(s => s.published !== true);
     }
     return filtered;
-  }, [visibleSkills, mySkillsSubTab, mySkillsPublishFilter, installedSkillMap]);
+  }, [visibleSkills, mySkillsSubTab, mySkillsPublishFilter, installedSkillNames]);
 
   const toggleSkillDisabled = async (skillName: string) => {
     const skill = skills.find(s => s.name === skillName);

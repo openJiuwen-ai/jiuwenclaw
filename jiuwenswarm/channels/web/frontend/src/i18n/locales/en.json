@@ -2805,6 +2805,9 @@
       "submitError": "Creation failed - this still awaits backend support",
       "withSkillNotWired": "This entry point isn't wired to the chat panel yet"
     },
+    "chatPrompts": {
+      "createPlugin": "Help me create a xxx plugin that's great at xxx"
+    },
     "errors": {
       "runtimeMissing": "This MCP requires a runtime environment that isn't installed. Please install it before using this MCP.",
       "runtimeMissingNamed": "This MCP requires {{runtime}}. Please install {{runtime}} before using this MCP.",

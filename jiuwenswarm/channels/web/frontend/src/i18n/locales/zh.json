@@ -2776,7 +2776,7 @@
     },
     "statusFilter": {
       "all": "全部",
-      "pending": "待安装/联接",
+      "pending": "待安装/连接",
       "available": "已连接"
     },
     "create": {
@@ -2801,6 +2801,9 @@
       "pickMcpTitle": "选择MCP",
       "submitError": "创建失败，该功能仍在等待后端支持",
       "withSkillNotWired": "该入口尚未接入聊天面板，需先在聊天输入框完成对接"
+    },
+    "chatPrompts": {
+      "createPlugin": "帮我创建一个xxx插件，擅长xxx"
     },
     "errors": {
       "runtimeMissing": "该 MCP 依赖的运行环境缺失，请先安装对应运行环境后再使用",

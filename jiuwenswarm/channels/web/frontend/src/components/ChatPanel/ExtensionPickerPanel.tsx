@@ -142,7 +142,15 @@ export function ExtensionPickerPanel({ anchorRect, onClose, panelRef }: Extensio
   }, [activeSessionId, installedMap, pluginConnectionStateMap, myConnectors]);
 
   useEffect(() => {
+    // 授权/连接弹窗（ConnectTokenModal/CliAuthModal，含 pluginInstallFlow/pluginReconnectFlow
+    // 串行续跑的那两份）是单独 createPortal 到 document.body 的兄弟节点，不是 panelRef 的子
+    // 节点——靠 data-connector-auth-modal 属性（见两个弹窗组件头注释）识别"点的是弹窗内部"，
+    // 跳过关闭，弹窗只由它自己的取消/关闭按钮控制。不能靠 tokenTarget/authTarget 等 state 判断
+    // ——那样只覆盖了本组件直接持有的这份 state，pluginInstallFlow/pluginReconnectFlow 内部的
+    // tokenTarget/authTarget 是 usePendingConnectorFlow 钩子私有的，这里拿不到，还是会漏（
+    // 2026-08-25 用户反馈：点连接弹窗任何地方，整个"+"扩展下拉框直接退出，弹窗跟着一起消失）。
     const handlePointerDown = (event: PointerEvent) => {
+      if ((event.target as HTMLElement | null)?.closest?.('[data-connector-auth-modal]')) return;
       if (!panelRef.current?.contains(event.target as Node)) onClose();
     };
     document.addEventListener('pointerdown', handlePointerDown);

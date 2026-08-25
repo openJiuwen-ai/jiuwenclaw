@@ -1220,6 +1220,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (!attachMenuOpen) return;
 
     const handlePointerDown = (event: PointerEvent) => {
+      // ExtensionPickerPanel.tsx 扩展面板里点"连接"弹出的授权弹窗（ConnectTokenModal/
+      // CliAuthModal）是单独 portal 到 document.body 的兄弟节点，既不在 attachMenuRef/
+      // attachMenuPortalRef 里，也不在 extensionPanelRef 里——不跳过的话点弹窗内部会被这里
+      // 也判成"点了外面"，把一级"+"菜单和二级扩展面板一起关掉，弹窗因为状态挂在扩展面板组件
+      // 里也跟着卸载消失（2026-08-25 用户反馈，同一根因见 ExtensionPickerPanel.tsx 头部
+      // pointerdown 处理的注释）。
+      if ((event.target as HTMLElement | null)?.closest?.('[data-connector-auth-modal]')) return;
       if (
         !attachMenuRef.current?.contains(event.target as Node) &&
         !attachMenuPortalRef.current?.contains(event.target as Node) &&
