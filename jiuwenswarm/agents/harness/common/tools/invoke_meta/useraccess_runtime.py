@@ -129,17 +129,33 @@ def build_oa_plugin_headers(*, plugin_session_id: str = "", extra: dict[str, str
 def build_local_relay_headers(*, extra: dict[str, str] | None = None) -> dict[str, str]:
     """Headers for AgentServer → CloudWsRelay (localAuth + x-relay-role=plugin)."""
     xiaoyi = _xiaoyi_channel()
-    # Prefer desktop-injected env (AgentServer); config may still be ${CLAW_XIAOYI_*} placeholders.
+    # 桌面密钥包形态（2026-08-26 合并适配）：ak/sk/agentId 不经 env 下发，
+    # 由 stdin 密钥包承载（secrets_bootstrap.get_secret('localAuth.*')）；
+    # env（CLAW_XIAOYI_*）与 config.yaml 渠道段仅为旧形态兜底。
+    try:
+        from jiuwenswarm.common.secrets_bootstrap import get_secret
+    except Exception:  # noqa: BLE001
+        get_secret = None
+
+    def _secret(key: str) -> str:
+        if get_secret is None:
+            return ""
+        value = get_secret(f"localAuth.{key}")
+        return str(value).strip() if value else ""
+
     ak = (
         (os.environ.get("CLAW_XIAOYI_AK") or "").strip()
+        or _secret("ak")
         or str(xiaoyi.get("ak") or "").strip()
     )
     sk = (
         (os.environ.get("CLAW_XIAOYI_SK") or "").strip()
+        or _secret("sk")
         or str(xiaoyi.get("sk") or "").strip()
     )
     agent_id = (
         (os.environ.get("CLAW_XIAOYI_AGENT_ID") or "").strip()
+        or _secret("agentId")
         or str(xiaoyi.get("agent_id") or xiaoyi.get("agentId") or "").strip()
     )
 
