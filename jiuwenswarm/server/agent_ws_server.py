@@ -795,7 +795,6 @@ async def _resolve_auto_macro_lane_for_request(
         normalize_macro_mode,
         route_macro_mode,
     )
-    from jiuwenswarm.common.config import get_config
 
     params = request.params if isinstance(request.params, dict) else {}
     requested = str(params.get("mode") or "").strip()
