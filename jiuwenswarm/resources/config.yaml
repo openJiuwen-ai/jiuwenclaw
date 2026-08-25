@@ -56,24 +56,25 @@ symphony:
 
   skill_retrieval:
     enabled: false
+    # Controls taxonomy construction and consumption independently of discovery.
+    # Enabling it never changes a live session's frozen directory strategy.
+    index:
+      enabled: false
     artifact_root: ${SYMPHONY_SKILL_RETRIEVAL_ROOT:-}
+    discovery:
+      # Strictly below the fixed 1% context threshold, a new session receives
+      # a complete metadata snapshot; larger inventories use skill_index.
+      max_output_chars: 12000
+      incremental_notice_max_chars: 4000
+      prompt_preferred_skills:
+        - skill-creator
+        - swarmskill-creator
+        - symphony-assistant
     build:
-      branching_factor: 12
-      max_depth: 6
-      root_categories: ""
-      max_workers: 2
-      max_retries: 2
-      request_timeout_seconds: 420
-      classification_batch_limit: 32
-      discovery_seed: 42
-      postprocess_enabled: true
-      postprocess_max_passes: 1
-      postprocess_min_skills: 6
-      equivalence_enabled: false
-    retrieve:
-      compact_codes_enabled: false
-      flatten_tree: false
-      max_exposure_depth: 1
+      # A failed refresh keeps the last usable taxonomy available to discovery.
+      preserve_previous_index_on_failure: true
+    # Index construction uses the default configured model. An optional llm
+    # mapping can override model, api_key, base_url and seed for this builder.
 
 # Auto Memory：对话结束后自动提取记忆，按项目隔离存储
 # 存储路径：~/.jiuwenswarm/projects/{sanitized-project-path}/memory/

@@ -53,6 +53,9 @@ class FakeAgent:
         _ = session_id
         return None
 
+    def _persist_skill_retrieval_session_profile(self) -> None:
+        """Match the session adapter's required profile persistence hook."""
+
 
 class FailingReloadAgent(FakeAgent):
     async def reload_agent_config(self, *args, **kwargs):

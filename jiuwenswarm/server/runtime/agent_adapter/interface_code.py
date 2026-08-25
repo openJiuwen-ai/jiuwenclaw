@@ -2289,7 +2289,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             logger.warning("[JiuwenSwarmCodeAdapter] skill_toolkit build failed: %s", exc)
             return None
 
-    def _skill_retrieval_tools_enabled_for_runtime(
+    def _resolve_skill_retrieval_session_enabled(
         self,
         config_base: dict[str, Any] | None = None,
     ) -> bool:
@@ -2299,23 +2299,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             if isinstance(config_base, dict)
             else self._active_code_config()
         )
-        retrieval_config = config.get("symphony", {}).get("skill_retrieval", {})
-        enabled_value = (
-            retrieval_config.get("enabled", False)
-            if isinstance(retrieval_config, dict)
-            else False
-        )
-        if isinstance(enabled_value, str):
-            enabled = enabled_value.strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-                "enabled",
-            }
-        else:
-            enabled = bool(enabled_value)
-        if not enabled:
+        if not super()._resolve_skill_retrieval_session_enabled(config):
             return False
         configured_tools = config.get("modes", {}).get("code", {}).get("tools") or []
         return "skill_retrieval" in configured_tools

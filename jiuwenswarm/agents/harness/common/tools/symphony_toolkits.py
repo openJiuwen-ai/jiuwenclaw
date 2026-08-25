@@ -52,7 +52,9 @@ class SymphonyToolkit:
         try:
             service = self._service or get_swarm_symphony_service()
             handler = getattr(service, operation)
-            payload = await asyncio.wait_for(handler(*args, **kwargs), timeout=timeout_s)
+            payload = await asyncio.wait_for(
+                handler(*args, **kwargs), timeout=timeout_s
+            )
         except asyncio.TimeoutError:
             if operation not in {"plan", "refresh_graph"}:
                 return {
@@ -443,9 +445,7 @@ class SymphonyToolkit:
                 description=description,
                 input_params=input_params,
                 properties=(
-                    {"resilience": {"timeout_s": None}}
-                    if uses_internal_timeout
-                    else {}
+                    {"resilience": {"timeout_s": None}} if uses_internal_timeout else {}
                 ),
             )
             return LocalFunction(card=card, func=func)
@@ -471,36 +471,21 @@ class SymphonyToolkit:
             make_tool(
                 "symphony_compose_graph",
                 (
-                    "MUST call before executing Skills or answering when any trigger condition "
-                    "is true: the user explicitly requests using, selecting, combining, or "
-                    "orchestrating Skills (including skill(s) or 技能); the task requires two "
-                    "or more specialized capabilities or an ordered toolchain; or you have "
-                    "identified, inspected, selected, invoked, or recommended an installed Skill. "
-                    "Calling skill_branch_explore requires a follow-up call to this tool before "
-                    "executing any Skill or returning a final answer. Select only the few relevant "
-                    "Skills from exploration and pass their exact identifiers or names as "
-                    "candidate_skill_ids; never pass every explored Skill. If no candidate can be "
-                    "selected confidently, call this tool with the original query and omit "
-                    "candidate_skill_ids. "
-                    "This is the skill-orchestration entrypoint: it reads the graph, refreshes a stale "
-                    "or missing graph, then composes the skill execution graph from the provided "
-                    "candidates or a default graph subgraph. If no suitable candidates or a missing "
-                    "capability is reported, use search_skill to discover external skills; when "
-                    "installing a discovered skill is appropriate, call install_skill, then call "
-                    "symphony_refresh_graph and retry this tool with the original query. "
-                    "After it returns, present its content result directly to the user; "
-                    "do not call individual skill tools just to manually recreate the plan. "
-                    "If a result reports graph_build_timeout or manual_graph_build, do not "
-                    "call this tool or symphony_refresh_graph again in this round. "
-                    "Skip only when none of the three trigger conditions is true and "
-                    "skill_branch_explore was not called in the current round."
+                    "Compose an execution plan for a task that requires multiple installed "
+                    "skills or an ordered skill workflow. Discovery, comparison, and "
+                    "recommendation alone do not require this tool. Pass only shortlisted "
+                    "exact skill IDs in candidate_skill_ids; omit that argument when the "
+                    "user requested a plan but no candidate is known. The tool may refresh a "
+                    "missing or stale graph before composing. Use its returned plan and ask "
+                    "for any missing inputs it reports. If it returns graph_build_timeout or "
+                    "manual_graph_build, do not retry graph tools in the same round."
                 ),
                 {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "The original user task to complete with skill capabilities.",
+                            "description": "The user's original task, without retrieval commands or internal notes.",
                         },
                         "mode": {
                             "type": "string",
@@ -518,10 +503,9 @@ class SymphonyToolkit:
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Optional identifiers or exact names of the installed Skills "
-                                "you consider most relevant to the user's task. When relevant "
-                                "Skills have already been identified, provide them here so "
-                                "the orchestration tool uses them and their eligible neighbors as seeds."
+                                "Exact installed skill IDs already shortlisted for the task. "
+                                "Batch all relevant IDs in this one argument; do not include "
+                                "weak matches or every skill from a catalog overview."
                             ),
                         },
                     },

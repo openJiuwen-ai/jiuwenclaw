@@ -117,7 +117,7 @@ def _workspace_root(ctx: SwarmBuildContext) -> str | None:
 
 
 class SkillRetrievalPromptInput(ConstructionInput):
-    """Construction inputs for the agentic skill retrieval prompt rail."""
+    """Construction inputs for the Skill directory prompt rail."""
 
     global_skills_dir: str | None = context_field(
         attr="global_skills_dir",
@@ -128,7 +128,7 @@ class SkillRetrievalPromptInput(ConstructionInput):
 @harness_element(
     kind=ElementKind.RAIL,
     name=SKILL_RETRIEVAL_PROMPT,
-    description="Lightweight prompt guidance for agentic installed-skill tree retrieval.",
+    description="Prompt guidance and session reminders for Skill directory retrieval.",
     input_model=SkillRetrievalPromptInput,
 )
 def _build_skill_retrieval_prompt_rail(
@@ -139,16 +139,19 @@ def _build_skill_retrieval_prompt_rail(
     from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
         is_skill_retrieval_enabled,
     )
-    from jiuwenswarm.agents.swarm.providers.tools import visible_skill_names_for_list_skill
-    from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+    from jiuwenswarm.agents.swarm.providers.tools import (
+        skill_retrieval_toolkit_for_context,
+    )
 
-    if not is_skill_retrieval_enabled():
+    if not is_skill_retrieval_enabled(context.config):
         return None
     SkillRetrievalPromptInput.resolve(params, context)
-    manager = SkillManager()
+    toolkit = skill_retrieval_toolkit_for_context(context)
+    session_scope = toolkit.session_scope
     return SkillRetrievalPromptRail(
-        manager=manager,
-        visible_skill_names=lambda: visible_skill_names_for_list_skill(context),
+        toolkit=toolkit,
+        session_scope=session_scope,
+        config_base=context.config,
     )
 
 
@@ -631,7 +634,11 @@ def _build_team_permission_rail(params: dict[str, Any], context: Any) -> Any | N
     from openjiuwen.agent_teams.security.narrowing import narrow_permissions
 
     override = get_permissions_override(context)
-    narrowed_config = narrow_permissions(inp.permissions_config, override) if override else inp.permissions_config
+    narrowed_config = (
+        narrow_permissions(inp.permissions_config, override)
+        if override
+        else inp.permissions_config
+    )
 
     message_manager = TeamMessageManager(
         backend.team_name,

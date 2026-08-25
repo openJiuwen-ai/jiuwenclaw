@@ -108,6 +108,7 @@ export type SkillGraphPanelHandle = {
 
 type SkillGraphPanelProps = {
   onReadingChange?: (reading: boolean) => void;
+  onBuildAccepted?: (mode: SymphonyBuildMode) => void;
   externalError?: string | null;
   onExternalErrorClear?: () => void;
 };
@@ -688,7 +689,7 @@ function buildLogSignature(entries?: BuildLogEntry[]): string {
 }
 
 export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanelProps>(function SkillGraphPanel(
-  { onReadingChange, externalError, onExternalErrorClear },
+  { onReadingChange, onBuildAccepted, externalError, onExternalErrorClear },
   ref,
 ) {
   const { t } = useTranslation();
@@ -1056,6 +1057,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         throw new Error(localizedServerDetail(data.detail, 'skills.graph.errors.refreshFailed', t));
       }
       externalBuildRunningRef.current = true;
+      onBuildAccepted?.(mode);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       externalBuildRunningRef.current = false;
@@ -1069,7 +1071,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
       }));
       throw error;
     }
-  }, [applyBuildLog, onExternalErrorClear, t]);
+  }, [applyBuildLog, onBuildAccepted, onExternalErrorClear, t]);
 
   const cancelBuild = useCallback(async () => {
     setCancellingBuild(true);
