@@ -1,14 +1,14 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: jiuwenclaw-gateway-sa
+  name: <<GATEWAY_NAME>>-sa
   namespace: <<NAMESPACE>>
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: jiuwenclaw-agentserver-creator
+  name: <<GATEWAY_NAME>>-agentserver-creator
   namespace: <<NAMESPACE>>
 rules:
   - apiGroups: [""]
@@ -25,15 +25,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: jiuwenclaw-gateway-agentserver-binding
+  name: <<GATEWAY_NAME>>-agentserver-binding
   namespace: <<NAMESPACE>>
 subjects:
   - kind: ServiceAccount
-    name: <<GATEWAY_SERVICE_ACCOUNT>>
+    name: <<GATEWAY_NAME>>-sa
     namespace: <<NAMESPACE>>
 roleRef:
   kind: Role
-  name: jiuwenclaw-agentserver-creator
+  name: <<GATEWAY_NAME>>-agentserver-creator
   apiGroup: rbac.authorization.k8s.io
 
 ---
@@ -113,7 +113,7 @@ spec:
             items:
               - key: .env
                 path: .env
-      serviceAccountName: <<GATEWAY_SERVICE_ACCOUNT>>
+      serviceAccountName: <<GATEWAY_NAME>>-sa
 
 ---
 # Service：提供稳定 DNS 域名, 供集群内部访问

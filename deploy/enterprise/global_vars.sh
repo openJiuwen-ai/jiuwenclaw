@@ -133,7 +133,6 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_NAME"]="jiuwenclaw-gateway"
     ["GATEWAY_PG_SCHEMA"]="public"
     ["GATEWAY_REPLICAS"]="1"
-    ["GATEWAY_SERVICE_ACCOUNT"]="jiuwenclaw-gateway-sa"
     ["GATEWAY_SQLITE_PATH"]="gateway.db"
     ["IS_UP_MANAGER_WEB"]="true"
     ["IDENTITY_NAME"]="jiuwenclaw-identity"

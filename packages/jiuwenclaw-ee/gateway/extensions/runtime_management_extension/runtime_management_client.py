@@ -61,18 +61,18 @@ from openjiuwen_runtime.foundation.security.link_auth import (
     verify_and_pin,
 )
 
-from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
-from jiuwenclaw.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
-from jiuwenclaw.e2a.models import E2AEnvelope, E2AResponse
-from jiuwenclaw.e2a.wire_codec import (
+from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
+from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
+from jiuwenswarm.common.e2a.models import E2AEnvelope, E2AResponse
+from jiuwenswarm.common.e2a.wire_codec import (
     is_e2a_response_wire_dict,
     parse_agent_server_wire_chunk,
 )
-from jiuwenclaw.gateway.agent_client import AgentServerClient, _wire_request_id_key
-from jiuwenclaw.gateway.session_map import load_session_map_scope
-from jiuwenclaw.schema import AgentRequest
-from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
-from jiuwenclaw.gateway.message_handler import MessageHandler
+from jiuwenswarm.gateway.routing.agent_client import AgentServerClient, _wire_request_id_key
+from jiuwenswarm.gateway.routing.session_map import load_session_map_scope
+from jiuwenswarm.common.schema import AgentRequest
+from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenswarm.gateway.message_handler import MessageHandler
 
 logger = logging.getLogger(__name__)
 
