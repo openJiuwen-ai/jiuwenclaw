@@ -641,6 +641,7 @@ def _bounded_diagnostic(
     secrets: tuple[str, ...],
     limit: int,
     fallback: str,
+    keep_tail: bool = False,
 ) -> str:
     if not isinstance(value, str):
         return fallback
@@ -649,7 +650,8 @@ def _bounded_diagnostic(
         character if character >= " " or character in "\n\t" else " "
         for character in text
     ).strip()
-    return text[:limit] or fallback
+    bounded = text[-limit:] if keep_tail else text[:limit]
+    return bounded or fallback
 
 
 def _redact_json_value(value: Any, secrets: tuple[str, ...]) -> Any:
@@ -751,6 +753,7 @@ def _sanitize_terminal_outcome(
             secrets=secrets,
             limit=DEEPRESEARCH_STDERR_OUTCOME_MAX_CHARS,
             fallback="DeepResearch child diagnostics unavailable",
+            keep_tail=True,
         )
     return sanitized
 

@@ -1504,6 +1504,65 @@ class AgentManager:
                     )
         return "agent"
 
+    def _agent_lookup_from_request(self, request: Any) -> tuple[str, str | None, str | None]:
+        """Resolve get_agent keys from a chat request.
+
+        Must match ``AgentWebSocketServer._prepare_code_mode_chat_turn`` so the
+        tenant-pool path reuses the same cached instance after plan-mode sync.
+        """
+        from jiuwenswarm.server.handlers._shared import resolve_agent_request_mode
+
+        params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
+        mode_full = self._resolve_request_mode(request, params)
+        mode, sub_mode, _canonical = resolve_agent_request_mode(mode_full)
+        agent_mode = "agent" if mode == "auto_harness" else mode
+        project_dir = (
+            params.get("project_dir")
+            or params.get("workspace_dir")
+            or params.get("cwd")
+        )
+        if isinstance(project_dir, str):
+            project_dir = project_dir.strip() or None
+        else:
+            project_dir = None
+        source = str(params.get("source") or "").strip()
+        is_interrupt_continuation = (
+            source
+            in {"permission_interrupt", "confirm_interrupt", "ask_user_interrupt"}
+            and isinstance(params.get("answers"), list)
+            and bool(str(params.get("request_id") or "").strip())
+        )
+        if project_dir is None and is_interrupt_continuation:
+            sid = str(getattr(request, "session_id", "") or "").strip()
+            if sid:
+                try:
+                    from jiuwenswarm.common.utils import resolve_tenant_sessions_dir
+                    from jiuwenswarm.server.runtime.session.session_metadata import (
+                        get_session_metadata,
+                    )
+
+                    sessions_root = resolve_tenant_sessions_dir(
+                        self.service_id, self.agent_id,
+                    )
+                    meta = get_session_metadata(
+                        sid,
+                        cache_bust=True,
+                        enable_writeback=False,
+                        sessions_root=sessions_root,
+                    )
+                    stored_project_dir = (
+                        meta.get("project_dir") if isinstance(meta, dict) else None
+                    )
+                    if isinstance(stored_project_dir, str) and stored_project_dir.strip():
+                        project_dir = stored_project_dir.strip()
+                        params["project_dir"] = project_dir
+                except Exception:
+                    logger.debug(
+                        "[AgentManager] resolve project_dir from session metadata failed",
+                        exc_info=True,
+                    )
+        return agent_mode, sub_mode, project_dir
+
     async def process_message(self, request: Any) -> Any:
         """处理非流式请求.
 
@@ -1521,15 +1580,13 @@ class AgentManager:
                 return await self._process_disk_only_evolution(request)
 
             channel_id = getattr(request, "channel_id", "")
-            params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
-            mode_full = self._resolve_request_mode(request, params)
-            mode = str(mode_full).split(".")[0] if mode_full else "agent"
-            workspace_dir = params.get("workspace_dir")
+            mode, sub_mode, project_dir = self._agent_lookup_from_request(request)
 
             agent = await self.get_agent(
                 channel_id=channel_id,
                 mode=mode,
-                project_dir=workspace_dir,
+                project_dir=project_dir,
+                sub_mode=sub_mode,
             )
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
@@ -1551,15 +1608,13 @@ class AgentManager:
         try:
             await self.wait_for_session_prewarm(getattr(request, "session_id", None))
             channel_id = getattr(request, "channel_id", "")
-            params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
-            mode_full = self._resolve_request_mode(request, params)
-            mode = str(mode_full).split(".")[0] if mode_full else "agent"
-            workspace_dir = params.get("workspace_dir")
+            mode, sub_mode, project_dir = self._agent_lookup_from_request(request)
 
             agent = await self.get_agent(
                 channel_id=channel_id,
                 mode=mode,
-                project_dir=workspace_dir,
+                project_dir=project_dir,
+                sub_mode=sub_mode,
             )
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")

@@ -115,108 +115,79 @@ check_if_nfs_sc_up() {
     DEPLOY_VARS["CLAW_PVC"]="jiuwenclaw-pvc"
 }
 
-check_if_mysql_up() {
-    local name="${DEPLOY_VARS["MYSQL_NAME"]}"
-
-    if [ "${DEPLOY_VARS["DB_TYPE"]}" != "mysql" ]; then
-       return
-    fi
-
-    # Check if external MySQL server
-    if [ -n "${DEPLOY_VARS["DB_HOST"]:-}" ]; then
-        info "Use external MySQL server"
-        if [ -z "${DEPLOY_VARS["DB_PORT"]:-}" ]; then
-            error "Please define DB_PORT in .env.custom"
-
-        fi
-        DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]="true"
-        return
-    fi
-
-    # No Build-In MySQL server
-    if ! check_k8s_resource_exists "statefulset" "${name}"; then
-        error "MySQL is not deployed. Please deploy it first with: ./$(basename "$0") up mysql"
-    fi
-
-    info "Use built-in MySQL server"
-    DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
-    DEPLOY_VARS["DB_PORT"]="3306"
-    DEPLOY_VARS["MANAGER_DB_USER"]="root"
-    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
-    DEPLOY_VARS["GATEWAY_DB_USER"]="root"
-    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
-}
-
-check_if_postgresql_up() {
-    local name="${DEPLOY_VARS["POSTGRES_NAME"]}"
-
-    if [ "${DEPLOY_VARS["DB_TYPE"]}" != "postgresql" ]; then
-        return
-    fi
-
-    # Check if external PostgreSQL server
-    if [ -n "${DEPLOY_VARS["DB_HOST"]:-}" ]; then
-        info "Use external PostgreSQL server"
-        if [ -z "${DEPLOY_VARS["DB_PORT"]:-}" ]; then
-            error "Please define DB_PORT in .env.custom"
-        fi
-        DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]="true"
-        return
-    fi
-
-    # No Build-In PostgreSQL server
-    if ! check_k8s_resource_exists "statefulset" "${name}"; then
-        error "PostgreSQL is not deployed. Please deploy it first with: ./$(basename "$0") up postgresql"
-    fi
-
-    info "Use built-in PostgreSQL server"
-    DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
-    DEPLOY_VARS["DB_PORT"]="5432"
-    DEPLOY_VARS["MANAGER_DB_USER"]="postgres"
-    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
-    DEPLOY_VARS["GATEWAY_DB_USER"]="postgres"
-    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
-}
-
-
 check_if_db_up() {
+    # 已经执行过检查，直接返回，避免重复校验
+    if [[ "${DEPLOY_VARS["DB_CHECKED"]:-}" == "true" ]]; then
+        return
+    fi
+
     local db_type="${DEPLOY_VARS["DB_TYPE"]}"
+    local db_type_upper="${db_type^^}"
+    local name="${DEPLOY_VARS["${db_type_upper}_NAME"]}"
+
     info "DB_TYPE: ${db_type}"
+    DEPLOY_VARS["DB_CHECKED"]="true"
     if [ "${db_type}" == "sqlite" ]; then
         return
-    fi 
-    check_if_${db_type}_up
-
-    if [[ "${DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]}" == "true" || "${DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]}" == "true" ]]; then
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_USER"]:-}" ]; then
-            DEPLOY_VARS["MANAGER_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
-        fi
-
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_USER"]:-}" ]; then
-            error "Please set up MANAGER_DB_USER or DB_USER."
-        fi
-
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_PASSWORD"]:-}" ]; then
-            DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
-        fi
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_PASSWORD"]:-}" ]; then
-            error "Please set up MANAGER_DB_PASSWORD or DB_PASSWORD."
-        fi
-
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_USER"]:-}" ]; then
-            DEPLOY_VARS["GATEWAY_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
-        fi
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_USER"]:-}" ]; then
-            error "Please set up GATEWAY_DB_USER or DB_USER."
-        fi
-
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_PASSWORD"]:-}" ]; then
-            DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
-        fi
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_PASSWORD"]:-}" ]; then
-            error "Please set up GATEWAY_DB_PASSWORD or DB_PASSWORD."
-        fi
     fi
+
+    # Build-In DB server
+    if [[ -z "${DEPLOY_VARS["DB_HOST"]:-}" || "${DEPLOY_VARS["DB_HOST"]}" == "${name}-headless.default" ]]; then
+        if ! check_k8s_resource_exists "statefulset" "${name}"; then
+            error "${db_type} is not deployed. Please deploy it first with: ./$(basename "$0") up ${db_type}"
+        fi
+
+        info "Use built-in ${db_type} server"
+        case "${db_type}" in
+            mysql)
+                DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
+                DEPLOY_VARS["DB_PORT"]="3306"
+                for module in GATEWAY WEB MANAGER IDENTITY
+                do
+                    DEPLOY_VARS["${module}_DB_USER"]="root"
+                    DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+                done
+                ;;
+            postgresql)
+                DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
+                DEPLOY_VARS["DB_PORT"]="5432"
+                for module in GATEWAY WEB MANAGER IDENTITY
+                do
+                    DEPLOY_VARS["${module}_DB_USER"]="postgres"
+                    DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRESQL_PASSWORD"]}
+                done
+                ;;
+            *)
+                error "check_if_db_up: unknown db '${db_type}'"
+                ;;
+        esac
+        return
+    fi
+
+    info "Use external ${DB_TYPE} server"
+
+    if [ -z "${DEPLOY_VARS["DB_PORT"]:-}" ]; then
+        error "Please define DB_PORT in .env.custom"
+    fi
+
+    for module in GATEWAY WEB MANAGER IDENTITY
+    do
+        if [ -z "${DEPLOY_VARS["${module}_DB_USER"]:-}" ]; then
+            DEPLOY_VARS["${module}_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
+        fi
+
+        if [ -z "${DEPLOY_VARS["${module}_DB_USER"]:-}" ]; then
+            error "Please set up ${module}_DB_USER or DB_USER."
+        fi
+
+        if [ -z "${DEPLOY_VARS["${module}_DB_PASSWORD"]:-}" ]; then
+            DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
+        fi
+
+        if [ -z "${DEPLOY_VARS["${module}_DB_PASSWORD"]:-}" ]; then
+            error "Please set up ${module}_DB_PASSWORD or DB_PASSWORD."
+        fi
+    done
 }
 
 check_if_obs_up() {
@@ -336,7 +307,7 @@ check_mysql_up_dependency(){
 }
 
 check_postgresql_up_dependency(){
-    local pg_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["POSTGRES_NAME"]}"
+    local pg_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["POSTGRESQL_NAME"]}"
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
     check_if_nfs_up

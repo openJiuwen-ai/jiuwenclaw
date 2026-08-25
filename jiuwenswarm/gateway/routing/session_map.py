@@ -138,16 +138,30 @@ class SessionMap:
 
     def __init__(self, *, scope: SessionMapScope | None = None) -> None:
         self._scope = scope if scope is not None else load_session_map_scope()
-        self._storage: SessionStorage
+        self._storage = self._resolve_storage()
 
-        # 企业版：AGENT_RUNTIME + active-standby 时使用 Redis；否则本地文件
+    @staticmethod
+    def _resolve_storage() -> SessionStorage:
+        from jiuwenswarm.gateway.routing.session_map_access import (
+            PersistentSessionStorage,
+            get_session_map_repository,
+            session_map_read_through_enabled,
+        )
+
+        repo = get_session_map_repository()
+        if repo is not None:
+            return PersistentSessionStorage(
+                repo,
+                read_through=session_map_read_through_enabled(),
+            )
+
+        # 未注入 Repository 时走旧路径
         if (
             os.getenv("AGENT_RUNTIME", "").strip()
             and get_declared_deployment_mode() == "active-standby"
         ):
-            self._storage = RedisSessionStorage()
-        else:
-            self._storage = LocalSessionStorage()
+            return RedisSessionStorage()
+        return LocalSessionStorage()
 
     def get_identity_key(
         self,

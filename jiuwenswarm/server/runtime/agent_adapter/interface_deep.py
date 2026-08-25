@@ -136,6 +136,8 @@ ERROR_EVENT_TYPE = _ERROR_EVENT.value
 # 与 skill_turbo/executor.STREAM_SOURCE_ID_FIELD 一致：并发节点用它标识 source，
 # 前端据其路由到 subagent 行。adapter 转发 llm_reasoning / llm_output 时须原样透传。
 STREAM_SOURCE_ID_FIELD = "stream_source_id"
+_INTERRUPT_OUTPUT_ATTACH_RETRY_COUNT = 20
+_INTERRUPT_OUTPUT_ATTACH_RETRY_INTERVAL_SECONDS = 0.05
 
 
 def _propagate_stream_source_id(
@@ -218,10 +220,6 @@ from jiuwenswarm.agents.harness.common.rails import (
 from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
     ConcurrentSafeSysOperationRail,
     ConcurrentSafeTaskPlanningRail,
-)
-from jiuwenswarm.agents.harness.common.rails.execution_guard import (
-    CircuitBreakerRail,
-    CircuitBreakerConfig,
 )
 from jiuwenswarm.common.config import get_model_names
 from jiuwenswarm.common.hooks_config import load_hooks_config
@@ -393,6 +391,7 @@ from jiuwenswarm.common.config import (
 from jiuwenswarm.common.mcp_config import (
     OfficeClawMcpRegistration,
     RequestScopedOfficeClawMcpTool,
+    bind_active_office_claw_mcp_tools,
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
     extract_office_claw_mcp,
@@ -407,8 +406,10 @@ from jiuwenswarm.perf.interface_hooks import (
     finalize_perf_summary_request,
     mark_request_first_answer,
     mark_request_first_byte,
+    merge_perf_summary_usage_fallback,
     maybe_mark_answer_first_byte,
     set_perf_summary_context,
+    snapshot_perf_summary_usage,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
@@ -1873,6 +1874,27 @@ class _RuntimeCronToolContext:
         return self._tool_scope
 
 
+def _agent_ras_kwargs_from_config(config_base: dict[str, Any] | None) -> dict[str, Any]:
+    """Thin YAML gate for create_deep_agent ``agent_ras``.
+
+    Schema validation stays in agent-core. Missing / non-dict section → do
+    not pass (core defaults to Agent RAS enabled). Explicit ``enabled: false``
+    passes ``False`` to disable. Otherwise pass a deep-copied raw dict.
+    """
+    raw = (config_base or {}).get("agent_ras")
+    if not isinstance(raw, dict):
+        if raw is not None:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ignoring invalid agent_ras section: "
+                "expected dict, got %s",
+                type(raw).__name__,
+            )
+        return {}
+    if raw.get("enabled", True) is not True:
+        return {"agent_ras": False}
+    return {"agent_ras": copy.deepcopy(raw)}
+
+
 class JiuWenSwarmDeepAdapter:
     SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
@@ -2005,6 +2027,10 @@ class JiuWenSwarmDeepAdapter:
         self._instance_overrides: dict[str, Any] = {}
         self._is_session_scoped_adapter: bool = False
         self._parent_session_id: str | None = None
+        # Active request-scoped OfficeClaw MCP registration for this session
+        # adapter. Used for safe short-name cleanup and diagnostics; invoke
+        # allowlisting is enforced via bind_active_office_claw_mcp_tools.
+        self._active_office_claw_mcp: OfficeClawMcpRegistration | None = None
         # Tenant tip namespace for Track-B env reads (sync_agents_configs).
         # Defaults match unbound single-tenant; AgentManager / copy_tenant_env_bindings_from
         # overwrite for per-agent scopes.
@@ -2059,6 +2085,15 @@ class JiuWenSwarmDeepAdapter:
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
         )
+        # Per-session-adapter snapshot of the current chat request's route,
+        # captured from request.* at request entry. Used by
+        # _get_deepresearch_tool_context() so deepresearch_stream progress
+        # pushes bind to the originating session/request even when concurrent
+        # requests leak module-level _CRON_TOOL_* bindings into background
+        # tool tasks. Plain attribute (not ContextVar): per-session-scoped,
+        # no propagation/reset concerns. Cron-triggered paths don't set this
+        # and fall back to _runtime_cron_tool_context.
+        self._current_request_route: dict[str, str] = {}
         # Language the currently registered cron tools were built for, or None
         # when they are not registered yet. Doubles as the rebuild condition.
         self._cron_tools_registered_language: str | None = None
@@ -2511,16 +2546,6 @@ class JiuWenSwarmDeepAdapter:
                         "[JiuWenSwarmDeepAdapter] cleanup_session(%s) failed: %s",
                         sid, exc,
                     )
-            if cleanup_rail:
-                circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
-                if circuit_breaker_rail is not None:
-                    try:
-                        circuit_breaker_rail.cleanup_session(sid)
-                    except Exception as exc:
-                        logger.warning(
-                            "[JiuWenSwarmDeepAdapter] circuit_breaker cleanup_session(%s) failed: %s",
-                            sid, exc,
-                        )
         else:
             self._active_session_ids[sid] = count - 1
 
@@ -3638,20 +3663,24 @@ class JiuWenSwarmDeepAdapter:
                 # are still fully removable by the common cleanup path.
                 tool_ids.append(tool_id)
                 tool_names.append(tool_name)
-                ability_result = self._instance.ability_manager.add(card)
-                if not bool(getattr(ability_result, "added", True)):
-                    raise RuntimeError(f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name}")
+                self._install_office_claw_ability_card(card)
 
             registration = OfficeClawMcpRegistration(
                 request_id=request.request_id,
                 tool_ids=tuple(tool_ids),
                 tool_names=tuple(tool_names),
             )
+            self._active_office_claw_mcp = registration
+            request_env = params.get("env") if isinstance(params.get("env"), dict) else {}
+            invocation_id = str(request_env.get("OFFICE_CLAW_INVOCATION_ID") or "").strip()
             logger.info(
                 "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP registered: "
-                "request_id=%s tools=%s",
+                "request_id=%s session_id=%s invocation_id=%s tools=%s tool_ids=%s",
                 request.request_id,
+                request.session_id,
+                invocation_id or "-",
                 tool_names,
+                tool_ids,
             )
             return registration
         except asyncio.CancelledError:
@@ -3677,6 +3706,77 @@ class JiuWenSwarmDeepAdapter:
             )
             return None
 
+    def _owned_office_claw_tool_ids(self) -> frozenset[str]:
+        active = self._active_office_claw_mcp
+        if active is None:
+            return frozenset()
+        return frozenset(active.tool_ids)
+
+    def _install_office_claw_ability_card(self, card: ToolCard) -> None:
+        """Register a request-scoped OfficeClaw tool card by short name.
+
+        Same-id rebinds are allowed. A different id is replaced only when the
+        existing card belongs to this adapter's active registration; otherwise
+        registration fails hard so a concurrent request cannot silently steal
+        the short-name mapping.
+        """
+
+        if self._instance is None:
+            raise RuntimeError("OfficeClaw MCP ability install requires an initialized agent")
+        ability_manager = self._instance.ability_manager
+        tool_name = str(card.name or "").strip()
+        tool_id = str(card.id or "").strip()
+        if not tool_name or not tool_id:
+            raise RuntimeError("OfficeClaw MCP tool card is missing name or id")
+
+        existing = None
+        getter = getattr(ability_manager, "get", None)
+        if callable(getter):
+            existing = getter(tool_name)
+        existing_id = str(getattr(existing, "id", "") or "") if existing is not None else ""
+
+        if existing is not None and existing_id and existing_id != tool_id:
+            if existing_id in self._owned_office_claw_tool_ids():
+                try:
+                    ability_manager.remove(tool_name)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"failed to replace owned OfficeClaw MCP ability: {tool_name}"
+                    ) from exc
+                try:
+                    Runner.resource_mgr.remove_tool(existing_id)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] failed to remove replaced OfficeClaw MCP "
+                        "resource: tool_id=%s error=%s",
+                        existing_id,
+                        exc,
+                    )
+            else:
+                raise RuntimeError(
+                    f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name} "
+                    f"(existing_id={existing_id}, new_id={tool_id})"
+                )
+
+        ability_result = ability_manager.add(card)
+        if ability_result is None:
+            # Legacy AbilityManager.add returned None and may overwrite by name.
+            return
+        added = getattr(ability_result, "added", None)
+        if added is False:
+            # Conflict-aware AbilityManager kept the existing card. Retry once if
+            # we own it; otherwise fail closed.
+            existing = getter(tool_name) if callable(getter) else None
+            existing_id = str(getattr(existing, "id", "") or "") if existing is not None else ""
+            if existing_id and existing_id in self._owned_office_claw_tool_ids():
+                ability_manager.remove(tool_name)
+                ability_result = ability_manager.add(card)
+                added = getattr(ability_result, "added", None)
+            if added is False:
+                raise RuntimeError(
+                    f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name}"
+                )
+
     async def cleanup_request_scoped_office_claw_mcp(
         self,
         registration: OfficeClawMcpRegistration | None,
@@ -3697,9 +3797,29 @@ class JiuWenSwarmDeepAdapter:
                     exc,
                 )
         if self._instance is not None:
+            ability_manager = self._instance.ability_manager
+            getter = getattr(ability_manager, "get", None)
+            owned_ids = frozenset(registration.tool_ids)
             for tool_name in registration.tool_names:
                 try:
-                    self._instance.ability_manager.remove(tool_name)
+                    existing = getter(tool_name) if callable(getter) else None
+                    existing_id = (
+                        str(getattr(existing, "id", "") or "") if existing is not None else ""
+                    )
+                    # Only drop the short-name mapping when it still points at
+                    # this request's tool id — never delete another request's bind.
+                    if existing is None:
+                        continue
+                    if existing_id and existing_id not in owned_ids:
+                        logger.warning(
+                            "[JiuWenSwarmDeepAdapter] skip OfficeClaw MCP ability cleanup; "
+                            "short name rebound: request_id=%s tool=%s existing_id=%s",
+                            registration.request_id,
+                            tool_name,
+                            existing_id,
+                        )
+                        continue
+                    ability_manager.remove(tool_name)
                 except Exception as exc:
                     logger.warning(
                         "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP ability cleanup failed: "
@@ -3708,6 +3828,11 @@ class JiuWenSwarmDeepAdapter:
                         tool_name,
                         exc,
                     )
+        if (
+            self._active_office_claw_mcp is not None
+            and self._active_office_claw_mcp.request_id == registration.request_id
+        ):
+            self._active_office_claw_mcp = None
         logger.info(
             "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP cleaned up: request_id=%s",
             registration.request_id,
@@ -6341,7 +6466,7 @@ class JiuWenSwarmDeepAdapter:
 
             react_cfg = config if config is not None else self._config_cache
             rail_kwargs = resolve_task_planning_rail_kwargs(react_cfg)
-            task_planning_rail = TaskPlanningRail(**rail_kwargs)
+            task_planning_rail = ConcurrentSafeTaskPlanningRail(**rail_kwargs)
             logger.info(
                 "[JiuWenSwarmDeepAdapter] TaskPlanningRail create success "
                 "enable_progress_repeat=%s list_tool_call_interval=%s",
@@ -6566,31 +6691,6 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] LLMRetryRail create failed: %s", exc)
             return None
 
-    def _build_circuit_breaker_rail(self) -> CircuitBreakerRail | None:
-        try:
-            guard_cfg = (get_config() or {}).get("execution_guard") or {}
-            cb_cfg = guard_cfg.get("circuit_breaker") or {}
-            if cb_cfg.get("enabled", False) is not True:
-                logger.info("[JiuWenSwarmDeepAdapter] CircuitBreakerRail disabled by config")
-                return None
-            defaults = CircuitBreakerConfig()
-            config = CircuitBreakerConfig(
-                warning_threshold=cb_cfg.get("warning_threshold", defaults.warning_threshold),
-                critical_threshold=cb_cfg.get("critical_threshold", defaults.critical_threshold),
-                global_breaker_threshold=cb_cfg.get(
-                    "global_breaker_threshold", defaults.global_breaker_threshold
-                ),
-                unknown_tool_threshold=cb_cfg.get(
-                    "unknown_tool_threshold", defaults.unknown_tool_threshold
-                ),
-            )
-            rail = CircuitBreakerRail(config, language=self._resolve_runtime_language())
-            logger.info("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create success")
-            return rail
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create failed: %s", exc)
-            return None
-
     def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
         """Build RuntimePromptRail for per-model-call time/channel/runtime injection."""
         try:
@@ -6642,7 +6742,28 @@ class JiuWenSwarmDeepAdapter:
         return rail
 
     def _get_deepresearch_tool_context(self) -> dict[str, str]:
-        """Return the adapter-owned route that survives runner task boundaries."""
+        """Return the adapter-owned route that survives runner task boundaries.
+
+        Prefers the per-session-adapter ``_current_request_route`` snapshot
+        (captured from request.* at chat request entry) so deepresearch_stream
+        progress pushes bind to the originating session/request even when
+        concurrent requests leak module-level ``_CRON_TOOL_*`` bindings into
+        background tool tasks. Falls back to ``_runtime_cron_tool_context``
+        for cron-triggered paths that don't populate the snapshot.
+        """
+        route = self._current_request_route
+        if route.get("session_id"):
+            scope = RuntimeScopeKey.from_adapter(
+                self, session_id=route["session_id"]
+            )
+            return {
+                "request_id": str(route.get("request_id") or ""),
+                "channel_id": str(route.get("channel_id") or ""),
+                "session_id": scope.session_id,
+                "service_id": scope.service_id,
+                "agent_id": scope.agent_id,
+                "output_dir": self._deepresearch_artifact_output_dir(),
+            }
         context = self._runtime_cron_tool_context
         metadata = context.metadata if isinstance(context.metadata, dict) else {}
         scope = RuntimeScopeKey.from_adapter(self, session_id=context.session_id)
@@ -6820,7 +6941,6 @@ class JiuWenSwarmDeepAdapter:
                 self._build_llm_retry_rail,
                 {"config_base": config_base},
             ),
-            _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
             _RailBuildInfo(
@@ -7607,6 +7727,9 @@ class JiuWenSwarmDeepAdapter:
                 language=self._resolve_runtime_language(),
                 auto_create_workspace=False
             )
+
+            # agent_ras YAML passthrough (Agent RAS owns loop detection / recovery).
+            common_kwargs.update(_agent_ras_kwargs_from_config(config_base))
 
             self._instance = create_deep_agent(
                 **common_kwargs,
@@ -8923,9 +9046,6 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] permission_rail.set_trusted_dirs failed",
                     exc_info=True,
                 )
-        circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
-        if circuit_breaker_rail is not None:
-            circuit_breaker_rail.set_language(resolved_language)
         stage_timer.mark("rail_setters")
 
         self._schedule_runtime_state_write(
@@ -9569,6 +9689,14 @@ class JiuWenSwarmDeepAdapter:
             )
             from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
                 apply_interactive_ask_to_inputs,
+                resolve_resume_interactive_ask,
+            )
+            # 入站 answers payload 一般不携带 interactive_ask；此时从中断点
+            # resume_ctx 恢复中断前的引导模式状态，避免 resume 后被强制
+            # 设为 False、把带 preview 的内容确认类 ask_user 误判为 skipped，
+            # 或让引导模式管线在 resume 阶段退化为非引导。
+            raw_interactive = resolve_resume_interactive_ask(
+                raw_interactive, resume_ctx.get("inputs")
             )
             resume_inputs = apply_interactive_ask_to_inputs(
                 resume_ctx.get("inputs", inputs),
@@ -10062,6 +10190,61 @@ class JiuWenSwarmDeepAdapter:
         if emitted_terminal_chat_final:
             return False
         return not self._goal_record_is_active()
+
+    @staticmethod
+    def _approved_plan_exit_resume_tool_call_id(params: Any) -> str:
+        """返回已批准 plan-exit resume 对应的工具调用 ID。
+
+        Confirm interrupt 恢复后，运行时可能在模型已经给出结论的情况下只向
+        输出流暴露工具事件。这一标记让流末尾能为该极窄路径补一个用户可见的
+        完成消息；其他 confirm / permission resume 不受影响。
+        """
+        if not isinstance(params, dict):
+            return ""
+        if str(params.get("source") or "").strip() != "confirm_interrupt":
+            return ""
+        tool_call_id = str(params.get("request_id") or "").strip()
+        answers = params.get("answers")
+        if not tool_call_id or not isinstance(answers, list) or not answers:
+            return ""
+        answer = answers[0]
+        if not isinstance(answer, dict):
+            return ""
+        options = answer.get("selected_options")
+        if not isinstance(options, list) or not options:
+            return ""
+        approved_values = {"approve", "本次允许", "批准", "proceed", "开始执行"}
+        selected = str(options[0] or "").strip().lower()
+        return tool_call_id if selected in approved_values else ""
+
+    def _plan_exit_fallback_content(self) -> str:
+        if self._resolve_runtime_language() == "en":
+            return "Plan approved. Exited plan mode and switched to code.normal mode."
+        return "计划已获批准，已退出 plan 模式，当前处于 code.normal 模式。"
+
+    async def _reattach_interrupt_output(self, session_id: str) -> Any | None:
+        """Briefly wait for the interrupted consumer to release its output lease."""
+        started = time.monotonic()
+        for attempt in range(1, _INTERRUPT_OUTPUT_ATTACH_RETRY_COUNT + 1):
+            await asyncio.sleep(_INTERRUPT_OUTPUT_ATTACH_RETRY_INTERVAL_SECONDS)
+            interaction_stream = await self._instance.attach_output()
+            if interaction_stream is not None:
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] interrupt output reattached: "
+                    "session_id=%s attempts=%s elapsed_ms=%.1f",
+                    session_id,
+                    attempt,
+                    (time.monotonic() - started) * 1000,
+                )
+                return interaction_stream
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] interrupt output still leased; returning ACK: "
+            "session_id=%s attempts=%s elapsed_ms=%.1f",
+            session_id,
+            _INTERRUPT_OUTPUT_ATTACH_RETRY_COUNT,
+            (time.monotonic() - started) * 1000,
+        )
+        return None
 
     @staticmethod
     def _resolve_input_dispatch_mode(params: Any) -> InputDispatchMode | None:
@@ -13039,7 +13222,10 @@ class JiuWenSwarmDeepAdapter:
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
             request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
-                return await session_adapter.process_message_impl(request, inputs)
+                with bind_active_office_claw_mcp_tools(
+                    request_mcp.tool_ids if request_mcp is not None else ()
+                ):
+                    return await session_adapter.process_message_impl(request, inputs)
             finally:
                 try:
                     await session_adapter.cleanup_request_scoped_office_claw_mcp(request_mcp)
@@ -13609,8 +13795,11 @@ class JiuWenSwarmDeepAdapter:
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
             request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
-                async for chunk in session_adapter.process_message_stream_impl(request, inputs):
-                    yield chunk
+                with bind_active_office_claw_mcp_tools(
+                    request_mcp.tool_ids if request_mcp is not None else ()
+                ):
+                    async for chunk in session_adapter.process_message_stream_impl(request, inputs):
+                        yield chunk
                 return
             finally:
                 try:
@@ -13695,6 +13884,11 @@ class JiuWenSwarmDeepAdapter:
             getattr(self, "_model", None) and getattr(self._model, "model_config", None)
             and getattr(self._model.model_config, "model_name", "") or ""
         )
+        self._current_request_route = {
+            "session_id": session_id,
+            "request_id": rid or "",
+            "channel_id": cid or "",
+        }
 
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):
@@ -13993,6 +14187,10 @@ class JiuWenSwarmDeepAdapter:
             "total_cost": 0.0,
         }
         emitted_ask_user_request_ids: set[str] = set()
+        approved_plan_exit_tool_call_id = self._approved_plan_exit_resume_tool_call_id(
+            request.params
+        )
+        saw_approved_plan_exit_result = False
 
         def should_skip_duplicate_ask_user(parsed: dict | None) -> bool:
             if not isinstance(parsed, dict):
@@ -14026,7 +14224,19 @@ class JiuWenSwarmDeepAdapter:
 
         def note_chat_payload(payload: dict[str, Any]) -> dict[str, Any]:
             nonlocal had_assistant_output, emitted_terminal_chat_final
+            nonlocal saw_approved_plan_exit_result
             event_type = payload.get("event_type")
+            is_plan_exit_result = (
+                event_type == "chat.tool_result"
+                and str(payload.get("tool_name") or "") == "exit_plan_mode"
+            )
+            if (
+                approved_plan_exit_tool_call_id
+                and is_plan_exit_result
+                and str(payload.get("tool_call_id") or "")
+                == approved_plan_exit_tool_call_id
+            ):
+                saw_approved_plan_exit_result = True
             # first_byte: first history-visible assistant event (matches history.jsonl).
             if event_type in (
                 "chat.delta",
@@ -14072,6 +14282,7 @@ class JiuWenSwarmDeepAdapter:
         session_active = False
         session_task_registered = False
         perf_context_initialized = False
+        perf_usage_fallback: dict[str, int] | None = None
         initialization_complete = False
         stream_consumer_cancelled = False
         image_files_token = None
@@ -14451,6 +14662,18 @@ class JiuWenSwarmDeepAdapter:
                     )
                 )
                 if interaction_stream is None:
+                    # The interrupted chat.send consumer releases its output
+                    # lease asynchronously.  A resume arriving in that tiny
+                    # window used to receive only runtime.accepted, while the
+                    # original consumer had already emitted its complete frame;
+                    # no client then remained to relay the resumed final reply.
+                    # Give that predecessor a bounded chance to unwind before
+                    # falling back to the ACK-only path for genuinely busy
+                    # sessions owned by another consumer.
+                    interaction_stream = await self._reattach_interrupt_output(
+                        request.session_id or "default"
+                    )
+                if interaction_stream is None:
                     async for chunk in _yield_runtime_accepted():
                         yield chunk
                     interaction_stream_abort = False
@@ -14822,12 +15045,15 @@ class JiuWenSwarmDeepAdapter:
                 emitted_terminal_chat_final=emitted_terminal_chat_final,
             ):
                 self._stream_content_run_kind = None
+                fallback_content = ""
+                if saw_approved_plan_exit_result and not had_assistant_output:
+                    fallback_content = self._plan_exit_fallback_content()
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
                     payload=note_chat_payload({
                         "event_type": "chat.final",
-                        "content": "",
+                        "content": fallback_content,
                     }),
                     is_complete=False,
                 )
@@ -14883,6 +15109,8 @@ class JiuWenSwarmDeepAdapter:
         finally:
             active_error = sys.exc_info()[1]
             cleanup_error: BaseException | None = None
+            if perf_context_initialized:
+                perf_usage_fallback = snapshot_perf_summary_usage(request.request_id)
             if interaction_stream is not None:
                 try:
                     await interaction_stream.close(
@@ -15020,6 +15248,18 @@ class JiuWenSwarmDeepAdapter:
                     )
             if active_error is None and cleanup_error is not None:
                 raise cleanup_error
+
+        if merge_perf_summary_usage_fallback(
+            usage_accumulator,
+            perf_usage_fallback,
+        ):
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] recovered missing llm_usage from perf summary: "
+                "request_id=%s session_id=%s usage=%s",
+                rid,
+                session_id,
+                perf_usage_fallback,
+            )
 
         summary = {
             "input_tokens": usage_accumulator["input_tokens"],

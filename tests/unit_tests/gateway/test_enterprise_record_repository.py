@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""企业专属表 ConfigRecordRepository（不注入运行时）。"""
+"""企业专属表 EnterpriseRecordRepository（不注入运行时）。"""
 
 from __future__ import annotations
 
@@ -7,23 +7,23 @@ import pytest
 
 from jiuwenswarm.gateway.config.enterprise import (
     ENTERPRISE_RECORD_STORE_NAMES,
-    ConfigRecordRepository,
-    clear_config_record_repositories,
-    get_config_record_repository,
-    set_config_record_repositories,
+    EnterpriseRecordRepository,
+    clear_enterprise_record_repositories,
+    get_enterprise_record_repository,
+    set_enterprise_record_repositories,
 )
 from jiuwenswarm.gateway.storage.backends.memory_persistent import InMemoryPersistentBackend
 from jiuwenswarm.gateway.storage_assembly.layouts import build_gateway_store_registry
 from jiuwenswarm.gateway.storage_assembly.setup import (
-    create_config_record_repository,
-    create_enterprise_config_record_repositories,
+    create_enterprise_record_repository,
+    create_enterprise_record_repositories,
 )
 
 
 @pytest.mark.asyncio
 async def test_policy_crud_and_scope() -> None:
     store = InMemoryPersistentBackend()
-    repo = ConfigRecordRepository(
+    repo = EnterpriseRecordRepository(
         store,
         "config_effective_global_policy",
         instance_id="inst-1",
@@ -48,7 +48,7 @@ async def test_policy_crud_and_scope() -> None:
     assert updated is not None
     assert updated["priority"] == 20
 
-    other = ConfigRecordRepository(
+    other = EnterpriseRecordRepository(
         store,
         "config_effective_global_policy",
         instance_id="inst-2",
@@ -61,7 +61,7 @@ async def test_policy_crud_and_scope() -> None:
 @pytest.mark.asyncio
 async def test_template_upsert_and_sync() -> None:
     store = InMemoryPersistentBackend()
-    repo = create_config_record_repository(
+    repo = create_enterprise_record_repository(
         store, "model_template", instance_id="gw-1"
     )
     await repo.upsert(
@@ -109,7 +109,7 @@ async def test_template_upsert_and_sync() -> None:
 @pytest.mark.asyncio
 async def test_singleton_keypair_no_scope() -> None:
     store = InMemoryPersistentBackend()
-    repo = ConfigRecordRepository(store, "gateway_enc_keypair")
+    repo = EnterpriseRecordRepository(store, "gateway_enc_keypair")
     await repo.create(
         {
             "id": "default",
@@ -129,7 +129,7 @@ async def test_singleton_keypair_no_scope() -> None:
 @pytest.mark.asyncio
 async def test_task_memory_single_document_sync() -> None:
     store = InMemoryPersistentBackend()
-    repo = ConfigRecordRepository(
+    repo = EnterpriseRecordRepository(
         store, "task_memory_config", instance_id="inst-1"
     )
     await repo.sync_by_business_key([{"enabled": True, "llm_model": "m"}])
@@ -144,18 +144,18 @@ async def test_task_memory_single_document_sync() -> None:
 
 @pytest.mark.asyncio
 async def test_access_not_injected_by_default() -> None:
-    clear_config_record_repositories()
-    assert get_config_record_repository("model_template") is None
+    clear_enterprise_record_repositories()
+    assert get_enterprise_record_repository("model_template") is None
 
     store = InMemoryPersistentBackend()
-    repos = create_enterprise_config_record_repositories(
+    repos = create_enterprise_record_repositories(
         store, instance_id="inst-1"
     )
     assert set(repos) == set(ENTERPRISE_RECORD_STORE_NAMES)
-    set_config_record_repositories(repos)
-    assert get_config_record_repository("model_template") is repos["model_template"]
-    clear_config_record_repositories()
-    assert get_config_record_repository("model_template") is None
+    set_enterprise_record_repositories(repos)
+    assert get_enterprise_record_repository("model_template") is repos["model_template"]
+    clear_enterprise_record_repositories()
+    assert get_enterprise_record_repository("model_template") is None
 
 
 def test_layouts_register_all_enterprise_names() -> None:

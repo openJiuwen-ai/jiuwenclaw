@@ -257,10 +257,10 @@ def _detail_interaction(state: dict[str, Any]) -> dict[str, Any]:
             "questions": [
                 {
                     "header": "报告详略度",
-                    "question": "您希望这份报告是精简版还是专业版？",
+                    "question": "您希望这份报告是通用版还是专业版？",
                     "options": [
                         {"label": "专业版（包含深度分析和详细评测）"},
-                        {"label": "精简版（仅包含核心结论和快速对比）"},
+                        {"label": "通用版（仅包含核心结论和快速对比）"},
                     ],
                 }
             ],
@@ -312,7 +312,7 @@ def _detail_query(query: str, user_input: Any) -> str:
     selected = " ".join(values)
     if "专业版" in selected:
         requirement = "请生成专业版报告"
-    elif "精简版" in selected:
+    elif "通用版" in selected or "精简版" in selected:
         requirement = "请生成精简版报告"
     else:
         requirement = selected.strip()
@@ -735,9 +735,16 @@ def _terminal_error(
     *,
     error_code: str,
     content: str,
+    **diagnostics: Any,
 ) -> dict[str, Any]:
     state = _persist(context, state, "error", error_code=error_code)
-    return _result("error", state, error_code=error_code, content=content)
+    return _result(
+        "error",
+        state,
+        error_code=error_code,
+        content=content,
+        **diagnostics,
+    )
 
 
 async def _handle_outcome(
@@ -867,11 +874,19 @@ async def _handle_outcome(
         return _result("cancelled", state, content="DeepResearch 任务已取消。")
     error_code = str(outcome.get("error_code") or "deepresearch_failed")
     error = str(outcome.get("error") or "DeepResearch 执行失败。")
+    diagnostics: dict[str, Any] = {}
+    returncode = outcome.get("returncode")
+    if isinstance(returncode, int) and not isinstance(returncode, bool):
+        diagnostics["returncode"] = returncode
+    stderr_tail = outcome.get("stderr_tail")
+    if isinstance(stderr_tail, str) and stderr_tail:
+        diagnostics["stderr_tail"] = stderr_tail
     return _terminal_error(
         context,
         state,
         error_code=error_code,
         content=f"DeepResearch 执行失败：{error}",
+        **diagnostics,
     )
 
 

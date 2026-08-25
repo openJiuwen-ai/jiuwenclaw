@@ -77,6 +77,7 @@ async def handle_permissions_config(ctx: RequestContext) -> None:
     read_only_methods = {
         ReqMethod.PERMISSIONS_ENABLED_GET,
         ReqMethod.PERMISSIONS_WORKSPACE_ENABLE_GET,
+        ReqMethod.PERMISSIONS_WORKSPACE_ACCESS_GET,
         ReqMethod.PERMISSIONS_TOOLS_GET,
         ReqMethod.PERMISSIONS_TOOLS_LIST,
         ReqMethod.PERMISSIONS_RULES_GET,

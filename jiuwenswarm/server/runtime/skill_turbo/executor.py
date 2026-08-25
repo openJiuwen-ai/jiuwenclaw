@@ -278,6 +278,17 @@ class TaskCompleteEventData:
     error: Any | None
 
 
+def _is_subplan_business_failure(result: Any) -> bool:
+    """子节点返回业务失败状态时，也应标记 task.complete 为 failed。"""
+    if not isinstance(result, dict):
+        return False
+    if result.get("export_status") == "failed":
+        return True
+    if result.get("status") == "error":
+        return True
+    return False
+
+
 @dataclass
 class _StreamBufferBucket:
     """单个 (stream_source_id, event_type) 桶的缓冲状态。
@@ -319,6 +330,52 @@ class _StreamBufferState:
 
     def clear(self) -> None:
         self.buckets.clear()
+
+
+_SKILL_TURBO_TC_PREFIX = "skill_turbo-tc-"
+
+
+def _parse_tool_name_from_call_id(tool_call_id: str) -> str | None:
+    """从 ``skill_turbo-tc-{tool_name}-{args_hash}-{idx}`` 解析 tool_name。
+
+    tool_name 自身可能含 ``-``（如 ``ask_user``），所以从尾部剥掉 ``-{idx}``
+    和 ``-{args_hash}``（各 8/16 进制 hex 段），剩余即 tool_name。
+
+    解析失败返回 ``None``（如非本格式或过短）。
+    """
+    if not isinstance(tool_call_id, str) or not tool_call_id.startswith(
+        _SKILL_TURBO_TC_PREFIX
+    ):
+        return None
+    body = tool_call_id[len(_SKILL_TURBO_TC_PREFIX):]
+    if not body:
+        return None
+    last_dash = body.rfind("-")
+    if last_dash <= 0:
+        return None
+    body = body[:last_dash]  # 去掉末段 idx
+    last_dash = body.rfind("-")
+    if last_dash <= 0:
+        return None
+    name = body[:last_dash]  # 去掉 args_hash
+    return name or None
+
+
+def _parse_call_idx_from_call_id(tool_call_id: Any) -> int | None:
+    """从 ``skill_turbo-tc-{tool_name}-{args_hash}-{idx}`` 解析末段 idx。
+
+    idx 是同一 ``(tool_name, args_hash)`` 组合的第几次调用（0-based）。
+    解析失败返回 ``None``。
+    """
+    if not isinstance(tool_call_id, str):
+        return None
+    last_dash = tool_call_id.rfind("-")
+    if last_dash <= 0 or last_dash == len(tool_call_id) - 1:
+        return None
+    try:
+        return int(tool_call_id[last_dash + 1:])
+    except ValueError:
+        return None
 
 
 class SkillTurboExecutor:
@@ -1283,6 +1340,9 @@ class SkillTurboExecutor:
         self._resume_replay = True
         self._pending_resume = {
             "expected_tool_call_id": expected_tool_call_id,
+            "expected_tool_name": _parse_tool_name_from_call_id(
+                expected_tool_call_id
+            ),
             "user_input": user_input,
             "task_states": copy.deepcopy(task_states) if task_states else None,
         }
@@ -1306,16 +1366,66 @@ class SkillTurboExecutor:
             return [copy.deepcopy(state) for state in task_states.values()]
         return []
 
-    def _consume_pending_resume_input(self, current_tool_call_id: str) -> Any | None:
+    def _consume_pending_resume_input(
+        self, current_tool_call_id: str, current_tool_name: str
+    ) -> tuple[Any | None, str]:
+        """取出对当前 tool_call 的用户回复。
+
+        返回 ``(user_input, effective_tool_call_id)``：
+
+        - 精确命中：``current_tool_call_id == pending.expected_tool_call_id``，
+          返回 ``(user_input, current_tool_call_id)`` 并清空 pending。
+        - 回退命中（resume 重放）：``current_tool_call_id`` 因重放时 ask_user
+          等工具的非确定性参数（如 LLM 生成的候选项）而与中断时不一致，但
+          ``current_tool_name == pending.expected_tool_name`` 且两者末段 idx
+          一致时，返回 ``(user_input, expected_tool_call_id)`` 并清空 pending
+          ——用中断时的 ``tool_call_id`` 覆盖本次，使 rail 能把 ``user_input``
+          注入到与中断点对齐的 ``ctx.extra[RESUME_USER_INPUT_KEY]``，避免
+          再次中断形成死循环。
+
+          idx 段比较用于区分"同一 stage 内多个同名工具调用"：idx 是同
+          ``(tool_name, args_hash)`` 组合的调用次序，中断点与重放点的 idx
+          一致才回退命中，避免把 user_input 误注入到非中断点的同名调用。
+        - 未命中：返回 ``(None, current_tool_call_id)``，pending 保留待后续匹配。
+
+        ``current_tool_name`` 由调用方 ``use_tool`` 传入，避免在本方法里再解析
+        一次 ``current_tool_call_id``。
+        """
         pending = self._pending_resume
         if not pending:
-            return None
-        if pending.get("expected_tool_call_id") != current_tool_call_id:
-            return None
-        user_input = pending.get("user_input")
-        # 保留可能尚未取出的 task_states（理论上 init 已 pop）；整表清空
-        self._pending_resume = None
-        return user_input
+            return None, current_tool_call_id
+        expected_id = pending.get("expected_tool_call_id")
+        if expected_id == current_tool_call_id:
+            user_input = pending.get("user_input")
+            self._pending_resume = None
+            return user_input, current_tool_call_id
+        expected_name = pending.get("expected_tool_name")
+        current_idx = _parse_call_idx_from_call_id(current_tool_call_id)
+        expected_idx = _parse_call_idx_from_call_id(expected_id)
+        idx_match = current_idx is not None and current_idx == expected_idx
+        fallback_match = (
+            bool(expected_name)
+            and current_tool_name == expected_name
+            and pending.get("user_input") is not None
+            and idx_match
+        )
+        if fallback_match:
+            user_input = pending.get("user_input")
+            logger.warning(
+                "[SkillTurboExecutor] resume tool_call_id mismatch fallback: "
+                "current_tcid=%s expected_tcid=%s tool_name=%s; "
+                "aligning to expected_tcid to inject user_input "
+                "(likely non-deterministic ask_user args on replay)",
+                current_tool_call_id,
+                expected_id,
+                current_tool_name,
+            )
+            self._pending_resume = None
+            aligned_id = (
+                expected_id if isinstance(expected_id, str) else current_tool_call_id
+            )
+            return user_input, aligned_id
+        return None, current_tool_call_id
 
     def _next_tool_call_id(self, tool_name: str, kwargs: dict[str, Any]) -> str:
         """生成确定性 tool_call_id：基于 (tool_name, canonical_args, call_index) 哈希。
@@ -1351,7 +1461,9 @@ class SkillTurboExecutor:
         """
         session = _session_var.get()
         tool_call_id = self._next_tool_call_id(tool_name, kwargs)
-        resume_input = self._consume_pending_resume_input(tool_call_id)
+        resume_input, tool_call_id = self._consume_pending_resume_input(
+            tool_call_id, tool_name
+        )
 
         # ─── 工具调用 trace 上下文 ───
         # begin_tool_trace_event 在本次 use_tool 调用范围内分配独立 event_id，
@@ -2621,6 +2733,38 @@ class SkillTurboExecutor:
         )
         return True
 
+    async def _should_suppress_subplan_start_banner(
+        self,
+        subplan: PlanNode,
+        inputs: dict[str, Any],
+    ) -> bool:
+        """HITL resume 重放时，抑制二层 stage 的「开始执行」进度横幅。
+
+        completed stage 已由 ``_should_skip_subplan_execute`` 静默跳过；
+        in_progress stage 仍需重入（命中 ask_user tool_call_id），但不应再刷横幅。
+        """
+        del inputs
+        if not self._resume_replay:
+            return False
+        if subplan.depth != 1:
+            return False
+        task_states = self._live_task_states()
+        if not task_states:
+            return False
+        found = self._find_task_state_by_plan_name(subplan.plan_name, task_states)
+        if found is None:
+            return False
+        _task_id, task_state = found
+        if task_state.get("status") != "in_progress":
+            return False
+        logger.info(
+            "[SkillTurboExecutor] suppress start banner for in-progress stage "
+            "(HITL resume replay): plan_name=%s task_id=%s",
+            subplan.plan_name,
+            _task_id,
+        )
+        return True
+
     async def _before_subplan_execute(
         self, subplan: PlanNode, inputs: dict[str, Any]
     ) -> None:
@@ -2744,7 +2888,9 @@ class SkillTurboExecutor:
         task_id = task_context["task_id"]
         timestamp = time.time()
         duration_ms = int((timestamp - task_context.get("start_time", time.time())) * 1000)
-        is_error = isinstance(result_or_error, Exception)
+        is_error = isinstance(result_or_error, Exception) or _is_subplan_business_failure(
+            result_or_error
+        )
         status = "failed" if is_error else "completed"
         prior_status = (
             task_states[task_id].get("status") if task_id in task_states else None
@@ -3130,6 +3276,7 @@ class SkillTurboExecutor:
             before_subplan_execute=self._before_subplan_execute,
             after_subplan_execute=self._after_subplan_execute,
             should_skip_subplan_execute=self._should_skip_subplan_execute,
+            should_suppress_subplan_start_banner=self._should_suppress_subplan_start_banner,
         )
 
     @staticmethod

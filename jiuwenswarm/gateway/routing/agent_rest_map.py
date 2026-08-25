@@ -165,6 +165,8 @@ _ROUTE_ROWS: tuple[tuple[str, str, str], ...] = (
     ("permissions.approval_overrides.delete", "DELETE", "/permissions/approval-overrides/{override_id}"),
     ("permissions.file_guard.workspace.rw_enabled.get", "GET", "/permissions/file-guard/workspace"),
     ("permissions.file_guard.workspace.rw_enabled.set", "PUT", "/permissions/file-guard/workspace"),
+    ("permissions.file_guard.workspace.access.get", "GET", "/permissions/file-guard/workspace/access"),
+    ("permissions.file_guard.workspace.access.set", "PUT", "/permissions/file-guard/workspace/access"),
     ("config.cache_clear", "POST", "/config/actions/cache-clear"),
     ("agent.reload_config", "POST", "/config/actions/agent-reload"),
     ("sync_agents_configs", "POST", "/config/actions/sync-agents"),

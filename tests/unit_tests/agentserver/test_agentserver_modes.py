@@ -1,7 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
@@ -68,7 +68,7 @@ def test_progressive_defaults_expose_registered_ask_user_tool():
 
 def test_progressive_runtime_config_exposes_registered_ask_user_tool():
     config_path = Path(__file__).parents[3] / "jiuwenswarm/resources/config.yaml"
-    config = yaml.safe_load(config_path.read_text())
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     eager_tools = config["react"]["tool_lazy_load"]["eager_tools"]
 
     assert "ask_user" in eager_tools
@@ -98,6 +98,61 @@ def test_progressive_legacy_eager_config_exposes_registered_ask_user_tool():
         "read_file",
         "ask_user",
     ]
+
+
+def test_deep_adapter_builds_usage_reporting_task_planning_rail():
+    from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
+        ConcurrentSafeTaskPlanningRail,
+    )
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    adapter = JiuWenSwarmDeepAdapter()
+    rail = adapter._build_task_planning_rail({})  # pylint: disable=protected-access
+
+    assert isinstance(rail, ConcurrentSafeTaskPlanningRail)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_task_planning_rail_uses_session_api_and_preserves_terminal_todos():
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+    from openjiuwen.harness.schema.task import TaskPlan, TodoItem, TodoStatus
+    from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
+        ConcurrentSafeTaskPlanningRail,
+    )
+
+    persisted_todos = [
+        TodoItem(id="complete-me", content="Complete me", status=TodoStatus.IN_PROGRESS),
+        TodoItem(id="cancelled", content="Stay cancelled", status=TodoStatus.CANCELLED),
+    ]
+    tool = Mock()
+    tool.load_todos = AsyncMock(return_value=persisted_todos)
+    tool.save_todos = AsyncMock()
+
+    rail = ConcurrentSafeTaskPlanningRail()
+    rail._find_todo_tool = Mock(return_value=tool)  # pylint: disable=protected-access
+
+    state = Mock(
+        task_plan=TaskPlan(
+            tasks=[
+                TodoItem(id="complete-me", content="Complete me", status=TodoStatus.COMPLETED),
+                TodoItem(id="cancelled", content="Stay cancelled", status=TodoStatus.IN_PROGRESS),
+            ]
+        )
+    )
+    session = Mock()
+    session.get_session_id.return_value = "session-1"
+    agent = Mock()
+    agent.load_state.return_value = state
+    ctx = AgentCallbackContext(agent=agent, session=session)
+
+    await rail._sync_todos_from_plan(ctx)  # pylint: disable=protected-access
+
+    tool.load_todos.assert_awaited_once_with("session-1")
+    tool.save_todos.assert_awaited_once_with("session-1", persisted_todos)
+    assert persisted_todos[0].status == TodoStatus.COMPLETED
+    assert persisted_todos[1].status == TodoStatus.CANCELLED
 
 
 @pytest.mark.parametrize(
@@ -267,7 +322,19 @@ def test_resolve_request_project_dir_prefers_params_project_dir():
     assert agent_ws_server_module.resolve_request_project_dir(request) == "/tmp/project"
 
 
-def test_resolve_request_project_dir_falls_back_to_cwd_for_legacy_clients():
+def test_resolve_request_project_dir_falls_back_to_workspace_dir() -> None:
+    request = AgentRequest(
+        request_id="req-e2a",
+        channel_id="officeclaw",
+        params={"workspace_dir": "E:/workspace/demo-project"},
+    )
+
+    assert agent_ws_server_module.resolve_request_project_dir(request) == (
+        "E:/workspace/demo-project"
+    )
+
+
+def test_resolve_request_project_dir_falls_back_to_cwd_for_legacy_clients() -> None:
     request = AgentRequest(
         request_id="req-chat",
         channel_id="tui",
@@ -1536,7 +1603,6 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda *a, **k: None)
     monkeypatch.setattr(adapter, "_build_security_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_heartbeat_rail", lambda: None)
-    monkeypatch.setattr(adapter, "_build_circuit_breaker_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_avatar_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_subagent_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_skill_rail", lambda **_kwargs: None)
