@@ -40,7 +40,7 @@ const FRAME_INTERVAL_MS = 500;
 const MAX_FRAMES = 6;
 const MAX_SCREENS = 4;
 const MAX_FRAME_WIDTH = 768;
-const SCREEN_PREVIEW_FRAME_RATE = 5;
+const SCREEN_PREVIEW_FRAME_RATE = 30;
 const FRAME_JPEG_QUALITY = 0.72;
 
 function cleanAssistantText(text: string): string {
