@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 # bundleName for Seedream image + Seedance video (skills/seedance-image-gen.md, seedance-video-gen.md)
@@ -26,12 +27,132 @@ PLUGIN_SKILL_CATALOG: dict[str, str] = {
 _CATALOG_HELP = (
     "仅允许 skill 文档中的云端能力，禁止臆造 bundleName/functionName。\n"
     "生图：functionName=seedreamLite4Skill|SeedreamPro4Skill，"
-    f"bundleName={_ATOMIC_BUNDLE}，必填 prompt；可选 reference_images/max_images/size 等。\n"
-    "生视频：functionName=seedanceMiniTask（提交，必填 content）或 "
+    f"bundleName={_ATOMIC_BUNDLE}，必填 prompt；"
+    "size 仅 1K|2K（1024x1024→1K，2048x2048→2K）；"
+    "max_images 仅 Lite（1~15），Pro 勿传。\n"
+    "生视频：functionName=seedanceMiniTask（提交，必填 content；默认提交后自动轮询 "
+    "seedanceMiniTaskQuery 直到成片，arguments.wait=false 则只返回 task_id）或 "
     "seedanceMiniTaskQuery（查询，必填 id），"
-    f"bundleName={_ATOMIC_BUNDLE}；成片须先 task 再 query。\n"
+    f"bundleName={_ATOMIC_BUNDLE}。\n"
     f"图像理解：functionName=imageUnderStandStream，bundleName={_XIAOYI_BUNDLE}，必填 imageUrl；可选 text。"
 )
+
+_SEEDREAM_FUNCS = ("seedreamLite4Skill", "SeedreamPro4Skill")
+_SEEDREAM_SIZE_MAP = {
+    "1k": "1K",
+    "1024": "1K",
+    "1024x1024": "1K",
+    "1024*1024": "1K",
+    "2k": "2K",
+    "2048": "2K",
+    "2048x2048": "2K",
+    "2048*2048": "2K",
+}
+
+
+def _canonical_seedream_size(raw: Any) -> str | None:
+    """Map skill-doc / pixel aliases to 1K|2K. None = omitted or invalid."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        key = str(int(raw))
+    else:
+        key = str(raw).strip().lower().replace(" ", "").replace("×", "x")
+        if not key:
+            return None
+    return _SEEDREAM_SIZE_MAP.get(key)
+
+
+def normalize_plugin_skill_args(
+    func_name: str, params: dict[str, Any]
+) -> tuple[dict[str, Any], str | None]:
+    """Coerce seedream size / drop Pro max_images. Returns (params, error)."""
+    out = dict(params)
+    if func_name not in _SEEDREAM_FUNCS:
+        return out, None
+
+    if "size" in out and out["size"] is not None and str(out["size"]).strip() != "":
+        mapped = _canonical_seedream_size(out["size"])
+        if mapped is None:
+            return out, (
+                f"arguments.size={out['size']!r} 无效，仅允许 1K 或 2K"
+                "（像素写法 1024x1024→1K、2048x2048→2K）。"
+            )
+        out["size"] = mapped
+
+    if func_name == "SeedreamPro4Skill":
+        out.pop("max_images", None)
+        return out, None
+
+    if "max_images" not in out or out["max_images"] is None:
+        return out, None
+    try:
+        count = int(out["max_images"])
+    except (TypeError, ValueError):
+        return out, "arguments.max_images 须为 1~15 的整数（仅 Lite 可用）。"
+    if count < 1 or count > 15:
+        return out, "arguments.max_images 取值范围 1~15（仅 Lite 可用）。"
+    out["max_images"] = count
+    return out, None
+
+
+def parse_plugin_json_payload(raw: Any) -> dict[str, Any]:
+    """Parse cloud plugin content that may be a JSON string or dict."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def extract_seedance_task_id(result: dict[str, Any]) -> str:
+    """Read task_id from seedanceMiniTask invoke result."""
+    payload = parse_plugin_json_payload(result.get("content"))
+    if not payload and isinstance(result, dict):
+        payload = {k: v for k, v in result.items() if k != "frames"}
+    nested = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+    for candidate in (payload, nested):
+        if not isinstance(candidate, dict):
+            continue
+        for key in ("task_id", "id", "taskId"):
+            value = str(candidate.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def extract_seedance_query_state(result: dict[str, Any]) -> tuple[str, str]:
+    """Return (status, video_url) from seedanceMiniTaskQuery result."""
+    payload = parse_plugin_json_payload(result.get("content"))
+    if not payload and isinstance(result, dict):
+        payload = {k: v for k, v in result.items() if k != "frames"}
+    nested = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+    status = str(payload.get("status") or nested.get("status") or "").strip().lower()
+    video_url = str(
+        nested.get("video_url")
+        or nested.get("videoUrl")
+        or payload.get("video_url")
+        or payload.get("videoUrl")
+        or ""
+    ).strip()
+    return status, video_url
+
+
+def want_seedance_wait(params: dict[str, Any]) -> bool:
+    """Default True; arguments.wait=false skips auto-poll after submit."""
+    if "wait" not in params:
+        return True
+    val = params.get("wait")
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() not in {"0", "false", "no", "off"}
 
 
 def validate_plugin_skill_args(func_name: str, params: dict[str, Any]) -> str | None:
@@ -56,7 +177,7 @@ def validate_plugin_skill_args(func_name: str, params: dict[str, Any]) -> str | 
             f"{_CATALOG_HELP}"
         )
 
-    if func_name in ("seedreamLite4Skill", "SeedreamPro4Skill"):
+    if func_name in _SEEDREAM_FUNCS:
         if not str(params.get("prompt") or "").strip():
             return f"{func_name} 须提供 arguments.prompt（见 seedance-image-gen / 生图 skill）。"
     elif func_name == "imageUnderStandStream":
@@ -93,12 +214,18 @@ def invoke_tool_description() -> str:
         "\"functionName\":\"imageUnderStandStream\","
         f"\"bundleName\":\"{_XIAOYI_BUNDLE}\","
         "\"imageUrl\":\"https://...\",\"text\":\"描述图片\"}}。\n"
-        "示例生视频：先 seedanceMiniTask（content），再 seedanceMiniTaskQuery（id）取 video_url。"
+        "示例生视频：seedanceMiniTask（content）默认会轮询到 video_url；"
+        "只要 task_id 时传 arguments.wait=false，再用 seedanceMiniTaskQuery（id）。"
     )
 
 
 __all__ = [
     "PLUGIN_SKILL_CATALOG",
+    "extract_seedance_query_state",
+    "extract_seedance_task_id",
     "invoke_tool_description",
+    "normalize_plugin_skill_args",
+    "parse_plugin_json_payload",
     "validate_plugin_skill_args",
+    "want_seedance_wait",
 ]
