@@ -224,6 +224,12 @@ from jiuwenswarm.agents.harness.common.rails import (
 from jiuwenswarm.agents.harness.common.rails.disabled_tools_rail import (
     DisabledToolsRail,
 )
+from jiuwenswarm.agents.harness.common.rails.skill_active_state import SkillActiveStateRail
+from jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail import (
+    SkillCredentialInjectionRail,
+    coalesce_config_skill_envs,
+    coalesce_skill_envs,
+)
 from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
     ConcurrentSafeSysOperationRail,
     ConcurrentSafeTaskPlanningRail,
@@ -2051,6 +2057,8 @@ class JiuWenSwarmDeepAdapter:
         self._subagent_rail: SubagentRail | None = None
         self._ask_user_rail: StructuredAskUserRail | None = None
         self._permission_rail: Any = None
+        self._skill_active_state_rail: SkillActiveStateRail | None = None
+        self._skill_credential_injection_rail: SkillCredentialInjectionRail | None = None
         self._avatar_rail: Any = None
         self._tool_cards = None
         self._evolution_watcher_tasks: set[asyncio.Task] = set()
@@ -2165,6 +2173,11 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
+
+    def _skill_envs_provider(self) -> dict[str, dict[str, str]]:
+        if self._skill_credential_injection_rail is None:
+            return {}
+        return self._skill_credential_injection_rail.get_skill_envs()
 
     def _schedule_runtime_state_write(
         self,
@@ -3803,10 +3816,7 @@ class JiuWenSwarmDeepAdapter:
                 )
 
         ability_result = ability_manager.add(card)
-        if ability_result is None:
-            # Legacy AbilityManager.add returned None and may overwrite by name.
-            return
-        added = getattr(ability_result, "added", None)
+        added = getattr(ability_result, "added", None) if ability_result is not None else None
         if added is False:
             # Conflict-aware AbilityManager kept the existing card. Retry once if
             # we own it; otherwise fail closed.
@@ -3815,11 +3825,22 @@ class JiuWenSwarmDeepAdapter:
             if existing_id and existing_id in self._owned_office_claw_tool_ids():
                 ability_manager.remove(tool_name)
                 ability_result = ability_manager.add(card)
-                added = getattr(ability_result, "added", None)
+                added = getattr(ability_result, "added", None) if ability_result is not None else None
             if added is False:
                 raise RuntimeError(
                     f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name}"
                 )
+
+        # Legacy AbilityManager.add() returns None and may overwrite by name.
+        # Always verify the short-name mapping lands on *this* card id so a
+        # conflict-aware or raced manager cannot leave a foreign bind in place.
+        installed = getter(tool_name) if callable(getter) else None
+        installed_id = str(getattr(installed, "id", "") or "") if installed is not None else ""
+        if installed_id != tool_id:
+            raise RuntimeError(
+                f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name} "
+                f"(existing_id={installed_id or '-'}, new_id={tool_id})"
+            )
 
     async def cleanup_request_scoped_office_claw_mcp(
         self,
@@ -6069,6 +6090,39 @@ class JiuWenSwarmDeepAdapter:
             skill_rail = None
         return skill_rail
 
+    @staticmethod
+    def _build_skill_active_state_rail() -> SkillActiveStateRail | None:
+        try:
+            rail = SkillActiveStateRail()
+            logger.info("[JiuWenSwarmDeepAdapter] SkillActiveStateRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] SkillActiveStateRail create failed: %s",
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _build_skill_credential_injection_rail(
+        config: dict[str, Any],
+    ) -> SkillCredentialInjectionRail | None:
+        try:
+            skill_envs = coalesce_skill_envs(config.get("skill_envs"), None)
+            rail = SkillCredentialInjectionRail(skill_envs=skill_envs)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillCredentialInjectionRail create success "
+                "(skills=[%s])",
+                ", ".join(skill_envs.keys()) if skill_envs else "",
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] SkillCredentialInjectionRail create failed: %s",
+                exc,
+            )
+            return None
+
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail.
 
@@ -7113,6 +7167,19 @@ class JiuWenSwarmDeepAdapter:
         else:
             self._skill_protocol_prompt_rail = None
 
+        rail_infos.insert(
+            0,
+            _RailBuildInfo(
+                "_skill_credential_injection_rail",
+                self._build_skill_credential_injection_rail,
+                {"config": config},
+            ),
+        )
+        rail_infos.insert(
+            1,
+            _RailBuildInfo("_skill_active_state_rail", self._build_skill_active_state_rail),
+        )
+
         rail_infos.append(
             _RailBuildInfo(
                 "_progressive_tool_rail",
@@ -7292,6 +7359,40 @@ class JiuWenSwarmDeepAdapter:
 
         self._update_permission_rail(config_base)
 
+        skill_credential_rail_newly_created = False
+        incoming_skill_envs = config.get("skill_envs", {})
+        current_skill_envs = (
+            self._skill_credential_injection_rail.get_skill_envs()
+            if self._skill_credential_injection_rail is not None
+            else None
+        )
+        new_skill_envs = coalesce_skill_envs(incoming_skill_envs, current_skill_envs)
+        if new_skill_envs is not incoming_skill_envs and new_skill_envs:
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] keeping skill_envs skills=[%s]; "
+                "empty YAML/overlay would wipe catalog credentials",
+                ", ".join(new_skill_envs.keys()),
+            )
+            config["skill_envs"] = new_skill_envs
+            if isinstance(config_base, dict):
+                react_base = config_base.get("react")
+                if isinstance(react_base, dict):
+                    react_base["skill_envs"] = new_skill_envs
+        if self._skill_credential_injection_rail is not None:
+            self._skill_credential_injection_rail.update_skill_envs(new_skill_envs)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] skill_envs hot-updated for SkillCredentialInjectionRail"
+            )
+        else:
+            self._skill_credential_injection_rail = self._build_skill_credential_injection_rail(
+                config
+            )
+            if self._skill_credential_injection_rail is not None:
+                skill_credential_rail_newly_created = True
+
+        if self._skill_active_state_rail is None:
+            self._skill_active_state_rail = self._build_skill_active_state_rail()
+
         progressive_tool_rail = None
         if "tool_lazy_load" in config:
             old_progressive_tool_rail = self._progressive_tool_rail
@@ -7331,6 +7432,10 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(disabled_tools_rail)
         elif not disabled_tools_configured and self._disabled_tools_rail is not None:
             rails_list.append(self._disabled_tools_rail)
+        if skill_credential_rail_newly_created and self._skill_credential_injection_rail is not None:
+            rails_list.append(self._skill_credential_injection_rail)
+        if self._skill_active_state_rail is not None:
+            rails_list.append(self._skill_active_state_rail)
         return rails_list, rails_to_unregister
 
     def _runtime_agent_scope_id(self) -> str:
@@ -7737,7 +7842,12 @@ class JiuWenSwarmDeepAdapter:
         ns_token, overlay_token = self._bind_request_env_overlay()
         try:
             load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
+            incoming_config_base = config_base
             config_base = _resolve_instance_config_base(config_base)
+            config_base = coalesce_config_skill_envs(
+                config_base,
+                incoming_config_base if isinstance(incoming_config_base, dict) else self._config_base_cache,
+            )
             # 企业版：create_instance 时可带 request，按 params 加载企业配置并合并模型
             bootstrap_request = self._instance_overrides.pop("request", None)
             if bootstrap_request is not None and os.getenv("AGENT_RUNTIME", "").strip():
@@ -8120,6 +8230,18 @@ class JiuWenSwarmDeepAdapter:
             raise TypeError("config_base must be a dict when provided")
         else:
             config_base = resolve_env_vars(config_base)
+
+        live_skill_envs = (
+            self._skill_credential_injection_rail.get_skill_envs()
+            if self._skill_credential_injection_rail is not None
+            else None
+        )
+        previous_for_skill_envs = (
+            {"react": {"skill_envs": live_skill_envs}}
+            if live_skill_envs
+            else self._config_base_cache
+        )
+        config_base = coalesce_config_skill_envs(config_base, previous_for_skill_envs)
 
         # 同步扩展配置到 ExtensionRegistry
         # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
@@ -9471,6 +9593,59 @@ class JiuWenSwarmDeepAdapter:
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[CRON-CTX] cron checkpoint commit failed: session_id=%s "
+                "request_id=%s error=%s",
+                session_id, request_id, exc,
+            )
+
+    async def _persist_session_checkpoint(self, session_id: str, request_id: str) -> None:
+        """流式 chat 收尾补 commit：把 context_engine 内存 context 落盘到 checkpointer。
+
+        流式 chat.send 走``_inner_stream``，其 ``session.commit()`` 挂在 ``need_cleanup`` 分支下；
+        而 adapter 在 ``start_interaction`` 已提前绑定 session，``_inner_stream`` 收到现成 session 致
+        ``need_cleanup=False``，commit 被跳过。于是 ``context_engine`` 内存里本轮新增的对话
+        （user/assistant/tool 消息）从未经 ``save_contexts`` 回写到 ``session.global_state['context']``，
+        checkpointer 存的 context 停在恢复时的旧值。重启或跨 channel 后，
+        下一轮 ``pre_agent_execute`` 从 checkpointer restore 出来的就只有 上轮残留的残缺状态，历史对话丢失，相当于全新会话。
+        """
+        try:
+            if self._instance is None:
+                return
+            react_agent = getattr(self._instance, "react_agent", None)
+            if react_agent is None:
+                return
+            context_engine = react_agent.context_engine
+            # 无可落盘的 context 则跳过，避免写空状态覆盖既有历史。
+            _ctx = context_engine.get_context(session_id=session_id)
+            if _ctx is None:
+                return
+            try:
+                _ctx_msg_count = len(list(_ctx.get_messages() or []))
+            except Exception:  # noqa: BLE001
+                _ctx_msg_count = 0
+            if _ctx_msg_count <= 0:
+                return
+            # 用运行中的 _interaction_session（而非新建 session）：
+            # save_contexts 内部 _save_state_to_session 会把 context messages 存回该 session 的
+            # global_state['context']，commit 再触发 post_agent_execute → _agent_storage.save 落盘。
+            # 下一轮 pre_agent_execute 即可从 checkpointer restore 回这些 messages。
+            session = getattr(self._instance, "_interaction_session", None)
+            if session is None:
+                logger.warning(
+                    "[STREAM-CTX] checkpoint skip: no active _interaction_session "
+                    "session_id=%s request_id=%s",
+                    session_id, request_id,
+                )
+                return
+            await context_engine.save_contexts(session)
+            await session.commit()  # → post_agent_execute → _agent_storage.save 落盘
+            logger.info(
+                "[STREAM-CTX] checkpoint committed: session_id=%s request_id=%s "
+                "msg_count=%s",
+                session_id, request_id, _ctx_msg_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[STREAM-CTX] checkpoint commit failed: session_id=%s "
                 "request_id=%s error=%s",
                 session_id, request_id, exc,
             )
@@ -15434,6 +15609,22 @@ class JiuWenSwarmDeepAdapter:
                     logger.warning(
                         "[JiuWenSwarmDeepAdapter] cleanup failed: "
                         "step=pending_reload error_type=%s",
+                        type(exc).__name__,
+                    )
+            # 流式 chat 收尾补 commit：把本轮 context_engine 内存 context 落盘到 checkpointer。
+            # 根因：流式路径 session.commit() 挂在 need_cleanup 下，而 adapter 预绑定 session 致
+            # need_cleanup=False，commit 被跳过 → 跨重启/跨 channel 下一轮 restore 出来历史为空，
+            # agent 从头重新调研。对齐 _persist_cron_checkpoint 显式补一次落盘，覆盖 officeclaw
+            # 等非 cron 普通会话。失败不阻断清理（仅记 cleanup_error），对齐周围姿势。
+            if initialization_complete:
+                try:
+                    await self._persist_session_checkpoint(session_id, rid)
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] cleanup failed: "
+                        "step=session_checkpoint error_type=%s",
                         type(exc).__name__,
                     )
             if active_error is None and cleanup_error is not None:

@@ -18,6 +18,8 @@ def _rail_plan_adapter() -> JiuWenSwarmDeepAdapter:
     adapter = JiuWenSwarmDeepAdapter()
     adapter._build_skill_rail = MagicMock(return_value=None)
     adapter._build_progressive_tool_rail = MagicMock(return_value=None)
+    adapter._build_skill_credential_injection_rail = MagicMock(return_value=None)
+    adapter._build_skill_active_state_rail = MagicMock(return_value=None)
     adapter._filesystem_rail_enabled_for_profile = MagicMock(return_value=True)
     adapter._update_permission_rail = MagicMock()
     return adapter

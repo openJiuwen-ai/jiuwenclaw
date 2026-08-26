@@ -855,6 +855,47 @@ def ensure_request_scoped_office_claw_tool_allowed(tool_id: str) -> None:
         )
 
 
+def get_active_office_claw_mcp_tool_ids() -> frozenset[str] | None:
+    """Return the request-local OfficeClaw tool id allowlist, if bound."""
+
+    return _active_office_claw_tool_ids.get()
+
+
+def resolve_active_office_claw_tool_id(tool_name: str) -> str | None:
+    """Map a short tool name to this request's OfficeClaw tool id.
+
+    Request-scoped ids look like
+    ``office-claw-request-<hash>.office-claw.<tool_name>``. ProgressiveToolRail
+    may hold a stale AbilityManager card whose id points at another request's
+    (already cleaned-up) registration; the active allowlist is the authority
+    for *this* chat.send.
+    """
+
+    name = str(tool_name or "").strip()
+    if not name:
+        return None
+    allowed = _active_office_claw_tool_ids.get()
+    if not allowed:
+        return None
+    suffix = f".{name}"
+    matches = [
+        tool_id
+        for tool_id in allowed
+        if tool_id.endswith(suffix) or tool_id.rsplit(".", 1)[-1] == name
+    ]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    # Prefer the canonical request-scoped shape when multiple ids match.
+    preferred = [
+        tool_id
+        for tool_id in matches
+        if tool_id.startswith(OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX) and tool_id.endswith(suffix)
+    ]
+    return preferred[0] if preferred else matches[0]
+
+
 def extract_office_claw_mcp(params: Any) -> dict[str, Any] | None:
     """Return only the legacy ``office_claw_mcp`` request field."""
 
@@ -1130,9 +1171,11 @@ __all__ = [
     "ensure_request_scoped_office_claw_tool_allowed",
     "extract_enabled_mcp_server_entries",
     "extract_office_claw_mcp",
+    "get_active_office_claw_mcp_tool_ids",
     "invalidate_office_claw_mcp_schema_cache",
     "list_office_claw_mcp_tools",
     "preflight_mcp_server_reachable",
+    "resolve_active_office_claw_tool_id",
     "validate_office_claw_mcp_config",
     "_check_dangerous_args",
     "_is_blocked_host",
