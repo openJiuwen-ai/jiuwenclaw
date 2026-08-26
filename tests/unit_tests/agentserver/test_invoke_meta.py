@@ -591,6 +591,12 @@ def test_needs_insecure_ssl_for_test_host_and_ip():
 def test_extract_seedance_task_id_from_json_content():
     assert extract_seedance_task_id({"content": '{"task_id":"cgt-1"}'}) == "cgt-1"
     assert extract_seedance_task_id({"content": {"id": "cgt-2"}}) == "cgt-2"
+    assert (
+        extract_seedance_task_id(
+            {"content": '{"items":[{"id":"cgt-20260826000744-5bttn"}]}'}
+        )
+        == "cgt-20260826000744-5bttn"
+    )
 
 
 def test_extract_seedance_query_state():
@@ -603,6 +609,35 @@ def test_extract_seedance_query_state():
     )
     assert status == "succeeded"
     assert url == "https://cdn.example/a.mp4"
+
+
+def test_extract_seedance_query_state_from_items():
+    status, url = extract_seedance_query_state(
+        {
+            "content": json.dumps(
+                {
+                    "items": [
+                        {
+                            "id": "cgt-20260826000744-5bttn",
+                            "status": "succeeded",
+                            "video_url": "https://cdn.example/a.mp4",
+                        }
+                    ]
+                }
+            )
+        }
+    )
+    assert status == "succeeded"
+    assert url == "https://cdn.example/a.mp4"
+
+
+def test_normalize_seedance_string_content_to_text_array():
+    out, err = normalize_plugin_skill_args(
+        "seedanceMiniTask",
+        {"content": "一只在月光下奔跑的狐狸", "duration": 10},
+    )
+    assert err is None
+    assert out["content"] == [{"type": "text", "text": "一只在月光下奔跑的狐狸"}]
 
 
 def test_want_seedance_wait_defaults_true():
@@ -636,16 +671,29 @@ async def test_invoke_seedance_auto_polls_until_video_url(monkeypatch):
         async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
             names.append(spec.tool_name)
             if spec.tool_name == "seedanceMiniTask":
-                return {"success": True, "content": json.dumps({"task_id": "cgt-1"})}
+                return {
+                    "success": True,
+                    "content": json.dumps({"items": [{"id": "cgt-1"}]}),
+                }
             query_count = names.count("seedanceMiniTaskQuery")
             if query_count == 1:
-                return {"success": True, "content": json.dumps({"status": "running"})}
+                return {
+                    "success": True,
+                    "content": json.dumps(
+                        {"items": [{"id": "cgt-1", "status": "running"}]}
+                    ),
+                }
             return {
                 "success": True,
                 "content": json.dumps(
                     {
-                        "status": "succeeded",
-                        "content": {"video_url": "https://cdn.example/a.mp4"},
+                        "items": [
+                            {
+                                "id": "cgt-1",
+                                "status": "succeeded",
+                                "video_url": "https://cdn.example/a.mp4",
+                            }
+                        ]
                     }
                 ),
             }
@@ -695,6 +743,43 @@ async def test_invoke_seedance_wait_false_skips_poll(monkeypatch):
     assert result.get("success") is True
     assert names == ["seedanceMiniTask"]
     assert "cgt-9" in str(result.get("content", ""))
+
+
+@pytest.mark.asyncio
+async def test_invoke_seedance_string_content_reaches_plugin(monkeypatch):
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    seen: list[dict[str, Any]] = []
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            seen.append(dict(arguments))
+            return {
+                "success": True,
+                "content": json.dumps({"items": [{"id": "cgt-str"}]}),
+            }
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": _seedance_task_args(
+                    wait=False,
+                    content="一只在月光下奔跑的狐狸",
+                ),
+            }
+        )
+
+    assert result.get("success") is True
+    assert "须提供 arguments.content 数组" not in str(result.get("error") or "")
+    assert seen
+    assert seen[0]["content"] == [{"type": "text", "text": "一只在月光下奔跑的狐狸"}]
 
 
 def test_design_system_prompt_includes_video_workflow():

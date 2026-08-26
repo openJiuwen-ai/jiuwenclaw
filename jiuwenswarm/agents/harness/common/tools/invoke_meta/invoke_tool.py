@@ -304,14 +304,14 @@ async def _dispatch_invoke(
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
 
-    # Skill-documented cloud capabilities: validate catalog (fail fast vs 120s timeout).
+    # Skill-documented cloud capabilities: coerce then validate (fail fast vs 120s timeout).
     if via_plugin_skill or func_name in PLUGIN_SKILL_CATALOG:
-        catalog_err = validate_plugin_skill_args(func_name, params)
-        if catalog_err is not None:
-            return {"success": False, "error": catalog_err}
         params, norm_err = normalize_plugin_skill_args(func_name, params)
         if norm_err is not None:
             return {"success": False, "error": norm_err}
+        catalog_err = validate_plugin_skill_args(func_name, params)
+        if catalog_err is not None:
+            return {"success": False, "error": catalog_err}
 
     built = _build_plugin_spec(func_name, params)
     if isinstance(built, dict):
