@@ -39,7 +39,13 @@ _CN_PROTOCOL = """## 技能执行规范（强制）
 随后按 SKILL 工作流执行；下列规范约束执行过程。
 
 1. **声明步骤**：默认情况下，每次行动前必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。若 SKILL.md 明确声明“阶段状态和阶段消息由工具事件唯一生成”，则以该声明为准，禁止自行输出 `[当前步骤: ...]` 或其他步骤声明。
-2. **必须使用 todo**：在执行 skill 步骤前，必须先创建 todo 列表。创建后，必须在执行过程中持续更新（如打勾已完成项、添加遗漏项等），确保 todo 与实际执行状态始终保持一致。
+2. **必须使用 todo**：在执行 skill 步骤前，必须先创建 todo 列表。
+   - **创建时搭便车**：`todo_create` **必须**和第一个工作工具在同一轮发出，禁止 `todo_create` 独占一轮。
+   - **更新时搭便车（强制）**：`todo_modify` **必须**和下一个任务的工作工具在同一轮发出，禁止 `todo_modify` 独占一轮。系统会在工作工具被调用时自动将 pending 推进为 in_progress，你只需要用 `todo_modify` 标记 completed/cancelled。
+   - ✅ 正确：`[write_file(...), todo_modify(action="update", todos=[{"id":"step1","status":"completed"}])]`
+   - ❌ 禁止：`[todo_modify(action="update", todos=[{"id":"step1","status":"completed"}])]` ← 独占一轮，浪费 LLM 调用
+   - 唯一例外：所有工作完成后、即将给出最终回复的最后一轮，可以单独调 `todo_modify`。
+   - 可在连续推进多个任务后用一次 `todo_modify` 统一批量更新状态。
    放弃、跳过或决定不再执行某步骤时（如用户说「不生成 PPT 了」），**必须**立即 `todo_modify` 将该条标为 `cancelled`；
    禁止仅用口头回复收尾而仍保留 `in_progress`/`pending` 项。
 3. **严格顺序**：按 SKILL.md 定义的顺序逐步执行，**禁止跳过、合并或重排步骤**，除非 SKILL.md 或用户明确允许。
@@ -73,8 +79,12 @@ Then execute the workflow; the rules below govern execution.
 
 1. **Declare step**: By default, before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step. If SKILL.md explicitly states that stage status and stage messages are emitted exclusively by tool events, follow that rule and you must not declare `[Current Step: ...]` or any other step message yourself.
 2. **Use todo (mandatory)**: For skills, you MUST create a todo list before executing the skill steps.
-   Once created, you MUST continuously update it throughout execution (e.g. check off completed items,
-   add missing steps) to ensure the todo always reflects the actual execution state.
+   - **Piggyback on creation**: `todo_create` **MUST** be called in the same response as the first work tool — never in a standalone todo-only round.
+   - **Piggyback on updates (MANDATORY)**: `todo_modify` **MUST** be called alongside the next task's work tool in the same response — never alone. The system auto-advances pending tasks to in_progress when work tools are called, so you only need `todo_modify` to mark tasks completed/cancelled.
+   - ✅ CORRECT: `[write_file(...), todo_modify(action="update", todos=[{"id":"step1","status":"completed"}])]`
+   - ❌ PROHIBITED: `[todo_modify(action="update", todos=[{"id":"step1","status":"completed"}])]` ← wastes an entire LLM round
+   - The ONLY exception: the very final round when all work is done and you are about to give the final answer.
+   - You may run several tasks back-to-back and update statuses in a single batched `todo_modify`.
    When abandoning or skipping a step (e.g. the user says not to generate the PPT), you **must** call
    `todo_modify` to mark it `cancelled` immediately; never end with text only while items stay
    `in_progress` or `pending`.
