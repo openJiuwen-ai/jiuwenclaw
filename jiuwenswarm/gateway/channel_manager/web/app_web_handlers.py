@@ -547,11 +547,16 @@ def _merge_models_for_replace_all(
                 new_mcc["timeout"] = item["timeout"]
             if not _values_match(item["alias"], (resolved_entry or {}).get("alias")):
                 new_entry["alias"] = item["alias"]
-            # vendor_key: persist the hint into model_client_config (or clear it).
+            # vendor_key + plan: persist the exact provider selection identity
+            # into model_client_config (or clear it).
             if item.get("vendor_key"):
                 new_mcc["vendor_key"] = item["vendor_key"]
             else:
                 new_mcc.pop("vendor_key", None)
+            if item.get("plan"):
+                new_mcc["plan"] = item["plan"]
+            else:
+                new_mcc.pop("plan", None)
             # endpoint_profile: OpenAI 协议端点方言(deepseek/openrouter/dashscope/...)。
             # 前端透传则落库；不传则清掉(避免残留旧方言)。Anthropic 协议时此字段被 core 忽略。
             if item.get("endpoint_profile"):
@@ -577,9 +582,10 @@ def _merge_models_for_replace_all(
                     "client_provider": item["model_provider"],
                     "timeout": item["timeout"],
                     "verify_ssl": item["verify_ssl"],
-                    # vendor_key persisted on model_client_config so the UI can
-                    # match this entry back to a registry preset (icon/re-select).
+                    # vendor_key + plan identify the exact registry preset so
+                    # the UI can restore the provider selection after reload.
                     **({"vendor_key": item["vendor_key"]} if item.get("vendor_key") else {}),
+                    **({"plan": item["plan"]} if item.get("plan") else {}),
                     # endpoint_profile: OpenAI 协议端点方言(透传；Anthropic 时 core 忽略)。
                     **({"endpoint_profile": item["endpoint_profile"]} if item.get("endpoint_profile") else {}),
                 },
@@ -3009,6 +3015,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             is_default = bool(item.get("is_default", False))
             alias = str(item.get("alias") or "").strip()
             reasoning_level = str(item.get("reasoning_level") or "").strip()
+            vendor_key = str(item.get("vendor_key") or "").strip() or None
+            plan = str(item.get("plan") or "").strip() or None
+            if plan:
+                from jiuwenswarm.common.model_vendor_registry import PlanKind
+
+                try:
+                    plan = PlanKind(plan).value
+                except ValueError as exc:
+                    raise _ConfigBadRequest(
+                        f"models[{idx}].plan must be one of: token_plan, coding_plan, custom_api"
+                    ) from exc
+                if not vendor_key:
+                    raise _ConfigBadRequest(f"models[{idx}].vendor_key is required when plan is set")
 
             if alias:
                 if alias in aliases_seen:
@@ -3033,7 +3052,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 # present in jiuwenswarm.common.model_vendor_registry). It is
                 # persisted so the UI can match a configured entry back to its
                 # preset for icon display / re-selection. Not required.
-                "vendor_key": str(item.get("vendor_key") or "").strip() or None,
+                "vendor_key": vendor_key,
+                # plan is the other half of the provider-selection identity.
+                # Older entries may have vendor_key only; do not infer a plan.
+                "plan": plan,
                 # endpoint_profile: OpenAI 协议端点方言(deepseek/openrouter/dashscope/...);
                 # opaque passthrough, not validated. Anthropic 协议时 core 忽略此字段。
                 "endpoint_profile": str(item.get("endpoint_profile") or "").strip() or None,
@@ -3304,6 +3326,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "origin_index": idx,
                     "context_window_tokens": context_window_tokens,
                     "vendor_key": mcc.get("vendor_key") or entry.get("vendor_key") or "",
+                    "plan": mcc.get("plan") or entry.get("plan") or "",
                     "endpoint_profile": mcc.get("endpoint_profile") or "",
                 })
             # Zen 免费模型仅存在于进程内缓存，不能写回 models.defaults；但需要
@@ -3549,11 +3572,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 get_preset,
             )
 
-            def _fetch_remote_sync(endpoint: str, hdrs: dict[str, str]) -> list[str]:
+            def _fetch_remote_sync(
+                endpoint: str, hdrs: dict[str, str]
+            ) -> tuple[list[str], str]:
                 """同步拉取并解析 /models(在线程池里跑,不阻塞事件循环)。
 
-                成功返回模型 ID 列表;任何失败(网络/状态码非200/解析失败/空)
-                都返回空列表,由调用方回退预设。永不抛异常。
+                成功返回 ``(模型 ID 列表, "")``;任何失败(网络/状态码非 200/
+                解析失败/空)返回 ``([], 原因)``。原因透传给前端,写进回退响应的
+                ``reason`` 字段,便于联调时区分鉴权失败/端点问题/限流/网络异常,
+                而非笼统的"拉取失败"。永不抛异常。
                 """
                 import httpx  # noqa: PLC0415
                 from openjiuwen.extensions.external_provider.openai_auth.openai_account_models import (
@@ -3563,19 +3590,24 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     resp = httpx.get(endpoint, headers=hdrs, timeout=12.0)
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("[vendors.fetch_models] http error: %s", exc)
-                    return []
+                    return [], f"remote fetch error: {type(exc).__name__}"
                 if resp.status_code != 200:
-                    return []
+                    # 401/403 = key 错或鉴权方式不符(如 maas 需华为签名);
+                    # 429 = 限流;5xx = 上游故障。把状态码透传给前端。
+                    return [], f"remote returned HTTP {resp.status_code}"
                 try:
                     payload_json = resp.json()
                 except ValueError:
-                    return []
+                    return [], "remote returned non-JSON body"
                 if not isinstance(payload_json, dict):
-                    return []
+                    return [], "remote returned unexpected body shape"
                 try:
-                    return parse_openai_account_model_ids(payload_json)
+                    ids = parse_openai_account_model_ids(payload_json)
                 except Exception:  # noqa: BLE001
-                    return []
+                    return [], "remote payload parse failed"
+                if not ids:
+                    return [], "remote returned empty model list"
+                return ids, ""
 
             try:
                 plan = PlanKind(plan_raw)
@@ -3625,7 +3657,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
             # 同步 httpx.get 通过 asyncio.to_thread 卸载到线程池,避免阻塞事件循环
             # (与同文件 _openai_account_*_payload / _updater_* 的 to_thread 模式一致)。
-            remote_ids = await asyncio.to_thread(
+            remote_ids, remote_reason = await asyncio.to_thread(
                 _fetch_remote_sync, preset.models_endpoint, headers,
             )
 
@@ -3636,13 +3668,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 )
                 return
 
-            # 远端失败/空 -> 回退预设
+            # 远端失败/空 -> 回退预设。把远端状态码/原因透传给前端,联调时能
+            # 分辨是鉴权失败(key 错 / 需厂商专属签名)、限流、还是端点不可达,
+            # 而非笼统的"拉取报错"。注意:仍回 source="preset" + ok=True,保证
+            # 拉取失败不阻塞前端选模型,只是可见地说明为何回退。
             await channel.send_response(
                 ws, req_id, ok=True,
                 payload={
                     "models": list(preset.model_options),
                     "source": "preset",
-                    "reason": "remote fetch failed or empty",
+                    "reason": remote_reason or "remote fetch failed or empty",
                 },
             )
         except Exception as exc:  # noqa: BLE001

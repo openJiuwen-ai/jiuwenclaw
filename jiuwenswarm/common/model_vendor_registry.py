@@ -132,6 +132,9 @@ _PRESETS: list[VendorPreset] = [
         default_model="pangu-large",
         model_options=("pangu-ultra", "pangu-large", "pangu-small"),
         icon_key="pangu",
+        # 已知限制:此 URL 存在(实测 401 而非 404),但 ModelArts MaaS 不接受简单
+        # Bearer,要求华为云 SDK 签名(X-Sdk-Date + V4 签名 Authorization)。当前
+        # fetch_models handler 只发 Bearer,故 maas 拉列表恒 401 → 回退预设。签名支持待补。
         models_endpoint="https://api.modelarts-maas.com/openai/v1/models",
         models_needs_key=True,
         anthropic_base="https://api.modelarts-maas.com/plan/anthropic",
@@ -151,17 +154,20 @@ _PRESETS: list[VendorPreset] = [
         ),
         icon_key="baidu",
         models_endpoint="https://qianfan.baidubce.com/v2/models",
-        models_needs_key=False,  # 列表公开(实测200);chat/completions仍需Bearer
+        models_needs_key=True,  # 实测无 key 返回 403 AccessDenied;带 Bearer 才 200
         anthropic_base="https://qianfan.baidubce.com/anthropic/tokenplan/personal",
     ),
     VendorPreset(
         vendor_key="mimo", display_name="小米Mimo", plan=PlanKind.TOKEN_PLAN,
         client_provider="OpenAI",
-        api_base="https://token-plan-cn.xiaomimimo.com/v1",
+        api_base="https://token-plan-cn.xiaomimimo.com/v1",  # 套餐调用走套餐域名(需套餐 key)
         default_model="mimo-v2.5-pro",
         model_options=("mimo-v2.5-pro", "mimo-v2.5"),
         icon_key="mimo",
-        models_endpoint="https://token-plan-cn.xiaomimimo.com/v1/models",
+        # 拉列表走通用域名:套餐域名 token-plan-cn.* 只认套餐 key,通用 key 实测 401;
+        # 通用 api.xiaomimimo.com/v1/models + 通用 key 实测 200。与 alibaba Token Plan 同款
+        # (套餐调用走 token-plan 域名、拉列表走通用 dashscope 域名)。
+        models_endpoint="https://api.xiaomimimo.com/v1/models",
         models_needs_key=True,
         anthropic_base="https://token-plan-cn.xiaomimimo.com/anthropic",
     ),
@@ -220,7 +226,7 @@ _PRESETS: list[VendorPreset] = [
         model_options=("deepseek-v4-pro", "deepseek-v4-flash", "glm-5.1", "kimi-k2.5"),
         icon_key="baidu",
         models_endpoint="https://qianfan.baidubce.com/v2/models",
-        models_needs_key=False,
+        models_needs_key=True,  # 实测无 key 返回 403;带 Bearer 才 200
         anthropic_base="https://qianfan.baidubce.com/anthropic/coding",
     ),
 
@@ -331,6 +337,8 @@ _PRESETS: list[VendorPreset] = [
         default_model="pangu-large",
         model_options=("pangu-ultra", "pangu-large", "pangu-small"),
         icon_key="pangu",
+        # 已知限制:同 Token Plan 的 maas 条目,ModelArts MaaS 需华为云 SDK 签名,
+        # handler 仅发 Bearer 故恒 401 → 回退预设。签名支持待补。
         models_endpoint="https://api.modelarts-maas.com/openai/v1/models",
         models_needs_key=True,
         anthropic_base="https://api.modelarts-maas.com/anthropic/v1",
@@ -363,7 +371,7 @@ _PRESETS: list[VendorPreset] = [
         ),
         icon_key="baidu",
         models_endpoint="https://qianfan.baidubce.com/v2/models",
-        models_needs_key=False,
+        models_needs_key=True,  # 实测无 key 返回 403;带 Bearer 才 200
         anthropic_base="https://qianfan.baidubce.com/anthropic",
     ),
     VendorPreset(
