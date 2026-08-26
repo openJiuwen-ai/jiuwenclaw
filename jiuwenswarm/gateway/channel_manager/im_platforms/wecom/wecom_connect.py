@@ -1133,15 +1133,19 @@ class WecomChannel(BaseChannel):
         msg: Message,
         *,
         routing_target: RoutingTarget | None = None,
-    ) -> None:
+    ) -> bool:
         """通过企业微信发送消息。支持流式（reply_stream）与非流式（send_message）。
 
         V2: resolved/delivery 为 team 模式分发元数据，企微通道当前通过
         msg.metadata 获取投递信息，暂不直接消费。
+
+        Returns True when a payload was handed to the WeCom client for this call.
+        Early skips (not connected, filtered event types) return False so ask_user
+        pending registration does not treat a no-op as delivery.
         """
         if not self._ws_client or not getattr(self._ws_client, "is_connected", False):
             logger.warning("WecomChannel 未连接，跳过发送")
-            return
+            return False
 
         # 不向企业微信发送 chat.processing_status（思考状态事件），避免展示思考过程
         if msg.event_type == EventType.CHAT_PROCESSING_STATUS:
@@ -1149,7 +1153,7 @@ class WecomChannel(BaseChannel):
             meta = getattr(msg, "metadata", None) or {}
             if isinstance(payload, dict):
                 await self._handle_processing_status_event(msg, meta, payload)
-            return
+            return False
 
         # 提取事件类型
         payload = msg.payload if isinstance(msg.payload, dict) else {}
@@ -1158,7 +1162,7 @@ class WecomChannel(BaseChannel):
         # 处理文件发送事件（chat.media 与 chat.file 统一走文件发送路径）
         if event_type in ("chat.file", "chat.media"):
             await self._send_file_message(msg)
-            return
+            return False
 
         # 心跳/系统事件
         if msg.event_type == EventType.HEARTBEAT_RELAY:
@@ -1177,7 +1181,7 @@ class WecomChannel(BaseChannel):
                 logger.warning(
                     "[WecomChannel] 心跳未发送：无有效 chatid。请先在企业微信中与机器人对话一次，以写入 last_chat_id"
                 )
-            return
+            return False
 
         # 流式回复：CHAT_DELTA / CHAT_FINAL 通过 reply_stream 发送，替换首帧「...」
         req_id = self._get_req_id_for_stream(msg)
@@ -1191,7 +1195,7 @@ class WecomChannel(BaseChannel):
             if entry:
                 if self._is_reasoning_chunk(msg):
                     logger.debug("WecomChannel 跳过 reasoning chunk: req_id=%s", req_id)
-                    return
+                    return False
                 content = self._extract_content_from_payload(msg)
                 if content is not None:
                     is_final = msg.event_type == EventType.CHAT_FINAL
@@ -1205,9 +1209,9 @@ class WecomChannel(BaseChannel):
                         if msg.event_type == EventType.CHAT_FINAL:
                             self._pending_streams.pop(req_id, None)
                             self._stream_completed_requests.add(req_id)
-                        return
+                        return False
                     if not is_final and to_send == entry.get("last_sent"):
-                        return
+                        return False
                     
                     # 群聊场景：出站管线已在 publish_robot_messages 时设置 reply_scope
                     meta = getattr(msg, "metadata", None) or {}
@@ -1230,9 +1234,10 @@ class WecomChannel(BaseChannel):
                             body = {"msgtype": "markdown", "markdown": {"content": to_send}}
                             await self._ws_client.send_message(target_user_id, body)
                             logger.info("[WecomChannel] 私发消息成功: user_id=%s len=%d", target_user_id, len(to_send))
+                            return True
                         except Exception as e:
                             logger.error("[WecomChannel] 私发消息失败: %s", e)
-                        return
+                            return False
                     
                     # 非群聊场景或无目标用户，正常流式发送
                     try:
@@ -1252,17 +1257,18 @@ class WecomChannel(BaseChannel):
                         if is_final:
                             self._pending_streams.pop(req_id, None)
                             self._stream_completed_requests.add(req_id)
+                        return True
                     except Exception as e:
                         logger.error("WecomChannel 流式发送失败: %s", e)
                         if msg.event_type == EventType.CHAT_FINAL:
                             self._pending_streams.pop(req_id, None)
                             self._stream_completed_requests.add(req_id)
-                    return
+                        return False
 
         if req_id and req_id in self._stream_completed_requests:
             logger.debug("WecomChannel 跳过已完成的流式请求: req_id=%s", req_id)
             self._stream_completed_requests.discard(req_id)
-            return
+            return False
 
         if msg.event_type == EventType.CHAT_ERROR:
             if req_id:
@@ -1278,20 +1284,20 @@ class WecomChannel(BaseChannel):
                     )
                 except Exception as e:
                     logger.debug("WecomChannel 发送错误消息失败: %s", e)
-            return
+            return False
 
         # 非流式或无 pending：仅 CHAT_FINAL 用 send_message
         if msg.event_type != EventType.CHAT_FINAL:
-            return
+            return False
         if req_id:
             self._pending_streams.pop(req_id, None)
         if self._is_reasoning_chunk(msg):
             logger.debug("[WecomChannel] 跳过 final reasoning chunk")
-            return
+            return False
         content = self._strip_think_tags(self._extract_content(msg)).strip()
         if not content or self._is_thinking_only_content(content):
             logger.debug("[WecomChannel] 消息内容为空或仅为思考占位，跳过发送")
-            return
+            return False
 
         meta = getattr(msg, "metadata", None) or {}
         chatid = self._extract_chatid(msg)
@@ -1304,7 +1310,7 @@ class WecomChannel(BaseChannel):
         )
         if not chatid:
             logger.warning("[WecomChannel] 无法确定回发目标 chatid, msg.id=%s", msg.id)
-            return
+            return False
 
         request_id = str(msg.id or "").strip()
         if request_id:
@@ -1356,6 +1362,8 @@ class WecomChannel(BaseChannel):
 
         except Exception as e:
             logger.error("WecomChannel 发送失败: %s", e)
+            return False
+        return True
 
     async def _run_client(self) -> None:
         """在后台运行 WebSocket 客户端。"""

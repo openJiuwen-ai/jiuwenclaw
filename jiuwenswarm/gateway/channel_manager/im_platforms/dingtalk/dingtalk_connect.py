@@ -18,6 +18,9 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.errors import (
     AttachmentPersistError,
 )
 from jiuwenswarm.common.schema.message import Message, ReqMethod
+from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.text_delivery import (
+    is_stream_intermediate,
+)
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -330,6 +333,9 @@ class DingTalkChannel(BaseChannel):
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.CHAT_SEND,
+            # chat.ask_user_question is only produced as a stream chunk, so
+            # a non-streaming request never sees the question at all.
+            is_stream=True,
             chat_id=conversation_id,
             metadata=metadata,
         )
@@ -572,22 +578,24 @@ class DingTalkChannel(BaseChannel):
 
         return url, data
 
-    async def _send_http_request(self, url: str, data: dict, token: str, chat_id: str) -> None:
-        """发送HTTP请求"""
+    async def _send_http_request(self, url: str, data: dict, token: str, chat_id: str) -> bool:
+        """发送HTTP请求. Returns True only when the platform accepts the message."""
         headers = {"x-acs-dingtalk-access-token": token}
 
         if not self._http:
             logger.warning("钉钉HTTP客户端未初始化，无法发送消息")
-            return
+            return False
 
         try:
             resp = await self._http.post(url, json=data, headers=headers)
             if resp.status_code != 200:
                 logger.error(f"钉钉消息发送失败: {resp.text}")
-            else:
-                logger.debug("钉钉消息已发送至 %s", chat_id)
+                return False
+            logger.debug("钉钉消息已发送至 %s", chat_id)
+            return True
         except Exception as e:
             logger.error(f"发送钉钉消息时出错: {e}")
+            return False
 
     async def send_attachment_error_reply(
         self, sender_id: str, conversation_id: str, conversation_type: str,
@@ -605,7 +613,7 @@ class DingTalkChannel(BaseChannel):
     async def send(
         self, msg: Message,
         *, routing_target: RoutingTarget | None = None,
-    ) -> None:
+    ) -> bool:
         """通过钉钉发送消息"""
         # 提取事件类型
         payload = msg.payload if isinstance(msg.payload, dict) else {}
@@ -614,26 +622,35 @@ class DingTalkChannel(BaseChannel):
         # 处理文件发送事件（chat.media 与 chat.file 统一走文件发送路径）
         if event_type in ("chat.file", "chat.media"):
             await self._send_file_message(msg)
-            return
+            # File delivery reports success through its own path; treat completion
+            # without raise as delivered so callers that check the bool stay sane.
+            return True
+
+        # the inbound request now streams so ask_user is emitted at all,
+        # which also turns on reasoning and tool chunks. They are dropped here,
+        # deliberately after the file branch above: a file event carries no text
+        # content and must keep reaching its own delivery path.
+        if is_stream_intermediate(msg):
+            return False
 
         # 提取内容
         content = self._extract_message_content(msg)
         if not content:
             logger.warning("钉钉发送: 在 msg.params 或 msg.payload 中未找到内容")
-            return
+            return False
         if not content.strip():
             logger.debug("钉钉发送: 跳过纯空白流式内容")
-            return
+            return False
 
         # 提取聊天ID
         chat_id = self._extract_chat_id(msg)
         if not chat_id:
             logger.warning("钉钉发送: 在消息中未找到 chat_id 或 session_id")
-            return
+            return False
 
         token = await self._get_access_token()
         if not token:
-            return
+            return False
 
         # 构建请求
         metadata = msg.metadata or {}
@@ -641,12 +658,12 @@ class DingTalkChannel(BaseChannel):
         open_conversation_id = metadata.get("conversation_id", "")
         url, data = self._build_send_request(chat_id, content, conversation_type, open_conversation_id)
 
-        # 发送HTTP请求
-        await self._send_http_request(url, data, token, chat_id)
+        delivered = await self._send_http_request(url, data, token, chat_id)
 
         # chat.final 兜底文件发送
         if event_type == "chat.final":
             await self._send_fallback_files(msg, content)
+        return delivered
 
     # ==================== 文件下载处理方法 ====================
 

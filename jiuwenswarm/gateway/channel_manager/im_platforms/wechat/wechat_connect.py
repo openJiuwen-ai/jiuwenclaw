@@ -469,16 +469,18 @@ class WechatChannel(BaseChannel):
             raise RuntimeError("WechatChannel HTTP client is not initialized")
         return http
 
-    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> bool:
         """delta 聚合；enable_streaming 时与原先一致：工具调用/结果会即时下发并在边界冲刷 delta；关闭时仅 chat.final / interrupt 等完结事件合并下发（对齐飞书非流式）。"""
         if not self._http or not self.config.bot_token:
             logger.warning("WechatChannel 未就绪，跳过发送")
-            return
+            return False
 
         streaming = bool(self.config.enable_streaming)
+        meta = getattr(msg, "metadata", None)
+        standalone_notice = isinstance(meta, dict) and bool(meta.get("standalone_notice"))
 
         if msg.event_type == EventType.CHAT_PROCESSING_STATUS:
-            return
+            return False
 
         if msg.event_type == EventType.HEARTBEAT_RELAY:
             user_id = self._extract_platform_user_id(msg)
@@ -486,18 +488,19 @@ class WechatChannel(BaseChannel):
                 logger.warning(
                     "WechatChannel 心跳未发送：无有效用户 ID（需先发消息或携带 wechat_user_id/reply_to_user_id）"
                 )
-                return
+                return False
             content = self._extract_content(msg)
             if content:
                 if await self._should_skip_due_to_send_limit(msg):
                     self._stash_overflow_content(msg, content)
-                    return
+                    return False
                 await self._send_text_chunks_to_user(msg, content)
-            return
+                return True
+            return False
 
         if msg.event_type == EventType.CHAT_TOOL_CALL:
             if not streaming:
-                return
+                return False
             flushed = self._take_accumulated_delta(msg)
             payload = msg.payload if isinstance(msg.payload, dict) else {}
             tool_call_str = format_tool_call_message(payload)
@@ -506,40 +509,41 @@ class WechatChannel(BaseChannel):
             )
             if await self._should_skip_due_to_send_limit(msg):
                 self._stash_overflow_content(msg, content)
-                return
+                return False
             await self._send_text_chunks_to_user(msg, content)
-            return
+            return True
 
         if msg.event_type == EventType.CHAT_TOOL_RESULT:
-            return
+            return False
 
         if msg.event_type == EventType.CHAT_ERROR:
             if await self._should_skip_due_to_send_limit(msg):
                 self._stash_overflow_content(msg, self._extract_content(msg))
-                return
+                return False
             self._clear_delta_session(msg)
             err_line = self._extract_content(msg)
             if err_line:
                 await self._send_text_chunks_to_user(msg, err_line)
-            return
+                return True
+            return False
 
         if msg.event_type == EventType.CHAT_DELTA:
             if self._is_reasoning_chunk(msg):
-                return
+                return False
             payload = msg.payload if isinstance(msg.payload, dict) else {}
             chunk = str(payload.get("content", "") or "")
             raw_index = payload.get("index")
             index = raw_index if isinstance(raw_index, int) else None
             sk = self._delta_session_key(msg)
             if not sk:
-                return
+                return False
             mk = self._message_session_key(msg)
             if mk:
                 self._streaming_sessions.add(mk)
             flushed = self._delta_accumulator.add_chunk(sk, chunk, index=index)
             if flushed:
                 self._delta_leading[sk] = (self._delta_leading.get(sk) or "") + flushed
-            return
+            return False
 
         if self._is_stream_complete_marker(msg):
             mk = self._message_session_key(msg)
@@ -547,7 +551,7 @@ class WechatChannel(BaseChannel):
                 self._streaming_sessions.discard(mk)
                 self._continue_active_sessions.discard(mk)
             self._clear_delta_session(msg)
-            return
+            return False
 
         allow_plain_res = (
             msg.type == "res"
@@ -559,30 +563,34 @@ class WechatChannel(BaseChannel):
             EventType.CHAT_INTERRUPT_RESULT,
         )
         if msg.event_type not in final_like_events and not allow_plain_res:
-            return
+            return False
 
         user_id = self._extract_platform_user_id(msg)
         if not user_id:
             logger.warning("WechatChannel 无法确定回发目标用户")
-            return
+            return False
         if self._is_reasoning_chunk(msg):
-            return
+            return False
 
         content_str = self._strip_think_tags(self._extract_content(msg)).strip()
         if not content_str or self._is_thinking_only_content(content_str):
             logger.debug("WechatChannel 消息内容为空或仅为思考占位，跳过发送")
-            return
+            return False
         if await self._should_skip_due_to_send_limit(msg):
             self._stash_overflow_content(msg, content_str)
-            return
+            return False
         await self._send_text_chunks_to_user(msg, content_str)
-        self._clear_delta_session(msg)
-        mk = self._message_session_key(msg)
-        if mk:
-            self._streaming_sessions.discard(mk)
-            self._continue_active_sessions.discard(mk)
-        self.current_round = 0
-        self._current_round_session_key = ""
+        # ask_user plain-text notices are CHAT_FINAL but must not wipe the
+        # in-flight answer accumulator mid-stream.
+        if not standalone_notice:
+            self._clear_delta_session(msg)
+            mk = self._message_session_key(msg)
+            if mk:
+                self._streaming_sessions.discard(mk)
+                self._continue_active_sessions.discard(mk)
+            self.current_round = 0
+            self._current_round_session_key = ""
+        return True
 
     def _delta_session_key(self, msg: Message) -> str:
         return str(msg.session_id or msg.id or "")

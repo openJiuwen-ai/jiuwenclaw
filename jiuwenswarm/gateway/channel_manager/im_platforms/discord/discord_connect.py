@@ -8,6 +8,9 @@ from typing import Any, Callable
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.text_delivery import (
+    is_stream_intermediate,
+)
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
@@ -113,18 +116,23 @@ class DiscordChannel(BaseChannel):
                 logger.warning("DiscordChannel stop failed: %s", e)
         logger.info("DiscordChannel stopped")
 
-    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> bool:
         if self._client is None or self._client.is_closed():
-            return
+            return False
+        # the inbound request streams so ask_user is emitted at all, which
+        # also turns on reasoning and tool chunks. Discord posts one message at
+        # a time, so the intermediates are dropped here.
+        if is_stream_intermediate(msg):
+            return False
 
         content = self._extract_outgoing_text(msg)
         if not content:
-            return
+            return False
 
         target_channel_id = self._extract_target_channel_id(msg)
         if target_channel_id is None:
             logger.warning("DiscordChannel send skipped: missing target channel id")
-            return
+            return False
 
         channel = self._client.get_channel(target_channel_id)
         if channel is None:
@@ -132,12 +140,14 @@ class DiscordChannel(BaseChannel):
                 channel = await self._client.fetch_channel(target_channel_id)
             except Exception as e:  # noqa: BLE001
                 logger.warning("DiscordChannel fetch channel failed: %s", e)
-                return
+                return False
 
         try:
             await channel.send(content)
         except Exception as e:  # noqa: BLE001
             logger.warning("DiscordChannel send failed: %s", e)
+            return False
+        return True
 
     async def _handle_discord_message(self, message: Any) -> None:
         if not self._running:
@@ -197,6 +207,9 @@ class DiscordChannel(BaseChannel):
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.CHAT_SEND,
+            # chat.ask_user_question is only produced as a stream chunk, so
+            # a non-streaming request never sees the question at all.
+            is_stream=True,
             metadata={
                 "discord_user_id": author_id,
                 "discord_username": author_name,

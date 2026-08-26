@@ -536,8 +536,19 @@ class SessionDispatcher:
 
         routing_target = SessionDispatcher._build_routing_target(target, group_subs, delivery)
         try:
+            # fan-out bypasses the single-channel dispatch branch, so the
+            # ask_user text rewrite + post-send registration must live here too.
+            from jiuwenswarm.gateway.channel_manager.channel_manager import (
+                deliver_with_ask_user_fallback,
+            )
+
             await asyncio.wait_for(
-                channel.send(msg, routing_target=routing_target),
+                deliver_with_ask_user_fallback(
+                    channel,
+                    msg,
+                    channel_id=container_key.channel_id,
+                    routing_target=routing_target,
+                ),
                 timeout=10.0,
             )
         except asyncio.TimeoutError:

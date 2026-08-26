@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.text_delivery import (
+    is_stream_intermediate,
+)
 from jiuwenswarm.gateway.channel_manager.base import (
     BaseChannel,
     ChannelMetadata,
@@ -126,20 +129,23 @@ class SlackChannel(BaseChannel):
 
     async def send(
         self, msg: Message, *, routing_target: RoutingTarget | None = None
-    ) -> None:
+    ) -> bool:
         if self._client is None:
-            return
-        if msg.event_type == EventType.CHAT_DELTA:
-            return
+            return False
+        # the inbound request streams so ask_user is emitted at all, which
+        # also turns on reasoning and tool chunks. Slack posts one message at a
+        # time, so the intermediates are dropped here.
+        if is_stream_intermediate(msg):
+            return False
 
         content = self._extract_outgoing_text(msg)
         if not content:
-            return
+            return False
 
         channel_id, thread_ts = self._extract_delivery(msg, routing_target)
         if not channel_id:
             logger.warning("SlackChannel send skipped: missing target channel id")
-            return
+            return False
 
         for chunk in self._split_text(content):
             kwargs: dict[str, Any] = {"channel": channel_id, "text": chunk}
@@ -149,7 +155,8 @@ class SlackChannel(BaseChannel):
                 await self._client.chat_postMessage(**kwargs)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("SlackChannel send failed: %s", exc)
-                return
+                return False
+        return True
 
     async def _handle_app_mention(
         self, event: dict[str, Any], body: dict[str, Any]
@@ -229,6 +236,9 @@ class SlackChannel(BaseChannel):
             chat_id=channel_id,
             user_id=user_id,
             req_method=ReqMethod.CHAT_SEND,
+            # chat.ask_user_question is only produced as a stream chunk, so
+            # a non-streaming request never sees the question at all.
+            is_stream=True,
             metadata={
                 "user_id": user_id,
                 "slack_event_id": event_id,

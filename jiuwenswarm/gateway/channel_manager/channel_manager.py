@@ -31,6 +31,129 @@ class ChannelEvent:
     user_id: str
 
 
+def conversation_key_of(msg: "Message") -> str:
+    """The scope a pending ``ask_user`` question belongs to.
+
+    The session is the right grain: the outbound question and the reply that
+    answers it share one, and two sessions on the same channel must not steal
+    each other's answers. ``chat_id`` is the fallback for a channel that has
+    not resolved a session yet.
+    """
+    session_id = str(getattr(msg, "session_id", "") or "").strip()
+    if session_id:
+        return session_id
+    return str(getattr(msg, "chat_id", "") or "").strip()
+
+
+def prepare_ask_user_outbound(
+    msg: "Message",
+    *,
+    channel_id: str | None = None,
+) -> "Message | None":
+    """Rewrite an ``ask_user`` question for a text-only channel.
+
+    Does **not** register a pending question -- that happens only after a
+    successful ``channel.send``, so a delivery failure cannot leave a record
+    that steals a later ``1``/label reply.
+
+    ``channel_id`` is the physical delivery channel (fan-out target); when
+    omitted, ``msg.channel_id`` is used.
+
+    Returns the message unchanged when it is not a question or the channel
+    renders its own, and ``None`` when the event carries nothing worth sending.
+    """
+    try:
+        from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.ask_user_notice import (
+            as_text_message,
+            channel_renders_questions,
+        )
+    except Exception:  # noqa: BLE001 - never break dispatch over a fallback
+        logger.exception("[ChannelManager] ask_user fallback unavailable")
+        return msg
+
+    target_channel = str(
+        channel_id if channel_id is not None else getattr(msg, "channel_id", "") or ""
+    )
+    try:
+        return as_text_message(msg, channel_id=channel_id)
+    except Exception:  # noqa: BLE001 - a broken fallback must not drop traffic
+        logger.exception("[ChannelManager] ask_user fallback failed")
+        # Rich channels keep the original event. Text-only channels must not
+        # receive the raw structured payload: they drop it, and with no pending
+        # record the tool stays hung with nothing to answer.
+        if channel_renders_questions(target_channel):
+            return msg
+        return None
+
+
+def register_ask_user_pending(
+    msg: "Message",
+    *,
+    channel_id: str | None = None,
+) -> None:
+    """Record a pending question after the text notice was successfully sent."""
+    try:
+        from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.ask_user_notice import (
+            channel_renders_questions,
+            parse_question,
+        )
+        from jiuwenswarm.gateway.routing.pending_question import PENDING_QUESTIONS
+    except Exception:  # noqa: BLE001 - never break dispatch over a fallback
+        logger.exception("[ChannelManager] ask_user pending registry unavailable")
+        return
+
+    try:
+        target_channel = str(
+            channel_id if channel_id is not None else getattr(msg, "channel_id", "") or ""
+        )
+        if channel_renders_questions(target_channel):
+            return
+        parsed = parse_question(getattr(msg, "payload", None))
+        if parsed is None:
+            return
+        PENDING_QUESTIONS.register(
+            request_id=parsed.request_id,
+            channel_id=target_channel,
+            conversation_key=conversation_key_of(msg),
+            options=parsed.options,
+            source=parsed.source,
+            question=parsed.question,
+        )
+    except Exception:  # noqa: BLE001 - a broken registry must not drop traffic
+        logger.exception("[ChannelManager] ask_user pending registration failed")
+
+
+def _channel_send_delivered(result: Any) -> bool:
+    """Whether ``channel.send`` reported a real delivery.
+
+    Channels that implement the ask_user delivery contract return ``True`` only
+    after a message was handed to the platform API. Legacy ``send()`` returns
+    ``None``; that must not count as success, or a skipped send (bot down,
+    client missing, swallowed HTTP error) would register a pending question the
+    human never saw.
+    """
+    return result is True
+
+
+async def deliver_with_ask_user_fallback(
+    channel: Any,
+    msg: "Message",
+    *,
+    channel_id: str | None = None,
+    **send_kwargs: Any,
+) -> None:
+    """Prepare, send, then register a text ``ask_user`` notice on success."""
+    target_channel = str(
+        channel_id if channel_id is not None else getattr(msg, "channel_id", "") or ""
+    )
+    outbound = prepare_ask_user_outbound(msg, channel_id=target_channel)
+    if outbound is None:
+        return
+    result = await channel.send(outbound, **send_kwargs)
+    if outbound is not msg and _channel_send_delivered(result):
+        register_ask_user_pending(msg, channel_id=target_channel)
+
+
 def _build_mention_target(names: list[str]) -> dict[str, Any]:
     """构造 mention intent 的 fan_out 目标 dict（点名指定 member_names）。"""
     return {
@@ -526,7 +649,9 @@ class ChannelManager(ABC):
                 )
                 if channel:
                     try:
-                        await channel.send(msg)
+                        # text-only channels get ask_user as numbered text;
+                        # register only after a successful send.
+                        await deliver_with_ask_user_fallback(channel, msg)
                     except Exception as e:
                         logger.error("send to channel %s: %s", msg.channel_id, e, exc_info=True)
                         if msg.id and msg.id.startswith("cron-push-"):
