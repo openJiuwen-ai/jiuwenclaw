@@ -221,9 +221,12 @@ def test_installer_cleans_only_confirmed_stale_openjiuwen_descriptions():
     assert "CompareText(FindRec.Name, 'fragments') <> 0" in script
     assert "AddBackslash(LanguageDirectory) + '*.md'" in script
     assert "Unable to remove stale OpenJiuwen description" in script
-    assert script.index("CleanupStaleOpenJiuwenDescriptions();") < script.index(
-        "DoctorSucceeded := False;"
+    postinstall_handler = script.index("procedure CurStepChanged(CurStep: TSetupStep);")
+    postinstall_guard = script.index("if CurStep <> ssPostInstall", postinstall_handler)
+    cleanup_call = script.index(
+        "CleanupStaleOpenJiuwenDescriptions();", postinstall_handler
     )
+    assert postinstall_guard < cleanup_call
 
 
 def test_installer_keeps_workswarm_upgrade_app_id():
