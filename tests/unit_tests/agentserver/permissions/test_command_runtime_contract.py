@@ -344,16 +344,15 @@ async def test_real_ability_manager_uses_policy_frozen_workdir(
 ) -> None:
     paths = _runtime_paths(tmp_path)
     sys_operation, _provider = _jiuwenbox_sys_operation()
-    policy = StaticPolicyEvaluator(PolicyEvaluation(level="allow", reason="allow"))
+    policy = StaticPolicyEvaluator(PolicyEvaluation(level="ask", reason="ask"))
+    reviewer = StaticReviewerClient(outcome=ReviewerOutcome.ALLOW_ONCE)
     rail = AutoPermissionInterruptRail(
         base_rail=FakeBaseRail(),
         permission_config={"mode": "auto", "enabled": True},
         workspace_root=paths.workspace_root,
         sys_operation=sys_operation,
         policy_evaluator=policy,
-        auto_reviewer=AutoReviewer(
-            client=StaticReviewerClient(outcome=ReviewerOutcome.ALLOW_ONCE)
-        ),
+        auto_reviewer=AutoReviewer(client=reviewer),
     )
     monkeypatch.setattr(
         invocation_context,
@@ -390,6 +389,11 @@ async def test_real_ability_manager_uses_policy_frozen_workdir(
     assert executed == [expected]
     assert policy.calls
     assert all(call.tool_args == expected for call in policy.calls)
+    assert len(reviewer.requests) == 1
+    assert reviewer.requests[0].required_unknown_acknowledgements == (
+        "filesystem_effect",
+        "network_effect",
+    )
     facts = build_tool_decision_facts(
         "mcp_exec_command",
         executed[0],

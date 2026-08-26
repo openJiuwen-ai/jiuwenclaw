@@ -140,6 +140,12 @@ def reviewer_route(
     if guard == "terminal_manual":
         return _manual("terminal_manual")
 
+    if requires_manual_execution_provider_review(
+        facts.tool_name,
+        tool_category=facts.capability.category,
+    ):
+        return _manual(EXECUTION_PROVIDER_CONTRACT_UNVERIFIED)
+
     allow_unknown_shell_accesses = bool(
         policy == ASK_LEVEL
         and facts.capability.category == "shell"
@@ -161,12 +167,6 @@ def reviewer_route(
             return _deny(domain_route.reason or "domain_policy_deny")
         if domain_route.requires_manual:
             return _manual(domain_route.reason or "domain_policy_manual")
-
-    if requires_manual_execution_provider_review(
-        facts.tool_name,
-        tool_category=facts.capability.category,
-    ):
-        return _manual(EXECUTION_PROVIDER_CONTRACT_UNVERIFIED)
 
     if (
         facts.capability.category == "shell"
