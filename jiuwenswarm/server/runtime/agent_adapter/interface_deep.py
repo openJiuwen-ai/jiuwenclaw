@@ -77,6 +77,10 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
+# FullCompact 仅用于溢出兜底（413/上下文溢出），日常压缩由 preset 链承担。
+# 从 processor.compressor 包入口取 Config（__init__ 显式导出，跨版本稳定）；
+# _merge_processors 只认 BaseModel 实例，不区分配置类来源
+from openjiuwen.core.context_engine.processor.compressor import FullCompactProcessorConfig
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload as _SkillTurboConfirmPayload
 try:
     from openjiuwen.agent_evolving.skill_self_evolution import resolve_skill_evolution_action
@@ -216,6 +220,9 @@ from jiuwenswarm.agents.harness.common.rails import (
     SymphonyOrchestrationRail,
     TaskExecutionRail,
     ContextOverflowRecoveryRail,
+)
+from jiuwenswarm.agents.harness.common.rails.disabled_tools_rail import (
+    DisabledToolsRail,
 )
 from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
     ConcurrentSafeSysOperationRail,
@@ -390,6 +397,7 @@ from jiuwenswarm.common.config import (
     get_sandbox_startup_mode,
     get_skill_create_enabled,
     resolve_env_vars,
+    resolve_string_or_list_config,
 )
 from jiuwenswarm.common.mcp_config import (
     OfficeClawMcpRegistration,
@@ -1437,6 +1445,16 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
         if isinstance(round_level_cfg, dict) and round_level_cfg:
             user_processors.append(("RoundLevelCompressor", round_level_cfg))
 
+        # 兜底压缩：整窗口 token 超阈值时调一次 LLM 把历史压成 summary。
+        # ContextOverflowRecoveryRail 在 413/上下文溢出时靠 set_force_compact 触发。
+        # 注意：FullCompactProcessor 不在 0.1.16 preset 链中，_merge_processors 对非 preset
+        # processor 不接受 dict（无 base_cfg 可合并），必须传完整 BaseModel 实例。
+        full_compact_cfg = context_engine_cfg.get("full_compact_processor_config", {})
+        if isinstance(full_compact_cfg, dict) and full_compact_cfg:
+            user_processors.append(
+                ("FullCompactProcessor", FullCompactProcessorConfig(**full_compact_cfg))
+            )
+
         reasoning_loop_cfg = context_engine_cfg.get("reasoning_tool_loop_compact_config", {})
         if isinstance(reasoning_loop_cfg, dict) and reasoning_loop_cfg:
             reasoning_loop_cfg = {
@@ -1967,6 +1985,7 @@ class JiuWenSwarmDeepAdapter:
         self._filesystem_rail: SysOperationRail | None = None
         self._progressive_tool_rail: ProgressiveToolRail | None = None
         self._deepresearch_execution_rail: DeepResearchExecutionRail | None = None
+        self._disabled_tools_rail: DisabledToolsRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._enabled_skills: list[str] | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
@@ -6764,6 +6783,37 @@ class JiuWenSwarmDeepAdapter:
             )
         return rail
 
+    @staticmethod
+    def _build_disabled_tools_rail(
+        config: dict[str, Any]
+    ) -> DisabledToolsRail | None:
+        """Build DisabledToolsRail to filter out disabled tools based on config.
+
+        ``react.disabled_tools`` accepts two formats (same field, pick one):
+          - YAML list:      ``disabled_tools: ["bash", "fork_agent"]``
+          - Env var string: ``disabled_tools: ${DISABLED_TOOLS-defaults}``
+            (set DISABLED_TOOLS=bash,fork_agent in .env)
+        """
+        try:
+            disabled_list = resolve_string_or_list_config(config.get("disabled_tools"))
+            if not disabled_list:
+                return None
+            rail = DisabledToolsRail(disabled_tools=disabled_list)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] DisabledToolsRail create success, "
+                "disabled_tools: %s",
+                disabled_list,
+            )
+            return rail
+        except Exception as exc:
+            logger.error(
+                "[JiuWenSwarmDeepAdapter] DisabledToolsRail create failed: %s", exc,
+                exc_info=True,
+            )
+            # disabled_tools is a security boundary. Refuse to initialize or
+            # hot-reload with the blacklist silently disabled (fail closed).
+            raise
+
     def _get_deepresearch_tool_context(self) -> dict[str, str]:
         """Return the adapter-owned route that survives runner task boundaries.
 
@@ -7052,6 +7102,16 @@ class JiuWenSwarmDeepAdapter:
             )
         )
 
+        # 统一工具开关（黑名单）：在其它工具注册后注销被禁用的工具。
+        # priority=1 确保最后执行，此时工具已全部注册。
+        rail_infos.append(
+            _RailBuildInfo(
+                "_disabled_tools_rail",
+                self._build_disabled_tools_rail,
+                {"config": config},
+            )
+        )
+
         return self._instantiate_rails(rail_infos, config_base)
 
     @staticmethod
@@ -7222,6 +7282,17 @@ class JiuWenSwarmDeepAdapter:
             elif old_progressive_tool_rail is not None:
                 rails_to_unregister.append(old_progressive_tool_rail)
 
+        # 统一工具开关热更新：重建式（与 ProgressiveToolRail 一致）。
+        # 旧 rail uninit 时回滚它注销的工具（重新注册），新 rail init 再按新名单注销。
+        disabled_tools_rail = None
+        disabled_tools_configured = "disabled_tools" in config
+        if disabled_tools_configured:
+            old_disabled_tools_rail = self._disabled_tools_rail
+            disabled_tools_rail = self._build_disabled_tools_rail(config)
+            if old_disabled_tools_rail is not None:
+                rails_to_unregister.append(old_disabled_tools_rail)
+            self._disabled_tools_rail = disabled_tools_rail
+
         rails_list = []
         if self._skill_rail is not None:
             rails_list.append(self._skill_rail)
@@ -7237,6 +7308,10 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(self._permission_rail)
         if progressive_tool_rail is not None:
             rails_list.append(progressive_tool_rail)
+        if disabled_tools_rail is not None:
+            rails_list.append(disabled_tools_rail)
+        elif not disabled_tools_configured and self._disabled_tools_rail is not None:
+            rails_list.append(self._disabled_tools_rail)
         return rails_list, rails_to_unregister
 
     def _runtime_agent_scope_id(self) -> str:
@@ -8196,12 +8271,24 @@ class JiuWenSwarmDeepAdapter:
             # 加载用户自定义的 Rail 扩展
             await self.load_user_rails()
 
+            # 双保险：即便 DisabledToolsRail 时序未注销，deep_cfg 的 tool_cards 也先剔除黑名单。
+            disabled_names = set(
+                resolve_string_or_list_config(config.get("disabled_tools"))
+            )
+            if disabled_names and self._tool_cards:
+                filtered_tool_cards = [
+                    card for card in self._tool_cards
+                    if getattr(card, "name", None) not in disabled_names
+                ]
+            else:
+                filtered_tool_cards = self._tool_cards if self._tool_cards else []
+
             deep_cfg = self._make_deep_agent_config(
                 model=model,
                 config=config,
                 config_base=config_base,
                 agent_card=agent_card,
-                tool_cards=self._tool_cards if self._tool_cards else [],
+                tool_cards=filtered_tool_cards,
                 rails=rails_list,
             )
             omitted_fields, reload_fingerprints = self._omit_unchanged_reload_fields(deep_cfg)
@@ -8211,7 +8298,11 @@ class JiuWenSwarmDeepAdapter:
                 self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
 
             first_unregister_error: Exception | None = None
-            rail_cache_attrs = ("_progressive_tool_rail", "_filesystem_rail")
+            rail_cache_attrs = (
+                "_progressive_tool_rail",
+                "_filesystem_rail",
+                "_disabled_tools_rail",
+            )
             for rail in rails_to_unregister:
                 try:
                     await self._instance.unregister_rail(rail)

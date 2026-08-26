@@ -107,12 +107,10 @@ def _ensure_enterprise_config_loader() -> tuple[Any, Any, Any]:
     ):
         return _load_effective_enterprise_config, _service_config_slot, _extension_config_slot
 
-    from jiuwenswarm.infrastructure.module_importer import (
-        import_manager_ws_client_module,
-    )
+    from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
 
-    loader_mod = import_manager_ws_client_module("core.enterprise_config.loader")
-    schemas_mod = import_manager_ws_client_module("core.enterprise_config.schemas")
+    loader_mod = import_manager_config_receiver_module("core.enterprise_config.loader")
+    schemas_mod = import_manager_config_receiver_module("core.enterprise_config.schemas")
     _load_effective_enterprise_config = loader_mod.load_effective_enterprise_config
     _service_config_slot = schemas_mod.TemplateRefSlot.SERVICE_CONFIG
     _extension_config_slot = schemas_mod.TemplateRefSlot.EXTENSION_CONFIG
@@ -148,10 +146,10 @@ async def load_all_service_configs() -> list[dict[str, Any]]:
     """查询当前 ``jiuwenclaw_id`` 下全量 ``service_config_template``（enabled=True）。"""
     try:
         from jiuwenswarm.infrastructure.module_importer import (
-            import_manager_ws_client_module,
+            import_manager_config_receiver_module,
         )
 
-        gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
+        gateway_db_mod = import_manager_config_receiver_module("core.enterprise_config.gateway_db")
         jiuwenclaw_id = os.getenv("JIUWENCLAW_ID", "").strip() or None
         if not jiuwenclaw_id:
             logger.warning(
@@ -199,9 +197,9 @@ def _coalesce_loaded_invoke_ids(
         if raw_ws and str(raw_ws).strip():
             workspace_dir = str(raw_ws).strip()
 
-    from jiuwenswarm.infrastructure.module_importer import import_manager_ws_client_module
+    from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
 
-    loader_mod = import_manager_ws_client_module("core.enterprise_config.loader")
+    loader_mod = import_manager_config_receiver_module("core.enterprise_config.loader")
     ctx = loader_mod.routing_context_from_request(request)
     default_svc, default_ag = _default_invoke_ids(ctx.group_id, ctx.bot_id, ctx.user_id)
     default_ws = f"{ctx.group_id}{ctx.bot_id}{ctx.user_id}".strip()

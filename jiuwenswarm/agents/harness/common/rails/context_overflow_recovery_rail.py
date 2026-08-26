@@ -6,9 +6,6 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
-    FullCompactProcessor,
-)
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.common.logging import logger
@@ -184,7 +181,12 @@ class ContextOverflowRecoveryRail(DeepAgentRail):
             logger.warning("[ContextOverflowRecovery] Context has no _processors when finding FullCompactProcessor")
             return None
         for processor in processors:
-            if isinstance(processor, FullCompactProcessor):
+            # 框架以 processor_type() 同名键标识处理器（见 MetaContextProcessor +
+            # ContextEngine._PROCESSOR_MAP）。forked.activate() 把 "FullCompactProcessor"
+            # 键覆盖为 forked 类，其实例不继承原始类，isinstance 会漏判；改用同名键 +
+            # set_force_compact 能力识别，forked/原始实例均可命中。
+            proc_type_fn = getattr(processor, "processor_type", None)
+            if callable(proc_type_fn) and proc_type_fn() == "FullCompactProcessor":
                 return processor
         logger.warning(
             "[ContextOverflowRecovery] No FullCompactProcessor found in context processors: %s",
