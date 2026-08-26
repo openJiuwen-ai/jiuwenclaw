@@ -514,9 +514,25 @@ _LLM_TRACE_MODEL_NAME: ContextVar[str] = ContextVar(
     "llm_trace_model_name",
     default="",
 )
+# First Model.invoke/stream of this request → stage=3 pre_llm (jiuwenswarm-only).
+_LATENCY_PRE_LLM_MARKED: ContextVar[bool] = ContextVar(
+    "latency_pre_llm_marked",
+    default=False,
+)
 
 _REASONING_TRACE_LOG_BATCH = 5
 _LLM_IO_TRACE_PATCH_APPLIED = False
+
+
+def _log_latency_pre_llm_once(request_id: str | None) -> None:
+    """Mark ③ endpoint once per request, right before provider call."""
+    if _LATENCY_PRE_LLM_MARKED.get():
+        return
+    _LATENCY_PRE_LLM_MARKED.set(True)
+    logger.info(
+        "[latency] stage=3 name=pre_llm request_id=%s",
+        (request_id or "").strip() or "-",
+    )
 
 
 @dataclass(slots=True)
@@ -747,6 +763,7 @@ def _apply_llm_io_trace_patch() -> None:
                     )
                 except Exception:
                     logger.debug("[llm_trace] log_invoke_input failed", exc_info=True)
+                _log_latency_pre_llm_once(trace_rid)
                 result = await original_invoke(
                     self, messages, tools=tools, model=model, **kwargs
                 )
@@ -796,6 +813,7 @@ def _apply_llm_io_trace_patch() -> None:
                     )
                 except Exception:
                     logger.debug("[llm_trace] log_stream_input failed", exc_info=True)
+                _log_latency_pre_llm_once(trace_rid)
                 accumulated: Any = None
                 reasoning_seq = 0
                 reasoning_trace_pending: List[Tuple[int, str]] = []
@@ -3707,6 +3725,7 @@ class JiuWenSwarmDeepAdapter:
                 tool_names,
                 tool_ids,
             )
+            logger.info("[latency] stage=2 name=mcp request_id=%s", request.request_id)
             return registration
         except asyncio.CancelledError:
             registration = OfficeClawMcpRegistration(
@@ -3784,10 +3803,7 @@ class JiuWenSwarmDeepAdapter:
                 )
 
         ability_result = ability_manager.add(card)
-        if ability_result is None:
-            # Legacy AbilityManager.add returned None and may overwrite by name.
-            return
-        added = getattr(ability_result, "added", None)
+        added = getattr(ability_result, "added", None) if ability_result is not None else None
         if added is False:
             # Conflict-aware AbilityManager kept the existing card. Retry once if
             # we own it; otherwise fail closed.
@@ -3796,11 +3812,22 @@ class JiuWenSwarmDeepAdapter:
             if existing_id and existing_id in self._owned_office_claw_tool_ids():
                 ability_manager.remove(tool_name)
                 ability_result = ability_manager.add(card)
-                added = getattr(ability_result, "added", None)
+                added = getattr(ability_result, "added", None) if ability_result is not None else None
             if added is False:
                 raise RuntimeError(
                     f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name}"
                 )
+
+        # Legacy AbilityManager.add() returns None and may overwrite by name.
+        # Always verify the short-name mapping lands on *this* card id so a
+        # conflict-aware or raced manager cannot leave a foreign bind in place.
+        installed = getter(tool_name) if callable(getter) else None
+        installed_id = str(getattr(installed, "id", "") or "") if installed is not None else ""
+        if installed_id != tool_id:
+            raise RuntimeError(
+                f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name} "
+                f"(existing_id={installed_id or '-'}, new_id={tool_id})"
+            )
 
     async def cleanup_request_scoped_office_claw_mcp(
         self,
@@ -7869,6 +7896,10 @@ class JiuWenSwarmDeepAdapter:
             logger.info(
                 "[JiuWenSwarmDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s", self._agent_name, mode, sub_mode
             )
+            logger.info(
+                "[latency] stage=1 name=init request_id=%s",
+                _LLM_TRACE_REQUEST_ID.get() or "-",
+            )
 
             # 加载已激活的 packages（skills, rails, tools）
             await self._load_active_packages()
@@ -9457,6 +9488,59 @@ class JiuWenSwarmDeepAdapter:
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[CRON-CTX] cron checkpoint commit failed: session_id=%s "
+                "request_id=%s error=%s",
+                session_id, request_id, exc,
+            )
+
+    async def _persist_session_checkpoint(self, session_id: str, request_id: str) -> None:
+        """流式 chat 收尾补 commit：把 context_engine 内存 context 落盘到 checkpointer。
+
+        流式 chat.send 走``_inner_stream``，其 ``session.commit()`` 挂在 ``need_cleanup`` 分支下；
+        而 adapter 在 ``start_interaction`` 已提前绑定 session，``_inner_stream`` 收到现成 session 致
+        ``need_cleanup=False``，commit 被跳过。于是 ``context_engine`` 内存里本轮新增的对话
+        （user/assistant/tool 消息）从未经 ``save_contexts`` 回写到 ``session.global_state['context']``，
+        checkpointer 存的 context 停在恢复时的旧值。重启或跨 channel 后，
+        下一轮 ``pre_agent_execute`` 从 checkpointer restore 出来的就只有 上轮残留的残缺状态，历史对话丢失，相当于全新会话。
+        """
+        try:
+            if self._instance is None:
+                return
+            react_agent = getattr(self._instance, "react_agent", None)
+            if react_agent is None:
+                return
+            context_engine = react_agent.context_engine
+            # 无可落盘的 context 则跳过，避免写空状态覆盖既有历史。
+            _ctx = context_engine.get_context(session_id=session_id)
+            if _ctx is None:
+                return
+            try:
+                _ctx_msg_count = len(list(_ctx.get_messages() or []))
+            except Exception:  # noqa: BLE001
+                _ctx_msg_count = 0
+            if _ctx_msg_count <= 0:
+                return
+            # 用运行中的 _interaction_session（而非新建 session）：
+            # save_contexts 内部 _save_state_to_session 会把 context messages 存回该 session 的
+            # global_state['context']，commit 再触发 post_agent_execute → _agent_storage.save 落盘。
+            # 下一轮 pre_agent_execute 即可从 checkpointer restore 回这些 messages。
+            session = getattr(self._instance, "_interaction_session", None)
+            if session is None:
+                logger.warning(
+                    "[STREAM-CTX] checkpoint skip: no active _interaction_session "
+                    "session_id=%s request_id=%s",
+                    session_id, request_id,
+                )
+                return
+            await context_engine.save_contexts(session)
+            await session.commit()  # → post_agent_execute → _agent_storage.save 落盘
+            logger.info(
+                "[STREAM-CTX] checkpoint committed: session_id=%s request_id=%s "
+                "msg_count=%s",
+                session_id, request_id, _ctx_msg_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[STREAM-CTX] checkpoint commit failed: session_id=%s "
                 "request_id=%s error=%s",
                 session_id, request_id, exc,
             )
@@ -12496,12 +12580,18 @@ class JiuWenSwarmDeepAdapter:
         query: object,
     ) -> RewriteFastPathResult | None:
         from jiuwenswarm.agents.harness.common.tools.deepresearch import rewrite_tools
+        from jiuwenswarm.common.thinking.adapter import adapt_thinking
+        from jiuwenswarm.common.thinking.types import thaw_llm_call_kwargs
 
+        model_call_kwargs = thaw_llm_call_kwargs(
+            adapt_thinking("off", model=self._model).llm_call_kwargs
+        )
         return await run_rewrite_fast_path(
             query,
             model_invoke=self._model.invoke,
             prepare_invoke=rewrite_tools.deepresearch_prepare_rewrite._func,  # pylint: disable=protected-access
             commit_invoke=rewrite_tools.deepresearch_commit_rewrite._func,  # pylint: disable=protected-access
+            model_call_kwargs=model_call_kwargs,
         )
 
     @staticmethod
@@ -15414,6 +15504,22 @@ class JiuWenSwarmDeepAdapter:
                     logger.warning(
                         "[JiuWenSwarmDeepAdapter] cleanup failed: "
                         "step=pending_reload error_type=%s",
+                        type(exc).__name__,
+                    )
+            # 流式 chat 收尾补 commit：把本轮 context_engine 内存 context 落盘到 checkpointer。
+            # 根因：流式路径 session.commit() 挂在 need_cleanup 下，而 adapter 预绑定 session 致
+            # need_cleanup=False，commit 被跳过 → 跨重启/跨 channel 下一轮 restore 出来历史为空，
+            # agent 从头重新调研。对齐 _persist_cron_checkpoint 显式补一次落盘，覆盖 officeclaw
+            # 等非 cron 普通会话。失败不阻断清理（仅记 cleanup_error），对齐周围姿势。
+            if initialization_complete:
+                try:
+                    await self._persist_session_checkpoint(session_id, rid)
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] cleanup failed: "
+                        "step=session_checkpoint error_type=%s",
                         type(exc).__name__,
                     )
             if active_error is None and cleanup_error is not None:

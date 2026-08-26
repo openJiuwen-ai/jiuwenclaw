@@ -108,6 +108,9 @@ def load_dotenv_runtime(dotenv_path: str | Path | None, *, override: bool = True
     """
     from dotenv import load_dotenv
 
+    # relay-claw spawn env 注入 EXTENSION_DIRS；.env 的空值会经 override=True 覆盖。
+    saved_extension_dirs = os.environ.get("EXTENSION_DIRS")
+
     preserve = _should_preserve_session_ports()
     saved = (
         {k: os.environ[k] for k in DESKTOP_PRESERVED_ENV_KEYS if k in os.environ}
@@ -115,6 +118,8 @@ def load_dotenv_runtime(dotenv_path: str | Path | None, *, override: bool = True
         else {}
     )
     loaded = load_dotenv(dotenv_path=dotenv_path, override=override)
+    if saved_extension_dirs is not None:
+        os.environ["EXTENSION_DIRS"] = saved_extension_dirs
     if saved:
         os.environ.update(saved)
     if preserve:

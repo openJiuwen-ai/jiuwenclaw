@@ -60,7 +60,7 @@ def _write_skill(skills_root: Path, name: str, description: str) -> Path:
     skill_dir = skills_root / name
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
-        f"---\ndescription: {description}\n---\n\n# {name}\n",
+        f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n",
         encoding="utf-8",
     )
     return skill_dir

@@ -11,7 +11,7 @@ from openjiuwen_runtime.foundation.security.link_auth import InMemoryPinStore, v
 from pydantic import BaseModel, Field
 
 from ..core.enterprise_config.gateway_db import GatewayDb
-from ..core.instance import resolve_public_endpoint
+from ..infrastructure.public_endpoint import resolve_public_endpoint
 from ..infrastructure.utils import (
     get_gateway_register_identity,
     get_jiuwenclaw_id,
