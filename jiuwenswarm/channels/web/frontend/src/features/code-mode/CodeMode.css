@@ -782,6 +782,36 @@ button.code-environment__row:disabled {
 .code-review__toolbar {
   min-height: 46px;
   padding-inline: 14px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+.code-review__toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 46px;
+}
+
+.code-review__toolbar-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 8px 0;
+  justify-content: center;
+}
+
+.code-review__toolbar-info-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.code-review__toolbar-branch {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--color-text-placeholder);
 }
 
 .code-review__source {

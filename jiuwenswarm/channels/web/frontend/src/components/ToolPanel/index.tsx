@@ -6,14 +6,14 @@
 
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
-import { useFullscreenPanel } from '../../hooks';
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Info } from 'lucide-react';
-import { ArtifactExpandedPanel, useSessionArtifacts, useSessionArtifactsCount } from '../ArtifactsPanel';
-import { TeamArea, useTaskPlanningMetrics } from '../teamArea';
+import { useSessionArtifacts, useSessionArtifactsCount } from '../ArtifactsPanel';
+import { useTaskPlanningMetrics } from '../teamArea';
+import { ExpandedPanel } from '../teamArea/ExpandedPanel';
 import { loadTeamHistoryPanelState } from '../../features/teamHistoryPanelRestore';
 import { TaskPlanningPanel } from '../teamArea/TaskPlanningPanel';
-import { ExpandedPanelTabs, useExpandedPanelTabs } from '../teamArea/ExpandedPanelTabs';
+import { TeamMembersPanel } from '../teamArea/TeamMembersPanel';
 import { CompactTaskList } from '../teamArea/CompactTaskList';
 import { FileIcon } from '../FileIcon';
 import { CollapsibleSection } from './CollapsibleSection';
@@ -107,109 +107,6 @@ function mergeById<T>(historyItems: T[], currentItems: T[], getId: (item: T) => 
   return Array.from(itemsById.values());
 }
 
-function ExpandedSingleAgentArea({
-  sessionId,
-  activeTab,
-  tasks,
-  members,
-  totalTasks,
-  completedTasks,
-  onTabChange,
-  onCollapse,
-  shouldFullscreen,
-  reviewPanel,
-  selectedArtifactId,
-  onArtifactSelect,
-  emptyIllustration,
-}: {
-  sessionId: string;
-  activeTab: SingleAgentToolTab;
-  tasks: TeamTask[];
-  members: Parameters<typeof TaskPlanningPanel>[0]['members'];
-  totalTasks: number;
-  completedTasks: number;
-  onTabChange: (tab: SingleAgentToolTab) => void;
-  onCollapse: () => void;
-  shouldFullscreen?: boolean;
-  reviewPanel?: ReactNode;
-  selectedArtifactId?: string;
-  onArtifactSelect: (artifactId: string) => void;
-  emptyIllustration?: string;
-}) {
-  const { t } = useTranslation();
-  const tabPanelId = useId();
-  const artifactsCount = useSessionArtifactsCount();
-  const { ref: fullscreenRef, isFullscreen, toggle: toggleFullscreen, enter: enterFullscreen, exit: exitFullscreen } = useFullscreenPanel<HTMLDivElement>();
-  const subagentCount = useSubagentStore(state => Object.keys(state.runtimes[sessionId]?.subagentsById ?? {}).length);
-
-  useEffect(() => {
-    if (shouldFullscreen) {
-      enterFullscreen();
-    } else {
-      exitFullscreen();
-    }
-  }, [shouldFullscreen, enterFullscreen, exitFullscreen]);
-  const resolvedTab =
-    activeTab === 'artifacts' && artifactsCount > 0
-      ? 'artifacts'
-      : activeTab === 'subagents' && subagentCount > 0
-        ? 'subagents'
-        : activeTab === 'review' && reviewPanel
-          ? 'review'
-          : 'planning';
-  const tabs = useExpandedPanelTabs({
-    middleTab: {
-      key: 'subagents',
-      label: t('subagent.title'),
-      icon: <img src={teamIcon} width={16} height={16} aria-hidden="true" />,
-    },
-    showMiddleTab: subagentCount > 0,
-    artifactsCount,
-    reviewPanel,
-  });
-
-  return (
-    <div ref={fullscreenRef} data-testid="tool-panel-expanded-body" className="flex h-full flex-col overflow-hidden bg-card">
-      <ExpandedPanelTabs
-        tabs={tabs}
-        activeTab={resolvedTab}
-        onTabChange={tab => onTabChange(tab as SingleAgentToolTab)}
-        onCollapse={onCollapse}
-        onToggleFullscreen={toggleFullscreen}
-        isFullscreen={isFullscreen}
-      />
-
-      <div
-        data-testid="tool-panel-expanded-content"
-        id={`${tabPanelId}-panel`}
-        className="flex min-h-0 flex-1 overflow-hidden"
-        role="tabpanel"
-        aria-labelledby={`${tabPanelId}-${resolvedTab}`}
-      >
-        {resolvedTab === 'subagents' ? (
-          <SubagentExpandedPanel sessionId={sessionId} />
-        ) : resolvedTab === 'artifacts' ? (
-          <ArtifactExpandedPanel selectedArtifactId={selectedArtifactId} onSelectArtifact={onArtifactSelect} />
-        ) : resolvedTab === 'review' && reviewPanel ? (
-          <div data-testid="tool-panel-review-pane" data-variant="review" className="flex min-w-0 flex-1 overflow-hidden">
-            {reviewPanel}
-          </div>
-        ) : (
-          <TaskPlanningPanel
-            variant="expanded"
-            tasks={tasks}
-            members={members}
-            totalTasks={totalTasks}
-            completedTasks={completedTasks}
-            hideAssignee
-            emptyIllustration={emptyIllustration}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
 export function ToolPanel({
   sessionId,
   project = null,
@@ -253,8 +150,9 @@ export function ToolPanel({
   const [teamPlanningExpanded, setTeamPlanningExpanded] = useState(false);
   const [teamMembersExpanded, setTeamMembersExpanded] = useState(false);
   const [artifactsExpanded, setArtifactsExpanded] = useState(false);
-  const { completedTasks: teamCompletedTasks, teamTasks, totalTasks: teamTotalTasks } = useTaskPlanningMetrics();
+  const { completedTasks: teamCompletedTasks, progressTasks, teamTasks, totalTasks: teamTotalTasks, now } = useTaskPlanningMetrics();
   const artifactsCount = useSessionArtifactsCount();
+  const subagentCount = useSubagentStore(state => Object.keys(state.runtimes[resolvedSessionId]?.subagentsById ?? {}).length);
   const sessionArtifacts = useSessionArtifacts();
   const artifactTasks = useMemo(
     () =>
@@ -448,54 +346,64 @@ export function ToolPanel({
   const panelExpanded = mode === 'team' ? teamAreaExpanded : singleAgentPanelExpanded;
 
   if (panelExpanded && mode !== 'auto_harness') {
-    if (mode !== 'team') {
-      return (
-        <div data-testid="tool-panel-expanded-single-agent" className="bg-panel h-full overflow-hidden flex-1 flex flex-col min-w-[512px]">
-          <div className="h-full bg-panel flex flex-col overflow-hidden">
-            <ExpandedSingleAgentArea
-              sessionId={resolvedSessionId}
-              activeTab={singleAgentPanelActiveTab}
-              tasks={todoTeamTasks}
-              members={teamMembers}
-              totalTasks={todos.length}
-              completedTasks={todoCompletedTasks}
-              onTabChange={setSingleAgentPanelActiveTab}
-              onCollapse={() => {
-                setSingleAgentPanelExpanded(false);
-              }}
-              shouldFullscreen={shouldFullscreen}
-              reviewPanel={codeReviewPanel}
-              selectedArtifactId={singleAgentPanelSelectedArtifactId}
-              onArtifactSelect={setSingleAgentPanelSelectedArtifactId}
-              emptyIllustration={emptyPlanningIcon}
-            />
-          </div>
-        </div>
-      );
-    }
+    const isTeam = mode === 'team';
+    const testId = isTeam ? 'tool-panel-expanded-team' : 'tool-panel-expanded-single-agent';
 
-    // 展开模式 - 更宽的面板，只显示 TeamArea
     return (
-      <div data-testid="tool-panel-expanded-team" className="bg-panel h-full overflow-hidden flex-1 flex flex-col">
+      <div data-testid={testId} className="bg-panel h-full overflow-hidden flex-1 flex flex-col min-w-[512px]">
         <div className="h-full bg-panel flex flex-col overflow-hidden">
-          <TeamArea
-            members={teamMembers}
-            historyMessages={teamHistoryMessages}
-            expanded={true}
-            activeTab={teamAreaActiveTab}
-            activeDetailTab={teamAreaActiveDetailTab}
-            selectedMemberId={teamAreaSelectedMemberId}
-            selectedArtifactId={teamAreaSelectedArtifactId}
-            onTabChange={setTeamAreaActiveTab}
-            onDetailTabChange={setTeamAreaActiveDetailTab}
-            onMemberSelect={setTeamAreaSelectedMemberId}
-            onArtifactSelect={setTeamAreaSelectedArtifactId}
-            onCollapse={() => {
-              setTeamAreaExpanded(false);
-              setTeamAreaSelectedMemberId('');
-            }}
-            reviewPanel={codeReviewPanel}
+          <ExpandedPanel
+            activeTab={isTeam ? teamAreaActiveTab : singleAgentPanelActiveTab}
+            onTabChange={isTeam ? (tab => setTeamAreaActiveTab(tab as TabType)) : (tab => setSingleAgentPanelActiveTab(tab as SingleAgentToolTab))}
+            onCollapse={isTeam ? () => { setTeamAreaExpanded(false); setTeamAreaSelectedMemberId(''); } : () => { setSingleAgentPanelExpanded(false); }}
             shouldFullscreen={shouldFullscreen}
+            reviewPanel={codeReviewPanel}
+            selectedArtifactId={isTeam ? teamAreaSelectedArtifactId : singleAgentPanelSelectedArtifactId}
+            onArtifactSelect={isTeam ? setTeamAreaSelectedArtifactId : setSingleAgentPanelSelectedArtifactId}
+            middleTab={isTeam ? { key: 'team', label: t('team.membersTab'), icon: <img src={teamIcon} width={16} height={16} aria-hidden="true" /> } : { key: 'subagents', label: t('subagent.title'), icon: <img src={teamIcon} width={16} height={16} aria-hidden="true" /> }}
+            showMiddleTab={isTeam ? true : subagentCount > 0}
+            resolveActiveTab={(tab, count, review) => {
+              if (tab === 'artifacts' && count > 0) return 'artifacts';
+              if (isTeam) return tab === 'review' && !review ? 'planning' : tab;
+              if (tab === 'subagents' && subagentCount > 0) return 'subagents';
+              if (tab === 'review' && review) return 'review';
+              return 'planning';
+            }}
+            renderMiddleTabContent={() => isTeam ? (
+              <TeamMembersPanel
+                variant="expanded"
+                members={teamMembers}
+                selectedMemberId={teamAreaSelectedMemberId ?? ''}
+                selectedMember={teamMembers.find(m => m.member_id === teamAreaSelectedMemberId) ?? null}
+                activeDetailTab={teamAreaActiveDetailTab}
+                historyMessages={teamHistoryMessages}
+                onSelectMember={setTeamAreaSelectedMemberId}
+                onDetailTabChange={setTeamAreaActiveDetailTab}
+              />
+            ) : (
+              <SubagentExpandedPanel sessionId={resolvedSessionId} />
+            )}
+            renderPlanningContent={() => isTeam ? (
+              <TaskPlanningPanel
+                variant="expanded"
+                tasks={teamTasks}
+                progressTasks={progressTasks}
+                now={now}
+                members={teamMembers}
+                totalTasks={teamTotalTasks}
+                completedTasks={teamCompletedTasks}
+              />
+            ) : (
+              <TaskPlanningPanel
+                variant="expanded"
+                tasks={todoTeamTasks}
+                members={teamMembers}
+                totalTasks={todos.length}
+                completedTasks={todoCompletedTasks}
+                hideAssignee
+                emptyIllustration={emptyPlanningIcon}
+              />
+            )}
           />
         </div>
       </div>
@@ -568,6 +476,8 @@ export function ToolPanel({
           onExpand={() => expandTo('team')}
           onExpandAll={() => setTeamMembersExpanded(true)}
           dataTestId="tool-panel-team-members"
+          defaultCollapsed
+          autoExpandOnContent
         >
           <CompactTaskList
             tasks={memberTasks}
@@ -630,6 +540,8 @@ export function ToolPanel({
           onExpand={() => expandTo('artifacts')}
           onExpandAll={() => setArtifactsExpanded(true)}
           dataTestId="tool-panel-artifacts"
+          defaultCollapsed
+          autoExpandOnContent
         >
           <CompactTaskList
             tasks={artifactTasks}
@@ -640,6 +552,14 @@ export function ToolPanel({
             emptyText={t('artifacts.empty')}
             emptyIllustration={emptyArtifactsIcon}
             renderStatusIcon={task => <FileIcon fileName={task.title ?? ''} size={16} className="shrink-0" />}
+            onTaskClick={taskId => {
+              expandTo('artifacts');
+              if (isTeam) {
+                setTeamAreaSelectedArtifactId(taskId);
+              } else {
+                setSingleAgentPanelSelectedArtifactId(taskId);
+              }
+            }}
           />
         </CollapsibleSection>
       ),
@@ -654,6 +574,8 @@ export function ToolPanel({
           childCount={skillTasks.length}
           showExpandButton={false}
           dataTestId="tool-panel-references"
+          defaultCollapsed
+          autoExpandOnContent
         >
           <CompactTaskList
             tasks={skillTasks}

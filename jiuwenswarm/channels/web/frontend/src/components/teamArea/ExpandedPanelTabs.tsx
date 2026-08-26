@@ -1,10 +1,11 @@
 import { useId, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Info, Minimize2 } from 'lucide-react';
+import { Minimize2 } from 'lucide-react';
 import MaximizeIcon from '../../assets/maximize.svg?react';
 import PanelCollapseIcon from '../../assets/panel-collapse.svg?react';
 import RecentTasksIcon from '../../assets/work-mode/progress-tasks.svg?react';
 import artifactsIcon from '../../assets/artifacts.svg';
+import reviewIcon from '../../assets/review.svg';
 import '../subagent/Subagent.css';
 
 export interface PanelTabItem {
@@ -42,7 +43,7 @@ export function useExpandedPanelTabs({
           },
         ]
       : []),
-    ...(reviewPanel ? [{ key: 'review', label: t('codeMode.review'), icon: <Info size={16} /> }] : []),
+    ...(reviewPanel ? [{ key: 'review', label: t('codeMode.review'), icon: <img src={reviewIcon} width={16} height={16} aria-hidden="true" /> }] : []),
   ];
 }
 

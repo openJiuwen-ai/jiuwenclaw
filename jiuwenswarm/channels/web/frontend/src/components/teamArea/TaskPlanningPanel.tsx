@@ -269,7 +269,7 @@ export function TaskPlanningPanel({
   emptyIllustration,
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
-  const [view, setView] = useState<'board' | 'list'>('board');
+  const [view, setView] = useState<'board' | 'list'>('list');
   const groupedTasks = useMemo(() => {
     const groups: Record<TaskColumnKey, SessionTeamTask[]> = {
       waiting: [],

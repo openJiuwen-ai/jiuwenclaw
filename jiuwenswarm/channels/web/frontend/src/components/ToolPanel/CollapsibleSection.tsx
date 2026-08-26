@@ -19,7 +19,7 @@
  * 使用位置：
  * - ToolPanel/index.tsx 收起模式（tool-panel-planning / tool-panel-code-environment）
  */
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Maximize2 } from 'lucide-react';
 import collapseIcon from '../../assets/work-mode/collapse.svg';
@@ -36,6 +36,8 @@ interface CollapsibleSectionProps {
   showExpandButton?: boolean;
   showCollapseButton?: boolean;
   dataTestId?: string;
+  defaultCollapsed?: boolean;
+  autoExpandOnContent?: boolean;
 }
 
 export function CollapsibleSection({
@@ -49,13 +51,21 @@ export function CollapsibleSection({
   showExpandButton = true,
   showCollapseButton = true,
   dataTestId = 'collapsible-section',
+  defaultCollapsed = false,
+  autoExpandOnContent = false,
 }: CollapsibleSectionProps) {
   const { t } = useTranslation();
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const [expanded, setExpanded] = useState(false);
 
+  useEffect(() => {
+    if (autoExpandOnContent && childCount !== undefined && childCount > 0 && collapsed) {
+      setCollapsed(false);
+    }
+  }, [autoExpandOnContent, childCount, collapsed]);
+
   const handleToggleCollapse = () => {
-    setCollapsed((prev) => !prev);
+    setCollapsed(prev => !prev);
   };
 
   const handleExpandAll = () => {
@@ -63,23 +73,20 @@ export function CollapsibleSection({
     onExpandAll?.();
   };
 
-  const overflowCount = childCount !== undefined && childCount > maxCollapsedCount
-    ? childCount - maxCollapsedCount
-    : 0;
+  const overflowCount = childCount !== undefined && childCount > maxCollapsedCount ? childCount - maxCollapsedCount : 0;
   const showExpandAll = overflowCount > 0 && !collapsed && !expanded;
 
   return (
-    <div
-      data-testid={dataTestId}
-      className="collapsible-section flex flex-col"
-    >
+    <div data-testid={dataTestId} className="collapsible-section flex flex-col">
       <div
         className={`collapsible-section__header flex w-full shrink-0 items-center justify-between bg-card ${collapsed ? 'py-6' : 'pt-6 pb-4'}`}
         data-testid={`${dataTestId}-header`}
       >
         <div className="flex items-center gap-2">
           {icon && (
-            <span className="flex items-center" aria-hidden="true">{icon}</span>
+            <span className="flex items-center" aria-hidden="true">
+              {icon}
+            </span>
           )}
           <span className="text-sm font-semibold text-text" data-testid={`${dataTestId}-title`}>
             {title}
@@ -90,13 +97,7 @@ export function CollapsibleSection({
               data-testid={`${dataTestId}-collapse-button`}
               className="rounded p-1 text-text-muted hover:bg-secondary hover:text-text"
             >
-              <img
-                src={collapsed ? arrowRightIcon : collapseIcon}
-                width={12}
-                height={12}
-                aria-hidden="true"
-                className="collapsible-section__toggle-icon"
-              />
+              <img src={collapsed ? arrowRightIcon : collapseIcon} width={12} height={12} aria-hidden="true" className="collapsible-section__toggle-icon" />
             </button>
           )}
         </div>
@@ -111,21 +112,11 @@ export function CollapsibleSection({
           </button>
         )}
       </div>
-      <div
-        className="collapsible-section__content flex-1 min-h-0"
-        data-testid={`${dataTestId}-content`}
-        style={collapsed ? { display: 'none' } : undefined}
-      >
+      <div className="collapsible-section__content flex-1 min-h-0" data-testid={`${dataTestId}-content`} style={collapsed ? { display: 'none' } : undefined}>
         {children}
         {showExpandAll && (
-          <div
-            className="collapsible-section__expand-all"
-            data-testid={`${dataTestId}-expand-all`}
-          >
-            <button
-              onClick={handleExpandAll}
-              className="w-full text-left text-xs text-text-muted hover:text-text pt-4 pb-0"
-            >
+          <div className="collapsible-section__expand-all" data-testid={`${dataTestId}-expand-all`}>
+            <button onClick={handleExpandAll} className="w-full text-left text-xs text-text-muted hover:text-text pt-4 pb-0">
               {t('common.expandMore', { count: overflowCount })}
             </button>
           </div>
