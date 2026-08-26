@@ -152,12 +152,17 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
       : typeof directDataRecord?.message === 'string'
         ? directDataRecord.message
         : undefined;
+  const rawOutputFallback =
+    typeof rawOutputRecord?.output === 'string'
+      ? rawOutputRecord.output
+      : undefined;
   const result =
     rawOutputResult ||
     nestedDataResult ||
     (typeof toolResultPayload.result === 'string' &&
       toolResultPayload.result) ||
     directDataResult ||
+    rawOutputFallback ||
     (typeof toolResultPayload.data === 'string' ? toolResultPayload.data : '') ||
     (typeof toolResultPayload.error === 'string'
       ? toolResultPayload.error
