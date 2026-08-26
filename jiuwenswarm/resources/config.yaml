@@ -1347,7 +1347,7 @@ modes:
 # sandbox.enabled: true 时才 install + 创建沙箱进程 (opt-in, 避免开箱即拉起)。
 # ============================================================
 sandbox:
-  enabled: true
+  enabled: false
   startup_mode: internal
   url: http://127.0.0.1:8321
   type: jiuwenbox
