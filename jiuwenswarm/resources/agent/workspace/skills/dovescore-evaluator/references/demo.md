@@ -32,18 +32,28 @@ With DoveScore demo mode:
 python scripts/run_dovescore.py --demo
 ```
 
-Example summarized output:
+Example demo output:
 
 ```json
 {
-  "metric": "dovescore",
-  "total_score": 0.5,
-  "alignment_level": "low",
-  "event_score": 1.0,
-  "order_score": 1.0,
-  "descriptive_score": 0.0,
-  "interpretation": "DoveScore evaluates whether the target is supported by the source, including factual alignment and event-order consistency.",
-  "note": "DoveScore is an information-alignment metric, not a fluency or style score."
+  "demo": "dovescore_contrast",
+  "question": "Does the target faithfully preserve the source facts?",
+  "source": "The Eiffel Tower is in Paris. It was completed in 1889 for the Exposition Universelle.",
+  "target": "The Eiffel Tower is in Paris. It was completed in 1989 for the Exposition Universelle.",
+  "without_skill": {
+    "likely_judgment": "Looks faithful because almost every word overlaps.",
+    "missed_problem": "The year changed from 1889 to 1989."
+  },
+  "with_dovescore": {
+    "metric": "dovescore",
+    "total_score": 0.5,
+    "alignment_level": "low",
+    "event_score": 1.0,
+    "order_score": 1.0,
+    "descriptive_score": 0.0,
+    "finding": "The target is fluent and similar, but one descriptive fact is unsupported."
+  },
+  "takeaway": "DoveScore catches source-target factual mismatches that surface similarity or quick reading can miss."
 }
 ```
 

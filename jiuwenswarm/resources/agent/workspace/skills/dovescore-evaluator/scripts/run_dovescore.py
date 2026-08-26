@@ -44,9 +44,27 @@ def _json_ready(value: Any) -> Any:
         return {key: _json_ready(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_json_ready(item) for item in value]
-    if hasattr(value, "item"):
-        return value.item()
+    value_module = value.__class__.__module__
+    if value_module == "numpy" or value_module.startswith("numpy."):
+        if hasattr(value, "tolist"):
+            return _json_ready(value.tolist())
+        item = getattr(value, "item", None)
+        if callable(item):
+            return _json_ready(item())
     return value
+
+
+def _emit_json_result(result: dict[str, Any], output: str | None, pretty: bool) -> int:
+    indent = 2 if pretty else None
+    rendered = json.dumps(result, ensure_ascii=False, indent=indent)
+    try:
+        if output:
+            Path(output).expanduser().write_text(rendered + "\n", encoding="utf-8")
+    except OSError as exc:
+        logger.error("Failed to write output file: %s", exc)
+        return 2
+    _emit_result(rendered)
+    return 0
 
 
 def _score_value(result: dict[str, Any], key: str) -> float | None:
@@ -159,13 +177,7 @@ def main() -> int:
     logging.basicConfig(level=logging.ERROR, format="%(message)s")
     args = parse_args()
     if args.demo:
-        result = _demo_result()
-        indent = 2 if args.pretty else None
-        rendered = json.dumps(result, ensure_ascii=False, indent=indent)
-        if args.output:
-            Path(args.output).expanduser().write_text(rendered + "\n", encoding="utf-8")
-        _emit_result(rendered)
-        return 0
+        return _emit_json_result(_demo_result(), args.output, args.pretty)
 
     try:
         source = _flatten_text(_read_text(args.source, args.source_file, "source"))
@@ -195,17 +207,16 @@ def main() -> int:
 
     evaluator_args = SimpleNamespace(api_key=args.api_key, backbone=args.backbone)
     evaluator = DoveScoreEvaluator(evaluator_args)
-    result = _summarize_result(
-        _json_ready(evaluator.evaluate(source, target)),
-        args.include_details,
-    )
+    try:
+        result = _summarize_result(
+            _json_ready(evaluator.evaluate(source, target)),
+            args.include_details,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("DoveScore evaluation failed: %s", exc)
+        return 2
 
-    indent = 2 if args.pretty else None
-    rendered = json.dumps(result, ensure_ascii=False, indent=indent)
-    if args.output:
-        Path(args.output).expanduser().write_text(rendered + "\n", encoding="utf-8")
-    _emit_result(rendered)
-    return 0
+    return _emit_json_result(result, args.output, args.pretty)
 
 
 if __name__ == "__main__":
