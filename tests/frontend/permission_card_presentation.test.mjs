@@ -59,6 +59,7 @@ const { bindPendingPermissionCard } = await import(
   pathToFileURL(pendingQueueBundle).href
 );
 const {
+  AutoReviewerDetails,
   reviewerBadgeTone,
   reviewerDecisionSourceCategory,
   reviewerDetailValues,
@@ -282,6 +283,32 @@ test('renders the current permission card reviewer and redacted payload', async 
   assert.doesNotMatch(html, /stale-manual-hint/);
   assert.doesNotMatch(html, /Authorization/);
   assert.doesNotMatch(html, /Missing evidence/);
+
+  const manualHtml = renderToStaticMarkup(
+    React.createElement(
+      I18nextProvider,
+      { i18n },
+      React.createElement(AutoReviewerDetails, {
+        reviewer: {
+          final_reviewer_status: 'manual',
+          decision_source: 'auto_reviewer',
+          risk_level: 'high',
+          manual_reason_summary: 'review the redirected path',
+          user_review_hint: 'confirm the command matches the user request',
+        },
+      }),
+    ),
+  );
+
+  assert.match(
+    manualHtml,
+    /class="min-w-0 col-span-full" data-detail-field="reason"/,
+  );
+  assert.match(
+    manualHtml,
+    /class="min-w-0 col-span-full" data-detail-field="hint"/,
+  );
+  assert.match(manualHtml, /class="min-w-0" data-detail-field="risk"/);
 });
 
 test('uses English only when JiuwenSwarm explicitly configures English', async () => {
