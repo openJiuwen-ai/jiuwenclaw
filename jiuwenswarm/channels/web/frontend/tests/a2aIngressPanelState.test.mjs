@@ -4,6 +4,7 @@ import {
   canOperateA2AIngress,
   draftFromA2AIngressSnapshot,
   isA2AIngressTransitioning,
+  normalizeA2AIngressHistory,
   normalizeA2AIngressSnapshot,
   shouldAcceptA2AIngressResponse,
   toA2AIngressPatch,
@@ -89,4 +90,21 @@ test('A2A ingress lifecycle actions wait for a snapshot and a saved form', () =>
 test('A2A ingress ignores obsolete refresh responses', () => {
   assert.equal(shouldAcceptA2AIngressResponse(4, 4), true);
   assert.equal(shouldAcceptA2AIngressResponse(3, 4), false);
+});
+
+test('A2A ingress history accepts lifecycle metadata and rejects malformed rows', () => {
+  assert.deepEqual(normalizeA2AIngressHistory({
+    items: [{
+      request_id: 'req-1', context_id: 'ctx-1', message_id: 'msg-1', operation: 'message',
+      status: 'completed', started_at: 10, finished_at: 10.2, duration_ms: 200, error: null,
+    }],
+    total: 1,
+  }), {
+    items: [{
+      request_id: 'req-1', context_id: 'ctx-1', message_id: 'msg-1', operation: 'message',
+      status: 'completed', started_at: 10, finished_at: 10.2, duration_ms: 200, error: null,
+    }],
+    total: 1,
+  });
+  assert.equal(normalizeA2AIngressHistory({ items: [{ request_id: '', status: 'completed' }] }), null);
 });

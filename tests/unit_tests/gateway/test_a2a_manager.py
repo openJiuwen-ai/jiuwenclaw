@@ -34,6 +34,10 @@ class _ChannelProbe:
         self.start_error = start_error
         self.start_calls = 0
         self.stop_calls = 0
+        self.request_observer = None
+
+    def set_request_observer(self, callback) -> None:
+        self.request_observer = callback
 
     async def start(self) -> None:
         self.start_calls += 1
@@ -174,6 +178,91 @@ async def test_manager_handles_start_failure_and_still_stops():
 
     assert channel_manager.unregistered == ["a2a"]
     assert manager.channel is None
+
+
+@pytest.mark.asyncio
+async def test_manager_retains_bounded_request_history_across_channel_reload():
+    channel_manager = _ChannelManagerProbe()
+    channels = []
+
+    def factory(config, router):
+        channel = _ChannelProbe(config, router)
+        channels.append(channel)
+        return channel
+
+    manager = A2AManager(
+        channel_manager, object(), A2AIngressConfig(enabled=True), channel_factory=factory,
+    )
+    await manager.enable()
+    channels[0].request_observer({
+        "request_id": "req-1", "context_id": "ctx-1", "message_id": "msg-1",
+        "status": "processing", "started_at": 10.0,
+    })
+    channels[0].request_observer({
+        "request_id": "req-1", "context_id": "ctx-1", "message_id": "msg-1",
+        "status": "completed", "started_at": 10.0, "finished_at": 10.125, "error": None,
+    })
+    await manager.reload()
+
+    history = manager.history()
+    assert history["total"] == 1
+    assert history["items"][0] == {
+        "request_id": "req-1",
+        "context_id": "ctx-1",
+        "message_id": "msg-1",
+        "operation": "message",
+        "status": "completed",
+        "started_at": 10.0,
+        "finished_at": 10.125,
+        "duration_ms": 125,
+        "error": None,
+    }
+    assert channels[1].request_observer is not None
+
+
+def test_manager_request_history_terminal_status_cannot_be_overwritten():
+    manager = A2AManager(
+        _ChannelManagerProbe(), object(), A2AIngressConfig(), repository=_ConfigRepositoryProbe(),
+    )
+    manager._record_request_event({
+        "request_id": "req-completed", "status": "processing", "started_at": 10.0,
+    })
+    manager._record_request_event({
+        "request_id": "req-completed", "status": "completed", "finished_at": 10.1,
+    })
+    manager._record_request_event({
+        "request_id": "req-completed", "status": "canceled", "finished_at": 10.2,
+    })
+    manager._record_request_event({
+        "request_id": "req-completed", "status": "failed", "finished_at": 10.3,
+        "error": "late failure",
+    })
+
+    item = manager.history()["items"][0]
+    assert item["status"] == "completed"
+    assert item["finished_at"] == 10.1
+    assert item["duration_ms"] == 100
+    assert item["error"] is None
+
+
+def test_manager_request_history_keeps_cancellation_terminal():
+    manager = A2AManager(
+        _ChannelManagerProbe(), object(), A2AIngressConfig(), repository=_ConfigRepositoryProbe(),
+    )
+    manager._record_request_event({
+        "request_id": "req-canceled", "status": "processing", "started_at": 20.0,
+    })
+    manager._record_request_event({
+        "request_id": "req-canceled", "status": "canceled", "finished_at": 20.2,
+    })
+    manager._record_request_event({
+        "request_id": "req-canceled", "status": "completed", "finished_at": 20.3,
+    })
+
+    item = manager.history()["items"][0]
+    assert item["status"] == "canceled"
+    assert item["finished_at"] == 20.2
+    assert item["duration_ms"] == 200
 
 
 @pytest.mark.asyncio

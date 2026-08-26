@@ -40,6 +40,25 @@ export interface A2AIngressDraft {
   expose_reasoning: boolean;
 }
 
+export type A2AIngressRequestStatus = 'processing' | 'completed' | 'failed' | 'canceled';
+
+export interface A2AIngressRequestRecord {
+  request_id: string;
+  context_id: string | null;
+  message_id: string | null;
+  operation: string;
+  status: A2AIngressRequestStatus;
+  started_at: number;
+  finished_at: number | null;
+  duration_ms: number | null;
+  error: string | null;
+}
+
+export interface A2AIngressHistory {
+  items: A2AIngressRequestRecord[];
+  total: number;
+}
+
 const DEFAULT_DRAFT: A2AIngressDraft = {
   host: '127.0.0.1',
   port: '19100',
@@ -93,6 +112,34 @@ export function normalizeA2AIngressSnapshot(value: unknown): A2AIngressSnapshot 
     last_error: typeof payload.last_error === 'string' ? payload.last_error : null,
     config_revision: asNumber(payload.config_revision),
   };
+}
+
+export function normalizeA2AIngressHistory(value: unknown): A2AIngressHistory | null {
+  if (!value || typeof value !== 'object') return null;
+  const payload = value as Record<string, unknown>;
+  if (!Array.isArray(payload.items)) return null;
+  const statuses = new Set<A2AIngressRequestStatus>(['processing', 'completed', 'failed', 'canceled']);
+  const items: A2AIngressRequestRecord[] = [];
+  for (const rawItem of payload.items) {
+    if (!rawItem || typeof rawItem !== 'object') return null;
+    const item = rawItem as Record<string, unknown>;
+    const requestId = asString(item.request_id).trim();
+    const status = asString(item.status) as A2AIngressRequestStatus;
+    const startedAt = asNumber(item.started_at, Number.NaN);
+    if (!requestId || !statuses.has(status) || !Number.isFinite(startedAt)) return null;
+    items.push({
+      request_id: requestId,
+      context_id: typeof item.context_id === 'string' ? item.context_id : null,
+      message_id: typeof item.message_id === 'string' ? item.message_id : null,
+      operation: asString(item.operation, 'message'),
+      status,
+      started_at: startedAt,
+      finished_at: typeof item.finished_at === 'number' ? item.finished_at : null,
+      duration_ms: typeof item.duration_ms === 'number' ? item.duration_ms : null,
+      error: typeof item.error === 'string' ? item.error : null,
+    });
+  }
+  return { items, total: asNumber(payload.total, items.length) };
 }
 
 export function draftFromA2AIngressSnapshot(snapshot: A2AIngressSnapshot): A2AIngressDraft {

@@ -62,6 +62,10 @@ _CONFIG_ROUTES: tuple[WebHttpMappedRoute, ...] = (
 _A2A_INGRESS_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     WebHttpMappedRoute("GET", "/a2a/ingress", "a2a.ingress.get", "a2a", "读取 A2A 入站服务状态"),
     WebHttpMappedRoute(
+        "GET", "/a2a/ingress/history", "a2a.ingress.history", "a2a", "读取 A2A 入站请求处理历史",
+        query_keys=("limit",),
+    ),
+    WebHttpMappedRoute(
         "PATCH", "/a2a/ingress", "a2a.ingress.update", "a2a", "保存 A2A 入站配置",
         accept_body=True,
     ),

@@ -1582,6 +1582,21 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _a2a_ingress_get(ws, req_id, params, session_id):
         await _send_a2a_snapshot(ws, req_id, lambda: _a2a_snapshot_async(a2a_manager))
 
+    async def _a2a_ingress_history(ws, req_id, params, session_id):
+        if a2a_manager is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="A2A ingress manager is unavailable", code="A2A_BIND_FAILED"
+            )
+            return
+        try:
+            limit = int(params.get("limit", 100))
+        except (TypeError, ValueError):
+            await channel.send_response(
+                ws, req_id, ok=False, error="limit must be an integer", code="A2A_CONFIG_INVALID"
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=a2a_manager.history(limit))
+
     async def _a2a_ingress_update(ws, req_id, params, session_id):
         payload = params.get("config", params)
         if not isinstance(payload, dict):
@@ -1603,6 +1618,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await _send_a2a_snapshot(ws, req_id, a2a_manager.reload)
 
     channel.register_method("a2a.ingress.get", _a2a_ingress_get)
+    channel.register_method("a2a.ingress.history", _a2a_ingress_history)
     channel.register_method("a2a.ingress.update", _a2a_ingress_update)
     channel.register_method("a2a.ingress.enable", _a2a_ingress_enable)
     channel.register_method("a2a.ingress.disable", _a2a_ingress_disable)

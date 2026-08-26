@@ -539,16 +539,22 @@
   "a2aIngress": {
     "title": "A2A Control Center",
     "subtitle": "Manage the A2A ingress service exposed by JiuwenSwarm.",
+    "tabs": { "ariaLabel": "A2A Control Center pages", "config": "Ingress Configuration", "history": "Processing History" },
     "enable": "Enable service", "enabling": "Enabling...", "disable": "Disable service", "disabling": "Disabling...", "reload": "Reload", "reloading": "Reloading...",
     "save": "Save configuration", "saveAndApply": "Save and apply", "applying": "Applying...", "saved": "Configuration saved; it has not been applied to the running service.", "savedAndApplied": "Configuration saved and applied.",
     "disconnected": "Gateway is disconnected, so the A2A service cannot be read or changed.",
     "saveBeforeLifecycleAction": "Configuration has unsaved changes. Save it before enabling, disabling, or reloading the service.",
-    "outboundNotice": "This release manages A2A ingress only. External Agent discovery and outbound calls will be available in a future release.",
     "states": { "disabled": "Disabled", "starting": "Starting", "running": "Running", "stopping": "Stopping", "error": "Error" },
     "status": { "title": "Service status", "configRevision": "Configuration revision: {{revision}}", "effectiveRpcUrl": "Effective JSON-RPC URL", "effectiveCardUrl": "Effective Agent Card URL", "notListening": "Not listening" },
     "config": { "title": "Ingress configuration", "description": "Save updates the desired configuration only; Save and apply reloads the running service." },
+    "history": {
+      "title": "Ingress request history", "description": "Shows the latest 200 A2A ingress requests in this Gateway process without retaining request bodies.", "total": "{{count}} total", "empty": "No processing history", "emptyDescription": "Incoming A2A request statuses will appear here.", "processing": "Processing",
+      "statuses": { "processing": "Processing", "completed": "Completed", "failed": "Failed", "canceled": "Canceled" },
+      "operations": { "message": "Message" },
+      "columns": { "status": "Status", "operation": "Request type", "requestId": "Request ID", "contextId": "Context ID", "startedAt": "Started", "duration": "Duration", "error": "Error" }
+    },
     "fields": { "host": "Bind host", "port": "Bind port", "rpc_path": "RPC path", "card_path": "Agent Card path", "extended_card_path": "Extended Card path", "protocol_version": "Protocol version", "app_name": "Agent name", "app_description": "Agent description", "app_version": "Agent version", "expose_reasoning": "Expose reasoning in A2A responses" },
-    "errors": { "invalidResponse": "The A2A service returned an invalid status.", "invalidField": "Please check: {{field}}" }
+    "errors": { "invalidResponse": "The A2A service returned an invalid status.", "invalidHistoryResponse": "The A2A service returned invalid processing history.", "invalidField": "Please check: {{field}}" }
   },
   "offloadFiles": {
     "title": "Offload Files",
