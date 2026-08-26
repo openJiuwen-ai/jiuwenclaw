@@ -23,7 +23,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 
@@ -126,7 +125,6 @@ def enrich_team_spec_for_swarm(
         team_ws_root=team_ws_root,
         team_skills_dir=team_skills_dir,
         global_skills_dir=global_skills_dir,
-        trajectory_registry=InMemoryTrajectoryRegistry(),
         config=config,
         language=_normalize_prompt_language(
             getattr(spec, "language", None)

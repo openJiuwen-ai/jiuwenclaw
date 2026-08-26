@@ -163,6 +163,9 @@ enable_dev_mode_if_needed() {
         manager-server)
             mount_runtime_code "${file}"
             ;;
+        runtime)
+            mount_runtime_code "${file}"
+            ;;
         identity)
             mount_runtime_code "${file}"
             ;;
@@ -193,7 +196,7 @@ add_resource_if_set() {
     local module="$1"  file="$2"
     local kind_type="Deployment"
 
-    if [[ "${module}" == "MYSQL" || "${module}" == "POSTGRES" ]]; then
+    if [[ "${module}" == "MYSQL" || "${module}" == "POSTGRESQL" ]]; then
         kind_type="StatefulSet"
     fi
 

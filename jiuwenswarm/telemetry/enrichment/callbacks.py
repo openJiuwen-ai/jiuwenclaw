@@ -14,7 +14,11 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.trace import Span
 
-from openjiuwen.agent_teams.observability import abort_current_llm_span
+try:
+    from openjiuwen.agent_teams.observability import abort_current_llm_span
+except ImportError:
+    def abort_current_llm_span(error: BaseException) -> bool:
+        return False
 from openjiuwen.agent_teams.observability.span_context import (
     get_current_agent_span,
     get_current_llm_span,

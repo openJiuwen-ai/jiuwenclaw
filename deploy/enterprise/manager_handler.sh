@@ -72,12 +72,11 @@ deploy_manager() {
     wait_k8s_resource_ready "deployment" "${manager_server_name}" "${namespace}"
     success "MANAGER_SERVER_NODE_PORT: ${DEPLOY_VARS["MANAGER_SERVER_NODE_PORT"]}"
 
-    # identity（manager-web 的 /idp 反代到此）
+    # identity
     local identity_name="${DEPLOY_VARS["IDENTITY_NAME"]}"
     local identity_file="${CONFIG["IDENTITY_FILE"]}"
     exec_cmd kubectl apply -f ${identity_file}
     wait_k8s_resource_ready "deployment" "${identity_name}" "${namespace}"
-    success "IDENTITY_REST_PORT: ${DEPLOY_VARS["IDENTITY_REST_PORT"]}"
 
     # manager-web
     if [ "${is_up_web}" == "true" ]; then
@@ -87,6 +86,11 @@ deploy_manager() {
         exec_cmd kubectl apply -f ${manager_web_file}
         wait_k8s_resource_ready "deployment" "${manager_web_name}" "${namespace}"
         success "MANAGER_WEB_NODE_PORT: ${DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]}"
+    fi
+
+    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ]; then
+        delete_k8s_resource \
+            "service" "${DEPLOY_VARS["WEB_NAME"]}-nodeport" "${namespace}"
     fi
 }
 

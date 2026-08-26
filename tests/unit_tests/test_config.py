@@ -13,10 +13,13 @@ from jiuwenswarm.common.config import (
     get_evolution_auto_save_enabled,
     get_evolution_enabled,
     get_evolution_review_trigger_enabled,
+    get_evolution_signal_trigger_enabled,
+    get_passive_skill_evolution_triggers,
     get_skill_create_enabled,
     migrate_config_from_template,
     replace_teams_in_config,
     resolve_env_vars,
+    resolve_string_or_list_config,
     update_skill_retrieval_in_config,
     update_setup_guide_enabled_in_config,
     update_evolution_enabled_in_config,
@@ -43,6 +46,28 @@ class TestResolveEnvVars:
         monkeypatch.setenv("TEST_VAR", "actual_value")
         result = resolve_env_vars("${TEST_VAR:-default_value}")
         assert result == "actual_value"
+
+    @staticmethod
+    def test_resolve_unset_only_default_preserves_explicit_empty(
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("DISABLED_TOOLS", "")
+        value = resolve_env_vars(
+            "${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill}"
+        )
+        assert resolve_string_or_list_config(value) == []
+
+    @staticmethod
+    def test_resolve_unset_only_default_when_missing(monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("DISABLED_TOOLS", raising=False)
+        value = resolve_env_vars(
+            "${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill}"
+        )
+        assert resolve_string_or_list_config(value) == [
+            "search_skill",
+            "install_skill",
+            "uninstall_skill",
+        ]
 
     @staticmethod
     def test_resolve_empty_string():
@@ -191,6 +216,54 @@ class TestConfigFunctions:
             monkeypatch.setenv("EVOLUTION_REVIEW_TRIGGER", env_value)
 
         assert get_evolution_review_trigger_enabled(config, fallback=fallback) is expected
+
+    @pytest.mark.parametrize(
+        ("env_value", "config", "fallback", "expected"),
+        [
+            (None, {"react": {"evolution": {"signal_trigger": True}}}, False, True),
+            (None, {"react": {"evolution": {"auto_scan": True}}}, False, True),
+            (None, {"evolution": {"signal_trigger": False}}, True, False),
+            (None, {"evolution": {}}, False, False),
+            (None, {"react": {"evolution": {}}}, True, True),
+            ("true", {"react": {"evolution": {"signal_trigger": False}}}, False, True),
+        ],
+    )
+    def test_evolution_signal_trigger_config_and_env_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_value,
+        config,
+        fallback,
+        expected,
+    ):
+        monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+        monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+        if env_value is None:
+            pass
+        else:
+            monkeypatch.setenv("EVOLUTION_SIGNAL_TRIGGER", env_value)
+
+        assert get_evolution_signal_trigger_enabled(config, fallback=fallback) is expected
+
+    @pytest.mark.parametrize(
+        ("config", "expected_signal", "expected_review"),
+        [
+            ({"react": {"evolution": {"signal_trigger": True, "review_trigger": True}}}, True, False),
+            ({"react": {"evolution": {"signal_trigger": False, "review_trigger": True}}}, False, False),
+            ({"react": {"evolution": {}}}, True, False),
+        ],
+    )
+    def test_passive_skill_evolution_triggers_ignore_review_for_single_agent(
+        self,
+        config,
+        expected_signal,
+        expected_review,
+    ):
+        triggers = get_passive_skill_evolution_triggers(config)
+        assert triggers == {
+            "signal_trigger": expected_signal,
+            "review_trigger": expected_review,
+        }
 
     @pytest.mark.parametrize(
         ("env_value", "config", "expected"),

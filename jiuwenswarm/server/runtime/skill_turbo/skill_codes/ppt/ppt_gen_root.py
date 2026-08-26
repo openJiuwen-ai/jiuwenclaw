@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from jiuwenswarm.server.runtime.skill_turbo.plan_node import PlanNode
+from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
+
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_common import NODE_DISPLAY_NAMES
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.pipeline_init import PipelineInitNode
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.intent_classify import IntentClassifyNode
@@ -19,6 +21,8 @@ from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_page_gen import 
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_export import PPTExportNode
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.delivery import DeliveryNode
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.speaker_notes import SpeakerNotesNode
+
+logger = logging.getLogger(__name__)
 
 _P3_SKIP_MESSAGE = "未检测到待解析文档，跳过文档解析"
 _P3_SKIP_FIELDS = {
@@ -54,6 +58,20 @@ def _result_status(result: Any) -> str:
     if isinstance(result, dict):
         return str(result.get("status", "ok"))
     return "ok"
+
+
+def _append_subplan_step(
+    results: list[dict[str, Any]],
+    subplan: PlanNode,
+    result: Any,
+) -> None:
+    results.append(
+        {
+            "node": subplan.plan_name,
+            "status": _result_status(result),
+            "result": result,
+        }
+    )
 
 
 class PPTGenRootNode(PlanNode):
@@ -102,19 +120,19 @@ class PPTGenRootNode(PlanNode):
     ) -> None:
         result = await self.execute_subplan(subplan, inputs)
         _merge_subplan_result(inputs, result)
-        results.append(
-            {
-                "node": subplan.plan_name,
-                "status": _result_status(result),
-                "result": result,
-            }
-        )
+        _append_subplan_step(results, subplan, result)
 
     async def _skip_p3_subplan(
         self,
         inputs: dict[str, Any],
         results: list[dict[str, Any]],
     ) -> None:
+        if await self.should_skip_subplan(self._p3, inputs):
+            result = await self.execute_subplan(self._p3, inputs)
+            _merge_subplan_result(inputs, result)
+            _append_subplan_step(results, self._p3, result)
+            return
+
         result = await self.skip_subplan(
             self._p3,
             inputs,
@@ -122,13 +140,7 @@ class PPTGenRootNode(PlanNode):
             extra=_P3_SKIP_FIELDS,
         )
         _merge_subplan_result(inputs, result)
-        results.append(
-            {
-                "node": self._p3.plan_name,
-                "status": _result_status(result),
-                "result": result,
-            }
-        )
+        _append_subplan_step(results, self._p3, result)
 
     async def _run_p3_and_p2(self, inputs: dict[str, Any], results: list[dict[str, Any]]) -> None:
         if inputs.get("has_documents"):
@@ -159,6 +171,44 @@ class PPTGenRootNode(PlanNode):
             "steps": results,
         }
 
+    async def _silent_resume_skip_subplan_stream(
+        self,
+        subplan: PlanNode,
+        inputs: dict[str, Any],
+        results: list[dict[str, Any]],
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Resume 重放时已 completed 的 stage：不广播进度，仍走 subplan 回调链。"""
+        if self._before_subplan_execute is not None:
+            await self._before_subplan_execute(subplan, inputs)
+        skipped = await self._maybe_skip_subplan_execute(subplan, inputs)
+        if skipped is not None:
+            _merge_subplan_result(inputs, skipped)
+            _append_subplan_step(results, subplan, skipped)
+            return
+            yield  # pragma: no cover - async generator marker
+
+        # should_skip_subplan 与 _maybe_skip_subplan_execute 二次判定不一致时
+        # （理论上不应发生），回退真实执行，避免 subplan 被静默丢弃。
+        logger.warning(
+            "[PPTGenRoot] resume skip disagreement for %s: "
+            "entered silent skip path but skip execute declined; falling back to run_stream",
+            subplan.plan_name,
+        )
+        last_chunk: Any = None
+        hitl_interrupt = False
+        try:
+            async for chunk in subplan.run_stream(inputs):
+                last_chunk = chunk
+                yield chunk
+        except AbortError:
+            hitl_interrupt = True
+            raise
+        finally:
+            if self._after_subplan_execute is not None and not hitl_interrupt:
+                await self._after_subplan_execute(subplan, inputs, last_chunk)
+        _merge_subplan_result(inputs, last_chunk)
+        _append_subplan_step(results, subplan, last_chunk)
+
     async def _run_subplan_stream(
         self,
         subplan: PlanNode,
@@ -168,14 +218,22 @@ class PPTGenRootNode(PlanNode):
         index: int,
         total_steps: int,
     ) -> AsyncIterator[dict[str, Any]]:
-        yield {
-            "node": self.plan_name,
-            "status": "progress",
-            "message": f"开始执行 {subplan.plan_name}（{index}/{total_steps}）",
-            "current_node": subplan.plan_name,
-            "step": index,
-            "total_steps": total_steps,
-        }
+        if await self.should_skip_subplan(subplan, inputs):
+            async for chunk in self._silent_resume_skip_subplan_stream(
+                subplan, inputs, results
+            ):
+                yield chunk
+            return
+
+        if not await self.should_suppress_subplan_start_banner(subplan, inputs):
+            yield {
+                "node": self.plan_name,
+                "status": "progress",
+                "message": f"开始执行 {subplan.plan_name}（{index}/{total_steps}）",
+                "current_node": subplan.plan_name,
+                "step": index,
+                "total_steps": total_steps,
+            }
 
         last_chunk: Any = None
         async for chunk in self.execute_subplan_stream(subplan, inputs):
@@ -183,13 +241,7 @@ class PPTGenRootNode(PlanNode):
             yield chunk
 
         _merge_subplan_result(inputs, last_chunk)
-        results.append(
-            {
-                "node": subplan.plan_name,
-                "status": _result_status(last_chunk),
-                "result": last_chunk,
-            }
-        )
+        _append_subplan_step(results, subplan, last_chunk)
         yield {
             "node": self.plan_name,
             "status": "progress",
@@ -207,14 +259,22 @@ class PPTGenRootNode(PlanNode):
         index: int,
         total_steps: int,
     ) -> AsyncIterator[dict[str, Any]]:
-        yield {
-            "node": self.plan_name,
-            "status": "progress",
-            "message": f"开始执行 {self._p3.plan_name}（{index}/{total_steps}）",
-            "current_node": self._p3.plan_name,
-            "step": index,
-            "total_steps": total_steps,
-        }
+        if await self.should_skip_subplan(self._p3, inputs):
+            async for chunk in self._silent_resume_skip_subplan_stream(
+                self._p3, inputs, results
+            ):
+                yield chunk
+            return
+
+        if not await self.should_suppress_subplan_start_banner(self._p3, inputs):
+            yield {
+                "node": self.plan_name,
+                "status": "progress",
+                "message": f"开始执行 {self._p3.plan_name}（{index}/{total_steps}）",
+                "current_node": self._p3.plan_name,
+                "step": index,
+                "total_steps": total_steps,
+            }
 
         last_chunk: Any = None
         async for chunk in self.skip_subplan_stream(
@@ -227,13 +287,7 @@ class PPTGenRootNode(PlanNode):
             yield chunk
 
         _merge_subplan_result(inputs, last_chunk)
-        results.append(
-            {
-                "node": self._p3.plan_name,
-                "status": _result_status(last_chunk),
-                "result": last_chunk,
-            }
-        )
+        _append_subplan_step(results, self._p3, last_chunk)
         yield {
             "node": self.plan_name,
             "status": "progress",
@@ -271,11 +325,14 @@ class PPTGenRootNode(PlanNode):
         results: list[dict[str, Any]] = []
         total_steps = len(self.sub_plans)
 
-        yield {
-            "node": self.plan_name,
-            "status": "progress",
-            "message": "PPT生成任务流开始执行",
-        }
+        # HITL resume 重放时首段 stage 往往已是 completed；不再广播「全流程开始」，
+        # 避免对话框重复刷 Stage 1–N 的假进度。
+        if not await self.should_skip_subplan(self._p0, inputs):
+            yield {
+                "node": self.plan_name,
+                "status": "progress",
+                "message": "PPT生成任务流开始执行",
+            }
 
         for index, subplan in enumerate([self._p0, self._p1], start=1):
             async for chunk in self._run_subplan_stream(

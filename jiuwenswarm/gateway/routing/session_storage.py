@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Session 存储抽象层。
 
-提供统一的存储接口，屏蔽 Redis 和本地文件的实现差异。
+提供统一的存储接口，屏蔽 Redis、本地文件与 PersistentStore Repository 的实现差异。
 """
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ class LocalSessionStorage(SessionStorage):
 
 
 class RedisSessionStorage(SessionStorage):
-    """Redis 存储实现（异步）."""
+    """Redis 存储实现（异步）。"""
 
     def __init__(self, ttl: int | None = None) -> None:
         if ttl is None:
@@ -131,7 +131,7 @@ class RedisSessionStorage(SessionStorage):
                 ttl = 604800
         self._ttl = int(ttl)
         self._redis: Any | None = None
-        self._mapping: dict[str, "Session"] = {}  # identity_key -> Session
+        self._mapping: dict[str, "Session"] = {}
         self._lock = threading.Lock()
         self._claw_id = self._get_claw_id()
 
@@ -186,7 +186,6 @@ class RedisSessionStorage(SessionStorage):
         return result.get("value")
 
     def _session_to_json(self, session: "Session") -> str:
-        """将 Session 序列化为 JSON 字符串。"""
         return json.dumps(
             {
                 "session_id": session.session_id,
@@ -196,7 +195,6 @@ class RedisSessionStorage(SessionStorage):
         )
 
     def _session_from_json(self, raw: str | None) -> "Session | None":
-        """从 JSON / 旧版纯字符串反序列化为 Session。"""
         from jiuwenswarm.gateway.routing.session_map import _session_from_stored_value
 
         if not raw:
@@ -208,7 +206,7 @@ class RedisSessionStorage(SessionStorage):
             return _session_from_stored_value(raw)
 
     def load(self) -> None:
-        """从 Redis 加载所有数据到内存."""
+        """从 Redis 加载所有数据到内存。"""
         try:
             redis = self._get_redis()
             if redis is None:
@@ -240,7 +238,7 @@ class RedisSessionStorage(SessionStorage):
             logger.warning("[RedisSessionStorage] load 失败: %s", exc)
 
     def save(self, session: "Session") -> None:
-        """保存单条 Session 数据到 Redis."""
+        """保存单条 Session 数据到 Redis。"""
         redis = self._get_redis()
         if redis is None:
             return

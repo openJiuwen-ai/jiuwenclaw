@@ -920,12 +920,14 @@ class WecomChannel(BaseChannel):
         # 写入 last_chat_id 和 last_user_id 供 cron/心跳推送使用
         if chatid and not self._looks_like_msgid(chatid):
             try:
-                from jiuwenswarm.common.config import update_channel_in_config
+                from jiuwenswarm.gateway.config.channel.access import (
+                    update_channel_in_config,
+                )
 
                 update_data: dict[str, str] = {"last_chat_id": chatid or ""}
                 if sender_user_id:
                     update_data["last_user_id"] = sender_user_id
-                update_channel_in_config("wecom", update_data)
+                await update_channel_in_config("wecom", update_data)
             except Exception as e:
                 logger.warning("WecomChannel 写入 last_chat_id 失败: %s", e)
 

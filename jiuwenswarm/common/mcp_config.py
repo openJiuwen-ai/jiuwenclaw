@@ -5,12 +5,15 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import ipaddress
 import json
 import os
 import re
 import sys
+import threading
+import time
 from contextlib import AsyncExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -35,7 +38,9 @@ except ImportError:
 _HTTP_MCP_TRANSPORTS = frozenset({"sse", "http", "streamable-http", "streamable_http"})
 
 
-def extract_enabled_mcp_server_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
+def extract_enabled_mcp_server_entries(
+    config_base: dict[str, Any],
+) -> list[dict[str, Any]]:
     """Return enabled ``mcp.servers`` entries from a resolved config mapping."""
     if not isinstance(config_base, dict):
         return []
@@ -173,7 +178,10 @@ async def preflight_mcp_server_reachable(
     except Exception as exc:
         # Connection refused / DNS failure / etc. — also defensive: the probe
         # itself must never break startup with an unexpected exception type.
-        return False, f"tcp connect to {host}:{port} failed: {type(exc).__name__}: {exc}"
+        return (
+            False,
+            f"tcp connect to {host}:{port} failed: {type(exc).__name__}: {exc}",
+        )
 
     writer.close()
     try:
@@ -181,7 +189,9 @@ async def preflight_mcp_server_reachable(
     except Exception as exc:
         logger.debug(
             "[mcp-preflight] reachability probe socket close failed for %s:%s: %r",
-            host, port, exc,
+            host,
+            port,
+            exc,
         )
     return True, ""
 
@@ -200,9 +210,7 @@ def is_asyncio_outer_cancellation() -> bool:
 
 def _stable_mcp_server_id(scope: str, name: str, payload: dict[str, Any]) -> str:
     stable_payload = {
-        key: value
-        for key, value in payload.items()
-        if key != "server_id"
+        key: value for key, value in payload.items() if key != "server_id"
     }
     raw = json.dumps(
         {"scope": scope, "payload": stable_payload},
@@ -240,7 +248,9 @@ def _normalize_stdio_command_kind(command: str) -> str:
         return "npx"
     if normalized in ("uvx", "uvx.exe"):
         return "uvx"
-    raise ValueError(f"不支持的 command 类型: '{command}'，目前仅支持 node/python/npx/uvx 及其绝对路径")
+    raise ValueError(
+        f"不支持的 command 类型: '{command}'，目前仅支持 node/python/npx/uvx 及其绝对路径"
+    )
 
 
 def _normalize_mcp_client_type(raw_type: object) -> str:
@@ -272,9 +282,15 @@ def _optional_auth_dict(tool_config: dict, key: str) -> dict | None:
     return dict(raw)
 
 
-_DANGEROUS_ARGS_PATTERN = frozenset({
-    "-e", "--eval", "-c", "--command", "-i",
-})
+_DANGEROUS_ARGS_PATTERN = frozenset(
+    {
+        "-e",
+        "--eval",
+        "-c",
+        "--command",
+        "-i",
+    }
+)
 
 
 def _check_dangerous_args(tool_name: str, args: list) -> None:
@@ -395,7 +411,9 @@ def _validate_cat_cafe_request_scoped_stdio(params: dict[str, Any]) -> None:
             continue
         candidate = Path(s).expanduser()
         if not candidate.is_absolute() and cwd_path is None:
-            raise ValueError("请求级 cat_cafe_mcp 使用相对脚本路径时必须提供位于受信根下的 cwd")
+            raise ValueError(
+                "请求级 cat_cafe_mcp 使用相对脚本路径时必须提供位于受信根下的 cwd"
+            )
         try:
             if cwd_path is not None and not candidate.is_absolute():
                 resolved = (cwd_path / candidate).resolve()
@@ -404,25 +422,35 @@ def _validate_cat_cafe_request_scoped_stdio(params: dict[str, Any]) -> None:
         except OSError:
             continue
         if not _path_is_under_trusted_root(resolved, roots):
-            raise ValueError(f"请求级 cat_cafe_mcp 参数路径不在受信根目录下: {resolved}")
+            raise ValueError(
+                f"请求级 cat_cafe_mcp 参数路径不在受信根目录下: {resolved}"
+            )
 
 
-_REQUEST_REMOTE_BLOCKED_HOSTS = frozenset({
-    "localhost",
-    "metadata.google.internal",
-    "metadata",
-    "metadata.azure.com",
-})
+_REQUEST_REMOTE_BLOCKED_HOSTS = frozenset(
+    {
+        "localhost",
+        "metadata.google.internal",
+        "metadata",
+        "metadata.azure.com",
+    }
+)
 
-_REQUEST_REMOTE_METADATA_HOSTS = frozenset({
-    "metadata.google.internal",
-    "metadata",
-    "metadata.azure.com",
-})
+_REQUEST_REMOTE_METADATA_HOSTS = frozenset(
+    {
+        "metadata.google.internal",
+        "metadata",
+        "metadata.azure.com",
+    }
+)
 
 
 def _loopback_mcp_allowed() -> bool:
-    return (os.getenv("JIUWENSWARM_ALLOW_LOOPBACK_MCP") or "").strip().lower() in ("1", "true", "yes")
+    return (os.getenv("JIUWENSWARM_ALLOW_LOOPBACK_MCP") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 def _is_blocked_host(host: str) -> bool:
@@ -573,7 +601,9 @@ def create_mcp_tool(config_str: str) -> McpServerConfig:
     client_type = _normalize_mcp_client_type(tool_config.get("type"))
     params = {}
     if isinstance(env, dict) and env:
-        params["env"] = {str(k): str(v) for k, v in env.items() if k is not None and v is not None}
+        params["env"] = {
+            str(k): str(v) for k, v in env.items() if k is not None and v is not None
+        }
     if client_type == "sse":
         if not url:
             raise ValueError(f"工具 '{tool_name}'（'{client_type}'）需要 url")
@@ -586,14 +616,12 @@ def create_mcp_tool(config_str: str) -> McpServerConfig:
             client_type="sse",
             auth_headers=headers,
             auth_query_params=query,
-            params=params
+            params=params,
         )
 
     if client_type == "streamable-http":
         if not url:
-            raise ValueError(
-                f"工具 '{tool_name}'（'{client_type}'）需要 url"
-            )
+            raise ValueError(f"工具 '{tool_name}'（'{client_type}'）需要 url")
         headers = _optional_auth_dict(tool_config, "auth_headers")
         query = _optional_auth_dict(tool_config, "auth_query_params")
         return McpServerConfig(
@@ -603,33 +631,29 @@ def create_mcp_tool(config_str: str) -> McpServerConfig:
             client_type="streamable-http",
             auth_headers=headers,
             auth_query_params=query,
-            params=params
+            params=params,
         )
 
     if client_type == "playwright":
         if not url:
-            raise ValueError(
-                f"工具 '{tool_name}'（'{client_type}'）需要 url"
-            )
+            raise ValueError(f"工具 '{tool_name}'（'{client_type}'）需要 url")
         return McpServerConfig(
             server_id=server_id or tool_name,
             server_name=tool_name,
             server_path=url,
             client_type="playwright",
-            params=params
+            params=params,
         )
 
     if client_type == "openapi":
         if not url:
-            raise ValueError(
-                f"工具 '{tool_name}'（'{client_type}'）需要 url"
-            )
+            raise ValueError(f"工具 '{tool_name}'（'{client_type}'）需要 url")
         return McpServerConfig(
             server_id=server_id or tool_name,
             server_name=tool_name,
             server_path=url,
             client_type="openapi",
-            params=params
+            params=params,
         )
 
     if not isinstance(args, list):
@@ -648,7 +672,7 @@ def create_mcp_tool(config_str: str) -> McpServerConfig:
         server_name=tool_name,
         server_path=f"stdio://{tool_name}",
         client_type="stdio",
-        params=params
+        params=params,
     )
 
 
@@ -664,6 +688,119 @@ _OFFICE_CLAW_MCP_ENV_KEYS = frozenset(
         "NODE_EXTRA_CA_CERTS",
     }
 )
+
+_OFFICE_CLAW_MCP_SCHEMA_CACHE_ENV = "JIUWENSWARM_MCP_SCHEMA_CACHE"
+_OFFICE_CLAW_MCP_SCHEMA_CACHE_OFF = frozenset({"0", "false", "no", "off"})
+_office_claw_mcp_schema_cache: dict[str, list[dict[str, Any]]] = {}
+_office_claw_mcp_schema_inflight: dict[
+    tuple[int, int, str], asyncio.Task[list[dict[str, Any]]]
+] = {}
+_office_claw_mcp_schema_cache_lock = threading.Lock()
+_office_claw_mcp_schema_generation = 0
+
+
+def _office_claw_mcp_schema_cache_enabled() -> bool:
+    return (
+        str(os.environ.get(_OFFICE_CLAW_MCP_SCHEMA_CACHE_ENV, "") or "").strip().lower()
+        not in _OFFICE_CLAW_MCP_SCHEMA_CACHE_OFF
+    )
+
+
+def _office_claw_mcp_build_fingerprint(
+    params: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Fingerprint the MCP bundle file(s) so a rebuild rotates the cache key.
+
+    Relative script paths in ``command``/``args`` are resolved against
+    ``params["cwd"]`` first — the stdio MCP process is spawned with that cwd,
+    so it is the directory that actually owns the bundle — and only fall back
+    to the sidecar process cwd. Resolving against the process cwd alone would
+    either miss the real bundle or stat the wrong file, so a bundle rebuild
+    would not change the fingerprint and the cache would serve a stale schema.
+    """
+    fingerprints: list[dict[str, Any]] = []
+    base_dirs: list[Path] = []
+    cwd_raw = str(params.get("cwd") or "").strip()
+    if cwd_raw:
+        base_dirs.append(Path(cwd_raw).expanduser())
+    base_dirs.append(Path.cwd())
+    candidates = [params.get("command"), *(params.get("args") or [])]
+    seen: set[str] = set()
+    for candidate in candidates:
+        raw = str(candidate or "").strip()
+        if not raw:
+            continue
+        probe = Path(raw).expanduser()
+        resolved: Path | None = None
+        if probe.is_absolute():
+            resolved = probe
+        else:
+            for base in base_dirs:
+                candidate_path = base / probe
+                if candidate_path.is_file():
+                    resolved = candidate_path
+                    break
+        if resolved is None:
+            try:
+                resolved = probe.resolve(strict=False)
+            except OSError:
+                continue
+        resolved_str = str(resolved)
+        if not resolved.is_file() or resolved_str in seen:
+            continue
+        seen.add(resolved_str)
+        try:
+            stat = resolved.stat()
+        except OSError:
+            continue
+        fingerprints.append(
+            {
+                "path": _normalized_path(resolved_str),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+        )
+    return fingerprints
+
+
+def _office_claw_mcp_schema_cache_key(params: Mapping[str, Any]) -> str:
+    raw_excluded = str(
+        (params.get("env") or {}).get("OFFICE_CLAW_MCP_EXCLUDED_TOOLS") or ""
+    )
+    payload = {
+        "command": _normalized_path(str(params.get("command") or "")),
+        "args": [str(value) for value in params.get("args") or []],
+        "cwd": _normalized_path(str(params.get("cwd") or "")),
+        "excluded_tools": sorted(
+            {item.strip() for item in raw_excluded.split(",") if item.strip()}
+        ),
+        "build_files": _office_claw_mcp_build_fingerprint(params),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def invalidate_office_claw_mcp_schema_cache() -> None:
+    """Drop the entire OfficeClaw MCP schema cache and abort coalesced discovery.
+
+    Called when the agent catalog revision changes (Relay resync) so that a
+    rebuilt MCP bundle or changed excluded-tool set is re-discovered instead
+    of serving a stale schema. Bumping ``_office_claw_mcp_schema_generation``
+    also prevents any in-flight discovery task from writing back into a newer
+    generation.
+    """
+    global _office_claw_mcp_schema_generation
+    with _office_claw_mcp_schema_cache_lock:
+        _office_claw_mcp_schema_generation += 1
+        _office_claw_mcp_schema_cache.clear()
+        _office_claw_mcp_schema_inflight.clear()
+
+
+def _clear_office_claw_mcp_schema_cache_for_tests() -> None:
+    invalidate_office_claw_mcp_schema_cache()
 
 
 @dataclass(frozen=True)
@@ -776,7 +913,9 @@ def validate_office_claw_mcp_config(
 
     normalized_args = [str(item) for item in args]
     if _normalized_path(command) != _normalized_path(expected_command):
-        raise ValueError("office_claw_mcp command does not match Relay startup identity")
+        raise ValueError(
+            "office_claw_mcp command does not match Relay startup identity"
+        )
     if normalized_args != expected_args:
         raise ValueError("office_claw_mcp args do not match Relay startup identity")
     if _normalized_path(cwd) != _normalized_path(expected_cwd):
@@ -815,7 +954,7 @@ def _stdio_server_parameters(params: Mapping[str, Any]):
     )
 
 
-async def list_office_claw_mcp_tools(
+async def _list_office_claw_mcp_tools_uncached(
     params: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     """Start OfficeClaw MCP once, collect its tool schemas, then stop it."""
@@ -843,6 +982,88 @@ async def list_office_claw_mcp_tools(
         ]
     finally:
         await stack.aclose()
+
+
+async def _discover_and_cache_office_claw_mcp_schema(
+    params: Mapping[str, Any],
+    cache_key: str,
+    loop_key: tuple[int, int, str],
+    generation: int,
+) -> list[dict[str, Any]]:
+    """Producer: run one discovery, write the cache, then clean up in-flight.
+
+    The cache write and the in-flight removal are bound to THIS task's own
+    completion (its ``finally``), never to whichever waiter happened to start
+    it. A cancelled waiter cannot abort the shared discovery or orphan its
+    result, because ``asyncio.shield`` keeps this task alive regardless of
+    waiter cancellation; this task owns both the write-back and the cleanup.
+    """
+    started_at = time.monotonic()
+    try:
+        tools = await _list_office_claw_mcp_tools_uncached(params)
+        frozen = copy.deepcopy(tools)
+        with _office_claw_mcp_schema_cache_lock:
+            if generation == _office_claw_mcp_schema_generation:
+                _office_claw_mcp_schema_cache[cache_key] = frozen
+        logger.info(
+            "OfficeClaw MCP schema cache filled: key=%s tools=%s duration_ms=%.1f",
+            cache_key[:12],
+            len(frozen),
+            (time.monotonic() - started_at) * 1000,
+        )
+        return frozen
+    finally:
+        current = asyncio.current_task()
+        with _office_claw_mcp_schema_cache_lock:
+            if _office_claw_mcp_schema_inflight.get(loop_key) is current:
+                _office_claw_mcp_schema_inflight.pop(loop_key, None)
+
+
+async def list_office_claw_mcp_tools(
+    params: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Return immutable OfficeClaw tool schemas, coalescing identical discovery.
+
+    The tool list / name / description / JSON Schema is static while the MCP
+    bundle file is unchanged; only callback tokens, credentials and call
+    results are per-request. When ``JIUWENSWARM_MCP_SCHEMA_CACHE`` is enabled
+    (Relay default), the first discovery fills a process-local cache keyed by
+    the command/args/cwd/excluded-tools and the bundle build fingerprint
+    (size + mtime_ns); subsequent identical discoveries return a deep copy so
+    callers cannot mutate the frozen schema. Concurrent discoveries for the
+    same event loop + generation + key are coalesced into one in-flight
+    producer task; waiters are pure consumers wrapped in ``asyncio.shield``,
+    so a cancelled waiter cannot abort the shared discovery or evict it from
+    the in-flight table. ``invalidate_office_claw_mcp_schema_cache`` drops
+    everything on catalog revision change. Setting the env var to
+    ``0/false/no/off`` falls back to the uncached path.
+    """
+
+    if not _office_claw_mcp_schema_cache_enabled():
+        return await _list_office_claw_mcp_tools_uncached(params)
+
+    cache_key = _office_claw_mcp_schema_cache_key(params)
+    with _office_claw_mcp_schema_cache_lock:
+        generation = _office_claw_mcp_schema_generation
+        loop_key = (id(asyncio.get_running_loop()), generation, cache_key)
+        cached = _office_claw_mcp_schema_cache.get(cache_key)
+        if cached is not None:
+            logger.debug("OfficeClaw MCP schema cache hit: key=%s", cache_key[:12])
+            return copy.deepcopy(cached)
+        task = _office_claw_mcp_schema_inflight.get(loop_key)
+        if task is None:
+            task = asyncio.create_task(
+                _discover_and_cache_office_claw_mcp_schema(
+                    params, cache_key, loop_key, generation
+                ),
+                name=f"office-claw-mcp-schema-{cache_key[:12]}",
+            )
+            _office_claw_mcp_schema_inflight[loop_key] = task
+
+    # Pure consumer: a cancelled waiter must not affect the shared producer
+    # task. The producer owns the cache write and its own in-flight cleanup.
+    tools = await asyncio.shield(task)
+    return copy.deepcopy(tools)
 
 
 class RequestScopedOfficeClawMcpTool(Tool):
@@ -909,6 +1130,7 @@ __all__ = [
     "ensure_request_scoped_office_claw_tool_allowed",
     "extract_enabled_mcp_server_entries",
     "extract_office_claw_mcp",
+    "invalidate_office_claw_mcp_schema_cache",
     "list_office_claw_mcp_tools",
     "preflight_mcp_server_reachable",
     "validate_office_claw_mcp_config",

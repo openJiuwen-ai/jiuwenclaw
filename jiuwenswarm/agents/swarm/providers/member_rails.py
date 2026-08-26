@@ -36,6 +36,9 @@ from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import (
     RuntimePromptRail,
 )
+from jiuwenswarm.agents.harness.common.rails.disabled_tools_rail import (
+    DisabledToolsRail,
+)
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
@@ -67,6 +70,7 @@ PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
 SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
 TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
+DISABLED_TOOLS = "swarm.disabled_tools"
 
 
 def _workspace_root(ctx: SwarmBuildContext) -> str | None:
@@ -144,6 +148,32 @@ def _build_symphony_orchestration_rail(
     if getattr(context, "role", "") != "leader":
         return None
     return SymphonyOrchestrationRail()
+
+
+class DisabledToolsInput(ConstructionInput):
+    """Configured tool names hidden from this swarm member."""
+
+    disabled_tools: list[str] = param_field(
+        default_factory=list,
+        description="Model-facing tool names disabled for the member.",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=DISABLED_TOOLS,
+    description="Per-member filter for react.disabled_tools.",
+    input_model=DisabledToolsInput,
+)
+def _build_disabled_tools_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> DisabledToolsRail | None:
+    """Apply the unified disabled-tools policy to one team member."""
+    inp = DisabledToolsInput.resolve(params, context)
+    if not inp.disabled_tools:
+        return None
+    return DisabledToolsRail(disabled_tools=inp.disabled_tools)
 
 
 class RuntimePromptInput(ConstructionInput):
@@ -452,6 +482,7 @@ __all__ = [
     "PLUGIN_RAILS",
     "SKILL_RETRIEVAL_PROMPT",
     "SYMPHONY_ORCHESTRATION_PROMPT",
+    "DISABLED_TOOLS",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
 ]

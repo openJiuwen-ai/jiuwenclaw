@@ -20,8 +20,8 @@ declare -A CONFIG=(
     ["MYSQL_TEMPLATE_FILE"]="${TEMPLATE_DIR}/mysql.template.yaml"
     ["MYSQL_FILE"]="${CONFIG_DIR}/mysql.yaml"
 
-    ["POSTGRES_TEMPLATE_FILE"]="${TEMPLATE_DIR}/postgresql.template.yaml"
-    ["POSTGRES_FILE"]="${CONFIG_DIR}/postgresql.yaml"
+    ["POSTGRESQL_TEMPLATE_FILE"]="${TEMPLATE_DIR}/postgresql.template.yaml"
+    ["POSTGRESQL_FILE"]="${CONFIG_DIR}/postgresql.yaml"
 
     ["RABBITMQ_TEMPLATE_FILE"]="${TEMPLATE_DIR}/rabbitmq.template.yaml"
     ["RABBITMQ_FILE"]="${CONFIG_DIR}/rabbitmq.yaml"
@@ -56,6 +56,9 @@ declare -A CONFIG=(
     ["MANAGER_WEB_TEMPLATE_FILE"]="${TEMPLATE_DIR}/manager-web.template.yaml"
     ["MANAGER_WEB_FILE"]="${CONFIG_DIR}/manager-web.yaml"
 
+    ["RUNTIME_TEMPLATE_FILE"]="${TEMPLATE_DIR}/runtime.template.yaml"
+    ["RUNTIME_FILE"]="${CONFIG_DIR}/runtime.yaml"
+
     ["IDENTITY_TEMPLATE_FILE"]="${TEMPLATE_DIR}/identity.template.yaml"
     ["IDENTITY_FILE"]="${CONFIG_DIR}/identity.yaml"
 
@@ -79,7 +82,7 @@ declare -A ARGS=(
 
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "LOG" "JINA" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "LOG" "JINA" "GATEWAY" "WEB" "MANAGER" "RUNTIME")
 
 declare -ga MODULES=()
 
@@ -108,13 +111,14 @@ declare -A DEPLOY_VARS=(
     ["DEPLOYMENT_MODE"]="standalone"
     ["GATEWAY_HTTP_PORT"]="19001"
     ["GATEWAY_WS_PORT"]="19000"
+    # Manager → Gateway 配置同步 HTTP（manager_config_receiver）
+    ["GATEWAY_CONFIG_HTTP_PORT"]="8775"
     ["ENABLE_EXTERNAL_OBS"]="false"
-    ["ENABLE_EXTERNAL_MYSQL"]="false"
     ["ENABLE_EXTERNAL_NFS"]="false"
     ["ENABLE_EXTERNAL_PVC"]="false"
-    ["ENABLE_EXTERNAL_POSTGRES"]="false"
     ["ENABLE_EXTERNAL_RABBITMQ"]="false"
     ["ENABLE_EXTERNAL_REDIS"]="false"
+    ["ENABLE_USER_WEB_EMBEDDING"]="false"
     ["FLUENT_BIT_NAME"]="fluent-bit"
     ["FLUENT_BIT_IMAGE"]="fluent/fluent-bit:3.0.0"
     ["FUNC_SVC_NAME"]="0@jiuwen@clawtest"
@@ -135,7 +139,6 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_NAME"]="jiuwenclaw-gateway"
     ["GATEWAY_PG_SCHEMA"]="public"
     ["GATEWAY_REPLICAS"]="1"
-    ["GATEWAY_SERVICE_ACCOUNT"]="jiuwenclaw-gateway-sa"
     ["GATEWAY_SQLITE_PATH"]="gateway.db"
     ["IS_UP_MANAGER_WEB"]="true"
     ["IDENTITY_NAME"]="jiuwenclaw-identity"
@@ -183,11 +186,11 @@ declare -A DEPLOY_VARS=(
     ["OBS_SECURE"]="false"
     ["OBS_PUBLIC_BASE_URL"]=""
     ["POOL_ID"]="claw"
-    ["POSTGRES_IMAGE"]="postgres:16"
-    ["POSTGRES_NAME"]="postgresql"
-    ["POSTGRES_PASSWORD"]="Root@123456"
-    ["POSTGRES_MAX_CONNECTION"]="192"
-    ["POSTGRES_STORAGE_SIZE"]="4Gi"
+    ["POSTGRESQL_IMAGE"]="postgres:16"
+    ["POSTGRESQL_NAME"]="postgresql"
+    ["POSTGRESQL_PASSWORD"]="Root@123456"
+    ["POSTGRESQL_MAX_CONNECTION"]="192"
+    ["POSTGRESQL_STORAGE_SIZE"]="4Gi"
     ["PVC_NAME"]="pvc-nfs-shared"
     ["PV_NAME"]="pv-nfs-shared"
     ["RABBITMQ_IMAGE"]="rabbitmq:3.9.22-management"
@@ -213,6 +216,15 @@ declare -A DEPLOY_VARS=(
     ["WEB_NAME"]="jiuwenclaw-web"
     ["WEB_WS_PORT"]="19000"
     ["WEB_HTTP_PORT"]="5173"
+    ["AGENT_RUNTIME_NAME"]="jiuwenclaw-agent-runtime"
+    ["AGENT_RUNTIME_IMAGE"]=""
+    ["AGENT_RUNTIME_REPLICAS"]="1"
+    ["AGENT_RUNTIME_PORT"]="8091"
+    ["AGENT_RUNTIME_DB_NAME"]="runtime"
+    ["AGENT_RUNTIME_REDIS_DB"]="2"
+    ["AGENT_RUNTIME_REQUEST_TIMEOUT"]="300"
+    ["AGENT_RUNTIME_SCOPE_FULL_TIMEOUT"]="8"
+    ["AGENT_RUNTIME_LOG_LEVEL"]="INFO"
     ["WS_ALLOWED_ORIGINS"]=""
     ["WS_ORIGIN_CHECK_ENABLED"]="false"
 )

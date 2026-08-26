@@ -145,11 +145,13 @@ from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
 
 apply_openai_sse_invoke_patch()
 
+from jiuwenswarm.common.openjiuwen_rail_compat import install_evolution_rail_kwargs_compat
 from jiuwenswarm.openjiuwen_skip_tool_patch import apply_skip_tool_tool_message_patch
 from jiuwenswarm.openjiuwen_streaming_tool_patch import apply_streaming_tool_wait_timeout_patch
 
 apply_skip_tool_tool_message_patch()
 apply_streaming_tool_wait_timeout_patch()
+install_evolution_rail_kwargs_compat()
 
 # Batch-scoped tool concurrency limits from react.concurrency (AbilityManager hook).
 from jiuwenswarm.server.tool_concurrency import apply_tool_concurrency_limit
@@ -296,10 +298,10 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
 
     if os.getenv("AGENT_RUNTIME", "").strip():
         try:
-            from jiuwenswarm.common.utils import reload_logging_levels_from_gateway_db
+            from jiuwenswarm.common.utils import reload_logging_levels
 
-            await reload_logging_levels_from_gateway_db()
-            logger.info("[AgentServer] logging levels loaded from Gateway DB (if any)")
+            await reload_logging_levels()
+            logger.info("[AgentServer] logging levels reloaded from config store (if any)")
         except Exception:  # noqa: BLE001
             logger.warning("[AgentServer] logging_config cold load skipped", exc_info=True)
 

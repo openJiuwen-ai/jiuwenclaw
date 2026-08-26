@@ -77,8 +77,11 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
+# FullCompact 仅用于溢出兜底（413/上下文溢出），日常压缩由 preset 链承担。
+# 从 processor.compressor 包入口取 Config（__init__ 显式导出，跨版本稳定）；
+# _merge_processors 只认 BaseModel 实例，不区分配置类来源
+from openjiuwen.core.context_engine.processor.compressor import FullCompactProcessorConfig
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload as _SkillTurboConfirmPayload
-from openjiuwen.agent_evolving.trajectory import FileTrajectoryStore
 try:
     from openjiuwen.agent_evolving.skill_self_evolution import resolve_skill_evolution_action
 except ImportError:
@@ -205,6 +208,7 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
     CompatibleTodoModifyTool,
     install_todo_modify_compat_patch,
 )
+from jiuwenswarm.common.openjiuwen_rail_compat import install_evolution_rail_kwargs_compat
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails import (
     DeepResearchExecutionRail,
@@ -216,6 +220,9 @@ from jiuwenswarm.agents.harness.common.rails import (
     SymphonyOrchestrationRail,
     TaskExecutionRail,
     ContextOverflowRecoveryRail,
+)
+from jiuwenswarm.agents.harness.common.rails.disabled_tools_rail import (
+    DisabledToolsRail,
 )
 from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
     ConcurrentSafeSysOperationRail,
@@ -382,11 +389,15 @@ from jiuwenswarm.common.config import (
     get_default_models,
     get_evolution_enabled,
     get_evolution_review_trigger_enabled,
+    get_evolution_signal_trigger_enabled,
+    get_passive_skill_evolution_triggers,
+    get_skill_evolution_enabled,
     get_sandbox_endpoint,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_skill_create_enabled,
     resolve_env_vars,
+    resolve_string_or_list_config,
 )
 from jiuwenswarm.common.mcp_config import (
     OfficeClawMcpRegistration,
@@ -462,6 +473,7 @@ load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 TodoModifyTool = CompatibleTodoModifyTool
 install_todo_modify_compat_patch()
+install_evolution_rail_kwargs_compat()
 
 _react_config = get_config().get("react", {})
 
@@ -1245,8 +1257,10 @@ def _set_skill_evolution_triggers(
     rail: Any,
     *,
     review_trigger: bool,
+    signal_trigger: bool = True,
 ) -> None:
     rail.review_trigger = review_trigger
+    rail.signal_trigger = signal_trigger
 
 
 def _clean_heartbeat_content(content: str) -> str:
@@ -1430,6 +1444,16 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
         round_level_cfg = context_engine_cfg.get("round_level_compressor_config", {})
         if isinstance(round_level_cfg, dict) and round_level_cfg:
             user_processors.append(("RoundLevelCompressor", round_level_cfg))
+
+        # 兜底压缩：整窗口 token 超阈值时调一次 LLM 把历史压成 summary。
+        # ContextOverflowRecoveryRail 在 413/上下文溢出时靠 set_force_compact 触发。
+        # 注意：FullCompactProcessor 不在 0.1.16 preset 链中，_merge_processors 对非 preset
+        # processor 不接受 dict（无 base_cfg 可合并），必须传完整 BaseModel 实例。
+        full_compact_cfg = context_engine_cfg.get("full_compact_processor_config", {})
+        if isinstance(full_compact_cfg, dict) and full_compact_cfg:
+            user_processors.append(
+                ("FullCompactProcessor", FullCompactProcessorConfig(**full_compact_cfg))
+            )
 
         reasoning_loop_cfg = context_engine_cfg.get("reasoning_tool_loop_compact_config", {})
         if isinstance(reasoning_loop_cfg, dict) and reasoning_loop_cfg:
@@ -1961,6 +1985,7 @@ class JiuWenSwarmDeepAdapter:
         self._filesystem_rail: SysOperationRail | None = None
         self._progressive_tool_rail: ProgressiveToolRail | None = None
         self._deepresearch_execution_rail: DeepResearchExecutionRail | None = None
+        self._disabled_tools_rail: DisabledToolsRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._enabled_skills: list[str] | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
@@ -6025,10 +6050,92 @@ class JiuWenSwarmDeepAdapter:
             skill_rail = None
         return skill_rail
 
-    @staticmethod
-    def _resolve_evolution_trajectory_dir() -> Path:
-        """Resolve directory for FileTrajectoryStore (always use default)."""
-        return get_agent_evolution_trajectories_dir()
+    def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
+        """Build SkillEvolutionRail.
+
+        Product contract: while the rail is mounted, generated experiences always
+        persist (``rail.auto_save=True``). Automatic version merge after
+        persistence is gated per-skill by ``resolve_skill_evolution_action``
+        (``selfEvolution=auto`` only).
+        """
+        if not get_skill_evolution_enabled(config):
+            return None
+        from jiuwenswarm.agents.harness.observability_runtime import (
+            get_trajectory_span_processor,
+        )
+
+        try:
+            evolution_triggers = get_passive_skill_evolution_triggers(config)
+            model_name = self._default_model_name or config.get("model_name", "gpt-4")
+            skill_evolution_rail = SkillEvolutionRail(
+                skills_dir=self._resolve_skill_dirs(),
+                llm=self._model,
+                model=model_name,
+                review_runtime=EvolutionReviewRuntime(),
+                review_trigger=evolution_triggers["review_trigger"],
+                signal_trigger=evolution_triggers["signal_trigger"],
+                auto_save=True,
+                disabled_skills=merge_evolution_disabled_skills(
+                    self._skill_manager.list_execution_disabled_skills()
+                ),
+                trajectory_span_processor=get_trajectory_span_processor(),
+            )
+            self._skill_evolution_rail = skill_evolution_rail
+            logger.info("[JiuWenSwarmDeepAdapter] SkillEvolutionRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] SkillEvolutionRail create failed: %s", exc)
+            skill_evolution_rail = None
+        return skill_evolution_rail
+
+    async def _ensure_active_evolution_rails_registered(self) -> None:
+        """Configure, register, and cache single-agent skill evolution rails."""
+        if self._instance is None:
+            return
+
+        resolved_language = self._resolve_runtime_language()
+        evolution_triggers = get_passive_skill_evolution_triggers(self._config_cache)
+        if (
+            self._skill_evolution_rail is not None
+            and getattr(self._skill_evolution_rail, "_language", None) != resolved_language
+        ):
+            await self._unconfigure_active_evolution_rails()
+
+        disabled_skills = merge_evolution_disabled_skills(
+            self._skill_manager.list_execution_disabled_skills()
+            if self._skill_manager is not None
+            else []
+        )
+        from jiuwenswarm.agents.harness.observability_runtime import (
+            get_trajectory_span_processor,
+        )
+
+        await configure_skill_evolution_runtime(
+            self._instance,
+            skills_dir=self._resolve_skill_dirs(),
+            llm=self._model,
+            model=self._default_model_name
+            or self._config_cache.get("model_name", "gpt-4"),
+            review_trigger=evolution_triggers["review_trigger"],
+            signal_trigger=evolution_triggers["signal_trigger"],
+            auto_save=True,
+            disabled_skills=disabled_skills,
+            language=resolved_language,
+            trajectory_span_processor=get_trajectory_span_processor(),
+        )
+        self._refresh_active_evolution_rail_refs()
+        if self._skill_evolution_rail is not None:
+            sync_evolution_disabled_skills(self._skill_evolution_rail, disabled_skills)
+            _set_skill_evolution_triggers(
+                self._skill_evolution_rail,
+                review_trigger=evolution_triggers["review_trigger"],
+                signal_trigger=evolution_triggers["signal_trigger"],
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillEvolutionRail configured "
+                "(review_trigger=%s, signal_trigger=%s)",
+                evolution_triggers["review_trigger"],
+                evolution_triggers["signal_trigger"],
+            )
 
     async def refresh_enabled_skills_from_db(self) -> None:
         """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。
@@ -6141,83 +6248,6 @@ class JiuWenSwarmDeepAdapter:
             len(self._enabled_skills),
         )
 
-    def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
-        """Build SkillEvolutionRail.
-
-        Product contract: while the rail is mounted, generated experiences always
-        persist (``rail.auto_save=True``). Automatic version merge after
-        persistence is gated per-skill by ``resolve_skill_evolution_action``
-        (``selfEvolution=auto`` only).
-        """
-        try:
-            evolution_review_trigger = get_evolution_review_trigger_enabled(config)
-            model_name = self._default_model_name or config.get("model_name", "gpt-4")
-            trajectory_dir = self._resolve_evolution_trajectory_dir()
-            skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=self._resolve_skill_dirs(),
-                llm=self._model,
-                model=model_name,
-                review_runtime=EvolutionReviewRuntime(),
-                review_trigger=evolution_review_trigger,
-                auto_save=True,
-                disabled_skills=merge_evolution_disabled_skills(
-                    self._skill_manager.list_execution_disabled_skills()
-                ),
-                trajectory_store=FileTrajectoryStore(trajectory_dir),
-            )
-            self._skill_evolution_rail = skill_evolution_rail
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] SkillEvolutionRail create success, trajectory_dir=%s",
-                trajectory_dir,
-            )
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] SkillEvolutionRail create failed: %s", exc)
-            skill_evolution_rail = None
-        return skill_evolution_rail
-
-    async def _ensure_active_evolution_rails_registered(self) -> None:
-        """Configure, register, and cache single-agent skill evolution rails."""
-        if self._instance is None:
-            return
-
-        resolved_language = self._resolve_runtime_language()
-        evolution_review_trigger = get_evolution_review_trigger_enabled(self._config_cache)
-        if (
-            self._skill_evolution_rail is not None
-            and getattr(self._skill_evolution_rail, "_language", None) != resolved_language
-        ):
-            await self._unconfigure_active_evolution_rails()
-
-        disabled_skills = merge_evolution_disabled_skills(
-            self._skill_manager.list_execution_disabled_skills()
-            if self._skill_manager is not None
-            else []
-        )
-        trajectory_dir = self._resolve_evolution_trajectory_dir()
-        await configure_skill_evolution_runtime(
-            self._instance,
-            skills_dir=self._resolve_skill_dirs(),
-            llm=self._model,
-            model=self._default_model_name
-            or self._config_cache.get("model_name", "gpt-4"),
-            review_trigger=evolution_review_trigger,
-            auto_save=True,
-            disabled_skills=disabled_skills,
-            language=resolved_language,
-            trajectory_store=FileTrajectoryStore(trajectory_dir),
-        )
-        self._refresh_active_evolution_rail_refs()
-        if self._skill_evolution_rail is not None:
-            sync_evolution_disabled_skills(self._skill_evolution_rail, disabled_skills)
-            _set_skill_evolution_triggers(
-                self._skill_evolution_rail,
-                review_trigger=evolution_review_trigger,
-            )
-            logger.info(
-                "[JiuWenSwarmDeepAdapter] SkillEvolutionRail configured, trajectory_dir=%s",
-                trajectory_dir,
-            )
-
     async def _unconfigure_active_evolution_rails(self) -> None:
         """Remove cached single-agent evolution rails before rebuilding them."""
         if self._instance is None:
@@ -6228,7 +6258,12 @@ class JiuWenSwarmDeepAdapter:
             for rail in (self._skill_evolution_rail, self._evolution_interrupt_rail)
             if rail is not None
         ]
-        unconfigure_skill_evolution(self._instance, team=False)
+        try:
+            unconfigure_skill_evolution(self._instance, team=False)
+        except AttributeError:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] evolution bulk unconfigure unavailable"
+            )
         unregister = getattr(self._instance, "unregister_rail", None)
         if callable(unregister):
             for rail in rails:
@@ -6285,22 +6320,29 @@ class JiuWenSwarmDeepAdapter:
 
         SkillCreateRail requires task-loop mode (enable_task_loop=True) to function
         because it uses AFTER_TASK_ITERATION event and enqueue_follow_up().
-        Config: evolution.skill_create (bool) - true to register rail with auto_trigger=true.
-        Env: SKILL_CREATE - takes precedence over config.yaml.
+        Config: ``react.evolution.skill_evolution`` enables the rail; legacy
+        ``evolution.skill_create`` remains supported for backward compatibility.
         """
         try:
-            skill_create_enabled = get_skill_create_enabled(config)
-            # Check if skill_create is explicitly enabled
+            skill_create_enabled = (
+                get_skill_evolution_enabled(config)
+                or get_skill_create_enabled(config)
+            )
             if not skill_create_enabled:
                 logger.debug("[JiuWenSwarmDeepAdapter] SkillCreateRail disabled by config")
                 return None
+
+            from jiuwenswarm.agents.harness.observability_runtime import (
+                get_trajectory_span_processor,
+            )
 
             language = config.get("language", "cn")
             skills_dirs = self._resolve_skill_dirs()
             rail = SkillCreateRail(
                 skills_dir=skills_dirs[0] if skills_dirs else str(get_agent_skills_dir()),
-                auto_trigger=True,  # When skill_create=true, auto_trigger is always true
+                auto_trigger=True,
                 language=language,
+                trajectory_span_processor=get_trajectory_span_processor(),
             )
             self._skill_create_rail = rail
             logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail created with auto_trigger=True")
@@ -6741,6 +6783,37 @@ class JiuWenSwarmDeepAdapter:
             )
         return rail
 
+    @staticmethod
+    def _build_disabled_tools_rail(
+        config: dict[str, Any]
+    ) -> DisabledToolsRail | None:
+        """Build DisabledToolsRail to filter out disabled tools based on config.
+
+        ``react.disabled_tools`` accepts two formats (same field, pick one):
+          - YAML list:      ``disabled_tools: ["bash", "fork_agent"]``
+          - Env var string: ``disabled_tools: ${DISABLED_TOOLS-defaults}``
+            (set DISABLED_TOOLS=bash,fork_agent in .env)
+        """
+        try:
+            disabled_list = resolve_string_or_list_config(config.get("disabled_tools"))
+            if not disabled_list:
+                return None
+            rail = DisabledToolsRail(disabled_tools=disabled_list)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] DisabledToolsRail create success, "
+                "disabled_tools: %s",
+                disabled_list,
+            )
+            return rail
+        except Exception as exc:
+            logger.error(
+                "[JiuWenSwarmDeepAdapter] DisabledToolsRail create failed: %s", exc,
+                exc_info=True,
+            )
+            # disabled_tools is a security boundary. Refuse to initialize or
+            # hot-reload with the blacklist silently disabled (fail closed).
+            raise
+
     def _get_deepresearch_tool_context(self) -> dict[str, str]:
         """Return the adapter-owned route that survives runner task boundaries.
 
@@ -7029,6 +7102,16 @@ class JiuWenSwarmDeepAdapter:
             )
         )
 
+        # 统一工具开关（黑名单）：在其它工具注册后注销被禁用的工具。
+        # priority=1 确保最后执行，此时工具已全部注册。
+        rail_infos.append(
+            _RailBuildInfo(
+                "_disabled_tools_rail",
+                self._build_disabled_tools_rail,
+                {"config": config},
+            )
+        )
+
         return self._instantiate_rails(rail_infos, config_base)
 
     @staticmethod
@@ -7155,9 +7238,11 @@ class JiuWenSwarmDeepAdapter:
         # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, self._default_model_name)
+            evolution_triggers = get_passive_skill_evolution_triggers(config)
             _set_skill_evolution_triggers(
                 self._skill_evolution_rail,
-                review_trigger=get_evolution_review_trigger_enabled(config),
+                review_trigger=evolution_triggers["review_trigger"],
+                signal_trigger=evolution_triggers["signal_trigger"],
             )
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills
@@ -7197,6 +7282,17 @@ class JiuWenSwarmDeepAdapter:
             elif old_progressive_tool_rail is not None:
                 rails_to_unregister.append(old_progressive_tool_rail)
 
+        # 统一工具开关热更新：重建式（与 ProgressiveToolRail 一致）。
+        # 旧 rail uninit 时回滚它注销的工具（重新注册），新 rail init 再按新名单注销。
+        disabled_tools_rail = None
+        disabled_tools_configured = "disabled_tools" in config
+        if disabled_tools_configured:
+            old_disabled_tools_rail = self._disabled_tools_rail
+            disabled_tools_rail = self._build_disabled_tools_rail(config)
+            if old_disabled_tools_rail is not None:
+                rails_to_unregister.append(old_disabled_tools_rail)
+            self._disabled_tools_rail = disabled_tools_rail
+
         rails_list = []
         if self._skill_rail is not None:
             rails_list.append(self._skill_rail)
@@ -7212,6 +7308,10 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(self._permission_rail)
         if progressive_tool_rail is not None:
             rails_list.append(progressive_tool_rail)
+        if disabled_tools_rail is not None:
+            rails_list.append(disabled_tools_rail)
+        elif not disabled_tools_configured and self._disabled_tools_rail is not None:
+            rails_list.append(self._disabled_tools_rail)
         return rails_list, rails_to_unregister
 
     def _runtime_agent_scope_id(self) -> str:
@@ -8171,12 +8271,24 @@ class JiuWenSwarmDeepAdapter:
             # 加载用户自定义的 Rail 扩展
             await self.load_user_rails()
 
+            # 双保险：即便 DisabledToolsRail 时序未注销，deep_cfg 的 tool_cards 也先剔除黑名单。
+            disabled_names = set(
+                resolve_string_or_list_config(config.get("disabled_tools"))
+            )
+            if disabled_names and self._tool_cards:
+                filtered_tool_cards = [
+                    card for card in self._tool_cards
+                    if getattr(card, "name", None) not in disabled_names
+                ]
+            else:
+                filtered_tool_cards = self._tool_cards if self._tool_cards else []
+
             deep_cfg = self._make_deep_agent_config(
                 model=model,
                 config=config,
                 config_base=config_base,
                 agent_card=agent_card,
-                tool_cards=self._tool_cards if self._tool_cards else [],
+                tool_cards=filtered_tool_cards,
                 rails=rails_list,
             )
             omitted_fields, reload_fingerprints = self._omit_unchanged_reload_fields(deep_cfg)
@@ -8195,7 +8307,11 @@ class JiuWenSwarmDeepAdapter:
             await self._instance.ensure_initialized()
 
             first_unregister_error: Exception | None = None
-            rail_cache_attrs = ("_progressive_tool_rail", "_filesystem_rail")
+            rail_cache_attrs = (
+                "_progressive_tool_rail",
+                "_filesystem_rail",
+                "_disabled_tools_rail",
+            )
             for rail in rails_to_unregister:
                 try:
                     await self._instance.unregister_rail(rail)
@@ -9698,6 +9814,14 @@ class JiuWenSwarmDeepAdapter:
             )
             from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
                 apply_interactive_ask_to_inputs,
+                resolve_resume_interactive_ask,
+            )
+            # 入站 answers payload 一般不携带 interactive_ask；此时从中断点
+            # resume_ctx 恢复中断前的引导模式状态，避免 resume 后被强制
+            # 设为 False、把带 preview 的内容确认类 ask_user 误判为 skipped，
+            # 或让引导模式管线在 resume 阶段退化为非引导。
+            raw_interactive = resolve_resume_interactive_ask(
+                raw_interactive, resume_ctx.get("inputs")
             )
             resume_inputs = apply_interactive_ask_to_inputs(
                 resume_ctx.get("inputs", inputs),
@@ -13220,6 +13344,24 @@ class JiuWenSwarmDeepAdapter:
             AgentResponse 包含执行结果
         """
         if not self._is_session_scoped_adapter:
+            # 提前绑定 LLM trace ContextVar，使 supervisor task（由
+            # _get_or_create_session_adapter → start_interaction →
+            # self._instance.start() 经 asyncio.create_task 创建）继承正确的
+            # session_id / request_id。否则 task 上下文里恒为空，
+            # LLM_IO_TRACE 行全部 session_id='' request_id=''。
+            _early_trace_sid = _LLM_TRACE_SESSION_ID.set(
+                request.session_id or "default"
+            )
+            _early_trace_rid = _LLM_TRACE_REQUEST_ID.set(
+                request.request_id or ""
+            )
+            _early_trace_iter = _LLM_TRACE_ITERATION.set(0)
+            _early_trace_model = _LLM_TRACE_MODEL_NAME.set(
+                getattr(self, "_model", None)
+                and getattr(self._model, "model_config", None)
+                and getattr(self._model.model_config, "model_name", "")
+                or ""
+            )
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
             request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
@@ -13228,6 +13370,10 @@ class JiuWenSwarmDeepAdapter:
                 ):
                     return await session_adapter.process_message_impl(request, inputs)
             finally:
+                _LLM_TRACE_SESSION_ID.reset(_early_trace_sid)
+                _LLM_TRACE_REQUEST_ID.reset(_early_trace_rid)
+                _LLM_TRACE_ITERATION.reset(_early_trace_iter)
+                _LLM_TRACE_MODEL_NAME.reset(_early_trace_model)
                 try:
                     await session_adapter.cleanup_request_scoped_office_claw_mcp(request_mcp)
                 finally:
@@ -13793,6 +13939,24 @@ class JiuWenSwarmDeepAdapter:
         # "entering runner streaming" line so the pre-dispatch work is visible.
         stream_impl_started_at = time.monotonic()
         if not self._is_session_scoped_adapter:
+            # 提前绑定 LLM trace ContextVar，使 supervisor task（由
+            # _get_or_create_session_adapter → start_interaction →
+            # self._instance.start() 经 asyncio.create_task 创建）继承正确的
+            # session_id / request_id。否则 task 上下文里恒为空，
+            # LLM_IO_TRACE 行全部 session_id='' request_id=''。
+            _early_trace_sid = _LLM_TRACE_SESSION_ID.set(
+                request.session_id or "default"
+            )
+            _early_trace_rid = _LLM_TRACE_REQUEST_ID.set(
+                request.request_id or ""
+            )
+            _early_trace_iter = _LLM_TRACE_ITERATION.set(0)
+            _early_trace_model = _LLM_TRACE_MODEL_NAME.set(
+                getattr(self, "_model", None)
+                and getattr(self._model, "model_config", None)
+                and getattr(self._model.model_config, "model_name", "")
+                or ""
+            )
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
             request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
@@ -13803,6 +13967,10 @@ class JiuWenSwarmDeepAdapter:
                         yield chunk
                 return
             finally:
+                _LLM_TRACE_SESSION_ID.reset(_early_trace_sid)
+                _LLM_TRACE_REQUEST_ID.reset(_early_trace_rid)
+                _LLM_TRACE_ITERATION.reset(_early_trace_iter)
+                _LLM_TRACE_MODEL_NAME.reset(_early_trace_model)
                 try:
                     await session_adapter.cleanup_request_scoped_office_claw_mcp(request_mcp)
                 finally:
@@ -14293,6 +14461,7 @@ class JiuWenSwarmDeepAdapter:
         interaction_stream = None
         interaction_stream_abort = True
         perf_summary_status = "ok"
+        hitl_pending_stream = False
         try:
             self._runtime_cron_tool_context.remember_current_binding()
             token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())

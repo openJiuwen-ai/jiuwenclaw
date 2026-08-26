@@ -291,12 +291,17 @@ class MessageHandler(ABC):
     def set_outbound_pipeline(self, pipeline: Any) -> None:
         self._outbound_pipeline = pipeline
 
-        # 直接使用 jiuwenswarm.config 的 get_config_raw/set_config/update_channel_in_config
-        # 避免在此处重复实现 config 模块加载逻辑。
-        from jiuwenswarm.common.config import get_config_raw, update_channel_in_config
+        # Channel 写路径经 access（Repository 注入时走 PersistentStore）。
+        from jiuwenswarm.common.config import get_config_raw
+        from jiuwenswarm.gateway.config.channel.access import update_channel_in_config
+        from jiuwenswarm.gateway.storage.async_bridge import run_awaitable
 
         self._get_config_raw = get_config_raw
-        self._update_channel_in_config = update_channel_in_config
+
+        def _update_channel_in_config(channel_id: str, conf: dict) -> None:
+            run_awaitable(update_channel_in_config(channel_id, conf))
+
+        self._update_channel_in_config = _update_channel_in_config
 
         set_server_push_handler = getattr(
             self.agent_client,
@@ -305,10 +310,6 @@ class MessageHandler(ABC):
         )
         if callable(set_server_push_handler):
             set_server_push_handler(self._handle_agent_server_push)
-
-    def reload_session_map(self) -> None:
-        """Reload Redis-backed SessionMap cache after leader switchover (active-standby)."""
-        self._session_map.reload()
 
     @classmethod
     def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":

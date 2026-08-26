@@ -280,7 +280,9 @@ def test_unified_force_does_not_make_later_legacy_provider_sticky(
 ) -> None:
     import openjiuwen.agent_teams.observability as core_observability
     from jiuwenswarm.agents.harness import agent_observability as adapter
+    from jiuwenswarm.agents.harness import observability_runtime
 
+    observability_runtime.reset_observability_demands()
     runtime_active = True
     runtime = _unified_runtime()
     runtime.is_unified_active = lambda: runtime_active
@@ -291,10 +293,18 @@ def test_unified_force_does_not_make_later_legacy_provider_sticky(
         "get_config",
         lambda: {"agent_observability": {"enabled": config_enabled}},
     )
-    monkeypatch.setattr(core_observability, "is_initialized", lambda: False)
+    state = {"initialized": False}
+
+    def _is_initialized() -> bool:
+        return state["initialized"]
+
+    def _init(_config, **_kwargs) -> None:
+        state["initialized"] = True
+
+    monkeypatch.setattr(core_observability, "is_initialized", _is_initialized)
     monkeypatch.setattr(core_observability, "ObservabilityConfig", SimpleNamespace)
-    init = Mock()
-    shutdown = Mock()
+    init = Mock(side_effect=_init)
+    shutdown = Mock(side_effect=lambda: state.__setitem__("initialized", False))
     monkeypatch.setattr(core_observability, "init_observability", init)
     monkeypatch.setattr(core_observability, "shutdown_observability", shutdown)
     monkeypatch.setattr(adapter, "_agent_observability_active", False)
@@ -321,6 +331,7 @@ def test_legacy_root_span_still_uses_agentcore_tracer_and_registry(
 ) -> None:
     import openjiuwen.agent_teams.observability as core_observability
     from openjiuwen.agent_teams.observability import span_context
+    from openjiuwen.extensions.observability import setup as ext_setup
     from jiuwenswarm.agents.harness import agent_observability as adapter
 
     tracer = _Tracer()
@@ -330,7 +341,8 @@ def test_legacy_root_span_still_uses_agentcore_tracer_and_registry(
     )
     monkeypatch.setattr(adapter, "_get_unified_runtime", lambda: runtime)
     monkeypatch.setattr(core_observability, "is_initialized", lambda: True)
-    monkeypatch.setattr(core_observability, "get_tracer", lambda _name: tracer)
+    monkeypatch.setattr(ext_setup, "is_initialized", lambda: True)
+    monkeypatch.setattr(ext_setup, "get_tracer", lambda _name: tracer)
     monkeypatch.setattr(span_context, "cascade_close_children", Mock())
     monkeypatch.setattr(span_context, "flush_child_spans", Mock())
     monkeypatch.setattr(adapter, "_agent_observability_active", True)

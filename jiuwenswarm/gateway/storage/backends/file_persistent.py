@@ -214,6 +214,12 @@ class FilePersistentBackend:
             data = json.load(handle)
         if isinstance(data, list):
             return [dict(item) for item in data if isinstance(item, dict)]
+        doc_key = str(layout.json_document_key or "").strip()
+        if isinstance(data, dict) and doc_key:
+            wrapped = data.get(doc_key)
+            if isinstance(wrapped, list):
+                return [dict(item) for item in wrapped if isinstance(item, dict)]
+            return []
         if isinstance(data, dict) and layout.shape == "map" and layout.key_fields:
             field = layout.key_fields[0]
             records: list[dict[str, Any]] = []
@@ -236,6 +242,11 @@ class FilePersistentBackend:
                 str(row[field]): _strip_map_key(layout, row)
                 for row in records
                 if field in row
+            }
+        elif layout.shape == "list" and str(layout.json_document_key or "").strip():
+            payload = {
+                "version": 1,
+                str(layout.json_document_key).strip(): records,
             }
         else:
             payload = records

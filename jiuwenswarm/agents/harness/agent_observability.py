@@ -23,9 +23,8 @@ Shared-provider caveat (important):
     and ``init_observability`` is a no-op if already initialized. In a process
     where BOTH team and agent observability are enabled, whichever runs first
     wins; the other silently reuses it (its exporter/endpoint/service_name are
-    ignored). To stay safe in that case we track ``_agent_owns_provider``:
-    agent shutdown only tears down the provider when the agent actually
-    created it, and never tears down a provider the team subsystem depends on.
+    ignored). Provider demands are coordinated by ``observability_runtime`` so
+    agent shutdown never tears down a provider the team subsystem depends on.
 """
 
 from __future__ import annotations
@@ -37,8 +36,13 @@ from typing import TYPE_CHECKING, Any
 
 from openjiuwen.harness.rails.base import DeepAgentRail
 
-from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.config import get_config, get_skill_evolution_enabled
 from jiuwenswarm.common.utils import get_user_workspace_dir
+from jiuwenswarm.agents.harness.observability_runtime import (
+    acquire_observability_demand,
+    build_observability_config,
+    release_observability_demand,
+)
 
 if TYPE_CHECKING:
     from jiuwenswarm.telemetry.request_context import (
@@ -82,8 +86,14 @@ class AgentTraceBindingRail(DeepAgentRail):
             from openjiuwen.agent_teams.observability.span_context import (
                 set_team_span,
             )
+            from openjiuwen.extensions.observability.span_context import (
+                set_current_session_id,
+                set_root_span,
+            )
 
             set_team_span(root_span, team_name="single-agent")
+            set_root_span(root_span, session_id=session_id)
+            set_current_session_id(session_id)
         except Exception as exc:
             logger.debug("[AgentObservability] trace binding rail skipped: %s", exc)
 
@@ -198,12 +208,15 @@ def sync_agent_observability(*, force: bool = False) -> None:
     * enabled -> disabled : ``shutdown_agent_observability()``
     * unchanged           : no-op
 
+    Evolution also requests the provider when the explicit switch is disabled.
+
     ``force=True`` (set by a ``/debug`` run when ``debug_trace.<mode>.otel_enabled``
     is true) treats ``want_enabled`` as true regardless of config, so a debug
     request can pull up OTel even when ``agent_observability.enabled`` is false.
     Once force is ever used, the provider stays up for the process (sticky — see
     ``_force_ever_enabled``) to avoid init/shutdown churn across alternating
-    requests; the normal config hot-reload teardown is unchanged otherwise.
+    requests; the normal config hot-reload teardown is unchanged when evolution
+    is disabled.
     """
     global _agent_observability_active, _agent_owns_provider
     global _force_ever_enabled, _runtime_managed_agent_observability
@@ -224,64 +237,61 @@ def sync_agent_observability(*, force: bool = False) -> None:
         _agent_observability_active = False
         _runtime_managed_agent_observability = False
 
-    cfg = get_config().get("agent_observability", {}) or {}
-    want_enabled = bool(cfg.get("enabled", False)) or force
+    config = get_config()
+    cfg = config.get("agent_observability", {}) or {}
+    evolution_requested = get_skill_evolution_enabled(config)
+    want_enabled = (
+        bool(cfg.get("enabled", False))
+        or evolution_requested
+        or force
+        or _force_ever_enabled
+    )
 
-    if want_enabled and not _agent_observability_active:
-        try:
-            from openjiuwen.agent_teams.observability import (
-                ObservabilityConfig,
-                init_observability,
-                is_initialized,
-            )
+    if not want_enabled:
+        if _agent_observability_active and not _force_ever_enabled:
+            shutdown_agent_observability()
+        return
 
-            if is_initialized():
-                # Another subsystem (e.g. team) already owns the provider.
-                # Reuse it so the global OtelCallbackHandler keeps emitting
-                # LLM/tool spans for this single agent too — do NOT re-init.
-                _agent_observability_active = True
-                _agent_owns_provider = False
+    try:
+        traces_dir = str(cfg.get("traces_dir") or get_user_workspace_dir() / ".trace")
+        obs_cfg = build_observability_config(
+            cfg,
+            service_name="jiuwenswarm-agent",
+            traces_dir=traces_dir,
+        )
+        provider_existed = acquire_observability_demand(
+            "agent",
+            observability_config=obs_cfg,
+        )
+        was_active = _agent_observability_active
+        _agent_observability_active = True
+        _agent_owns_provider = not provider_existed
+        if not was_active:
+            if provider_existed:
                 logger.info(
                     "[AgentObservability] reusing existing observability provider "
                     "(owned by another subsystem)"
                 )
-                return
-
-            obs_cfg = ObservabilityConfig(
-                enabled=True,
-                service_name=cfg.get("service_name", "jiuwenswarm-agent"),
-                exporter=cfg.get("exporter", "otlp_grpc"),
-                endpoint=cfg.get("endpoint", "http://localhost:4317"),
-                sample_rate=cfg.get("sample_rate", 1.0),
-                attribute_value_max_length=cfg.get("attribute_value_max_length", 10240),
-                redact_prompts=cfg.get("redact_prompts", False),
-                redact_completions=cfg.get("redact_completions", False),
-                langfuse_public_key=cfg.get("langfuse_public_key", ""),
-                langfuse_secret_key=cfg.get("langfuse_secret_key", ""),
-                traces_dir=cfg.get("traces_dir")
-                or str(get_user_workspace_dir() / ".trace"),
-                file_retention_days=cfg.get("file_retention_days", 7),
-            )
-            init_observability(obs_cfg)
-            _agent_observability_active = True
-            _agent_owns_provider = True
-            if obs_cfg.exporter == "file":
+            elif cfg.get("exporter", "otlp_grpc") == "file":
                 logger.info(
                     "[AgentObservability] enabled: exporter=%s traces_dir=%s",
-                    obs_cfg.exporter,
-                    obs_cfg.traces_dir,
+                    cfg.get("exporter", "otlp_grpc"),
+                    traces_dir,
                 )
             else:
                 logger.info(
                     "[AgentObservability] enabled: exporter=%s endpoint=%s",
-                    obs_cfg.exporter,
-                    obs_cfg.endpoint,
+                    cfg.get("exporter", "otlp_grpc"),
+                    cfg.get("endpoint", "http://localhost:4317"),
                 )
-        except Exception as exc:
-            logger.warning("[AgentObservability] init failed: %s", exc)
-
-    elif not want_enabled and _agent_observability_active and not _force_ever_enabled:
-        shutdown_agent_observability()
+    except Exception as exc:
+        _agent_observability_active = False
+        _agent_owns_provider = False
+        if evolution_requested:
+            raise RuntimeError(
+                "Agent evolution observability initialization failed"
+            ) from exc
+        logger.warning("[AgentObservability] init failed: %s", exc)
 
 
 def shutdown_agent_observability() -> None:
@@ -297,19 +307,8 @@ def shutdown_agent_observability() -> None:
         _runtime_managed_agent_observability = False
         return
 
-    if not _agent_owns_provider:
-        # Provider is owned by the team subsystem (or another run); tearing it
-        # down here would break team tracing. Just drop our activation flag.
-        _agent_observability_active = False
-        logger.info(
-            "[AgentObservability] disabled (provider owned elsewhere, left intact)"
-        )
-        return
-
     try:
-        from openjiuwen.agent_teams.observability import shutdown_observability
-
-        shutdown_observability()
+        release_observability_demand("agent")
         _agent_observability_active = False
         _agent_owns_provider = False
         logger.info("[AgentObservability] disabled")
@@ -396,8 +395,8 @@ def open_agent_run_span(
     try:
         from opentelemetry.trace import SpanKind
 
-        from openjiuwen.agent_teams.observability import get_tracer, is_initialized
-        from openjiuwen.agent_teams.observability.semconv import LANGFUSE_SESSION_ID
+        from openjiuwen.extensions.observability.setup import get_tracer, is_initialized
+        from openjiuwen.extensions.observability.semconv import LANGFUSE_SESSION_ID
         from openjiuwen.agent_teams.observability.span_context import set_team_span
         from jiuwenswarm.extensions.identity_provider import IdentityStore
         from jiuwenswarm.telemetry.attributes import (
@@ -459,6 +458,13 @@ def open_agent_run_span(
         # Register as the team span so OtelCallbackHandler's parent lookup
         # (get_team_span fallback) finds it for LLM/tool span creation.
         set_team_span(span, team_name="single-agent")
+        from openjiuwen.extensions.observability.span_context import (
+            set_current_session_id,
+            set_root_span,
+        )
+
+        set_root_span(span, session_id=session_id)
+        set_current_session_id(session_id)
         trace_bindings = runtime.trace_bindings
         try:
             binding = trace_bindings.bind(session_id, request_id, span)
@@ -580,3 +586,13 @@ def close_agent_run_span(handle: Any, *, session_id: str = "") -> None:
             clear_team_span()
         except Exception as exc:
             logger.debug("[AgentObservability] clear root span failed: %s", exc)
+    try:
+        from openjiuwen.extensions.observability.span_context import (
+            clear_current_session_id,
+            clear_root_span,
+        )
+
+        clear_root_span(session_id=session_id, expected_span=root_span)
+        clear_current_session_id()
+    except Exception as exc:
+        logger.debug("[AgentObservability] clear extensions root span failed: %s", exc)

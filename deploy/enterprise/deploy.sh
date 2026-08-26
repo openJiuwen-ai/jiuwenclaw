@@ -22,6 +22,7 @@ source "configmap_secret_handler.sh"
 source "gateway_handler.sh"
 source "manager_handler.sh"
 source "web_handler.sh"
+source "runtime_handler.sh"
 
 process_up() {
     # MODULES是ALL_MODULES的子集，启动顺序正着来

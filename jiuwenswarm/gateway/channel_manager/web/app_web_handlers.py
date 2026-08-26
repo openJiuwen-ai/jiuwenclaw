@@ -50,8 +50,6 @@ from jiuwenswarm.common.config import (
     replace_teams_in_config,
     update_default_models_in_config,
     update_heartbeat_in_config,
-    update_channel_in_config,
-    replace_channel_subsection_with_cleanup,
     update_browser_in_config,
     update_preferred_language_in_config,
     update_evolution_enabled_in_config,
@@ -62,14 +60,24 @@ from jiuwenswarm.common.config import (
     update_kv_cache_release_enabled_in_config,
     update_skill_retrieval_in_config,
     update_symphony_in_config,
-    update_permissions_enabled_in_config,
     update_setup_guide_enabled_in_config,
-    update_memory_forbidden_enabled_in_config,
-    update_memory_forbidden_description_in_config,
     update_swarmflow_enabled_in_config,
     update_a2ui_in_config,
     update_updater_in_config,
     update_proactive_recommendation_in_config,
+)
+from jiuwenswarm.gateway.config.channel.access import (
+    replace_channel_subsection_with_cleanup,
+    update_channel_in_config,
+)
+from jiuwenswarm.gateway.config.memory.access import (
+    update_memory_forbidden_description_in_config,
+    update_memory_forbidden_enabled_in_config,
+    update_memory_forbidden_in_config,
+)
+from jiuwenswarm.gateway.config.permissions.access import (
+    update_permissions_enabled_in_config,
+    update_permissions_owner_scopes_in_config,
 )
 from jiuwenswarm.common.kv_cache_affinity_config import (
     ASCEND_AFFINITY_PROVIDER,
@@ -1860,7 +1868,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "failed to preserve team entity config: " + ", ".join(sorted(failed_team_names))
             )
 
-    def _apply_config_payload(params: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+    async def _apply_config_payload(params: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
         """Apply config.set-style payload to .env/config.yaml without triggering reload."""
         params = _encrypt_config_params(params)
         env_updates: dict[str, str] = {}
@@ -1915,14 +1923,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 elif param_key == "kv_cache_affinity_enabled":
                     update_kv_cache_affinity_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
-                    update_permissions_enabled_in_config(parsed)
+                    await update_permissions_enabled_in_config(parsed)
                 elif param_key == "setup_guide_enabled":
                     update_setup_guide_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_enabled":
-                    update_memory_forbidden_enabled_in_config(parsed)
+                    await update_memory_forbidden_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_description":
                     desc_val = str(val).strip()
-                    update_memory_forbidden_description_in_config({preferred_lang: desc_val})
+                    await update_memory_forbidden_description_in_config({preferred_lang: desc_val})
                 elif param_key == "swarmflow_enabled":
                     update_swarmflow_enabled_in_config(parsed)
                 elif param_key.startswith("a2ui_"):
@@ -2125,7 +2133,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         try:
-            env_updates, yaml_updated = _apply_config_payload(params)
+            env_updates, yaml_updated = await _apply_config_payload(params)
         except _ConfigBadRequest as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
             return
@@ -2585,7 +2593,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     yaml_updated.append("models.default_provider")
 
             if config_params:
-                applied_env, applied_yaml = _apply_config_payload(config_params)
+                applied_env, applied_yaml = await _apply_config_payload(config_params)
                 env_updates.update(applied_env)
                 yaml_updated.extend(applied_yaml)
 
@@ -5363,7 +5371,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("feishu", {"apps": merged_apps})
             should_clear_agent_config_cache = False
             try:
-                replace_channel_subsection_with_cleanup("feishu", "apps", merged_apps, {"apps", "send_file_allowed"})
+                await replace_channel_subsection_with_cleanup(
+                    "feishu", "apps", merged_apps, {"apps", "send_file_allowed"}
+                )
                 should_clear_agent_config_cache = True
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.feishu.set_conf] 写回 config.yaml apps 失败: %s", e)
@@ -5444,7 +5454,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             merged_apps = _merge_apps_by_id(normalized_apps, existing_apps)
             await cm.set_conf("xiaoyi", {"apps": merged_apps})
             try:
-                replace_channel_subsection_with_cleanup("xiaoyi", "apps", merged_apps, {"apps", "send_file_allowed"})
+                await replace_channel_subsection_with_cleanup(
+                    "xiaoyi", "apps", merged_apps, {"apps", "send_file_allowed"}
+                )
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.xiaoyi.set_conf] 写回 config.yaml apps 失败: %s", e)
@@ -5497,7 +5509,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("telegram", params)
             conf = cm.get_conf("telegram")
             try:
-                update_channel_in_config("telegram", conf)
+                await update_channel_in_config("telegram", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.telegram.set_conf] 写回 config.yaml 失败: %s", e)
@@ -5549,7 +5561,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             conf = cm.get_conf("dingtalk")
             should_clear_agent_config_cache = False
             try:
-                update_channel_in_config("dingtalk", conf)
+                await update_channel_in_config("dingtalk", conf)
                 should_clear_agent_config_cache = True
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.dingtalk.set_conf] 写回 config.yaml 失败: %s", e)
@@ -5604,7 +5616,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("whatsapp", params)
             conf = cm.get_conf("whatsapp")
             try:
-                update_channel_in_config("whatsapp", conf)
+                await update_channel_in_config("whatsapp", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.whatsapp.set_conf] 写回 config.yaml 失败: %s", e)
@@ -5655,7 +5667,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("discord", params)
             conf = cm.get_conf("discord")
             try:
-                update_channel_in_config("discord", conf)
+                await update_channel_in_config("discord", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.discord.set_conf] 写回 config.yaml 失败: %s", e)
@@ -5706,7 +5718,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("slack", params)
             conf = cm.get_conf("slack")
             try:
-                update_channel_in_config("slack", conf)
+                await update_channel_in_config("slack", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.slack.set_conf] failed to persist config.yaml: %s", e)
@@ -5757,7 +5769,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("wecom", params)
             conf = cm.get_conf("wecom")
             try:
-                update_channel_in_config("wecom", conf)
+                await update_channel_in_config("wecom", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.wecom.set_conf] 写回 config.yaml 失败: %s", e)
@@ -5819,7 +5831,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("wechat", params)
             conf = cm.get_conf("wechat")
             try:
-                update_channel_in_config("wechat", conf)
+                await update_channel_in_config("wechat", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.wechat.set_conf] 写回 config.yaml 失败: %s", e)
@@ -5865,7 +5877,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("wechat", new_conf)
             final = cm.get_conf("wechat")
             try:
-                update_channel_in_config("wechat", final)
+                await update_channel_in_config("wechat", final)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.wechat.unbind] 写回 config.yaml 失败: %s", e)
@@ -6373,15 +6385,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _permissions_owner_scopes_set(ws, req_id, params, session_id):
-        from jiuwenswarm.common.config import update_permissions_owner_scopes_in_config
-
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         try:
             owner_scopes = params.get("owner_scopes", {})
             deny_guidance = params.get("deny_guidance_message")
-            update_permissions_owner_scopes_in_config(owner_scopes, deny_guidance)
+            await update_permissions_owner_scopes_in_config(owner_scopes, deny_guidance)
             applied_without_restart = await _apply_config_change_set(
                 _ConfigChangeSet({}, ["permissions"], force=True)
             )
@@ -6503,12 +6513,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _memory_forbidden_set(ws, req_id, params, session_id):
-        from jiuwenswarm.common.config import update_memory_forbidden_in_config
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         try:
-            update_memory_forbidden_in_config(params)
+            await update_memory_forbidden_in_config(params)
             await channel.send_response(ws, req_id, ok=True, payload={"ok": True})
         except Exception as e:
             logger.exception("[memory.forbidden.set] %s", e)
