@@ -953,7 +953,7 @@ def _deep_agent_kv_cache_affinity_config(
     """Build the ReActAgent KV cache affinity config from jiuwenswarm config."""
     # 取 model.model_client_config 供新式 extensions.kv_cache.mode 判别；
     # model_provider 兼容旧 AscendAffinity 别名。
-    mcc = getattr(getattr(model, "model_client_config", None), "model_client_config", None)
+    mcc = getattr(model, "model_client_config", None)
     return build_kv_cache_affinity_config(
         react_cfg,
         provider=model_provider(model),
