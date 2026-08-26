@@ -788,7 +788,7 @@ def _extract_js_array(html: str, marker: str) -> str | None:
         elif ch in ("]", "}"):
             depth -= 1
             if depth == 0:
-                return html[pos : i + 1]
+                return html[pos:i + 1]
     return None
 
 
@@ -834,7 +834,7 @@ def parse_inference_html(html_content: str) -> dict:
             "nodes": [_map_node_type(n) for n in nodes],
             "edges": [_map_edge_type(e) for e in edges],
         }
-    except (json.JSONDecodeError, ValueError, TypeError, IndexError) as exc:
+    except (ValueError, TypeError, IndexError) as exc:
         return {"nodes": [], "edges": [], "parse_error": str(exc)}
 
 
@@ -865,12 +865,16 @@ def _supplement_intermediate_nodes(nodes: list[dict], edges: list[dict]) -> list
         if label != "" and str(label) != node_id_str:
             continue
 
-        from_ids = [
-            e["from"]
-            for e in edges
-            if e.get("to") == node["id"]
-            and (e.get("type") == "combine_edge" or e.get("label") == "汇总")
-        ]
+        from_ids = []
+        for edge in edges:
+            if edge.get("to") != node["id"]:
+                continue
+            if (
+                edge.get("type") != "combine_edge"
+                and edge.get("label") != "汇总"
+            ):
+                continue
+            from_ids.append(edge["from"])
         source_labels = [
             node_by_id[from_id]["label"]
             for from_id in from_ids
