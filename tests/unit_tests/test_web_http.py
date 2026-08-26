@@ -573,7 +573,23 @@ def test_chat_interrupt(app_with_mock):
 
     async def _disp(*args, **kwargs):
         rid = kwargs.get("request_id") or "r"
-        peer = _FakePeer([{"type": "res", "id": rid, "ok": True, "payload": {"accepted": True}}])
+        peer = _FakePeer(
+            [
+                {
+                    "type": "res",
+                    "id": rid,
+                    "ok": True,
+                    "payload": {
+                        "accepted": True,
+                        "session_id": "sess_1",
+                        "intent": "cancel",
+                        "event_type": "chat.interrupt_result",
+                        "success": True,
+                        "message": "任务已取消",
+                    },
+                }
+            ]
+        )
         return peer, rid, "sess_1"
 
     dispatch.side_effect = _disp
@@ -581,6 +597,8 @@ def test_chat_interrupt(app_with_mock):
     r = client.post("/api/v1/chat/sess_1/actions/interrupt", json={})
     assert r.status_code == 200
     assert dispatch.await_args.kwargs["method"] == "chat.interrupt"
+    assert r.json()["data"]["event_type"] == "chat.interrupt_result"
+    assert r.json()["data"]["success"] is True
 
 
 web_http_routes = _load_module(

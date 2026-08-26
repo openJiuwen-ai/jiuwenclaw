@@ -571,6 +571,36 @@ def _merge_models_for_replace_all(
     return out
 
 
+# HTTP unary 在收到第一帧 ``res`` 后即卸载 outbound，MH 随后推的
+# ``chat.interrupt_result`` 事件到不了 HTTP。把结果字段合进同一帧 ``res``，
+# 且仅 enrichment HTTP，避免改 WS ``accepted`` 形状。
+_INTERRUPT_HTTP_MESSAGES = {
+    "pause": "任务已暂停",
+    "resume": "任务已恢复",
+    "cancel": "任务已取消",
+    "supplement": "任务已切换",
+}
+
+
+def _chat_interrupt_ack_payload(
+    session_id: str,
+    params: dict | None,
+    *,
+    for_http: bool,
+) -> dict:
+    intent = params.get("intent") if isinstance(params, dict) else None
+    payload: dict = {"accepted": True, "session_id": session_id}
+    if isinstance(intent, str) and intent:
+        payload["intent"] = intent
+    if for_http:
+        resolved = payload.get("intent") or "cancel"
+        payload["intent"] = resolved
+        payload["event_type"] = "chat.interrupt_result"
+        payload["success"] = True
+        payload["message"] = _INTERRUPT_HTTP_MESSAGES.get(str(resolved), "任务已中断")
+    return payload
+
+
 # 仅满足 Channel 构造所需，不入队、不路由；仅用 channel_manager + message_handler 做入站/出站
 class _DummyBus:
     async def publish_user_messages(self, msg):  # noqa: ANN001, ARG002
@@ -5102,10 +5132,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _chat_interrupt(ws, req_id, params, session_id):
-        intent = params.get("intent") if isinstance(params, dict) else None
-        payload = {"accepted": True, "session_id": session_id}
-        if isinstance(intent, str) and intent:
-            payload["intent"] = intent
+        payload = _chat_interrupt_ack_payload(
+            session_id,
+            params if isinstance(params, dict) else None,
+            for_http=bool(getattr(ws, "is_http_outbound", False)),
+        )
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _chat_user_answer(ws, req_id, params, session_id):
