@@ -58,7 +58,7 @@
     <tr>
       <td width="22%"><strong>视频直播</strong></td>
       <td width="28%"><a href="zh/视频直播.md">JoyAI 配置与使用</a></td>
-      <td width="50%">配置 JoyAI 视觉、ASR/TTS、持续任务、打断与异步搜索。</td>
+      <td width="50%">配置 JoyAI 官方视觉 API、SiliconFlow ASR/TTS、持续任务、打断与异步搜索。</td>
     </tr>
     <tr>
       <td width="22%"><strong>页面概览</strong></td>
