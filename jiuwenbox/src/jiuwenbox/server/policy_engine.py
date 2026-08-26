@@ -11,18 +11,14 @@ import yaml
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import NetworkRulePolicy, SecurityPolicy
+from jiuwenbox.server.runtime.errors import PolicyValidationError
 from jiuwenbox.server.workspace import SANDBOX_WORKSPACE, JIUWENBOX_HOME
+
+# Re-export for callers that historically imported from this module.
+__all__ = ["PolicyEngine", "PolicyValidationError"]
 
 configure_logging()
 logger = logging.getLogger(__name__)
-
-
-class PolicyValidationError(Exception):
-    """Raised when a policy fails validation."""
-
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-        logger.error("%s: %s", self.__class__.__name__, str(self))
 
 
 class PolicyEngine:
@@ -230,6 +226,35 @@ class PolicyEngine:
                     "or ports; sandbox will reject new inbound connections"
                 )
 
+        return warnings
+
+    def validate_conch_policy(self, policy: SecurityPolicy) -> list[str]:
+        """Validate Conch-specific policy fields used when sandbox_runtime=conch."""
+        warnings: list[str] = []
+        seen_guest_paths: set[str] = set()
+        for mount in policy.conch.filesystem_policy.bind_mounts:
+            if (
+                not self._is_absolute_sandbox_path(mount.host_path)
+                or not self._is_absolute_sandbox_path(mount.sandbox_path)
+            ):
+                raise PolicyValidationError(
+                    "conch.filesystem_policy.bind_mounts paths must be absolute"
+                )
+            host = Path(mount.host_path)
+            if not host.exists():
+                raise PolicyValidationError(
+                    f"conch bind mount host_path does not exist: {mount.host_path}"
+                )
+            if not host.is_dir():
+                raise PolicyValidationError(
+                    f"conch bind mount host_path must be a directory: {mount.host_path}"
+                )
+            if mount.sandbox_path in seen_guest_paths:
+                raise PolicyValidationError(
+                    f"conch bind mount sandbox_path is duplicated: {mount.sandbox_path}"
+                )
+            seen_guest_paths.add(mount.sandbox_path)
+        # Network fields are validated by ConchNetworkPolicy pydantic validators.
         return warnings
 
     @staticmethod

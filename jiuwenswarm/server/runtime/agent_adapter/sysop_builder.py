@@ -24,10 +24,13 @@ from jiuwenswarm.common.config import (
     get_sandbox_endpoint,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
+    reject_files_for_jiuwenbox_conch,
+    require_jiuwenbox_conch_template_id,
 )
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
     get_config_file,
+    get_user_workspace_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,6 +186,15 @@ def _resolve_config_ro_path() -> Path | None:
     return resolved
 
 
+def _is_jiuwenswarm_data_root(resolved: Path) -> bool:
+    """True when *resolved* is the jiuwenswarm user data root (``.jiuwenswarm``)."""
+    try:
+        data_root = get_user_workspace_dir().expanduser().resolve()
+    except OSError:
+        return False
+    return resolved == data_root
+
+
 def _resolve_project_dir(override: str | Path | None) -> Path | None:
     """Resolve the host directory to bind into the sandbox as ``rw``.
 
@@ -195,8 +207,10 @@ def _resolve_project_dir(override: str | Path | None) -> Path | None:
          ``build_filesystem_policy`` is called.
 
     Returns ``None`` when the resolved path doesn't exist, isn't a directory,
-    or is the filesystem root (we refuse to ``rw``-bind ``/``; that would
-    expose every other host file the user didn't intend to share).
+    is the filesystem root (we refuse to ``rw``-bind ``/``; that would
+    expose every other host file the user didn't intend to share), or is the
+    jiuwenswarm data root (``.jiuwenswarm`` / ``JIUWENSWARM_DATA_DIR``) —
+    that tree is already covered by the dedicated workspace mount.
     """
     candidates: list[Path] = []
     if override is not None:
@@ -233,6 +247,16 @@ def _resolve_project_dir(override: str | Path | None) -> Path | None:
                 resolved,
             )
             return None
+        if _is_jiuwenswarm_data_root(resolved):
+            # ``jiuwenswarm-start`` often runs with cwd under the data root;
+            # mounting that whole tree as project_dir duplicates the dedicated
+            # agent workspace mount and exposes unrelated host state.
+            logger.debug(
+                "[sysop_builder] project_dir candidate %s is the jiuwenswarm "
+                "data root; skipping mount",
+                resolved,
+            )
+            continue
         return resolved
     return None
 
@@ -383,11 +407,19 @@ def build_filesystem_policy(
     project_dir: str | Path | None = None,
     is_code_agent: bool = False,
     startup_mode: str | None = None,
+    share_mounts_only: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    """build jiuwenbox filesystem policy."""
+    """build jiuwenbox filesystem policy.
+
+    When ``share_mounts_only`` is True (jiuwenbox-conch), only host-sharing
+    mounts are produced (workspace / project_dir / intrinsic ro config). User
+    ``files.allow`` / ``files.deny`` are ignored — callers must reject non-empty
+    files before invoking this path.
+    """
     del is_code_agent  # retained for caller compatibility
     files_runtime = files_runtime or {}
-    validate_sandbox_files_runtime(files_runtime)
+    if not share_mounts_only:
+        validate_sandbox_files_runtime(files_runtime)
     effective_startup_mode = (
         startup_mode if startup_mode is not None else get_sandbox_startup_mode()
     )
@@ -508,38 +540,39 @@ def build_filesystem_policy(
             config_str = str(config_path)
             _record_ro_resource_bind(config_str, config_str)
 
-    for entry in files_runtime.get("allow") or []:
-        normalized = _normalize_fs_entry(entry)
-        if normalized is None:
-            continue
-        path = normalized["path"].rstrip("/") or "/"
-        normalized["path"] = path
-        host = Path(path)
-        if not host.exists():
-            raise FileNotFoundError(
-                f"sandbox files.allow path does not exist on host: {path!r}"
+    if not share_mounts_only:
+        for entry in files_runtime.get("allow") or []:
+            normalized = _normalize_fs_entry(entry)
+            if normalized is None:
+                continue
+            path = normalized["path"].rstrip("/") or "/"
+            normalized["path"] = path
+            host = Path(path)
+            if not host.exists():
+                raise FileNotFoundError(
+                    f"sandbox files.allow path does not exist on host: {path!r}"
+                )
+            _record_rw_bind(
+                path,
+                path,
+                is_dir=host.is_dir(),
+                permissions="0666",
             )
-        _record_rw_bind(
-            path,
-            path,
-            is_dir=host.is_dir(),
-            permissions="0666",
-        )
-        if path not in read_write_promote:
-            read_write_promote.append(path)
+            if path not in read_write_promote:
+                read_write_promote.append(path)
 
-    for entry in files_runtime.get("deny") or []:
-        normalized = _normalize_fs_entry(entry)
-        if normalized is None:
-            continue
-        path = normalized["path"].rstrip("/") or "/"
-        normalized["path"] = path
-        host = Path(path)
-        if not host.exists():
-            raise FileNotFoundError(
-                f"sandbox files.deny path does not exist on host: {path!r}"
-            )
-        _record_user_deny_bind(path, path)
+        for entry in files_runtime.get("deny") or []:
+            normalized = _normalize_fs_entry(entry)
+            if normalized is None:
+                continue
+            path = normalized["path"].rstrip("/") or "/"
+            normalized["path"] = path
+            host = Path(path)
+            if not host.exists():
+                raise FileNotFoundError(
+                    f"sandbox files.deny path does not exist on host: {path!r}"
+                )
+            _record_user_deny_bind(path, path)
 
     fs_policy: dict[str, Any] = {
         "files": allow_files,
@@ -568,11 +601,17 @@ def create_sandbox_sysop_card(
     is_code_agent: bool = False,
     startup_mode: str | None = None,
 ) -> SysOperationCard | None:
-    """Create sandbox SysOperationCard (jiuwenbox or yuanrong)."""
+    """Create sandbox SysOperationCard (jiuwenbox, jiuwenbox-conch, or yuanrong)."""
     # 触发 sandbox provider 注册（@SandboxRegistry.provider 装饰器副作用）
     import openjiuwen.extensions.sys_operation.sandbox.providers  # noqa: F401
 
     normalized_type = str(sandbox_type or "").strip().lower()
+    is_conch = normalized_type == "jiuwenbox-conch"
+    provider_type = (
+        "jiuwenbox"
+        if normalized_type in ("jiuwenbox", "jiuwenbox-conch")
+        else normalized_type
+    )
     try:
         if normalized_type == "jiuwenbox":
             from jiuwenswarm.server.runtime.no_host_fallback_jiuwenbox import (
@@ -619,6 +658,89 @@ def create_sandbox_sysop_card(
             )
             return sysop_card
 
+        if is_conch:
+            reject_files_for_jiuwenbox_conch(files_runtime)
+            endpoint = get_sandbox_endpoint()
+            template_id = require_jiuwenbox_conch_template_id(
+                endpoint.get("template_id")
+            )
+            policy_raw, upload_list = build_filesystem_policy(
+                None,
+                project_dir=project_dir,
+                is_code_agent=is_code_agent,
+                startup_mode=startup_mode,
+                share_mounts_only=True,
+            )
+            fs_raw = (
+                policy_raw.get("filesystem_policy", {})
+                if isinstance(policy_raw, dict)
+                else {}
+            )
+            bind_mounts = list(fs_raw.get("bind_mounts") or [])
+            policy = {
+                "conch": {
+                    "template_id": template_id,
+                    "filesystem_policy": {"bind_mounts": bind_mounts},
+                }
+            }
+            extra_params: dict[str, Any] = {
+                "policy": policy,
+                "policy_mode": "append",
+                "api_sandbox_runtime": "conch",
+                "excluded_commands": list(excluded_commands or []),
+                "fallback_on_failure": bool(fallback_on_failure),
+                "preserve_file_sharing_mode": _PRESERVE_FILE_SHARING_MODE,
+                "preserve_files_upload": upload_list,
+            }
+            if idle_check_interval is not None:
+                extra_params["idle_check_interval"] = idle_check_interval
+
+            isolation_custom_id = _sandbox_isolation_custom_id(project_dir)
+            gateway_config = SandboxGatewayConfig(
+                isolation=SandboxIsolationConfig(
+                    container_scope=ContainerScope.CUSTOM,
+                    custom_id=isolation_custom_id,
+                ),
+                launcher_config=PreDeployLauncherConfig(
+                    base_url=sandbox_url,
+                    sandbox_type=provider_type,
+                    idle_ttl_seconds=idle_ttl_seconds,
+                    extra_params=extra_params,
+                ),
+            )
+            sysop_card = SysOperationCard(
+                mode=OperationMode.SANDBOX,
+                work_config=LocalWorkConfig(shell_allowlist=None),
+                gateway_config=gateway_config,
+            )
+            logger.info(
+                "[sysop_builder] jiuwenbox-conch SysOperationCard created:\n"
+                "  base_url=%s provider_type=%s api_sandbox_runtime=conch\n"
+                "  template_id=%s\n"
+                "  isolation_custom_id=%s\n"
+                "  idle_ttl=%s idle_check_interval=%s\n"
+                "  preserve_file_sharing_mode=%s\n"
+                "  excluded_commands(%d)=%s\n"
+                "  conch.bind_mounts(%d)=%s\n"
+                "  preserve_files_upload(%d)=%s\n"
+                "  policy_mode=%s",
+                sandbox_url,
+                provider_type,
+                template_id,
+                isolation_custom_id,
+                idle_ttl_seconds,
+                idle_check_interval,
+                _PRESERVE_FILE_SHARING_MODE,
+                len(extra_params["excluded_commands"]),
+                extra_params["excluded_commands"] or "[]",
+                len(bind_mounts),
+                bind_mounts,
+                len(upload_list),
+                upload_list or [],
+                extra_params["policy_mode"],
+            )
+            return sysop_card
+
         policy, upload_list = build_filesystem_policy(
             files_runtime,
             project_dir=project_dir,
@@ -643,12 +765,12 @@ def create_sandbox_sysop_card(
                 container_scope=ContainerScope.CUSTOM,
                 custom_id=isolation_custom_id,
             ),
-            launcher_config=PreDeployLauncherConfig(
-                base_url=sandbox_url,
-                sandbox_type=sandbox_type,
-                idle_ttl_seconds=idle_ttl_seconds,
-                extra_params=extra_params,
-            ),
+                launcher_config=PreDeployLauncherConfig(
+                    base_url=sandbox_url,
+                    sandbox_type=provider_type,
+                    idle_ttl_seconds=idle_ttl_seconds,
+                    extra_params=extra_params,
+                ),
         )
         sysop_card = SysOperationCard(
             mode=OperationMode.SANDBOX,
@@ -836,21 +958,25 @@ def list_auto_managed_sandbox_paths(
     else:
         resolved_project = _resolve_project_dir(None)
 
-    if (
-        resolved_project is not None
-        and resolved_project.is_dir()
-        and resolved_project != Path(resolved_project.anchor)
-    ):
-        project_str = str(resolved_project)
-        if not any(item.get("path", "").rstrip("/") == project_str for item in allow):
-            _append_unique(
-                allow,
-                {
-                    "path": project_str + "/",
-                    "access": "rw",
-                    "kind": "directory",
-                },
-            )
+    if resolved_project is not None:
+        is_mountable_project = (
+            resolved_project.is_dir()
+            and resolved_project != Path(resolved_project.anchor)
+            and not _is_jiuwenswarm_data_root(resolved_project)
+        )
+        if is_mountable_project:
+            project_str = str(resolved_project)
+            if not any(
+                item.get("path", "").rstrip("/") == project_str for item in allow
+            ):
+                _append_unique(
+                    allow,
+                    {
+                        "path": project_str + "/",
+                        "access": "rw",
+                        "kind": "directory",
+                    },
+                )
 
     if effective_startup_mode == "internal":
         config_path = _resolve_config_ro_path()

@@ -282,7 +282,7 @@ ls /tmp/jiuwenbox-logs
 | --- | --- | --- |
 | `version` | `1` | Policy schema 版本，当前仅支持 `1`。 |
 | `name` | `"default"` | 可读名称，供 policy API 展示。 |
-| `environment` | `{}` | 注入到沙箱内每个进程的环境变量键值对。 |
+| `environment` | `{}` | **仅 bwrap/process**：注入到沙箱内每个进程的环境变量。`sandbox_runtime=conch` **不会**读取此字段；Conch 请用 `conch.env`。 |
 
 #### `filesystem_policy`
 
@@ -404,6 +404,37 @@ jiuwenbox **服务端**的空闲沙箱淘汰配置，**仅在 server 启动时�
 推理隐私代理配置。`listen_port: 0`（默认）表示禁用；启用时需同时设置 `listen_host`（IP 地址）和 `listen_port > 0`。`routes` 定义按 `path_prefix` 转发的目标端点和 API 密钥注入规则。详见下文 [推理隐私代理](#推理隐私代理) 章节。
 
 若 policy 仅包含 `version` / `name` / `inference_privacy_proxies` 且 `listen_port > 0`，jiuwenbox 会进入仅代理模式（跳过沙箱子系统）。参考 [`src/jiuwenbox/configs/inference-policy.yaml`](src/jiuwenbox/configs/inference-policy.yaml)。
+
+#### `conch`（仅 `sandbox_runtime=conch`）
+
+bwrap / ProcessRuntime **忽略**本段。创建 Conch 沙箱时由 `ConchRuntime` 映射到 Conch SDK。
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `template_id` | `""` | Conch template；也可由 `JIUWENBOX_CONCH_TEMPLATE_ID` 或 conchd 默认兜底 |
+| `vcpu_num` | 省略/`null` | 可选；VM 启动 vCPU 数（`>= 1`）。省略则用 SDK/`sdk-config.yaml` 默认 |
+| `vcpu_max` | 省略/`null` | 可选；vCPU 上限，须 `>= vcpu_num`；单独设置而无 `vcpu_num` 会校验失败 |
+| `ram_mb` | 省略/`null` | 可选；VM 内存 MB（`>= 1`） |
+| `env` | `{}` | Conch guest 环境变量。**不是**顶层 `environment`。create API 的 `env` 会覆盖同名 key |
+| `filesystem_policy.bind_mounts` | `[]` | 映射为 Conch `volume_mounts`（`host_path`→`source`，`sandbox_path`→`path`，`mode=ro`→`readonly`） |
+| `network` | allow-all | IPv4 `allowed_ips` / `blocked_ips` + `default`；可热更新。不支持 domains/ports |
+
+更改 `vcpu_*` / `ram_mb` / `env` 需重建沙箱（不支持热更新）。
+
+```yaml
+conch:
+  template_id: tmpl_xxx
+  vcpu_num: 2
+  vcpu_max: 4
+  ram_mb: 4096
+  env:
+    FOO: bar
+  filesystem_policy:
+    bind_mounts: []
+  network:
+    egress:
+      default: allow
+```
 
 ### 最小示例
 
@@ -537,7 +568,8 @@ jiuwenswarm 通过 `config.yaml` 的 `sandbox` 段决定**是否启用沙箱、�
 sandbox:
   # —— 端点 & 类型 ——
   url: "http://127.0.0.1:8321"      # jiuwenbox HTTP 端点；TCP 用 http://，UDS 用 unix:///abs/socket/path
-  type: "jiuwenbox"                 # sandbox provider 名；当前固定为 jiuwenbox
+  type: "jiuwenbox"                 # jiuwenbox | jiuwenbox-conch | yuanrong
+  # template_id: "<conch-template>" # jiuwenbox-conch 必填；本模式不支持 files
 
   # —— 启动方式 & policy ——
   startup_mode: "internal"          # internal=agent-server 自动拉起 jiuwenbox-server；external=用户自行启动
@@ -549,7 +581,7 @@ sandbox:
   excluded_commands:                # shell glob，命中后绕过沙箱在本地执行
     - "git *"
   fallback_on_failure: false        # jiuwenbox exec 异常时回退本地（非零 exit 不回退）
-  files:                            # 用户配置的写入策略（auto-managed 路径不需要写在这里，服务端会自动注入）
+  files:                            # 仅 type=jiuwenbox；jiuwenbox-conch 配置非空会校验失败
     allow: []
     deny: []
 ```
@@ -559,14 +591,28 @@ sandbox:
 | 字段 | 取值 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `sandbox.url` | URL 字符串 | `http://127.0.0.1:8321` | jiuwenbox 管理 API 端点。TCP 用 `http://host:port`；UDS 用 `unix:///abs/socket/path`（与 `JIUWENBOX_LISTEN` 配置的形态一致） |
-| `sandbox.type` | 字符串 | `jiuwenbox` | sandbox provider 名。当前 jiuwenswarm 只接通了 `jiuwenbox` |
-| `sandbox.startup_mode` | `internal` / `external` | `internal` | `internal`：agent-server 启动时自动 spawn `jiuwenbox-server` 子进程并落盘最终生效的 `url`（端口被占用时自动换端口）；`external`：jiuwenswarm 完全不碰 jiuwenbox 进程，要求按本 README 顶部的方式提前自己启动 |
+| `sandbox.type` | 字符串 | `jiuwenbox` | `jiuwenbox`（bwrap/process）、`jiuwenbox-conch`（同一 HTTP + Conch；provider 仍复用 jiuwenbox）、`yuanrong` |
+| `sandbox.template_id` | 字符串 | （无） | **`jiuwenbox-conch` 必填**，写入 `policy.conch.template_id` |
+| `sandbox.startup_mode` | `internal` / `external` | `internal` | `internal`：agent-server 启动时自动 spawn `jiuwenbox-server` 子进程并落盘最终生效的 `url`（端口被占用时自动换端口）；`external`：jiuwenswarm 完全不碰 jiuwenbox 进程，要求按本 README 顶部的方式提前自己启动。Conch 推荐 `external` |
 | `sandbox.policy_file` | 文件名 / 路径 | `code-agent-policy.yaml` | 仅给文件名 → 自动定位到 `jiuwenbox/configs/<name>`；包含 `/` `\` 或 `~` 时按整路径解析。**仅在 `startup_mode=internal` 下生效**——`external` 模式下 policy 由用户自启动时的 `JIUWENBOX_DEFAULT_POLICY_PATH` 决定 |
-| `sandbox.preserve_file_sharing_mode` | `mount` | `mount` | intrinsic 文件（`AGENT.md` 等）与 `project_dir` 通过 bind mount 注入沙箱，`project_dir/config/config.yaml` 自动加进 `deny_write`。 写入其它值会被服务端拒绝 |
+| `sandbox.preserve_file_sharing_mode` | `mount` | `mount` | host 共享路径通过 bind/volume 注入沙箱。`jiuwenbox-conch` 下进入 `policy.conch.filesystem_policy.bind_mounts` |
 | `sandbox.enabled` | bool | `false` | 启用后 agent 在重建时会切到 sandbox provider；可用 `/sandbox enable` 触发 |
 | `sandbox.excluded_commands` | list[str] | `[]` | shell glob 列表；按 **simple-command 叶子**匹配。全命中→整条本地；全未命中→整条沙箱；混合→本地 bash 编排并用 `jiuwenbox sandbox exec` 包装远端段（需安装 CLI）。不安全的混合形态不改写，整条进沙箱 |
 | `sandbox.fallback_on_failure` | bool | `false` | jiuwenbox exec 异常（连接失败、daemon 不可用等）时回退宿主机本地执行；沙箱内命令非零 exit 不回退 |
-| `sandbox.files.allow` / `sandbox.files.deny` | list | `[]` | 用户额外配置的写入策略；最终生效集合是 `auto_managed ∪ user_configured`，详见 [`/sandbox` 命令说明](../docs/zh/Slash命令表.md) |
+| `sandbox.files.allow` / `sandbox.files.deny` | list | `[]` | 写权限策略（非挂载清单）。**仅 `type=jiuwenbox` 支持**；`jiuwenbox-conch` 配置非空会报错 |
+
+Conch 最小示例：
+
+```yaml
+sandbox:
+  type: jiuwenbox-conch
+  url: http://127.0.0.1:8321
+  startup_mode: external
+  template_id: <conch-template>
+  policy_file: code-agent-policy.yaml
+  enabled: true
+  preserve_file_sharing_mode: mount
+```
 
 ### 两种典型部署方式
 
@@ -869,6 +915,10 @@ jiuwenbox sandbox rm "$ID" --yes
 
 # 沙箱策略
 jiuwenbox policy get "$ID"
+jiuwenbox policy get-default
+# 批量改网络规则，并让此后新建的沙箱也复用更新过的策略
+jiuwenbox policy update-all --policy-mode append --update-default-policy \
+  --policy '{"network":{"egress":{"blocked_ips":["203.0.113.50/32"]}}}'
 jiuwenbox policy get-default
 # 批量改网络规则，并让此后新建的沙箱也复用更新过的策略
 jiuwenbox policy update-all --policy-mode append --update-default-policy \
