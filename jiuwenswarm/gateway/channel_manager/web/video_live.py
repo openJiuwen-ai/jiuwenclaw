@@ -1097,6 +1097,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
             "engine": "Jiuwen Core Agent",
             "has_frame": bool(frame_data_url),
         }
+
         async def emit_progress(progress: dict[str, Any]) -> None:
             entry = {
                 **progress,
