@@ -29,6 +29,7 @@ Runtime layout:
 
 import ctypes
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -546,10 +547,12 @@ def prompt_preferred_language() -> Optional[Literal["zh", "en"]]:
 
 def _get_builtin_skill_names() -> set[str]:
     """Get the set of built-in skill names from package resources."""
-    builtin_skills_dir = get_builtin_skills_dir()
-    if not builtin_skills_dir.exists():
-        return set()
-    return {item.name for item in builtin_skills_dir.iterdir() if item.is_dir()}
+    names: set[str] = set()
+    for builtin_skills_dir in iter_builtin_skills_dirs():
+        if not builtin_skills_dir.exists():
+            continue
+        names.update(item.name for item in builtin_skills_dir.iterdir() if item.is_dir())
+    return names
 
 
 def _update_skills_state_for_builtin(
@@ -2331,6 +2334,34 @@ def get_builtin_skills_dir() -> Path:
     # 回退到 skills 目录
     fallback_path = package_root / "resources" / "agent" / "skills"
     return fallback_path
+
+
+# Optional pip packages that contribute extra builtin skills when installed.
+_OPTIONAL_SKILL_PACKAGES = ("jiuwenswarm_skills_ascend",)
+
+
+def get_extra_builtin_skills_dirs() -> list[Path]:
+    """Skills dirs contributed by optional skill packages, if installed."""
+    dirs: list[Path] = []
+    for mod_name in _OPTIONAL_SKILL_PACKAGES:
+        try:
+            spec = importlib.util.find_spec(mod_name)
+        except (ImportError, ValueError):
+            continue
+        if spec is None or not spec.origin:
+            continue
+        path = Path(spec.origin).resolve().parent / "skills"
+        if path.is_dir():
+            dirs.append(path)
+    return dirs
+
+
+def iter_builtin_skills_dirs() -> list[Path]:
+    """Primary builtin skills dir plus optional skill-package dirs.
+
+    The primary dir always comes first so name collisions resolve to it.
+    """
+    return [get_builtin_skills_dir(), *get_extra_builtin_skills_dirs()]
 
 
 def get_agent_sessions_dir() -> Path:

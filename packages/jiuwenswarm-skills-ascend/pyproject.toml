@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workswarm-skills-ascend"
+version = "0.1.0"
+description = "Optional Huawei Ascend NPU skills for JiuwenSwarm"
+requires-python = ">=3.11,<3.14"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+]
+
+[tool.setuptools]
+py-modules = []
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jiuwenswarm_skills_ascend*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+jiuwenswarm_skills_ascend = [
+    "skills/**/*",
+    "skills/*",
+]

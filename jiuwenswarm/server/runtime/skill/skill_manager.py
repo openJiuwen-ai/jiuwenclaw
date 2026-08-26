@@ -37,8 +37,9 @@ from openjiuwen.agent_evolving.checkpointing.evolution_store import (
 from jiuwenswarm.common.utils import (
     get_agent_root_dir,
     get_agent_skills_dir,
-    get_builtin_skills_dir,
     is_package_installation,
+    get_builtin_skills_dir,
+    get_extra_builtin_skills_dirs,
 )
 from jiuwenswarm.server.runtime.skill.archive_store import (
     ARCHIVE_DIRNAME,
@@ -526,6 +527,29 @@ def _safe_child_path(base: Path, name: Any, label: str) -> Path:
     except ValueError as exc:
         raise ValueError(f"invalid {label} path: {safe_name}") from exc
     return candidate
+
+
+def _builtin_skills_dirs() -> list[Path]:
+    """Primary builtin skills dir first, then optional skill-package dirs.
+
+    Resolved through this module's names so tests can monkeypatch
+    ``get_builtin_skills_dir`` here.
+    """
+    return [get_builtin_skills_dir(), *get_extra_builtin_skills_dirs()]
+
+
+def _find_builtin_skill_path(name: str) -> Path | None:
+    """Locate a builtin skill by folder name across all builtin dirs."""
+    for builtin_dir in _builtin_skills_dirs():
+        if not builtin_dir.exists():
+            continue
+        try:
+            path = _safe_child_path(builtin_dir, name, "skill")
+        except ValueError:
+            return None
+        if path.exists() and path.is_dir():
+            return path
+    return None
 
 
 def _log_rejected_name(operation: str, label: str, value: Any, exc: ValueError) -> None:
@@ -1666,9 +1690,8 @@ class SkillManager:
             except ValueError as exc:
                 _log_rejected_name("skills.install", "skill", spec, exc)
                 return {"success": False, "detail": str(exc)}
-            builtin_dir = get_builtin_skills_dir()
-            builtin_path = _safe_child_path(builtin_dir, safe_name, "skill")
-            if builtin_path.exists() and builtin_path.is_dir():
+            builtin_path = _find_builtin_skill_path(safe_name)
+            if builtin_path is not None:
                 return await self.handle_skills_install_builtin({"name": safe_name})
             return {"success": False, "detail": "spec 格式应为 skill@marketplace，内置技能可直接使用名称安装"}
 
@@ -1760,12 +1783,11 @@ class SkillManager:
             _log_rejected_name("skills.install_builtin", "skill", name, exc)
             return {"success": False, "detail": str(exc)}
 
-        builtin_dir = get_builtin_skills_dir()
-        if not builtin_dir.exists():
+        if not any(d.exists() for d in _builtin_skills_dirs()):
             return {"success": False, "detail": "内置技能目录不存在"}
 
-        src = _safe_child_path(builtin_dir, name, "skill")
-        if not src.exists() or not src.is_dir():
+        src = _find_builtin_skill_path(name)
+        if src is None:
             return {"success": False, "detail": f"未找到内置技能: {name}"}
 
         # 检查是否已经安装
@@ -3440,15 +3462,12 @@ class SkillManager:
             return {"success": False, "detail": f"未找到 skill: {name}"}
 
         # 检查是否为真正的内置技能（源码目录中的，不允许删除）
-        builtin_dir = get_builtin_skills_dir()
-        if builtin_dir.exists():
-            # 检查 builtin 技能目录中是否有该技能
-            builtin_skill_path = None
-            direct_builtin = _safe_child_path(builtin_dir, name, "skill")
-            if direct_builtin.exists() and direct_builtin.is_dir():
-                builtin_skill_path = direct_builtin
-            else:
-                # 遍历 builtin 目录，通过解析 SKILL.md 查找匹配的技能
+        builtin_skill_path = _find_builtin_skill_path(name)
+        if builtin_skill_path is None:
+            # Fall back to matching the name declared in each SKILL.md
+            for builtin_dir in _builtin_skills_dirs():
+                if not builtin_dir.exists():
+                    continue
                 for child in builtin_dir.iterdir():
                     if not child.is_dir() or child.name.startswith("_"):
                         continue
@@ -3459,10 +3478,12 @@ class SkillManager:
                     if meta and meta.get("name") == name:
                         builtin_skill_path = child
                         break
+                if builtin_skill_path is not None:
+                    break
 
-            if builtin_skill_path:
-                if dest.resolve() == builtin_skill_path.resolve():
-                    return {"success": False, "detail": "内置技能不允许删除"}
+        if builtin_skill_path:
+            if dest.resolve() == builtin_skill_path.resolve():
+                return {"success": False, "detail": "内置技能不允许删除"}
 
         _safe_rmtree(dest)
 
@@ -4356,17 +4377,14 @@ class SkillManager:
 
             # 如果提供了 skill_path，直接判断该路径是否在 builtin_dir 下
             if skill_path is not None:
-                builtin_dir = get_builtin_skills_dir()
-                if builtin_dir.exists():
-                    return skill_path.resolve().parent == builtin_dir.resolve()
-                return False
+                return any(
+                    skill_path.resolve().parent == d.resolve()
+                    for d in _builtin_skills_dirs()
+                    if d.exists()
+                )
 
             # 没有提供 skill_path 时，回退到通过 skill_name 判断（兼容旧代码）
-            builtin_dir = get_builtin_skills_dir()
-            if builtin_dir.exists():
-                builtin_skill_path = _safe_child_path(builtin_dir, skill_name, "skill")
-                return builtin_skill_path.exists() and builtin_skill_path.is_dir()
-            return False
+            return _find_builtin_skill_path(skill_name) is not None
         except Exception:
             return False
 
@@ -4452,12 +4470,7 @@ class SkillManager:
         meta["enabled"] = self.get_skill_enabled(meta.get("name", ""))
         # 判断是否为内置技能（传入 child 路径，通过实际路径判断）
         meta["is_builtin"] = self._is_builtin_skill(meta.get("name", ""), self._get_installed_plugins(), child)
-        builtin_dir = get_builtin_skills_dir()
-        if builtin_dir.exists():
-            builtin_skill_path = builtin_dir / child.name
-            meta["is_builtin_source"] = builtin_skill_path.exists() and builtin_skill_path.is_dir()
-        else:
-            meta["is_builtin_source"] = False
+        meta["is_builtin_source"] = _find_builtin_skill_path(child.name) is not None
         meta["has_evolutions"] = _has_effective_evolutions(child)
         self.apply_archive_version_and_type(meta, child)
         # 不在列表中返回 body
@@ -4470,40 +4483,45 @@ class SkillManager:
         返回的技能列表仅包含那些存在于内置目录但尚未在用户目录中的技能。
         """
         results: list[dict] = []
-        builtin_dir = get_builtin_skills_dir()
         user_skills_dir = get_agent_skills_dir()
+        # Primary dir comes first, so it wins on folder-name collisions
+        seen: set[str] = set()
 
-        if not builtin_dir.exists() or not builtin_dir.is_dir():
-            return results
-
-        for child in builtin_dir.iterdir():
-            if not child.is_dir() or child.name.startswith("_"):
+        for builtin_dir in _builtin_skills_dirs():
+            if not builtin_dir.exists() or not builtin_dir.is_dir():
                 continue
 
-            # 检查该技能是否已经在用户目录中安装
-            user_skill_path = user_skills_dir / child.name
-            if user_skill_path.exists() and user_skill_path.is_dir():
-                continue  # 已安装，跳过
+            for child in builtin_dir.iterdir():
+                if not child.is_dir() or child.name.startswith("_"):
+                    continue
+                if child.name in seen:
+                    continue
+                seen.add(child.name)
 
-            md = self._try_find_skill_file(child)
-            if md is None:
-                continue
-            meta = self._parse_skill_md(md)
-            if meta is None:
-                continue
+                # 检查该技能是否已经在用户目录中安装
+                user_skill_path = user_skills_dir / child.name
+                if user_skill_path.exists() and user_skill_path.is_dir():
+                    continue  # 已安装，跳过
 
-            # 设置内置技能的标记
-            meta["name"] = self._resolve_skill_name(child, md, meta)
-            meta["source"] = "builtin"
-            meta["is_builtin"] = True
-            meta["is_builtin_source"] = True
-            meta["installed"] = False
-            meta["has_evolutions"] = False
-            self._apply_enabled_config(meta, meta.get("name", ""))
-            self.apply_archive_version_and_type(meta, child)
-            # 不在列表中返回 body
-            meta.pop("body", None)
-            results.append(meta)
+                md = self._try_find_skill_file(child)
+                if md is None:
+                    continue
+                meta = self._parse_skill_md(md)
+                if meta is None:
+                    continue
+
+                # 设置内置技能的标记
+                meta["name"] = self._resolve_skill_name(child, md, meta)
+                meta["source"] = "builtin"
+                meta["is_builtin"] = True
+                meta["is_builtin_source"] = True
+                meta["installed"] = False
+                meta["has_evolutions"] = False
+                self._apply_enabled_config(meta, meta.get("name", ""))
+                self.apply_archive_version_and_type(meta, child)
+                # 不在列表中返回 body
+                meta.pop("body", None)
+                results.append(meta)
 
         return results
 
@@ -4922,12 +4940,7 @@ class SkillManager:
                     ),
                     "is_builtin_source": False,
                 }
-                builtin_dir = get_builtin_skills_dir()
-                if builtin_dir.exists():
-                    builtin_skill_path = builtin_dir / child.name
-                    base["is_builtin_source"] = (
-                        builtin_skill_path.exists() and builtin_skill_path.is_dir()
-                    )
+                base["is_builtin_source"] = _find_builtin_skill_path(child.name) is not None
                 return child, base
 
         # marketplace 未安装副本（只支持读 workspace 语义，无本地产品版本）
@@ -5047,7 +5060,8 @@ class SkillManager:
             if (
                 source_resources_skills_dir.exists()
                 and source_resources_skills_dir.resolve() != self._skills_dir.resolve()
-                and source_resources_skills_dir.resolve() != get_builtin_skills_dir().resolve()
+                and source_resources_skills_dir.resolve()
+                not in {d.resolve() for d in _builtin_skills_dirs()}
             ):
                 mirrors.append(source_resources_skills_dir)
         except Exception:
@@ -6782,8 +6796,6 @@ class SkillManager:
             return
 
         registered = get_registered_skill_names(self._state)
-        builtin_dir = get_builtin_skills_dir()
-        builtin_exists = builtin_dir.exists()
         changed = False
 
         for child in self._skills_dir.iterdir():
@@ -6799,7 +6811,7 @@ class SkillManager:
             if not name or name in registered:
                 continue
             # 排除内置技能（用户目录下与 builtin 目录同名的文件夹），避免改变其来源/行为。
-            if builtin_exists and (builtin_dir / child.name).is_dir():
+            if _find_builtin_skill_path(child.name) is not None:
                 continue
             self._add_local_skill({"name": name, "origin": "local", "source": "local"})
             registered.add(name)
@@ -6874,14 +6886,8 @@ class SkillManager:
             dest = _safe_child_path(self._skills_dir, skill_name, "skill")
         except ValueError:
             return False
-        builtin_dir = get_builtin_skills_dir()
-        if not builtin_dir.exists():
-            return False
-        try:
-            builtin_skill_path = _safe_child_path(builtin_dir, skill_name, "skill")
-        except ValueError:
-            return False
-        if not builtin_skill_path.exists() or not builtin_skill_path.is_dir():
+        builtin_skill_path = _find_builtin_skill_path(skill_name)
+        if builtin_skill_path is None:
             return False
         return dest.exists() and dest.is_dir() and dest.resolve() == builtin_skill_path.resolve()
 

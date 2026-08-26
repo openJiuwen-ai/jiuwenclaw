@@ -5360,6 +5360,9 @@ dependencies = [
 a2a = [
     { name = "a2a-sdk", extra = ["http-server"] },
 ]
+ascend-skills = [
+    { name = "workswarm-skills-ascend" },
+]
 claude = [
     { name = "openjiuwen", extra = ["claude"] },
 ]
@@ -5562,9 +5565,10 @@ requires-dist = [
     { name = "websockets", specifier = ">=12.0,<16" },
     { name = "wecom-aibot-sdk", specifier = ">=1.0.5,<2" },
     { name = "wecom-aibot-sdk", marker = "extra == 'harmony'", specifier = ">=1.0.5" },
+    { name = "workswarm-skills-ascend", marker = "extra == 'ascend-skills'", directory = "packages/jiuwenswarm-skills-ascend" },
     { name = "workswarm-tui", marker = "extra == 'tui'", directory = "packages/jiuwenswarm-tui" },
 ]
-provides-extras = ["harmony", "a2a", "ssh", "desktop", "dev", "tui", "distribute", "claude", "codex", "shell-ast", "test"]
+provides-extras = ["harmony", "a2a", "ssh", "desktop", "dev", "tui", "ascend-skills", "distribute", "claude", "codex", "shell-ast", "test"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -5601,6 +5605,11 @@ test = [
     { name = "pytest-mock", specifier = ">=3.14.0" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
+
+[[package]]
+name = "workswarm-skills-ascend"
+version = "0.1.0"
+source = { directory = "packages/jiuwenswarm-skills-ascend" }
 
 [[package]]
 name = "workswarm-tui"

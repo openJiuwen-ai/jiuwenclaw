@@ -160,15 +160,14 @@ def _get_all_skills() -> tuple[set[str], list[dict[str, Any]]]:
       （下划线开头），已被 startswith("_") 跳过，这里不重复处理。
     """
     try:
-        from jiuwenswarm.common.utils import get_agent_skills_dir, get_builtin_skills_dir
+        from jiuwenswarm.common.utils import get_agent_skills_dir, iter_builtin_skills_dirs
         skills_dir = get_agent_skills_dir()
-        builtin_dir = get_builtin_skills_dir()
         skills: list[dict[str, Any]] = []
         installed_names: set[str] = set()
         seen: set[str] = set()
-        for child_dir, source, is_installed in [
-            (skills_dir, "local", True), (builtin_dir, "builtin", False),
-        ]:
+        scan_targets = [(skills_dir, "local", True)]
+        scan_targets.extend((d, "builtin", False) for d in iter_builtin_skills_dirs())
+        for child_dir, source, is_installed in scan_targets:
             if not child_dir or not child_dir.exists():
                 continue
             for child in child_dir.iterdir():

@@ -41,6 +41,12 @@ _EXTERNAL_MEMORY_BASENAMES = frozenset(
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_optional_skill_packages(monkeypatch):
+    """Keep the suite hermetic: ignore optional skill packages installed in the env."""
+    monkeypatch.setattr(_utils, "_OPTIONAL_SKILL_PACKAGES", ())
+
+
 @pytest.fixture
 def allow_macos_pytest_temp_sources(monkeypatch):
     """让使用 /private/var 临时目录的测试显式绕过内置 /var 黑名单。"""

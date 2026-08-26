@@ -103,53 +103,57 @@ class SkillToolkit:
         limit: int,
     ) -> list[dict[str, Any]]:
         """从内置技能目录中模糊匹配 query，返回未安装的内置技能列表。"""
-        from jiuwenswarm.common.utils import get_builtin_skills_dir, get_agent_skills_dir
+        from jiuwenswarm.common.utils import iter_builtin_skills_dirs, get_agent_skills_dir
 
-        builtin_dir = get_builtin_skills_dir()
         user_skills_dir = get_agent_skills_dir()
-        if not builtin_dir.exists():
-            return []
-
         query_lower = query.lower()
         results: list[dict[str, Any]] = []
+        seen: set[str] = set()
 
-        for child in builtin_dir.iterdir():
-            if not child.is_dir() or child.name.startswith("_"):
-                continue
-            user_skill_path = user_skills_dir / child.name
-            if user_skill_path.exists() and user_skill_path.is_dir():
+        for builtin_dir in iter_builtin_skills_dirs():
+            if not builtin_dir.exists():
                 continue
 
-            meta = self._manager.get_skill_meta(child.name)
-            if meta is None:
-                md_path = child / "SKILL.md"
-                if md_path.exists():
-                    parsed = _parse_skill_md_from_path(md_path)
-                    if parsed is None:
-                        continue
-                    meta = parsed
-                    meta.setdefault("name", child.name)
-                else:
+            for child in builtin_dir.iterdir():
+                if not child.is_dir() or child.name.startswith("_"):
+                    continue
+                if child.name in seen:
+                    continue
+                seen.add(child.name)
+                user_skill_path = user_skills_dir / child.name
+                if user_skill_path.exists() and user_skill_path.is_dir():
                     continue
 
-            name = str(meta.get("name", child.name))
-            description = str(meta.get("description", ""))
-            if query_lower not in name.lower() and query_lower not in description.lower():
-                continue
+                meta = self._manager.get_skill_meta(child.name)
+                if meta is None:
+                    md_path = child / "SKILL.md"
+                    if md_path.exists():
+                        parsed = _parse_skill_md_from_path(md_path)
+                        if parsed is None:
+                            continue
+                        meta = parsed
+                        meta.setdefault("name", child.name)
+                    else:
+                        continue
 
-            results.append({
-                "name": name,
-                "description": description[:80],
-                "source": "builtin",
-                "identifier": name,
-                "installed": name in installed_names,
-                "is_builtin": True,
-                "is_builtin_source": True,
-                "score": None,
-            })
+                name = str(meta.get("name", child.name))
+                description = str(meta.get("description", ""))
+                if query_lower not in name.lower() and query_lower not in description.lower():
+                    continue
 
-            if len(results) >= limit:
-                break
+                results.append({
+                    "name": name,
+                    "description": description[:80],
+                    "source": "builtin",
+                    "identifier": name,
+                    "installed": name in installed_names,
+                    "is_builtin": True,
+                    "is_builtin_source": True,
+                    "score": None,
+                })
+
+                if len(results) >= limit:
+                    return results
 
         return results
 
