@@ -513,6 +513,10 @@ react:
   max_iterations: 100
   model_name: ${MODEL_NAME}
   skill_mode: all
+  # Per-skill credential env vars injected into shell tools when a skill is active.
+  # OfficeClaw sync writes real values here (e.g. hwocr HWOCR_AK/HWOCR_SK). Empty {} is a
+  # YAML placeholder only; runtime coalesce keeps catalog-injected credentials on reload.
+  skill_envs: {}
   # Todo 周期 progress 提醒（deep/chat 主会话 + team 非 leader 成员）
   # Code 模式不读此开关（强制 False，走 attachment task_reminder）
   # enable_progress_repeat: 仅 true|false（可用环境变量 TODO_PROGRESS_REPEAT）
