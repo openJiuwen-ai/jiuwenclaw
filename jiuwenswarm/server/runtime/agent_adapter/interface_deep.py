@@ -3784,10 +3784,7 @@ class JiuWenSwarmDeepAdapter:
                 )
 
         ability_result = ability_manager.add(card)
-        if ability_result is None:
-            # Legacy AbilityManager.add returned None and may overwrite by name.
-            return
-        added = getattr(ability_result, "added", None)
+        added = getattr(ability_result, "added", None) if ability_result is not None else None
         if added is False:
             # Conflict-aware AbilityManager kept the existing card. Retry once if
             # we own it; otherwise fail closed.
@@ -3796,11 +3793,22 @@ class JiuWenSwarmDeepAdapter:
             if existing_id and existing_id in self._owned_office_claw_tool_ids():
                 ability_manager.remove(tool_name)
                 ability_result = ability_manager.add(card)
-                added = getattr(ability_result, "added", None)
+                added = getattr(ability_result, "added", None) if ability_result is not None else None
             if added is False:
                 raise RuntimeError(
                     f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name}"
                 )
+
+        # Legacy AbilityManager.add() returns None and may overwrite by name.
+        # Always verify the short-name mapping lands on *this* card id so a
+        # conflict-aware or raced manager cannot leave a foreign bind in place.
+        installed = getter(tool_name) if callable(getter) else None
+        installed_id = str(getattr(installed, "id", "") or "") if installed is not None else ""
+        if installed_id != tool_id:
+            raise RuntimeError(
+                f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name} "
+                f"(existing_id={installed_id or '-'}, new_id={tool_id})"
+            )
 
     async def cleanup_request_scoped_office_claw_mcp(
         self,
