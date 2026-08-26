@@ -300,6 +300,58 @@ async def test_foreign_short_name_conflict_fails_closed(
 
 
 @pytest.mark.asyncio
+async def test_legacy_ability_manager_post_add_mismatch_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy AbilityManager.add() returns None. If the short-name mapping
+    does not land on our card id afterwards, registration must fail closed
+    instead of treating ``None`` as success."""
+
+    class _StickyForeignAbilityManager(_AbilityManager):
+        def add(self, card: object) -> None:
+            # Pretend to accept the card (legacy return) but keep the foreign bind.
+            return None
+
+    for key, value in _startup_env().items():
+        monkeypatch.setenv(key, value)
+    resource_manager = _ResourceManager()
+    monkeypatch.setattr(interface_deep.Runner, "resource_mgr", resource_manager)
+    monkeypatch.setattr(
+        interface_deep,
+        "list_office_claw_mcp_tools",
+        AsyncMock(
+            return_value=[
+                {
+                    "name": "office_claw_preview_scheduled_task",
+                    "description": "preview",
+                    "input_params": {"type": "object"},
+                }
+            ]
+        ),
+    )
+    adapter = _bare_session_adapter()
+    sticky = _StickyForeignAbilityManager()
+    sticky.cards["office_claw_preview_scheduled_task"] = ToolCard(
+        id="office-claw-request-foreign.office-claw.office_claw_preview_scheduled_task",
+        name="office_claw_preview_scheduled_task",
+        description="foreign",
+        input_params={},
+    )
+    # Pre-check sees foreign id and fails before add — exercise post-add path
+    # by clearing the foreign card only for the pre-check window is hard;
+    # instead start empty and make add() a no-op so post-verify sees missing id.
+    sticky.cards.clear()
+    adapter._instance = SimpleNamespace(ability_manager=sticky)
+
+    registration = await adapter.register_request_scoped_office_claw_mcp(
+        _request(_valid_config())
+    )
+
+    assert registration is None
+    assert sticky.cards == {}
+
+
+@pytest.mark.asyncio
 async def test_registration_failure_is_non_blocking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
