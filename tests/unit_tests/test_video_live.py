@@ -803,7 +803,8 @@ async def test_joyai_user_instruction_preserves_native_silence(monkeypatch) -> N
     assert "Delegate 是不可拆分的原子动作" in grounded_instruction
     assert "</delegation>" in grounded_instruction
     assert grounded_instruction.startswith("【用户原话】每当画面出现瓶子时介绍它的样子。")
-    assert grounded_instruction.endswith("纯视觉问答无需搜索。")
+    assert "纯视觉问答无需搜索。" in grounded_instruction
+    assert grounded_instruction.endswith("严格遵循用户要求的触发时机和输出频率，不擅自降低频率。")
     payload = channel.responses[-1][1]["payload"]
     assert payload["decision"] == "silence"
     assert payload["response"] == ""
@@ -850,6 +851,18 @@ async def test_joyai_monitor_silence_is_not_retried(monkeypatch) -> None:
 
 def test_ground_joyai_user_instruction_preserves_empty_frame_turn() -> None:
     assert video_live._ground_joyai_user_instruction("") == ""
+
+
+def test_ground_joyai_user_instruction_keeps_continuous_task_active() -> None:
+    prompt = video_live._ground_joyai_user_instruction(
+        "每当画面切换时，你都描述画面中的景色。"
+    )
+
+    assert prompt.startswith("【用户原话】每当画面切换时，你都描述画面中的景色。")
+    assert "不能因为已经回应过一次就把任务视为完成" in prompt
+    assert "视频内容内部的镜头、场景、字幕、对象、动作或状态发生实质变化" in prompt
+    assert "之后再次发生时应视为新的合法事件" in prompt
+    assert "没有新事件、证据不足或只是同一状态延续时选择 Silence" in prompt
 
 
 def test_ground_joyai_user_instruction_defers_unresolved_search_and_resumes_it() -> None:

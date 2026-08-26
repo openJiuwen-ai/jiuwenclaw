@@ -32,6 +32,11 @@ import { createRealtimeProvider, RealtimeDuplexSession } from './realtimeProvide
 import { MINICPM_CURRENT_TASK_MONITORING_ENABLED } from '../../utils/realtimeDuplex';
 import { searchAwareToolStatus } from '../../utils/searchPresentation';
 import {
+  mergeSearchProgressJob,
+  searchProgressOptionLabel,
+  selectSearchProgressJob,
+} from './searchProgressHistory';
+import {
   AgentAction,
   ChatContextItem,
   SearchJobPayload,
@@ -120,6 +125,7 @@ export function VideoLivePanel() {
   const [isRealtimeStarting, setIsRealtimeStarting] = useState(false);
   const [currentTask, setCurrentTask] = useState('');
   const [searchProgressJobs, setSearchProgressJobs] = useState<SearchProgressJob[]>([]);
+  const [selectedSearchJobId, setSelectedSearchJobId] = useState('');
   const [isSearchProgressExpanded, setIsSearchProgressExpanded] = useState(false);
 
   const reportRealtimeEvent = (event: string, details: Record<string, unknown> = {}) => {
@@ -135,31 +141,7 @@ export function VideoLivePanel() {
   };
 
   const updateSearchProgress = (payload: SearchJobPayload) => {
-    const jobId = payload.job_id?.trim();
-    if (!jobId) return;
-    setSearchProgressJobs((jobs) => {
-      const existing = jobs.find((job) => job.id === jobId);
-      const incoming = payload.progress_history?.length
-        ? payload.progress_history
-        : payload.progress ? [payload.progress] : [];
-      const progressByKey = new Map(
-        (existing?.progress || []).map((entry) => [
-          `${entry.sequence}:${entry.stage}:${entry.tool_call_id || ''}`,
-          entry,
-        ]),
-      );
-      incoming.forEach((entry) => {
-        progressByKey.set(`${entry.sequence}:${entry.stage}:${entry.tool_call_id || ''}`, entry);
-      });
-      const updated: SearchProgressJob = {
-        id: jobId,
-        query: payload.query?.trim() || existing?.query || '',
-        status: payload.status || existing?.status || 'running',
-        latencyMs: payload.latency_ms ?? existing?.latencyMs,
-        progress: [...progressByKey.values()].sort((left, right) => left.sequence - right.sequence),
-      };
-      return [...jobs.filter((job) => job.id !== jobId), updated].slice(-4);
-    });
+    setSearchProgressJobs((jobs) => mergeSearchProgressJob(jobs, payload));
   };
 
   const stopModelTransport = () => {
@@ -194,6 +176,7 @@ export function VideoLivePanel() {
     setCurrentTask('');
     setToolStatus('');
     setSearchProgressJobs([]);
+    setSelectedSearchJobId('');
     setIsSearchProgressExpanded(false);
   };
 
@@ -990,7 +973,12 @@ export function VideoLivePanel() {
     }
   };
 
-  const visibleSearchProgress = searchProgressJobs.at(-1);
+  const selectedSearchJobExists = searchProgressJobs.some((job) => job.id === selectedSearchJobId);
+  const effectiveSelectedSearchJobId = selectedSearchJobExists ? selectedSearchJobId : '';
+  const visibleSearchProgress = selectSearchProgressJob(
+    searchProgressJobs,
+    effectiveSelectedSearchJobId,
+  );
   const visibleSearchStep = visibleSearchProgress?.progress.at(-1);
 
   return (
@@ -1154,33 +1142,51 @@ export function VideoLivePanel() {
           {realtimeStatus && <div className="video-live__realtime-status">{realtimeStatus}</div>}
           {visibleSearchProgress && (
             <div className={`video-live__search-progress is-${visibleSearchProgress.status}`}>
-              <button
-                type="button"
-                className="video-live__search-progress-toggle"
-                aria-expanded={isSearchProgressExpanded}
-                onClick={() => setIsSearchProgressExpanded((expanded) => !expanded)}
-              >
-                <span className="video-live__search-progress-icon">
-                  {visibleSearchProgress.status === 'running'
-                    ? <LoaderCircle className="video-live__spinner" aria-hidden />
-                    : visibleSearchProgress.status === 'completed'
-                      ? <CheckCircle2 aria-hidden />
-                      : <XCircle aria-hidden />}
-                </span>
-                <span className="video-live__search-progress-copy">
-                  <strong>Jiuwen Core Agent</strong>
-                  <span>{visibleSearchStep?.title || '准备搜索'}</span>
-                </span>
-                {visibleSearchProgress.latencyMs !== undefined && (
-                  <span className="video-live__search-progress-time">
-                    {(visibleSearchProgress.latencyMs / 1_000).toFixed(1)}s
+              <div className="video-live__search-progress-head">
+                <button
+                  type="button"
+                  className="video-live__search-progress-toggle"
+                  aria-expanded={isSearchProgressExpanded}
+                  onClick={() => setIsSearchProgressExpanded((expanded) => !expanded)}
+                >
+                  <span className="video-live__search-progress-icon">
+                    {visibleSearchProgress.status === 'running'
+                      ? <LoaderCircle className="video-live__spinner" aria-hidden />
+                      : visibleSearchProgress.status === 'completed'
+                        ? <CheckCircle2 aria-hidden />
+                        : <XCircle aria-hidden />}
                   </span>
+                  <span className="video-live__search-progress-copy">
+                    <strong>Jiuwen Core Agent</strong>
+                    <span>{visibleSearchStep?.title || '准备搜索'}</span>
+                  </span>
+                  {visibleSearchProgress.latencyMs !== undefined && (
+                    <span className="video-live__search-progress-time">
+                      {(visibleSearchProgress.latencyMs / 1_000).toFixed(1)}s
+                    </span>
+                  )}
+                  <ChevronDown
+                    className={isSearchProgressExpanded ? 'is-expanded' : ''}
+                    aria-hidden
+                  />
+                </button>
+                {searchProgressJobs.length > 1 && (
+                  <select
+                    className="video-live__search-progress-select"
+                    value={effectiveSelectedSearchJobId}
+                    onChange={(event) => setSelectedSearchJobId(event.target.value)}
+                    aria-label="选择搜索记录"
+                    title="选择搜索记录"
+                  >
+                    <option value="">最新搜索（自动）</option>
+                    {[...searchProgressJobs].reverse().map((job, index) => (
+                      <option value={job.id} key={job.id}>
+                        {searchProgressOptionLabel(job, searchProgressJobs.length - index)}
+                      </option>
+                    ))}
+                  </select>
                 )}
-                <ChevronDown
-                  className={isSearchProgressExpanded ? 'is-expanded' : ''}
-                  aria-hidden
-                />
-              </button>
+              </div>
               {isSearchProgressExpanded && (
                 <div className="video-live__search-progress-detail">
                   {visibleSearchProgress.query && (
