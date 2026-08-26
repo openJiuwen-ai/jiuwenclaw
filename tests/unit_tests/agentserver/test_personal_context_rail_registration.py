@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import ast
 import asyncio
-import threading
 from pathlib import Path
 
 import pytest
+from openjiuwen.harness.rails.personal_context import (
+    PersonalContextRail as CorePersonalContextRail,
+)
 
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep
 from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -17,60 +18,9 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
 )
 
 
-def _source(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8")
-
-
-def _parse(source: str) -> ast.Module:
-    """在全新线程中执行 ast.parse，规避 CPython gh-106905。
-
-    Python 3.11.8 之前的版本存在已知 bug：调用点递归较深时（pytest 下约
-    110 层），大文件 AST 构造会触发内部递归上限，且错误路径漏减计数器，
-    最终把正常解析报成 ``SystemError: AST constructor recursion depth
-    mismatch``。新线程从接近 0 的递归深度开始，可稳定避开该内部上限。
-    """
-    outcome: dict[str, object] = {}
-
-    def _run() -> None:
-        try:
-            outcome["tree"] = ast.parse(source)
-        except BaseException as exc:  # noqa: BLE001 - 原样传回主线程重新抛出
-            outcome["error"] = exc
-
-    worker = threading.Thread(target=_run, daemon=True)
-    worker.start()
-    worker.join()
-    error = outcome.get("error")
-    if isinstance(error, BaseException):
-        raise error
-    tree = outcome.get("tree")
-    assert isinstance(tree, ast.Module)
-    return tree
-
-
 def test_deep_adapter_imports_core_personal_context_rail_only() -> None:
-    module = (
-        Path(__file__).parents[3]
-        / "jiuwenswarm"
-        / "server"
-        / "runtime"
-        / "agent_adapter"
-        / "interface_deep.py"
-    )
-    tree = _parse(_source(str(module)))
-    imports = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Import, ast.ImportFrom))
-    ]
-    imported_names = {
-        alias.name
-        for node in imports
-        for alias in (node.names if isinstance(node, ast.Import) else node.names)
-    }
-
-    assert "PersonalContextRail" in imported_names
-    assert "ProactiveContextRail" not in imported_names
+    assert interface_deep.PersonalContextRail is CorePersonalContextRail
+    assert not hasattr(interface_deep, "ProactiveContextRail")
 
 
 @pytest.mark.asyncio
