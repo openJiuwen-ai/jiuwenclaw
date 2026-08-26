@@ -13,6 +13,7 @@ import { isTeamLeaderMember, isUserMember } from '../../utils/teamMemberAvatar';
 import { contextCompressionRunningText } from '../../utils/contextCompression';
 import teamIcon from '../../assets/team.svg';
 import { MemberListItem } from './MemberListItem';
+import { MemberTaskListBar, MemberTaskListItems } from './MemberTaskList';
 import {
   buildProcessItems,
   buildTaskMap,
@@ -23,7 +24,6 @@ import {
   latestUserPrompt,
   mergeUniqueMessages,
   StatusIcon,
-  type MemberTask,
   type ProcessItem,
   type TaskStatus,
   type TeamDetailTab,
@@ -142,30 +142,6 @@ function isLeaderMember(member: TeamMember, leaderIds: string[]): boolean {
     member.mode === 'team_leader' ||
     leaderIds.some((leaderId) => memberKeys.includes(normalizeMemberKey(leaderId)))
   );
-}
-
-function formatRawValue(value: unknown): string {
-  if (value === null || value === undefined || value === '') return '-';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value ?? '');
-  }
-}
-
-function buildTaskRawEntries(task: MemberTask): ProcessDetailRow[] {
-  const raw = task.raw || {
-    task_id: task.id,
-    title: task.title,
-    detail: task.detail,
-    status: task.status,
-    assignee: task.assignee,
-    source: task.source,
-    updated_at: task.updatedAt,
-  };
-  return Object.entries(raw).map(([key, value]) => [key, formatRawValue(value)]);
 }
 
 function normalizeFinalEventContent(content?: string): string {
@@ -506,7 +482,6 @@ function MemberTaskDetail({
     ).sort((a, b) => a.timestamp - b.timestamp),
     [member.member_id, teamMemberExecutionEvents],
   );
-  const completedCount = memberTasks.filter((task) => task.status === 'completed').length;
   const displayName = getMemberDisplayName(member);
   const contextCompressionState = teamMemberContextCompression[member.member_id];
 
@@ -553,51 +528,14 @@ function MemberTaskDetail({
             }
           }}
         />
-        <TaskListBar
+        <MemberTaskListBar
           tasks={memberTasks}
           expanded={taskListExpanded}
           onToggle={() => setTaskListExpanded((expanded) => !expanded)}
-          completedCount={completedCount}
         />
         {taskListExpanded && (
           <div className="px-5 pb-4 max-h-[200px] overflow-y-auto" data-testid="team-area-member-detail-task-list-panel">
-            {memberTasks.length === 0 ? (
-              <div className="py-4 text-center text-sm text-text-muted" data-testid="team-area-member-detail-task-list-empty">
-                {t('team.noMemberTasks')}
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {memberTasks.map((task) => (
-                  <div
-                    key={task.id}
-                    className="flex items-start gap-3 rounded-md px-1 py-1.5"
-                    data-testid="team-area-member-detail-task-item"
-                    data-variant={task.id}
-                  >
-                    <StatusIcon status={task.status} />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm text-text" data-testid="team-area-member-detail-task-title">{task.title}</div>
-                      <div className="mt-1 text-xs leading-5 text-text-muted" data-testid="team-area-member-detail-task-detail">{task.detail}</div>
-                      <div className="mt-1 text-[11px] text-muted" data-testid="team-area-member-detail-task-status-label">
-                        {getTaskStatusLabel(task.status)}
-                        {task.id ? ` · ${task.id}` : ''}
-                      </div>
-                      <div
-                        className="mt-2 rounded bg-[var(--color-team-detail-surface)] px-3 py-2 text-[11px] leading-5 text-[var(--color-team-detail-text)]"
-                        data-testid="team-area-member-detail-task-raw"
-                      >
-                        {buildTaskRawEntries(task).map(([label, value]) => (
-                          <div key={label} className="grid grid-cols-[88px_minmax(0,1fr)] gap-2">
-                            <span className="text-[var(--color-team-detail-label)]" data-testid="team-area-member-detail-task-raw-label">{label}</span>
-                            <span className="whitespace-pre-wrap break-words" data-testid="team-area-member-detail-task-raw-value">{value}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+            <MemberTaskListItems tasks={memberTasks} />
           </div>
         )}
       </div>
@@ -804,40 +742,5 @@ function ProcessDetail({ item }: { item: ProcessItem }) {
         ))}
       </div>
     </div>
-  );
-}
-
-function TaskListBar({
-  tasks,
-  expanded,
-  onToggle,
-  completedCount,
-}: {
-  tasks: MemberTask[];
-  expanded: boolean;
-  onToggle: () => void;
-  completedCount: number;
-}) {
-  const { t } = useTranslation();
-
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      data-testid="team-area-member-detail-task-list-bar"
-      className="flex w-full h-[54px] items-center justify-between px-5 text-left  hover:bg-secondary"
-    >
-      <div className="flex min-w-0 items-center gap-2">
-        <span className="text-sm font-medium text-text" data-testid="team-area-task-list-bar-title">{t('team.memberTasks')}</span>
-        <span className="text-muted">|</span>
-        <span className="shrink-0 text-sm text-text-muted" data-testid="team-area-task-list-bar-toggle-label">
-          {expanded ? t('team.collapseView') : t('team.expandView')}
-        </span>
-      </div>
-      <div className="ml-4 flex shrink-0 items-center gap-4">
-        <span className="text-sm text-text-muted" data-testid="team-area-task-list-bar-count">{completedCount}/{tasks.length}</span>
-        <span className="text-text-muted"><Chevron expanded={expanded} /></span>
-      </div>
-    </button>
   );
 }

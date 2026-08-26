@@ -800,8 +800,12 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
     assert len(fake_manager.claim_session_calls) == 1
     assert fake_manager.claim_session_calls[0]["channel_id"] == "acp"
     assert fake_manager.claim_session_calls[0]["create_token"] == "create-acp-001"
-    metadata = json.loads((sessions_root / "acp_session_001" / "metadata.json").read_text(encoding="utf-8"))
-    assert metadata["mode"] == "agent"
+    # 读路径惰性迁移：旧 canonical agent → 新 canonical agent.work.normal。
+    # 直接用 get_session_metadata 读取，避免与 create 流程里 resolve_session_switch_context
+    # 触发的异步惰性迁移写回（agent → agent.work.normal）构成原始文件读竞态。
+    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+    metadata = get_session_metadata("acp_session_001", cache_bust=True)
+    assert metadata["mode"] == "agent.work.normal"
     assert fake_ws.sent == [
         {
             "response_id": "req-session-create",
@@ -811,12 +815,74 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
             "ok": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_locks_persist_session(monkeypatch, tmp_path):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="persist_session_001")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+    request = AgentRequest(
+        request_id="create-persist-session",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"create_token": "persist-token", "persist_session": True},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls[0]["persist_session"] is True
+    assert fake_ws.sent[0]["payload"]["persist_session"] is True
+    metadata = json.loads(
+        (sessions_root / "persist_session_001" / "metadata.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metadata["persist_session"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_value", [1, "true", None, {}])
+async def test_handle_session_create_requires_boolean_persist_session(
+    monkeypatch, tmp_path, invalid_value
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-create")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+    request = AgentRequest(
+        request_id="create-invalid-persist",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"create_token": "invalid-token", "persist_session": invalid_value},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls == []
+    assert fake_ws.sent[0]["ok"] is False
+    assert fake_ws.sent[0]["payload"]["error"] == "persist_session must be a boolean"
 
 
 @pytest.mark.asyncio
@@ -936,6 +1002,64 @@ async def test_handle_tui_session_create_accepts_explicit_id_without_prewarm(
 
 
 @pytest.mark.asyncio
+async def test_handle_tui_non_explicit_create_resolves_project_in_agentserver(
+    monkeypatch, tmp_path
+):
+    """Non-``--session`` TUI creates resolve the code project in AgentServer."""
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="tui_non_explicit")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+    project_dir = str(tmp_path / "tui-code-project")
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
+        lambda _params: types.SimpleNamespace(
+            project_id="proj_tui_code",
+            project_dir=project_dir,
+            work_mode="code",
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.resolve_session_project_binding",
+        lambda project_id, resolved_dir: (project_id, resolved_dir, None, None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.get_project_by_id",
+        lambda project_id, cache_bust=True: types.SimpleNamespace(work_mode="code"),
+    )
+
+    request = AgentRequest(
+        request_id="req-tui-non-explicit",
+        channel_id="tui",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={
+            "create_token": "legacy-tui-create-001",
+            "mode": "code.normal",
+            "cwd": project_dir,
+            "project_dir": project_dir,
+        },
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert len(fake_manager.claim_session_calls) == 1
+    assert fake_manager.claim_session_calls[0]["project_id"] == "proj_tui_code"
+    metadata = json.loads(
+        (sessions_root / "tui_non_explicit" / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["project_id"] == "proj_tui_code"
+    assert metadata["project_dir"] == project_dir
+    assert fake_ws.sent[0]["ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_handle_tui_explicit_session_create_is_idempotent_and_bypasses_prewarm(
     monkeypatch, tmp_path
 ):
@@ -969,6 +1093,42 @@ async def test_handle_tui_explicit_session_create_is_idempotent_and_bypasses_pre
         assert response["ok"] is True
         assert response["payload"]["session_id"] == "tui_external_idempotent"
         assert response["payload"]["prewarm_status"] == "bypassed"
+
+
+@pytest.mark.asyncio
+async def test_handle_tui_existing_session_rejects_persist_session_change(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    sessions_root = tmp_path / "sessions"
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+    init_session_metadata(
+        session_id="tui_persist_locked",
+        channel_id="tui",
+        persist_session=True,
+    )
+    fake_ws = FakeWebSocket()
+    request = AgentRequest(
+        request_id="register-persist-mismatch",
+        channel_id="tui",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"session_id": "tui_persist_locked", "persist_session": False},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent[0]["ok"] is False
+    assert fake_ws.sent[0]["payload"]["code"] == "CONFLICT"
+    assert fake_manager.claim_session_calls == []
 
 
 @pytest.mark.asyncio
@@ -1229,6 +1389,7 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
                 "projectId": "proj_code",
                 "projectDir": code_project.project_dir,
                 "workMode": "code",
+                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
@@ -1239,7 +1400,8 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
     from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
     metadata = get_session_metadata("sess_code_project", cache_bust=True)
-    assert metadata["mode"] == "code.normal"
+    # 读路径惰性迁移：旧 canonical code.normal → 新 canonical agent.code.normal
+    assert metadata["mode"] == "agent.code.normal"
     assert metadata["work_mode"] == "code"
 
 
@@ -1296,6 +1458,7 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
@@ -1365,6 +1528,7 @@ async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_p
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "persist_session": False,
                 "prewarm_hit": False,
                 "prewarm_status": "bypassed",
             },
@@ -2725,6 +2889,24 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
     ensure_calls = []
     release_calls = []
     cleared_metadata_cache = []
+    heartbeat_deleted = []
+    heartbeat_delete_prepared = []
+
+    class HeartbeatRuntime:
+        is_available = True
+
+        async def begin_session_delete(self, session_id: str) -> None:
+            heartbeat_delete_prepared.append(session_id)
+
+        async def abort_session_delete(
+            self, session_id: str, *, channel_id: str = ""
+        ) -> None:
+            raise AssertionError("successful deletion must not be aborted")
+
+        async def commit_session_delete(self, session_id: str) -> None:
+            heartbeat_deleted.append(session_id)
+
+    server._heartbeat_runtime = HeartbeatRuntime()
 
     async def fake_ensure_persistent_checkpointer():
         ensure_calls.append("called")
@@ -2773,6 +2955,8 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
     assert ensure_calls == ["called"]
     assert release_calls == ["sess-agent-1"]
     assert cleared_metadata_cache == ["sess-agent-1"]
+    assert heartbeat_delete_prepared == ["sess-agent-1"]
+    assert heartbeat_deleted == ["sess-agent-1"]
     assert not session_dir.exists()
     assert fake_ws.sent == [
         {
@@ -2796,6 +2980,9 @@ async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cl
     events = []
 
     class RuntimeManager:
+        def get_agent_nowait(self, *args, **kwargs):
+            return None
+
         async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
             events.append(("runtime", channel_id, session_id))
             return True

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from openjiuwen.agent_teams.harness.manifest import (
@@ -42,6 +43,7 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyOrchestrationRail,
 )
+from jiuwenswarm.agents.harness.code.rails.heartbeat_rail import HeartbeatRail
 from jiuwenswarm.agents.harness.team.rails.team_skill_storage_policy_rail import (
     TeamSkillStoragePolicyRail,
 )
@@ -71,6 +73,41 @@ MODEL_ANOMALY_DETECTION = "swarm.model_anomaly_detection"
 PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
 SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
+HEARTBEAT = "swarm.heartbeat"
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=HEARTBEAT,
+    description="AgentServer-owned Heartbeat job tools bound to the Team session.",
+)
+def _build_heartbeat_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> HeartbeatRail | None:
+    """Mount the new Job Heartbeat Rail for Team members.
+
+    The service remains process-owned by AgentServer.  The provider only binds
+    the member tools to the immutable Team session identity; it never creates a
+    scheduler and never uses the deprecated ``RunKind.HEARTBEAT`` rail.
+    """
+    _ = params
+    service = getattr(context, "heartbeat_job_service", None)
+    session_id = str(getattr(context, "session_id", "") or "").strip()
+    if service is None or not session_id:
+        return None
+    metadata = dict(getattr(context, "request_metadata", None) or {})
+    tool_context = SimpleNamespace(
+        channel_id=str(getattr(context, "channel_id", None) or "web"),
+        session_id=session_id,
+        metadata=metadata,
+        user_id=str(getattr(context, "user_id", None) or ""),
+        mode=str(getattr(context, "mode", None) or "team"),
+        tool_scope=(
+            f"team_member_{getattr(context, 'member_card_id', None) or 'unknown'}"
+        ),
+    )
+    return HeartbeatRail(service=service, context=tool_context)
 
 
 def _workspace_root(ctx: SwarmBuildContext) -> str | None:
@@ -487,6 +524,7 @@ __all__ = [
     "PLUGIN_RAILS",
     "SKILL_RETRIEVAL_PROMPT",
     "SYMPHONY_ORCHESTRATION_PROMPT",
+    "HEARTBEAT",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
 ]

@@ -38,7 +38,10 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
-from jiuwenswarm.common.config import get_skill_evolution_enabled
+from jiuwenswarm.common.config import (
+    get_evolution_review_feedback_min_confidence,
+    get_skill_evolution_enabled,
+)
 from jiuwenswarm.common.utils import get_agent_skills_dir
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
@@ -211,6 +214,9 @@ class SwarmTeamSkillEvolutionRail(TeamSkillEvolutionRail):
             team_manager = get_team_manager(self._swarm_channel)
             team_manager.register_team_live_rail(self._swarm_session_id, agent, self)
             team_manager.register_team_skill_rail(self._swarm_session_id, self)
+            self.bind_review_feedback_skill_create_rail(
+                team_manager.get_team_skill_create_rail(self._swarm_session_id)
+            )
             if team_manager.consume_team_evolution_watcher_deferred(self._swarm_session_id):
                 from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
                     ensure_team_evolution_watcher,
@@ -286,6 +292,14 @@ class SwarmTeamSkillCreateRail(TeamSkillCreateRail):
             team_manager = get_team_manager(self._swarm_channel)
             team_manager.register_team_live_rail(self._swarm_session_id, agent, self)
             team_manager.register_team_skill_create_rail(self._swarm_session_id, self)
+            team_rail = team_manager.get_team_skill_rail(self._swarm_session_id)
+            bind_create_rail = getattr(
+                team_rail,
+                "bind_review_feedback_skill_create_rail",
+                None,
+            )
+            if callable(bind_create_rail):
+                bind_create_rail(self)
             _register_team_rail_context(
                 self._swarm_channel,
                 self._swarm_session_id,
@@ -331,7 +345,7 @@ class SwarmMemberSkillEvolutionRail(SkillEvolutionRail):
             skills_dir: The single Skill library.
             team_id: Team name.
             config: The resolved ``config.yaml`` mapping.
-            trajectory_registry: Per-team in-memory trajectory registry.
+            trajectory_span_processor: Process-level Team trajectory processor.
             language: Resolved member language code.
         """
         self._swarm_channel = channel
@@ -551,6 +565,17 @@ def build_team_skill_evolution_rail(
                 inp.trajectory_span_processor or get_trajectory_span_processor()
             ),
         )
+        if inp.global_skills_dir:
+            rail.configure_review_feedback_evolution(
+                session_id=str(inp.session_id or ""),
+                team_id=str(inp.team_id or ""),
+                min_confidence=get_evolution_review_feedback_min_confidence(ctx.config),
+            )
+        else:
+            logger.warning(
+                "[swarm.team_skill_evolution] review-feedback integration skipped: "
+                "global_skills_dir is unavailable"
+            )
         rail.bind_swarm_context(
             channel=inp.channel,
             session_id=inp.session_id,

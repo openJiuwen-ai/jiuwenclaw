@@ -79,6 +79,13 @@ CommandRunner = Callable[[str], "CommandResult"]
 ProcRunner = Callable[[str], tuple[Any, str]]
 
 
+# Structured CommandResult failure kind. Empty string = unclassified.
+# binary_not_found: executable/runtime not on PATH (FileNotFoundError / WinError 2
+# / ENOENT), distinct from "ran but returned non-zero". Lets the connect flow
+# tell the user "install node" instead of dumping WinError 2.
+ERR_BINARY_NOT_FOUND = "binary_not_found"
+
+
 @dataclass
 class CommandResult:
     command: str
@@ -86,6 +93,9 @@ class CommandResult:
     stdout: str = ""
     stderr: str = ""
     timed_out: bool = False
+    # Failure kind (see ERR_* constants). Set by default_runner; read by
+    # CliDriver.install to map FileNotFoundError onto a user-actionable error.
+    error_kind: str = ""
 
     @property
     def succeeded(self) -> bool:
@@ -98,6 +108,21 @@ class CommandResult:
 
 _SHELL_FORBIDDEN_FIRST = {"bash", "cmd", "/bin/sh", "sh"}
 _SHELL_FORBIDDEN_SECOND = "-c"
+
+
+def _is_binary_not_found(exc: BaseException) -> bool:
+    """True when *exc* means the executable/runtime is missing from PATH.
+
+    Matches on type (FileNotFoundError) and errno (ENOENT==2) rather than
+    locale-dependent substrings, so classification is stable across
+    Chinese/English Windows.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return True
+    errno = getattr(exc, "errno", None)
+    if errno == 2:  # errno.ENOENT
+        return True
+    return False
 
 
 def _safe_split_command(command: str) -> list[str]:
@@ -159,7 +184,12 @@ def default_runner(command: str, timeout: float = 120.0, env: dict[str, str] | N
             timed_out=True,
         )
     except (OSError, ValueError) as exc:
-        return CommandResult(command=command, returncode=-1, stderr=str(exc))
+        return CommandResult(
+            command=command,
+            returncode=-1,
+            stderr=str(exc),
+            error_kind=ERR_BINARY_NOT_FOUND if _is_binary_not_found(exc) else "",
+        )
 
 
 def _parse_version(text: str) -> str | None:
@@ -191,58 +221,6 @@ def _extract_url(text: str, domain_hint: str = "") -> str | None:
             if domain_hint in url:
                 return url
     return matches[0]
-
-
-def _derive_bin_name(command: str) -> str | None:
-    """Derive the CLI binary name from a versionCheck command string.
-
-    Pure CLI (feishu/dingtalk/zsxq/...) have no ``mcp.json``; their
-    stdio MCP entry runs ``<bin> mcp`` where <bin> comes from cli.json's
-    versionCheck command (e.g. ``lark-cli.cmd --version`` -> ``lark-cli``).
-
-    The versionCheck command is the ONLY reliable source — npm package names
-    in the init command (``@larksuite/cli`` / ``dingtalk-workspace-cli``) do
-    NOT map to bin names (bin is ``lark-cli`` / ``dws``), so init is not used.
-
-    Strips ``.cmd``/``.exe`` suffixes (Windows) so the registered bare name
-    resolves cross-platform via PATH (node CLIs install a .cmd shim on Windows).
-    """
-    if not command:
-        return None
-    cmd = command.strip()
-    if not cmd:
-        return None
-    # "<bin>[.cmd|.exe] [args...]" — take the first token, strip shim suffix.
-    first = cmd.split()[0] if " " in cmd else cmd
-    for suf in (".cmd", ".exe", ".bat"):
-        if first.lower().endswith(suf):
-            first = first[: -len(suf)]
-            break
-    return first or None
-
-
-def build_stdio_entry(name: str, manifest: "CliManifest") -> dict[str, Any] | None:
-    """Build a state.json ``mcp.servers`` stdio entry running ``<bin> mcp``.
-
-    For pure-CLI MCPs with no mcp.json, the MCP server is the CLI's own
-    ``mcp`` subcommand (e.g. ``lark-cli mcp`` / ``dws mcp``). <bin> is derived
-    from the manifest's versionCheck command. Returns None if versionCheck is
-    absent (hybrid packages with a real mcp.json use that instead).
-    """
-    n = str(name or "").strip()
-    if not n:
-        return None
-    bin_name = _derive_bin_name(manifest.version_cmd)
-    if not bin_name:
-        return None
-    return {
-        "name": n,
-        "transport": "stdio",
-        "command": bin_name,
-        "args": ["mcp"],
-        "enabled": True,
-        "server_id_scope": f"mcp:{n}",
-    }
 
 
 @dataclass
@@ -335,6 +313,15 @@ class InstallResult:
     min_version: str
     version_ok: bool
     error: str = ""
+    # Mirrors CommandResult.error_kind; set when a command's binary was missing
+    # so _connect_cli raises MCP_RUNTIME_MISSING instead of a raw WinError string.
+    error_kind: str = ""
+    # cli.json runtime.type (e.g. "node"/"python"), surfaced so the frontend
+    # hint can name the missing dependency. Empty when the manifest has no runtime.
+    runtime: str = ""
+    # cli.json init command for the current platform, surfaced on incomplete
+    # failures so the frontend can show the exact upgrade command.
+    install_cmd: str = ""
 
 
 @dataclass
@@ -348,6 +335,9 @@ class AuthStepResult:
     auth_domain: str = ""
     output: str = ""
     error: str = ""
+    # Mirrors CommandResult.error_kind; set when the auth command's binary was
+    # missing so _connect_cli raises MCP_CLI_INCOMPLETE instead of a raw error.
+    error_kind: str = ""
 
 
 @dataclass
@@ -430,6 +420,7 @@ class CliDriver:
         err = ""
         version: str | None = None
         version_ok = True
+        kind = ""
         # Version-check first: if the CLI is already installed at a sufficient
         # version, skip the (potentially slow, network-bound) init/install step
         # entirely. Only fall back to init when the version check fails or
@@ -444,6 +435,8 @@ class CliDriver:
             elif m.min_version and not version:
                 version_ok = False
                 err = f"could not parse version from: {res.combined_output}"
+            if res.error_kind == ERR_BINARY_NOT_FOUND:
+                kind = ERR_BINARY_NOT_FOUND
         if version_ok and version:
             # CLI already present and recent enough — skip init.
             logger.info("[cli_driver] %s skip init (version %s ok)", self.name, version)
@@ -452,6 +445,8 @@ class CliDriver:
             if not res.succeeded:
                 err = f"init failed (rc={res.returncode}): {res.combined_output}"
                 logger.warning("[cli_driver] %s init failed: %s", self.name, err)
+            if res.error_kind == ERR_BINARY_NOT_FOUND:
+                kind = ERR_BINARY_NOT_FOUND
             # re-check version after install
             if m.version_cmd:
                 res2 = self._runner(m.version_cmd)
@@ -461,10 +456,13 @@ class CliDriver:
                 elif m.min_version:
                     version_ok = False
                     err = (err + "; " if err else "") + f"could not parse version after init: {res2.combined_output}"
+                if res2.error_kind == ERR_BINARY_NOT_FOUND:
+                    kind = ERR_BINARY_NOT_FOUND
         return InstallResult(
             name=self.name, installed=True,
             version=version, min_version=m.min_version,
-            version_ok=version_ok, error=err
+            version_ok=version_ok, error=err, error_kind=kind,
+            runtime=m.runtime_type, install_cmd=m.init_cmd,
         )
 
     def auth_step(self, index: int = 0) -> AuthStepResult:
@@ -513,7 +511,8 @@ class CliDriver:
             succeeded=res.succeeded, needs_user_action=bool(domain),
             auth_url=url, auth_domain=domain,
             output=res.combined_output,
-            error="" if res.succeeded else f"rc={res.returncode}: {res.combined_output}"
+            error="" if res.succeeded else f"rc={res.returncode}: {res.combined_output}",
+            error_kind=res.error_kind if not res.succeeded else "",
         )
 
     def _start_auth_proc(self, index: int, cmd: str, domain: str) -> AuthStepResult:
@@ -551,7 +550,8 @@ class CliDriver:
             return AuthStepResult(
                 name=self.name, step_index=index, command=cmd,
                 succeeded=False, needs_user_action=False,
-                error=f"failed to start auth: {exc}"
+                error=f"failed to start auth: {exc}",
+                error_kind=ERR_BINARY_NOT_FOUND if _is_binary_not_found(exc) else "",
             )
         _cleanup_stale_auth_proc(self.name)
         _PENDING_AUTH_PROCS[self.name] = proc
@@ -660,14 +660,6 @@ class CliDriver:
         if not self.manifest.unauth_cmd:
             return CommandResult(command="", returncode=0, stdout="no unauth command")
         return self._runner(self.manifest.unauth_cmd)
-
-    def build_stdio_entry(self, name: str, manifest: "CliManifest" | None = None) -> dict[str, Any] | None:
-        """Derive the ``<bin> mcp`` stdio config entry from the manifest.
-
-        Thin wrapper over the module-level :func:`build_stdio_entry` so callers
-        holding a CliDriver instance can ask for the stdio entry directly.
-        """
-        return build_stdio_entry(name, manifest or self.manifest)
 
 
 __all__ = [

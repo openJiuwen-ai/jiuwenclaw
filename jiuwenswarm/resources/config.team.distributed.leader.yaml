@@ -232,6 +232,7 @@ react:
   evolution:
     skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
     auto_save: false           # true = 自演进审批无需用户点击自动通过
+    review_feedback_min_confidence: 0.7
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
@@ -282,11 +283,20 @@ gateway:
   session_map_scope: per_chat_bot
 
 heartbeat:
-  # 心跳间隔（秒），默认 60
+  jobs:
+    min_interval_seconds: 60
+    max_active_jobs_per_session: 5
+    max_active_jobs_global: 100
+    default_max_runs: 12
+    default_concurrency_policy: skip
+    default_session_deleted_policy: disable
+
+health_check:
+  # 探活间隔（秒）
   every: 3600
-  # 心跳结果回传的 channel（如 "web"），
+  # 探活结果回传的 channel（如 "web"）
   target: web
-  # 心跳生效时间段（本地时间），start <= now < end 时心跳生效
+  # 探活生效时间段（本地时间）
   active_hours:
     start: 08:00
     end: 22:00
@@ -503,6 +513,15 @@ permissions:
     cron_delete_job: allow
     cron_toggle_job: allow
     cron_preview_job: allow
+    heartbeat_list_jobs: allow
+    heartbeat_get_job: allow
+    heartbeat_create_job: allow
+    heartbeat_update_job: allow
+    heartbeat_delete_job: allow
+    heartbeat_toggle_job: allow
+    heartbeat_preview_job: allow
+    heartbeat_run_now: allow
+    heartbeat_cancel_run: allow
 
   rules:
     - id: shell_allow_dir

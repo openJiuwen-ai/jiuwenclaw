@@ -42,7 +42,7 @@ async def test_history_get_stream_emits_todo_updated_on_page_one(tmp_path, monke
         AgentWebSocketServer,
         "get_conversation_history",
         staticmethod(
-            lambda session_id, page_idx: {
+            lambda session_id, page_idx, **_kwargs: {
                 "messages": [{"role": "user", "content": "hi"}],
                 "total_pages": 1,
                 "page_idx": page_idx,
@@ -120,7 +120,7 @@ async def test_history_get_stream_skips_todo_on_later_pages(tmp_path, monkeypatc
         AgentWebSocketServer,
         "get_conversation_history",
         staticmethod(
-            lambda session_id, page_idx: {
+            lambda session_id, page_idx, **_kwargs: {
                 "messages": [],
                 "total_pages": 2,
                 "page_idx": page_idx,

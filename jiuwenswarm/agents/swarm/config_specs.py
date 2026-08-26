@@ -57,12 +57,21 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
 from jiuwenswarm.agents.swarm import registry
 from jiuwenswarm.agents.swarm.providers import tools as _tools
 from jiuwenswarm.common.mode_matrix import (
+    NEW_TEAM_CODE_NORMAL,
+    NEW_TEAM_CODE_PLAN,
     TEAM_PLAN_CODE_MODE,
-    TEAM_PLAN_NORMAL_MODE,
+    is_team_plan_mode,
 )
 
 # Modes that route to the code adapter and get the code member profile.
-_CODE_MODES: frozenset[str] = frozenset({"code.team", TEAM_PLAN_CODE_MODE})
+_CODE_MODES: frozenset[str] = frozenset(
+    {
+        "code.team",
+        TEAM_PLAN_CODE_MODE,
+        NEW_TEAM_CODE_NORMAL,
+        NEW_TEAM_CODE_PLAN,
+    }
+)
 
 
 def _kv_cache_affinity_config(config: dict[str, Any]) -> KVCacheAffinityConfig:
@@ -133,6 +142,7 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.MULTIMODAL_IMAGE,
     registry.SECURITY,
     registry.MODEL_ANOMALY_DETECTION,
+    registry.HEARTBEAT,
     registry.CODE_LSP,
     registry.CODE_PROJECT_MEMORY,
     registry.PERMISSION_INTERRUPT,
@@ -534,7 +544,7 @@ def _build_team_capability_specs(
     ]
     if role == "leader":
         rails_specs.append(RailSpec(type=registry.STRUCTURED_ASK_USER))
-        if mode == TEAM_PLAN_NORMAL_MODE:
+        if is_team_plan_mode(mode):
             rails_specs.extend(
                 [
                     RailSpec(type=registry.CODE_AGENT_MODE),
@@ -588,7 +598,7 @@ def _build_code_capability_specs(
     When ``enable_permissions`` is false the permission interrupt rail is
     removed entirely: it would deadlock a teammate on any ASK-level tool call.
     """
-    is_team_plan_leader = mode == TEAM_PLAN_CODE_MODE and role == "leader"
+    is_team_plan_leader = is_team_plan_mode(mode) and role == "leader"
 
     rails_specs: list[RailSpec] = [
         RailSpec(type=name, params=_rail_params(name, config))
@@ -685,7 +695,7 @@ def _subagent_language(mode: str, role: str, config: dict[str, Any]) -> str:
     configured preferred language. Baked into ``factory_kwargs`` so the generic
     openjiuwen sub-agent providers stay free of swarm mode/role policy.
     """
-    if mode == TEAM_PLAN_CODE_MODE and role == "leader":
+    if is_team_plan_mode(mode) and role == "leader":
         return resolve_language((config or {}).get("preferred_language", "zh"))
     return "en"
 

@@ -1299,6 +1299,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
         events = {}
 
     adapter = JiuWenSwarmDeepAdapter()
+    adapter.set_heartbeat_service(object())
     ask_user_rail = object()
     orchestration_rail = object()
 
@@ -1308,10 +1309,9 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(adapter, "_build_stream_event_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_security_rail", lambda: None)
-    monkeypatch.setattr(adapter, "_build_heartbeat_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_circuit_breaker_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_avatar_rail", lambda: None)
-    monkeypatch.setattr(adapter, "_build_subagent_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_subagent_rail", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_build_skill_rail", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_build_skill_retrieval_prompt_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_symphony_orchestration_rail", lambda: orchestration_rail)
@@ -1322,11 +1322,16 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
 
     plan_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.plan")
     fast_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.fast")
+    code_rails = adapter._build_agent_rails({}, {"models": {}}, mode="code.normal")
+
+    from jiuwenswarm.agents.harness.code.rails.heartbeat_rail import HeartbeatRail
 
     assert orchestration_rail in plan_rails
     assert orchestration_rail in fast_rails
     assert ask_user_rail in plan_rails
     assert ask_user_rail in fast_rails
+    assert any(isinstance(rail, HeartbeatRail) for rail in plan_rails)
+    assert any(isinstance(rail, HeartbeatRail) for rail in code_rails)
 
 
 def test_deep_adapter_unregisters_evolution_runtime_rails_when_leaving_plan(monkeypatch):

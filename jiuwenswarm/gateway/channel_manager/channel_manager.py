@@ -125,6 +125,7 @@ class ChannelManager(ABC):
         self._channels[key] = channel
         channel.on_message(self._on_channel_message)
         self._try_set_event_reporter(channel)
+        self._try_wire_file_persist_hook(channel)
         logger.info("[ChannelManager] 已注册 Channel: channel_id=%s, 当前共 %d 个", cid, len(self._channels))
 
     def register_channel_with_inbound(
@@ -137,6 +138,124 @@ class ChannelManager(ABC):
         self._channels[key] = channel
         channel.on_message(on_message)
         self._try_set_event_reporter(channel)
+        self._try_wire_file_persist_hook(channel)
+
+    def _try_wire_file_persist_hook(self, channel: "BaseChannel") -> None:
+        """为 IM 通道注入附件落盘钩子（Phase 3：经 E2A 落盘到目标 AgentServer）。
+
+        仅在通道支持 ``set_file_persist_hook`` 且 MessageHandler 持有 AgentServer
+        客户端时注入。钩子把下载字节经 base64 交给 AgentServer 的
+        ``IM_FILE_PERSIST``，落盘到注入目录的 ``<平台>_files/downloads/``；失败
+        抛错（决策 D6：按可重试错误失败整条消息），不回落到 Gateway 本地写盘。
+        """
+        setter = getattr(channel, "set_file_persist_hook", None)
+        if setter is None:
+            return
+        agent_client = getattr(self._message_handler, "agent_client", None)
+        if agent_client is None:
+            return
+        # IM AgentOS routing is explicitly deferred.  In particular, the
+        # attachment hook has no authenticated per-message user_id, so routing
+        # its HTTP/E2A upload by a Gateway-local default would target the wrong
+        # user.  Leave the existing single-user IM path untouched until the IM
+        # channel carries that route context end to end.
+        from jiuwenswarm.gateway.routing.e2a_proxy import (
+            is_agentos_routing_client,
+            is_legacy_shared_directory_client,
+        )
+
+        # IM 的 AgentOS 多用户路由尚未实现。绝不能让 FileService 因此回退到
+        # Gateway 的部署目录；安装一个明确失败的 hook，让上层返回可重试附件
+        # 错误，直至入站 IM 协议具备受认证的 user_id 路由键。
+        if is_agentos_routing_client(agent_client):
+            async def _agentos_route_required(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                raise RuntimeError(
+                    "IM attachment routing requires an authenticated AgentOS user_id"
+                )
+
+            setter(_agentos_route_required)
+            return
+        if is_legacy_shared_directory_client(agent_client):
+            return
+        platform = str(getattr(channel, "channel_id", "") or "").strip()
+        # 企业飞书多 Bot 使用 ``feishu_enterprise:<bot_key>`` 作为 channel_id；
+        # 冒号不能作为 WorkspaceFileAdapter 的目录标识（Windows 也不允许），
+        # 统一投影为稳定、安全的用户目录名。
+        storage_platform = "".join(
+            char if (char.isalnum() or char in "_-") else "_"
+            for char in platform.lower()
+        ).strip("_") or "im"
+
+        async def _persist_hook(content: Any, category: str, filename: str) -> dict[str, Any]:
+            import base64 as _base64
+
+            from jiuwenswarm.common.schema.message import ReqMethod
+            from jiuwenswarm.gateway.routing.e2a_proxy import fetch_agent_unary
+
+            from jiuwenswarm.gateway.routing.agent_http_bridge import (
+                E2A_PAYLOAD_MAX_BYTES,
+            )
+
+            content_bytes = bytes(content)
+            # 传输取舍（方案 §10.5）：大附件走受认证 HTTP bridge 上传（不落盘
+            # Gateway），避免 base64 帧超过内部 WS 8MB 帧限制（PayloadTooBig 会
+            # 击穿整个 Gateway↔AgentServer 连接）；小附件与文本内容走 base64 E2A。
+            if len(content_bytes) > E2A_PAYLOAD_MAX_BYTES:
+                from jiuwenswarm.gateway.routing.agent_http_bridge import (
+                    upload_file_bytes,
+                )
+
+                import mimetypes
+
+                rel_path = (
+                    f"agent/workspace/{storage_platform}_files/downloads/"
+                    f"{category}/{filename}"
+                )
+                ok, payload = await asyncio.to_thread(
+                    upload_file_bytes, content_bytes, rel_path
+                )
+                if not ok:
+                    # 决策 D6：钩子仅在非共享目录客户端上安装，上传失败一律按
+                    # 可重试错误抛出，绝不回退到 Gateway 本地落盘（否则附件会
+                    # 写进 Gateway 部署目录而非目标 AgentServer 的注入目录）。
+                    raise RuntimeError(
+                        str(payload.get("error") or "im attachment upload failed")
+                    )
+                # 补全与 IM_FILE_PERSIST 一致的落盘元数据（name 取实际落盘名，
+                # 含 AgentServer 侧同名去重后的后缀）。
+                from pathlib import Path as _Path
+
+                persisted_name = _Path(str(payload.get("path") or "")).name or filename
+                mime_type, _ = mimetypes.guess_type(persisted_name)
+                return {
+                    "path": str(payload.get("path") or ""),
+                    "name": persisted_name,
+                    "filename": persisted_name,
+                    "size": int(payload.get("size") or len(content_bytes)),
+                    "mime_type": mime_type or "application/octet-stream",
+                    "platform": platform,
+                    "file_category": category,
+                }
+
+            ok, payload = await fetch_agent_unary(
+                agent_client=agent_client,
+                req_method=ReqMethod.IM_FILE_PERSIST,
+                params={
+                    "platform": storage_platform,
+                    "category": category,
+                    "filename": filename,
+                    "data": _base64.b64encode(content_bytes).decode("ascii"),
+                },
+                session_id=None,
+                user_id=None,
+                channel_id=platform or "im",
+                label="im.file_persist",
+            )
+            if not ok:
+                raise RuntimeError(str(payload.get("error") or "im.file_persist failed"))
+            return payload
+
+        setter(_persist_hook)
 
     def register_external_channel(self, channel_id: str | ChannelKey, channel: Any) -> None:
         """登记一个已由外部完成入站装配的 channel 实例。"""
@@ -349,7 +468,7 @@ class ChannelManager(ABC):
                     and msg.channel_id == "feishu"
                     and (
                         (getattr(msg, "id", "") or "").startswith("cron-push-")
-                        or getattr(msg, "event_type", None) == _EventType.HEARTBEAT_RELAY
+                        or getattr(msg, "event_type", None) == _EventType.HEALTH_CHECK_RELAY
                     )
                 )
                 if _is_feishu_fanout:

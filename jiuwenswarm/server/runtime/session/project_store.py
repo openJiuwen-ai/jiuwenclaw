@@ -1092,20 +1092,14 @@ def find_or_create_code_project_for_dir(project_dir: str) -> Project | None:
         proj, restored = create_or_restore_project(
             name=f"{name}-{suffix}", project_dir=pd, work_mode=DEFAULT_TUI_WORK_MODE,
         )
-    # 新建(非恢复)的 code 项目需要 auto git init(与 WEB project.create 路径一致)
-    # 恢复的隐藏项目也需要重新探测 Git:被隐藏期间 .git 可能被删除或分支被外部
-    # 切换,持久化的 git 快照会过期。
+    # TUI 会为当前工作目录隐式登记 code 项目。这不是用户显式创建项目的操作，
+    # 因此只刷新 Git 快照，不得在空目录中自动执行 git init。
     from jiuwenswarm.server.runtime.session.project_git import get_project_git_service
     try:
-        if not restored:
-            get_project_git_service().ensure_on_project_create(proj)
-        else:
-            # 恢复项目:做一次轻量 probe 刷新 git 快照,不自动 init
-            # (恢复场景下用户可能有意删除 .git,不应自动重建)
-            get_project_git_service().probe(proj)
+        get_project_git_service().probe(proj)
     except Exception:  # noqa: BLE001
         logger.debug(
-            "[ProjectStore] git probe/ensure failed for dir=%s restored=%s",
+            "[ProjectStore] git probe failed for dir=%s restored=%s",
             pd, restored, exc_info=True,
         )
     return proj

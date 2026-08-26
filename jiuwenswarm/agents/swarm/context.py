@@ -22,6 +22,20 @@ from openjiuwen.agent_teams import paths as ojw_paths
 from openjiuwen.agent_teams.schema.build_context import BuildContext
 
 
+_heartbeat_job_service: Any | None = None
+
+
+def set_heartbeat_job_service(service: Any | None) -> None:
+    """Publish the AgentServer-owned Heartbeat service to Team builders."""
+    global _heartbeat_job_service
+    _heartbeat_job_service = service
+
+
+def get_heartbeat_job_service() -> Any | None:
+    """Return the process-local Heartbeat service, if AgentServer installed it."""
+    return _heartbeat_job_service
+
+
 @dataclass
 class SwarmBuildContext(BuildContext):
     """BuildContext subclass carrying jiuwenswarm runtime handles.
@@ -34,6 +48,7 @@ class SwarmBuildContext(BuildContext):
     Attributes:
         session_id: Active session id.
         request_id: Originating request id (may be None).
+        user_id: Authenticated request owner, used by user-routed tools.
         channel_id: Raw channel id from the request (may be None).
         channel: Resolved channel key for ``get_team_manager`` (``channel_id``
             or "default").
@@ -58,6 +73,9 @@ class SwarmBuildContext(BuildContext):
         global_skills_dir: The one physical Skill library every agent reads.
         trajectory_span_processor: Process-level trajectory span processor
             shared by Team evolution rails.
+        heartbeat_job_service: Process-level AgentServer Heartbeat service.
+            This live handle is intentionally omitted from serialized seeds and
+            reacquired from the receiving JiuwenSwarm process.
         config: The resolved ``config.yaml`` mapping (``get_config()``).
 
     Note:
@@ -69,6 +87,7 @@ class SwarmBuildContext(BuildContext):
 
     session_id: str = ""
     request_id: str | None = None
+    user_id: str | None = None
     channel_id: str | None = None
     channel: str = "default"
     request_metadata: dict[str, Any] | None = None
@@ -81,6 +100,7 @@ class SwarmBuildContext(BuildContext):
     team_skill_visibility_path: str | None = None
     global_skills_dir: str | None = None
     trajectory_span_processor: Any = None
+    heartbeat_job_service: Any = None
     config: dict[str, Any] | None = None
 
     def resolve_member_skill_visibility_path(self) -> str | None:
@@ -132,6 +152,7 @@ class SwarmBuildContext(BuildContext):
         return {
             "session_id": self.session_id,
             "request_id": self.request_id,
+            "user_id": self.user_id,
             "channel_id": self.channel_id,
             "channel": self.channel,
             "request_metadata": self.request_metadata,
@@ -167,6 +188,7 @@ class SwarmBuildContext(BuildContext):
         return cls(
             session_id=seed.get("session_id", ""),
             request_id=seed.get("request_id"),
+            user_id=seed.get("user_id"),
             channel_id=seed.get("channel_id"),
             channel=seed.get("channel") or "default",
             request_metadata=seed.get("request_metadata"),
@@ -179,8 +201,13 @@ class SwarmBuildContext(BuildContext):
             team_skill_visibility_path=seed.get("team_skill_visibility_path"),
             global_skills_dir=seed.get("global_skills_dir"),
             trajectory_span_processor=trajectory_span_processor,
+            heartbeat_job_service=get_heartbeat_job_service(),
             config=config,
         )
 
 
-__all__ = ["SwarmBuildContext"]
+__all__ = [
+    "SwarmBuildContext",
+    "get_heartbeat_job_service",
+    "set_heartbeat_job_service",
+]

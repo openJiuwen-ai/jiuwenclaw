@@ -119,7 +119,7 @@ class CronJobStore:
 
     并发安全:
       - ``asyncio.Lock``：同进程协程互斥；
-      - ``portalocker`` 伴生 ``cron_jobs.json.lock``：跨进程（多 Gateway / Agent）互斥。
+      - ``portalocker`` 伴生 ``cron_jobs.json.lock``：跨进程（多 Gateway）互斥。
       整个 read-modify-write 在双层锁内完成，避免 lost update。
     """
 
@@ -224,8 +224,8 @@ class CronJobStore:
                 return job
         return None
 
-    async def create_job(
-        self,
+    @staticmethod
+    def build_job(
         *,
         job_id: str | None = None,
         name: str,
@@ -246,6 +246,12 @@ class CronJobStore:
         work_mode: str = DEFAULT_WEB_WORK_MODE,
         user_id: str = "",
     ) -> CronJob:
+        """Construct and validate a ``CronJob`` without persisting it.
+
+        Phase 4 单源收敛：Gateway 侧 ``create_job`` 在 ``build_job`` 之后落盘；
+        AgentServer 侧 cron 工具复用 ``build_job`` 得到规范化视图（含 round-trip
+        校验）后仅经 E2A 转发 Gateway 落库，不再本地持久化。
+        """
         now = time.time()
         sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
         ct = str(chat_type).strip() if isinstance(chat_type, str) and chat_type.strip() else None
@@ -286,6 +292,50 @@ class CronJobStore:
         )
         # validate via round-trip
         CronJob.from_dict(job.to_dict())
+        return job
+
+    async def create_job(
+        self,
+        *,
+        job_id: str | None = None,
+        name: str,
+        cron_expr: str,
+        timezone: str,
+        description: str,
+        targets: str,
+        enabled: bool = True,
+        wake_offset_seconds: int | None = None,
+        session_id: str | None = None,
+        chat_type: str | None = None,
+        mode: str | None = None,
+        delete_after_run: bool | None = None,
+        timeout_seconds: int | None = None,
+        project_id: str = "",
+        model_name: str | None = None,
+        app_id: str = "",
+        work_mode: str = DEFAULT_WEB_WORK_MODE,
+        user_id: str = "",
+    ) -> CronJob:
+        job = self.build_job(
+            job_id=job_id,
+            name=name,
+            cron_expr=cron_expr,
+            timezone=timezone,
+            description=description,
+            targets=targets,
+            enabled=enabled,
+            wake_offset_seconds=wake_offset_seconds,
+            session_id=session_id,
+            chat_type=chat_type,
+            mode=mode,
+            delete_after_run=delete_after_run,
+            timeout_seconds=timeout_seconds,
+            project_id=project_id,
+            model_name=model_name,
+            app_id=app_id,
+            work_mode=work_mode,
+            user_id=user_id,
+        )
         await self._upsert_job(job)
         return job
 

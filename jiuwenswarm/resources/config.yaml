@@ -5,7 +5,7 @@ preferred_language: zh
 # true：只向模型暴露 direct 工具和 tool_search，其他工具按需搜索；
 # false：不挂载 ProgressiveToolRail，未显式声明 exposure 的工具按 direct 暴露。
 # ToolCard 自己显式声明的 exposure 优先级更高。
-progressive_tool_enabled: true
+progressive_tool_enabled: false
 
 # Web 首次模型配置引导；用户确认完成后会自动关闭，可通过侧栏问号再次打开
 setup_guide:
@@ -524,6 +524,10 @@ react:
       enabled: true
       # Browser Agent 独立轮次预算；未配置时默认 100。
       # max_iterations: 100
+  # 常驻 subagent 运行时。开启后 task_tool 被 subagent_spawn/wait/list/
+  # send_input/close/resume 六个工具替换（两者互斥）。默认开启。
+  subagent_runtime:
+    enabled: true
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
@@ -588,6 +592,7 @@ react:
   evolution:
     skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
     auto_save: false           # true = 自演进审批无需用户点击自动通过
+    review_feedback_min_confidence: 0.7
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
@@ -683,11 +688,20 @@ gateway:
     auth_enabled: false
 
 heartbeat:
-  # 心跳间隔（秒），默认 3600
+  jobs:
+    min_interval_seconds: 60
+    max_active_jobs_per_session: 5
+    max_active_jobs_global: 100
+    default_max_runs: 12
+    default_concurrency_policy: skip
+    default_session_deleted_policy: disable
+
+health_check:
+  # 业务探活间隔（秒），默认 3600
   every: 3600
-  # 心跳结果回传的 channel（如 "web"），
+  # 探活结果回传的 channel（如 "web"），
   target: web
-  # 心跳生效时间段（本地时间），start <= now < end 时心跳生效
+  # 探活生效时间段（本地时间），start <= now < end 时探活生效
   active_hours:
     start: 08:00
     end: 22:00

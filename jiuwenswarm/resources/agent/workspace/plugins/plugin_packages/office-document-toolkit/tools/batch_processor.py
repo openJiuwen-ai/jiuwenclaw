@@ -48,12 +48,15 @@ class BatchProcessor(Tool):
                                 "convert(target_format)"
                             ),
                         },
-                        "output_subdir": {
+                        "output_dir": {
                             "type": "string",
-                            "description": "输出子目录名，默认为 batch_output",
+                            "description": (
+                                "产物输出目录的绝对路径。传当前项目目录；"
+                                "用户指定了保存位置时用用户指定的目录。"
+                            ),
                         },
                     },
-                    "required": ["operation", "input_dir"],
+                    "required": ["operation", "input_dir", "output_dir"],
                 },
             )
         )
@@ -63,7 +66,7 @@ class BatchProcessor(Tool):
         input_dir = inputs.get("input_dir", "")
         pattern = inputs.get("pattern", "*")
         options = inputs.get("options", {})
-        output_subdir = inputs.get("output_subdir", "batch_output")
+        output_dir = inputs.get("output_dir", "")
 
         if not operation:
             return {"success": False, "error": "缺少 operation 参数"}
@@ -72,10 +75,13 @@ class BatchProcessor(Tool):
                 "success": False,
                 "error": f"输入目录不存在: {input_dir}",
             }
+        if not output_dir:
+            return {
+                "success": False,
+                "error": "缺少 output_dir：请传入当前项目目录的绝对路径",
+            }
 
-        from openjiuwen.core.sys_operation.cwd import get_cwd
-
-        base_dir = Path(get_cwd()) / output_subdir
+        base_dir = Path(output_dir).expanduser()
         base_dir.mkdir(parents=True, exist_ok=True)
 
         try:

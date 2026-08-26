@@ -36,6 +36,23 @@ AGENT_REQUEST_TIMEOUT_SECONDS: float = 600.0
 _UNARY_REQUEST_TIMEOUT_SECONDS = AGENT_REQUEST_TIMEOUT_SECONDS
 
 
+class AgentServerUnaryTimeout(RuntimeError):
+    """非流式请求等待 AgentServer 响应超时。
+
+    继承 ``RuntimeError`` 以保持向后兼容：调用方此前依赖 ``RuntimeError`` 与
+    "AgentServer 非流式请求超时" 文案。作为独立类型后，cron 等显式传入
+    ``timeout`` 的调用方能精确捕获并执行自身的超时收尾（如 cancel 后端
+    会话），而不是被写死的内层 600s 截断成裸 ``RuntimeError``、跳过收尾。
+    """
+
+    def __init__(self, request_id: str, timeout: float) -> None:
+        super().__init__(
+            f"AgentServer 非流式请求超时 (request_id={request_id}, timeout={timeout}s)"
+        )
+        self.request_id = request_id
+        self.timeout = timeout
+
+
 class _ReceiverFailure:
     def __init__(self, exc: BaseException) -> None:
         self.exc = exc
@@ -94,8 +111,21 @@ class AgentServerClient(ABC):
         ...
 
     @abstractmethod
-    async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
-        """发送 E2A 信封，等待完整响应."""
+    async def send_request(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResponse:
+        """发送 E2A 信封，等待完整响应.
+
+        Args:
+            envelope: E2A 信封.
+            timeout: 等待响应的上限（秒）。``None`` 时使用客户端默认值
+                （``_UNARY_REQUEST_TIMEOUT_SECONDS``，600s）。调用方可传入
+                更大的值以覆盖默认上限（例如 cron 任务的 ``timeout_seconds``），
+                使任务自身的超时真正生效，而非被内层默认值提前截断.
+        """
         ...
 
     @abstractmethod
@@ -225,6 +255,18 @@ class WebSocketAgentServerClient(AgentServerClient):
                 try:
                     raw = await self._ws.recv()
                     data = json.loads(raw)
+                    # 迟到的 connection.ack（connect 等待首帧 5s 超时后才到达）：
+                    # 补置就绪状态。connect 只 recv 一次首帧，超时后该 ack 只能由
+                    # 接收循环收到；若不补置，server_ready 永久为 False，会令
+                    # e2a_proxy 等依赖 server_ready 的入口（如 Web session.list）
+                    # 永久返回 SERVICE_UNAVAILABLE，即使连接实际已建立。
+                    if data.get("type") == "event" and data.get("event") == "connection.ack":
+                        if not self._server_ready:
+                            self._server_ready = True
+                            logger.info(
+                                "[WebSocketAgentServerClient] 接收循环收到迟到的 connection.ack，AgentServer 已就绪"
+                            )
+                        continue
                     meta = data.get("metadata")
                     if isinstance(meta, dict) and meta.get(E2A_WIRE_SERVER_PUSH_KEY):
                         if self._on_server_push is not None:
@@ -258,7 +300,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                             await self._message_queues[request_id].put(data)
                         else:
                             # 没有对应的队列（非预期情况）——可能是 E2A 编解码导致
-                            # request_id 不匹配，此时 send_request 会等满 600s 超时。
+                            # request_id 不匹配，此时 send_request 会等满自身超时
+                            # （默认 600s，或调用方透传的 timeout）。
                             # 提升为 warning 让问题可见，便于排查"到点没推送"类故障。
                             logger.warning(
                                 "[WebSocketAgentServerClient] 收到无目标队列的消息（等待方将超时）: request_id=%s",
@@ -383,11 +426,22 @@ class WebSocketAgentServerClient(AgentServerClient):
             await self._stop_receiver_after_fatal_error(exc)
             raise RuntimeError("AgentServer WebSocket connection closed") from exc
 
-    async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
+    async def send_request(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResponse:
         await self._ensure_connected_for_request()
         # 非流式 API 必须与 AgentServer 的 unary 路径一致；忽略信封上误带的 is_stream=True。
         envelope.is_stream = False
         rid = _wire_request_id_key(envelope.request_id)
+        # 调用方可显式覆盖等待上限（如 cron 任务的 timeout_seconds）；未指定时
+        # 回退到客户端默认 600s。这样任务自身的超时真正生效，而非被内层默认值
+        # 提前截断成裸 RuntimeError、跳过调用方的超时收尾（cancel 后端会话等）。
+        effective_timeout = (
+            float(timeout) if timeout is not None else _UNARY_REQUEST_TIMEOUT_SECONDS
+        )
         logger.info(
             "[E2A][out][nostream] request_id=%s channel=%s method=%s is_stream=%s",
             rid,
@@ -418,18 +472,16 @@ class WebSocketAgentServerClient(AgentServerClient):
                 await self._send_wire_payload(payload)
 
             try:
-                data = await asyncio.wait_for(queue.get(), timeout=_UNARY_REQUEST_TIMEOUT_SECONDS)
+                data = await asyncio.wait_for(queue.get(), timeout=effective_timeout)
                 if isinstance(data, _ReceiverFailure):
                     raise RuntimeError("AgentServer WebSocket connection closed") from data.exc
             except asyncio.TimeoutError as e:
                 logger.warning(
                     "[WebSocketAgentServerClient] 非流式请求超时: request_id=%s timeout=%ss",
                     rid,
-                    _UNARY_REQUEST_TIMEOUT_SECONDS,
+                    effective_timeout,
                 )
-                raise RuntimeError(
-                    f"AgentServer 非流式请求超时 (request_id={rid}, timeout={_UNARY_REQUEST_TIMEOUT_SECONDS}s)"
-                ) from e
+                raise AgentServerUnaryTimeout(rid, effective_timeout) from e
             resp = parse_agent_server_wire_unary(data)
             return resp
         finally:

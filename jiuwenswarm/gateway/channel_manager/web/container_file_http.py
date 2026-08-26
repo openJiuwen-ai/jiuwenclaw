@@ -5,24 +5,15 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import mimetypes
 from typing import TYPE_CHECKING, Annotated, Any, Mapping
+from urllib.parse import quote
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-
-from jiuwenswarm.extensions.agentos.auth.common import (
-    extract_token_from_path_and_headers,
-    headers_to_dict,
-)
-from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
-    AgentOSFileTransferError,
-    AgentOSRouterClient,
-    build_auth_headers_from_mapping,
-    build_auth_headers_from_token,
-)
 
 if TYPE_CHECKING:
     from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel
@@ -119,6 +110,15 @@ def _error_json(*, error: str, code: str | None = None, status_code: int | None 
 
 
 def _auth_headers_from_request(request: Request) -> dict[str, str]:
+    from jiuwenswarm.extensions.agentos.auth.common import (
+        extract_token_from_path_and_headers,
+        headers_to_dict,
+    )
+    from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
+        build_auth_headers_from_mapping,
+        build_auth_headers_from_token,
+    )
+
     header_map = headers_to_dict(request.headers)
     mapped = build_auth_headers_from_mapping(header_map)
     if mapped:
@@ -229,8 +229,40 @@ def _decode_text(raw: bytes, encoding: str) -> tuple[str, str]:
     raise OSError("Unable to decode file with any known encoding")
 
 
+def _decode_download_token_location(token: str) -> tuple[str, str] | None:
+    """Read the routing fields from a signed AgentServer download token.
+
+    AgentOS Gateway and the user's AgentServer do not necessarily share the
+    download-token secret, so the Gateway cannot validate this HMAC.  The
+    request's AgentOS credentials establish the user identity; this helper
+    only obtains the container path and session used to select that user's
+    runtime.  The token is deliberately never treated as an AgentOS bearer
+    credential.
+    """
+    try:
+        encoded = token.split(".", 1)[0]
+        padding = "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(encoded + padding))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(payload, dict):
+        return None
+    path = payload.get("path")
+    session_id = payload.get("sid")
+    if not isinstance(path, str) or not path.strip() or not isinstance(session_id, str):
+        return None
+    return path.strip(), session_id.strip()
+
+
 def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
     """Mount ``/file-api`` when channel has an AgentOSRouterClient backend."""
+    from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
+        AgentOSFileTransferError,
+        AgentOSRouterClient,
+        build_auth_headers_from_mapping,
+    )
+    from jiuwenswarm.extensions.agentos.auth.common import headers_to_dict
+
     client = getattr(channel, "container_file_client", None)
     if not isinstance(client, AgentOSRouterClient):
         return
@@ -366,6 +398,76 @@ def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.exception("[file-api/raw-file] failed: %s", exc)
             return _error_json(error=str(exc), code="INTERNAL_ERROR", status_code=500)
+
+    @app.api_route(f"{prefix}/download", methods=["GET", "HEAD"])
+    async def download_sent_file(request: Request) -> Response:
+        """Serve a ``send_file_to_user`` attachment from its owner's container.
+
+        Browser file cards only have the opaque download token, unlike the
+        file-browser APIs which receive an explicit path and user id.  In an
+        AgentOS deployment this WebChannel port is the public HTTP entrypoint,
+        hence it must translate that token to the container-file router call.
+        """
+        token = str(request.query_params.get("token") or "").strip()
+        location = _decode_download_token_location(token)
+        if location is None:
+            return _error_json(error="invalid_download_token", code="BAD_REQUEST", status_code=400)
+        uid = _resolve_user_id(request, request.query_params.get("user_id"))
+        if not uid:
+            return _error_json(error="user_id is required", code="BAD_REQUEST", status_code=400)
+
+        file_path, session_id = location
+        # Do not use _auth_headers_from_request here: when no Authorization
+        # header is present it would promote the *file* token to Bearer auth.
+        auth = build_auth_headers_from_mapping(headers_to_dict(request.headers))
+        try:
+            first = await client.download_container_file(
+                user_id=uid,
+                path=file_path,
+                offset=0,
+                limit=_STREAM_CHUNK,
+                session_id=session_id,
+                auth_headers=auth,
+            )
+        except AgentOSFileTransferError as exc:
+            return _error_json(error=str(exc), code=exc.code)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[file-api/download] failed: %s", exc)
+            return _error_json(error=str(exc), code="INTERNAL_ERROR", status_code=500)
+
+        file_name = file_path.rsplit("/", 1)[-1] or "download"
+        mime_type = first.content_type or mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        headers = {
+            "Cache-Control": "no-store",
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(file_name, safe='')}",
+        }
+        if first.size >= 0:
+            headers["Content-Length"] = str(first.size)
+        if request.method == "HEAD":
+            return Response(status_code=200, media_type=mime_type, headers=headers)
+
+        async def _stream_download():
+            if first.data:
+                yield first.data
+            if first.eof:
+                return
+            offset = first.offset + first.chunk_size
+            while True:
+                chunk = await client.download_container_file(
+                    user_id=uid,
+                    path=file_path,
+                    offset=offset,
+                    limit=_STREAM_CHUNK,
+                    session_id=session_id,
+                    auth_headers=auth,
+                )
+                if chunk.data:
+                    yield chunk.data
+                if chunk.eof:
+                    return
+                offset = chunk.offset + chunk.chunk_size
+
+        return StreamingResponse(_stream_download(), media_type=mime_type, headers=headers)
 
     @app.get(f"{prefix}/file-content")
     async def file_content_get(

@@ -287,6 +287,20 @@ class TestUserWorkspace:
         pass
 
 
+def test_prepare_workspace_does_not_copy_legacy_heartbeat_template(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / ".jiuwenswarm"
+
+    utils.prepare_workspace(
+        overwrite=False,
+        preferred_language="en",
+        workspace_dir=workspace_dir,
+    )
+
+    assert not (workspace_dir / "agent" / "workspace" / "HEARTBEAT.md").exists()
+
+
 class TestConstants:
     """Test module constants."""
 

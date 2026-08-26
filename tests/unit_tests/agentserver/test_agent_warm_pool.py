@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
+from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
 
 class _FakeRootAgent:
@@ -68,6 +69,45 @@ async def _wait_until(predicate, *, attempts: int = 100) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("condition did not become true")
+
+
+@pytest.mark.asyncio
+async def test_persist_session_is_create_identity_but_not_warm_key() -> None:
+    class WarmPool:
+        def __init__(self):
+            self.claim_calls = 0
+
+        @staticmethod
+        def make_key(**kwargs):
+            return AgentWarmPool.make_key(**kwargs)
+
+        async def claim(self, _key):
+            self.claim_calls += 1
+            return object()
+
+    warm_pool = WarmPool()
+    manager = object.__new__(AgentManager)
+    manager.warm_pool = warm_pool
+    manager._session_create_token_lock = asyncio.Lock()
+    manager._session_create_tokens = {}
+    params = {
+        "channel_id": "web",
+        "project_id": "default",
+        "project_dir": "",
+        "work_mode": "work",
+        "is_swarm": False,
+        "prewarm_eligible": True,
+        "create_token": "stable-token",
+    }
+
+    first = await manager.claim_prewarmed_session(**params, persist_session=True)
+    second = await manager.claim_prewarmed_session(**params, persist_session=True)
+
+    assert first is second
+    assert warm_pool.claim_calls == 1
+    with pytest.raises(ValueError, match="different session parameters"):
+        await manager.claim_prewarmed_session(**params, persist_session=False)
+    assert warm_pool.claim_calls == 1
 
 
 @pytest.fixture

@@ -226,12 +226,13 @@ _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_
 
 ## 8. assembly.py：enrich 流程
 
-`enrich_team_spec_for_swarm(spec, *, session_id, mode, project_dir, request_id, channel_id, request_metadata)`（就地改写 `spec`）：
+`enrich_team_spec_for_swarm(spec, *, session_id, mode, project_dir, request_id, channel_id, request_metadata, agent_group_name)`（就地改写 `spec`）：
 
 1. `register_swarm_providers()`（幂等，把 manifest catalog 驱动注册进 openjiuwen 注册表）；
 2. 用 `get_config()` + 工作区路径 + 进程级 trajectory span processor 建 `SwarmBuildContext`；
 3. 对 `leader` / `teammate` 调 `build_member_deep_agent_spec`，把能力 spec（含烘焙好的 params）折叠到成员 `DeepAgentSpec`；
-4. `spec.build_context = base`；`spec.build_context_seed = base.to_seed()`（跨边界重建）。
+4. 若指定 `agent_group_name`，加载 AgentGroup，为 Leader 写入模板快照、按通用 teammate spec 派生同名预定义成员，并设置 `team_mode="hybrid"`，保留运行时动态增加成员的能力；
+5. `spec.build_context = base`；`spec.build_context_seed = base.to_seed()`（跨边界重建）。
 
 ---
 
@@ -333,7 +334,7 @@ harness_element(kind=RAIL, name=..., builder=SomeRailClass)              # 直�
 
 归一后这些元素由 openjiuwen 声明 + 注册，swarm 经 `config_specs` 按 `core.*` 名引用（params 由 swarm 烘焙）：
 
-- Rail：`core.sys_operation`、`core.task_planning`、`core.security`、`core.heartbeat`、`core.confirm_interrupt`(tool_names)、`core.worktree`(enabled)、`core.lsp`(project_dir)。
+- Rail：`core.sys_operation`、`core.task_planning`、`core.security`、`swarm.heartbeat`（AgentServer-owned Job Heartbeat）、`core.confirm_interrupt`(tool_names)、`core.worktree`(enabled)、`core.lsp`(project_dir)。
 - Tool：`core.web_search`、`core.web_fetch`、`core.web_paid_search`、`core.vision`(vision_model_config)、`core.audio`(dedicated + audio_model_config)。vision/audio 的 config 由 swarm `tools.vision_model_config_params` / `audio_model_config_params` 从 yaml+env 填充后烘焙进 params。
 - Sub-agent：`core.explore_agent`、`core.plan_agent`、`core.browser_agent`（language / max_iterations 为 params，model 取 `ctx.extras["_parent_model"]`）。
 

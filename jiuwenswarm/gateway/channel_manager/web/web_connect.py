@@ -12,7 +12,6 @@ import asyncio
 import inspect
 import json
 import logging
-import os
 import secrets
 import time
 import uuid
@@ -20,10 +19,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
-import aiohttp
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
-from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter, ConnectHook
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
@@ -62,11 +59,13 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "chat.interrupt_result",
         "chat.evolution_status",
         "chat.error",
+        "health_check.relay",
         "heartbeat.relay",
         "context.usage",
         "context.compression_state",
         "chat.ask_user_question",
         "chat.subtask_update",
+        "chat.subagent_activity",
         "chat.symphony_status",
         "chat.notice",
         "history.message",
@@ -130,9 +129,11 @@ class WebChannel(BaseWsChannel):
     name = "web"
     channel_id = "web"
 
-    def __init__(self, config: WebChannelConfig, router: RobotMessageRouter):
+    def __init__(self, config: WebChannelConfig, router: RobotMessageRouter, agent_client: Any = None):
         super().__init__(config, router)
         self.config: WebChannelConfig = config
+        # Phase 2：注入 AgentServerClient，供 _process_files 文件导入 E2A 转发使用
+        self.agent_client: Any = agent_client
         self._server: Any = None
         self._uvicorn_server: Any = None
         self._on_message_cb: Callable[[Message], Any] | None = None
@@ -487,50 +488,81 @@ class WebChannel(BaseWsChannel):
             clients = {c for c in clients if c is not exclude_ws}
         await self._broadcast_to(frame, clients)
 
-    async def _download_file(self, url: str) -> bytes | None:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        return await response.read()
-                    else:
-                        logger.warning("WebChannel 文件下载失败: %s, 状态码: %s", url, response.status)
-                        return None
-        except Exception as e:
-            logger.warning("WebChannel 文件下载异常: %s, 错误: %s", url, e)
-            return None
+    async def _process_files(
+        self,
+        params: dict[str, Any],
+        *,
+        session_id: str | None = None,
+        req_id: str = "",
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """chat.send 上行文件处理（Phase 2：不再 Gateway 下载/落盘）。
 
-    async def _process_files(self, params: dict[str, Any]) -> dict[str, Any]:
+        把 ``files`` 中的外部 ``url`` 列表经 E2A ``FILE_IMPORT_URL`` 交给目标
+        AgentServer 下载落盘至其注入目录，返回带本地 ``path`` 的元数据供后续
+        CHAT_SEND 链路消费。Gateway 全程不接触文件内容（方案 §10.5 传输取舍）。
+        AgentServer 不可达时保留原样并记日志（不可达由下游链路返回可重试错误）。
+        """
         files = params.get("files")
         if not files or not isinstance(files, list):
             return params
 
-        downloaded_files = []
-        workspace_dir = str(get_agent_workspace_dir())
+        url_files = [
+            file_info
+            for file_info in files
+            if isinstance(file_info, dict) and (file_info.get("url") or file_info.get("uri"))
+        ]
+        if not url_files:
+            return params
 
-        for file_info in files:
-            if not isinstance(file_info, dict):
-                downloaded_files.append(file_info)
-                continue
+        ac = getattr(self, "agent_client", None)
+        if ac is None:
+            logger.warning("[WebChannel] 文件导入跳过：AgentServer 不可用")
+            return params
 
-            file_url = file_info.get("url") or file_info.get("uri") or ""
-            file_name = file_info.get("name") or file_info.get("filename") or "unknown_file"
+        from jiuwenswarm.gateway.routing.e2a_proxy import (
+            fetch_agent_unary,
+            is_agentos_routing_client,
+        )
 
-            if file_url:
-                file_content = await self._download_file(file_url)
-                if file_content:
-                    try:
-                        os.makedirs(workspace_dir, exist_ok=True)
-                        file_path = os.path.join(workspace_dir, file_name)
-                        with open(file_path, "wb") as f:
-                            f.write(file_content)
-                        file_info["path"] = file_path
-                    except Exception as e:
-                        logger.warning("WebChannel 文件保存失败: %s", e)
-
-            downloaded_files.append(file_info)
-
-        params["files"] = downloaded_files
+        ok, payload = await fetch_agent_unary(
+            agent_client=ac,
+            req_method=ReqMethod.FILE_IMPORT_URL,
+            # Retain the historic overwrite semantics in the shared-directory
+            # single-user deployment.  Per-user AgentOS directories keep
+            # collision-safe names so independent uploads never overwrite a
+            # user artifact.
+            params={
+                "files": url_files,
+                "overwrite": not is_agentos_routing_client(ac),
+            },
+            session_id=session_id,
+            user_id=user_id or None,
+            channel_id=self.channel_id,
+            label="file.import_url",
+        )
+        if not ok:
+            logger.warning(
+                "[WebChannel] 文件导入失败，保留原 files: %s",
+                payload.get("error") or "forward failed",
+            )
+            return params
+        imported = payload.get("files")
+        if isinstance(imported, list):
+            # 按原 files 顺序合并：导入成功项替换为带 path 的元数据
+            imported_by_url = {
+                str(item.get("url") or item.get("uri") or ""): item
+                for item in imported
+                if isinstance(item, dict) and (item.get("path") or item.get("error"))
+            }
+            merged = []
+            for file_info in files:
+                if isinstance(file_info, dict):
+                    key = str(file_info.get("url") or file_info.get("uri") or "")
+                    merged.append(imported_by_url.get(key, file_info))
+                else:
+                    merged.append(file_info)
+            params["files"] = merged
         return params
 
     # ── Channel 生命周期 ──────────────────────────────────
@@ -677,6 +709,24 @@ class WebChannel(BaseWsChannel):
         )
 
     @staticmethod
+    def _attach_automation_metadata(
+        payload: dict[str, Any], msg: Message
+    ) -> dict[str, Any]:
+        """Expose only the public automation marker, not routing metadata."""
+        message_metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        automation = message_metadata.get("automation")
+        if not isinstance(automation, dict) or automation.get("kind") != "heartbeat":
+            return payload
+        payload_metadata = (
+            dict(payload.get("metadata"))
+            if isinstance(payload.get("metadata"), dict)
+            else {}
+        )
+        payload_metadata["automation"] = dict(automation)
+        payload["metadata"] = payload_metadata
+        return payload
+
+    @staticmethod
     def _should_backfill_request_id(event_name: str) -> bool:
         # goal.snapshot/goal.updated/execution.error 原来没有回填 request_id，导致 Web
         # 前端的事件去重逻辑只能靠内容比对，分不清"同一次操作的重复投递"和"不同操作但
@@ -685,7 +735,11 @@ class WebChannel(BaseWsChannel):
         # runtime.accepted 的 payload 本身已经带了 request_id（见
         # interface_deep.py `_yield_runtime_accepted`），调用处的 "request_id" not in
         # payload 判断会自动跳过它，不会重复赋值。
-        return event_name.startswith("chat.") or event_name.startswith("goal.") or event_name == "execution.error"
+        return (
+            event_name.startswith("chat.")
+            or event_name.startswith("goal.")
+            or event_name == "execution.error"
+        )
 
     @classmethod
     def _build_event_payload(cls, msg: Message, event_name: str) -> dict[str, Any]:
@@ -698,7 +752,7 @@ class WebChannel(BaseWsChannel):
                 needs_request_id = "request_id" not in payload and msg.id
                 if cls._should_backfill_request_id(event_name) and needs_request_id:
                     payload["request_id"] = msg.id
-                return payload
+                return cls._attach_automation_metadata(payload, msg)
 
             content = str(msg.payload.get("content", "") or "")
             if not content and not getattr(msg, "ok", True) and msg.payload.get("error"):
@@ -729,13 +783,13 @@ class WebChannel(BaseWsChannel):
                         source, msg.payload.get("proactive_type"),
                         len(str(payload.get("content", ""))), list(payload.keys()),
                     )
-            return payload
+            return cls._attach_automation_metadata(payload, msg)
 
         content = str((msg.params or {}).get("content", "") or "")
-        return {
+        return cls._attach_automation_metadata({
             "session_id": msg.session_id,
             "content": content,
-        }
+        }, msg)
 
     async def send(
         self,
@@ -757,39 +811,40 @@ class WebChannel(BaseWsChannel):
             getattr(msg, "id", ""), getattr(msg, "event_type", None), _et,
             _has_fanout, routing_target is not None, len(self.clients),
         )
-        # 维护 session busy 状态(供 /ws/git 写操作查询)。
-        # 必须在所有路由分支之前执行:集群模式下 chat.processing_status 事件携带
-        # fan_out_targets(godview 兜底),经 SessionDispatcher 走 V2 精确路由后
-        # 提前 return,不会再经过下方旧路径的 busy 更新。若只在旧路径维护,
-        # 任务结束后 _session_busy 会残留 True,撤销/重做(discard/redo)会被
-        # is_session_busy 误判为忙碌,永远报 SESSION_BUSY(前端却显示已完成)。
+        # Maintain the session busy state before any routing branch can return.
         self._track_session_busy(msg)
-        # ── 心跳 relay：临时 session_id（heartbeat_{ts}_{suffix}）不匹配任何前端连接，
-        # 按常规 session_id 路由会被当作"无连接"丢弃。心跳状态是全局的（非会话级），
+
+        # ── health_check relay：临时 session_id（health_check_{ts}_{suffix}）
+        # 不匹配任何前端连接，
+        # 按常规 session_id 路由会被当作"无连接"丢弃。探活状态是全局的（非会话级），
         # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
-        # 与 wechat 等 IM 渠道在 send() 中对 HEARTBEAT_RELAY 的专属分支对齐。
-        if msg.event_type == EventType.HEARTBEAT_RELAY:
+        # 与 wechat 等 IM 渠道在 send() 中对 HEALTH_CHECK_RELAY 的专属分支对齐。
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY:
             frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
             logger.debug(
-                "[WebChannel] heartbeat.relay broadcast to %d client(s) id=%s",
+                "[WebChannel] health_check.relay broadcast to %d client(s) id=%s",
                 len(clients), getattr(msg, "id", ""),
             )
             return
 
-        # ── 定时任务推 web：原设计绑定 job.session_id，但关闭 tab/换设备后旧会话再无连接，
-        # 按 session_id 路由会被丢弃。cron 推送（占位 + 结果）带 payload.cron 标记，普通对话
-        # chat.final 不带，以此为识别条件广播给所有 web 客户端。前端 _push_to_targets 已对 web
-        # 置空 session_id，shouldHandleSessionEvent 放行，消息进当前活跃会话流（含 placeholder 替换）。
+        # ── 定时任务推 web：不绑定旧 session_id，以支持关闭 tab/换设备；但在
+        # AgentOS 下必须按 job.user_id 限定接收者。空 user_id 是历史单用户任务，
+        # 仍保持原有广播行为。
         if (
             msg.event_type == EventType.CHAT_FINAL
             and isinstance(msg.payload, dict)
             and isinstance(msg.payload.get("cron"), dict)
         ):
             frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
-            clients = self.clients
+            cron_user_id = str(msg.payload.get("user_id") or "").strip()
+            clients = (
+                [ws for ws in self.clients if self.connection_user_id(ws) == cron_user_id]
+                if cron_user_id
+                else self.clients
+            )
             for w in clients:
                 self._enqueue_send(w, frame)
             logger.debug(
@@ -1317,7 +1372,12 @@ class WebChannel(BaseWsChannel):
                 self._ws_sessions[ws_id] = sessions
             sessions.add(session_id)
 
-        params = await self._process_files(params)
+        params = await self._process_files(
+            params,
+            session_id=session_id,
+            req_id=req_id if isinstance(req_id, str) else "",
+            user_id=self._connection_user_id(ws),
+        )
 
         # ── V2: 用实际的 session_id / mode / agent_id 更新 ws 注册 ──
         _flat_query = {k: (v[0] if v else "") for k, v in query.items()}
@@ -1439,6 +1499,8 @@ class WebChannel(BaseWsChannel):
         else:
             payload = {"session_id": getattr(msg, "session_id", None), "content": ""}
 
+        payload = self._attach_automation_metadata(payload, msg)
+
         agent_ref = getattr(msg, "agent_ref", None)
         if agent_ref:
             payload["agent_ref"] = agent_ref if isinstance(agent_ref, dict) else {
@@ -1462,7 +1524,7 @@ class WebChannel(BaseWsChannel):
 
     @staticmethod
     def _parse_mode(raw_mode: Any) -> Mode:
-        return Mode.from_raw(raw_mode, default=Mode.AGENT)
+        return Mode.from_raw(raw_mode, default=Mode.AGENT_WORK_NORMAL)
 
     @staticmethod
     def _make_session_id() -> str:

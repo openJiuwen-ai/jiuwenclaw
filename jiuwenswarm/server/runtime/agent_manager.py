@@ -16,6 +16,11 @@ from weakref import WeakValueDictionary
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config, get_default_models
+from jiuwenswarm.common.mode_matrix import (
+    NEW_AGENT_WORK_NORMAL,
+    NEW_AGENT_WORK_PLAN,
+    deprecate_mode,
+)
 
 if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -129,6 +134,7 @@ class AgentManager:
         # disconnect cleanup cannot tear it down in that gap.
         self._agent_borrowers: dict[int, set[asyncio.Task]] = {}
         self._agent_pins: dict[int, int] = {}
+        self._heartbeat_service: Any | None = None
         self._pending_tui_retirements: set[int] = set()
         self._retirement_tasks: dict[int, asyncio.Task] = {}
         self._agent_create_locks: WeakValueDictionary[
@@ -142,6 +148,16 @@ class AgentManager:
         from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
 
         self.warm_pool = AgentWarmPool(self)
+
+    def set_heartbeat_service(self, service: Any | None) -> None:
+        """Inject the process-owned Heartbeat service into single and Team agents."""
+        self._heartbeat_service = service
+        from jiuwenswarm.agents.swarm.context import set_heartbeat_job_service
+
+        set_heartbeat_job_service(service)
+        for agents in self.agents.values():
+            for agent in agents.values():
+                agent.set_heartbeat_service(service)
 
     def _get_agent_create_lock(
         self,
@@ -450,6 +466,7 @@ class AgentManager:
             project_dir or None,
         )
         agent = JiuWenSwarm()
+        agent.set_heartbeat_service(self._heartbeat_service)
         setter = getattr(agent, "set_personal_context_runtime_enabled", None)
         if callable(setter):
             setter(self._personal_context_runtime_enabled)
@@ -540,12 +557,20 @@ class AgentManager:
             return ACP_DEFAULT_CAPABILITIES.copy()
         return None
 
-    async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
+    async def cancel_all_inflight_work(
+        self,
+        reason: str = "[gateway ws disconnect] ",
+        *,
+        exclude_session_ids: set[str] | None = None,
+    ) -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时：取消所有已创建 Agent 实例上的在途任务。"""
         for modes in list(self.agents.values()):
             for agent in list(modes.values()):
                 try:
-                    await agent.cancel_inflight_work(reason)
+                    await agent.cancel_inflight_work(
+                        reason,
+                        exclude_session_ids=exclude_session_ids,
+                    )
                 except Exception:
                     logger.exception("[AgentManager] cancel_inflight_work failed")
 
@@ -849,6 +874,7 @@ class AgentManager:
         project_dir: str | None,
         work_mode: str,
         is_swarm: bool,
+        persist_session: bool = False,
         prewarm_eligible: bool = True,
         create_token: str | None = None,
     ):
@@ -860,7 +886,10 @@ class AgentManager:
             work_mode=work_mode,
             is_swarm=is_swarm,
         )
-        create_signature = (key, bool(prewarm_eligible))
+        # persist_session 不属于 WarmKey：同一预热 Agent 可服务开启或关闭的
+        # Session，避免为布尔开关复制预热槽。但它属于 session.create 的幂等
+        # 身份，同一 create_token 不允许用不同值重试。
+        create_signature = (key, bool(prewarm_eligible), bool(persist_session))
         token_key = (key.channel_id, token)
         async with self._session_create_token_lock:
             if token:
@@ -1036,7 +1065,13 @@ class AgentManager:
 
         if mode is None and project_dir is None and sub_mode is None:
             for agent in channel_agents.values():
-                if getattr(agent, "_jiuwenswarm_agent_mode", "") == "agent":
+                # 默认回落优先取"普通 agent"实例：旧串 "agent" 与新 canonical
+                # agent.work.* 都要命中。deprecate 归一把新旧形式统一成
+                # agent.work.normal / agent.work.plan 再判定。
+                if deprecate_mode(getattr(agent, "_jiuwenswarm_agent_mode", "")) in (
+                    NEW_AGENT_WORK_NORMAL,
+                    NEW_AGENT_WORK_PLAN,
+                ):
                     return self._borrow_agent(agent)
             agent = next(iter(channel_agents.values()), None)
             return self._borrow_agent(agent) if agent is not None else None

@@ -445,6 +445,13 @@ def test_find_team_skill_rail_for_request_uses_pending_governance() -> None:
     assert manager.find_team_skill_rail_for_request("missing") is None
 
 
+def test_find_team_skill_rail_for_request_uses_core_owned_child_request() -> None:
+    manager = TeamManager()
+    rail = _FakeTeamSkillEvolutionRail()
+    rail.add_pending_approval_snapshot("skill_evolve_review_req1")
+    manager.register_team_skill_rail("sess-1", rail)
+
+    assert manager.find_team_skill_rail_for_request("skill_evolve_review_req1") is rail
 @pytest.mark.asyncio
 async def test_update_evolution_config_disables_team_skill_create_rail(
     monkeypatch: pytest.MonkeyPatch,
@@ -1094,6 +1101,44 @@ async def test_cancel_all_stream_tasks_uses_per_session_lifecycle_locks(
     assert first_cancelled.is_set() is True
     assert manager.has_stream_task("sess-1") is False
     assert manager.has_stream_task("sess-2") is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_stream_tasks_preserves_heartbeat_owned_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
+        lambda: {"team": {"runtime": {"mode": "local"}}},
+    )
+    manager = _TeamManagerHarness()
+    protected_cancelled = asyncio.Event()
+    ordinary_cancelled = asyncio.Event()
+
+    async def wait_until_cancelled(cancelled: asyncio.Event) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    protected_task = asyncio.create_task(wait_until_cancelled(protected_cancelled))
+    ordinary_task = asyncio.create_task(wait_until_cancelled(ordinary_cancelled))
+    await asyncio.sleep(0)
+    manager.register_stream_task("heartbeat-session", protected_task)
+    manager.register_stream_task("user-session", ordinary_task)
+
+    await manager.cancel_all_stream_tasks(
+        exclude_session_ids={"heartbeat-session"},
+    )
+
+    assert ordinary_cancelled.is_set() is True
+    assert protected_cancelled.is_set() is False
+    assert manager.has_stream_task("heartbeat-session") is True
+    assert manager.has_stream_task("user-session") is False
+
+    protected_task.cancel()
+    await asyncio.gather(protected_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

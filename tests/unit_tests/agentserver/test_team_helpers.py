@@ -40,6 +40,62 @@ def test_team_event_queue_is_bounded() -> None:
     assert queue.maxsize > 0
 
 
+def test_agent_group_selection_inherits_session_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        team_helpers,
+        "get_session_metadata",
+        lambda *args, **kwargs: {"agent_group_name": "finance-group"},
+    )
+
+    assert team_helpers._resolve_agent_group_selection(
+        session_id="s",
+        params={},
+        is_first_request=False,
+    ) == ("finance-group", False)
+
+
+def test_agent_group_selection_binds_only_on_first_team_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        team_helpers,
+        "get_session_metadata",
+        lambda *args, **kwargs: {},
+    )
+
+    assert team_helpers._resolve_agent_group_selection(
+        session_id="s",
+        params={"agent_group_name": "sample-expert-group"},
+        is_first_request=True,
+    ) == ("sample-expert-group", True)
+
+    with pytest.raises(ValueError, match="only be selected"):
+        team_helpers._resolve_agent_group_selection(
+            session_id="s",
+            params={"agent_group_name": "sample-expert-group"},
+            is_first_request=False,
+        )
+
+
+def test_agent_group_selection_rejects_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        team_helpers,
+        "get_session_metadata",
+        lambda *args, **kwargs: {"agent_group_name": "group-a"},
+    )
+
+    with pytest.raises(ValueError, match="cannot be changed"):
+        team_helpers._resolve_agent_group_selection(
+            session_id="s",
+            params={"agent_group_name": "group-b"},
+            is_first_request=True,
+        )
+
+
 def test_persist_team_history_event_keeps_human_spawn_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1283,20 +1339,29 @@ async def test_ensure_team_evolution_watcher_defers_when_rail_missing(monkeypatc
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("signal_trigger", "review_trigger", "auto_save", "should_start"),
+    (
+        "signal_trigger",
+        "review_trigger",
+        "auto_save",
+        "review_feedback_enabled",
+        "should_start",
+    ),
     [
-        (False, False, False, False),
-        (False, True, False, False),
-        (True, False, False, True),
-        (True, True, False, True),
-        (True, False, True, False),
+        (False, False, False, False, False),
+        (False, True, False, False, False),
+        (True, False, False, False, True),
+        (True, True, False, False, True),
+        (True, False, True, False, False),
+        (False, True, False, True, True),
+        (False, True, True, True, True),
     ],
 )
-async def test_ensure_team_evolution_watcher_requires_pending_signal_approval(
+async def test_ensure_team_evolution_watcher_requires_host_visible_events(
         monkeypatch,
         signal_trigger: bool,
         review_trigger: bool,
         auto_save: bool,
+        review_feedback_enabled: bool,
         should_start: bool,
 ):
     registered: dict[str, asyncio.Task] = {}
@@ -1307,6 +1372,7 @@ async def test_ensure_team_evolution_watcher_requires_pending_signal_approval(
     _Rail.signal_trigger = signal_trigger
     _Rail.review_trigger = review_trigger
     _Rail.auto_save = auto_save
+    _Rail.review_feedback_evolution_enabled = review_feedback_enabled
 
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         @staticmethod

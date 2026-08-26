@@ -395,6 +395,7 @@ react:
   evolution:
     skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
     auto_save: false           # true = 自演进审批无需用户点击自动通过
+    review_feedback_min_confidence: 0.70
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
