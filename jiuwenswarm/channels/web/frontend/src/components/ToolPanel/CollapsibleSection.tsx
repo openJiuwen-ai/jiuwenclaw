@@ -57,14 +57,16 @@ export function CollapsibleSection({
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const [expanded, setExpanded] = useState(false);
+  const [userToggled, setUserToggled] = useState(false);
 
   useEffect(() => {
-    if (autoExpandOnContent && childCount !== undefined && childCount > 0 && collapsed) {
+    if (autoExpandOnContent && childCount !== undefined && childCount > 0 && collapsed && !userToggled) {
       setCollapsed(false);
     }
-  }, [autoExpandOnContent, childCount, collapsed]);
+  }, [autoExpandOnContent, childCount, collapsed, userToggled]);
 
   const handleToggleCollapse = () => {
+    setUserToggled(true);
     setCollapsed(prev => !prev);
   };
 
