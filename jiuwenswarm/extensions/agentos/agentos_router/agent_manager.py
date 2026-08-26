@@ -78,6 +78,10 @@ class AgentCreateFailed(RuntimeError):
     """Previous create failed; automatic retry is disabled to avoid double create."""
 
 
+class AgentCreateRejected(RuntimeError):
+    """New create refused (e.g. node heartbeat unhealthy). Existing READY runtimes are unaffected."""
+
+
 @dataclass
 class AgentRuntime:
     """In-process agent record: business info plus create-wait signaling."""
@@ -310,6 +314,7 @@ class AgentManager:
         timeout_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
         acquire: bool = False,
+        allow_create: bool = True,
     ) -> AgentRuntime:
         """Get a READY Agent runtime or create one, waiting for in-flight creation.
 
@@ -317,6 +322,9 @@ class AgentManager:
         incremented atomically before the snapshot is returned, so the idle
         reaper can never reclaim an agent between resolve and use. Callers
         must pair it with :meth:`release`.
+
+        ``allow_create=False`` reuses READY / waits for in-flight create, but
+        refuses to insert a new CREATING runtime (``AgentCreateRejected``).
         """
 
         key = self._make_key(user_id, agent_type, key_values=key_values)
@@ -343,6 +351,11 @@ class AgentManager:
                     return existing.snapshot()
 
                 if existing is None:
+                    if not allow_create:
+                        raise AgentCreateRejected(
+                            f"AGENT_CREATE_REJECTED: {key_desc}: "
+                            "node heartbeat unhealthy"
+                        )
                     runtime = AgentRuntime.for_key(
                         key,
                         user_id=key_user_id,
@@ -488,6 +501,13 @@ class AgentManager:
                 for runtime in self._runtimes.values()
                 if runtime.info.user_id == normalized_user_id
             ]
+
+    async def runtime_counts(self) -> tuple[int, int]:
+        """Return ``(total, ready)`` in-process runtime counts for heartbeat."""
+        async with self._runtimes_lock:
+            total = len(self._runtimes)
+            ready = sum(1 for runtime in self._runtimes.values() if runtime.is_ready())
+        return total, ready
 
     async def _mark_creator_failed(
         self,

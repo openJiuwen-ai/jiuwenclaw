@@ -3,6 +3,7 @@
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     BUILTIN_AGENT_TYPE,
     AgentCreateFailed,
+    AgentCreateRejected,
     AgentCreatingTimeout,
     AgentDeleted,
     AgentManager,
@@ -37,6 +38,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.third_agent import AgentOSThi
 
 __all__ = [
     "AgentCreateFailed",
+    "AgentCreateRejected",
     "AgentCreatingTimeout",
     "AgentInfo",
     "AgentManager",

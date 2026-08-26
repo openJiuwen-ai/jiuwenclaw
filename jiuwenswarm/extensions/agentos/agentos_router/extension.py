@@ -62,6 +62,9 @@ class AgentOSRouter(AgentServerClientExtension, ThirdAgentExtension):
                 config.disconnect_cleanup_timeout_seconds
             ),
             connect_warmup_enabled=config.connect_warmup_enabled,
+            node_heartbeat_interval_seconds=(
+                config.node_heartbeat_interval_seconds
+            ),
             auth_client=AgentOSAuthenticator(config.auth_service_url, config.timeout) if config.auth_enabled else None
         )
         self._third_agent = AgentOSThirdAgent(self._router_client)

@@ -19,6 +19,7 @@ from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     BUILTIN_AGENT_TYPE,
     AgentCreateFailed,
+    AgentCreateRejected,
     AgentCreatingTimeout,
     AgentDeleted,
     AgentManager,
@@ -50,6 +51,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.registry_client import (
     RegistryClient,
     instance_service_id,
 )
+from jiuwenswarm.extensions.agentos.agentos_router.retry import backoff_sleep
 from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
     DEFAULT_CLIENT_KEYS_DIR,
     YuanrongSshRelay,
@@ -151,6 +153,8 @@ _DISCONNECT_CLEANUP_MAX_ATTEMPTS = 3
 # pop_if_idle 的固定 idle 宽限（秒）：真正的安全守卫是连接数==0 + task_count==0
 # + READY，宽限只需覆盖 release 的 touch 落地竞态，秒级即可。
 _DISCONNECT_CLEANUP_IDLE_GRACE_SECONDS = 1.0
+_HEARTBEAT_FAIL_THRESHOLD = 3
+_HEARTBEAT_DEFAULT_TTL_SECONDS = 90.0
 
 
 def _is_agent_network_error(exc: BaseException) -> bool:
@@ -373,6 +377,7 @@ class AgentOSRouterClient(AgentServerClient):
         sandbox_idle_check_interval_seconds: float = 30.0,
         disconnect_cleanup_timeout_seconds: float = 60.0,
         connect_warmup_enabled: bool = True,
+        node_heartbeat_interval_seconds: float = 0.0,
         auth_client: AgentOSAuthenticator | None = None,
         ws_client_factory: Callable[[], WebSocketAgentServerClient] | None = None,
     ) -> None:
@@ -396,7 +401,13 @@ class AgentOSRouterClient(AgentServerClient):
             disconnect_cleanup_timeout_seconds
         )
         self._connect_warmup_enabled = bool(connect_warmup_enabled)
+        # <= 0: derive interval from HeartbeatResult.ttl_seconds / 3.
+        self._node_heartbeat_interval_seconds = float(
+            node_heartbeat_interval_seconds
+        )
         self._idle_reaper_task: asyncio.Task[None] | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._accepting_creates = True
         self._server_ready = False
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._closed = False
@@ -702,6 +713,7 @@ class AgentOSRouterClient(AgentServerClient):
                 agent_type,
                 creator=self._create_agent,
                 acquire=False,
+                allow_create=self._accepting_creates,
             )
             await self._get_ws_client(runtime)
         except Exception:
@@ -785,8 +797,9 @@ class AgentOSRouterClient(AgentServerClient):
                     creator=self._create_agent,
                     metadata={"session_id": session_id} if session_id else None,
                     acquire=acquire,
+                    allow_create=self._accepting_creates,
                 )
-            except (ValueError, AgentCreatingTimeout, AgentCreateFailed, AgentDeleted) as exc:
+            except (ValueError, AgentCreatingTimeout, AgentCreateFailed, AgentCreateRejected, AgentDeleted) as exc:
                 raise AgentOSFileTransferError(str(exc), code="INTERNAL_ERROR") from exc
             acquired_key = runtime.key if acquire else None
         else:
@@ -975,6 +988,7 @@ class AgentOSRouterClient(AgentServerClient):
         self._closed = False
         self._server_ready = True
         self._ensure_idle_reaper_task()
+        self._ensure_heartbeat_task()
 
     async def disconnect(self) -> None:
         if self._closed:
@@ -982,6 +996,7 @@ class AgentOSRouterClient(AgentServerClient):
         self._closed = True
         self._server_ready = False
         await self._stop_idle_reaper_task()
+        await self._stop_heartbeat_task()
         # 取消所有挂起的延迟清理任务
         for task in self._pending_cleanups.values():
             if not task.done():
@@ -1233,7 +1248,7 @@ class AgentOSRouterClient(AgentServerClient):
         await self._inject_external_cli_agents(envelope)
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
-        except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
+        except (ValueError, AgentCreatingTimeout, AgentCreateFailed, AgentCreateRejected) as exc:
             self._log_route("route.error", envelope, level=logging.WARNING, error=str(exc))
             return self._routing_error_response(envelope, str(exc))
         try:
@@ -1290,7 +1305,7 @@ class AgentOSRouterClient(AgentServerClient):
         await self._inject_external_cli_agents(envelope)
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
-        except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
+        except (ValueError, AgentCreatingTimeout, AgentCreateFailed, AgentCreateRejected) as exc:
             self._log_route("route.error", envelope, level=logging.WARNING, error=str(exc))
             yield self._routing_error_chunk(envelope, str(exc))
             return
@@ -1540,8 +1555,9 @@ class AgentOSRouterClient(AgentServerClient):
                 key_values={"session_id": session_id} if session_id else None,
                 creator=self._create_agent,
                 metadata={"session_id": session_id} if session_id else None,
+                allow_create=self._accepting_creates,
             )
-        except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
+        except (ValueError, AgentCreatingTimeout, AgentCreateFailed, AgentCreateRejected) as exc:
             return {
                 "ok": False,
                 "error": str(exc),
@@ -1699,7 +1715,7 @@ class AgentOSRouterClient(AgentServerClient):
                 )
                 return
             runtime = await self._resolve_agent(envelope, acquire=True)
-        except (ValueError, AgentCreatingTimeout, AgentCreateFailed, AgentDeleted) as exc:
+        except (ValueError, AgentCreatingTimeout, AgentCreateFailed, AgentCreateRejected, AgentDeleted) as exc:
             log_agentos(
                 logger,
                 logging.WARNING,
@@ -1817,6 +1833,7 @@ class AgentOSRouterClient(AgentServerClient):
             creator=self._create_agent,
             metadata={"session_id": envelope.session_id},
             acquire=acquire,
+            allow_create=self._accepting_creates,
         )
 
     # ---------- idle sandbox reclamation ----------
@@ -1844,6 +1861,96 @@ class AgentOSRouterClient(AgentServerClient):
             await task
         except asyncio.CancelledError:
             pass
+
+    def _heartbeat_registry_node(self) -> str:
+        return str(getattr(self._registry, "node", "") or "").strip()
+
+    def _ensure_heartbeat_task(self) -> None:
+        if self._closed:
+            return
+        if not bool(getattr(self._registry, "enabled", False)):
+            return
+        if not self._heartbeat_registry_node():
+            log_agentos(
+                logger,
+                logging.ERROR,
+                "heartbeat.skip",
+                error="registry.node is empty",
+            )
+            return
+        if self._heartbeat_task is not None and not self._heartbeat_task.done():
+            return
+        self._heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(),
+            name="agentos-node-heartbeat",
+        )
+
+    async def _stop_heartbeat_task(self) -> None:
+        task = self._heartbeat_task
+        self._heartbeat_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    def _heartbeat_interval_seconds(self, ttl_seconds: int | float | None) -> float:
+        configured = self._node_heartbeat_interval_seconds
+        if configured > 0:
+            return configured
+        ttl = float(ttl_seconds) if ttl_seconds and float(ttl_seconds) > 0 else (
+            _HEARTBEAT_DEFAULT_TTL_SECONDS
+        )
+        return max(1.0, ttl / 3.0)
+
+    async def _heartbeat_loop(self) -> None:
+        fail_count = 0
+        fail_attempt = 0
+        while not self._closed:
+            try:
+                total, ready = await self._agent_manager.runtime_counts()
+                result = await self._registry.report_node_heartbeat(
+                    status={"instances": total, "ready": ready},
+                )
+            except Exception:
+                fail_count += 1
+                fail_attempt += 1
+                if fail_count >= _HEARTBEAT_FAIL_THRESHOLD and self._accepting_creates:
+                    self._accepting_creates = False
+                    log_agentos(
+                        logger,
+                        logging.WARNING,
+                        "heartbeat.unhealthy",
+                        error=f"consecutive_failures={fail_count}",
+                        node=self._heartbeat_registry_node(),
+                    )
+                logger.exception(
+                    "[AgentOS] heartbeat.fail node=%s consecutive=%s",
+                    self._heartbeat_registry_node(),
+                    fail_count,
+                )
+                await backoff_sleep(fail_attempt - 1)
+                continue
+
+            recovered = fail_count > 0 or not self._accepting_creates
+            fail_count = 0
+            fail_attempt = 0
+            if not self._accepting_creates:
+                self._accepting_creates = True
+            if recovered:
+                log_agentos(
+                    logger,
+                    logging.INFO,
+                    "heartbeat.ok",
+                    node=self._heartbeat_registry_node(),
+                    status="recovered",
+                )
+            interval = self._heartbeat_interval_seconds(
+                getattr(result, "ttl_seconds", None)
+            )
+            await asyncio.sleep(interval)
 
     async def _idle_reaper_loop(self) -> None:
         while not self._closed:

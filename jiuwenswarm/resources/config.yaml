@@ -685,6 +685,9 @@ gateway:
     # Web/TUI 连接建立后后台预热内置 jiuwenswarm 沙箱并打通 instance WS，
     # 避免首条 chat 卡在 create + 冷启动 502 重试。失败不影响连接。
     connect_warmup_enabled: true
+    # 节点心跳续约周期（秒）。<= 0 表示用注册中心返回的 ttl_seconds/3。
+    # 心跳覆盖该节点全部 instance，是节点故障判定的前提。
+    node_heartbeat_interval_seconds: 0
     registry:
       # Agent OS 注册中心地址（空=本地 stub，不发 HTTP）。一体机默认 http://127.0.0.1:8000
       endpoint:

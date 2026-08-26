@@ -57,6 +57,9 @@ class RouterConfig:
     # the instance WS in the background so the first chat is not blocked on
     # create + cold-start 502 retries. Failure never drops the connection.
     connect_warmup_enabled: bool = True
+    # Node heartbeat renew interval. <= 0 means derive from the registry
+    # HeartbeatResult.ttl_seconds / 3 after each successful beat.
+    node_heartbeat_interval_seconds: float = 0.0
     ssh: YuanrongSshSettings = YuanrongSshSettings()
     ssh_channel: SshChannelEndpoint | None = None
     auth_service_url: str = ""
@@ -200,6 +203,9 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         ),
         disconnect_cleanup_timeout_seconds=disconnect_cleanup_timeout_seconds,
         connect_warmup_enabled=_read_bool(agentos, "connect_warmup_enabled", True),
+        node_heartbeat_interval_seconds=_read_float(
+            agentos, "node_heartbeat_interval_seconds", 0.0
+        ),
         ssh=load_yuanrong_ssh_settings(agentos.get("ssh")),
         ssh_channel=load_ssh_channel_endpoint(config),
         auth_service_url=auth_service_url,

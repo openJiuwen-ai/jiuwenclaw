@@ -225,6 +225,32 @@ async def test_http_launch_spec_register_update_heartbeat() -> None:
     assert hb.node == "192.168.0.12"
     assert hb.state == "healthy"
     assert hb.ttl_seconds == 90
+    heartbeat_calls = [
+        call
+        for call in transport.calls
+        if call[0] == "POST" and str(call[1]).endswith("/heartbeat")
+    ]
+    assert heartbeat_calls[-1][2] is None
+
+    hb_status = await client.report_node_heartbeat(
+        status={"instances": 2, "ready": 1},
+    )
+    assert hb_status.state == "healthy"
+    heartbeat_calls = [
+        call
+        for call in transport.calls
+        if call[0] == "POST" and str(call[1]).endswith("/heartbeat")
+    ]
+    assert heartbeat_calls[-1][2] == {"status": '{"instances":2,"ready":1}'}
+
+    hb_text = await client.report_node_heartbeat(status="healthy")
+    assert hb_text.state == "healthy"
+    heartbeat_calls = [
+        call
+        for call in transport.calls
+        if call[0] == "POST" and str(call[1]).endswith("/heartbeat")
+    ]
+    assert heartbeat_calls[-1][2] == {"status": "healthy"}
 
     deleted = await client.unregister_instance(sid)
     assert deleted["deleted"] is True

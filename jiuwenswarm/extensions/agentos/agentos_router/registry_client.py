@@ -13,6 +13,7 @@ AgentOS can boot without a live registry process.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -388,7 +389,7 @@ class RegistryClient:
             )
         if not self.enabled:
             return InstanceRecord.from_dict({**body, "status": "运行", "dataset": "default"})
-        data = await self._request_json("POST", "api/instances", json=body)
+        data = await self._request_json("POST", "api/instances", payload=body)
         return InstanceRecord.from_dict(data)
 
     async def update_instance(
@@ -422,7 +423,7 @@ class RegistryClient:
         data = await self._request_json(
             "PATCH",
             f"api/instances/{_encode(sid)}",
-            json=body,
+            payload=body,
         )
         return InstanceRecord.from_dict(data)
 
@@ -454,7 +455,15 @@ class RegistryClient:
             )
         body: dict[str, Any] | None = None
         if status is not None:
-            body = {"status": status}
+            # Registry ``NodeHeartbeatRequest.status`` is Optional[str];
+            # dict summaries (instances/ready) must be JSON-encoded.
+            body = {
+                "status": status
+                if isinstance(status, str)
+                else json.dumps(
+                    status, ensure_ascii=False, separators=(",", ":")
+                ),
+            }
         if not self.enabled:
             return HeartbeatResult(
                 node=node_ip,
@@ -465,7 +474,7 @@ class RegistryClient:
         data = await self._request_json(
             "POST",
             f"api/nodes/{_encode(node_ip)}/heartbeat",
-            json=body,
+            payload=body,
         )
         return HeartbeatResult.from_dict(data)
 
@@ -698,13 +707,13 @@ class RegistryClient:
         method: str,
         path: str,
         *,
-        json: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         expect_list: bool = False,
     ) -> Any:
         client = await self._get_http()
         try:
-            resp = await client.request(method, path, json=json, params=params)
+            resp = await client.request(method, path, json=payload, params=params)
         except httpx.HTTPError as exc:
             raise RegistryConnectionError(f"{type(exc).__name__}: {exc}") from exc
         if resp.status_code >= 400:

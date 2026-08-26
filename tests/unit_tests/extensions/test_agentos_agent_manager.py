@@ -6,6 +6,7 @@ import pytest
 
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentCreateFailed,
+    AgentCreateRejected,
     AgentCreatingTimeout,
     AgentDeleted,
     AgentManager,
@@ -369,3 +370,46 @@ async def test_session_scoped_key_creates_independent_agents() -> None:
     assert await agent_manager.get_agent(
         "u1", "jiuwenswarm", key_values={"session_id": "sess-2"}
     ) is not None
+
+
+@pytest.mark.asyncio
+async def test_allow_create_false_rejects_missing_runtime() -> None:
+    agent_manager = AgentManager()
+    create_calls = 0
+
+    async def creator(agent: AgentInfo) -> AgentInfo:
+        nonlocal create_calls
+        create_calls += 1
+        agent.sandbox_id = "sandbox-1"
+        return agent
+
+    with pytest.raises(AgentCreateRejected, match="AGENT_CREATE_REJECTED"):
+        await agent_manager.get_or_create_agent(
+            "u1", "jiuwenswarm", creator=creator, allow_create=False
+        )
+    assert create_calls == 0
+    assert await agent_manager.list_user_agents("u1") == []
+
+
+@pytest.mark.asyncio
+async def test_allow_create_false_reuses_ready_runtime() -> None:
+    agent_manager = AgentManager()
+    create_calls = 0
+
+    async def creator(agent: AgentInfo) -> AgentInfo:
+        nonlocal create_calls
+        create_calls += 1
+        agent.sandbox_id = "sandbox-1"
+        return agent
+
+    first = await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", creator=creator
+    )
+    reused = await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", creator=creator, allow_create=False
+    )
+    assert create_calls == 1
+    assert reused.info.agent_id == first.info.agent_id
+    total, ready = await agent_manager.runtime_counts()
+    assert total == 1
+    assert ready == 1

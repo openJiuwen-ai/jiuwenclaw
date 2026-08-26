@@ -11,6 +11,7 @@ import pytest
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
+    AgentCreateRejected,
     AgentManager,
     AgentRuntime,
 )
@@ -202,6 +203,30 @@ class FakeRegistryClient:
         self.updated_instances: list[dict] = []
         self.image_lookups = 0
         self.list_user_images_calls: list[str] = []
+        self.enabled = False
+        self.node = ""
+        self.heartbeats: list[dict[str, Any]] = []
+        self.heartbeat_error: Exception | None = None
+
+    async def report_node_heartbeat(
+        self,
+        node: str | None = None,
+        *,
+        status: Any = None,
+    ):
+        from jiuwenswarm.extensions.agentos.agentos_router.registry_client import (
+            HeartbeatResult,
+        )
+
+        if self.heartbeat_error is not None:
+            raise self.heartbeat_error
+        payload = {"node": node, "status": status}
+        self.heartbeats.append(payload)
+        return HeartbeatResult(
+            node=str(node or self.node or ""),
+            state="healthy",
+            ttl_seconds=90,
+        )
 
     async def get_image_info(self, image_name: str) -> ImageInfo:
         self.image_lookups += 1
@@ -1402,6 +1427,27 @@ def test_load_router_config_connect_warmup_knobs() -> None:
     assert disabled_str.connect_warmup_enabled is False
 
 
+def test_load_router_config_node_heartbeat_interval() -> None:
+    base_agent_client = {
+        "type": "agentos_router",
+        "frontend_endpoint": "http://yuanrong.test",
+        "function_version_urn": "urn:test",
+    }
+
+    defaults = load_router_config({"gateway": {"agent_client": base_agent_client}})
+    assert defaults.node_heartbeat_interval_seconds == 0.0
+
+    loaded = load_router_config(
+        {
+            "gateway": {
+                "agent_client": base_agent_client,
+                "agentos": {"node_heartbeat_interval_seconds": 15},
+            }
+        }
+    )
+    assert loaded.node_heartbeat_interval_seconds == 15.0
+
+
 def test_agentos_selected_by_agent_client_type() -> None:
     assert agentos_router_selected(
         {
@@ -1784,3 +1830,134 @@ async def test_register_agent_skips_when_runtime_already_cleaned() -> None:
         assert len(registry.registered) == 1  # 无新增
     finally:
         await client.shutdown()
+
+
+async def _wait_until(predicate, *, timeout: float = 1.0) -> None:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not met before timeout")
+
+
+@pytest.mark.asyncio
+async def test_connect_starts_node_heartbeat_and_disconnect_stops_it() -> None:
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    registry.enabled = True
+    registry.node = "10.0.0.8"
+    client = _router_client(
+        yuanrong,
+        registry,
+        node_heartbeat_interval_seconds=60.0,
+    )
+    try:
+        await client.connect("")
+        await _wait_until(lambda: len(registry.heartbeats) >= 1)
+        assert registry.heartbeats[0]["status"] == {"instances": 0, "ready": 0}
+        task = client._heartbeat_task  # noqa: SLF001
+        assert task is not None and not task.done()
+    finally:
+        await client.disconnect()
+    assert client._heartbeat_task is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_skipped_when_registry_disabled_or_node_empty() -> None:
+    yuanrong = FakeYuanRongClient()
+    stub = FakeRegistryClient()
+    stub.enabled = False
+    stub.node = "10.0.0.8"
+    client = _router_client(yuanrong, stub)
+    try:
+        await client.connect("")
+        await asyncio.sleep(0.05)
+        assert stub.heartbeats == []
+        assert client._heartbeat_task is None  # noqa: SLF001
+    finally:
+        await client.disconnect()
+
+    missing_node = FakeRegistryClient()
+    missing_node.enabled = True
+    missing_node.node = ""
+    client2 = _router_client(yuanrong, missing_node)
+    try:
+        await client2.connect("")
+        await asyncio.sleep(0.05)
+        assert missing_node.heartbeats == []
+        assert client2._heartbeat_task is None  # noqa: SLF001
+    finally:
+        await client2.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_consecutive_heartbeat_failures_reject_new_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _no_backoff(attempt: int, **kwargs: Any) -> float:
+        del attempt, kwargs
+        await asyncio.sleep(0)
+        return 0.0
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.agentos.agentos_router.router_client.backoff_sleep",
+        _no_backoff,
+    )
+
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    registry.enabled = True
+    registry.node = "10.0.0.8"
+    registry.heartbeat_error = RuntimeError("registry down")
+    agent_manager = AgentManager()
+    client = _router_client(yuanrong, registry, agent_manager)
+    try:
+        await client.connect("")
+        await _wait_until(lambda: client._accepting_creates is False)  # noqa: SLF001
+        with pytest.raises(AgentCreateRejected, match="AGENT_CREATE_REJECTED"):
+            await agent_manager.get_or_create_agent(
+                "u1",
+                "jiuwenswarm",
+                creator=client._create_agent,
+                allow_create=client._accepting_creates,
+            )
+        assert yuanrong.create_calls == 0
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_unhealthy_still_reuses_ready_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _no_backoff(attempt: int, **kwargs: Any) -> float:
+        del attempt, kwargs
+        await asyncio.sleep(0)
+        return 0.0
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.agentos.agentos_router.router_client.backoff_sleep",
+        _no_backoff,
+    )
+
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    agent_manager = AgentManager()
+    client = _router_client(yuanrong, registry, agent_manager)
+    created = await client.send_request(_envelope())
+    await asyncio.sleep(0.05)
+    assert created.ok
+    assert yuanrong.create_calls == 1
+
+    registry.enabled = True
+    registry.node = "10.0.0.8"
+    registry.heartbeat_error = RuntimeError("registry down")
+    try:
+        await client.connect("")
+        await _wait_until(lambda: client._accepting_creates is False)  # noqa: SLF001
+        reused = await client.send_request(_envelope())
+        assert reused.ok
+        assert yuanrong.create_calls == 1
+    finally:
+        await client.disconnect()
