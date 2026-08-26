@@ -330,6 +330,8 @@
     "modeSwitchConfirm": "当前会话有历史消息，切换模式将新建会话。是否继续？",
     "skills": "技能",
     "skillsToggle": "查看已安装技能",
+    "swarmSkills": "团队技能",
+    "noInstalledSwarmSkills": "暂无已安装团队技能",
     "noInstalledSkills": "暂无已安装技能",
     "skillsSearchPlaceholder": "搜索技能名称或描述",
     "skillsManage": "技能管理",

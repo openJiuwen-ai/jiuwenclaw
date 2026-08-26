@@ -330,6 +330,8 @@
     "modeSwitchConfirm": "Current session has history messages. Switching mode will create a new session. Continue?",
     "skills": "Skills",
     "skillsToggle": "View installed skills",
+    "swarmSkills": "Swarm Skills",
+    "noInstalledSwarmSkills": "No installed swarm skills",
     "noInstalledSkills": "No installed skills",
     "skillsSearchPlaceholder": "Search skill name or description",
     "skillsManage": "Skill Management",
