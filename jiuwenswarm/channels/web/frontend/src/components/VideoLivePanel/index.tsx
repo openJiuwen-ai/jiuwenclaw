@@ -1,5 +1,20 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, FileVideo, LoaderCircle, Mic, Monitor, Send, Square, Video, X } from 'lucide-react';
+import {
+  Camera,
+  CheckCircle2,
+  ChevronDown,
+  Circle,
+  FileVideo,
+  LoaderCircle,
+  Mic,
+  Monitor,
+  Search,
+  Send,
+  Square,
+  Video,
+  X,
+  XCircle,
+} from 'lucide-react';
 import { webClient, webRequest } from '../../services/webClient';
 import { RealtimeVideoFrameScheduler } from '../../utils/realtimeVideoFrameScheduler';
 import { fetchTtsAudio, playAudioBase64, sanitizeTtsText, stopGlobalAudio } from '../../utils/tts';
@@ -20,6 +35,7 @@ import {
   AgentAction,
   ChatContextItem,
   SearchJobPayload,
+  SearchProgressJob,
   SearchJobState,
   VideoSessionConfig,
 } from './types';
@@ -103,6 +119,8 @@ export function VideoLivePanel() {
   const [realtimeStatus, setRealtimeStatus] = useState('');
   const [isRealtimeStarting, setIsRealtimeStarting] = useState(false);
   const [currentTask, setCurrentTask] = useState('');
+  const [searchProgressJobs, setSearchProgressJobs] = useState<SearchProgressJob[]>([]);
+  const [isSearchProgressExpanded, setIsSearchProgressExpanded] = useState(false);
 
   const reportRealtimeEvent = (event: string, details: Record<string, unknown> = {}) => {
     void webRequest('video.realtime.telemetry', {
@@ -114,6 +132,34 @@ export function VideoLivePanel() {
 
   const setSearchStatus = (status: string) => {
     setToolStatus(searchAwareToolStatus(status, searchJobsRef.current.values()));
+  };
+
+  const updateSearchProgress = (payload: SearchJobPayload) => {
+    const jobId = payload.job_id?.trim();
+    if (!jobId) return;
+    setSearchProgressJobs((jobs) => {
+      const existing = jobs.find((job) => job.id === jobId);
+      const incoming = payload.progress_history?.length
+        ? payload.progress_history
+        : payload.progress ? [payload.progress] : [];
+      const progressByKey = new Map(
+        (existing?.progress || []).map((entry) => [
+          `${entry.sequence}:${entry.stage}:${entry.tool_call_id || ''}`,
+          entry,
+        ]),
+      );
+      incoming.forEach((entry) => {
+        progressByKey.set(`${entry.sequence}:${entry.stage}:${entry.tool_call_id || ''}`, entry);
+      });
+      const updated: SearchProgressJob = {
+        id: jobId,
+        query: payload.query?.trim() || existing?.query || '',
+        status: payload.status || existing?.status || 'running',
+        latencyMs: payload.latency_ms ?? existing?.latencyMs,
+        progress: [...progressByKey.values()].sort((left, right) => left.sequence - right.sequence),
+      };
+      return [...jobs.filter((job) => job.id !== jobId), updated].slice(-4);
+    });
   };
 
   const stopModelTransport = () => {
@@ -147,6 +193,8 @@ export function VideoLivePanel() {
     setStreamingAnswer('');
     setCurrentTask('');
     setToolStatus('');
+    setSearchProgressJobs([]);
+    setIsSearchProgressExpanded(false);
   };
 
   const appendChat = (role: ChatContextItem['role'], text: string) => {
@@ -409,6 +457,7 @@ export function VideoLivePanel() {
     );
     const unsubscribeStarted = webClient.on<SearchJobPayload>('video.search.started', ({ payload }) => {
       if (!belongsToCurrentSession(payload) || !payload.job_id) return;
+      updateSearchProgress(payload);
       searchJobsRef.current.set(payload.job_id, {
         id: payload.job_id,
         searchSessionId: payload.search_session_id || searchSessionRef.current,
@@ -419,11 +468,18 @@ export function VideoLivePanel() {
       });
       setSearchStatus('');
     });
+    const unsubscribeProgress = webClient.on<SearchJobPayload>('video.search.progress', ({ payload }) => {
+      if (belongsToCurrentSession(payload)) updateSearchProgress(payload);
+    });
     const unsubscribeCompleted = webClient.on<SearchJobPayload>('video.search.completed', ({ payload }) => {
-      if (belongsToCurrentSession(payload)) acceptCompletedSearch(payload);
+      if (!belongsToCurrentSession(payload)) return;
+      updateSearchProgress(payload);
+      acceptCompletedSearch(payload);
     });
     const unsubscribeFailed = webClient.on<SearchJobPayload>('video.search.failed', ({ payload }) => {
-      if (belongsToCurrentSession(payload)) acceptFailedSearch(payload);
+      if (!belongsToCurrentSession(payload)) return;
+      updateSearchProgress(payload);
+      acceptFailedSearch(payload);
     });
     const pollTimer = window.setInterval(() => {
       searchJobsRef.current.forEach((job) => {
@@ -434,6 +490,7 @@ export function VideoLivePanel() {
           search_session_id: job.searchSessionId,
         }, { timeoutMs: 5_000 })
           .then((payload) => {
+            updateSearchProgress(payload);
             if (payload.status === 'completed') acceptCompletedSearch(payload);
             if (payload.status === 'failed') acceptFailedSearch(payload);
           })
@@ -443,6 +500,7 @@ export function VideoLivePanel() {
     }, 1_000);
     return () => {
       unsubscribeStarted();
+      unsubscribeProgress();
       unsubscribeCompleted();
       unsubscribeFailed();
       window.clearInterval(pollTimer);
@@ -932,6 +990,9 @@ export function VideoLivePanel() {
     }
   };
 
+  const visibleSearchProgress = searchProgressJobs.at(-1);
+  const visibleSearchStep = visibleSearchProgress?.progress.at(-1);
+
   return (
     <section className="video-live">
       <header className="video-live__header">
@@ -1091,6 +1152,65 @@ export function VideoLivePanel() {
 
           {error && <div className="video-live__error">{error}</div>}
           {realtimeStatus && <div className="video-live__realtime-status">{realtimeStatus}</div>}
+          {visibleSearchProgress && (
+            <div className={`video-live__search-progress is-${visibleSearchProgress.status}`}>
+              <button
+                type="button"
+                className="video-live__search-progress-toggle"
+                aria-expanded={isSearchProgressExpanded}
+                onClick={() => setIsSearchProgressExpanded((expanded) => !expanded)}
+              >
+                <span className="video-live__search-progress-icon">
+                  {visibleSearchProgress.status === 'running'
+                    ? <LoaderCircle className="video-live__spinner" aria-hidden />
+                    : visibleSearchProgress.status === 'completed'
+                      ? <CheckCircle2 aria-hidden />
+                      : <XCircle aria-hidden />}
+                </span>
+                <span className="video-live__search-progress-copy">
+                  <strong>Jiuwen Core Agent</strong>
+                  <span>{visibleSearchStep?.title || '准备搜索'}</span>
+                </span>
+                {visibleSearchProgress.latencyMs !== undefined && (
+                  <span className="video-live__search-progress-time">
+                    {(visibleSearchProgress.latencyMs / 1_000).toFixed(1)}s
+                  </span>
+                )}
+                <ChevronDown
+                  className={isSearchProgressExpanded ? 'is-expanded' : ''}
+                  aria-hidden
+                />
+              </button>
+              {isSearchProgressExpanded && (
+                <div className="video-live__search-progress-detail">
+                  {visibleSearchProgress.query && (
+                    <div className="video-live__search-progress-query">
+                      <Search aria-hidden />
+                      <span>{visibleSearchProgress.query}</span>
+                    </div>
+                  )}
+                  <ol>
+                    {visibleSearchProgress.progress.map((entry) => (
+                      <li className={`is-${entry.status}`} key={`${entry.sequence}-${entry.stage}-${entry.tool_call_id || ''}`}>
+                        <span className="video-live__search-progress-step-icon">
+                          {entry.status === 'completed'
+                            ? <CheckCircle2 aria-hidden />
+                            : entry.status === 'failed'
+                              ? <XCircle aria-hidden />
+                              : <Circle aria-hidden />}
+                        </span>
+                        <div>
+                          <strong>{entry.title}</strong>
+                          {entry.detail && <p>{entry.detail}</p>}
+                        </div>
+                        {entry.elapsed_ms !== undefined && <time>{(entry.elapsed_ms / 1_000).toFixed(1)}s</time>}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+            </div>
+          )}
           {toolStatus && <div className="video-live__tool-status">{toolStatus}</div>}
 
           <form className="video-live__composer" onSubmit={(event) => void sendText(event)}>

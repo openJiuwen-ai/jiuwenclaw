@@ -13,6 +13,28 @@ export interface SearchJobPayload {
   error?: string;
   engine?: string;
   status?: 'running' | 'completed' | 'failed';
+  latency_ms?: number;
+  progress?: SearchProgressEntry;
+  progress_history?: SearchProgressEntry[];
+}
+
+export interface SearchProgressEntry {
+  stage: string;
+  title: string;
+  detail?: string;
+  status: 'running' | 'completed' | 'failed';
+  sequence: number;
+  elapsed_ms?: number;
+  tool_name?: string;
+  tool_call_id?: string;
+}
+
+export interface SearchProgressJob {
+  id: string;
+  query: string;
+  status: 'running' | 'completed' | 'failed';
+  latencyMs?: number;
+  progress: SearchProgressEntry[];
 }
 
 export interface SearchJobState {

@@ -430,6 +430,153 @@
   background: var(--fill-tertiary);
 }
 
+.video-live__search-progress {
+  border-top: 1px solid var(--color-border-default);
+  border-bottom: 1px solid var(--color-border-default);
+  background: var(--fill-tertiary);
+}
+
+.video-live__search-progress-toggle {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto 18px;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 46px;
+  padding: 7px 10px;
+  border: 0;
+  color: var(--color-text-primary);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.video-live__search-progress-toggle:hover {
+  background: var(--color-action-primary-subtle);
+}
+
+.video-live__search-progress-toggle > svg {
+  width: 17px;
+  height: 17px;
+  color: var(--color-text-secondary);
+  transition: transform 160ms ease;
+}
+
+.video-live__search-progress-toggle > svg.is-expanded {
+  transform: rotate(180deg);
+}
+
+.video-live__search-progress-icon,
+.video-live__search-progress-step-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-action-primary);
+}
+
+.video-live__search-progress-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.video-live__search-progress.is-failed .video-live__search-progress-icon,
+.video-live__search-progress-detail li.is-failed .video-live__search-progress-step-icon {
+  color: var(--color-feedback-danger);
+}
+
+.video-live__search-progress-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.video-live__search-progress-copy strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.video-live__search-progress-copy span {
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-live__search-progress-time {
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.video-live__search-progress-detail {
+  max-height: 250px;
+  padding: 0 10px 10px 39px;
+  overflow-y: auto;
+}
+
+.video-live__search-progress-query {
+  display: grid;
+  grid-template-columns: 15px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  margin-bottom: 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.video-live__search-progress-query svg {
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+}
+
+.video-live__search-progress-detail ol {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.video-live__search-progress-detail li {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 7px;
+  color: var(--color-text-secondary);
+}
+
+.video-live__search-progress-step-icon svg {
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+}
+
+.video-live__search-progress-detail li > div {
+  min-width: 0;
+}
+
+.video-live__search-progress-detail li strong {
+  display: block;
+  color: var(--color-text-primary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.video-live__search-progress-detail li p {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.video-live__search-progress-detail li time {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .video-live__realtime-status {
   padding: 8px 12px;
   color: var(--color-action-primary);

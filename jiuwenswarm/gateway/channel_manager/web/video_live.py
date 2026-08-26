@@ -848,6 +848,96 @@ async def _synthesize_speech(text: str) -> tuple[bytes, str, str]:
     return response.content, "audio/mpeg", model
 
 
+def _core_agent_text(value: Any, *, limit: int = 280) -> str:
+    if isinstance(value, str):
+        text = value
+    elif value is None:
+        return ""
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            text = str(value)
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit].rstrip()}..."
+
+
+def _core_agent_progress(payload: dict[str, Any]) -> dict[str, Any] | None:
+    event_type = str(payload.get("event_type") or "").strip()
+    if event_type == "chat.reasoning":
+        return {"stage": "reasoning", "title": "正在分析问题", "status": "running"}
+    if event_type == "chat.tool_call":
+        tool = payload.get("tool_call") if isinstance(payload.get("tool_call"), dict) else payload
+        name = str(
+            tool.get("display_name") or tool.get("name") or payload.get("tool_name") or "工具"
+        ).strip()
+        detail = _core_agent_text(tool.get("formatted_args") or tool.get("arguments"))
+        return {
+            "stage": "tool_call",
+            "title": f"调用工具：{name}",
+            "detail": detail,
+            "status": "running",
+            "tool_call_id": str(tool.get("id") or tool.get("tool_call_id") or ""),
+            "tool_name": name,
+        }
+    if event_type == "chat.tool_update":
+        update = payload.get("tool_update") if isinstance(payload.get("tool_update"), dict) else payload
+        name = str(update.get("tool_name") or update.get("name") or "工具").strip()
+        detail = _core_agent_text(update.get("beam_search") or update.get("progress"))
+        return {
+            "stage": "tool_update",
+            "title": f"{name} 正在执行",
+            "detail": detail,
+            "status": "running",
+            "tool_call_id": str(update.get("tool_call_id") or ""),
+            "tool_name": name,
+        }
+    if event_type == "chat.tool_result":
+        result = payload.get("tool_result") if isinstance(payload.get("tool_result"), dict) else payload
+        name = str(result.get("tool_name") or result.get("name") or "工具").strip()
+        raw_status = str(result.get("status") or "").strip().lower()
+        failed = result.get("success") is False or raw_status in {
+            "error", "failed", "failure", "timeout", "timed_out",
+        }
+        detail = _core_agent_text(
+            result.get("summary") or result.get("error") or result.get("result")
+        )
+        return {
+            "stage": "tool_result",
+            "title": f"{name}{'执行失败' if failed else '执行完成'}",
+            "detail": detail,
+            "status": "failed" if failed else "completed",
+            "tool_call_id": str(result.get("tool_call_id") or ""),
+            "tool_name": name,
+        }
+    if event_type == "todo.updated":
+        todos = payload.get("todos")
+        if not isinstance(todos, list) or not todos:
+            return None
+        completed = sum(
+            1 for item in todos
+            if isinstance(item, dict) and str(item.get("status") or "").lower() == "completed"
+        )
+        return {
+            "stage": "plan",
+            "title": "执行计划已更新",
+            "detail": f"{completed}/{len(todos)} 项已完成",
+            "status": "running",
+        }
+    if event_type == "chat.delta" and str(payload.get("content") or "").strip():
+        return {"stage": "answer", "title": "正在整理搜索结果", "status": "running"}
+    if event_type == "chat.error":
+        return {
+            "stage": "error",
+            "title": "Core Agent 执行失败",
+            "detail": _core_agent_text(payload.get("error") or payload.get("content")),
+            "status": "failed",
+        }
+    return None
+
+
 async def _execute_core_agent(
     agent_client: Any,
     *,
@@ -856,6 +946,7 @@ async def _execute_core_agent(
     visual_context: str,
     search_session_id: str,
     frame_data_url: str = "",
+    on_progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Run one video research job through the standard, full Core Agent API."""
     from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -898,14 +989,49 @@ async def _execute_core_agent(
         is_stream=False,
         timestamp=time.time(),
     )
-    response = await client.send_request(env)
-    payload = response.payload if isinstance(response.payload, dict) else {}
-    if not response.ok:
-        raise RuntimeError(str(payload.get("error") or "Jiuwen Core Agent failed"))
-    answer = str(payload.get("content") or payload.get("answer") or "").strip()
+    send_stream = getattr(client, "send_request_stream", None)
+    if not callable(send_stream):
+        response = await client.send_request(env)
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        if not response.ok:
+            raise RuntimeError(str(payload.get("error") or "Jiuwen Core Agent failed"))
+        answer = str(payload.get("content") or payload.get("answer") or "").strip()
+        if not answer:
+            raise RuntimeError("Jiuwen Core Agent returned empty output")
+        return {**payload, "answer": answer}
+
+    final_payload: dict[str, Any] = {}
+    delta_parts: list[str] = []
+    tools_used: list[str] = []
+    emitted_once: set[str] = set()
+    async for chunk in send_stream(env):
+        payload = chunk.payload if isinstance(chunk.payload, dict) else {}
+        event_type = str(payload.get("event_type") or "").strip()
+        if event_type == "chat.error":
+            raise RuntimeError(str(payload.get("error") or payload.get("content") or "Jiuwen Core Agent failed"))
+        content = str(payload.get("content") or "")
+        if event_type == "chat.delta" and content:
+            delta_parts.append(content)
+        elif event_type == "chat.final" and content.strip():
+            final_payload = payload
+        progress = _core_agent_progress(payload)
+        if progress is not None:
+            stage = str(progress.get("stage") or "")
+            tool_key = str(progress.get("tool_call_id") or "")
+            dedupe_key = f"{stage}:{tool_key}" if tool_key else stage
+            if stage in {"reasoning", "answer", "plan"} and dedupe_key in emitted_once:
+                continue
+            emitted_once.add(dedupe_key)
+            tool_name = str(progress.get("tool_name") or "").strip()
+            if tool_name and tool_name not in tools_used:
+                tools_used.append(tool_name)
+            if on_progress is not None:
+                await on_progress(progress)
+
+    answer = str(final_payload.get("content") or "").strip() or "".join(delta_parts).strip()
     if not answer:
         raise RuntimeError("Jiuwen Core Agent returned empty output")
-    return {**payload, "answer": answer}
+    return {**final_payload, "answer": answer, "tools_used": tools_used}
 
 
 def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> None:
@@ -932,6 +1058,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
         frame_data_url: str,
     ) -> None:
         started_at = time.perf_counter()
+        progress_history: list[dict[str, Any]] = []
         base_payload = {
             "job_id": job_id,
             "search_session_id": search_session_id,
@@ -940,10 +1067,43 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
             "engine": "Jiuwen Core Agent",
             "has_frame": bool(frame_data_url),
         }
-        search_jobs[job_id] = {**base_payload, "status": "running"}
+        async def emit_progress(progress: dict[str, Any]) -> None:
+            entry = {
+                **progress,
+                "sequence": len(progress_history) + 1,
+                "elapsed_ms": round((time.perf_counter() - started_at) * 1000),
+            }
+            progress_history.append(entry)
+            current = search_jobs.get(job_id, {})
+            search_jobs[job_id] = {
+                **current,
+                **base_payload,
+                "status": "running",
+                "progress_history": list(progress_history),
+            }
+            await _send_search_event(ws, "video.search.progress", {
+                **base_payload,
+                "status": "running",
+                "progress": entry,
+            })
+
+        start_progress = {
+            "stage": "started",
+            "title": "Core Agent 已开始处理",
+            "status": "running",
+            "sequence": 1,
+            "elapsed_ms": 0,
+        }
+        progress_history.append(start_progress)
+        search_jobs[job_id] = {
+            **base_payload,
+            "status": "running",
+            "progress_history": list(progress_history),
+        }
         await _send_search_event(ws, "video.search.started", {
             **base_payload,
             "status": "running",
+            "progress_history": list(progress_history),
         })
         await asyncio.to_thread(_append_video_task_log, {
             "stage": "search_started",
@@ -958,6 +1118,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
                     visual_context=visual_context,
                     search_session_id=search_session_id,
                     frame_data_url=frame_data_url,
+                    on_progress=emit_progress,
                 )
                 answer = core_result["answer"]
                 await asyncio.to_thread(_append_video_task_log, {
@@ -970,11 +1131,19 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
             if not answer:
                 raise RuntimeError("Jiuwen Core Agent returned empty output")
             latency_ms = round((time.perf_counter() - started_at) * 1000)
+            progress_history.append({
+                "stage": "completed",
+                "title": "Core Agent 已完成搜索",
+                "status": "completed",
+                "sequence": len(progress_history) + 1,
+                "elapsed_ms": latency_ms,
+            })
             completed_payload = {
                 **base_payload,
                 "status": "completed",
                 "result": answer,
                 "latency_ms": latency_ms,
+                "progress_history": list(progress_history),
             }
             search_jobs[job_id] = completed_payload
             await asyncio.to_thread(_append_video_task_log, {
@@ -985,11 +1154,20 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
         except Exception as exc:  # noqa: BLE001
             error = str(exc).strip() or "Jiuwen Core Agent failed"
             latency_ms = round((time.perf_counter() - started_at) * 1000)
+            progress_history.append({
+                "stage": "failed",
+                "title": "Core Agent 执行失败",
+                "detail": _core_agent_text(error),
+                "status": "failed",
+                "sequence": len(progress_history) + 1,
+                "elapsed_ms": latency_ms,
+            })
             failed_payload = {
                 **base_payload,
                 "status": "failed",
                 "error": error,
                 "latency_ms": latency_ms,
+                "progress_history": list(progress_history),
             }
             search_jobs[job_id] = failed_payload
             await asyncio.to_thread(_append_video_task_log, {

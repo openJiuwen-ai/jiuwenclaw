@@ -1522,15 +1522,46 @@ async def test_video_search_uses_full_core_agent_rpc(monkeypatch) -> None:
     requests = []
 
     class FakeAgentClient:
-        async def send_request(self, envelope):
+        async def send_request_stream(self, envelope):
             requests.append(envelope)
-            return SimpleNamespace(
-                ok=True,
+            yield SimpleNamespace(
+                payload={"event_type": "chat.reasoning", "content": "hidden"},
+                is_complete=False,
+            )
+            yield SimpleNamespace(
                 payload={
+                    "event_type": "chat.tool_call",
+                    "tool_call": {
+                        "id": "search-call",
+                        "name": "mcp_free_search",
+                        "arguments": {"query": "Luckin Coffee company profile"},
+                    },
+                },
+                is_complete=False,
+            )
+            yield SimpleNamespace(
+                payload={
+                    "event_type": "chat.tool_result",
+                    "tool_result": {
+                        "tool_call_id": "search-call",
+                        "tool_name": "mcp_free_search",
+                        "success": True,
+                        "summary": "找到可靠来源",
+                    },
+                },
+                is_complete=False,
+            )
+            yield SimpleNamespace(
+                payload={"event_type": "chat.delta", "content": "瑞幸咖啡是中国咖啡连锁品牌。"},
+                is_complete=False,
+            )
+            yield SimpleNamespace(
+                payload={
+                    "event_type": "chat.final",
                     "content": "瑞幸咖啡是中国咖啡连锁品牌。https://example.com/luckin",
-                    "tools_used": ["free_search", "fetch_webpage"],
                     "model": "default",
                 },
+                is_complete=True,
             )
 
     video_live.register_video_live_handler(channel, agent_client=FakeAgentClient())
@@ -1581,6 +1612,17 @@ async def test_video_search_uses_full_core_agent_rpc(monkeypatch) -> None:
     assert completed["job_id"] == job["id"]
     assert completed["engine"] == "Jiuwen Core Agent"
     assert "瑞幸咖啡" in completed["result"]
+    progress_events = [
+        payload for event, payload in channel.events
+        if event == "video.search.progress"
+    ]
+    assert [item["progress"]["stage"] for item in progress_events] == [
+        "reasoning", "tool_call", "tool_result", "answer",
+    ]
+    assert progress_events[0]["progress"]["title"] == "正在分析问题"
+    assert "hidden" not in str(progress_events)
+    assert progress_events[1]["progress"]["tool_name"] == "mcp_free_search"
+    assert completed["progress_history"][-1]["status"] == "completed"
 
 
 @pytest.mark.asyncio
