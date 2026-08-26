@@ -13,6 +13,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -145,10 +146,22 @@ def chat_text(client: Any, model: str, messages: list[dict[str, str]]) -> str:
     completion = client.chat.completions.create(model=model, messages=messages)
     content = completion.choices[0].message.content
     if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        return "\n".join(str(part) for part in content).strip()
-    return str(content).strip()
+        raw = content.strip()
+    elif isinstance(content, list):
+        raw = "\n".join(str(part) for part in content).strip()
+    else:
+        raw = str(content).strip()
+    return " ".join(raw.split())
+
+
+def require_parsed_message(completion: Any, output_name: str) -> Any:
+    message = completion.choices[0].message
+    parsed = message.parsed
+    if parsed is None:
+        refusal = getattr(message, "refusal", None)
+        detail = refusal or "structured output parsing failed"
+        raise ValueError(f"Generator model refused or failed to produce {output_name}: {detail}")
+    return parsed
 
 
 def generate_paraphrases(
@@ -178,7 +191,7 @@ def generate_paraphrases(
         ],
         response_format=ParaphraseResponse,
     )
-    parsed = completion.choices[0].message.parsed
+    parsed = require_parsed_message(completion, "paraphrases")
     return unique_items(parsed.paraphrases)
 
 
@@ -209,7 +222,7 @@ def generate_distractors(
         ],
         response_format=DistractorResponse,
     )
-    parsed = completion.choices[0].message.parsed
+    parsed = require_parsed_message(completion, "distractors")
     return unique_items(parsed.distractors, forbidden={normalize_answer(request.answer)})
 
 
@@ -352,6 +365,27 @@ def run_trustscore(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def self_test_result() -> dict[str, Any]:
+    class FakeCompletions:
+        @staticmethod
+        def create(**_kwargs: Any) -> SimpleNamespace:
+            message = SimpleNamespace(content="Barack\nObama")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    multiline_answer = chat_text(fake_client, "fake-model", [])
+    if multiline_answer != "Barack Obama":
+        raise ValueError("Self-test failed: chat_text did not normalize multiline answers.")
+
+    fake_message = SimpleNamespace(parsed=None, refusal="blocked")
+    fake_completion = SimpleNamespace(choices=[SimpleNamespace(message=fake_message)])
+    try:
+        require_parsed_message(fake_completion, "paraphrases")
+    except ValueError as exc:
+        if "paraphrases: blocked" not in str(exc):
+            raise ValueError("Self-test failed: parsed refusal detail was not preserved.") from exc
+    else:
+        raise ValueError("Self-test failed: parsed None did not raise ValueError.")
+
     mcq_questions = [
         "\n".join(
             [
