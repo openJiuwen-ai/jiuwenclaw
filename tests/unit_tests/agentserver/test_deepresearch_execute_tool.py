@@ -83,25 +83,6 @@ async def _invoke(
 
 
 @pytest.mark.asyncio
-async def test_missing_detail_interrupts_before_sdk_start():
-    with patch.object(de, "_call_deepresearch_stream_impl", new=AsyncMock()) as stream:
-        result, saved = await _invoke()
-
-    assert result["kind"] == "interaction"
-    assert result["interaction"]["questions"][0]["header"] == "报告详略度"
-    assert result["interaction"]["questions"][0]["question"] == (
-        "您希望这份报告是通用版还是专业版？"
-    )
-    assert result["interaction"]["questions"][0]["options"] == [
-        {"label": "专业版（包含深度分析和详细评测）"},
-        {"label": "通用版（仅包含核心结论和快速对比）"},
-    ]
-    assert result["state"]["phase"] == "wait_report_detail"
-    assert saved[-1]["phase"] == "wait_report_detail"
-    stream.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_missing_query_fails_before_sdk_start():
     with patch.object(de, "_call_deepresearch_stream_impl", new=AsyncMock()) as stream:
         result, saved = await _invoke(query="   ")
@@ -136,128 +117,7 @@ async def test_runner_error_preserves_bounded_subprocess_diagnostics():
 
 
 @pytest.mark.asyncio
-async def test_detail_answer_starts_sdk_and_preserves_sdk_questions():
-    state = {
-        "schema_version": 1,
-        "phase": "wait_report_detail",
-        "query": "研究智能家电竞争格局",
-        "file_name": "智能家电报告",
-        "revision": 1,
-    }
-    questions = ["重点研究哪些品类？", "覆盖哪些市场？", "报告用于什么决策？"]
-    outcome = {
-        "status": "interrupted",
-        "conversation_id": "conversation-1",
-        "node_id": "feedback_handler",
-        "marker": {"questions": "\n".join(f"{i}. {q}" for i, q in enumerate(questions, 1))},
-    }
-    model = _Model(_option_payload(*questions))
-    answer = {
-        "status": "answered",
-        "answers": [{"selected_options": ["专业版（包含深度分析和详细评测）"]}],
-    }
-
-    with patch.object(
-        de,
-        "_call_deepresearch_stream_impl",
-        new=AsyncMock(return_value=json.dumps(outcome, ensure_ascii=False)),
-    ) as stream:
-        result, saved = await _invoke(state=state, user_input=answer, model=model)
-
-    assert [item["question"] for item in result["interaction"]["questions"]] == questions
-    assert all(len(item["options"]) == 2 for item in result["interaction"]["questions"])
-    assert result["state"]["phase"] == "wait_feedback"
-    assert saved[0]["phase"] == "starting"
-    stream.assert_awaited_once()
-    assert stream.await_args.kwargs["action"] == "start"
-    assert "请生成专业版报告" in stream.await_args.kwargs["query"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "selected_option",
-    [
-        "通用版（仅包含核心结论和快速对比）",
-        "精简版（仅包含核心结论和快速对比）",
-    ],
-)
-async def test_general_and_legacy_brief_detail_answers_map_to_brief_sdk_query(
-    selected_option,
-):
-    state = {
-        "schema_version": 1,
-        "phase": "wait_report_detail",
-        "query": "研究智能家电竞争格局",
-        "file_name": "智能家电报告",
-        "revision": 1,
-    }
-    completed = {
-        "status": "completed",
-        "conversation_id": "conversation-1",
-        "report_delivered": True,
-        "report_chars": 42,
-    }
-    answer = {
-        "status": "answered",
-        "answers": [{"selected_options": [selected_option]}],
-    }
-
-    with patch.object(
-        de,
-        "_call_deepresearch_stream_impl",
-        new=AsyncMock(return_value=json.dumps(completed, ensure_ascii=False)),
-    ) as stream:
-        result, _ = await _invoke(state=state, user_input=answer)
-
-    assert result["kind"] == "completed"
-    assert stream.await_args.kwargs["query"] == (
-        "研究智能家电竞争格局（请生成精简版报告）"
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("terminal_status", ["cancelled", "error"])
-async def test_terminal_report_detail_stops_without_starting_sdk(terminal_status):
-    state = {
-        "schema_version": 1,
-        "phase": "wait_report_detail",
-        "query": "研究智能家电竞争格局",
-        "file_name": "智能家电报告",
-        "revision": 1,
-    }
-
-    with patch.object(de, "_call_deepresearch_stream_impl", new=AsyncMock()) as stream:
-        result, saved = await _invoke(
-            state=state,
-            user_input={"status": terminal_status, "answers": []},
-        )
-
-    assert result["kind"] == terminal_status
-    assert saved[-1]["phase"] == terminal_status
-    stream.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_invalid_report_detail_stops_without_starting_sdk():
-    state = {
-        "schema_version": 1,
-        "phase": "wait_report_detail",
-        "query": "研究智能家电竞争格局",
-        "file_name": "智能家电报告",
-        "revision": 1,
-    }
-
-    with patch.object(de, "_call_deepresearch_stream_impl", new=AsyncMock()) as stream:
-        result, saved = await _invoke(state=state, user_input="not-json")
-
-    assert result["kind"] == "error"
-    assert result["error_code"] == "interaction_invalid"
-    assert saved[-1]["phase"] == "error"
-    stream.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_explicit_detail_query_starts_without_detail_card():
+async def test_new_query_starts_sdk_directly():
     completed = {
         "status": "completed",
         "conversation_id": "conversation-1",
@@ -269,7 +129,7 @@ async def test_explicit_detail_query_starts_without_detail_card():
         "_call_deepresearch_stream_impl",
         new=AsyncMock(return_value=json.dumps(completed, ensure_ascii=False)),
     ) as stream:
-        result, saved = await _invoke(query="请生成一份详细的智能家电竞争报告")
+        result, saved = await _invoke(query="研究智能家电竞争格局")
 
     assert result["kind"] == "completed"
     assert saved[0]["phase"] == "starting"
@@ -278,13 +138,6 @@ async def test_explicit_detail_query_starts_without_detail_card():
 
 @pytest.mark.asyncio
 async def test_invalid_option_generation_retries_then_keeps_free_text_questions():
-    state = {
-        "schema_version": 1,
-        "phase": "wait_report_detail",
-        "query": "研究智能家电竞争格局",
-        "file_name": "智能家电报告",
-        "revision": 1,
-    }
     questions = ["重点研究哪些品类？", "覆盖哪些市场？"]
     outcome = {
         "status": "interrupted",
@@ -293,14 +146,13 @@ async def test_invalid_option_generation_retries_then_keeps_free_text_questions(
         "marker": {"questions": "\n".join(questions)},
     }
     model = _Model("not-json")
-    answer = {"status": "skipped", "answers": []}
 
     with patch.object(
         de,
         "_call_deepresearch_stream_impl",
         new=AsyncMock(return_value=json.dumps(outcome, ensure_ascii=False)),
     ):
-        result, _ = await _invoke(state=state, user_input=answer, model=model)
+        result, _ = await _invoke(model=model)
 
     assert [item["question"] for item in result["interaction"]["questions"]] == questions
     assert [item["options"] for item in result["interaction"]["questions"]] == [[], []]
@@ -518,7 +370,7 @@ async def test_feedback_answer_resumes_once_and_returns_direct_completion():
     state = {
         "schema_version": 1,
         "phase": "wait_feedback",
-        "query": "研究智能家电竞争格局（请生成专业版报告）",
+        "query": "研究智能家电竞争格局",
         "file_name": "智能家电报告",
         "conversation_id": "conversation-1",
         "questions": ["重点研究哪些品类？"],
@@ -578,7 +430,7 @@ async def test_terminal_result_preserves_all_sdk_timing_windows():
     state = {
         "schema_version": 1,
         "phase": "wait_outline",
-        "query": "研究智能家电竞争格局（请生成专业版报告）",
+        "query": "研究智能家电竞争格局",
         "file_name": "智能家电报告",
         "conversation_id": "conversation-1",
         "outline_presented": True,
@@ -798,18 +650,18 @@ def _rail_ctx(*, result, session=None, resume_input=None, tool_call_id="call-1")
 
 @pytest.mark.asyncio
 async def test_execution_rail_turns_interaction_result_into_native_interrupt():
-    state = {"schema_version": 1, "phase": "wait_report_detail", "revision": 1}
+    state = {"schema_version": 1, "phase": "wait_feedback", "revision": 1}
     result = {
         "schema_version": de.EXECUTION_SCHEMA,
         "kind": "interaction",
         "interaction": {
-            "query": "请选择",
+            "query": "请回答以下研究主题澄清问题",
             "return_json": True,
             "questions": [
                 {
-                    "header": "报告详略度",
-                    "question": "通用版还是专业版？",
-                    "options": [{"label": "专业版"}, {"label": "通用版"}],
+                    "header": "研究方向反馈",
+                    "question": "重点研究哪些品类？",
+                    "options": [{"label": "方向A"}, {"label": "方向B"}],
                 }
             ],
         },
@@ -884,53 +736,33 @@ async def test_same_outer_tool_call_survives_multiple_native_interrupts():
     session = _Session()
     rail = DeepResearchExecutionRail(model_provider=lambda: None)
 
-    first = _rail_ctx(result=None, session=session)
-    await rail.before_tool_call(first)
-    first.inputs.tool_result = await de.deepresearch_execute._func(
-        query="研究智能家电竞争格局",
-        file_name="智能家电报告",
-    )
-    await rail.after_tool_call(first)
-    assert isinstance(first.inputs.tool_result, ToolInterruptException)
-    first_interaction_id = first.inputs.tool_result.tool_call.id
-    assert first_interaction_id != "call-1"
-    assert session.state[DEEPRESEARCH_EXECUTION_STATE_KEY]["call-1"]["phase"] == (
-        "wait_report_detail"
-    )
-
     sdk_questions = {
         "status": "interrupted",
         "conversation_id": "conversation-1",
         "node_id": "feedback_handler",
         "marker": {"questions": "1. 重点研究哪些品类？"},
     }
-    detail_answer = {
-        "status": "answered",
-        "answers": [{"selected_options": ["专业版（包含深度分析和详细评测）"]}],
-    }
-    second = _rail_ctx(
-        result=None,
-        session=session,
-        resume_input=detail_answer,
-        tool_call_id=first_interaction_id,
-    )
-    await rail.before_tool_call(second)
+
+    first = _rail_ctx(result=None, session=session)
+    await rail.before_tool_call(first)
     start_sdk = AsyncMock(return_value=json.dumps(sdk_questions, ensure_ascii=False))
     with patch.object(
         de,
         "_call_deepresearch_stream_impl",
         new=start_sdk,
     ):
-        second.inputs.tool_result = await de.deepresearch_execute._func(
+        first.inputs.tool_result = await de.deepresearch_execute._func(
             query="研究智能家电竞争格局",
             file_name="智能家电报告",
         )
-    assert "请生成专业版报告" in start_sdk.await_args.kwargs["query"]
-    await rail.after_tool_call(second)
-    assert isinstance(second.inputs.tool_result, ToolInterruptException)
-    second_interaction_id = second.inputs.tool_result.tool_call.id
-    assert second_interaction_id not in {"call-1", first_interaction_id}
-    assert second.inputs.tool_result.request.questions[0]["question"] == (
+    await rail.after_tool_call(first)
+    assert isinstance(first.inputs.tool_result, ToolInterruptException)
+    first_interaction_id = first.inputs.tool_result.tool_call.id
+    assert first_interaction_id != "call-1"
+    assert session.state[DEEPRESEARCH_EXECUTION_STATE_KEY]["call-1"]["phase"] == (
+        "wait_feedback"
+    )
+    assert first.inputs.tool_result.request.questions[0]["question"] == (
         "重点研究哪些品类？"
     )
 
@@ -949,25 +781,25 @@ async def test_same_outer_tool_call_survives_multiple_native_interrupts():
         "report_delivered": True,
         "report_chars": 321,
     }
-    third = _rail_ctx(
+    second = _rail_ctx(
         result=None,
         session=session,
         resume_input=feedback_answer,
-        tool_call_id=second_interaction_id,
+        tool_call_id=first_interaction_id,
     )
-    await rail.before_tool_call(third)
+    await rail.before_tool_call(second)
     with patch.object(
         de,
         "_call_deepresearch_stream_impl",
         new=AsyncMock(return_value=json.dumps(completed, ensure_ascii=False)),
     ):
-        third.inputs.tool_result = await de.deepresearch_execute._func(
+        second.inputs.tool_result = await de.deepresearch_execute._func(
             query="研究智能家电竞争格局",
             file_name="智能家电报告",
         )
-    await rail.after_tool_call(third)
+    await rail.after_tool_call(second)
 
-    assert third.force_finish_requests[0]["result_type"] == "answer"
-    assert "321" in third.force_finish_requests[0]["output"]
+    assert second.force_finish_requests[0]["result_type"] == "answer"
+    assert "321" in second.force_finish_requests[0]["output"]
     assert session.state[DEEPRESEARCH_EXECUTION_STATE_KEY] == {}
     assert session.state[DEEPRESEARCH_EXECUTION_ALIAS_KEY] == {}
