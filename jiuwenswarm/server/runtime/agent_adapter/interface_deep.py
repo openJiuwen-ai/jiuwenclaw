@@ -8442,6 +8442,15 @@ class JiuWenSwarmDeepAdapter:
             finally:
                 self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
 
+            # configure() 把旧 rail 移入 _stale_rails、新 rail 入 _pending_rails 并
+            # 置 _initialized=False，但真正的换装（unregister stale + init pending
+            # 进 dispatch 列表）在 _ensure_initialized 中懒触发，其入口仅在
+            # invoke/stream。office 服务路径不走 invoke/stream，导致换装永不执行、
+            # 旧 SkillUseRail 继续服务、新装 skill 对运行中会话不可见。此处显式
+            # 触发换装，与创建期 ensure_initialized() 调用一致；_needs_workspace_init
+            # 守卫重 init，已初始化的工作区不会重建，无长阻塞。
+            await self._instance.ensure_initialized()
+
             first_unregister_error: Exception | None = None
             rail_cache_attrs = (
                 "_progressive_tool_rail",
