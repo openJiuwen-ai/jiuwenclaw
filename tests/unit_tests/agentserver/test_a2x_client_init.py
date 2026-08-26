@@ -529,7 +529,7 @@ def test_make_deep_agent_config_resolves_completion_timeout(
     assert deep_cfg.completion_timeout == expected_timeout
 
 
-def test_make_deep_agent_config_disables_read_image_multimodal_with_vision_model(
+def test_make_deep_agent_config_leaves_read_image_multimodal_auto_with_vision_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = JiuWenSwarmDeepAdapter()
@@ -554,7 +554,8 @@ def test_make_deep_agent_config_disables_read_image_multimodal_with_vision_model
             rails=[],
         )
 
-    assert deep_cfg.enable_read_image_multimodal is False
+    # None means auto: agent-core resolves it from the image modality probe.
+    assert deep_cfg.enable_read_image_multimodal is None
 
 
 @pytest.mark.asyncio

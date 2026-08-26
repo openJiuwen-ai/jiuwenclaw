@@ -64,6 +64,10 @@ from openjiuwen.harness.factory import (
     _inject_general_purpose_subagent,
     create_deep_agent,
 )
+from openjiuwen.harness.image_modality_probe import (
+    get_cached_image_support,
+    schedule_image_support_probe,
+)
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
     ModelAnomalyDetectionRail,
@@ -4630,42 +4634,27 @@ class JiuWenSwarmDeepAdapter:
             notice["model_name"] = model_name
         return notice
 
-    @staticmethod
-    def _native_image_support_from_model_name(model_name: str) -> bool | None:
-        normalized = model_name.strip().lower()
-        if not normalized:
-            return None
-
-        if re.search(r"(?:^|[/_:-])glm-[0-9]+(?:\.[0-9]+)*(?:$|[/_:-])", normalized):
-            return False
-        if re.search(r"(?:^|[/_:-])glm-[^/]*v(?:$|[/_.:-])", normalized):
-            return True
-        if any(token in normalized for token in ("vision", "vl", "omni")):
-            return True
-        return None
-
     def _native_image_input_enabled(self, config: dict[str, Any], model: Any | None) -> bool:
-        model_config = getattr(model, "model_config", None)
-        model_name = str(getattr(model_config, "model_name", "") or "").strip()
-        support = self._native_image_support_from_model_name(model_name)
-        if support is False:
-            return False
         configured = config.get("enable_read_image_multimodal")
         if isinstance(configured, bool):
             return configured
-        if support is True:
-            return True
+        if model is not None:
+            support = get_cached_image_support(model)
+            if support is not None:
+                return support
+            schedule_image_support_probe(model)
+        # No verdict yet: caption via the vision model when one is configured,
+        # otherwise attempt native input.
         return self._vision_model_config is None
 
-    def _resolve_enable_read_image_multimodal(
-        self,
-        config: dict[str, Any],
-    ) -> bool | None:
+    @staticmethod
+    def _resolve_enable_read_image_multimodal(config: dict[str, Any]) -> bool | None:
         configured = config.get("enable_read_image_multimodal")
         if isinstance(configured, bool):
             return configured
-        if self._vision_model_config is not None:
-            return False
+        # None means auto: agent-core resolves it from the image modality
+        # probe on each run, keeping the rail and read_file consistent with
+        # _native_image_input_enabled.
         return None
 
     def _apply_model_to_react_agent(self, model: Model) -> None:
