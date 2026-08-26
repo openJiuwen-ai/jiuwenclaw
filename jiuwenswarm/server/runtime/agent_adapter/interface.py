@@ -1364,6 +1364,9 @@ class JiuWenSwarm:
             for d in raw_trusted_dirs:
                 if isinstance(d, str) and d.strip():
                     trusted_dirs.append(d.strip())
+        # 显式传入快照：仅这部分进用户消息；开关兜底注入只服务权限轨，不进用户消息，
+        # 避免模型把亲缘路径当越界、用聊天文本代替系统审批卡。
+        explicit_trusted_dirs = list(trusted_dirs)
         # 用户选中的 skill 名列表（前端从 content 提取，如 /doc /review）。
         # 若提供，build_user_prompt 直接用作 skills_to_use、且不剥离 content。
         skills: list[str] | None = None
@@ -1380,7 +1383,8 @@ class JiuWenSwarm:
             if isinstance(metadata_project_dir, str) and metadata_project_dir.strip()
             else None
         )
-        # 未显式传 trusted_dirs 时，若 workspace.read 已开为 allow 则注入 project_dir
+        # 未显式传 trusted_dirs 时，若 workspace.read 已开为 allow 则为权限轨注入 project_dir。
+        # 仅注入权限轨（file_guard 免审批），不进用户消息。
         if not trusted_dirs and project_dir:
             try:
                 ws_trusted = get_permissions_file_guard_workspace_access().get("read") == "allow"
@@ -1438,7 +1442,7 @@ class JiuWenSwarm:
                         files=params.get("files", {}),
                         channel=channel,
                         language=language,
-                        trusted_dirs=trusted_dirs,
+                        trusted_dirs=explicit_trusted_dirs,
                         metadata=request.metadata,
                         skills=skills,
                         supplementary_info=supplementary,
@@ -1449,7 +1453,7 @@ class JiuWenSwarm:
                     files=params.get("files", {}),
                     channel=channel,
                     language=language,
-                    trusted_dirs=trusted_dirs,
+                    trusted_dirs=explicit_trusted_dirs,
                     metadata=request.metadata,
                     skills=skills,
                     supplementary_info=supplementary,
