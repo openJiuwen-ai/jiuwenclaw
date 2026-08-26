@@ -127,23 +127,23 @@ def _resolve_active_is_code_agent(ctx, channel_id: str) -> bool:
     return bool(getattr(adapter, "_is_code_agent", False))
 
 
-def _allocate_internal_jiuwenbox_port(
-    ctx,
+def allocate_internal_jiuwenbox_port(
+    services,
     host: str,
     preferred_port: int,
 ) -> int:
     """internal 模式下确定 jiuwenbox 实际监听端口。
 
-        - 若本 runner 已经在 ``host:preferred_port`` 上拥有一个仍在跑的 jiuwenbox,
-          直接复用 (避免重复 spawn);
-        - 否则若 ``preferred_port`` 当前无人占用, 用之;
-        - 再否则让内核挑一个空闲端口返回。
-        """
-    if ctx.services.jiuwenbox_runner.is_owned_listener(host, preferred_port):
+    - 若本 runner 已经在 ``host:preferred_port`` 上拥有一个仍在跑的 jiuwenbox,
+      直接复用 (避免重复 spawn);
+    - 否则若 ``preferred_port`` 当前无人占用, 用之;
+    - 再否则让内核挑一个空闲端口返回。
+    """
+    if services.jiuwenbox_runner.is_owned_listener(host, preferred_port):
         return preferred_port
-    if ctx.services.is_tcp_port_bindable(host, preferred_port):
+    if services.is_tcp_port_bindable(host, preferred_port):
         return preferred_port
-    new_port = ctx.services.pick_free_tcp_port(host)
+    new_port = services.pick_free_tcp_port(host)
     logger.warning(
         "[command.sandbox] preferred port %s:%d is busy; "
         "allocating fresh port %d for new jiuwenbox instance",
@@ -221,7 +221,7 @@ async def _apply_sandbox_runtime_patch(
         logger.warning("[command.sandbox] apply_sandbox_runtime_patch failed: %s", exc)
 
 
-def _parse_sandbox_host_port(url: str) -> tuple[str, int]:
+def parse_sandbox_host_port(url: str) -> tuple[str, int]:
     """从 sandbox url 解析 host:port; 默认 127.0.0.1:8321."""
     from urllib.parse import urlparse
     try:
@@ -288,9 +288,9 @@ async def _handle_sandbox_enable(ctx, channel_id: str) -> dict[str, Any]:
     # 2. 解析 host:port 并 (internal 模式下) 完成端口分配。
     # external 模式: 直接用配置里的 url, 由用户保证 jiuwenbox 监听在此处。
     # internal 模式: 期望端口被占就换一个随机空闲端口, 不去探测占用方是谁。
-    host, preferred_port = _parse_sandbox_host_port(url)
+    host, preferred_port = parse_sandbox_host_port(url)
     if startup_mode == "internal":
-        port = _allocate_internal_jiuwenbox_port(ctx, host, preferred_port)
+        port = allocate_internal_jiuwenbox_port(ctx.services, host, preferred_port)
         if port != preferred_port:
             # 端口换过, 同步刷新 url 以便后续落盘 / 透传给前端
             url = f"http://{host}:{port}"
@@ -647,7 +647,7 @@ async def _attach_landlock_status(ctx, payload: dict[str, Any]) -> None:
             port = int(jb["port"])
         else:
             url = endpoint.get("url") or "http://127.0.0.1:8321"
-            host, port = _parse_sandbox_host_port(url)
+            host, port = parse_sandbox_host_port(url)
         health = await ctx.services.jiuwenbox_runner.fetch_health(host, port)
         landlock_supported = bool(health.get("landlock_supported")) if health else False
         policy_file = endpoint.get("policy_file") or DEFAULT_SANDBOX_POLICY_FILE

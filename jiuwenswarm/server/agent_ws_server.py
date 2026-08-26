@@ -665,7 +665,8 @@ class AgentWebSocketServer:
         self._server: Any = None
         # send_push的推送订阅者统一由PushRegistry持有，本类不持有当前连接；
         # WS侧以固定id：`WS_PUSH_SUBSCRIBER_ID`注册。
-        self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
+        # key是``_ws_capabilities_key``返回的str(id(ws))，与RequestContext.connection_id
+        self._acp_client_capabilities_by_ws: dict[str, dict[str, Any]] = {}
         # AgentManager 实例（企业多租户入口见 TenantAgentPool，按 AGENT_RUNTIME 使用）
         self._agent_manager = AgentManager()
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
@@ -899,8 +900,15 @@ class AgentWebSocketServer:
                 )
                 return
 
-            host, preferred_port = self._parse_sandbox_host_port(url)
-            port = self._allocate_internal_jiuwenbox_port(host, preferred_port)
+            from jiuwenswarm.server.handlers.sandbox import (
+                allocate_internal_jiuwenbox_port,
+                parse_sandbox_host_port,
+            )
+
+            host, preferred_port = parse_sandbox_host_port(url)
+            port = allocate_internal_jiuwenbox_port(
+                AgentServerServices(self), host, preferred_port
+            )
             if port != preferred_port:
                 url = f"http://{host}:{port}"
                 logger.info(
