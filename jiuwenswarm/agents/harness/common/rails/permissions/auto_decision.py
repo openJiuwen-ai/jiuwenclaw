@@ -425,25 +425,27 @@ def terminal_low_risk_route(
     """Return the closed low-risk path-read route before base ASK."""
     if deterministic_guard_route(facts) is not None:
         return None
-    if (
-        facts.tool_name not in _STRUCTURED_WORKSPACE_READ_TOOLS
-        or facts.capability.facts_source != "host_static"
-        or facts.capability.alias_conflict
-        or not facts.arguments_valid_object
-        or facts.capability.category != "path"
-        or facts.capability.operation_family != "workspace_read"
-        or facts.capability.risk_tier != "low"
-        or facts.capability.high_flex
-        or facts.capability.static_side_effects
-        or facts.external_paths
-        or facts.write_paths
-        or not facts.accesses_known
-        or structured_read_guard_level not in {"allow", "neutral"}
-        or not (
-            policy_level == ALLOW_LEVEL
-            or (policy_level == ASK_LEVEL and default_ask)
+    unsupported_facts = any(
+        (
+            facts.tool_name not in _STRUCTURED_WORKSPACE_READ_TOOLS,
+            facts.capability.facts_source != "host_static",
+            facts.capability.alias_conflict,
+            not facts.arguments_valid_object,
+            facts.capability.category != "path",
+            facts.capability.operation_family != "workspace_read",
+            facts.capability.risk_tier != "low",
+            facts.capability.high_flex,
+            facts.capability.static_side_effects,
+            bool(facts.external_paths),
+            bool(facts.write_paths),
+            not facts.accesses_known,
+            structured_read_guard_level not in {"allow", "neutral"},
         )
-    ):
+    )
+    policy_allows = policy_level == ALLOW_LEVEL or (
+        policy_level == ASK_LEVEL and default_ask
+    )
+    if unsupported_facts or not policy_allows:
         return None
     try:
         if facts.tool_name == "lsp":

@@ -168,11 +168,11 @@ class SessionArtifactPathProvenance:
 
         protected_roots = _protected_roots(root, excluded_paths)
         grounded_workdir = _safe_effective_workdir(root, effective_workdir)
-        canonical_accesses = {
-            path.as_posix()
-            for raw_path in access_paths
-            if (path := _canonical_regular_file(raw_path, root=root)) is not None
-        }
+        canonical_accesses: set[str] = set()
+        for raw_path in access_paths:
+            path = _canonical_regular_file(raw_path, root=root)
+            if path is not None:
+                canonical_accesses.add(path.as_posix())
         texts = tuple(str(value) for value in grounding_texts if str(value))
         relevant: list[str] = []
         stale: list[str] = []

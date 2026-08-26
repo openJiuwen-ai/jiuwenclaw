@@ -171,7 +171,7 @@ def _effective_workdir(
         if len(relative.encode("utf-8")) > 1024:
             return ""
         return relative
-    except (OSError, RuntimeError, TypeError, UnicodeEncodeError, ValueError):
+    except (OSError, RuntimeError, TypeError, ValueError):
         return ""
 
 

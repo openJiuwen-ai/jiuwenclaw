@@ -997,17 +997,22 @@ def _parse_artifact_paths(raw_paths: Any) -> tuple[str, ...] | None:
         except UnicodeEncodeError:
             return None
         total_bytes += encoded_size
-        if (
-            not path
-            or encoded_size > AUTO_REVIEW_ARTIFACT_PATH_MAX_BYTES
-            or total_bytes > AUTO_REVIEW_ARTIFACT_PATHS_MAX_BYTES
-            or path.startswith(("/", "\\", "~", "$"))
-            or path.endswith("/")
-            or "\\" in path
-            or "//" in path
-            or any(character in path for character in "*?[]{}\x00\r\n")
-            or any(not character.isprintable() for character in path)
-        ):
+        within_limits = (
+            bool(path)
+            and encoded_size <= AUTO_REVIEW_ARTIFACT_PATH_MAX_BYTES
+            and total_bytes <= AUTO_REVIEW_ARTIFACT_PATHS_MAX_BYTES
+        )
+        relative_path = (
+            not path.startswith(("/", "\\", "~", "$"))
+            and not path.endswith("/")
+            and "\\" not in path
+        )
+        clean_path = (
+            "//" not in path
+            and not any(character in path for character in "*?[]{}\x00\r\n")
+            and all(character.isprintable() for character in path)
+        )
+        if not within_limits or not relative_path or not clean_path:
             return None
         components = path.split("/")
         if any(component in {"", ".", ".."} for component in components):

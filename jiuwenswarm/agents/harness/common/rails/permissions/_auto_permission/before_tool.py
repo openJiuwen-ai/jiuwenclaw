@@ -275,17 +275,20 @@ class AutoPermissionBeforeToolMixin:
                 facts=facts,
                 decision_source=decision_source,
             )
-            if (
+            is_background_shell = facts.tool_name == "bash" and bool(
+                facts.untrusted_args.get("run_in_background", False)
+            )
+            is_grounded_execution = facts.tool_category != "shell" or bool(
+                facts.effective_workdir
+            )
+            should_publish_artifact_candidate = (
                 self.session_artifact_paths is not None
                 and classify_permission_result(result) == "allow"
-                and not (
-                    facts.tool_name == "bash"
-                    and bool(facts.untrusted_args.get("run_in_background", False))
-                )
-                and (
-                    facts.tool_category != "shell"
-                    or bool(facts.effective_workdir)
-                )
+            )
+            if (
+                should_publish_artifact_candidate
+                and not is_background_shell
+                and is_grounded_execution
             ):
                 publish_artifact_candidate_state(
                     invocation.ctx,
