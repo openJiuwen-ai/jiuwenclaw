@@ -93,9 +93,7 @@ def assert_jiuwenclaw_id_matches(jiuwenclaw_id: str) -> str:
         )
     jid = registered or jiuwenclaw_id
     if not jid:
-        raise ValueError(
-            "jiuwenclaw_id is not set; manager ws register.ack required"
-        )
+        raise ValueError("jiuwenclaw_id is not set; set JIUWENCLAW_ID or use /register")
     return jid
 
 
