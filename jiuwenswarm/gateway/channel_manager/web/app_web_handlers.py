@@ -1624,6 +1624,122 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("a2a.ingress.disable", _a2a_ingress_disable)
     channel.register_method("a2a.ingress.reload", _a2a_ingress_reload)
 
+    async def _send_a2a_outbound(ws, req_id, operation) -> None:
+        if a2a_manager is None or not a2a_manager.outbound_available:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="A2A 出站管理服务当前不可用。",
+                code="A2A_OUTBOUND_STORE_INVALID",
+            )
+            return
+        try:
+            payload = await operation()
+        except Exception as exc:  # noqa: BLE001
+            from jiuwenswarm.gateway.a2a_manager.outbound import (
+                A2AOutboundError,
+                A2AOutboundErrorCode,
+                safe_error_summary,
+            )
+
+            if isinstance(exc, A2AOutboundError):
+                code = exc.code.value
+                error = exc.summary
+            else:
+                code = A2AOutboundErrorCode.STORE_INVALID.value
+                error = safe_error_summary(A2AOutboundErrorCode.STORE_INVALID)
+            await channel.send_response(
+                ws, req_id, ok=False, error=error, code=code
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _a2a_outbound_discover(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_discover(
+                str(params.get("url") or ""),
+                str(params["card_path"]) if params.get("card_path") is not None else None,
+            ),
+        )
+
+    async def _a2a_outbound_register(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws, req_id, lambda: a2a_manager.outbound_register(dict(params))
+        )
+
+    async def _a2a_outbound_list(ws, req_id, params, session_id):
+        await _send_a2a_outbound(ws, req_id, a2a_manager.outbound_list)
+
+    async def _a2a_outbound_get(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws, req_id, lambda: a2a_manager.outbound_get(str(params.get("agent_id") or ""))
+        )
+
+    async def _a2a_outbound_update(ws, req_id, params, session_id):
+        payload = dict(params)
+        agent_id = str(payload.pop("agent_id", ""))
+        await _send_a2a_outbound(
+            ws, req_id, lambda: a2a_manager.outbound_update(agent_id, payload)
+        )
+
+    async def _a2a_outbound_refresh(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws, req_id, lambda: a2a_manager.outbound_refresh(str(params.get("agent_id") or ""))
+        )
+
+    async def _a2a_outbound_confirm_revision(ws, req_id, params, session_id):
+        accept = params.get("accept")
+        if not isinstance(accept, bool):
+            from jiuwenswarm.gateway.a2a_manager.outbound import (
+                A2AOutboundErrorCode,
+                safe_error_summary,
+            )
+
+            code = A2AOutboundErrorCode.STORE_INVALID
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=safe_error_summary(code),
+                code=code.value,
+            )
+            return
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_confirm_revision(
+                str(params.get("agent_id") or ""),
+                accept=accept,
+            ),
+        )
+
+    async def _a2a_outbound_delete(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws, req_id, lambda: a2a_manager.outbound_delete(str(params.get("agent_id") or ""))
+        )
+
+    async def _a2a_outbound_dispatch_get(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_dispatch_get(str(params.get("dispatch_id") or "")),
+        )
+
+    channel.register_method("a2a.outbound.discover", _a2a_outbound_discover)
+    channel.register_method("a2a.outbound.register", _a2a_outbound_register)
+    channel.register_method("a2a.outbound.list", _a2a_outbound_list)
+    channel.register_method("a2a.outbound.get", _a2a_outbound_get)
+    channel.register_method("a2a.outbound.update", _a2a_outbound_update)
+    channel.register_method("a2a.outbound.refresh", _a2a_outbound_refresh)
+    channel.register_method(
+        "a2a.outbound.confirm_revision", _a2a_outbound_confirm_revision
+    )
+    channel.register_method("a2a.outbound.delete", _a2a_outbound_delete)
+    channel.register_method("a2a.outbound.dispatch.get", _a2a_outbound_dispatch_get)
+
     from jiuwenswarm.common.schema.message import Message, EventType
 
     def _resolve(ref, key="value"):

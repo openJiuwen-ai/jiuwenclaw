@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { WebError } from '../../types/websocket';
+import { A2AOutboundPanel } from './A2AOutboundPanel';
 import {
   canOperateA2AIngress,
   draftFromA2AIngressSnapshot,
@@ -41,7 +42,7 @@ function errorMessage(error: unknown): string {
 
 export function A2AIngressPanel({ isConnected, request }: A2AIngressPanelProps) {
   const { t, i18n } = useTranslation();
-  const [activeTab, setActiveTab] = useState<'config' | 'history'>('config');
+  const [activeTab, setActiveTab] = useState<'config' | 'outbound' | 'history'>('config');
   const [snapshot, setSnapshot] = useState<A2AIngressSnapshot | null>(null);
   const [draft, setDraft] = useState<A2AIngressDraft | null>(null);
   const [loading, setLoading] = useState(false);
@@ -196,12 +197,12 @@ export function A2AIngressPanel({ isConnected, request }: A2AIngressPanelProps) 
             <button type="button" className="btn secondary" onClick={() => void runOperation('reload')} disabled={!canReload}>
               {operation === 'reload' ? t('a2aIngress.reloading') : t('a2aIngress.reload')}
             </button>
-          </div> : <button type="button" className="btn secondary" onClick={() => void refreshHistory()} disabled={!isConnected || historyLoading}>
+          </div> : activeTab === 'history' ? <button type="button" className="btn secondary" onClick={() => void refreshHistory()} disabled={!isConnected || historyLoading}>
             {historyLoading ? t('common.refreshing') : t('common.refresh')}
-          </button>}
+          </button> : null}
         </div>
         <div className="app-subtabs shrink-0" role="tablist" aria-label={t('a2aIngress.tabs.ariaLabel')}>
-          {(['config', 'history'] as const).map(tab => (
+          {(['config', 'outbound', 'history'] as const).map(tab => (
             <button
               key={tab}
               type="button"
@@ -319,7 +320,7 @@ export function A2AIngressPanel({ isConnected, request }: A2AIngressPanelProps) 
             </div>
           </section>
         )}
-        </div> : <div id="a2a-ingress-panel-history" role="tabpanel" aria-labelledby="a2a-ingress-tab-history" className="flex min-h-0 flex-1 flex-col gap-3 pt-1">
+        </div> : activeTab === 'outbound' ? <div id="a2a-ingress-panel-outbound" role="tabpanel" aria-labelledby="a2a-ingress-tab-outbound" className="flex min-h-0 flex-1 flex-col pt-1"><A2AOutboundPanel isConnected={isConnected} request={request} /></div> : <div id="a2a-ingress-panel-history" role="tabpanel" aria-labelledby="a2a-ingress-tab-history" className="flex min-h-0 flex-1 flex-col gap-3 pt-1">
           {!isConnected && <Alert tone="warn">{t('a2aIngress.disconnected')}</Alert>}
           {historyError && <Alert tone="danger">{historyError}</Alert>}
           <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-panel-strong/60">

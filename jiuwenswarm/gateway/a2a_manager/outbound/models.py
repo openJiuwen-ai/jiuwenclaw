@@ -198,6 +198,7 @@ class A2AOutboundAgent:
     last_success_at: str | None = None
     last_error_code: str | None = None
     last_error_summary: str | None = None
+    pending_revision: dict[str, Any] | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -233,6 +234,8 @@ class A2AOutboundAgent:
         record["availability"] = self.availability.value
         record["agent_card"] = sanitize_persisted_value(self.agent_card)
         record["selected_interface"] = asdict(self.selected_interface)
+        if self.pending_revision is not None:
+            record["pending_revision"] = sanitize_persisted_value(self.pending_revision)
         return record
 
     def public_dict(self) -> dict[str, Any]:
@@ -272,6 +275,11 @@ class A2AOutboundAgent:
                 last_success_at=record.get("last_success_at"),
                 last_error_code=record.get("last_error_code"),
                 last_error_summary=record.get("last_error_summary"),
+                pending_revision=(
+                    dict(record.get("pending_revision") or {})
+                    if record.get("pending_revision") is not None
+                    else None
+                ),
                 created_at=str(record.get("created_at") or ""),
                 updated_at=str(record.get("updated_at") or ""),
             )

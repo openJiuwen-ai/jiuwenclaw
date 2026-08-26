@@ -10,6 +10,9 @@ class A2AOutboundErrorCode(str, Enum):
     DISCOVERY_BLOCKED = "A2A_DISCOVERY_BLOCKED"
     CARD_FETCH_FAILED = "A2A_CARD_FETCH_FAILED"
     CARD_INVALID = "A2A_CARD_INVALID"
+    DISCOVERY_NOT_FOUND = "A2A_DISCOVERY_NOT_FOUND"
+    DISCOVERY_EXPIRED = "A2A_DISCOVERY_EXPIRED"
+    AGENT_ALREADY_REGISTERED = "A2A_AGENT_ALREADY_REGISTERED"
     AGENT_NOT_REGISTERED = "A2A_AGENT_NOT_REGISTERED"
     AGENT_DISABLED = "A2A_AGENT_DISABLED"
     AGENT_UNAVAILABLE = "A2A_AGENT_UNAVAILABLE"
@@ -29,6 +32,9 @@ _SAFE_SUMMARIES: dict[A2AOutboundErrorCode, str] = {
     A2AOutboundErrorCode.DISCOVERY_BLOCKED: "发现地址被安全策略拦截。",
     A2AOutboundErrorCode.CARD_FETCH_FAILED: "无法获取第三方 Agent Card。",
     A2AOutboundErrorCode.CARD_INVALID: "第三方 Agent Card 无效或不兼容。",
+    A2AOutboundErrorCode.DISCOVERY_NOT_FOUND: "未找到指定的发现候选。",
+    A2AOutboundErrorCode.DISCOVERY_EXPIRED: "发现候选已过期，请重新发现。",
+    A2AOutboundErrorCode.AGENT_ALREADY_REGISTERED: "该第三方 Agent 已注册。",
     A2AOutboundErrorCode.AGENT_NOT_REGISTERED: "指定的第三方 Agent 尚未注册。",
     A2AOutboundErrorCode.AGENT_DISABLED: "指定的第三方 Agent 已停用。",
     A2AOutboundErrorCode.AGENT_UNAVAILABLE: "指定的第三方 Agent 当前不可用。",

@@ -1625,6 +1625,7 @@ async def _run_with_telemetry(
     await init_gateway_redis_from_config(dict(full_cfg or {}))
 
     gateway_storage_ctx = None
+    a2a_outbound_repository = None
     try:
         from jiuwenswarm.gateway.storage_assembly.setup import (
             is_session_map_repository_enabled,
@@ -1637,6 +1638,16 @@ async def _run_with_telemetry(
         ):
             gateway_storage_ctx = await setup_gateway_storage_repositories(full_cfg)
             if gateway_storage_ctx is not None:
+                from jiuwenswarm.gateway.edition import resolve_gateway_edition
+
+                if resolve_gateway_edition(full_cfg) != "enterprise":
+                    from jiuwenswarm.gateway.storage_assembly import (
+                        create_a2a_outbound_repository,
+                    )
+
+                    a2a_outbound_repository = create_a2a_outbound_repository(
+                        await gateway_storage_ctx.persistent()
+                    )
                 wired: list[str] = []
                 if is_session_map_repository_enabled(full_cfg):
                     wired.append("session_map")
@@ -1921,6 +1932,7 @@ async def _run_with_telemetry(
         _DummyBus(),
         a2a_config,
         initial_error=a2a_config_error,
+        outbound_repository=a2a_outbound_repository,
     )
 
     _register_web_handlers(
