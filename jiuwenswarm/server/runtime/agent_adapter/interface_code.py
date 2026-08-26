@@ -730,13 +730,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
         context_engine_config = _deep_agent_context_engine_config(
             config,
-            full_config=config_base,
-            model_name=getattr(
-                getattr(model, "model_config", None),
-                "model_name",
-                "",
-            ),
-            model=model,
         )
         logger.info(
             "[JiuwenSwarmCodeAdapter] ContextEngineConfig resolved: "
