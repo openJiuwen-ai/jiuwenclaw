@@ -274,6 +274,7 @@
   },
   "chat": {
     "placeholder": "Enter to send, Shift+Enter for new line",
+    "placeholderCompacting": "Context compression in progress. Messages are temporarily disabled",
     "placeholderProcessing": "Processing, enter to interrupt...",
     "placeholderProcessingQueue": "Processing, new input will join the queue...",
     "placeholderTeamMode": "Team mode, new input will run in parallel...",
@@ -341,6 +342,7 @@
     "extensionManagePlugins": "Manage My Plugins",
     "extensionManageMcps": "Manage My MCPs",
     "recentTasks": "Progress",
+    "contextCompressionCommandRunning": "Compressing context",
     "teamPause": "Pause",
     "teamPauseHint": "After pausing a team, send the next message to continue",
     "teamBroadcastTarget": "@all",

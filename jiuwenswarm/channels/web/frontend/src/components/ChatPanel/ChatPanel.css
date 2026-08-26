@@ -188,9 +188,29 @@ overflow: hidden;
   border-color: var(--color-feedback-danger) !important;
 }
 
+.chat-input-container--command-pending {
+  background: var(--color-surface-muted);
+}
+
 .chat-input-frame {
   position: relative;
   width: 100%;
+}
+
+.chat-input-compact-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  margin: 0 4px 8px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.chat-input-compact-progress__spinner {
+  flex: 0 0 auto;
+  animation: harness-spin 0.9s linear infinite;
 }
 
 .chat-active-team-group {
@@ -826,6 +846,11 @@ overflow: hidden;
 
 .chat-input-editor:focus-visible {
   box-shadow: none;
+}
+
+.chat-input-editor--disabled {
+  color: var(--color-text-secondary);
+  cursor: not-allowed;
 }
 
 /* inline chip（contenteditable 内的技能标签） */

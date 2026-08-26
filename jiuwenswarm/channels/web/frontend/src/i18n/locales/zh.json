@@ -274,6 +274,7 @@
   },
   "chat": {
     "placeholder": "Enter 发送，Shift+Enter 换行",
+    "placeholderCompacting": "压缩进行中，暂时无法发送消息",
     "placeholderProcessing": "处理中，输入新指令可中断...",
     "placeholderProcessingQueue": "处理中，输入新指令将加入等待队列...",
     "placeholderTeamMode": "集群模式，输入新指令会并行执行...",
@@ -341,6 +342,7 @@
     "extensionManagePlugins": "管理我的插件",
     "extensionManageMcps": "管理我的MCP",
     "recentTasks": "进度",
+    "contextCompressionCommandRunning": "正在压缩上下文",
     "teamPause": "暂停",
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "teamBroadcastTarget": "@所有人",
