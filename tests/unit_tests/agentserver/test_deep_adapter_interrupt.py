@@ -15,6 +15,7 @@ import pytest
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.runtime.agent_adapter import interface_deep
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
     SKILL_TURBO_RESUME_CTX_KEY,
@@ -69,6 +70,26 @@ def _make_adapter(**state: object) -> JiuWenSwarmDeepAdapter:
     for name, value in state.items():
         setattr(adapter, name, value)
     return adapter
+
+
+def test_a2a_tool_route_survives_background_task_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(interface_deep, "get_runtime_tool_session_id", lambda: None)
+    monkeypatch.setattr(interface_deep, "get_runtime_tool_channel_id", lambda: "default")
+    adapter = _make_adapter(
+        _current_request_route={
+            "session_id": "web-session",
+            "request_id": "request-1",
+            "channel_id": "web",
+        },
+        _runtime_cron_tool_context=SimpleNamespace(
+            session_id=None,
+            channel_id="default",
+        ),
+    )
+
+    assert adapter._get_a2a_outbound_tool_route() == ("web-session", "web")
 
 
 def _make_message_adapter(monkeypatch: pytest.MonkeyPatch) -> JiuWenSwarmDeepAdapter:

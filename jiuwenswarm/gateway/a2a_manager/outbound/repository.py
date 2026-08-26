@@ -252,6 +252,11 @@ class A2AOutboundRepository:
             if current.status in TERMINAL_DISPATCH_STATUSES:
                 return current
 
+            # Lifecycle timestamps record the first observation and must not
+            # drift on later working/poll events.
+            if current.accepted_at is not None:
+                changes["accepted_at"] = current.accepted_at
+
             stamp = updated_at or utc_now_text()
             if normalized_status in TERMINAL_DISPATCH_STATUSES:
                 changes.setdefault("finished_at", stamp)

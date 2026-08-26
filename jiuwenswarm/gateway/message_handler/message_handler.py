@@ -208,6 +208,10 @@ class MessageHandler(ABC):
         self._user_messages: asyncio.Queue["Message"] = asyncio.Queue()
         self._robot_messages: asyncio.Queue["Message"] = asyncio.Queue()
         self._running = False
+        self._a2a_outbound_tool_manager: Any | None = None
+        self._active_a2a_outbound_tool_tasks: dict[
+            str, tuple[asyncio.Task[Any], str]
+        ] = {}
         self._forward_task: asyncio.Task | None = None
         self._stream_tasks: dict[str, asyncio.Task] = {}  # request_id -> task
         self._stream_channels: dict[str, str] = {}  # request_id -> channel_id
@@ -2834,6 +2838,12 @@ class MessageHandler(ABC):
             session_id: str | None = str(sid_raw)
         else:
             session_id = self._stream_sessions.get(rid)
+
+        if await self._handle_a2a_outbound_tool_push(
+            chunk=chunk,
+            session_id=session_id,
+        ):
+            return
         
         # 获取原始请求的 metadata，用于合并
         request_metadata = self._stream_metadata.get(rid)
@@ -2897,6 +2907,160 @@ class MessageHandler(ABC):
             chunk.channel_id,
             _push_app_id,
         )
+
+    def set_a2a_outbound_tool_manager(self, manager: Any | None) -> None:
+        """Bind the Gateway-owned Manager used by private Agent tool RPC."""
+        self._a2a_outbound_tool_manager = manager
+        if not hasattr(self, "_active_a2a_outbound_tool_tasks"):
+            self._active_a2a_outbound_tool_tasks = {}
+
+    async def _handle_a2a_outbound_tool_push(
+        self, *, chunk: Any, session_id: str | None
+    ) -> bool:
+        from jiuwenswarm.common.e2a.adapters import build_acp_tool_response_message
+        from jiuwenswarm.gateway.a2a_manager.outbound import (
+            A2AOutboundError,
+            A2AOutboundErrorCode,
+            safe_error_summary,
+        )
+        from jiuwenswarm.gateway.a2a_manager.tool_rpc import (
+            A2A_TOOL_CANCEL_CALL,
+            A2A_TOOL_DISPATCH_TASK,
+            A2A_TOOL_FIND_AGENTS,
+            A2A_TOOL_GET_DISPATCH,
+            A2A_TOOL_METHODS,
+        )
+
+        payload = chunk.payload if isinstance(chunk.payload, dict) else {}
+        # ``acp.output_request`` is normalized from E2A as
+        # {"event_type": "acp.output_request", "jsonrpc": {...}}. Keep
+        # accepting the legacy flat shape, but route the canonical wire shape
+        # through its nested JSON-RPC envelope.
+        nested_jsonrpc = payload.get("jsonrpc")
+        rpc_payload = (
+            dict(nested_jsonrpc)
+            if payload.get("event_type") == "acp.output_request"
+            and isinstance(nested_jsonrpc, dict)
+            else payload
+        )
+        method = str(rpc_payload.get("method") or "").strip()
+        if method not in A2A_TOOL_METHODS:
+            return False
+        jsonrpc_id = str(rpc_payload.get("id") or "").strip()
+        params = rpc_payload.get("params")
+        params = dict(params) if isinstance(params, dict) else {}
+        manager = self._a2a_outbound_tool_manager
+        current_task = asyncio.current_task()
+        trusted_session_id = str(session_id or "").strip()
+        active_calls = getattr(self, "_active_a2a_outbound_tool_tasks", None)
+        if active_calls is None:
+            active_calls = self._active_a2a_outbound_tool_tasks = {}
+        if method == A2A_TOOL_CANCEL_CALL:
+            target_id = str(params.get("jsonrpc_id") or "").strip()
+            active = active_calls.get(target_id)
+            target = active[0] if active is not None else None
+            canceled = bool(
+                active is not None
+                and active[1] == trusted_session_id
+                and target is not current_task
+            )
+            if canceled:
+                target.cancel()
+            response = {
+                "jsonrpc": "2.0",
+                "id": jsonrpc_id,
+                "result": {"canceled": canceled},
+            }
+            reply = build_acp_tool_response_message(
+                jsonrpc_id,
+                response,
+                str(session_id or "") or None,
+                channel_id=str(chunk.channel_id or "default"),
+            )
+            await self.publish_user_messages(reply)
+            return True
+        if jsonrpc_id and current_task is not None:
+            active_calls[jsonrpc_id] = (current_task, trusted_session_id)
+        try:
+            if manager is None:
+                raise A2AOutboundError(A2AOutboundErrorCode.MANAGER_UNAVAILABLE)
+            source_session_id = trusted_session_id
+            if not source_session_id:
+                raise A2AOutboundError(A2AOutboundErrorCode.DISPATCH_REJECTED)
+            if method == A2A_TOOL_FIND_AGENTS:
+                required = params.get("required_skills")
+                if required is not None and not isinstance(required, list):
+                    raise A2AOutboundError(A2AOutboundErrorCode.TASK_INVALID)
+                result = await manager.outbound_find_agents(
+                    query=str(params.get("query") or ""),
+                    required_skills=required,
+                    limit=int(params.get("limit") or 5),
+                )
+            elif method == A2A_TOOL_DISPATCH_TASK:
+                result = await manager.outbound_dispatch_task(
+                    agent_id=str(params.get("agent_id") or ""),
+                    task=str(params.get("task") or ""),
+                    mode=str(params.get("mode") or ""),
+                    source_session_id=source_session_id,
+                    reason=str(params.get("reason") or "") or None,
+                )
+            elif method == A2A_TOOL_GET_DISPATCH:
+                result = await manager.outbound_get_dispatch(
+                    dispatch_id=str(params.get("dispatch_id") or ""),
+                    source_session_id=source_session_id,
+                )
+            response = {"jsonrpc": "2.0", "id": jsonrpc_id, "result": result}
+        except A2AOutboundError as exc:
+            response = {
+                "jsonrpc": "2.0",
+                "id": jsonrpc_id,
+                "error": {
+                    "code": -32060,
+                    "message": exc.summary,
+                    "data": {"code": exc.code.value},
+                },
+            }
+        except (TypeError, ValueError):
+            code = A2AOutboundErrorCode.TASK_INVALID
+            response = {
+                "jsonrpc": "2.0",
+                "id": jsonrpc_id,
+                "error": {
+                    "code": -32602,
+                    "message": safe_error_summary(code),
+                    "data": {"code": code.value},
+                },
+            }
+        except Exception:
+            logger.exception(
+                "[MessageHandler] A2A outbound tool RPC failed: method=%s session_id=%s",
+                method,
+                session_id,
+            )
+            code = A2AOutboundErrorCode.MANAGER_UNAVAILABLE
+            response = {
+                "jsonrpc": "2.0",
+                "id": jsonrpc_id,
+                "error": {
+                    "code": -32061,
+                    "message": safe_error_summary(code),
+                    "data": {"code": code.value},
+                },
+            }
+        finally:
+            if (
+                jsonrpc_id
+                and active_calls.get(jsonrpc_id, (None, ""))[0] is current_task
+            ):
+                active_calls.pop(jsonrpc_id, None)
+        reply = build_acp_tool_response_message(
+            jsonrpc_id,
+            response,
+            str(session_id or "") or None,
+            channel_id=str(chunk.channel_id or "default"),
+        )
+        await self.publish_user_messages(reply)
+        return True
 
     async def _push_file_to_web_and_get_token(
         self,

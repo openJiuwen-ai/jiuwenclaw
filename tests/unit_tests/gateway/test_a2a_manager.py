@@ -1,4 +1,6 @@
 import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -6,11 +8,15 @@ from jiuwenswarm.gateway.a2a_manager import (
     A2AIngressConfig,
     A2AIngressConfigRepository,
     A2AIngressError,
+    A2AOutboundSettingsRepository,
     A2AManager,
     load_a2a_ingress_config,
     load_a2a_ingress_config_safely,
 )
-from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2ADependencyMissingError
+from jiuwenswarm.gateway.a2a_manager import config as a2a_config_module
+from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import (
+    A2ADependencyMissingError,
+)
 
 
 class _ChannelManagerProbe:
@@ -105,6 +111,60 @@ def test_invalid_a2a_config_has_a_disabled_boot_fallback():
     assert error.code == "A2A_CONFIG_INVALID"
 
 
+def test_outbound_loopback_setting_round_trips_through_dotenv(tmp_path, monkeypatch):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        'KEEP_ME="yes"\nA2A_OUTBOUND_ALLOW_LOOPBACK_HTTP="false"\n', "utf-8"
+    )
+    monkeypatch.delenv("A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP", raising=False)
+    repository = A2AOutboundSettingsRepository(env_path)
+
+    assert repository.load({}) == {"allow_loopback_http": False}
+    repository.save(allow_loopback_http=True)
+
+    assert repository.load() == {"allow_loopback_http": True}
+    content = env_path.read_text("utf-8")
+    assert 'KEEP_ME="yes"' in content
+    assert content.count("A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP") == 1
+    assert 'A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP="true"' in content
+
+
+def test_ingress_and_outbound_repositories_share_one_dotenv_writer(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text('KEEP_ME="yes"\n', "utf-8")
+    ingress = A2AIngressConfigRepository(env_path)
+    outbound = A2AOutboundSettingsRepository(env_path)
+
+    # Holding the shared lock proves both public repositories enter the same
+    # read-modify-write critical section instead of racing independent writers.
+    executor = ThreadPoolExecutor(max_workers=2)
+    a2a_config_module._DOTENV_WRITE_LOCK.acquire()
+    try:
+        ingress_future = executor.submit(
+            ingress.save,
+            A2AIngressConfig(port=19234, app_name="Concurrent ingress"),
+        )
+        outbound_future = executor.submit(
+            outbound.save,
+            allow_loopback_http=True,
+        )
+        time.sleep(0.05)
+        assert ingress_future.done() is False
+        assert outbound_future.done() is False
+    finally:
+        a2a_config_module._DOTENV_WRITE_LOCK.release()
+    try:
+        ingress_future.result(timeout=2)
+        outbound_future.result(timeout=2)
+    finally:
+        executor.shutdown(wait=True)
+
+    content = env_path.read_text("utf-8")
+    assert 'KEEP_ME="yes"' in content
+    assert 'A2A_SERVER_PORT="19234"' in content
+    assert 'A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP="true"' in content
+
+
 @pytest.mark.asyncio
 async def test_manager_exposes_boot_config_error_without_starting_a_channel():
     config, error = load_a2a_ingress_config_safely({"A2A_SERVER_PATH": "missing-slash"})
@@ -128,7 +188,12 @@ async def test_manager_registers_starts_and_stops_channel_once():
         channels.append(channel)
         return channel
 
-    manager = A2AManager(channel_manager, object(), A2AIngressConfig(enabled=True), channel_factory=factory)
+    manager = A2AManager(
+        channel_manager,
+        object(),
+        A2AIngressConfig(enabled=True),
+        channel_factory=factory,
+    )
     await manager.start_from_config()
     await manager.start_from_config()
     await asyncio.sleep(0)
@@ -154,7 +219,9 @@ async def test_manager_retains_disabled_config_for_the_protocol_adapter():
         channels.append(channel)
         return channel
 
-    manager = A2AManager(channel_manager, object(), A2AIngressConfig(), channel_factory=factory)
+    manager = A2AManager(
+        channel_manager, object(), A2AIngressConfig(), channel_factory=factory
+    )
     await manager.start_from_config()
     await asyncio.sleep(0)
     await manager.stop()
@@ -169,9 +236,16 @@ async def test_manager_handles_start_failure_and_still_stops():
     channel_manager = _ChannelManagerProbe()
 
     def factory(config, router):
-        return _ChannelProbe(config, router, start_error=RuntimeError("a2a sdk missing"))
+        return _ChannelProbe(
+            config, router, start_error=RuntimeError("a2a sdk missing")
+        )
 
-    manager = A2AManager(channel_manager, object(), A2AIngressConfig(enabled=True), channel_factory=factory)
+    manager = A2AManager(
+        channel_manager,
+        object(),
+        A2AIngressConfig(enabled=True),
+        channel_factory=factory,
+    )
     await manager.start_from_config()
     await asyncio.sleep(0)
     await manager.stop()
@@ -191,17 +265,32 @@ async def test_manager_retains_bounded_request_history_across_channel_reload():
         return channel
 
     manager = A2AManager(
-        channel_manager, object(), A2AIngressConfig(enabled=True), channel_factory=factory,
+        channel_manager,
+        object(),
+        A2AIngressConfig(enabled=True),
+        channel_factory=factory,
     )
     await manager.enable()
-    channels[0].request_observer({
-        "request_id": "req-1", "context_id": "ctx-1", "message_id": "msg-1",
-        "status": "processing", "started_at": 10.0,
-    })
-    channels[0].request_observer({
-        "request_id": "req-1", "context_id": "ctx-1", "message_id": "msg-1",
-        "status": "completed", "started_at": 10.0, "finished_at": 10.125, "error": None,
-    })
+    channels[0].request_observer(
+        {
+            "request_id": "req-1",
+            "context_id": "ctx-1",
+            "message_id": "msg-1",
+            "status": "processing",
+            "started_at": 10.0,
+        }
+    )
+    channels[0].request_observer(
+        {
+            "request_id": "req-1",
+            "context_id": "ctx-1",
+            "message_id": "msg-1",
+            "status": "completed",
+            "started_at": 10.0,
+            "finished_at": 10.125,
+            "error": None,
+        }
+    )
     await manager.reload()
 
     history = manager.history()
@@ -222,21 +311,40 @@ async def test_manager_retains_bounded_request_history_across_channel_reload():
 
 def test_manager_request_history_terminal_status_cannot_be_overwritten():
     manager = A2AManager(
-        _ChannelManagerProbe(), object(), A2AIngressConfig(), repository=_ConfigRepositoryProbe(),
+        _ChannelManagerProbe(),
+        object(),
+        A2AIngressConfig(),
+        repository=_ConfigRepositoryProbe(),
     )
-    manager._record_request_event({
-        "request_id": "req-completed", "status": "processing", "started_at": 10.0,
-    })
-    manager._record_request_event({
-        "request_id": "req-completed", "status": "completed", "finished_at": 10.1,
-    })
-    manager._record_request_event({
-        "request_id": "req-completed", "status": "canceled", "finished_at": 10.2,
-    })
-    manager._record_request_event({
-        "request_id": "req-completed", "status": "failed", "finished_at": 10.3,
-        "error": "late failure",
-    })
+    manager._record_request_event(
+        {
+            "request_id": "req-completed",
+            "status": "processing",
+            "started_at": 10.0,
+        }
+    )
+    manager._record_request_event(
+        {
+            "request_id": "req-completed",
+            "status": "completed",
+            "finished_at": 10.1,
+        }
+    )
+    manager._record_request_event(
+        {
+            "request_id": "req-completed",
+            "status": "canceled",
+            "finished_at": 10.2,
+        }
+    )
+    manager._record_request_event(
+        {
+            "request_id": "req-completed",
+            "status": "failed",
+            "finished_at": 10.3,
+            "error": "late failure",
+        }
+    )
 
     item = manager.history()["items"][0]
     assert item["status"] == "completed"
@@ -247,17 +355,32 @@ def test_manager_request_history_terminal_status_cannot_be_overwritten():
 
 def test_manager_request_history_keeps_cancellation_terminal():
     manager = A2AManager(
-        _ChannelManagerProbe(), object(), A2AIngressConfig(), repository=_ConfigRepositoryProbe(),
+        _ChannelManagerProbe(),
+        object(),
+        A2AIngressConfig(),
+        repository=_ConfigRepositoryProbe(),
     )
-    manager._record_request_event({
-        "request_id": "req-canceled", "status": "processing", "started_at": 20.0,
-    })
-    manager._record_request_event({
-        "request_id": "req-canceled", "status": "canceled", "finished_at": 20.2,
-    })
-    manager._record_request_event({
-        "request_id": "req-canceled", "status": "completed", "finished_at": 20.3,
-    })
+    manager._record_request_event(
+        {
+            "request_id": "req-canceled",
+            "status": "processing",
+            "started_at": 20.0,
+        }
+    )
+    manager._record_request_event(
+        {
+            "request_id": "req-canceled",
+            "status": "canceled",
+            "finished_at": 20.2,
+        }
+    )
+    manager._record_request_event(
+        {
+            "request_id": "req-canceled",
+            "status": "completed",
+            "finished_at": 20.3,
+        }
+    )
 
     item = manager.history()["items"][0]
     assert item["status"] == "canceled"
@@ -268,9 +391,13 @@ def test_manager_request_history_keeps_cancellation_terminal():
 @pytest.mark.asyncio
 async def test_stop_propagates_its_own_cancellation_after_channel_cleanup():
     channel_manager = _ChannelManagerProbe()
-    channel = _CancellationProbe(A2AIngressConfig(enabled=True).to_channel_config(), object())
+    channel = _CancellationProbe(
+        A2AIngressConfig(enabled=True).to_channel_config(), object()
+    )
     manager = A2AManager(
-        channel_manager, object(), A2AIngressConfig(enabled=True),
+        channel_manager,
+        object(),
+        A2AIngressConfig(enabled=True),
         channel_factory=lambda config, router: channel,
     )
     await manager.start_from_config()
@@ -327,7 +454,9 @@ def test_repository_persists_only_a2a_environment_fields(tmp_path, monkeypatch):
     environ = {}
     monkeypatch.setattr(a2a_config.os, "environ", environ)
 
-    A2AIngressConfigRepository(env_path).save(A2AIngressConfig(enabled=True, port=19123))
+    A2AIngressConfigRepository(env_path).save(
+        A2AIngressConfig(enabled=True, port=19123)
+    )
 
     text = env_path.read_text(encoding="utf-8")
     assert "MODEL_NAME=kept" in text
@@ -335,7 +464,9 @@ def test_repository_persists_only_a2a_environment_fields(tmp_path, monkeypatch):
     assert environ["A2A_SERVER_ENABLED"] == "true"
 
 
-def test_repository_escapes_values_and_preserves_comments_and_export_lines(tmp_path, monkeypatch):
+def test_repository_escapes_values_and_preserves_comments_and_export_lines(
+    tmp_path, monkeypatch
+):
     from jiuwenswarm.gateway.a2a_manager import config as a2a_config
 
     env_path = tmp_path / ".env"
@@ -361,7 +492,10 @@ def test_repository_escapes_values_and_preserves_comments_and_export_lines(tmp_p
 async def test_invalid_patch_does_not_persist_or_change_running_config():
     repository = _ConfigRepositoryProbe()
     manager = A2AManager(
-        _ChannelManagerProbe(), object(), A2AIngressConfig(), repository=repository,
+        _ChannelManagerProbe(),
+        object(),
+        A2AIngressConfig(),
+        repository=repository,
         channel_factory=lambda config, router: _ChannelProbe(config, router),
     )
 
@@ -377,7 +511,10 @@ async def test_invalid_patch_does_not_persist_or_change_running_config():
 async def test_update_apply_false_separates_desired_and_effective_addresses():
     channel_manager = _ChannelManagerProbe()
     manager = A2AManager(
-        channel_manager, object(), A2AIngressConfig(), repository=_ConfigRepositoryProbe(),
+        channel_manager,
+        object(),
+        A2AIngressConfig(),
+        repository=_ConfigRepositoryProbe(),
         channel_factory=lambda config, router: _ChannelProbe(config, router),
     )
 
@@ -403,7 +540,11 @@ async def test_enable_applies_a_saved_but_unapplied_running_config():
         return channel
 
     manager = A2AManager(
-        _ChannelManagerProbe(), object(), A2AIngressConfig(), repository=_ConfigRepositoryProbe(), channel_factory=factory,
+        _ChannelManagerProbe(),
+        object(),
+        A2AIngressConfig(),
+        repository=_ConfigRepositoryProbe(),
+        channel_factory=factory,
     )
     await manager.enable()
     await manager.update({"port": 19123}, apply=False)
@@ -417,7 +558,10 @@ async def test_enable_applies_a_saved_but_unapplied_running_config():
 @pytest.mark.asyncio
 async def test_update_apply_false_warns_when_desired_bind_is_public():
     manager = A2AManager(
-        _ChannelManagerProbe(), object(), A2AIngressConfig(), repository=_ConfigRepositoryProbe(),
+        _ChannelManagerProbe(),
+        object(),
+        A2AIngressConfig(),
+        repository=_ConfigRepositoryProbe(),
         channel_factory=lambda config, router: _ChannelProbe(config, router),
     )
 
@@ -437,7 +581,11 @@ async def test_update_apply_true_with_disabled_config_stops_running_service():
         return channel
 
     manager = A2AManager(
-        channel_manager, object(), A2AIngressConfig(), repository=_ConfigRepositoryProbe(), channel_factory=factory,
+        channel_manager,
+        object(),
+        A2AIngressConfig(),
+        repository=_ConfigRepositoryProbe(),
+        channel_factory=factory,
     )
     await manager.enable()
     snapshot = await manager.update({"enabled": False}, apply=True)
@@ -453,7 +601,10 @@ async def test_update_apply_true_with_disabled_config_stops_running_service():
 @pytest.mark.parametrize(
     ("start_error", "code"),
     [
-        (A2ADependencyMissingError("optional dependency a2a-sdk is missing"), "A2A_DEPENDENCY_MISSING"),
+        (
+            A2ADependencyMissingError("optional dependency a2a-sdk is missing"),
+            "A2A_DEPENDENCY_MISSING",
+        ),
         (OSError("address already in use"), "A2A_BIND_FAILED"),
         (ValueError("bad channel config"), "A2A_CONFIG_INVALID"),
         (RuntimeError("unexpected startup failure"), "A2A_START_FAILED"),
@@ -465,7 +616,9 @@ async def test_enable_surfaces_stable_startup_error_codes(start_error, code):
         object(),
         A2AIngressConfig(),
         repository=_ConfigRepositoryProbe(),
-        channel_factory=lambda config, router: _ChannelProbe(config, router, start_error=start_error),
+        channel_factory=lambda config, router: _ChannelProbe(
+            config, router, start_error=start_error
+        ),
     )
 
     with pytest.raises(A2AIngressError) as exc_info:

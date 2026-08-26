@@ -4,6 +4,7 @@ import {
   normalizeA2AOutboundAgent,
   normalizeA2AOutboundDiscovery,
   normalizeA2AOutboundList,
+  normalizeA2AOutboundSettings,
   shouldAcceptA2AOutboundResponse,
 } from '../node_modules/.cache/a2a-outbound-panel-state/components/A2AIngressPanel/a2aOutboundPanelState.js';
 
@@ -62,6 +63,12 @@ test('A2A outbound list rejects any malformed item', () => {
   assert.deepEqual(normalizeA2AOutboundList({ items: [agent] }), [agent]);
   assert.equal(normalizeA2AOutboundList({ items: [agent, { agent_id: '' }] }), null);
   assert.equal(normalizeA2AOutboundList({ items: 'invalid' }), null);
+});
+
+test('A2A outbound settings require an explicit loopback boolean', () => {
+  assert.deepEqual(normalizeA2AOutboundSettings({ allow_loopback_http: true }), { allow_loopback_http: true });
+  assert.equal(normalizeA2AOutboundSettings({ allow_loopback_http: 'true' }), null);
+  assert.equal(normalizeA2AOutboundSettings({}), null);
 });
 
 test('A2A outbound ignores obsolete responses', () => {

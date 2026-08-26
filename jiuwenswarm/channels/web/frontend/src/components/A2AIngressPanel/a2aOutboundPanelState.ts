@@ -39,6 +39,10 @@ export interface A2AOutboundAgent {
   pending_revision: Record<string, unknown> | null;
 }
 
+export interface A2AOutboundSettings {
+  allow_loopback_http: boolean;
+}
+
 const asString = (value: unknown): string => typeof value === 'string' ? value : '';
 const asNumber = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? value : 0;
 
@@ -104,6 +108,12 @@ export function normalizeA2AOutboundList(value: unknown): A2AOutboundAgent[] | n
     result.push(item);
   }
   return result;
+}
+
+export function normalizeA2AOutboundSettings(value: unknown): A2AOutboundSettings | null {
+  if (!value || typeof value !== 'object') return null;
+  const enabled = (value as Record<string, unknown>).allow_loopback_http;
+  return typeof enabled === 'boolean' ? { allow_loopback_http: enabled } : null;
 }
 
 export const shouldAcceptA2AOutboundResponse = (generation: number, current: number): boolean => generation === current;

@@ -1428,7 +1428,7 @@ class AgentWebSocketServer:
     def _tenant_pool() -> TenantAgentPool:
         return TenantAgentPool.get_instance()
 
-    async def send_push(self, msg) -> None:
+    async def send_push(self, msg) -> bool:
         """AgentServer 主动向 Gateway 推送消息。
 
         payload 格式与 AgentResponse.payload 一致，
@@ -1444,13 +1444,13 @@ class AgentWebSocketServer:
             logger.warning(
                 "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接"
             )
-            return
+            return False
 
         try:
             wire = build_server_push_wire(msg)
         except Exception as e:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
-            return
+            return False
 
         delivered = await registry.push(wire)
 
@@ -1462,7 +1462,7 @@ class AgentWebSocketServer:
                 "（内容过大降级为错误帧，或订阅者过滤后无人匹配）: channel_id=%s",
                 msg.get("channel_id", ""),
             )
-            return
+            return False
 
         response_kind = str(msg.get("response_kind") or "").strip()
         if response_kind:
@@ -1479,6 +1479,7 @@ class AgentWebSocketServer:
                 msg.get("channel_id", ""),
                 delivered,
             )
+        return True
 
     def get_agent(self):
         """获取 default agent 实例（向后兼容）."""

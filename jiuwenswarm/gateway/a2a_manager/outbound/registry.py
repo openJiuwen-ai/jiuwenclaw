@@ -90,6 +90,9 @@ class A2AOutboundRegistry:
         self._registration_lock = asyncio.Lock()
         self._agent_operation_locks = KeyedLockPool()
 
+    def set_allow_loopback_http(self, enabled: bool) -> None:
+        self._discovery.set_allow_loopback_http(enabled)
+
     async def discover(self, url: str, card_path: str | None = None) -> dict[str, Any]:
         card = await self._discovery.discover(url, card_path)
         now = self._now()

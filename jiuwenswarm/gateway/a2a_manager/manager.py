@@ -4,18 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from collections import deque
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChannel, A2ADependencyMissingError
+from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import (
+    A2AChannel,
+    A2ADependencyMissingError,
+)
 
-from .config import A2AIngressConfigRepository
-from .models import A2AIngressConfig, A2AIngressError, A2AIngressSnapshot, A2AIngressState
+from .config import A2AIngressConfigRepository, A2AOutboundSettingsRepository
+from .models import (
+    A2AIngressConfig,
+    A2AIngressError,
+    A2AIngressSnapshot,
+    A2AIngressState,
+)
 from .outbound import (
     A2AOutboundDiscoveryService,
+    A2AOutboundDispatcher,
     A2AOutboundError,
     A2AOutboundErrorCode,
     A2AOutboundRegistry,
@@ -52,6 +60,8 @@ class A2AManager:
         initial_error: A2AIngressError | None = None,
         outbound_repository: A2AOutboundRepository | None = None,
         outbound_registry: A2AOutboundRegistry | None = None,
+        outbound_dispatcher: A2AOutboundDispatcher | None = None,
+        outbound_settings_repository: A2AOutboundSettingsRepository | Any | None = None,
     ) -> None:
         self._channel_manager = channel_manager
         self._router = router
@@ -62,15 +72,19 @@ class A2AManager:
         self._effective_config: A2AIngressConfig | None = None
         self._starting_config: A2AIngressConfig | None = None
         self._start_task: asyncio.Task[None] | None = None
-        self._state = A2AIngressState.ERROR if initial_error else A2AIngressState.DISABLED
+        self._state = (
+            A2AIngressState.ERROR if initial_error else A2AIngressState.DISABLED
+        )
         self._started_at: float | None = None
         self._last_error: str | None = str(initial_error) if initial_error else None
         self._config_revision = 0
         self._request_history: deque[dict[str, Any]] = deque(maxlen=200)
         self._lock = asyncio.Lock()
-        allow_loopback_http = os.getenv(
-            "A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP", ""
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._outbound_settings_repository = (
+            outbound_settings_repository or A2AOutboundSettingsRepository()
+        )
+        outbound_settings = self._outbound_settings_repository.load()
+        allow_loopback_http = bool(outbound_settings.get("allow_loopback_http", False))
         self._outbound = outbound_registry
         if self._outbound is None and outbound_repository is not None:
             self._outbound = A2AOutboundRegistry(
@@ -79,6 +93,15 @@ class A2AManager:
                     allow_loopback_http=allow_loopback_http
                 ),
             )
+        self._outbound_dispatcher = outbound_dispatcher
+        if self._outbound_dispatcher is None and outbound_repository is not None:
+            self._outbound_dispatcher = A2AOutboundDispatcher(
+                outbound_repository,
+                discovery_service=A2AOutboundDiscoveryService(
+                    allow_loopback_http=allow_loopback_http
+                ),
+            )
+        self._apply_outbound_settings(allow_loopback_http)
 
     @property
     def channel(self) -> _ManagedA2AChannel | None:
@@ -93,10 +116,33 @@ class A2AManager:
             raise A2AOutboundError(A2AOutboundErrorCode.STORE_INVALID)
         return self._outbound
 
+    def _require_outbound_dispatcher(self) -> A2AOutboundDispatcher:
+        if self._outbound_dispatcher is None:
+            raise A2AOutboundError(A2AOutboundErrorCode.MANAGER_UNAVAILABLE)
+        return self._outbound_dispatcher
+
     async def outbound_discover(
         self, url: str, card_path: str | None = None
     ) -> dict[str, Any]:
         return await self._require_outbound().discover(url, card_path)
+
+    async def outbound_get_settings(self) -> dict[str, bool]:
+        return dict(self._outbound_settings_repository.load())
+
+    async def outbound_update_settings(
+        self, *, allow_loopback_http: bool
+    ) -> dict[str, bool]:
+        if not isinstance(allow_loopback_http, bool):
+            raise A2AOutboundError(A2AOutboundErrorCode.STORE_INVALID)
+        self._outbound_settings_repository.save(allow_loopback_http=allow_loopback_http)
+        self._apply_outbound_settings(allow_loopback_http)
+        return {"allow_loopback_http": allow_loopback_http}
+
+    def _apply_outbound_settings(self, allow_loopback_http: bool) -> None:
+        for target in (self._outbound, self._outbound_dispatcher):
+            setter = getattr(target, "set_allow_loopback_http", None)
+            if callable(setter):
+                setter(allow_loopback_http)
 
     async def outbound_register(self, params: dict[str, Any]) -> dict[str, Any]:
         return await self._require_outbound().register(params)
@@ -126,11 +172,51 @@ class A2AManager:
     async def outbound_dispatch_get(self, dispatch_id: str) -> dict[str, Any]:
         return await self._require_outbound().get_dispatch(dispatch_id)
 
+    async def outbound_find_agents(
+        self,
+        *,
+        query: str = "",
+        required_skills: list[str] | None = None,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        return await self._require_outbound_dispatcher().find_agents(
+            query=query,
+            required_skills=required_skills,
+            limit=limit,
+        )
+
+    async def outbound_dispatch_task(
+        self,
+        *,
+        agent_id: str,
+        task: str,
+        mode: str,
+        source_session_id: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._require_outbound_dispatcher().dispatch(
+            agent_id=agent_id,
+            task=task,
+            mode=mode,
+            source_session_id=source_session_id,
+            reason=reason,
+        )
+
+    async def outbound_get_dispatch(
+        self, *, dispatch_id: str, source_session_id: str
+    ) -> dict[str, Any]:
+        return await self._require_outbound_dispatcher().query_dispatch(
+            dispatch_id,
+            source_session_id=source_session_id,
+        )
+
     def snapshot(self) -> A2AIngressSnapshot:
         config = self._config
         effective = self._effective_config
         desired_base_url = f"http://{config.host}:{config.port}"
-        effective_base_url = f"http://{effective.host}:{effective.port}" if effective else None
+        effective_base_url = (
+            f"http://{effective.host}:{effective.port}" if effective else None
+        )
         return A2AIngressSnapshot(
             enabled=config.enabled,
             state=self._state,
@@ -150,11 +236,16 @@ class A2AManager:
             effective_port=effective.port if effective else None,
             effective_rpc_path=effective.rpc_path if effective else None,
             effective_card_path=effective.card_path if effective else None,
-            effective_rpc_url=(f"{effective_base_url}{effective.rpc_path}" if effective else None),
-            effective_card_url=(f"{effective_base_url}{effective.card_path}" if effective else None),
+            effective_rpc_url=(
+                f"{effective_base_url}{effective.rpc_path}" if effective else None
+            ),
+            effective_card_url=(
+                f"{effective_base_url}{effective.card_path}" if effective else None
+            ),
             exposure_warning=(
                 "A2A ingress is bound to all network interfaces; configure network access controls."
-                if config.host == "0.0.0.0" else None
+                if config.host == "0.0.0.0"
+                else None
             ),
             started_at=self._started_at,
             last_error=self._last_error,
@@ -165,14 +256,27 @@ class A2AManager:
         """Return newest-first request lifecycle metadata for this Gateway process."""
         normalized_limit = max(1, min(int(limit), 200))
         items = list(reversed(self._request_history))[:normalized_limit]
-        return {"items": [dict(item) for item in items], "total": len(self._request_history)}
+        return {
+            "items": [dict(item) for item in items],
+            "total": len(self._request_history),
+        }
 
     def _record_request_event(self, event: dict[str, Any]) -> None:
         request_id = str(event.get("request_id") or "").strip()
         if not request_id:
             return
-        existing = next((item for item in self._request_history if item["request_id"] == request_id), None)
-        if existing is not None and existing.get("status") in _TERMINAL_REQUEST_STATUSES:
+        existing = next(
+            (
+                item
+                for item in self._request_history
+                if item["request_id"] == request_id
+            ),
+            None,
+        )
+        if (
+            existing is not None
+            and existing.get("status") in _TERMINAL_REQUEST_STATUSES
+        ):
             return
         if existing is None:
             started_at = float(event.get("started_at") or time.time())
@@ -194,7 +298,10 @@ class A2AManager:
         if existing.get("finished_at") is not None:
             existing["duration_ms"] = max(
                 0,
-                round((float(existing["finished_at"]) - float(existing["started_at"])) * 1000),
+                round(
+                    (float(existing["finished_at"]) - float(existing["started_at"]))
+                    * 1000
+                ),
             )
 
     async def start_from_config(self) -> A2AIngressSnapshot:
@@ -209,7 +316,9 @@ class A2AManager:
             await self._create_and_start_locked(wait=False)
             return self.snapshot()
 
-    async def update(self, patch: dict[str, Any], *, apply: bool = False) -> A2AIngressSnapshot:
+    async def update(
+        self, patch: dict[str, Any], *, apply: bool = False
+    ) -> A2AIngressSnapshot:
         async with self._lock:
             next_config = self._config.with_patch(patch)
             self._persist_locked(next_config)
@@ -264,7 +373,9 @@ class A2AManager:
 
     async def _create_and_start_locked(self, *, wait: bool) -> None:
         effective_config = self._config
-        channel = self._channel_factory(effective_config.to_channel_config(), self._router)
+        channel = self._channel_factory(
+            effective_config.to_channel_config(), self._router
+        )
         set_request_observer = getattr(channel, "set_request_observer", None)
         if callable(set_request_observer):
             set_request_observer(self._record_request_event)
@@ -273,7 +384,12 @@ class A2AManager:
         self._starting_config = effective_config
         self._state = A2AIngressState.STARTING
         self._last_error = None
-        logger.info("a2a.ingress starting: rpc_url=http://%s:%s%s", effective_config.host, effective_config.port, effective_config.rpc_path)
+        logger.info(
+            "a2a.ingress starting: rpc_url=http://%s:%s%s",
+            effective_config.host,
+            effective_config.port,
+            effective_config.rpc_path,
+        )
         task = asyncio.create_task(channel.start(), name="a2a-channel")
         self._start_task = task
         task.add_done_callback(self._on_start_done)
@@ -309,7 +425,10 @@ class A2AManager:
             try:
                 await task
             except asyncio.CancelledError:
-                if asyncio.current_task() is not None and asyncio.current_task().cancelling():
+                if (
+                    asyncio.current_task() is not None
+                    and asyncio.current_task().cancelling()
+                ):
                     propagate_cancellation = True
             except Exception:  # noqa: BLE001
                 pass
@@ -325,9 +444,14 @@ class A2AManager:
             return
         exc = task.exception()
         if exc is None:
-            asyncio.create_task(self._record_start_success(task), name="a2a-ingress-started")
+            asyncio.create_task(
+                self._record_start_success(task), name="a2a-ingress-started"
+            )
         else:
-            asyncio.create_task(self._record_background_error(task, exc), name="a2a-ingress-start-failed")
+            asyncio.create_task(
+                self._record_background_error(task, exc),
+                name="a2a-ingress-start-failed",
+            )
 
     async def _record_start_success(self, task: asyncio.Task[None]) -> None:
         async with self._lock:
@@ -337,7 +461,9 @@ class A2AManager:
                 self._effective_config = self._starting_config
                 logger.info("a2a.ingress running")
 
-    async def _record_background_error(self, task: asyncio.Task[None], exc: Exception) -> None:
+    async def _record_background_error(
+        self, task: asyncio.Task[None], exc: Exception
+    ) -> None:
         async with self._lock:
             if self._start_task is task:
                 self._record_start_error(exc)
@@ -366,4 +492,8 @@ class A2AManager:
         """Gateway shutdown; does not persist a configuration change."""
         async with self._lock:
             await self._dispose_channel_locked()
-            self._state = A2AIngressState.DISABLED if not self._config.enabled else A2AIngressState.ERROR
+            self._state = (
+                A2AIngressState.DISABLED
+                if not self._config.enabled
+                else A2AIngressState.ERROR
+            )
