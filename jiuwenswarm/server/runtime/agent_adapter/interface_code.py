@@ -903,7 +903,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     def _build_context_assemble_rail(self) -> Any:
         """构建 ContextEngineeringRail."""
-        return ContextAssembleRail()
+        return ContextAssembleRail(
+            include_tools_section=self._progressive_tool_rail is None
+        )
 
     def _build_context_processor_rail(self) -> Any:
         """构建 ContextProcessorRail — 复用父类逻辑."""

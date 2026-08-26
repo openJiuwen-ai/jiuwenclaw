@@ -142,8 +142,8 @@ class FakeContextProcessorRail:
 
 
 class FakeContextAssembleRail:
-    def __init__(self):
-        pass
+    def __init__(self, include_tools_section: bool = True):
+        self.include_tools_section = include_tools_section
 
 
 class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):

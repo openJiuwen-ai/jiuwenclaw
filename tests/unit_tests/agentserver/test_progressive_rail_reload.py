@@ -77,6 +77,37 @@ def test_reload_plan_adds_new_progressive_rail_when_enabled():
     assert adapter._progressive_tool_rail is new_rail
 
 
+def test_reload_plan_skips_tools_section_when_progressive_tool_enabled():
+    adapter = _rail_plan_adapter()
+    assemble = SimpleNamespace(include_tools_section=True)
+    adapter._context_assemble_rail = assemble
+    adapter._build_progressive_tool_rail.return_value = MagicMock()
+
+    adapter._get_current_agent_rails(
+        {"tool_lazy_load": {"enabled": True}},
+        {"react": {"tool_lazy_load": {"enabled": True}}},
+    )
+
+    assert assemble.include_tools_section is False
+
+
+def test_reload_plan_restores_tools_section_when_progressive_tool_disabled():
+    adapter = _rail_plan_adapter()
+    assemble = SimpleNamespace(include_tools_section=False)
+    adapter._context_assemble_rail = assemble
+    old_rail = MagicMock(name="old-progressive-tool-rail")
+    adapter._progressive_tool_rail = old_rail
+    adapter._build_progressive_tool_rail.return_value = None
+
+    adapter._get_current_agent_rails(
+        {"tool_lazy_load": {"enabled": False}},
+        {"react": {"tool_lazy_load": {"enabled": False}}},
+    )
+
+    assert assemble.include_tools_section is True
+    assert adapter._progressive_tool_rail is old_rail
+
+
 def test_reload_plan_replaces_disabled_tools_rail():
     adapter = _rail_plan_adapter()
     old_rail = MagicMock(name="old-disabled-tools-rail")

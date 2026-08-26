@@ -1405,10 +1405,15 @@ def _deep_agent_kv_cache_affinity_config(
     )
 
 
-def _build_context_assemble_rail() -> ContextAssembleRail | None:
+def _build_context_assemble_rail(
+    *,
+    include_tools_section: bool = True,
+) -> ContextAssembleRail | None:
     """Build ContextAssembleRail."""
     try:
-        context_assemble_rail = ContextAssembleRail()
+        context_assemble_rail = ContextAssembleRail(
+            include_tools_section=include_tools_section,
+        )
         logger.info("[JiuWenSwarmDeepAdapter] ContextAssembleRail create success")
     except Exception as exc:
         logger.warning("[JiuWenSwarmDeepAdapter] ContextAssembleRail create failed: %s", exc)
@@ -6802,6 +6807,19 @@ class JiuWenSwarmDeepAdapter:
             )
         return rail
 
+    def _sync_context_assemble_tools_section(
+        self, *, include_tools_section: bool
+    ) -> None:
+        """Keep ContextAssembleRail.include_tools_section in sync with ProgressiveTool.
+
+        No-op until ContextAssembleRail exists (it is registered later in
+        ``_update_agent_rails``). Construction passes the initial value.
+        """
+        rail = self._context_assemble_rail
+        if rail is None:
+            return
+        rail.include_tools_section = include_tools_section
+
     @staticmethod
     def _build_disabled_tools_rail(
         config: dict[str, Any]
@@ -7300,6 +7318,11 @@ class JiuWenSwarmDeepAdapter:
                 self._progressive_tool_rail = progressive_tool_rail
             elif old_progressive_tool_rail is not None:
                 rails_to_unregister.append(old_progressive_tool_rail)
+            # Use the newly built rail, not _progressive_tool_rail: disable
+            # stages unregister but keeps the old attr until unregister runs.
+            self._sync_context_assemble_tools_section(
+                include_tools_section=progressive_tool_rail is None
+            )
 
         # 统一工具开关热更新：重建式（与 ProgressiveToolRail 一致）。
         # 旧 rail uninit 时回滚它注销的工具（重新注册），新 rail init 再按新名单注销。
@@ -8670,7 +8693,9 @@ class JiuWenSwarmDeepAdapter:
             if self._context_assemble_rail is not None:
                 await self._instance.unregister_rail(self._context_assemble_rail)
                 self._context_assemble_rail = None
-            self._context_assemble_rail = _build_context_assemble_rail()
+            self._context_assemble_rail = _build_context_assemble_rail(
+                include_tools_section=self._progressive_tool_rail is None
+            )
             self._context_assemble_mode = "agent"
             await self._instance.register_rail(self._context_assemble_rail)
             logger.info(
