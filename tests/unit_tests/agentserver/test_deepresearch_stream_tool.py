@@ -561,11 +561,94 @@ async def test_repeated_cancellation_finishes_reap_and_untrack_before_reraising(
 
 
 @pytest.mark.asyncio
-async def test_stdout_pending_buffer_is_bounded():
+async def test_stdout_pending_buffer_temporarily_accepts_legacy_limit():
+    legacy_limit = 16 * 1024 * 1024
+    payload = b"x" * (legacy_limit + 1)
+    lines = []
+
+    with patch.object(dt.logger, "warning") as warning:
+        async for line in dt._iter_ndjson_lines(_Reader(payload + b"\n")):
+            lines.append(line)
+
+    assert lines == [payload]
+    assert warning.call_args.args[1:3] == (
+        len(payload),
+        dt.DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stdout_pending_buffer_is_bounded_and_logs_dimensions():
     stream = _Reader(b"x" * (dt.DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES + 1))
-    with pytest.raises(ValueError, match="deepresearch_stdout_limit_exceeded"):
-        async for _line in dt._iter_ndjson_lines(stream):
-            pass
+    with patch.object(dt.logger, "error") as error:
+        with pytest.raises(ValueError, match="deepresearch_stdout_limit_exceeded"):
+            async for _line in dt._iter_ndjson_lines(stream):
+                pass
+
+    assert error.call_args.args[1:3] == (
+        dt.DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES + 1,
+        dt.DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exception_message", "expected_reason", "expected_exc_info"),
+    [
+        (
+            "deepresearch_stdout_limit_exceeded",
+            "deepresearch_stdout_limit_exceeded",
+            True,
+        ),
+        ("exception-secret-that-must-not-be-logged", "unclassified", False),
+    ],
+)
+async def test_stream_failure_logs_safe_reason_and_correlation(
+    exception_message: str, expected_reason: str, expected_exc_info: bool
+):
+    proc = _Proc([])
+    route = {
+        "request_id": "REQ-123",
+        "channel_id": "CHANNEL-123",
+        "session_id": "SESSION-123",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    patches = _stream_patches(proc, route=route)
+
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        logged_error = stack.enter_context(patch.object(dt.logger, "error"))
+        stack.enter_context(
+            patch.object(
+                dt,
+                "_consume_stream",
+                new=AsyncMock(side_effect=ValueError(exception_message)),
+            )
+        )
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(
+                action="resume",
+                conversation_id="CONVERSATION-123",
+                node="user_feedback_processor",
+                query="query-secret-that-must-not-be-logged",
+            )
+        )
+
+    assert outcome["error_code"] == "stream_failed"
+    assert outcome["error"] == "DeepResearch stream failed: ValueError"
+    assert logged_error.call_args.args[1:] == (
+        "ValueError",
+        expected_reason,
+        "REQ-123",
+        "SESSION-123",
+        "CONVERSATION-123",
+    )
+    assert logged_error.call_args.kwargs == {"exc_info": expected_exc_info}
+    logged_call = repr(logged_error.call_args)
+    assert "query-secret-that-must-not-be-logged" not in logged_call
+    assert "exception-secret-that-must-not-be-logged" not in logged_call
 
 
 @pytest.mark.asyncio

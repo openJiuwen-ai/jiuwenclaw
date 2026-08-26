@@ -79,7 +79,10 @@ logger = logging.getLogger(__name__)
 
 DEEPRESEARCH_CONFIG_PROTOCOL_VERSION = 1
 DEEPRESEARCH_CONFIG_MAX_BYTES = 64 * 1024
-DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES = 16 * 1024 * 1024
+# Temporary diagnostic headroom for terminal frames that embed final_result.
+# Keep the former limit as an early-warning threshold and retain a bounded cap.
+DEEPRESEARCH_STDOUT_PENDING_WARN_BYTES = 16 * 1024 * 1024
+DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES = 64 * 1024 * 1024
 DEEPRESEARCH_STDERR_TAIL_MAX_BYTES = 20_000
 DEEPRESEARCH_ERROR_TEXT_MAX_CHARS = 2048
 DEEPRESEARCH_STDERR_OUTCOME_MAX_CHARS = 2048
@@ -98,6 +101,7 @@ _REPORT_PUBLICATION_ATTEMPTS = 8
 
 _CHILD_ERROR_CODE_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
 _PROTOCOL_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,127}")
+_LOG_CORRELATION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _PROTOCOL_FIXED_KEYS = frozenset(
     {
         "__deepsearch_status__",
@@ -203,6 +207,14 @@ class _ReportPublicationCollision(FileExistsError):
 
 class _StreamProtocolInvalid(ValueError):
     """A child-controlled JSON structure cannot be forwarded safely."""
+
+
+def _safe_log_correlation_id(value: object) -> str:
+    """Return a bounded identifier for logs without echoing arbitrary input."""
+    candidate = str(value or "").strip()
+    if _LOG_CORRELATION_ID_PATTERN.fullmatch(candidate):
+        return candidate
+    return "-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -841,9 +853,32 @@ async def _stop_deepresearch_process(proc: Any, timeout: float = 10.0) -> None:
             await proc.wait()
 
 
-async def _iter_ndjson_lines(stream: Any, read_size: int = 64 * 1024):
+async def _iter_ndjson_lines(
+    stream: Any,
+    read_size: int = 64 * 1024,
+    *,
+    request_id: str = "",
+    session_id: str = "",
+    conversation_id: str = "",
+):
     if stream is None:
         return
+    correlation_ids = (
+        _safe_log_correlation_id(request_id),
+        _safe_log_correlation_id(session_id),
+        _safe_log_correlation_id(conversation_id),
+    )
+
+    def log_large_frame(frame_bytes: int) -> None:
+        logger.warning(
+            "[deepresearch_stream] large stdout frame "
+            "frame_bytes=%s limit_bytes=%s request_id=%s session_id=%s "
+            "conversation_id=%s",
+            frame_bytes,
+            DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES,
+            *correlation_ids,
+        )
+
     read = getattr(stream, "read", None)
     if not callable(read):
         async for line in stream:
@@ -856,14 +891,26 @@ async def _iter_ndjson_lines(stream: Any, read_size: int = 64 * 1024):
             break
         pending.extend(chunk)
         if len(pending) > DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES:
+            logger.error(
+                "[deepresearch_stream] stdout frame limit exceeded "
+                "pending_bytes=%s limit_bytes=%s request_id=%s session_id=%s "
+                "conversation_id=%s",
+                len(pending),
+                DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES,
+                *correlation_ids,
+            )
             raise ValueError("deepresearch_stdout_limit_exceeded")
         while True:
             newline = pending.find(b"\n")
             if newline < 0:
                 break
+            if newline > DEEPRESEARCH_STDOUT_PENDING_WARN_BYTES:
+                log_large_frame(newline)
             yield bytes(pending[:newline])
             del pending[: newline + 1]
     if pending:
+        if len(pending) > DEEPRESEARCH_STDOUT_PENDING_WARN_BYTES:
+            log_large_frame(len(pending))
         yield bytes(pending)
 
 
@@ -1877,6 +1924,22 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
     except _StreamProtocolInvalid:
         outcome = _stream_protocol_error()
     except Exception as exc:  # pylint: disable=broad-exception-caught
+        safe_reason = (
+            "deepresearch_stdout_limit_exceeded"
+            if isinstance(exc, ValueError)
+            and str(exc) == "deepresearch_stdout_limit_exceeded"
+            else "unclassified"
+        )
+        logger.error(
+            "[deepresearch_stream] stream consume failed type=%s reason=%s "
+            "request_id=%s session_id=%s conversation_id=%s",
+            type(exc).__name__,
+            safe_reason,
+            _safe_log_correlation_id(route.get("request_id")),
+            _safe_log_correlation_id(session_id),
+            _safe_log_correlation_id(conversation_id),
+            exc_info=safe_reason != "unclassified",
+        )
         outcome = {
             "status": "error",
             "error_code": "stream_failed",
@@ -2060,7 +2123,12 @@ async def _consume_stream(
             result["timing"] = timing
         return result
 
-    async for raw in _iter_ndjson_lines(proc.stdout):
+    async for raw in _iter_ndjson_lines(
+        proc.stdout,
+        request_id=str(route.get("request_id") or ""),
+        session_id=str(route.get("session_id") or ""),
+        conversation_id=conversation_id,
+    ):
         try:
             line = raw.decode("utf-8").strip()
         except UnicodeDecodeError:
