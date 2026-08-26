@@ -77,6 +77,10 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
+# FullCompact 仅用于溢出兜底（413/上下文溢出），日常压缩由 preset 链承担。
+# 从 processor.compressor 包入口取 Config（__init__ 显式导出，跨版本稳定）；
+# _merge_processors 只认 BaseModel 实例，不区分配置类来源
+from openjiuwen.core.context_engine.processor.compressor import FullCompactProcessorConfig
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload as _SkillTurboConfirmPayload
 try:
     from openjiuwen.agent_evolving.skill_self_evolution import resolve_skill_evolution_action
@@ -1440,6 +1444,16 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
         round_level_cfg = context_engine_cfg.get("round_level_compressor_config", {})
         if isinstance(round_level_cfg, dict) and round_level_cfg:
             user_processors.append(("RoundLevelCompressor", round_level_cfg))
+
+        # 兜底压缩：整窗口 token 超阈值时调一次 LLM 把历史压成 summary。
+        # ContextOverflowRecoveryRail 在 413/上下文溢出时靠 set_force_compact 触发。
+        # 注意：FullCompactProcessor 不在 0.1.16 preset 链中，_merge_processors 对非 preset
+        # processor 不接受 dict（无 base_cfg 可合并），必须传完整 BaseModel 实例。
+        full_compact_cfg = context_engine_cfg.get("full_compact_processor_config", {})
+        if isinstance(full_compact_cfg, dict) and full_compact_cfg:
+            user_processors.append(
+                ("FullCompactProcessor", FullCompactProcessorConfig(**full_compact_cfg))
+            )
 
         reasoning_loop_cfg = context_engine_cfg.get("reasoning_tool_loop_compact_config", {})
         if isinstance(reasoning_loop_cfg, dict) and reasoning_loop_cfg:
