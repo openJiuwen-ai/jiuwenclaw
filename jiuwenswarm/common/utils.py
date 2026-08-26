@@ -1965,6 +1965,46 @@ def get_shared_agent_skills_dirs() -> list[Path]:
     return parse_shared_skills_dirs_raw(raw.strip())
 
 
+def merge_shared_skills_trusted_dirs(
+    trusted_dirs: list[str] | None = None,
+) -> list[str]:
+    """Union CLI ``trusted_dirs`` with shared skill roots for file_guard allow.
+
+    Aligns GitCode !4622 ``file_guard.global`` whitelist: tip/overlay (via
+    ``get_shared_agent_skills_dirs``) ∪ ``os.environ``, pathsep-split.
+    ``PermissionInterruptRail.set_trusted_dirs`` replaces the list, so callers
+    must re-merge on every hot update.
+    """
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str) -> None:
+        text = str(raw).strip()
+        if not text:
+            return
+        try:
+            text = str(Path(text).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            pass
+        if text in seen:
+            return
+        seen.add(text)
+        merged.append(text)
+
+    for item in trusted_dirs or []:
+        if item:
+            _add(str(item))
+    for path in get_shared_agent_skills_dirs():
+        _add(str(path))
+    for key in (
+        JIUWENSWARM_SHARED_SKILLS_DIRS_ENV,
+        JIUWENCLAW_SHARED_SKILLS_DIRS_ENV,
+    ):
+        for path in parse_shared_skills_dirs_raw(os.environ.get(key, "") or ""):
+            _add(str(path))
+    return merged
+
+
 def resolve_agent_registered_skill_dirs() -> list[Path]:
     """Resolve skill dirs: request-bound override, shared tip dirs, else workspace."""
     try:
