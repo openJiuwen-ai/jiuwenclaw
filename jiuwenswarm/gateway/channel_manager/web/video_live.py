@@ -8,6 +8,7 @@ from array import array
 from datetime import datetime, timezone
 import io
 import json
+import logging
 import os
 import re
 import struct
@@ -16,6 +17,7 @@ import time
 import wave
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import urljoin
 import uuid
 
 import httpx
@@ -58,6 +60,7 @@ _IMAGE_FILENAME_SUFFIXES = {
     "image/webp": ".webp",
 }
 _LOG_WRITE_LOCK = threading.Lock()
+_LOGGER = logging.getLogger(__name__)
 
 
 class _JoyAIRateLimitError(RuntimeError):
@@ -122,6 +125,15 @@ _REALTIME_TELEMETRY_EVENTS = {
     "search_result_answered",
     "search_result_response_interrupted",
     "search_result_response_empty",
+}
+_REALTIME_TELEMETRY_FIELDS = {
+    "event", "client_time", "level", "peak_level", "threshold",
+    "noise_floor", "speech_ms", "assistant_playing", "response_active", "reason",
+    "previous_task", "current_task",
+    "source", "frame_count", "model", "url", "code", "message",
+    "client_build", "task", "job_id", "search_session_id", "question",
+    "query", "result", "realtime_answer", "turn_id", "attempt",
+    "decision", "response_chars",
 }
 
 
@@ -218,8 +230,11 @@ def _video_model_config() -> tuple[str, str, str]:
         client = video.get("model_client_config") if isinstance(video, dict) else None
         if isinstance(client, dict):
             configured = client
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.debug(
+            "Unable to load the configured video model; using VIDEO_* environment variables",
+            exc_info=exc,
+        )
     api_base = str(configured.get("api_base") or os.environ.get("VIDEO_API_BASE") or "").strip()
     api_key = str(configured.get("api_key") or os.environ.get("VIDEO_API_KEY") or "").strip()
     model = str(configured.get("model_name") or os.environ.get("VIDEO_MODEL_NAME") or "").strip()
@@ -266,7 +281,7 @@ def _realtime_public_url() -> str:
         api_base = "wss://" + api_base[8:]
     elif api_base.startswith("http://"):
         api_base = "ws://" + api_base[7:]
-    return api_base.rstrip("/") + "/realtime" if api_base else ""
+    return urljoin(f"{api_base.rstrip('/')}/", "realtime") if api_base else ""
 
 
 def _realtime_ref_audio() -> str:
@@ -724,7 +739,9 @@ async def _transcribe_audio(audio_inputs: list[tuple[str, str]]) -> str:
     from openai import AsyncOpenAI
 
     api_base, api_key, model = _model_config("ASR_")
-    if not audio_inputs or not api_base or not api_key or not model:
+    if not audio_inputs:
+        return ""
+    if not all((api_base, api_key, model)):
         return ""
     client = AsyncOpenAI(api_key=api_key, base_url=api_base, timeout=45.0)
     try:
@@ -1452,20 +1469,12 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
                 ws, req_id, ok=False, error="unsupported telemetry event", code="BAD_REQUEST"
             )
             return
-        allowed = {
-            key: value
-            for key, value in params.items()
-            if key in {
-                "event", "client_time", "level", "peak_level", "threshold",
-                "noise_floor", "speech_ms", "assistant_playing", "response_active", "reason",
-                "previous_task", "current_task",
-                "source", "frame_count", "model", "url", "code", "message",
-                "client_build", "task", "job_id", "search_session_id", "question",
-                "query", "result", "realtime_answer", "turn_id", "attempt",
-                "decision", "response_chars",
-            }
-            and isinstance(value, (str, int, float, bool))
-        }
+        allowed: dict[str, str | int | float | bool] = {}
+        for key, value in params.items():
+            if key not in _REALTIME_TELEMETRY_FIELDS:
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                allowed[key] = value
         for key in ("question", "query", "task"):
             if isinstance(allowed.get(key), str):
                 allowed[key] = allowed[key][:1_000]
