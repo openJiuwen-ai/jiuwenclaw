@@ -1999,6 +1999,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "chromadb" },
     { name = "croniter" },
+    { name = "cryptography" },
     { name = "dingtalk-stream" },
     { name = "discord-py" },
     { name = "faiss-cpu" },
@@ -2026,6 +2027,7 @@ dependencies = [
     { name = "portalocker" },
     { name = "psutil" },
     { name = "pydantic" },
+    { name = "pymysql" },
     { name = "python-json-logger" },
     { name = "python-multipart" },
     { name = "python-socks" },
@@ -2163,6 +2165,7 @@ requires-dist = [
     { name = "coverage", marker = "extra == 'test'", specifier = ">=7.7.1" },
     { name = "croniter", specifier = ">=2.0.0" },
     { name = "croniter", marker = "extra == 'harmony'", specifier = ">=2.0.0" },
+    { name = "cryptography", specifier = ">=42.0.0" },
     { name = "dingtalk-stream", specifier = ">=0.24.3" },
     { name = "dingtalk-stream", marker = "extra == 'harmony'", specifier = ">=0.24.3" },
     { name = "discord-py", specifier = ">=2.4.0" },
@@ -2213,6 +2216,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic", marker = "extra == 'harmony'", specifier = ">=2.0" },
     { name = "pyinstaller", marker = "extra == 'dev'", specifier = ">=6.0.0" },
+    { name = "pymysql", specifier = ">=1.1.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3.5" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=1.0.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=7.0.0" },
@@ -3334,7 +3338,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.16"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=dev-stable#5d48d0d8d10ea06340fd7ad38493929a38e56d43" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=dev-stable#abef7c187bfe6a4989fab4142d8b892f6c0ce500" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -3365,6 +3369,7 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "python-docx" },
     { name = "python-dotenv" },
+    { name = "python-pptx" },
     { name = "requests" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "sqlmodel" },
@@ -4425,6 +4430,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/94/0c/92adff800a04cd3e9b3f17c06fa972c8d590846b1e0bac0ccf39e054b596/pymilvus-2.6.9.tar.gz", hash = "sha256:c53a3d84ff15814e251be13edda70a98a1c8a6090d7597a908387cbb94a9504a", size = 1493560, upload-time = "2026-02-10T11:01:27.415Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6a/56/ab7f0a5aba6fc06dc210a059d6f6d2ee1f3371d40e2b4366a409576554b8/pymilvus-2.6.9-py3-none-any.whl", hash = "sha256:3e14e8072f6429dcd79d52a24dc021c594cb80841ddd76cb974bc539d1f4cdda", size = 301225, upload-time = "2026-02-10T11:01:25.796Z" },
+]
+
+[[package]]
+name = "pymysql"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c9/bc/1c6a92f385940f727daeecf3bacaf186e03875dff57197801046c583bcf0/pymysql-1.2.0.tar.gz", hash = "sha256:6c7b17ca686988104d7426c27895b455cdeea3e9d3ceb1270f0c3704fead8c33", size = 49021, upload-time = "2026-05-19T08:26:22.302Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/bd/2534e130295c8cfd4f0a2e31623baab7502278f1e97bcfe61db75656a77f/pymysql-1.2.0-py3-none-any.whl", hash = "sha256:62169ce6d5510f08e140c5e7990ee884a9764024e4a9a27b2cc11f1099322ae0", size = 45716, upload-time = "2026-05-19T08:26:20.974Z" },
 ]
 
 [[package]]

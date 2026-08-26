@@ -314,27 +314,31 @@ class TestSessionRegistry:
             lg.flush()  # close the dump file opened on construction
 
 
-# ── OTel get_team_span session-registry fallback ───────────────────────────
+# ── OTel root-span session-registry fallback ───────────────────────────────
 class TestOtelTeamSpanFallback:
-    """The get_team_span monkeypatch resolves a root by current session."""
+    """The root-span monkeypatch resolves a root by current session."""
 
     def test_patch_is_installed(self):
-        # ALL consumers must be patched: callback_handler (llm/tool spans) AND
-        # rail (agent.<type>.invoke spans — returns early when get_team_span is None).
-        import openjiuwen.agent_teams.observability.callback_handler as ch
+        # The current callback handler owns generic llm/tool spans; the legacy
+        # Team rail remains a consumer for its agent.<type>.invoke spans.
+        import openjiuwen.extensions.observability.callback_handler as ch
         import openjiuwen.agent_teams.observability.rail as rail
         import jiuwenswarm.agents.harness.agent_observability as obs  # triggers install
 
         # Patched bindings are tracked in the module-level _team_span_patched set
         # (the wrapper is itself the key — it becomes the next lookup's orig, so
         # re-install is idempotent).
-        assert ch.get_team_span in obs._team_span_patched
+        assert ch.get_root_span in obs._team_span_patched
         assert rail.get_team_span in obs._team_span_patched
 
     def test_fallback_returns_current_session_root_span(self, monkeypatch):
-        import openjiuwen.agent_teams.observability.callback_handler as ch
+        import openjiuwen.extensions.observability.callback_handler as ch
         from openjiuwen.agent_teams.context import reset_session_id, set_session_id
         from openjiuwen.agent_teams.observability.span_context import clear_team_span
+        from openjiuwen.extensions.observability.span_context import (
+            clear_current_session_id,
+            clear_root_span,
+        )
         import jiuwenswarm.agents.harness.agent_observability as obs
         from jiuwenswarm.telemetry.request_context import TraceBindingRegistry
 
@@ -343,17 +347,25 @@ class TestOtelTeamSpanFallback:
         runtime = SimpleNamespace(trace_bindings=registry)
         monkeypatch.setattr(obs, "_get_unified_runtime", lambda: runtime)
         clear_team_span()
+        clear_root_span(session_id="s1")
+        clear_current_session_id()
         token = set_session_id("s1")
         try:
-            assert ch.get_team_span() == "ROOT_SENTINEL"
+            assert ch.get_root_span() == "ROOT_SENTINEL"
         finally:
             reset_session_id(token)
             clear_team_span()
+            clear_root_span(session_id="s1")
+            clear_current_session_id()
 
     def test_fallback_none_when_session_has_no_binding(self, monkeypatch):
-        import openjiuwen.agent_teams.observability.callback_handler as ch
+        import openjiuwen.extensions.observability.callback_handler as ch
         from openjiuwen.agent_teams.context import reset_session_id, set_session_id
         from openjiuwen.agent_teams.observability.span_context import clear_team_span
+        from openjiuwen.extensions.observability.span_context import (
+            clear_current_session_id,
+            clear_root_span,
+        )
         import jiuwenswarm.agents.harness.agent_observability as obs
         from jiuwenswarm.telemetry.request_context import TraceBindingRegistry
 
@@ -362,12 +374,16 @@ class TestOtelTeamSpanFallback:
         )
         monkeypatch.setattr(obs, "_get_unified_runtime", lambda: runtime)
         clear_team_span()
+        clear_root_span(session_id="missing")
+        clear_current_session_id()
         token = set_session_id("missing")
         try:
-            assert ch.get_team_span() is None
+            assert ch.get_root_span() is None
         finally:
             reset_session_id(token)
             clear_team_span()
+            clear_root_span(session_id="missing")
+            clear_current_session_id()
 
 
 # ── truncation / redaction ─────────────────────────────────────────────────
