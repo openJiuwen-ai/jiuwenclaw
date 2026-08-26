@@ -2703,37 +2703,44 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                   </span>
                 </button>
-                <button
-                  ref={extensionMenuItemRef}
-                  type="button"
-                  className="chat-mode-select__option"
-                  role="menuitem"
-                  aria-haspopup="menu"
-                  aria-expanded={extensionPanelOpen}
-                  onClick={() => {
-                    if (!extensionPanelOpen && extensionMenuItemRef.current) {
-                      setExtensionAnchor(extensionMenuItemRef.current.getBoundingClientRect());
-                    }
-                    setExtensionPanelOpen((open) => !open);
-                  }}
-                >
-                  <span className="chat-mode-select__option-main">
-                    {/* 手绘拼图图标（ConnectorMarket/icons.tsx）在这个菜单里视觉上比旁边
-                        FileText/Target/ClipboardList 这些 lucide 图标显得更小（用户 2026-08-19
-                        反馈），单独放大到 18px。真正生效的是 CSS 里的 --lg 修饰 class（见
-                        ChatPanel.css `.chat-mode-select__icon svg { width/height: 14px }`
-                        这条共享基础规则的选择器特异度是 class+元素，Tailwind 任意值 class 在
-                        SVG 自身上加宽高属性/class 特异度更低会被它盖掉，实测确认过），不是这里
-                        ExtensionIcon 的 className。 */}
-                    <span className="chat-mode-select__icon chat-mode-select__icon--lg" aria-hidden="true">
-                      <ExtensionIcon />
+                {/* 插件/MCP 装备目前后端在集群模式下不生效（JiuWenSwarmDeepAdapter
+                    ._ensure_chat_extensions 对 team 模式直接短路，见
+                    interface_deep.py），继续展示这个入口只会让用户以为选了插件/MCP 会生效，
+                    实际发出去也是白发。集群模式下直接不渲染这个入口，跟旁边 SkillSelector
+                    （!isTeamMode 判断）保持同样的处理方式。 */}
+                {!isTeamMode && (
+                  <button
+                    ref={extensionMenuItemRef}
+                    type="button"
+                    className="chat-mode-select__option"
+                    role="menuitem"
+                    aria-haspopup="menu"
+                    aria-expanded={extensionPanelOpen}
+                    onClick={() => {
+                      if (!extensionPanelOpen && extensionMenuItemRef.current) {
+                        setExtensionAnchor(extensionMenuItemRef.current.getBoundingClientRect());
+                      }
+                      setExtensionPanelOpen((open) => !open);
+                    }}
+                  >
+                    <span className="chat-mode-select__option-main">
+                      {/* 手绘拼图图标（ConnectorMarket/icons.tsx）在这个菜单里视觉上比旁边
+                          FileText/Target/ClipboardList 这些 lucide 图标显得更小（用户 2026-08-19
+                          反馈），单独放大到 18px。真正生效的是 CSS 里的 --lg 修饰 class（见
+                          ChatPanel.css `.chat-mode-select__icon svg { width/height: 14px }`
+                          这条共享基础规则的选择器特异度是 class+元素，Tailwind 任意值 class 在
+                          SVG 自身上加宽高属性/class 特异度更低会被它盖掉，实测确认过），不是这里
+                          ExtensionIcon 的 className。 */}
+                      <span className="chat-mode-select__icon chat-mode-select__icon--lg" aria-hidden="true">
+                        <ExtensionIcon />
+                      </span>
+                      <span className="chat-mode-select__label">{t('chat.extension')}</span>
                     </span>
-                    <span className="chat-mode-select__label">{t('chat.extension')}</span>
-                  </span>
-                  <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
-                  </svg>
-                </button>
+                    <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
+                    </svg>
+                  </button>
+                )}
                 {(canUsePlanMenu || canUseGoalMenu) && <div className="chat-mode-select__divider" role="separator" />}
                 {canUsePlanMenu && (() => {
                   // 对称地：已有未完成目标时不能选计划；对话进行中（isProcessing）时也先禁掉，
