@@ -458,20 +458,19 @@ class SkillRetrievalToolkit:
             **pinned_snapshot_kwargs,
         )
         environment_snapshot = self._environment.prompt_snapshot()
-        if (
-            restored_snapshot is not None
-            and restored_snapshot.mode in {"indexed", "indexed-stale"}
-            and not restored_snapshot.branches
-            and environment_snapshot.branches
-        ):
-            # Profiles written before branch orientation was persisted still
-            # carry a pinned taxonomy snapshot. Recover only its root routing
-            # hints; keep the frozen candidate entries and budget unchanged.
-            restored_snapshot = replace(
-                restored_snapshot,
-                branches=environment_snapshot.branches,
-                omitted_branch_count=environment_snapshot.omitted_branch_count,
-            )
+        if restored_snapshot is not None and restored_snapshot.mode in {
+            "indexed",
+            "indexed-stale",
+        }:
+            if not restored_snapshot.branches and environment_snapshot.branches:
+                # Profiles written before branch orientation was persisted still
+                # carry a pinned taxonomy snapshot. Recover only its root routing
+                # hints; keep the frozen candidate entries and budget unchanged.
+                restored_snapshot = replace(
+                    restored_snapshot,
+                    branches=environment_snapshot.branches,
+                    omitted_branch_count=environment_snapshot.omitted_branch_count,
+                )
         self._frozen_prompt_snapshot = restored_snapshot or environment_snapshot
         restored_strategy = (
             str(frozen_profile.get("effective_strategy") or "")

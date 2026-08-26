@@ -395,12 +395,9 @@ class SkillRetrievalPromptRail(DeepAgentRail):
 
         inputs = getattr(ctx, "inputs", None)
         tools = getattr(inputs, "tools", None)
-        if (
-            not restored_cards
-            or inputs is None
-            or tools is not None
-            and not isinstance(tools, list)
-        ):
+        if not restored_cards or inputs is None:
+            return
+        if tools is not None and not isinstance(tools, list):
             return
 
         restored = list(tools or [])
