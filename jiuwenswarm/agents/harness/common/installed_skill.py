@@ -390,7 +390,7 @@ def resolve_final_tenant_ids(
     if not svc or not ag:
         if g and b and u:
             try:
-                from openjiuwen_runtime_management_extension.runtime_management_client import (  # type: ignore
+                from openjiuwen_runtime_management_extension.invoke_ids import (  # type: ignore
                     _default_invoke_ids,
                 )
 

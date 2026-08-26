@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Runtime Management Extension."""
+"""Runtime Routing Extension（route → HTTP → touch，不管理 AgentServer 生命周期）。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class RuntimeManagementExtension(AgentServerClientExtension):
-    """Runtime 管理扩展：注册旁路路由 + HTTP 发送客户端。"""
+    """Runtime 路由扩展：注册 session route + HTTP 发送客户端（不含 Pod/配置下发）。"""
 
     def __init__(self, client: AgentServerClient) -> None:
         self._client = client
@@ -67,7 +67,7 @@ class RuntimeManagementExtension(AgentServerClientExtension):
 
 
 async def register_extensions(registry) -> list[RuntimeManagementExtension]:
-    """注册 Runtime Management 扩展。"""
+    """注册 Runtime 路由扩展。"""
     client = RuntimeRoutedAgentClient()
     ext = RuntimeManagementExtension(client)
     registry.register_agent_server_client(ext)

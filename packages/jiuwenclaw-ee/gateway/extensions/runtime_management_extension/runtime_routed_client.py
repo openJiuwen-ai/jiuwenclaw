@@ -177,14 +177,6 @@ class RuntimeRoutedAgentClient(AgentServerClient):
         self._route_attempts = max(1, int(route_attempts))
         self._connected = False
 
-    def set_or_update_server_config(
-        self,
-        *,
-        config: dict[str, Any],
-        env: dict[str, str] | None = None,
-    ) -> None:
-        return None
-
     async def connect(self, uri: str) -> None:
         _ = uri
         self._connected = True
