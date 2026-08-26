@@ -3392,6 +3392,12 @@ claude = [
 codex = [
     { name = "openai-codex" },
 ]
+observability = [
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+]
 postgres = [
     { name = "asyncpg" },
 ]
@@ -3403,7 +3409,7 @@ zmq = [
 [[package]]
 name = "openjiuwen-deepsearch"
 version = "0.2.0"
-source = { git = "https://gitcode.com/openJiuwen/deepsearch.git?subdirectory=deepsearch&rev=dev-stable#7dd18ea09b6e9a97bf05e37e001d0ec0c961ab68" }
+source = { git = "https://gitcode.com/openJiuwen/deepsearch.git?subdirectory=deepsearch&rev=dev-stable#474fb975a93100b867eb43b6fbaae4295d2891cb" }
 dependencies = [
     { name = "aiolimiter" },
     { name = "beautifulsoup4" },
@@ -3416,7 +3422,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "networkx" },
     { name = "numpy" },
-    { name = "openjiuwen" },
+    { name = "openjiuwen", extra = ["observability"] },
     { name = "pypdfium2" },
     { name = "python-docx" },
     { name = "pyvis" },
