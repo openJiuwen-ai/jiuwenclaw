@@ -213,6 +213,34 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
     assert foreground_manager.events == ["begin", "end"]
 
 
+@pytest.mark.asyncio
+async def test_team_stream_admission_is_owned_by_actual_round_not_transport():
+    server = agent_ws_server.AgentWebSocketServer.__new__(
+        agent_ws_server.AgentWebSocketServer
+    )
+    admission = SimpleNamespace(
+        begin_user=AsyncMock(),
+        end_user=AsyncMock(),
+    )
+    server._agent_manager = None
+    server._heartbeat_runtime = SimpleNamespace(admission=admission)
+    server._should_trigger_before_chat_request_hook = lambda request: False
+    server._handle_stream_impl = AsyncMock()
+    request = AgentRequest(
+        request_id="team-persistent-stream",
+        channel_id="web",
+        session_id="team-session",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"mode": "team"},
+        is_stream=True,
+    )
+
+    await server._handle_stream(FakeWebSocket(), request, asyncio.Lock())
+
+    admission.begin_user.assert_not_awaited()
+    admission.end_user.assert_not_awaited()
+
+
 def test_agent_ws_server_has_no_direct_websocket_send_calls():
     path = Path(agent_ws_server.__file__)
     tree = ast.parse(path.read_text(encoding="utf-8"))
