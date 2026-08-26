@@ -25,6 +25,7 @@ class PromptPriority(IntEnum):
     """Named prompt section priorities for general agent builder."""
 
     IDENTITY = 10
+    PARALLEL_TOOL_CALLS = 44
     SKILLS = 40
     SKILL_PROTOCOL = 45
     MEMORY = 55
@@ -437,6 +438,32 @@ to specify delivery targets by channel id (e.g. `["feishu", "xiaoyi", "web"]`).
     )
 
 
+# ─── parallel tool calls section (general agent, ported from code mode) ──
+
+
+def _parallel_tool_calls_prompt(language: str) -> PromptSection:
+    """引导 agent/team 模式对无依赖工具批量并行调用。
+
+    Code 模式已有此段（code_prompt_builder.py:370-382），agent/team 模式此前缺失，
+    导致模型遇到多个独立只读工具时逐个串行调用，每轮一次 LLM 往返。
+    """
+    if language == "cn":
+        content = """## 并行工具调用
+
+你可以在一次回复中调用多个工具。若你打算调用多个工具且它们之间没有依赖关系，就把所有无依赖的工具一次性发出。尽可能使用并行工具调用来提升效率。但当某些调用依赖前序调用产生的值时，不要并行，改为顺序执行。例如：一轮并行查询多个独立信息源（日历、笔记、消息、联系人、网页搜索、wiki、记忆）；一轮并行派发多个独立研究子任务给子代理。
+"""
+    else:
+        content = """## Parallel tool calls
+
+You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, issue all of the independent tool calls together. Use parallel tool calls wherever you can to work more efficiently. But when some calls rely on values produced by earlier calls, do NOT run them in parallel; run them one after another instead. For example, querying multiple independent information sources (calendar, notes, messages, contacts, web search, wiki, memory) in one round; dispatching multiple independent research subtasks to subagents in one round.
+"""
+    return PromptSection(
+        name="parallel_tool_calls",
+        content={language: content},
+        priority=PromptPriority.PARALLEL_TOOL_CALLS,
+    )
+
+
 # ─── entry point (general agent) ────────────────
 
 
@@ -452,6 +479,7 @@ def build_agent_identity_prompt(
     builder = SystemPromptBuilder(language=resolved_language)
 
     builder.add_section(_identity_prompt(resolved_language))
+    builder.add_section(_parallel_tool_calls_prompt(resolved_language))
 
     return builder.build()
 

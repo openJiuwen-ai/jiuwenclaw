@@ -39,9 +39,9 @@ _CN_PROTOCOL = """## 技能执行规范（强制）
 随后按 SKILL 工作流执行；下列规范约束执行过程。
 
 1. **声明步骤**：默认情况下，每次行动前必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。若 SKILL.md 明确声明“阶段状态和阶段消息由工具事件唯一生成”，则以该声明为准，禁止自行输出 `[当前步骤: ...]` 或其他步骤声明。
-2. **必须使用 todo**：在执行 skill 步骤前，必须先创建 todo 列表。创建后，必须在执行过程中持续更新（如打勾已完成项、添加遗漏项等），确保 todo 与实际执行状态始终保持一致。
-   放弃、跳过或决定不再执行某步骤时（如用户说「不生成 PPT 了」），**必须**立即 `todo_modify` 将该条标为 `cancelled`；
+2. **必须使用 todo**：在执行 skill 步骤前，必须先创建 todo 列表。更新原则：**批量更新**——当多个 stage 状态发生变化时，合并到一次 `todo_modify` 调用，不要每个 stage 单独调用。优先把"标记完成 + 启动下个 stage"与实际工作工具放在**同一轮**调用，避免 todo-only 轮（即整轮只调 todo_modify 而不伴随实际工作）。放弃、跳过或决定不再执行某步骤时（如用户说「不生成 PPT 了」），**必须**立即 `todo_modify` 将该条标为 `cancelled`；
    禁止仅用口头回复收尾而仍保留 `in_progress`/`pending` 项。
+   > 边界说明：批量更新仅作用于**正常推进**路径的状态记录频率；放弃/取消属异常路径，仍保持"立即单独标记 cancelled"（与第 9 条用户打断后的批量取消语义一致）。第 3 条"禁止合并步骤"约束的是**执行顺序**，与批量更新约束的**状态记录频率**是不同维度，不冲突。
 3. **严格顺序**：按 SKILL.md 定义的顺序逐步执行，**禁止跳过、合并或重排步骤**，除非 SKILL.md 或用户明确允许。
 4. **闸门等待**：遇到需要用户确认/审批的步骤时，**必须等待用户回复，禁止自行假设用户同意**。
 5. **不确定时重读**：只能再次调用 `skill_tool`，**不得**用其它工具获取 SKILL.md。
@@ -73,11 +73,18 @@ Then execute the workflow; the rules below govern execution.
 
 1. **Declare step**: By default, before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step. If SKILL.md explicitly states that stage status and stage messages are emitted exclusively by tool events, follow that rule and you must not declare `[Current Step: ...]` or any other step message yourself.
 2. **Use todo (mandatory)**: For skills, you MUST create a todo list before executing the skill steps.
-   Once created, you MUST continuously update it throughout execution (e.g. check off completed items,
-   add missing steps) to ensure the todo always reflects the actual execution state.
+   Update principle: **batch updates** — when multiple stage statuses change, merge them into a single
+   `todo_modify` call; do not call `todo_modify` separately for each stage. Prefer putting
+   "mark completed + start next stage" in the **same response** as the actual work tool; avoid
+   todo-only rounds (i.e. a whole round that only calls `todo_modify` without accompanying real work).
    When abandoning or skipping a step (e.g. the user says not to generate the PPT), you **must** call
    `todo_modify` to mark it `cancelled` immediately; never end with text only while items stay
    `in_progress` or `pending`.
+   > Boundary note: batch updates apply only to the **normal-advance** path's state-recording frequency;
+   abandonment/cancellation is an exception path that still uses "immediately mark cancelled"
+   (consistent with rule 9's batch-cancel-on-interrupt semantics). Rule 3 "do not merge steps"
+   constrains **execution order**, while batch updates constrain **state-recording frequency** —
+   different dimensions, no conflict.
 3. **Strict order**: Execute steps in the order defined by SKILL.md. **Do not skip, merge, or reorder steps** unless SKILL.md or the user explicitly allows it.
 4. **Gate enforcement**: When a step requires user confirmation/approval, **you MUST wait for the user's response. Never assume approval.**
 5. **Re-read when unsure**: Refresh the SKILL.md body **only** by calling `skill_tool` again — **never** use any other tool to obtain SKILL.md.
