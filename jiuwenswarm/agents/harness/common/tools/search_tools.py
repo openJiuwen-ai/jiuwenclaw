@@ -218,18 +218,26 @@ def _search_duckduckgo_via_jina_sync(
     query: str, max_results: int, timeout_seconds: int
 ) -> list[dict[str, str]]:
     url = f"https://r.jina.ai/http://duckduckgo.com/html/?q={quote_plus(query)}"
-    response = _http_request("GET", url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
+    # Jina Reader may challenge browser-like user agents; request its text API.
+    response = _http_request(
+        "GET", url, headers={"Accept": "text/plain"}, timeout=timeout_seconds
+    )
     response.raise_for_status()
     text = response.text or ""
 
-    # Parse markdown links rendered by r.jina.ai.
-    matches = re.findall(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)", text, flags=re.IGNORECASE)
+    # Parse each DuckDuckGo result block rendered by Jina Reader. The last
+    # descriptive link in a block is DuckDuckGo's result snippet.
+    matches = re.findall(
+        r"^## \[([^\]\n]+)\]\((https?://[^\s)]+)\)\s*(.*?)(?=^## |\Z)",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
 
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
-    for title_raw, href in matches:
+    for title_raw, href, body in matches:
         title = _strip_tags(title_raw)
-        if not title or title.startswith("Image "):
+        if not title:
             continue
         decoded = _decode_ddg_redirect(href)
         parsed = urlparse(decoded)
@@ -241,7 +249,19 @@ def _search_duckduckgo_via_jina_sync(
         if decoded in seen:
             continue
         seen.add(decoded)
-        rows.append({"title": title, "url": decoded, "snippet": ""})
+        labels = re.findall(r"\[([^\]\n]+)\]\(https?://[^\s)]+\)", body)
+        snippets = [
+            _strip_tags(label.replace("**", ""))
+            for label in labels
+            if not label.startswith("![Image ") and len(label) >= 40
+        ]
+        rows.append(
+            {
+                "title": title,
+                "url": decoded,
+                "snippet": max(snippets, key=len, default=""),
+            }
+        )
         if len(rows) >= max_results:
             break
     return rows
@@ -290,10 +310,12 @@ def _search_free_sync(
     errors: list[str] = []
     engines = []
     if _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=False):
-        engines.extend([
-            ("duckduckgo", _search_duckduckgo_sync),
-            ("duckduckgo-jina", _search_duckduckgo_via_jina_sync),
-        ])
+        engines.extend(
+            [
+                ("duckduckgo-jina", _search_duckduckgo_via_jina_sync),
+                ("duckduckgo", _search_duckduckgo_sync),
+            ]
+        )
     if _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=False):
         engines.append(("bing", _search_bing_sync))
     if not engines:
@@ -562,7 +584,7 @@ async def mcp_paid_search(
             query=query, max_results=max_results, timeout_seconds=timeout_seconds
         ),
     }
-    
+
     available_providers = []
     if os.environ.get("BOCHA_API_KEY"):
         available_providers.append("bocha")
@@ -572,10 +594,10 @@ async def mcp_paid_search(
         available_providers.append("serper")
     if os.environ.get("JINA_API_KEY"):
         available_providers.append("jina")
-    
+
     if not available_providers:
         return "[ERROR]: no paid search API keys configured."
-    
+
     if provider != "auto":
         if provider not in available_providers:
             return f"[ERROR]: {provider} API key not configured. Available providers: {', '.join(available_providers)}"

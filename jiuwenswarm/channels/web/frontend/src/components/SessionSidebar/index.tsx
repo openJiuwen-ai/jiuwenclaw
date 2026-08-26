@@ -47,6 +47,14 @@ const teamNavIcon = (
   </svg>
 );
 
+const videoLiveNavIcon = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+    <rect x="3.5" y="5.5" width="12.5" height="13" rx="2.5" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M16 10l4.5-2.5v9L16 14" />
+    <circle cx="8" cy="10" r="1.2" fill="currentColor" stroke="none" />
+  </svg>
+);
+
 // "扩展"（连接器市场：插件+MCP）导航图标——和 plugin.svg（Harness 插件管理，纯命名撞车、
 // 业务无关）故意区分开，用网格/市场的视觉隐喻而不是拼图块。
 const connectorMarketNavIcon = (
@@ -60,6 +68,7 @@ const connectorMarketNavIcon = (
 
 const mainNavItems: NavItem[] = [
   { key: 'chat', labelKey: 'nav.work', icon: <WorkIcon aria-hidden /> },
+  { key: 'videolive', labelKey: 'nav.videoLive', icon: videoLiveNavIcon },
   { key: 'skills', labelKey: 'nav.skills', icon: <SkillDesignIcon aria-hidden /> },
   { key: 'channels', labelKey: 'nav.channels', icon: <ChannelIcon aria-hidden /> },
   { key: 'agents', labelKey: 'nav.agent', icon: <AgentDesignIcon aria-hidden /> },

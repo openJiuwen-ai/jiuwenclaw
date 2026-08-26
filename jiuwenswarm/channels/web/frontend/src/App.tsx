@@ -16,6 +16,7 @@ import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
 import { ChannelsPanel } from './components/ChannelsPanel';
 import { BrowserPanel } from './components/BrowserPanel';
+import { VideoLivePanel } from './components/VideoLivePanel';
 import { UpdatePanel } from './components/UpdatePanel';
 import { ExtensionsHubPanel } from './components/ExtensionsHubPanel';
 import { ConnectorMarketPanel } from './components/ConnectorMarket';
@@ -3244,6 +3245,11 @@ function AppContent() {
         {activeNav === 'browserpanel' && (
           <div className="app-section">
             <BrowserPanel isConnected={isConnected} request={request} />
+          </div>
+        )}
+        {activeNav === 'videolive' && (
+          <div className="app-section">
+            <VideoLivePanel />
           </div>
         )}
         {FEATURE_APP_UPDATER_UI && activeNav === 'updatepanel' && (

@@ -2030,6 +2030,9 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.CONFIG_CACHE_CLEAR:
                 await self._handle_config_cache_clear(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.VIDEO_RESEARCH:
+                await self._handle_video_research(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.AGENT_RELOAD_CONFIG:
                 await self._handle_agent_reload_config(ws, request, send_lock)
                 return
@@ -9273,6 +9276,58 @@ class AgentWebSocketServer:
                 ok=False,
                 payload={"error": str(e)},
             )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_video_research(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Run the official ResearchAgent for an asynchronous video search job."""
+        params = request.params if isinstance(request.params, dict) else {}
+        question = str(params.get("question") or "").strip()
+        query = str(params.get("query") or question).strip()
+        model_name = str(params.get("model_name") or "").strip() or None
+        if not question and not query:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "question or query is required", "code": "BAD_REQUEST"},
+            )
+        else:
+            try:
+                from jiuwenswarm.server.runtime.video_research import run_video_research
+
+                model = self._resolve_model(model_name)
+                if model is None:
+                    raise RuntimeError("no model is configured for official ResearchAgent")
+                result = await run_video_research(
+                    model,
+                    question=question,
+                    query=query,
+                    visual_context=str(params.get("visual_context") or ""),
+                    search_session_id=str(params.get("search_session_id") or ""),
+                )
+                result["model"] = model_name or "default"
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload=result,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("[AgentServer] video.research failed: %s", exc)
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": str(exc) or "official ResearchAgent failed"},
+                )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:

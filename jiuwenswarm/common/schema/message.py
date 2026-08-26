@@ -156,6 +156,7 @@ class ReqMethod(Enum):
     HARMONYOS_DEV_INIT = "harmonyos.dev_init"
 
     TTS_SYNTHESIZE = "tts.synthesize"
+    VIDEO_RESEARCH = "video.research"
 
     AGENTS_LIST = "agents.list"
     AGENTS_GET = "agents.get"

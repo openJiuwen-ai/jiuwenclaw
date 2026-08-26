@@ -44,6 +44,19 @@ logger = logging.getLogger(__name__)
 _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
+_LOCAL_ONLY_METHODS = frozenset(
+    {
+        "video.realtime.config",
+        "video.joyai.frame",
+        "video.realtime.telemetry",
+        "video.transcribe",
+        "video.agent",
+        "video.search.status",
+        "tts.synthesize",
+        "tts.stream.start",
+        "tts.stream.cancel",
+    }
+)
 
 _STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
 _STREAM_COALESCE_MAX_FRAMES = 32
@@ -1424,6 +1437,21 @@ class WebChannel(BaseWsChannel):
 
         # 发布到 route 或回调
         handler = self._method_handlers.get(method)
+        if method in _LOCAL_ONLY_METHODS:
+            if handler is None:
+                await self.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=f"unknown method: {method}",
+                    code="METHOD_NOT_FOUND",
+                )
+                return
+            invocation = _MethodHandlerInvocation(
+                ws, method, req_id, params, session_id, handler,
+            )
+            await self._invoke_method_handler(invocation)
+            return
         handler_already_called = False
         if method in _HANDLER_BEFORE_CALLBACK_METHODS and handler is not None:
             handler_already_called = await self._invoke_method_handler(
