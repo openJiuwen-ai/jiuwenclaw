@@ -689,6 +689,8 @@ _PLUGIN_ROUTES: dict[ReqMethod, str] = {
 
 # Catalog + lifecycle: method → package_manager callable.
 _PACKAGE_ROUTES: dict[ReqMethod, str] = {
+    ReqMethod.AGENT_GROUPS_LIST: "list_agent_groups",
+    ReqMethod.AGENT_GROUPS_SHOW: "show_agent_group",
     ReqMethod.AGENT_TEMPLATES_LIST: "list_agent_templates",
     ReqMethod.AGENT_TEMPLATES_SHOW: "show_agent_template",
     ReqMethod.AGENT_TEMPLATES_FILE_LIST: "list_agent_template_files",
@@ -1836,8 +1838,17 @@ class JiuWenSwarm:
         # Frontend contract uses `id`; accept legacy `name` as alias.
         name = params.get("id") if params.get("id") not in (None, "") else params.get("name")
         try:
-            if method == ReqMethod.AGENT_TEMPLATES_LIST:
+            if method == ReqMethod.AGENT_GROUPS_LIST:
                 payload: dict[str, Any] = {
+                    "agentGroups": package_manager.list_agent_groups(params)
+                }
+            elif method == ReqMethod.AGENT_GROUPS_SHOW:
+                group = package_manager.show_agent_group(str(name or ""))
+                if group is None:
+                    raise ValueError(f"agent_group not found: {name!r}")
+                payload = {"group": group}
+            elif method == ReqMethod.AGENT_TEMPLATES_LIST:
+                payload = {
                     "templates": package_manager.list_agent_templates(params)
                 }
             elif method == ReqMethod.AGENT_TEMPLATES_SHOW:
