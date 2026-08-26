@@ -2810,6 +2810,11 @@ class JiuWenSwarm:
                                 _et,
                                 f" tasks={_n_tasks}" if _n_tasks else "",
                             )
+                        if _put_count == 1:
+                            logger.info(
+                                "[latency] stage=4 name=first_token request_id=%s",
+                                rid,
+                            )
                         await stream_queue.put(("chunk", chunk))
                 except asyncio.CancelledError:
                     logger.info("[JiuWenSwarm] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
