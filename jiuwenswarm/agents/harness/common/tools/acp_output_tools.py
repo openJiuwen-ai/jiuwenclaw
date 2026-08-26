@@ -54,14 +54,12 @@ class AcpOutputRequest:
 class AcpOutputManager:
     _instance: AcpOutputManager | None = None
     _pending: dict[str, AcpOutputRequest]
-    _jsonrpc_counter: int
     _send_push_callback: Any
 
     def __new__(cls) -> AcpOutputManager:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._pending = {}
-            cls._instance._jsonrpc_counter = 0
             cls._instance._send_push_callback = None
         return cls._instance
 
@@ -71,13 +69,16 @@ class AcpOutputManager:
     def set_send_push_callback(self, callback: Any) -> None:
         self._send_push_callback = callback
 
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
+
     def reset_state(self) -> None:
         """Reset runtime state.
 
         Intended for unit tests and controlled lifecycle cleanup.
         """
         self._pending.clear()
-        self._jsonrpc_counter = 0
 
     def add_pending_request(self, request: AcpOutputRequest) -> None:
         """Register a pending request explicitly.
@@ -141,18 +142,23 @@ class AcpOutputManager:
         channel_id: str = "acp",
         session_id: str | None = None,
         timeout: float = _ACP_REQUEST_TIMEOUT_SECONDS,
+        log_params: bool = True,
+        cancel_method: str | None = None,
     ) -> dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
         logger.info(
             "[AcpOutput] send_jsonrpc_request called: method=%s params=%s",
             method,
-            params,
+            params if log_params else "<redacted>",
         )
         if self._send_push_callback is None:
             logger.error("[AcpOutput] send_push callback is None!")
             raise RuntimeError("ACP output send_push callback not set")
 
-        self._jsonrpc_counter += 1
-        jsonrpc_id = str(self._jsonrpc_counter)
+        # IDs cross the AgentServer -> Gateway boundary and must remain unique
+        # across process restarts and multiple AgentServer instances.
+        jsonrpc_id = f"acp-{uuid.uuid4().hex}"
         request_id = f"acp_out_{uuid.uuid4().hex[:12]}"
 
         future: asyncio.Future[dict[str, Any]] = (
@@ -212,7 +218,22 @@ class AcpOutputManager:
         try:
             callback_result = self._send_push_callback(push_msg)
             if inspect.isawaitable(callback_result):
-                await callback_result
+                callback_result = await asyncio.wait_for(
+                    callback_result,
+                    timeout=max(0.0, deadline - loop.time()),
+                )
+            if callback_result is False:
+                raise RuntimeError("ACP output request was not delivered")
+        except asyncio.CancelledError:
+            self._pending.pop(jsonrpc_id, None)
+            await self._notify_cancellation(
+                cancel_method=cancel_method,
+                jsonrpc_id=jsonrpc_id,
+                channel_id=channel_id,
+                session_id=session_id,
+                method=method,
+            )
+            raise
         except Exception as exc:
             self._pending.pop(jsonrpc_id, None)
             raise RuntimeError(f"Failed to send ACP output request: {exc}") from exc
@@ -225,7 +246,22 @@ class AcpOutputManager:
         )
 
         try:
-            return await asyncio.wait_for(future, timeout=timeout)
+            if future.done():
+                return future.result()
+            return await asyncio.wait_for(
+                future,
+                timeout=max(0.0, deadline - loop.time()),
+            )
+        except asyncio.CancelledError:
+            self._pending.pop(jsonrpc_id, None)
+            await self._notify_cancellation(
+                cancel_method=cancel_method,
+                jsonrpc_id=jsonrpc_id,
+                channel_id=channel_id,
+                session_id=session_id,
+                method=method,
+            )
+            raise
         except asyncio.TimeoutError:
             self._pending.pop(jsonrpc_id, None)
             logger.warning(
@@ -235,6 +271,38 @@ class AcpOutputManager:
                 timeout,
             )
             raise
+
+    async def _notify_cancellation(
+        self,
+        *,
+        cancel_method: str | None,
+        jsonrpc_id: str,
+        channel_id: str,
+        session_id: str | None,
+        method: str,
+    ) -> None:
+        if not cancel_method:
+            return
+        cancel_task = asyncio.create_task(
+            self.send_jsonrpc_request(
+                cancel_method,
+                {"jsonrpc_id": jsonrpc_id},
+                channel_id=channel_id,
+                session_id=session_id,
+                timeout=5.0,
+                log_params=False,
+            ),
+            name=f"acp-cancel-{jsonrpc_id}",
+        )
+        try:
+            await asyncio.shield(cancel_task)
+        except Exception:
+            logger.warning(
+                "[AcpOutput] cancellation notification failed: "
+                "jsonrpc_id=%s method=%s",
+                jsonrpc_id,
+                method,
+            )
 
 
 def get_acp_output_manager() -> AcpOutputManager:

@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { ChevronDown } from 'lucide-react';
 import type { WebError } from '../../types/websocket';
+import { Switch } from '../Switch';
 import {
   normalizeA2AOutboundAgent,
   normalizeA2AOutboundDiscovery,
   normalizeA2AOutboundList,
+  normalizeA2AOutboundSettings,
   shouldAcceptA2AOutboundResponse,
   type A2AOutboundAgent,
   type A2AOutboundAvailability,
@@ -28,6 +31,9 @@ export function A2AOutboundPanel({ isConnected, request }: Props) {
   const [url, setUrl] = useState('');
   const [discovery, setDiscovery] = useState<A2AOutboundDiscovery | null>(null);
   const [agents, setAgents] = useState<A2AOutboundAgent[]>([]);
+  const [allowLoopbackHttp, setAllowLoopbackHttp] = useState(false);
+  const [savedAllowLoopbackHttp, setSavedAllowLoopbackHttp] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [credential, setCredential] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -40,11 +46,17 @@ export function A2AOutboundPanel({ isConnected, request }: Props) {
     if (!isConnected) return;
     const generation = ++generationRef.current;
     try {
-      const payload = await request('a2a.outbound.list');
+      const [payload, rawSettings] = await Promise.all([
+        request('a2a.outbound.list'),
+        request('a2a.outbound.settings.get'),
+      ]);
       if (!shouldAcceptA2AOutboundResponse(generation, generationRef.current)) return;
       const next = normalizeA2AOutboundList(payload);
-      if (!next) throw new Error(t('a2aIngress.outbound.errors.invalidResponse'));
+      const settings = normalizeA2AOutboundSettings(rawSettings);
+      if (!next || !settings) throw new Error(t('a2aIngress.outbound.errors.invalidResponse'));
       setAgents(next);
+      setAllowLoopbackHttp(settings.allow_loopback_http);
+      setSavedAllowLoopbackHttp(settings.allow_loopback_http);
       setError(null);
     } catch (nextError) {
       if (shouldAcceptA2AOutboundResponse(generation, generationRef.current)) setError(errorMessage(nextError));
@@ -62,6 +74,29 @@ export function A2AOutboundPanel({ isConnected, request }: Props) {
       setDiscovery(next); setDisplayName(next.agent.name); setCredential('');
       setNotice(t('a2aIngress.outbound.discovery.previewReady'));
     } catch (nextError) { setError(errorMessage(nextError)); }
+    finally { setBusy(null); }
+  };
+
+  const updateAllowLoopbackHttp = async (nextEnabled: boolean) => {
+    if (busy || !isConnected) return;
+    const generation = ++generationRef.current;
+    const previous = savedAllowLoopbackHttp;
+    setAllowLoopbackHttp(nextEnabled);
+    setBusy('settings'); setError(null); setNotice(null);
+    try {
+      const settings = normalizeA2AOutboundSettings(await request('a2a.outbound.settings.update', {
+        allow_loopback_http: nextEnabled,
+      }));
+      if (!settings) throw new Error(t('a2aIngress.outbound.errors.invalidResponse'));
+      if (!shouldAcceptA2AOutboundResponse(generation, generationRef.current)) return;
+      setAllowLoopbackHttp(settings.allow_loopback_http);
+      setSavedAllowLoopbackHttp(settings.allow_loopback_http);
+      setNotice(t('a2aIngress.outbound.localDebug.saved'));
+    } catch (nextError) {
+      if (!shouldAcceptA2AOutboundResponse(generation, generationRef.current)) return;
+      setAllowLoopbackHttp(previous);
+      setError(errorMessage(nextError));
+    }
     finally { setBusy(null); }
   };
 
@@ -134,6 +169,32 @@ export function A2AOutboundPanel({ isConnected, request }: Props) {
       <div className="mt-4 flex gap-2">
         <input className="min-w-0 flex-1 rounded-md border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus:border-accent" value={url} onChange={event => setUrl(event.target.value)} placeholder="https://agent.example.com" disabled={!!busy} />
         <button type="button" className="btn primary" onClick={() => void discover()} disabled={!isConnected || !!busy || !url.trim()}>{busy === 'discover' ? t('a2aIngress.outbound.discovery.discovering') : t('a2aIngress.outbound.discovery.action')}</button>
+      </div>
+      <div className="mt-4 border-t border-border pt-3">
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-3 text-left text-sm font-medium text-text-muted hover:text-text"
+          aria-expanded={advancedOpen}
+          onClick={() => setAdvancedOpen(open => !open)}
+        >
+          <span>{t('a2aIngress.outbound.discovery.advanced')}</span>
+          <ChevronDown size={16} className={`shrink-0 transition-transform ${advancedOpen ? 'rotate-180' : ''}`} />
+        </button>
+        {advancedOpen && <div className="mt-3 rounded-lg border border-border bg-bg/60 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium text-text">{t('a2aIngress.outbound.localDebug.allow')}</div>
+              <p className="mt-1 text-xs text-text-muted">{t('a2aIngress.outbound.localDebug.description')}</p>
+            </div>
+            <Switch
+              checked={allowLoopbackHttp}
+              onChange={nextEnabled => void updateAllowLoopbackHttp(nextEnabled)}
+              disabled={!isConnected || !!busy}
+              title={t('a2aIngress.outbound.localDebug.allow')}
+            />
+          </div>
+          {allowLoopbackHttp && <p className="mt-3 border-t border-warn/20 pt-3 text-xs text-warn">{t('a2aIngress.outbound.localDebug.warning')}</p>}
+        </div>}
       </div>
     </section>
     {discovery && <section className="rounded-xl border border-accent/30 bg-accent/5 p-4">

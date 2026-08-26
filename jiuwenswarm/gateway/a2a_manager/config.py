@@ -5,8 +5,11 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import threading
 from collections.abc import Mapping
 from pathlib import Path
+
+import portalocker
 
 from .models import A2AIngressConfig, A2AIngressError
 
@@ -14,13 +17,81 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
 A2A_INGRESS_ENV_MAP = {
-    "enabled": "A2A_SERVER_ENABLED", "host": "A2A_SERVER_HOST", "port": "A2A_SERVER_PORT",
-    "rpc_path": "A2A_SERVER_PATH", "protocol_version": "A2A_SERVER_PROTOCOL_VERSION",
-    "card_path": "A2A_SERVER_CARD_PATH", "extended_card_path": "A2A_SERVER_EXTENDED_CARD_PATH",
-    "app_name": "A2A_SERVER_APP_NAME", "app_description": "A2A_SERVER_APP_DESCRIPTION",
-    "app_version": "A2A_SERVER_APP_VERSION", "expose_reasoning": "A2A_SERVER_EXPOSE_REASONING",
+    "enabled": "A2A_SERVER_ENABLED",
+    "host": "A2A_SERVER_HOST",
+    "port": "A2A_SERVER_PORT",
+    "rpc_path": "A2A_SERVER_PATH",
+    "protocol_version": "A2A_SERVER_PROTOCOL_VERSION",
+    "card_path": "A2A_SERVER_CARD_PATH",
+    "extended_card_path": "A2A_SERVER_EXTENDED_CARD_PATH",
+    "app_name": "A2A_SERVER_APP_NAME",
+    "app_description": "A2A_SERVER_APP_DESCRIPTION",
+    "app_version": "A2A_SERVER_APP_VERSION",
+    "expose_reasoning": "A2A_SERVER_EXPOSE_REASONING",
 }
-_ENV_ASSIGNMENT_RE = re.compile(r"^(?P<indent>\s*)(?P<export>export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=")
+A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP_ENV = "A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP"
+_ENV_ASSIGNMENT_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<export>export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*="
+)
+_DOTENV_WRITE_LOCK = threading.Lock()
+_DOTENV_LOCK_TIMEOUT_SECONDS = 10.0
+
+
+def _quote_dotenv_value(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
+
+
+def _persist_dotenv_updates(env_path: Path, updates: Mapping[str, str]) -> None:
+    """Atomically merge allow-listed values under one shared .env writer lock."""
+    temp_path: Path | None = None
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = env_path.with_name(f"{env_path.name}.lock")
+    try:
+        with _DOTENV_WRITE_LOCK:
+            with portalocker.Lock(
+                str(lock_path), timeout=_DOTENV_LOCK_TIMEOUT_SECONDS
+            ):
+                lines = (
+                    env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+                    if env_path.is_file()
+                    else []
+                )
+                pending = dict(updates)
+                output: list[str] = []
+                for line in lines:
+                    match = _ENV_ASSIGNMENT_RE.match(line)
+                    key = match.group("key") if match else ""
+                    if key not in pending:
+                        output.append(line)
+                        continue
+                    output.append(
+                        f"{match.group('indent')}{match.group('export') or ''}{key}="
+                        f'"{_quote_dotenv_value(pending.pop(key))}"\n'
+                    )
+                output.extend(
+                    f'{key}="{_quote_dotenv_value(value)}"\n'
+                    for key, value in pending.items()
+                )
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=env_path.parent,
+                    prefix=f".{env_path.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temp_file:
+                    temp_file.write("".join(output))
+                    temp_path = Path(temp_file.name)
+                os.replace(temp_path, env_path)
+                temp_path = None
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
 
 
 def _value(env: Mapping[str, str], name: str, default: str) -> str:
@@ -43,9 +114,13 @@ def load_a2a_ingress_config(env: Mapping[str, str] | None = None) -> A2AIngressC
     try:
         port = int(port_text)
     except ValueError as exc:
-        raise A2AIngressError("A2A_CONFIG_INVALID", "A2A_SERVER_PORT must be an integer") from exc
+        raise A2AIngressError(
+            "A2A_CONFIG_INVALID", "A2A_SERVER_PORT must be an integer"
+        ) from exc
     if not 1 <= port <= 65535:
-        raise A2AIngressError("A2A_CONFIG_INVALID", "A2A_SERVER_PORT must be between 1 and 65535")
+        raise A2AIngressError(
+            "A2A_CONFIG_INVALID", "A2A_SERVER_PORT must be between 1 and 65535"
+        )
 
     return A2AIngressConfig(
         enabled=_bool(source, "A2A_SERVER_ENABLED", False),
@@ -53,12 +128,18 @@ def load_a2a_ingress_config(env: Mapping[str, str] | None = None) -> A2AIngressC
         port=port,
         rpc_path=_value(source, "A2A_SERVER_PATH", "/a2a"),
         protocol_version=_value(source, "A2A_SERVER_PROTOCOL_VERSION", "1.0.0"),
-        card_path=_value(source, "A2A_SERVER_CARD_PATH", "/.well-known/agent-card.json"),
+        card_path=_value(
+            source, "A2A_SERVER_CARD_PATH", "/.well-known/agent-card.json"
+        ),
         extended_card_path=_value(
             source, "A2A_SERVER_EXTENDED_CARD_PATH", "/agent/authenticatedExtendedCard"
         ),
-        app_name=_value(source, "A2A_SERVER_APP_NAME", "JiuwenSwarm Gateway A2A Server"),
-        app_description=_value(source, "A2A_SERVER_APP_DESCRIPTION", "A2A ingress for JiuwenSwarm Gateway"),
+        app_name=_value(
+            source, "A2A_SERVER_APP_NAME", "JiuwenSwarm Gateway A2A Server"
+        ),
+        app_description=_value(
+            source, "A2A_SERVER_APP_DESCRIPTION", "A2A ingress for JiuwenSwarm Gateway"
+        ),
         app_version=_value(source, "A2A_SERVER_APP_VERSION", "0.1.0"),
         expose_reasoning=_bool(source, "A2A_SERVER_EXPOSE_REASONING", True),
     ).validate()
@@ -86,55 +167,68 @@ class A2AIngressConfigRepository:
 
     def save(self, config: A2AIngressConfig) -> None:
         updates = self._to_env_updates(config.validate())
-        temp_path: Path | None = None
         try:
-            lines = (
-                self._env_path.read_text(encoding="utf-8").splitlines(keepends=True)
-                if self._env_path.is_file()
-                else []
-            )
-            pending = dict(updates)
-            output: list[str] = []
-            for line in lines:
-                match = _ENV_ASSIGNMENT_RE.match(line)
-                key = match.group("key") if match else ""
-                if key not in pending:
-                    output.append(line)
-                    continue
-                output.append(
-                    f'{match.group("indent")}{match.group("export") or ""}{key}='
-                    f'"{self._quote_dotenv_value(pending.pop(key))}"\n'
-                )
-            output.extend(
-                f'{key}="{self._quote_dotenv_value(value)}"\n' for key, value in pending.items()
-            )
-            self._env_path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=self._env_path.parent,
-                prefix=f".{self._env_path.name}.", suffix=".tmp", delete=False,
-            ) as temp_file:
-                temp_file.write("".join(output))
-                temp_path = Path(temp_file.name)
-            os.replace(temp_path, self._env_path)
-        except OSError as exc:
-            raise A2AIngressError("A2A_CONFIG_INVALID", f"Failed to persist A2A ingress config: {exc}") from exc
-        finally:
-            if temp_path is not None and temp_path.exists():
-                temp_path.unlink(missing_ok=True)
+            _persist_dotenv_updates(self._env_path, updates)
+        except (OSError, portalocker.exceptions.LockException) as exc:
+            raise A2AIngressError(
+                "A2A_CONFIG_INVALID", f"Failed to persist A2A ingress config: {exc}"
+            ) from exc
         os.environ.update(updates)
 
     @staticmethod
     def _quote_dotenv_value(value: str) -> str:
-        return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
+        return _quote_dotenv_value(value)
 
     @staticmethod
     def _to_env_updates(config: A2AIngressConfig) -> dict[str, str]:
         values = {
-            "enabled": "true" if config.enabled else "false", "host": config.host,
-            "port": str(config.port), "rpc_path": config.rpc_path,
-            "protocol_version": config.protocol_version, "card_path": config.card_path,
-            "extended_card_path": config.extended_card_path, "app_name": config.app_name,
-            "app_description": config.app_description, "app_version": config.app_version,
+            "enabled": "true" if config.enabled else "false",
+            "host": config.host,
+            "port": str(config.port),
+            "rpc_path": config.rpc_path,
+            "protocol_version": config.protocol_version,
+            "card_path": config.card_path,
+            "extended_card_path": config.extended_card_path,
+            "app_name": config.app_name,
+            "app_description": config.app_description,
+            "app_version": config.app_version,
             "expose_reasoning": "true" if config.expose_reasoning else "false",
         }
         return {A2A_INGRESS_ENV_MAP[name]: value for name, value in values.items()}
+
+
+class A2AOutboundSettingsRepository:
+    """Persist the small personal-edition outbound settings surface in ``.env``."""
+
+    def __init__(self, env_path: Path | None = None) -> None:
+        if env_path is None:
+            from jiuwenswarm.common.utils import get_env_file
+
+            env_path = get_env_file()
+        self._env_path = Path(env_path)
+
+    def load(self, env: Mapping[str, str] | None = None) -> dict[str, bool]:
+        source = os.environ if env is None else env
+        return {
+            "allow_loopback_http": _bool(
+                source, A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP_ENV, False
+            )
+        }
+
+    def save(self, *, allow_loopback_http: bool) -> None:
+        if not isinstance(allow_loopback_http, bool):
+            raise A2AIngressError(
+                "A2A_CONFIG_INVALID", "allow_loopback_http must be a boolean"
+            )
+        update = "true" if allow_loopback_http else "false"
+        try:
+            _persist_dotenv_updates(
+                self._env_path,
+                {A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP_ENV: update},
+            )
+        except (OSError, portalocker.exceptions.LockException) as exc:
+            raise A2AIngressError(
+                "A2A_CONFIG_INVALID",
+                f"Failed to persist A2A outbound settings: {exc}",
+            ) from exc
+        os.environ[A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP_ENV] = update

@@ -549,7 +549,8 @@
     "status": { "title": "服务状态", "configRevision": "配置版本：{{revision}}", "effectiveRpcUrl": "实际 JSON-RPC 地址", "effectiveCardUrl": "实际 Agent Card 地址", "notListening": "当前未监听" },
     "config": { "title": "入站服务配置", "description": "保存只更新目标配置；“保存并应用”会重载正在运行的服务。" },
     "outbound": {
-      "discovery": { "title": "发现第三方 Agent", "description": "发现仅获取并预览 Agent Card；完成手动注册后，JiuwenSwarm 才能调用该 Agent。", "action": "发现 Agent", "discovering": "发现中...", "previewOnly": "仅预览，尚未注册", "previewReady": "发现成功。请核对信息并显式注册，当前候选尚不可调用。" },
+      "localDebug": { "title": "本地 Agent 调试", "description": "控制是否允许发现和调用本机 loopback 地址上的明文 HTTP Agent。设置保存后立即生效。", "allow": "允许本机 HTTP Agent", "warning": "仅用于本机 E2E 调试。启用后会放宽针对 127.0.0.1 / ::1 的 SSRF 防护，请勿在生产环境开启。", "saving": "保存中...", "saved": "出站本地调试设置已保存并立即生效。" },
+      "discovery": { "title": "发现第三方 Agent", "description": "发现仅获取并预览 Agent Card；完成手动注册后，JiuwenSwarm 才能调用该 Agent。", "action": "发现 Agent", "discovering": "发现中...", "previewOnly": "仅预览，尚未注册", "previewReady": "发现成功。请核对信息并显式注册，当前候选尚不可调用。", "advanced": "高级配置" },
       "list": { "title": "已注册 Agent", "total": "共 {{count}} 个", "empty": "暂无已注册的第三方 Agent" },
       "fields": { "version": "版本", "endpoint": "实际 Endpoint", "protocol": "协议", "expiresAt": "候选过期时间", "displayName": "显示名称", "credential": "API Key / Bearer（可选，不会回显）", "revision": "Card 版本", "credentialState": "凭据", "lastChecked": "最近检查", "connectTimeout": "连接超时（秒）", "syncWait": "同步等待超时（秒）", "replaceCredential": "替换凭据（留空则不修改）" },
       "availability": { "available": "可用", "unreachable": "不可达", "incompatible": "不兼容", "review_required": "待确认" },

@@ -151,6 +151,13 @@ def _pinned_transport_factory(
     return _PinnedAsyncHTTPTransport(pinned_addresses)
 
 
+def create_pinned_transport(
+    pinned_addresses: Mapping[str, str],
+) -> httpx.AsyncBaseTransport:
+    """Build the shared DNS-pinned transport used by discovery and dispatch."""
+    return _pinned_transport_factory(pinned_addresses)
+
+
 async def _resolve_addresses(host: str, port: int) -> list[str]:
     loop = asyncio.get_running_loop()
     rows = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -183,6 +190,13 @@ class A2AOutboundDiscoveryService:
         self._allow_loopback_http = allow_loopback_http
         self._address_resolver = address_resolver
         self._transport_factory = transport_factory
+
+    @property
+    def allow_loopback_http(self) -> bool:
+        return self._allow_loopback_http
+
+    def set_allow_loopback_http(self, enabled: bool) -> None:
+        self._allow_loopback_http = bool(enabled)
 
     async def discover(self, url: str, card_path: str | None = None) -> DiscoveredCard:
         source_url, normalized_path, card_url = self._normalize(url, card_path)
@@ -379,5 +393,14 @@ class A2AOutboundDiscoveryService:
             pinned_address=addresses[0],
         )
 
+    async def validate_network_target(self, url: str) -> _ValidatedTarget:
+        """Revalidate and resolve a target immediately before a connection."""
+        return await self._validate_network_target(url)
 
-__all__ = ["A2AOutboundDiscoveryService", "DiscoveredCard", "DEFAULT_CARD_PATH"]
+
+__all__ = [
+    "A2AOutboundDiscoveryService",
+    "DiscoveredCard",
+    "DEFAULT_CARD_PATH",
+    "create_pinned_transport",
+]

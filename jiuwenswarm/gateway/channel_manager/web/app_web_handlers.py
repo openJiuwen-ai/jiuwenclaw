@@ -1707,6 +1707,28 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             ),
         )
 
+    async def _a2a_outbound_settings_get(ws, req_id, params, session_id):
+        await _send_a2a_outbound(ws, req_id, a2a_manager.outbound_get_settings)
+
+    async def _a2a_outbound_settings_update(ws, req_id, params, session_id):
+        enabled = params.get("allow_loopback_http")
+        if not isinstance(enabled, bool):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="allow_loopback_http must be a boolean",
+                code="A2A_CONFIG_INVALID",
+            )
+            return
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_update_settings(
+                allow_loopback_http=enabled
+            ),
+        )
+
     async def _a2a_outbound_register(ws, req_id, params, session_id):
         await _send_a2a_outbound(
             ws, req_id, lambda: a2a_manager.outbound_register(dict(params))
@@ -1770,6 +1792,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             lambda: a2a_manager.outbound_dispatch_get(str(params.get("dispatch_id") or "")),
         )
 
+    channel.register_method("a2a.outbound.settings.get", _a2a_outbound_settings_get)
+    channel.register_method("a2a.outbound.settings.update", _a2a_outbound_settings_update)
     channel.register_method("a2a.outbound.discover", _a2a_outbound_discover)
     channel.register_method("a2a.outbound.register", _a2a_outbound_register)
     channel.register_method("a2a.outbound.list", _a2a_outbound_list)

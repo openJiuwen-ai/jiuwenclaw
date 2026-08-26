@@ -398,6 +398,9 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 from jiuwenswarm.agents.harness.common.rails.progressive_tool_rail import (
     ProgressiveToolRail,
 )
+from jiuwenswarm.agents.harness.common.rails.a2a_outbound_toolkit_rail import (
+    A2AOutboundToolkitRail,
+)
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.harness_named_web_tools import (
@@ -7090,6 +7093,29 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillRetrievalPromptRail create failed: %s", exc)
             return None
 
+    def _build_a2a_outbound_toolkit_rail(self) -> A2AOutboundToolkitRail | None:
+        if is_enterprise_runtime():
+            return None
+        return A2AOutboundToolkitRail(runtime_route=self._get_a2a_outbound_tool_route)
+
+    def _get_a2a_outbound_tool_route(self) -> tuple[str, str]:
+        """Return an adapter-owned route that survives DeepAgent task boundaries."""
+        context_session = str(get_runtime_tool_session_id() or "").strip()
+        if context_session:
+            context_channel = str(get_runtime_tool_channel_id() or "").strip()
+            return context_session, context_channel or "default"
+
+        route = self._current_request_route
+        session_id = str(route.get("session_id") or "").strip()
+        channel_id = str(route.get("channel_id") or "").strip()
+        if session_id:
+            return session_id, channel_id or "default"
+
+        runtime_context = self._runtime_cron_tool_context
+        session_id = str(runtime_context.session_id or "").strip()
+        channel_id = str(runtime_context.channel_id or "").strip()
+        return session_id, channel_id or "default"
+
     def _build_progressive_tool_rail(
         self, config: dict[str, Any]
     ) -> ProgressiveToolRail | None:
@@ -7382,6 +7408,13 @@ class JiuWenSwarmDeepAdapter:
         )
         rail_infos.insert(
             4 if self._filesystem_rail_enabled_for_profile() else 3,
+            _RailBuildInfo(
+                "_a2a_outbound_toolkit_rail",
+                self._build_a2a_outbound_toolkit_rail,
+            ),
+        )
+        rail_infos.insert(
+            5 if self._filesystem_rail_enabled_for_profile() else 4,
             _RailBuildInfo(
                 "_symphony_orchestration_rail",
                 self._build_symphony_orchestration_rail,

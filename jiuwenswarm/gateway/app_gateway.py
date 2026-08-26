@@ -2019,6 +2019,7 @@ async def _run_with_telemetry(
         initial_error=a2a_config_error,
         outbound_repository=a2a_outbound_repository,
     )
+    message_handler.set_a2a_outbound_tool_manager(a2a_manager)
 
     _register_web_handlers(
         WebHandlersBindParams(
