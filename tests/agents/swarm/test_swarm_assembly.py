@@ -1210,6 +1210,28 @@ def test_team_workspace_report_path_returns_none_without_root() -> None:
     assert member_rails._build_team_workspace_report_path_rail({}, ctx) is None
 
 
+async def test_team_workspace_report_path_uses_flat_mount_with_team_id() -> None:
+    """A session-scoped team id must not be repeated inside the mount path."""
+    team_id = "oc_team_preset-research-insight_officeclaw_1a03cd0f2a9_26b2ec1a2e78"
+    ctx = SwarmBuildContext(
+        team_ws_root=r"C:\Users\tester\.office-claw\agent_teams\team\team-workspace",
+        team_id=team_id,
+    )
+    rail = member_rails._build_team_workspace_report_path_rail({}, ctx)
+    assert rail is not None
+    builder = SystemPromptBuilder(language="cn")
+    rail.init(types.SimpleNamespace(system_prompt_builder=builder))
+
+    await rail.before_model_call(
+        AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
+
+    prompt = builder.build()
+    assert "Internal mount path: `.team/`" in prompt
+    assert f".team/{team_id}/" not in prompt
+    assert ".team/<team>/team-workspace/" not in prompt
+
+
 # ---------------------------------------------------------------------------
 # Multimodal / xiaoyi tool gating (config-sourced base tools)
 # ---------------------------------------------------------------------------
