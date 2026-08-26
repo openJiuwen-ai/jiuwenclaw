@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Switch } from '../../../../components/ui';
 import { Form, FormDialog, useForm } from '../../../../components/form';
-import { normalizeA2UIEnabled, setA2UIFeatureEnabled } from '../../../../features/a2ui/featureConfig';
+import { setA2UIFeatureEnabled } from '../../../../features/a2ui/featureConfig';
 import {
   EXTERNAL_CLI_AGENT_KINDS,
   ExternalCliAgentsSection,
@@ -304,17 +304,10 @@ export function A2UISetting({ disabled }: SettingsCustomItemProps) {
   const { isConnected } = useSettingsServices();
   const source = useSettingsSource();
   const a2ui = parseConfigBoolean(source.values.a2ui_enabled);
-  const updateA2ui = async (next: boolean) => {
-    const previous = normalizeA2UIEnabled(source.values.a2ui_enabled);
+  async function updateA2UI(next: boolean): Promise<void> {
+    await source.save({ a2ui_enabled: next }, 'a2ui-enabled');
     setA2UIFeatureEnabled(next);
-    try {
-      await source.save({ a2ui_enabled: next }, 'a2ui-enabled');
-      window.setTimeout(() => window.location.reload(), 650);
-    } catch (error) {
-      setA2UIFeatureEnabled(previous);
-      throw error;
-    }
-  };
+  }
 
   return (
     <SettingRow
@@ -325,7 +318,7 @@ export function A2UISetting({ disabled }: SettingsCustomItemProps) {
         aria-label={t('settingsPanel.fields.a2ui_enabled.title')}
         checked={a2ui}
         disabled={disabled || !isConnected || source.savingKeys.has('a2ui_enabled')}
-        onChange={(next) => void updateA2ui(next).catch(() => undefined)}
+        onChange={(next) => void updateA2UI(next).catch(() => undefined)}
       />
     </SettingRow>
   );

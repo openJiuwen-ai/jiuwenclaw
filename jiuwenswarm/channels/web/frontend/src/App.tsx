@@ -368,7 +368,6 @@ function AppContent({
   const [shareExportSnapshot, setShareExportSnapshot] = useState<ShareImageSnapshot | null>(null);
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
-  const [a2uiRefreshPending, setA2uiRefreshPending] = useState(false);
   const [saveToastVisible, setSaveToastVisible] = useState(false);
   const [configChangedConfirmOpen, setConfigChangedConfirmOpen] = useState(false);
   const [proactiveToastVisible, setProactiveToastVisible] = useState(false);
@@ -1503,7 +1502,6 @@ function AppContent({
     setRestartSuccess(false);
     setRestartSeenDisconnect(false);
     setAppliedWithoutRestart(false);
-    setA2uiRefreshPending(false);
   }, [clearRestartAutoCloseTimer]);
 
   const clearSaveToastTimer = useCallback(() => {
@@ -1676,28 +1674,22 @@ function AppContent({
     if (hasExternalCliDependencyInstall) {
       return payload;
     }
+    if ('a2ui_enabled' in effectiveUpdates) {
+      setA2UIFeatureEnabled(normalizeA2UIEnabled(effectiveUpdates.a2ui_enabled));
+      setConfigError(null);
+      return payload;
+    }
     setConfigError(null);
     setRestartModalOpen(true);
     setRestartSuccess(false);
     setRestartSeenDisconnect(false);
-    if ('a2ui_enabled' in updates) {
-      setAppliedWithoutRestart(false);
-      setA2uiRefreshPending(true);
+    setAppliedWithoutRestart(payload?.applied_without_restart === true);
+    clearRestartAutoCloseTimer();
+    if (payload?.applied_without_restart === true) {
       setRestartSuccess(true);
-      clearRestartAutoCloseTimer();
       restartAutoCloseTimerRef.current = window.setTimeout(() => {
         closeRestartModal();
-        window.location.reload();
       }, 5000);
-    } else {
-      setAppliedWithoutRestart(payload?.applied_without_restart === true);
-      clearRestartAutoCloseTimer();
-      if (payload?.applied_without_restart === true) {
-        setRestartSuccess(true);
-        restartAutoCloseTimerRef.current = window.setTimeout(() => {
-          closeRestartModal();
-        }, 5000);
-      }
     }
     return payload;
   }, [clearRestartAutoCloseTimer, closeRestartModal, request]);
@@ -1851,18 +1843,8 @@ function AppContent({
       return result;
     }
     if (isA2UIChange) {
-      // Show modal then refresh page after 5 seconds
+      setA2UIFeatureEnabled(normalizeA2UIEnabled(payload.config?.a2ui_enabled));
       setConfigError(null);
-      setRestartModalOpen(true);
-      setRestartSuccess(true);
-      setRestartSeenDisconnect(false);
-      setAppliedWithoutRestart(false);
-      setA2uiRefreshPending(true);
-      clearRestartAutoCloseTimer();
-      restartAutoCloseTimerRef.current = window.setTimeout(() => {
-        closeRestartModal();
-        window.location.reload();
-      }, 5000);
     } else {
       applyConfigSaveUiState(result?.applied_without_restart === true);
     }
@@ -3484,31 +3466,21 @@ function AppContent({
               <h3 className="text-base font-semibold text-text mb-1" data-testid="app-restart-modal-title">
                 {!restartSuccess
                   ? t('app.restarting')
-                  : a2uiRefreshPending
-                    ? t('app.a2uiRefresh')
-                    : appliedWithoutRestart
-                      ? t('app.configApplied')
-                      : t('app.restartSuccess')}
+                  : appliedWithoutRestart
+                    ? t('app.configApplied')
+                    : t('app.restartSuccess')}
               </h3>
               <p className="text-sm text-text-muted mb-5" data-testid="app-restart-modal-description">
                 {!restartSuccess
                   ? t('app.restartWaiting')
-                  : a2uiRefreshPending
-                    ? t('app.a2uiRefreshDesc')
-                    : appliedWithoutRestart
-                      ? t('app.configAppliedDesc')
-                      : t('app.restartSuccessDesc')}
+                  : appliedWithoutRestart
+                    ? t('app.configAppliedDesc')
+                    : t('app.restartSuccessDesc')}
               </p>
               {restartSuccess && (
                 <button
                   type="button"
-                  onClick={() => {
-                    if (a2uiRefreshPending) {
-                      window.location.reload();
-                    } else {
-                      closeRestartModal();
-                    }
-                  }}
+                  onClick={closeRestartModal}
                   className="btn primary !px-4 !py-2"
                   data-testid="app-restart-modal-ok"
                 >
