@@ -129,9 +129,9 @@ def _require_jiuwenclaw_id() -> str:
 
 
 async def _handler() -> Any:
-    from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+    from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
 
-    db_mod = import_manager_ws_client_module("infrastructure.db")
+    db_mod = import_manager_config_receiver_module("infrastructure.db")
     return await db_mod.ensure_db_handler(log_prefix=TABLE)
 
 
@@ -390,7 +390,7 @@ def resolve_final_tenant_ids(
     if not svc or not ag:
         if g and b and u:
             try:
-                from openjiuwen_runtime_management_extension.runtime_management_client import (  # type: ignore
+                from openjiuwen_runtime_management_extension.invoke_ids import (  # type: ignore
                     _default_invoke_ids,
                 )
 

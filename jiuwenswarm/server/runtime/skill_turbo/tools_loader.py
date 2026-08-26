@@ -207,13 +207,9 @@ def _load_jw_image_gen(ctx: ToolLoaderContext) -> list[Any]:
     """图像生成：image_gen_enabled 开关（沿用 _get_tool_cards 同款写法）。"""
     if not ctx.image_gen_enabled:
         return []
-    try:
-        from jiuwenswarm.agents.harness.common.tools.image_gen_tools import text_to_image
-    except ImportError:
-        text_to_image = None
-    if text_to_image is None:
-        return []
-    return [text_to_image]
+    from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
+
+    return [generate_image]
 
 
 def _load_jw_skill_toolkit(ctx: ToolLoaderContext) -> list[Any]:

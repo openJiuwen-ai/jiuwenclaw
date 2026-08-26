@@ -27,7 +27,7 @@ RUN pip install -e . \
     ${PIP_EXTRA_ARGS}
 
 RUN yq -y -i '.dependencies = {}' packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/extension.yaml
-RUN yq -y -i '.dependencies = {}' packages/jiuwenclaw-ee/gateway/extensions/manager_ws_client/extension.yaml
+RUN yq -y -i '.dependencies = {}' packages/jiuwenclaw-ee/gateway/extensions/manager_config_receiver/extension.yaml
 
 RUN mkdir -p /home/app/.jiuwenswarm && printf 'yes\nzh\n' | jiuwenswarm-init
 

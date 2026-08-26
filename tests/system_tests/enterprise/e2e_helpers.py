@@ -312,12 +312,14 @@ def build_gateway_env(
     gateway_port: int,
     *,
     jiuwenclaw_id: str = DEFAULT_JIUWENCLAW_ID,
-    manager_ws_url: str | None = None,
-    manager_ws_client_enabled: bool = False,
+    manager_http_url: str | None = None,
+    manager_config_public_host: str | None = None,
+    manager_config_receiver_enabled: bool = False,
 ) -> dict[str, str]:
     load_gateway_dotenv()
     env = os.environ.copy()
     logs_dir = gateway_structured_logs_dir(gateway_home)
+    enabled = manager_config_receiver_enabled
     env.update(
         {
             "HOME": str(gateway_home),
@@ -335,11 +337,13 @@ def build_gateway_env(
             "OPENJIUWEN_RUNTIME_LOG_FILE": str(gateway_home / "runtime_sdk.log"),
             "JIUWENCLAW_ID": jiuwenclaw_id,
             "LOG_ROOT_PATH": str(logs_dir),
-            "GATEWAY_MANAGER_WS_CLIENT_ENABLED": "true" if manager_ws_client_enabled else "false",
+            "GATEWAY_CONFIG_RECEIVER_ENABLED": "true" if enabled else "false",
         }
     )
-    if manager_ws_url is not None:
-        env["GATEWAY_MANAGER_WS_URL"] = manager_ws_url
+    if manager_http_url is not None:
+        env["GATEWAY_MANAGER_HTTP_URL"] = manager_http_url
+    if manager_config_public_host is not None:
+        env["GATEWAY_CONFIG_PUBLIC_HOST"] = manager_config_public_host
     ut_log(
         "env.gateway.ready",
         gateway_home=gateway_home,
@@ -347,8 +351,9 @@ def build_gateway_env(
         web_port=web_port,
         gateway_port=gateway_port,
         jiuwenclaw_id=jiuwenclaw_id,
-        manager_ws_client_enabled=env["GATEWAY_MANAGER_WS_CLIENT_ENABLED"],
-        manager_ws_url=env.get("GATEWAY_MANAGER_WS_URL"),
+        manager_config_receiver_enabled=env["GATEWAY_CONFIG_RECEIVER_ENABLED"],
+        manager_http_url=env.get("GATEWAY_MANAGER_HTTP_URL"),
+        manager_config_public_host=env.get("GATEWAY_CONFIG_PUBLIC_HOST"),
         gateway_sqlite_path=env["GATEWAY_SQLITE_PATH"],
         log_root_path=env["LOG_ROOT_PATH"],
     )

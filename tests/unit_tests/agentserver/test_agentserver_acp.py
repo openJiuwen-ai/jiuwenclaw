@@ -1371,6 +1371,18 @@ async def test_handle_team_binding_generate_uses_officeclaw_tenant_catalog(monke
     binding_store = TeamBindingStore(tmp_path / "teams" / "bindings.json")
     entity_store = TeamEntityStore(tmp_path / ".agent_teams")
     tenant_config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "model_name": "${MODEL_NAME}",
+                        "client_provider": "${MODEL_PROVIDER}",
+                        "api_base": "${API_BASE}",
+                        "api_key": "${API_KEY}",
+                    }
+                }
+            ]
+        },
         "modes": {
             "team": {
                 "tenant_template": {
@@ -1386,12 +1398,23 @@ async def test_handle_team_binding_generate_uses_officeclaw_tenant_catalog(monke
             service_id="officeclaw_service_owner",
             agent_id="agentteam",
             config=tenant_config,
+            env={
+                "MODEL_NAME": "team-model",
+                "MODEL_PROVIDER": "OpenAI",
+                "API_BASE": "https://models.example/v1",
+                "API_KEY": "secret",
+            },
         )
     )
 
     async def fake_generate_team_name(description, *, config_base, template_id):
         assert description == "build a tenant team"
-        assert config_base is tenant_config
+        assert config_base["models"]["defaults"][0]["model_client_config"] == {
+            "model_name": "team-model",
+            "client_provider": "OpenAI",
+            "api_base": "https://models.example/v1",
+            "api_key": "secret",
+        }
         assert template_id == "tenant_template"
         return "tenant_generated_team"
 
@@ -1805,6 +1828,10 @@ def test_active_team_session_map_uses_logical_binding_name(monkeypatch, tmp_path
 async def test_handle_team_session_bind_allows_existing_session_dir_without_metadata(monkeypatch, tmp_path):
     from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
     from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStore
+    from jiuwenswarm.server.runtime.tenant_catalog_registry import (
+        TenantAgentSpec,
+        TenantCatalogRegistry,
+    )
 
     server = AgentWebSocketServerHarness()
     fake_ws = FakeWebSocket()
@@ -1819,6 +1846,57 @@ async def test_handle_team_session_bind_allows_existing_session_dir_without_meta
         template_snapshot={"team_name": "template_team", "leader": {"member_name": "lead_1"}},
         created_at=binding.created_at,
     )
+    tenant_config = {
+        "modes": {
+            "team": {
+                "default": {
+                    "team_name": "template_team",
+                    "leader": {"member_name": "lead_1"},
+                    "agents": {
+                        "lead_1": {},
+                        "new_analyst": {
+                            "description": "new member",
+                            "model": {
+                                "model_client_config": {
+                                    "model_name": "team-model",
+                                    "client_provider": "OpenAI",
+                                    "api_base": "https://models.example/v1",
+                                    "api_key": "secret",
+                                },
+                                "model_request_config": {"model": "team-model"},
+                            },
+                        },
+                    },
+                }
+            }
+        },
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "model_name": "${MODEL_NAME}",
+                        "client_provider": "${MODEL_PROVIDER}",
+                        "api_base": "${API_BASE}",
+                        "api_key": "${API_KEY}",
+                    }
+                }
+            ]
+        },
+    }
+    registry = TenantCatalogRegistry.get_instance()
+    registry.upsert(
+        TenantAgentSpec(
+            service_id="officeclaw_service_owner",
+            agent_id="agentteam",
+            config=tenant_config,
+            env={
+                "MODEL_NAME": "team-model",
+                "MODEL_PROVIDER": "OpenAI",
+                "API_BASE": "https://models.example/v1",
+                "API_KEY": "secret",
+            },
+        )
+    )
 
     patch_shared_name(monkeypatch, "encode_agent_response_for_wire", fake_encode_agent_response_for_wire)
     patch_session_roots(monkeypatch, sessions_root)
@@ -1830,51 +1908,9 @@ async def test_handle_team_session_bind_allows_existing_session_dir_without_meta
         "jiuwenswarm.server.runtime.team_entity_store.get_team_entity_store",
         lambda: entity_store,
     )
-    patch_shared_name(
-        monkeypatch,
-        "_effective_config_for_request",
-        lambda _request: {
-            "modes": {
-                "team": {
-                    "default": {
-                        "team_name": "template_team",
-                        "leader": {"member_name": "lead_1"},
-                        "agents": {
-                            "lead_1": {},
-                            "new_analyst": {
-                                "description": "new member",
-                                "model": {
-                                    "model_client_config": {
-                                        "model_name": "team-model",
-                                        "client_provider": "OpenAI",
-                                        "api_base": "https://models.example/v1",
-                                        "api_key": "secret",
-                                    },
-                                    "model_request_config": {"model": "team-model"},
-                                },
-                            },
-                        },
-                    }
-                }
-            },
-            "models": {
-                "defaults": [
-                    {
-                        "model_client_config": {
-                            "model_name": "team-model",
-                            "client_provider": "OpenAI",
-                            "api_base": "https://models.example/v1",
-                            "api_key": "secret",
-                        }
-                    }
-                ]
-            },
-        },
-    )
-
     request = AgentRequest(
         request_id="req-team-session-bind-existing",
-        channel_id="web",
+        channel_id="officeclaw",
         service_id="officeclaw_service_owner",
         agent_id="agentteam",
         req_method=ReqMethod.TEAM_SESSION_BIND,
@@ -1885,7 +1921,10 @@ async def test_handle_team_session_bind_allows_existing_session_dir_without_meta
         },
     )
 
-    await server.handle_team_session_bind_for_test(fake_ws, request, asyncio.Lock())
+    try:
+        await server.handle_team_session_bind_for_test(fake_ws, request, asyncio.Lock())
+    finally:
+        TenantCatalogRegistry.reset_for_tests()
 
     metadata = json.loads((sessions_root / "existing_session" / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["mode"] == "code.team"

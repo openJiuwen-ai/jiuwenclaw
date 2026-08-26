@@ -575,6 +575,16 @@ react:
     enabled: true                    # 总开关（未配置时默认 false）
     skill_name: pptx-craft           # PPT skill 外部目录名
     skill_checksum: ""               # 外部 skill 目录 SHA256 校验值（空=跳过校验）
+  # ============ 统一工具开关（黑名单 disabled_tools）============
+  # 列出的工具名将在 agent init 后从注册表注销，模型不可见；未列出者默认注册。
+  # 两种格式二选一：
+  #   1) YAML 列表：disabled_tools: ["search_skill", "install_skill"]
+  #   2) 环境变量：disabled_tools: ${DISABLED_TOOLS-默认列表}
+  #      在 .env 中设置：DISABLED_TOOLS=search_skill,install_skill（逗号/分号分隔）
+  # 默认禁用 search_skill / install_skill / uninstall_skill（技能广场界面安装不受影响，
+  # 那条链路走 SkillManager.handle_skills_install，不经模型工具）。
+  # 单横线 ``-`` 仅在变量未设置时使用默认值；显式 DISABLED_TOOLS= 可清空黑名单。
+  disabled_tools: ${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill}
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
@@ -635,6 +645,14 @@ react:
       trigger_context_ratio: 0.8      # 上下文占用达到该比例时触发压缩
       min_target_context_ratio: 0.1   # 压缩目标下限（占窗口比例）
       keep_recent_messages: 4         # 保留最近消息数
+
+    # 兜底压缩：整窗口 token 超阈值时调一次 LLM 把历史压成 summary，并在尾部 reinject 最近 skill/file/task_status 等关键状态。
+    # 仅用于溢出恢复：日常 add 路径不触发，由 ContextOverflowRecoveryRail 在 413/上下文溢出时靠 set_force_compact 在 GET 路径触发。
+    # 413 恢复时 threshold_override 会按模型真实窗口*0.85 自适应覆盖下方 trigger_total_tokens。
+    full_compact_processor_config:
+      trigger_total_tokens: 100000   # 整窗口 token 阈值；溢出兜底用，高于日常压缩阈值，仅在真溢出时被动触发
+      compression_call_max_tokens: 200000   # 压缩调 LLM 时的最大上下文预算
+      messages_to_keep: 10                  # 保留最近 N 条；buffer < 此值时不会删历史，只新增 summary
 
     # 连续相同 reasoning+工具集 / 相同工具入参时，折叠重复轮次；超阈值后兜底中止
     reasoning_tool_loop_compact_config:
@@ -1238,7 +1256,7 @@ permissions:
     workspace:
       read: allow
       write: allow
-      exec: ask
+      exec: allow
     paths:
       - path: '**/.ssh/**'
         match: glob

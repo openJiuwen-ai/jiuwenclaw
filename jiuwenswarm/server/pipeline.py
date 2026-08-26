@@ -74,6 +74,8 @@ async def dispatch_parsed_request(
         request.channel_id,
         request.is_stream,
     )
+    if request.is_stream and request.req_method == ReqMethod.CHAT_SEND:
+        logger.info("[latency] stage=0 name=recv request_id=%s", request.request_id)
 
     # First touch point of frontend chat input inside AgentServer: record it through the
     # agent-core logging system so it lands in the unified agent log stream.

@@ -19,6 +19,7 @@ from jiuwenswarm.common.config import (
     migrate_config_from_template,
     replace_teams_in_config,
     resolve_env_vars,
+    resolve_string_or_list_config,
     update_skill_retrieval_in_config,
     update_setup_guide_enabled_in_config,
     update_evolution_enabled_in_config,
@@ -45,6 +46,28 @@ class TestResolveEnvVars:
         monkeypatch.setenv("TEST_VAR", "actual_value")
         result = resolve_env_vars("${TEST_VAR:-default_value}")
         assert result == "actual_value"
+
+    @staticmethod
+    def test_resolve_unset_only_default_preserves_explicit_empty(
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("DISABLED_TOOLS", "")
+        value = resolve_env_vars(
+            "${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill}"
+        )
+        assert resolve_string_or_list_config(value) == []
+
+    @staticmethod
+    def test_resolve_unset_only_default_when_missing(monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("DISABLED_TOOLS", raising=False)
+        value = resolve_env_vars(
+            "${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill}"
+        )
+        assert resolve_string_or_list_config(value) == [
+            "search_skill",
+            "install_skill",
+            "uninstall_skill",
+        ]
 
     @staticmethod
     def test_resolve_empty_string():

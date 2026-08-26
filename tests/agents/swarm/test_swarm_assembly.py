@@ -117,6 +117,7 @@ _TEAM_SHARED_RAIL_NAMES: frozenset[str] = frozenset(
         registry.SKILL_RETRIEVAL_PROMPT,
         registry.SYMPHONY_ORCHESTRATION_PROMPT,
         registry.MEMBER_SKILL_TOOLKIT,
+        registry.DISABLED_TOOLS,
     }
 )
 
@@ -415,6 +416,7 @@ def test_build_member_capability_specs_rail_names(
 ) -> None:
     """Each role gets the common rails plus its role-specific extra rails."""
     config = {
+        "react": {"disabled_tools": ["search_skill", "install_skill"]},
         "agents": {
             "leader": {"skills": ["alpha"]},
             "teammate": {"skills": ["beta"]},
@@ -430,8 +432,14 @@ def test_build_member_capability_specs_rail_names(
 
     assert _TEAM_SHARED_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    assert len(_TEAM_SHARED_RAIL_NAMES) == 15
+    assert len(_TEAM_SHARED_RAIL_NAMES) == 16
     assert rail_names == expected
+    disabled_tools = next(
+        spec for spec in rails_specs if spec.type == registry.DISABLED_TOOLS
+    )
+    assert disabled_tools.params == {
+        "disabled_tools": ["search_skill", "install_skill"]
+    }
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
     logger.info("%s rails: %s", role, sorted(rail_names))
@@ -1583,11 +1591,6 @@ def test_team_skill_create_rail_registers_full_workspace(
     """
     register_swarm_providers()
     monkeypatch.setenv("SKILL_CREATE", "true")
-    monkeypatch.setattr(
-        evolution_rails,
-        "get_trajectory_span_processor",
-        lambda: object(),
-    )
 
     config = {"react": {"evolution": {"skill_create": True}}}
     ctx = SwarmBuildContext(
@@ -1665,6 +1668,7 @@ _EXPECTED_CODE_RAIL_NAMES_LEADER: frozenset[str] = frozenset(
         registry.MEMBER_SKILL_TOOLKIT,
         registry.TEAM_WORKSPACE_REPORT_PATH,
         registry.PLUGIN_RAILS,
+        registry.DISABLED_TOOLS,
     }
 )
 

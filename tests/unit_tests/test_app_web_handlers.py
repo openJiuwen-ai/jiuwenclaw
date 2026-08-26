@@ -12,6 +12,7 @@ import pytest
 from jiuwenswarm.gateway.channel_manager.web import app_web_handlers
 from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     WebHandlersBindParams,
+    _chat_interrupt_ack_payload,
     _flatten_modes_team_for_config_panel,
     _flatten_symphony_for_config_panel,
     _normalize_feishu_conf,
@@ -1763,3 +1764,29 @@ def test_update_channel_subsection_in_config_overwrites_existing(tmp_path, monke
     assert len(saved["channels"]["feishu"]["apps"]) == 1
     assert saved["channels"]["feishu"]["apps"][0]["name"] == "新应用"
     assert saved["channels"]["feishu"]["apps"][0]["app_id"] == "new_id"
+
+
+def test_chat_interrupt_ack_payload_ws_shape_unchanged():
+    payload = _chat_interrupt_ack_payload("s1", {"intent": "pause"}, for_http=False)
+    assert payload == {"accepted": True, "session_id": "s1", "intent": "pause"}
+    empty = _chat_interrupt_ack_payload("s1", {}, for_http=False)
+    assert empty == {"accepted": True, "session_id": "s1"}
+    assert "event_type" not in empty
+
+
+def test_chat_interrupt_ack_payload_http_carries_interrupt_result():
+    payload = _chat_interrupt_ack_payload("s1", {"intent": "cancel"}, for_http=True)
+    assert payload["accepted"] is True
+    assert payload["session_id"] == "s1"
+    assert payload["intent"] == "cancel"
+    assert payload["event_type"] == "chat.interrupt_result"
+    assert payload["success"] is True
+    assert payload["message"] == "任务已取消"
+
+    defaulted = _chat_interrupt_ack_payload("s1", {}, for_http=True)
+    assert defaulted["intent"] == "cancel"
+    assert defaulted["event_type"] == "chat.interrupt_result"
+
+    paused = _chat_interrupt_ack_payload("s1", {"intent": "pause"}, for_http=True)
+    assert paused["intent"] == "pause"
+    assert paused["message"] == "任务已暂停"

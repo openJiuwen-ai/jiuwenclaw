@@ -105,10 +105,17 @@ def _is_routeless_envelope(envelope: E2AEnvelope) -> bool:
 
 
 def _default_http_base() -> str:
-    base = read_env("GATEWAY_RUNTIME_DEFAULT_HTTP_BASE", "http://127.0.0.1:18092").strip()
-    if not base:
-        base = "http://127.0.0.1:18092"
-    return base.rstrip("/")
+    """管理类请求（reload_config 等）的默认 Agent HTTP Base。
+
+    须指向 Agent ``http_server``（默认 ``AGENT_HTTP_PORT=8766``），
+    **不要**打 WS 口 ``AGENT_SERVER_PORT=18092``（对该口发 HTTP 会 426/400 且无 JSON）。
+    """
+    explicit = read_env("GATEWAY_RUNTIME_DEFAULT_HTTP_BASE", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    host = read_env("AGENT_SERVER_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    port = read_env("AGENT_HTTP_PORT", "8766").strip() or "8766"
+    return f"http://{host}:{port}"
 
 
 def identity_from_envelope(envelope: E2AEnvelope) -> tuple[str, str, str, str, str | None]:
@@ -169,14 +176,6 @@ class RuntimeRoutedAgentClient(AgentServerClient):
         self._touch_interval_seconds = max(0.0, float(touch_interval_seconds))
         self._route_attempts = max(1, int(route_attempts))
         self._connected = False
-
-    def set_or_update_server_config(
-        self,
-        *,
-        config: dict[str, Any],
-        env: dict[str, str] | None = None,
-    ) -> None:
-        return None
 
     async def connect(self, uri: str) -> None:
         _ = uri

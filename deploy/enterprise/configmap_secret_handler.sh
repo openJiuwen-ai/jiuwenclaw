@@ -17,6 +17,7 @@ render_secret_configmap() {
         "MANAGER_DB_PASSWORD"
         "IDENTITY_DB_PASSWORD"
         "WEB_DB_PASSWORD"
+        "RUNTIME_DB_PASSWORD"
         "REDIS_PASSWORD"
         "OBS_SECRET_KEY"
         "API_KEY"
@@ -53,10 +54,11 @@ uninstall_secret_configmap() {
         "${DEPLOY_VARS["GATEWAY_NAME"]}"
         "${DEPLOY_VARS["MANAGER_SERVER_NAME"]}"
         "${DEPLOY_VARS["WEB_NAME"]}"
+        "${DEPLOY_VARS["AGENT_RUNTIME_NAME"]}"
     )
     local file="${CONFIG["SECRET_CM_FILE"]}"
 
-    # Gateway、Web、Manager这三个组件都依赖于本资源，检查三者是否存在，若存在不能删除本资源
+    # Gateway、Web、Manager、AgentRuntime这些组件都依赖于本资源，检查它们是否存在，若存在不能删除本资源
     for cname in "${component_names[@]}"; do
         if check_k8s_resource_exists "deployment" "${cname}" "${namespace}"; then
             warning "Deployment ${namespace}/${cname} exists, skip deleting ${namespace}/${name}."

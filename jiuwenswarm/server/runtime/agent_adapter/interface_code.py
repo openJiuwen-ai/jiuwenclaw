@@ -358,6 +358,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         "JiuSwarmStreamEventRail", "SecurityRail",
         "LspRail", "ProjectMemoryRail", "PermissionInterruptRail",
         "ContextProcessorRail",
+        "ContextOverflowRecoveryRail",
         "SysOperationRail", "CodingMemoryRail",
         "AgentModeRail", "StructuredAskUserRail", "ConfirmInterruptRail",
         "FileSystemRail",  # 别名
@@ -617,6 +618,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 {"tool_names": ["switch_mode"]},
             ),
             _RailBuildInfo("_context_processor_rail", self._build_context_processor_rail),
+            # 溢出兜底：与链路 A（DeepAdapter）对齐，复用父类 _build_context_overflow_recovery_rail。
+            # ContextOverflowRecoveryRail 在 413/上下文溢出时靠 set_force_compact 触发 FullCompact。
+            _RailBuildInfo(
+                "_context_overflow_recovery_rail",
+                self._build_context_overflow_recovery_rail,
+            ),
             _RailBuildInfo("_code_task_planning_rail", self._build_code_task_planning_rail),
             _RailBuildInfo("_code_agent_rail", self._build_code_agent_rail),
             _RailBuildInfo("_code_plan_approval_rail", self._build_plan_approval_rail),
@@ -660,6 +667,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 "[JiuwenSwarmCodeAdapter] Dynamic rail %s queued from config",
                 rail_name,
             )
+
+        # Keep the unified react.disabled_tools policy consistent with agent
+        # mode. Its low priority makes it run after fixed and dynamic rails
+        # have registered their tools.
+        rail_infos.append(
+            _RailBuildInfo(
+                "_disabled_tools_rail",
+                self._build_disabled_tools_rail,
+                {"config": config},
+            )
+        )
 
         return self._instantiate_rails(rail_infos, config_base)
 

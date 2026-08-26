@@ -224,14 +224,38 @@ def _agent_workspace_dir_for_request(request: AgentRequest) -> Path:
 
 
 def _effective_config_for_request(request: AgentRequest) -> Any:
-    """Return the OfficeClaw tenant snapshot; native gateway keeps disk config."""
+    """Return the resolved OfficeClaw tenant snapshot; native gateway keeps disk config."""
+    from jiuwenswarm.common.config import resolve_env_vars
+    from jiuwenswarm.common.local_env_config import (
+        bind_agent_env_ns,
+        bind_task_env_overlay,
+        build_effective_env_overlay,
+        reset_agent_env_ns,
+        reset_task_env_overlay,
+    )
+    from jiuwenswarm.server.runtime.sync_agents_configs import materialize_sync_env
     from jiuwenswarm.server.runtime.tenant_catalog_registry import TenantCatalogRegistry
 
     if request.channel_id == "officeclaw":
         agent_id, service_id, _workspace_key = TenantAgentPool.extract_ids(request)
         spec = TenantCatalogRegistry.get_instance().get(service_id, agent_id)
         if spec is not None and isinstance(spec.config, dict):
-            return spec.config
+            env = materialize_sync_env(spec.env) if isinstance(spec.env, dict) else {}
+            ns_token = bind_agent_env_ns(service_id, agent_id)
+            try:
+                overlay_token = bind_task_env_overlay(
+                    build_effective_env_overlay(
+                        env,
+                        service_id=service_id,
+                        agent_id=agent_id,
+                    )
+                )
+                try:
+                    return resolve_env_vars(spec.config)
+                finally:
+                    reset_task_env_overlay(overlay_token)
+            finally:
+                reset_agent_env_ns(ns_token)
         return {}
     return get_config()
 
