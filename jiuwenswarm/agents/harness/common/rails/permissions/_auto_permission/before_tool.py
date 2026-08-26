@@ -275,9 +275,6 @@ class AutoPermissionBeforeToolMixin:
                 facts=facts,
                 decision_source=decision_source,
             )
-            is_background_shell = facts.tool_name == "bash" and bool(
-                facts.untrusted_args.get("run_in_background", False)
-            )
             is_grounded_execution = facts.tool_category != "shell" or bool(
                 facts.effective_workdir
             )
@@ -287,7 +284,6 @@ class AutoPermissionBeforeToolMixin:
             )
             if (
                 should_publish_artifact_candidate
-                and not is_background_shell
                 and is_grounded_execution
             ):
                 publish_artifact_candidate_state(
