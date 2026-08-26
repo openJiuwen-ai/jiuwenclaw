@@ -51,6 +51,13 @@ _SECTION_PROCESS_NODES = {
     "collector_summary",
     "sub_reporter",
 }
+# Brief mode performs report-wide collection/review outside the per-section
+# process branch.  Their ordinary ``content`` carries the evidence detail that
+# users expect in the expanded reasoning view, not final report prose.
+_BRIEF_PROCESS_CONTENT_NODES = {
+    "brief_info_collector",
+    "brief_evidence_reviewer",
+}
 _FINAL_REPORT_NODES = {
     "reporter",
     "vlm_chart_generator",
@@ -307,9 +314,13 @@ def _node_frames_for_chunk(
     frames: list[dict] = []
     if starts_node and event != "done":
         frames.append(_node_reasoning(stage, agent, display, f"{display[0]}开始\n"))
-    reasoning = _chunk_reasoning_content(chunk, content)
-    if reasoning:
-        frames.append(_node_reasoning(stage, agent, display, _as_text(reasoning)))
+    if agent in _BRIEF_PROCESS_CONTENT_NODES:
+        process_parts = _raw_process_parts(chunk, content, agent=agent)
+    else:
+        reasoning = _chunk_reasoning_content(chunk, content)
+        process_parts = [_as_text(reasoning)] if reasoning else []
+    for process_content in process_parts:
+        frames.append(_node_reasoning(stage, agent, display, process_content))
     if completes_node:
         frames.append(_node_reasoning(stage, agent, display, f"{display[0]}完成\n"))
     return frames, starts_node, completes_node

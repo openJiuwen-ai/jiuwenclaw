@@ -14,6 +14,7 @@ import zipfile
 from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -1968,6 +1969,57 @@ async def test_stage_three_remains_in_progress_when_research_fails():
     assert any(
         task["task_id"] == "deepresearch_stage_3" and task["status"] == "in_progress"
         for task in updates[-1]["tasks"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_brief_process_content_reaches_gateway_reasoning():
+    detail = "证据详情：Redis 适合共享状态，SQLite 适合本地持久化。"
+    proc = _Proc(
+        [
+            json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+            json.dumps(
+                {
+                    "agent": "brief_info_collector",
+                    "event": "message",
+                    "reasoning_content": "正在判断证据覆盖范围",
+                    "content": detail,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps({"__deepsearch_status__": "error", "error": "failed"}),
+        ]
+    )
+    route = {
+        "request_id": "R",
+        "channel_id": "CH",
+        "session_id": "S",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    push = AsyncMock()
+    patches = _stream_patches(proc, route=route)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=push)
+        )
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(action="start", query="q")
+        )
+
+    assert outcome["status"] == "error"
+    reasoning_payloads = [
+        call.args[0]["payload"]
+        for call in push.send_push.await_args_list
+        if call.args[0]["payload"].get("event_type") == "chat.reasoning"
+    ]
+    assert any(
+        payload.get("task_id") == "deepresearch_stage_3"
+        and payload.get("stream_source_id") == "dr_brief_info_collector"
+        and payload.get("content") == detail
+        for payload in reasoning_payloads
     )
 
 

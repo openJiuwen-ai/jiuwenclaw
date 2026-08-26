@@ -1728,3 +1728,31 @@ def test_brief_research_nodes_are_visible_in_stage_three(agent):
 
     _assert_stage(_stage_update(frames), 3)
     assert any(frame["event_type"] == "chat.reasoning" for frame in frames)
+
+
+@pytest.mark.parametrize(
+    ("agent", "start_message"),
+    [
+        ("brief_info_collector", "报告级资料检索开始\n"),
+        ("brief_evidence_reviewer", "证据审阅开始\n"),
+    ],
+)
+def test_brief_process_nodes_preserve_reasoning_and_content(agent, start_message):
+    frames = route_chunk(
+        {
+            "agent": agent,
+            "event": "message",
+            "reasoning_content": "正在判断证据覆盖范围",
+            "content": "证据详情：Redis 适合共享状态，SQLite 适合本地持久化。",
+        },
+        RouterState(current_stage=2),
+    )
+
+    reasoning = _process_reasoning(frames)
+    assert [frame["content"] for frame in reasoning] == [
+        start_message,
+        "正在判断证据覆盖范围",
+        "证据详情：Redis 适合共享状态，SQLite 适合本地持久化。",
+    ]
+    assert all(frame["task_id"] == "deepresearch_stage_3" for frame in reasoning)
+    assert all(frame["stream_source_id"] == f"dr_{agent}" for frame in reasoning)
