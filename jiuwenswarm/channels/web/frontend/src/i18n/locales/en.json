@@ -539,7 +539,7 @@
   "a2aIngress": {
     "title": "A2A Control Center",
     "subtitle": "Manage the A2A service exposed by JiuwenSwarm.",
-    "tabs": { "ariaLabel": "A2A Control Center pages", "config": "Ingress Configuration", "history": "Processing History" },
+    "tabs": { "ariaLabel": "A2A Control Center pages", "config": "Ingress Configuration", "outbound": "Outbound Configuration", "history": "Processing History" },
     "enable": "Enable service", "enabling": "Enabling...", "disable": "Disable service", "disabling": "Disabling...", "reload": "Reload", "reloading": "Reloading...",
     "save": "Save configuration", "saveAndApply": "Save and apply", "applying": "Applying...", "saved": "Configuration saved; it has not been applied to the running service.", "savedAndApplied": "Configuration saved and applied.",
     "disconnected": "Gateway is disconnected, so the A2A service cannot be read or changed.",
@@ -547,6 +547,17 @@
     "states": { "disabled": "Disabled", "starting": "Starting", "running": "Running", "stopping": "Stopping", "error": "Error" },
     "status": { "title": "Service status", "configRevision": "Configuration revision: {{revision}}", "effectiveRpcUrl": "Effective JSON-RPC URL", "effectiveCardUrl": "Effective Agent Card URL", "notListening": "Not listening" },
     "config": { "title": "Ingress configuration", "description": "Save updates the desired configuration only; Save and apply reloads the running service." },
+    "outbound": {
+      "discovery": { "title": "Discover a third-party Agent", "description": "Discovery only fetches and previews the Agent Card. JiuwenSwarm can call the Agent only after explicit registration.", "action": "Discover Agent", "discovering": "Discovering...", "previewOnly": "Preview only, not registered", "previewReady": "Discovery succeeded. Review and explicitly register this candidate before it can be called." },
+      "list": { "title": "Registered Agents", "total": "{{count}} total", "empty": "No third-party Agents are registered" },
+      "fields": { "version": "Version", "endpoint": "Effective endpoint", "protocol": "Protocol", "expiresAt": "Candidate expires", "displayName": "Display name", "credential": "API Key / Bearer (optional, never displayed)", "revision": "Card revision", "credentialState": "Credential", "lastChecked": "Last checked", "connectTimeout": "Connect timeout (seconds)", "syncWait": "Sync wait timeout (seconds)", "replaceCredential": "Replace credential (leave blank to keep)" },
+      "availability": { "available": "Available", "unreachable": "Unreachable", "incompatible": "Incompatible", "review_required": "Review required" },
+      "register": "Register", "registering": "Registering...", "registered": "The third-party Agent is registered and can now participate in outbound calls when enabled and available.",
+      "enabled": "Enabled", "disabled": "Disabled", "enable": "Enable", "disable": "Disable", "refresh": "Refresh Card",
+      "configured": "Configured", "notConfigured": "Not configured", "settings": "Settings", "saved": "Registration settings saved.", "clearCredential": "Clear saved credential", "reviewRequired": "A critical endpoint, protocol, security, or identity change was detected. New calls are paused until confirmation.", "endpointChange": "Endpoint change",
+      "confirm": "Confirm and apply", "reject": "Reject change", "deleteConfirm": "Delete this registration? Existing dispatch history is retained, but new calls will be rejected immediately.",
+      "errors": { "invalidResponse": "The A2A outbound manager returned invalid data.", "invalidSettings": "Enter a valid display name and timeout values greater than zero." }
+    },
     "history": {
       "title": "Ingress request history", "description": "Shows the latest 200 A2A ingress requests in this Gateway process without retaining request bodies.", "total": "{{count}} total", "empty": "No processing history", "emptyDescription": "Incoming A2A request statuses will appear here.", "processing": "Processing",
       "statuses": { "processing": "Processing", "completed": "Completed", "failed": "Failed", "canceled": "Canceled" },
