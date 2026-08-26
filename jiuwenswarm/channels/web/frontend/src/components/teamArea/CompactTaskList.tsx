@@ -26,6 +26,7 @@ import statusProcessingIcon from '../../assets/work-mode/status-processing.svg';
 import statusSuccessIcon from '../../assets/work-mode/status-success.svg';
 import statusWaitingIcon from '../../assets/work-mode/status-waiting.svg';
 import statusWarningIcon from '../../assets/work-mode/status-warning.svg';
+import teamLeaderIcon from '../../assets/teamleader.svg';
 import { getBoardTaskTitle, getMemberDisplayName, getTaskColumnKey, type TaskColumnKey, type TeamMember } from './shared';
 
 const compactStatusIcons: Record<TaskColumnKey, string> = {
@@ -133,15 +134,12 @@ export function CompactTaskList({
 }
 
 function UnassignedTeamAvatar({ className }: { className?: string }) {
-  const { t } = useTranslation();
-
   return (
-    <div
-      className={`flex shrink-0 items-center justify-center overflow-hidden border border-border bg-card text-[12px] font-medium text-muted ${className || ''}`}
-      aria-label={t('team.planning.unassignedAvatar')}
-      title={t('team.planning.unassigned')}
-    >
-      --
-    </div>
+    <img
+      src={teamLeaderIcon}
+      className={className}
+      alt=""
+      aria-hidden="true"
+    />
   );
 }

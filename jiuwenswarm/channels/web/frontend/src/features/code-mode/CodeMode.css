@@ -773,8 +773,7 @@ button.code-environment__row:disabled {
   cursor: pointer;
 }
 
-.code-review__icon-button:hover,
-.code-review__icon-button.is-active {
+.code-review__icon-button:hover {
   background: var(--color-surface-hover);
   color: var(--color-text-primary);
 }

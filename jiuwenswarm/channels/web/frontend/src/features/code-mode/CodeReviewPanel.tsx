@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, ChevronRight, ChevronUp, FileCode2, Folder, LoaderCircle, Search } from 'lucide-react';
 import CollapseAllIcon from '../../assets/collapse-all.svg?react';
+import ExpandAllIcon from '../../assets/expand-all.svg?react';
 import ViewVerticalIcon from '../../assets/view-vertical.svg?react';
 import ViewHorizontalIcon from '../../assets/view-horizontal.svg?react';
 import menuExpandIcon from '../../assets/menu-expand.svg';
@@ -672,15 +673,25 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
           <button
             type="button"
             className="code-review__icon-button"
-            onClick={() => setExpandedPaths(new Set())}
-            title="收起全部文件"
-            data-testid="code-mode-review-refresh"
+            onClick={() => {
+              if (files.length > 0 && expandedPaths.size === files.length) {
+                setExpandedPaths(new Set());
+              } else {
+                setExpandedPaths(new Set(files.map(file => file.file_path)));
+              }
+            }}
+            title={files.length > 0 && expandedPaths.size === files.length ? '收起全部文件' : '展开全部文件'}
+            data-testid="code-mode-review-collapse"
           >
-            <CollapseAllIcon className="h-[24px] w-[24px]" aria-hidden="true" />
+            {files.length > 0 && expandedPaths.size === files.length ? (
+              <CollapseAllIcon className="h-[24px] w-[24px]" aria-hidden="true" />
+            ) : (
+              <ExpandAllIcon className="h-[24px] w-[24px]" aria-hidden="true" />
+            )}
           </button>
           <button
             type="button"
-            className="code-review__icon-button is-active"
+            className="code-review__icon-button"
             onClick={() => setViewMode(viewMode === 'unified' ? 'split' : 'unified')}
             title={viewMode === 'unified' ? '拆分差异视图' : '统一差异视图'}
             data-testid="code-mode-review-view-mode"
