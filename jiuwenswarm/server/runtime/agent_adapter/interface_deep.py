@@ -224,6 +224,12 @@ from jiuwenswarm.agents.harness.common.rails import (
 from jiuwenswarm.agents.harness.common.rails.disabled_tools_rail import (
     DisabledToolsRail,
 )
+from jiuwenswarm.agents.harness.common.rails.skill_active_state import SkillActiveStateRail
+from jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail import (
+    SkillCredentialInjectionRail,
+    coalesce_config_skill_envs,
+    coalesce_skill_envs,
+)
 from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
     ConcurrentSafeSysOperationRail,
     ConcurrentSafeTaskPlanningRail,
@@ -2033,6 +2039,8 @@ class JiuWenSwarmDeepAdapter:
         self._subagent_rail: SubagentRail | None = None
         self._ask_user_rail: StructuredAskUserRail | None = None
         self._permission_rail: Any = None
+        self._skill_active_state_rail: SkillActiveStateRail | None = None
+        self._skill_credential_injection_rail: SkillCredentialInjectionRail | None = None
         self._avatar_rail: Any = None
         self._tool_cards = None
         self._evolution_watcher_tasks: set[asyncio.Task] = set()
@@ -2147,6 +2155,11 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
+
+    def _skill_envs_provider(self) -> dict[str, dict[str, str]]:
+        if self._skill_credential_injection_rail is None:
+            return {}
+        return self._skill_credential_injection_rail.get_skill_envs()
 
     def _schedule_runtime_state_write(
         self,
@@ -6050,6 +6063,39 @@ class JiuWenSwarmDeepAdapter:
             skill_rail = None
         return skill_rail
 
+    @staticmethod
+    def _build_skill_active_state_rail() -> SkillActiveStateRail | None:
+        try:
+            rail = SkillActiveStateRail()
+            logger.info("[JiuWenSwarmDeepAdapter] SkillActiveStateRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] SkillActiveStateRail create failed: %s",
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _build_skill_credential_injection_rail(
+        config: dict[str, Any],
+    ) -> SkillCredentialInjectionRail | None:
+        try:
+            skill_envs = coalesce_skill_envs(config.get("skill_envs"), None)
+            rail = SkillCredentialInjectionRail(skill_envs=skill_envs)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillCredentialInjectionRail create success "
+                "(skills=[%s])",
+                ", ".join(skill_envs.keys()) if skill_envs else "",
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] SkillCredentialInjectionRail create failed: %s",
+                exc,
+            )
+            return None
+
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail.
 
@@ -7094,6 +7140,19 @@ class JiuWenSwarmDeepAdapter:
         else:
             self._skill_protocol_prompt_rail = None
 
+        rail_infos.insert(
+            0,
+            _RailBuildInfo(
+                "_skill_credential_injection_rail",
+                self._build_skill_credential_injection_rail,
+                {"config": config},
+            ),
+        )
+        rail_infos.insert(
+            1,
+            _RailBuildInfo("_skill_active_state_rail", self._build_skill_active_state_rail),
+        )
+
         rail_infos.append(
             _RailBuildInfo(
                 "_progressive_tool_rail",
@@ -7273,6 +7332,40 @@ class JiuWenSwarmDeepAdapter:
 
         self._update_permission_rail(config_base)
 
+        skill_credential_rail_newly_created = False
+        incoming_skill_envs = config.get("skill_envs", {})
+        current_skill_envs = (
+            self._skill_credential_injection_rail.get_skill_envs()
+            if self._skill_credential_injection_rail is not None
+            else None
+        )
+        new_skill_envs = coalesce_skill_envs(incoming_skill_envs, current_skill_envs)
+        if new_skill_envs is not incoming_skill_envs and new_skill_envs:
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] keeping skill_envs skills=[%s]; "
+                "empty YAML/overlay would wipe catalog credentials",
+                ", ".join(new_skill_envs.keys()),
+            )
+            config["skill_envs"] = new_skill_envs
+            if isinstance(config_base, dict):
+                react_base = config_base.get("react")
+                if isinstance(react_base, dict):
+                    react_base["skill_envs"] = new_skill_envs
+        if self._skill_credential_injection_rail is not None:
+            self._skill_credential_injection_rail.update_skill_envs(new_skill_envs)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] skill_envs hot-updated for SkillCredentialInjectionRail"
+            )
+        else:
+            self._skill_credential_injection_rail = self._build_skill_credential_injection_rail(
+                config
+            )
+            if self._skill_credential_injection_rail is not None:
+                skill_credential_rail_newly_created = True
+
+        if self._skill_active_state_rail is None:
+            self._skill_active_state_rail = self._build_skill_active_state_rail()
+
         progressive_tool_rail = None
         if "tool_lazy_load" in config:
             old_progressive_tool_rail = self._progressive_tool_rail
@@ -7312,6 +7405,10 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(disabled_tools_rail)
         elif not disabled_tools_configured and self._disabled_tools_rail is not None:
             rails_list.append(self._disabled_tools_rail)
+        if skill_credential_rail_newly_created and self._skill_credential_injection_rail is not None:
+            rails_list.append(self._skill_credential_injection_rail)
+        if self._skill_active_state_rail is not None:
+            rails_list.append(self._skill_active_state_rail)
         return rails_list, rails_to_unregister
 
     def _runtime_agent_scope_id(self) -> str:
@@ -7718,7 +7815,12 @@ class JiuWenSwarmDeepAdapter:
         ns_token, overlay_token = self._bind_request_env_overlay()
         try:
             load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
+            incoming_config_base = config_base
             config_base = _resolve_instance_config_base(config_base)
+            config_base = coalesce_config_skill_envs(
+                config_base,
+                incoming_config_base if isinstance(incoming_config_base, dict) else self._config_base_cache,
+            )
             # 企业版：create_instance 时可带 request，按 params 加载企业配置并合并模型
             bootstrap_request = self._instance_overrides.pop("request", None)
             if bootstrap_request is not None and os.getenv("AGENT_RUNTIME", "").strip():
@@ -8097,6 +8199,18 @@ class JiuWenSwarmDeepAdapter:
             raise TypeError("config_base must be a dict when provided")
         else:
             config_base = resolve_env_vars(config_base)
+
+        live_skill_envs = (
+            self._skill_credential_injection_rail.get_skill_envs()
+            if self._skill_credential_injection_rail is not None
+            else None
+        )
+        previous_for_skill_envs = (
+            {"react": {"skill_envs": live_skill_envs}}
+            if live_skill_envs
+            else self._config_base_cache
+        )
+        config_base = coalesce_config_skill_envs(config_base, previous_for_skill_envs)
 
         # 同步扩展配置到 ExtensionRegistry
         # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
