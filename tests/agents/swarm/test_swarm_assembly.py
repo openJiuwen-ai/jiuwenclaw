@@ -1591,11 +1591,6 @@ def test_team_skill_create_rail_registers_full_workspace(
     """
     register_swarm_providers()
     monkeypatch.setenv("SKILL_CREATE", "true")
-    monkeypatch.setattr(
-        evolution_rails,
-        "get_trajectory_span_processor",
-        lambda: object(),
-    )
 
     config = {"react": {"evolution": {"skill_create": True}}}
     ctx = SwarmBuildContext(
