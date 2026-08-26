@@ -156,8 +156,8 @@ def _tool_call_ctx(
 def test_build_agent_identity_prompt_contains_stable_identity_and_task_strategy():
     prompt = build_agent_identity_prompt(language="zh")
 
-    assert "# 身份" in prompt
-    assert "# 任务执行策略" in prompt
+    assert "# Identity" in prompt
+    assert "# Task Execution Strategy" in prompt
     assert "# JiuwenSwarm 内部数据" not in prompt
     assert "## 输出文件放置规范" not in prompt
     assert "## 文件发送" not in prompt
@@ -167,7 +167,11 @@ def test_build_agent_identity_prompt_contains_stable_identity_and_task_strategy(
 
 
 @pytest.mark.asyncio
-async def test_response_prompt_rail_splits_input_and_output_rules():
+async def test_response_prompt_rail_no_longer_injects_input_or_output_sections():
+    """Input/Output rules moved from ResponsePromptRail into RuntimePromptRail's
+    ``env`` section. ResponsePromptRail now only syncs the A2UI section, so it
+    must not leave behind ``input`` / ``output`` / ``response`` sections.
+    """
     builder = SystemPromptBuilder(language="cn")
     agent = _FakeAgent(builder)
     rail = ResponsePromptRail()
@@ -182,14 +186,50 @@ async def test_response_prompt_rail_splits_input_and_output_rules():
     await rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "# 输入说明" in prompt
-    assert "# 输出规则" in prompt
-    assert "## 输出语言" in prompt
-    assert "## 模型名称回答" in prompt
-    assert "# 消息说明" not in prompt
-    assert builder.has_section("input")
-    assert builder.has_section("output")
+    assert not builder.has_section("input")
+    assert not builder.has_section("output")
     assert not builder.has_section("response")
+    assert "## Input Instructions" not in prompt
+    assert "## Output Rules" not in prompt
+    assert "### Output Language" not in prompt
+    assert "### Model Name Answers" not in prompt
+    assert "## Subagent Usage Rules" not in prompt
+    assert "# 消息说明" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_runtime_env_section_includes_message_rules_subsections():
+    """RuntimePromptRail's ``env`` section now hosts the Input Instructions /
+    Output Rules / Subagent Usage Rules subsections (headings demoted one level)
+    so they read as subsections of ``# Runtime Environment`` and are shared
+    across office / code / design / team profiles.
+    """
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    runtime_rail = RuntimePromptRail(language="cn", channel="web")
+    runtime_rail.init(agent)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "## Input Instructions" in prompt
+    assert "### User Messages" in prompt
+    assert "### System Messages" in prompt
+    assert "## Output Rules" in prompt
+    assert "### Final Response Rules" in prompt
+    assert "### Artifact and Deliverable Rules" in prompt
+    assert "### Output Language" in prompt
+    assert "### Model Name Answers" in prompt
+    assert "## Subagent Usage Rules" in prompt
+    assert builder.has_section("env")
+    assert not builder.has_section("input")
+    assert not builder.has_section("output")
+    assert "# 消息说明" not in prompt
 
 
 @pytest.mark.asyncio
@@ -492,7 +532,6 @@ async def test_runtime_environment_section_participates_in_priority_order():
     builder = SystemPromptBuilder(language="cn")
     builder.add_section(PromptSection(name="identity", content={"cn": "identity"}, priority=10))
     builder.add_section(PromptSection(name="tools", content={"cn": "# 可用工具"}, priority=30))
-    builder.add_section(PromptSection(name="workspace", content={"cn": "# 工作空间"}, priority=70))
 
     agent = _FakeAgent(builder)
     runtime_rail = RuntimePromptRail(
@@ -510,11 +549,13 @@ async def test_runtime_environment_section_participates_in_priority_order():
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
+    # The openjiuwen WORKSPACE section is removed and its content folded into
+    # the consolidated directory_boundaries section (priority 96, last).
     ordered_markers = [
         "identity",
         "# 可用工具",
-        "# 工作空间",
         "# 运行环境",
+        "# 目录与运行时上下文",
     ]
     positions = [prompt.index(marker) for marker in ordered_markers]
     assert positions == sorted(positions)
@@ -524,6 +565,7 @@ async def test_runtime_environment_section_participates_in_priority_order():
     assert not builder.has_section("language_output")
     assert not builder.has_section("runtime")
     assert "# 运行时状态" not in prompt
+    assert builder.has_section("directory_boundaries")
 
 
 @pytest.mark.asyncio
@@ -719,17 +761,24 @@ async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, 
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "# Directory and File-Operation Boundaries" in prompt
-    assert "# Runtime Directory Context" not in prompt
+    assert "# Directory and Runtime Context" in prompt
+    assert "## Runtime Directory Context" in prompt
     assert "# Working Directory Runtime Values" not in prompt
     assert "The project directory is your current workspace" in prompt
     assert f"the current project directory is: `{project_dir}`" in prompt
     assert "Agent internal data directory" in prompt
-    assert "## JiuwenSwarm Internal Directories" in prompt
+    assert "## xiaoyi work Internal Data Directories" in prompt
     assert str(project_dir) in prompt
-    assert str(current_dir) not in prompt
+    # current_dir is the runtime cwd; it legitimately appears in the Runtime
+    # Directory Context, but must NOT leak into Other Authorized Directories
+    # (it is filtered because it equals cwd).
+    assert "Other Authorized Directories" not in prompt or (
+        str(current_dir) not in prompt.split("Other Authorized Directories")[-1]
+    )
     assert str(stale_dir) not in prompt
-    assert str(extra_dir) not in prompt
+    # extra_dir is a valid trusted dir distinct from project/cwd; it SHOULD
+    # appear in Other Authorized Directories.
+    assert str(extra_dir) in prompt
     assert "System directory" not in prompt
 
     items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
@@ -800,7 +849,7 @@ async def test_runtime_prompt_describes_agent_data_cwd_fallback(tmp_path, monkey
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "# 目录与文件操作边界" in prompt
+    assert "# 目录与运行时上下文" in prompt
     assert f"当前项目目录是：`{agent_data_dir}`" in prompt
     assert "其他可访问目录" not in prompt
 
@@ -829,11 +878,11 @@ async def test_runtime_prompt_clears_directory_boundaries_outside_web_and_tui(
     )
 
     await runtime_rail.before_model_call(ctx)
-    assert "# 目录与文件操作边界" in builder.build()
+    assert "# 目录与运行时上下文" in builder.build()
 
     runtime_rail.set_channel("a2a")
     await runtime_rail.before_model_call(ctx)
-    assert "# 目录与文件操作边界" not in builder.build()
+    assert "# 目录与运行时上下文" not in builder.build()
 
 
 @pytest.mark.asyncio
@@ -905,7 +954,7 @@ async def test_runtime_prompt_reports_powershell_and_removes_generic_shell_rules
     prompt = builder.build()
     assert "- Shell：PowerShell" in prompt
     assert "Shell 规则：" not in prompt
-    assert "### 项目目录规则" in prompt
+    assert "## 项目目录规则" in prompt
     assert "### 项目录规则" not in prompt
 
 

@@ -919,18 +919,24 @@ class JiuWenSwarm:
 
     @staticmethod
     def _adapter_mode_for_request(request: AgentRequest) -> str:
-        """选择 Deep / Code adapter。
+        """选择 Deep / Code adapter.
 
         Web 请求（显式携带 ``work_mode``）由 ``work_mode`` 决定 profile：
-        ``code`` 走 CodeAdapter，``work`` 走 DeepAdapter。TUI 等历史客户端不带
-        ``work_mode``，继续按完整 mode 串判定，行为不变。
+        ``code`` / ``design`` 走 CodeAdapter（design 派生自 code，复用其 rails/tools
+        装配与 CodeAdapter 实例化路径，仅 system prompt 与 invoke 工具注册按 design
+        切换），``work`` 走 DeepAdapter。TUI 等历史客户端不带 ``work_mode``，继续按
+        完整 mode 串判定，行为不变。
         """
         params = request.params if isinstance(request.params, dict) else {}
         work_mode = read_request_work_mode(params)
         raw_mode = params.get("mode", "")
         mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else ""
         if work_mode is not None and is_web_composable_mode(mode or "agent"):
-            return "code" if work_mode == "code" else "agent"
+            if work_mode == "code":
+                return "code"
+            if work_mode == "design":
+                return "design"
+            return "agent"
         if mode == "team.plan":
             return "code"
         if mode == "code" or mode.startswith("code."):

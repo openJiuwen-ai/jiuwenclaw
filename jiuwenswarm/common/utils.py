@@ -637,6 +637,10 @@ def _install_default_builtin_skills(
         "secret-guardian",
         "skill-scope",
         "plugin-audit",
+        "find-skills",
+        "xiaoyi-doc-convert",
+        "xiaoyi-pdf",
+        "xiaoyi-ppt",
     ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
@@ -697,6 +701,10 @@ def ensure_builtin_skills_installed() -> None:
         "secret-guardian",
         "skill-scope",
         "plugin-audit",
+        "find-skills",
+        "xiaoyi-doc-convert",
+        "xiaoyi-pdf",
+        "xiaoyi-ppt",
     ]
 
     builtin_dir = get_builtin_skills_dir()

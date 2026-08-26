@@ -1141,6 +1141,12 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         self._audio_tools: list[Any] = []
         self._instance_overrides: dict[str, Any] = {}
         self._is_session_scoped_adapter: bool = False
+        # Office (work) profile always uses English for system-prompt scaffolding
+        # (identity / safety / skills / task_execution / runtime / env sections),
+        # mirroring code mode. ``preferred_language`` only governs the output
+        # language (see ``_resolve_output_language``).
+        self._runtime_language_override: str | None = None
+        self._force_english_runtime_prompt: bool = True
         self._parent_session_id: str | None = None
         # Root-adapter-only: its own DeepAgent is built on demand (see
         # ``ensure_instance``), so the chat path does not pay for an instance it
@@ -2042,13 +2048,41 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
 
     @staticmethod
     def _resolve_prompt_language() -> str:
-        """Resolve configured prompt language for builder input."""
-        config_base = get_config()
-        return str(config_base.get("preferred_language", "zh")).strip().lower()
+        """Office mode always uses English for system prompts.
+
+        Mirrors code mode: the system-prompt scaffolding (identity, safety,
+        skills, task_execution, runtime/env sections) is fixed English so the
+        monkey-patched ``safety_override`` / ``skills_goal_override`` sections
+        also render in English. The user-facing response language is governed
+        separately by :meth:`_resolve_output_language`.
+        """
+        return "en"
 
     def _resolve_runtime_language(self) -> str:
-        """Resolve normalized runtime language shared by rails and tools."""
-        return resolve_language(self._resolve_prompt_language())
+        """Resolve normalized runtime language shared by rails and tools.
+
+        Returns the per-session override if set, otherwise English (the office
+        profile default). Rails and tools built from this value (web search,
+        ask_user, circuit breaker, plan mode, etc.) thus inherit English
+        scaffolding regardless of ``preferred_language``.
+        """
+        return self._runtime_language_override or "en"
+
+    def _resolve_output_language(self) -> str:
+        """Resolve user-facing output language for the Language section and
+        runtime_state display.
+
+        Distinct from prompt/runtime language (always ``en`` in office mode):
+        reads ``config.yaml``'s ``preferred_language`` so the LLM can still be
+        instructed to respond in the user's chosen language even though the
+        system prompt itself is English. Mirrors code mode's
+        ``_resolve_output_language``.
+        """
+        config_base = get_config()
+        raw = str(config_base.get("preferred_language", "zh")).strip().lower()
+        if raw == "zh":
+            raw = "cn"
+        return resolve_language(raw)
 
     def _resolve_model_name(self) -> str:
         """Resolve current model name from model request config."""
@@ -6551,7 +6585,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         stage_timer.mark("cwd_seed")
 
         if self._runtime_prompt_rail:
-            self._runtime_prompt_rail.set_language(resolved_language)
+            # Language section (response language) must follow the user's
+            # preferred language, not the office-mode "en" which only governs
+            # system-prompt scaffolding (time/runtime/env sections).
+            self._runtime_prompt_rail.set_language(self._resolve_output_language())
+            self._runtime_prompt_rail.set_force_english(self._force_english_runtime_prompt)
             self._runtime_prompt_rail.set_channel(resolved_channel)
             self._runtime_prompt_rail.set_trusted_dirs(
                 runtime_config.trusted_dirs if bind_request else None
@@ -6590,7 +6628,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
 
         self._schedule_runtime_state_write(
             mode=runtime_config.mode,
-            language=resolved_language,
+            language=self._resolve_output_language(),
             channel=resolved_channel,
             session_id=runtime_config.session_id,
             project_dir=runtime_config.project_dir
@@ -9330,7 +9368,6 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 inputs,
                 enable_read_image_multimodal=enable_read_image_multimodal,
             )
-            resolved_language = self._resolve_runtime_language()
             resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
             if self._runtime_prompt_rail:
                 self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
@@ -9338,7 +9375,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 self._runtime_prompt_rail.set_session_id(session_id)
             self._write_runtime_state(
                 mode=mode,
-                language=resolved_language,
+                language=self._resolve_output_language(),
                 channel=resolved_channel,
                 session_id=session_id,
                 project_dir=inputs.get("project_dir")
