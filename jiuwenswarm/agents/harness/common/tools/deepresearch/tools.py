@@ -40,6 +40,7 @@ from jiuwenswarm.agents.harness.common.tools.deepresearch.path_safety import (
     private_mode_is_compatible,
 )
 from jiuwenswarm.agents.harness.common.tools.deepresearch.stream_router import (
+    ROUTER_LIMIT_ERROR,
     RouterState,
     _format_outline_card_markdown,
     advance_stage,
@@ -79,10 +80,7 @@ logger = logging.getLogger(__name__)
 
 DEEPRESEARCH_CONFIG_PROTOCOL_VERSION = 1
 DEEPRESEARCH_CONFIG_MAX_BYTES = 64 * 1024
-# Temporary diagnostic headroom for terminal frames that embed final_result.
-# Keep the former limit as an early-warning threshold and retain a bounded cap.
-DEEPRESEARCH_STDOUT_PENDING_WARN_BYTES = 16 * 1024 * 1024
-DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES = 64 * 1024 * 1024
+DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES = 16 * 1024 * 1024
 DEEPRESEARCH_STDERR_TAIL_MAX_BYTES = 20_000
 DEEPRESEARCH_ERROR_TEXT_MAX_CHARS = 2048
 DEEPRESEARCH_STDERR_OUTCOME_MAX_CHARS = 2048
@@ -869,16 +867,6 @@ async def _iter_ndjson_lines(
         _safe_log_correlation_id(conversation_id),
     )
 
-    def log_large_frame(frame_bytes: int) -> None:
-        logger.warning(
-            "[deepresearch_stream] large stdout frame "
-            "frame_bytes=%s limit_bytes=%s request_id=%s session_id=%s "
-            "conversation_id=%s",
-            frame_bytes,
-            DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES,
-            *correlation_ids,
-        )
-
     read = getattr(stream, "read", None)
     if not callable(read):
         async for line in stream:
@@ -904,13 +892,9 @@ async def _iter_ndjson_lines(
             newline = pending.find(b"\n")
             if newline < 0:
                 break
-            if newline > DEEPRESEARCH_STDOUT_PENDING_WARN_BYTES:
-                log_large_frame(newline)
             yield bytes(pending[:newline])
             del pending[: newline + 1]
     if pending:
-        if len(pending) > DEEPRESEARCH_STDOUT_PENDING_WARN_BYTES:
-            log_large_frame(len(pending))
         yield bytes(pending)
 
 
@@ -1924,12 +1908,12 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
     except _StreamProtocolInvalid:
         outcome = _stream_protocol_error()
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        safe_reason = (
-            "deepresearch_stdout_limit_exceeded"
-            if isinstance(exc, ValueError)
-            and str(exc) == "deepresearch_stdout_limit_exceeded"
-            else "unclassified"
-        )
+        safe_reason = "unclassified"
+        if isinstance(exc, ValueError) and str(exc) in {
+            "deepresearch_stdout_limit_exceeded",
+            ROUTER_LIMIT_ERROR,
+        }:
+            safe_reason = str(exc)
         logger.error(
             "[deepresearch_stream] stream consume failed type=%s reason=%s "
             "request_id=%s session_id=%s conversation_id=%s",

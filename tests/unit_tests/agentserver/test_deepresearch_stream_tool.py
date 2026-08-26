@@ -23,6 +23,9 @@ from jiuwenswarm.agents.harness.common.tools.deepresearch import tools as dt
 from jiuwenswarm.agents.harness.common.tools.deepresearch.runtime import (
     DeepResearchRuntimeError,
 )
+from jiuwenswarm.agents.harness.common.tools.deepresearch.stream_router import (
+    MAX_CHUNK_TEXT_CHARS,
+)
 from jiuwenswarm.common.local_env_config import (
     bind_task_env_overlay,
     clear_agent_env_ns,
@@ -561,19 +564,18 @@ async def test_repeated_cancellation_finishes_reap_and_untrack_before_reraising(
 
 
 @pytest.mark.asyncio
-async def test_stdout_pending_buffer_temporarily_accepts_legacy_limit():
+async def test_stdout_pending_buffer_enforces_legacy_limit():
     legacy_limit = 16 * 1024 * 1024
-    payload = b"x" * (legacy_limit + 1)
-    lines = []
+    stream = _Reader(b"x" * (legacy_limit + 1))
 
-    with patch.object(dt.logger, "warning") as warning:
-        async for line in dt._iter_ndjson_lines(_Reader(payload + b"\n")):
-            lines.append(line)
+    with patch.object(dt.logger, "error") as error:
+        with pytest.raises(ValueError, match="deepresearch_stdout_limit_exceeded"):
+            async for _line in dt._iter_ndjson_lines(stream):
+                pass
 
-    assert lines == [payload]
-    assert warning.call_args.args[1:3] == (
-        len(payload),
-        dt.DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES,
+    assert error.call_args.args[1:3] == (
+        legacy_limit + 1,
+        legacy_limit,
     )
 
 
@@ -598,6 +600,11 @@ async def test_stdout_pending_buffer_is_bounded_and_logs_dimensions():
         (
             "deepresearch_stdout_limit_exceeded",
             "deepresearch_stdout_limit_exceeded",
+            True,
+        ),
+        (
+            "deepresearch_router_limit_exceeded",
+            "deepresearch_router_limit_exceeded",
             True,
         ),
         ("exception-secret-that-must-not-be-logged", "unclassified", False),
@@ -1317,6 +1324,70 @@ async def test_completed_marker_accepts_formal_sdk_end_result_when_section_done_
         "report_delivered": True,
         "report_chars": len("# Final"),
     }
+
+
+@pytest.mark.asyncio
+async def test_completed_marker_delivers_large_sdk_end_result(tmp_path: Path):
+    """Large final results are terminal artifacts, not process-display text."""
+    final_result = {
+        "response_content": "# Final",
+        "content": "x" * MAX_CHUNK_TEXT_CHARS,
+    }
+    end_content = json.dumps(final_result)
+    proc = _Proc(
+        [
+            json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+            json.dumps(
+                {
+                    "agent": "end",
+                    "section_idx": "0",
+                    "event": "summary_response",
+                    "content": end_content,
+                }
+            ),
+            json.dumps(
+                {
+                    "__deepsearch_status__": "completed",
+                    "conversation_id": "C1",
+                    "final_result": final_result,
+                }
+            ),
+        ]
+    )
+    route = {
+        "request_id": "R1",
+        "channel_id": "CH1",
+        "session_id": "S1",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    patches = _stream_patches(proc, route=route)
+
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=AsyncMock())
+        )
+        write_artifacts = stack.enter_context(
+            patch.object(
+                dt,
+                "_write_report_artifacts_stream",
+                new=AsyncMock(return_value={"md": str(tmp_path / "r.md")}),
+            )
+        )
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(action="start", query="q")
+        )
+
+    assert len(end_content) > MAX_CHUNK_TEXT_CHARS
+    assert outcome == {
+        "status": "completed",
+        "conversation_id": "C1",
+        "report_delivered": True,
+        "report_chars": len("# Final"),
+    }
+    write_artifacts.assert_awaited_once()
 
 
 @pytest.mark.asyncio

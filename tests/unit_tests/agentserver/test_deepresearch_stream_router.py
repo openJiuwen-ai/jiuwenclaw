@@ -4,8 +4,12 @@ import json
 
 import pytest
 
+from jiuwenswarm.agents.harness.common.tools.deepresearch import (
+    stream_router as stream_router_module,
+)
 from jiuwenswarm.agents.harness.common.tools.deepresearch.stream_router import (
     MAX_ACCUMULATED_TEXT_CHARS,
+    MAX_CHUNK_TEXT_CHARS,
     RouterState,
     advance_stage,
     build_interrupt_prompt,
@@ -1185,6 +1189,49 @@ def test_skip_node_no_frame():
     state = RouterState()
     assert route_chunk({"agent": "start"}, state) == []
     assert route_chunk({"agent": "end"}, state) == []
+
+
+def test_successful_end_result_bypasses_process_display_text_limit():
+    state = RouterState()
+    content = json.dumps({"response_content": "x" * MAX_CHUNK_TEXT_CHARS})
+
+    frames = route_chunk(
+        {
+            "agent": "end",
+            "event": "summary_response",
+            "section_idx": "0",
+            "content": content,
+        },
+        state,
+    )
+
+    assert len(content) > MAX_CHUNK_TEXT_CHARS
+    assert state.final_report_started is True
+    assert frames[-1] == {
+        "event_type": "task.start",
+        "task_id": "deepresearch_stage_4",
+        "task_content": "最终报告处理",
+        "stream_source_id": "deepresearch_final_report",
+    }
+
+
+def test_successful_end_result_keeps_json_shape_limit(monkeypatch):
+    monkeypatch.setattr(stream_router_module, "MAX_JSON_NODES", 4)
+    content = json.dumps({
+        "response_content": "# Final",
+        "metadata": [1, 2, 3],
+    })
+
+    with pytest.raises(ValueError, match="deepresearch_router_limit_exceeded"):
+        route_chunk(
+            {
+                "agent": "end",
+                "event": "summary_response",
+                "section_idx": "0",
+                "content": content,
+            },
+            RouterState(),
+        )
 
 
 def test_unknown_node_no_frame():
