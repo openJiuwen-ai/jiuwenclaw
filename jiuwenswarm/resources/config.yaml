@@ -22,6 +22,18 @@ a2ui:
   non_web_fallback_enabled: false
   dev_smoke_tools_enabled: false
 
+# Evidence-gated context for long-horizon research agents. It is opt-in so
+# existing JiuwenSwarm behavior remains unchanged until a project enables it.
+research_evidence:
+  enabled: false
+  store_directory: .jiuwen/research_evidence
+  token_budget: 2048
+  min_reliability: 0.35
+  required_kinds:
+    - literature
+    - experiment
+    - negative_result
+
 symphony:
   enabled: false
   paths:

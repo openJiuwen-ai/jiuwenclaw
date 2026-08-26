@@ -1,6 +1,13 @@
 # 前端显示语言：zh（中文）/ en（英文），与 Web 界面语言切换同步
 preferred_language: zh
 
+research_evidence:
+  enabled: false
+  store_directory: .jiuwen/research_evidence
+  token_budget: 2048
+  min_reliability: 0.35
+  required_kinds: [literature, experiment, negative_result]
+
 # 日志目录：~/.jiuwenswarm/agent/.logs/
 # gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总。
 # level：未单独指定时的默认级别。console_level：控制台；可省略则用 level。
