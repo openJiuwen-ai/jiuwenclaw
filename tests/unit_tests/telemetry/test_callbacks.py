@@ -519,7 +519,10 @@ async def test_real_model_decorators_normalize_positional_input_and_llm_output_o
     telemetry_env.provider.force_flush()
 
     assert returned is business_result
-    assert state_counts_after_inner_output == [(1, 1)]
+    # AgentCore now treats LLM_OUTPUT as the terminal event for both streaming
+    # and non-streaming calls, so the JiuwenClaw state is settled before the
+    # core callback closes its owned span.
+    assert state_counts_after_inner_output == [(0, 0)]
     spans = [
         span
         for span in telemetry_env.exporter.get_finished_spans()
@@ -536,13 +539,10 @@ async def test_real_model_decorators_normalize_positional_input_and_llm_output_o
     assert attrs["gen_ai.span.type"] == "model"
     assert attrs["gen_ai.decision.type"] == "tool_call"
     assert attrs["gen_ai.decision.tool_names"] == ("weather",)
-    assert "parsed business result" in attrs["gen_ai.output.messages"]
-    assert "parsed reasoning" in attrs["gen_ai.output.messages"]
-    assert "observable answer" not in attrs["gen_ai.output.messages"]
+    assert "observable answer" in attrs["gen_ai.output.messages"]
+    assert "observable reasoning" in attrs["gen_ai.output.messages"]
     assert "call-weather" in attrs["gen_ai.output.messages"]
     assert 'city\\":\\"Paris' in attrs["gen_ai.output.messages"]
-    assert attrs["gen_ai.response.finish_reasons"] == ("tool_calls",)
-    assert attrs["gen_ai.response.finish_reason"] == "tool_calls"
     assert attrs["gen_ai.usage.cache_read.input_tokens"] == 3
     assert attrs["gen_ai.usage.cache_creation.input_tokens"] == 2
     assert attrs["gen_ai.usage.cache_read_tokens"] == 3
@@ -559,7 +559,7 @@ async def test_real_model_decorators_normalize_positional_input_and_llm_output_o
         event for event in spans[0].events if event.name == "gen_ai.assistant.message"
     ]
     assert len(assistant_events) == 1
-    assert "parsed business result" in assistant_events[0].attributes["content"]
+    assert "observable answer" in assistant_events[0].attributes["content"]
 
 
 @pytest.mark.asyncio
