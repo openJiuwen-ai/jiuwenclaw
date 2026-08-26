@@ -142,6 +142,12 @@ from jiuwenswarm.common.log_preview import preview_text
 
 logger = logging.getLogger(__name__)
 
+# Give a cancelled stream producer a brief grace window to
+# finish its normal cleanup before the unary interrupt reaches the adapter.
+# This is only an ordering optimization: adapter cleanup confirmation remains
+# the authority for the interrupt result when the task is still pending here.
+_CANCELLED_STREAM_CLEANUP_GRACE_SECONDS = 0.05
+
 # Session owner preparation completes before the response. Optional KVC signals
 # run after the response so affinity latency cannot fail a UI session change.
 _background_session_kvc_tasks: set[asyncio.Task] = set()
@@ -2101,6 +2107,19 @@ class AgentWebSocketServer:
 
                 cancel_response: AgentResponse | None = None
                 try:
+                    if stream_tasks:
+                        _done, pending_stream_tasks = await asyncio.wait(
+                            stream_tasks,
+                            timeout=_CANCELLED_STREAM_CLEANUP_GRACE_SECONDS,
+                        )
+                        if pending_stream_tasks:
+                            logger.debug(
+                                "[AgentWebSocketServer] cancel: %d stream task(s) still "
+                                "unwinding after grace window: session_id=%s intent=%s",
+                                len(pending_stream_tasks),
+                                sid,
+                                intent,
+                            )
                     # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
                     # allow_create=False：找不到已有 agent 时不 fallback 新建（见 _handle_cancel docstring）。
                     cancel_response = await self._handle_cancel(

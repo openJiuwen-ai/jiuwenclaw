@@ -151,6 +151,45 @@ def _permission_core_state(session_id: str, interruption_state: object):
     return loop_session, context, context_engine
 
 
+def _missing_state_permission_adapter(
+    queue: RootPermissionQueue,
+    session_id: str,
+    *,
+    messages: list[object] | None = None,
+    save_error: Exception | None = None,
+):
+    loop_session = MagicMock()
+    loop_session.get_session_id.return_value = session_id
+    loop_session.get_state.return_value = None
+    context = MagicMock()
+    context.get_messages.return_value = list(messages or [])
+    context_engine = MagicMock()
+    context_engine.get_context.return_value = context
+    context_engine.save_contexts = AsyncMock(side_effect=save_error)
+    instance = MagicMock()
+    instance._interaction_started = True
+    instance._loop_session = loop_session
+    instance.react_agent = SimpleNamespace(context_engine=context_engine)
+    instance.goal_manager = None
+    instance.cancel_round = AsyncMock(return_value=False)
+    instance._active_interaction_round = None
+    instance._interaction_round_task = None
+    instance._loop_controller = SimpleNamespace(
+        _task_scheduler=SimpleNamespace(_running_tasks={})
+    )
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = []
+    adapter = _make_adapter(
+        _active_session_ids={session_id: 1},
+        _session_agent_tasks={},
+        _stream_event_rail=rail,
+        _instance=instance,
+        _root_permission_queue=queue,
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+    return adapter, instance, loop_session, context_engine
+
+
 def _nonpermission_core_state(
     session_id: str,
     *,
@@ -1270,6 +1309,9 @@ async def test_interaction_cancel_stops_scheduler_task_before_cancel_round() -> 
     await child_started.wait()
 
     scheduler = SimpleNamespace(_running_tasks={"round-task": (None, child_task)})
+    child_task.add_done_callback(
+        lambda _task: scheduler._running_tasks.pop("round-task", None)
+    )
     instance = MagicMock()
     instance._interaction_started = True
     instance._loop_controller = SimpleNamespace(_task_scheduler=scheduler)
@@ -1307,6 +1349,441 @@ async def test_interaction_cancel_stops_scheduler_task_before_cancel_round() -> 
     instance.cancel_round.assert_awaited_once_with(reason="user_cancel")
     assert response.payload["event_type"] == "chat.interrupt_result"
     assert response.payload["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_interaction_cancel_accepts_task_manager_not_found_after_exact_cleanup() -> None:
+    from openjiuwen.core.controller.config import ControllerConfig
+    from openjiuwen.core.controller.modules.task_manager import TaskManager
+    from openjiuwen.core.controller.modules.task_scheduler import TaskScheduler
+    from openjiuwen.harness import DeepAgent
+
+    queue = RootPermissionQueue(id_factory=lambda: "tiv-not-found")
+    card, _state = _pending_permission_state(queue, session_id="sess-not-found")
+    loop_session = MagicMock()
+    loop_session.get_session_id.return_value = "sess-not-found"
+    loop_session.get_state.return_value = None
+    context = MagicMock()
+    context.get_messages.return_value = []
+    context_engine = MagicMock()
+    context_engine.get_context.return_value = context
+    context_engine.save_contexts = AsyncMock()
+
+    task_manager = TaskManager(ControllerConfig())
+    scheduler = object.__new__(TaskScheduler)
+    scheduler._task_manager = task_manager
+    scheduler._sessions = {}
+    scheduler._running_tasks = {}
+    scheduler._lock = asyncio.Lock()
+    controller = SimpleNamespace(
+        task_scheduler=scheduler,
+        _task_scheduler=scheduler,
+    )
+
+    deep_agent = object.__new__(DeepAgent)
+    deep_agent._loop_controller = controller
+    deep_agent._loop_session = loop_session
+    deep_agent._interaction_session = None
+    deep_agent._interaction_started = True
+    deep_agent._react_agent = SimpleNamespace(context_engine=context_engine)
+    deep_agent.goal_manager = None
+    deep_agent.abort = AsyncMock()
+    deep_agent._active_interaction_round = SimpleNamespace(
+        run_kind="user",
+        goal_id=None,
+        revision=None,
+        task_id="task-already-removed",
+    )
+    release_side_effect = asyncio.Event()
+    round_started = asyncio.Event()
+    delayed_side_effects: list[str] = []
+
+    async def old_round() -> None:
+        round_started.set()
+        try:
+            await release_side_effect.wait()
+            delayed_side_effects.append("old tool resumed")
+        finally:
+            deep_agent._active_interaction_round = None
+
+    round_task = asyncio.create_task(old_round())
+    await round_started.wait()
+    deep_agent._interaction_round_task = round_task
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = []
+    adapter = _make_adapter(
+        _active_session_ids={"sess-not-found": 1},
+        _session_agent_tasks={},
+        _stream_event_rail=rail,
+        _instance=deep_agent,
+        _root_permission_queue=queue,
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+
+    response = await adapter.process_interrupt(
+        _build_cancel_request("sess-not-found")
+    )
+    release_side_effect.set()
+
+    assert response.ok is True
+    assert response.payload["success"] is True
+    assert round_task.cancelled()
+    assert scheduler._running_tasks == {}
+    assert await task_manager.get_task() == []
+    assert queue.get(card.key) is None
+    assert delayed_side_effects == []
+    context_engine.save_contexts.assert_awaited_once_with(loop_session)
+
+
+@pytest.mark.asyncio
+async def test_interaction_cancel_accepts_natural_exit_while_cutover_is_held() -> None:
+    queue = RootPermissionQueue(id_factory=lambda: "tiv-natural-exit")
+    card, _state = _pending_permission_state(queue, session_id="sess-natural-exit")
+    adapter, instance, _loop_session, _context_engine = (
+        _missing_state_permission_adapter(queue, "sess-natural-exit")
+    )
+    allow_exit = asyncio.Event()
+    instance.cancel_round = AsyncMock(side_effect=lambda **_kwargs: allow_exit.set() or False)
+
+    async def old_stream() -> None:
+        await allow_exit.wait()
+        assert adapter._root_permission_dispatch_lock.locked()
+        with pytest.raises(
+            RootPermissionQueueError,
+            match="permission_queue_quarantined",
+        ):
+            queue.raise_if_quarantined("sess-natural-exit")
+
+    stream_task = asyncio.create_task(old_stream())
+    adapter._session_agent_tasks["sess-natural-exit"] = {stream_task}
+
+    response = await adapter.process_interrupt(
+        _build_cancel_request("sess-natural-exit")
+    )
+
+    assert response.ok is True
+    assert response.payload["success"] is True
+    assert stream_task.done()
+    assert queue.get(card.key) is None
+
+
+@pytest.mark.asyncio
+async def test_interaction_cancel_waits_for_round_async_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    queue = RootPermissionQueue(id_factory=lambda: "tiv-round-cleanup")
+    card, _state = _pending_permission_state(queue, session_id="sess-round-cleanup")
+    adapter, instance, _loop_session, _context_engine = (
+        _missing_state_permission_adapter(queue, "sess-round-cleanup")
+    )
+    round_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def old_round() -> None:
+        round_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            cleanup_started.set()
+            await allow_cleanup.wait()
+            instance._active_interaction_round = None
+
+    round_task = asyncio.create_task(old_round())
+    await round_started.wait()
+    instance._active_interaction_round = object()
+    instance._interaction_round_task = round_task
+    confirmation_wait_started = asyncio.Event()
+    original_wait = asyncio.wait
+
+    async def observed_wait(tasks: object, *, timeout: float):
+        if round_task in tasks:
+            confirmation_wait_started.set()
+        return await original_wait(tasks, timeout=timeout)
+
+    monkeypatch.setattr(interface_deep.asyncio, "wait", observed_wait)
+
+    async def cancel_round(*, reason: str) -> bool:
+        assert reason == "user_cancel"
+        round_task.cancel()
+        await cleanup_started.wait()
+        return True
+
+    instance.cancel_round = AsyncMock(side_effect=cancel_round)
+    interrupt_task = asyncio.create_task(
+        adapter.process_interrupt(_build_cancel_request("sess-round-cleanup"))
+    )
+    await cleanup_started.wait()
+    await confirmation_wait_started.wait()
+    assert not interrupt_task.done()
+    assert not round_task.cancelled()
+
+    allow_cleanup.set()
+    response = await interrupt_task
+
+    assert response.ok is True
+    assert round_task.done()
+    assert instance._active_interaction_round is None
+    assert queue.get(card.key) is None
+
+
+@pytest.mark.asyncio
+async def test_interaction_cancel_rejects_round_registered_after_cancel_round_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    queue = RootPermissionQueue(id_factory=lambda: "tiv-late-round")
+    card, _state = _pending_permission_state(queue, session_id="sess-late-round")
+    adapter, instance, _loop_session, _context_engine = (
+        _missing_state_permission_adapter(queue, "sess-late-round")
+    )
+    round_task = asyncio.create_task(asyncio.Event().wait())
+    instance._interaction_round_task = round_task
+    monkeypatch.setattr(
+        interface_deep,
+        "_INTERACTION_CANCEL_CLEANUP_TIMEOUT_SECONDS",
+        0,
+    )
+
+    try:
+        response = await adapter.process_interrupt(
+            _build_cancel_request("sess-late-round")
+        )
+    finally:
+        round_task.cancel()
+        await asyncio.gather(round_task, return_exceptions=True)
+
+    assert response.ok is False
+    assert queue.get(card.key) is not None
+    with pytest.raises(RootPermissionQueueError, match="permission_queue_quarantined"):
+        queue.raise_if_quarantined("sess-late-round")
+
+
+@pytest.mark.asyncio
+async def test_interaction_cancel_keeps_quarantine_when_cleanup_task_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    queue = RootPermissionQueue(id_factory=lambda: "tiv-live-cleanup")
+    card, state = _pending_permission_state(queue, session_id="sess-live-cleanup")
+    loop_session, _context, context_engine = _permission_core_state(
+        "sess-live-cleanup", state
+    )
+    instance = MagicMock()
+    instance._interaction_started = True
+    instance._loop_session = loop_session
+    instance.react_agent = SimpleNamespace(context_engine=context_engine)
+    instance.goal_manager = None
+    instance.cancel_round = AsyncMock(return_value=False)
+    instance._active_interaction_round = None
+    instance._interaction_round_task = None
+    instance._loop_controller = SimpleNamespace(
+        _task_scheduler=SimpleNamespace(_running_tasks={})
+    )
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = []
+    adapter = _make_adapter(
+        _active_session_ids={"sess-live-cleanup": 1},
+        _session_agent_tasks={},
+        _stream_event_rail=rail,
+        _instance=instance,
+        _root_permission_queue=queue,
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+    never_finishes = asyncio.create_task(asyncio.Event().wait())
+    adapter._session_agent_tasks["sess-live-cleanup"] = {never_finishes}
+    monkeypatch.setattr(
+        interface_deep,
+        "_INTERACTION_CANCEL_CLEANUP_TIMEOUT_SECONDS",
+        0,
+    )
+
+    try:
+        response = await adapter.process_interrupt(
+            _build_cancel_request("sess-live-cleanup")
+        )
+    finally:
+        never_finishes.cancel()
+        await asyncio.gather(never_finishes, return_exceptions=True)
+
+    assert response.ok is False
+    assert response.payload["success"] is False
+    assert queue.get(card.key) is not None
+    with pytest.raises(RootPermissionQueueError, match="permission_queue_quarantined"):
+        queue.raise_if_quarantined("sess-live-cleanup")
+
+
+@pytest.mark.asyncio
+async def test_interaction_missing_core_state_requires_exact_root_card_identity() -> None:
+    queue = RootPermissionQueue(id_factory=lambda: "tiv-wrong-identity")
+    card = _begin_invocation(
+        queue,
+        session_id="sess-wrong-identity",
+        request_id="request-old",
+        tool_call_id="call-old",
+    )
+    wrong_key = card.key.to_wire()
+    wrong_key["tool_call_id"] = "call-other"
+    queue.mark_pending(
+        card.key,
+        request=InterruptRequest(
+            message="approve",
+            metadata={"tool_invocation_key": wrong_key},
+        ),
+        auto_manual=True,
+        root_context=None,
+    )
+    adapter, _instance, _loop_session, context_engine = (
+        _missing_state_permission_adapter(queue, "sess-wrong-identity")
+    )
+
+    response = await adapter.process_interrupt(
+        _build_cancel_request("sess-wrong-identity")
+    )
+
+    assert response.ok is False
+    assert queue.get(card.key) is not None
+    context_engine.save_contexts.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_interaction_missing_core_state_rejects_exact_context_residue() -> None:
+    queue = RootPermissionQueue(id_factory=lambda: "tiv-context-residue")
+    card, _state = _pending_permission_state(queue, session_id="sess-context-residue")
+    adapter, _instance, _loop_session, context_engine = (
+        _missing_state_permission_adapter(
+            queue,
+            "sess-context-residue",
+            messages=[
+                SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(id=card.key.tool_call_id, name="bash")
+                    ]
+                )
+            ],
+        )
+    )
+
+    response = await adapter.process_interrupt(
+        _build_cancel_request("sess-context-residue")
+    )
+
+    assert response.ok is False
+    assert queue.get(card.key) is not None
+    context_engine.save_contexts.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_interaction_missing_core_state_fails_when_context_save_fails() -> None:
+    queue = RootPermissionQueue(id_factory=lambda: "tiv-save-fails")
+    card, _state = _pending_permission_state(queue, session_id="sess-save-fails")
+    adapter, _instance, _loop_session, _context_engine = (
+        _missing_state_permission_adapter(
+            queue,
+            "sess-save-fails",
+            save_error=RuntimeError("save failed"),
+        )
+    )
+
+    response = await adapter.process_interrupt(
+        _build_cancel_request("sess-save-fails")
+    )
+
+    assert response.ok is False
+    assert queue.get(card.key) is not None
+
+
+@pytest.mark.asyncio
+async def test_interaction_missing_core_state_rejects_child_execution_card() -> None:
+    queue = RootPermissionQueue(id_factory=lambda: "tiv-child")
+    card = queue.begin(
+        root_session_id="sess-root",
+        request_id="request-old",
+        runtime_mode="agent",
+        agent_id="main-agent",
+        execution_session_id="sess-root_child",
+        tool_call_id="call-child",
+        tool_name="bash",
+    )
+    request = InterruptRequest(
+        message="approve",
+        metadata={"tool_invocation_key": card.key.to_wire()},
+    )
+    queue.mark_pending(
+        card.key,
+        request=request,
+        auto_manual=True,
+        root_context=None,
+    )
+    assert queue.begin_cutover(root_session_id="sess-root") is True
+    adapter, _instance, _loop_session, context_engine = (
+        _missing_state_permission_adapter(queue, "sess-root")
+    )
+
+    discarded = await adapter._discard_frozen_permission_continuation(
+        "sess-root",
+        (card.key,),
+        allow_missing_core_state=True,
+    )
+
+    assert discarded is False
+    assert queue.get(card.key) is not None
+    context_engine.save_contexts.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_interaction_cancel_does_not_swallow_cancel_round_failure() -> None:
+    instance = MagicMock()
+    instance._interaction_started = True
+    instance.goal_manager = None
+    instance.cancel_round = AsyncMock(side_effect=RuntimeError("cancel failed"))
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = []
+    adapter = _make_adapter(
+        _active_session_ids={"sess-cancel-failed": 1},
+        _session_agent_tasks={},
+        _stream_event_rail=rail,
+        _instance=instance,
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+
+    response = await adapter.process_interrupt(
+        _build_cancel_request("sess-cancel-failed")
+    )
+
+    assert response.ok is False
+    assert response.payload["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_fresh_input_does_not_use_missing_core_state_fallback() -> None:
+    queue = RootPermissionQueue(id_factory=lambda: "tiv-fresh-missing")
+    card, _state = _pending_permission_state(queue, session_id="sess-fresh-missing")
+    adapter, _instance, _loop_session, context_engine = (
+        _missing_state_permission_adapter(queue, "sess-fresh-missing")
+    )
+    request = AgentRequest(
+        request_id="request-new",
+        channel_id="web",
+        session_id="sess-fresh-missing",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "new", "mode": "agent"},
+    )
+
+    with pytest.raises(
+        RootPermissionQueueError,
+        match="permission_continuation_discard_failed",
+    ):
+        await adapter._prepare_root_input_dispatch(request, {"query": "new"})
+
+    assert queue.get(card.key) is not None
+    context_engine.save_contexts.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -24,6 +24,15 @@ def _facts(tmp_path: Path):
     )
 
 
+def _shell_facts(tmp_path: Path):
+    return build_tool_decision_facts(
+        "mcp_exec_command",
+        {"command": "uv pip install -e ."},
+        workspace_root=tmp_path,
+        original_args_were_valid_object=True,
+    )
+
+
 def _capture(caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     caplog.set_level(logging.INFO, logger=audit_logger.name)
     monkeypatch.setattr(audit_logger, "handlers", [*audit_logger.handlers, caplog.handler])
@@ -67,6 +76,28 @@ def test_audit_persists_only_compact_record(tmp_path: Path) -> None:
     content = result.path.read_text(encoding="utf-8")
     assert "secret-token.txt" not in content
     assert "args_digest" not in content
+
+
+def test_shell_audit_records_incomplete_accesses_in_log_and_persistence(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _capture(caplog, monkeypatch)
+    writer = PersistentAuditWriter(data_root=tmp_path / "data")
+
+    result = emit_permission_audit(
+        _shell_facts(tmp_path),
+        decision="ask",
+        reason="reviewer_manual",
+        degraded=False,
+        persistent_writer=writer,
+    )
+
+    assert '"accesses_known":false' in caplog.text
+    assert result is not None and result.persisted is True
+    content = result.path.read_text(encoding="utf-8")
+    assert '"accesses_known":false' in content
 
 
 def test_audit_keeps_allowed_route_metadata(

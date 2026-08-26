@@ -216,23 +216,41 @@ def test_read_pdf_is_a_static_read_path_tool() -> None:
     assert info.facts_source == "host_static"
 
 
+def test_lsp_is_a_static_low_risk_read_path_tool() -> None:
+    info = classify_tool("lsp")
+
+    assert info.category == "path"
+    assert info.operation_family == "workspace_read"
+    assert info.risk_tier == "low"
+    assert info.high_flex is False
+    assert info.static_side_effects == frozenset()
+    assert info.facts_source == "host_static"
+
+
 def test_permission_file_semantics_installer_is_explicit_and_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import jiuwenswarm.agents.harness.common.rails.permissions.tool_capabilities as mod
 
-    state: list[FileToolSpec] = []
+    state: dict[str, list[FileToolSpec]] = {}
     monkeypatch.setattr(
         mod,
         "lookup_file_tool_specs",
-        lambda _tool_name: list(state) or None,
+        lambda tool_name: list(state.get(tool_name, ())) or None,
     )
-    monkeypatch.setattr(mod, "register_file_tool", state.append)
+    monkeypatch.setattr(
+        mod,
+        "register_file_tool",
+        lambda spec: state.setdefault(spec.tool_name, []).append(spec),
+    )
 
     install_permission_file_semantics()
     install_permission_file_semantics()
 
-    assert state == [FileToolSpec("read_pdf", "pdf_path", "read")]
+    assert state == {
+        "read_pdf": [FileToolSpec("read_pdf", "pdf_path", "read")],
+        "lsp": [FileToolSpec("lsp", "file_path", "read")],
+    }
 
 
 def test_permission_file_semantics_installer_rejects_collision(

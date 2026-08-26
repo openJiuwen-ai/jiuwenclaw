@@ -27,9 +27,9 @@ if not hasattr(_traj_mod, "InMemoryTrajectoryRegistry"):
     _traj_mod.InMemoryTrajectoryRegistry = MagicMock
 
 import jiuwenswarm.server.runtime.agent_adapter.interface_code as _ic_mod
+import jiuwenswarm.server.runtime.agent_adapter.interface_deep as _id_mod
 
 _RAIL_BUILD_NAMES = getattr(_ic_mod, "_RAIL_BUILD_NAMES")
-_RailBuildInfo = getattr(_ic_mod, "_RailBuildInfo")
 JiuwenSwarmCodeAdapter = _ic_mod.JiuwenSwarmCodeAdapter
 _FIXED_RAIL_NAMES = getattr(JiuwenSwarmCodeAdapter, "_FIXED_RAIL_NAMES")
 
@@ -38,6 +38,7 @@ def test_code_adapter_propagates_enabled_permission_build_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = JiuwenSwarmCodeAdapter()
+    adapter._sys_operation = object()
     for method_name in (
         "_build_runtime_prompt_rail",
         "_build_response_prompt_rail",
@@ -52,10 +53,15 @@ def test_code_adapter_propagates_enabled_permission_build_failure(
     def fail_permission_build(**_kwargs):
         raise RuntimeError("permission_build_failed")
 
-    monkeypatch.setattr(_ic_mod, "build_permission_rail", fail_permission_build)
+    monkeypatch.setattr(_id_mod, "build_permission_rail", fail_permission_build)
 
     with pytest.raises(RuntimeError, match="permission_build_failed"):
-        adapter._build_agent_rails({}, {"permissions": {"enabled": True}})
+        adapter._build_agent_rails(
+            {},
+            {"permissions": {"enabled": True}},
+            mode="code",
+            composition_scope="single_agent",
+        )
 
 
 def test_code_browser_spec_keeps_prepared_settings(

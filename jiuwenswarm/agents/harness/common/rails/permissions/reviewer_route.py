@@ -7,6 +7,8 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import unquote
 
+from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
+
 from jiuwenswarm.agents.harness.common.rails.permissions.auto_decision import (
     ALLOW_LEVEL,
     ASK_LEVEL,
@@ -154,6 +156,13 @@ def reviewer_route(
     ):
         return _manual(EXECUTION_PROVIDER_CONTRACT_UNVERIFIED)
 
+    if (
+        facts.capability.category == "shell"
+        and not facts.accesses_known
+        and not _shell_payload_is_reviewable(facts, policy_level=policy)
+    ):
+        return _manual("core_accesses_unknown")
+
     if facts.tool_name == "send_file_to_user":
         delivery_reason = file_delivery_manual_reason(
             facts,
@@ -202,7 +211,7 @@ def reviewer_route(
 def _structural_manual_reason(facts: ToolDecisionFacts) -> str:
     if not facts.arguments_valid_object:
         return "arguments_not_object"
-    if facts.capability.category in {"path", "shell"} and not facts.accesses_known:
+    if facts.capability.category == "path" and not facts.accesses_known:
         return "core_accesses_unknown"
     if facts.capability.alias_conflict:
         return "alias_conflict"
@@ -214,6 +223,36 @@ def _structural_manual_reason(facts: ToolDecisionFacts) -> str:
     ):
         return "unknown_operation"
     return ""
+
+
+def _shell_payload_is_reviewable(
+    facts: ToolDecisionFacts,
+    *,
+    policy_level: str,
+) -> bool:
+    """Allow semantic review only when Core exposes a usable simple AST."""
+
+    if (
+        policy_level not in {ASK_LEVEL, ALLOW_LEVEL}
+        or facts.capability.category != "shell"
+        or not facts.arguments_valid_object
+    ):
+        return False
+    if (
+        facts.capability.alias_conflict
+        or facts.capability.facts_source != "host_static"
+        or not facts.command
+    ):
+        return False
+    try:
+        parsed = parse_shell_for_permission(facts.command)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return bool(
+        parsed.kind == "simple"
+        and parsed.subcommands
+        and all(subcommand.argv for subcommand in parsed.subcommands)
+    )
 
 
 def _is_public_search(facts: ToolDecisionFacts) -> bool:

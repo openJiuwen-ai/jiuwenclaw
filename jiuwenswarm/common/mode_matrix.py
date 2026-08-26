@@ -164,6 +164,37 @@ def is_code_profile_mode(mode: Any) -> bool:
     }
 
 
+def resolve_agent_composition_scope(mode: Any, sub_mode: Any) -> str:
+    """Resolve the closed permission-composition scope from Host-owned facts."""
+    normalized_mode = str(mode or "").strip().lower()
+    normalized_sub_mode = str(sub_mode or "").strip().lower()
+    if normalized_mode not in {"agent", "code", "team", "auto_harness"}:
+        raise RuntimeError(
+            f"agent_composition_scope_unclassified:{normalized_mode or '<empty>'}"
+        )
+    if normalized_mode == "auto_harness" and normalized_sub_mode in {
+        "",
+        "auto_harness",
+    }:
+        return "auto_harness"
+    if normalized_mode == "agent" and normalized_sub_mode == "auto_harness":
+        return "auto_harness"
+    if normalized_mode == "team" and normalized_sub_mode in {"", "plan"}:
+        return "team_root"
+    if normalized_mode == "code" and normalized_sub_mode == "team":
+        return "team_root"
+    if normalized_mode in {"agent", "code"} and normalized_sub_mode in {
+        "",
+        "normal",
+        "plan",
+        "fast",
+    }:
+        return "single_agent"
+    raise RuntimeError(
+        f"agent_composition_scope_unclassified:{normalized_mode or '<empty>'}"
+    )
+
+
 def base_mode_without_plan(canonical_mode: Any) -> str:
     """canonical plan 模式退出后应回到的普通模式。非 plan 模式原样返回。"""
     text = canonicalize_mode_text(canonical_mode)
@@ -262,5 +293,6 @@ __all__ = [
     "normalize_mode_text",
     "normalize_work_mode",
     "read_request_work_mode",
+    "resolve_agent_composition_scope",
     "resolve_request_mode",
 ]

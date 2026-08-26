@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
+
+from openjiuwen.harness.tools.lsp_tool import LspToolInput
+from pydantic import TypeAdapter, ValidationError
 
 from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
     OriginalUserIntentEvidence,
@@ -74,6 +78,7 @@ BROWSER_INSPECTION_OPERATIONS = (
     "health",
     "wait_for",
 )
+_LSP_INPUT_ADAPTER = TypeAdapter(LspToolInput)
 
 
 def deterministic_guard_route(
@@ -405,10 +410,32 @@ def terminal_low_risk_route(facts: ToolDecisionFacts) -> DecisionRoute | None:
         or not facts.accesses_known
     ):
         return None
+    if facts.tool_name == "lsp":
+        try:
+            _LSP_INPUT_ADAPTER.validate_python(dict(facts.untrusted_args))
+        except (TypeError, ValueError, ValidationError):
+            return None
+        if not _lsp_read_paths_within_workspace(facts):
+            return None
     if facts.capability.category == "path":
         if facts.capability.risk_tier == "low" and not facts.capability.static_side_effects:
             return DecisionRoute(ALLOW_LEVEL, "terminal_low_risk_allow", "hard_guard")
     return None
+
+
+def _lsp_read_paths_within_workspace(facts: ToolDecisionFacts) -> bool:
+    """Prove every canonical LSP read remains under the runtime workspace."""
+
+    if not facts.workspace_root or not facts.read_paths:
+        return False
+    try:
+        workspace = Path(facts.workspace_root).resolve(strict=False)
+        return all(
+            Path(path).resolve(strict=False).is_relative_to(workspace)
+            for path in facts.read_paths
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
 
 
 def terminal_internal_route(facts: ToolDecisionFacts) -> DecisionRoute | None:

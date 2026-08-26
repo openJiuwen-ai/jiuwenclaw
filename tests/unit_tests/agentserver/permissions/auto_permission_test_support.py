@@ -85,6 +85,14 @@ class StaticReviewerClient:
             "rationale": self.rationale,
             "reason_code": self.reason_code,
         }
+        if self.outcome == ReviewerOutcome.ALLOW_ONCE:
+            required_unknowns = getattr(
+                request,
+                "required_unknown_acknowledgements",
+                (),
+            )
+            if required_unknowns:
+                payload["acknowledged_unknowns"] = list(required_unknowns)
         if self.outcome == ReviewerOutcome.MANUAL:
             payload.update(
                 {

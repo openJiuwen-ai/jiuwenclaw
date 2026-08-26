@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import replace
 import pytest
 
+import jiuwenswarm.agents.harness.common.rails.permissions.auto_reviewer as auto_reviewer_module
+import jiuwenswarm.agents.harness.common.rails.permissions.reviewer_route as reviewer_route_module
 from jiuwenswarm.agents.harness.common.rails.permissions.execution_provider_contract import (
     ACP_IDE_EXECUTION_TOOLS,
     EXECUTION_PROVIDER_CONTRACT_UNVERIFIED,
@@ -31,10 +33,20 @@ from tests.unit_tests.agentserver.permissions.auto_permission_test_support impor
 )
 
 
-async def test_known_jiuwenbox_shell_reaches_reviewer_without_instance_binding(
+@pytest.mark.parametrize(
+    ("reviewer_outcome", "expected_result"),
+    [
+        (ReviewerOutcome.ALLOW_ONCE, "allow"),
+        (ReviewerOutcome.MANUAL, "interrupt"),
+        (ReviewerOutcome.DENY, "denied"),
+    ],
+)
+async def test_known_jiuwenbox_shell_reviewer_outcomes(
     tmp_path,
+    reviewer_outcome: str,
+    expected_result: str,
 ) -> None:
-    reviewer_client = StaticReviewerClient(outcome=ReviewerOutcome.ALLOW_ONCE)
+    reviewer_client = StaticReviewerClient(outcome=reviewer_outcome)
     rail = AutoPermissionInterruptRail(
         base_rail=FakeBaseRail(),
         permission_config={"mode": "auto", "enabled": True},
@@ -59,7 +71,7 @@ async def test_known_jiuwenbox_shell_reaches_reviewer_without_instance_binding(
         tool_call_id="shell-call",
     )
 
-    assert classify_permission_result(result) == "allow"
+    assert classify_permission_result(result) == expected_result
     assert len(reviewer_client.requests) == 1
 
 
@@ -181,3 +193,51 @@ async def test_shell_reviewer_timeout_is_manual_not_deterministic_allow(
 
     assert classify_permission_result(result) == "interrupt"
     assert len(reviewer_client.requests) == 1
+
+
+async def test_shell_parser_exception_is_stable_manual_interrupt(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_parser_error(_command: str) -> None:
+        raise RuntimeError("parser failed")
+
+    monkeypatch.setattr(
+        reviewer_route_module,
+        "parse_shell_for_permission",
+        raise_parser_error,
+    )
+    monkeypatch.setattr(
+        auto_reviewer_module,
+        "parse_shell_for_permission",
+        raise_parser_error,
+    )
+    reviewer_client = StaticReviewerClient(outcome=ReviewerOutcome.ALLOW_ONCE)
+    rail = AutoPermissionInterruptRail(
+        base_rail=FakeBaseRail(),
+        permission_config={"mode": "auto", "enabled": True},
+        workspace_root=tmp_path,
+        sandbox=replace(
+            _strong_sandbox(),
+            execution_workspace_root=tmp_path.as_posix(),
+        ),
+        policy_evaluator=_ask_policy(),
+        auto_reviewer=AutoReviewer(client=reviewer_client),
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="bash",
+        tool_args={"command": "ls", "cwd": tmp_path.as_posix()},
+        session_id="shell-session",
+        request_id="shell-request",
+        tool_call_id="shell-call-parser-error",
+    )
+
+    assert classify_permission_result(result) == "interrupt"
+    assert len(reviewer_client.requests) == 1
+    request = reviewer_client.requests[0]
+    assert request.allowed_outcomes == ("manual", "deny")
+    assert request.no_auto_allow_reason == "core_accesses_unknown"
+    assert request.review_evidence["command"]["operators"] == []
+    assert request.review_evidence["command"]["programs"] == []
+    assert result["value"]["manual_reason_code"] == "reviewer_outcome_not_allowed"

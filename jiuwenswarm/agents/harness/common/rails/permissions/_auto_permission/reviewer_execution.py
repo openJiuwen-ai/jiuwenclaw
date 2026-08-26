@@ -230,14 +230,22 @@ class AutoPermissionReviewerExecutionMixin:
             domain_route=domain_route,
         )
         assessment = await self.auto_reviewer.assess(request)
+        effect_statuses = request.effect_statuses
         audit_extra = {
             "action_summary": _reviewer_action_summary(facts),
             "channel_kind": channel_kind,
             "decision_source": "auto_reviewer",
             "evidence_summary": assessment.reason_summary,
+            "filesystem_effect_status": effect_statuses.get(
+                "filesystem_effect", "unknown"
+            ),
             "final_reviewer_status": assessment.status,
+            "network_effect_status": effect_statuses.get(
+                "network_effect", "unknown"
+            ),
             "policy_level": policy_level,
             "reviewer_called": True,
+            "reviewer_acknowledged_unknowns": assessment.acknowledged_unknowns,
             **_reviewer_route_audit_extra(
                 route,
                 policy_level=policy_level,
@@ -247,6 +255,9 @@ class AutoPermissionReviewerExecutionMixin:
             "reviewer_outcome": assessment.outcome,
             "reviewer_reason_code": assessment.reason_code,
             "reviewer_reason_summary": assessment.reason_summary,
+            "reviewer_required_unknowns": (
+                request.required_unknown_acknowledgements
+            ),
             "user_review_hint": assessment.user_review_hint,
         }
         if assessment.fallback_reason:

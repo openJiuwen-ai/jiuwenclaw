@@ -6,9 +6,11 @@ from __future__ import annotations
 # data without external network I/O.
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import jiuwenswarm.agents.harness.common.rails.permissions.reviewer_route as reviewer_route_module
 from jiuwenswarm.agents.harness.common.rails.permissions.reviewer_route import (
     HARD_BLOCK_SOURCE,
     MANUAL_REVIEW_SOURCE,
@@ -105,6 +107,100 @@ def test_policy_and_guard_precedence(
         workspace_root=tmp_path,
     )
     assert route.source == expected_source
+
+
+@pytest.mark.parametrize("command", ("ls", "uv pip install -e ."))
+@pytest.mark.parametrize(
+    ("policy_level", "expected_source"),
+    [
+        ("ask", SEMANTIC_REVIEW_SOURCE),
+        ("allow", SEMANTIC_REVIEW_SOURCE),
+        ("deny", HARD_BLOCK_SOURCE),
+    ],
+)
+def test_simple_shell_remains_semantically_reviewable(
+    tmp_path: Path,
+    command: str,
+    policy_level: str,
+    expected_source: str,
+) -> None:
+    facts = _facts("mcp_exec_command", {"command": command}, tmp_path)
+
+    route = reviewer_route(
+        facts,
+        policy_level=policy_level,
+        guard_result="not_applicable",
+        workspace_root=tmp_path,
+    )
+
+    assert facts.accesses_known is False
+    assert route.source == expected_source
+
+
+def test_too_complex_shell_is_manual_only(tmp_path: Path) -> None:
+    facts = _facts(
+        "mcp_exec_command",
+        {"command": "printf '%s' \"$(pwd)\""},
+        tmp_path,
+    )
+
+    route = reviewer_route(
+        facts,
+        policy_level="ask",
+        guard_result="not_applicable",
+        workspace_root=tmp_path,
+    )
+
+    assert route.source == MANUAL_REVIEW_SOURCE
+    assert route.reason == "core_accesses_unknown"
+    assert route.allowed_outcomes == ("manual", "deny")
+
+
+def test_parse_unavailable_shell_is_manual_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reviewer_route_module,
+        "parse_shell_for_permission",
+        lambda _command: SimpleNamespace(kind="parse_unavailable", subcommands=()),
+    )
+    facts = _facts("mcp_exec_command", {"command": "ls"}, tmp_path)
+
+    route = reviewer_route(
+        facts,
+        policy_level="ask",
+        guard_result="not_applicable",
+        workspace_root=tmp_path,
+    )
+
+    assert route.source == MANUAL_REVIEW_SOURCE
+    assert route.reason == "core_accesses_unknown"
+
+
+def test_shell_parser_exception_is_manual_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_parser_error(_command: str) -> None:
+        raise RuntimeError("parser failed")
+
+    monkeypatch.setattr(
+        reviewer_route_module,
+        "parse_shell_for_permission",
+        raise_parser_error,
+    )
+    facts = _facts("mcp_exec_command", {"command": "ls"}, tmp_path)
+
+    route = reviewer_route(
+        facts,
+        policy_level="allow",
+        guard_result="not_applicable",
+        workspace_root=tmp_path,
+    )
+
+    assert route.source == MANUAL_REVIEW_SOURCE
+    assert route.reason == "core_accesses_unknown"
 
 
 @pytest.mark.parametrize(
