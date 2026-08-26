@@ -1108,6 +1108,13 @@ async def test_run_rewrite_fast_path_rejects_reordered_slots_after_retry():
 
 @pytest.mark.asyncio
 async def test_run_rewrite_fast_path_preserves_commit_error():
+    format_conflict = _json_result(
+        {
+            "status": "error",
+            "error_code": "FORMAT_CONFLICT",
+            "error": "rewrite changed protected inline topology",
+        }
+    )
     result = await run_rewrite_fast_path(
         _query(),
         prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
@@ -1115,20 +1122,47 @@ async def test_run_rewrite_fast_path_preserves_commit_error():
             return_value=SimpleNamespace(content=_json_result(_STRUCTURED_RESULT))
         ),
         commit_invoke=AsyncMock(
-            return_value=_json_result(
-                {
-                    "status": "error",
-                    "error_code": "FORMAT_CONFLICT",
-                    "error": "rewrite changed protected inline topology",
-                }
-            )
+            side_effect=[format_conflict, format_conflict]
         ),
     )
 
     assert result is not None
     assert result.status == "error"
     assert result.error_code == "FORMAT_CONFLICT"
-    assert result.model_calls == 1
+    assert result.model_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_run_rewrite_fast_path_retries_format_conflict_with_plain_text_prompt():
+    model = AsyncMock(
+        return_value=SimpleNamespace(content=_json_result(_STRUCTURED_RESULT))
+    )
+    commit = AsyncMock(
+        side_effect=[
+            _json_result(
+                {
+                    "status": "error",
+                    "error_code": "FORMAT_CONFLICT",
+                    "error": "rewrite changed protected inline topology",
+                }
+            ),
+            _json_result({"status": "completed"}),
+        ]
+    )
+
+    result = await run_rewrite_fast_path(
+        _query(),
+        prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
+        model_invoke=model,
+        commit_invoke=commit,
+    )
+
+    assert result is not None
+    assert result.status == "completed"
+    assert result.model_calls == 2
+    assert model.await_count == 2
+    assert commit.await_count == 2
+    assert "protected inline Markdown structure" in model.await_args_list[1].args[0][0]["content"]
 
 
 @pytest.mark.asyncio

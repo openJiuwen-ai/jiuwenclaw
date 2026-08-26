@@ -79,6 +79,12 @@ _RETRY_SYSTEM_SUFFIX = (
     "Return only the required JSON object. Do not use Markdown fences and do "
     "not copy input metadata fields."
 )
+_FORMAT_CONFLICT_RETRY_SYSTEM_SUFFIX = (
+    "\n\nStrict retry: the previous rewrite changed protected inline Markdown "
+    "structure. Return a fresh JSON object whose text values contain only "
+    "replacement prose. Do not add Markdown delimiters, citations, links, code, "
+    "formulas, URLs, or inline formatting."
+)
 _USAGE_SUM_KEYS = {
     "input_tokens",
     "output_tokens",
@@ -799,6 +805,133 @@ async def run_rewrite_fast_path(
             model_output_adjustments=model_output_adjustments,
         )
     commit_ms = _milliseconds(commit_started)
+    if (
+        committed.get("status") != "completed"
+        and committed.get("error_code") == "FORMAT_CONFLICT"
+        and model_calls < 2
+    ):
+        retry_messages = [
+            {
+                "role": "system",
+                "content": _SYSTEM_PROMPT + _FORMAT_CONFLICT_RETRY_SYSTEM_SUFFIX,
+            },
+            messages[1],
+        ]
+        try:
+            model_calls += 1
+            remaining_seconds = _remaining_seconds(deadline)
+            call_timeout_seconds = min(
+                model_call_timeout_seconds,
+                remaining_seconds,
+            )
+            response = await asyncio.wait_for(
+                model_invoke(retry_messages, **model_kwargs),
+                timeout=call_timeout_seconds,
+            )
+        except TimeoutError:
+            task_timed_out = remaining_seconds <= model_call_timeout_seconds
+            return _result(
+                started_at=started_at,
+                status="error",
+                action=request.action,
+                error_code=(
+                    "REWRITE_TIMEOUT" if task_timed_out else "MODEL_CALL_TIMEOUT"
+                ),
+                message=(
+                    "rewrite task timed out"
+                    if task_timed_out
+                    else "rewrite model call timed out"
+                ),
+                usage_metadata=usage_metadata,
+                prepare_ms=prepare_ms,
+                model_ms=_milliseconds(model_started),
+                commit_ms=commit_ms,
+                model_calls=model_calls,
+                model_output_adjustments=model_output_adjustments,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            return _result(
+                started_at=started_at,
+                status="error",
+                action=request.action,
+                error_code="MODEL_CALL_FAILED",
+                message="rewrite model call failed",
+                usage_metadata=usage_metadata,
+                prepare_ms=prepare_ms,
+                model_ms=_milliseconds(model_started),
+                commit_ms=commit_ms,
+                model_calls=model_calls,
+                model_output_adjustments=model_output_adjustments,
+            )
+        usage_metadata = _merge_usage_metadata(
+            usage_metadata,
+            _normalize_usage_metadata(getattr(response, "usage_metadata", None)),
+        )
+        try:
+            structured_result, retry_adjustments = _decode_model_result(
+                getattr(response, "content", None),
+                projected_units,
+            )
+        except ModelOutputError as exc:
+            return _result(
+                started_at=started_at,
+                status="error",
+                action=request.action,
+                error_code="MODEL_OUTPUT_INVALID",
+                message="invalid structured rewrite result",
+                usage_metadata=usage_metadata,
+                prepare_ms=prepare_ms,
+                model_ms=_milliseconds(model_started),
+                commit_ms=commit_ms,
+                model_calls=model_calls,
+                model_output_adjustments=model_output_adjustments,
+                model_output_error_reason=exc.reason,
+            )
+        model_output_adjustments = tuple(
+            dict.fromkeys(model_output_adjustments + retry_adjustments)
+        )
+        model_ms = _milliseconds(model_started)
+        commit_started = time.perf_counter()
+        try:
+            committed = _decode_tool_result(
+                await asyncio.wait_for(
+                    commit_invoke(
+                        context_token=context_token,
+                        structured_result=structured_result,
+                    ),
+                    timeout=_remaining_seconds(deadline),
+                ),
+                max_bytes=_TOOL_JSON_MAX_BYTES,
+            )
+        except TimeoutError:
+            return _result(
+                started_at=started_at,
+                status="error",
+                action=request.action,
+                error_code="REWRITE_TIMEOUT",
+                message="rewrite task timed out",
+                usage_metadata=usage_metadata,
+                prepare_ms=prepare_ms,
+                model_ms=model_ms,
+                commit_ms=_milliseconds(commit_started),
+                model_calls=model_calls,
+                model_output_adjustments=model_output_adjustments,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            return _result(
+                started_at=started_at,
+                status="error",
+                action=request.action,
+                error_code="WRITE_FAILED",
+                message="rewrite commit failed",
+                usage_metadata=usage_metadata,
+                prepare_ms=prepare_ms,
+                model_ms=model_ms,
+                commit_ms=_milliseconds(commit_started),
+                model_calls=model_calls,
+                model_output_adjustments=model_output_adjustments,
+            )
+        commit_ms = _milliseconds(commit_started)
     if committed.get("status") != "completed":
         code, message = _safe_error_fields(
             committed,
