@@ -1,27 +1,20 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Plugin invoke transport: direct mcp/run or local CloudWsRelay."""
+"""Plugin invoke transport: direct mcp/run (businessCredential handshake)."""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import base64
-import logging
 import os
-import time
+import uuid
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
-# Desktop CloudWsRelay local port (claw_desktop JIUWEN_XIAOYI_RELAY_PORT).
-_DEFAULT_RELAY_WS = "ws://127.0.0.1:19690"
-_RELAY_URL_ENVS = ("XIAOYI_RELAY_WS_URL", "CLAW_XIAOYI_RELAY_WS_URL", "USERACCESS_PLUGIN_WS_URL")
 # Direct plugin WS: full URL, do not concatenate.
 # Example: wss://host:18449/agent-runtime-service-ws/v1/mcp/run
 _MCP_RUN_ENV = "AGENT_RUNTIME_MCP_RUN"
 _AGENT_BASE_ENV = "AGENT_RUNTIME_BASEURL"
 _UID_ENV = "AGENT_RUNTIME_UID"
+_CLAW_UID_ENV = "CLAW_XIAOYI_UID"
+_CREDENTIAL_ENV = "CLAW_BUSINESS_CREDENTIAL"
 _DEVICE_ID_ENVS = ("AGENT_RUNTIME_DEVICE_ID", "X_DEVICE_ID")
 
 # skills/request.txt HarmonyOS deviceInfo when mcp/run has no desktop getDeviceInfo.
@@ -41,19 +34,8 @@ def is_mcp_run_url(url: str) -> bool:
 
 
 def resolve_plugin_runtime_url() -> str:
-    """Prefer AGENT_RUNTIME_MCP_RUN (full URL, no path concat) over local CloudWsRelay.
-
-    Desktop injects XIAOYI_RELAY_WS_URL=ws://127.0.0.1:19690; that must not hide an
-    explicit mcp/run URL.
-    """
-    mcp = (os.environ.get(_MCP_RUN_ENV) or "").strip()
-    if mcp:
-        return mcp
-    for key in _RELAY_URL_ENVS:
-        value = (os.environ.get(key) or "").strip()
-        if value:
-            return value
-    return _DEFAULT_RELAY_WS
+    """Return AGENT_RUNTIME_MCP_RUN (full URL, no path concat). Empty if unset."""
+    return (os.environ.get(_MCP_RUN_ENV) or "").strip()
 
 
 def resolve_agent_runtime_baseurl() -> str:
@@ -73,10 +55,16 @@ def _xiaoyi_channel() -> dict[str, Any]:
 
 
 def resolve_runtime_uid() -> str:
-    env_uid = (os.environ.get(_UID_ENV) or "").strip()
-    if env_uid:
-        return env_uid
+    for key in (_CLAW_UID_ENV, _UID_ENV):
+        env_uid = (os.environ.get(key) or "").strip()
+        if env_uid:
+            return env_uid
     return str(_xiaoyi_channel().get("uid") or "").strip()
+
+
+def resolve_business_credential() -> str:
+    """Product mcp/run handshake credential (desktop spawn, not .env)."""
+    return (os.environ.get(_CREDENTIAL_ENV) or "").strip()
 
 
 def resolve_runtime_device_id() -> str:
@@ -107,18 +95,19 @@ def resolve_device_sandbox_system() -> str:
     return (os.environ.get("CLAW_DEVICE_SANDBOX_SYSTEM") or "").strip()
 
 
-def build_oa_plugin_headers(*, plugin_session_id: str = "", extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Handshake headers for direct mcp/run (OA)."""
+def build_product_mcp_headers(*, plugin_session_id: str = "", extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Handshake headers for mcp/run (aligned with conversation-report / billing)."""
     uid = resolve_runtime_uid()
+    device_id = resolve_runtime_device_id()
     headers: dict[str, str] = {
         "Content-Type": "application/json",
-        "x-request-from": (os.environ.get("OA_REQUEST_FROM") or "jiuwenclaw").strip(),
-        "x-sandbox-id": (os.environ.get("OA_SANDBOX_ID") or "rytest").strip(),
-        "x-api-key": (os.environ.get("OA_API_KEY") or "").strip(),
-        "x-hag-trace-id": (os.environ.get("OA_HAG_TRACE_ID") or "rytest001").strip(),
+        "businessCredential": resolve_business_credential(),
+        "x-hag-trace-id": uuid.uuid4().hex,
     }
     if uid:
         headers["x-uid"] = uid
+    if device_id:
+        headers["x-device-id"] = device_id
     if plugin_session_id:
         headers["x-plugin-session-id"] = plugin_session_id
     if extra:
@@ -126,59 +115,13 @@ def build_oa_plugin_headers(*, plugin_session_id: str = "", extra: dict[str, str
     return headers
 
 
-def build_local_relay_headers(*, extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Headers for AgentServer → CloudWsRelay (localAuth + x-relay-role=plugin)."""
-    xiaoyi = _xiaoyi_channel()
-    # Prefer desktop-injected env (AgentServer); config may still be ${CLAW_XIAOYI_*} placeholders.
-    ak = (
-        (os.environ.get("CLAW_XIAOYI_AK") or "").strip()
-        or str(xiaoyi.get("ak") or "").strip()
-    )
-    sk = (
-        (os.environ.get("CLAW_XIAOYI_SK") or "").strip()
-        or str(xiaoyi.get("sk") or "").strip()
-    )
-    agent_id = (
-        (os.environ.get("CLAW_XIAOYI_AGENT_ID") or "").strip()
-        or str(xiaoyi.get("agent_id") or xiaoyi.get("agentId") or "").strip()
-    )
-
-    headers: dict[str, str] = {
-        "Content-Type": "application/json",
-        "x-relay-role": "plugin",
-    }
-    if ak and sk and agent_id:
-        ts = str(int(time.time() * 1000))
-        signature = base64.b64encode(
-            hmac.new(sk.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256).digest()
-        ).decode("ascii")
-        headers["x-access-key"] = ak
-        headers["x-sign"] = signature
-        headers["x-ts"] = ts
-        headers["x-agent-id"] = agent_id
-    else:
-        logger.warning(
-            "[useraccess_runtime] 本地中转鉴权缺失：需 CLAW_XIAOYI_AK/SK/AGENT_ID "
-            "（桌面 spawn AgentServer 注入）或 channels.xiaoyi.ak/sk/agent_id"
-        )
-
-    if extra:
-        headers.update({k: v for k, v in extra.items() if v})
-    return headers
-
-
 def build_runtime_headers(*, extra: dict[str, str] | None = None, url: str | None = None) -> dict[str, str]:
-    """Handshake headers for plugin invoke.
-
-    mcp/run uses OA headers; local relay uses localAuth.
-    """
-    resolved = (url or "").strip() or resolve_plugin_runtime_url()
+    """Handshake headers for mcp/run: businessCredential + uid/device/trace."""
+    _ = url
     plugin_session_id = ""
     if extra:
         plugin_session_id = str(extra.get("x-plugin-session-id") or "")
-    if is_mcp_run_url(resolved):
-        return build_oa_plugin_headers(plugin_session_id=plugin_session_id, extra=extra)
-    return build_local_relay_headers(extra=extra)
+    return build_product_mcp_headers(plugin_session_id=plugin_session_id, extra=extra)
 
 
 def build_plugin_skill_extra_info(
@@ -188,9 +131,8 @@ def build_plugin_skill_extra_info(
 ) -> dict[str, Any]:
     """Build extraInfo aligned with skills/request.txt.
 
-    uid 与握手 x-uid 同源（AGENT_RUNTIME_UID / 渠道 uid）。
-    mcp/run 且无桌面 getDeviceInfo 时，deviceInfo 用 request.txt 鸿蒙缺省；
-    本机 relay 仍映射 CLAW_DEVICE_HOSTNAME / CLAW_DEVICE_SANDBOX_SYSTEM。
+    uid 与握手 x-uid 同源（CLAW_XIAOYI_UID / AGENT_RUNTIME_UID / 渠道 uid）。
+    有桌面 CLAW_DEVICE_* / device id 时用桌面设备信息；否则用 request.txt 鸿蒙缺省。
     """
     uid = resolve_runtime_uid()
     device_id = resolve_runtime_device_id()
@@ -222,9 +164,7 @@ def build_plugin_skill_extra_info(
     except Exception:  # noqa: BLE001
         pass
 
-    use_request_txt_device = is_mcp_run_url(resolve_plugin_runtime_url()) and not (
-        hostname or sandbox_system or device_id
-    )
+    use_request_txt_device = not (hostname or sandbox_system or device_id)
     if use_request_txt_device:
         device_info: dict[str, Any] = dict(_REQUEST_TXT_DEVICE_INFO)
         session_device_id = str(device_info.get("x-device-id") or "")
@@ -286,8 +226,19 @@ def missing_plugin_url_error(*, plugin_id: str = "", tool_name: str = "") -> dic
     return {
         "success": False,
         "error": (
-            "缺少本地 CloudWsRelay 地址：请确认桌面云端渠道已启用，"
-            "或配置环境变量 XIAOYI_RELAY_WS_URL"
+            "缺少插件 WS 地址：需 AGENT_RUNTIME_MCP_RUN（桌面 spawn 注入，或实验室写入环境）"
+        ),
+        "pluginId": plugin_id,
+        "toolName": tool_name,
+    }
+
+
+def missing_credential_error(*, plugin_id: str = "", tool_name: str = "") -> dict[str, Any]:
+    return {
+        "success": False,
+        "error": (
+            "缺少插件握手凭证：需 CLAW_BUSINESS_CREDENTIAL（桌面登录后 spawn 注入，"
+            "或实验室写入环境）"
         ),
         "pluginId": plugin_id,
         "toolName": tool_name,
@@ -305,14 +256,15 @@ def missing_agent_baseurl_error() -> dict[str, Any]:
 
 __all__ = [
     "build_cloud_plugin_context",
-    "build_local_relay_headers",
-    "build_oa_plugin_headers",
+    "build_product_mcp_headers",
     "build_plugin_skill_extra_info",
     "build_runtime_headers",
     "is_mcp_run_url",
     "missing_agent_baseurl_error",
+    "missing_credential_error",
     "missing_plugin_url_error",
     "resolve_agent_runtime_baseurl",
+    "resolve_business_credential",
     "resolve_device_hostname",
     "resolve_device_sandbox_system",
     "resolve_plugin_runtime_url",
