@@ -250,10 +250,10 @@ def _shell_payload_is_reviewable(
     *,
     policy_level: str,
 ) -> bool:
-    """Allow semantic review only when Core exposes a usable simple AST."""
+    """Allow ASK semantic review when the Core parser call itself is available."""
 
     if (
-        policy_level not in {ASK_LEVEL, ALLOW_LEVEL}
+        policy_level != ASK_LEVEL
         or facts.capability.category != "shell"
         or not facts.arguments_valid_object
     ):
@@ -265,14 +265,10 @@ def _shell_payload_is_reviewable(
     ):
         return False
     try:
-        parsed = parse_shell_for_permission(facts.command)
+        parse_shell_for_permission(facts.command)
     except (OSError, RuntimeError, TypeError, ValueError):
         return False
-    return bool(
-        parsed.kind == "simple"
-        and parsed.subcommands
-        and all(subcommand.argv for subcommand in parsed.subcommands)
-    )
+    return True
 
 
 def _is_public_search(facts: ToolDecisionFacts) -> bool:
