@@ -120,25 +120,28 @@ def _real_lsp_rail(
     *,
     workspace_level: str,
     file_guard_enabled: bool = True,
+    explicit_tool_ask: bool = False,
 ):
+    permissions = {
+        "enabled": True,
+        "schema": "tiered_policy",
+        "mode": "auto",
+        "defaults": {"*": "ask"},
+        "file_guard": {
+            "enabled": file_guard_enabled,
+            "defaults": {"read": "ask", "write": "ask", "exec": "ask"},
+            "workspace": {
+                "read": workspace_level,
+                "write": workspace_level,
+                "exec": "ask",
+            },
+        },
+    }
+    if explicit_tool_ask:
+        permissions["tools"] = {"lsp": "ask"}
     rail = build_permission_rail(
         {
-            "permissions": {
-                "enabled": True,
-                "schema": "tiered_policy",
-                "mode": "auto",
-                "defaults": {"*": "ask"},
-                "tools": {"lsp": "ask"},
-                "file_guard": {
-                    "enabled": file_guard_enabled,
-                    "defaults": {"read": "ask", "write": "ask", "exec": "ask"},
-                    "workspace": {
-                        "read": workspace_level,
-                        "write": workspace_level,
-                        "exec": "ask",
-                    },
-                },
-            }
+            "permissions": permissions,
         },
         enable_auto_permission=True,
         workspace_root=tmp_path,
@@ -785,6 +788,54 @@ async def test_code_control_tools_are_silent_before_allow_capable_paths(
     assert base.calls == []
 
 
+async def test_edit_file_reviewer_receives_complete_diff(tmp_path) -> None:
+    rail, _policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="edit_file",
+        tool_args={
+            "file_path": str(tmp_path / "README.md"),
+            "old_string": "old",
+            "new_string": "new",
+        },
+        session_id="session-a",
+    )
+
+    assert result is None
+    assert len(reviewer.requests) == 1
+    assert reviewer.requests[0].review_evidence["reviewable_payload"] == {
+        "old_string": "old",
+        "new_string": "new",
+        "replace_all": False,
+    }
+    assert base.calls == []
+
+
+async def test_incomplete_edit_payload_goes_manual_without_reviewer_call(
+    tmp_path,
+) -> None:
+    rail, _policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="edit_file",
+        tool_args={
+            "file_path": str(tmp_path / "README.md"),
+            "new_string": "new",
+        },
+        session_id="session-a",
+    )
+
+    assert classify_permission_result(result) == "interrupt"
+    assert reviewer.requests == []
+    assert base.calls == []
+
+
 async def test_custom_agent_deny_precedes_all_allow_capable_paths(tmp_path) -> None:
     rail, policy, reviewer, base = _rail(
         tmp_path,
@@ -846,6 +897,78 @@ async def test_lsp_workspace_read_bypasses_reviewer_and_manual_base(tmp_path) ->
     assert reviewer.requests == []
     assert "deterministic_allow" in repr(ctx.extra)
     assert "reviewer_lifecycle" in repr(ctx.extra)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_args"),
+    [
+        ("read_file", {"file_path": "README.md"}),
+        ("list_files", {"path": "src", "show_hidden": False}),
+        ("grep", {"pattern": "main", "path": "src"}),
+    ],
+)
+async def test_default_ask_structured_workspace_read_skips_reviewer(
+    tmp_path,
+    tool_name: str,
+    tool_args: dict[str, object],
+) -> None:
+    rail = build_permission_rail(
+        {
+            "permissions": {
+                "enabled": True,
+                "schema": "tiered_policy",
+                "mode": "auto",
+                "defaults": {"*": "ask"},
+                "file_guard": {
+                    "enabled": True,
+                    "defaults": {"read": "ask", "write": "ask", "exec": "ask"},
+                    "workspace": {
+                        "read": "allow",
+                        "write": "ask",
+                        "exec": "ask",
+                    },
+                },
+            }
+        },
+        enable_auto_permission=True,
+        workspace_root=tmp_path,
+    )
+    reviewer = StaticReviewerClient(outcome=ReviewerOutcome.ALLOW_ONCE)
+    rail.auto_reviewer = AutoReviewer(client=reviewer)
+    ctx = _runtime_ctx(
+        _Session(),
+        tool_name=tool_name,
+        tool_args=tool_args,
+    )
+
+    result = await rail.before_tool_call(ctx)
+
+    assert result is None
+    assert reviewer.requests == []
+    metadata = repr(ctx.extra)
+    assert "structured_workspace_read_allow" in metadata
+    assert "'reviewer_called': False" in metadata
+    assert "'reviewer_lifecycle': 'not_called'" in metadata
+
+
+async def test_explicit_lsp_tool_ask_still_calls_reviewer(tmp_path) -> None:
+    rail, reviewer = _real_lsp_rail(
+        tmp_path,
+        workspace_level="allow",
+        explicit_tool_ask=True,
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="lsp",
+        tool_args={
+            "operation": "documentSymbol",
+            "file_path": (tmp_path / "src" / "main.py").as_posix(),
+        },
+        session_id="session-a",
+    )
+
+    assert result is None
+    assert len(reviewer.requests) == 1
 
 
 async def test_invalid_lsp_input_does_not_use_fast_path(tmp_path) -> None:
@@ -1327,7 +1450,11 @@ async def test_ineligible_auto_manual_never_reaches_core_session_remember(
 
     assert session.get_state(INTERRUPT_AUTO_CONFIRM_KEY) in (None, {})
 
-    known_args = {"file_path": str(tmp_path / "report.md")}
+    known_args = {
+        "file_path": str(tmp_path / "report.md"),
+        "old_string": "old",
+        "new_string": "new",
+    }
     known_ctx = _runtime_ctx(session, tool_name="edit_file", tool_args=known_args)
     result = await rail.before_tool_call(known_ctx)
 

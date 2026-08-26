@@ -1790,6 +1790,175 @@ def test_reviewer_payload_surrogate_fails_atomically(tmp_path: Path) -> None:
     assert action_view.review_evidence["reviewable_payload"] == {}
 
 
+@pytest.mark.parametrize(
+    ("old_string", "new_string", "replace_all", "expected_replace_all"),
+    [
+        ("old", "new", None, False),
+        ("", "new", False, False),
+        ("old", "", True, True),
+    ],
+)
+def test_edit_file_payload_preserves_complete_diff_and_default(
+    tmp_path: Path,
+    old_string: str,
+    new_string: str,
+    replace_all: bool | None,
+    expected_replace_all: bool,
+) -> None:
+    args: dict[str, object] = {
+        "file_path": "README.md",
+        "old_string": old_string,
+        "new_string": new_string,
+    }
+    if replace_all is not None:
+        args["replace_all"] = replace_all
+    facts = build_facts("edit_file", args, workspace_root=tmp_path)
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    )
+
+    assert action_view.payload_complete is True
+    assert action_view.review_evidence["reviewable_payload"] == {
+        "old_string": old_string,
+        "new_string": new_string,
+        "replace_all": expected_replace_all,
+    }
+
+
+@pytest.mark.parametrize(
+    "args, expected_error",
+    [
+        (
+            {"file_path": "README.md", "new_string": "new"},
+            "reviewer_payload_incomplete",
+        ),
+        (
+            {"file_path": "README.md", "old_string": "old"},
+            "reviewer_payload_incomplete",
+        ),
+        (
+            {
+                "file_path": "README.md",
+                "old_string": 1,
+                "new_string": "new",
+            },
+            "reviewer_payload_invalid",
+        ),
+        (
+            {
+                "file_path": "README.md",
+                "old_string": "old",
+                "new_string": "new",
+                "replace_all": "yes",
+            },
+            "reviewer_payload_invalid",
+        ),
+    ],
+)
+def test_edit_file_payload_invalid_fields_fail_atomically(
+    tmp_path: Path,
+    args: dict[str, object],
+    expected_error: str,
+) -> None:
+    facts = build_facts("edit_file", args, workspace_root=tmp_path)
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    )
+
+    assert action_view.payload_complete is False
+    assert action_view.payload_error == expected_error
+    assert action_view.review_evidence["reviewable_payload"] == {}
+
+
+def test_edit_file_payload_and_purpose_share_atomic_budget(tmp_path: Path) -> None:
+    old_string = "旧值"
+    new_string = "new"
+    claim = "edit requested value"
+    facts = build_facts(
+        "edit_file",
+        {
+            "file_path": "README.md",
+            "old_string": old_string,
+            "new_string": new_string,
+        },
+        workspace_root=tmp_path,
+    )
+    exact_size = sum(
+        len(value.encode("utf-8"))
+        for value in (old_string, new_string, "false", claim)
+    )
+
+    exact = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+        model_purpose_claim=claim,
+        reviewer_payload_max_bytes=exact_size,
+    )
+    over = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+        model_purpose_claim=claim,
+        reviewer_payload_max_bytes=exact_size - 1,
+    )
+
+    assert exact.payload_complete is True
+    assert exact.review_evidence["model_purpose_claim"] == claim
+    assert over.payload_complete is False
+    assert over.payload_error == "reviewer_payload_too_large"
+    assert over.review_evidence["reviewable_payload"] == {}
+    assert "model_purpose_claim" not in over.review_evidence
+
+
+def test_edit_file_unencodable_diff_fails_atomically(tmp_path: Path) -> None:
+    facts = build_facts(
+        "edit_file",
+        {
+            "file_path": "README.md",
+            "old_string": "old",
+            "new_string": "\ud800",
+        },
+        workspace_root=tmp_path,
+    )
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    )
+
+    assert action_view.payload_complete is False
+    assert action_view.payload_error == "reviewer_payload_unrepresentable"
+    assert action_view.review_evidence["reviewable_payload"] == {}
+
+
 def test_reviewer_payload_fails_atomically_when_over_limit(tmp_path: Path) -> None:
     facts = build_facts(
         "mcp_exec_command",

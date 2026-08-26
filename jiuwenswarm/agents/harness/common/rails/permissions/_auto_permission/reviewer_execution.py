@@ -258,8 +258,13 @@ class AutoPermissionReviewerExecutionMixin:
                     "The complete payload cannot be represented for semantic review; "
                     "review this invocation manually."
                     if request.payload_error == "reviewer_payload_unrepresentable"
-                    else "The complete payload exceeds the semantic reviewer capacity; "
-                    "review this invocation manually."
+                    else (
+                        "The complete payload exceeds the semantic reviewer capacity; "
+                        "review this invocation manually."
+                        if request.payload_error == "reviewer_payload_too_large"
+                        else "The complete payload is missing or invalid for semantic "
+                        "review; review this invocation manually."
+                    )
                 ),
                 "reviewer_called": False,
                 "reviewer_status": "manual",

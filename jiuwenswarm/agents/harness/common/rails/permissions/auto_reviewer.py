@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from jsonschema import SchemaError as JsonSchemaError
+from jsonschema import ValidationError as JsonSchemaValidationError
+from jsonschema import validate as validate_json_schema
+from openjiuwen.harness.prompts.tools.filesystem import get_edit_file_input_params
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
 from jiuwenswarm.agents.harness.common.rails.permissions.reviewer_redaction import (
@@ -581,10 +585,10 @@ def _payload_view(
     *,
     model_purpose_claim: str,
     max_bytes: int,
-) -> tuple[dict[str, str], bool, str]:
+) -> tuple[dict[str, Any], bool, str]:
     """Return one complete, format-preserving payload or fail atomically."""
 
-    raw_payloads: dict[str, str] = {}
+    raw_payloads: dict[str, Any] = {}
     command = str(facts.raw_command or "")
     if command.strip():
         raw_payloads["command"] = command
@@ -595,6 +599,22 @@ def _payload_view(
         if key == "command" or value == command:
             continue
         raw_payloads[key] = value
+    if facts.tool_name == "edit_file":
+        edit_args = dict(facts.untrusted_args)
+        if "old_string" not in edit_args or "new_string" not in edit_args:
+            return {}, False, "reviewer_payload_incomplete"
+        try:
+            validate_json_schema(
+                instance=edit_args,
+                schema=get_edit_file_input_params("en"),
+            )
+        except JsonSchemaValidationError:
+            return {}, False, "reviewer_payload_invalid"
+        except (JsonSchemaError, TypeError, ValueError):
+            return {}, False, "reviewer_payload_unrepresentable"
+        raw_payloads["old_string"] = edit_args["old_string"]
+        raw_payloads["new_string"] = edit_args["new_string"]
+        raw_payloads["replace_all"] = edit_args.get("replace_all", False)
 
     normalized_max_bytes = min(
         max(int(max_bytes), 1),
@@ -602,7 +622,12 @@ def _payload_view(
     )
     try:
         raw_size = len(model_purpose_claim.encode("utf-8")) + sum(
-            len(value.encode("utf-8")) for value in raw_payloads.values()
+            len(
+                (json.dumps(value) if isinstance(value, bool) else value).encode(
+                    "utf-8"
+                )
+            )
+            for value in raw_payloads.values()
         )
     except UnicodeEncodeError:
         return {}, False, "reviewer_payload_unrepresentable"
