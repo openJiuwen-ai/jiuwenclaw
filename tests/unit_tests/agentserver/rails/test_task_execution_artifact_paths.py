@@ -43,7 +43,12 @@ def test_write_tool_fallback_ignores_non_python_paths() -> None:
 
 
 def test_image_path_extraction_keeps_image_whitelist() -> None:
+    # generate_image 真实输出格式：每行一个路径，可能含空格（effective_project_dir）
     paths = _extract_image_paths_from_tool_result(
-        "Generated /workspace/out/chart.png and /workspace/out/demo.py"
+        "Generated 1 image(s) successfully!\n"
+        "Local file paths (use for attachments or send_file):\n"
+        "- E:\\01 code\\proj\\generated_images\\chart.png\n"
+        "- /workspace/out/demo.py\n"
+        "Prompt: a chart"
     )
-    assert paths == ["/workspace/out/chart.png"]
+    assert paths == ["E:\\01 code\\proj\\generated_images\\chart.png"]
