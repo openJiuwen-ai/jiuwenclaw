@@ -1609,7 +1609,8 @@ class JiuWenSwarmDeepAdapter:
     def skill_retrieval_status_fields(self) -> dict[str, Any]:
         """Return the child adapter fields exposed to session status callers."""
         return {
-            "enabled": bool(self._skill_retrieval_session_enabled),
+            "enabled": bool(self._skill_retrieval_session_enabled)
+            and is_skill_retrieval_enabled(self._config_base_cache),
             "model_name": self._skill_retrieval_context_model_name,
         }
 
@@ -4443,13 +4444,15 @@ class JiuWenSwarmDeepAdapter:
         self,
         config_base: dict[str, Any] | None = None,
     ) -> bool:
-        """Return the Skill discovery profile frozen for this adapter session."""
+        """Return the session profile under the current global kill switch."""
 
         if self._skill_retrieval_session_enabled is None:
             self._skill_retrieval_session_enabled = (
                 self._resolve_skill_retrieval_session_enabled(config_base)
             )
-        return self._skill_retrieval_session_enabled
+        return self._skill_retrieval_session_enabled and is_skill_retrieval_enabled(
+            config_base
+        )
 
     def _sync_skill_retrieval_tools_for_runtime(
         self,
@@ -7529,7 +7532,10 @@ class JiuWenSwarmDeepAdapter:
             return
 
         model = self._create_model(config_base)
-        if self._is_session_scoped_adapter and self._skill_retrieval_session_enabled:
+        if (
+            self._is_session_scoped_adapter
+            and self._skill_retrieval_tools_enabled_for_runtime(config_base)
+        ):
             self._freeze_skill_retrieval_context_window(config_base, model)
         if self._is_session_scoped_adapter:
             await self._try_init_a2x_client(config_base)

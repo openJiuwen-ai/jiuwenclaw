@@ -1435,7 +1435,7 @@ class SkillManager:
             pinned_index_revision = str(
                 session_profile.get("pinned_index_revision") or ""
             )
-            enabled = bool(session_profile.get("enabled"))
+            enabled = configured_enabled and bool(session_profile.get("enabled"))
             index_enabled = bool(session_profile.get("index_enabled"))
             if session_profile.get("candidate_scale") in {"small", "large"}:
                 candidate_scale = str(session_profile["candidate_scale"])
@@ -1492,17 +1492,19 @@ class SkillManager:
             if session_profile is not None
             else ""
         )
-        effective_strategy = (
-            requested_strategy
-            if requested_strategy
-            in {"legacy", "small_full", "large_flat", "indexed", "indexed_stale"}
-            else resolve_skill_retrieval_strategy(
-                enabled=enabled,
-                candidate_scale=candidate_scale,
-                layout=layout,
-                index_state=public_index_state,
+        effective_strategy = "legacy"
+        if enabled:
+            effective_strategy = (
+                requested_strategy
+                if requested_strategy
+                in {"small_full", "large_flat", "indexed", "indexed_stale"}
+                else resolve_skill_retrieval_strategy(
+                    enabled=True,
+                    candidate_scale=candidate_scale,
+                    layout=layout,
+                    index_state=public_index_state,
+                )
             )
-        )
         index_recommended = (
             enabled and candidate_scale == "large" and not index_enabled
         )

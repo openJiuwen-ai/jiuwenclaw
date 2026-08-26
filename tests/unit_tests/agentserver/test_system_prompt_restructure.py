@@ -1481,6 +1481,28 @@ def test_code_adapter_skill_retrieval_sync_freezes_spec_snapshot():
         )
         is True
     )
+    assert (
+        adapter._skill_retrieval_tools_enabled_for_runtime(
+            {
+                "modes": {
+                    "code": {"tools": ["skill_toolkit", "skill_retrieval"]}
+                },
+                "symphony": {"skill_retrieval": {"enabled": False}},
+            }
+        )
+        is False
+    )
+    assert (
+        adapter._skill_retrieval_tools_enabled_for_runtime(
+            {
+                "modes": {
+                    "code": {"tools": ["skill_toolkit", "skill_retrieval"]}
+                },
+                "symphony": {"skill_retrieval": {"enabled": True}},
+            }
+        )
+        is True
+    )
     adapter = JiuwenSwarmCodeAdapter()
     assert (
         adapter._skill_retrieval_tools_enabled_for_runtime(
