@@ -1054,12 +1054,15 @@ permissions:
   defaults:
     '*': allow
   tools:
-    bash: ask
+    bash: allow
     mcp_exec_command: ask
     create_terminal: ask
     write: allow
     write_file: allow
     edit_file: allow
+    skill_tool: allow
+    read_file: allow
+    skill_complete: allow
     search_replace: allow
     ask_user: allow
     write_memory: allow
