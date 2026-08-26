@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Gateway DB-backed cron job store（企业就绪路径权威存储）。"""
+"""Gateway DB-backed cron job store（企业就绪路径权威存储，经 PersistentStore）。"""
 
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ from datetime import datetime, timezone as dt_timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import aiosqlite
-
 from jiuwenswarm.gateway.cron.cron_expr import _DEFAULT_WAKE_OFFSET_SECONDS
 from jiuwenswarm.gateway.cron.cron_job_mutations import (
     apply_cron_job_patch,
@@ -22,7 +20,7 @@ from jiuwenswarm.gateway.cron.cron_job_mutations import (
 )
 from jiuwenswarm.gateway.cron.enterprise_gate import get_bound_jiuwenclaw_id
 from jiuwenswarm.gateway.cron.models import CronJob
-from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+from jiuwenswarm.gateway.storage.protocols.persistent import PersistentStore
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +157,7 @@ def _row_to_job(row: Any) -> CronJob | None:
 
 
 class GatewayDbCronJobStore:
-    """企业 cron 权威：Gateway DB ``cron_job`` 表。"""
+    """企业 cron 权威：``cron_job`` 表经 ``PersistentStore``。"""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -173,11 +171,14 @@ class GatewayDbCronJobStore:
         return jid
 
     @staticmethod
-    def _require_db_path() -> str:
-        db_path = gateway_db.resolve_gateway_db_path()
-        if not db_path:
-            raise RuntimeError("gateway db not available")
-        return db_path
+    async def _require_store() -> PersistentStore:
+        from jiuwenswarm.gateway.storage.access import require_persistent_store
+
+        return await require_persistent_store()
+
+    @staticmethod
+    def _job_identity(*, jiuwenclaw_id: str, job_id: str) -> dict[str, Any]:
+        return {"jiuwenclaw_id": jiuwenclaw_id, "job_id": job_id}
 
     async def get_revision(self) -> int:
         return int(self._revision)
@@ -187,13 +188,14 @@ class GatewayDbCronJobStore:
 
     async def list_jobs(self, *, filters: dict[str, Any] | None = None) -> list[CronJob]:
         jid = self._require_jiuwenclaw_id()
+        store = await self._require_store()
         query: dict[str, Any] = {"jiuwenclaw_id": jid}
         filters = dict(filters or {})
         for key in ("group_id", "bot_id", "user_id"):
             val = filters.get(key)
             if isinstance(val, str) and val.strip():
                 query[key] = val.strip()
-        rows = await gateway_db.list_records(
+        rows = await store.list(
             _TABLE,
             filters=query,
             order_by="updated_at DESC",
@@ -210,9 +212,11 @@ class GatewayDbCronJobStore:
         if not job_id:
             return None
         jid = self._require_jiuwenclaw_id()
-        rows = await gateway_db.list_records(
+        store = await self._require_store()
+        rows = await store.list(
             _TABLE,
-            filters={"jiuwenclaw_id": jid, "job_id": job_id},
+            filters=self._job_identity(jiuwenclaw_id=jid, job_id=job_id),
+            limit=1,
         )
         if not rows:
             return None
@@ -257,25 +261,15 @@ class GatewayDbCronJobStore:
 
     async def create_job(self, **kwargs: Any) -> CronJob:
         jid = self._require_jiuwenclaw_id()
+        store = await self._require_store()
         job = build_new_cron_job(**kwargs)
         row_data = self._job_to_row(job, jiuwenclaw_id=jid)
-        db_path = self._require_db_path()
+        identity = self._job_identity(jiuwenclaw_id=jid, job_id=job.id)
         async with self._lock:
-            async with aiosqlite.connect(db_path) as conn:
-                async with conn.execute(
-                    f"SELECT 1 FROM {_TABLE} WHERE jiuwenclaw_id = ? AND job_id = ?",
-                    (jid, job.id),
-                ) as cursor:
-                    if await cursor.fetchone() is not None:
-                        raise ValueError(f"cron job already exists: {job.id}")
-                columns = list(row_data.keys())
-                placeholders = ", ".join("?" for _ in columns)
-                col_sql = ", ".join(columns)
-                await conn.execute(
-                    f"INSERT INTO {_TABLE} ({col_sql}) VALUES ({placeholders})",
-                    [row_data[c] for c in columns],
-                )
-                await conn.commit()
+            existing_rows = await store.list(_TABLE, filters=identity, limit=1)
+            if existing_rows:
+                raise ValueError(f"cron job already exists: {job.id}")
+            await store.create(_TABLE, row_data)
             self._bump_revision()
         return job
 
@@ -284,7 +278,8 @@ class GatewayDbCronJobStore:
         if not job_id:
             raise ValueError("id is required")
         jid = self._require_jiuwenclaw_id()
-        db_path = self._require_db_path()
+        store = await self._require_store()
+        identity = self._job_identity(jiuwenclaw_id=jid, job_id=job_id)
         async with self._lock:
             existing = await self.get_job(job_id)
             if existing is None:
@@ -296,14 +291,9 @@ class GatewayDbCronJobStore:
             row_data.pop("created_at", None)
             if "last_run_at" in patch:
                 row_data["last_run_at"] = patch.get("last_run_at")
-            set_clause = ", ".join(f"{k} = ?" for k in row_data)
-            params = list(row_data.values()) + [jid, job_id]
-            async with aiosqlite.connect(db_path) as conn:
-                await conn.execute(
-                    f"UPDATE {_TABLE} SET {set_clause} WHERE jiuwenclaw_id = ? AND job_id = ?",
-                    params,
-                )
-                await conn.commit()
+            result = await store.update(_TABLE, identity, row_data)
+            if result is None:
+                raise KeyError("job not found")
             self._bump_revision()
         return updated
 
@@ -312,15 +302,10 @@ class GatewayDbCronJobStore:
         if not job_id:
             return False
         jid = self._require_jiuwenclaw_id()
-        db_path = self._require_db_path()
+        store = await self._require_store()
+        identity = self._job_identity(jiuwenclaw_id=jid, job_id=job_id)
         async with self._lock:
-            async with aiosqlite.connect(db_path) as conn:
-                cursor = await conn.execute(
-                    f"DELETE FROM {_TABLE} WHERE jiuwenclaw_id = ? AND job_id = ?",
-                    (jid, job_id),
-                )
-                await conn.commit()
-                deleted = cursor.rowcount > 0
+            deleted = await store.delete(_TABLE, identity)
             if deleted:
                 self._bump_revision()
             return bool(deleted)

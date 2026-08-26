@@ -9,23 +9,16 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import format_ts, utc_now
-from ...models.application_config_models import MEMORY_CONFIG_TABLE_DEF
+from ...infrastructure.repository_access import require_memory_repository
 
-_TABLE = MEMORY_CONFIG_TABLE_DEF.table_name
 logger = logging.getLogger(__name__)
 
 
-def _row_to_dict(obj: Any) -> dict[str, Any]:
-    body = getattr(obj, "body", None)
+def _document_to_dict(document) -> dict[str, Any]:
     return {
-        "id": getattr(obj, "id"),
-        "jiuwenclaw_id": getattr(obj, "jiuwenclaw_id"),
-        "body": dict(body) if isinstance(body, dict) else body,
-        "source": getattr(obj, "source", "manager"),
-        "revision": getattr(obj, "revision", 1),
-        "created_at": format_ts(getattr(obj, "created_at", None)),
-        "updated_at": format_ts(getattr(obj, "updated_at", None)),
+        "body": dict(document.body),
+        "source": document.source,
+        "revision": document.revision,
     }
 
 
@@ -59,6 +52,7 @@ class MemoryConfigService:
         source: str = "manager",
         **_extra: Any,
     ) -> dict[str, Any] | None:
+        _ = jiuwenclaw_id
         if body is None and isinstance(_extra.get("body"), dict):
             body = _extra["body"]
         if body is None:
@@ -68,42 +62,23 @@ class MemoryConfigService:
         if not isinstance(body, dict):
             raise ValueError("memory_config.body must be an object for upsert")
 
-        now = utc_now()
-        existing = await self._handler.get(_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
-        if existing is not None:
-            update_data: dict[str, Any] = {
-                "body": body,
-                "source": str(source or "manager"),
-                "updated_at": now,
-                "revision": int(getattr(existing, "revision", 1) or 1) + 1,
-            }
-            updated = await self._handler.update(
-                _TABLE,
-                {"jiuwenclaw_id": jiuwenclaw_id},
-                update_data,
-            )
-            result = _row_to_dict(updated) if updated else None
-        else:
-            row_data = {
-                "jiuwenclaw_id": jiuwenclaw_id,
-                "body": body,
-                "source": str(source or "manager"),
-                "revision": 1,
-                "created_at": now,
-                "updated_at": now,
-            }
-            created = await self._handler.create(_TABLE, row_data)
-            result = _row_to_dict(created) if created else None
-
+        repo = require_memory_repository()
+        saved = await repo.upsert_body(
+            body,
+            source=str(source or "manager"),
+        )
+        result = _document_to_dict(saved)
         _apply_memory(body, op="upsert")
         logger.info(
             "[ManagerConfigReceiver] memory_config hot-reload upsert revision=%s",
-            (result or {}).get("revision"),
+            result.get("revision"),
         )
         return result
 
     async def delete(self, jiuwenclaw_id: str) -> None:
-        await self._handler.delete(_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
+        _ = jiuwenclaw_id
+        repo = require_memory_repository()
+        await repo.delete()
         _apply_memory(None, op="delete")
         logger.info(
             "[ManagerConfigReceiver] memory_config deleted jiuwenclaw_id=%s",
