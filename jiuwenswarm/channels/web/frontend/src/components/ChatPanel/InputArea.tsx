@@ -1329,6 +1329,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (!attachMenuOpen) return;
 
     const handlePointerDown = (event: PointerEvent) => {
+      // ExtensionPickerPanel.tsx 扩展面板里点"连接"弹出的授权弹窗（ConnectTokenModal/
+      // CliAuthModal）是单独 portal 到 document.body 的兄弟节点，既不在 attachMenuRef/
+      // attachMenuPortalRef 里，也不在 extensionPanelRef 里——不跳过的话点弹窗内部会被这里
+      // 也判成"点了外面"，把一级"+"菜单和二级扩展面板一起关掉，弹窗因为状态挂在扩展面板组件
+      // 里也跟着卸载消失（2026-08-25 用户反馈，同一根因见 ExtensionPickerPanel.tsx 头部
+      // pointerdown 处理的注释）。
+      if ((event.target as HTMLElement | null)?.closest?.('[data-connector-auth-modal]')) return;
       if (
         !attachMenuRef.current?.contains(event.target as Node) &&
         !attachMenuPortalRef.current?.contains(event.target as Node) &&
@@ -3088,12 +3095,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       {showWorkContextRow ? (
         <div ref={workMenuRef} className="chat-work-context-row" data-testid="chat-panel-work-context-row">
           <div className={clsx('chat-work-select', workMenuOpen === 'project' && 'chat-work-select--open')} data-testid="chat-panel-work-select">
-            <button
-              type="button"
+            <div
+              role="button"
+              tabIndex={0}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isWorkContextLocked) setWorkMenuOpen((open) => open === 'project' ? null : 'project'); } }}
               className={clsx('chat-work-select__trigger', displayedProject && 'chat-work-select__trigger--selected')}
               data-testid="chat-panel-work-select-trigger"
               onClick={() => !isWorkContextLocked && setWorkMenuOpen((open) => open === 'project' ? null : 'project')}
-              disabled={isWorkContextLocked}
               title={displayedProject?.project_dir || (isWorkContextLocked ? t('multiSession.project.lockedProjectTitle') : t('multiSession.project.chooseProjectDirectory'))}
             >
               <WorkIcon name="folder" className="chat-work-select__root-icon" />
@@ -3123,7 +3131,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
                 </svg>
               )}
-            </button>
+            </div>
             {workMenuOpen === 'project' && !isWorkContextLocked ? (
               <div className={clsx('chat-work-select__menu', hasInputProjectOptions && 'chat-work-select__menu--projects')} role="menu" data-testid="chat-panel-work-select-menu">
                 {!hasInputProjectOptions ? (

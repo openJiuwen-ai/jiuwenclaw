@@ -19,8 +19,8 @@ description: |
 ├── manifest.json          # 必须
 ├── README.md              # 必须
 ├── skills/<name>/SKILL.md # 可选
-├── tools/<name>.py        # 可选
-├── rails/<name>.py        # 可选
+├── tools/<name>_tool.py        # 可选
+├── rails/<name>_rail.py        # 可选
 ```
 
 包落盘目录（由 `JIUWENSWARM_DATA_DIR` 决定，未设置时默认 `~/.jiuwenswarm`）：
@@ -138,7 +138,7 @@ python3 <skill_dir>/scripts/register_plugin.py <plugin-name> --bump
 2. **产物位置**：包路径（`create` 用 init 脚本输出；`update` 用已定位的 `local/<plugin-name>/`）
 3. **推荐提问**：直接引用 manifest 的 `quick_inputs`（3 条），强调是**能力触发语**而非人设介绍
 4. **如何启用**：
-  - `create`：打开插件中心 → 找到该插件 → 安装 → **启用** → 新对话输入区勾选插件 chip（可配合任意专家）
+  - `create`：打开扩展 → 找到该插件 → 安装 → **启用** → 新对话输入区勾选插件 chip
   - `update`：若原本已启用，建议重开对话或切换装备以加载新版本；若未安装，同 `create` 先安装并启用
 
 ---

@@ -65,10 +65,12 @@ interface ConnectorMarketPanelProps {
    */
   onUseExtension?: (payload: { kind: 'plugin' | 'mcp'; id: string }) => void;
   /**
-   * "创建"下拉菜单里的"通过聊天创建"——跳新会话，不带任何预填内容（用户 2026-08-20 明确要求
-   * "不需要有预输入文字什么的，就直接跳转过去就好"）。跟 onUseExample/onUseExtension 同一条
-   * requestSessionNavigation('new', ...) 通道，只是不传 options。不传这个 prop 就退化成原来的
-   * "尚未接入"提示（同款可选 prop 处理）。
+   * "创建"下拉菜单里的"通过聊天创建"——跳新会话，自动预填"帮我创建一个xxx插件，擅长xxx"提示词
+   * 并把 plugin-creator 选中为技能 chip（2026-08-25，取代此前"不带预填"的决定）。跟
+   * SkillPanel.handleCreateViaChat（"通过聊天创建技能"）走同一条 jiuwen:new-conversation
+   * 事件链路，而不是 onUseExample/onUseExtension 用的 requestSessionNavigation('new', ...)
+   * ——因为 plugin-creator 本质是技能，需要 skill chip 机制而不是 initialEnabledPlugins。
+   * 不传这个 prop 就退化成原来的"尚未接入"提示（同款可选 prop 处理）。
    */
   onCreateViaChat?: () => void;
 }
@@ -202,9 +204,12 @@ export function ConnectorMarketPanel({ onUseExample, onUsePluginExample, onUseEx
           onOpenPluginDetail={(id) => setView({ name: 'plugin-detail', id, fromMy: topTab === 'my' })}
           onUse={onUseExtension ?? handleUseNotWired}
           onCreateManual={() => setView({ name: 'create-manual' })}
-          // 2026-08-20：接上 onCreateViaChat（App.tsx 传 requestSessionNavigation('new')，不带
-          // options，直接跳空白新会话）。不传这个 prop（理论上不会发生，App.tsx 恒传）才退化成
-          // 提示未接入，跟 onUse/handleUseNotWired 同款可选 prop 兜底处理。
+          // 2026-08-25：onCreateViaChat 改为跳新会话并预填"帮我创建一个xxx插件，擅长xxx"提示词，
+          // 同时把 plugin-creator 作为技能 chip 自动选中（App.tsx 派发 jiuwen:new-conversation，
+          // 跟 SkillPanel.handleCreateViaChat 的"通过聊天创建技能"是同一条链路，见该文件
+          // handleCreateViaChat 注释）——2026-08-20 那版"不带预填、直接跳空白新会话"的决定已被
+          // 本次需求取代。不传这个 prop（理论上不会发生，App.tsx 恒传）才退化成提示未接入，跟
+          // onUse/handleUseNotWired 同款可选 prop 兜底处理。
           onCreateWithSkill={onCreateViaChat ?? (() => window.alert(t('connectorMarket.create.withSkillNotWired')))}
           onCreateWithUpload={() => setUploadModalOpen(true)}
           onRegisterCustomMcp={() => setView({ name: 'register-mcp' })}

@@ -15,14 +15,15 @@ import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea, type InputAreaHandle } from './InputArea';
-import chatIcon from '../../assets/chat.svg';
-import expandIcon from '../../assets/expand.svg';
+import ChatOverviewIcon from '../../assets/chat-overview.svg?react';
+import PanelCollapseIcon from '../../assets/panel-collapse.svg?react';
 import lineUpIcon from '../../assets/lineUp.svg';
 import loadSendIcon from '../../assets/load-send.svg';
 import editIcon from '../../assets/edit.svg';
 import deleteIcon from '../../assets/delete.svg';
 import moveIcon from '../../assets/move.svg';
 import restartIcon from '../../assets/restart.svg';
+import ShareExportIcon from '../../assets/share-export.svg?react';
 import { InlineQuestionCard } from './InlineQuestionCard';
 import { InteractionSlot } from '../InteractionSlot';
 import { GoalBar } from '../GoalBar';
@@ -31,7 +32,7 @@ import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember, type TeamMemberIdentity } from '../../utils/teamMemberAvatar';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
-import welcomeBanner from '../../assets/home-banner-workswarm.png';
+import welcomeBanner from '../../assets/home-banner-workswarm.svg';
 import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
@@ -1280,7 +1281,7 @@ export function ChatPanel({
                     <span className="share-export-btn__label" data-testid="chat-panel-share-export-loading-label">{t('share.generating')}</span>
                   </>
                 ) : (
-                  <Share2 size={14} strokeWidth={2} />
+                  <ShareExportIcon className="h-[32px] w-[32px]" />
                 )}
               </button>
             )}
@@ -1302,7 +1303,7 @@ export function ChatPanel({
               data-variant="collapse"
               onClick={() => onToggleTeamArea?.(teamAreaExpanded === false ? null : false)}
             >
-              <img src={chatIcon} alt="" className="chat-header-icon-btn__icon" />
+              <ChatOverviewIcon className="h-[32px] w-[32px]" aria-hidden />
             </button>
             {!(teamAreaExpanded && mode !== 'team') && (
               <button
@@ -1312,7 +1313,7 @@ export function ChatPanel({
                 data-variant="expand"
                 onClick={() => onToggleTeamArea?.(teamAreaExpanded === true ? null : true)}
               >
-                <img src={expandIcon} alt="" className="chat-header-icon-btn__icon" />
+                <PanelCollapseIcon className="h-[32px] w-[32px]" aria-hidden />
               </button>
             )}
           </div>
@@ -1371,9 +1372,9 @@ export function ChatPanel({
             </>
           ) : (
             <div className="chat-welcome" data-testid="chat-panel-welcome">
-              <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} data-testid="chat-panel-welcome-banner" />
               <h2 className="chat-welcome__heading" data-testid="chat-panel-welcome-heading"><WelcomeHeading /></h2>
               <div className="chat-welcome__composer" data-testid="chat-panel-welcome-composer">
+                <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} data-testid="chat-panel-welcome-banner" />
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />

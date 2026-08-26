@@ -31,6 +31,7 @@ def write_stdout(text: str) -> None:
     """CLI product output to fd 1 (avoid print/sys.stdout for G.LOG.02)."""
     os.write(1, text.encode("utf-8"))
 
+
 HOT_LOAD_WORKER = Path(__file__).resolve().parent / "validate_hot_load_worker.py"
 HOT_LOAD_TIMEOUT_SEC = 120
 
@@ -65,7 +66,6 @@ FORBIDDEN_OUTPUT_PARAMS = {
     "output_root",
     "workspace_root",
     "base_output_dir",
-    "output_dir",
     "absolute_path",
 }
 PATH_RECEIVER_WRITE_METHODS = {
@@ -372,7 +372,8 @@ def _has_base(cls: ast.ClassDef, keyword: str) -> bool:
 
 def _has_async_method(cls: ast.ClassDef, name: str) -> bool:
     return any(
-        isinstance(node, ast.AsyncFunctionDef) and node.name == name for node in cls.body
+        isinstance(node, ast.AsyncFunctionDef) and node.name == name
+        for node in cls.body
     )
 
 
@@ -429,20 +430,32 @@ def _is_package_path_write(node: ast.Call, package_path_vars: set[str]) -> bool:
     if attr in PATH_RECEIVER_WRITE_METHODS:
         return _contains_package_path(node.func, package_path_vars)
     if attr == "open":
-        return _contains_package_path(node.func, package_path_vars) and _open_mode_is_write(node)
+        return _contains_package_path(
+            node.func, package_path_vars
+        ) and _open_mode_is_write(node)
     if isinstance(node.func, ast.Name) and node.func.id == "open":
-        return bool(node.args) and _contains_package_path(node.args[0], package_path_vars) and _open_mode_is_write(node)
+        return (
+            bool(node.args)
+            and _contains_package_path(node.args[0], package_path_vars)
+            and _open_mode_is_write(node)
+        )
     if attr in PATH_ARGUMENT_WRITE_METHODS:
         return any(_contains_package_path(arg, package_path_vars) for arg in node.args)
     return False
 
 
-def _check_runtime_path_policy(tree: ast.Module, rel: str, component: str, layer: Layer) -> None:
+def _check_runtime_path_policy(
+    tree: ast.Module, rel: str, component: str, layer: Layer
+) -> None:
     """拦截明确的运行时路径坏味道，不做复杂静态分析。"""
     package_path_vars: set[str] = set()
 
     assignments = sorted(
-        (node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))),
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+        ),
         key=lambda node: getattr(node, "lineno", 0),
     )
     for node in assignments:
@@ -460,16 +473,28 @@ def _check_runtime_path_policy(tree: ast.Module, rel: str, component: str, layer
             for target in targets:
                 package_path_vars.update(_target_names(target))
 
-    for node in sorted((n for n in ast.walk(tree) if isinstance(n, ast.Call)), key=lambda n: n.lineno):
+    for node in sorted(
+        (n for n in ast.walk(tree) if isinstance(n, ast.Call)), key=lambda n: n.lineno
+    ):
         if _is_runtime_cwd_bypass(node):
+            fix = (
+                "Tool 的文件写入路径必须由入参显式传入"
+                if component == "Tool"
+                else "内部状态路径统一使用 get_workspace()"
+            )
             layer.error(
                 f"{rel}: 禁止使用 Path.cwd() / os.getcwd()（第 {node.lineno} 行）",
-                "运行态目录统一改用 openjiuwen.core.sys_operation.cwd.get_cwd()",
+                fix,
             )
         if _is_package_path_write(node, package_path_vars):
+            fix = (
+                "包内路径只读；Tool 的文件写入路径必须由入参显式传入"
+                if component == "Tool"
+                else "包内路径只读；内部状态使用 get_workspace()"
+            )
             layer.error(
                 f"{rel}: {component} 禁止用包内路径写运行时文件（第 {node.lineno} 行）",
-                "包内路径只读；产物用 get_cwd()，状态用 get_workspace() or get_cwd()",
+                fix,
             )
 
 
@@ -477,7 +502,11 @@ def _check_no_arg_init(
     cls: ast.ClassDef, rel: str, layer: Layer, *, required: bool, fix: str
 ) -> None:
     init = next(
-        (n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"),
+        (
+            n
+            for n in cls.body
+            if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+        ),
         None,
     )
     if init is None:
@@ -520,7 +549,7 @@ def _check_tool_card(cls: ast.ClassDef, rel: str, layer: Layer) -> None:
         return
     if not isinstance(params, ast.Dict):
         layer.warn(
-            f"{rel}: input_params 不是字面量 dict，无法静态确认是否含 \"type\": \"object\""
+            f'{rel}: input_params 不是字面量 dict，无法静态确认是否含 "type": "object"'
         )
         return
     has_object_type = any(
@@ -542,7 +571,7 @@ def _check_tool_card(cls: ast.ClassDef, rel: str, layer: Layer) -> None:
             if key in FORBIDDEN_OUTPUT_PARAMS:
                 layer.error(
                     f"{rel}: input_params.properties 禁止暴露 {key!r}",
-                    "不要让 Tool 自带产物根；只允许 filename / output_subdir 等相对运行目录参数",
+                    "文件写入目录使用必填的 output_dir；不要暴露其他产物根参数",
                 )
 
 

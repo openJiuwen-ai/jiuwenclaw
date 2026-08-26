@@ -86,8 +86,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: 0;
   border-radius: 4px;
@@ -3587,19 +3587,18 @@ overflow: hidden;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: var(--color-text-tertiary);
+  color: var(--color-text-primary);
   cursor: pointer;
 }
 
 .share-export-btn:hover:not(:disabled) {
   background: var(--color-action-secondary);
-  color: var(--color-text-primary);
 }
 
 .share-export-btn:focus-visible {
@@ -3656,21 +3655,33 @@ overflow: hidden;
   padding: 2rem 1.5rem 6rem 1.5rem;
 }
 
+.chat-welcome__composer {
+  position: relative;
+  width: min(100%, 768px);
+  margin-bottom: 1.25rem;
+}
+
 .chat-welcome__banner {
+  position: absolute;
+  top: -124px;
+  right: -129px;
   width: 300px;
   height: 150px;
   max-width: 100%;
   display: block;
   object-fit: contain;
+  pointer-events: none;
+  z-index: 10;
 }
 
 .chat-welcome__heading {
-  font-size: 24px;
+  font-size: 32px;
   font-weight: 600;
   color: var(--color-text-strong);
   line-height: 48px;
-  margin: 20px 0;
-  text-align: center;
+  margin: 0 0 20px 0;
+  text-align: left;
+  align-self: flex-start;
 }
 
 .chat-welcome__subtext {

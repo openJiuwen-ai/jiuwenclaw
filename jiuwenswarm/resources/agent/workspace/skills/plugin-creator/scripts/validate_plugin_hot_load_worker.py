@@ -13,6 +13,7 @@ Exit codes:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -51,6 +52,85 @@ def _result(
         "skip_reason": skip_reason,
         "skip_fix": skip_fix,
     }
+
+
+def _build_rail_smoke_inputs(event: Any) -> Any:
+    """Build benign typed inputs for one rail callback event."""
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentCallbackEvent,
+        InvokeInputs,
+        ModelCallInputs,
+        SteeringDrainInputs,
+        TaskIterationInputs,
+        ToolCallInputs,
+        UserMessageInputs,
+    )
+
+    if event in (AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
+        return InvokeInputs(query="plugin validation", result={})
+    if event in (
+        AgentCallbackEvent.BEFORE_MODEL_CALL,
+        AgentCallbackEvent.AFTER_MODEL_CALL,
+        AgentCallbackEvent.ON_MODEL_EXCEPTION,
+    ):
+        return ModelCallInputs(messages=[], tools=[], response={})
+    if event in (
+        AgentCallbackEvent.BEFORE_TOOL_CALL,
+        AgentCallbackEvent.AFTER_TOOL_CALL,
+        AgentCallbackEvent.ON_TOOL_EXCEPTION,
+    ):
+        return ToolCallInputs(tool_name="", tool_args={}, tool_result={})
+    if event in (
+        AgentCallbackEvent.BEFORE_TASK_ITERATION,
+        AgentCallbackEvent.AFTER_TASK_ITERATION,
+    ):
+        return TaskIterationInputs(
+            iteration=1,
+            loop_event=None,
+            query="plugin validation",
+            result={},
+        )
+    if event == AgentCallbackEvent.ON_USER_MESSAGE:
+        return UserMessageInputs(parts=["plugin validation"])
+    if event == AgentCallbackEvent.BEFORE_STEERING_DRAIN:
+        return SteeringDrainInputs(pending=1)
+    return {}
+
+
+async def _smoke_rail_callbacks(
+    rail: Any,
+    *,
+    identity: str,
+    agent: Any,
+    session: Any,
+) -> list[list[str]]:
+    """Invoke every registered rail callback once with a benign runtime context."""
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+    errors: list[list[str]] = []
+    for event, callback in rail.get_callbacks().items():
+        if not callable(callback):
+            continue
+        ctx = AgentCallbackContext(
+            agent=agent,
+            event=event,
+            inputs=_build_rail_smoke_inputs(event),
+            session=session,
+        )
+        if event.value.startswith("on_") and event.value.endswith("_exception"):
+            ctx.exception = RuntimeError("plugin validation smoke exception")
+        try:
+            result = callback(ctx)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            errors.append(
+                [
+                    f"Rail callback 冒烟失败: {identity}.{event.value}: {exc}",
+                    "",
+                ]
+            )
+    return errors
 
 
 async def _hot_load(pkg: Path) -> dict[str, Any]:
@@ -191,6 +271,17 @@ async def _hot_load(pkg: Path) -> dict[str, Any]:
                                     "",
                                 ]
                             )
+                    callback_errors = await _smoke_rail_callbacks(
+                        rail,
+                        identity=ref.identity,
+                        agent=agent,
+                        session=test_session,
+                    )
+                    errors.extend(callback_errors)
+                    if not callback_errors:
+                        notes.append(
+                            f"Rail callback 冒烟通过: {ref.identity}（{len(callbacks)} 个）"
+                        )
         finally:
             await test_session.post_run()
 

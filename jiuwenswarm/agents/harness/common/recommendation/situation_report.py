@@ -160,7 +160,9 @@ def _scan_sessions(
     summaries: list[SessionSummary] = []
 
     for session_dir in sessions_dir.iterdir():
-        if not session_dir.is_dir() or session_dir.name.startswith("heartbeat"):
+        if not session_dir.is_dir() or session_dir.name.startswith(
+            ("health_check_", "heartbeat")
+        ):
             continue
 
         meta_path = session_dir / "metadata.json"

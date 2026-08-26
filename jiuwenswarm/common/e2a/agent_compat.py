@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any
 
 from jiuwenswarm.common.e2a.gateway_normalize import E2A_INTERNAL_CONTEXT_KEY
 from jiuwenswarm.common.e2a.models import E2AEnvelope
@@ -61,11 +60,11 @@ def e2a_to_agent_request(env: E2AEnvelope) -> AgentRequest:
         is_stream=bool(env.is_stream),
         timestamp=_e2a_timestamp_to_float(env.timestamp),
         metadata=metadata,
-        # ``user_id`` is an authenticated routing identity, not channel
-        # metadata.  AgentOS cron snapshots and Agent-side cron commands use
-        # it to address the Gateway-owned job view; omitting it makes every
-        # restarted AgentServer see an empty cron list.
-        user_id=env.user_id,
         # V2: 透传 agent_ref 到 AgentServer，供响应侧 chunk/response 回带（设计 §6.3）。
         agent_ref=env.agent_ref,
+        # ``user_id`` is a Gateway-authenticated routing identity, not channel
+        # metadata. Preserve it across E2A as a normalized string so both
+        # AgentServer-owned Heartbeat and Gateway-owned Cron enforce the same
+        # ownership boundary after reconnect/restart.
+        user_id=str(env.user_id or ""),
     )

@@ -57,12 +57,21 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
 from jiuwenswarm.agents.swarm import registry
 from jiuwenswarm.agents.swarm.providers import tools as _tools
 from jiuwenswarm.common.mode_matrix import (
+    NEW_TEAM_CODE_NORMAL,
+    NEW_TEAM_CODE_PLAN,
     TEAM_PLAN_CODE_MODE,
     is_team_plan_mode,
 )
 
 # Modes that route to the code adapter and get the code member profile.
-_CODE_MODES: frozenset[str] = frozenset({"code.team", TEAM_PLAN_CODE_MODE})
+_CODE_MODES: frozenset[str] = frozenset(
+    {
+        "code.team",
+        TEAM_PLAN_CODE_MODE,
+        NEW_TEAM_CODE_NORMAL,
+        NEW_TEAM_CODE_PLAN,
+    }
+)
 
 
 def _kv_cache_affinity_config(config: dict[str, Any]) -> KVCacheAffinityConfig:
@@ -133,6 +142,7 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.MULTIMODAL_IMAGE,
     registry.SECURITY,
     registry.MODEL_ANOMALY_DETECTION,
+    registry.HEARTBEAT,
     registry.CODE_LSP,
     registry.CODE_PROJECT_MEMORY,
     registry.PERMISSION_INTERRUPT,
@@ -301,7 +311,9 @@ def _team_skill_use_rail_spec(config: dict[str, Any], role: str) -> RailSpec:
     )
 
 
-def _collapse_skill_use_rails(rails: list[RailSpec], *, retrieval_enabled: bool) -> list[RailSpec]:
+def _collapse_skill_use_rails(
+    rails: list[RailSpec], *, retrieval_enabled: bool
+) -> list[RailSpec]:
     """Keep exactly one Skill rail, the first declared one.
 
     A member must never mount two Skill rails: they scan the same library and
@@ -473,7 +485,9 @@ def _tool_params(name: str, config: dict[str, Any]) -> dict[str, Any]:
 def _team_common_rail_names(role: str) -> tuple[str, ...]:
     """Shared chat-team rails; leaders omit harness todo planning."""
     if role == "leader":
-        return tuple(name for name in _COMMON_RAIL_NAMES if name != registry.TASK_PLANNING)
+        return tuple(
+            name for name in _COMMON_RAIL_NAMES if name != registry.TASK_PLANNING
+        )
     return _COMMON_RAIL_NAMES
 
 
@@ -485,8 +499,7 @@ def _code_base_rail_names(role: str) -> tuple[str, ...]:
     leader's interrupt path is unreliable in a team context.
     """
     names = tuple(
-        name for name in _CODE_RAIL_NAMES
-        if name != registry.PERMISSION_INTERRUPT
+        name for name in _CODE_RAIL_NAMES if name != registry.PERMISSION_INTERRUPT
     )
     if role == "leader":
         return tuple(name for name in names if name != registry.CODE_TASK_PLANNING)
@@ -588,7 +601,7 @@ def _build_code_capability_specs(
     When ``enable_permissions`` is false the permission interrupt rail is
     removed entirely: it would deadlock a teammate on any ASK-level tool call.
     """
-    is_team_plan_leader = mode == TEAM_PLAN_CODE_MODE and role == "leader"
+    is_team_plan_leader = is_team_plan_mode(mode) and role == "leader"
 
     rails_specs: list[RailSpec] = [
         RailSpec(type=name, params=_rail_params(name, config))
@@ -662,7 +675,9 @@ def build_member_capability_specs(
         A ``(rails_specs, tool_specs)`` tuple of openjiuwen specs.
     """
     if _is_code_mode(mode):
-        return _build_code_capability_specs(config, mode, role, enable_permissions=enable_permissions)
+        return _build_code_capability_specs(
+            config, mode, role, enable_permissions=enable_permissions
+        )
     return _build_team_capability_specs(
         config, mode, role, enable_permissions=enable_permissions
     )
@@ -685,7 +700,7 @@ def _subagent_language(mode: str, role: str, config: dict[str, Any]) -> str:
     configured preferred language. Baked into ``factory_kwargs`` so the generic
     openjiuwen sub-agent providers stay free of swarm mode/role policy.
     """
-    if mode == TEAM_PLAN_CODE_MODE and role == "leader":
+    if is_team_plan_mode(mode) and role == "leader":
         return resolve_language((config or {}).get("preferred_language", "zh"))
     return "en"
 
@@ -779,7 +794,9 @@ def build_member_subagent_specs(
 
     specs: list[SubAgentSpec] = []
     if _is_subagent_default_enabled(
-        subagents_cfg.get("statusline-setup") if isinstance(subagents_cfg, dict) else None
+        subagents_cfg.get("statusline-setup")
+        if isinstance(subagents_cfg, dict)
+        else None
     ):
         specs.append(
             _code_subagent_spec(
@@ -795,7 +812,9 @@ def build_member_subagent_specs(
 
     specs.extend(
         [
-            _code_subagent_spec("explore_agent", registry.EXPLORE_AGENT, react, language),
+            _code_subagent_spec(
+                "explore_agent", registry.EXPLORE_AGENT, react, language
+            ),
             _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
         ]
     )
@@ -840,7 +859,10 @@ def build_member_deep_agent_spec(
         A new ``DeepAgentSpec`` with the capability specs applied.
     """
     rails_specs, tool_specs = build_member_capability_specs(
-        config, mode, role, enable_permissions=enable_permissions,
+        config,
+        mode,
+        role,
+        enable_permissions=enable_permissions,
     )
 
     merged_rails = list(base_spec.rails or [])
@@ -850,7 +872,9 @@ def build_member_deep_agent_spec(
     merged_mcps = _merge_mcp_configs(base_spec.mcps, mcp_configs)
 
     retrieval_enabled = _retrieval_enabled(config)
-    merged_rails = _collapse_skill_use_rails(merged_rails, retrieval_enabled=retrieval_enabled)
+    merged_rails = _collapse_skill_use_rails(
+        merged_rails, retrieval_enabled=retrieval_enabled
+    )
 
     update: dict[str, Any] = {
         "rails": merged_rails,
@@ -879,8 +903,12 @@ def build_member_deep_agent_spec(
     if not _is_code_mode(mode):
         react_cfg = (config or {}).get("react", {})
         react_cfg = react_cfg if isinstance(react_cfg, dict) else {}
-        subagents_cfg = react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
-        if isinstance(subagents_cfg, dict) and _is_subagent_enabled(subagents_cfg.get("browser_agent")):
+        subagents_cfg = (
+            react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
+        )
+        if isinstance(subagents_cfg, dict) and _is_subagent_enabled(
+            subagents_cfg.get("browser_agent")
+        ):
             language = _subagent_language(mode, role, config)
             team_browser_spec = _code_subagent_spec(
                 "browser_agent", registry.SWARM_BROWSER_AGENT, react_cfg, language
@@ -895,8 +923,7 @@ def build_member_deep_agent_spec(
         # checks are what actually match here.
         if any(_is_explore_subagent(spec) for spec in subagent_specs):
             merged_subagents = [
-                spec for spec in merged_subagents
-                if not _is_explore_subagent(spec)
+                spec for spec in merged_subagents if not _is_explore_subagent(spec)
             ]
         # Remove any browser_agent from base_spec to prevent the shared
         # playwright_official_stdio entry from co-existing with our isolated one.
@@ -904,7 +931,8 @@ def build_member_deep_agent_spec(
             getattr(s, "subagent_type", None) == "browser_agent" for s in subagent_specs
         ):
             merged_subagents = [
-                s for s in merged_subagents
+                s
+                for s in merged_subagents
                 if getattr(s, "subagent_type", None) != "browser_agent"
             ]
         if team_browser_spec:
@@ -930,13 +958,9 @@ def _merge_mcp_configs(
     if not config_mcps:
         return merged or None
 
-    existing_ids = {
-        str(getattr(cfg, "server_id", "") or "").strip()
-        for cfg in merged
-    }
+    existing_ids = {str(getattr(cfg, "server_id", "") or "").strip() for cfg in merged}
     existing_names = {
-        str(getattr(cfg, "server_name", "") or "").strip()
-        for cfg in merged
+        str(getattr(cfg, "server_name", "") or "").strip() for cfg in merged
     }
 
     for cfg in config_mcps:

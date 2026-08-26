@@ -7,7 +7,7 @@
 | SKILL mode | 本文件怎么用 |
 |------------|-------------|
 | `create` | init 完成后按下方完整顺序执行 §1→§4 |
-| `update` | **跳过 §1**；只按用户确认范围局部改文件；能力增减走 §2–§4；不要重写整包 |
+| `update` | **跳过 §1**；只按用户确认范围局部改文件；能力增减走 §2–§4；新增 Tool 时还必须回写 persona「工作流程」；不要重写整包 |
 
 ## 执行顺序
 
@@ -133,7 +133,7 @@ python -c "import ast; ast.parse(open(r'<file>', encoding='utf-8').read())"
 
 ```json
 {
-  "file": "tools/<name>.py",
+  "file": "tools/<name>_tool.py",
   "class": "<PascalCase>",
   "display_name": { "en": "<tool_or_rail_id>", "zh": "<tool_or_rail_id>" },
   "display_description": {

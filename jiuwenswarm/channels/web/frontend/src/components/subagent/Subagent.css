@@ -11,20 +11,21 @@
 
 .single-agent-tool-tabs {
   display: flex;
-  min-height: 56px;
+  min-height: 68px;
   flex-shrink: 0;
   align-items: stretch;
   justify-content: space-between;
   border-bottom: 1px solid var(--color-border-default);
   background: var(--color-surface-card);
-  padding-inline: 24px;
+  padding-left: 24px;
+  padding-right: 16px;
 }
 
 .single-agent-tool-tabs__list {
   display: flex;
   min-width: 0;
-  align-items: stretch;
-  gap: 24px;
+  align-items: center;
+  gap: 16px;
 }
 
 .single-agent-tool-tab {
@@ -32,8 +33,10 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  height: 36px;
+  padding: 8px 16px;
   border-bottom: 2px solid transparent;
-  color: var(--color-text-secondary);
+  color: var(--color-text-primary);
   font-size: var(--font-size-sm);
   white-space: nowrap;
 }
@@ -43,10 +46,17 @@
   color: var(--color-text-primary);
 }
 
+.single-agent-tool-tab:not(.single-agent-tool-tab--active):hover,
+.single-agent-tool-tab:not(.single-agent-tool-tab--active):focus-visible {
+  background: var(--color-tool-tab-hover-bg);
+  border-radius: 8px;
+}
+
 .single-agent-tool-tab--active {
-  border-bottom-color: var(--color-action-primary);
   color: var(--color-text-primary);
   font-weight: 600;
+  background: var(--color-tool-tab-active-bg);
+  border-radius: 8px;
 }
 
 .single-agent-tool-tabs__collapse {
@@ -192,7 +202,7 @@
   padding: 24px;
 }
 
-.subagent-expanded-panel__list > .scrollbar-gutter-stable {
+.subagent-expanded-panel__list>.scrollbar-gutter-stable {
   scrollbar-gutter: stable;
 }
 
@@ -230,7 +240,7 @@
   scrollbar-gutter: stable;
 }
 
-.subagent-turn + .subagent-turn {
+.subagent-turn+.subagent-turn {
   margin-top: var(--subagent-turn-gap);
   border-top: 2px solid var(--color-border-default);
   padding-top: var(--subagent-turn-padding);
@@ -267,11 +277,11 @@
   line-height: 1.6;
 }
 
-.subagent-markdown > :first-child {
+.subagent-markdown> :first-child {
   margin-top: 0;
 }
 
-.subagent-markdown > :last-child {
+.subagent-markdown> :last-child {
   margin-bottom: 0;
 }
 

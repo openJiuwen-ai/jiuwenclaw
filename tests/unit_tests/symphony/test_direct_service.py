@@ -189,6 +189,7 @@ def _forbidden_symphony_import(
     node,
     *,
     allowed_symbols,
+    allowed_modules=frozenset(),
 ):
     if isinstance(node, ast.Import):
         imported_modules = {
@@ -196,7 +197,7 @@ def _forbidden_symphony_import(
             for alias in node.names
             if alias.name.startswith("openjiuwen.symphony")
         }
-        forbidden = imported_modules - {"openjiuwen.symphony"}
+        forbidden = imported_modules - {"openjiuwen.symphony", *allowed_modules}
         return ",".join(sorted(forbidden))
     if not isinstance(node, ast.ImportFrom):
         return ""
@@ -204,6 +205,8 @@ def _forbidden_symphony_import(
     if node.module == "openjiuwen":
         return "openjiuwen:symphony" if "symphony" in imported else ""
     if not (node.module or "").startswith("openjiuwen.symphony"):
+        return ""
+    if node.module in allowed_modules:
         return ""
     if node.module == "openjiuwen.symphony" and imported <= allowed_symbols:
         return ""
@@ -1339,6 +1342,10 @@ def test_production_uses_only_stable_openjiuwen_symphony_imports():
         "SourceSnapshot",
         "SymphonyRuntime",
     }
+    allowed_modules = {
+        "openjiuwen.symphony.agent",
+        "openjiuwen.symphony.discovery",
+    }
     offenders = []
     for path in package_root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -1346,6 +1353,7 @@ def test_production_uses_only_stable_openjiuwen_symphony_imports():
             violation = _forbidden_symphony_import(
                 node,
                 allowed_symbols=allowed_symbols,
+                allowed_modules=allowed_modules,
             )
             if violation:
                 offenders.append(

@@ -912,7 +912,6 @@
       "externalCliAgentCodexEnabled": "启用 Codex",
       "kvCacheReleaseEnabled": "旧链路（KV 释放）",
       "kvCacheAffinityEnabled": "新链路（Ascend 亲和）",
-      "skillRetrievalBuildRootCategoriesPlaceholder": "直接编辑 YAML/JSON 树根分层配置",
       "agentSkillsPlaceholder": "点击选择技能",
       "agentSkillsEmpty": "暂无已安装技能",
       "agentName": "名称",
@@ -937,22 +936,9 @@
       "symphonyEnabled": "启用技能编排",
       "symphonyDynamicGraphEnabled": "启用动态图谱",
       "skillRetrievalEnabled": "启用技能检索",
-      "skillRetrievalBuildBranchingFactor": "拆分阈值基数",
-      "skillRetrievalBuildMaxDepth": "最大树深",
-      "skillRetrievalBuildRootCategories": "树根分层配置",
-      "skillRetrievalBuildMaxWorkers": "构建并发数",
-      "skillRetrievalBuildMaxRetries": "构建重试次数",
-      "skillRetrievalBuildTimeout": "构建请求超时（秒）",
-      "skillRetrievalBuildTotalTimeout": "构建总超时（秒，0为不限制）",
-      "skillRetrievalBuildClassificationBatchLimit": "分类批大小上限",
-      "skillRetrievalBuildDiscoverySeed": "分支发现随机种子",
-      "skillRetrievalBuildPostprocessEnabled": "启用构建后处理",
-      "skillRetrievalBuildPostprocessMaxPasses": "后处理最大轮次",
-      "skillRetrievalBuildPostprocessMinSkills": "后处理最小技能数",
-      "skillRetrievalBuildEquivalenceEnabled": "启用等价分支合并",
-      "skillRetrievalCompactCodes": "紧凑编码模式",
-      "skillRetrievalFlattenTree": "平铺检索树",
-      "skillRetrievalMaxExposureDepth": "单次披露深度",
+      "skillRetrievalIndexEnabled": "启用分类索引",
+      "skillRetrievalMaxOutputChars": "命令输出上限",
+      "skillRetrievalIncrementalNoticeMaxChars": "增量 Skill 提醒字符预算",
       "proactiveEnabled": "启用主动推荐",
       "proactiveTickInterval": "检查间隔（分钟）",
       "proactiveMaxPerDay": "每日推荐上限",
@@ -985,13 +971,9 @@
       "skillEvolution": "从任务中自动学习并建议沉淀经验或创建新技能。",
       "memoryForbiddenDescription": "描述禁止写入记忆的敏感信息类型或规则，例如密码、证件号、密钥等。",
       "symphonyDynamicGraphEnabled": "关闭后仅使用静态图谱，已有运行时数据会保留。",
-      "skillRetrievalBuildRootCategories": "直接编辑包含 tree_root_categories 或 root_categories 的 YAML/JSON；页面会展示默认分层供参考。保存后会写入配置内容本身，而不是外部文件路径。",
-      "skillRetrievalBuildMaxDepth": "技能分类树的最大深度，过深会增加构建耗时。",
-      "skillRetrievalBuildMaxWorkers": "构建技能树时的并发工作线程数。",
-      "skillRetrievalBuildMaxRetries": "构建过程中单次请求失败后的最大重试次数。",
-      "skillRetrievalBuildTotalTimeout": "整次构建的总超时时间（秒）；0 表示不限制。",
-      "skillRetrievalBuildClassificationBatchLimit": "单批送入模型做分类的技能数量上限。",
-      "skillRetrievalMaxExposureDepth": "单次检索向模型披露技能树的最大深度。",
+      "skillRetrievalIndexEnabled": "仅在技能检索开启时可用。对于大规模候选目录，开启后允许使用模型构建和刷新分类索引，会消耗模型 token；关闭时保留已有索引文件。",
+      "skillRetrievalMaxOutputChars": "单次 skill_index 结果的默认输出上限；通常保持默认值，只在用户再次确认继续完整展示后调整。",
+      "skillRetrievalIncrementalNoticeMaxChars": "Skill 新增可用时一次性提醒所使用的最大字符数。",
       "proactiveMaxPerDay": "每个用户每日主动推荐次数上限，防止打扰过多。",
       "proactiveMaxRounds": "每次检查时最多读取的近期对话轮数，用于推断推荐上下文。",
       "agentSkills": "预挂载到该 Agent 的技能列表；未选则运行时按需检索/调用。",
@@ -1162,6 +1144,7 @@
       "freeSearchBing": "启用 Bing",
       "enabled": "启用",
       "dynamicGraph": "启用动态图谱",
+      "skillRetrievalIndex": "启用分类索引",
       "kvCacheRelease": "旧链路（KV 释放）",
       "kvCacheAffinity": "新链路（Ascend 亲和）",
       "externalCliClaude": "启用 Claude",
@@ -1603,7 +1586,7 @@
     "tabs": {
       "mySkills": "我的技能",
       "marketplace": "技能广场",
-      "skillIndex": "技能索引",
+      "skillRetrieval": "技能检索",
       "skillGraph": "技能图谱"
     },
     "mySkillsTabs": {
@@ -1824,97 +1807,65 @@
       "changelog": "更新日志"
     },
     "retrieval": {
-      "title": "本地技能检索",
+      "title": "Skill 目录",
+      "legacyReady": "Symphony Skill 发现已关闭；新会话继续使用 JiuwenSwarm 原有 Skill 逻辑。",
+      "smallReady": "候选目录低于 1% 预算阈值；新会话使用完整的冻结候选快照。",
+      "flatReady": "候选目录达到或超过 1% 预算阈值；新会话使用实时平铺检索。",
+      "indexedReady": "分类目录已就绪；新会话会自动使用。",
+      "indexedStale": "现有分类目录已过期但仍可用；新增 Skill 会出现在 /newly_installed_skills 下。",
+      "description": "开启 Skill 发现后，系统按 1% 阈值为新会话选择完整候选快照或实时 skill_index 检索；分类索引是否构建由单独的索引开关控制。已有会话保持创建时冻结的策略。",
+      "globalDisabledHint": "全局发现开关已关闭。Agent 使用 JiuwenSwarm 原有 Skill 逻辑；已有分类索引文件会保留但不使用。",
+      "indexNotNeeded": "完整候选快照低于 1% 阈值时无需分类索引；即使已保存索引偏好，也不会启动构建。",
+      "indexRecommended": "候选目录达到或超过 1% 阈值。实时平铺检索仍完整可用；如需按层级浏览，可在配置中启用可选的分类索引。构建和刷新会消耗模型 token。",
+      "indexDisabled": "分类索引开关已关闭。实时平铺检索仍可用，已有索引文件会保留。",
+      "indexBuildRunning": "分类索引正在后台构建。构建期间检索仍可用；构建会消耗模型 token。",
+      "indexActive": "分类索引开关已开启，当前分类目录正在使用；刷新会消耗模型 token。",
+      "indexRefreshSuggested": "旧分类目录仍可使用，新增 Skill 位于 /newly_installed_skills；是否刷新由你决定，刷新会消耗模型 token。",
+      "indexBuildEnabled": "分类索引开关已开启。构建可以在后台进行并会消耗模型 token；发布前仍可使用平铺检索。",
+      "flatMode": "实时平铺目录",
+      "indexedMode": "分类目录（已索引 {{count}} 个）",
+      "searchableSkills": "当前可检索 Skill",
+      "retrievalMode": "检索模式",
+      "globalSwitch": "Skill 发现开关",
+      "candidateScale": "候选规模",
+      "candidateSmall": "小规模（低于 1%）",
+      "candidateLarge": "大规模（达到或超过 1%）",
+      "candidateBudget": "估算 {{estimated}} / 预算 {{budget}} tokens",
+      "sessionProfile": "会话冻结画像 · {{model}}",
+      "defaultProfile": "默认模型预估 · {{model}}",
+      "unknownModel": "未知模型",
+      "effectiveStrategy": "新会话策略",
+      "indexSwitch": "分类索引开关",
+      "switchOn": "开启",
+      "switchOff": "关闭",
+      "notRequired": "当前规模无需索引",
+      "recommended": "建议按需启用可选索引",
+      "originalLogic": "JiuwenSwarm 原有逻辑",
+      "strategies": {
+        "legacy": "JiuwenSwarm 原有逻辑",
+        "small_full": "完整冻结候选快照",
+        "large_flat": "实时平铺检索",
+        "indexed": "当前分类索引检索",
+        "indexed_stale": "旧分类索引与实时兜底"
+      },
+      "agentTool": "Agent Tool",
+      "buildIndex": "构建分类目录",
+      "refreshIndex": "刷新分类目录",
+      "refreshStatus": "刷新状态",
+      "buildUnavailable": "仅在 Skill 发现和分类索引均已开启、且候选目录达到或超过 1% 阈值时，才可构建或刷新。",
+      "startingBuild": "正在启动…",
+      "building": "正在构建分类目录…",
+      "cancelBuild": "取消构建",
+      "cancelling": "正在取消…",
+      "buildStarted": "分类目录已在后台开始构建。",
+      "buildFailed": "分类目录构建启动失败。",
+      "cancelRequested": "已请求取消分类目录构建。",
+      "cancelFailed": "取消分类目录构建失败。",
+      "disabledHint": "请在配置中启用 symphony.skill_retrieval 以向 Agent 暴露目录；可独立构建可选的分类目录。",
       "disabled": "检索已关闭",
-      "ready": "索引就绪",
-      "stale": "索引需要更新",
-      "missing": "索引未构建",
-      "indexedCount": "已索引 {{count}} 个",
-      "installedCount": "已安装 {{count}} 个",
-      "build": "构建索引",
-      "fullRebuild": "全量重新构建",
-      "building": "构建中...",
-      "buildFailed": "构建失败",
-      "lastBuildFailedUsingExisting": "上次重新构建失败，当前仍在使用上一次成功构建的索引。",
-      "lastBuildCancelledUsingExisting": "上次重新构建已取消，当前仍在使用上一次成功构建的索引。",
-      "cancel": "取消构建",
-      "cancelling": "取消中...",
-      "cancelled": "构建已取消",
-      "buildStageUnknown": "等待构建状态",
-      "buildProgress": "进度 {{progress}}%",
-      "buildMonitorTitle": "构建进度",
-      "buildMonitorSubtitle": "当前阶段：{{stage}}",
-      "buildPipelineTitle": "索引构建流程",
-      "buildMetric": {
-        "progress": "进度",
-        "skills": "技能",
-        "indexed": "索引"
-      },
-      "buildPipeline": {
-        "queued": {
-          "title": "准备构建任务",
-          "detail": "创建临时输出目录，解析构建配置和索引路径。"
-        },
-        "scan": {
-          "title": "扫描已安装技能",
-          "detail": "读取 {{count}} 个已安装且启用的技能，提取名称、描述和 SKILL.md。"
-        },
-        "llmCheck": {
-          "title": "检查模型连接",
-          "detail": "使用当前模型配置发送轻量请求，确认构建模型可访问。"
-        },
-        "build": {
-          "title": "构建技能树",
-          "detail": "根据技能能力进行分组、分类和分支描述生成，并写入树结构。"
-        },
-        "publish": {
-          "title": "发布索引产物",
-          "detail": "校验 tree_index.yaml、catalog.jsonl、manifest.json，并替换线上索引目录。"
-        },
-        "success": {
-          "title": "索引就绪",
-          "detail": "{{count}} 个技能可用于 Agentic 技能检索。"
-        }
-      },
-      "buildPhaseState": {
-        "done": "完成",
-        "active": "当前",
-        "pending": "等待",
-        "failed": "失败",
-        "cancelled": "取消"
-      },
-      "buildStages": {
-        "queued": "任务排队",
-        "scan": "扫描技能",
-        "llmCheck": "检查模型连接",
-        "buildTree": "构建技能树",
-        "publish": "发布索引",
-        "reuse": "复用索引",
-        "success": "构建完成",
-        "failed": "构建失败",
-        "timeout": "构建超时",
-        "llmConfig": "模型配置",
-        "cancelled": "已取消",
-        "interrupted": "构建中断"
-      },
-      "treeTitle": "索引树",
-      "treeCount": "{{branches}} 个分支 · {{skills}} 个技能",
-      "noTree": "暂无索引树",
-      "nodeDetails": "节点详情",
-      "selectNodeHint": "请选择左侧树节点查看描述。",
-      "nodeDescription": "描述",
-      "nodeSelectWhen": "选择条件",
-      "nodeDontSelectWhen": "排除条件",
-      "nodeSourceDescription": "来源描述",
-      "nodeWorkerId": "Skill ID",
-      "nodeCategory": "分类",
-      "nodeKeywords": "关键词",
-      "nodeExamples": "示例",
-      "disabledSkill": "已禁用",
-      "nodeTypes": {
-        "branch": "分支",
-        "skill": "技能"
-      }
+      "statusLoadFailed": "实时检索状态加载失败，请重试。",
+      "statusIncompatible": "后端返回了不兼容的技能检索状态；请更新或重启服务后重试。",
+      "profileRecoveryFailed": "会话冻结画像无法恢复；本会话将使用原有 Skill 逻辑（{{reason}}）。"
     },
     "graph": {
       "orchestration": {
@@ -2340,7 +2291,35 @@
       "sessionTaskUnknown": "未知任务",
       "sessionDescription": "描述",
       "sessionResult": "结果",
-      "latest": "↓ 最新"
+      "latest": "↓ 最新",
+      "symphony": {
+        "search": "Searching for “{{query}}”",
+        "find": "Finding “{{query}}”",
+        "findGeneric": "Finding relevant items",
+        "browse": "Browsing catalog",
+        "browsePath": "Browsing {{path}}",
+        "location": "Checking catalog location",
+        "command": "Running discovery",
+        "commandNamed": "Running {{command}}",
+        "readSkill": "Reading {{target}}",
+        "readSkillFirst": "Reading {{target}} · lines 1–{{end}} ({{count}} lines)",
+        "readSkillRange": "Reading {{target}} · lines {{start}}–{{end}} ({{count}} lines)",
+        "readSkillFrom": "Reading {{target}} · from line {{start}}",
+        "readSkillLast": "Reading {{target}} · last {{count}} lines",
+        "readMetadata": "Reading {{target}} metadata",
+        "readMetadataFirst": "Reading {{target}} metadata · lines 1–{{end}} ({{count}} lines)",
+        "readMetadataRange": "Reading {{target}} metadata · lines {{start}}–{{end}} ({{count}} lines)",
+        "readMetadataFrom": "Reading {{target}} metadata · from line {{start}}",
+        "readMetadataLast": "Reading {{target}} metadata · last {{count}} lines",
+        "readFile": "Reading {{target}}",
+        "readFileFirst": "Reading {{target}} · lines 1–{{end}} ({{count}} lines)",
+        "readFileRange": "Reading {{target}} · lines {{start}}–{{end}} ({{count}} lines)",
+        "readFileFrom": "Reading {{target}} · from line {{start}}",
+        "readFileLast": "Reading {{target}} · last {{count}} lines",
+        "completed": "Discovery completed",
+        "failed": "Discovery failed",
+        "resultWords": "{{count}} words returned"
+      }
     },
     "teamActivity": {
       "preparing": "Agent Team 正在准备",
@@ -2784,7 +2763,7 @@
     },
     "statusFilter": {
       "all": "全部",
-      "pending": "待安装/联接",
+      "pending": "待安装/连接",
       "available": "已连接"
     },
     "create": {
@@ -2809,6 +2788,9 @@
       "pickMcpTitle": "选择MCP",
       "submitError": "创建失败，该功能仍在等待后端支持",
       "withSkillNotWired": "该入口尚未接入聊天面板，需先在聊天输入框完成对接"
+    },
+    "chatPrompts": {
+      "createPlugin": "帮我创建一个xxx插件，擅长xxx"
     },
     "errors": {
       "runtimeMissing": "该 MCP 依赖的运行环境缺失，请先安装对应运行环境后再使用",
@@ -2954,5 +2936,20 @@
       "search": "搜索",
       "noResult": "没有匹配结果"
     }
+  },
+  "auth": {
+    "title": "登录 JiuwenSwarm",
+    "subtitle": "输入你的账号与密码以继续",
+    "username": "账号",
+    "usernamePlaceholder": "输入账号",
+    "password": "密码",
+    "passwordPlaceholder": "输入密码",
+    "login": "登录",
+    "loggingIn": "登录中…",
+    "invalidCredentials": "账号或密码错误",
+    "loginFailed": "登录失败,请稍后重试",
+    "authRequired": "需要登录后才能访问",
+    "secureHint": "登录后将自动保持登录状态",
+    "logout": "登出"
   }
 }

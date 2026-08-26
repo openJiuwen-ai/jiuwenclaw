@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-import json
+import inspect
 import logging
 import re
 import shutil
@@ -254,6 +254,33 @@ def _history_media_record(value: Any, *, default_type: str = "image") -> dict[st
     return record
 
 
+def _with_heartbeat_history_metadata(
+    extra: dict[str, Any] | None,
+    params: Any,
+) -> dict[str, Any] | None:
+    """Persist the public Heartbeat marker in the same shape Web events use."""
+    result = dict(extra or {})
+    if not isinstance(params, dict):
+        return result or None
+    automation = params.get("automation")
+    if not isinstance(automation, dict) or automation.get("kind") != "heartbeat":
+        return result or None
+
+    # Some event payloads may already contain metadata.  Preserve it while
+    # ensuring restored history exposes ``metadata.automation`` just like the
+    # live Web stream.
+    metadata = (
+        dict(result.get("metadata"))
+        if isinstance(result.get("metadata"), dict)
+        else {}
+    )
+    metadata["automation"] = dict(automation)
+    result["metadata"] = metadata
+    # Do not retain a second top-level copy added by generic parameter merging.
+    result.pop("automation", None)
+    return result
+
+
 def _history_user_extra(params: Any) -> dict[str, Any] | None:
     if not isinstance(params, dict):
         return None
@@ -290,7 +317,7 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
         if skills:
             extra["skills"] = skills
 
-    return extra or None
+    return _with_heartbeat_history_metadata(extra, params)
 
 
 def _compact_stats_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -619,6 +646,7 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_TEAMSKILLS_HUB_VALIDATE: "handle_skills_team_skills_hub_validate",
     ReqMethod.SKILLS_TEAMSKILLS_HUB_PACK: "handle_skills_team_skills_hub_pack",
     ReqMethod.SKILLS_TEAMSKILLS_HUB_SEARCH: "handle_skills_team_skills_hub_search",
+    ReqMethod.SKILLS_SWARMSKILLS_HUB_RECOMMEND: "handle_skills_swarm_skills_hub_recommend",
     ReqMethod.SKILLS_TEAMSKILLS_HUB_INSTALL: "handle_skills_team_skills_hub_install",
     ReqMethod.SKILLS_TEAMSKILLS_HUB_PUBLISH: "handle_skills_team_skills_hub_publish",
     ReqMethod.SKILLS_TEAMSKILLS_HUB_DELETE: "handle_skills_team_skills_hub_delete",
@@ -807,8 +835,21 @@ class JiuWenSwarm:
         self._sdk_name: str | None = None
         self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
         self._session_manager = SessionManager()
+        self._heartbeat_service: Any | None = None
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
+
+    def set_heartbeat_service(self, service: Any | None) -> None:
+        """Inject the AgentServer-owned Heartbeat runtime before adapter creation."""
+        self._heartbeat_service = service
+        # Team members are assembled declaratively outside the single-agent
+        # adapter. Publish the same process-owned service to their build context;
+        # this is dependency injection only, never scheduler ownership.
+        from jiuwenswarm.agents.swarm.context import set_heartbeat_job_service
+
+        set_heartbeat_job_service(service)
+        if self._adapter is not None and hasattr(self._adapter, "set_heartbeat_service"):
+            self._adapter.set_heartbeat_service(service)
 
     @staticmethod
     def _prepare_skill_library() -> None:
@@ -875,6 +916,8 @@ class JiuWenSwarm:
             self._adapter = create_adapter(self._sdk_name, mode=mode)
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
+            if hasattr(self._adapter, "set_heartbeat_service"):
+                self._adapter.set_heartbeat_service(self._heartbeat_service)
             setter = getattr(
                 self._adapter, "set_personal_context_runtime_enabled", None
             )
@@ -1567,6 +1610,20 @@ class JiuWenSwarm:
                 params["_session_id"] = str(request.session_id or "").strip()
                 if handler_name == "handle_skills_files_get" and not params.get("session_id"):
                     params["session_id"] = params["_session_id"]
+            if handler_name in {
+                "handle_skills_retrieval_status",
+                "handle_skills_retrieval_index_build",
+            }:
+                params.pop("_session_profile", None)
+                profile_getter = getattr(
+                    self._adapter,
+                    "get_skill_retrieval_status_profile",
+                    None,
+                )
+                if callable(profile_getter):
+                    profile = profile_getter(request.session_id)
+                    if isinstance(profile, dict):
+                        params["_session_profile"] = profile
             payload = await handler(params)
             _reload_after_skills = handler_name in [
                 "handle_skills_install",
@@ -2245,6 +2302,7 @@ class JiuWenSwarm:
         await self.reconcile_session_mcp(
             request.session_id,
             compute_chat_send_mcp_needed(params),
+            model_name=params.get("model_name"),
         )
 
         # cloud memory: before chat hook
@@ -2313,6 +2371,7 @@ class JiuWenSwarm:
                 event_type="chat.final",
                 content=content_str,
                 timestamp=time.time(),
+                extra=_with_heartbeat_history_metadata(None, request.params),
                 mode=request.params.get("mode", "unknown"),
             )
             _schedule_feedback_once("success")
@@ -2539,6 +2598,7 @@ class JiuWenSwarm:
         await self.reconcile_session_mcp(
             request.session_id,
             compute_chat_send_mcp_needed(params),
+            model_name=params.get("model_name"),
         )
 
         # Team 模式：把整个 turn 交给 team_helpers。它先用 turn.text（用户原
@@ -2708,10 +2768,13 @@ class JiuWenSwarm:
                 return
             extra_fields = _attach_reasoning_content({
                 k: v for k, v in request.params.items()
-                if k in ("source", "proactive_type", "proactive_target")
+                if k in ("source", "proactive_type", "proactive_target", "automation")
             })
             if not isinstance(extra_fields, dict):
                 extra_fields = {}
+            extra_fields = _with_heartbeat_history_metadata(
+                extra_fields, request.params
+            ) or {}
             record_timestamp = _resolve_final_record_timestamp(
                 event_type="chat.final",
                 segment_started_at=segment_started_at,
@@ -2988,7 +3051,10 @@ class JiuWenSwarm:
                         content=str(data),
                         timestamp=time.time(),
                         mode=request.params.get("mode", "unknown"),
-                        extra={"error_type": error_type} if error_type else None,
+                        extra=_with_heartbeat_history_metadata(
+                            {"error_type": error_type} if error_type else None,
+                            request.params,
+                        ),
                     )
                     completion_status = "error"
                     yield AgentResponseChunk(
@@ -3140,11 +3206,19 @@ class JiuWenSwarm:
                                 if et in {"chat.final", "chat.tool_call"}:
                                     extra_fields = _attach_reasoning_content(extra_fields)
                                 # 透传 proactive 标记——刷新页面时前端靠 source 识别卡片
-                                for pk in ("source", "proactive_type", "proactive_target"):
+                                for pk in (
+                                    "source",
+                                    "proactive_type",
+                                    "proactive_target",
+                                    "automation",
+                                ):
                                     if pk not in extra_fields and pk in request.params:
                                         extra_fields[pk] = request.params[pk]
                                 if not isinstance(extra_fields, dict):
                                     extra_fields = {}
+                                extra_fields = _with_heartbeat_history_metadata(
+                                    extra_fields, request.params
+                                ) or {}
                                 record_timestamp = _resolve_final_record_timestamp(
                                     event_type=et,
                                     segment_started_at=(
@@ -3305,11 +3379,19 @@ class JiuWenSwarm:
                             if et in {"chat.final", "chat.tool_call"}:
                                 extra_fields = _attach_reasoning_content(extra_fields)
                             # 透传 proactive 标记——刷新页面时前端靠 source 识别卡片
-                            for pk in ("source", "proactive_type", "proactive_target"):
+                            for pk in (
+                                "source",
+                                "proactive_type",
+                                "proactive_target",
+                                "automation",
+                            ):
                                 if pk not in extra_fields and pk in request.params:
                                     extra_fields[pk] = request.params[pk]
                             if not isinstance(extra_fields, dict):
                                 extra_fields = {}
+                            extra_fields = _with_heartbeat_history_metadata(
+                                extra_fields, request.params
+                            ) or {}
                             record_timestamp = _resolve_final_record_timestamp(
                                 event_type=et,
                                 segment_started_at=(
@@ -3428,6 +3510,15 @@ class JiuWenSwarm:
         if finalized_assistant_message and (
                 finalized_assistant_message != assistant_message or suppress_a2ui_stream
         ):
+            history_metadata: dict[str, Any] = {}
+            for key in (
+                "source",
+                "proactive_type",
+                "proactive_target",
+                "automation",
+            ):
+                if key in request.params:
+                    history_metadata[key] = request.params[key]
             append_history_record(
                 session_id=session_id,
                 request_id=rid,
@@ -3436,10 +3527,10 @@ class JiuWenSwarm:
                 event_type="chat.final",
                 content=finalized_assistant_message,
                 timestamp=time.time(),
-                extra=_attach_reasoning_content({
-                    k: v for k, v in request.params.items()
-                    if k in ("source", "proactive_type", "proactive_target")
-                }),
+                extra=_with_heartbeat_history_metadata(
+                    _attach_reasoning_content(history_metadata),
+                    request.params,
+                ),
                 mode=request.params.get("mode", "unknown"),
             )
             final_answer_content = finalized_assistant_message
@@ -3554,7 +3645,11 @@ class JiuWenSwarm:
         return False
 
     async def reconcile_session_mcp(
-        self, session_id: str | None, needed: list[str] | None
+        self,
+        session_id: str | None,
+        needed: list[str] | None,
+        *,
+        model_name: str | None = None,
     ) -> None:
         """Reconcile this session's MCP set to ``needed`` (idempotent diff).
 
@@ -3572,7 +3667,19 @@ class JiuWenSwarm:
             # Adapter doesn't support session-level MCP (e.g. a stub/mock
             # adapter) — session-level enable is a no-op for it.
             return
-        await reconcile(session_id, needed)
+        try:
+            parameters = inspect.signature(reconcile).parameters
+        except (TypeError, ValueError):
+            supports_model_name = True
+        else:
+            supports_model_name = "model_name" in parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+        if supports_model_name:
+            await reconcile(session_id, needed, model_name=model_name)
+        else:
+            await reconcile(session_id, needed)
 
     def sync_mcp_credentials(self) -> bool:
         """Sync connected MCPs' tokens into os.environ (skill scripts).
@@ -3799,9 +3906,18 @@ class JiuWenSwarm:
             return bool(has_runtime())
         return bool(has_runtime(session_id))
 
-    async def cancel_inflight_work(self, log_prefix: str = "[gateway disconnect] ") -> None:
+    async def cancel_inflight_work(
+        self,
+        log_prefix: str = "[gateway disconnect] ",
+        *,
+        exclude_session_ids: set[str] | None = None,
+    ) -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时调用：取消 session 流式任务并中止 adapter 内层循环。"""
-        await self._session_manager.cancel_all_session_tasks(log_prefix)
+        protected = set(exclude_session_ids or ())
+        await self._session_manager.cancel_all_session_tasks(
+            log_prefix,
+            exclude_session_ids=protected,
+        )
         adapter = self._adapter
         if adapter is None:
             return
@@ -3809,7 +3925,7 @@ class JiuWenSwarm:
         if not callable(abort_fn):
             return
         try:
-            await abort_fn()
+            await abort_fn(exclude_session_ids=protected)
         except Exception:
             logger.exception("[JiuWenSwarm] adapter.abort_on_gateway_disconnect failed")
 

@@ -42,11 +42,13 @@ import {
 import { prefetchHistoryPages } from './features/historyPagination';
 import { isPlanWireMode } from './features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from './features/goalPendingObjectiveBubble';
+import { LoginPage } from './features/auth/LoginPage';
+import { LogoutButton } from './features/auth/LogoutButton';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
-import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout } from './hooks';
+import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout, useResponsivePanelResize } from './hooks';
 import { webRequest } from './services/webClient';
 import { processOAuthCallback } from './utils/gitcodeOAuth';
 import { useTeamPanelState } from './features/teamPanelState';
@@ -367,13 +369,12 @@ function AppContent() {
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
   const {
+    isMobile,
     conversationSidebarCollapsed,
     setConversationSidebarCollapsed,
     conversationSidebarFloating,
     toolPanelHidden,
     setToolPanelHidden,
-    toolPanelMaximized,
-    setToolPanelMaximized,
   } = useResponsiveLayout();
 
   const [modelSetupGuideStep, setModelSetupGuideStep] = useState<ModelSetupGuideStep | null>(null);
@@ -581,12 +582,6 @@ function AppContent() {
   }, [navigate, route, setSingleAgentPanelExpanded, setTeamAreaExpanded, setHasVisitedSkills]);
 
   useEffect(() => {
-    if (!teamAreaExpanded || toolPanelHidden) {
-      setToolPanelMaximized(false);
-    }
-  }, [teamAreaExpanded, toolPanelHidden]);
-
-  useEffect(() => {
     ensureSessionRuntimes(sessionId);
     useChatStore.getState().setActiveSessionId(sessionId);
     useSubagentStore.getState().hydrateRuntime(sessionId);
@@ -651,11 +646,9 @@ function AppContent() {
       setToolPanelHidden(true);
       setTeamAreaExpanded(false);
       setSingleAgentPanelExpanded(false);
-      setToolPanelMaximized(false);
       return;
     }
     setToolPanelHidden(false);
-    setToolPanelMaximized(false);
     if (effectiveMode === 'team') {
       setTeamAreaExpanded(expanded);
       return;
@@ -664,7 +657,7 @@ function AppContent() {
       setTeamAreaActiveTab('planning');
     }
     setSingleAgentPanelExpanded(expanded);
-  }, [effectiveMode, setSingleAgentPanelExpanded, setTeamAreaActiveTab, setTeamAreaExpanded, setToolPanelHidden, setToolPanelMaximized, teamAreaActiveTab]);
+  }, [effectiveMode, setSingleAgentPanelExpanded, setTeamAreaActiveTab, setTeamAreaExpanded, setToolPanelHidden, teamAreaActiveTab]);
 
   const handleOpenCodeReview = useCallback((target: CodeReviewTarget) => {
     setCodeReviewTarget(target);
@@ -846,6 +839,15 @@ function AppContent() {
   // 避免右侧面板与聊天面板平分空间导致宽度与集群模式不一致；auto_harness 走收起态分支。
   const panelExpanded = effectiveMode === 'team' ? teamAreaExpanded : singleAgentPanelExpanded;
   const isTeamAreaExpanded = mode !== 'auto_harness' && panelExpanded && toolPanelHasContent;
+
+  const { shouldFullscreen } = useResponsivePanelResize({
+    isTeamAreaExpanded,
+    conversationSidebarCollapsed,
+    setConversationSidebarCollapsed,
+    setSingleAgentPanelExpanded,
+    setTeamAreaExpanded,
+    mode,
+  });
 
   // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递
   const {
@@ -2770,12 +2772,12 @@ function AppContent() {
 
   const requestSessionNavigation = useCallback((target: Session | 'new', options?: NewConversationOptions) => {
     if (target === 'new') { enterNewConversation(mode, options); return; }
-    if (window.matchMedia('(max-width: 823px)').matches) {
+    if (isMobile) {
       setTeamAreaExpanded(false);
       setToolPanelHidden(true);
     }
     void handleRestoreSession(target.session_id, target.mode, target);
-  }, [enterNewConversation, handleRestoreSession, mode, setTeamAreaExpanded, setToolPanelHidden]);
+  }, [enterNewConversation, handleRestoreSession, isMobile, mode, setTeamAreaExpanded, setToolPanelHidden]);
 
   const handleTeamSessionsDeleted = useCallback(async (sessionIds: string[]) => {
     const deletedSessionIds = new Set(sessionIds);
@@ -2850,11 +2852,10 @@ function AppContent() {
   }, [deleteTarget, enterNewConversation, mode, request, t]);
 
   const handleNavigate = useCallback((nav: MainNavKey) => {
-    const isSmallScreen = window.matchMedia('(max-width: 823px)').matches;
     setActiveNav(nav);
     if (nav === 'chat') {
       setConversationSidebarCollapsed(false);
-      if (isSmallScreen) {
+      if (isMobile) {
         setTeamAreaExpanded(false);
         setToolPanelHidden(true);
       }
@@ -2864,7 +2865,7 @@ function AppContent() {
     }
     if (nav === 'skills') setHasVisitedSkills(true);
     if (nav === 'channels') setHasVisitedChannels(true);
-  }, [modelSetupGuideStep, setTeamAreaExpanded, setToolPanelHidden]);
+  }, [isMobile, modelSetupGuideStep, setTeamAreaExpanded, setToolPanelHidden]);
 
   const skipModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
@@ -2994,7 +2995,7 @@ function AppContent() {
     && missingSessionId === routeSessionId
     && isConversationMissing(routeSessionId, true, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
-  const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound && !toolPanelMaximized;
+  const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound && !shouldFullscreen;
   const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
 
@@ -3075,7 +3076,7 @@ function AppContent() {
                 )}
                 {/* Chat Panel - 在展开时可拖拽调整宽度 */}
                 <div
-                  className={`${showConversationNotFound || toolPanelMaximized ? 'hidden' : 'flex'} chat-layout__surface  pt-0 flex-col ${isTeamAreaExpanded ? '' : 'min-w-0'} min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
+                  className={`${showConversationNotFound || shouldFullscreen ? 'hidden' : 'flex'} chat-layout__surface  pt-0 flex-col ${isTeamAreaExpanded ? '' : 'min-w-0'} min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
                   style={isTeamAreaExpanded ? { width: `${chatPanelWidthPct}%` } : undefined}
                   data-testid="app-chat-surface"
                 >
@@ -3155,9 +3156,7 @@ function AppContent() {
                     setSingleAgentPanelExpanded={setSingleAgentPanelExpanded}
                     setSingleAgentPanelActiveTab={setSingleAgentPanelActiveTab}
                     setSingleAgentPanelSelectedArtifactId={setSingleAgentPanelSelectedArtifactId}
-                    onMaximize={() => setToolPanelMaximized(true)}
-                    onRestore={() => setToolPanelMaximized(false)}
-                    maximized={toolPanelMaximized}
+                    shouldFullscreen={shouldFullscreen}
                   />
                 )}
               </div>
@@ -3290,7 +3289,13 @@ function AppContent() {
         {activeNav === 'connectorMarket' && (
           <div className="app-section">
             <ConnectorMarketPanel
-              onCreateViaChat={() => requestSessionNavigation('new')}
+              onCreateViaChat={() => window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
+                detail: {
+                  skillName: 'plugin-creator',
+                  suffixText: t('connectorMarket.chatPrompts.createPlugin'),
+                  metadata: { scene: 'create_plugin' },
+                },
+              }))}
               onUseExample={(initialInputValue, mcpName) =>
                 requestSessionNavigation('new', { initialInputValue, initialEnabledMcps: [mcpName] })
               }
@@ -3470,4 +3475,83 @@ function App() {
   );
 }
 
-export default App;
+/**
+ * 鉴权外壳: 进入前探测 cookie 是否携带有效 access_token + 是否一体机模式。
+ * - GET /api/web-config: 本地端点, 拿 {remote: bool, iam_enabled: bool}
+ *   - iam_enabled=false: 未配置 IAM, 无鉴权, 直接渲染主 App
+ *   - iam_enabled=true: 配置了 IAM, 继续探测登录态
+ * - GET /auth-api/v1/auth/permissions (同源, 浏览器自动带 HttpOnly cookie)
+ *   - 200 -> 已登录, 渲染主 App (+ 一体机模式时浮 LogoutButton)
+ *   - 401/其他 -> 未登录, 渲染 LoginPage
+ * control-panel 只认 Authorization: Bearer, app_web.py 的 _proxy_auth_http
+ * 会从 jw_token cookie 取 token 注入头, 故前端只需同源请求。
+ */
+function AppWithAuth() {
+  const [authStatus, setAuthStatus] = useState<'checking' | 'loggedOut' | 'loggedIn' | 'noIam'>('checking');
+  const [remote, setRemote] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    // 先拿 web-config: 如果 iam_enabled=false, 直接跳过鉴权探测
+    fetch('/api/web-config', { credentials: 'same-origin' })
+      .then((r) => r.json())
+      .then((cfg) => {
+        if (cancelled) return;
+        if (cfg && typeof cfg.remote === 'boolean') setRemote(cfg.remote);
+        if (cfg && cfg.iam_enabled === false) {
+          setAuthStatus('noIam');
+          return;
+        }
+        // IAM 已配置, 探测登录态
+        fetch('/auth-api/v1/auth/permissions', { credentials: 'same-origin' })
+          .then((resp) => {
+            if (cancelled) return;
+            if (resp.ok) {
+              setAuthStatus('loggedIn');
+            } else {
+              setAuthStatus('loggedOut');
+            }
+          })
+          .catch(() => {
+            if (!cancelled) setAuthStatus('loggedOut');
+          });
+      })
+      .catch(() => {
+        // web-config 获取失败, 回退到探测登录态
+        fetch('/auth-api/v1/auth/permissions', { credentials: 'same-origin' })
+          .then((resp) => {
+            if (cancelled) return;
+            if (resp.ok) {
+              setAuthStatus('loggedIn');
+            } else {
+              setAuthStatus('loggedOut');
+            }
+          })
+          .catch(() => {
+            if (!cancelled) setAuthStatus('loggedOut');
+          });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (authStatus === 'checking') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+        <div className="text-slate-400 text-sm">Loading…</div>
+      </div>
+    );
+  }
+  if (authStatus === 'loggedOut') {
+    return <LoginPage />;
+  }
+  return (
+    <>
+      {remote && <LogoutButton />}
+      <App />
+    </>
+  );
+}
+
+export default AppWithAuth;

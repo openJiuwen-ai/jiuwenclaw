@@ -22,6 +22,20 @@ from openjiuwen.agent_teams import paths as ojw_paths
 from openjiuwen.agent_teams.schema.build_context import BuildContext
 
 
+_heartbeat_job_service: Any | None = None
+
+
+def set_heartbeat_job_service(service: Any | None) -> None:
+    """Publish the AgentServer-owned Heartbeat service to Team builders."""
+    global _heartbeat_job_service
+    _heartbeat_job_service = service
+
+
+def get_heartbeat_job_service() -> Any | None:
+    """Return the process-local Heartbeat service, if AgentServer installed it."""
+    return _heartbeat_job_service
+
+
 @dataclass
 class SwarmBuildContext(BuildContext):
     """BuildContext subclass carrying jiuwenswarm runtime handles.
@@ -59,7 +73,12 @@ class SwarmBuildContext(BuildContext):
         global_skills_dir: The one physical Skill library every agent reads.
         trajectory_span_processor: Process-level trajectory span processor
             shared by Team evolution rails.
+        heartbeat_job_service: Process-level AgentServer Heartbeat service.
+            This live handle is intentionally omitted from serialized seeds and
+            reacquired from the receiving JiuwenSwarm process.
         config: The resolved ``config.yaml`` mapping (``get_config()``).
+        skill_retrieval_toolkit: Per-member, non-serializable Symphony
+            discovery runtime shared by skill_index and its prompt rail.
 
     Note:
         Backward incompatible: the ``team_skills_dir`` field and its seed key
@@ -83,7 +102,9 @@ class SwarmBuildContext(BuildContext):
     team_skill_visibility_path: str | None = None
     global_skills_dir: str | None = None
     trajectory_span_processor: Any = None
+    heartbeat_job_service: Any = None
     config: dict[str, Any] | None = None
+    skill_retrieval_toolkit: Any = None
 
     def resolve_member_skill_visibility_path(self) -> str | None:
         """Resolve the current member's Skill visibility metadata file path.
@@ -177,14 +198,21 @@ class SwarmBuildContext(BuildContext):
             mode=seed.get("mode") or "team",
             project_dir=seed.get("project_dir"),
             trusted_dirs=seed.get("trusted_dirs"),
-            disable_teammate_worktree=bool(seed.get("disable_teammate_worktree", False)),
+            disable_teammate_worktree=bool(
+                seed.get("disable_teammate_worktree", False)
+            ),
             team_id=seed.get("team_id", ""),
             team_ws_root=seed.get("team_ws_root"),
             team_skill_visibility_path=seed.get("team_skill_visibility_path"),
             global_skills_dir=seed.get("global_skills_dir"),
             trajectory_span_processor=trajectory_span_processor,
+            heartbeat_job_service=get_heartbeat_job_service(),
             config=config,
         )
 
 
-__all__ = ["SwarmBuildContext"]
+__all__ = [
+    "SwarmBuildContext",
+    "get_heartbeat_job_service",
+    "set_heartbeat_job_service",
+]

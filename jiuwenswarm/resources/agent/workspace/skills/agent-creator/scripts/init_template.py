@@ -84,7 +84,7 @@ README_TEMPLATE = """# %(title)s
 
 ## 使用方式
 
-[TODO: 在 JiuwenSwarm 专家中心打开该专家，按引导对话。]
+[TODO: 在 JiuwenSwarm 扩展打开该专家，按引导对话。]
 """
 
 PERSONA_TEMPLATE = """# [TODO: 角色名称] - [TODO: 人设名]
