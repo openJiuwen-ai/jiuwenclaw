@@ -212,6 +212,11 @@ interface ChatState {
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
   appendReasoning: (sessionId: string, content: string, options?: { atMs?: number }) => void;
   closeReasoning: (sessionId: string, options?: { atMs?: number }) => void;
+  /**
+   * 本轮可视工作收尾：关掉「思考中…」，并在已空闲时把仍 pending 的工具收成完成。
+   * Team / Goal 续跑时 isProcessing 仍为 true，工具不会被误结算。
+   */
+  settleLiveTurnWork: (sessionId: string, options?: { atMs?: number }) => void;
   restoreReasoningSegments: (sessionId: string, items: { at: string; text: string; updatedAt?: number }[]) => void;
   startStreaming: (sessionId: string, messageId: string, streamKey?: string) => void;
   stopStreaming: (sessionId: string, streamKey?: string) => void;
@@ -476,6 +481,11 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         },
       };
     });
+  },
+
+  settleLiveTurnWork: (sessionId, options) => {
+    get().closeReasoning(sessionId, options);
+    get().settleHistoricalToolExecutions(sessionId);
   },
 
   restoreReasoningSegments: (sessionId, items) => {

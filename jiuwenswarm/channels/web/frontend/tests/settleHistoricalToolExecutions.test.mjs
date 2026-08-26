@@ -149,3 +149,66 @@ test('addToolCall then addToolResult yields completed status', () => {
     teardown();
   }
 });
+
+function lastReasoning(sessionId = SID) {
+  const segments = useChatStore.getState().getRuntime(sessionId)?.reasoningSegments ?? [];
+  return segments[segments.length - 1];
+}
+
+test('settleLiveTurnWork closes thinking and pending tools when the turn is idle', () => {
+  setup();
+  try {
+    useChatStore.getState().appendReasoning(SID, 'thinking…', { atMs: 1_700_000_000_000 });
+    addToolCall('call-live-1', 'bash');
+    assert.equal(lastReasoning()?.closed, false);
+    assert.equal(getToolStatus('call-live-1'), 'pending');
+
+    useChatStore.getState().settleLiveTurnWork(SID, { atMs: 1_700_000_010_000 });
+
+    const reasoning = lastReasoning();
+    assert.equal(reasoning?.closed, true);
+    assert.equal(reasoning?.closedAt, 1_700_000_010_000);
+    assert.equal(getToolStatus('call-live-1'), 'completed');
+  } finally {
+    teardown();
+  }
+});
+
+test('settleLiveTurnWork closes thinking but does not settle tools while processing', () => {
+  setup();
+  try {
+    useChatStore.getState().setProcessing(SID, true);
+    useChatStore.getState().appendReasoning(SID, 'still thinking', { atMs: 1_700_000_000_000 });
+    addToolCall('call-live-2', 'read_file');
+
+    useChatStore.getState().settleLiveTurnWork(SID, { atMs: 1_700_000_020_000 });
+
+    assert.equal(lastReasoning()?.closed, true);
+    assert.equal(getToolStatus('call-live-2'), 'pending');
+  } finally {
+    useChatStore.getState().setProcessing(SID, false);
+    teardown();
+  }
+});
+
+test('settleLiveTurnWork is a no-op when thinking and tools are already settled', () => {
+  setup();
+  try {
+    useChatStore.getState().appendReasoning(SID, 'done', { atMs: 1_700_000_000_000 });
+    useChatStore.getState().closeReasoning(SID, { atMs: 1_700_000_001_000 });
+    addToolCall('call-live-3', 'search');
+    useChatStore.getState().addToolResult(SID, {
+      toolCallId: 'call-live-3',
+      toolName: 'search',
+      result: 'ok',
+      success: true,
+    });
+
+    useChatStore.getState().settleLiveTurnWork(SID, { atMs: 1_700_000_099_000 });
+
+    assert.equal(lastReasoning()?.closedAt, 1_700_000_001_000);
+    assert.equal(getToolStatus('call-live-3'), 'completed');
+  } finally {
+    teardown();
+  }
+});
