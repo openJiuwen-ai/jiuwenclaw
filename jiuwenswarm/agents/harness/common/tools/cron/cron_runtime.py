@@ -385,6 +385,10 @@ def _extract_legacy_params(
         if kind == "at":
             # kind=at 为一次性任务：5 段 cron 无年份字段，必须触发后删除，否则次年同期重复（对齐 controller.py kind=at 处理）
             out["delete_after_run"] = True
+        elif kind == "cron" and cron_expr:
+            # kind=cron 为周期/间隔任务：清除一次性语义，否则遗留的 delete_after_run
+            # 会在首次触发后把任务标记为禁用/过期（对齐 controller.py update_job_a2a 处理）
+            out["delete_after_run"] = False
         required_device_intents = (
             data.get("required_device_intents")
             if "required_device_intents" in data
