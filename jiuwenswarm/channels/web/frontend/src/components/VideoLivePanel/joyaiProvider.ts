@@ -6,9 +6,6 @@ import {
 } from '../../utils/joyaiVoice';
 import {
   assistantSpeechText,
-  joyaiSearchAnswerInstruction,
-  joyaiSearchAnswerSessionId,
-  joyaiSearchFinalAnswer,
 } from '../../utils/searchPresentation';
 import {
   AgentAction,
@@ -205,50 +202,34 @@ export class JoyAIProvider {
       query: payload.query?.trim() || existing?.query || '',
       status: 'queued',
     });
-    this.callbacks.setToolStatus('搜索完成，等待 JoyAI 组织回答…');
+    this.callbacks.setToolStatus('搜索完成，等待输出结果…');
     this.callbacks.report('search_result_waiting_for_output_slot', {
       job_id: jobId,
-      message: 'Core Agent result queued for a grounded JoyAI answer',
+      message: 'Core Agent final answer queued for display',
     });
 
     const deliver = async () => {
       if (!await this.waitForAnswerSlot(sessionId)) return;
-      this.callbacks.setToolStatus('JoyAI 正在根据搜索资料生成回答…');
+      this.callbacks.setToolStatus('正在整理搜索结果…');
       const responseGeneration = this.ttsGeneration;
       try {
-        let finalAnswer = '';
-        let lastDecision = '';
-        for (let attempt = 0; attempt < 2 && !finalAnswer; attempt += 1) {
-          const joyaiResult = await this.requestFrame(
-            joyaiSearchAnswerInstruction(question, result, attempt > 0),
-            question,
-            {
-              frameDataUrl: existing?.frameDataUrl,
-              commitResponse: false,
-              requestKind: 'tool',
-              required: true,
-              joyaiSessionId: joyaiSearchAnswerSessionId(sessionId, jobId, attempt),
-            },
-          );
-          lastDecision = joyaiResult?.decision || '';
-          finalAnswer = joyaiSearchFinalAnswer(joyaiResult);
-          this.callbacks.report('search_result_dispatched', {
-            job_id: jobId,
-            attempt: attempt + 1,
-            decision: lastDecision,
-            response_chars: finalAnswer.length,
-            message: 'Core Agent result sent to JoyAI for final answer generation',
-          });
-        }
+        const finalAnswer = result.trim();
         if (!finalAnswer) {
-          throw new Error(`JoyAI 未生成有效搜索回答（decision=${lastDecision || 'empty'}）`);
+          throw new Error('Core Agent 未返回有效最终答案');
         }
+        this.callbacks.report('search_result_dispatched', {
+          job_id: jobId,
+          attempt: 1,
+          decision: 'core_agent',
+          response_chars: finalAnswer.length,
+          message: 'Core Agent chat.final content sent directly to the output queue',
+        });
         this.commitAndSpeak(finalAnswer, jobId, responseGeneration);
         this.callbacks.setToolStatus('');
         this.callbacks.report('search_result_answered', {
           job_id: jobId,
           realtime_answer: finalAnswer,
-          message: 'JoyAI generated the displayed answer from Core Agent evidence',
+          message: 'Core Agent final answer displayed directly without JoyAI summarization',
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : '请重试';
@@ -259,7 +240,7 @@ export class JoyAIProvider {
           query: payload.query?.trim() || existing?.query || '',
           status: 'failed',
         });
-        this.callbacks.setToolStatus(`搜索已完成，但 JoyAI 生成回答失败：${message}`);
+        this.callbacks.setToolStatus(`搜索已完成，但结果处理失败：${message}`);
         this.callbacks.report('search_result_response_empty', {
           job_id: jobId,
           message,
@@ -501,7 +482,7 @@ export class JoyAIProvider {
 
   private speakText(text: string, generation: number): void {
     const voice = this.voice;
-    const spokenText = assistantSpeechText(text);
+    const spokenText = assistantSpeechText(text, 500);
     if (!this.active || !voice || !spokenText
       || !canPlayJoyAIResponse(generation, this.ttsGeneration, this.userSpeechActive)) return;
 

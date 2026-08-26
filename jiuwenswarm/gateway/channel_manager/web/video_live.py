@@ -34,8 +34,11 @@ _MAX_JOYAI_FRAME_CHARS = 4_000_000
 _MAX_JOYAI_INSTRUCTION_CHARS = 2_000
 _JOYAI_TTS_VOICE = "vivian"
 _JOYAI_TTS_INSTRUCTIONS = (
-    "Always use the same Vivian voice. Speak at a slightly faster pace, "
-    "around 1.2x normal speed, while keeping pronunciation clear and natural."
+    "Always use the same Vivian voice. Read all Chinese text in Standard Mandarin "
+    "(Mainland China Putonghua, zh-CN), never Cantonese or another Chinese dialect. "
+    "If the input contains Traditional Chinese characters or Hong Kong wording, "
+    "interpret it as Simplified Chinese Mandarin before speaking. Speak at a slightly "
+    "faster pace, around 1.2x normal speed, while keeping pronunciation clear and natural."
 )
 _JOYAI_TTS_TEMPERATURE = 0.2
 _JOYAI_ACTION_TEMPERATURE = 0.0
@@ -979,7 +982,10 @@ async def _execute_core_agent(
         f"建议搜索线索：{query or question}\n"
         f"Realtime视觉模型提供的画面线索：{visual_context or '无'}\n\n"
         "请使用可用工具完成任务。请求附带当前视频帧时，如果问题涉及画面中的实体、文字或指代，"
-        "先使用图片理解工具核对画面，再生成准确搜索词；外部事实必须以搜索和网页正文为依据。"
+        "先使用图片理解工具核对画面，再生成准确搜索词；外部事实必须以搜索和网页正文为依据。\n\n"
+        "最终回答要求：必须使用简体中文。完成工具调用后直接回答用户问题，只保留结论、必要依据和必要来源，"
+        "不得复述搜索、抓取、重试或核实过程。"
+        "通常使用2至4个完整句子且不超过500个汉字；问题确实需要列举时可使用简短列表。"
     )
     params: dict[str, Any] = {
         "query": prompt,
@@ -1015,7 +1021,7 @@ async def _execute_core_agent(
         answer = str(payload.get("content") or payload.get("answer") or "").strip()
         if not answer:
             raise RuntimeError("Jiuwen Core Agent returned empty output")
-        return {**payload, "answer": answer}
+        return {**payload, "answer": answer, "raw_answer_chars": len(answer)}
 
     final_payload: dict[str, Any] = {}
     delta_parts: list[str] = []
@@ -1029,7 +1035,7 @@ async def _execute_core_agent(
         content = str(payload.get("content") or "")
         if event_type == "chat.delta" and content:
             delta_parts.append(content)
-        elif event_type == "chat.final" and content.strip():
+        elif event_type == "chat.final":
             final_payload = payload
         progress = _core_agent_progress(payload)
         if progress is not None:
@@ -1045,10 +1051,17 @@ async def _execute_core_agent(
             if on_progress is not None:
                 await on_progress(progress)
 
+    # Match the normal Jiuwen conversation path: a non-empty chat.final replaces
+    # the streamed bubble; an empty final only closes it and leaves its deltas.
     answer = str(final_payload.get("content") or "").strip() or "".join(delta_parts).strip()
     if not answer:
         raise RuntimeError("Jiuwen Core Agent returned empty output")
-    return {**final_payload, "answer": answer, "tools_used": tools_used}
+    return {
+        **final_payload,
+        "answer": answer,
+        "raw_answer_chars": len(answer),
+        "tools_used": tools_used,
+    }
 
 
 def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> None:

@@ -232,6 +232,9 @@ async def test_joyai_channel_tts_collects_pcm_and_returns_wav(monkeypatch) -> No
     config = json.loads(socket.sent[0])["config"]
     assert config["voice"] == "vivian"
     assert config["temperature"] == 0.2
+    assert "Standard Mandarin" in config["instructions"]
+    assert "never Cantonese" in config["instructions"]
+    assert "Simplified Chinese" in config["instructions"]
     assert "1.2x normal speed" in config["instructions"]
     assert json.loads(socket.sent[1])["type"] == "input_text.append"
     assert json.loads(socket.sent[2])["type"] == "input_text.commit"
@@ -1185,6 +1188,80 @@ def test_jsonl_appends_are_atomic_across_threads(tmp_path) -> None:
 
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert sorted(record["index"] for record in records) == list(range(100))
+
+
+@pytest.mark.asyncio
+async def test_execute_core_agent_uses_unary_content_without_custom_wrapper() -> None:
+    requests = []
+
+    class FakeAgentClient:
+        async def send_request(self, envelope):
+            requests.append(envelope)
+            return SimpleNamespace(
+                ok=True,
+                payload={"content": "香港今天有骤雨，外出建议带伞。"},
+            )
+
+    result = await video_live._execute_core_agent(
+        FakeAgentClient(),
+        question="香港今天天气如何？",
+        query="香港今日天气",
+        visual_context="室内画面",
+        search_session_id="search-session",
+    )
+
+    assert result["answer"] == "香港今天有骤雨，外出建议带伞。"
+    assert result["raw_answer_chars"] == len(result["answer"])
+    assert len(requests) == 1
+    assert "<final_answer>" not in requests[0].params["query"]
+    assert "必须使用简体中文" in requests[0].params["query"]
+
+
+@pytest.mark.asyncio
+async def test_execute_core_agent_prefers_chat_final_like_normal_chat() -> None:
+    class FakeAgentClient:
+        async def send_request_stream(self, envelope):
+            del envelope
+            yield SimpleNamespace(
+                payload={"event_type": "chat.delta", "content": "正在查询资料……"},
+            )
+            yield SimpleNamespace(
+                payload={"event_type": "chat.final", "content": "香港今天有骤雨，外出建议带伞。"},
+            )
+
+    result = await video_live._execute_core_agent(
+        FakeAgentClient(),
+        question="香港今天天气如何？",
+        query="香港今日天气",
+        visual_context="室内画面",
+        search_session_id="search-session",
+    )
+
+    assert result["answer"] == "香港今天有骤雨，外出建议带伞。"
+
+
+@pytest.mark.asyncio
+async def test_execute_core_agent_empty_final_keeps_streamed_answer() -> None:
+    class FakeAgentClient:
+        async def send_request_stream(self, envelope):
+            del envelope
+            yield SimpleNamespace(
+                payload={"event_type": "chat.delta", "content": "香港今天有骤雨，"},
+            )
+            yield SimpleNamespace(
+                payload={"event_type": "chat.delta", "content": "外出建议带伞。"},
+            )
+            yield SimpleNamespace(payload={"event_type": "chat.final", "content": ""})
+
+    result = await video_live._execute_core_agent(
+        FakeAgentClient(),
+        question="香港今天天气如何？",
+        query="香港今日天气",
+        visual_context="室内画面",
+        search_session_id="search-session",
+    )
+
+    assert result["answer"] == "香港今天有骤雨，外出建议带伞。"
 
 
 @pytest.mark.asyncio
