@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, Callable
 
@@ -21,6 +22,29 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_SERVICE_TIMEOUT_S = 1800.0
 _COMPOSE_SERVICE_TIMEOUT_S = 3300.0
+
+
+def _coerce_compose_inputs(inputs: Any) -> Any:
+    if not isinstance(inputs, dict):
+        return inputs
+    encoded_candidate_ids = inputs.get("candidate_skill_ids")
+    if not isinstance(encoded_candidate_ids, str):
+        return inputs
+    try:
+        decoded_candidate_ids = json.loads(encoded_candidate_ids)
+    except json.JSONDecodeError:
+        return inputs
+    if not isinstance(decoded_candidate_ids, list):
+        return inputs
+
+    normalized_inputs = dict(inputs)
+    normalized_inputs["candidate_skill_ids"] = decoded_candidate_ids
+    return normalized_inputs
+
+
+class _ComposeGraphLocalFunction(LocalFunction):
+    async def invoke(self, inputs: Any, **kwargs: Any) -> Any:
+        return await super().invoke(_coerce_compose_inputs(inputs), **kwargs)
 
 
 class SymphonyToolkit:
@@ -448,7 +472,12 @@ class SymphonyToolkit:
                     {"resilience": {"timeout_s": None}} if uses_internal_timeout else {}
                 ),
             )
-            return LocalFunction(card=card, func=func)
+            tool_type = (
+                _ComposeGraphLocalFunction
+                if name == "symphony_compose_graph"
+                else LocalFunction
+            )
+            return tool_type(card=card, func=func)
 
         return [
             make_tool(
