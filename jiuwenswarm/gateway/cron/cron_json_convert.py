@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime
 
-from jiuwenswarm.gateway.cron.cron_expr import iso_to_seven_field_cron
+from jiuwenswarm.gateway.cron.cron_expr import iso_to_five_field_cron
 
 
 _EXTERNAL_TO_INTERNAL_CHANNELS: dict[str, str] = {
@@ -105,13 +105,13 @@ def convert_cron_job_dict_to_flat(data: dict[str, Any]) -> dict[str, Any]:
         expr = str(sched.get("expr") or "").strip()
         tz = str(sched.get("tz") or "").strip()
     elif kind == "at":
-        # one-shot：使用 croniter 的 7 段表达式固定到指定年份
+        # one-shot：转为 5 段 cron（无年份，每年重复），靠 delete_after_run 在触发后删除实现单次
         at_raw = str(sched.get("at") or "").strip()
         if not at_raw:
             return data
         tz = str(sched.get("tz") or "").strip() or "UTC"
         try:
-            expr = iso_to_seven_field_cron(at_raw, timezone=tz)
+            expr = iso_to_five_field_cron(at_raw, timezone=tz)
         except Exception:  # noqa: BLE001
             return data
     else:
