@@ -2416,12 +2416,16 @@ async def process_team_message_stream(
                     "[TeamHelpers] cleared waiter set: session_id=%s",
                     session_id,
                 )
-        if (
+        cancelled_submitted_heartbeat = (
             event_stream_cancelled
             and is_heartbeat_request
             and round_submitted
+        )
+        owns_cancelled_heartbeat_round = (
+            cancelled_submitted_heartbeat
             and team_manager.is_round_owner(session_id, rid)
-        ):
+        )
+        if owns_cancelled_heartbeat_round:
             # Cancellation must stop the already submitted Runner round before
             # HeartbeatExecution releases its admission/run record.  Otherwise
             # the persistent Team stream would continue as ghost automation.
