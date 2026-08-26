@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -346,6 +347,27 @@ def test_resolve_request_project_dir_falls_back_to_cwd_for_legacy_clients() -> N
 
 
 def test_build_inputs_keeps_stable_project_dir_and_dynamic_cwd(monkeypatch):
+    interface_module, fake_adapter = _prepare_build_inputs_trusted_dirs_test(monkeypatch)
+    request = AgentRequest(
+        request_id="req-chat",
+        channel_id="tui",
+        session_id="tui_session",
+        params={
+            "query": "hello",
+            "project_dir": "/tmp/project",
+            "cwd": "/tmp/project-worktree",
+            "trusted_dirs": ["/tmp/project"],
+        },
+    )
+    asyncio.run(interface_module.JiuWenSwarm().process_message(request))
+    inputs = fake_adapter.seen_inputs
+    assert inputs["project_dir"] == "/tmp/project"
+    assert inputs["cwd"] == "/tmp/project-worktree"
+    assert inputs["trusted_dirs"] == ["/tmp/project"]
+
+
+def _prepare_build_inputs_trusted_dirs_test(monkeypatch):
+    """Shared fakes + monkeypatch harness for _build_inputs trusted_dirs fallback tests."""
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
     class FakeSkillManager:
@@ -384,12 +406,7 @@ def test_build_inputs_keeps_stable_project_dir_and_dynamic_cwd(monkeypatch):
             )
 
     fake_adapter = FakeAdapter()
-
-    monkeypatch.setattr(
-        interface_module,
-        "get_config",
-        lambda: {"preferred_language": "zh"},
-    )
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
     monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
     monkeypatch.setattr(interface_module, "SkillManager", FakeSkillManager)
     monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
@@ -400,24 +417,75 @@ def test_build_inputs_keeps_stable_project_dir_and_dynamic_cwd(monkeypatch):
         "create_adapter",
         lambda _sdk, mode="agent", **_kwargs: fake_adapter,
     )
+    return interface_module, fake_adapter
+
+
+def test_build_inputs_injects_project_dir_as_trusted_when_workspace_read_allow(monkeypatch):
+    interface_module, fake_adapter = _prepare_build_inputs_trusted_dirs_test(monkeypatch)
+    monkeypatch.setattr(
+        interface_module,
+        "get_permissions_file_guard_workspace_access",
+        lambda: {"read": "allow", "write": "allow", "exec": "allow"},
+    )
     request = AgentRequest(
-        request_id="req-chat",
+        request_id="req-inject",
+        channel_id="officeclaw",
+        session_id="officeclaw_session",
+        params={"query": "hello", "project_dir": "/tmp/project"},
+    )
+    asyncio.run(interface_module.JiuWenSwarm().process_message(request))
+    assert fake_adapter.seen_inputs["trusted_dirs"] == [os.path.abspath("/tmp/project")]
+
+
+def test_build_inputs_skips_injection_when_workspace_read_ask(monkeypatch):
+    interface_module, fake_adapter = _prepare_build_inputs_trusted_dirs_test(monkeypatch)
+    monkeypatch.setattr(
+        interface_module,
+        "get_permissions_file_guard_workspace_access",
+        lambda: {"read": "ask", "write": "ask", "exec": "ask"},
+    )
+    request = AgentRequest(
+        request_id="req-skip",
+        channel_id="officeclaw",
+        session_id="officeclaw_session",
+        params={"query": "hello", "project_dir": "/tmp/project"},
+    )
+    asyncio.run(interface_module.JiuWenSwarm().process_message(request))
+    assert "trusted_dirs" not in fake_adapter.seen_inputs
+
+
+def test_build_inputs_preserves_explicit_trusted_dirs_even_when_read_ask(monkeypatch):
+    interface_module, fake_adapter = _prepare_build_inputs_trusted_dirs_test(monkeypatch)
+    monkeypatch.setattr(
+        interface_module,
+        "get_permissions_file_guard_workspace_access",
+        lambda: {"read": "ask", "write": "ask", "exec": "ask"},
+    )
+    request = AgentRequest(
+        request_id="req-preserve",
         channel_id="tui",
         session_id="tui_session",
-        params={
-            "query": "hello",
-            "project_dir": "/tmp/project",
-            "cwd": "/tmp/project-worktree",
-            "trusted_dirs": ["/tmp/project"],
-        },
+        params={"query": "hello", "project_dir": "/tmp/project", "trusted_dirs": ["/tmp/explicit"]},
     )
-
     asyncio.run(interface_module.JiuWenSwarm().process_message(request))
+    assert fake_adapter.seen_inputs["trusted_dirs"] == ["/tmp/explicit"]
 
-    inputs = fake_adapter.seen_inputs
-    assert inputs["project_dir"] == "/tmp/project"
-    assert inputs["cwd"] == "/tmp/project-worktree"
-    assert inputs["trusted_dirs"] == ["/tmp/project"]
+
+def test_build_inputs_skips_injection_when_workspace_access_raises(monkeypatch):
+    interface_module, fake_adapter = _prepare_build_inputs_trusted_dirs_test(monkeypatch)
+
+    def _boom():
+        raise RuntimeError("config unavailable")
+
+    monkeypatch.setattr(interface_module, "get_permissions_file_guard_workspace_access", _boom)
+    request = AgentRequest(
+        request_id="req-boom",
+        channel_id="officeclaw",
+        session_id="officeclaw_session",
+        params={"query": "hello", "project_dir": "/tmp/project"},
+    )
+    asyncio.run(interface_module.JiuWenSwarm().process_message(request))
+    assert "trusted_dirs" not in fake_adapter.seen_inputs
 
 
 def test_build_inputs_propagates_user_interaction_capability(monkeypatch):
