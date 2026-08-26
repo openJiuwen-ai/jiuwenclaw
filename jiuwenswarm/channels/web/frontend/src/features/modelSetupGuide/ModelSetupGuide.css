@@ -19,7 +19,7 @@
   pointer-events: none;
 }
 
-[data-model-setup-guide-target='more'][aria-describedby^='model-setup-guide-description-'] {
+[data-model-setup-guide-target='settings'][aria-describedby^='model-setup-guide-description-'] {
   outline: none;
   box-shadow: none;
 }

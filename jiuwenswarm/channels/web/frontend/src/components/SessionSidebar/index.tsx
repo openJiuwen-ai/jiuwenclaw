@@ -4,13 +4,9 @@
  * Redesigned sidebar with logo and navigation.
  */
 
-import { useLayoutEffect, useCallback } from 'react';
+import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import './SessionSidebar.css';
-import ChannelIcon from '../../assets/sidebar/channel.svg?react';
-import PluginIcon from '../../assets/sidebar/plugin.svg?react';
-import ConfigIcon from '../../assets/sidebar/config.svg?react';
-import WebIcon from '../../assets/sidebar/web.svg?react';
 import PlusIcon from '../../assets/sidebar/plus.svg?react';
 import logoIcon from '/logo.svg';
 import SettingsIcon from '../../assets/settings/app-navigation/settings.svg?react';
@@ -18,7 +14,6 @@ import UpdateIcon from '../../assets/sidebar/advanced-config.svg?react';
 import WorkIcon from '../../assets/工作.svg?react';
 import SkillDesignIcon from '../../assets/技能.svg?react';
 import AgentDesignIcon from '../../assets/智能体.svg?react';
-import MoreDesignIcon from '../../assets/更多.svg?react';
 import type { SidebarNavKey } from '../../utils/frontendPlatform';
 
 type MainNavKey = SidebarNavKey | 'connectorMarket';
@@ -29,7 +24,6 @@ interface SessionSidebarProps {
   onNewSession?: () => void;
   showNewSession?: boolean;
   hiddenNavItems?: MainNavKey[];
-  onMorePanelOpenChange?: (open: boolean) => void;
 }
 
 interface NavItem {
@@ -58,18 +52,11 @@ const connectorMarketNavIcon = (
 const mainNavItems: NavItem[] = [
   { key: 'chat', labelKey: 'nav.work', icon: <WorkIcon aria-hidden /> },
   { key: 'skills', labelKey: 'nav.skills', icon: <SkillDesignIcon aria-hidden /> },
-  { key: 'channels', labelKey: 'nav.channels', icon: <ChannelIcon aria-hidden /> },
   { key: 'agents', labelKey: 'nav.agent', icon: <AgentDesignIcon aria-hidden /> },
   { key: 'connectorMarket', labelKey: 'nav.connectorMarket', icon: connectorMarketNavIcon },
   { key: 'teams', labelKey: 'nav.teams', icon: teamNavIcon },
   { key: 'settings', labelKey: 'nav.settings', icon: <SettingsIcon aria-hidden /> },
   { key: 'updatepanel', labelKey: 'nav.update', icon: <UpdateIcon aria-hidden /> },
-];
-
-const moreNavItems: NavItem[] = [
-  { key: 'configpanel', labelKey: 'nav.config', icon: <ConfigIcon aria-hidden /> },
-  { key: 'extensions', labelKey: 'nav.extensions', icon: <PluginIcon aria-hidden /> },
-  { key: 'browserpanel', labelKey: 'nav.browser', icon: <WebIcon aria-hidden /> },
 ];
 
 export function SessionSidebar({
@@ -78,7 +65,6 @@ export function SessionSidebar({
   onNewSession,
   showNewSession = true,
   hiddenNavItems = [],
-  onMorePanelOpenChange,
 }: SessionSidebarProps) {
   const { t } = useTranslation();
 
@@ -89,36 +75,16 @@ export function SessionSidebar({
     }
   }, [onNavigate, onNewSession]);
 
-  const handleMoreClick = () => {
-    if (!isMoreActive) {
-      const defaultMoreNav = visibleMoreNavItems[0]?.key;
-      if (defaultMoreNav) {
-        onNavigate(defaultMoreNav);
-      }
-    }
-  };
-
   const handleNavClick = (nav: MainNavKey) => {
-    onNavigate(nav);
-  };
-
-  const handleMoreNavClick = (nav: MainNavKey) => {
     onNavigate(nav);
   };
 
   const getNavItemLabel = (item: NavItem) => t(item.labelKey);
   const visibleMainNavItems = mainNavItems.filter((item) => !hiddenNavItems.includes(item.key));
-  const visibleMoreNavItems = moreNavItems.filter((item) => !hiddenNavItems.includes(item.key));
-  const isMoreActive = visibleMoreNavItems.some((item) => item.key === activeNav);
   // 定时任务（cron）是"任务"区内与会话同级的视图，没有独立的导航图标，
   // 因此进入定时任务时"任务"导航项也应保持选中态
   const isNavItemActive = (item: NavItem) =>
     activeNav === item.key || (item.key === 'chat' && activeNav === 'cron');
-
-  useLayoutEffect(() => {
-    onMorePanelOpenChange?.(isMoreActive);
-    return () => onMorePanelOpenChange?.(false);
-  }, [isMoreActive, onMorePanelOpenChange]);
 
   return (
     <aside className="sidebar sidebar--icon-rail" data-testid="session-sidebar-rail">
@@ -146,47 +112,12 @@ export function SessionSidebar({
           onClick={() => handleNavClick(item.key)}
           data-testid="session-sidebar-nav-item"
           data-variant={item.key}
+          data-model-setup-guide-target={item.key === 'settings' ? 'settings' : undefined}
         >
           <span className="icon-rail-nav-item__icon">{item.icon}</span>
           <span className="icon-rail-nav-item__label">{getNavItemLabel(item)}</span>
         </button>
       ))}
-
-      {visibleMoreNavItems.length > 0 && (
-        <>
-          <button
-            className={`icon-rail-nav-item${isMoreActive ? ' icon-rail-nav-item--active' : ''}`}
-            onClick={handleMoreClick}
-            aria-expanded={isMoreActive}
-            data-model-setup-guide-target="more"
-            data-testid="session-sidebar-more-trigger"
-          >
-            <span className="icon-rail-nav-item__icon">
-              <MoreDesignIcon aria-hidden />
-            </span>
-            <span className="icon-rail-nav-item__label">{t('nav.more')}</span>
-          </button>
-          {isMoreActive && (
-            <div className="icon-rail-more-panel" data-testid="session-sidebar-more-panel">
-              <div className="icon-rail-more-panel__title" data-testid="session-sidebar-more-panel-title">{t('sessionSidebar.moreSettings')}</div>
-              <nav className="icon-rail-more-panel__list" aria-label={t('sessionSidebar.moreSettings')} data-testid="session-sidebar-more-nav">
-                {visibleMoreNavItems.map((item) => (
-                  <button
-                    key={item.key}
-                    className={`icon-rail-more-panel__item${activeNav === item.key ? ' icon-rail-more-panel__item--active' : ''}`}
-                    onClick={() => handleMoreNavClick(item.key)}
-                    data-testid="session-sidebar-more-nav-item"
-                    data-variant={item.key}
-                  >
-                    <span className="icon-rail-more-panel__icon">{item.icon}</span>
-                    <span className="icon-rail-more-panel__text">{getNavItemLabel(item)}</span>
-                  </button>
-                ))}
-              </nav>
-            </div>
-          )}
-        </>
-      )}
 
       <div className="icon-rail-spacer" />
     </aside>

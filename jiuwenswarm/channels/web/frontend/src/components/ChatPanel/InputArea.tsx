@@ -31,6 +31,7 @@ import {
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
+import { requestSettingsModule } from '../../features/settings/settingsNavigation';
 import { AgentMode, MediaItem, ModelEntry, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
@@ -3630,7 +3631,7 @@ function ModelSelector({
 
   const handleAddModel = () => {
     setIsOpen(false);
-    window.dispatchEvent(new CustomEvent<string>('jiuwen:nav', { detail: 'configpanel' }));
+    requestSettingsModule('models');
   };
 
   return (

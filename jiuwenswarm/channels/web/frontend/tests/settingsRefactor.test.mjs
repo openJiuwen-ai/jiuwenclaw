@@ -1605,24 +1605,84 @@ test('Settings channel implementation stays decomposed around shared form capabi
   assert.doesNotMatch(source(files.panel), /channel\.[a-z]+\.(?:get|set)_conf/);
 });
 
-test('standalone and Settings channel surfaces stay independent', () => {
+test('legacy channel and More surfaces are removed while Settings owns their replacements', () => {
   const sidebar = source('src/components/SessionSidebar/index.tsx');
   const app = source('src/App.tsx');
   const settingsChannelsModule = source('src/features/settings/modules/channels/ChannelsModule.tsx');
-  const mainNavItems = sidebar.slice(sidebar.indexOf('const mainNavItems'), sidebar.indexOf('const moreNavItems'));
-  const moreNavItems = sidebar.slice(
-    sidebar.indexOf('const moreNavItems'),
-    sidebar.indexOf('export function SessionSidebar'),
-  );
+  const settingsNavigation = source('src/features/settings/settingsNavigation.ts');
+  const modelDialog = source('src/features/settings/modules/models/ModelDialog.tsx');
+  const mainNavItems = sidebar.slice(sidebar.indexOf('const mainNavItems'), sidebar.indexOf('export function SessionSidebar'));
   assert.match(mainNavItems, /key: 'updatepanel'/);
   assert.match(mainNavItems, /key: 'settings'/);
-  assert.match(mainNavItems, /key: 'channels'/);
-  assert.doesNotMatch(moreNavItems, /key: 'updatepanel'/);
+  assert.doesNotMatch(mainNavItems, /key: 'channels'/);
+  assert.doesNotMatch(sidebar, /moreNavItems|configpanel|browserpanel|key: 'extensions'/);
   assert.match(app, /<SettingsPage/);
-  assert.match(app, /<ChannelsPanel/);
-  assert.match(app, /discardConfirmMessage=\{t\('settingsPanel\.dialog\.discardConfirm'\)\}/);
-  assert.match(app, /onHasChangesChange=\{handleChannelsHasChangesChange\}/);
-  assert.match(app, /activeNav === 'channels'[\s\S]*channelsHasChangesRef\.current[\s\S]*window\.confirm/);
+  assert.match(app, /initialModuleId=\{requestedSettingsModuleId \?\? undefined\}/);
+  assert.doesNotMatch(app, /ConfigPanel|BrowserPanel|ChannelsPanel|ExtensionsHubPanel/);
   assert.match(settingsChannelsModule, /import \{ SettingsChannelsPanel \} from '\.\/SettingsChannelsPanel'/);
   assert.doesNotMatch(settingsChannelsModule, /components\/ChannelsPanel/);
+  assert.match(settingsNavigation, /export type SettingsModuleTarget = 'models' \| 'agent'/);
+  assert.match(settingsNavigation, /SETTINGS_MODULE_NAVIGATION_EVENT = 'jiuwen:settings-module'/);
+  assert.equal(existsSync(new URL('src/components/ConfigPanel/index.tsx', root)), false);
+  assert.equal(existsSync(new URL('src/components/BrowserPanel/index.tsx', root)), false);
+  assert.equal(existsSync(new URL('src/components/ChannelsPanel/index.tsx', root)), false);
+  assert.equal(existsSync(new URL('src/components/ExtensionsHubPanel/index.tsx', root)), false);
+  assert.match(modelDialog, /OpenAIAccountSettings, useOpenAIAccountController/);
+  assert.equal(existsSync(new URL('src/features/settings/modules/models/OpenAIAccountField.tsx', root)), true);
+});
+
+test('legacy page translations and Harness package state are removed without deleting shared Settings keys', () => {
+  const supportedChannelIds = ['dingtalk', 'discord', 'feishu', 'slack', 'telegram', 'whatsapp', 'xiaoyi'];
+  const expectedConfigSections = [
+    'booleanLabels',
+    'enterValue',
+    'externalCli',
+    'keyHelp',
+    'modelList',
+    'openaiAccount',
+    'proactive',
+  ];
+
+  for (const locale of [zh, en]) {
+    assert.deepEqual(Object.keys(locale.browser).sort(), [
+      'browserTypeAuto',
+      'browserTypeChrome',
+      'browserTypeEdge',
+      'errors',
+    ]);
+    assert.deepEqual(Object.keys(locale.channels.labels).sort(), supportedChannelIds);
+    assert.deepEqual(Object.keys(locale.config).sort(), expectedConfigSections);
+    assert.equal(locale.extensions, undefined);
+    assert.equal(locale.harnessPackage, undefined);
+    assert.equal(locale.sessionSidebar.moreSettings, undefined);
+    for (const key of ['noExtension', 'refreshFiles', 'loadFailed']) {
+      assert.equal(locale.toolPanel[key], undefined, `toolPanel.${key} must be absent`);
+    }
+    for (const key of ['channels', 'extensions', 'rails', 'harnesspkg', 'config', 'browser']) {
+      assert.equal(locale.nav[key], undefined, `nav.${key} must be absent`);
+    }
+    for (const key of ['title', 'subtitle', 'listTitle', 'listMeta', 'loading', 'wechatLogin', 'wechatUnbind']) {
+      assert.equal(locale.channels[key], undefined, `channels.${key} must be absent`);
+    }
+    assert.equal(locale.channels.config.wechatTitle, undefined);
+    assert.equal(locale.channels.config.wecomTitle, undefined);
+    assert.equal(locale.nav.more.length > 0, true);
+    assert.equal(locale.channels.config.xiaoyiTitle.length > 0, true);
+    assert.equal(locale.config.openaiAccount.title.length > 0, true);
+  }
+
+  const types = source('src/types/index.ts');
+  const harnessStore = source('src/stores/harnessStore.ts');
+  const storeExports = source('src/stores/index.ts');
+  const utilityExports = source('src/utils/index.ts');
+  assert.equal(existsSync(new URL('src/components/ToolPanel/HarnessExtensionTree.tsx', root)), false);
+  assert.equal(existsSync(new URL('src/utils/harnessErrors.ts', root)), false);
+  assert.doesNotMatch(types, /interface (?:PackageInfo|NativeVersionInfo|PackagesPayload|ActivatePayload|DeactivatePayload)\b/);
+  assert.doesNotMatch(harnessStore, /CachedFileTreeEntry/);
+  assert.doesNotMatch(storeExports, /CachedFileTreeEntry/);
+  assert.doesNotMatch(utilityExports, /harnessErrors/);
+  assert.doesNotMatch(
+    harnessStore,
+    /\b(?:CachedFileTreeEntry|packages|nativeVersion|activePackageIds|selectedPackageId|loadingPackages|activatingPackage|deactivatingPackage|extensionFileTreeCache|fileTreeLoadingPaths|setPackages|isPackageActive|setSelectedPackageId|setLoadingPackages|setActivatingPackage|setDeactivatingPackage|setFileTreeCache|getFileTreeCache|clearFileTreeCache|setFileTreeLoading|isFileTreeLoading)\s*:/,
+  );
 });

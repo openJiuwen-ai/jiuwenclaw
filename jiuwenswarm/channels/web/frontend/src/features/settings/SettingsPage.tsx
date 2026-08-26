@@ -8,6 +8,7 @@ import type {
 import { SettingsPageLayout } from './SettingsPageLayout';
 import { SettingsServicesProvider } from './services/SettingsServicesProvider';
 import type { SettingsPageDefinition } from './registry/types';
+import type { SettingsModuleTarget } from './settingsNavigation';
 
 export function SettingsPage({
   definition,
@@ -18,6 +19,7 @@ export function SettingsPage({
   onDetectExternalCli,
   onSelectExternalCliPath,
   onGetCodexDependencyInstallStatus,
+  initialModuleId,
 }: {
   definition: SettingsPageDefinition;
   isConnected: boolean;
@@ -27,6 +29,7 @@ export function SettingsPage({
   onDetectExternalCli?: (agent: ExternalCliAgentKind, path?: string) => Promise<ExternalCliDetectResult>;
   onSelectExternalCliPath?: (agent: ExternalCliAgentKind, initialPath?: string) => Promise<string | null>;
   onGetCodexDependencyInstallStatus?: () => Promise<CodexDependencyInstallStatus>;
+  initialModuleId?: SettingsModuleTarget;
 }) {
   return (
     <SettingsServicesProvider
@@ -38,7 +41,7 @@ export function SettingsPage({
       onSelectExternalCliPath={onSelectExternalCliPath}
       onGetCodexDependencyInstallStatus={onGetCodexDependencyInstallStatus}
     >
-      <SettingsPageLayout definition={definition} />
+      <SettingsPageLayout definition={definition} initialModuleId={initialModuleId} />
     </SettingsServicesProvider>
   );
 }

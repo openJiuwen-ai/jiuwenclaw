@@ -7,11 +7,7 @@ export type SidebarNavKey =
   | 'teams'
   | 'sessions'
   | 'cron'
-  | 'channels'
   | 'settings'
-  | 'extensions'
-  | 'configpanel'
-  | 'browserpanel'
   | 'updatepanel';
 
 export const DEFAULT_FRONTEND_PLATFORM: FrontendPlatform = 'web';
@@ -29,7 +25,7 @@ const PLATFORM_ALIASES: Record<string, FrontendPlatform | null> = {
 
 const HIDDEN_NAV_ITEMS_BY_PLATFORM: Record<FrontendPlatform, readonly SidebarNavKey[]> = {
   web: ['sessions'],
-  harmony: ['teams', 'sessions', 'browserpanel', 'updatepanel'],
+  harmony: ['teams', 'sessions', 'updatepanel'],
 };
 
 export function normalizeFrontendPlatform(value: unknown): FrontendPlatform | null {

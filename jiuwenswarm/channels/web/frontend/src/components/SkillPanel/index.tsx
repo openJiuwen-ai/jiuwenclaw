@@ -180,7 +180,7 @@ interface SkillPanelProps {
   isConnected: boolean;
   symphonyEnabled: boolean;
   onSymphonyEnabledChange: (enabled: boolean) => Promise<boolean>;
-  onNavigateToConfig?: () => void;
+  onNavigateToSettings?: () => void;
   /** 当前是否处于激活状态（左边栏选中技能） */
   isActive?: boolean;
 }
@@ -336,7 +336,7 @@ export function SkillPanel({
   isConnected,
   symphonyEnabled,
   onSymphonyEnabledChange,
-  onNavigateToConfig,
+  onNavigateToSettings,
   isActive = false,
 }: SkillPanelProps) {
   const { t, i18n } = useTranslation();
@@ -3101,9 +3101,9 @@ export function SkillPanel({
         open={sourceModalOpen}
         sessionId={sessionId}
         onClose={() => setSourceModalOpen(false)}
-        onNavigateToConfig={() => {
+        onNavigateToSettings={() => {
           setSourceModalOpen(false);
-          onNavigateToConfig?.();
+          onNavigateToSettings?.();
         }}
       />
       <SkillNetSearchModal
@@ -3115,9 +3115,9 @@ export function SkillPanel({
         onInstalled={async () => {
           await fetchSkills();
         }}
-        onNavigateToConfig={() => {
+        onNavigateToSettings={() => {
           setSkillNetModalOpen(false);
-          onNavigateToConfig?.();
+          onNavigateToSettings?.();
         }}
       />
       <ClawHubSearchModal

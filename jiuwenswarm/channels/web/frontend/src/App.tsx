@@ -14,14 +14,15 @@ import { SessionsPanel } from './components/SessionsPanel';
 import CronPanel from './components/CronPanel';
 import HeartbeatPanel from './components/HeartbeatPanel';
 import { ToolPanel } from './components/ToolPanel';
-import { ConfigPanel } from './components/ConfigPanel';
-import { BrowserPanel } from './components/BrowserPanel';
-import { ChannelsPanel } from './components/ChannelsPanel';
 import { UpdatePanel } from './components/UpdatePanel';
 import { SettingsPage } from './features/settings/SettingsPage';
 import type { SettingsPageDefinition } from './features/settings/registry/types';
 import type { SettingsRequest } from './features/settings/services/settingsContract';
-import { ExtensionsHubPanel } from './components/ExtensionsHubPanel';
+import {
+  SETTINGS_MODULE_NAVIGATION_EVENT,
+  requestSettingsModule,
+  type SettingsModuleTarget,
+} from './features/settings/settingsNavigation';
 import { ConnectorMarketPanel } from './components/ConnectorMarket';
 import {
   ShareImageDocument,
@@ -58,6 +59,10 @@ import { processOAuthCallback } from './utils/gitcodeOAuth';
 import { useTeamPanelState } from './features/teamPanelState';
 import { useSingleAgentPanelState } from './features/singleAgentPanelState';
 import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
+import type {
+  CodexDependencyInstallStatus,
+  ExternalCliAgentKind,
+} from './components/ExternalCliAgentsSection';
 import {
   ensureSessionRuntimes,
   useSessionStore,
@@ -133,14 +138,6 @@ type ChatPanelResizeDrag = {
 };
 const PREVIEW_MODEL_SETUP_GUIDE = import.meta.env.DEV
   && new URLSearchParams(window.location.search).get('modelSetupGuide') === '1';
-const EXTERNAL_CLI_AGENT_CONFIG_KEYS = new Set([
-  "external_cli_agent_claude_enabled",
-  "external_cli_agent_claude_use_builtin",
-  "external_cli_agent_claude_cli_path",
-  "external_cli_agent_codex_enabled",
-  "external_cli_agent_codex_use_builtin",
-  "external_cli_agent_codex_cli_path",
-]);
 
 function shouldPreviewModelSetupGuide(): boolean {
   return PREVIEW_MODEL_SETUP_GUIDE;
@@ -162,82 +159,6 @@ type LoadedHistoryPage = {
   totalPages: number;
   result: FetchHistoryPageResult | null;
 };
-
-type AgentsTeamsSavePayload = {
-  agents: Record<string, {
-    model: { provider: string; api_base: string; api_key: string; model: string };
-    skills: string[];
-  }>;
-  team: Array<{
-    team_name: string;
-    lifecycle: string;
-    teammate_mode: string;
-    spawn_mode: string;
-    enable_permissions: boolean;
-    external_cli_agents?: Array<{ cli_agent: "claude" | "codex"; cli_path?: string }>;
-    external_cli_publish_url?: string;
-    leader: { member_name: string; display_name: string; persona: string; agent_key: string };
-    teammate: { agent_key: string };
-    predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
-  }>;
-};
-
-type ConfigSaveAllPayload = {
-  config?: Record<string, string>;
-  models?: ModelEntry[];
-  agents?: AgentsTeamsSavePayload["agents"];
-  team?: AgentsTeamsSavePayload["team"];
-};
-
-type ConfigSaveResult = {
-  updated?: string[];
-  applied_without_restart?: boolean;
-  models_count?: number | null;
-  external_cli_dependency_installs?: Partial<Record<ExternalCliAgentKind, ExternalCliDependencyInstallStatus>>;
-};
-
-type ExternalCliAgentKind = "claude" | "codex";
-
-type ExternalCliDependencyInstallStatus = {
-  cli_agent?: ExternalCliAgentKind;
-  status?: string;
-  phase?: string;
-  error?: string;
-  last_log?: string;
-  log_tail?: string[];
-  started_at?: number;
-  finished_at?: number;
-  updated_at?: number;
-};
-
-function externalCliDependencyInstallAgents(result: ConfigSaveResult | void): Set<ExternalCliAgentKind> {
-  const installs = result?.external_cli_dependency_installs ?? {};
-  return new Set(
-    Object.entries(installs)
-      .filter((entry): entry is [ExternalCliAgentKind, ExternalCliDependencyInstallStatus] => {
-        const [cliAgent, status] = entry;
-        return (cliAgent === "claude" || cliAgent === "codex") && !!status?.status;
-      })
-      .map(([cliAgent]) => cliAgent),
-  );
-}
-
-function hasExternalCliDependencyInstallResult(result: ConfigSaveResult | void): boolean {
-  return externalCliDependencyInstallAgents(result).size > 0;
-}
-
-function removeExternalCliAgentsFromTeamPayload(
-  team: AgentsTeamsSavePayload["team"],
-  cliAgents: Set<ExternalCliAgentKind>,
-): AgentsTeamsSavePayload["team"] {
-  if (cliAgents.size === 0) {
-    return team;
-  }
-  return team.map((item) => ({
-    ...item,
-    external_cli_agents: item.external_cli_agents?.filter((agent) => !cliAgents.has(agent.cli_agent)),
-  }));
-}
 
 function getWorkContextForSession(sessionId: string): {
   project_id?: string;
@@ -369,14 +290,13 @@ function AppContent({
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
   const [saveToastVisible, setSaveToastVisible] = useState(false);
-  const [configChangedConfirmOpen, setConfigChangedConfirmOpen] = useState(false);
   const [proactiveToastVisible, setProactiveToastVisible] = useState(false);
   const [proactiveToastMessage, setProactiveToastMessage] = useState('');
   const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
   const [securityAlertContent, setSecurityAlertContent] = useState('');
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
-  const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
-  const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
+  const [requestedSettingsModuleId, setRequestedSettingsModuleId] =
+    useState<SettingsModuleTarget | null>(null);
   const {
     isMobile,
     conversationSidebarCollapsed,
@@ -397,8 +317,6 @@ function AppContent({
   const modelSetupGuideEvaluatedRef = useRef(false);
   /** OAuth 回调恢复导航后标记，防止 fetchConfig 等后续逻辑覆盖 activeNav */
   const oauthNavRestoredRef = useRef(false);
-  /** 从 SkillNet 等入口跳转配置页时，首次展开对应配置分组（如第三方服务） */
-  const [configInitialExpandGroup, setConfigInitialExpandGroup] = useState<string | null>(null);
 
   useEffect(() => {
     tRef.current = t;
@@ -422,9 +340,6 @@ function AppContent({
   }, []);
 
   useEffect(() => {
-    if (activeNav !== 'configpanel') {
-      setConfigInitialExpandGroup(null);
-    }
     if (activeNav === 'chat') {
       const { defaultModelName, setSelectedModelName } = useSessionStore.getState();
       const runtime = useSessionStore.getState().getRuntime(sessionId);
@@ -450,12 +365,20 @@ function AppContent({
     return () => window.removeEventListener('jiuwen:nav', handler);
   }, []);
 
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const moduleId = (event as CustomEvent<SettingsModuleTarget>).detail;
+      setRequestedSettingsModuleId(moduleId);
+      setActiveNav('settings');
+    };
+    window.addEventListener(SETTINGS_MODULE_NAVIGATION_EVENT, handler);
+    return () => window.removeEventListener(SETTINGS_MODULE_NAVIGATION_EVENT, handler);
+  }, []);
+
   const restartAutoCloseTimerRef = useRef<number | null>(null);
   const saveToastTimerRef = useRef<number | null>(null);
   const proactiveToastTimerRef = useRef<number | null>(null);
-  const hasChangesRef = useRef(false);
   const settingsHasChangesRef = useRef(false);
-  const channelsHasChangesRef = useRef(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyPrepending, setHistoryPrepending] = useState(false);
   const [historyRetrySessions, setHistoryRetrySessions] = useState<ReadonlySet<string>>(
@@ -1548,41 +1471,12 @@ function AppContent({
     };
   }, []);
 
-  const validateModelConfig = useCallback(
-    async (fields: {
-      api_base: string;
-      api_key: string;
-      model: string;
-      model_provider: string;
-      reasoning_level?: string;
-    }) => {
-      await request('config.validate_model', fields, { timeoutMs: 60000 });
-    },
-    [request],
-  );
-
-  const handleModelsReplaceAll = useCallback(async (models: ModelEntry[]) => {
-    await request('models.replace_all', { models });
-  }, [request]);
-
   const handleConfigChanged = useCallback(() => {
-    if (hasChangesRef.current) {
-      setConfigChangedConfirmOpen(true);
-      return;
-    }
     void fetchConfig();
   }, [fetchConfig]);
 
-  const handleHasChangesChange = useCallback((hasChanges: boolean) => {
-    hasChangesRef.current = hasChanges;
-  }, []);
-
   const handleSettingsHasChangesChange = useCallback((hasChanges: boolean) => {
     settingsHasChangesRef.current = hasChanges;
-  }, []);
-
-  const handleChannelsHasChangesChange = useCallback((hasChanges: boolean) => {
-    channelsHasChangesRef.current = hasChanges;
   }, []);
 
   const handleModelsRefresh = useCallback(async () => {
@@ -1633,8 +1527,8 @@ function AppContent({
   }, [request, t]);
 
   const getExternalCliDependencyInstallStatus = useCallback(
-    async (cliAgent: ExternalCliAgentKind): Promise<ExternalCliDependencyInstallStatus> => {
-      return request<ExternalCliDependencyInstallStatus>(
+    async (cliAgent: ExternalCliAgentKind): Promise<CodexDependencyInstallStatus> => {
+      return request<CodexDependencyInstallStatus>(
         "external_cli.install_status",
         { cli_agent: cliAgent },
         { timeoutMs: 10 * 1000 },
@@ -1647,52 +1541,6 @@ function AppContent({
     () => getExternalCliDependencyInstallStatus('codex'),
     [getExternalCliDependencyInstallStatus],
   );
-
-  const saveConfigAndRestart = useCallback(async (updates: Record<string, string>): Promise<ConfigSaveResult> => {
-    const payload = await request<ConfigSaveResult>(
-      'config.set',
-      updates
-    );
-    const hasExternalCliDependencyInstall = hasExternalCliDependencyInstallResult(payload);
-    const effectiveUpdates = hasExternalCliDependencyInstall
-      ? Object.fromEntries(
-          Object.entries(updates).filter(([key]) => !EXTERNAL_CLI_AGENT_CONFIG_KEYS.has(key)),
-        )
-      : updates;
-    setServerConfig((prev) => {
-      if (!prev) return effectiveUpdates;
-      const next: Record<string, unknown> = { ...prev, ...effectiveUpdates };
-      // Keep the bilingual memory_forbidden_description dictionary structure.
-      if (typeof prev?.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
-          && !Array.isArray(prev.memory_forbidden_description) && effectiveUpdates.memory_forbidden_description !== undefined) {
-        const prevDict = prev.memory_forbidden_description as Record<string, string>;
-        const lang = i18n.language || 'zh';
-        next.memory_forbidden_description = { ...prevDict, [lang]: effectiveUpdates.memory_forbidden_description };
-      }
-      return next;
-    });
-    if (hasExternalCliDependencyInstall) {
-      return payload;
-    }
-    if ('a2ui_enabled' in effectiveUpdates) {
-      setA2UIFeatureEnabled(normalizeA2UIEnabled(effectiveUpdates.a2ui_enabled));
-      setConfigError(null);
-      return payload;
-    }
-    setConfigError(null);
-    setRestartModalOpen(true);
-    setRestartSuccess(false);
-    setRestartSeenDisconnect(false);
-    setAppliedWithoutRestart(payload?.applied_without_restart === true);
-    clearRestartAutoCloseTimer();
-    if (payload?.applied_without_restart === true) {
-      setRestartSuccess(true);
-      restartAutoCloseTimerRef.current = window.setTimeout(() => {
-        closeRestartModal();
-      }, 5000);
-    }
-    return payload;
-  }, [clearRestartAutoCloseTimer, closeRestartModal, request]);
 
   const savePermissionSilent = useCallback(async (updates: Record<string, string>) => {
     try {
@@ -1739,117 +1587,6 @@ function AppContent({
     }
     return appliedWithoutRestart;
   }, [applyConfigSaveUiState, request]);
-
-  const buildAgentsTeamsFlatConfig = useCallback((payload: AgentsTeamsSavePayload) => {
-    const updates: Record<string, string> = {};
-    const agentCount = Object.keys(payload.agents).length;
-    Object.entries(payload.agents).forEach(([name, agent], idx) => {
-      updates[`agent_name_${idx}`] = name;
-      updates[`agent_model_${idx}`] = agent.model.model;
-      updates[`agent_skills_${idx}`] = agent.skills.join(',');
-    });
-    for (let i = agentCount; i < 10; i++) {
-      updates[`agent_name_${i}`] = "";
-      updates[`agent_model_${i}`] = "";
-      updates[`agent_skills_${i}`] = "";
-    }
-    payload.team.forEach((team, idx) => {
-      // 使用与后端一致的键名格式：team_${idx}_name
-      updates[`team_${idx}_name`] = team.team_name;
-      updates[`team_${idx}_lifecycle`] = team.lifecycle;
-      updates[`team_${idx}_teammate_mode`] = team.teammate_mode;
-      updates[`team_${idx}_spawn_mode`] = team.spawn_mode;
-      updates[`team_${idx}_enable_permissions`] = String(team.enable_permissions);
-      updates[`team_${idx}_leader_member_name`] = team.leader.member_name;
-      updates[`team_${idx}_leader_display_name`] = team.leader.display_name;
-      updates[`team_${idx}_leader_persona`] = team.leader.persona;
-      updates[`team_${idx}_leader_agent_key`] = team.leader.agent_key;
-      updates[`team_${idx}_teammate_agent_key`] = team.teammate.agent_key;
-      updates[`team_${idx}_predefined_members`] = team.predefined_members?.length
-        ? JSON.stringify(team.predefined_members)
-        : "";
-      updates[`team_${idx}_external_cli_agents`] = team.external_cli_agents?.length
-        ? JSON.stringify(team.external_cli_agents)
-        : "";
-    });
-    for (let i = payload.team.length; i < 10; i++) {
-      // 使用与后端一致的键名格式：team_${i}_name
-      updates[`team_${i}_name`] = "";
-      updates[`team_${i}_lifecycle`] = "";
-      updates[`team_${i}_teammate_mode`] = "";
-      updates[`team_${i}_spawn_mode`] = "";
-      updates[`team_${i}_enable_permissions`] = "";
-      updates[`team_${i}_leader_member_name`] = "";
-      updates[`team_${i}_leader_display_name`] = "";
-      updates[`team_${i}_leader_persona`] = "";
-      updates[`team_${i}_leader_agent_key`] = "";
-      updates[`team_${i}_teammate_agent_key`] = "";
-      updates[`team_${i}_predefined_members`] = "";
-      updates[`team_${i}_external_cli_agents`] = "";
-    }
-    return updates;
-  }, []);
-
-  const handleAgentsTeamsSave = useCallback(async (payload: AgentsTeamsSavePayload) => {
-    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
-      'config.set',
-      payload as unknown as Record<string, string>
-    );
-    // 更新前端配置缓存
-    const updates = buildAgentsTeamsFlatConfig(payload);
-    setServerConfig((prev: Record<string, unknown> | null) => ({ ...prev, ...updates }));
-    applyConfigSaveUiState(result?.applied_without_restart === true);
-  }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, request]);
-
-  const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload): Promise<ConfigSaveResult> => {
-    const isA2UIChange = payload.config && 'a2ui_enabled' in payload.config;
-    const result = await request<ConfigSaveResult>(
-      'config.save_all',
-      payload as unknown as Record<string, unknown>
-    );
-    const pendingExternalCliAgents = externalCliDependencyInstallAgents(result);
-    const hasExternalCliDependencyInstall = pendingExternalCliAgents.size > 0;
-    setServerConfig((prev) => {
-      const next: Record<string, unknown> = { ...(prev ?? {}) };
-      if (payload.config) {
-        const effectiveConfig = hasExternalCliDependencyInstall
-          ? Object.fromEntries(
-              Object.entries(payload.config).filter(([key]) => !EXTERNAL_CLI_AGENT_CONFIG_KEYS.has(key)),
-            )
-          : payload.config;
-        Object.assign(next, effectiveConfig);
-        if (typeof prev?.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
-            && !Array.isArray(prev.memory_forbidden_description)
-            && effectiveConfig.memory_forbidden_description !== undefined) {
-          const prevDict = prev.memory_forbidden_description as Record<string, string>;
-          const lang = i18n.language || 'zh';
-          next.memory_forbidden_description = {
-            ...prevDict,
-            [lang]: effectiveConfig.memory_forbidden_description,
-          };
-        }
-      }
-      if (payload.agents !== undefined || payload.team !== undefined) {
-        const agents = payload.agents || {};
-        const team = removeExternalCliAgentsFromTeamPayload(payload.team || [], pendingExternalCliAgents);
-        Object.assign(next, buildAgentsTeamsFlatConfig({
-          agents,
-          team,
-        }));
-      }
-      return next;
-    });
-    if (hasExternalCliDependencyInstall) {
-      return result;
-    }
-    if (isA2UIChange) {
-      setA2UIFeatureEnabled(normalizeA2UIEnabled(payload.config?.a2ui_enabled));
-      setConfigError(null);
-    } else {
-      applyConfigSaveUiState(result?.applied_without_restart === true);
-    }
-    return result;
-  }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, i18n.language, request]);
 
   useEffect(() => {
     if (!restartModalOpen || restartSuccess) {
@@ -2886,14 +2623,7 @@ function AppContent({
       ) {
         return;
       }
-      if (
-        activeNav === 'channels' &&
-        nav !== 'channels' &&
-        channelsHasChangesRef.current &&
-        !window.confirm(t('settingsPanel.dialog.discardConfirm'))
-      ) {
-        return;
-      }
+      if (nav !== 'settings') setRequestedSettingsModuleId(null);
       setActiveNav(nav);
       if (nav === 'chat') {
         setConversationSidebarCollapsed(false);
@@ -2902,11 +2632,11 @@ function AppContent({
           setToolPanelHidden(true);
         }
       }
-      if (modelSetupGuideStep === 1 && nav === 'configpanel') {
+      if (modelSetupGuideStep === 1 && nav === 'settings') {
+        setRequestedSettingsModuleId('models');
         setModelSetupGuideStep(2);
       }
       if (nav === 'skills') setHasVisitedSkills(true);
-      if (nav === 'channels') setHasVisitedChannels(true);
     },
     [activeNav, isMobile, modelSetupGuideStep, setTeamAreaExpanded, setToolPanelHidden, t],
   );
@@ -3051,11 +2781,7 @@ function AppContent({
   }, [clearChatPanelResize, showWorkspaceDivider]);
 
   return (
-    <div
-      className={`shell shell--icon-rail ${sidebarMorePanelOpen ? 'shell--more-panel-open' : ''}`}
-      data-testid="app-shell"
-      data-session-id={sessionId}
-    >
+    <div className="shell shell--icon-rail" data-testid="app-shell" data-session-id={sessionId}>
       {/* Navigation Sidebar */}
       <SessionSidebar
         activeNav={activeNav}
@@ -3063,7 +2789,6 @@ function AppContent({
         onNewSession={handleNewSession}
         showNewSession={false}
         hiddenNavItems={hiddenNavItems}
-        onMorePanelOpenChange={setSidebarMorePanelOpen}
       />
 
       {modelSetupGuideStep !== null ? (
@@ -3278,32 +3003,6 @@ function AppContent({
             </div>
           </div>
         )}
-        {activeNav === 'configpanel' && (
-          <div className="app-section">
-            <ConfigPanel
-              config={serverConfig}
-              isConnected={isConnected}
-              sessionId={sessionId}
-              onSaveConfig={saveConfigAndRestart}
-              onSaveAllConfig={saveAllConfigAndRestart}
-              onValidateModel={validateModelConfig}
-              initialExpandGroupTag={configInitialExpandGroup}
-              onModelsReplaceAll={handleModelsReplaceAll}
-              onModelValidate={validateModelConfig}
-              onModelsRefresh={handleModelsRefresh}
-              onAgentsTeamsSave={handleAgentsTeamsSave}
-              onHasChangesChange={handleHasChangesChange}
-              onDetectExternalCli={detectExternalCli}
-              onSelectExternalCliPath={selectExternalCliPath}
-              onGetExternalCliDependencyInstallStatus={getExternalCliDependencyInstallStatus}
-            />
-          </div>
-        )}
-        {activeNav === 'browserpanel' && (
-          <div className="app-section">
-            <BrowserPanel isConnected={isConnected} request={request} />
-          </div>
-        )}
         {activeNav === 'settings' && (
           <div className="app-section">
             <SettingsPage
@@ -3315,6 +3014,7 @@ function AppContent({
               onDetectExternalCli={detectExternalCli}
               onSelectExternalCliPath={selectExternalCliPath}
               onGetCodexDependencyInstallStatus={getCodexDependencyInstallStatus}
+              initialModuleId={requestedSettingsModuleId ?? undefined}
             />
           </div>
         )}
@@ -3332,25 +3032,8 @@ function AppContent({
               isActive={activeNav === 'skills'}
               symphonyEnabled={normalizeConfigBoolean(serverConfig?.symphony_enabled)}
               onSymphonyEnabledChange={saveSymphonyEnabled}
-              onNavigateToConfig={() => {
-                setConfigInitialExpandGroup('third_party_api');
-                setActiveNav('configpanel');
-              }}
+              onNavigateToSettings={() => requestSettingsModule('agent')}
             />
-          </div>
-        )}
-        {hasVisitedChannels && (
-          <div className={`app-section ${activeNav === 'channels' ? '' : 'is-hidden'}`}>
-            <ChannelsPanel
-              isConnected={isConnected}
-              discardConfirmMessage={t('settingsPanel.dialog.discardConfirm')}
-              onHasChangesChange={handleChannelsHasChangesChange}
-            />
-          </div>
-        )}
-        {activeNav === 'extensions' && (
-          <div className="app-section">
-            <ExtensionsHubPanel sessionId={sessionId} isConnected={isConnected} />
           </div>
         )}
         {activeNav === 'connectorMarket' && (
@@ -3487,31 +3170,6 @@ function AppContent({
                   {t('common.ok')}
                 </button>
               )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {configChangedConfirmOpen && (
-        <div className="app-restart-modal" data-testid="app-config-changed-modal">
-          <div className="app-restart-modal__backdrop" data-testid="app-config-changed-modal-backdrop" />
-          <div className="app-restart-modal__panel" data-testid="app-config-changed-modal-panel">
-            <div className="flex flex-col items-center text-center" data-testid="app-config-changed-modal-body">
-              <div className="w-12 h-12 rounded-full bg-warn-subtle text-warn flex items-center justify-center mb-4" data-testid="app-config-changed-modal-icon">
-                <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                </svg>
-              </div>
-              <h3 className="text-base font-semibold text-text mb-1" data-testid="app-config-changed-modal-title">{t('config.errors.configChangedTitle')}</h3>
-              <p className="text-sm text-text-muted mb-5" data-testid="app-config-changed-modal-description">{t('config.errors.configChangedDesc')}</p>
-              <div className="flex gap-3" data-testid="app-config-changed-modal-actions">
-                <button type="button" onClick={() => { setConfigChangedConfirmOpen(false); void fetchConfig(); }} className="btn primary !px-4 !py-2" data-testid="app-config-changed-modal-confirm">
-                  {t('config.errors.configChangedConfirm')}
-                </button>
-                <button type="button" onClick={() => setConfigChangedConfirmOpen(false)} className="btn !px-4 !py-2" data-testid="app-config-changed-modal-cancel">
-                  {t('config.errors.configChangedCancel')}
-                </button>
-              </div>
             </div>
           </div>
         </div>

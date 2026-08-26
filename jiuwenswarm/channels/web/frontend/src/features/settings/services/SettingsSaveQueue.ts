@@ -9,7 +9,7 @@ type Listener = (status: SettingsSaveStatus) => void;
 
 const SAVE_SUCCESS_VISIBLE_MS = 2000;
 
-/** Strictly serializes real settings writes. Tests, OAuth, installation, polling and ChannelsPanel internal writes intentionally bypass this queue. */
+/** Strictly serializes real settings writes. Tests, OAuth, installation, polling and channel-module writes intentionally bypass this queue. */
 export class SettingsSaveQueue {
   private tail: Promise<void> = Promise.resolve();
   private status: SettingsSaveStatus = { status: 'idle', operation: null, error: null };

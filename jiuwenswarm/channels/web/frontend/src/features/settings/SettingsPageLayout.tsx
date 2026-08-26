@@ -7,6 +7,7 @@ import type { SettingsAccessResult, SettingsModuleDefinition, SettingsPageDefini
 import { restrictSettingsAccess } from './registry/buildSettingsPageDefinition';
 import { useSettingsServices } from './services/SettingsServicesProvider';
 import { SettingsSourceProvider } from './services/SettingsSourceProvider';
+import type { SettingsModuleTarget } from './settingsNavigation';
 import './SettingsPage.css';
 
 function visibleItems(definition: SettingsPageDefinition, module: SettingsModuleDefinition) {
@@ -87,10 +88,16 @@ function SettingsItem({
   );
 }
 
-export function SettingsPageLayout({ definition }: { definition: SettingsPageDefinition }) {
+export function SettingsPageLayout({
+  definition,
+  initialModuleId,
+}: {
+  definition: SettingsPageDefinition;
+  initialModuleId?: SettingsModuleTarget;
+}) {
   const { t } = useTranslation();
   const { saveQueue, unsavedChanges } = useSettingsServices();
-  const [activeModuleId, setActiveModuleId] = useState(definition.modules[0]?.id ?? '');
+  const [activeModuleId, setActiveModuleId] = useState(initialModuleId ?? definition.modules[0]?.id ?? '');
   const [pendingModuleId, setPendingModuleId] = useState<string | null>(null);
   const saveStatus = useSyncExternalStore(
     saveQueue.subscribe.bind(saveQueue),
