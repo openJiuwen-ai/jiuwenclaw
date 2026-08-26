@@ -32,8 +32,10 @@ logger = logging.getLogger(__name__)
 PERSONAL_CONTEXT_REQUEST_METHODS = frozenset(
     {
         ReqMethod.PERSONAL_CONTEXT_RUNTIME_STATUS,
-        ReqMethod.PERSONAL_CONTEXT_RUNTIME_START,
-        ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_START_COLLECTION,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP_COLLECTION,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_START_AGENT_USE,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP_AGENT_USE,
         ReqMethod.PERSONAL_CONTEXT_RUNTIME_GET_CONFIG,
         ReqMethod.PERSONAL_CONTEXT_RUNTIME_PATCH_CONFIG,
         ReqMethod.PERSONAL_CONTEXT_RUNTIME_SELECT_MODEL,
@@ -43,16 +45,16 @@ PERSONAL_CONTEXT_REQUEST_METHODS = frozenset(
         ReqMethod.PERSONAL_CONTEXT_FETCH_PATCH_SERVICE,
         ReqMethod.PERSONAL_CONTEXT_FETCH_START_SERVICE,
         ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SERVICE,
-        ReqMethod.PERSONAL_CONTEXT_FETCH_START_SCHEDULER,
-        ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SCHEDULER,
         ReqMethod.PERSONAL_CONTEXT_FETCH_RUN_ALL,
         ReqMethod.PERSONAL_CONTEXT_FETCH_RUN_ONE,
         ReqMethod.PERSONAL_CONTEXT_FETCH_GET_RUN_STATUS,
         ReqMethod.PERSONAL_CONTEXT_FETCH_GET_AUTHORIZATION_STATUS,
         ReqMethod.PERSONAL_CONTEXT_FETCH_AUTHORIZE_PROVIDER,
         ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH,
+        ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_TREE,
         ReqMethod.PERSONAL_CONTEXT_CONTEXT_SEARCH_PAGES,
         ReqMethod.PERSONAL_CONTEXT_CONTEXT_GET_NODE,
+        ReqMethod.PERSONAL_CONTEXT_CONTEXT_GET_SOURCE,
     }
 )
 
@@ -154,35 +156,49 @@ async def _stream_graph(
     ws: Any,
     request: AgentRequest,
     send_lock: asyncio.Lock,
+    *,
+    tree: bool = False,
 ) -> None:
-    graph = await host.get_graph()
+    root_id = request.params.get("root_id")
+    if root_id is not None and (not isinstance(root_id, str) or not root_id.strip()):
+        raise ValueError("root_id must be null or a non-empty string")
+    depth = request.params.get("depth", 3)
+    if type(depth) is not int or not 1 <= depth <= 10:
+        raise ValueError("depth must be an integer between 1 and 10")
+    normalized_root = root_id.strip() if isinstance(root_id, str) else None
+    if tree:
+        graph = await host.get_tree(root_id=normalized_root, depth=depth)
+    else:
+        graph = await host.get_graph(root_id=normalized_root, depth=depth)
     nodes = graph.get("nodes")
     edges = graph.get("edges")
     if not isinstance(nodes, list) or not isinstance(edges, list):
         raise TypeError("PersonalContext graph nodes and edges must be arrays")
     events: list[dict[str, object]] = [
         {
-            "event_type": "personal_context.graph.start",
+            "event_type": "personal_context.context.start",
             "context_ready": bool(graph.get("context_ready")),
+            "root_id": normalized_root,
+            "depth": depth,
         }
     ]
     events.extend(
         {
-            "event_type": "personal_context.graph.nodes",
-            "nodes": nodes[index: index + 200],
+            "event_type": "personal_context.context.nodes",
+            "nodes": nodes[index : index + 200],
         }
         for index in range(0, len(nodes), 200)
     )
     events.extend(
         {
-            "event_type": "personal_context.graph.edges",
-            "edges": edges[index: index + 200],
+            "event_type": "personal_context.context.edges",
+            "edges": edges[index : index + 200],
         }
         for index in range(0, len(edges), 200)
     )
     events.append(
         {
-            "event_type": "personal_context.graph.end",
+            "event_type": "personal_context.context.end",
             "node_count": len(nodes),
             "edge_count": len(edges),
         }
@@ -213,12 +229,16 @@ async def _execute(
     params = request.params
     if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_STATUS:
         return _payload(await host.get_status())
-    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_START:
-        result = await host.set_runtime_enabled(True)
+    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_START_COLLECTION:
+        return _payload(await host.set_collection_enabled(True))
+    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP_COLLECTION:
+        return _payload(await host.set_collection_enabled(False))
+    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_START_AGENT_USE:
+        result = await host.set_agent_use_enabled(True)
         await _notify_runtime_enabled(runtime_enabled_changed, True)
         return _payload(result)
-    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP:
-        result = await host.set_runtime_enabled(False)
+    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP_AGENT_USE:
+        result = await host.set_agent_use_enabled(False)
         await _notify_runtime_enabled(runtime_enabled_changed, False)
         return _payload(result)
     if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_GET_CONFIG:
@@ -248,17 +268,9 @@ async def _execute(
         ReqMethod.PERSONAL_CONTEXT_FETCH_START_SERVICE,
         ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SERVICE,
     }:
-        await host.set_fetching(
-            enabled=method == ReqMethod.PERSONAL_CONTEXT_FETCH_START_SERVICE,
-            service_id=_text(params, "service_id"),
-        )
-        return {"ok": True}
-    if method in {
-        ReqMethod.PERSONAL_CONTEXT_FETCH_START_SCHEDULER,
-        ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SCHEDULER,
-    }:
-        await host.set_fetching(
-            enabled=method == ReqMethod.PERSONAL_CONTEXT_FETCH_START_SCHEDULER,
+        await host.set_fetch_service_enabled(
+            _text(params, "service_id"),
+            method == ReqMethod.PERSONAL_CONTEXT_FETCH_START_SERVICE,
         )
         return {"ok": True}
     if method == ReqMethod.PERSONAL_CONTEXT_FETCH_RUN_ALL:
@@ -277,6 +289,8 @@ async def _execute(
         return await host.search_graph(_text(params, "query"))
     if method == ReqMethod.PERSONAL_CONTEXT_CONTEXT_GET_NODE:
         return await host.get_graph_page(_text(params, "node_id"))
+    if method == ReqMethod.PERSONAL_CONTEXT_CONTEXT_GET_SOURCE:
+        return await host.get_source(_text(params, "source_id"))
     raise ValueError("unknown PersonalContext method")
 
 
@@ -313,12 +327,21 @@ async def handle_personal_context_request(
     """Execute one parsed PersonalContext request without introducing a PersonalContext wire protocol."""
 
     try:
-        if request.req_method == ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH:
+        if request.req_method in {
+            ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH,
+            ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_TREE,
+        }:
             if not request.is_stream:
-                raise ValueError(
-                    "personal_context.context.stream_graph requires is_stream=true"
-                )
-            await _stream_graph(host, ws, request, send_lock)
+                raise ValueError(f"{request.req_method.value} requires is_stream=true")
+            await _stream_graph(
+                host,
+                ws,
+                request,
+                send_lock,
+                tree=(
+                    request.req_method == ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_TREE
+                ),
+            )
             return
         await _send_result(
             ws,
