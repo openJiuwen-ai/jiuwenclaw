@@ -1238,7 +1238,7 @@ permissions:
     workspace:
       read: allow
       write: allow
-      exec: ask
+      exec: allow
     paths:
       - path: '**/.ssh/**'
         match: glob
