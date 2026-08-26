@@ -291,8 +291,8 @@ def _extract_legacy_params(
             at_raw = str(schedule.get("at") or "").strip()
             if at_raw:
                 try:
-                    from jiuwenswarm.gateway.cron.cron_expr import iso_to_seven_field_cron
-                    cron_expr = iso_to_seven_field_cron(at_raw, timezone=timezone)
+                    from jiuwenswarm.gateway.cron.cron_expr import iso_to_five_field_cron
+                    cron_expr = iso_to_five_field_cron(at_raw, timezone=timezone)
                     logger.info(
                         "[CronRuntimeBridge] _extract_legacy_params: converted kind=at '%s' to cron_expr='%s'",
                         at_raw, cron_expr,
@@ -382,6 +382,9 @@ def _extract_legacy_params(
             out["wake_offset_seconds"] = data.get("wake_offset_seconds")
         if "deleteAfterRun" in data:
             out["delete_after_run"] = bool(data.get("deleteAfterRun"))
+        if kind == "at":
+            # kind=at 为一次性任务：5 段 cron 无年份字段，必须触发后删除，否则次年同期重复（对齐 controller.py kind=at 处理）
+            out["delete_after_run"] = True
         required_device_intents = (
             data.get("required_device_intents")
             if "required_device_intents" in data

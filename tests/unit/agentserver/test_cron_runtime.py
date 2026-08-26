@@ -606,10 +606,11 @@ class TestExtractLegacyParamsKindAt:
 
         out = _extract_legacy_params(payload, context=context, require_schedule=True)
 
-        assert out["cron_expr"] == "31 25 18 24 7 ? 2026"
+        assert out["cron_expr"] == "25 18 24 7 5"
         assert out["timezone"] == "Asia/Shanghai"
         assert out["description"] == "喝水提醒"
         assert "wake_offset_seconds" not in out
+        assert out["delete_after_run"] is True
 
     def test_kind_at_without_at_field_raises(self) -> None:
         context = SimpleNamespace(channel_id="web", session_id="sess-1")
@@ -644,7 +645,22 @@ class TestExtractLegacyParamsKindAt:
         out = _extract_legacy_params(payload, context=context, require_schedule=True)
 
         assert out["timezone"] == "Asia/Tokyo"
-        assert out["cron_expr"] == "0 0 9 1 1 ? 2026"
+        assert out["cron_expr"] == "0 9 1 1 4"
+        assert out["delete_after_run"] is True
+
+    def test_kind_at_forces_delete_after_run_true_even_when_false(self) -> None:
+        context = SimpleNamespace(channel_id="web", session_id="sess-1")
+        payload = {
+            "schedule": {"kind": "at", "at": "2026-07-24T18:25:31+08:00"},
+            "payload": {"kind": "agentTurn", "message": "提醒"},
+            "delivery": {"mode": "announce"},
+            "deleteAfterRun": False,
+        }
+
+        out = _extract_legacy_params(payload, context=context, require_schedule=True)
+
+        assert out["delete_after_run"] is True
+        assert out["cron_expr"] == "25 18 24 7 5"
 
     def test_kind_every_still_raises(self) -> None:
         context = SimpleNamespace(channel_id="web", session_id="sess-1")
@@ -716,38 +732,37 @@ class TestComputeNextRunMissedTriggerWindow:
     """When croniter fails on a one-shot job, check if the missed trigger is within
     the window and schedule immediate execution instead of marking expired."""
 
-    def test_missed_trigger_within_window_schedules_immediate(self) -> None:
+    def test_5field_cron_returns_next_cycle_after_just_missed(self) -> None:
         svc = _TestableScheduler.__new__(_TestableScheduler)
 
         job = _make_job(
-            job_id="one-shot",
-            cron_expr="31 25 18 24 7 ? 2026",
+            job_id="daily-930",
+            cron_expr="30 9 * * *",
             timezone="Asia/Shanghai",
             wake_offset_seconds=0,
         )
 
-        trigger_ts = datetime(2026, 7, 24, 18, 25, 31, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
-        now_ts = trigger_ts + 2.0
+        now_ts = datetime(2026, 7, 24, 9, 30, 5, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
 
         push_dt, wake_dt, run_id = svc.compute_next_run(job, now_ts=now_ts)
 
-        assert push_dt == datetime(2026, 7, 24, 18, 25, 31, tzinfo=ZoneInfo("Asia/Shanghai"))
+        assert push_dt == datetime(2026, 7, 25, 9, 30, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         assert wake_dt == push_dt
-        assert run_id.startswith("one-shot:")
+        assert run_id.startswith("daily-930:")
 
-    def test_missed_trigger_beyond_window_raises(self) -> None:
+    def test_5field_impossible_cron_raises_failed_to_find_date(self) -> None:
         svc = _TestableScheduler.__new__(_TestableScheduler)
 
         job = _make_job(
-            job_id="old-shot",
-            cron_expr="0 0 9 1 1 ? 2025",
+            job_id="impossible",
+            cron_expr="0 9 31 2 *",
             timezone="Asia/Shanghai",
             wake_offset_seconds=0,
         )
 
         now_ts = datetime(2026, 7, 24, 18, 25, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
 
-        with pytest.raises(Exception, match="failed to find next date"):
+        with pytest.raises(Exception, match="failed to find"):
             svc.compute_next_run(job, now_ts=now_ts)
 
     def test_recurring_job_still_works(self) -> None:
