@@ -63,11 +63,11 @@ async def apply_log_masking_rule_table(jiuwenclaw_id: str, ctx: TableApplyContex
 async def apply_channel_config_table(jiuwenclaw_id: str, ctx: TableApplyContext) -> None:
     _ = jiuwenclaw_id
     try:
-        from jiuwenclaw.gateway.channel_config_overlay import ChannelConfigChange
-        from jiuwenclaw.gateway.channel_config_reload import maybe_trigger_channel_config_reload
+        from jiuwenswarm.gateway.channel_config_overlay import ChannelConfigChange
+        from jiuwenswarm.gateway.channel_config_reload import maybe_trigger_channel_config_reload
     except ImportError as exc:
         raise RuntimeError(
-            "channel_config reload unavailable; manager_ws_client not loaded"
+            "channel_config reload unavailable; manager_config_receiver not loaded"
         ) from exc
 
     for channel_id in sorted(ctx.removed_channel_ids):

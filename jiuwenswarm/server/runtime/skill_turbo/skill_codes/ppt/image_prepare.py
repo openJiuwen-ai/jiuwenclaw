@@ -182,7 +182,7 @@ class ImagePrepareNode(PlanNode):
                 "### 门控\n"
                 "- local 可用 ← image_paths 非空\n"
                 "- network 恒不可用（禁用）\n"
-                "- ai 可用 ← has_tool(text_to_image)\n"
+                "- ai 可用 ← has_tool(generate_image)\n"
                 "- 全不可用 → 跳过\n"
                 "\n"
                 "### 失败兜底\n"
@@ -419,9 +419,9 @@ class ImagePrepareNode(PlanNode):
         self, output_dir: str, pptx_root: str,
         image_sources: list, topic: str, style_id: str,
     ) -> None:
-        # 最终确认：text_to_image 工具是否可用
-        if not self.has_tool("text_to_image"):
-            logger.warning("[P6.5] text_to_image 工具不可用，跳过 ai 源")
+        # 最终确认：generate_image 工具是否可用
+        if not self.has_tool("generate_image"):
+            logger.warning("[P6.5] generate_image 工具不可用，跳过 ai 源")
             return
 
         # prod: 改用 cli stage-ai-image 替代旧 ai-plan.js（含 SHA-256 精确复制）
@@ -488,7 +488,7 @@ class ImagePrepareNode(PlanNode):
                 prompt = _build_ai_prompt(keywords, topic, style_id, usage)
                 try:
                     raw = await self.call_tool(
-                        "text_to_image", inputs={"prompt": prompt, "size": size, "n": 1},
+                        "generate_image", inputs={"prompt": prompt, "size": size, "n": 1},
                     )
                     paths = _parse_image_paths(str(raw))
                     if not paths:

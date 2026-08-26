@@ -655,6 +655,67 @@ Web 为 JiuwenSwarm 企业版面向终端用户的对话可视化前端，用于
 
 ```
 
+#### 4.3.1 用户面入口模式
+
+用户面支持独立入口和 Manager Web 统一登录入口两种部署方式。通过 `.env.custom` 配置：
+
+```bash
+# false：保留 User Web 独立 NodePort 入口（默认，兼容原有部署）
+# true：用户登录 Manager Web 后从 /user 进入内嵌 User Web，不暴露 User Web NodePort
+ENABLE_USER_WEB_EMBEDDING=false
+```
+
+启用统一入口时，Manager Web 是用户面唯一的集群外入口，User Web 仍会部署并保留
+ClusterIP，供 Manager Web 转发文件请求等内部调用。配置必须同时满足：
+
+```bash
+ENABLE_USER_WEB_EMBEDDING=true
+IS_UP_MANAGER_WEB=true
+```
+
+统一入口使用以下同源路由，不需要额外暴露 Identity、Manager Server、Gateway 或
+User Server：
+
+| 路径 | 目标服务 | 用途 |
+|---|---|---|
+| `/idp/*` | Identity Center | 登录、刷新令牌和用户信息 |
+| `/api/*` | Manager Server | 管理面与用户目录接口 |
+| `/chat/*` | Manager Web 内置 User Web | 用户面对话界面 |
+| `/web/invoke` | Gateway HTTP/SSE | 对话请求与流式响应 |
+| `/file-api/*` | User Server | 文件相关接口 |
+
+从独立入口切换为统一入口时，部署脚本会删除同命名空间中已有的 User Web NodePort
+Service，避免用户绕过统一登录入口；切回独立入口并重新部署 Web 后会恢复 NodePort。
+
+#### 4.3.2 升级已有 MySQL 数据库
+
+全新数据库会按当前表定义自动建表，不需要手工迁移。复用旧版 Manager MySQL
+数据库并升级到包含 Agent 工作区策略的版本时，先检查策略表是否已有
+`workspace_dir`：
+
+```sql
+SELECT COLUMN_NAME
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = '<manager数据库名>'
+  AND TABLE_NAME = 'config_effective_agent_policy'
+  AND COLUMN_NAME = 'workspace_dir';
+```
+
+仅当表存在且查询结果为空时执行：
+
+```sql
+ALTER TABLE <manager数据库名>.config_effective_agent_policy
+ADD COLUMN workspace_dir VARCHAR(512) NULL;
+```
+
+`workspace_dir` 是 Agent 策略的数据目录逻辑键，可使用 `${user_id}`、
+`${group_id}`、`${bot_id}` 等模板变量。它不参与用户登录或 JWT 验签。
+
+Identity Center 使用全新 MySQL 数据库时不需要迁移。若复用曾运行旧版联合认证的
+数据库，应先确认 `federated_identity` 表已经包含 `identity_key`；该字段需要根据
+原三元组生成摘要并建立唯一索引，不能只增加一个空字段。存在旧联合身份数据时应先
+备份并使用对应 Runtime 版本的迁移流程，部署工具不会自动修改业务身份数据。
+
 ## 5 服务异常排查
 
 系统服务运行异常时，可按以下步骤逐层定位故障根因：
@@ -902,4 +963,3 @@ RUNTIME_CODE_PATH=""
 # 注意：Web源代码代码需要npm run build之后，才能mount进容器，
 IS_MOUNT_WEB_CODE="false"
 ```
-

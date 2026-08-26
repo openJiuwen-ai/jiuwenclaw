@@ -44,7 +44,10 @@ from jiuwenswarm.common.config import (
     get_default_model_provider,
     get_evolution_auto_save_enabled,
     get_evolution_review_trigger_enabled,
+    get_evolution_signal_trigger_enabled,
+    get_passive_skill_evolution_triggers,
     get_skill_create_enabled,
+    resolve_string_or_list_config,
 )
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     get_context_engine_enabled,
@@ -97,6 +100,7 @@ _COMMON_RAIL_NAMES: tuple[str, ...] = (
     registry.PLUGIN_RAILS,
     registry.SKILL_RETRIEVAL_PROMPT,
     registry.SYMPHONY_ORCHESTRATION_PROMPT,
+    registry.DISABLED_TOOLS,
 )
 
 # Tools common to both roles. Each element self-gates on config, so all are
@@ -143,6 +147,7 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.CODE_SKILL_USE,
     registry.SKILL_RETRIEVAL_PROMPT,
     registry.SYMPHONY_ORCHESTRATION_PROMPT,
+    registry.DISABLED_TOOLS,
 )
 
 # Rails shared with the team profile, appended to the code profile.
@@ -334,13 +339,21 @@ def _team_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
 
 def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the member skill-evolution rail."""
+    triggers = get_passive_skill_evolution_triggers(config)
     return {
         "evolution_model_config": _evolution_model_config(config),
+        "signal_trigger": triggers["signal_trigger"],
+        "review_trigger": triggers["review_trigger"],
     }
 
 
 # Per-element attribute params, keyed by provider name; empty for parameterless.
 _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    registry.DISABLED_TOOLS: lambda c: {
+        "disabled_tools": resolve_string_or_list_config(
+            _config_section(c, "react").get("disabled_tools")
+        )
+    },
     registry.CONTEXT_PROCESSOR: _context_processor_params,
     registry.CODE_PROJECT_MEMORY: lambda c: {
         "additional_directories": _additional_directories(c)

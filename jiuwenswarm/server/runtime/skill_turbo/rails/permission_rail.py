@@ -28,7 +28,7 @@ SKILL_TURBO_APPROVAL_TOOLS: list[tuple[str, str]] = [
     ("glob", "搜索文件"),
     ("image_ocr", "图片文字识别"),
     ("visual_question_answering", "图片视觉理解"),
-    ("text_to_image", "生成图片"),
+    ("generate_image", "生成图片"),
     ("send_file_to_user", "发送最终产物"),
 ]
 

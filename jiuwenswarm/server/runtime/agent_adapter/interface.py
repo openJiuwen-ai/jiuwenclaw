@@ -44,7 +44,7 @@ from jiuwenswarm.server.runtime.session.permission_response_ledger import (
 )
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
-from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.config import get_config, get_permissions_file_guard_workspace_access
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.ask_user import normalize_ask_user_response
@@ -1380,6 +1380,15 @@ class JiuWenSwarm:
             if isinstance(metadata_project_dir, str) and metadata_project_dir.strip()
             else None
         )
+        # 未显式传 trusted_dirs 时，若 workspace.read 已开为 allow 则注入 project_dir
+        if not trusted_dirs and project_dir:
+            try:
+                ws_trusted = get_permissions_file_guard_workspace_access().get("read") == "allow"
+            except Exception:
+                logger.warning("[_build_inputs] trusted_dirs 注入跳过：workspace 配置读取失败", exc_info=True)
+                ws_trusted = False
+            if ws_trusted:
+                trusted_dirs = [os.path.abspath(project_dir)]
         param_cwd = params.get("cwd")
         metadata_cwd = metadata.get("cwd") if isinstance(metadata, dict) else None
         cwd = (

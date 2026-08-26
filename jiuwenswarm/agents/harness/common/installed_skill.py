@@ -129,9 +129,9 @@ def _require_jiuwenclaw_id() -> str:
 
 
 async def _handler() -> Any:
-    from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+    from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
 
-    db_mod = import_manager_ws_client_module("infrastructure.db")
+    db_mod = import_manager_config_receiver_module("infrastructure.db")
     return await db_mod.ensure_db_handler(log_prefix=TABLE)
 
 

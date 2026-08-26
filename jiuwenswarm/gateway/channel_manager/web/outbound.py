@@ -255,25 +255,27 @@ class HttpSseOutbound(_HttpOutboundBase):
         self,
         req_id: str,
         *,
-        timeout: float = 600.0,
+        timeout: float = 0.0,
         idle_timeout: float = 0.0,
         keepalive: float = 30.0,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Yield frames until stream end, total timeout, or optional idle timeout.
+        """Yield frames until stream end, optional total timeout, or optional idle timeout.
 
-        ``idle_timeout<=0`` keeps the historical behaviour: emit keepalive while
-        waiting until ``timeout`` elapses. When ``idle_timeout>0``, end with
-        ``chat.error`` if no real frame arrives within that idle window.
+        ``timeout<=0`` means no total lifetime cap (long agent runs stay open).
+        ``idle_timeout<=0`` emits keepalive while waiting and does not end on silence.
+        When ``idle_timeout>0``, end with ``chat.error`` if no real frame arrives
+        within that idle window.
         """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + max(float(timeout), 0.1)
+        total_limit = float(timeout) if timeout and timeout > 0 else 0.0
+        deadline = (loop.time() + total_limit) if total_limit > 0 else None
         idle_limit = float(idle_timeout) if idle_timeout and idle_timeout > 0 else 0.0
         last_frame_at = loop.time()
         ping = max(float(keepalive), 0.5)
         while True:
             now = loop.time()
-            remaining = deadline - now
-            if remaining <= 0:
+            remaining = (deadline - now) if deadline is not None else None
+            if remaining is not None and remaining <= 0:
                 yield {
                     "type": "event",
                     "event": "chat.error",
@@ -287,7 +289,7 @@ class HttpSseOutbound(_HttpOutboundBase):
                     "payload": {"error": "stream idle timeout", "session_id": ""},
                 }
                 return
-            wait_for = min(remaining, ping)
+            wait_for = ping if remaining is None else min(remaining, ping)
             if idle_limit > 0:
                 wait_for = min(wait_for, idle_limit - (now - last_frame_at))
             wait_for = max(wait_for, 0.05)

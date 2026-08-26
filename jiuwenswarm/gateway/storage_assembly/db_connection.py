@@ -52,9 +52,9 @@ class GatewayDbConnection:
         self._lock = asyncio.Lock()
 
     def _bind_database(self) -> Any:
-        from jiuwenswarm.infrastructure.module_importer import import_manager_ws_client_module
+        from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
 
-        gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
+        gateway_db_mod = import_manager_config_receiver_module("core.enterprise_config.gateway_db")
         db = gateway_db_mod.GatewayDb.bind(None)
         self._db_obj = db
         return db

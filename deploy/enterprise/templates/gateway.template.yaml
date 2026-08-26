@@ -73,6 +73,30 @@ spec:
           # 调试模式：gateway 崩溃后容器不退出（sleep 保活），便于进 Pod 排查。
           # command: ["/bin/sh", "-c"]
           # args: ["jiuwenswarm-gateway; echo '[debug-keepalive] gateway exited rc=$?, sleeping'; sleep infinity"]
+          ports:
+            - name: web-ws
+              containerPort: <<GATEWAY_WS_PORT>>
+            - name: http
+              containerPort: <<GATEWAY_HTTP_PORT>>
+            - name: config-http
+              containerPort: <<GATEWAY_CONFIG_HTTP_PORT>>
+          # active-standby：仅 PRIMARY Ready，保证 ClusterIP 流量打到主
+          readinessProbe:
+            httpGet:
+              path: /api/v1/ready
+              port: config-http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: config-http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
           envFrom:
             - secretRef:
                 name: <<SECRET_CM_NAME>>
@@ -132,4 +156,7 @@ spec:
     - name: http
       port: <<GATEWAY_HTTP_PORT>>
       targetPort: <<GATEWAY_HTTP_PORT>>
+    - name: config-http
+      port: <<GATEWAY_CONFIG_HTTP_PORT>>
+      targetPort: <<GATEWAY_CONFIG_HTTP_PORT>>
   type: ClusterIP                             # 集群内部访问，不需要外网
