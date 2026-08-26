@@ -16,7 +16,7 @@ function ClusterModeIcon({ className }: { className?: string }) {
 }
 
 function SingleAgentModeIcon({ className }: { className?: string }) {
-  return <span className={`chat-config-icon chat-config-icon--agent ${className ?? ''}`} aria-hidden="true" />;
+  return <span className={`chat-config-icon chat-config-icon--single-agent ${className ?? ''}`} aria-hidden="true" />;
 }
 
 function AutoModeIcon({ className }: { className?: string }) {
