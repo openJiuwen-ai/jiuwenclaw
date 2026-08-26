@@ -15,17 +15,6 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from jiuwenswarm.extensions.agentos.auth.common import (
-    extract_token_from_path_and_headers,
-    headers_to_dict,
-)
-from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
-    AgentOSFileTransferError,
-    AgentOSRouterClient,
-    build_auth_headers_from_mapping,
-    build_auth_headers_from_token,
-)
-
 if TYPE_CHECKING:
     from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel
 
@@ -121,6 +110,15 @@ def _error_json(*, error: str, code: str | None = None, status_code: int | None 
 
 
 def _auth_headers_from_request(request: Request) -> dict[str, str]:
+    from jiuwenswarm.extensions.agentos.auth.common import (
+        extract_token_from_path_and_headers,
+        headers_to_dict,
+    )
+    from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
+        build_auth_headers_from_mapping,
+        build_auth_headers_from_token,
+    )
+
     header_map = headers_to_dict(request.headers)
     mapped = build_auth_headers_from_mapping(header_map)
     if mapped:
@@ -258,6 +256,13 @@ def _decode_download_token_location(token: str) -> tuple[str, str] | None:
 
 def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
     """Mount ``/file-api`` when channel has an AgentOSRouterClient backend."""
+    from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
+        AgentOSFileTransferError,
+        AgentOSRouterClient,
+        build_auth_headers_from_mapping,
+    )
+    from jiuwenswarm.extensions.agentos.auth.common import headers_to_dict
+
     client = getattr(channel, "container_file_client", None)
     if not isinstance(client, AgentOSRouterClient):
         return

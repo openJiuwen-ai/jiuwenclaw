@@ -109,6 +109,7 @@ def test_message_to_e2a_or_fallback_preserves_user_id():
     )
     env = message_to_e2a_or_fallback(msg)
     assert env.user_id == "alice"
+    assert e2a_to_agent_request(env).user_id == "alice"
 
 
 def test_e2a_from_agent_fields_user_id():

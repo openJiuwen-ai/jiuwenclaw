@@ -425,7 +425,7 @@ export function MarketplacePage({
 
         <div className="flex shrink-0 items-center gap-2">
           <div className="flex items-center gap-1">
-            {(['all', 'pending', 'available'] as const).map((key) => {
+            {(['all', 'available', 'pending'] as const).map((key) => {
               const active = statusFilter === key;
               return (
                 <button

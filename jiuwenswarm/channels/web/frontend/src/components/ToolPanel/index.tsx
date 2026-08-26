@@ -6,12 +6,14 @@
 
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
-import { FileCheck2, FileText, Info, Minimize2 } from 'lucide-react';
-import { ArtifactsPanel, useSessionArtifacts, useSessionArtifactsCount } from '../ArtifactsPanel';
-import { TeamArea, useTaskPlanningMetrics } from '../teamArea';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Info } from 'lucide-react';
+import { useSessionArtifacts, useSessionArtifactsCount } from '../ArtifactsPanel';
+import { useTaskPlanningMetrics } from '../teamArea';
+import { ExpandedPanel } from '../teamArea/ExpandedPanel';
 import { loadTeamHistoryPanelState } from '../../features/teamHistoryPanelRestore';
 import { TaskPlanningPanel } from '../teamArea/TaskPlanningPanel';
+import { TeamMembersPanel } from '../teamArea/TeamMembersPanel';
 import { CompactTaskList } from '../teamArea/CompactTaskList';
 import { FileIcon } from '../FileIcon';
 import { CollapsibleSection } from './CollapsibleSection';
@@ -20,13 +22,14 @@ import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import { getMemberPlainName, type TabType, type TeamDetailTab } from '../teamArea/shared';
 import type { TeamTask, TeamTaskStatus } from '../../stores/sessionStore';
 import type { ProjectInfo, TodoItem, TodoStatus } from '../../types';
-import teamProcessIcon from '../../assets/team-process.svg';
 import teamIcon from '../../assets/team.svg';
-import recentTasksIcon from '../../assets/work-mode/recent-tasks.svg';
+import RecentTasksIcon from '../../assets/work-mode/progress-tasks.svg?react';
 import artifactsIcon from '../../assets/artifacts.svg';
+import emptyArtifactsIcon from '../../assets/empty-artifacts.svg';
+import emptyMembersIcon from '../../assets/empty-members.svg';
+import emptyPlanningIcon from '../../assets/empty-planning.svg';
+import emptyReferencesIcon from '../../assets/empty-references.svg';
 import skillIcon from '../../assets/sidebar/skill.svg';
-import maximizeIcon from '../../assets/maximize.svg';
-import expandIcon from '../../assets/expand.svg';
 import { CodeEnvironmentPanel } from '../../features/code-mode/CodeEnvironmentPanel';
 import { CodeReviewPanel } from '../../features/code-mode/CodeReviewPanel';
 import type { CodeReviewTarget } from '../../features/code-mode/types';
@@ -34,7 +37,6 @@ import { useCodeGitDiffWatch } from '../../features/code-mode/useCodeGitDiffWatc
 import { type SingleAgentToolTab } from '../../features/singleAgentPanelState';
 import { SubagentExpandedPanel } from '../subagent/SubagentExpandedPanel';
 import { useSubagentStore } from '../../stores/subagentStore';
-import TeamMembersIcon from '../../assets/subagent/team-members.svg?react';
 import './ToolPanel.css';
 
 /** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
@@ -77,22 +79,16 @@ interface ToolPanelProps {
   setSingleAgentPanelExpanded: (expanded: boolean) => void;
   setSingleAgentPanelActiveTab: (tab: SingleAgentToolTab) => void;
   setSingleAgentPanelSelectedArtifactId: (artifactId: string) => void;
-  onMaximize?: () => void;
-  onRestore?: () => void;
-  maximized?: boolean;
+  shouldFullscreen?: boolean;
 }
 
 function isEmptyValue(value: unknown): boolean {
   return value === undefined || value === null || value === '';
 }
 
-function mergeById<T>(
-  historyItems: T[],
-  currentItems: T[],
-  getId: (item: T) => string
-): T[] {
-  const itemsById = new Map<string, T>(historyItems.map((item) => [getId(item), item]));
-  currentItems.forEach((item) => {
+function mergeById<T>(historyItems: T[], currentItems: T[], getId: (item: T) => string): T[] {
+  const itemsById = new Map<string, T>(historyItems.map(item => [getId(item), item]));
+  currentItems.forEach(item => {
     const id = getId(item);
     const existing = itemsById.get(id);
     if (existing && typeof existing === 'object' && typeof item === 'object') {
@@ -109,153 +105,6 @@ function mergeById<T>(
     }
   });
   return Array.from(itemsById.values());
-}
-
-function ExpandedSingleAgentArea({
-  sessionId,
-  activeTab,
-  tasks,
-  members,
-  totalTasks,
-  completedTasks,
-  onTabChange,
-  onCollapse,
-  onMaximize,
-  onRestore,
-  maximized,
-  reviewPanel,
-  selectedArtifactId,
-  onArtifactSelect,
-}: {
-  sessionId: string;
-  activeTab: SingleAgentToolTab;
-  tasks: TeamTask[];
-  members: Parameters<typeof TaskPlanningPanel>[0]['members'];
-  totalTasks: number;
-  completedTasks: number;
-  onTabChange: (tab: SingleAgentToolTab) => void;
-  onCollapse: () => void;
-  onMaximize: () => void;
-  onRestore: () => void;
-  maximized: boolean;
-  reviewPanel?: ReactNode;
-  selectedArtifactId?: string;
-  onArtifactSelect: (artifactId: string) => void;
-}) {
-  const { t } = useTranslation();
-  const tabPanelId = useId();
-  const artifactsCount = useSessionArtifactsCount();
-  const subagentCount = useSubagentStore((state) => Object.keys(state.runtimes[sessionId]?.subagentsById ?? {}).length);
-  const resolvedTab =
-    activeTab === 'artifacts' && artifactsCount > 0
-      ? 'artifacts'
-      : activeTab === 'subagents' && subagentCount > 0
-        ? 'subagents'
-        : activeTab === 'review' && reviewPanel
-          ? 'review'
-          : 'planning';
-  const tabs = [
-    {
-      key: 'planning',
-      label: t('team.planning.tab'),
-      count: `${completedTasks}/${totalTasks}`,
-      icon: <img src={teamProcessIcon} width={16} height={16} aria-hidden="true" />,
-    },
-    ...(subagentCount > 0
-      ? [{
-          key: 'subagents' as const,
-          label: t('subagent.title'),
-          icon: <TeamMembersIcon className="h-4 w-4" aria-hidden="true" />,
-        }]
-      : []),
-    ...(artifactsCount > 0
-      ? [{
-          key: 'artifacts' as const,
-          label: t('artifacts.tab'),
-          count: artifactsCount,
-          icon: <FileText size={16} />,
-        }]
-      : []),
-    ...(reviewPanel ? [{ key: 'review' as const, label: t('codeMode.review'), icon: <FileCheck2 size={16} /> }] : []),
-  ];
-
-  return (
-    <div data-testid="tool-panel-expanded-body" className="flex h-full flex-col overflow-hidden bg-card">
-      <div data-testid="tool-panel-expanded-header" className="single-agent-tool-tabs">
-        <div data-testid="tool-panel-expanded-tabs" className="single-agent-tool-tabs__list" role="tablist" aria-label={t('team.toolTabs')}>
-          {tabs.map((tab) => (
-            <button
-              key={tab.key}
-              data-testid="tool-panel-tab"
-              data-variant={tab.key}
-              id={`${tabPanelId}-${tab.key}`}
-              type="button"
-              role="tab"
-              aria-selected={resolvedTab === tab.key}
-              aria-controls={`${tabPanelId}-panel`}
-              className={`single-agent-tool-tab ${
-                resolvedTab === tab.key
-                  ? 'single-agent-tool-tab--active'
-                  : ''
-              }`}
-              onClick={() => onTabChange(tab.key as SingleAgentToolTab)}
-            >
-              {tab.icon}
-              {tab.label}{'count' in tab ? ` (${tab.count})` : ''}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex items-center gap-2" >
-          <button
-            onClick={maximized ? onRestore : onMaximize}
-            data-testid="tool-panel-maximize"
-            className="rounded p-2 text-text-muted hover:bg-secondary hover:text-text"
-            aria-label={maximized ? t('team.restore') : t('team.maximize')}
-            title={maximized ? t('team.restore') : t('team.maximize')}
-          >
-            {maximized ? <Minimize2 size={12} /> : <img src={maximizeIcon} alt="" width={12} height={12} />}
-          </button>
-          <button
-            onClick={onCollapse}
-            data-testid="tool-panel-collapse"
-            className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
-            aria-label={t('team.collapse')}
-            title={t('team.collapse')}
-          >
-            <img src={expandIcon} alt="" width={12} height={12} />
-          </button>
-        </div>
-      </div>
-
-      <div
-        data-testid="tool-panel-expanded-content"
-        id={`${tabPanelId}-panel`}
-        className="flex min-h-0 flex-1 overflow-hidden"
-        role="tabpanel"
-        aria-labelledby={`${tabPanelId}-${resolvedTab}`}
-      >
-        {resolvedTab === 'subagents' ? (
-          <SubagentExpandedPanel sessionId={sessionId} />
-        ) : resolvedTab === 'artifacts' ? (
-          <div data-testid="tool-panel-artifacts-pane" data-variant="artifacts" className="flex min-w-0 flex-1 overflow-hidden">
-            <ArtifactsPanel selectedArtifactId={selectedArtifactId} onSelectArtifact={onArtifactSelect} />
-          </div>
-        ) : resolvedTab === 'review' && reviewPanel ? (
-          <div data-testid="tool-panel-review-pane" data-variant="review" className="flex min-w-0 flex-1 overflow-hidden">{reviewPanel}</div>
-        ) : (
-          <TaskPlanningPanel
-            variant="expanded"
-            tasks={tasks}
-            members={members}
-            totalTasks={totalTasks}
-            completedTasks={completedTasks}
-            hideAssignee
-          />
-        )}
-      </div>
-    </div>
-  );
 }
 
 export function ToolPanel({
@@ -280,41 +129,43 @@ export function ToolPanel({
   setSingleAgentPanelExpanded,
   setSingleAgentPanelActiveTab,
   setSingleAgentPanelSelectedArtifactId,
-  onMaximize,
-  onRestore,
-  maximized = false,
+  shouldFullscreen = false,
 }: ToolPanelProps) {
   const { t } = useTranslation();
   const { isConnected } = useSessionStore();
-  const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const activeSessionId = useChatStore(s => s.activeSessionId);
+  const mode = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
   const resolvedSessionId = sessionId ?? activeSessionId ?? '';
-  const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
-  const teamHistoryMessages = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHistoryMessages ?? []);
-  const setTeamMembers = useSessionStore((s) => s.setTeamMembers);
-  const setTeamTaskEvents = useSessionStore((s) => s.setTeamTaskEvents);
-  const setTeamTasks = useSessionStore((s) => s.setTeamTasks);
-  const mergeTeamTaskProgressBaseline = useSessionStore((s) => s.mergeTeamTaskProgressBaseline);
-  const setTeamMemberExecutionEvents = useSessionStore((s) => s.setTeamMemberExecutionEvents);
-  const setTeamHistoryMessages = useSessionStore((s) => s.setTeamHistoryMessages);
-  const setTeamHumanShareCommands = useSessionStore((s) => s.setTeamHumanShareCommands);
-  const isProcessing = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isProcessing ?? false);
+  const teamMembers = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
+  const teamHistoryMessages = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.teamHistoryMessages ?? []);
+  const setTeamMembers = useSessionStore(s => s.setTeamMembers);
+  const setTeamTaskEvents = useSessionStore(s => s.setTeamTaskEvents);
+  const setTeamTasks = useSessionStore(s => s.setTeamTasks);
+  const mergeTeamTaskProgressBaseline = useSessionStore(s => s.mergeTeamTaskProgressBaseline);
+  const setTeamMemberExecutionEvents = useSessionStore(s => s.setTeamMemberExecutionEvents);
+  const setTeamHistoryMessages = useSessionStore(s => s.setTeamHistoryMessages);
+  const setTeamHumanShareCommands = useSessionStore(s => s.setTeamHumanShareCommands);
+  const isProcessing = useChatStore(s => s.runtimes[activeSessionId ?? '']?.isProcessing ?? false);
   const [planningExpanded, setPlanningExpanded] = useState(false);
   const [teamPlanningExpanded, setTeamPlanningExpanded] = useState(false);
   const [teamMembersExpanded, setTeamMembersExpanded] = useState(false);
-  const { completedTasks: teamCompletedTasks, teamTasks, totalTasks: teamTotalTasks } = useTaskPlanningMetrics();
+  const [artifactsExpanded, setArtifactsExpanded] = useState(false);
+  const { completedTasks: teamCompletedTasks, progressTasks, teamTasks, totalTasks: teamTotalTasks, now } = useTaskPlanningMetrics();
   const artifactsCount = useSessionArtifactsCount();
+  const subagentCount = useSubagentStore(state => Object.keys(state.runtimes[resolvedSessionId]?.subagentsById ?? {}).length);
   const sessionArtifacts = useSessionArtifacts();
   const artifactTasks = useMemo(
-    () => sessionArtifacts.map((artifact) => ({
-      task_id: artifact.id,
-      title: artifact.name,
-      status: 'completed' as const,
-      timestamp: artifact.timestamp,
-    })),
+    () =>
+      sessionArtifacts.map(artifact => ({
+        task_id: artifact.id,
+        title: artifact.name,
+        status: 'completed' as const,
+        timestamp: artifact.timestamp,
+      })),
     [sessionArtifacts],
   );
-  const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
+  const messages = useChatStore(s => s.runtimes[activeSessionId ?? '']?.messages ?? []);
+  const toolExecutions = useChatStore(s => s.runtimes[activeSessionId ?? '']?.toolExecutions ?? new Map());
   const skillTasks = useMemo(() => {
     const seen = new Set<string>();
     for (const msg of messages) {
@@ -327,34 +178,64 @@ export function ToolPanel({
         }
       }
     }
-    return Array.from(seen).map((name) => ({
+    for (const execution of toolExecutions.values()) {
+      const name = execution.toolCall.name
+        .trim()
+        .toLowerCase()
+        .replace(/[\s-]+/g, '_');
+      if (name !== 'skill_tool' && !name.endsWith('.skill_tool') && !name.endsWith('/skill_tool') && !name.endsWith(':skill_tool')) {
+        continue;
+      }
+      const args = execution.toolCall.arguments;
+      if (args) {
+        const skillName = (args.skill_name ?? args.skillName) as unknown;
+        if (typeof skillName === 'string') {
+          const trimmed = skillName.trim();
+          if (trimmed) seen.add(trimmed);
+        }
+      }
+    }
+    return Array.from(seen).map(name => ({
       task_id: `skill-${name}`,
       title: name,
       status: 'completed' as const,
     }));
-  }, [messages]);
-  const teamLeaderMemberIds = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamLeaderMemberIds ?? []);
+  }, [messages, toolExecutions]);
+  const teamLeaderMemberIds = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.teamLeaderMemberIds ?? []);
   const memberTasks = useMemo(
-    () => teamMembers
-      .filter((member) => {
-        const memberKeys = [member.member_id, member.name || ''].map((v) => v.trim().toLowerCase().replace(/[\s_-]+/g, ''));
-        return !(
-          isTeamLeaderMember(member.member_id) ||
-          member.mode === 'leader' ||
-          member.mode === 'team_leader' ||
-          teamLeaderMemberIds.some((leaderId) => memberKeys.includes(leaderId.trim().toLowerCase().replace(/[\s_-]+/g, '')))
-        );
-      })
-      .map((member) => ({
-        task_id: member.member_id,
-        title: `${getMemberPlainName(member)} @${member.member_id}`,
-        status: 'completed' as const,
-        assignee: member.member_id,
-      })),
+    () =>
+      teamMembers
+        .filter(member => {
+          const memberKeys = [member.member_id, member.name || ''].map(v =>
+            v
+              .trim()
+              .toLowerCase()
+              .replace(/[\s_-]+/g, ''),
+          );
+          return !(
+            isTeamLeaderMember(member.member_id) ||
+            member.mode === 'leader' ||
+            member.mode === 'team_leader' ||
+            teamLeaderMemberIds.some(leaderId =>
+              memberKeys.includes(
+                leaderId
+                  .trim()
+                  .toLowerCase()
+                  .replace(/[\s_-]+/g, ''),
+              ),
+            )
+          );
+        })
+        .map(member => ({
+          task_id: member.member_id,
+          title: `@${member.member_id} ${getMemberPlainName(member)}`,
+          status: 'completed' as const,
+          assignee: member.member_id,
+        })),
     [teamMembers, teamLeaderMemberIds],
   );
   // 规划/性能模式下复用 TaskPlanningPanel 紧凑态：把 TodoItem 降级为 TeamTask
-  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const todos = useTodoStore(s => s.runtimes[activeSessionId ?? '']?.todos ?? []);
   const codeProject = project?.work_mode === 'code' && !project.is_default ? project : null;
   const canReviewCode = Boolean(codeProject && sessionId && sessionId !== 'new');
   const codeGitDiffWatch = useCodeGitDiffWatch({
@@ -362,24 +243,17 @@ export function ToolPanel({
     sessionId: canReviewCode && sessionId ? sessionId : null,
     enabled: canReviewCode,
   });
-  const codeReviewPanel = canReviewCode && codeProject && sessionId
-    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} target={codeReviewTarget} diffWatch={codeGitDiffWatch} isProcessing={isProcessing} />
-    : undefined;
+  const codeReviewPanel =
+    canReviewCode && codeProject && sessionId ? (
+      <CodeReviewPanel project={codeProject} sessionId={sessionId} target={codeReviewTarget} diffWatch={codeGitDiffWatch} isProcessing={isProcessing} />
+    ) : undefined;
   const todoTeamTasks = useMemo(() => todos.map(todoItemToTeamTask), [todos]);
-  const todoCompletedTasks = useMemo(
-    () => todos.filter((t) => t.status === 'completed').length,
-    [todos],
-  );
+  const todoCompletedTasks = useMemo(() => todos.filter(t => t.status === 'completed').length, [todos]);
   const hydratedTeamHistorySessionRef = useRef<string | null>(null);
   const loadingTeamHistorySessionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (
-      mode !== 'team'
-      || !isConnected
-      || !sessionId
-      || !(sessionId.startsWith('sess_') || sessionId.startsWith('web_'))
-    ) {
+    if (mode !== 'team' || !isConnected || !sessionId || !(sessionId.startsWith('sess_') || sessionId.startsWith('web_'))) {
       if (sessionId) setTeamHistoryMessages(sessionId, []);
       hydratedTeamHistorySessionRef.current = null;
       loadingTeamHistorySessionRef.current = null;
@@ -404,24 +278,16 @@ export function ToolPanel({
     const controller = new AbortController();
     loadingTeamHistorySessionRef.current = sessionId;
     void loadTeamHistoryPanelState(sessionId, controller.signal)
-      .then((historyState) => {
+      .then(historyState => {
         loadingTeamHistorySessionRef.current = null;
         hydratedTeamHistorySessionRef.current = sessionId;
         const current = useSessionStore.getState().runtimes[sessionId];
-        const mergedMembers = mergeById(
-          historyState.members,
-          current?.teamMembers ?? [],
-          (member) => member.member_id
-        );
+        const mergedMembers = mergeById(historyState.members, current?.teamMembers ?? [], member => member.member_id);
         if (mergedMembers.length > 0) {
           setTeamMembers(sessionId, mergedMembers);
         }
 
-        const mergedTaskEvents = mergeById(
-          historyState.taskEvents,
-          current?.teamTaskEvents ?? [],
-          (event) => event.task_id
-        );
+        const mergedTaskEvents = mergeById(historyState.taskEvents, current?.teamTaskEvents ?? [], event => event.task_id);
         // Always apply — an empty restored list must clear stale events too.
         setTeamTaskEvents(sessionId, mergedTaskEvents);
 
@@ -430,23 +296,13 @@ export function ToolPanel({
         // a prior optimistic upsert). Always setTeamTasks — including [] — so
         // an empty restore actually clears those orphans instead of leaving
         // the previous store contents untouched.
-        const restoredTaskIds = new Set(historyState.tasks.map((task) => task.task_id));
-        const liveTasksForMerge = (current?.teamTasks ?? []).filter((task) =>
-          restoredTaskIds.has(task.task_id)
-        );
-        const mergedTasks = mergeById(
-          historyState.tasks,
-          liveTasksForMerge,
-          (task) => task.task_id
-        );
+        const restoredTaskIds = new Set(historyState.tasks.map(task => task.task_id));
+        const liveTasksForMerge = (current?.teamTasks ?? []).filter(task => restoredTaskIds.has(task.task_id));
+        const mergedTasks = mergeById(historyState.tasks, liveTasksForMerge, task => task.task_id);
         setTeamTasks(sessionId, mergedTasks);
         mergeTeamTaskProgressBaseline(sessionId, historyState.taskProgressBaseline);
 
-        const mergedExecutionEvents = mergeById(
-          historyState.executionEvents,
-          current?.teamMemberExecutionEvents ?? [],
-          (event) => event.id
-        );
+        const mergedExecutionEvents = mergeById(historyState.executionEvents, current?.teamMemberExecutionEvents ?? [], event => event.id);
         if (mergedExecutionEvents.length > 0) {
           setTeamMemberExecutionEvents(sessionId, mergedExecutionEvents);
         }
@@ -454,7 +310,7 @@ export function ToolPanel({
         const mergedHumanShareCommands = mergeById(
           historyState.humanShareCommands,
           current?.teamHumanShareCommands ?? [],
-          (command) => `${command.sessionId}:${command.memberName}`
+          command => `${command.sessionId}:${command.memberName}`,
         );
         if (mergedHumanShareCommands.length > 0) {
           setTeamHumanShareCommands(sessionId, mergedHumanShareCommands);
@@ -462,7 +318,7 @@ export function ToolPanel({
 
         setTeamHistoryMessages(sessionId, historyState.messages);
       })
-      .catch((error) => {
+      .catch(error => {
         loadingTeamHistorySessionRef.current = null;
         if (error instanceof DOMException && error.name === 'AbortError') {
           return;
@@ -473,63 +329,81 @@ export function ToolPanel({
     return () => {
       controller.abort();
     };
-  }, [isConnected, isNewSessionPromotion, mergeTeamTaskProgressBaseline, mode, sessionId, setTeamHistoryMessages, setTeamHumanShareCommands, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
+  }, [
+    isConnected,
+    isNewSessionPromotion,
+    mergeTeamTaskProgressBaseline,
+    mode,
+    sessionId,
+    setTeamHistoryMessages,
+    setTeamHumanShareCommands,
+    setTeamMemberExecutionEvents,
+    setTeamMembers,
+    setTeamTaskEvents,
+    setTeamTasks,
+  ]);
 
   const panelExpanded = mode === 'team' ? teamAreaExpanded : singleAgentPanelExpanded;
 
   if (panelExpanded && mode !== 'auto_harness') {
-    if (mode !== 'team') {
-      return (
-        <div
-          data-testid="tool-panel-expanded-single-agent"
-          className="bg-panel h-full overflow-hidden flex-1 flex flex-col min-w-[512px]"
-        >
-          <div className="h-full bg-panel flex flex-col overflow-hidden">
-            <ExpandedSingleAgentArea
-              sessionId={resolvedSessionId}
-              activeTab={singleAgentPanelActiveTab}
-              tasks={todoTeamTasks}
-              members={teamMembers}
-              totalTasks={todos.length}
-              completedTasks={todoCompletedTasks}
-              onTabChange={setSingleAgentPanelActiveTab}
-              onCollapse={() => { setSingleAgentPanelExpanded(false); onRestore?.(); }}
-              onMaximize={() => onMaximize?.()}
-              onRestore={() => onRestore?.()}
-              maximized={maximized}
-              reviewPanel={codeReviewPanel}
-              selectedArtifactId={singleAgentPanelSelectedArtifactId}
-              onArtifactSelect={setSingleAgentPanelSelectedArtifactId}
-            />
-          </div>
-        </div>
-      );
-    }
+    const isTeam = mode === 'team';
+    const testId = isTeam ? 'tool-panel-expanded-team' : 'tool-panel-expanded-single-agent';
 
-    // 展开模式 - 更宽的面板，只显示 TeamArea
     return (
-      <div
-        data-testid="tool-panel-expanded-team"
-        className="bg-panel h-full overflow-hidden flex-1 flex flex-col"
-      >
+      <div data-testid={testId} className="bg-panel h-full overflow-hidden flex-1 flex flex-col min-w-[512px]">
         <div className="h-full bg-panel flex flex-col overflow-hidden">
-          <TeamArea
-            members={teamMembers}
-            historyMessages={teamHistoryMessages}
-            expanded={true}
-            activeTab={teamAreaActiveTab}
-            activeDetailTab={teamAreaActiveDetailTab}
-            selectedMemberId={teamAreaSelectedMemberId}
-            selectedArtifactId={teamAreaSelectedArtifactId}
-            onTabChange={setTeamAreaActiveTab}
-            onDetailTabChange={setTeamAreaActiveDetailTab}
-            onMemberSelect={setTeamAreaSelectedMemberId}
-            onArtifactSelect={setTeamAreaSelectedArtifactId}
-            onCollapse={() => {
-              setTeamAreaExpanded(false);
-              setTeamAreaSelectedMemberId('');
-            }}
+          <ExpandedPanel
+            activeTab={isTeam ? teamAreaActiveTab : singleAgentPanelActiveTab}
+            onTabChange={isTeam ? (tab => setTeamAreaActiveTab(tab as TabType)) : (tab => setSingleAgentPanelActiveTab(tab as SingleAgentToolTab))}
+            onCollapse={isTeam ? () => { setTeamAreaExpanded(false); setTeamAreaSelectedMemberId(''); } : () => { setSingleAgentPanelExpanded(false); }}
+            shouldFullscreen={shouldFullscreen}
             reviewPanel={codeReviewPanel}
+            selectedArtifactId={isTeam ? teamAreaSelectedArtifactId : singleAgentPanelSelectedArtifactId}
+            onArtifactSelect={isTeam ? setTeamAreaSelectedArtifactId : setSingleAgentPanelSelectedArtifactId}
+            middleTab={isTeam ? { key: 'team', label: t('team.membersTab'), icon: <img src={teamIcon} width={16} height={16} aria-hidden="true" /> } : { key: 'subagents', label: t('subagent.title'), icon: <img src={teamIcon} width={16} height={16} aria-hidden="true" /> }}
+            showMiddleTab={isTeam ? true : subagentCount > 0}
+            resolveActiveTab={(tab, count, review) => {
+              if (tab === 'artifacts' && count > 0) return 'artifacts';
+              if (isTeam) return tab === 'review' && !review ? 'planning' : tab;
+              if (tab === 'subagents' && subagentCount > 0) return 'subagents';
+              if (tab === 'review' && review) return 'review';
+              return 'planning';
+            }}
+            renderMiddleTabContent={() => isTeam ? (
+              <TeamMembersPanel
+                variant="expanded"
+                members={teamMembers}
+                selectedMemberId={teamAreaSelectedMemberId ?? ''}
+                selectedMember={teamMembers.find(m => m.member_id === teamAreaSelectedMemberId) ?? null}
+                activeDetailTab={teamAreaActiveDetailTab}
+                historyMessages={teamHistoryMessages}
+                onSelectMember={setTeamAreaSelectedMemberId}
+                onDetailTabChange={setTeamAreaActiveDetailTab}
+              />
+            ) : (
+              <SubagentExpandedPanel sessionId={resolvedSessionId} />
+            )}
+            renderPlanningContent={() => isTeam ? (
+              <TaskPlanningPanel
+                variant="expanded"
+                tasks={teamTasks}
+                progressTasks={progressTasks}
+                now={now}
+                members={teamMembers}
+                totalTasks={teamTotalTasks}
+                completedTasks={teamCompletedTasks}
+              />
+            ) : (
+              <TaskPlanningPanel
+                variant="expanded"
+                tasks={todoTeamTasks}
+                members={teamMembers}
+                totalTasks={todos.length}
+                completedTasks={todoCompletedTasks}
+                hideAssignee
+                emptyIllustration={emptyPlanningIcon}
+              />
+            )}
           />
         </div>
       </div>
@@ -568,7 +442,7 @@ export function ToolPanel({
       render: () => (
         <CollapsibleSection
           title={t('chat.recentTasks')}
-          icon={<img src={recentTasksIcon} width={16} height={16} aria-hidden="true" />}
+          icon={<RecentTasksIcon className="h-4 w-4" aria-hidden="true" />}
           childCount={planningProps.tasks.length}
           maxCollapsedCount={4}
           onExpand={() => expandTo('planning')}
@@ -585,6 +459,7 @@ export function ToolPanel({
             title={t('chat.recentTasks')}
             maxCollapsedCount={4}
             {...planningProps}
+            emptyIllustration={emptyPlanningIcon}
           />
         </CollapsibleSection>
       ),
@@ -601,6 +476,8 @@ export function ToolPanel({
           onExpand={() => expandTo('team')}
           onExpandAll={() => setTeamMembersExpanded(true)}
           dataTestId="tool-panel-team-members"
+          defaultCollapsed
+          autoExpandOnContent
         >
           <CompactTaskList
             tasks={memberTasks}
@@ -609,50 +486,48 @@ export function ToolPanel({
             maxCollapsedCount={4}
             expanded={teamMembersExpanded}
             emptyText={t('team.noMemberData')}
-            renderStatusIcon={(task) => (
-              <TeamMemberAvatar
-                member={task.assignee ?? ''}
-                alt={task.title ?? ''}
-                className="h-4 w-4 rounded-full shrink-0"
-                imageClassName="rounded-full"
-              />
+            emptyIllustration={emptyMembersIcon}
+            renderStatusIcon={task => (
+              <TeamMemberAvatar member={task.assignee ?? ''} alt={task.title ?? ''} className="h-4 w-4 rounded-full shrink-0" imageClassName="rounded-full" />
             )}
           />
         </CollapsibleSection>
       ),
     },
-    canReviewCode && codeProject && sessionId && {
-      key: 'code',
-      testId: 'tool-panel-code-environment-pane',
-      render: () => (
-        <CollapsibleSection
-          title={t('codeMode.environment')}
-          icon={<Info size={16} />}
-          showExpandButton={false}
-          onExpand={() => {
-            setCodeReviewTarget?.({ source: 'working_tree' });
-            expandTo('review');
-          }}
-          dataTestId="tool-panel-code-environment"
-        >
-          <CodeEnvironmentPanel
-            project={codeProject}
-            isProcessing={isProcessing}
-            diffWatch={codeGitDiffWatch}
-            onReview={() => {
+    canReviewCode &&
+      codeProject &&
+      sessionId && {
+        key: 'code',
+        testId: 'tool-panel-code-environment-pane',
+        render: () => (
+          <CollapsibleSection
+            title={t('codeMode.environment')}
+            icon={<Info size={16} />}
+            showExpandButton={false}
+            onExpand={() => {
               setCodeReviewTarget?.({ source: 'working_tree' });
-              if (mode === 'team') {
-                setTeamAreaActiveTab('review');
-                setTeamAreaExpanded(true);
-              } else {
-                setSingleAgentPanelActiveTab('review');
-                setSingleAgentPanelExpanded(true);
-              }
+              expandTo('review');
             }}
-          />
-        </CollapsibleSection>
-      ),
-    },
+            dataTestId="tool-panel-code-environment"
+          >
+            <CodeEnvironmentPanel
+              project={codeProject}
+              isProcessing={isProcessing}
+              diffWatch={codeGitDiffWatch}
+              onReview={() => {
+                setCodeReviewTarget?.({ source: 'working_tree' });
+                if (mode === 'team') {
+                  setTeamAreaActiveTab('review');
+                  setTeamAreaExpanded(true);
+                } else {
+                  setSingleAgentPanelActiveTab('review');
+                  setSingleAgentPanelExpanded(true);
+                }
+              }}
+            />
+          </CollapsibleSection>
+        ),
+      },
     {
       key: 'artifacts',
       testId: 'tool-panel-artifacts-pane',
@@ -661,15 +536,30 @@ export function ToolPanel({
           title={t('artifacts.tab')}
           icon={<img src={artifactsIcon} width={16} height={16} aria-hidden="true" />}
           childCount={artifactsCount}
+          maxCollapsedCount={4}
           onExpand={() => expandTo('artifacts')}
+          onExpandAll={() => setArtifactsExpanded(true)}
           dataTestId="tool-panel-artifacts"
+          defaultCollapsed
+          autoExpandOnContent
         >
           <CompactTaskList
             tasks={artifactTasks}
             members={[]}
             hideAssignee
+            maxCollapsedCount={4}
+            expanded={artifactsExpanded}
             emptyText={t('artifacts.empty')}
-            renderStatusIcon={(task) => <FileIcon fileName={task.title ?? ''} size={16} className="shrink-0" />}
+            emptyIllustration={emptyArtifactsIcon}
+            renderStatusIcon={task => <FileIcon fileName={task.title ?? ''} size={16} className="shrink-0" />}
+            onTaskClick={taskId => {
+              expandTo('artifacts');
+              if (isTeam) {
+                setTeamAreaSelectedArtifactId(taskId);
+              } else {
+                setSingleAgentPanelSelectedArtifactId(taskId);
+              }
+            }}
           />
         </CollapsibleSection>
       ),
@@ -684,12 +574,15 @@ export function ToolPanel({
           childCount={skillTasks.length}
           showExpandButton={false}
           dataTestId="tool-panel-references"
+          defaultCollapsed
+          autoExpandOnContent
         >
           <CompactTaskList
             tasks={skillTasks}
             members={[]}
             hideAssignee
             emptyText={t('references.empty')}
+            emptyIllustration={emptyReferencesIcon}
             renderStatusIcon={() => <img src={skillIcon} width={16} height={16} aria-hidden="true" className="shrink-0" />}
           />
         </CollapsibleSection>
@@ -702,12 +595,9 @@ export function ToolPanel({
   }[];
 
   return (
-    <div
-      data-testid="tool-panel-collapsed"
-      className="bg-panel py-0 px-6 tool-panel-floating"
-    >
+    <div data-testid="tool-panel-collapsed" className="bg-panel py-0 px-6 tool-panel-floating">
       <div className="bg-panel flex flex-col">
-        {collapsedSections.map((section) => (
+        {collapsedSections.map(section => (
           <div key={section.key} data-testid={section.testId}>
             {section.render()}
           </div>

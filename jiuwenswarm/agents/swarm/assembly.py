@@ -40,7 +40,10 @@ from openjiuwen.agent_teams.schema.team import TeamMemberSpec, TeamRole
 from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
 
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
-from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.agents.swarm.context import (
+    SwarmBuildContext,
+    get_heartbeat_job_service,
+)
 from jiuwenswarm.agents.swarm.registry import register_swarm_providers
 from jiuwenswarm.agents.harness.observability_runtime import get_trajectory_span_processor
 from jiuwenswarm.common.config import get_config
@@ -320,6 +323,7 @@ def enrich_team_spec_for_swarm(
         team_skill_visibility_path=team_visibility_path,
         global_skills_dir=global_skills_dir,
         trajectory_span_processor=get_trajectory_span_processor(),
+        heartbeat_job_service=get_heartbeat_job_service(),
         config=config,
     )
     mcp_configs = build_enabled_mcp_server_configs(

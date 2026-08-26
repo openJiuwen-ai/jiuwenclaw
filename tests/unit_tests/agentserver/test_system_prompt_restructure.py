@@ -6,12 +6,14 @@ import pytest
 
 from openjiuwen.core.foundation.llm import Model, ToolMessage
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
     ToolCallInputs,
 )
 from openjiuwen.core.single_agent.ability_manager import AbilityExecutionError
+from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
@@ -806,49 +808,45 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
 
 
 @pytest.mark.asyncio
-async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
-    rail = _TestableJiuWenSwarmDeepAdapter()._build_subagent_rail()
-    if rail is None:
-        pytest.skip("SubagentRail is unavailable with the installed openjiuwen API")
+async def test_browser_policy_is_injected_only_when_browser_agent_is_loaded():
+    rail = JiuWenSwarmDeepAdapter._build_subagent_rail()
+    assert rail is not None
     rail.tools = [object()]
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
 
+    browser_agent = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser",
+    )
+    agent = SimpleNamespace(
+        deep_config=SimpleNamespace(subagents=[browser_agent])
+    )
     ctx = AgentCallbackContext(
-        agent=SimpleNamespace(),
+        agent=agent,
         inputs=None,
         session=_FakeSession(),
         extra={},
     )
     await rail.before_model_call(ctx)
 
-    section = rail.system_prompt_builder.get_section("subagent_tools")
-    if section is None:
-        section = rail.system_prompt_builder.get_section("task_tool")
-    if section is None:
-        pytest.skip("subagent prompt section is unavailable in this tool configuration")
-    assert "## Browser Subagent Rules" in section.content["en"]
-    assert 'set `subagent_type` to `"browser_agent"`' in section.content["en"]
-    if "task_tool" in section.content["en"] and section.name == "task_tool":
-        assert "# Subagent Usage Rules" in section.content["en"]
-        assert "## task_tool" not in section.content["en"]
-    else:
-        assert "subagent_spawn" in section.content["en"]
+    task_section = rail.system_prompt_builder.get_section("task_tool")
+    assert task_section is not None
+    assert "## Browser Subagent Rules" in task_section.content["en"]
+    assert 'set `subagent_type` to `"browser_agent"`' in task_section.content["en"]
     assert not rail.system_prompt_builder.has_section("browser_tool_policy")
     assert "浏览器子智能体规则" in build_browser_task_prompt("cn")
 
-    rail.set_channel("tui")
+    agent.deep_config.subagents = [
+        SubAgentConfig(
+            agent_card=AgentCard(name="explore_agent", description="explore"),
+            system_prompt="explore",
+        )
+    ]
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
     await rail.before_model_call(ctx)
-    non_web_section = rail.system_prompt_builder.get_section("subagent_tools")
-    if non_web_section is None:
-        non_web_section = rail.system_prompt_builder.get_section("task_tool")
-    if non_web_section is None:
-        pytest.skip("subagent prompt section is unavailable in this tool configuration")
-    if non_web_section.name == "task_tool":
-        assert "# Subagent Usage Rules" in non_web_section.content["en"]
-    else:
-        assert "subagent_spawn" in non_web_section.content["en"]
-    assert "## Browser Subagent Rules" not in non_web_section.content["en"]
+    unloaded_task_section = rail.system_prompt_builder.get_section("task_tool")
+    assert unloaded_task_section is not None
+    assert "## Browser Subagent Rules" not in unloaded_task_section.content["en"]
 
 
 def test_task_planning_tools_remain_enabled_without_todo_prompt_section():
@@ -897,7 +895,7 @@ async def test_runtime_attachment_tracks_live_code_agent_mode(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_runtime_git_status_attachment_clears_when_git_context_disappears(tmp_path, monkeypatch):
+async def test_runtime_git_status_is_stable_system_context_for_one_invoke(tmp_path, monkeypatch):
     monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
     runtime_state = tmp_path / "runtime_state" / "default.yaml"
     runtime_state.parent.mkdir(parents=True, exist_ok=True)
@@ -918,14 +916,31 @@ async def test_runtime_git_status_attachment_clears_when_git_context_disappears(
         extra={},
     )
 
-    await runtime_rail.before_model_call(ctx)
-    session_items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
-    assert [item.id for item in session_items if item.id.endswith(".git_status")] == ["session.sess1.git_status"]
-
-    runtime_state.write_text("git_branch: ''\n", encoding="utf-8")
-    await runtime_rail.before_model_call(ctx)
+    await runtime_rail.before_invoke(ctx)
+    prompt = builder.build()
+    assert "This is the git status at the start of the conversation." in prompt
+    assert "Current branch: feature/test" in prompt
+    assert "Status:\nM file.py" in prompt
+    assert "Recent commits:\nabc init" in prompt
     session_items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     assert [item.id for item in session_items if item.id.endswith(".git_status")] == []
+
+    runtime_state.write_text(
+        "git_branch: feature/changed\n"
+        "git_status: M changed.py\n"
+        "git_recent_commits: def changed\n",
+        encoding="utf-8",
+    )
+    await runtime_rail.before_model_call(ctx)
+    prompt = builder.build()
+    assert "Current branch: feature/test" in prompt
+    assert "feature/changed" not in prompt
+    session_items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
+    assert [item.id for item in session_items if item.id.endswith(".git_status")] == []
+
+    runtime_state.write_text("git_branch: ''\n", encoding="utf-8")
+    await runtime_rail.before_invoke(ctx)
+    assert "This is the git status at the start of the conversation." not in builder.build()
 
 
 @pytest.mark.asyncio

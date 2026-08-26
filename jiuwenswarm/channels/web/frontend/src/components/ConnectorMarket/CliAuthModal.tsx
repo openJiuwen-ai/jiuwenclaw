@@ -89,8 +89,12 @@ export function CliAuthModal({ name, initial, onCancel, onConnected }: CliAuthMo
   const stepIndex = (step.stepIndex ?? 0) + 1;
   const hasUrl = !!step.authUrl;
 
+  // z-[10100] + data-connector-auth-modal：同 ConnectTokenModal.tsx 头部注释——这个弹窗可能从
+  // "+"扩展面板（zIndex:9999）里弹出，必须盖在它上面；data 属性供 InputArea.tsx/
+  // ExtensionPickerPanel.tsx 的外部点击关闭监听识别"点的是弹窗内部"从而跳过关闭（2026-08-25
+  // 用户反馈）。
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay-cron-dialog">
+    <div data-connector-auth-modal="true" className="fixed inset-0 z-[10100] flex items-center justify-center bg-overlay-cron-dialog">
       <div className="relative w-[420px] rounded-2xl bg-card p-6 shadow-xl">
         <button type="button" onClick={onCancel} className="absolute right-5 top-5 text-text-muted hover:text-text">
           <X size={18} />

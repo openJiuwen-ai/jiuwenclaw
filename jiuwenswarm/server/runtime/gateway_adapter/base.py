@@ -1,6 +1,6 @@
 """适配器层协议底座：GatewayAdapter 基类与 AdapterRegistry 注册表。
 
-设计（方案第 6 章 Phase 1）：
+设计（方案第 6 章）：
 - ``GatewayAdapter``：按业务域拆分的适配器基类，声明支持的 E2A method
   （``methods``），实现 ``handle(request) -> AgentResponse`` 纯业务契约；
 - ``AdapterRegistry``：method → adapter 的注册表，供 ``_handle_message``
@@ -90,8 +90,9 @@ class GatewayAdapter:
 class AdapterRegistry:
     """method → GatewayAdapter 注册表。
 
-    渐进式接入：Phase 1 首批注册 ``SessionAdapter``（session.list），
-    后续 Phase 逐业务域注册；未被注册表覆盖的 method 继续走既有 if/elif 链。
+    按业务域注册适配器（SessionAdapter、ConfigAdapter、WorkspaceFileAdapter、
+    ProjectAdapter、MemoryAdapter、HarmonyOSAdapter 等）；未被注册表覆盖的
+    method 继续走既有 if/elif 链。
     """
 
     def __init__(self) -> None:

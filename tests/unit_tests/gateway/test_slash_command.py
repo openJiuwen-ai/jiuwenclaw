@@ -26,6 +26,7 @@ VALID_MODE_LINES = _MOD.VALID_MODE_LINES
 VALID_SWITCH_LINES = _MOD.VALID_SWITCH_LINES
 format_skills_list_for_notice = _MOD.format_skills_list_for_notice
 is_control_like_for_im_batching = _MOD.is_control_like_for_im_batching
+list_builtin_commands = _MOD.list_builtin_commands
 parse_channel_control_text = _MOD.parse_channel_control_text
 
 
@@ -343,6 +344,16 @@ def test_first_batch_registry_ids() -> None:
         "goal",
     }
     assert ids == expected
+
+
+def test_web_slash_picker_command_contract() -> None:
+    commands = list_builtin_commands({"work_mode": "code.normal"})["commands"]
+    assert [command["name"] for command in commands] == ["btw", "compact", "plan"]
+    assert commands[0]["req_method"] == "command.btw"
+    assert commands[1]["req_method"] == "command.compact"
+    assert commands[2]["execution"] == "chat.send_with_mode"
+    assert commands[2]["takesArgs"] is True
+    assert commands[2]["plan_entry_source"] == "slash_command"
 
 
 def test_exit_parse_rejects_short_form_requires_full_team_session_ref() -> None:

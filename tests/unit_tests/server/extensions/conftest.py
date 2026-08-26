@@ -103,7 +103,7 @@ def create_package(kind: str, package_id: str) -> None:
         catalog.create_agent_template(
             {
                 "id": package_id,
-                "name": "N",
+                "name": package_id,
                 "description": "D",
                 "persona": "P",
                 "skills": [],

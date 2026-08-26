@@ -11,6 +11,7 @@ import {
   forwardRef,
   useImperativeHandle,
   FormEvent,
+  Fragment,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -40,6 +41,7 @@ import { ModelProviderIcon } from '../ModelProviderIcon';
 import { FileIcon } from '../FileIcon';
 import { getEvolutionPillLabel } from './evolution-status';
 import { webRequest } from '../../services/webClient';
+import { parseSlashLine, findSlashCommand } from './slashCommands/registry';
 import { getSkillAvatar } from '../../utils/skillAvatar';
 import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import { ExtensionPickerPanel } from './ExtensionPickerPanel';
@@ -85,6 +87,19 @@ type InputAreaSkillItem = {
   is_builtin_source?: boolean;
   enabled?: boolean;
   installed?: boolean;
+  tags?: string[];
+};
+
+type SlashCommandMeta = {
+  name: string;
+  description: string;
+  usage?: string;
+  takesArgs?: boolean;
+  execution?: string;
+  req_method?: string;
+  mode?: string;
+  plan_entry_source?: string;
+  requires_session?: boolean;
 };
 
 /** 已安装插件信息（用于判定技能是否已安装） */
@@ -104,7 +119,7 @@ type InputAreaTeamMember = {
   status?: string;
 };
 
-type ComposerSuggestionKind = 'member' | 'role';
+type ComposerSuggestionKind = 'member' | 'role' | 'slash';
 type WorkIconName = 'add' | 'arrow' | 'check' | 'close' | 'collapse' | 'expand' | 'folder' | 'search';
 
 type ComposerSuggestionState = {
@@ -116,13 +131,48 @@ type ComposerSuggestionItem = {
   id: string;
   label: string;
   status?: string;
+  description?: string;
+  itemKind?: 'command' | 'skill';
+  source?: string;
+  takesArgs?: boolean;
 };
 
 function getComposerSuggestionItems(
   suggestion: ComposerSuggestionState | null,
-  members: ComposerSuggestionItem[]
+  members: ComposerSuggestionItem[],
+  slashCommands: SlashCommandMeta[],
+  slashSkills: InputAreaSkillItem[],
 ): ComposerSuggestionItem[] {
   if (!suggestion) return [];
+  if (suggestion.kind === 'slash') {
+    const query = suggestion.query.trim().toLowerCase();
+    const commands = slashCommands
+      .filter((command) => !query || command.name.toLowerCase().includes(query))
+      .map((command) => ({
+        id: command.name,
+        label: `/${command.name}`,
+        description: command.description,
+        itemKind: 'command' as const,
+        takesArgs: command.takesArgs,
+      }));
+    const skills = slashSkills
+      .filter((skill) => {
+        if (!query) return true;
+        return [skill.name, skill.display_name, skill.description, ...(skill.tags ?? [])]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+          .includes(query);
+      })
+      .map((skill) => ({
+        id: skill.name,
+        label: skill.display_name || skill.name,
+        description: skill.description,
+        itemKind: 'skill' as const,
+        source: skill.source,
+      }));
+    return [...commands, ...skills];
+  }
   const query = suggestion.query.trim().toLowerCase();
   return members
     .filter((item) => {
@@ -544,6 +594,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const [composerSuggestion, setComposerSuggestion] = useState<ComposerSuggestionState | null>(null);
   const [composerSuggestionIndex, setComposerSuggestionIndex] = useState(0);
+  const [composerSuggestionNavigationMode, setComposerSuggestionNavigationMode] = useState<'keyboard' | 'pointer'>('pointer');
+  const [slashCommands, setSlashCommands] = useState<SlashCommandMeta[]>([]);
+  const [slashSkills, setSlashSkills] = useState<InputAreaSkillItem[]>([]);
+  const [slashCatalogLoading, setSlashCatalogLoading] = useState(false);
+  const [slashCatalogLoaded, setSlashCatalogLoaded] = useState(false);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [attachMenuAnchor, setAttachMenuAnchor] = useState<DOMRect | null>(null);
@@ -555,6 +610,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [extensionPanelOpen, setExtensionPanelOpen] = useState(false);
   const [extensionAnchor, setExtensionAnchor] = useState<DOMRect | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
+  const insertSkillChipRef = useRef<(skillName: string) => void>(() => undefined);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
   const savedRangeRef = useRef<Range | null>(null);
   const modeMenuRef = useRef<HTMLDivElement>(null);
@@ -642,13 +698,62 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   }, [teamMembers]);
 
   const composerSuggestionItems = useMemo(
-    () => getComposerSuggestionItems(composerSuggestion, mentionableMembers),
-    [composerSuggestion, mentionableMembers]
+    () => getComposerSuggestionItems(
+      composerSuggestion,
+      mentionableMembers,
+      slashCommands,
+      slashSkills,
+    ),
+    [composerSuggestion, mentionableMembers, slashCommands, slashSkills],
   );
+
+  useEffect(() => {
+    if (composerSuggestion?.kind !== 'slash' || slashCatalogLoaded || slashCatalogLoading) return;
+    setSlashCatalogLoading(true);
+    void Promise.all([
+      webRequest<{ commands?: SlashCommandMeta[] }>(
+        'commands.list',
+        { work_mode: activeSession?.work_mode ?? workMode },
+      ),
+      webRequest<{ skills?: InputAreaSkillItem[]; plugins?: InputAreaInstalledPlugin[] }>(
+        'skills.list',
+        { with_installed: true },
+        { timeoutMs: 30_000 },
+      ),
+    ]).then(([commandData, skillData]) => {
+      const installedNames = new Set(
+        (skillData.plugins ?? []).flatMap((plugin) => plugin.skills ?? []),
+      );
+      const availableSkills = (skillData.skills ?? []).filter((skill) => (
+        Boolean(skill.name) &&
+        skill.enabled !== false &&
+        Boolean(
+          skill.installed ||
+          skill.is_builtin ||
+          skill.is_builtin_source ||
+          skill.source === 'builtin' ||
+          skill.source === 'local' ||
+          skill.source === 'project' ||
+          installedNames.has(skill.name)
+        )
+      ));
+      setSlashCommands(commandData.commands ?? []);
+      setSlashSkills(availableSkills);
+      setSlashCatalogLoaded(true);
+    }).catch((error) => {
+      console.error('Failed to load slash command catalog:', error);
+    }).finally(() => {
+      setSlashCatalogLoading(false);
+    });
+  }, [activeSession?.work_mode, composerSuggestion?.kind, slashCatalogLoaded, workMode]);
 
   useEffect(() => {
     setComposerSuggestionIndex(0);
   }, [composerSuggestion?.kind, composerSuggestion?.query]);
+
+  useEffect(() => {
+    setComposerSuggestionNavigationMode('pointer');
+  }, [composerSuggestion?.kind]);
 
   useEffect(() => {
     if (composerSuggestionItems.length === 0) {
@@ -1220,6 +1325,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (!attachMenuOpen) return;
 
     const handlePointerDown = (event: PointerEvent) => {
+      // ExtensionPickerPanel.tsx 扩展面板里点"连接"弹出的授权弹窗（ConnectTokenModal/
+      // CliAuthModal）是单独 portal 到 document.body 的兄弟节点，既不在 attachMenuRef/
+      // attachMenuPortalRef 里，也不在 extensionPanelRef 里——不跳过的话点弹窗内部会被这里
+      // 也判成"点了外面"，把一级"+"菜单和二级扩展面板一起关掉，弹窗因为状态挂在扩展面板组件
+      // 里也跟着卸载消失（2026-08-25 用户反馈，同一根因见 ExtensionPickerPanel.tsx 头部
+      // pointerdown 处理的注释）。
+      if ((event.target as HTMLElement | null)?.closest?.('[data-connector-auth-modal]')) return;
       if (
         !attachMenuRef.current?.contains(event.target as Node) &&
         !attachMenuPortalRef.current?.contains(event.target as Node) &&
@@ -1317,7 +1429,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     return () => window.removeEventListener('chat-input-sync', handler);
   }, []);
 
-  /** 从 contenteditable 提取纯文本（技能 chip 不进入纯文本，其它 token 展开为 @/$ 文本） */
+  /** 从 contenteditable 提取纯文本（技能 chip 不进入纯文本，其它 token 展开为可提交文本） */
   const extractPlainText = useCallback((): string => {
     const el = inputRef.current;
     if (!el) return '';
@@ -1327,7 +1439,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         text += node.textContent || '';
       } else if (node.nodeType === Node.ELEMENT_NODE) {
         const elem = node as HTMLElement;
-        if (elem.getAttribute('contenteditable') === 'false' && elem.dataset.composerToken) {
+        if (elem.getAttribute('contenteditable') === 'false' && elem.dataset.slashCommand) {
+          text += `/${elem.dataset.slashCommand}`;
+        } else if (elem.getAttribute('contenteditable') === 'false' && elem.dataset.composerToken) {
           const prefix = elem.dataset.composerToken === 'role' ? '$' : '@';
           text += `${prefix}${elem.dataset.value || elem.textContent || ''}`;
         } else if (elem.getAttribute('contenteditable') === 'false') {
@@ -1350,7 +1464,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         text += node.textContent || '';
       } else if (node.nodeType === Node.ELEMENT_NODE) {
         const elem = node as HTMLElement;
-        if (elem.getAttribute('contenteditable') === 'false' && elem.hasAttribute('data-skill')) {
+        if (elem.getAttribute('contenteditable') === 'false' && elem.dataset.slashCommand) {
+          text += `/${elem.dataset.slashCommand}`;
+        } else if (elem.getAttribute('contenteditable') === 'false' && elem.hasAttribute('data-skill')) {
           text += `{{skill:${elem.getAttribute('data-skill')}}}`;
         } else if (elem.getAttribute('contenteditable') === 'false' && elem.dataset.composerToken) {
           const prefix = elem.dataset.composerToken === 'role' ? '$' : '@';
@@ -1367,6 +1483,45 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     // 用富文本（含 chip 标记）作为发送内容，气泡可交织渲染技能
     const richContent = extractRichContent();
     const trimmedBase = (richContent + pendingVoiceText).trim();
+
+    // 斜杠命令拦截：控制命令不走 chat.send / 队列 / 中断逻辑（与 command.goal 同级——
+    // 控制操作不该被排进消息队列，/btw 还要能与主对话并行）。命中注册表即执行并 return；
+    if (trimmedBase.startsWith('/')) {
+      const { name, args } = parseSlashLine(trimmedBase);
+      const cmd = findSlashCommand(name);
+      if (cmd) {
+        const slashSid = useChatStore.getState().activeSessionId;
+        if (isListening) stopListening();
+        if (slashSid) useChatStore.getState().setInputValue(slashSid, '');
+        setPendingVoiceText('');
+        setAttachments([]);
+        setAttachmentAlerts([]);
+        if (inputRef.current) inputRef.current.innerHTML = '';
+        setComposerSuggestion(null);
+        // requiresSession=false 的命令（如 /plan 纯本地开关）无需真实会话，欢迎页也能用
+        if (cmd.requiresSession === false || (slashSid && slashSid !== NEW_CONVERSATION_ID)) {
+          const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? 'agent';
+          void cmd.execute(
+            {
+              sessionId: slashSid ?? NEW_CONVERSATION_ID,
+              mode: slashMode,
+              inputLine: trimmedBase,
+              addMessage: useChatStore.getState().addMessage,
+              submitMessage: onSubmit,
+            },
+            args,
+          );
+        } else {
+          useChatStore.getState().addMessage(slashSid ?? NEW_CONVERSATION_ID, {
+            id: `slash-sys-${Date.now()}`,
+            role: 'system',
+            content: '请先开始一个对话再使用该指令。',
+            timestamp: new Date().toISOString(),
+          });
+        }
+        return;
+      }
+    }
     const readyDrafts = attachments.filter(
       (attachment) =>
         attachment.status === 'ready' &&
@@ -1500,6 +1655,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     beforeRange.selectNodeContents(el);
     beforeRange.setEnd(range.endContainer, range.endOffset);
     const beforeText = beforeRange.toString().replace(/\u200B/g, '');
+    const slashMatch = beforeText.match(/(?:^|\s)(\/)([a-zA-Z][\w-]*)?$/);
+    if (slashMatch) {
+      return { kind: 'slash', query: slashMatch[2] ?? '' };
+    }
     const match = beforeText.match(/([@$])([\p{L}\p{N}_\-\u4e00-\u9fa5]*)$/u);
     if (!match) return null;
 
@@ -1511,7 +1670,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const updateComposerSuggestion = useCallback(() => {
     const trigger = getCurrentComposerTrigger();
-    if (!trigger || mentionableMembers.length === 0) {
+    if (!trigger) {
+      setComposerSuggestion(null);
+      return;
+    }
+    // slash 指令不依赖团队成员，即便没有可 @ 的成员也照常弹出
+    if (trigger.kind !== 'slash' && mentionableMembers.length === 0) {
       setComposerSuggestion(null);
       return;
     }
@@ -1536,12 +1700,139 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     range.collapse(false);
   }, []);
 
-  const insertComposerToken = useCallback((kind: ComposerSuggestionKind, value: string, label: string) => {
+  const insertComposerToken = useCallback((
+    kind: ComposerSuggestionKind,
+    value: string,
+    label: string,
+    slashItemKind?: 'command' | 'skill',
+    slashTakesArgs?: boolean,
+  ) => {
     const el = inputRef.current;
     const selection = window.getSelection();
     if (!el || !selection || selection.rangeCount === 0) return;
     const range = selection.getRangeAt(0);
     if (!el.contains(range.commonAncestorContainer)) return;
+
+    // slash 选中
+    if (kind === 'slash') {
+      if (slashItemKind === 'skill') {
+        const trigger = getCurrentComposerTrigger();
+        if (trigger) {
+          const beforeRange = range.cloneRange();
+          beforeRange.selectNodeContents(el);
+          beforeRange.setEnd(range.endContainer, range.endOffset);
+          const beforeTextLength = beforeRange.toString().replace(/​/g, '').length;
+          const triggerLength = trigger.query.length + 1;
+          setRangeStartByTextOffset(range, el, Math.max(0, beforeTextLength - triggerLength));
+          range.deleteContents();
+        }
+        savedRangeRef.current = range.cloneRange();
+        const slashSid = useChatStore.getState().activeSessionId;
+        if (slashSid) useSessionStore.getState().addSelectedSkill(slashSid, value);
+        insertSkillChipRef.current(value);
+        setComposerSuggestion(null);
+        return;
+      }
+      const slashCmd = findSlashCommand(value);
+      // 无参命令（/plan、/compact）：选中即执行，不插入文本、不再等回车
+      // —— 与「输入 /plan + 回车」走同一执行路径（含 NEW_CONVERSATION_ID 提示）。
+      if (slashCmd && slashTakesArgs === false) {
+        const trigger = getCurrentComposerTrigger();
+        if (trigger) {
+          const beforeRange = range.cloneRange();
+          beforeRange.selectNodeContents(el);
+          beforeRange.setEnd(range.endContainer, range.endOffset);
+          const beforeTextLength = beforeRange.toString().replace(/​/g, '').length;
+          const triggerLength = trigger.query.length + 1; // '/' + query
+          setRangeStartByTextOffset(range, el, Math.max(0, beforeTextLength - triggerLength));
+          range.deleteContents();
+        }
+        const slashSid = useChatStore.getState().activeSessionId;
+        if (slashSid) useChatStore.getState().setInputValue(slashSid, extractPlainText());
+        setComposerSuggestion(null);
+        el.focus();
+        // requiresSession=false 的命令（如 /plan 纯本地开关）无需真实会话，欢迎页也能用
+        if (slashCmd.requiresSession === false || (slashSid && slashSid !== NEW_CONVERSATION_ID)) {
+          const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? 'agent';
+          void slashCmd.execute(
+            {
+              sessionId: slashSid ?? NEW_CONVERSATION_ID,
+              mode: slashMode,
+              inputLine: `/${value}`,
+              addMessage: useChatStore.getState().addMessage,
+              submitMessage: onSubmit,
+            },
+            '',
+          );
+        } else {
+          useChatStore.getState().addMessage(slashSid ?? NEW_CONVERSATION_ID, {
+            id: `slash-sys-${Date.now()}`,
+            role: 'system',
+            content: '请先开始一个对话再使用该指令。',
+            timestamp: new Date().toISOString(),
+          });
+        }
+        return;
+      }
+      // 有参命令（/btw）：把 "/query" 替换成蓝色原子 chip。提取文本时再还原为
+      // "/<name>"，因此视觉表现和技能一致，同时保留既有命令解析/提交语义。
+      const trigger = getCurrentComposerTrigger();
+      if (trigger) {
+        const beforeRange = range.cloneRange();
+        beforeRange.selectNodeContents(el);
+        beforeRange.setEnd(range.endContainer, range.endOffset);
+        const beforeTextLength = beforeRange.toString().replace(/​/g, '').length;
+        const triggerLength = trigger.query.length + 1; // '/' + query
+        setRangeStartByTextOffset(range, el, Math.max(0, beforeTextLength - triggerLength));
+        range.deleteContents();
+      }
+      const chip = document.createElement('span');
+      chip.className = 'chat-input-chip-inline chat-input-chip-inline--slash-command';
+      chip.setAttribute('contenteditable', 'false');
+      chip.dataset.slashCommand = value;
+
+      const prefix = document.createElement('span');
+      prefix.className = 'chat-input-chip-inline__prefix';
+      prefix.textContent = '/';
+
+      const labelEl = document.createElement('span');
+      labelEl.className = 'chat-input-chip-inline__label';
+      labelEl.textContent = label.replace(/^\/+/, '');
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'chat-input-chip-inline__remove';
+      removeBtn.setAttribute('aria-label', 'remove slash command');
+      removeBtn.innerHTML = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M14 6l-8 8"/></svg>`;
+      removeBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const next = chip.nextSibling;
+        if (next && next.nodeType === Node.TEXT_NODE) {
+          const nextText = next.textContent || '';
+          if (nextText.startsWith(' ')) {
+            next.textContent = nextText.slice(1);
+          }
+        }
+        chip.remove();
+        const sid = useChatStore.getState().activeSessionId;
+        if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
+      });
+
+      chip.append(prefix, labelEl, removeBtn);
+      range.insertNode(chip);
+      const spacer = document.createTextNode(' ');
+      chip.after(spacer);
+      range.setStartAfter(spacer);
+      range.setEndAfter(spacer);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const sid = useChatStore.getState().activeSessionId;
+      if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
+      setComposerSuggestion(null);
+      el.focus();
+      return;
+    }
 
     const trigger = getCurrentComposerTrigger();
     if (trigger) {
@@ -1604,7 +1895,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
     setComposerSuggestion(null);
     el.focus();
-  }, [extractPlainText, getCurrentComposerTrigger, setRangeStartByTextOffset]);
+  }, [extractPlainText, getCurrentComposerTrigger, onSubmit, setRangeStartByTextOffset]);
 
   const notifyKVCInputIntent = useCallback(() => {
     if (!activeSessionId || activeSessionId === NEW_CONVERSATION_ID) return;
@@ -1629,6 +1920,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
         if (e.key === 'ArrowDown') {
           e.preventDefault();
+          setComposerSuggestionNavigationMode('keyboard');
           if (composerSuggestionItems.length > 0) {
             setComposerSuggestionIndex((index) => (index + 1) % composerSuggestionItems.length);
           }
@@ -1637,6 +1929,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
         if (e.key === 'ArrowUp') {
           e.preventDefault();
+          setComposerSuggestionNavigationMode('keyboard');
           if (composerSuggestionItems.length > 0) {
             setComposerSuggestionIndex((index) => (
               index - 1 + composerSuggestionItems.length
@@ -1650,7 +1943,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           e.preventDefault();
           const item = composerSuggestionItems[composerSuggestionIndex];
           if (item) {
-            insertComposerToken(composerSuggestion.kind, item.id, item.label);
+            insertComposerToken(
+              composerSuggestion.kind,
+              item.id,
+              item.label,
+              item.itemKind,
+              item.takesArgs,
+            );
           }
           return;
         }
@@ -1912,6 +2211,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
   }, [extractPlainText]);
 
+  useEffect(() => {
+    insertSkillChipRef.current = insertSkillChip;
+  }, [insertSkillChip]);
+
   /** 从 contenteditable 中移除指定技能的 chip 节点 */
   const removeSkillChip = useCallback((skillName: string) => {
     const el = inputRef.current;
@@ -2111,6 +2414,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const currentMode = AGENT_MODE_OPTIONS.find((item) => item.value === mode) ?? AGENT_MODE_OPTIONS[0];
   const evolutionLabel = getEvolutionPillLabel(mode, evolutionStatus, t);
   const attachmentAlertPortalTarget = inputRef.current?.closest<HTMLElement>('.chat-panel-shell');
+  const showSlashSuggestionBelow = (
+    showWorkContextRow && composerSuggestion?.kind === 'slash'
+  );
 
   return (
     <>
@@ -2139,7 +2445,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             'chat-input-container',
             showWorkContextRow && 'chat-input-container--work-home',
             (isModeMenuOpen || workMenuOpen) && 'chat-input-container--menu-open',
-            composerSuggestion && 'chat-input-container--suggestion-open',
+            composerSuggestion && !showSlashSuggestionBelow && 'chat-input-container--suggestion-open',
             isListening && 'chat-input-container--recording',
           )}
           data-testid="chat-panel-input-container"
@@ -2153,15 +2459,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         </div>
       )}
 
-      {composerSuggestion && (
-        <ComposerSuggestionMenu
-          suggestion={composerSuggestion}
-          items={composerSuggestionItems}
-          highlightedIndex={composerSuggestionIndex}
-          onHighlight={setComposerSuggestionIndex}
-          onPick={insertComposerToken}
-        />
-      )}
       <div className="chat-input-body" data-testid="chat-panel-input-body">
       {attachments.length > 0 && (
         <div className="chat-input-attachment-panel" data-testid="chat-panel-input-attachment-panel">
@@ -2295,6 +2592,20 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             ))}
           </div>
         </div>
+      )}
+      {composerSuggestion && !showSlashSuggestionBelow && (
+        <ComposerSuggestionMenu
+          suggestion={composerSuggestion}
+          items={composerSuggestionItems}
+          highlightedIndex={composerSuggestionIndex}
+          navigationMode={composerSuggestionNavigationMode}
+          onPointerHighlight={(index) => {
+            setComposerSuggestionNavigationMode('pointer');
+            setComposerSuggestionIndex(index);
+          }}
+          onPick={insertComposerToken}
+          loading={slashCatalogLoading}
+        />
       )}
       <div
         ref={inputRef}
@@ -2728,7 +3039,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               )}
             </button>
           )} */}
-          
+
           <ModelSelector
             disabled={isProcessing || activeSessionId !== NEW_CONVERSATION_ID}
           />
@@ -2761,15 +3072,32 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       </div>
       </div>
 
+      {showSlashSuggestionBelow && composerSuggestion && (
+        <ComposerSuggestionMenu
+          suggestion={composerSuggestion}
+          items={composerSuggestionItems}
+          highlightedIndex={composerSuggestionIndex}
+          navigationMode={composerSuggestionNavigationMode}
+          onPointerHighlight={(index) => {
+            setComposerSuggestionNavigationMode('pointer');
+            setComposerSuggestionIndex(index);
+          }}
+          onPick={insertComposerToken}
+          loading={slashCatalogLoading}
+          placement="below"
+        />
+      )}
+
       {showWorkContextRow ? (
         <div ref={workMenuRef} className="chat-work-context-row" data-testid="chat-panel-work-context-row">
           <div className={clsx('chat-work-select', workMenuOpen === 'project' && 'chat-work-select--open')} data-testid="chat-panel-work-select">
-            <button
-              type="button"
+            <div
+              role="button"
+              tabIndex={0}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isWorkContextLocked) setWorkMenuOpen((open) => open === 'project' ? null : 'project'); } }}
               className={clsx('chat-work-select__trigger', displayedProject && 'chat-work-select__trigger--selected')}
               data-testid="chat-panel-work-select-trigger"
               onClick={() => !isWorkContextLocked && setWorkMenuOpen((open) => open === 'project' ? null : 'project')}
-              disabled={isWorkContextLocked}
               title={displayedProject?.project_dir || (isWorkContextLocked ? t('multiSession.project.lockedProjectTitle') : t('multiSession.project.chooseProjectDirectory'))}
             >
               <WorkIcon name="folder" className="chat-work-select__root-icon" />
@@ -2799,7 +3127,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
                 </svg>
               )}
-            </button>
+            </div>
             {workMenuOpen === 'project' && !isWorkContextLocked ? (
               <div className={clsx('chat-work-select__menu', hasInputProjectOptions && 'chat-work-select__menu--projects')} role="menu" data-testid="chat-panel-work-select-menu">
                 {!hasInputProjectOptions ? (
@@ -2983,56 +3311,181 @@ function ComposerSuggestionMenu({
   suggestion,
   items,
   highlightedIndex,
-  onHighlight,
+  navigationMode,
+  onPointerHighlight,
   onPick,
+  loading,
+  placement = 'above',
 }: {
   suggestion: ComposerSuggestionState;
   items: ComposerSuggestionItem[];
   highlightedIndex: number;
-  onHighlight: (index: number) => void;
-  onPick: (kind: ComposerSuggestionKind, value: string, label: string) => void;
+  navigationMode: 'keyboard' | 'pointer';
+  onPointerHighlight: (index: number) => void;
+  onPick: (
+    kind: ComposerSuggestionKind,
+    value: string,
+    label: string,
+    slashItemKind?: 'command' | 'skill',
+    slashTakesArgs?: boolean,
+  ) => void;
+  loading: boolean;
+  placement?: 'above' | 'below';
 }) {
+  const isSlash = suggestion.kind === 'slash';
   const tokenPrefix = suggestion.kind === 'role' ? '$' : '@';
   const { t } = useTranslation();
+  const commandCount = items.filter((item) => item.itemKind === 'command').length;
+  const skillCount = items.filter((item) => item.itemKind === 'skill').length;
+  const listRef = useRef<HTMLDivElement>(null);
+  const activeItemRef = useRef<HTMLButtonElement>(null);
+  const [slashListMaxHeight, setSlashListMaxHeight] = useState<number>();
+
+  useEffect(() => {
+    if (!isSlash || placement === 'below') {
+      setSlashListMaxHeight(undefined);
+      return;
+    }
+    const updateMaxHeight = () => {
+      const list = listRef.current;
+      const frameTop = list?.closest('.chat-input-container')?.getBoundingClientRect().top;
+      if (frameTop == null) return;
+      const headerBottom = list
+        ?.closest('.chat-panel-shell')
+        ?.querySelector<HTMLElement>('.chat-panel-header')
+        ?.getBoundingClientRect().bottom ?? 16;
+      // Existing conversations open the picker above the composer. Cap it to
+      // the actual free space so a long skill list cannot cover the header.
+      setSlashListMaxHeight(Math.max(
+        0,
+        Math.min(320, Math.floor(frameTop - headerBottom - 16)),
+      ));
+    };
+    updateMaxHeight();
+    window.addEventListener('resize', updateMaxHeight);
+    return () => window.removeEventListener('resize', updateMaxHeight);
+  }, [isSlash, placement]);
+
+  useEffect(() => {
+    const list = listRef.current;
+    const activeItem = activeItemRef.current;
+    if (!list || !activeItem) return;
+    if (highlightedIndex === 0) {
+      list.scrollTop = 0;
+      return;
+    }
+    const listRect = list.getBoundingClientRect();
+    const itemRect = activeItem.getBoundingClientRect();
+    if (itemRect.top < listRect.top) {
+      list.scrollTop -= listRect.top - itemRect.top;
+    } else if (itemRect.bottom > listRect.bottom) {
+      list.scrollTop += itemRect.bottom - listRect.bottom;
+    }
+  }, [highlightedIndex, items.length]);
 
   return (
-    <div className="chat-composer-suggestion" role="listbox" data-testid="chat-panel-composer-suggestion">
-      <div className="chat-composer-suggestion__header" data-testid="chat-panel-composer-suggestion-header">
-        <AtSign size={14} />
-        <span>{t('chat.selectTeamMembers')}</span>
-      </div>
-      <div className="chat-composer-suggestion__list" data-testid="chat-panel-composer-suggestion-list">
+    <div
+      className={clsx(
+        'chat-composer-suggestion',
+        isSlash && 'chat-composer-suggestion--slash',
+        isSlash && placement === 'below' && 'chat-composer-suggestion--below',
+        navigationMode === 'keyboard' && 'chat-composer-suggestion--keyboard-nav',
+      )}
+      role="listbox"
+      data-testid="chat-panel-composer-suggestion"
+    >
+      {!isSlash && (
+        <div className="chat-composer-suggestion__header" data-testid="chat-panel-composer-suggestion-header">
+          <AtSign size={14} />
+          <span>{t('chat.selectTeamMembers')}</span>
+        </div>
+      )}
+      <div
+        ref={listRef}
+        className="chat-composer-suggestion__list"
+        data-testid="chat-panel-composer-suggestion-list"
+        style={isSlash && slashListMaxHeight != null ? { maxHeight: slashListMaxHeight } : undefined}
+      >
         {items.length === 0 ? (
           <div className="chat-composer-suggestion__empty" data-testid="chat-panel-composer-suggestion-empty">
-            {t('chat.noTeamMembersAvailable')}
+            {isSlash
+              ? loading
+                ? '正在加载指令与技能…'
+                : '没有匹配的指令或技能'
+              : t('chat.noTeamMembersAvailable')}
           </div>
-        ) : items.map((item, index) => (
-          <button
-            key={`${suggestion.kind}:${item.id}`}
-            type="button"
-            className={clsx(
-              'chat-composer-suggestion__item',
-              highlightedIndex === index && 'chat-composer-suggestion__item--active'
-            )}
-            role="option"
-            aria-selected={highlightedIndex === index}
-            data-testid="chat-panel-composer-suggestion-item"
-            data-variant={item.id}
-            onMouseDown={(event) => event.preventDefault()}
-            onMouseEnter={() => onHighlight(index)}
-            onClick={() => onPick(suggestion.kind, item.id, item.label)}
-          >
-            <span className="chat-composer-suggestion__avatar" aria-hidden="true">
-              <TeamMemberAvatar member={item.id} className="chat-composer-suggestion__team-avatar" />
-            </span>
-            <span className="chat-composer-suggestion__text">
-              <span className="chat-composer-suggestion__label">{item.label}</span>
-              <span className="chat-composer-suggestion__meta">
-                {`${tokenPrefix}${item.id}`}
-              </span>
-            </span>
-          </button>
-        ))}
+        ) : items.map((item, index) => {
+          const showSectionTitle = isSlash && (
+            index === 0 || items[index - 1]?.itemKind !== item.itemKind
+          );
+          const sectionCount = item.itemKind === 'command' ? commandCount : skillCount;
+          return (
+            <Fragment key={`${suggestion.kind}:${item.itemKind}:${item.id}`}>
+              {showSectionTitle && (
+                <div className="chat-composer-suggestion__section-title">
+                  <span>{item.itemKind === 'command' ? '指令' : '技能'}</span>
+                  <span>({sectionCount})</span>
+                </div>
+              )}
+              <button
+                ref={highlightedIndex === index ? activeItemRef : undefined}
+                type="button"
+                className={clsx(
+                  'chat-composer-suggestion__item',
+                  highlightedIndex === index && 'chat-composer-suggestion__item--active',
+                )}
+                role="option"
+                aria-selected={highlightedIndex === index}
+                data-testid="chat-panel-composer-suggestion-item"
+                data-variant={item.id}
+                onMouseDown={(event) => event.preventDefault()}
+                onPointerMove={() => onPointerHighlight(index)}
+                onClick={() => onPick(
+                  suggestion.kind,
+                  item.id,
+                  item.label,
+                  item.itemKind,
+                  item.takesArgs,
+                )}
+              >
+                {isSlash ? (
+                  <>
+                    <span
+                      className={clsx(
+                        'chat-composer-suggestion__slash-icon',
+                        item.itemKind === 'skill' && 'chat-composer-suggestion__slash-icon--skill',
+                      )}
+                      aria-hidden="true"
+                    >
+                      {item.itemKind === 'command' ? '/' : null}
+                    </span>
+                    <span className="chat-composer-suggestion__text">
+                      <span className="chat-composer-suggestion__label">{item.label}</span>
+                      {item.description ? (
+                        <span className="chat-composer-suggestion__meta">{item.description}</span>
+                      ) : null}
+                    </span>
+                    {item.source ? (
+                      <span className="chat-composer-suggestion__source">{item.source}</span>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <span className="chat-composer-suggestion__avatar" aria-hidden="true">
+                      <TeamMemberAvatar member={item.id} className="chat-composer-suggestion__team-avatar" />
+                    </span>
+                    <span className="chat-composer-suggestion__text">
+                      <span className="chat-composer-suggestion__label">{item.label}</span>
+                      <span className="chat-composer-suggestion__meta">
+                        {`${tokenPrefix}${item.id}`}
+                      </span>
+                    </span>
+                  </>
+                )}
+              </button>
+            </Fragment>
+          );
+        })}
       </div>
     </div>
   );

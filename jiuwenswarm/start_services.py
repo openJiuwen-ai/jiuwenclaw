@@ -431,7 +431,13 @@ def _run_instance_with_pid(commands: list[tuple[str, list[str], Path]],
                 ports=config.ports,
             )
 
-        write_pid_file(config, os.getpid(), time.time())
+        launcher_create_time = _launcher_create_time()
+        write_pid_file(
+            config,
+            os.getpid(),
+            launcher_create_time,
+            _instance_process_metadata(processes, launcher_create_time),
+        )
         logging.info(f"[start_services] Instance '{config.name}' started")
 
         _wait_for_services_ready(config.ports, processes)
@@ -449,6 +455,71 @@ def _run_instance_with_pid(commands: list[tuple[str, list[str], Path]],
         return 130
     finally:
         _terminate_processes(processes)
+
+
+def _launcher_create_time() -> float:
+    """Return the launcher process birth time for PID-reuse validation."""
+    import psutil
+
+    return psutil.Process(os.getpid()).create_time()
+
+
+def _instance_process_metadata(
+    processes: dict[str, subprocess.Popen[bytes]], launcher_create_time: float
+) -> dict[str, object]:
+    """Build PID-file ownership evidence for an externally ``setsid`` launcher."""
+    import psutil
+
+    launcher_pid = os.getpid()
+    getpgid = getattr(os, "getpgid", None)
+    getsid = getattr(os, "getsid", None)
+    if getpgid is None or getsid is None:
+        # Windows has no POSIX process-group/session APIs.  The schema v2
+        # record remains useful there for PID birth-time validation, while
+        # stop uses the Windows taskkill process-tree path.
+        pgid = sid = None
+        dedicated_session = False
+    else:
+        try:
+            pgid = getpgid(launcher_pid)
+            sid = getsid(launcher_pid)
+            dedicated_session = pgid == launcher_pid and sid == launcher_pid
+        except OSError:
+            pgid = sid = None
+            dedicated_session = False
+
+    witnesses: list[dict[str, object]] = []
+    for name, process in processes.items():
+        try:
+            process_info = psutil.Process(process.pid)
+            cmdline = process_info.cmdline()
+            dotenv_index = cmdline.index("--dotenv")
+            dotenv_path = os.path.realpath(cmdline[dotenv_index + 1])
+            module_index = cmdline.index("-m")
+            module = cmdline[module_index + 1]
+            witnesses.append(
+                {
+                    "name": name,
+                    "pid": process.pid,
+                    "create_time": process_info.create_time(),
+                    "module": module,
+                    "dotenv": dotenv_path,
+                }
+            )
+        except (IndexError, ValueError, psutil.Error):
+            # A child that exits before its identity can be captured is not a
+            # safe witness.  The supervisor's normal failure handling remains
+            # responsible for terminating the rest of the launch.
+            continue
+
+    return {
+        "schema_version": 2,
+        "launcher": {"pid": launcher_pid, "create_time": launcher_create_time},
+        "pgid": pgid,
+        "sid": sid,
+        "dedicated_session": dedicated_session,
+        "witnesses": witnesses,
+    }
 
 
 def _build_commands(mode: str, dotenv_path: Path | None = None) -> list[tuple[str, list[str], Path]]:
@@ -828,8 +899,8 @@ def _action_stop(name: str) -> int:
     if running is None:
         return 1
     if not running:
-        logging.info(f"[start_services] Instance '{name}' is not running.")
-        return 0
+        logging.info(f"[start_services] Cleaning up stopped instance '{name}'.")
+        return 0 if stop_instance_process(cmd.config, timeout=10.0) else 1
 
     # Execute stop
     return do_stop_instance(cmd)
@@ -853,14 +924,17 @@ def _action_restart(name: str, mode: str = "all") -> int:
     if error is not None:
         return error
 
-    # First stop (only if running)
+    # Stop even when the launcher has exited: a setsid-launched service tree
+    # can still own the instance ports after its leader is gone.
     if cmd.check_running():
         stop_result = do_stop_instance(cmd)
-        if stop_result != 0:
-            logging.info("[start_services] Restart aborted: stop failed.")
-            return stop_result
-        # Wait for process to fully exit
-        time.sleep(1)
+    else:
+        stop_result = 0 if stop_instance_process(cmd.config, timeout=10.0) else 1
+    if stop_result != 0:
+        logging.info("[start_services] Restart aborted: stop failed.")
+        return stop_result
+    # Wait for process to fully exit
+    time.sleep(1)
 
     # Then start
     if cmd.is_default:

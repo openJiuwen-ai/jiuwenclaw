@@ -266,6 +266,10 @@ async def test_handle_command_compact_returns_custom_instructions(server, fake_w
     )
 
     class MockAgent:
+        async def ensure_instance(self):
+            # /compact 同 /btw：server 会先 ensure_instance 懒构建根 DeepAgent。
+            return None
+
         async def compress_context(self, session_id, *, return_state=False):
             return {
                 "result": "compressed",
@@ -322,6 +326,10 @@ async def test_handle_command_compact_pushes_current_compression_state_event(ser
     )
 
     class MockAgent:
+        async def ensure_instance(self):
+            # /compact 同 /btw：server 会先 ensure_instance 懒构建根 DeepAgent。
+            return None
+
         async def compress_context(self, session_id, *, return_state=False):
             return {
                 "result": "compressed",

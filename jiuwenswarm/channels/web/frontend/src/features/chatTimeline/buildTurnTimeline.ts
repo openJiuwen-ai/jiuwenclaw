@@ -490,6 +490,13 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       out.push(item);
       continue;
     }
+    // slash 命令结果不属于上一轮 assistant 工作，也不应产生自己的「任务用时」。
+    // 先收束上一轮，再把 BTW/compact 等命令结果作为独立时间线块插入。
+    if (item.type === 'message' && item.message.isCommandOutput) {
+      flush(false);
+      out.push(item);
+      continue;
+    }
     // 主动推荐消息自成一块（与 buildRenderItems 里推进 currentTurnId 对齐）：
     // 先 flush 掉上一轮，再 +1 进入新 turn，避免推荐消息并入上一轮导致
     // buildTurnWorkMeta 的 proactive 补丁误把上一轮 hasWork 置 false。

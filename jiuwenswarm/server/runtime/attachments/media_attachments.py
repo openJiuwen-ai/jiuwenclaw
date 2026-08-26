@@ -13,9 +13,9 @@ from typing import Any
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir
 from jiuwenswarm.server.runtime.attachments.upload_storage import (
+    atomic_write_unique,
     safe_session_dirname,
     safe_upload_filename,
-    unique_upload_path,
 )
 
 _SUPPORTED_IMAGE_MIME_TYPES = {
@@ -42,9 +42,10 @@ def normalize_chat_media_attachments(params: dict[str, Any], session_id: str | N
     """Validate browser media_items, persist images, and enrich the chat params.
 
     The frontend sends images as base64 for cross-platform browser compatibility.
-    The gateway stores images under the current session and returns structured
-    image file records. Downstream multimodal rails can load images from these
-    paths without sending long base64 payloads through normal text context.
+    Images are persisted under the current session directory and returned as
+    structured image file records. Downstream multimodal rails can load images
+    from these paths without sending long base64 payloads through normal text
+    context.
     """
 
     raw_items = params.get("media_items")
@@ -128,8 +129,7 @@ def _store_image_item(item: dict[str, Any], *, session_id: str | None, index: in
     )
     if Path(filename).suffix.lower() not in set(_SUPPORTED_IMAGE_MIME_TYPES.values()):
         filename = f"{filename}{suffix}"
-    path = unique_upload_path(upload_dir / filename)
-    path.write_bytes(data)
+    path = atomic_write_unique(upload_dir / filename, data)
 
     return {
         "type": "image",

@@ -11,6 +11,8 @@ from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
     build_cli_route_binding,
     register_cli_handlers,
 )
+from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+from jiuwenswarm.gateway.heartbeat import HeartbeatServiceUnavailableError
 
 
 class FakeGatewayServer:
@@ -43,6 +45,42 @@ class FakeGatewayServer:
                 "code": code,
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_cli_reports_unavailable_and_missing_job_codes():
+    server = FakeGatewayServer()
+    register_cli_handlers(
+        CliHandlersBindParams(channel=server, heartbeat_controller=None, path="/tui")
+    )
+    await server.local_handlers["/tui"]["heartbeat.job.list"](
+        object(), "list-unavailable", {}, "session-current"
+    )
+    assert server.responses[-1]["code"] == "SERVICE_UNAVAILABLE"
+
+    class Controller:
+        async def get_job(self, *_args, **_kwargs):
+            raise KeyError("missing")
+
+        async def get_meta(self, **_kwargs):
+            raise HeartbeatServiceUnavailableError("agentserver offline")
+
+    server = FakeGatewayServer()
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            heartbeat_controller=Controller(),
+            path="/tui",
+        )
+    )
+    await server.local_handlers["/tui"]["heartbeat.job.get"](
+        object(), "get-missing", {"id": "missing"}, "session-current"
+    )
+    assert server.responses[-1]["code"] == "NOT_FOUND"
+    await server.local_handlers["/tui"]["heartbeat.job.meta"](
+        object(), "meta-unavailable", {}, "session-current"
+    )
+    assert server.responses[-1]["code"] == "SERVICE_UNAVAILABLE"
 
 
 class FakeMessageHandler:
@@ -1091,17 +1129,9 @@ def test_model_meta_index_field_matches_raw_defaults_position():
 
 # ── 单用户 AgentServer 不可达时的本地回落（P2 遗留修复回归） ──────────────────
 
-class _OfflineAgentClient:
+def _offline_local_client() -> WebSocketAgentServerClient:
     """server_ready=False 的本地 WebSocketAgentServerClient（共享目录单用户）。"""
-
-    server_ready = False
-
-
-def _offline_local_client() -> _OfflineAgentClient:
-    client = _OfflineAgentClient()
-    client.__class__.__name__ = "WebSocketAgentServerClient"
-    client.__class__.__module__ = "jiuwenswarm.gateway.routing.agent_client"
-    return client
+    return WebSocketAgentServerClient()  # server_ready defaults to False
 
 
 @pytest.mark.asyncio

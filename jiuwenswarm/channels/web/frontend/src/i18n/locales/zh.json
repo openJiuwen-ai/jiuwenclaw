@@ -15,7 +15,8 @@
     "and": "和",
     "modify": "修改",
     "delete": "删除",
-    "expandMore": "展开 {{count}} 个"
+    "expandMore": "展开 {{count}} 个",
+    "processing": "处理中…"
   },
   "a2ui": {
     "generating": "A2UI 界面生成中...",
@@ -1707,7 +1708,7 @@
       "skillIcon": "Skill图标",
       "skillIconOptional": "Skill图标（可选）",
       "skillIconHint": "PNG文件，不能超过5MB",
-      "sha256": "SHA-256 校验",
+      "sha256": "SHA-256 校验和",
       "versionNote": "版本说明",
       "versionNoteOptional": "版本说明（Swarm Skill，可选）",
       "confirm": "确认发布",
@@ -1717,7 +1718,21 @@
       "placeholderSha256": "打包完成后显示 64 位小写十六进制",
       "noticeText": "技能将会被发布到 JiuwenHub。",
       "noticeView": "去查看",
-      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill"
+      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill",
+      "errorNameTooLong": "名称不能超过 {{max}} 个字符",
+      "errorInvalidName": "名称须以小写字母开头，仅含小写字母、数字和连字符",
+      "errorInvalidVersion": "版本号格式应为 x.y.z（如 1.0.0）",
+      "errorDisplayNameTooLong": "显示名不能超过 {{max}} 个字符",
+      "pathNotFound": "无法确定技能目录",
+      "forceOverwrite": "强制覆盖（版本已存在时覆盖原插件）"
+    },
+    "oauthLogin": {
+      "title": "登录以发布技能",
+      "description": "需要登录账号才能发布技能到 SkillHub",
+      "gitcodeLogin": "使用 GitCode 登录",
+      "githubLogin": "使用 GitHub 登录",
+      "notConfigured": "GitCode OAuth 未配置，请在 .env.local 中设置 VITE_GITCODE_OAUTH_CLIENT_ID 和 VITE_GITCODE_OAUTH_CLIENT_SECRET",
+      "githubNotConfigured": "GitHub OAuth 未配置，请在 .env.local 中设置 VITE_GITHUB_OAUTH_CLIENT_ID"
     },
     "uploadSkillModal": {
       "title": "上传技能",
@@ -2177,12 +2192,20 @@
     "installPrompt": "请输入插件规格 (plugin@marketplace)",
     "importPrompt": "请输入服务端本地 skill 路径（SKILL.md 或目录）",
     "uninstallConfirm": "确认卸载 {{pluginName}} ?",
+    "overwriteConfirm": "是否覆盖保存？",
     "messages": {
       "installing": "安装中：{{name}}...",
       "installed": "已安装：{{spec}}",
       "imported": "已导入：{{name}}",
       "uninstalled": "已卸载：{{pluginName}}",
-      "skillNetInstalled": "已安装：{{name}}"
+      "skillNetInstalled": "已安装：{{name}}",
+      "knowledgeSkillCreated": "知识转技能已完成",
+      "knowledgeSkillCreating": "知识转技能处理中…",
+      "knowledgeSkillCreatingCount": "知识转技能处理中…（{{count}} 条任务）",
+      "packFailed": "打包失败",
+      "downloadFailed": "下载打包文件失败",
+      "published": "技能 {{name}} 发布成功",
+      "publishFailed": "发布失败"
     },
     "errors": {
       "installFailed": "安装失败",
@@ -2753,7 +2776,7 @@
     },
     "statusFilter": {
       "all": "全部",
-      "pending": "待安装/联接",
+      "pending": "待安装/连接",
       "available": "已连接"
     },
     "create": {
@@ -2778,6 +2801,9 @@
       "pickMcpTitle": "选择MCP",
       "submitError": "创建失败，该功能仍在等待后端支持",
       "withSkillNotWired": "该入口尚未接入聊天面板，需先在聊天输入框完成对接"
+    },
+    "chatPrompts": {
+      "createPlugin": "帮我创建一个xxx插件，擅长xxx"
     },
     "errors": {
       "runtimeMissing": "该 MCP 依赖的运行环境缺失，请先安装对应运行环境后再使用",
@@ -2923,5 +2949,20 @@
       "search": "搜索",
       "noResult": "没有匹配结果"
     }
+  },
+  "auth": {
+    "title": "登录 JiuwenSwarm",
+    "subtitle": "输入你的账号与密码以继续",
+    "username": "账号",
+    "usernamePlaceholder": "输入账号",
+    "password": "密码",
+    "passwordPlaceholder": "输入密码",
+    "login": "登录",
+    "loggingIn": "登录中…",
+    "invalidCredentials": "账号或密码错误",
+    "loginFailed": "登录失败,请稍后重试",
+    "authRequired": "需要登录后才能访问",
+    "secureHint": "登录后将自动保持登录状态",
+    "logout": "登出"
   }
 }

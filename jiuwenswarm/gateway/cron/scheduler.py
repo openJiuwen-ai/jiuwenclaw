@@ -201,10 +201,6 @@ def _extract_text_from_agent_payload(payload: dict | None) -> str:
         return str(content)
     if isinstance(content, str):
         return content
-    # Fallbacks
-    heartbeat = payload.get("heartbeat")
-    if isinstance(heartbeat, str) and heartbeat:
-        return heartbeat
     text = payload.get("text")
     if isinstance(text, str) and text:
         return text
@@ -1054,7 +1050,7 @@ class CronSchedulerService:
                         # 文件推送的 channel_id，与 cron 文本结果推送到同一批渠道。
                         "targets": str(job.targets or "").strip(),
                     },
-                    user_id=job.user_id,
+                    user_id=job.user_id or None,
                 )
                 if not str(job.user_id or "").strip():
                     logger.warning(

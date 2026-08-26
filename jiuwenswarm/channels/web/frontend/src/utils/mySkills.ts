@@ -28,11 +28,37 @@ export function computeMySkills<
 
 /** 从"已安装插件"列表反推出"通过插件装进来的技能名"集合——同 SkillPanel/index.tsx 的
  * installedSkillNames 计算方式，供不需要 installedSkillMap 那份完整 Map（只要判断集合归属）的
- * 调用方直接用。 */
-export function buildInstalledSkillNames(plugins: { skills: string[] }[]): Set<string> {
+ * 调用方直接用。plugin.skills 里每一项可能是纯字符串，也可能是 `{name, version}` 对象（后端
+ * 两种形状都会返回，见 SkillPanel/index.tsx InstalledPluginItem 类型注释），2026-08-25 之前
+ * 这里只处理了字符串形式，遇到对象形式会把整个对象塞进 Set，导致 `.has(name)` 恒为 false——
+ * 这个 Set 只被 computeMySkills 的"候选集"判断用到过，被其余 OR 条件（source==='local'/
+ * is_builtin 等）掩盖，直到 filterEnabledMySkills 严格依赖它才暴露出来（真机验证时"添加技能"
+ * 弹窗直接空了）。 */
+export function buildInstalledSkillNames(plugins: { skills: (string | { name: string })[] }[]): Set<string> {
   const set = new Set<string>();
   for (const plugin of plugins) {
-    for (const skill of plugin.skills) set.add(skill);
+    for (const skill of plugin.skills) {
+      set.add(typeof skill === 'string' ? skill : skill.name);
+    }
   }
   return set;
+}
+
+/** 判定一个技能是否"已安装"——装了某个插件、或本地/项目技能，都算。跟 SkillPanel/index.tsx
+ * 原来内联的 isSkillInstalled 同一份规则。 */
+export function isSkillInstalled<T extends { name: string; source?: string }>(
+  skill: T,
+  installedSkillNames: Set<string>,
+): boolean {
+  return installedSkillNames.has(skill.name) || skill.source === 'local' || skill.source === 'project';
+}
+
+/** computeMySkills 之后，默认只保留"已启用"的技能——跟 SkillPanel/index.tsx "我的技能" tab
+ * 默认 mySkillsSubTab==='enabled' 同一口径。手动创建插件的"添加技能"弹窗（CreatePluginPage.tsx）
+ * 之前没有这层过滤，会把用户已停用的技能也列出来，2026-08-25 改成共用这份规则。 */
+export function filterEnabledMySkills<T extends { name: string; source?: string; enabled?: boolean }>(
+  skills: T[],
+  installedSkillNames: Set<string>,
+): T[] {
+  return skills.filter((skill) => isSkillInstalled(skill, installedSkillNames) && skill.enabled !== false);
 }

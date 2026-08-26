@@ -8,8 +8,11 @@ import json
 import logging
 import re
 import shutil
-from pathlib import Path
-from pathlib import PureWindowsPath
+import tarfile
+import tempfile
+import time
+import zipfile
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
@@ -237,8 +240,10 @@ def _map_class_entries(manifest: dict, key: str) -> list[dict]:
         cards.append(
             {
                 "id": entry_id.strip(),
-                "displayName": _i18n(spec.get("displayName"), entry_id.strip()),
-                "displayDescription": _i18n(spec.get("displayDescription")),
+                "displayName": _i18n(
+                    spec.get("display_name"), entry_id.strip()
+                ),
+                "displayDescription": _i18n(spec.get("display_description")),
             }
         )
     return cards
@@ -315,15 +320,21 @@ def _map_mcps(pkg_dir: Path, manifest: dict) -> list[dict]:
         if isinstance(connector, str) and connector.strip():
             name = connector.strip()
             dn, dd = _connector_display(name)
-            if spec.get("displayName") not in (None, ""):
-                dn = spec.get("displayName")
-            if spec.get("displayDescription") not in (None, ""):
-                dd = spec.get("displayDescription")
+            override_name = spec.get("display_name")
+            override_desc = spec.get("display_description")
+            if override_name not in (None, ""):
+                dn = override_name
+            if override_desc not in (None, ""):
+                dd = override_desc
             _add(name, dn, dd, kind="connector")
             continue
         mcp_id = spec.get("id") or spec.get("server_id") or spec.get("name")
         if isinstance(mcp_id, str) and mcp_id.strip():
-            _add(mcp_id.strip(), spec.get("displayName"), spec.get("displayDescription"))
+            _add(
+                mcp_id.strip(),
+                spec.get("display_name"),
+                spec.get("display_description"),
+            )
             continue
         file_ref = spec.get("file")
         if isinstance(file_ref, str) and file_ref.strip():
@@ -405,8 +416,8 @@ def _build_list_card(
     category = manifest.get("category")
     card: dict[str, Any] = {
         "id": pkg_dir.name,
-        "displayName": manifest.get("displayName") or pkg_dir.name,
-        "displayDescription": manifest.get("displayDescription") or {},
+        "displayName": manifest.get("display_name") or pkg_dir.name,
+        "displayDescription": manifest.get("display_description") or {},
         "category": category if isinstance(category, str) else "",
         "source": source,
     }
@@ -440,8 +451,8 @@ def _build_show_card(
     tags = manifest.get("tags")
     card: dict[str, Any] = {
         "id": pkg_dir.name,
-        "displayName": manifest.get("displayName") or pkg_dir.name,
-        "displayDescription": manifest.get("displayDescription") or {},
+        "displayName": manifest.get("display_name") or pkg_dir.name,
+        "displayDescription": manifest.get("display_description") or {},
         "source": resolved_source,
         "avatar": avatar if isinstance(avatar, str) else "",
         "version": version if isinstance(version, str) else "",
@@ -465,9 +476,8 @@ def _build_show_card(
     card["pending_connectors"] = unready_connectors(
         _connector_names_from_manifest(manifest)
     )
-    if package_type == "agent_template":
-        quick = manifest.get("quickInputs")
-        card["quickInputs"] = quick if isinstance(quick, list) else []
+    quick = manifest.get("quick_inputs")
+    card["quickInputs"] = quick if isinstance(quick, list) else []
     return card
 
 
@@ -648,9 +658,19 @@ def _read_marketplace_entries(marketplace_path: Path) -> list[dict]:
     return [entry for entry in plugins if isinstance(entry, dict)]
 
 
+def _slim_marketplace_entry(entry: dict) -> dict:
+    """Keep only the runtime marketplace contract: id, source, installed."""
+    slim: dict[str, Any] = {"id": entry.get("id")}
+    source = entry.get("source")
+    if isinstance(source, str) and source:
+        slim["source"] = source
+    slim["installed"] = bool(entry.get("installed", False))
+    return slim
+
+
 def _write_marketplace_entries(marketplace_path: Path, entries: list[dict]) -> None:
     marketplace_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"plugins": entries}
+    payload = {"plugins": [_slim_marketplace_entry(entry) for entry in entries]}
     marketplace_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -671,8 +691,7 @@ def _upsert_marketplace_entry(
         if entry.get("id") == package_id:
             record = {**entry, **record}
             break
-    # Experts and plugins no longer persist `enabled`; ignore legacy keys on write.
-    record.pop("enabled", None)
+    # Drop name/description/version/enabled and any other leftover catalog cache.
     for index, entry in enumerate(entries):
         if entry.get("id") == package_id:
             entries[index] = record
@@ -902,7 +921,7 @@ def _reject_preview_path_symlink(pkg_dir: Path, rel: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle: create / install / uninstall
+# Lifecycle: create / import / install / uninstall
 # ---------------------------------------------------------------------------
 
 
@@ -929,6 +948,26 @@ def _require_skill_names(params: dict) -> list[str]:
         if not skill_dir.is_dir():
             raise ValueError(f"skill not found: {skill_name}")
         names.append(skill_name)
+    return names
+
+
+def _require_mcp_names(params: dict) -> list[str]:
+    """Validate optional params.mcps is a list of connector names."""
+    mcps = params.get("mcps")
+    if mcps is None:
+        return []
+    if not isinstance(mcps, list):
+        raise ValueError("missing or invalid mcps")
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in mcps:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("invalid mcp name: empty")
+        name = _reject_package_name(item.strip(), "mcp")
+        if name in seen:
+            continue
+        names.append(name)
+        seen.add(name)
     return names
 
 
@@ -981,15 +1020,24 @@ def _apply_list_source_filter(
     cards: list[dict], params: dict | None
 ) -> list[dict]:
     """Filter list cards by ``params.filter`` (``builtin`` | ``local``).
-
-    Missing / non-dict params / illegal filter values → return full list.
+    local: source is local or builtin and installed
+    builtin: source is builtin
     """
     if not isinstance(params, dict):
         return cards
     raw = params.get("filter")
     if raw not in ("builtin", "local"):
         return cards
-    return [card for card in cards if card.get("source") == raw]
+    if raw == "builtin":
+        return [card for card in cards if card.get("source") == "builtin"]
+    filtered: list[dict] = []
+    for card in cards:
+        source = card.get("source")
+        if source == "local" or (
+            source == "builtin" and bool(card.get("installed"))
+        ):
+            filtered.append(card)
+    return filtered
 
 
 def list_agent_templates(params: dict | None = None) -> list[dict]:
@@ -1256,6 +1304,7 @@ def create_agent_template(params: dict) -> None:
     description = _require_nonempty_str(params, "description")
     persona = _require_nonempty_str(params, "persona")
     skill_names = _require_skill_names(params)
+    mcp_names = _require_mcp_names(params)
 
     local_root = _local_root(_AGENT_TEMPLATE_KIND)
     built_in_root = _built_in_root(_AGENT_TEMPLATE_KIND)
@@ -1280,10 +1329,12 @@ def create_agent_template(params: dict) -> None:
             "name": name,
             "description": description,
             "persona": {"dir": "./persona"},
-            "displayName": {"zh": name, "en": name},
-            "displayDescription": {"zh": description, "en": description},
+            "display_name": {"zh": name, "en": name},
+            "display_description": {"zh": description, "en": description},
             "skills": _skills_manifest_entries(skill_names),
         }
+        if mcp_names:
+            manifest["mcps"] = [{"connector": n} for n in mcp_names]
         _write_json(pkg_dir / "manifest.json", manifest)
     except Exception:
         if pkg_dir.exists():
@@ -1302,6 +1353,7 @@ def create_plugin_package(params: dict) -> None:
     name = _require_nonempty_str(params, "name")
     description = _require_nonempty_str(params, "description")
     skill_names = _require_skill_names(params)
+    mcp_names = _require_mcp_names(params)
 
     local_root = _local_root(_PLUGIN_PACKAGE_KIND)
     built_in_root = _built_in_root(_PLUGIN_PACKAGE_KIND)
@@ -1323,10 +1375,12 @@ def create_plugin_package(params: dict) -> None:
             "id": package_id,
             "name": name,
             "description": description,
-            "displayName": {"zh": name, "en": name},
-            "displayDescription": {"zh": description, "en": description},
+            "display_name": {"zh": name, "en": name},
+            "display_description": {"zh": description, "en": description},
             "skills": _skills_manifest_entries(skill_names),
         }
+        if mcp_names:
+            manifest["mcps"] = [{"connector": n} for n in mcp_names]
         _write_json(pkg_dir / "manifest.json", manifest)
     except Exception:
         if pkg_dir.exists():
@@ -1334,6 +1388,167 @@ def create_plugin_package(params: dict) -> None:
         raise
     upsert_plugin_marketplace_entry(
         package_id, installed=False, source="local"
+    )
+
+
+def _reject_archive_member_name(name: str) -> None:
+    """Reject zip/tar members that are absolute or contain ``..``."""
+    raw = (name or "").replace("\\", "/")
+    if not raw:
+        return
+    posix = PurePosixPath(raw)
+    if posix.is_absolute() or ".." in posix.parts:
+        raise ValueError("archive member contains illegal path")
+    if PureWindowsPath(raw).is_absolute():
+        raise ValueError("archive member contains illegal path")
+
+
+def _extract_archive(src: Path, dest: Path) -> None:
+    """Extract a zip/tar/tar.gz archive into dest after member-path checks."""
+    dest.mkdir(parents=True, exist_ok=True)
+    name = src.name.lower()
+    try:
+        if name.endswith(".zip"):
+            with zipfile.ZipFile(src, "r") as zf:
+                for info in zf.infolist():
+                    _reject_archive_member_name(info.filename)
+                zf.extractall(dest)
+            return
+        if name.endswith(".tar.gz") or name.endswith(".tar"):
+            with tarfile.open(src, "r:*") as tf:
+                for member in tf.getmembers():
+                    _reject_archive_member_name(member.name)
+                tf.extractall(dest)
+            return
+    except (zipfile.BadZipFile, tarfile.TarError, OSError) as exc:
+        raise ValueError(f"failed to extract archive: {src.name}") from exc
+    raise ValueError("unsupported archive format")
+
+
+def _resolve_import_source_path(params: dict) -> Path:
+    """Validate params.path: local absolute path, no URL, no symlink."""
+    if not isinstance(params, dict):
+        raise ValueError("invalid params")
+    raw = str(params.get("path") or "").strip()
+    if not raw:
+        raise ValueError("缺少参数: path")
+    if "://" in raw.lower():
+        raise ValueError("仅支持本地文件路径，不支持 URL 协议")
+    if "\0" in raw:
+        raise ValueError("path 包含非法字符")
+    src = Path(raw).expanduser()
+    if not src.is_absolute():
+        raise ValueError("path 仅支持绝对路径")
+    if not src.exists():
+        raise ValueError(f"路径不存在: {raw}")
+    if src.is_symlink():
+        raise ValueError(f"path 不支持符号链接: {raw}")
+    return src
+
+
+def _find_package_root(base: Path, kind_label: str) -> Path:
+    """Return the package root: this dir, or exactly one child with manifest.json."""
+    if (base / "manifest.json").is_file():
+        return base
+    try:
+        children = [entry for entry in base.iterdir() if entry.is_dir()]
+    except OSError as exc:
+        raise ValueError(f"{kind_label} package missing/corrupt manifest.json") from exc
+    candidates = [child for child in children if (child / "manifest.json").is_file()]
+    if len(candidates) != 1:
+        raise ValueError(f"{kind_label} package missing/corrupt manifest.json")
+    return candidates[0]
+
+
+def _package_id_from_manifest(
+    manifest: dict, *, package_type: str, kind_label: str
+) -> str:
+    """Read the package identifier and reject unsafe directory names."""
+    if package_type == "plugin":
+        raw = manifest.get("id")
+    else:
+        raw = manifest.get("name")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{kind_label} package missing id")
+    return _reject_package_name(raw.strip(), kind_label)
+
+
+def _commit_imported_package(
+    pkg_root: Path, *, kind: str, kind_label: str, package_type: str
+) -> dict:
+    """Validate, copy into local/{id}/, and upsert marketplace installed=false."""
+    _validate_package_manifest(pkg_root, kind_label, package_type)
+    manifest = _read_package_manifest(pkg_root)
+    if manifest is None:
+        raise ValueError(
+            f"{kind_label} package missing/corrupt manifest.json: {pkg_root.name}"
+        )
+    package_id = _package_id_from_manifest(
+        manifest, package_type=package_type, kind_label=kind_label
+    )
+    local_root = _local_root(kind)
+    _assert_package_id_available(
+        package_id,
+        local_root=local_root,
+        built_in_root=_built_in_root(kind),
+        kind=kind_label,
+        resources_root=_resources_root(kind),
+    )
+    dest = local_root / package_id
+    local_root.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copytree(pkg_root, dest)
+    except Exception:
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        raise
+    if kind == _PLUGIN_PACKAGE_KIND:
+        upsert_plugin_marketplace_entry(package_id, installed=False, source="local")
+    else:
+        upsert_agent_template_marketplace_entry(
+            package_id, installed=False, source="local"
+        )
+    return {"id": package_id}
+
+
+def _import_package_from_path(
+    params: dict, *, kind: str, kind_label: str, package_type: str
+) -> dict:
+    """Import a zip/tar/dir package into local/{id}/. Raises ValueError on failure."""
+    src = _resolve_import_source_path(params)
+    if src.is_dir():
+        pkg_root = _find_package_root(src, kind_label)
+        return _commit_imported_package(
+            pkg_root, kind=kind, kind_label=kind_label, package_type=package_type
+        )
+    if src.is_file():
+        with tempfile.TemporaryDirectory(prefix="jiuwenswarm_pkg_import_") as tmp:
+            extract_dir = Path(tmp)
+            _extract_archive(src, extract_dir)
+            pkg_root = _find_package_root(extract_dir, kind_label)
+            return _commit_imported_package(
+                pkg_root, kind=kind, kind_label=kind_label, package_type=package_type
+            )
+    raise ValueError(f"不支持的路径类型: {src}")
+
+
+def import_agent_template(params: dict) -> dict:
+    """params['path'] -> {'id': package_id}. Raises ValueError on failure."""
+    return _import_package_from_path(
+        params,
+        kind=_AGENT_TEMPLATE_KIND,
+        kind_label="agent_template",
+        package_type="agent_template",
+    )
+
+
+def import_plugin_package(params: dict) -> dict:
+    """params['path'] -> {'id': package_id}. Raises ValueError on failure."""
+    return _import_package_from_path(
+        params,
+        kind=_PLUGIN_PACKAGE_KIND,
+        kind_label="plugin",
+        package_type="plugin",
     )
 
 
@@ -1423,13 +1638,26 @@ def _locate_user_package_dir(
     raise ValueError(f"{kind_label} package not found: {package_id}")
 
 
+def _rmtree(path: Path, *, retries: int = 6, delay: float = 0.5) -> None:
+    """Delete directory; retry on transient file lock."""
+    for attempt in range(retries):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as exc:
+            locked = getattr(exc, "winerror", None) == 32 or isinstance(exc, PermissionError)
+            if not locked or attempt + 1 >= retries:
+                raise
+            time.sleep(delay)
+
+
 def uninstall_agent_template(params: dict) -> None:
     """Uninstall an expert package."""
     package_id = _lifecycle_package_id(params, "agent_template")
     pkg_dir = _locate_user_package_dir(
         package_id, kind=_AGENT_TEMPLATE_KIND, kind_label="agent_template"
     )
-    shutil.rmtree(pkg_dir)
+    _rmtree(pkg_dir)
     remove_agent_template_marketplace_entry(package_id)
 
 
@@ -1439,7 +1667,7 @@ def uninstall_plugin_package(params: dict) -> None:
     pkg_dir = _locate_user_package_dir(
         package_id, kind=_PLUGIN_PACKAGE_KIND, kind_label="plugin"
     )
-    shutil.rmtree(pkg_dir)
+    _rmtree(pkg_dir)
     remove_plugin_marketplace_entry(package_id)
 
 
