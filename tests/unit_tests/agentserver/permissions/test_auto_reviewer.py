@@ -1930,6 +1930,17 @@ def test_reviewer_contract_omits_ambiguous_inputs_and_referenced_script_outputs(
     assert "paths inferred only from a referenced script" in (
         ISOLATED_AUTO_REVIEWER_PROMPT
     )
+    assert "accepted into the current-session artifact ledger" in (
+        ISOLATED_AUTO_REVIEWER_PROMPT
+    )
+    assert "it grants no authority" in ISOLATED_AUTO_REVIEWER_PROMPT
+    assert "Unshown script bodies and side effects remain unreviewed" in (
+        ISOLATED_AUTO_REVIEWER_PROMPT
+    )
+    assert "not a predetermined outcome" in ISOLATED_AUTO_REVIEWER_PROMPT
+    assert "upload behavior, or login" not in ISOLATED_AUTO_REVIEWER_PROMPT
+    assert "send_file_to_user" not in ISOLATED_AUTO_REVIEWER_PROMPT
+    assert "you may consider allow_once" not in ISOLATED_AUTO_REVIEWER_PROMPT
 
 
 def test_reviewer_exposes_only_relevant_session_artifact_evidence(

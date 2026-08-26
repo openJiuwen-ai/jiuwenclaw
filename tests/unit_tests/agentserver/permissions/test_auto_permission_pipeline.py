@@ -37,6 +37,10 @@ from jiuwenswarm.agents.harness.common.rails.permissions.auto_reviewer import (
     AutoReviewer,
     ReviewerOutcome,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.artifact_path_post_gate import (
+    ArtifactCandidateState,
+    ArtifactPathCandidate,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.artifact_path_provenance import (
     SessionArtifactPathProvenance,
 )
@@ -63,6 +67,9 @@ from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue_r
     RootPermissionQueueRail,
     bind_root_permission_request,
     reset_root_permission_request,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.reviewer_stream_metadata import (
+    peek_reviewer_tool_result_metadata,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.session_deny import (
     SessionDenyStore,
@@ -354,6 +361,97 @@ async def test_semantic_artifact_round_trip_becomes_later_reviewer_evidence(
     assert reviewer.requests[-1].review_evidence[
         "trusted_session_artifact_paths"
     ] == ["report.csv"]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_result_class"),
+    [
+        (ReviewerOutcome.ALLOW_ONCE, "allowed"),
+        (ReviewerOutcome.MANUAL, "interrupt"),
+        (ReviewerOutcome.DENY, "denied"),
+    ],
+)
+async def test_artifact_evidence_preserves_reviewer_outcome(
+    tmp_path,
+    outcome: str,
+    expected_result_class: str,
+) -> None:
+    output = tmp_path / "report.csv"
+    output.write_text("draft", encoding="utf-8")
+    ledger = SessionArtifactPathProvenance("session-a")
+    recorded = ledger.record_verified(
+        state=ArtifactCandidateState(
+            session_id="session-a",
+            tool_name="write_file",
+            tool_call_id="producer-call",
+            workspace_root=str(tmp_path),
+            effective_workdir=str(tmp_path),
+            candidates=(
+                ArtifactPathCandidate(
+                    path=str(output),
+                    requires_grounding=False,
+                ),
+            ),
+            grounding_texts=(),
+            facts=None,
+        )
+    )
+    assert recorded.accepted == 1
+    reviewer = StaticReviewerClient(outcome=outcome)
+    rail = AutoPermissionInterruptRail(
+        base_rail=FakeBaseRail(),
+        permission_config={"enabled": True, "mode": "auto"},
+        workspace_root=tmp_path,
+        policy_evaluator=StaticPolicyEvaluator(
+            PolicyEvaluation(level="ask", reason="default_ask")
+        ),
+        auto_reviewer=AutoReviewer(client=reviewer),
+        session_artifact_paths=ledger,
+    )
+    ctx = _runtime_ctx(
+        _Session(),
+        tool_name="write_file",
+        tool_args={"path": str(output), "content": "final"},
+    )
+    intent_token = bind_root_decision_context(
+        RootDecisionContext(
+            "session-a",
+            "request-a",
+            "web",
+            (
+                RootIntentTurn(
+                    request_id="request-a",
+                    kind=RootIntentTurnKind.FRESH,
+                    text="Finalize the generated report.csv.",
+                ),
+            ),
+        )
+    )
+    try:
+        if outcome == ReviewerOutcome.MANUAL:
+            with pytest.raises(AbortError):
+                await rail.before_tool_call(ctx)
+            result_class = "interrupt"
+        else:
+            result = await rail.before_tool_call(ctx)
+            result_class = (
+                "allowed" if result is None else classify_permission_result(result)
+            )
+    finally:
+        reset_root_decision_context(intent_token)
+
+    assert result_class == expected_result_class
+    assert len(reviewer.requests) == 1
+    request = reviewer.requests[0]
+    assert request.allowed_outcomes == ("allow_once", "manual", "deny")
+    assert request.review_evidence["trusted_session_artifact_paths"] == ["report.csv"]
+    if outcome == ReviewerOutcome.ALLOW_ONCE:
+        metadata = peek_reviewer_tool_result_metadata(
+            ctx.extra,
+            tool_call_id="call-1",
+        )
+        assert metadata is not None
+        assert metadata["decision_source"] == "auto_reviewer"
 
 
 async def test_bash_nonroot_workdir_does_not_register_same_named_root_file(
