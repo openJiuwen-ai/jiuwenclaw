@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -14,6 +15,8 @@ from .config import A2AIngressConfigRepository
 from .models import A2AIngressConfig, A2AIngressError, A2AIngressSnapshot, A2AIngressState
 
 logger = logging.getLogger(__name__)
+
+_TERMINAL_REQUEST_STATUSES = frozenset({"completed", "failed", "canceled"})
 
 
 class _ManagedA2AChannel(Protocol):
@@ -53,6 +56,7 @@ class A2AManager:
         self._started_at: float | None = None
         self._last_error: str | None = str(initial_error) if initial_error else None
         self._config_revision = 0
+        self._request_history: deque[dict[str, Any]] = deque(maxlen=200)
         self._lock = asyncio.Lock()
 
     @property
@@ -93,6 +97,42 @@ class A2AManager:
             last_error=self._last_error,
             config_revision=self._config_revision,
         )
+
+    def history(self, limit: int = 100) -> dict[str, Any]:
+        """Return newest-first request lifecycle metadata for this Gateway process."""
+        normalized_limit = max(1, min(int(limit), 200))
+        items = list(reversed(self._request_history))[:normalized_limit]
+        return {"items": [dict(item) for item in items], "total": len(self._request_history)}
+
+    def _record_request_event(self, event: dict[str, Any]) -> None:
+        request_id = str(event.get("request_id") or "").strip()
+        if not request_id:
+            return
+        existing = next((item for item in self._request_history if item["request_id"] == request_id), None)
+        if existing is not None and existing.get("status") in _TERMINAL_REQUEST_STATUSES:
+            return
+        if existing is None:
+            started_at = float(event.get("started_at") or time.time())
+            existing = {
+                "request_id": request_id,
+                "context_id": str(event.get("context_id") or "") or None,
+                "message_id": str(event.get("message_id") or "") or None,
+                "operation": "message",
+                "status": "processing",
+                "started_at": started_at,
+                "finished_at": None,
+                "duration_ms": None,
+                "error": None,
+            }
+            self._request_history.append(existing)
+        for key in ("context_id", "message_id", "status", "finished_at", "error"):
+            if key in event:
+                existing[key] = event[key]
+        if existing.get("finished_at") is not None:
+            existing["duration_ms"] = max(
+                0,
+                round((float(existing["finished_at"]) - float(existing["started_at"])) * 1000),
+            )
 
     async def start_from_config(self) -> A2AIngressSnapshot:
         """Start during Gateway boot without delaying boot on A2A failures."""
@@ -162,6 +202,9 @@ class A2AManager:
     async def _create_and_start_locked(self, *, wait: bool) -> None:
         effective_config = self._config
         channel = self._channel_factory(effective_config.to_channel_config(), self._router)
+        set_request_observer = getattr(channel, "set_request_observer", None)
+        if callable(set_request_observer):
+            set_request_observer(self._record_request_event)
         self._channel_manager.register_channel(channel)
         self._channel = channel
         self._starting_config = effective_config

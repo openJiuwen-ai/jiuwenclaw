@@ -111,24 +111,41 @@ class _A2AAgentExecutor(_AgentExecutorBase):
         task_id = str(task.id)
         context_id = str(task.context_id)
         request_id = task_id
-
-        query, files = self._channel.map_a2a_parts_to_params(context.message)
-        if not query:
-            query = str(context.get_user_input() or "").strip()
-        if not query:
-            await event_queue.enqueue_event(task)
-            await event_queue.enqueue_event(
-                new_text_status_update_event(
-                    task_id,
-                    context_id,
-                    TaskState.TASK_STATE_FAILED,
-                    "empty query",
-                )
-            )
-            await event_queue.close()
-            return
+        message_id = str(getattr(context.message, "message_id", "") or "") or None
+        started_at = time.time()
+        self._channel.notify_request_observer(
+            request_id=request_id,
+            context_id=context_id,
+            message_id=message_id,
+            status="processing",
+            started_at=started_at,
+        )
 
         try:
+            query, files = self._channel.map_a2a_parts_to_params(context.message)
+            if not query:
+                query = str(context.get_user_input() or "").strip()
+            if not query:
+                await event_queue.enqueue_event(task)
+                await event_queue.enqueue_event(
+                    new_text_status_update_event(
+                        task_id,
+                        context_id,
+                        TaskState.TASK_STATE_FAILED,
+                        "empty query",
+                    )
+                )
+                self._channel.notify_request_observer(
+                    request_id=request_id,
+                    context_id=context_id,
+                    message_id=message_id,
+                    status="failed",
+                    started_at=started_at,
+                    finished_at=time.time(),
+                    error="empty query",
+                )
+                return
+
             await event_queue.enqueue_event(task)
             await event_queue.enqueue_event(
                 new_text_status_update_event(
@@ -225,10 +242,16 @@ class _A2AAgentExecutor(_AgentExecutorBase):
                 if is_terminal:
                     if response_msg.event_type == EventType.CHAT_ERROR:
                         final_state = TaskState.TASK_STATE_FAILED
+                        history_status = "failed"
+                        history_error = "agent request failed"
                     elif response_msg.event_type == EventType.CHAT_INTERRUPT_RESULT:
                         final_state = TaskState.TASK_STATE_CANCELED
+                        history_status = "canceled"
+                        history_error = None
                     else:
                         final_state = TaskState.TASK_STATE_COMPLETED
+                        history_status = "completed"
+                        history_error = None
                     await event_queue.enqueue_event(
                         TaskStatusUpdateEvent(
                             task_id=task_id,
@@ -236,9 +259,38 @@ class _A2AAgentExecutor(_AgentExecutorBase):
                             status=TaskStatus(state=final_state),
                         )
                     )
+                    self._channel.notify_request_observer(
+                        request_id=request_id,
+                        context_id=context_id,
+                        message_id=message_id,
+                        status=history_status,
+                        started_at=started_at,
+                        finished_at=time.time(),
+                        error=history_error,
+                    )
                     break
+        except asyncio.CancelledError:
+            self._channel.notify_request_observer(
+                request_id=request_id,
+                context_id=context_id,
+                message_id=message_id,
+                status="canceled",
+                started_at=started_at,
+                finished_at=time.time(),
+                error=None,
+            )
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("[A2AChannel] execution failed: request_id=%s err=%s", request_id, exc)
+            self._channel.notify_request_observer(
+                request_id=request_id,
+                context_id=context_id,
+                message_id=message_id,
+                status="failed",
+                started_at=started_at,
+                finished_at=time.time(),
+                error="request execution failed",
+            )
             await event_queue.enqueue_event(
                 TaskStatusUpdateEvent(
                     task_id=task_id,
@@ -256,6 +308,15 @@ class _A2AAgentExecutor(_AgentExecutorBase):
         task = context.current_task or self._resolve_task(context)
         task_id = str(context.task_id or task.id)
         context_id = str(context.context_id or task.context_id)
+        now = time.time()
+        await self._channel.cancel_pending_request(task_id)
+        self._channel.notify_request_observer(
+            request_id=task_id,
+            context_id=context_id,
+            message_id=str(getattr(context.message, "message_id", "") or "") or None,
+            status="canceled",
+            finished_at=now,
+        )
         await event_queue.enqueue_event(task)
         await event_queue.enqueue_event(
             TaskStatusUpdateEvent(
@@ -274,6 +335,7 @@ class A2AChannel(BaseChannel):
         super().__init__(config, router)
         self.config = config
         self._on_message_cb = None
+        self._request_observer = None
         self._pending: dict[str, _PendingA2ARequest] = {}
         self._uvicorn_server: Any | None = None
         self._server_task: asyncio.Task | None = None
@@ -284,6 +346,18 @@ class A2AChannel(BaseChannel):
 
     def on_message(self, callback) -> None:
         self._on_message_cb = callback
+
+    def set_request_observer(self, callback) -> None:
+        """Observe request lifecycle metadata without retaining request bodies."""
+        self._request_observer = callback
+
+    def notify_request_observer(self, **event: Any) -> None:
+        if self._request_observer is None:
+            return
+        try:
+            self._request_observer(dict(event))
+        except Exception:  # noqa: BLE001
+            logger.exception("[A2AChannel] request observer failed")
 
     async def start(self) -> None:
         if self._running:
@@ -433,6 +507,26 @@ class A2AChannel(BaseChannel):
 
     def clear_pending_request(self, request_id: str) -> None:
         self._pending.pop(str(request_id), None)
+
+    async def cancel_pending_request(self, request_id: str) -> bool:
+        """Wake an active executor with a terminal cancellation event."""
+        pending = self._pending.get(str(request_id))
+        if pending is None:
+            return False
+        await pending.queue.put(
+            Message(
+                id=str(request_id),
+                type="event",
+                channel_id=self.channel_id,
+                session_id=None,
+                params={},
+                timestamp=time.time(),
+                ok=False,
+                payload={"is_complete": True},
+                event_type=EventType.CHAT_INTERRUPT_RESULT,
+            )
+        )
+        return True
 
     @staticmethod
     def message_to_text(msg: Message) -> str:

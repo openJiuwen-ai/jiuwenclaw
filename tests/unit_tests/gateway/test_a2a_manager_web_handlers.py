@@ -56,14 +56,16 @@ async def test_a2a_ingress_web_handlers_return_snapshots():
     _register_web_handlers(WebHandlersBindParams(channel=channel, a2a_manager=manager))
 
     await channel.methods["a2a.ingress.get"](object(), "get", {}, "session")
+    await channel.methods["a2a.ingress.history"](object(), "history", {"limit": 20}, "session")
     await channel.methods["a2a.ingress.update"](
         object(), "update", {"port": 19123}, "session"
     )
     await channel.methods["a2a.ingress.enable"](object(), "enable", {}, "session")
 
     assert channel.responses[0]["payload"]["state"] == "disabled"
-    assert channel.responses[1]["payload"]["desired_port"] == 19123
-    assert channel.responses[2]["payload"]["state"] == "running"
+    assert channel.responses[1]["payload"] == {"items": [], "total": 0}
+    assert channel.responses[2]["payload"]["desired_port"] == 19123
+    assert channel.responses[3]["payload"]["state"] == "running"
 
 
 @pytest.mark.asyncio
@@ -103,10 +105,29 @@ async def test_a2a_ingress_handler_returns_operation_error_snapshot():
     assert channel.responses[-1]["payload"]["desired_rpc_path"] == "/a2a"
 
 
+@pytest.mark.asyncio
+async def test_a2a_ingress_history_rejects_non_integer_limit():
+    channel = _WebChannelProbe()
+    manager = A2AManager(
+        _ChannelManagerProbe(), object(), A2AIngressConfig(), repository=_RepositoryProbe(),
+        channel_factory=lambda config, router: _ChannelProbe(),
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel, a2a_manager=manager))
+
+    await channel.methods["a2a.ingress.history"](
+        object(), "history", {"limit": "invalid"}, "session"
+    )
+
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "A2A_CONFIG_INVALID"
+    assert channel.responses[-1]["error"] == "limit must be an integer"
+
+
 def test_a2a_ingress_http_routes_map_to_rpc_methods():
     routes = {(route.http_method, route.path): route.rpc_method for route in MAPPED_ROUTES}
 
     assert routes[("GET", "/a2a/ingress")] == "a2a.ingress.get"
+    assert routes[("GET", "/a2a/ingress/history")] == "a2a.ingress.history"
     assert routes[("PATCH", "/a2a/ingress")] == "a2a.ingress.update"
     assert routes[("POST", "/a2a/ingress:enable")] == "a2a.ingress.enable"
     assert routes[("POST", "/a2a/ingress:disable")] == "a2a.ingress.disable"
