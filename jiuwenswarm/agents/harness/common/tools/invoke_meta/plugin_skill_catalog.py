@@ -251,7 +251,7 @@ def validate_plugin_skill_args(func_name: str, params: dict[str, Any]) -> str | 
 def invoke_tool_description() -> str:
     """ToolCard description aligned with skills/*.md call contracts."""
     return (
-        "经桌面 CloudWsRelay 复用 /ws/link 调用云端 PluginSkillExec 能力，"
+        "调用云端 PluginSkillExec 能力，"
         "或 functionName=agent_as_a_tool 调用远程 Agent。"
         "调用形态与 skill 文档一致：顶层 functionName 固定为 PluginSkillExecTool，"
         "真实能力写在 arguments.functionName，并带对应 bundleName 与业务参数。"

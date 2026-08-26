@@ -59,6 +59,25 @@ def test_load_dotenv_runtime_preserves_desktop_ports(tmp_path: Path, monkeypatch
     assert os.environ["FRONTEND_PORT"] == "6173"
 
 
+def test_load_dotenv_runtime_preserves_invoke_env(tmp_path: Path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AGENT_RUNTIME_MCP_RUN=ws://stale/mcp/run\nCLAW_XIAOYI_UID=stale-uid\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("JIUWENSWARM_DESKTOP", "1")
+    monkeypatch.delenv(CLI_PORTS_ENV_FLAG, raising=False)
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://host/v1/mcp/run")
+    monkeypatch.setenv("CLAW_XIAOYI_UID", "spawn-uid")
+    monkeypatch.setenv("CLAW_BUSINESS_CREDENTIAL", "spawn-cred")
+
+    load_dotenv_runtime(env_file, override=True)
+
+    assert os.environ["AGENT_RUNTIME_MCP_RUN"] == "wss://host/v1/mcp/run"
+    assert os.environ["CLAW_XIAOYI_UID"] == "spawn-uid"
+    assert os.environ["CLAW_BUSINESS_CREDENTIAL"] == "spawn-cred"
+
+
 def test_load_dotenv_runtime_drops_stale_agent_server_url(tmp_path: Path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unified invoke meta-tool: routes via local CloudWsRelay → /ws/link (plugin) or Runtime (agent)."""
+"""Unified invoke meta-tool: cloud PluginSkillExec (mcp/run) or remote Agent Runtime."""
 
 from __future__ import annotations
 
@@ -35,7 +35,9 @@ from jiuwenswarm.agents.harness.common.tools.invoke_meta.schema_context import (
 )
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
     build_cloud_plugin_context,
+    missing_credential_error,
     missing_plugin_url_error,
+    resolve_business_credential,
     resolve_plugin_runtime_url,
 )
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.workspace_context import (
@@ -167,6 +169,8 @@ async def _invoke_cloud_plugin(
     base_url = resolve_plugin_runtime_url()
     if not base_url:
         return missing_plugin_url_error(plugin_id=spec.plugin_id, tool_name=spec.tool_name)
+    if not resolve_business_credential():
+        return missing_credential_error(plugin_id=spec.plugin_id, tool_name=spec.tool_name)
 
     skip = {
         _BUNDLE_NAME_KEY,
@@ -189,7 +193,7 @@ async def _invoke_cloud_plugin(
     context = build_cloud_plugin_context(session_id=session_id)
     client = CloudPluginClient(base_url=base_url, session_id=session_id)
     logger.info(
-        "[InvokeTool] [session=%s] plugin via relay pluginId=%s toolName=%s url=%s",
+        "[InvokeTool] [session=%s] plugin via mcp/run pluginId=%s toolName=%s url=%s",
         session_id or "",
         spec.plugin_id,
         spec.tool_name,
@@ -363,7 +367,7 @@ _INVOKE_TOOL_CARD = ToolCard(
 
 
 class InvokeTool(Tool):
-    """Routes invoke requests via local relay → /ws/link or Agent Runtime."""
+    """Routes invoke to cloud PluginSkillExec (mcp/run) or remote Agent."""
 
     def __init__(self, card: ToolCard | None = None) -> None:
         super().__init__(card or _INVOKE_TOOL_CARD)

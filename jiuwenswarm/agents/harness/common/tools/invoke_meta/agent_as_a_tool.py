@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Remote agent execution via UserAccess → Agent Runtime."""
+"""Remote agent execution via Agent Runtime (AGENT_RUNTIME_BASEURL)."""
 
 from __future__ import annotations
 
