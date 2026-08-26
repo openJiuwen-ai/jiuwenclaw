@@ -83,15 +83,14 @@ class AgentServerClient(ABC):
         """断开连接."""
         ...
 
-    @abstractmethod
     def set_or_update_server_config(
         self,
         *,
         config: dict[str, Any],
         env: dict[str, str] | None = None,
     ) -> None:
-        """缓存或更新服务端配置快照，供自定义 client 后续使用."""
-        ...
+        """缓存或更新服务端配置快照；默认 no-op，个人版 WebSocket client 可覆盖."""
+        return None
 
     @abstractmethod
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
