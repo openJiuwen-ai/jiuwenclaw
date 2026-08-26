@@ -33,11 +33,6 @@ def _kv_cache_mode(config_like: Any) -> str:
             kv = (config_like.get("extensions") or {}).get("kv_cache") or {}
             return str(kv.get("mode") or "").strip().lower()
         extensions = getattr(config_like, "extensions", None)
-        # core 的 ModelClientConfig.extensions 是 dict(非嵌套属性对象),
-        # 故 extensions 为 dict 时走 dict 取法,否则按属性链读。
-        if isinstance(extensions, dict):
-            kv = extensions.get("kv_cache") or {}
-            return str(kv.get("mode") or "").strip().lower()
         kv = getattr(extensions, "kv_cache", None)
         return str(getattr(kv, "mode", "") or "").strip().lower()
     except Exception:
