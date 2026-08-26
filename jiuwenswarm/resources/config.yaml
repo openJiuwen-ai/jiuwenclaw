@@ -77,7 +77,7 @@ symphony:
 # Auto Memory：对话结束后自动提取记忆，按项目隔离存储
 # 存储路径：~/.jiuwenswarm/projects/{sanitized-project-path}/memory/
 # 类似 Claude Code 的 auto-memory 功能
-auto_memory_enabled: false
+auto_memory_enabled: true
 
 # 日志目录：~/.jiuwenswarm/agent/.logs/
 # gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总。
@@ -110,7 +110,7 @@ memory:
   #   external — 仅外接记忆（LTM / Mem0 / OpenViking / 插件）
   #   both     — 内置 + 外接并存
   #   none     — 全部关闭
-  engine: external
+  engine: builtin
   forbidden_memory_definition:
     enabled: false
     patterns: []
