@@ -514,9 +514,25 @@ _LLM_TRACE_MODEL_NAME: ContextVar[str] = ContextVar(
     "llm_trace_model_name",
     default="",
 )
+# First Model.invoke/stream of this request → stage=3 pre_llm (jiuwenswarm-only).
+_LATENCY_PRE_LLM_MARKED: ContextVar[bool] = ContextVar(
+    "latency_pre_llm_marked",
+    default=False,
+)
 
 _REASONING_TRACE_LOG_BATCH = 5
 _LLM_IO_TRACE_PATCH_APPLIED = False
+
+
+def _log_latency_pre_llm_once(request_id: str | None) -> None:
+    """Mark ③ endpoint once per request, right before provider call."""
+    if _LATENCY_PRE_LLM_MARKED.get():
+        return
+    _LATENCY_PRE_LLM_MARKED.set(True)
+    logger.info(
+        "[latency] stage=3 name=pre_llm request_id=%s",
+        (request_id or "").strip() or "-",
+    )
 
 
 @dataclass(slots=True)
@@ -747,6 +763,7 @@ def _apply_llm_io_trace_patch() -> None:
                     )
                 except Exception:
                     logger.debug("[llm_trace] log_invoke_input failed", exc_info=True)
+                _log_latency_pre_llm_once(trace_rid)
                 result = await original_invoke(
                     self, messages, tools=tools, model=model, **kwargs
                 )
@@ -796,6 +813,7 @@ def _apply_llm_io_trace_patch() -> None:
                     )
                 except Exception:
                     logger.debug("[llm_trace] log_stream_input failed", exc_info=True)
+                _log_latency_pre_llm_once(trace_rid)
                 accumulated: Any = None
                 reasoning_seq = 0
                 reasoning_trace_pending: List[Tuple[int, str]] = []
@@ -3707,6 +3725,7 @@ class JiuWenSwarmDeepAdapter:
                 tool_names,
                 tool_ids,
             )
+            logger.info("[latency] stage=2 name=mcp request_id=%s", request.request_id)
             return registration
         except asyncio.CancelledError:
             registration = OfficeClawMcpRegistration(
@@ -7868,6 +7887,10 @@ class JiuWenSwarmDeepAdapter:
             await self._register_mcp_servers_from_config(config_base, tag=f"agent.{mode}")
             logger.info(
                 "[JiuWenSwarmDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s", self._agent_name, mode, sub_mode
+            )
+            logger.info(
+                "[latency] stage=1 name=init request_id=%s",
+                _LLM_TRACE_REQUEST_ID.get() or "-",
             )
 
             # 加载已激活的 packages（skills, rails, tools）
