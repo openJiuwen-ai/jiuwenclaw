@@ -797,7 +797,7 @@ async def test_container_file_http_raw_file_returns_binary_and_json() -> None:
     kwargs = router.download_container_file.await_args.kwargs
     assert kwargs["user_id"] == "user-1"
     assert kwargs["session_id"] == ""
-    assert kwargs["auth_headers"].get("Authorization") == "Bearer tok-1"
+    assert "auth_headers" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -847,7 +847,7 @@ async def test_container_file_http_downloads_sent_file_from_token() -> None:
     assert kwargs["user_id"] == "user-1"
     assert kwargs["session_id"] == "session-1"
     assert kwargs["path"] == "/home/agentos/reports/result.txt"
-    assert kwargs["auth_headers"].get("Authorization") == "Bearer tok-1"
+    assert "auth_headers" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -965,7 +965,7 @@ async def test_container_file_http_file_content_text() -> None:
     kwargs = router.upload_container_file.await_args.kwargs
     assert kwargs["content"] == b"# Hello"
     assert kwargs["session_id"] == ""
-    assert kwargs["auth_headers"].get("Authorization") == "Bearer tok-2"
+    assert "auth_headers" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -1091,6 +1091,7 @@ async def test_container_file_http_list_files_and_markdown() -> None:
     assert kwargs["max_depth"] == 3
     assert kwargs["user_id"] == "user-1"
     assert kwargs["session_id"] == ""
+    assert "auth_headers" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -1146,5 +1147,5 @@ async def test_container_file_http_mkdir() -> None:
     assert kwargs["recursive"] is True
     assert kwargs["user_id"] == "user-1"
     assert kwargs["session_id"] == "sess-1"
-    assert kwargs["auth_headers"].get("Authorization") == "Bearer tok-1"
+    assert "auth_headers" not in kwargs
 
