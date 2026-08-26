@@ -1,10 +1,12 @@
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from openjiuwen.core.foundation.llm import Model, ToolMessage
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.rail.base import (
@@ -18,6 +20,7 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
 )
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
+from openjiuwen.symphony.discovery import SkillPromptBranch, SkillPromptSnapshot
 
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
@@ -82,8 +85,13 @@ class _FakeLiveModeAgent(_FakeAgent):
 class _FakeAbilityManager:
     def __init__(self) -> None:
         self._items = {
-            "list_skill": SimpleNamespace(name="list_skill"),
-            "search_skill": SimpleNamespace(name="search_skill"),
+            name: ToolCard(
+                id=name,
+                name=name,
+                description=name,
+                input_params={"type": "object", "properties": {}},
+            )
+            for name in ("list_skill", "search_skill")
         }
         self.added: list[str] = []
         self.removed: list[str] = []
@@ -1220,6 +1228,82 @@ async def test_skill_retrieval_prompt_renders_directory_guidance(
     assert "在有序 `pipeline`" in rendered
     assert "基于已返回内容完成当前回答" in rendered
     assert "`disable_output_truncation=true`" in rendered
+
+    class _AttachmentContext:
+        def __init__(self):
+            self.messages = []
+
+        def get_messages(self, with_history=False):
+            _ = with_history
+            return list(self.messages)
+
+        async def add_messages(self, *messages):
+            self.messages.extend(messages)
+
+    history = _AttachmentContext()
+    manager = agent.prompt_attachment_manager
+    assert await manager.sync_to_context(history, "sess1") is not None
+
+    # before_invoke runs before the model tool list exists. It must not clear
+    # and then re-add the same large snapshot on every user turn.
+    await rail.before_invoke(
+        AgentCallbackContext(
+            agent=agent,
+            inputs=SimpleNamespace(tools=[]),
+            session=_FakeSession(),
+            extra={},
+        )
+    )
+    await rail.before_model_call(ctx)
+    assert await manager.sync_to_context(history, "sess1") is None
+    assert len(history.messages) == 1
+
+    missing_index_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=SimpleNamespace(tools=[]),
+        session=_FakeSession(),
+        extra={},
+    )
+    await rail.before_model_call(missing_index_ctx)
+    assert [tool.name for tool in missing_index_ctx.inputs.tools] == ["list_skill"]
+    assert agent.ability_manager.get("list_skill") is not None
+    assert "旧 list_skill 提示" in builder.build()
+
+    indexed = SkillPromptSnapshot(
+        mode="indexed",
+        total_count=20,
+        entries=(),
+        estimated_candidate_tokens=2_000,
+        candidate_budget_tokens=100,
+        index_state="fresh",
+        branches=(
+            SkillPromptBranch(
+                path="/OfficeDocs",
+                label="OfficeDocs",
+                description=(
+                    "办公文档处理。\n\nCovers 8 descendant skills.\n\n"
+                    "Representative keywords: office, docs\n"
+                    "Select when: 用户要处理 Word 或 PDF。\n"
+                    "Don't select when: 用户只需普通问答。"
+                ),
+            ),
+        ),
+    )
+    indexed_guidance = rail._build_guidance("cn", indexed)
+    indexed_appendix = rail._build_candidate_appendix("cn", indexed)
+    assert 'list(paths=["/OfficeDocs"], view="details")' in indexed_guidance
+    assert "普通问答、闲聊" in indexed_guidance
+    assert "`/OfficeDocs`: 办公文档处理。 Select when: 用户要处理 Word 或 PDF。" in indexed_appendix
+    assert "Covers 8 descendant skills" not in indexed_appendix
+    assert "Representative keywords" not in indexed_appendix
+
+    stale = replace(indexed, mode="indexed-stale", index_state="stale")
+    stale_chinese = rail._build_guidance("cn", stale)
+    stale_english = rail._build_guidance("en", stale)
+    assert "直接对完整目录 `/` 执行一次高信号 `search`" in stale_chinese
+    assert "沿主能力分支逐层浏览" not in stale_chinese
+    assert "full catalog `/` first" in stale_english
+    assert "do not browse the old tree first" in stale_english
 
 
 @pytest.mark.asyncio

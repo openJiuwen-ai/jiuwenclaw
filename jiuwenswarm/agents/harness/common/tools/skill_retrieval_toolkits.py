@@ -16,6 +16,7 @@ from openjiuwen.symphony.discovery import (
     InstalledSkillsDirectoryToolkit,
     SkillFS,
     SkillIndexSnapshot,
+    SkillPromptBranch,
     SkillPromptEntry,
     SkillPromptSnapshot,
     SkillRecord,
@@ -72,7 +73,10 @@ def _snapshot_from_profile(
     if not isinstance(raw, Mapping):
         return None
     raw_entries = raw.get("entries")
-    if not isinstance(raw_entries, (list, tuple)):
+    raw_branches = raw.get("branches", ())
+    if not isinstance(raw_entries, (list, tuple)) or not isinstance(
+        raw_branches, (list, tuple)
+    ):
         return None
     try:
         mode = str(raw.get("mode") or "")
@@ -102,7 +106,15 @@ def _snapshot_from_profile(
             estimated_candidate_tokens=estimated_tokens,
             candidate_budget_tokens=budget_tokens,
             index_state=index_state,
-            branches=(),
+            branches=tuple(
+                SkillPromptBranch(
+                    path=str(branch.get("path") or ""),
+                    label=str(branch.get("label") or ""),
+                    description=str(branch.get("description") or ""),
+                )
+                for branch in raw_branches
+                if isinstance(branch, Mapping) and str(branch.get("path") or "")
+            ),
             omitted_branch_count=omitted_count,
         )
     except (TypeError, ValueError):
@@ -445,23 +457,22 @@ class SkillRetrievalToolkit:
             pin_index_revision=consume_index,
             **pinned_snapshot_kwargs,
         )
-        artifact = self._environment.artifact
-        frozen_mode = (
-            "small"
-            if self._candidate_scale == "small"
-            else "indexed"
-            if artifact.layout == "tree" and artifact.index_state == "fresh"
-            else "indexed-stale"
-            if artifact.layout == "tree"
-            else "large-flat"
-        )
-        self._frozen_prompt_snapshot = restored_snapshot or replace(
-            flat_snapshot,
-            mode=frozen_mode,
-            index_state=artifact.index_state,
-            branches=(),
-            omitted_branch_count=0,
-        )
+        environment_snapshot = self._environment.prompt_snapshot()
+        if (
+            restored_snapshot is not None
+            and restored_snapshot.mode in {"indexed", "indexed-stale"}
+            and not restored_snapshot.branches
+            and environment_snapshot.branches
+        ):
+            # Profiles written before branch orientation was persisted still
+            # carry a pinned taxonomy snapshot. Recover only its root routing
+            # hints; keep the frozen candidate entries and budget unchanged.
+            restored_snapshot = replace(
+                restored_snapshot,
+                branches=environment_snapshot.branches,
+                omitted_branch_count=environment_snapshot.omitted_branch_count,
+            )
+        self._frozen_prompt_snapshot = restored_snapshot or environment_snapshot
         restored_strategy = (
             str(frozen_profile.get("effective_strategy") or "")
             if isinstance(frozen_profile, Mapping)
@@ -581,10 +592,7 @@ class SkillRetrievalToolkit:
             "searchable_count": len(self._environment.selection_cards()),
             "settings": asdict(self._settings),
             "selection_cards": self.frozen_selection_cards,
-            "prompt_snapshot": {
-                **asdict(self._frozen_prompt_snapshot),
-                "branches": [],
-            },
+            "prompt_snapshot": asdict(self._frozen_prompt_snapshot),
             "index_snapshot": pinned.to_dict() if pinned is not None else None,
         }
 

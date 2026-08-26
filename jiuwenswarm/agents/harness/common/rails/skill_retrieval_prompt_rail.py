@@ -15,6 +15,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.symphony.discovery import (
     DiscoverySettings,
     SkillFS,
+    SkillPromptBranch,
     SkillPromptEntry,
     SkillPromptSnapshot,
     consume_incremental_skill_reminder,
@@ -145,11 +146,14 @@ class SkillRetrievalPromptRail(DeepAgentRail):
         self._frozen_prompt_snapshot = None
         self._agent = None
 
-    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Stage discovery guidance before the first admitted user turn."""
-        await self._sync_prompt_attachment(ctx)
-
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        """Synchronize only after the model tool list has been populated.
+
+        ``before_invoke`` intentionally stays inherited as a no-op: its inputs
+        do not yet contain tools, so treating that temporary absence as a
+        disabled index would append remove/add deltas on every user turn.
+        """
+
         await self._sync_prompt_attachment(ctx)
 
     async def _sync_prompt_attachment(self, ctx: AgentCallbackContext) -> None:
@@ -168,7 +172,8 @@ class SkillRetrievalPromptRail(DeepAgentRail):
 
         if not self._session_enabled or not self._has_skill_index(ctx):
             await self._clear_prompt_attachments(ctx)
-            self._disable_agentic_prompt(ctx)
+            restored_legacy = self._disable_agentic_prompt(ctx)
+            self._restore_legacy_list_skill_in_model_inputs(ctx, restored_legacy)
             return
 
         if self.system_prompt_builder is None:
@@ -187,7 +192,7 @@ class SkillRetrievalPromptRail(DeepAgentRail):
                 exc_info=True,
             )
             snapshot = self._empty_prompt_snapshot()
-        guidance = self._build_guidance(language)
+        guidance = self._build_guidance(language, snapshot)
         candidate_appendix = self._build_candidate_appendix(language, snapshot)
         manager = self.attachment_manager
         if manager is None:
@@ -257,12 +262,13 @@ class SkillRetrievalPromptRail(DeepAgentRail):
                 "[SkillRetrievalPromptRail] attachment clear failed: %s", exc
             )
 
-    def _disable_agentic_prompt(self, ctx: AgentCallbackContext) -> None:
-        self._restore_legacy_list_skill(getattr(ctx, "agent", None))
+    def _disable_agentic_prompt(self, ctx: AgentCallbackContext) -> tuple[Any, ...]:
+        restored = self._restore_legacy_list_skill(getattr(ctx, "agent", None))
         self._restore_native_skills_section()
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section(self.SECTION_NAME)
             self.system_prompt_builder.remove_section(self.CANDIDATE_SECTION_NAME)
+        return restored
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         _ = ctx
@@ -356,21 +362,60 @@ class SkillRetrievalPromptRail(DeepAgentRail):
             if removed is not None:
                 self._hidden_legacy_abilities[name] = removed
 
-    def _restore_legacy_list_skill(self, agent: Any | None = None) -> None:
+    def _restore_legacy_list_skill(
+        self,
+        agent: Any | None = None,
+    ) -> tuple[Any, ...]:
         if agent is not None:
             self._agent = agent
         ability_manager = getattr(self._agent, "ability_manager", None)
         if ability_manager is None or not self._hidden_legacy_abilities:
-            return
+            return ()
         get_ability = getattr(ability_manager, "get", None)
         add_ability = getattr(ability_manager, "add", None)
         if not callable(get_ability) or not callable(add_ability):
+            return ()
+
+        restored: list[Any] = []
+        for name, card in list(self._hidden_legacy_abilities.items()):
+            current = get_ability(name)
+            if current is None:
+                add_ability(card)
+                current = card
+            restored.append(current)
+            self._hidden_legacy_abilities.pop(name, None)
+        return tuple(restored)
+
+    def _restore_legacy_list_skill_in_model_inputs(
+        self,
+        ctx: AgentCallbackContext,
+        restored_cards: tuple[Any, ...],
+    ) -> None:
+        """Expose a restored legacy ToolCard in the current model call."""
+
+        inputs = getattr(ctx, "inputs", None)
+        tools = getattr(inputs, "tools", None)
+        if (
+            not restored_cards
+            or inputs is None
+            or tools is not None
+            and not isinstance(tools, list)
+        ):
             return
 
-        for name, card in list(self._hidden_legacy_abilities.items()):
-            if get_ability(name) is None:
-                add_ability(card)
-            self._hidden_legacy_abilities.pop(name, None)
+        restored = list(tools or [])
+        original_count = len(restored)
+        visible_names = {self._model_tool_name(tool) for tool in restored}
+        for card in restored_cards:
+            name = self._model_tool_name(card)
+            if name in visible_names:
+                continue
+            to_tool_info = getattr(card, "tool_info", None)
+            if not callable(to_tool_info):
+                continue
+            restored.append(to_tool_info())
+        if len(restored) > original_count:
+            inputs.tools = restored
 
     def _hide_native_skills_section(self) -> None:
         if self.system_prompt_builder is None:
@@ -423,15 +468,15 @@ class SkillRetrievalPromptRail(DeepAgentRail):
     def _build_guidance(
         self,
         language: str,
-        _snapshot: SkillPromptSnapshot | None = None,
+        snapshot: SkillPromptSnapshot | None = None,
     ) -> str:
         if str(language).lower().startswith("en"):
-            return self._build_english_guidance()
-        return self._build_chinese_guidance()
+            return self._build_english_guidance(snapshot)
+        return self._build_chinese_guidance(snapshot)
 
     def _build_chinese_guidance(
         self,
-        _snapshot: SkillPromptSnapshot | None = None,
+        snapshot: SkillPromptSnapshot | None = None,
     ) -> str:
         lines = [
             "## Skill 发现",
@@ -445,16 +490,19 @@ class SkillRetrievalPromptRail(DeepAgentRail):
             (
                 "- 项目、工作区或系统文件使用文件工具或 Bash。不要用 "
                 "`skill_index` 执行、修改、安装、删除、启用或禁用 Skill。"
+                "普通问答、闲聊和不需要已安装 Skill 的任务不得仅为确认目录而调用它。"
                 "用户要求执行已选 Skill 时，把工具实际返回的精确 `skill_id` "
                 "交给 `skill_tool`。"
             ),
             (
                 "- 任务明确匹配会话候选快照中的 Skill 时可直接选择其精确 `skill_id`；"
-                "否则使用 `skill_index`。`list` 浏览当前目录或分类层级，"
+                "只有任务确实可能需要或明显受益于已安装 Skill、且快照不足以选择时，"
+                "才使用 `skill_index`。`list` 浏览当前目录或分类层级，"
                 "`search` 按名称或能力证据检索，`read` 批量读取已观察到的"
                 "元数据路径。参数必须使用工具的结构化字段，不得传入 "
                 "Shell 命令、选项或管道文本。"
             ),
+            self._chinese_routing_rule(snapshot),
             (
                 "- 检索前先提炼会改变 Skill 选择的约束。只有一个能力约束时，"
                 "把已知的高信号格式、库、API、协议、方法名及同义词合并到 "
@@ -474,8 +522,9 @@ class SkillRetrievalPromptRail(DeepAgentRail):
                 "只报告覆盖任务的最小充分候选集，不要为凑数加入弱相关项。"
             ),
             (
-                "- `list` 或 `search` 可能返回多条结果时，在有序 `pipeline` "
-                "末尾主动加入 `limit` 阶段：用户指定数量时使用该数量，"
+                "- `search` 使用 `per_query_limit` 限制每个需求的候选，不要再同时"
+                "传入 `pipeline limit`。`list` 可能返回多条结果时，在有序 "
+                "`pipeline` 末尾加入 `limit` 阶段：用户指定数量时使用该数量，"
                 "否则限制为 10 行。只有用户明确要求全部、完整清单或一个"
                 "不漏时才省略该阶段；“多一些”或“更广”不是穷举要求。"
                 "只需总数时设置 `output_mode=count`；`count` 不是第四种操作。"
@@ -500,7 +549,7 @@ class SkillRetrievalPromptRail(DeepAgentRail):
 
     def _build_english_guidance(
         self,
-        _snapshot: SkillPromptSnapshot | None = None,
+        snapshot: SkillPromptSnapshot | None = None,
     ) -> str:
         lines = [
             "## Skill Discovery",
@@ -515,17 +564,21 @@ class SkillRetrievalPromptRail(DeepAgentRail):
             (
                 "- Use filesystem tools or Bash for project and system files. "
                 "Do not use `skill_index` to execute, modify, install, remove, "
-                "enable, or disable a Skill. When the user requests execution, pass an "
+                "enable, or disable a Skill. Do not call it merely to check the catalog "
+                "for ordinary Q&A, chat, or tasks that need no installed Skill. "
+                "When the user requests execution, pass an "
                 "exact observed `skill_id` to `skill_tool`."
             ),
             (
                 "- A clear match in the session candidate snapshot may be selected "
                 "directly by exact `skill_id`; "
-                "otherwise use `skill_index`. Use `list` to browse a directory or "
+                "use `skill_index` only when an installed Skill may materially help "
+                "and the snapshot is insufficient. Use `list` to browse a directory or "
                 "category hierarchy, `search` for name or capability evidence, and "
                 "`read` to batch-read observed metadata paths. Always use the structured "
                 "fields; never pass a shell command, option, or pipeline string."
             ),
+            self._english_routing_rule(snapshot),
             (
                 "- Before searching, identify the constraints that could change Skill "
                 "selection. For one capability constraint, combine known high-signal "
@@ -549,8 +602,9 @@ class SkillRetrievalPromptRail(DeepAgentRail):
                 "shortlist and never add weak matches to fill a quota."
             ),
             (
-                "- When `list` or `search` may return multiple rows, append a `limit` "
-                "stage to the ordered `pipeline`: use the user's requested count, or "
+                "- Limit `search` candidates with `per_query_limit`; do not also pass a "
+                "pipeline `limit`. When `list` may return multiple rows, append a "
+                "`limit` stage to its ordered `pipeline`: use the user's requested count, or "
                 "10 rows when none is given. Omit it only for an explicit request for "
                 "all entries, a complete inventory, or no omissions; requests for more "
                 "or broader results are not exhaustive. For only a total, set "
@@ -576,6 +630,64 @@ class SkillRetrievalPromptRail(DeepAgentRail):
             ),
         ]
         return "\n".join(lines)
+
+    @staticmethod
+    def _chinese_routing_rule(snapshot: SkillPromptSnapshot | None) -> str:
+        if snapshot is not None and snapshot.mode == "indexed-stale":
+            return (
+                "- 当前索引分类可能已过期。直接对完整目录 `/` 执行一次高信号 "
+                "`search`；旧分支只作为会话冻结方向参考，只有已确认相关时才用于"
+                "限定 scope，不要按旧树逐层优先浏览。"
+            )
+        if snapshot is not None and snapshot.branches:
+            return (
+                "- 会话快照已显示根分类。任务主要落在一个信息明确的分类时，"
+                '直接使用复数参数，例如 `list(paths=["/OfficeDocs"], '
+                'view="details")`，沿主能力分支逐层浏览；不要再次 list 根目录。'
+                "若分支标签不足以路由、任务跨多个分类或已知精确 API/格式，"
+                "直接执行一次高信号 `search`。只有浏览结果仍缺少会改变选择的"
+                "证据时，才在已探索的 `paths` 内补充 search；不要机械地同时 list 和 search。"
+            )
+        if snapshot is not None and snapshot.all_candidates_included:
+            return (
+                "- 当前快照包含全部候选。先从名称和描述直接选择；只有没有明确"
+                "候选但任务仍明显需要 Skill 时，才调用一次高信号 `search`。"
+            )
+        return (
+            "- 当前会话没有可用分类方向。需要 Skill 时直接执行一次高信号 "
+            "`search`；不要先无目的地遍历根目录。"
+        )
+
+    @staticmethod
+    def _english_routing_rule(snapshot: SkillPromptSnapshot | None) -> str:
+        if snapshot is not None and snapshot.mode == "indexed-stale":
+            return (
+                "- The indexed categories may be stale. Run one high-signal `search` "
+                "over the full catalog `/` first. Treat old branches only as frozen "
+                "session orientation and scope to one only after its relevance is "
+                "confirmed; do not browse the old tree first."
+            )
+        if snapshot is not None and snapshot.branches:
+            return (
+                "- Root categories are already visible in the session snapshot. When one "
+                "informative category clearly owns the task, browse it with the plural "
+                'field, for example `list(paths=["/OfficeDocs"], view="details")`, '
+                "then follow only the main capability branch; do not list `/` again. "
+                "Use one high-signal `search` directly when labels are uninformative, the "
+                "task spans categories, or an exact API/format is known. Add a scoped "
+                "search only if browsing leaves evidence that could change selection; "
+                "never run list and search mechanically."
+            )
+        if snapshot is not None and snapshot.all_candidates_included:
+            return (
+                "- The snapshot contains every candidate. Select from its names and "
+                "descriptions first; call one high-signal `search` only when no clear "
+                "candidate is visible but the task still clearly needs a Skill."
+            )
+        return (
+            "- No useful category orientation is available in this session. When a Skill "
+            "is needed, use one high-signal `search` instead of browsing `/` without a goal."
+        )
 
     def _build_candidate_appendix(
         self,
@@ -609,14 +721,44 @@ class SkillRetrievalPromptRail(DeepAgentRail):
                 if small
                 else "当前会话没有固定的预置 Skill 引用。"
             )
-        return "\n".join(
+        lines = [heading, "", description]
+        if snapshot.branches:
+            lines.extend(
+                [
+                    "",
+                    "### Root Category Orientation"
+                    if str(language).lower().startswith("en")
+                    else "### 根分类方向",
+                    *(
+                        _render_prompt_branches(snapshot.branches)
+                        or [
+                            "No category orientation is available."
+                            if str(language).lower().startswith("en")
+                            else "当前没有可用分类方向。"
+                        ]
+                    ),
+                ]
+            )
+            if snapshot.omitted_branch_count:
+                lines.append(
+                    f"- … {snapshot.omitted_branch_count} more root categories omitted."
+                    if str(language).lower().startswith("en")
+                    else f"- … 另有 {snapshot.omitted_branch_count} 个根分类未显示。"
+                )
+        lines.extend(
             [
-                heading,
                 "",
-                description,
+                (
+                    "### Complete Skill Candidates"
+                    if small
+                    else "### Pinned Skill References"
+                )
+                if str(language).lower().startswith("en")
+                else ("### 完整 Skill 候选" if small else "### 固定 Skill 引用"),
                 *_render_prompt_entries(snapshot.entries, empty_text=empty),
             ]
         )
+        return "\n".join(lines)
 
     @staticmethod
     def _filter_legacy_list_skill_from_model_inputs(ctx: AgentCallbackContext) -> None:
@@ -665,6 +807,39 @@ def _render_prompt_entries(
         f"{_compact_prompt_text(entry.description)}"
         for entry in entries
     ]
+
+
+def _render_prompt_branches(
+    branches: tuple[SkillPromptBranch, ...],
+) -> list[str]:
+    return [
+        f"- `{_compact_prompt_text(branch.path)}`: "
+        f"{_compact_branch_description(branch.description, branch.label)}"
+        for branch in branches
+    ]
+
+
+def _compact_branch_description(description: str, fallback: str) -> str:
+    primary = ""
+    select_when = ""
+    for paragraph in str(description or "").split("\n\n"):
+        semantic_lines: list[str] = []
+        for raw_line in paragraph.splitlines():
+            line = raw_line.strip()
+            lowered = line.casefold()
+            if lowered.startswith("select when:"):
+                if not select_when:
+                    select_when = line
+                continue
+            if lowered.startswith(("covers ", "representative ", "don't select when:")):
+                continue
+            if line:
+                semantic_lines.append(line)
+        if semantic_lines and not primary:
+            primary = " ".join(semantic_lines)
+    return _compact_prompt_text(
+        " ".join(part for part in (primary, select_when) if part) or fallback
+    )
 
 
 def _compact_prompt_text(value: str) -> str:
