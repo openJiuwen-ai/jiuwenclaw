@@ -140,11 +140,9 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
     CompatibleTodoModifyTool,
     install_todo_modify_compat_patch,
 )
-from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
-    build_agent_conventions_section,
-    build_agent_persona_text,
-)
+from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails import (
+    BrowserTaskPromptRail,
     JiuSwarmStreamEventRail,
     InvocationContextRail,
     MultimodalImageRail,
@@ -4095,22 +4093,6 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
 
         return loaded
 
-    def _restore_dynamic_prompt_sections(self) -> None:
-        """prompt_builder 被重建后（create_deep_agent / configure 热重配）补回动态 section。
-
-        core 只会从 system_prompt 字符串重建 identity + prompt_attachments
-        两个 section（deep_agent._hot_reload_system_prompt），conventions 必须
-        由宿主补挂，否则专家替换 identity 时规则会被连带覆盖。
-        """
-        instance = self._instance
-        builder = getattr(instance, "system_prompt_builder", None)
-        if builder is None:
-            return
-        builder.add_section(
-            build_agent_conventions_section(self._resolve_prompt_language())
-        )
-        instance.apply_prompt_builder_to_react_agent()
-
     @property
     def is_session_scoped(self) -> bool:
         """是否 session 级子适配器。"""
@@ -4397,7 +4379,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
     def _build_task_planning_rail() -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
-            task_planning_rail = TaskPlanningRail()
+            task_planning_rail = TaskPlanningRail(inject_prompt=False)
             logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] TaskPlanningRail create failed: %s", exc)
@@ -4408,7 +4390,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
     def _build_subagent_rail() -> SubagentRail | None:
         """Build SubagentRail for subagent delegation."""
         try:
-            subagent_rail = SubagentRail()
+            subagent_rail = BrowserTaskPromptRail()
             logger.info("[JiuWenSwarmDeepAdapter] SubagentRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
@@ -5017,8 +4999,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             model=model,
             card=agent_card,
             tool_owner_id=self._tool_owner_id(),
-            # 同 create_instance：只传纯人设文本，conventions 由 reload 路径补挂
-            system_prompt=build_agent_persona_text(
+            system_prompt=build_agent_identity_prompt(
                 language=self._resolve_prompt_language(),
             ),
             context_engine_config=_deep_agent_context_engine_config(config),
@@ -5584,10 +5565,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             model=model,
             card=agent_card,
             tool_owner_id=self._tool_owner_id(),
-            # 只传纯人设文本：core 会把 system_prompt 字符串整段塞进 identity
-            # section；conventions 以独立 section 在 ensure_initialized 后补挂，
-            # 否则专家替换 identity 时规则会被连带覆盖
-            system_prompt=build_agent_persona_text(
+            system_prompt=build_agent_identity_prompt(
                 language=self._resolve_prompt_language(),
             ),
             tools=tool_cards if tool_cards else [],
@@ -5626,9 +5604,6 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         await asyncio.sleep(0)
         await self._instance.ensure_initialized()
         self._bind_invoke_workspace_context()
-        # create_deep_agent 只从 system_prompt 字符串重建 identity + prompt_attachments，
-        # conventions 等动态 section 在此补挂（专家替换 identity 时不受影响）
-        self._restore_dynamic_prompt_sections()
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
@@ -5935,10 +5910,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             self._instance.configure(deep_cfg)
         finally:
             self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
-        # configure 在 system_prompt 未省略时会整体重建 prompt_builder（只剩 identity +
-        # prompt_attachments，专家人设/notice/conventions 全丢）——补回 conventions 并重挂专家
         if "system_prompt" not in omitted_fields:
-            self._restore_dynamic_prompt_sections()
             await self._reapply_expert_after_prompt_rebuild()
         self._commit_reload_fingerprints(reload_fingerprints)
         self._sync_active_evolution_review_agent_after_reload()
@@ -6577,6 +6549,8 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
         if self._response_prompt_rail:
             self._response_prompt_rail.set_channel(resolved_channel)
+        if isinstance(self._subagent_rail, BrowserTaskPromptRail):
+            self._subagent_rail.set_channel(resolved_channel)
         # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
         # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
         # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
