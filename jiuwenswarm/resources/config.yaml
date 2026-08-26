@@ -894,7 +894,7 @@ channels:
 #
 # 三种动作: allow / ask / deny
 permissions:
-  enabled: false
+  enabled: true
   schema: tiered_policy
   permission_mode: normal
 
@@ -1031,6 +1031,22 @@ permissions:
       tools: [bash, mcp_exec_command, create_terminal]
       pattern: "chown *"
       severity: HIGH
+    - id: shell_ask_remove_item
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Remove-Item *"
+      severity: HIGH
+    - id: shell_ask_ri
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "ri *"
+      severity: HIGH
+    - id: shell_ask_rmdir
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "rmdir *"
+      severity: HIGH
+    - id: shell_ask_erase
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "erase *"
+      severity: HIGH
     - id: shell_ask_sensitive_file_reads
       tools: [bash, mcp_exec_command, create_terminal]
       pattern: 're:(?i)(^|[\s;&|()])((cat|type|less|more|head|tail|grep|find|Get-Content|Select-String)\b[^;&|]*(id_rsa|id_ed25519|\.pem\b|\.pfx\b|\.key\b|\.kube/config|\.aws/(credentials|config)|\.npmrc\b|\.env(\.[A-Za-z0-9_-]+)?\b|authorized_keys|\.ssh/))'
@@ -1047,13 +1063,13 @@ permissions:
   file_guard:
     enabled: true
     defaults:
-      read: ask
-      write: ask
+      read: allow
+      write: allow
       exec: ask
     workspace:
       read: allow
       write: allow
-      exec: ask
+      exec: allow
     paths:
       - path: "**/.ssh/**"
         match: glob
