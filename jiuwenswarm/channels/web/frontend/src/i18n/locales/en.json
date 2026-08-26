@@ -1,5 +1,6 @@
 {
   "common": {
+    "noData": "No data",
     "confirm": "Confirm",
     "cancel": "Cancel",
     "close": "Close",
@@ -13,7 +14,9 @@
     "ok": "OK",
     "and": "and",
     "modify": "Modify",
-    "delete": "Delete"
+    "delete": "Delete",
+    "expandMore": "Show {{count}} more",
+    "processing": "Processing…"
   },
   "a2ui": {
     "generating": "Generating A2UI interface...",
@@ -58,10 +61,13 @@
     "statusShutdown": "Shutdown",
     "statusError": "Error",
     "collapse": "Collapse",
+    "maximize": "Maximize",
+    "restore": "Exit Full Screen",
     "toolTabs": "Tool panel tabs",
     "taskOverview": "Task Overview",
     "elapsedTime": "Elapsed time: {{value}}",
-    "noTasks": "No tasks",
+    "duration": "Duration",
+    "noTasks": "No tasks currently",
     "noMemberData": "No member data",
     "selectMember": "Select a team member",
     "detailTabs": {
@@ -187,7 +193,7 @@
     "title": "Artifacts",
     "tab": "Artifacts",
     "count": "{{count}} item(s)",
-    "empty": "No artifacts",
+    "empty": "No artifacts currently",
     "download": "Download",
     "downloadFailed": "Could not download “{{name}}”. Check your connection and save location, then try again.",
     "expandList": "Show artifact list",
@@ -221,6 +227,10 @@
     "spreadsheetSheetTabsLabel": "Worksheets",
     "spreadsheetTableLabel": "{{sheet}} worksheet preview",
     "invalidJson": "The JSON or JSONL content is invalid"
+  },
+  "references": {
+    "tab": "References",
+    "empty": "No references currently"
   },
   "teams": {
     "title": "Team Management",
@@ -284,6 +294,7 @@
     "modeAutoHarness": "Auto-Harness Mode",
     "modeAutoHarnessDesc": "Automatically analyze and optimize target repository",
     "recording": "Recording... (release to send)",
+    "messageQueue": "Message queue",
     "waitingTasks": "Waiting tasks",
     "waitingTasksCount": "Waiting tasks ({{count}})",
     "removeTask": "Remove task",
@@ -329,7 +340,7 @@
     "extensionConnect": "Connect",
     "extensionManagePlugins": "Manage My Plugins",
     "extensionManageMcps": "Manage My MCPs",
-    "recentTasks": "Task Planning",
+    "recentTasks": "Progress",
     "teamPause": "Pause",
     "teamPauseHint": "After pausing a team, send the next message to continue",
     "teamBroadcastTarget": "@all",
@@ -366,7 +377,31 @@
           "confirm": "Continue Anyway"
         }
       }
-    }
+    },
+    "inputAttachment": {
+      "unnamedFile": "Unnamed file",
+      "unsupportedFileType": "Unsupported file type: {{name}}",
+      "fileSizeExceeded": "File size exceeds limit: {{name}} (max {{limit}})",
+      "forbiddenFileType": "Forbidden file type: {{name}}",
+      "localPathUnavailable": "Cannot get local file path: {{name}} (please select files via desktop client)",
+      "uploadFailed": "Upload failed, please try again",
+      "attachmentCountExceeded": "Attachment count exceeds limit (max {{limit}})",
+      "attachmentCountPartialAdd": "Attachment count exceeds limit (max {{limit}}), only the first {{count}} were added",
+      "imageSizeExceeded": "File size exceeds limit: {{name}} (image max {{limit}})",
+      "readFileFailed": "Failed to read file: {{name}}",
+      "readImageFailed": "Failed to read image: {{name}}",
+      "filePickerUnsupported": "Cannot open local file picker in this environment (please ensure jiuwenswarm is running locally and restarted with the latest backend)",
+      "filePickerFailed": "Failed to open file picker"
+    },
+    "uploading": "Uploading...",
+    "uploadFailed": "Upload failed",
+    "retry": "Retry",
+    "deleteLongPress": "Delete, long press for more actions",
+    "deleteAttachment": "Delete attachment",
+    "delete": "Delete",
+    "clearAttachments": "Clear attachments",
+    "selectTeamMembers": "Select team members",
+    "noTeamMembersAvailable": "No team members available"
   },
   "autoHarness": {
     "busy": "An Auto-Harness task is already running",
@@ -1092,7 +1127,8 @@
       "duplicateMemberName": "Member name already exists",
       "memberNameEnglishOnly": "Member name can only contain English letters",
       "memberNameFormatInvalid": "Member name must start with a lowercase letter, followed by lowercase letters, digits, or hyphens",
-      "referencedByTeams": "Referenced by {{count}} Team(s)"
+      "referencedByTeams": "Referenced by {{count}} Team(s)",
+       "duration": "duration"
     },
     "groups": {
       "modelDefault": { "label": "Default Model (Main Chat)", "hint": "Primary chat model service and auth" },
@@ -1295,6 +1331,7 @@
       "noProject": "-",
       "runNow": "Run now",
       "stop": "Stop",
+      "start": "Start",
       "edit": "Edit",
       "more": "More",
       "history": "Run history",
@@ -1684,7 +1721,21 @@
       "placeholderSha256": "64-digit lowercase hex displayed after packaging",
       "noticeText": "The skill will be published to JiuwenHub.",
       "noticeView": "View",
-      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill"
+      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill",
+      "errorNameTooLong": "Name cannot exceed {{max}} characters",
+      "errorInvalidName": "Name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens",
+      "errorInvalidVersion": "Version format should be x.y.z (e.g. 1.0.0)",
+      "errorDisplayNameTooLong": "Display name cannot exceed {{max}} characters",
+      "pathNotFound": "Unable to determine skill directory",
+      "forceOverwrite": "Force overwrite (overwrite existing plugin when version exists)"
+    },
+    "oauthLogin": {
+      "title": "Login to Publish Skill",
+      "description": "You need to login to publish skills to SkillHub",
+      "gitcodeLogin": "Login with GitCode",
+      "githubLogin": "Login with GitHub",
+      "notConfigured": "GitCode OAuth is not configured. Set VITE_GITCODE_OAUTH_CLIENT_ID and VITE_GITCODE_OAUTH_CLIENT_SECRET in .env.local",
+      "githubNotConfigured": "GitHub OAuth is not configured. Set VITE_GITHUB_OAUTH_CLIENT_ID in .env.local"
     },
     "uploadSkillModal": {
       "title": "Upload Skill",
@@ -2031,7 +2082,9 @@
       "titleRepoLinkText": "SkillNet on GitHub",
       "titleRepoAria": "SkillNet repository on GitHub",
       "search": "Search",
-      "collapse": "Collapse",
+    "collapse": "Collapse",
+    "maximize": "Maximize",
+    "restore": "Exit fullscreen",
       "expand": "Expand",
       "searchPlaceholder": "Enter keywords (e.g. pdf)",
       "noResults": "No matching skills. Try different keywords.",
@@ -2142,12 +2195,20 @@
     "installPrompt": "Enter plugin spec (plugin@marketplace)",
     "importPrompt": "Enter a local skill path on the server (SKILL.md or directory)",
     "uninstallConfirm": "Uninstall {{pluginName}}?",
+    "overwriteConfirm": "Overwrite existing?",
     "messages": {
       "installing": "Installing: {{name}}...",
       "installed": "Installed: {{spec}}",
       "imported": "Imported: {{name}}",
       "uninstalled": "Uninstalled: {{pluginName}}",
-      "skillNetInstalled": "Installed: {{name}}"
+      "skillNetInstalled": "Installed: {{name}}",
+      "knowledgeSkillCreated": "Knowledge-to-skill completed",
+      "knowledgeSkillCreating": "Processing knowledge-to-skill…",
+      "knowledgeSkillCreatingCount": "Processing knowledge-to-skill… ({{count}} tasks)",
+      "packFailed": "Packaging failed",
+      "downloadFailed": "Failed to download package file",
+      "published": "Skill {{name}} published successfully",
+      "publishFailed": "Publishing failed"
     },
     "errors": {
       "installFailed": "Install failed",
@@ -2520,6 +2581,9 @@
       "sendFile": "Send File",
       "sendFileDesc": "Send files to user"
     }
+  },
+  "security": {
+    "contentRetracted": "Content retracted for security reasons"
   },
   "codeMode": {
     "work": "Work",

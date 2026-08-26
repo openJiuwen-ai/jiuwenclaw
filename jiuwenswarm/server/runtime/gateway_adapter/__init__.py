@@ -1,8 +1,11 @@
 """Gateway 用户业务适配器层（AgentServer 侧）。
 
 把 Gateway 转发的 E2A 用户业务请求（session / config / workspace / project /
-Team / cron 执行等）转换为 AgentServer 中用户态业务门面可消费的形式，在
-当前 AgentServer 外部注入的 ``.jiuwenswarm`` 中执行。
+memory / harmonyos / cron 项目解析等）转换为 AgentServer 中用户态业务门面
+可消费的形式，在当前 AgentServer 外部注入的 ``.jiuwenswarm`` 中执行。
+
+注：Team 域请求（``team.*``）不经适配器层，由 ``agent_ws_server.py``
+if/elif 链直接处理（已有 E2A handler）。
 
 约束（方案第 6 章）：
 - 适配器只负责 Gateway 请求与用户业务门面之间的兼容，不负责认证、鉴权、

@@ -127,6 +127,7 @@ class ReqMethod(Enum):
 
     PROACTIVE_TICK = "proactive.tick"  # Trigger proactive recommendation tick (from Cron)
     COMMAND_GOAL = "command.goal"
+    COMMANDS_LIST = "commands.list"
 
     FILES_LIST = "files.list"
     FILES_GET = "files.get"
@@ -212,9 +213,11 @@ class ReqMethod(Enum):
     SKILLS_TEAMSKILLS_HUB_VALIDATE = "skills.teamskillshub.validate"
     SKILLS_TEAMSKILLS_HUB_PACK = "skills.teamskillshub.pack"
     SKILLS_TEAMSKILLS_HUB_SEARCH = "skills.teamskillshub.search"
+    SKILLS_SWARMSKILLS_HUB_RECOMMEND = "skills.swarmskillshub.recommend"
     SKILLS_TEAMSKILLS_HUB_INSTALL = "skills.teamskillshub.install"
     SKILLS_TEAMSKILLS_HUB_PUBLISH = "skills.teamskillshub.publish"
     SKILLS_TEAMSKILLS_HUB_DELETE = "skills.teamskillshub.delete"
+    SKILLS_SWARMSKILLS_HUB_DETAIL = "skills.swarmskillshub.detail"
     SKILLS_RETRIEVAL_STATUS = "skills.retrieval.status"
     SKILLS_RETRIEVAL_INDEX_BUILD = "skills.retrieval.index_build"
     SKILLS_RETRIEVAL_INDEX_CANCEL = "skills.retrieval.index_cancel"
@@ -277,18 +280,27 @@ class ReqMethod(Enum):
     AGENT_TEMPLATES_FILE_LIST = "agent_templates.file.list"
     AGENT_TEMPLATES_FILE_READ = "agent_templates.file.read"
     AGENT_TEMPLATES_CREATE = "agent_templates.create"
+    AGENT_TEMPLATES_IMPORT_LOCAL = "agent_templates.import_local"
     AGENT_TEMPLATES_INSTALL = "agent_templates.install"
     AGENT_TEMPLATES_UNINSTALL = "agent_templates.uninstall"
     PLUGIN_PACKAGES_LIST = "plugin_packages.list"
     PLUGIN_PACKAGES_SHOW = "plugin_packages.show"
     PLUGIN_PACKAGES_CREATE = "plugin_packages.create"
+    PLUGIN_PACKAGES_IMPORT_LOCAL = "plugin_packages.import_local"
     PLUGIN_PACKAGES_INSTALL = "plugin_packages.install"
     PLUGIN_PACKAGES_UNINSTALL = "plugin_packages.uninstall"
 
     HOOKS_LIST = "hooks.list"
 
+    # 旧探活使用 health_check 命名空间。
+    HEALTH_CHECK_GET_CONF = "health_check.get_conf"
+    HEALTH_CHECK_SET_CONF = "health_check.set_conf"
+    # Deprecated probe RPC aliases kept for clients upgrading across the rename.
     HEARTBEAT_GET_CONF = "heartbeat.get_conf"
     HEARTBEAT_SET_CONF = "heartbeat.set_conf"
+
+    # Gateway -> AgentServer proxy for AgentServer-owned Heartbeat job operations.
+    HEARTBEAT_JOB = "heartbeat.job"
 
     # 安全防护 permissions（与 Web ``register_method`` 同名，经 E2A → AgentServer 处理；owner_scopes 仅走 Web 直连）
     PERMISSIONS_TOOLS_GET = "permissions.tools.get"
@@ -397,9 +409,20 @@ class EventType(Enum):
     TEAM_TASK = "team.task"
     TEAM_MESSAGE = "team.message"
     WORKFLOW_UPDATED = "workflow.updated"
-    HEARTBEAT_RELAY = "heartbeat.relay"
+    # 旧探活结果通过 health_check.relay 发送。
+    # 新心跳任务(heartbeat.job.*)不使用 relay 事件,结果通过普通 chat.send 进入原会话。
+    HEALTH_CHECK_RELAY = "health_check.relay"
+    # Deprecated source-level alias. Legacy wire frames are normalized by
+    # _missing_ so every downstream channel sees HEALTH_CHECK_RELAY.
+    HEARTBEAT_RELAY = "health_check.relay"
     HISTORY_GET = "history.message"
     PROACTIVE_RECOMMENDATION = "proactive_recommendation"
+
+    @classmethod
+    def _missing_(cls, value):
+        if value == "heartbeat.relay":
+            return cls.HEALTH_CHECK_RELAY
+        return None
 
 
 class Mode(Enum):

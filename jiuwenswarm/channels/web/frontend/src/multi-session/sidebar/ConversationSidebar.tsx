@@ -49,6 +49,7 @@ import NewTaskIcon from '../../assets/work-mode/new-task.svg?react';
 import PinIcon from '../../assets/work-mode/pin.svg?react';
 import PlusIcon from '../../assets/work-mode/plus.svg?react';
 import UnpinIcon from '../../assets/work-mode/unpin.svg?react';
+import SidebarCollapseIcon from '../../assets/sidebar/collapse.svg?react';
 
 const UNREAD_KEY = 'jiuwenswarm_session_unread';
 const RELATIVE_TIME_REFRESH_MS = 60_000;
@@ -77,6 +78,12 @@ interface ConversationSidebarProps {
   onOpenCron: () => void;
   /** 当前是否正停留在定时任务面板，用于给下面这个入口按钮加选中态 */
   isCronActive: boolean;
+  /** 侧边栏是否收起 */
+  collapsed?: boolean;
+  /** 小屏下侧边栏脱离文档流浮动 */
+  floating?: boolean;
+  /** 切换侧边栏收起/展开 */
+  onToggleCollapse?: () => void;
 }
 
 interface ConversationListItemProps {
@@ -314,8 +321,8 @@ function ConversationListItem({
             }
           }}
         />
-      ) : null}
-    </div>
+        ) : null}
+      </div>
   );
 }
 
@@ -734,6 +741,9 @@ export function ConversationSidebar({
   onDelete,
   onOpenCron,
   isCronActive,
+  collapsed = false,
+  floating = false,
+  onToggleCollapse,
 }: ConversationSidebarProps) {
   const { t } = useTranslation();
   const runtimes = useChatStore((state) => state.runtimes);
@@ -1227,8 +1237,14 @@ export function ConversationSidebar({
 
   const hasPinnedSection = pinnedProjects.length > 0 || orderedPinnedSessions.length > 0;
 
+  const showOverlay = floating && !collapsed;
+
   return (
-    <aside className="conversation-sidebar" aria-label={t('multiSession.conversations')} data-testid="multi-session-sidebar">
+    <>
+    {showOverlay && (
+      <div className="conversation-sidebar__overlay" data-testid="multi-session-sidebar-overlay" onClick={onToggleCollapse} />
+    )}
+    <aside className={`conversation-sidebar${floating ? ' is-floating' : ''}${collapsed ? ' is-collapsed' : ''}`} aria-label={t('multiSession.conversations')} data-testid="multi-session-sidebar">
       <div ref={workModeMenuRef} className="conversation-sidebar__mode" data-testid="multi-session-work-mode">
         <button
           type="button"
@@ -1275,6 +1291,15 @@ export function ConversationSidebar({
             </button>
           </div>
         ) : null}
+        <button
+          type="button"
+          className="conversation-sidebar__mode-collapse"
+          onClick={onToggleCollapse}
+          aria-label={t('common.collapse') || 'Collapse'}
+          data-testid="multi-session-sidebar-collapse"
+        >
+          <SidebarCollapseIcon aria-hidden />
+        </button>
       </div>
       <div className="conversation-sidebar__operations" data-testid="multi-session-operations">
         <button type="button" className="conversation-sidebar__new" onClick={() => {
@@ -1435,5 +1460,6 @@ export function ConversationSidebar({
         />
       ) : null}
     </aside>
+    </>
   );
 }

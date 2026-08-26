@@ -201,10 +201,6 @@ def _extract_text_from_agent_payload(payload: dict | None) -> str:
         return str(content)
     if isinstance(content, str):
         return content
-    # Fallbacks
-    heartbeat = payload.get("heartbeat")
-    if isinstance(heartbeat, str) and heartbeat:
-        return heartbeat
     text = payload.get("text")
     if isinstance(text, str) and text:
         return text
@@ -391,6 +387,10 @@ class CronSchedulerService:
         if self._running:
             return
         self._running = True
+        # 以真正进入启动流程的时刻重置 boot_time：__init__ 到 start() 之间
+        # 可能超过 grace 窗口（初始化耗时长），此时崩溃重启后的首次 reload
+        # 不应被误判为运行期而恢复原先要避免的重复执行风险。
+        self._boot_time = self._now_fn()
         await self.reload()
         self._task = asyncio.create_task(self._loop(), name="cron-scheduler")
         logger.info("[Cron] scheduler started")
@@ -1050,7 +1050,7 @@ class CronSchedulerService:
                         # 文件推送的 channel_id，与 cron 文本结果推送到同一批渠道。
                         "targets": str(job.targets or "").strip(),
                     },
-                    user_id=job.user_id,
+                    user_id=job.user_id or None,
                 )
                 if not str(job.user_id or "").strip():
                     logger.warning(

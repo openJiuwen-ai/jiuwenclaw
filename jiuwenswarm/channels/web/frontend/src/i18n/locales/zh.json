@@ -1,5 +1,6 @@
 {
   "common": {
+    "noData": "暂无数据",
     "confirm": "确认",
     "cancel": "取消",
     "close": "关闭",
@@ -13,7 +14,9 @@
     "ok": "确定",
     "and": "和",
     "modify": "修改",
-    "delete": "删除"
+    "delete": "删除",
+    "expandMore": "展开 {{count}} 个",
+    "processing": "处理中…"
   },
   "a2ui": {
     "generating": "A2UI 界面生成中...",
@@ -58,10 +61,13 @@
     "statusShutdown": "已关闭",
     "statusError": "错误",
     "collapse": "收起",
+    "maximize": "放大",
+    "restore": "退出全屏",
     "toolTabs": "工具面板页签",
     "taskOverview": "任务概览",
     "elapsedTime": "已花费时间: {{value}}",
-    "noTasks": "暂无任务",
+    "duration": "耗时",
+    "noTasks": "当前暂无任务",
     "noMemberData": "暂无成员数据",
     "selectMember": "请选择 Team 成员",
     "detailTabs": {
@@ -156,7 +162,7 @@
       }
     },
     "planning": {
-      "tab": "任务规划",
+      "tab": "任务",
       "progressTitle": "任务进度",
       "token": "Token",
       "taskList": "任务列表",
@@ -187,7 +193,7 @@
     "title": "所有产物",
     "tab": "产物",
     "count": "{{count}} 个产物",
-    "empty": "暂无产物",
+    "empty": "当前暂无产物",
     "download": "下载",
     "downloadFailed": "“{{name}}”下载失败，请检查网络和保存位置后重试。",
     "expandList": "展开产物列表",
@@ -221,6 +227,10 @@
     "spreadsheetSheetTabsLabel": "工作表",
     "spreadsheetTableLabel": "{{sheet}} 工作表预览",
     "invalidJson": "JSON 或 JSONL 内容无效"
+  },
+  "references": {
+    "tab": "参考信息",
+    "empty": "当前暂无参考信息"
   },
   "teams": {
     "title": "团队管理",
@@ -330,7 +340,7 @@
     "extensionConnect": "连接",
     "extensionManagePlugins": "管理我的插件",
     "extensionManageMcps": "管理我的MCP",
-    "recentTasks": "任务规划",
+    "recentTasks": "进度",
     "teamPause": "暂停",
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "teamBroadcastTarget": "@所有人",
@@ -367,7 +377,31 @@
           "confirm": "仍然继续"
         }
       }
-    }
+    },
+    "inputAttachment": {
+      "unnamedFile": "未命名文件",
+      "unsupportedFileType": "文件类型不支持：{{name}}",
+      "fileSizeExceeded": "文件大小超出限制：{{name}}（最大{{limit}}）",
+      "forbiddenFileType": "禁止上传该文件类型：{{name}}",
+      "localPathUnavailable": "无法获取本地文件路径：{{name}}（请使用桌面端选择文件）",
+      "uploadFailed": "上传失败，请重试",
+      "attachmentCountExceeded": "附件数量超出限制（最多 {{limit}} 个）",
+      "attachmentCountPartialAdd": "附件数量超出限制（最多 {{limit}} 个），仅添加前 {{count}} 个",
+      "imageSizeExceeded": "文件大小超出限制：{{name}}（图片最大{{limit}}）",
+      "readFileFailed": "读取文件失败：{{name}}",
+      "readImageFailed": "读取图片失败：{{name}}",
+      "filePickerUnsupported": "当前环境无法打开本机文件选择器（请确认 jiuwenswarm 在本机运行且已重启加载最新后端）",
+      "filePickerFailed": "打开文件选择器失败"
+    },
+    "uploading": "上传中...",
+    "uploadFailed": "上传失败",
+    "retry": "重试",
+    "deleteLongPress": "删除，长按显示更多操作",
+    "deleteAttachment": "删除附件",
+    "delete": "删除",
+    "clearAttachments": "清空附件",
+    "selectTeamMembers": "选择团队成员",
+    "noTeamMembersAvailable": "暂无可选择的团队成员"
   },
   "autoHarness": {
     "busy": "当前已有 Auto-Harness 任务在运行",
@@ -528,7 +562,7 @@
     "subtitle": "浏览并管理会话与文件",
     "history": "历史会话",
     "count": "最多 20 条，当前 {{count}} 条",
-    "empty": "暂无会话",
+    "empty": "暂无任务",
     "restore": "恢复会话",
     "restoreDisabledNotConnected": "连接断开，无法恢复会话",
     "restoreDisabledProcessing": "助手处理中，请结束当前任务后再恢复会话",
@@ -611,7 +645,8 @@
     "status": {
       "label": "状态",
       "enabled": "已启用",
-      "disabled": "已禁用"
+      "disabled": "已禁用",
+      "expired": "已过期"
     },
     "skillnet": {
       "usageNoticeTitle": "提示",
@@ -1092,7 +1127,8 @@
       "duplicateMemberName": "成员名称已存在",
       "memberNameEnglishOnly": "成员名称只能包含英文字母",
       "memberNameFormatInvalid": "成员名称必须以小写字母开头，后跟小写字母、数字或连字符",
-      "referencedByTeams": "被 {{count}} 个 Team 引用"
+      "referencedByTeams": "被 {{count}} 个 Team 引用",
+      "duration": "时长"
     },
     "groups": {
       "modelDefault": { "label": "默认模型（主对话）", "hint": "主对话模型服务与鉴权参数" },
@@ -1672,7 +1708,7 @@
       "skillIcon": "Skill图标",
       "skillIconOptional": "Skill图标（可选）",
       "skillIconHint": "PNG文件，不能超过5MB",
-      "sha256": "SHA-256 校验",
+      "sha256": "SHA-256 校验和",
       "versionNote": "版本说明",
       "versionNoteOptional": "版本说明（Swarm Skill，可选）",
       "confirm": "确认发布",
@@ -1682,7 +1718,21 @@
       "placeholderSha256": "打包完成后显示 64 位小写十六进制",
       "noticeText": "技能将会被发布到 JiuwenHub。",
       "noticeView": "去查看",
-      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill"
+      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill",
+      "errorNameTooLong": "名称不能超过 {{max}} 个字符",
+      "errorInvalidName": "名称须以小写字母开头，仅含小写字母、数字和连字符",
+      "errorInvalidVersion": "版本号格式应为 x.y.z（如 1.0.0）",
+      "errorDisplayNameTooLong": "显示名不能超过 {{max}} 个字符",
+      "pathNotFound": "无法确定技能目录",
+      "forceOverwrite": "强制覆盖（版本已存在时覆盖原插件）"
+    },
+    "oauthLogin": {
+      "title": "登录以发布技能",
+      "description": "需要登录账号才能发布技能到 SkillHub",
+      "gitcodeLogin": "使用 GitCode 登录",
+      "githubLogin": "使用 GitHub 登录",
+      "notConfigured": "GitCode OAuth 未配置，请在 .env.local 中设置 VITE_GITCODE_OAUTH_CLIENT_ID 和 VITE_GITCODE_OAUTH_CLIENT_SECRET",
+      "githubNotConfigured": "GitHub OAuth 未配置，请在 .env.local 中设置 VITE_GITHUB_OAUTH_CLIENT_ID"
     },
     "uploadSkillModal": {
       "title": "上传技能",
@@ -2029,7 +2079,9 @@
       "titleRepoLinkText": "SkillNet 开源仓库",
       "titleRepoAria": "SkillNet 官方 GitHub 仓库",
       "search": "搜索",
-      "collapse": "收起",
+    "collapse": "收起",
+    "maximize": "放大",
+    "restore": "退出全屏",
       "expand": "展开",
       "searchPlaceholder": "输入关键词（例如 小红书）",
       "noResults": "未找到相关技能，可换个关键词再试。",
@@ -2140,12 +2192,20 @@
     "installPrompt": "请输入插件规格 (plugin@marketplace)",
     "importPrompt": "请输入服务端本地 skill 路径（SKILL.md 或目录）",
     "uninstallConfirm": "确认卸载 {{pluginName}} ?",
+    "overwriteConfirm": "是否覆盖保存？",
     "messages": {
       "installing": "安装中：{{name}}...",
       "installed": "已安装：{{spec}}",
       "imported": "已导入：{{name}}",
       "uninstalled": "已卸载：{{pluginName}}",
-      "skillNetInstalled": "已安装：{{name}}"
+      "skillNetInstalled": "已安装：{{name}}",
+      "knowledgeSkillCreated": "知识转技能已完成",
+      "knowledgeSkillCreating": "知识转技能处理中…",
+      "knowledgeSkillCreatingCount": "知识转技能处理中…（{{count}} 条任务）",
+      "packFailed": "打包失败",
+      "downloadFailed": "下载打包文件失败",
+      "published": "技能 {{name}} 发布成功",
+      "publishFailed": "发布失败"
     },
     "errors": {
       "installFailed": "安装失败",
@@ -2570,7 +2630,7 @@
       "searchProject": "搜索项目",
       "noProjectMatches": "暂无匹配项目",
       "noProjects": "暂无项目",
-      "noConversations": "暂无会话",
+      "noConversations": "暂无任务",
       "noSessions": "暂无执行记录",
       "startConversation": "从{{projectName}}开始新对话",
       "pinProject": "置顶项目",

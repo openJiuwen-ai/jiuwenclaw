@@ -250,9 +250,14 @@ class CronTools:
         return _gateway_jobs_snapshots.get(user_id)
 
     def _uses_gateway_command_ack(self) -> bool:
-        return bool(str(self._route().user_id or "").strip()) and isinstance(
-            self._gateway_push, WebSocketGatewayPushTransport
-        )
+        # The ack mechanism works whenever the built-in WebSocket push transport
+        # is present — it does not depend on ``user_id``.  In legacy single-user
+        # mode ``route_user_id`` is empty, but the push transport, Gateway
+        # processing, and ``CRON_COMMAND_ACK`` round-trip all function the same.
+        # Requiring ``route_user_id`` here previously caused single-user mode to
+        # return "submitted" immediately, silently dropping Gateway-side
+        # validation errors (e.g. invalid cron_expr, deleted project).
+        return isinstance(self._gateway_push, WebSocketGatewayPushTransport)
 
     async def _send_split(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         from jiuwenswarm.common.e2a.constants import E2A_RESPONSE_KIND_CRON
@@ -284,10 +289,12 @@ class CronTools:
                 "message": "",
             },
         }
-        # AgentOS cannot consult a user-local cron store.  Wait for the
-        # Gateway-owned controller's result, not merely socket acceptance.
+        # Wait for the Gateway-owned controller's result rather than merely
+        # confirming socket acceptance.  This surfaces Gateway-side validation
+        # errors (invalid cron_expr, project binding failures, etc.) back to
+        # the agent in both AgentOS and legacy single-user modes.
         ack: asyncio.Future[dict[str, Any]] | None = None
-        if route_user_id and self._uses_gateway_command_ack():
+        if self._uses_gateway_command_ack():
             ack = asyncio.get_running_loop().create_future()
             _gateway_command_acks[command_id] = ack
         delivered = await self._gateway_push.send_push(payload)

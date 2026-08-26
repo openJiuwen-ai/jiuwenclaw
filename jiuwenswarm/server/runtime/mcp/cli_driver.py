@@ -223,58 +223,6 @@ def _extract_url(text: str, domain_hint: str = "") -> str | None:
     return matches[0]
 
 
-def _derive_bin_name(command: str) -> str | None:
-    """Derive the CLI binary name from a versionCheck command string.
-
-    Pure CLI (feishu/dingtalk/zsxq/...) have no ``mcp.json``; their
-    stdio MCP entry runs ``<bin> mcp`` where <bin> comes from cli.json's
-    versionCheck command (e.g. ``lark-cli.cmd --version`` -> ``lark-cli``).
-
-    The versionCheck command is the ONLY reliable source — npm package names
-    in the init command (``@larksuite/cli`` / ``dingtalk-workspace-cli``) do
-    NOT map to bin names (bin is ``lark-cli`` / ``dws``), so init is not used.
-
-    Strips ``.cmd``/``.exe`` suffixes (Windows) so the registered bare name
-    resolves cross-platform via PATH (node CLIs install a .cmd shim on Windows).
-    """
-    if not command:
-        return None
-    cmd = command.strip()
-    if not cmd:
-        return None
-    # "<bin>[.cmd|.exe] [args...]" — take the first token, strip shim suffix.
-    first = cmd.split()[0] if " " in cmd else cmd
-    for suf in (".cmd", ".exe", ".bat"):
-        if first.lower().endswith(suf):
-            first = first[: -len(suf)]
-            break
-    return first or None
-
-
-def build_stdio_entry(name: str, manifest: "CliManifest") -> dict[str, Any] | None:
-    """Build a state.json ``mcp.servers`` stdio entry running ``<bin> mcp``.
-
-    For pure-CLI MCPs with no mcp.json, the MCP server is the CLI's own
-    ``mcp`` subcommand (e.g. ``lark-cli mcp`` / ``dws mcp``). <bin> is derived
-    from the manifest's versionCheck command. Returns None if versionCheck is
-    absent (hybrid packages with a real mcp.json use that instead).
-    """
-    n = str(name or "").strip()
-    if not n:
-        return None
-    bin_name = _derive_bin_name(manifest.version_cmd)
-    if not bin_name:
-        return None
-    return {
-        "name": n,
-        "transport": "stdio",
-        "command": bin_name,
-        "args": ["mcp"],
-        "enabled": True,
-        "server_id_scope": f"mcp:{n}",
-    }
-
-
 @dataclass
 class CliManifest:
     runtime_type: str = ""
@@ -712,14 +660,6 @@ class CliDriver:
         if not self.manifest.unauth_cmd:
             return CommandResult(command="", returncode=0, stdout="no unauth command")
         return self._runner(self.manifest.unauth_cmd)
-
-    def build_stdio_entry(self, name: str, manifest: "CliManifest" | None = None) -> dict[str, Any] | None:
-        """Derive the ``<bin> mcp`` stdio config entry from the manifest.
-
-        Thin wrapper over the module-level :func:`build_stdio_entry` so callers
-        holding a CliDriver instance can ask for the stdio entry directly.
-        """
-        return build_stdio_entry(name, manifest or self.manifest)
 
 
 __all__ = [

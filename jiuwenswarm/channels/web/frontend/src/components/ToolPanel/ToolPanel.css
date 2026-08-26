@@ -14,69 +14,107 @@
   border-bottom: 1px solid var(--color-border-default);
 }
 
+.tool-panel-floating {
+  position: fixed;
+  top: 68px;
+  right: 24px;
+  width: 340px;
+  max-height: calc(100vh - 68px - 32px);
+  overflow-y: auto;
+  border-left: 1px solid var(--color-border-default, rgb(240, 240, 240));
+  border-radius: 16px;
+  box-shadow: 0 2px 16px 0 rgba(0, 0, 0, 0.08);
+  z-index: 30;
+}
+
+.tool-panel-floating > div > div:not(:last-child) {
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.toolpanel-status-card:hover {
+  border-color: var(--color-border-strong);
+  box-shadow: var(--effect-tool-panel-shadow);
+  transform: translateY(-1px);
+}
+
+
 .toolpanel-collapsed-task-section > * {
   min-height: 0;
   flex: 1 1 auto;
   border-bottom: 0;
 }
 
-.toolpanel-context-card {
-  display: flex;
-  min-height: 0;
-  flex: 0 0 auto;
-  flex-direction: column;
-  gap: 12px;
-  border-top: 0;
-  background: var(--color-surface-card);
-  padding: 16px 32px 18px;
+.toolpanel-status-card {
+  padding: 1rem 0 0 0;
+  overflow-y: auto;
+  max-height: 13rem;
 }
 
-.toolpanel-context-card__heading,
-.toolpanel-context-card__row {
+.toolpanel-status-card:hover {
+  border-color: var(--color-border-strong);
+  box-shadow: var(--effect-tool-panel-shadow);
+  transform: translateY(-1px);
+}
+
+.toolpanel-status-card__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.75rem;
+}
+
+.toolpanel-status-card__row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  font-size: 0.75rem;
 }
 
-.toolpanel-context-card__heading {
-  color: var(--color-text-primary);
-  font-size: var(--font-size-sm);
-  font-weight: 600;
+/* ===========================
+   CollapsibleSection
+   =========================== */
+
+.collapsible-section {
+  display: flex;
+  flex-direction: column;
+  transition: max-height 0.3s ease-in-out;
 }
 
-.toolpanel-context-card__heading h3 {
-  margin: 0;
+.collapsible-section__header {
+  flex-shrink: 0;
+  width: 100%;
 }
 
-.toolpanel-context-card__heading .mono {
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-xs);
-  font-weight: 500;
+.collapsible-section__toggle-icon {
+  transition: transform 0.2s ease-in-out;
 }
 
-.toolpanel-context-card__meter {
-  height: 8px;
-  overflow: hidden;
-  border-radius: var(--radius-full);
-  background: var(--color-action-secondary);
+.collapsible-section__content {
+  overflow: visible;
+  padding-bottom: 24px;
 }
 
-.toolpanel-context-card__meter > span {
+.collapsible-section__expand-all {
+  flex-shrink: 0;
+}
+
+.collapsible-section__expand-all button {
   display: block;
-  height: 100%;
-  min-width: 0;
-  border-radius: inherit;
-  background: var(--color-action-primary);
-  transition: width 180ms ease;
-}
-
-.toolpanel-context-card__row {
+  width: 100%;
+  text-align: left;
+  font-size: 0.75rem;
   color: var(--color-text-secondary);
-  font-size: var(--font-size-xs);
+  background: var(--color-surface-card);
+  transition: color 0.2s ease;
+  cursor: pointer;
 }
 
-.toolpanel-context-card__row .mono {
+.collapsible-section__expand-all button:hover {
   color: var(--color-text-primary);
 }
 

@@ -54,8 +54,13 @@ function publishState(state: SingleAgentPanelState): void {
   window.dispatchEvent(new CustomEvent<SingleAgentPanelState>(SINGLE_AGENT_PANEL_STATE_EVENT, { detail: state }));
 }
 
-export function openSingleAgentPanel(activeTab: SingleAgentToolTab): void {
-  const nextState: SingleAgentPanelState = { ...loadState(), expanded: true, activeTab };
+export function openSingleAgentPanel(activeTab: SingleAgentToolTab, selectedArtifactId?: string): void {
+  const nextState: SingleAgentPanelState = {
+    ...loadState(),
+    expanded: true,
+    activeTab,
+    ...(selectedArtifactId ? { selectedArtifactId } : {}),
+  };
   publishState(nextState);
 }
 

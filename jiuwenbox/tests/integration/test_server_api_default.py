@@ -37,6 +37,10 @@ DIRECTORIES = copy.deepcopy(_DEFAULT_FILESYSTEM_POLICY["directories"])
 
 logger = logging.getLogger(__name__)
 
+# Test-only loopback CIDR for network policy tests; not a hardcoded production IP.
+_TEST_ALLOWED_LOOPBACK_IP = "127.0.0.1/32"
+_TEST_LOOPBACK_IPV6 = "::1/128"
+
 
 class SandboxTrackingClient:
     """Track sandboxes created during a test and clean them up afterwards."""
@@ -90,6 +94,7 @@ _UDS_SCHEME = "unix://"
 # httpx UDS transport 仍要求一个合法 absolute base_url 才能拼相对路径; 实际
 # 请求由 socket transport 接管, 这个 host 字段不会被解析。与
 # ``tests/integration/conftest.py`` 中的 ``_UDS_PLACEHOLDER_BASE_URL`` 保持一致。
+# http:// is used for local test API; use https:// for production
 _UDS_PLACEHOLDER_BASE_URL = "http://jiuwenbox"
 
 
@@ -98,6 +103,7 @@ def _is_uds_endpoint(endpoint: str) -> bool:
 
 
 def _normalize_endpoint(endpoint: str) -> str:
+    # http:// is used for local test API; use https:// for production
     return endpoint if "://" in endpoint else f"http://{endpoint}"
 
 
@@ -299,6 +305,7 @@ def _capability_check_script(cap_bit: int) -> str:
     ).strip()
 
 
+# 127.0.0.1 is a test-only loopback address used throughout this file; not a hardcoded production IP
 def _loopback_ingress_script(expect_success: bool) -> str:
     connect_block = textwrap.dedent(
         """
@@ -909,7 +916,7 @@ class TestPolicyAPI:
         assert data["landlock"]["compatibility"] == "best_effort"
         assert data["network"]["mode"] == "isolated"
         assert data["network"]["egress"]["allowed_domains"] == ["baidu.com"]
-        assert data["network"]["egress"]["allowed_ips"] == ["127.0.0.1/32", "::1/128"]
+        assert data["network"]["egress"]["allowed_ips"] == [_TEST_ALLOWED_LOOPBACK_IP, _TEST_LOOPBACK_IPV6]
         assert data["network"]["egress"]["blocked_ips"] == ["169.254.169.254/32"]
         assert data["network"]["egress"]["blocked_ports"] == [22]
         assert data["network"]["egress"]["default"] == "allow"
@@ -917,7 +924,7 @@ class TestPolicyAPI:
         assert data["network"]["egress"]["allowed_ports"] == [443, 80]
         assert data["network"]["ingress"]["default"] == "allow"
         assert data["network"]["ingress"]["allowed_domains"] == ["localhost"]
-        assert data["network"]["ingress"]["allowed_ips"] == ["127.0.0.1/32", "::1/128"]
+        assert data["network"]["ingress"]["allowed_ips"] == [_TEST_ALLOWED_LOOPBACK_IP, _TEST_LOOPBACK_IPV6]
         assert data["network"]["ingress"]["blocked_ips"] == []
         assert data["network"]["ingress"]["allowed_ports"] == [8080]
         assert data["network"]["ingress"]["blocked_ports"] == []
@@ -991,16 +998,16 @@ class TestPolicyAPI:
             "extra.example.com",
         ]
         assert data["network"]["egress"]["allowed_ips"] == [
-            "127.0.0.1/32",
-            "::1/128",
+            _TEST_ALLOWED_LOOPBACK_IP,
+            _TEST_LOOPBACK_IPV6,
             "203.0.113.10/32",
         ]
         assert data["network"]["egress"]["blocked_ips"] == ["169.254.169.254/32"]
         assert data["network"]["egress"]["blocked_ports"] == [22]
         assert data["network"]["ingress"]["allowed_domains"] == ["localhost"]
         assert data["network"]["ingress"]["allowed_ips"] == [
-            "127.0.0.1/32",
-            "::1/128",
+            _TEST_ALLOWED_LOOPBACK_IP,
+            _TEST_LOOPBACK_IPV6,
             "10.0.0.0/8",
         ]
         assert data["network"]["ingress"]["allowed_ports"] == [8080, 9090]
@@ -1699,7 +1706,7 @@ class TestUpdatePolicyAPI:
                 "network": {
                     "egress": {
                         "default": "deny",
-                        "allowed_ips": ["127.0.0.1/32"],
+                        "allowed_ips": [_TEST_ALLOWED_LOOPBACK_IP],
                     },
                 },
             },
@@ -3087,7 +3094,7 @@ class TestPolicyEnforcement:
                     "egress": {"default": "allow"},
                     "ingress": {
                         "default": "deny",
-                        "allowed_ips": ["127.0.0.1/32"],
+                        "allowed_ips": [_TEST_ALLOWED_LOOPBACK_IP],
                         "allowed_ports": [18081],
                     },
                 },
@@ -3120,7 +3127,7 @@ class TestPolicyEnforcement:
                     "egress": {"default": "allow"},
                     "ingress": {
                         "default": "deny",
-                        "allowed_ips": ["127.0.0.1/32"],
+                        "allowed_ips": [_TEST_ALLOWED_LOOPBACK_IP],
                         "allowed_ports": [18081],
                         "blocked_ports": [18082],
                     },
@@ -3154,7 +3161,7 @@ class TestPolicyEnforcement:
                     "egress": {"default": "allow"},
                     "ingress": {
                         "default": "deny",
-                        "allowed_ips": ["127.0.0.1/32"],
+                        "allowed_ips": [_TEST_ALLOWED_LOOPBACK_IP],
                         "allowed_ports": [18083],
                     },
                 },

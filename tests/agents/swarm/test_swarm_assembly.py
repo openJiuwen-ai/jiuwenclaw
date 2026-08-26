@@ -58,6 +58,10 @@ from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.rails import SkillUseRail
 
+from jiuwenswarm.agents.harness.code.rails.heartbeat.tools import (
+    HEARTBEAT_TOOL_NAMES,
+)
+from jiuwenswarm.agents.harness.code.rails.heartbeat_rail import HeartbeatRail
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
@@ -103,6 +107,69 @@ def test_member_runtime_prompt_rail_binds_request_identity(mode: str) -> None:
 
     assert rail._session_id == "session-123"
     assert rail._mode == mode
+
+
+def test_team_heartbeat_provider_mounts_new_job_rail_once() -> None:
+    service = object()
+    context = SwarmBuildContext(
+        session_id="session-123",
+        channel_id="web",
+        user_id="user-1",
+        request_metadata={"mode": "team.work.normal"},
+        mode="team.work.normal",
+        member_card_id="leader-card",
+        heartbeat_job_service=service,
+    )
+
+    rail = member_rails._build_heartbeat_rail({}, context)
+
+    assert isinstance(rail, HeartbeatRail)
+    assert rail._runtime._service is service
+    assert rail._context.session_id == "session-123"
+    assert rail._context.user_id == "user-1"
+
+    registered_tools = {}
+
+    class AbilityManager:
+        @staticmethod
+        def add_ability(card, tool) -> None:  # noqa: ANN001
+            registered_tools[card.name] = tool
+
+    rail.init(SimpleNamespace(ability_manager=AbilityManager()))
+    assert set(registered_tools) == HEARTBEAT_TOOL_NAMES
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "team",
+        "team.plan.normal",
+        "code.team",
+        "team.plan.code",
+        "team.work.normal",
+        "team.work.plan",
+        "team.code.normal",
+        "team.code.plan",
+    ],
+)
+@pytest.mark.parametrize("role", ["leader", "teammate"])
+def test_all_team_modes_declare_exactly_one_new_heartbeat_rail(
+    mode: str,
+    role: str,
+) -> None:
+    rails, _ = build_member_capability_specs({}, mode, role)
+
+    assert registry.HEARTBEAT == "swarm.heartbeat"
+    assert [spec.type for spec in rails].count(registry.HEARTBEAT) == 1
+
+
+@pytest.mark.parametrize("mode", ["team.code.normal", "team.code.plan"])
+def test_canonical_code_team_modes_use_code_profile(mode: str) -> None:
+    rails, _ = build_member_capability_specs({}, mode, "leader")
+    rail_types = {spec.type for spec in rails}
+
+    assert registry.CODE_RUNTIME_PROMPT in rail_types
+    assert registry.RUNTIME_PROMPT not in rail_types
 
 # Rail provider names shared by both roles (no role-specific evolution rails).
 # Harness todo planning is teammate-only; leaders use the team task board instead.

@@ -218,6 +218,22 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 1
 fi
 
+PLIST_PATH="$APP_PATH/Contents/Info.plist"
+BUNDLE_EXECUTABLE="$(
+  /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST_PATH"
+)"
+
+if [[ "$BUNDLE_EXECUTABLE" != "$BUILD_EXECUTABLE_NAME" ]]; then
+  printf 'Error: bundle executable mismatch: expected=%s actual=%s\n' \
+    "$BUILD_EXECUTABLE_NAME" "$BUNDLE_EXECUTABLE" >&2
+  exit 1
+fi
+
+if [[ ! -x "$APP_PATH/Contents/MacOS/$BUILD_EXECUTABLE_NAME" ]]; then
+  printf 'Error: bundle main executable missing or not executable\n' >&2
+  exit 1
+fi
+
 printf 'Verifying frozen A2UI v0.8 bundle...\n'
 "$APP_PATH/Contents/MacOS/$BUILD_EXECUTABLE_NAME" "$PROJECT_ROOT/scripts/verify_a2ui_bundle.py"
 

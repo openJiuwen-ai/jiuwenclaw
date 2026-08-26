@@ -134,6 +134,7 @@ class AgentManager:
         # disconnect cleanup cannot tear it down in that gap.
         self._agent_borrowers: dict[int, set[asyncio.Task]] = {}
         self._agent_pins: dict[int, int] = {}
+        self._heartbeat_service: Any | None = None
         self._pending_tui_retirements: set[int] = set()
         self._retirement_tasks: dict[int, asyncio.Task] = {}
         self._agent_create_locks: WeakValueDictionary[
@@ -147,6 +148,16 @@ class AgentManager:
         from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
 
         self.warm_pool = AgentWarmPool(self)
+
+    def set_heartbeat_service(self, service: Any | None) -> None:
+        """Inject the process-owned Heartbeat service into single and Team agents."""
+        self._heartbeat_service = service
+        from jiuwenswarm.agents.swarm.context import set_heartbeat_job_service
+
+        set_heartbeat_job_service(service)
+        for agents in self.agents.values():
+            for agent in agents.values():
+                agent.set_heartbeat_service(service)
 
     def _get_agent_create_lock(
         self,
@@ -455,6 +466,7 @@ class AgentManager:
             project_dir or None,
         )
         agent = JiuWenSwarm()
+        agent.set_heartbeat_service(self._heartbeat_service)
         setter = getattr(agent, "set_personal_context_runtime_enabled", None)
         if callable(setter):
             setter(self._personal_context_runtime_enabled)
@@ -545,12 +557,20 @@ class AgentManager:
             return ACP_DEFAULT_CAPABILITIES.copy()
         return None
 
-    async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
+    async def cancel_all_inflight_work(
+        self,
+        reason: str = "[gateway ws disconnect] ",
+        *,
+        exclude_session_ids: set[str] | None = None,
+    ) -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时：取消所有已创建 Agent 实例上的在途任务。"""
         for modes in list(self.agents.values()):
             for agent in list(modes.values()):
                 try:
-                    await agent.cancel_inflight_work(reason)
+                    await agent.cancel_inflight_work(
+                        reason,
+                        exclude_session_ids=exclude_session_ids,
+                    )
                 except Exception:
                     logger.exception("[AgentManager] cancel_inflight_work failed")
 

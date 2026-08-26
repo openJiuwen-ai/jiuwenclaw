@@ -8,8 +8,11 @@ import { useState, useCallback, useEffect, useRef, memo } from 'react';
 import type { ReactNode } from 'react';
 import {
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Info,
+  MessageCircle,
   Square,
   Target,
   Volume2,
@@ -41,11 +44,23 @@ import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
 import { fileArtifactId } from '../ArtifactsPanel';
 import { openArtifactPanel } from '../../features/teamPanelState';
+import { openSingleAgentPanel } from '../../features/singleAgentPanelState';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
 import { FileIcon } from '../FileIcon';
 import { webRequest } from '../../services/webClient';
 import { useChatStore } from '../../stores/chatStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import { extractTokenFromDownloadUrl } from '../../utils/fileDownloadDedup';
+
+function openArtifactPanelForActiveMode(selectedArtifactId: string): void {
+  const sessionId = useChatStore.getState().activeSessionId;
+  const mode = useSessionStore.getState().runtimes[sessionId ?? '']?.mode ?? 'agent';
+  if (mode === 'team' || mode === 'auto_harness') {
+    openArtifactPanel(selectedArtifactId);
+    return;
+  }
+  openSingleAgentPanel('artifacts', selectedArtifactId);
+}
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -64,6 +79,108 @@ export const MarkdownMessageBody = memo(function MarkdownMessageBody({
     />
   );
 });
+
+function BtwCommandCard({
+  command,
+  output,
+}: {
+  command: string;
+  output: string;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const [answerCopied, setAnswerCopied] = useState(false);
+  const question = command.replace(/^\/btw(?:\s+|$)/i, '').trim();
+
+  const copyAnswer = useCallback(async () => {
+    if (!output) return;
+    try {
+      await navigator.clipboard.writeText(output);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = output;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+    setAnswerCopied(true);
+    window.setTimeout(() => setAnswerCopied(false), 2000);
+  }, [output]);
+
+  return (
+    <section className="chat-btw-card animate-fade-in" data-testid="chat-panel-btw-card">
+      <button
+        type="button"
+        className="chat-btw-card__header"
+        aria-expanded={expanded}
+        data-testid="chat-panel-btw-card-toggle"
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <span className="chat-btw-card__icon" aria-hidden="true">
+          <MessageCircle size={16} strokeWidth={2} />
+        </span>
+        <span className="chat-btw-card__heading">
+          <span className="chat-btw-card__badge">BTW</span>
+          <span className="chat-btw-card__title">侧问</span>
+        </span>
+        <span className="chat-btw-card__scope">快速侧问，不打断主对话（基于当前上下文）</span>
+        <span className="chat-btw-card__chevron" aria-hidden="true">
+          {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="chat-btw-card__body" data-testid="chat-panel-btw-card-body">
+          {question && (
+            <div className="chat-btw-card__question">
+              <span className="chat-btw-card__section-label">问题</span>
+              <span className="chat-btw-card__question-text">{question}</span>
+            </div>
+          )}
+          <div className="chat-btw-card__answer">
+            <div className="chat-btw-card__answer-header">
+              <span className="chat-btw-card__section-label">回答</span>
+              <button
+                type="button"
+                className="chat-btw-card__copy"
+                onClick={() => void copyAnswer()}
+                disabled={!output}
+                data-testid="chat-panel-btw-card-copy"
+              >
+                {answerCopied ? <Check size={14} strokeWidth={2.2} /> : <Copy size={14} />}
+                <span>{answerCopied ? '已复制' : '复制'}</span>
+              </button>
+            </div>
+            {output ? (
+              <MarkdownMessageBody
+                content={output}
+                className="chat-btw-card__answer-content"
+                testId="chat-panel-btw-card-answer"
+              />
+            ) : (
+              <span className="chat-btw-card__empty">暂无回答</span>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CompactCommandDivider({ output }: { output: string }) {
+  return (
+    <div
+      className="chat-compact-divider animate-fade-in"
+      data-testid="chat-panel-compact-divider"
+    >
+      <span className="chat-compact-divider__line" aria-hidden="true" />
+      <span className="chat-compact-divider__label">{output}</span>
+      <span className="chat-compact-divider__line" aria-hidden="true" />
+    </div>
+  );
+}
 
 export function TeamMemberMessageFrame({
   member,
@@ -115,7 +232,7 @@ function TeamLeaderPlainTextMessage({
         <FileDownloadList
           files={fileItems}
           className="chat-message-file-list"
-          onPreview={(index) => openArtifactPanel(fileArtifactId(fileItems[index]))}
+          onPreview={(index) => openArtifactPanelForActiveMode(fileArtifactId(fileItems[index]))}
         />
       )}
       <div className="team-member-message__plain" data-testid="chat-panel-team-leader-message-plain">
@@ -264,6 +381,10 @@ export const MessageItem = memo(function MessageItem({
     mediaItems,
     fileItems,
     isGoalObjectiveMessage,
+    isCommandOutput,
+    commandName,
+    commandInput,
+    commandOutput,
   } = message;
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
@@ -427,6 +548,33 @@ export const MessageItem = memo(function MessageItem({
 
   // 系统消息
   if (role === 'system') {
+    // slash 命令输出按命令类型路由：BTW 使用侧问卡片，compact 使用时间线分隔条，
+    // 其余命令退回通用文本；isCommandOutput 标记不会影响其他 system 消息。
+    if (isCommandOutput) {
+      const newlineIdx = content.indexOf('\n');
+      const command = commandInput ?? (newlineIdx >= 0 ? content.slice(0, newlineIdx) : content);
+      const output = commandOutput ?? (newlineIdx >= 0 ? content.slice(newlineIdx + 1).trim() : '');
+      const normalizedCommandName = commandName || command.match(/^\/([\w-]+)/)?.[1]?.toLowerCase();
+
+      if (normalizedCommandName === 'btw') {
+        return <BtwCommandCard command={command} output={output} />;
+      }
+
+      if (normalizedCommandName === 'compact') {
+        return <CompactCommandDivider output={output} />;
+      }
+
+      return (
+        <div className="flex justify-center my-2 animate-fade-in">
+          <div className="w-[85%] max-w-[44rem] px-2 py-0.5 text-xs leading-5 text-left text-text-muted">
+            <span className="font-mono">{command}</span>
+            {output && (
+              <span className="mt-0.5 block whitespace-pre-wrap break-words">{output}</span>
+            )}
+          </div>
+        </div>
+      );
+    }
  	     // 检查是否为 chat.session_result 事件
  	     if (content && content.startsWith('chat.session_result:')) {
  	       console.log('chat.session_result event:', content);
@@ -673,7 +821,7 @@ export const MessageItem = memo(function MessageItem({
                   <FileDownloadList
                     files={visibleFileItems}
                     className="chat-message-file-list"
-                    onPreview={(index) => openArtifactPanel(fileArtifactId(visibleFileItems[index]))}
+                    onPreview={(index) => openArtifactPanelForActiveMode(fileArtifactId(visibleFileItems[index]))}
                   />
                 )}
               </>
@@ -813,6 +961,24 @@ function isImportOverwriteRequired(error: unknown): boolean {
   return msg.includes('已存在') || msg.includes('force=true') || msg.includes('IMPORT_OVERWRITE');
 }
 
+const SAVED_SKILLS_KEY = 'saved_skill_tokens';
+
+function persistSavedToken(token: string) {
+  try {
+    const raw = localStorage.getItem(SAVED_SKILLS_KEY);
+    const set = raw ? new Set<string>(JSON.parse(raw)) : new Set<string>();
+    set.add(token);
+    localStorage.setItem(SAVED_SKILLS_KEY, JSON.stringify([...set]));
+  } catch { /* ignore */ }
+}
+
+function getSavedSkillTokens(): Set<string> {
+  try {
+    const raw = localStorage.getItem(SAVED_SKILLS_KEY);
+    return raw ? new Set<string>(JSON.parse(raw)) : new Set<string>();
+  } catch { return new Set<string>(); }
+}
+
 function getFileExtension(name: string): string {
   const parts = name.split('.');
   if (parts.length < 2) return '';
@@ -854,6 +1020,18 @@ function FileDownloadList({
     return () => { cancelled = true; };
   }, [files]);
 
+  // 挂载时从 localStorage 恢复已保存的技能索引
+  useEffect(() => {
+    const savedTokens = getSavedSkillTokens();
+    if (savedTokens.size === 0) return;
+    const restored = new Set<number>();
+    files.forEach((file, index) => {
+      const token = resolveFileDownloadToken(file);
+      if (token && savedTokens.has(token)) restored.add(index);
+    });
+    if (restored.size > 0) setSavedIndex(restored);
+  }, [files]);
+
   const handleDownload = async (file: FileDownloadItem, index: number) => {
     if (expiredSet.has(index) || !file.download_url) return;
 
@@ -893,6 +1071,7 @@ function FileDownloadList({
     setSavingIndex(index);
     try {
       await webRequest('skills.import_local', importParams(false));
+      persistSavedToken(downloadToken);
       setSavedIndex((prev) => new Set(prev).add(index));
       setSaveSuccessIndex(index);
       setTimeout(() => setSaveSuccessIndex(null), 2000);
@@ -903,6 +1082,7 @@ function FileDownloadList({
         if (!overwrite) return;
         try {
           await webRequest('skills.import_local', importParams(true));
+          persistSavedToken(downloadToken);
           setSavedIndex((prev) => new Set(prev).add(index));
           setSaveSuccessIndex(index);
           setTimeout(() => setSaveSuccessIndex(null), 2000);

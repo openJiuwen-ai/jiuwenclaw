@@ -209,6 +209,9 @@
   --color-extension-input-border: #cccccc;
   --color-task-index-surface: #f2f2f2;
   --color-task-card-surface: #fafafa;
+  --color-task-progress: #67C57E;
+  --color-task-progress-track: #e0e0e0;
+  --color-task-column-label: #595959;
   --color-team-overflow-surface: #edf1ff;
   --color-team-detail-surface: #f8fafc;
   --color-team-detail-text: #5d6675;
@@ -242,6 +245,6 @@
   --color-connector-tool-icon-surface: #f3f3f3;
   --color-connector-tool-icon-border: #dfdfdf;
   --color-connector-add-hover-surface: rgba(20, 118, 255, 0.06);
-
+  --color-icon-remove: #c2c2c2;
   color-scheme: light;
 }

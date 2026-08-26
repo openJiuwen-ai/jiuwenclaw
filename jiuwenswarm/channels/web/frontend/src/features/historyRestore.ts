@@ -918,6 +918,10 @@ function parseHistoryTimelineEntry(
     const isGoalObjectiveMessage =
       isTruthyHistoryFlag(record.is_goal_objective_message) ||
       isTruthyHistoryFlag(record.isGoalObjectiveMessage);
+    const rawSkills = record.skills;
+    const skills = Array.isArray(rawSkills)
+      ? rawSkills.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+      : undefined;
     return {
       kind: 'message',
       message: {
@@ -927,6 +931,7 @@ function parseHistoryTimelineEntry(
         timestamp: at,
         ...(mediaItems.length > 0 ? { mediaItems } : {}),
         ...(isGoalObjectiveMessage ? { isGoalObjectiveMessage: true } : {}),
+        ...(skills && skills.length > 0 ? { skills } : {}),
       },
     };
   }

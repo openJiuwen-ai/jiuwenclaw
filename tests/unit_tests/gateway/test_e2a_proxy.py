@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
 from jiuwenswarm.gateway.routing.agent_request_timeout import (
     AGENT_SERVER_TIMEOUT_CODE,
     AGENT_SERVER_TIMEOUT_ERROR,
@@ -116,9 +117,7 @@ async def test_proxy_agent_unavailable() -> None:
 @pytest.mark.asyncio
 async def test_proxy_uses_adapter_fallback_only_for_local_websocket_client(monkeypatch) -> None:
     """A local shared-directory AgentServer outage must preserve Web behavior."""
-    local_client_type = type("WebSocketAgentServerClient", (), {"server_ready": False})
-    local_client_type.__module__ = "jiuwenswarm.gateway.routing.agent_client"
-    local_client = local_client_type()
+    local_client = WebSocketAgentServerClient()  # server_ready defaults to False
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.gateway_adapter.session_adapter.get_all_sessions_metadata",
         lambda *, limit, offset: ([{"session_id": "legacy", "mode": "agent"}], 1),
@@ -134,9 +133,7 @@ async def test_proxy_uses_adapter_fallback_only_for_local_websocket_client(monke
 @pytest.mark.asyncio
 async def test_proxy_keeps_permissions_fallback_for_local_websocket_client(monkeypatch) -> None:
     """Permissions kept their pre-refactor shared-directory availability path."""
-    local_client_type = type("WebSocketAgentServerClient", (), {"server_ready": False})
-    local_client_type.__module__ = "jiuwenswarm.gateway.routing.agent_client"
-    local_client = local_client_type()
+    local_client = WebSocketAgentServerClient()  # server_ready defaults to False
     from jiuwenswarm.agents.harness.common.rails.permissions import permissions_config_rpc
 
     monkeypatch.setattr(
