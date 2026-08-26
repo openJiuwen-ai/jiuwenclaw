@@ -42,6 +42,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.review
     _is_allow_once_confirmation,
     _is_rejection_confirmation,
     _parse_confirmation_payload,
+    _reviewer_route_audit_extra,
     _should_degrade_auto_confirm,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.runtime_result import (
@@ -825,12 +826,16 @@ class AutoPermissionBeforeToolMixin:
                 decision_source="policy_evaluator",
             )
 
-        if (
-            facts.tool_name == "lsp"
-            and not path_policy_requires_approval
-            and terminal_low_risk_route(facts) is not None
-        ):
-            reason = "lsp_terminal_low_risk_allow"
+        structured_read_route = terminal_low_risk_route(
+            facts,
+            policy_level=policy_evaluation.level,
+            default_ask=policy_evaluation.default_ask,
+            structured_read_guard_level=(
+                policy_evaluation.structured_read_guard_level
+            ),
+        )
+        if structured_read_route is not None:
+            reason = structured_read_route.reason
             self._record_reviewer_success_metadata(
                 invocation.ctx,
                 facts,
@@ -839,6 +844,7 @@ class AutoPermissionBeforeToolMixin:
                 metadata={
                     "decision_source": "deterministic_guard",
                     "final_reviewer_status": "deterministic_allow",
+                    "reviewer_called": False,
                     "reviewer_lifecycle": "not_called",
                     "reviewer_outcome": "allow_once",
                     "reviewer_reason_code": reason,
@@ -850,6 +856,11 @@ class AutoPermissionBeforeToolMixin:
                 decision=ALLOW_LEVEL,
                 reason=reason,
                 degraded=False,
+                extra=_reviewer_route_audit_extra(
+                    structured_read_route,
+                    policy_level=policy_evaluation.level,
+                    reviewer_called=False,
+                ),
             )
             return runtime_result(None, decision_source="deterministic_guard")
 
@@ -868,21 +879,6 @@ class AutoPermissionBeforeToolMixin:
                 None,
                 decision_source="manual_approval",
                 explicit_send_authorization=True,
-            )
-
-        if (
-            not path_policy_requires_approval
-            and terminal_low_risk_route(facts) is not None
-        ):
-            self._emit_audit(
-                facts,
-                decision="allow",
-                reason="terminal_low_risk_allow",
-                degraded=False,
-            )
-            return runtime_result(
-                None,
-                decision_source="deterministic_guard",
             )
 
         if policy_evaluation.level == ALLOW_LEVEL:

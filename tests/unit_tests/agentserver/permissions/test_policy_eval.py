@@ -146,6 +146,76 @@ async def test_policy_only_falsy_tool_names_use_empty_policy_key() -> None:
     assert engine.calls == [("", {"query": "public news"})]
 
 
+async def test_structured_read_records_default_ask_and_neutral_guard() -> None:
+    engine = FakeEngine(
+        PermissionResult(
+            permission=PermissionLevel.ASK,
+            matched_rule="tiered_policy:defaults.*",
+        )
+    )
+    engine.evaluate_global_policy_directly = lambda *_args, **_kwargs: (
+        PermissionLevel.ASK,
+        "tiered_policy:defaults.*",
+    )
+    engine._file_guard = None
+    evaluator = OpenJiuwenPolicyEvaluator(FakeRail(engine=engine))
+
+    result = await evaluator.evaluate(
+        _invocation("read_file", {"file_path": "README.md"})
+    )
+
+    assert result.default_ask is True
+    assert result.structured_read_guard_level == "neutral"
+
+
+async def test_structured_read_rejects_explicit_ask_origin_and_path_ask() -> None:
+    engine = FakeEngine(
+        PermissionResult(
+            permission=PermissionLevel.ASK,
+            matched_rule="tiered_policy:tools.read_file|file_guard:defaults",
+        )
+    )
+    engine.evaluate_global_policy_directly = lambda *_args, **_kwargs: (
+        PermissionLevel.ASK,
+        "tiered_policy:tools.read_file",
+    )
+    engine._file_guard = SimpleNamespace(
+        evaluate=lambda *_args, **_kwargs: PermissionResult(
+            permission=PermissionLevel.ASK,
+            matched_rule="file_guard:defaults",
+        )
+    )
+    evaluator = OpenJiuwenPolicyEvaluator(FakeRail(engine=engine))
+
+    result = await evaluator.evaluate(
+        _invocation("read_file", {"file_path": "README.md"})
+    )
+
+    assert result.default_ask is False
+    assert result.structured_read_guard_level == "ask"
+
+
+async def test_structured_read_evidence_failures_are_unevaluable() -> None:
+    engine = FakeEngine(PermissionResult(permission=PermissionLevel.ASK))
+
+    def fail_global(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("global policy unavailable")
+
+    def fail_guard(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("file guard unavailable")
+
+    engine.evaluate_global_policy_directly = fail_global
+    engine._file_guard = SimpleNamespace(evaluate=fail_guard)
+    evaluator = OpenJiuwenPolicyEvaluator(FakeRail(engine=engine))
+
+    result = await evaluator.evaluate(
+        _invocation("read_file", {"file_path": "README.md"})
+    )
+
+    assert result.default_ask is False
+    assert result.structured_read_guard_level == "unevaluable"
+
+
 async def test_policy_only_scene_hook_rejects_before_engine() -> None:
     async def scene_hook(_inp: object) -> tuple[str, str]:
         return ("reject", "[PERMISSION_DENIED] scene")
