@@ -2,19 +2,183 @@
 
 """Pytest configuration and shared fixtures."""
 
-import os
+import inspect
 import sys
 import tempfile
 import warnings
 from importlib import import_module
 from pathlib import Path
+from types import ModuleType
 from typing import Generator
 
 import pytest
 
+from jiuwenswarm.common.openjiuwen_rail_compat import install_evolution_rail_kwargs_compat
+
+
+def _install_missing_trajectory_processor_stub() -> None:
+    """CI openjiuwen may lack TrajectorySpanProcessor; stub it for collection/runtime."""
+    try:
+        import_module("openjiuwen.agent_evolving.trajectory.processor")
+        return
+    except ModuleNotFoundError:
+        pass
+
+    from opentelemetry.sdk.trace import SpanProcessor
+
+    module = ModuleType("openjiuwen.agent_evolving.trajectory.processor")
+
+    class TrajectorySpanProcessor(SpanProcessor):
+        def on_start(self, span, parent_context=None):
+            return None
+
+        def on_end(self, span):
+            return None
+
+        def shutdown(self):
+            return None
+
+        def force_flush(self, timeout_millis: int = 30000) -> bool:
+            del timeout_millis
+            return True
+
+        def subscribe(self, *args, **kwargs):
+            del args, kwargs
+            return object()
+
+        def unsubscribe(self, *args, **kwargs):
+            del args, kwargs
+            return None
+
+        def drain(self, *args, **kwargs):
+            del args, kwargs
+            return None, ()
+
+        def suppress(self):
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+    module.TrajectorySpanProcessor = TrajectorySpanProcessor
+    sys.modules["openjiuwen.agent_evolving.trajectory.processor"] = module
+
+
+def _ensure_module(name: str) -> ModuleType:
+    """Return an existing or newly registered module by dotted name."""
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    module = ModuleType(name)
+    parent_name, _, child = name.rpartition(".")
+    if parent_name:
+        parent = _ensure_module(parent_name)
+        setattr(parent, child, module)
+    sys.modules[name] = module
+    return module
+
+
+def _install_missing_extensions_observability_stub() -> None:
+    """CI openjiuwen may lack extensions.observability; stub imports used by root spans."""
+    try:
+        import_module("openjiuwen.extensions.observability.setup")
+        import_module("openjiuwen.extensions.observability.semconv")
+        import_module("openjiuwen.extensions.observability.span_context")
+        return
+    except ModuleNotFoundError:
+        pass
+
+    _ensure_module("openjiuwen.extensions")
+    package = _ensure_module("openjiuwen.extensions.observability")
+    package.__path__ = []  # mark as package for nested imports
+
+    setup = _ensure_module("openjiuwen.extensions.observability.setup")
+
+    def _get_tracer(name: str):
+        from openjiuwen.agent_teams import observability as core_obs
+
+        return core_obs.get_tracer(name)
+
+    def _is_initialized() -> bool:
+        from openjiuwen.agent_teams import observability as core_obs
+
+        return bool(core_obs.is_initialized())
+
+    setup.get_tracer = _get_tracer
+    setup.is_initialized = _is_initialized
+
+    semconv = _ensure_module("openjiuwen.extensions.observability.semconv")
+    semconv.LANGFUSE_SESSION_ID = "langfuse.session.id"
+
+    span_context = _ensure_module("openjiuwen.extensions.observability.span_context")
+    span_context.set_current_session_id = lambda session_id=None: None
+    span_context.set_root_span = lambda span, session_id=None, **kwargs: None
+    span_context.clear_root_span = lambda: None
+
+
+def _install_span_context_session_compat() -> None:
+    """Older agent-core set_root_span has no session_id; keep telemetry tests working."""
+    try:
+        span_context = import_module("openjiuwen.extensions.observability.span_context")
+    except ModuleNotFoundError:
+        return
+
+    if not hasattr(span_context, "set_current_session_id"):
+        span_context.set_current_session_id = lambda session_id=None: None
+
+    original = getattr(span_context, "set_root_span", None)
+    if original is None:
+        span_context.set_root_span = lambda span, session_id=None, **kwargs: None
+        return
+
+    def _set_root_span(span, session_id=None, **kwargs):
+        try:
+            return original(span, session_id=session_id, **kwargs)
+        except TypeError:
+            return original(span)
+
+    span_context.set_root_span = _set_root_span
+
+
+def _filter_unsupported_kwargs(func, kwargs: dict) -> dict:
+    """Drop kwargs that ``func`` cannot accept unless it already takes **kwargs."""
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return kwargs
+    if any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    ):
+        return kwargs
+    allowed = set(signature.parameters)
+    return {key: value for key, value in kwargs.items() if key in allowed}
+
+
+def _install_init_observability_kwargs_compat() -> None:
+    """Older openjiuwen init_observability rejects additional_span_processors."""
+    try:
+        observability = import_module("openjiuwen.agent_teams.observability")
+    except ModuleNotFoundError:
+        return
+
+    original = getattr(observability, "init_observability", None)
+    if original is None or getattr(original, "_jiuwenswarm_kwargs_compat", False):
+        return
+
+    def _compat(config, *args, **kwargs):
+        return original(config, *args, **_filter_unsupported_kwargs(original, kwargs))
+
+    _compat._jiuwenswarm_kwargs_compat = True  # type: ignore[attr-defined]
+    observability.init_observability = _compat
+
 
 def pytest_configure() -> None:
     """Preload pysbd while suppressing only its known Python 3.12 escapes."""
+    _install_missing_trajectory_processor_stub()
+    _install_missing_extensions_observability_stub()
+    _install_span_context_session_compat()
+    _install_init_observability_kwargs_compat()
+    install_evolution_rail_kwargs_compat()
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",

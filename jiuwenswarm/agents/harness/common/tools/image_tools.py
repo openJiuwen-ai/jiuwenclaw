@@ -569,6 +569,29 @@ def _sanitize_filename_part(value: str, max_len: int = 48) -> str:
     return cleaned[:max_len]
 
 
+def _resolve_default_output_dir() -> Path:
+    """解析默认输出目录：优先请求级 effective_project_dir，降级到 agent workspace。
+
+    请求级 effective_project_dir 在 interface_deep.py 请求开始时通过
+    set_effective_request_workspace_dir() 设置，对应用户的项目目录。
+    """
+    try:
+        from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+            get_effective_request_workspace_dir,
+        )
+
+        req_ws = get_effective_request_workspace_dir()
+        if req_ws:
+            return Path(req_ws)
+    except ImportError:
+        logger.debug(
+            "subagent_executor.context_vars unavailable, "
+            "falling back to agent workspace dir",
+            exc_info=True,
+        )
+    return get_agent_workspace_dir()
+
+
 def _save_generated_images(response: Any, *, prompt: str, output_dir: Path | None = None) -> list[Path]:
     items = _iter_response_image_items(response)
     if not items:
@@ -582,7 +605,7 @@ def _save_generated_images(response: Any, *, prompt: str, output_dir: Path | Non
     saved: list[Path] = []
 
     if output_dir is None:
-        output_dir = get_agent_workspace_dir() / _OUTPUT_SUBDIR
+        output_dir = _resolve_default_output_dir() / _OUTPUT_SUBDIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, item in enumerate(items, start=1):

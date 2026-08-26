@@ -11,6 +11,7 @@ import {
 } from '../types';
 import { getGatewayHttpBase } from '../utils/env';
 import i18n from '../i18n';
+import { buildRuntimeIdentityHeaders } from './runtimeScope';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -21,13 +22,6 @@ const DEFAULT_TIMEOUT_MS = 15000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function pickHeaderString(value: unknown): string | undefined {
-  if (typeof value === 'string' && value.trim()) {
-    return value;
-  }
-  return undefined;
 }
 
 type HttpVerb = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -386,6 +380,27 @@ function isChatSseTerminal(eventName: string): boolean {
   return eventName === 'chat.final' || eventName === 'chat.error';
 }
 
+/**
+ * HTTP unary ``chat.interrupt`` 把 ``accepted`` 与 ``interrupt_result`` 合在同一 JSON body。
+ * 只在 Gateway 明确给出 ``event_type`` 时映射为 WS 事件，前端不伪造 success。
+ */
+export function interruptUnaryToEvents(payload: unknown): WsEvent | null {
+  if (!isRecord(payload) || payload.event_type !== 'chat.interrupt_result') {
+    return null;
+  }
+  return {
+    type: 'event',
+    event: 'chat.interrupt_result',
+    payload: { ...payload },
+  };
+}
+
+function interruptIntentOf(payload: Record<string, unknown>): string {
+  return typeof payload.intent === 'string' && payload.intent.trim()
+    ? payload.intent.trim()
+    : 'cancel';
+}
+
 function isHistorySseDone(payload: Record<string, unknown>): boolean {
   return typeof payload.status === 'string' && payload.status.trim().toLowerCase() === 'done';
 }
@@ -395,6 +410,10 @@ export class WebHttpClient {
   private handlers = new Map<string, Set<EventHandler>>();
   private stateHandlers = new Set<StateHandler>();
   private inflight = new Map<string, AbortController>();
+  /** 仍在泵的 ``chat.send`` SSE，按 session 隔离；pause/resume 不碰。 */
+  private sseInflight = new Map<string, { controller: AbortController; sessionId: string }>();
+  /** 被后续 chat.send 顶掉的 SSE，abort 后不得再发 interrupt / 不得当发送失败。 */
+  private sseSuperseded = new Set<string>();
   private connectAbort: AbortController | null = null;
   private reconnectTimer: number | null = null;
   private reconnectAttempts = 0;
@@ -524,6 +543,14 @@ export class WebHttpClient {
     }
 
     try {
+      const chatSessionId = pickHeaderString(params?.session_id);
+      if (assembled.kind === 'sse') {
+        this.abortSseInflight({ exceptRequestId: requestId, sessionId: chatSessionId });
+        this.sseInflight.set(requestId, {
+          controller,
+          sessionId: chatSessionId ?? '',
+        });
+      }
       const headers: Record<string, string> = {
         ...this.identityHeaders(requestId, params ?? {}),
         Accept: assembled.kind === 'unary' ? 'application/json' : 'text/event-stream',
@@ -557,7 +584,13 @@ export class WebHttpClient {
               ? { page_idx: params.page_idx }
               : {}),
           };
-          void this.pumpSse(response, requestId, assembled.kind, controller);
+          void this.pumpSse(
+            response,
+            requestId,
+            assembled.kind,
+            controller,
+            chatSessionId
+          );
           return accepted as T;
         }
         if (assembled.kind === 'history-stream') {
@@ -573,10 +606,31 @@ export class WebHttpClient {
 
       const payload = await this.readUnaryPayload(response, requestId);
       this.inflight.delete(requestId);
+      if (method === 'chat.interrupt') {
+        const event = interruptUnaryToEvents(payload);
+        if (event) {
+          this.dispatchEvent(event);
+          if (event.payload.success === true && interruptIntentOf(event.payload) === 'cancel') {
+            this.abortSseInflight({
+              sessionId:
+                pickHeaderString(event.payload.session_id) ??
+                pickHeaderString(params?.session_id),
+            });
+          }
+        }
+      }
       return payload as T;
     } catch (error) {
       window.clearTimeout(timeoutId);
       this.inflight.delete(requestId);
+      this.sseInflight.delete(requestId);
+      if (this.sseSuperseded.delete(requestId)) {
+        // 新 chat.send 只中止浏览器读旧 SSE，Agent 侧由 Gateway new_chat_send 取消。
+        return {
+          accepted: true,
+          session_id: typeof params?.session_id === 'string' ? params.session_id : undefined,
+        } as T;
+      }
       if (options.signal?.aborted) {
         if (assembled.kind === 'sse' && typeof params?.session_id === 'string') {
           void this.interruptChat(params.session_id, requestId);
@@ -669,12 +723,20 @@ export class WebHttpClient {
     response: Response,
     requestId: string,
     kind: 'sse' | 'history-stream',
-    controller: AbortController
+    controller: AbortController,
+    sessionId?: string
   ): Promise<void> {
     const reader = response.body?.getReader();
     if (!reader) {
       this.inflight.delete(requestId);
+      this.sseInflight.delete(requestId);
       return;
+    }
+    if (kind === 'sse') {
+      this.sseInflight.set(requestId, {
+        controller,
+        sessionId: sessionId ?? this.sseInflight.get(requestId)?.sessionId ?? '',
+      });
     }
     const decoder = new TextDecoder();
     let buffer = '';
@@ -715,6 +777,8 @@ export class WebHttpClient {
       // abort / 断流：hook 靠现有 on(chat.error) 或 inflight 归零
     } finally {
       this.inflight.delete(requestId);
+      this.sseInflight.delete(requestId);
+      this.sseSuperseded.delete(requestId);
     }
   }
 
@@ -778,16 +842,7 @@ export class WebHttpClient {
     requestId: string,
     params: Record<string, unknown>
   ): Record<string, string> {
-    const headers: Record<string, string> = { 'X-Request-Id': requestId };
-    const userId = pickHeaderString(params.user_id);
-    const groupId = pickHeaderString(params.group_id);
-    const botId = pickHeaderString(params.bot_id);
-    const sessionId = pickHeaderString(params.session_id);
-    if (userId) headers['X-User-Id'] = userId;
-    if (groupId) headers['X-Group-Id'] = groupId;
-    if (botId) headers['X-Bot-Id'] = botId;
-    if (sessionId) headers['X-Session-Id'] = sessionId;
-    return headers;
+    return buildRuntimeIdentityHeaders(requestId, params);
   }
 
   private dispatchEvent(event: WsEvent): void {
@@ -825,6 +880,28 @@ export class WebHttpClient {
       controller.abort();
     });
     this.inflight.clear();
+    this.sseInflight.clear();
+    this.sseSuperseded.clear();
+  }
+
+  private abortSseInflight(opts: { exceptRequestId?: string; sessionId?: string } = {}): void {
+    const { exceptRequestId, sessionId } = opts;
+    if (!sessionId) {
+      return;
+    }
+    const toAbort: string[] = [];
+    this.sseInflight.forEach((entry, id) => {
+      if (id === exceptRequestId || entry.sessionId !== sessionId) {
+        return;
+      }
+      toAbort.push(id);
+    });
+    for (const id of toAbort) {
+      const entry = this.sseInflight.get(id);
+      this.sseInflight.delete(id);
+      this.sseSuperseded.add(id);
+      entry?.controller.abort();
+    }
   }
 
   private updateState(state: WebConnectionState): void {

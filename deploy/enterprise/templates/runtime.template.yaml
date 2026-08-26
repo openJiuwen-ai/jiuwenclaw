@@ -1,0 +1,139 @@
+# ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: <<AGENT_RUNTIME_NAME>>-sa
+  namespace: <<NAMESPACE>>
+
+---
+# RBAC：agent-runtime 需要 CRUD AgentServer Pod（与 gateway 的 agentserver-creator 同面）
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: <<AGENT_RUNTIME_NAME>>-agentserver-creator
+  namespace: <<NAMESPACE>>
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: <<AGENT_RUNTIME_NAME>>-agentserver-binding
+  namespace: <<NAMESPACE>>
+subjects:
+  - kind: ServiceAccount
+    name: <<AGENT_RUNTIME_NAME>>-sa
+    namespace: <<NAMESPACE>>
+roleRef:
+  kind: Role
+  name: <<AGENT_RUNTIME_NAME>>-agentserver-creator
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<AGENT_RUNTIME_NAME>>
+  namespace: <<NAMESPACE>>
+  labels:
+    app: <<AGENT_RUNTIME_NAME>>
+spec:
+  replicas: <<AGENT_RUNTIME_REPLICAS>>
+  selector:
+    matchLabels:
+      app: <<AGENT_RUNTIME_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<AGENT_RUNTIME_NAME>>
+    spec:
+      serviceAccountName: <<AGENT_RUNTIME_NAME>>-sa
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - <<AGENT_RUNTIME_NAME>>
+                topologyKey: "kubernetes.io/hostname"
+      containers:
+        - name: agent-runtime
+          image: <<AGENT_RUNTIME_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: rest
+              containerPort: <<AGENT_RUNTIME_PORT>>
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: rest
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: rest
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          envFrom:
+            - secretRef:
+                name: <<SECRET_CM_NAME>>
+          env:
+            - name: AGENT_RUNTIME_MODE
+              value: "server"
+            - name: OPENJIUWEN_SERVICE_HOST
+              value: "0.0.0.0"
+            - name: OPENJIUWEN_SERVICE_PORT
+              value: "<<AGENT_RUNTIME_PORT>>"
+            - name: OPENJIUWEN_SERVICE_REDIS_URL
+              value: "redis://<<REDIS_HOST>>:<<REDIS_PORT>>/<<AGENT_RUNTIME_REDIS_DB>>"
+            - name: OPENJIUWEN_SERVICE_REQUEST_TIMEOUT_SECONDS
+              value: "<<AGENT_RUNTIME_REQUEST_TIMEOUT>>"
+            - name: OPENJIUWEN_SERVICE_DB_TYPE
+              value: "<<DB_TYPE>>"
+            - name: OPENJIUWEN_SERVICE_DB_HOST
+              value: "<<DB_HOST>>"
+            - name: OPENJIUWEN_SERVICE_DB_PORT
+              value: "<<DB_PORT>>"
+            - name: OPENJIUWEN_SERVICE_DB_NAME
+              value: "<<AGENT_RUNTIME_DB_NAME>>"
+            - name: OPENJIUWEN_SERVICE_DB_USER
+              value: "<<RUNTIME_DB_USER>>"
+            - name: OPENJIUWEN_SERVICE_DEPLOY_REPLICAS
+              value: "1"
+            - name: AGENT_RUNTIME_KUBECONFIG
+              value: ""
+            - name: AGENT_RUNTIME_DEFAULT_NAMESPACE
+              value: "<<NAMESPACE>>"
+            - name: AGENT_RUNTIME_SCOPE_FULL_TIMEOUT
+              value: "<<AGENT_RUNTIME_SCOPE_FULL_TIMEOUT>>"
+            - name: AGENT_RUNTIME_LOG_LEVEL
+              value: "<<AGENT_RUNTIME_LOG_LEVEL>>"
+            - name: TZ
+              value: "<<TIMEZONE>>"
+
+---
+# Service：ClusterIP（gateway / 其它服务经此访问 agent-runtime）
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<AGENT_RUNTIME_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  selector:
+    app: <<AGENT_RUNTIME_NAME>>
+  ports:
+    - name: rest
+      port: <<AGENT_RUNTIME_PORT>>
+      targetPort: <<AGENT_RUNTIME_PORT>>
+  type: ClusterIP

@@ -14,7 +14,11 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.trace import Span
 
-from openjiuwen.agent_teams.observability import abort_current_llm_span
+try:
+    from openjiuwen.agent_teams.observability import abort_current_llm_span
+except ImportError:
+    def abort_current_llm_span(error: BaseException) -> bool:
+        return False
 from openjiuwen.agent_teams.observability.span_context import (
     get_current_agent_span,
     get_current_llm_span,
@@ -103,7 +107,7 @@ from jiuwenswarm.telemetry.span_registry import SpanRegistryProcessor
 
 
 NAMESPACE = "jiuwenswarm.telemetry.enrichment"
-CORE_NAMESPACE = "agent_teams.observability"
+CORE_NAMESPACE = "extensions.observability"
 INPUT_PRIORITY = -100
 OUTPUT_PRIORITY = 100
 _LOGGER = logging.getLogger(__name__)
@@ -556,25 +560,10 @@ class RichTelemetryCallbacks:
 
     async def _on_llm_output(self, *args: Any, **kwargs: Any) -> Any:
         del args
-        result = kwargs.get("result")
-        if result is None:
-            result = kwargs.get("response")
-        try:
-            streaming = self._is_streaming_llm_output(kwargs)
-        except BaseException as error:
-            await self._report_llm_control_error(error, kwargs)
-            raise
-        if not streaming:
-            try:
-                span = get_current_llm_span()
-                if span is not None and span.is_recording():
-                    self._write_llm_type_attributes(span, kwargs, None)
-            except Exception:
-                _LOGGER.warning(
-                    "LLM telemetry output metadata enrichment failed",
-                    exc_info=True,
-                )
-            return result
+        # AgentCore's extension runtime closes an LLM span from every terminal
+        # ``LLM_OUTPUT`` event, including non-streaming calls. Enrich here at
+        # our higher callback priority while the core-owned span is still live;
+        # waiting for ``LLM_INVOKE_OUTPUT`` would observe an already-ended span.
         return await self._finish_llm_output(kwargs)
 
     async def _on_llm_invoke_output(self, *args: Any, **kwargs: Any) -> Any:

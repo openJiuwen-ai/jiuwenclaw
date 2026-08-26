@@ -64,6 +64,11 @@ def test_parse_rewrite_envelope_ignores_plain_message():
     assert parse_rewrite_envelope("请润色这段文字") is None
 
 
+def test_rewrite_fast_path_defaults_allow_ten_minutes_for_long_selections():
+    assert fast_path_module._MODEL_CALL_TIMEOUT_SECONDS == 600.0
+    assert fast_path_module._TOTAL_TIMEOUT_SECONDS == 600.0
+
+
 def test_parse_rewrite_envelope_bounds_input_before_regex(monkeypatch):
     monkeypatch.setattr(fast_path_module, "_REQUEST_JSON_MAX_BYTES", 32)
 
@@ -852,6 +857,28 @@ async def test_run_rewrite_fast_path_maps_model_exception_without_committing():
 
 
 @pytest.mark.asyncio
+async def test_run_rewrite_fast_path_forwards_model_call_kwargs():
+    model = AsyncMock(
+        return_value=SimpleNamespace(content=_json_result(_STRUCTURED_RESULT))
+    )
+
+    result = await run_rewrite_fast_path(
+        _query(),
+        prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
+        model_invoke=model,
+        commit_invoke=AsyncMock(return_value=_json_result({"status": "completed"})),
+        model_call_kwargs={"extra_body": {"thinking": {"type": "disabled"}}},
+    )
+
+    assert result is not None
+    assert result.status == "completed"
+    assert model.await_args.kwargs == {
+        "temperature": 0.2,
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+
+
+@pytest.mark.asyncio
 async def test_run_rewrite_fast_path_ends_on_model_call_timeout():
     async def model_never_returns(*_args, **_kwargs):
         await asyncio.Event().wait()
@@ -1081,6 +1108,13 @@ async def test_run_rewrite_fast_path_rejects_reordered_slots_after_retry():
 
 @pytest.mark.asyncio
 async def test_run_rewrite_fast_path_preserves_commit_error():
+    format_conflict = _json_result(
+        {
+            "status": "error",
+            "error_code": "FORMAT_CONFLICT",
+            "error": "rewrite changed protected inline topology",
+        }
+    )
     result = await run_rewrite_fast_path(
         _query(),
         prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
@@ -1088,20 +1122,47 @@ async def test_run_rewrite_fast_path_preserves_commit_error():
             return_value=SimpleNamespace(content=_json_result(_STRUCTURED_RESULT))
         ),
         commit_invoke=AsyncMock(
-            return_value=_json_result(
-                {
-                    "status": "error",
-                    "error_code": "FORMAT_CONFLICT",
-                    "error": "rewrite changed protected inline topology",
-                }
-            )
+            side_effect=[format_conflict, format_conflict]
         ),
     )
 
     assert result is not None
     assert result.status == "error"
     assert result.error_code == "FORMAT_CONFLICT"
-    assert result.model_calls == 1
+    assert result.model_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_run_rewrite_fast_path_retries_format_conflict_with_plain_text_prompt():
+    model = AsyncMock(
+        return_value=SimpleNamespace(content=_json_result(_STRUCTURED_RESULT))
+    )
+    commit = AsyncMock(
+        side_effect=[
+            _json_result(
+                {
+                    "status": "error",
+                    "error_code": "FORMAT_CONFLICT",
+                    "error": "rewrite changed protected inline topology",
+                }
+            ),
+            _json_result({"status": "completed"}),
+        ]
+    )
+
+    result = await run_rewrite_fast_path(
+        _query(),
+        prepare_invoke=AsyncMock(return_value=_json_result(_PREPARED)),
+        model_invoke=model,
+        commit_invoke=commit,
+    )
+
+    assert result is not None
+    assert result.status == "completed"
+    assert result.model_calls == 2
+    assert model.await_count == 2
+    assert commit.await_count == 2
+    assert "protected inline Markdown structure" in model.await_args_list[1].args[0][0]["content"]
 
 
 @pytest.mark.asyncio

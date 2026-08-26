@@ -674,6 +674,26 @@ async def test_adapter_fast_path_plain_text_has_no_tool_or_model_side_effects():
 
 
 @pytest.mark.asyncio
+async def test_adapter_disables_thinking_for_glm_rewrite_model():
+    adapter, *_ = _adapter_with_active_session()
+    adapter._model = SimpleNamespace(
+        model_config=SimpleNamespace(model_name="glm-5.2"),
+        invoke=AsyncMock(),
+    )
+
+    with patch.object(
+        interface_module,
+        "run_rewrite_fast_path",
+        new=AsyncMock(return_value=_result()),
+    ) as run_fast_path:
+        await adapter._try_deepresearch_rewrite_fast_path(_query())
+
+    assert run_fast_path.await_args.kwargs["model_call_kwargs"] == {
+        "extra_body": {"thinking": {"type": "disabled"}}
+    }
+
+
+@pytest.mark.asyncio
 async def test_rewrite_transaction_holds_core_send_then_control_locks_through_persist():
     adapter, *_ = _adapter_with_active_session()
     result = _result()

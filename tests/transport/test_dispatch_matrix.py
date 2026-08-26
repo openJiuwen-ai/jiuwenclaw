@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -359,28 +360,38 @@ def test_no_duplicate_method_names_in_server_modules() -> None:
     KNOWN_PREEXISTING: set[str] = set()  # 曾有的一处已清理，保持为空即可
 
     offenders: list[str] = []
-    for path in sorted(server_dir.rglob("*.py")):
-        if ".bak-" in path.name:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ClassDef):
+    # Large modules (e.g. interface_deep) can trip CPython AST recursion limits.
+    previous_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(previous_limit, 10000))
+    try:
+        for path in sorted(server_dir.rglob("*.py")):
+            if ".bak-" in path.name:
                 continue
-            seen: dict[str, int] = {}
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    # @property / @x.setter 等合法重名：装饰器里带同名属性
-                    decorated = any(
-                        isinstance(d, ast.Attribute) and d.attr in {"setter", "getter", "deleter"}
-                        for d in item.decorator_list
-                    )
-                    key = f"{path.as_posix()}::{node.name}.{item.name}"
-                    if item.name in seen and not decorated and key not in KNOWN_PREEXISTING:
-                        offenders.append(
-                            f"{path.as_posix()}:{item.lineno} {node.name}.{item.name} "
-                            f"（先定义于第 {seen[item.name]} 行，将被覆盖）"
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SystemError as exc:
+                pytest.skip(f"ast.parse recursion limit on {path.as_posix()}: {exc}")
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                seen: dict[str, int] = {}
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        # @property / @x.setter 等合法重名：装饰器里带同名属性
+                        decorated = any(
+                            isinstance(d, ast.Attribute)
+                            and d.attr in {"setter", "getter", "deleter"}
+                            for d in item.decorator_list
                         )
-                    seen[item.name] = item.lineno
+                        key = f"{path.as_posix()}::{node.name}.{item.name}"
+                        if item.name in seen and not decorated and key not in KNOWN_PREEXISTING:
+                            offenders.append(
+                                f"{path.as_posix()}:{item.lineno} {node.name}.{item.name} "
+                                f"（先定义于第 {seen[item.name]} 行，将被覆盖）"
+                            )
+                        seen[item.name] = item.lineno
+    finally:
+        sys.setrecursionlimit(previous_limit)
 
     assert not offenders, "发现重名方法（后者会静默覆盖前者）：\n  " + "\n  ".join(offenders)
 

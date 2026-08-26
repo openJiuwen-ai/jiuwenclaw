@@ -29,7 +29,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
 from openjiuwen.harness.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
@@ -118,6 +117,7 @@ _TEAM_SHARED_RAIL_NAMES: frozenset[str] = frozenset(
         registry.SKILL_RETRIEVAL_PROMPT,
         registry.SYMPHONY_ORCHESTRATION_PROMPT,
         registry.MEMBER_SKILL_TOOLKIT,
+        registry.DISABLED_TOOLS,
     }
 )
 
@@ -186,12 +186,7 @@ class _FakeEvolutionRail:
 
 
 class _FakeMemberSkillEvolutionRail(_FakeEvolutionRail):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.bound_sink = None
-
-    def set_trajectory_sink(self, sink, *, team_id, member_role) -> None:
-        self.bound_sink = (sink, team_id, member_role)
+    pass
 
 
 def _assert_evolution_approval_stack(
@@ -421,6 +416,7 @@ def test_build_member_capability_specs_rail_names(
 ) -> None:
     """Each role gets the common rails plus its role-specific extra rails."""
     config = {
+        "react": {"disabled_tools": ["search_skill", "install_skill"]},
         "agents": {
             "leader": {"skills": ["alpha"]},
             "teammate": {"skills": ["beta"]},
@@ -436,8 +432,14 @@ def test_build_member_capability_specs_rail_names(
 
     assert _TEAM_SHARED_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    assert len(_TEAM_SHARED_RAIL_NAMES) == 15
+    assert len(_TEAM_SHARED_RAIL_NAMES) == 16
     assert rail_names == expected
+    disabled_tools = next(
+        spec for spec in rails_specs if spec.type == registry.DISABLED_TOOLS
+    )
+    assert disabled_tools.params == {
+        "disabled_tools": ["search_skill", "install_skill"]
+    }
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
     logger.info("%s rails: %s", role, sorted(rail_names))
@@ -899,7 +901,6 @@ def test_swarm_build_context_seed_round_trip_preserves_language() -> None:
     restored = SwarmBuildContext.from_seed(
         context.to_seed(),
         config={},
-        trajectory_registry=None,
     )
 
     assert restored.language == "en"
@@ -1430,6 +1431,11 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         lambda config: (object(), "model"),
     )
     monkeypatch.setattr(evolution_rails, "load_execution_disabled_skills", lambda: [])
+    monkeypatch.setattr(
+        evolution_rails,
+        "get_trajectory_span_processor",
+        lambda: object(),
+    )
 
     ctx = SwarmBuildContext(
         language="cn",
@@ -1439,7 +1445,6 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         team_id="t",
         team_ws_root=str(tmp_path),
         team_skills_dir=str(tmp_path / "skills"),
-        trajectory_registry=object(),
         config={},
     )
 
@@ -1505,7 +1510,6 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         team_skills_dir="/tmp/team-skills",
         team_id="team-1",
         config={},
-        trajectory_registry=object(),
     )
 
     rail.init(SimpleNamespace(card=SimpleNamespace(name="leader")))
@@ -1534,8 +1538,13 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         lambda config: (object(), "model"),
     )
     monkeypatch.setattr(evolution_rails, "load_execution_disabled_skills", lambda: [])
+    processor = object()
+    monkeypatch.setattr(
+        evolution_rails,
+        "get_trajectory_span_processor",
+        lambda: processor,
+    )
 
-    registry_obj = object()
     ctx = SwarmBuildContext(
         language="en",
         role="teammate",
@@ -1543,7 +1552,6 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         channel="web",
         team_id="t",
         team_skills_dir=str(tmp_path / "skills"),
-        trajectory_registry=registry_obj,
         config={},
     )
 
@@ -1559,9 +1567,10 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         language="en",
     )
     assert rail.kwargs["language"] == "en"
-    assert "signal_trigger" not in rail.kwargs
+    assert rail.kwargs["signal_trigger"] is True
+    assert rail.kwargs["review_trigger"] is False
     assert rail.kwargs["auto_save"] is True
-    assert rail.bound_sink == (registry_obj, "t", "teammate")
+    assert rail.kwargs["trajectory_span_processor"] is processor
 
 
 def test_rail_spec_build_flattens_single_and_list_provider_returns() -> None:
@@ -1600,12 +1609,11 @@ def test_team_skill_create_rail_registers_full_workspace(
     An empty workspace info previously broke ``update_evolution_config`` rebuilds
     (``build_member_rails`` skips the leader branch without ``skills_dir``). This
     asserts the rail-mount context now carries root_dir / skills_dir / team_id /
-    config / trajectory_registry from the build context.
+    config from the build context.
     """
     register_swarm_providers()
     monkeypatch.setenv("SKILL_CREATE", "true")
 
-    registry_obj = object()
     config = {"react": {"evolution": {"skill_create": True}}}
     ctx = SwarmBuildContext(
         language="cn",
@@ -1617,7 +1625,6 @@ def test_team_skill_create_rail_registers_full_workspace(
         team_ws_root="/tmp/team-x",
         team_skills_dir="/tmp/team-x/skills",
         global_skills_dir="/tmp/global",
-        trajectory_registry=registry_obj,
         config=config,
     )
 
@@ -1655,7 +1662,6 @@ def test_team_skill_create_rail_registers_full_workspace(
     assert workspace.skills_dir == "/tmp/team-x/skills"
     assert workspace.team_id == "t"
     assert workspace.config == config
-    assert workspace.trajectory_registry is registry_obj
 
 
 # ---------------------------------------------------------------------------
@@ -1684,6 +1690,7 @@ _EXPECTED_CODE_RAIL_NAMES_LEADER: frozenset[str] = frozenset(
         registry.MEMBER_SKILL_TOOLKIT,
         registry.TEAM_WORKSPACE_REPORT_PATH,
         registry.PLUGIN_RAILS,
+        registry.DISABLED_TOOLS,
     }
 )
 
@@ -2200,7 +2207,6 @@ def test_code_member_builds_declaratively_without_post_processing(
         team_ws_root=str(tmp_path),
         team_skills_dir=str(tmp_path / "skills"),
         global_skills_dir=str(tmp_path / "global"),
-        trajectory_registry=InMemoryTrajectoryRegistry(),
         config=config,
     )
     agent = spec.build(context=ctx)
@@ -2273,7 +2279,6 @@ def test_swarm_build_context_seed_round_trip() -> None:
         team_ws_root="/tmp/ws",
         team_skills_dir="/tmp/ws/skills",
         global_skills_dir="/tmp/global",
-        trajectory_registry=InMemoryTrajectoryRegistry(),
         config={"team": {}},
     )
     seed = base.to_seed()
@@ -2285,15 +2290,12 @@ def test_swarm_build_context_seed_round_trip() -> None:
         "workspace",
         "member_card_id",
         "config",
-        "trajectory_registry",
     ):
         assert excluded not in seed
 
-    registry_obj = InMemoryTrajectoryRegistry()
     restored = SwarmBuildContext.from_seed(
         seed,
         config={"k": "v"},
-        trajectory_registry=registry_obj,
     )
     assert restored.session_id == "s1"
     assert restored.mode == "code.team"
@@ -2305,11 +2307,10 @@ def test_swarm_build_context_seed_round_trip() -> None:
     assert restored.language == "cn"
     # Non-serializable handles are sourced from the receiver, not the seed.
     assert restored.config == {"k": "v"}
-    assert restored.trajectory_registry is registry_obj
 
 
-def test_build_context_factory_rebuilds_and_shares_registry() -> None:
-    """The registered factory rebuilds a context and shares per-team registries."""
+def test_build_context_factory_rebuilds_context() -> None:
+    """The registered factory rebuilds a context from a serializable seed."""
     from openjiuwen.agent_teams.schema.build_context import build_context_from_seed
 
     register_swarm_providers()
@@ -2321,15 +2322,14 @@ def test_build_context_factory_rebuilds_and_shares_registry() -> None:
     assert ctx.project_dir == "/p"
     # config is sourced locally (this process's config.yaml), not from the seed.
     assert ctx.config is not None
-    assert ctx.trajectory_registry is not None
 
-    # Same (session, team) shares a registry; a different team is isolated.
     again = build_context_from_seed(seed)
-    assert again.trajectory_registry is ctx.trajectory_registry
+    assert again.mode == ctx.mode
+    assert again.project_dir == ctx.project_dir
     other = build_context_from_seed(
         {"session_id": "s", "team_id": "t2", "mode": "team"}
     )
-    assert other.trajectory_registry is not ctx.trajectory_registry
+    assert other.team_id == "t2"
 
 
 def test_enrich_sets_serializable_build_context_seed() -> None:
@@ -2382,7 +2382,6 @@ def test_distributed_member_rebuild_reconstructs_build_context() -> None:
     assert rebuilt.build_context.mode == "code.team"
     assert rebuilt.build_context.project_dir == "/tmp/proj"
     assert rebuilt.build_context.config is not None
-    assert rebuilt.build_context.trajectory_registry is not None
     # Idempotent: a second call does not replace the rebuilt context.
     existing = rebuilt.build_context
     rebuilt.materialize_build_context()

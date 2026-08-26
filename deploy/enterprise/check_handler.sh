@@ -9,6 +9,35 @@ check_cmd() {
     fi
 }
 
+check_boolean_value() {
+    local name="$1"
+    local value="${DEPLOY_VARS["${name}"]:-}"
+    if [[ "${value}" != "true" && "${value}" != "false" ]]; then
+        error "${name} must be true or false, current value: ${value}"
+    fi
+}
+
+check_user_web_embedding_config() {
+    check_boolean_value "ENABLE_USER_WEB_EMBEDDING"
+    check_boolean_value "IS_UP_MANAGER_WEB"
+
+    if [[ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" \
+        && "${DEPLOY_VARS["IS_UP_MANAGER_WEB"]}" != "true" ]]; then
+        error "ENABLE_USER_WEB_EMBEDDING=true requires IS_UP_MANAGER_WEB=true"
+    fi
+}
+
+module_is_selected() {
+    local expected="$1"
+    local module=""
+    for module in "${MODULES[@]}"; do
+        if [ "${module}" == "${expected}" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 check_yq() {
     local YQ_VERSION=$(yq --version 2>&1)
 
@@ -142,7 +171,7 @@ check_if_db_up() {
             mysql)
                 DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
                 DEPLOY_VARS["DB_PORT"]="3306"
-                for module in GATEWAY WEB MANAGER IDENTITY
+                for module in GATEWAY WEB MANAGER IDENTITY RUNTIME
                 do
                     DEPLOY_VARS["${module}_DB_USER"]="root"
                     DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
@@ -151,7 +180,7 @@ check_if_db_up() {
             postgresql)
                 DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
                 DEPLOY_VARS["DB_PORT"]="5432"
-                for module in GATEWAY WEB MANAGER IDENTITY
+                for module in GATEWAY WEB MANAGER IDENTITY RUNTIME
                 do
                     DEPLOY_VARS["${module}_DB_USER"]="postgres"
                     DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRESQL_PASSWORD"]}
@@ -170,7 +199,7 @@ check_if_db_up() {
         error "Please define DB_PORT in .env.custom"
     fi
 
-    for module in GATEWAY WEB MANAGER IDENTITY
+    for module in GATEWAY WEB MANAGER IDENTITY RUNTIME
     do
         if [ -z "${DEPLOY_VARS["${module}_DB_USER"]:-}" ]; then
             DEPLOY_VARS["${module}_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
@@ -209,14 +238,15 @@ check_if_obs_up() {
 }
 
 check_if_redis_up() {
-    local mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]:-standalone}"
-    local name="${DEPLOY_VARS["REDIS_NAME"]}"
-
-    if [[ "${mode}" != "active-standby" ]]; then
-        info "DEPLOYMENT_MODE=${mode}, skip Redis check"
+    # 已经执行过检查，直接返回，避免重复校验
+    if [[ "${DEPLOY_VARS["REDIS_CHECKED"]:-}" == "true" ]]; then
         return
     fi
 
+    local mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]}"
+    local name="${DEPLOY_VARS["REDIS_NAME"]}"
+
+    DEPLOY_VARS["REDIS_CHECKED"]="true"
     if [ -n "${DEPLOY_VARS["REDIS_HOST"]:-}" ]; then
         info "Use external Redis server"
         DEPLOY_VARS["ENABLE_EXTERNAL_REDIS"]="true"
@@ -229,7 +259,7 @@ check_if_redis_up() {
     fi
 
     info "Use built-in Redis server"
-    DEPLOY_VARS["REDIS_HOST"]="${name}.default.svc.cluster.local"
+    DEPLOY_VARS["REDIS_HOST"]="${name}.default"
     DEPLOY_VARS["REDIS_PORT"]="6379"
 }
 
@@ -412,6 +442,14 @@ check_gateway_up_dependency(){
 }
 
 check_web_up_dependency(){
+    check_user_web_embedding_config
+    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ] \
+        && ! module_is_selected "MANAGER"; then
+        if ! check_k8s_resource_exists \
+            "deployment" "${DEPLOY_VARS["MANAGER_WEB_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
+            error "Embedded User Web requires the Manager Web module to be deployed"
+        fi
+    fi
     check_if_db_up
     check_if_obs_up
 
@@ -421,6 +459,19 @@ check_web_up_dependency(){
 }
 
 check_manager_up_dependency(){
+    check_user_web_embedding_config
+    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ] \
+        && ! module_is_selected "WEB"; then
+        if ! check_k8s_resource_exists \
+            "deployment" "${DEPLOY_VARS["WEB_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
+            error "Embedded User Web requires the Web module to be deployed"
+        fi
+    fi
     #check_if_rabbitmq_up
     check_if_db_up
+}
+
+check_runtime_up_dependency(){
+    check_if_db_up
+    check_if_redis_up
 }

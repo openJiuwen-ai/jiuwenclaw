@@ -2356,6 +2356,12 @@ def _write_report_markdown_once(
                     "version_base_stem": paths.version.base_stem,
                     "citations": bundle.citations,
                     "inference_manifest": bundle.inference_manifest,
+                    "inference_graph_path": bundle.inference_graph_path,
+                    "inference_graph_sha256": (
+                        hashlib.sha256(bundle.inference_graph_bytes).hexdigest()
+                        if bundle.inference_graph_bytes is not None
+                        else ""
+                    ),
                     "chart_manifest": bundle.chart_manifest,
                     "rewrite_history": [],
                 }

@@ -1,28 +1,31 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Runtime Management Extension."""
+"""Runtime Routing Extension（route → HTTP → touch，不管理 AgentServer 生命周期）。"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 
-from jiuwenclaw.extensions import ExtensionConfig
-from jiuwenclaw.extensions.sdk.agent_server_client import AgentServerClientExtension
+from jiuwenswarm.extensions.sdk.agent_server_client import AgentServerClientExtension
+from jiuwenswarm.extensions.types import ExtensionConfig
+from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
+
+from .runtime_routed_client import RuntimeRoutedAgentClient
 
 logger = logging.getLogger(__name__)
 
 
 class RuntimeManagementExtension(AgentServerClientExtension):
-    """Runtime 管理扩展。"""
+    """Runtime 路由扩展：注册 session route + HTTP 发送客户端（不含 Pod/配置下发）。"""
 
-    def __init__(self, client: RuntimeManagementAgentClient) -> None:
+    def __init__(self, client: AgentServerClient) -> None:
         self._client = client
 
     async def initialize(self, config: ExtensionConfig) -> None:
         return None
 
-    def get_client(self) -> RuntimeManagementAgentClient:
+    def get_client(self) -> AgentServerClient:
         return self._client
 
     async def shutdown(self) -> None:
@@ -32,13 +35,13 @@ class RuntimeManagementExtension(AgentServerClientExtension):
             logger.warning("[RuntimeManagement] shutdown error: %s", exc)
 
     def setup_gateway_shutdown_signals(self, shutdown_requested: asyncio.Event) -> None:
-        """Gateway 调用：注册 SIGINT/SIGTERM；退出路径由 Gateway ``finally`` 里 ``await client.disconnect()``（与本扩展 shutdown 一致）。"""
+        """Gateway 调用：注册 SIGINT/SIGTERM；退出路径由 Gateway ``finally`` 里 ``await client.disconnect()``。"""
         import signal
         import sys
 
         logger.info(
             "[RuntimeManagement] 注册停机信号处理器（K8s 删 Pod/SIGINT）；"
-            "退出时将执行 RuntimeManagementAgentClient.disconnect()。"
+            "退出时将执行 AgentServerClient.disconnect()。"
         )
 
         def _on_signal() -> None:
@@ -64,16 +67,8 @@ class RuntimeManagementExtension(AgentServerClientExtension):
 
 
 async def register_extensions(registry) -> list[RuntimeManagementExtension]:
-    """注册 Runtime Management 扩展。"""
-    from openjiuwen_runtime.foundation.log import setup_logging
-
-    log_file = setup_logging()
-    if log_file:
-        logger.info("[RuntimeManagement] runtime SDK log file: %s", log_file)
-
-    from .runtime_management_client import RuntimeManagementAgentClient
-
-    client = RuntimeManagementAgentClient()
+    """注册 Runtime 路由扩展。"""
+    client = RuntimeRoutedAgentClient()
     ext = RuntimeManagementExtension(client)
     registry.register_agent_server_client(ext)
     return [ext]

@@ -77,6 +77,49 @@ def test_reload_plan_adds_new_progressive_rail_when_enabled():
     assert adapter._progressive_tool_rail is new_rail
 
 
+def test_reload_plan_replaces_disabled_tools_rail():
+    adapter = _rail_plan_adapter()
+    old_rail = MagicMock(name="old-disabled-tools-rail")
+    new_rail = MagicMock(name="new-disabled-tools-rail")
+    adapter._disabled_tools_rail = old_rail
+    adapter._build_disabled_tools_rail = MagicMock(return_value=new_rail)
+
+    rails, rails_to_unregister = adapter._get_current_agent_rails(
+        {"disabled_tools": ["search_skill"]},
+        {"react": {"disabled_tools": ["search_skill"]}},
+    )
+
+    assert new_rail in rails
+    assert old_rail not in rails
+    assert rails_to_unregister == [old_rail]
+    assert adapter._disabled_tools_rail is new_rail
+
+
+def test_reload_plan_retires_disabled_tools_rail_when_blacklist_is_cleared():
+    adapter = _rail_plan_adapter()
+    old_rail = MagicMock(name="old-disabled-tools-rail")
+    adapter._disabled_tools_rail = old_rail
+
+    rails, rails_to_unregister = adapter._get_current_agent_rails(
+        {"disabled_tools": []},
+        {"react": {"disabled_tools": []}},
+    )
+
+    assert old_rail not in rails
+    assert rails_to_unregister == [old_rail]
+    assert adapter._disabled_tools_rail is None
+
+    # A later partial reload that omits disabled_tools must not resurrect the
+    # retired rail from a stale adapter attribute.
+    rails, rails_to_unregister = adapter._get_current_agent_rails(
+        {}, {"react": {}}
+    )
+
+    assert old_rail not in rails
+    assert rails_to_unregister == []
+    assert adapter._disabled_tools_rail is None
+
+
 def test_reload_plan_stages_filesystem_rail_when_profile_disables_it():
     adapter = _rail_plan_adapter()
     old_rail = MagicMock(name="old-filesystem-rail")

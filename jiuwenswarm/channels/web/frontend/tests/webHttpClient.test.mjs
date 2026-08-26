@@ -5,6 +5,7 @@ import {
   assembleWebRest,
   consumeSseBuffer,
   historyPageToEvents,
+  interruptUnaryToEvents,
   lookupWebRestRoute,
   RestAssemblyError,
   sseFrameToWsEvent,
@@ -362,5 +363,29 @@ test('empty history JSON page still emits done', () => {
   const events = historyPageToEvents({ messages: [], page_idx: 1, total_pages: 1 }, 'sid');
   assert.equal(events.length, 1);
   assert.equal(events[0].payload.status, 'done');
+});
+
+test('interrupt unary maps only real interrupt_result, never forges success', () => {
+  assert.equal(interruptUnaryToEvents({ accepted: true, session_id: 's1' }), null);
+  assert.equal(interruptUnaryToEvents({ accepted: true, intent: 'cancel' }), null);
+  const event = interruptUnaryToEvents({
+    accepted: true,
+    session_id: 's1',
+    event_type: 'chat.interrupt_result',
+    intent: 'cancel',
+    success: true,
+    message: '任务已取消',
+  });
+  assert.equal(event.event, 'chat.interrupt_result');
+  assert.equal(event.payload.success, true);
+  assert.equal(event.payload.intent, 'cancel');
+  const pause = interruptUnaryToEvents({
+    event_type: 'chat.interrupt_result',
+    intent: 'pause',
+    success: true,
+    message: '任务已暂停',
+    session_id: 's1',
+  });
+  assert.equal(pause.payload.intent, 'pause');
 });
 

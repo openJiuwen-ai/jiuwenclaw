@@ -77,6 +77,8 @@ spec:
               value: "<<DB_USER>>"
             - name: MANAGER_DB_NAME
               value: "manager"
+            - name: IDENTITY_PUBLIC_KEY_URL
+              value: "http://jiuwenclaw-identity:8770/v1/auth/public_key"
             - name: MANAGER_WS_ENABLED
               value: "true"
             - name: MANAGER_WS_HOST

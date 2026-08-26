@@ -12,7 +12,7 @@ parse_args() {
                 CMD="${args[$i]}"
                 i=$((i+1))
                 ;;
-            nfs|nfs-sc|rabbitmq|mysql|redis|postgresql|minio|log|jina|gateway|web|manager)
+            nfs|nfs-sc|rabbitmq|mysql|redis|postgresql|minio|log|jina|gateway|web|manager|runtime)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
@@ -51,7 +51,7 @@ parse_args() {
 }
 
 process_modules() {
-    MODULES=("GATEWAY" "WEB" "MANAGER")
+    MODULES=("GATEWAY" "WEB" "MANAGER" "RUNTIME")
 }
 
 # Print help info and exit

@@ -1,73 +1,94 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""module_importer：按需加载 manager_ws_client EE 扩展子模块。"""
+"""module_importer：按需加载 manager_config_receiver EE 扩展子模块。"""
 
 from __future__ import annotations
 
-import importlib
-from pathlib import Path
+import sys
+import types
 
 import pytest
 
-from jiuwenswarm.infrastructure.module_importer import (
-    MANAGER_WS_CLIENT_EXT_PKG,
-    ensure_manager_ws_client_package,
-    import_manager_ws_client_module,
-    is_manager_ws_client_available,
-    resolve_manager_ws_client_root,
-)
+from jiuwenswarm.infrastructure import module_importer as mi
 
 
-def test_resolve_manager_ws_client_root_finds_bundled_extension() -> None:
-    root = resolve_manager_ws_client_root()
-    assert root is not None
-    assert (root / "infrastructure" / "db.py").is_file()
-    assert is_manager_ws_client_available()
-
-
-def test_import_manager_ws_client_module_requires_suffix() -> None:
-    with pytest.raises(ValueError, match="module_suffix is required"):
-        import_manager_ws_client_module("")
-
-
-def test_resolve_manager_ws_client_root_honors_extension_dirs(
+def test_import_manager_config_receiver_module_uses_loaded_extension(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    ext_root = tmp_path / "manager_ws_client"
-    (ext_root / "infrastructure").mkdir(parents=True)
-    (ext_root / "infrastructure" / "db.py").write_text("# stub\n", encoding="utf-8")
-    monkeypatch.setenv("EXTENSION_DIRS", str(tmp_path))
-    assert resolve_manager_ws_client_root() == ext_root.resolve()
+    parent = types.ModuleType("jiuwenswarm.loaded_extension")
+    parent.__path__ = []
+    root = types.ModuleType("jiuwenswarm.loaded_extension.manager_config_receiver")
+    root.__path__ = []
+    stub = types.ModuleType(
+        "jiuwenswarm.loaded_extension.manager_config_receiver.stubmod"
+    )
+    stub.VALUE = 7
+
+    monkeypatch.setitem(sys.modules, "jiuwenswarm.loaded_extension", parent)
+    monkeypatch.setitem(
+        sys.modules, "jiuwenswarm.loaded_extension.manager_config_receiver", root
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "jiuwenswarm.loaded_extension.manager_config_receiver.stubmod",
+        stub,
+    )
+
+    mod = mi.import_manager_config_receiver_module("stubmod")
+    assert mod is stub
+    assert mod.VALUE == 7
 
 
-def test_import_manager_ws_client_module_loads_stub_module(
+def test_import_manager_ws_client_module_is_alias(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    ext_root = tmp_path / "manager_ws_client"
-    (ext_root / "infrastructure").mkdir(parents=True)
-    (ext_root / "infrastructure" / "db.py").write_text("# stub\n", encoding="utf-8")
-    (ext_root / "stubmod.py").write_text("VALUE = 42\n", encoding="utf-8")
-    monkeypatch.setenv("EXTENSION_DIRS", str(tmp_path))
+    parent = types.ModuleType("jiuwenswarm.loaded_extension")
+    parent.__path__ = []
+    root = types.ModuleType("jiuwenswarm.loaded_extension.manager_config_receiver")
+    root.__path__ = []
+    stub = types.ModuleType(
+        "jiuwenswarm.loaded_extension.manager_config_receiver.aliasmod"
+    )
 
-    ensure_manager_ws_client_package()
-    mod = import_manager_ws_client_module("stubmod")
-    assert mod.VALUE == 42
-    assert mod.__name__ == f"{MANAGER_WS_CLIENT_EXT_PKG}.stubmod"
+    monkeypatch.setitem(sys.modules, "jiuwenswarm.loaded_extension", parent)
+    monkeypatch.setitem(
+        sys.modules, "jiuwenswarm.loaded_extension.manager_config_receiver", root
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "jiuwenswarm.loaded_extension.manager_config_receiver.aliasmod",
+        stub,
+    )
+
+    assert mi.import_manager_ws_client_module("aliasmod") is stub
 
 
-def test_import_manager_ws_client_module_table_init() -> None:
-    openjiuwen_runtime = pytest.importorskip("openjiuwen_runtime")
-    _ = openjiuwen_runtime
-    mod = import_manager_ws_client_module("models.table_init")
-    assert hasattr(mod, "init_all_tables")
-    assert hasattr(mod, "ALL_TABLE_DEFINITIONS")
-    table_names = {table.table_name for table in mod.ALL_TABLE_DEFINITIONS}
-    assert "session_map" in table_names
+def test_import_manager_config_receiver_module_falls_back_to_manager_ws_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = types.ModuleType("jiuwenswarm.loaded_extension")
+    parent.__path__ = []
+    legacy = types.ModuleType("jiuwenswarm.loaded_extension.manager_ws_client")
+    legacy.__path__ = []
+    stub = types.ModuleType(
+        "jiuwenswarm.loaded_extension.manager_ws_client.legacy_stub"
+    )
+    stub.OK = True
 
+    # 清掉可能已存在的新扩展缓存，强制走旧名回退。
+    for key in list(sys.modules):
+        if "loaded_extension.manager_config_receiver" in key:
+            monkeypatch.delitem(sys.modules, key, raising=False)
 
-def test_import_manager_ws_client_module_gateway_db() -> None:
-    openjiuwen_runtime = pytest.importorskip("openjiuwen_runtime")
-    _ = openjiuwen_runtime
-    mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
-    assert hasattr(mod, "GatewayDb")
+    monkeypatch.setitem(sys.modules, "jiuwenswarm.loaded_extension", parent)
+    monkeypatch.setitem(
+        sys.modules, "jiuwenswarm.loaded_extension.manager_ws_client", legacy
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "jiuwenswarm.loaded_extension.manager_ws_client.legacy_stub",
+        stub,
+    )
+
+    mod = mi.import_manager_config_receiver_module("legacy_stub")
+    assert mod is stub
+    assert mod.OK is True

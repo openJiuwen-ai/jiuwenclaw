@@ -72,19 +72,27 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return out
 
 
+def _poll_table_filters(table: str, jiuwenclaw_id: str) -> dict[str, Any]:
+    """channel_config 为全局表（当前 MySQL 无 jiuwenclaw_id 列），不按实例过滤。"""
+    if table == "channel_config":
+        return {}
+    jid = str(jiuwenclaw_id or "").strip()
+    return {"jiuwenclaw_id": jid} if jid else {}
+
+
 async def _list_records_via_ee_handler(
     table: str,
     jiuwenclaw_id: str,
 ) -> list[dict[str, Any]] | None:
     try:
-        from jiuwenswarm.infrastructure.module_importer import import_manager_ws_client_module
+        from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
 
-        db_mod = import_manager_ws_client_module("infrastructure.db")
+        db_mod = import_manager_config_receiver_module("infrastructure.db")
         ensure_db_handler = getattr(db_mod, "ensure_db_handler", None)
         if ensure_db_handler is None:
             return None
         handler = await ensure_db_handler()
-        rows = await handler.list_records(table, {"jiuwenclaw_id": jiuwenclaw_id})
+        rows = await handler.list_records(table, _poll_table_filters(table, jiuwenclaw_id))
         return [_row_to_dict(row) for row in rows]
     except Exception as exc:  # noqa: BLE001
         logger.debug("[ConfigPoll] EE DB handler unavailable for %s: %s", table, exc)
@@ -96,7 +104,7 @@ async def list_table_records(table: str, jiuwenclaw_id: str) -> list[dict[str, A
         logger.warning("[ConfigPoll] unsupported table: %s", table)
         return []
     jid = str(jiuwenclaw_id or "").strip()
-    if not jid:
+    if table != "channel_config" and not jid:
         return []
 
     ee_rows = await _list_records_via_ee_handler(table, jid)
@@ -105,4 +113,7 @@ async def list_table_records(table: str, jiuwenclaw_id: str) -> list[dict[str, A
 
     from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 
-    return await gateway_db.list_records(table, filters={"jiuwenclaw_id": jid})
+    return await gateway_db.list_records(
+        table,
+        filters=_poll_table_filters(table, jid),
+    )

@@ -2,7 +2,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from openjiuwen.agent_evolving.trajectory import FileTrajectoryStore
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
@@ -167,6 +166,13 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
     monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "en")
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     monkeypatch.delenv("SKILL_CREATE", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "get_passive_skill_evolution_triggers",
+        lambda _config: {"signal_trigger": True, "review_trigger": False},
+    )
     monkeypatch.setattr(interface_deep_module, "get_skill_create_enabled", lambda _config: False)
 
     configure_calls = []
@@ -191,14 +197,14 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
     assert isinstance(registered[1], _FakeSkillEvolutionRail)
     assert len(configure_calls) == 1
     call = dict(configure_calls[0])
-    store = call.pop("trajectory_store")
-    assert isinstance(store, FileTrajectoryStore)
-    assert store._base_dir == JiuWenSwarmDeepAdapter._resolve_evolution_trajectory_dir()  # pylint: disable=protected-access
+    processor = call.pop("trajectory_span_processor")
+    assert processor is not None
     assert call == {
         "skills_dir": adapter._resolve_skill_dirs(),  # pylint: disable=protected-access
         "llm": adapter._model,  # pylint: disable=protected-access
         "model": "default-model",
         "review_trigger": False,
+        "signal_trigger": True,
         # Rail always persists experiences; config auto_save only gates version merge.
         "auto_save": True,
         # Execution-disabled + package builtins (sorted by merge_evolution_disabled_skills).

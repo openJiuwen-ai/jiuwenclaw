@@ -202,7 +202,6 @@ def test_attribute_fields_are_params_env_fields_are_context() -> None:
             "evolution_model_config": "params",
             "review_trigger": "params",
             "team_skills_dir": "context",
-            "trajectory_registry": "context",
         },
         registry.TEAM_SKILL_CREATE: {"skill_create": "params"},
     }
@@ -279,10 +278,11 @@ def test_chat_team_permissions_mount_user_interrupt_only_on_leader() -> None:
 def test_config_specs_maps_review_trigger_for_leader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Leader soft review uses review_trigger; member evolution has no signal_trigger param."""
+    """Leader uses review_trigger; teammate uses passive signal_trigger only."""
     from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
 
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     config = {"evolution": {"review_trigger": True}}
     leader_rails, _ = build_member_capability_specs(config, "team", "leader")
     member_rails, _ = build_member_capability_specs(config, "team", "teammate")
@@ -291,17 +291,18 @@ def test_config_specs_maps_review_trigger_for_leader(
 
     assert leader_params[registry.TEAM_SKILL_EVOLUTION]["review_trigger"] is True
     assert "signal_trigger" not in leader_params[registry.TEAM_SKILL_EVOLUTION]
-    assert "signal_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
-    assert "review_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
+    assert member_params[registry.MEMBER_SKILL_EVOLUTION]["signal_trigger"] is True
+    assert member_params[registry.MEMBER_SKILL_EVOLUTION]["review_trigger"] is False
 
 
 def test_config_specs_keeps_explicit_review_trigger_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Leader review_trigger is configurable; member rail has no trigger params."""
+    """Leader review_trigger is configurable; teammate review_trigger stays off."""
     from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
 
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     config = {
         "evolution": {
             "review_trigger": False,
@@ -314,8 +315,8 @@ def test_config_specs_keeps_explicit_review_trigger_override(
 
     assert leader_params[registry.TEAM_SKILL_EVOLUTION]["review_trigger"] is False
     assert "signal_trigger" not in leader_params[registry.TEAM_SKILL_EVOLUTION]
-    assert "signal_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
-    assert "review_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
+    assert member_params[registry.MEMBER_SKILL_EVOLUTION]["signal_trigger"] is True
+    assert member_params[registry.MEMBER_SKILL_EVOLUTION]["review_trigger"] is False
 
 
 def test_descriptor_json_round_trip() -> None:
