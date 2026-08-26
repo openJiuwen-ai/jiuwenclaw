@@ -15,6 +15,7 @@ from jiuwenswarm.gateway.routing.agent_rest_map import (
     API_PREFIX,
     REST_ROUTES,
     RestAssemblyError,
+    _METHODS_WITHOUT_PARAM_SESSION_ID,
     _PATH_PLACEHOLDER,
     assemble_rest_request,
     normalize_agent_http_base,
@@ -100,7 +101,7 @@ def test_every_rest_route_assembles(method: str, verb: str, path: str):
     assert assembled.url == expected
     used = set(_PATH_PLACEHOLDER.findall(path))
     remaining: dict = {"limit": 3}
-    if "session_id" not in used:
+    if "session_id" not in used and method not in _METHODS_WITHOUT_PARAM_SESSION_ID:
         remaining["session_id"] = "sess_1"
     if verb == "GET":
         assert assembled.json_body is None
@@ -293,7 +294,8 @@ def test_none_params_are_dropped():
         _env(ReqMethod.SESSION_CREATE, params={"title": "t", "hint": None}),
         base_url=BASE,
     )
-    assert assembled.json_body == {"title": "t", "session_id": "sess_1"}
+    # session.create 不把信封 session_id 写入 body；None 字段仍丢弃。
+    assert assembled.json_body == {"title": "t"}
 
 
 def test_identity_headers_omit_optional_ids():
