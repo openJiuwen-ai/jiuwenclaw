@@ -2889,6 +2889,24 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
     ensure_calls = []
     release_calls = []
     cleared_metadata_cache = []
+    heartbeat_deleted = []
+    heartbeat_delete_prepared = []
+
+    class HeartbeatRuntime:
+        is_available = True
+
+        async def begin_session_delete(self, session_id: str) -> None:
+            heartbeat_delete_prepared.append(session_id)
+
+        async def abort_session_delete(
+            self, session_id: str, *, channel_id: str = ""
+        ) -> None:
+            raise AssertionError("successful deletion must not be aborted")
+
+        async def commit_session_delete(self, session_id: str) -> None:
+            heartbeat_deleted.append(session_id)
+
+    server._heartbeat_runtime = HeartbeatRuntime()
 
     async def fake_ensure_persistent_checkpointer():
         ensure_calls.append("called")
@@ -2937,6 +2955,8 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
     assert ensure_calls == ["called"]
     assert release_calls == ["sess-agent-1"]
     assert cleared_metadata_cache == ["sess-agent-1"]
+    assert heartbeat_delete_prepared == ["sess-agent-1"]
+    assert heartbeat_deleted == ["sess-agent-1"]
     assert not session_dir.exists()
     assert fake_ws.sent == [
         {

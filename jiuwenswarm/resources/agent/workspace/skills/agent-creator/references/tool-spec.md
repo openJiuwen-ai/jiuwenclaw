@@ -1,4 +1,4 @@
-# tool 规范（tools/.py）
+# tool 规范（tools/<name>_tool.py）
 
 继承 `openjiuwen.core.foundation.tool.Tool`，通过 `ToolCard` 描述能力。
 
@@ -31,8 +31,6 @@ class MyTool(Tool):
         yield await self.invoke(inputs, **kwargs)
 ```
 
-多 action 工具可在 `invoke` 内按 `action` 分发到 `_do_xxx`；骨架示例同上，按需扩展。
-
 ## Tool 实现约束
 
 - **无参构造**：`__init__(self) -> None`；在内部自建 `ToolCard`
@@ -54,23 +52,24 @@ class MyTool(Tool):
 
 ## 运行时路径规则
 
-- Tool 不定义自己的产物根；用户可见产物默认写到 `get_cwd()` 派生目录下
-- 包内资源路径只用于读取模板/素材，禁止作为产物或状态写入根
-- 输入只允许 `filename` / `output_subdir` 这类相对项；不要暴露 `output_dir` / `absolute_path` / `*_root`
+- 涉及文件写入的 Tool，写入路径必须由入参显式传入（如 `output_dir`），且只能是用户指定目录或当前项目目录
+- **禁止自行推导写入路径**
+- 内部状态不适用本节，见「与 Rail 协作」；包内资源路径只用于读取模板/素材
 
 
 
 ## 与 Skill 协作
 
 - Tool 是执行层，不独立包办复杂全流程
-- 成对出现时 manifest 同时声明 `skills[]` 与 `tools[]`；persona 写清调用顺序
+- 禁止在单个 `invoke` 中完成应由 Skill 指导的全部环节
+- 成对出现时 manifest 同时声明 `skills[]` 与 `tools[]`；skill 正文写清何时调用哪个 tool、调用顺序
 
 
 
 ## 与 Rail 协作
 
 - Rail 监听生命周期、维护 session 状态；Tool 读同一状态返回结构化结果，字段名稳定
-- 状态文件从运行态根派生：`get_workspace() or get_cwd()` 下按 session 隔离；原子写（临时文件 + `os.replace`）
+- 状态根使用 `get_workspace()`，按 session 隔离；未配置 workspace 时明确报错；原子写（临时文件 + `os.replace`）
 - Tool 从 `kwargs["session"].get_session_id()` 取 session
 - 模块级全局变量只能作可丢弃缓存，不能作为 Rail/Tool 共享状态的事实来源
 

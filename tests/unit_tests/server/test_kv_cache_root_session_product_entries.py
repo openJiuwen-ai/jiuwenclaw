@@ -389,9 +389,11 @@ async def test_team_session_delete_keeps_baseline_stop_before_runner_delete(
         "jiuwenswarm.agents.harness.team.team_manager.Runner.delete_agent_team",
         _delete,
     )
-
     assert await manager.delete_session_runtime("team-session", reason="test: ")
-    assert events == ["baseline-stop", "baseline-delete"]
+    assert events == [
+        "baseline-stop",
+        "baseline-delete",
+    ]
 
 
 @pytest.mark.asyncio

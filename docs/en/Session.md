@@ -47,6 +47,7 @@ JiuwenSwarm session data is stored in the local workspace with the following str
 - **Regular sessions**: `cron_id` is empty; retrieved via `project.get_sessions`
 - **Cron sessions**: `cron_id` is non-empty (set to the `CronJob.id`); retrieved via `project.get_cron_sessions`, supports filtering by `cron_id` for all historical runs of a task
 - The two types are mutually exclusive in project view; `project.list` `session_count` only counts regular sessions
+- **Heartbeat jobs**: resume the regular session in which the job was created and do not create a separate heartbeat session directory
 
 **metadata.json File Content:**
 

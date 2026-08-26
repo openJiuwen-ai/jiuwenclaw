@@ -138,6 +138,18 @@ def apply_a2ui_text_fallback_to_gateway_payload(
     return apply_non_web_text_fallback_to_payload(payload, channel_id=channel_id)
 
 
+def normalize_legacy_health_check_relay_payload(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize the pre-split probe relay before channel fan-out."""
+    if payload.get("event_type") != "heartbeat.relay":
+        return payload
+    payload["event_type"] = "health_check.relay"
+    if "health_check" not in payload and "heartbeat" in payload:
+        payload["health_check"] = payload["heartbeat"]
+    return payload
+
+
 
 class ChannelMode(str, Enum):
     AGENT = "agent"
@@ -2865,6 +2877,7 @@ class MessageHandler(ABC):
                 dict(resp.payload),
                 channel_id=resp.channel_id,
             )
+            payload = normalize_legacy_health_check_relay_payload(payload)
             event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
                 try:
@@ -3233,6 +3246,7 @@ class MessageHandler(ABC):
                 dict(chunk.payload),
                 channel_id=chunk.channel_id,
             )
+            payload = normalize_legacy_health_check_relay_payload(payload)
             event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
                 try:

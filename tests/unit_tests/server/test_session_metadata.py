@@ -661,6 +661,7 @@ class TestGetAllSessionsMetadata:
 
         init_session_metadata(session_id="sess_a")
         init_session_metadata(session_id="heartbeat_abc123_deadbeef")
+        init_session_metadata(session_id="health_check_abc123_deadbeef")
         init_session_metadata(session_id="sess_b")
 
         sessions, total = get_all_sessions_metadata(limit=20)
@@ -2806,6 +2807,10 @@ class TestRebindSessionProjectConcurrency:
         # 陈旧快照: 旧 project 字段 + message_count+1 (模拟 set_session_pinned 的
         # read-before-rebind: 读盘时 project 仍是 proj_old, 改了 pinned/message_count)
         stale = get_session_metadata(sid, cache_bust=True)
+        # get_session_metadata 的 mode 惰性迁移会触发一次异步写回 (message_count=0)。
+        # 若不排空, 该异步写可能在后续 sync_write 之后才落盘, 用 message_count=0
+        # 覆盖 sync_write 写入的 message_count=1, 导致断言 flaky。
+        _drain_queue()
         stale["message_count"] = stale.get("message_count", 0) + 1
         stale["project_id"] = "proj_old"
         stale["project_dir"] = "/old/dir"

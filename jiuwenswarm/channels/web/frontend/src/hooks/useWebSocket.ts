@@ -72,7 +72,7 @@ import {
   findOverlappingFileExecutionEvent,
   mergeFileDownloadItems,
 } from '../utils/fileDownloadDedup';
-import { pruneEnabledExtensions } from '../utils/enabledExtensions';
+import { buildExtensionSendPayload } from '../utils/enabledExtensions';
 import { makeEventDedupKey } from '../utils/wsEventDedup';
 import {
   normalizeToolCallPayload,
@@ -1512,10 +1512,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       // 有权威定义（MCP 接口文档 v2 §6.2，字段名是 `mcp`，见下方 chat.send 调用处）。两者都不
       // 接入消息气泡展示——消息气泡怎么交织渲染插件/MCP 不在这轮范围内，只做输入栏可选可发送。
       // 2026-08-21 用户明确要求：这两个数组只在用户点开关那一刻校验过一次连接态，之后如果对应
-      // MCP 断连/插件被卸载不会自动摘除，发送前用 pruneEnabledExtensions 兜底重新核对一遍"我的
-      // 插件/我的MCP里已连接的"，避免把早就失效的名字发给后端；被摘掉的项同步从 sessionStore
-      // 里移除，让"+"扩展面板的开关同步变回关闭。
-      const { plugins: enabledPlugins, mcps: enabledMcps } = pruneEnabledExtensions(sessionId);
+      // MCP 断连/插件被卸载不会自动摘除，发送前用 buildExtensionSendPayload（内部调
+      // pruneEnabledExtensions）兜底重新核对一遍"我的插件/我的MCP里已连接的"，避免把早就失效的
+      // 名字发给后端；被摘掉的项同步从 sessionStore 里移除，让"+"扩展面板的开关同步变回关闭。
+      const extensionPayload = buildExtensionSendPayload(sessionId);
       useChatStore.getState().addMessage(sessionId, {
         id: `user-${Date.now()}`,
         role: 'user',
@@ -1611,18 +1611,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(selectedModel ? { model_name: selectedModel } : {}),
           ...workContext,
           skills: selectedSkills,
-          // plugin_names：对齐 专家与插件装备-前端接口_v2.md §1.3/§3.6——"不传"和"[]"是两种不同
-          // 语义（不传=不改该侧装备；[]=按 session LoadRecord 卸载全部），跟下面 `mcp` 字段"不传
-          // 和 [] 效果一致"正好相反，不能照抄同一种"选中为空就不传"的写法。这里永远显式传当前
-          // 会话已启用的插件全集（哪怕是空数组），确保用户在扩展面板里把插件开关关掉后，后端能
-          // 收到明确的 [] 去卸载，而不是被"不传"误判成"不改动、维持之前挂载的状态"。
-          // 2026-08-17 之前的写法（`enabledPlugins.length > 0 ? {...} : {}`）在"用户关闭全部已启用
-          // 插件后发送"这个场景下是真实 bug：见 cjh/feature/MCP/_migration/progress.md 当日记录。
-          plugin_names: enabledPlugins,
-          // mcp：MCP 接口文档 v2 §6.2 给出的权威字段名（不是 mcp_names——那是之前没有文档依据时
-          // 猜的占位名，后端从不解析）。语义：字段缺失和空数组效果一致，都会清除该会话已挂载的
-          // 全部 MCP，所以选中为空时不带这个字段是安全的，不用改成恒发 `mcp: []`。
-          ...(enabledMcps.length > 0 ? { mcp: enabledMcps } : {}),
+          // plugin_names/mcp 的组装+字段语义说明见 utils/enabledExtensions.ts 的
+          // buildExtensionSendPayload 头注释（plugin_names 恒传含空数组，mcp 只在非空时才带）。
+          ...extensionPayload,
           ...(inputMode ? { input_mode: inputMode } : {}),
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
           ...(sessionMetadata ? { metadata: sessionMetadata } : {}),
@@ -1688,6 +1679,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           mode: outgoingMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
           ...workContext,
+          ...buildExtensionSendPayload(sessionId),
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
         });
         consumePlanEntryMark(sessionId, outgoingMode);
@@ -1976,6 +1968,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ...structuredPlanPayload,
             ...approvalSchemaPayload,
             ...evolutionMetaPayload,
+            // 2026-08-25：resume（如 ask-user 工具被拒绝后自动续接）之前漏了这两个字段，
+            // 会话选中的插件/MCP 在 resume 后就丢了，见 buildExtensionSendPayload 头注释。
+            ...buildExtensionSendPayload(sessionId),
           });
         } else if (effectiveSource === 'activate_confirm') {
           const action = answers[0]?.selected_options[0] === '拒绝' ? 'reject' : 'accept';
@@ -1993,6 +1988,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               action,
               feedback: '',
             },
+            ...buildExtensionSendPayload(sessionId),
           });
           useHarnessStore.getState().setActivateInteraction(sessionId, null);
         } else {
@@ -2036,6 +2032,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             action,
             feedback: feedback || '',
           },
+          ...buildExtensionSendPayload(sessionId),
         });
         useHarnessStore.getState().setActivateInteraction(sessionId, null);
       } catch (error) {

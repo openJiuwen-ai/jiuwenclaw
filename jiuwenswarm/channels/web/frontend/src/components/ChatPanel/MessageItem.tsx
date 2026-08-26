@@ -961,6 +961,24 @@ function isImportOverwriteRequired(error: unknown): boolean {
   return msg.includes('已存在') || msg.includes('force=true') || msg.includes('IMPORT_OVERWRITE');
 }
 
+const SAVED_SKILLS_KEY = 'saved_skill_tokens';
+
+function persistSavedToken(token: string) {
+  try {
+    const raw = localStorage.getItem(SAVED_SKILLS_KEY);
+    const set = raw ? new Set<string>(JSON.parse(raw)) : new Set<string>();
+    set.add(token);
+    localStorage.setItem(SAVED_SKILLS_KEY, JSON.stringify([...set]));
+  } catch { /* ignore */ }
+}
+
+function getSavedSkillTokens(): Set<string> {
+  try {
+    const raw = localStorage.getItem(SAVED_SKILLS_KEY);
+    return raw ? new Set<string>(JSON.parse(raw)) : new Set<string>();
+  } catch { return new Set<string>(); }
+}
+
 function getFileExtension(name: string): string {
   const parts = name.split('.');
   if (parts.length < 2) return '';
@@ -1002,6 +1020,18 @@ function FileDownloadList({
     return () => { cancelled = true; };
   }, [files]);
 
+  // 挂载时从 localStorage 恢复已保存的技能索引
+  useEffect(() => {
+    const savedTokens = getSavedSkillTokens();
+    if (savedTokens.size === 0) return;
+    const restored = new Set<number>();
+    files.forEach((file, index) => {
+      const token = resolveFileDownloadToken(file);
+      if (token && savedTokens.has(token)) restored.add(index);
+    });
+    if (restored.size > 0) setSavedIndex(restored);
+  }, [files]);
+
   const handleDownload = async (file: FileDownloadItem, index: number) => {
     if (expiredSet.has(index) || !file.download_url) return;
 
@@ -1041,6 +1071,7 @@ function FileDownloadList({
     setSavingIndex(index);
     try {
       await webRequest('skills.import_local', importParams(false));
+      persistSavedToken(downloadToken);
       setSavedIndex((prev) => new Set(prev).add(index));
       setSaveSuccessIndex(index);
       setTimeout(() => setSaveSuccessIndex(null), 2000);
@@ -1051,6 +1082,7 @@ function FileDownloadList({
         if (!overwrite) return;
         try {
           await webRequest('skills.import_local', importParams(true));
+          persistSavedToken(downloadToken);
           setSavedIndex((prev) => new Set(prev).add(index));
           setSaveSuccessIndex(index);
           setTimeout(() => setSaveSuccessIndex(null), 2000);

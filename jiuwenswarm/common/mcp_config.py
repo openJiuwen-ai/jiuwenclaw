@@ -497,6 +497,46 @@ async def probe_mcp_live_connection(name: str) -> tuple[bool, str]:
     return True, ""
 
 
+async def prewarm_connected_mcps() -> None:
+    """Prewarm ``Runner.resource_mgr`` for every ``state==connected`` MCP.
+
+    Probes each so a later ``chat.send`` reconcile hits the existing-entry
+    branch (no re-spawn). Failure-isolated per MCP and never downgrades state.
+    Safe to call at startup and again from the root adapter (idempotent).
+    """
+    try:
+        from jiuwenswarm.server.runtime.mcp.state_store import (
+            list_truly_connected_mcps,
+        )
+        names = [
+            str(r.get("name", "")).strip()
+            for r in list_truly_connected_mcps()
+            if r.get("name")
+        ]
+        if not names:
+            return
+        logger.info(
+            "[mcp-prewarm] prewarming %d connected MCP(s): %s",
+            len(names), names,
+        )
+        for name in names:
+            try:
+                ok, reason = await probe_mcp_live_connection(name)
+                if ok:
+                    logger.info("[mcp-prewarm] '%s' prewarmed", name)
+                else:
+                    logger.warning(
+                        "[mcp-prewarm] '%s' prewarm failed: %s "
+                        "(will lazy-connect on first chat)", name, reason,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[mcp-prewarm] '%s' prewarm error: %s", name, exc,
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[mcp-prewarm] background prewarm failed: %s", exc)
+
+
 def _stable_mcp_server_id(scope: str, name: str, payload: dict[str, Any]) -> str:
     stable_payload = {
         key: value
@@ -525,4 +565,5 @@ __all__ = [
     "build_mcp_server_config",
     "extract_enabled_mcp_server_entries",
     "preflight_mcp_server_reachable",
+    "prewarm_connected_mcps",
 ]

@@ -51,8 +51,16 @@ export function ConnectTokenModal({ name, displayName, iconUrl, response, onCanc
     }
   }
 
+  // z-[10100]：这个弹窗可能从 ChatPanel/ExtensionPickerPanel.tsx 的"+"扩展面板里弹出，那个
+  // 面板自身是 zIndex:9999 的 fixed 浮层，弹窗必须盖在它上面（2026-08-25 用户反馈：连接弹窗
+  // 之前用 z-50，被扩展面板整个压在下面，弹窗形同虚设）。
+  // data-connector-auth-modal：InputArea.tsx（"+"一级菜单）和 ExtensionPickerPanel.tsx（扩展
+  // 二级面板）各自都有一份"点击外部即关闭"的 pointerdown 监听，这个弹窗是单独 portal 到
+  // document.body 的兄弟节点，不在它们任何一个的 ref 范围内——两处监听都要靠这个属性识别"点的
+  // 是弹窗内部"从而跳过关闭，否则点弹窗任何地方都会被误判成"点了外面"，把外层菜单和面板一起
+  // 带崩（2026-08-25 用户反馈：点连接弹窗，整个"+"扩展下拉框直接退出）。
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay-cron-dialog">
+    <div data-connector-auth-modal="true" className="fixed inset-0 z-[10100] flex items-center justify-center bg-overlay-cron-dialog">
       <div className="relative w-[400px] rounded-2xl bg-card p-6 shadow-xl">
         <button type="button" onClick={onCancel} className="absolute right-5 top-5 text-text-muted hover:text-text">
           <X size={18} />

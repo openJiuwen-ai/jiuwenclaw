@@ -733,7 +733,46 @@ class DesktopRuntime:
     def frontend_url(self) -> str:
         return f"http://{self.frontend_host}:{self.frontend_port}"
 
+    @staticmethod
+    def _preflight_gateway_singleton(wait: float = 15.0) -> None:
+        """Refuse to launch a second Gateway over the same workspace.
+
+        Uses ``GatewayLock.find_holder`` (non-authoritative preflight; the
+        Gateway process itself is the authoritative enforcer). Waits up to
+        ``wait`` seconds for a still-shutting-down Gateway from an upgrade
+        restart to release the lock, then raises if a live holder remains.
+        """
+        from jiuwenswarm.instance_manager.lock import GatewayLock
+
+        workspace = get_user_workspace_dir()
+        holder = GatewayLock.find_holder(workspace)
+        if holder is None:
+            return
+
+        deadline = time.monotonic() + max(0.0, wait)
+        while holder is not None and time.monotonic() < deadline:
+            time.sleep(0.5)
+            holder = GatewayLock.find_holder(workspace)
+
+        if holder is not None:
+            logger.error(
+                "[desktop] another Gateway is already serving this workspace "
+                "(pid=%s, workspace=%s); aborting to avoid duplicate cron scheduling",
+                holder.get("pid"),
+                holder.get("workspace"),
+            )
+            raise RuntimeError(
+                f"Another Gateway instance is running (pid={holder.get('pid')}, "
+                f"workspace={holder.get('workspace')}). Stop the existing one first."
+            )
+
     def start_services(self) -> None:
+        # Per-workspace Gateway preflight: refuse to start a second full stack
+        # over the same workspace (two CronSchedulerService instances over one
+        # cron_jobs.json => duplicate cron executions). Briefly wait so an
+        # in-flight upgrade restart (old gateway shutting down) can release
+        # the lock before we fail.
+        self._preflight_gateway_singleton()
         # 先起后台预读, 与后续子进程拉起/端口等待并行, 不阻塞 start_services.
         _warmup_page_cache_background()
         self.processes["app"] = _start_process(

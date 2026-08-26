@@ -17,7 +17,6 @@ Runtime layout:
   - AGENT.md
   - IDENTITY.md
   - SOUL.md
-  - HEARTBEAT.md
   - USER.md
 - <root>/agent/sessions
 - <root>/agent/workspace/agent-data.json
@@ -733,6 +732,8 @@ def _install_default_builtin_skills(
         "swarmskill-creator",
         "skill-omni-creation",
         "huawei-cloud-maas-setup",
+        "agent-creator",
+        "plugin-creator"
     ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
@@ -907,14 +908,13 @@ def _migrate_legacy_workspace(
     separate directories outside of the workspace.
 
     Migration:
-    - Old: ~/.jiuwenswarm/agent/home/ (PRINCIPLE.md, TONE.md, HEARTBEAT.md)
+    - Old: ~/.jiuwenswarm/agent/home/ (PRINCIPLE.md, TONE.md)
     - Old: ~/.jiuwenswarm/agent/skills/
     - Old: ~/.jiuwenswarm/agent/memory/
 
     - New: ~/.jiuwenswarm/agent/workspace/ (DeepAgent standard)
 
     Mapping:
-    - agent/home/HEARTBEAT.md -> agent/workspace/HEARTBEAT.md
     - agent/skills/ -> agent/workspace/skills/
     - agent/memory/ -> agent/workspace/memory/
 
@@ -936,13 +936,6 @@ def _migrate_legacy_workspace(
 
     # 1. Migrate old home files
     if old_home.exists():
-        # HEARTBEAT.md -> HEARTBEAT.md (if not exists in new location)
-        old_heartbeat = old_home / "HEARTBEAT.md"
-        new_heartbeat = new_workspace / "HEARTBEAT.md"
-        if old_heartbeat.exists() and not new_heartbeat.exists():
-            shutil.copy2(old_heartbeat, new_heartbeat)
-            logger.info("Migrated HEARTBEAT.md from home")
-
         # Merge PRINCIPLE.md and TONE.md into SOUL.md
         old_principle = old_home / "PRINCIPLE.md"
         old_tone = old_home / "TONE.md"
@@ -1328,7 +1321,6 @@ def prepare_workspace(
     suffix = "_ZH" if resolved_lang == "zh" else "_EN"
     multilang_files = [
         (f"AGENT{suffix}.md", "AGENT.md"),
-        (f"HEARTBEAT{suffix}.md", "HEARTBEAT.md"),
         (f"IDENTITY{suffix}.md", "IDENTITY.md"),
         (f"SOUL{suffix}.md", "SOUL.md"),
         (f"memory/MEMORY{suffix}.md", "memory/MEMORY.md"),
@@ -2247,6 +2239,14 @@ def get_cron_jobs_path() -> Path:
     return get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
 
 
+def get_heartbeat_jobs_path() -> Path:
+    """Canonical path for heartbeat_jobs.json (new thread-automation heartbeat jobs).
+
+    与 ``get_cron_jobs_path`` 同目录(``agent/home``),禁止在业务代码中硬编码该路径。
+    """
+    return get_agent_home_dir() / "heartbeat_jobs.json"
+
+
 def get_deepagent_todo_dir() -> Path:
     """Get the DeepAgent todo directory path.
 
@@ -2272,15 +2272,6 @@ def get_deepagent_agents_dir() -> Path:
         Path to agents directory: ~/.jiuwenswarm/agent/workspace/agents
     """
     return get_agent_workspace_dir() / "agents"
-
-
-def get_deepagent_heartbeat_path() -> Path:
-    """Get the DeepAgent HEARTBEAT.md file path.
-
-    Returns:
-        Path to HEARTBEAT.md: ~/.jiuwenswarm/agent/workspace/HEARTBEAT.md
-    """
-    return get_agent_workspace_dir() / "HEARTBEAT.md"
 
 
 def get_deepagent_agent_md_path() -> Path:

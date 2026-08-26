@@ -895,7 +895,7 @@ async def test_runtime_attachment_tracks_live_code_agent_mode(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_runtime_git_status_attachment_clears_when_git_context_disappears(tmp_path, monkeypatch):
+async def test_runtime_git_status_is_stable_system_context_for_one_invoke(tmp_path, monkeypatch):
     monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
     runtime_state = tmp_path / "runtime_state" / "default.yaml"
     runtime_state.parent.mkdir(parents=True, exist_ok=True)
@@ -916,14 +916,31 @@ async def test_runtime_git_status_attachment_clears_when_git_context_disappears(
         extra={},
     )
 
-    await runtime_rail.before_model_call(ctx)
-    session_items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
-    assert [item.id for item in session_items if item.id.endswith(".git_status")] == ["session.sess1.git_status"]
-
-    runtime_state.write_text("git_branch: ''\n", encoding="utf-8")
-    await runtime_rail.before_model_call(ctx)
+    await runtime_rail.before_invoke(ctx)
+    prompt = builder.build()
+    assert "This is the git status at the start of the conversation." in prompt
+    assert "Current branch: feature/test" in prompt
+    assert "Status:\nM file.py" in prompt
+    assert "Recent commits:\nabc init" in prompt
     session_items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     assert [item.id for item in session_items if item.id.endswith(".git_status")] == []
+
+    runtime_state.write_text(
+        "git_branch: feature/changed\n"
+        "git_status: M changed.py\n"
+        "git_recent_commits: def changed\n",
+        encoding="utf-8",
+    )
+    await runtime_rail.before_model_call(ctx)
+    prompt = builder.build()
+    assert "Current branch: feature/test" in prompt
+    assert "feature/changed" not in prompt
+    session_items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
+    assert [item.id for item in session_items if item.id.endswith(".git_status")] == []
+
+    runtime_state.write_text("git_branch: ''\n", encoding="utf-8")
+    await runtime_rail.before_invoke(ctx)
+    assert "This is the git status at the start of the conversation." not in builder.build()
 
 
 @pytest.mark.asyncio

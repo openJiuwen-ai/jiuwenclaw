@@ -209,7 +209,13 @@ class Sweeper:
         if not sessions_root.exists():
             return []
 
-        all_ids = {d.name for d in sessions_root.iterdir() if d.is_dir() and not d.name.startswith("heartbeat")}
+        all_ids: set[str] = set()
+        for session_dir in sessions_root.iterdir():
+            if not session_dir.is_dir():
+                continue
+            if session_dir.name.startswith(("health_check_", "heartbeat_")):
+                continue
+            all_ids.add(session_dir.name)
         scanned_ids = set(self.scanned_sessions.keys())
         brand_new = all_ids - scanned_ids
 

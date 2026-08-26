@@ -72,7 +72,6 @@ from openjiuwen.harness.rails import (
     SecurityRail,
     SubagentRail,
     SysOperationRail,
-    HeartbeatRail,
     MemoryRail,
 )
 from openjiuwen.harness.rails import (
@@ -176,6 +175,7 @@ from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
 from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
+from jiuwenswarm.agents.harness.code.rails.heartbeat_rail import HeartbeatRail
 from jiuwenswarm.agents.harness.common.auto_harness import (
     AutoHarnessService,
     validate_harness_config,
@@ -351,7 +351,6 @@ from jiuwenswarm.common.mcp_config import (
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
     preflight_mcp_server_reachable,
-    probe_mcp_live_connection,
 )
 from jiuwenswarm.server.runtime.mcp.call_timeout_patch import apply_mcp_call_timeout_patch
 from jiuwenswarm.common.task_loop_config import (
@@ -748,18 +747,6 @@ _CRON_TOOL_NAMES = frozenset(
         "cron_preview_job",
     }
 )
-
-
-def _clean_heartbeat_content(content: str) -> str:
-    """Remove HTML comments and blank lines from HEARTBEAT.md content."""
-    cleaned_lines: list[str] = []
-    for line in content.splitlines():
-        stripped_line = line.strip()
-        if stripped_line.startswith("<!--") and stripped_line.endswith("-->"):
-            continue
-        if stripped_line:
-            cleaned_lines.append(stripped_line)
-    return "\n".join(cleaned_lines)
 
 
 def _assemble_run_answer(deltas: list[str], final: str) -> str:
@@ -1280,6 +1267,7 @@ class JiuWenSwarmDeepAdapter:
         self._mcp_prewarm_task: asyncio.Task | None = None
         self._model_anomaly_detection_rail: ModelAnomalyDetectionRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
+        self._heartbeat_service: Any | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._evolution_interrupt_rail: EvolutionInterruptRail | None = None
         self._skill_create_rail: SkillCreateRail | None = None
@@ -1376,6 +1364,20 @@ class JiuWenSwarmDeepAdapter:
         # name → (load_record, manifest.version)
         self._loaded_plugins: dict[str, tuple[Any, str]] = {}
 
+    def set_heartbeat_service(self, service: Any | None) -> None:
+        """Bind the one process-level Heartbeat runtime used by this rail."""
+        self._heartbeat_service = service
+        for adapter in self._session_adapters.values():
+            adapter.set_heartbeat_service(service)
+
+    def _build_heartbeat_rail(self) -> HeartbeatRail | None:
+        if self._heartbeat_service is None:
+            return None
+        return HeartbeatRail(
+            service=self._heartbeat_service,
+            context=self._runtime_cron_tool_context,
+        )
+
     def _schedule_runtime_state_write(
         self,
         *,
@@ -1451,6 +1453,7 @@ class JiuWenSwarmDeepAdapter:
         )
         if self._skill_manager is not None:
             adapter.set_skill_manager(self._skill_manager)
+        adapter.set_heartbeat_service(self._heartbeat_service)
         return adapter
 
     @staticmethod
@@ -1831,6 +1834,17 @@ class JiuWenSwarmDeepAdapter:
     async def cleanup_session_adapter(self, session_id: str | None) -> bool:
         """Release an idle session-scoped adapter without deleting session history."""
         sid = self._session_adapter_key(session_id)
+        retain_session = getattr(
+            getattr(self, "_heartbeat_service", None),
+            "should_retain_session",
+            None,
+        )
+        if callable(retain_session) and await retain_session(sid):
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] keep session adapter for Heartbeat: %s",
+                sid,
+            )
+            return False
         if self._is_session_scoped_adapter:
             if self._session_adapter_key(self._parent_session_id) != sid:
                 return False
@@ -3371,43 +3385,9 @@ class JiuWenSwarmDeepAdapter:
         )
 
     async def _do_mcp_prewarm(self) -> None:
-        """对 state=connected 的 MCP 跑 probe_mcp_live_connection 建进程级缓存。
-
-        预热失败不降级 state（保持 connected，让首轮对话 reconcile 重试）——web
-        用户可能重启后还没发消息，不应自动摘掉连接态，与 TUI 的 one-shot
-        disconnected 降级不同。
-        """
-        try:
-            from jiuwenswarm.server.runtime.mcp.state_store import (
-                list_truly_connected_mcps,
-            )
-            names = [
-                str(r.get("name", "")).strip()
-                for r in list_truly_connected_mcps()
-                if r.get("name")
-            ]
-            if not names:
-                return
-            logger.info(
-                "[mcp-prewarm] prewarming %d connected MCP(s): %s",
-                len(names), names,
-            )
-            for name in names:
-                try:
-                    ok, reason = await probe_mcp_live_connection(name)
-                    if ok:
-                        logger.info("[mcp-prewarm] '%s' prewarmed", name)
-                    else:
-                        logger.warning(
-                            "[mcp-prewarm] '%s' prewarm failed: %s "
-                            "(will lazy-connect on first chat)", name, reason,
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "[mcp-prewarm] '%s' prewarm error: %s", name, exc,
-                    )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[mcp-prewarm] background prewarm failed: %s", exc)
+        """委托 ``prewarm_connected_mcps`` 建进程级缓存（启动预热任务的幂等兜底）。"""
+        from jiuwenswarm.common.mcp_config import prewarm_connected_mcps
+        await prewarm_connected_mcps()
 
     async def _register_mcp_servers_from_config(
         self, config_base: dict[str, Any], *, tag: str = "agent.main"
@@ -3561,7 +3541,26 @@ class JiuWenSwarmDeepAdapter:
             await self._unregister_mcp_server(server_id)
 
         for server_name in to_add:
-            await self._register_mcp_server(desired_by_name[server_name], tag=tag)
+            # Isolate per-MCP failures (same as the init path above): a bad MCP
+            # degrades to disconnected, the rest still register.
+            try:
+                await self._register_mcp_server(desired_by_name[server_name], tag=tag)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] MCP '%s' register failed on "
+                    "reload, marking disconnected: %s",
+                    server_name, exc,
+                )
+                try:
+                    from jiuwenswarm.server.runtime.mcp.state_store import (
+                        set_mcp_state,
+                    )
+                    set_mcp_state(server_name, state="disconnected")
+                except Exception as degr_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[JiuWenSwarmDeepAdapter] state degrade for '%s' failed: %s",
+                        server_name, degr_exc,
+                    )
 
         for server_name in to_check:
             server_id, current_cfg = current_by_name[server_name]
@@ -3587,7 +3586,25 @@ class JiuWenSwarmDeepAdapter:
             ):
                 continue
             await self._unregister_mcp_server(server_id)
-            await self._register_mcp_server(desired_cfg, tag=tag)
+            # Same per-MCP isolation as to_add above.
+            try:
+                await self._register_mcp_server(desired_cfg, tag=tag)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] MCP '%s' re-register failed on "
+                    "reload, marking disconnected: %s",
+                    server_name, exc,
+                )
+                try:
+                    from jiuwenswarm.server.runtime.mcp.state_store import (
+                        set_mcp_state,
+                    )
+                    set_mcp_state(server_name, state="disconnected")
+                except Exception as degr_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[JiuWenSwarmDeepAdapter] state degrade for '%s' failed: %s",
+                        server_name, degr_exc,
+                    )
 
     @staticmethod
     def _build_vision_model_config(
@@ -5769,17 +5786,6 @@ class JiuWenSwarmDeepAdapter:
         return memory_rail
 
     @staticmethod
-    def _build_heartbeat_rail() -> HeartbeatRail | None:
-        """Build HeartbeatRail."""
-        try:
-            heartbeat_rail = HeartbeatRail()
-            logger.info("[JiuWenSwarmDeepAdapter] HeartbeatRail create success")
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] HeartbeatRail create failed: %s", exc)
-            heartbeat_rail = None
-        return heartbeat_rail
-
-    @staticmethod
     def _build_avatar_rail() -> Any | None:
         """Build AvatarPromptRail for digital avatar mode."""
         try:
@@ -6191,12 +6197,12 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
-            _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo(
                 "_model_anomaly_detection_rail",
                 self._build_model_anomaly_detection_rail,
                 {"config_base": config_base},
             ),
+            _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
@@ -6437,6 +6443,9 @@ class JiuWenSwarmDeepAdapter:
 
         self._update_permission_rail(config_base)
 
+        if self._heartbeat_rail is None:
+            self._heartbeat_rail = self._build_heartbeat_rail()
+
         rails_list = []
         if self._skill_rail is not None:
             rails_list.append(self._skill_rail)
@@ -6452,6 +6461,8 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(self._memory_forbidden_rail)
         if self._permission_rail is not None:
             rails_list.append(self._permission_rail)
+        if self._heartbeat_rail is not None:
+            rails_list.append(self._heartbeat_rail)
         return rails_list
 
     def _tool_owner_id(self) -> str:
@@ -7633,7 +7644,9 @@ class JiuWenSwarmDeepAdapter:
             session_id: Session the current turn belongs to. Heartbeat and cron
                 sessions drive the scheduler themselves and get no cron tools.
         """
-        if session_id is not None and session_id.startswith(("heartbeat", "cron")):
+        if session_id is not None and session_id.startswith(
+            ("heartbeat", "health_check", "cron")
+        ):
             return
         language = self._resolve_runtime_language()
         registered_names = {
@@ -7671,11 +7684,11 @@ class JiuWenSwarmDeepAdapter:
         request_id: str | None,
         channel_id: str | None = None,
     ) -> None:
-        """刷新每请求相关的 cron / send_file 工具运行时状态。
+        """刷新每请求相关的 cron / heartbeat / send_file 工具运行时状态。
 
-        两者的工具实例都只建一次：cron 见 ``_ensure_cron_tools_registered``，
-        send_file 首次注册后改走 ``update_runtime_context``。这里每次请求只做
-        幂等检查和运行时上下文更新。
+        工具实例都只建一次：cron/heartbeat 分别由对应的 ``_ensure_*``
+        方法注册，send_file 首次注册后改走 ``update_runtime_context``。
+        这里每次请求只做幂等检查和运行时上下文更新。
         """
         self._ensure_cron_tools_registered(session_id)
 
@@ -9178,16 +9191,22 @@ class JiuWenSwarmDeepAdapter:
                 exc,
             )
 
-    async def abort_on_gateway_disconnect(self) -> None:
-        """Gateway 与 AgentServer 的 WebSocket 断开时：与 interrupt(cancel) 同样中止 rail 与 DeepAgent 实例。
-
-        Note: 这是基础设施级别的事件，会无条件 abort 共享 adapter 上的所有 session。
-        与 process_interrupt 的 session guard 不同，gateway 断开意味着前端已无法接收响应，
-        继续运行没有意义，因此不需要 other_sessions 保护。
-        """
-        if not self._is_session_scoped_adapter:
-            for adapter in list(self._session_adapters.values()):
-                await adapter.abort_on_gateway_disconnect()
+    async def abort_on_gateway_disconnect(
+        self,
+        *,
+        exclude_session_ids: set[str] | None = None,
+    ) -> None:
+        """Abort disconnected Gateway work while preserving internal Heartbeats."""
+        protected = set(exclude_session_ids or ())
+        if self._is_session_scoped_adapter:
+            if self._session_adapter_key(self._parent_session_id) in protected:
+                return
+        else:
+            for session_id, adapter in list(self._session_adapters.items()):
+                if session_id not in protected:
+                    await adapter.abort_on_gateway_disconnect(
+                        exclude_session_ids=protected
+                    )
 
         if self._stream_event_rail is not None:
             # Abort all active sessions on this shared adapter.
@@ -9401,51 +9420,24 @@ class JiuWenSwarmDeepAdapter:
         return approval_kind in (None, "", "evolve") and rail_kind in (None, "", "regular")
 
     async def handle_heartbeat(self, request: AgentRequest) -> AgentResponse | None:
-        """Handle heartbeat request. Returns None to continue normal flow.
-
-        Injects a heartbeat prompt into the query to ensure the LLM receives
-        a non-empty user message. Reading HEARTBEAT.md and injecting its content
-        into the system prompt is handled by HeartbeatRail in before_model_call.
-        """
+        """Answer a HealthCheck probe without executing workspace user tasks."""
         sid = str(request.session_id or "")
-        if not sid.startswith("heartbeat"):
+        if not sid.startswith("health_check_"):
             return None
-        if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
-            try:
-                return await session_adapter.handle_heartbeat(request)
-            finally:
-                await self._evict_idle_session_adapters()
 
-        content = ""
-        try:
-            deep_config = getattr(self._instance, "deep_config", None) if self._instance else None
-            workspace = getattr(deep_config, "workspace", None)
-            sys_operation = getattr(deep_config, "sys_operation", None) or self._sys_operation
-            if workspace is not None and sys_operation is not None:
-                heartbeat_path = str(workspace.get_node_path(WorkspaceNode.HEARTBEAT_MD))
-                read_res = await sys_operation.fs().read_file(heartbeat_path, mode="text")
-                if read_res.code == 0:
-                    content = _clean_heartbeat_content(read_res.data.content)
-                else:
-                    logger.warning("[JiuWenSwarmDeepAdapter] heartbeat failed to read HEARTBEAT.md")
-            else:
-                logger.warning("[JiuWenSwarmDeepAdapter] heartbeat workspace/sys_operation not available")
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] heartbeat failed to prepare HEARTBEAT.md content: %s", exc)
-
-        request.params["query"] = (
-            "这是一次心跳请求任务，请根据 <heartbeat_user_task> 标签中的内容进行回复。\n"
-            "<heartbeat_user_task>\n"
-            f"{content}\n"
-            "</heartbeat_user_task>"
-        )
         logger.info(
-            "[JiuWenSwarmDeepAdapter] heartbeat query injected:" " request_id=%s session_id=%s",
+            "[JiuWenSwarmDeepAdapter] health check acknowledged: "
+            "request_id=%s session_id=%s",
             request.request_id,
             request.session_id,
         )
-        return None
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload={"health_check": "HEALTH_CHECK_OK"},
+            metadata=request.metadata,
+        )
 
     async def _handle_evolution_approval(self, request_id: str, answers: list) -> bool:
         """Handle evolution approval via SkillEvolutionRail.on_approve/on_reject.
