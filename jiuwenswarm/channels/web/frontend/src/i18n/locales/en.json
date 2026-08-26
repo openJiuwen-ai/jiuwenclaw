@@ -538,7 +538,7 @@
   },
   "a2aIngress": {
     "title": "A2A Control Center",
-    "subtitle": "Manage the A2A ingress service exposed by JiuwenSwarm.",
+    "subtitle": "Manage the A2A service exposed by JiuwenSwarm.",
     "tabs": { "ariaLabel": "A2A Control Center pages", "config": "Ingress Configuration", "history": "Processing History" },
     "enable": "Enable service", "enabling": "Enabling...", "disable": "Disable service", "disabling": "Disabling...", "reload": "Reload", "reloading": "Reloading...",
     "save": "Save configuration", "saveAndApply": "Save and apply", "applying": "Applying...", "saved": "Configuration saved; it has not been applied to the running service.", "savedAndApplied": "Configuration saved and applied.",
