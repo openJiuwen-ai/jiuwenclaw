@@ -636,6 +636,7 @@ def _install_default_builtin_skills(
         "execution-validator-skill",
         "secret-guardian",
         "skill-scope",
+        "plugin-audit",
     ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
@@ -695,6 +696,7 @@ def ensure_builtin_skills_installed() -> None:
         "execution-validator-skill",
         "secret-guardian",
         "skill-scope",
+        "plugin-audit",
     ]
 
     builtin_dir = get_builtin_skills_dir()

