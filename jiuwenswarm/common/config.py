@@ -68,7 +68,10 @@ def get_merged_config_dict() -> dict[str, Any]:
 
 
 def resolve_env_vars(value: Any) -> Any:
-    """递归解析配置中的环境变量替换语法 ${VAR:-default}.
+    """递归解析配置中的环境变量替换语法.
+
+    Supports shell-style ``${VAR:-default}`` (default when unset or empty)
+    and ``${VAR-default}`` (default only when unset).
 
     Args:
         value: 配置值，可能是字符串、字典或列表
@@ -77,12 +80,12 @@ def resolve_env_vars(value: Any) -> Any:
         解析后的值
     """
     if isinstance(value, str):
-        # 匹配 ${VAR:-default} 格式
-        pattern = r'\$\{([^:}]+)(?::-([^}]*))?\}'
+        pattern = r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-)([^}]*))?\}'
 
         def replace_env(match):
             var_name = match.group(1)
-            default = match.group(2)
+            operator = match.group(2)
+            default = match.group(3)
             if var_name in SPAWN_ENV_KEYS:
                 current = os.environ.get(var_name)
             else:
@@ -101,12 +104,12 @@ def resolve_env_vars(value: Any) -> Any:
                         var_name,
                         exc_info=True,
                     )
-            # Bash: ${VAR:-default} uses default when VAR is unset OR empty.
-            # ${VAR} (no :-) keeps getenv behavior; unset -> "".
-            if default is not None:
+            if operator == ":-":
                 if current is None or current == "":
                     return default
                 return current
+            if operator == "-":
+                return default if current is None else current
             return current if current is not None else ""
 
         return re.sub(pattern, replace_env, value)
@@ -3168,3 +3171,39 @@ def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
         sandbox_block[key] = merged[key]
     _dump_yaml_round_trip(_current_config_yaml_path(), data)
     return merged
+
+
+def _parse_comma_separated_string(raw: str) -> list[str]:
+    """Split a comma/semicolon-separated string into stripped non-empty items."""
+    if not raw:
+        return []
+    return [item.strip() for item in raw.replace(";", ",").split(",") if item.strip()]
+
+
+def resolve_string_or_list_config(value: Any) -> list[str]:
+    """Resolve a config field that can be either a YAML list or an env string.
+
+    Handles three cases:
+      - list   → copy as ``list[str]``; non-string items are rejected
+      - str    → parse comma/semicolon-separated into ``list[str]``
+      - None   → empty list
+
+    Other values are rejected instead of being treated as an empty list. This
+    prevents malformed security configuration from silently enabling tools.
+
+    Used for ``react.disabled_tools`` which accepts both
+    ``["search_skill", "install_skill"]`` (YAML list) and
+    ``${DISABLED_TOOLS-search_skill,install_skill}`` (env string).
+    """
+    if isinstance(value, list):
+        if any(not isinstance(item, str) for item in value):
+            raise TypeError("config list items must be strings")
+        return [item.strip() for item in value if item.strip()]
+    if isinstance(value, str):
+        return _parse_comma_separated_string(value)
+    if value is None:
+        return []
+    raise TypeError(
+        f"config value must be a string, list of strings, or None; "
+        f"got {type(value).__name__}"
+    )

@@ -661,6 +661,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 rail_name,
             )
 
+        # Keep the unified react.disabled_tools policy consistent with agent
+        # mode. Its low priority makes it run after fixed and dynamic rails
+        # have registered their tools.
+        rail_infos.append(
+            _RailBuildInfo(
+                "_disabled_tools_rail",
+                self._build_disabled_tools_rail,
+                {"config": config},
+            )
+        )
+
         return self._instantiate_rails(rail_infos, config_base)
 
     # ─── Code 专属 Rail 构建 ────────────────
