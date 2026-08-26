@@ -72,11 +72,10 @@ class SystemPromptHookContext:
 
 @dataclass
 class ImageArtifactHookContext:
-    """图像产物落盘后的扩展回调上下文。
+    """图像产物落盘后的扩展回调上下文（兼容旧版扩展）。
 
-    TaskExecutionRail 在 generate_image 执行后从 tool_result 解析出图像路径，
-    触发 IMAGE_ARTIFACT_POST_PROCESS 事件，扩展可在 handler 中按 artifact_paths
-    对文件做原地后处理（如加水印）。
+    新版产物检测对所有产物同时触发 IMAGE_ARTIFACT_POST_PROCESS 和
+    ARTIFACT_POST_PROCESS，扩展在 handler 中按扩展名自行过滤。
     """
 
     session_id: str
