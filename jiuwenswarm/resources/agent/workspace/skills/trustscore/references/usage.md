@@ -44,6 +44,9 @@ python scripts/run_trustscore.py \
   --output trustscore-result.json
 ```
 
+For safety, `--question-file` and `--output` must be relative paths inside the
+current workspace. Absolute paths and paths containing `..` are rejected.
+
 OpenAI-compatible endpoint：
 
 ```bash
@@ -52,6 +55,21 @@ python scripts/run_trustscore.py \
   --model your-model-name \
   --base-url "https://your-provider.example/v1"
 ```
+
+Safety limits:
+
+```bash
+python scripts/run_trustscore.py \
+  --question "What is the capital of Montana?" \
+  --model gpt-4o-mini \
+  --timeout-seconds 120 \
+  --max-model-calls 25 \
+  --max-question-chars 4000
+```
+
+`--timeout-seconds` bounds each model request. `--max-model-calls` caps the
+planned call count for one run; the default `--mcq-num 20` plans 23 calls.
+`--max-question-chars` prevents accidental large prompts from increasing cost.
 
 ## 本地自检
 

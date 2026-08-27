@@ -18,6 +18,9 @@ from typing import Any
 
 
 DEFAULT_GENERATOR_MODEL = "gpt-5-mini-2025-08-07"
+DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_MAX_MODEL_CALLS = 25
+DEFAULT_MAX_QUESTION_CHARS = 4000
 CHOICE_LABELS = ["A", "B", "C", "D", "E"]
 
 logger = logging.getLogger("trustscore")
@@ -46,10 +49,23 @@ def read_text(value: str | None, file_path: str | None, label: str) -> str:
     if value and file_path:
         raise ValueError(f"Pass either --{label} or --{label}-file, not both.")
     if file_path:
-        return Path(file_path).expanduser().read_text(encoding="utf-8")
+        return safe_workspace_path(file_path, f"{label}-file").read_text(encoding="utf-8")
     if value:
         return value
     raise ValueError(f"Missing input: pass --{label} or --{label}-file.")
+
+
+def safe_workspace_path(raw_path: str, label: str) -> Path:
+    root = Path.cwd().resolve()
+    path = Path(raw_path)
+    if not raw_path or path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"Unsafe --{label} path: {raw_path!r}")
+    candidate = (root / path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"--{label} path escapes the current workspace: {raw_path!r}") from exc
+    return candidate
 
 
 def normalize_answer(text: str) -> str:
@@ -298,7 +314,7 @@ def run_trustscore(args: argparse.Namespace) -> dict[str, Any]:
     except ImportError as exc:
         raise RuntimeError("Install runtime dependencies with `pip install openai pydantic`.") from exc
 
-    client_args: dict[str, str] = {"api_key": args.api_key}
+    client_args: dict[str, Any] = {"api_key": args.api_key, "timeout": args.timeout_seconds}
     if args.base_url:
         client_args["base_url"] = args.base_url
     client = OpenAI(**client_args)
@@ -471,7 +487,28 @@ def parse_args() -> argparse.Namespace:
         help="Number of distractors to request from the generator model.",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed for MCQ construction.")
-    parser.add_argument("--output", help="Optional path for JSON output.")
+    parser.add_argument(
+        "--output",
+        help="Optional JSON output path under the current workspace.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=int(os.getenv("TRUSTSCORE_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))),
+        help="Per-request timeout for OpenAI-compatible API calls.",
+    )
+    parser.add_argument(
+        "--max-model-calls",
+        type=int,
+        default=int(os.getenv("TRUSTSCORE_MAX_MODEL_CALLS", str(DEFAULT_MAX_MODEL_CALLS))),
+        help="Maximum planned model calls allowed for one TrustScore run.",
+    )
+    parser.add_argument(
+        "--max-question-chars",
+        type=int,
+        default=int(os.getenv("TRUSTSCORE_MAX_QUESTION_CHARS", str(DEFAULT_MAX_QUESTION_CHARS))),
+        help="Maximum question length for cost control.",
+    )
     parser.add_argument(
         "--pretty",
         action=argparse.BooleanOptionalAction,
@@ -497,14 +534,36 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--paraphrase-num must be greater than 0.")
     if args.distractor_num < 3:
         raise ValueError("--distractor-num must be at least 3.")
-    read_text(args.question, args.question_file, "question")
+    if args.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0.")
+    if args.max_model_calls <= 0:
+        raise ValueError("--max-model-calls must be greater than 0.")
+    if args.max_question_chars <= 0:
+        raise ValueError("--max-question-chars must be greater than 0.")
+    planned_model_calls = args.mcq_num + 3
+    if planned_model_calls > args.max_model_calls:
+        raise ValueError(
+            "TrustScore run exceeds the configured model-call limit: "
+            f"{planned_model_calls} calls > {args.max_model_calls}. "
+            "Reduce --mcq-num or pass --max-model-calls to raise the limit intentionally."
+        )
+    question = read_text(args.question, args.question_file, "question")
+    if len(question) > args.max_question_chars:
+        raise ValueError(
+            "Question is too large for this safety limit: "
+            f"{len(question)} chars > {args.max_question_chars}. "
+            "Pass --max-question-chars to raise the limit intentionally."
+        )
 
 
 def emit_json(result: dict[str, Any], output: str | None, pretty: bool) -> None:
     indent = 2 if pretty else None
     rendered = json.dumps(result, ensure_ascii=False, indent=indent)
     if output:
-        Path(output).expanduser().write_text(rendered + "\n", encoding="utf-8")
+        try:
+            safe_workspace_path(output, "output").write_text(rendered + "\n", encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"Failed to write output file: {exc}") from exc
     result_logger.info(rendered)
 
 

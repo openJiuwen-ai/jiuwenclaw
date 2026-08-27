@@ -50,10 +50,16 @@ python scripts/run_trustscore.py \
 - `--mcq-num`: 生成并测试的 MCQ 数量，默认 `20`。
 - `--distractor-num`: 生成 distractors 的数量，默认 `20`。
 - `--base-url`: OpenAI-compatible API base URL。
-- `--output`: 将 JSON 结果写入文件。
+- `--output`: 将 JSON 结果写入当前 workspace 内的相对路径文件。
+- `--timeout-seconds`: 每次模型请求的超时时间，默认 `120`。
+- `--max-model-calls`: 单次运行允许的最大模型调用次数，默认 `25`。
+- `--max-question-chars`: question 最大字符数，默认 `4000`。
 - `--self-test`: 不调用模型，只验证 MCQ 归一化和打分逻辑。
 
 更多参数与输出字段见 [references/usage.md](references/usage.md)。
+
+出于安全考虑，`--question-file` 和 `--output` 只接受当前 workspace
+内的相对路径；绝对路径和包含 `..` 的路径会被拒绝。
 
 ## Workflow
 
