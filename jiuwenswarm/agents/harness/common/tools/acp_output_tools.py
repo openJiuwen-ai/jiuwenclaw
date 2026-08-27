@@ -80,6 +80,14 @@ class AcpOutputManager:
         """
         self._pending.clear()
 
+    def fail_pending_requests(self, exc: BaseException) -> None:
+        """Fail all requests owned by a reverse-RPC connection that was lost."""
+        pending = list(self._pending.values())
+        self._pending.clear()
+        for request in pending:
+            if not request.future.done():
+                request.future.set_exception(exc)
+
     def add_pending_request(self, request: AcpOutputRequest) -> None:
         """Register a pending request explicitly.
 
@@ -141,12 +149,12 @@ class AcpOutputManager:
         *,
         channel_id: str = "acp",
         session_id: str | None = None,
-        timeout: float = _ACP_REQUEST_TIMEOUT_SECONDS,
+        timeout: float | None = _ACP_REQUEST_TIMEOUT_SECONDS,
         log_params: bool = True,
         cancel_method: str | None = None,
     ) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
+        deadline = loop.time() + timeout if timeout is not None else None
         logger.info(
             "[AcpOutput] send_jsonrpc_request called: method=%s params=%s",
             method,
@@ -218,10 +226,13 @@ class AcpOutputManager:
         try:
             callback_result = self._send_push_callback(push_msg)
             if inspect.isawaitable(callback_result):
-                callback_result = await asyncio.wait_for(
-                    callback_result,
-                    timeout=max(0.0, deadline - loop.time()),
-                )
+                if deadline is None:
+                    callback_result = await callback_result
+                else:
+                    callback_result = await asyncio.wait_for(
+                        callback_result,
+                        timeout=max(0.0, deadline - loop.time()),
+                    )
             if callback_result is False:
                 raise RuntimeError("ACP output request was not delivered")
         except asyncio.CancelledError:
@@ -248,9 +259,10 @@ class AcpOutputManager:
         try:
             if future.done():
                 return future.result()
+            if deadline is None:
+                return await future
             return await asyncio.wait_for(
-                future,
-                timeout=max(0.0, deadline - loop.time()),
+                future, timeout=max(0.0, deadline - loop.time())
             )
         except asyncio.CancelledError:
             self._pending.pop(jsonrpc_id, None)
@@ -268,7 +280,7 @@ class AcpOutputManager:
                 "[AcpOutput] request timed out: jsonrpc_id=%s method=%s timeout=%.1fs",
                 jsonrpc_id,
                 method,
-                timeout,
+                float(timeout or 0),
             )
             raise
 

@@ -546,6 +546,9 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
         qp = request.query_params
         session_filter = qp.get("session_id") or session_id
         channel_filter = qp.get("channel_id")
+        reverse_rpc_capable = (
+            request.headers.get("x-jiuwen-push-consumer") == "gateway"
+        )
 
         registry = get_push_registry()
         sink = SSESink()
@@ -565,7 +568,11 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
             # 填满 maxsize 后，`PushRegistry.push` 每次扇到它都要等满超时才注销 ——
             # 进程级推送被一个早已消失的客户端拖累。
             registry.register(
-                subscriber_id, sink, session_id=session_filter, channel_id=channel_filter
+                subscriber_id,
+                sink,
+                session_id=session_filter,
+                channel_id=channel_filter,
+                reverse_rpc_capable=reverse_rpc_capable,
             )
             try:
                 while True:

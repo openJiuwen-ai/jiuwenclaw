@@ -20,10 +20,6 @@ from jiuwenswarm.gateway.a2a_manager.tool_rpc import (
 
 from .acp_output_tools import get_acp_output_manager
 
-_RPC_DISPATCH_TIMEOUT_SECONDS = 360.0
-_RPC_QUERY_TIMEOUT_SECONDS = 15.0
-
-
 class A2AOutboundToolBackend(Protocol):
     @property
     def ready(self) -> bool: ...
@@ -46,7 +42,7 @@ class GatewayA2AOutboundToolBackend:
 
         return bool(
             callable(getattr(get_acp_output_manager(), "_send_push_callback", None))
-            and get_push_registry().subscriber_count() > 0
+            and get_push_registry().reverse_rpc_ready()
         )
 
     async def call(
@@ -65,13 +61,11 @@ class GatewayA2AOutboundToolBackend:
                 params,
                 session_id=session_id,
                 channel_id=channel_id,
-                timeout=(
-                    _RPC_DISPATCH_TIMEOUT_SECONDS
-                    if method == _RPC_DISPATCH
-                    else _RPC_QUERY_TIMEOUT_SECONDS
-                ),
+                # The Gateway Manager owns operation budgets. In particular,
+                # sync_wait_seconds must not be preempted by a transport timer.
+                timeout=None,
                 log_params=False,
-                cancel_method=(_RPC_CANCEL if method == _RPC_DISPATCH else None),
+                cancel_method=_RPC_CANCEL,
             )
         except (asyncio.TimeoutError, RuntimeError):
             return _error(A2AOutboundErrorCode.MANAGER_UNAVAILABLE)

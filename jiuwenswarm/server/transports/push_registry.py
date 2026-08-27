@@ -20,6 +20,9 @@ WS 一律用 :data:`WS_PUSH_SUBSCRIBER_ID` 这**一个**固定 id 注册，由�
 挤出槽位后又清空；长连接因为一直没断**不会重新注册**，于是前端**永久收不到推送
 且毫无报错**，只能重启服务恢复（刷新浏览器无效）。
 
+反向 RPC 另有一个显式 owner。普通推送仍按原语义扇出；ACP/A2A 请求只投递给
+最后注册的 RPC-capable Gateway，避免多个 SSE 订阅者重复执行同一个工具请求。
+
 > 想改成「多 Gateway 连接各自收推送」，只需把固定 id 换成每连接唯一 id、并在
 > ``finally`` 里注销**自己那个** id。那是一次有意的行为变更，应单独验证。
 
@@ -39,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -102,10 +106,26 @@ class _Subscriber:
 class PushRegistry:
     """推送订阅者注册表：把「推给当前连接」变成「推给匹配的订阅者」。"""
 
-    __slots__ = ("_subscribers",)
+    __slots__ = (
+        "_subscribers",
+        "_reverse_rpc_owner_id",
+        "_reverse_rpc_owner_lost_callback",
+    )
 
     def __init__(self) -> None:
         self._subscribers: dict[str, _Subscriber] = {}
+        self._reverse_rpc_owner_id: str | None = None
+        self._reverse_rpc_owner_lost_callback: Callable[[], None] | None = None
+
+    def set_reverse_rpc_owner_lost_callback(
+        self, callback: Callable[[], None] | None
+    ) -> None:
+        self._reverse_rpc_owner_lost_callback = callback
+
+    def _notify_reverse_rpc_owner_lost(self) -> None:
+        callback = self._reverse_rpc_owner_lost_callback
+        if callback is not None:
+            callback()
 
     def register(
         self,
@@ -115,19 +135,29 @@ class PushRegistry:
         session_id: str | None = None,
         channel_id: str | None = None,
         drop_on_stall: bool = True,
+        reverse_rpc_capable: bool = False,
     ) -> None:
         """登记一个订阅者。同 ``subscriber_id`` 重复注册会覆盖旧的。
 
         ``drop_on_stall`` 的含义见 :class:`_Subscriber` —— WS 侧必须传 ``False``。
         """
+        replacing_rpc_owner = self._reverse_rpc_owner_id == subscriber_id
         self._subscribers[subscriber_id] = _Subscriber(
             sink=sink,
             session_id=session_id,
             channel_id=channel_id,
             drop_on_stall=drop_on_stall,
         )
+        if reverse_rpc_capable:
+            if self._reverse_rpc_owner_id is not None:
+                self._notify_reverse_rpc_owner_lost()
+            self._reverse_rpc_owner_id = subscriber_id
+        elif replacing_rpc_owner:
+            self._reverse_rpc_owner_id = None
+            self._notify_reverse_rpc_owner_lost()
         logger.info(
-            "[PushRegistry] 订阅者接入: id=%s session_id=%s channel_id=%s 当前订阅数=%d",
+            "[PushRegistry] 订阅者接入: id=%s session_id=%s "
+            "channel_id=%s 当前订阅数=%d",
             subscriber_id,
             session_id,
             channel_id,
@@ -137,6 +167,9 @@ class PushRegistry:
     def unregister(self, subscriber_id: str) -> None:
         """注销订阅者。不存在时静默返回（断连清理可能重入）。"""
         if self._subscribers.pop(subscriber_id, None) is not None:
+            if self._reverse_rpc_owner_id == subscriber_id:
+                self._reverse_rpc_owner_id = None
+                self._notify_reverse_rpc_owner_lost()
             logger.info(
                 "[PushRegistry] 订阅者断开: id=%s 当前订阅数=%d",
                 subscriber_id,
@@ -145,6 +178,41 @@ class PushRegistry:
 
     def subscriber_count(self) -> int:
         return len(self._subscribers)
+
+    def reverse_rpc_ready(self) -> bool:
+        owner_id = self._reverse_rpc_owner_id
+        return owner_id is not None and owner_id in self._subscribers
+
+    async def push_reverse_rpc(self, wire: dict[str, Any]) -> int:
+        """Deliver a point-to-point reverse RPC to the current Gateway owner."""
+        owner_id = self._reverse_rpc_owner_id
+        subscriber = self._subscribers.get(owner_id or "")
+        if owner_id is None or subscriber is None or not subscriber.matches(wire):
+            return 0
+        try:
+            if subscriber.drop_on_stall:
+                sent = await asyncio.wait_for(
+                    subscriber.sink.send_wire(wire), timeout=SEND_TIMEOUT
+                )
+            else:
+                sent = await subscriber.sink.send_wire(wire)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[PushRegistry] 反向 RPC 推送超时(%.1fs)，注销订阅者: id=%s",
+                SEND_TIMEOUT,
+                owner_id,
+            )
+            self.unregister(owner_id)
+            return 0
+        except Exception as exc:  # noqa: BLE001 - owner loss fails pending RPCs
+            logger.warning(
+                "[PushRegistry] 反向 RPC 推送失败，注销订阅者: id=%s error=%s",
+                owner_id,
+                exc,
+            )
+            self.unregister(owner_id)
+            return 0
+        return int(bool(sent))
 
     async def push(self, wire: dict[str, Any]) -> int:
         """向匹配的订阅者扇出一条已构造好的 wire 帧。

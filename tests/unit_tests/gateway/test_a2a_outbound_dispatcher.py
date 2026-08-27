@@ -26,6 +26,7 @@ from jiuwenswarm.agents.harness.common.rails.a2a_outbound_toolkit_rail import (
 )
 from jiuwenswarm.agents.harness.common.tools.a2a_outbound_tools import (
     A2AOutboundToolkit,
+    GatewayA2AOutboundToolBackend,
 )
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import (
     get_acp_output_manager,
@@ -695,6 +696,67 @@ async def test_toolkit_missing_route_is_not_reported_as_remote_rejection() -> No
 
     assert result["ok"] is False
     assert result["error_code"] == A2AOutboundErrorCode.MANAGER_UNAVAILABLE.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", [A2A_TOOL_DISPATCH_TASK, A2A_TOOL_GET_DISPATCH])
+async def test_gateway_backend_leaves_operation_timeout_to_manager(
+    monkeypatch, method
+) -> None:
+    output_manager = get_acp_output_manager()
+    calls = []
+
+    async def send(method, params, **kwargs):
+        calls.append((method, params, kwargs))
+        return {"result": {"ok": True}}
+
+    monkeypatch.setattr(output_manager, "send_jsonrpc_request", send)
+    monkeypatch.setattr(
+        GatewayA2AOutboundToolBackend,
+        "ready",
+        property(lambda _self: True),
+    )
+
+    result = await GatewayA2AOutboundToolBackend().call(
+        method,
+        {"agent_id": "agent-1", "task": "work", "mode": "sync"},
+        session_id="s1",
+        channel_id="web",
+    )
+
+    assert result == {"ok": True}
+    assert calls[0][2]["timeout"] is None
+    assert calls[0][2]["cancel_method"] == A2A_TOOL_CANCEL_CALL
+
+
+@pytest.mark.asyncio
+async def test_reverse_rpc_owner_loss_fails_request_without_transport_deadline(
+    monkeypatch,
+) -> None:
+    manager = get_acp_output_manager()
+    manager.reset_state()
+
+    async def delivered(_wire):
+        return True
+
+    monkeypatch.setattr(manager, "_send_push_callback", delivered)
+    request = asyncio.create_task(
+        manager.send_jsonrpc_request(
+            A2A_TOOL_GET_DISPATCH,
+            {"dispatch_id": "disp-1"},
+            session_id="s1",
+            timeout=None,
+        )
+    )
+    try:
+        while manager.pending_count == 0:
+            await asyncio.sleep(0)
+        manager.fail_pending_requests(RuntimeError("owner lost"))
+        with pytest.raises(RuntimeError, match="owner lost"):
+            await request
+        assert manager.pending_count == 0
+    finally:
+        manager.reset_state()
 
 
 @pytest.mark.asyncio

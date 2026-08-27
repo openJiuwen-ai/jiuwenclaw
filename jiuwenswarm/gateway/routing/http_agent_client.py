@@ -317,7 +317,12 @@ class HttpSseAgentServerClient(AgentServerClient):
             try:
                 http = self._ensure_http()
                 timeout = httpx.Timeout(None, connect=_CONNECT_TIMEOUT_SECONDS)
-                async with http.stream("GET", url, timeout=timeout) as response:
+                async with http.stream(
+                    "GET",
+                    url,
+                    headers={"X-Jiuwen-Push-Consumer": "gateway"},
+                    timeout=timeout,
+                ) as response:
                     response.raise_for_status()
                     async for frame in iter_sse_data_frames(response):
                         meta = frame.get("metadata")
