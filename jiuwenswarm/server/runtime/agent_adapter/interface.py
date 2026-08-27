@@ -689,6 +689,8 @@ _PLUGIN_ROUTES: dict[ReqMethod, str] = {
 
 # Catalog + lifecycle: method → package_manager callable.
 _PACKAGE_ROUTES: dict[ReqMethod, str] = {
+    ReqMethod.AGENT_GROUPS_LIST: "list_agent_groups",
+    ReqMethod.AGENT_GROUPS_SHOW: "show_agent_group",
     ReqMethod.AGENT_TEMPLATES_LIST: "list_agent_templates",
     ReqMethod.AGENT_TEMPLATES_SHOW: "show_agent_template",
     ReqMethod.AGENT_TEMPLATES_FILE_LIST: "list_agent_template_files",
@@ -1836,8 +1838,17 @@ class JiuWenSwarm:
         # Frontend contract uses `id`; accept legacy `name` as alias.
         name = params.get("id") if params.get("id") not in (None, "") else params.get("name")
         try:
-            if method == ReqMethod.AGENT_TEMPLATES_LIST:
+            if method == ReqMethod.AGENT_GROUPS_LIST:
                 payload: dict[str, Any] = {
+                    "agentGroups": package_manager.list_agent_groups(params)
+                }
+            elif method == ReqMethod.AGENT_GROUPS_SHOW:
+                group = package_manager.show_agent_group(str(name or ""))
+                if group is None:
+                    raise ValueError(f"agent_group not found: {name!r}")
+                payload = {"group": group}
+            elif method == ReqMethod.AGENT_TEMPLATES_LIST:
+                payload = {
                     "templates": package_manager.list_agent_templates(params)
                 }
             elif method == ReqMethod.AGENT_TEMPLATES_SHOW:
@@ -2303,6 +2314,7 @@ class JiuWenSwarm:
             request.session_id,
             compute_chat_send_mcp_needed(params),
             model_name=params.get("model_name"),
+            history_before_request_id=request.request_id,
         )
 
         # cloud memory: before chat hook
@@ -2599,6 +2611,7 @@ class JiuWenSwarm:
             request.session_id,
             compute_chat_send_mcp_needed(params),
             model_name=params.get("model_name"),
+            history_before_request_id=request.request_id,
         )
 
         # Team 模式：把整个 turn 交给 team_helpers。它先用 turn.text（用户原
@@ -3650,6 +3663,7 @@ class JiuWenSwarm:
         needed: list[str] | None,
         *,
         model_name: str | None = None,
+        history_before_request_id: str | None = None,
     ) -> None:
         """Reconcile this session's MCP set to ``needed`` (idempotent diff).
 
@@ -3658,6 +3672,8 @@ class JiuWenSwarm:
         ``plugin_names`` (see ``compute_chat_send_mcp_needed``). ``None`` /
         ``[]`` both clear the session's selection. See
         ``JiuWenSwarmDeepAdapter.reconcile_session_mcp`` for the diff logic.
+        ``history_before_request_id`` keeps a lazily-created session adapter
+        from restoring the current chat.send as disk history.
         """
         adapter = self._adapter
         if adapter is None:
@@ -3670,16 +3686,22 @@ class JiuWenSwarm:
         try:
             parameters = inspect.signature(reconcile).parameters
         except (TypeError, ValueError):
-            supports_model_name = True
+            # Preserve the previous fallback for opaque callables. Production
+            # adapters are Python methods and take the inspected branch below.
+            supported_kwargs = {"model_name": model_name}
         else:
-            supports_model_name = "model_name" in parameters or any(
+            accepts_kwargs = any(
                 parameter.kind is inspect.Parameter.VAR_KEYWORD
                 for parameter in parameters.values()
             )
-        if supports_model_name:
-            await reconcile(session_id, needed, model_name=model_name)
-        else:
-            await reconcile(session_id, needed)
+            supported_kwargs = {}
+            if "model_name" in parameters or accepts_kwargs:
+                supported_kwargs["model_name"] = model_name
+            if "history_before_request_id" in parameters or accepts_kwargs:
+                supported_kwargs["history_before_request_id"] = (
+                    history_before_request_id
+                )
+        await reconcile(session_id, needed, **supported_kwargs)
 
     def sync_mcp_credentials(self) -> bool:
         """Sync connected MCPs' tokens into os.environ (skill scripts).

@@ -177,6 +177,154 @@ def _resolve_agent_group_selection(
     return requested, not stored
 
 
+def _resolve_team_skill_selection(
+    params: dict[str, Any] | None,
+    *,
+    agent_group_name: str | None = None,
+) -> list[str] | None:
+    """Normalize the optional Team-wide Skill selection from ``chat.send``.
+
+    ``None`` means the request omitted ``skills`` and must not change the
+    Team's persisted visibility. For a plain Team, an explicit empty list
+    clears the Team-level selection (the visibility layer then inherits the
+    library), while a non-empty list replaces it. AgentGroup Teams reject
+    non-empty selections and treat an empty list as a no-op so their packaged
+    Skills and existing visibility remain untouched.
+
+    Args:
+        params: Raw ``chat.send`` params.
+        agent_group_name: Effective AgentGroup, including the session binding
+            when the current request omits ``agent_group_name``.
+
+    Returns:
+        ``None`` when omitted or empty for an AgentGroup Team, otherwise a
+        de-duplicated list preserving the frontend's order.
+
+    Raises:
+        ValueError: ``skills`` is invalid, or an AgentGroup Team requests an
+            additional Skill selection.
+    """
+    if not isinstance(params, dict) or "skills" not in params:
+        return None
+    raw_skills = params.get("skills")
+    if not isinstance(raw_skills, list):
+        raise ValueError("skills must be a list of non-empty strings")
+    if agent_group_name:
+        if raw_skills:
+            raise ValueError(
+                "skills cannot be selected when an agent_group_name is selected or bound"
+            )
+        return None
+
+    # Keep Team chat.send validation aligned with the visibility RPC instead
+    # of accepting a path-like name that could never identify a library Skill.
+    from jiuwenswarm.server.runtime.skill.skill_manager import _validate_skill_name
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for raw_name in raw_skills:
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError("skills must be a list of non-empty strings")
+        name = _validate_skill_name(raw_name.strip())
+        if name not in seen:
+            selected.append(name)
+            seen.add(name)
+    return selected
+
+
+def _validate_installed_team_skills(skill_names: list[str]) -> None:
+    """Require every selected Team Skill to be installed and executable."""
+    if not skill_names:
+        return
+
+    skills_root = get_agent_skills_dir().expanduser().resolve()
+    missing: list[str] = []
+    for name in skill_names:
+        try:
+            skill_dir = (skills_root / name).resolve(strict=True)
+            skill_dir.relative_to(skills_root)
+        except (OSError, ValueError):
+            missing.append(name)
+            continue
+        if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
+            missing.append(name)
+    if missing:
+        joined = ", ".join(repr(name) for name in missing)
+        raise ValueError(f"team skill not installed: {joined}")
+
+    from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
+
+    disabled = sorted(set(skill_names).intersection(load_execution_disabled_skills()))
+    if disabled:
+        joined = ", ".join(repr(name) for name in disabled)
+        raise ValueError(f"team skill is disabled: {joined}")
+
+
+async def _apply_team_skill_selection(
+    *,
+    team_manager: Any,
+    session_id: str,
+    team_spec: Any,
+    skill_names: list[str] | None,
+) -> None:
+    """Persist an explicit Skill selection at Team scope and refresh live rails.
+
+    Team and member Skill rails already compose the Team visibility document
+    into their effective view. Writing that one authoritative document makes
+    the selection available to the leader and every teammate without copying
+    Skill packages or changing ``agent-core``.
+    """
+    if skill_names is None:
+        return
+    _validate_installed_team_skills(skill_names)
+
+    build_context = getattr(team_spec, "build_context", None)
+    visibility_path = str(
+        getattr(build_context, "team_skill_visibility_path", "") or ""
+    ).strip()
+    team_name = str(getattr(team_spec, "team_name", "") or "").strip()
+    if not visibility_path or not team_name:
+        raise ValueError("Team Skill visibility path is unavailable")
+
+    from openjiuwen.agent_teams.skill.file_lock import FileLockTimeout
+    from openjiuwen.agent_teams.skill.visibility import SCOPE_TEAM, set_skill_visibility
+
+    try:
+        await asyncio.to_thread(
+            set_skill_visibility,
+            visibility_path,
+            scope=SCOPE_TEAM,
+            entity_id=team_name,
+            allow=skill_names,
+            # A frontend selection is an explicit Team-level enable decision.
+            # Member- or process-level deny rules still retain their precedence.
+            deny=[],
+        )
+    except FileLockTimeout as exc:
+        raise ValueError("Team Skill configuration is busy, please try again") from exc
+    except OSError as exc:
+        raise ValueError(f"failed to persist Team Skill selection: {exc}") from exc
+
+    reload_views = getattr(team_manager, "reload_team_skill_views", None)
+    if callable(reload_views):
+        try:
+            await reload_views(session_id)
+        except Exception as exc:  # noqa: BLE001
+            # Providers re-read visibility metadata on the next call; the eager
+            # reload is only a latency optimization for already-running rails.
+            logger.warning(
+                "[TeamHelpers] eager Team Skill reload failed: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+    logger.info(
+        "[TeamHelpers] applied Team Skill selection: session_id=%s team=%s skills=%s",
+        session_id,
+        team_name,
+        skill_names,
+    )
+
+
 def _team_hide_teammate_enabled() -> bool:
     """Return whether non-leader teammate frames should be filtered out in team mode."""
     return os.environ.get(_HIDE_TEAMMATE_ENV_KEY, "").strip().lower() == "true"
@@ -1926,6 +2074,12 @@ async def process_team_message_stream(
             params=params_obj if isinstance(params_obj, dict) else None,
             is_first_request=is_first_request,
         )
+        # Validate against the effective session binding before assembling a
+        # Team or writing visibility, including follow-ups and cold recovery.
+        team_skill_names = _resolve_team_skill_selection(
+            params_obj if isinstance(params_obj, dict) else None,
+            agent_group_name=agent_group_name,
+        )
         if agent_group_name:
             request_metadata["agent_group_name"] = agent_group_name
         requested_model_name = (
@@ -1947,6 +2101,13 @@ async def process_team_message_stream(
             requested_model_name=requested_model_name,
             agent_group_name=agent_group_name,
         )
+        if team_skill_names is not None:
+            await _apply_team_skill_selection(
+                team_manager=team_manager,
+                session_id=session_id,
+                team_spec=team_spec,
+                skill_names=team_skill_names,
+            )
         if persist_agent_group and agent_group_name:
             update_session_metadata(
                 session_id=session_id,

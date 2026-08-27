@@ -1,6 +1,7 @@
-import ast
 import asyncio
+import io
 import json
+import tokenize
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -243,13 +244,17 @@ async def test_team_stream_admission_is_owned_by_actual_round_not_transport():
 
 def test_agent_ws_server_has_no_direct_websocket_send_calls():
     path = Path(agent_ws_server.__file__)
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    source = path.read_text(encoding="utf-8")
+    tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
     direct_sends = [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "send"
+        token.start[0]
+        for index, token in enumerate(tokens[1:-1], start=1)
+        if token.type == tokenize.NAME
+        and token.string == "send"
+        and tokens[index - 1].type == tokenize.OP
+        and tokens[index - 1].string == "."
+        and tokens[index + 1].type == tokenize.OP
+        and tokens[index + 1].string == "("
     ]
 
     assert direct_sends == []
