@@ -3799,16 +3799,7 @@ class SkillManager:
             )
 
         with tempfile.TemporaryDirectory(prefix="jiuwenswarm_import_upload_") as tmpdir:
-            try:
-                skill_dir = self._extract_skill_package_file(src, Path(tmpdir))
-            except SkillRpcError:
-                raise
-            except Exception as exc:
-                logger.warning("[SkillManager] upload package extract failed: %s", exc)
-                raise SkillRpcError(
-                    ERROR_SKILL_INVALID_PACKAGE,
-                    f"解包失败: {exc}",
-                ) from exc
+            skill_dir = self._extract_skill_package_file(src, Path(tmpdir))
             return self._install_imported_skill_dir(
                 skill_dir,
                 force=overwrite,

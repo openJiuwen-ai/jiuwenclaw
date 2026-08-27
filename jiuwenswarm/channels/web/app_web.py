@@ -1627,7 +1627,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             from jiuwenswarm.server.runtime.skill.skills_multipart_http import (
                 handle_skills_import_http,
             )
-        except Exception as exc:  # noqa: BLE001
+        except ImportError as exc:
             self.log_error("skills import module unavailable: %s", exc)
             self._write_json(500, {"code": "SKILL_INVALID_PACKAGE", "message": "import 模块不可用", "error": "import 模块不可用"})
             return
@@ -1645,7 +1645,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             from jiuwenswarm.server.runtime.skill.skills_multipart_http import (
                 handle_skills_create_from_knowledge_http,
             )
-        except Exception as exc:  # noqa: BLE001
+        except ImportError as exc:
             self.log_error("skills create-from-knowledge module unavailable: %s", exc)
             self._write_json(
                 500,

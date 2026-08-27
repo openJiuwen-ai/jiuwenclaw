@@ -515,8 +515,9 @@ async def test_handle_skills_team_skills_hub_pack_excludes_archive(tmp_path):
     assert zip_path.is_file()
     with zipfile.ZipFile(zip_path, "r") as zf:
         names = set(zf.namelist())
-    assert "SKILL.md" in names
-    assert "archive/note.txt" in names
+    assert "pack-demo/plugin.yaml" in names
+    assert "pack-demo/pack-demo/SKILL.md" in names
+    assert "pack-demo/pack-demo/archive/note.txt" in names
     assert not any(n == ".archive" or n.startswith(".archive/") for n in names)
 
 

@@ -1664,22 +1664,9 @@ class JiuWenSwarm:
                 and payload.get("result_type") == "followup"
                 and payload.get("success")
             ):
-                try:
-                    payload = await self._run_skills_create_from_knowledge_silent(
-                        request, payload
-                    )
-                except SkillRpcError:
-                    raise
-                except Exception as exc:
-                    logger.exception(
-                        "[JiuWenSwarm] skills.create_from_knowledge 静默 Agent 失败: "
-                        "request_id=%s",
-                        request.request_id,
-                    )
-                    raise SkillRpcError(
-                        "SKILL_INVALID_PACKAGE",
-                        f"知识转 Skill 失败: {exc}",
-                    ) from exc
+                payload = await self._run_skills_create_from_knowledge_silent(
+                    request, payload
+                )
                 if payload.get("success"):
                     await self.create_instance()
                     self._refresh_team_shared_skill_links(request.session_id)
@@ -1806,6 +1793,69 @@ class JiuWenSwarm:
                 finally:
                     shutil.rmtree(workspace_backup, ignore_errors=True)
 
+    @staticmethod
+    def _coerce_optional_str_list(raw: Any) -> list[str]:
+        if not isinstance(raw, list):
+            return []
+        return [str(item).strip() for item in raw if str(item).strip()]
+
+    @staticmethod
+    def _build_skills_knowledge_followup_request(
+        request: AgentRequest,
+        *,
+        followup: str,
+        skills: list[str],
+        trusted_dirs: list[str],
+        input_file: str,
+    ) -> AgentRequest:
+        params = dict(request.params) if isinstance(request.params, dict) else {}
+        params["query"] = followup
+        params["log_as_user"] = False
+        params.setdefault("mode", params.get("mode") or "agent")
+        params["skills"] = skills
+        if trusted_dirs:
+            params["trusted_dirs"] = trusted_dirs
+        if input_file:
+            params["files"] = {
+                "uploaded_documents": [
+                    {"path": input_file, "filename": Path(input_file).name}
+                ]
+            }
+        param_metadata = (
+            params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+        )
+        params["metadata"] = {
+            **param_metadata,
+            "scene": "create_skill",
+        }
+
+        metadata = dict(request.metadata) if isinstance(request.metadata, dict) else {}
+        metadata["skills_create_from_knowledge_silent"] = True
+        metadata["scene"] = "create_skill"
+
+        return AgentRequest(
+            request_id=f"{request.request_id}-knowledge-followup",
+            channel_id=request.channel_id,
+            session_id=f"skills-knowledge:{request.request_id}",
+            chat_id=request.chat_id,
+            req_method=ReqMethod.CHAT_SEND,
+            params=params,
+            is_stream=True,
+            timestamp=request.timestamp,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _cleanup_knowledge_upload_file(input_file: str) -> None:
+        if not input_file:
+            return
+        try:
+            path = Path(input_file)
+            if path.is_file() and "jiuwenswarm_knowledge_upload_" in str(path.parent):
+                shutil.rmtree(path.parent, ignore_errors=True)
+        except OSError:
+            pass
+
     async def _run_skills_create_from_knowledge_silent(
         self,
         request: AgentRequest,
@@ -1820,52 +1870,17 @@ class JiuWenSwarm:
                 "create-from-knowledge follow-up 参数不完整",
             )
 
-        skills_raw = payload.get("skills")
-        skills: list[str] = []
-        if isinstance(skills_raw, list):
-            skills = [str(s).strip() for s in skills_raw if str(s).strip()]
-
-        trusted_dirs: list[str] = []
-        raw_trusted = payload.get("trusted_dirs")
-        if isinstance(raw_trusted, list):
-            trusted_dirs = [str(d).strip() for d in raw_trusted if str(d).strip()]
+        skills = self._coerce_optional_str_list(payload.get("skills"))
+        trusted_dirs = self._coerce_optional_str_list(payload.get("trusted_dirs"))
+        input_file = str(payload.get("input_file") or "").strip()
 
         try:
-            params = dict(request.params) if isinstance(request.params, dict) else {}
-            params["query"] = followup
-            params["log_as_user"] = False
-            params.setdefault("mode", params.get("mode") or "agent")
-            params["skills"] = skills
-            if trusted_dirs:
-                params["trusted_dirs"] = trusted_dirs
-            input_file = str(payload.get("input_file") or "").strip()
-            if input_file:
-                params["files"] = {
-                    "uploaded_documents": [
-                        {"path": input_file, "filename": Path(input_file).name}
-                    ]
-                }
-            param_metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
-            params["metadata"] = {
-                **param_metadata,
-                "scene": "create_skill",
-            }
-
-            metadata = dict(request.metadata) if isinstance(request.metadata, dict) else {}
-            metadata["skills_create_from_knowledge_silent"] = True
-            metadata["scene"] = "create_skill"
-
-            knowledge_session_id = f"skills-knowledge:{request.request_id}"
-            chat_request = AgentRequest(
-                request_id=f"{request.request_id}-knowledge-followup",
-                channel_id=request.channel_id,
-                session_id=knowledge_session_id,
-                chat_id=request.chat_id,
-                req_method=ReqMethod.CHAT_SEND,
-                params=params,
-                is_stream=True,
-                timestamp=request.timestamp,
-                metadata=metadata,
+            chat_request = self._build_skills_knowledge_followup_request(
+                request,
+                followup=followup,
+                skills=skills,
+                trusted_dirs=trusted_dirs,
+                input_file=input_file,
             )
             adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(chat_request))
             inputs, _, _ = self._build_inputs(chat_request)
@@ -1877,15 +1892,7 @@ class JiuWenSwarm:
             return result
         finally:
             shutil.rmtree(output_dir, ignore_errors=True)
-            input_file = str(payload.get("input_file") or "").strip()
-            # 输入文件由 HTTP 层写入临时目录时可一并清理；仅删除我们认识的临时上传前缀
-            if input_file:
-                try:
-                    p = Path(input_file)
-                    if p.is_file() and "jiuwenswarm_knowledge_upload_" in str(p.parent):
-                        shutil.rmtree(p.parent, ignore_errors=True)
-                except OSError:
-                    pass
+            self._cleanup_knowledge_upload_file(input_file)
 
     async def _handle_plugins_request(self, request: AgentRequest) -> AgentResponse | None:
         """处理 Plugin 相关请求，返回 None 表示不是 Plugin 请求."""

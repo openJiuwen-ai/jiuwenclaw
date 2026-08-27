@@ -131,7 +131,7 @@ async def _call_agent_skill_rpc(
     finally:
         try:
             await client.disconnect()
-        except Exception:  # noqa: BLE001
+        except OSError:
             pass
 
     payload = resp.payload if isinstance(getattr(resp, "payload", None), dict) else {}
@@ -154,7 +154,7 @@ def _run_coro(coro: Any) -> Any:
     def _runner() -> None:
         try:
             result["value"] = asyncio.run(coro)
-        except BaseException as exc:  # noqa: BLE001
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
             error.append(exc)
 
     import threading
@@ -203,9 +203,46 @@ def handle_skills_import_http(
         return 200, payload
     except SkillRpcError as exc:
         return skill_http_error_status(exc.code), skill_http_error_body(exc.code, exc.message)
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:
         logger.exception("[skills_multipart_http] import failed: %s", exc)
         return 500, skill_http_error_body("SKILL_INVALID_PACKAGE", str(exc))
+
+
+def _parse_knowledge_upload_fields(
+    fields: dict[str, Any],
+) -> tuple[dict[str, Any], Path | None]:
+    """解析 create-from-knowledge 表单字段，返回 RPC params 与可选上传目录."""
+    link_raw = fields.get("link")
+    link = str(link_raw).strip() if isinstance(link_raw, str) else ""
+    file_field = fields.get("file")
+    has_file = isinstance(file_field, dict) and isinstance(
+        file_field.get("content"), (bytes, bytearray)
+    )
+    has_link = bool(link)
+    if has_link == has_file:
+        raise SkillRpcError(
+            ERROR_SKILL_KNOWLEDGE_INPUT_CONFLICT,
+            "link 与 file 必须且只能提供一个",
+        )
+
+    skill_description_raw = fields.get("skill_description")
+    skill_description = (
+        str(skill_description_raw).strip() if isinstance(skill_description_raw, str) else ""
+    )
+
+    params: dict[str, Any] = {"skill_description": skill_description}
+    upload_dir: Path | None = None
+    if has_link:
+        params["link"] = link
+    else:
+        assert isinstance(file_field, dict)
+        upload_dir = Path(tempfile.mkdtemp(prefix="jiuwenswarm_knowledge_upload_"))
+        filename = str(file_field.get("filename") or "document.bin")
+        safe_name = Path(filename).name or "document.bin"
+        dest = upload_dir / safe_name
+        dest.write_bytes(bytes(file_field["content"]))
+        params["file_path"] = str(dest)
+    return params, upload_dir
 
 
 def handle_skills_create_from_knowledge_http(
@@ -218,35 +255,7 @@ def handle_skills_create_from_knowledge_http(
     upload_dir: Path | None = None
     try:
         fields = parse_multipart_form(content_type, body)
-        link_raw = fields.get("link")
-        link = str(link_raw).strip() if isinstance(link_raw, str) else ""
-        file_field = fields.get("file")
-        has_file = isinstance(file_field, dict) and isinstance(
-            file_field.get("content"), (bytes, bytearray)
-        )
-        has_link = bool(link)
-        if has_link == has_file:
-            raise SkillRpcError(
-                ERROR_SKILL_KNOWLEDGE_INPUT_CONFLICT,
-                "link 与 file 必须且只能提供一个",
-            )
-
-        skill_description_raw = fields.get("skill_description")
-        skill_description = (
-            str(skill_description_raw).strip() if isinstance(skill_description_raw, str) else ""
-        )
-
-        params: dict[str, Any] = {"skill_description": skill_description}
-        if has_link:
-            params["link"] = link
-        else:
-            assert isinstance(file_field, dict)
-            upload_dir = Path(tempfile.mkdtemp(prefix="jiuwenswarm_knowledge_upload_"))
-            filename = str(file_field.get("filename") or "document.bin")
-            safe_name = Path(filename).name or "document.bin"
-            dest = upload_dir / safe_name
-            dest.write_bytes(bytes(file_field["content"]))
-            params["file_path"] = str(dest)
+        params, upload_dir = _parse_knowledge_upload_fields(fields)
 
         if use_local_manager:
             # 单测/无 Agent 时仅跑领域准备；完整路径需 Agent 静默执行
@@ -264,7 +273,7 @@ def handle_skills_create_from_knowledge_http(
         return 200, payload
     except SkillRpcError as exc:
         return skill_http_error_status(exc.code), skill_http_error_body(exc.code, exc.message)
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:
         logger.exception("[skills_multipart_http] create-from-knowledge failed: %s", exc)
         return 500, skill_http_error_body("SKILL_INVALID_PACKAGE", str(exc))
     finally:

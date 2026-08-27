@@ -257,8 +257,8 @@ async def test_create_from_knowledge_silent_runs_agent(
                     "query": (request.params or {}).get("query"),
                 }
             )
-            if False:  # pragma: no cover
-                yield None
+            for _ in ():
+                yield _
 
     out = tmp_path / "out"
     skill_root = out / "from-link"
