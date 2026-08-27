@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import inspect
 import logging
 import re
 import shutil
@@ -1609,6 +1610,20 @@ class JiuWenSwarm:
                 params["_session_id"] = str(request.session_id or "").strip()
                 if handler_name == "handle_skills_files_get" and not params.get("session_id"):
                     params["session_id"] = params["_session_id"]
+            if handler_name in {
+                "handle_skills_retrieval_status",
+                "handle_skills_retrieval_index_build",
+            }:
+                params.pop("_session_profile", None)
+                profile_getter = getattr(
+                    self._adapter,
+                    "get_skill_retrieval_status_profile",
+                    None,
+                )
+                if callable(profile_getter):
+                    profile = profile_getter(request.session_id)
+                    if isinstance(profile, dict):
+                        params["_session_profile"] = profile
             payload = await handler(params)
             _reload_after_skills = handler_name in [
                 "handle_skills_install",
@@ -2287,6 +2302,7 @@ class JiuWenSwarm:
         await self.reconcile_session_mcp(
             request.session_id,
             compute_chat_send_mcp_needed(params),
+            model_name=params.get("model_name"),
         )
 
         # cloud memory: before chat hook
@@ -2582,6 +2598,7 @@ class JiuWenSwarm:
         await self.reconcile_session_mcp(
             request.session_id,
             compute_chat_send_mcp_needed(params),
+            model_name=params.get("model_name"),
         )
 
         # Team 模式：把整个 turn 交给 team_helpers。它先用 turn.text（用户原
@@ -3628,7 +3645,11 @@ class JiuWenSwarm:
         return False
 
     async def reconcile_session_mcp(
-        self, session_id: str | None, needed: list[str] | None
+        self,
+        session_id: str | None,
+        needed: list[str] | None,
+        *,
+        model_name: str | None = None,
     ) -> None:
         """Reconcile this session's MCP set to ``needed`` (idempotent diff).
 
@@ -3646,7 +3667,19 @@ class JiuWenSwarm:
             # Adapter doesn't support session-level MCP (e.g. a stub/mock
             # adapter) — session-level enable is a no-op for it.
             return
-        await reconcile(session_id, needed)
+        try:
+            parameters = inspect.signature(reconcile).parameters
+        except (TypeError, ValueError):
+            supports_model_name = True
+        else:
+            supports_model_name = "model_name" in parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+        if supports_model_name:
+            await reconcile(session_id, needed, model_name=model_name)
+        else:
+            await reconcile(session_id, needed)
 
     def sync_mcp_credentials(self) -> bool:
         """Sync connected MCPs' tokens into os.environ (skill scripts).

@@ -186,6 +186,58 @@ _background_permission_reload_tasks: set[asyncio.Task] = set()
 _background_session_kvc_tasks: set[asyncio.Task] = set()
 
 
+def _is_session_prewarm_model_eligible(
+    params: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> bool:
+    """Return whether session prewarm can safely use the configured default model.
+
+    A prewarmed single-agent child freezes its skill-retrieval budget before the
+    first chat request arrives.  Requests for a non-default model must therefore
+    create that child on the first chat, when the selected model is available.
+    """
+    requested = str(params.get("model_name") or "").strip()
+    if not requested:
+        return True
+
+    resolved_config = config if config is not None else get_config()
+    from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
+        is_skill_retrieval_enabled,
+    )
+
+    # The global switch promises the unchanged legacy runtime when disabled.
+    if not is_skill_retrieval_enabled(resolved_config):
+        return True
+
+    entries = get_default_models(resolved_config)
+    first_identifiers: set[str] | None = None
+    selected_identifiers: set[str] | None = None
+    name_counts: dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        model_client_config = entry.get("model_client_config")
+        if not isinstance(model_client_config, dict):
+            continue
+        model_name = str(model_client_config.get("model_name") or "").strip()
+        if not model_name:
+            continue
+
+        occurrence = name_counts.get(model_name, 0)
+        name_counts[model_name] = occurrence + 1
+        identifiers = {model_name, f"{model_name}#{occurrence}"}
+        alias = str(entry.get("alias") or "").strip()
+        if alias:
+            identifiers.add(alias)
+        if first_identifiers is None:
+            first_identifiers = identifiers
+        if selected_identifiers is None and entry.get("is_default") is True:
+            selected_identifiers = identifiers
+
+    default_identifiers = selected_identifiers or first_identifiers or set()
+    return requested in default_identifiers
+
+
 async def _reset_active_browser_runtimes_if_available(browser_move: Any) -> int:
     """Reset active browser runtimes when supported by the installed SDK."""
     reset_runtimes = getattr(
@@ -9992,6 +10044,7 @@ class AgentWebSocketServer:
                     "agent.work.normal",
                     "agent.code.normal",
                 }
+                and _is_session_prewarm_model_eligible(params)
             )
             create_token = str(params.get("create_token") or "").strip()
             if external_tui_session:

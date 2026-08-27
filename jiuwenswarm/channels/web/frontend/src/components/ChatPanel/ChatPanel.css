@@ -86,8 +86,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: 0;
   border-radius: 4px;
@@ -188,9 +188,29 @@ overflow: hidden;
   border-color: var(--color-feedback-danger) !important;
 }
 
+.chat-input-container--command-pending {
+  background: var(--color-surface-muted);
+}
+
 .chat-input-frame {
   position: relative;
   width: 100%;
+}
+
+.chat-input-compact-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  margin: 0 4px 8px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.chat-input-compact-progress__spinner {
+  flex: 0 0 auto;
+  animation: harness-spin 0.9s linear infinite;
 }
 
 .chat-active-team-group {
@@ -826,6 +846,11 @@ overflow: hidden;
 
 .chat-input-editor:focus-visible {
   box-shadow: none;
+}
+
+.chat-input-editor--disabled {
+  color: var(--color-text-secondary);
+  cursor: not-allowed;
 }
 
 /* inline chip（contenteditable 内的技能标签） */
@@ -3587,19 +3612,18 @@ overflow: hidden;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: var(--color-text-tertiary);
+  color: var(--color-text-primary);
   cursor: pointer;
 }
 
 .share-export-btn:hover:not(:disabled) {
   background: var(--color-action-secondary);
-  color: var(--color-text-primary);
 }
 
 .share-export-btn:focus-visible {
@@ -3656,21 +3680,33 @@ overflow: hidden;
   padding: 2rem 1.5rem 6rem 1.5rem;
 }
 
+.chat-welcome__composer {
+  position: relative;
+  width: min(100%, 768px);
+  margin-bottom: 1.25rem;
+}
+
 .chat-welcome__banner {
+  position: absolute;
+  top: -124px;
+  right: -129px;
   width: 300px;
   height: 150px;
   max-width: 100%;
   display: block;
   object-fit: contain;
+  pointer-events: none;
+  z-index: 10;
 }
 
 .chat-welcome__heading {
-  font-size: 24px;
+  font-size: 32px;
   font-weight: 600;
   color: var(--color-text-strong);
   line-height: 48px;
-  margin: 20px 0;
-  text-align: center;
+  margin: 0 0 20px 0;
+  text-align: left;
+  align-self: flex-start;
 }
 
 .chat-welcome__subtext {

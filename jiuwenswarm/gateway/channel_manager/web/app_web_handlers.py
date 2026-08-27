@@ -97,7 +97,6 @@ from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
 from jiuwenswarm.common.utils import (
     get_env_file,
     get_root_dir,
-    get_user_workspace_dir
 )
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 from jiuwenswarm.common.work_mode import (
@@ -108,13 +107,7 @@ from jiuwenswarm.common.work_mode import (
     SUPPORTED_WORK_MODES,
     is_default_project_id,
 )
-from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
-from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.common.version import __version__
-from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
-    coerce_root_categories_value,
-    root_categories_to_text,
-)
 
 for _jiuwen_log in LogManager.get_all_loggers().values():
     _jiuwen_log.set_level(logging.INFO)
@@ -1024,22 +1017,23 @@ _SYMPHONY_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
 _SYMPHONY_CONFIG_KEYS = tuple(_SYMPHONY_CONFIG_SPECS.keys())
 _SKILL_RETRIEVAL_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
     "skill_retrieval_enabled": (("enabled",), "bool", False),
-    "skill_retrieval_build_branching_factor": (("build", "branching_factor"), "int", 128),
-    "skill_retrieval_build_max_depth": (("build", "max_depth"), "int", 6),
-    "skill_retrieval_build_root_categories": (("build", "root_categories"), "root_categories", ""),
-    "skill_retrieval_build_max_workers": (("build", "max_workers"), "int", 2),
-    "skill_retrieval_build_max_retries": (("build", "max_retries"), "non_negative_int", 2),
-    "skill_retrieval_build_request_timeout_seconds": (("build", "request_timeout_seconds"), "float", 420.0),
-    "skill_retrieval_build_total_timeout_seconds": (("build", "total_timeout_seconds"), "float", 0.0),
-    "skill_retrieval_build_classification_batch_limit": (("build", "classification_batch_limit"), "int", 32),
-    "skill_retrieval_build_discovery_seed": (("build", "discovery_seed"), "raw_int", 42),
-    "skill_retrieval_build_postprocess_enabled": (("build", "postprocess_enabled"), "bool", True),
-    "skill_retrieval_build_postprocess_max_passes": (("build", "postprocess_max_passes"), "non_negative_int", 1),
-    "skill_retrieval_build_postprocess_min_skills": (("build", "postprocess_min_skills"), "int", 6),
-    "skill_retrieval_build_equivalence_enabled": (("build", "equivalence_enabled"), "bool", True),
-    "skill_retrieval_retrieve_compact_codes_enabled": (("retrieve", "compact_codes_enabled"), "bool", False),
-    "skill_retrieval_retrieve_flatten_tree": (("retrieve", "flatten_tree"), "bool", False),
-    "skill_retrieval_retrieve_max_exposure_depth": (("retrieve", "max_exposure_depth"), "int", 1),
+    "skill_retrieval_index_enabled": (("index", "enabled"), "bool", False),
+    "skill_retrieval_max_results": (("discovery", "max_results"), "int", 10),
+    "skill_retrieval_max_output_chars": (
+        ("discovery", "max_output_chars"),
+        "output_chars",
+        12000,
+    ),
+    "skill_retrieval_max_list_entries": (
+        ("discovery", "max_list_entries"),
+        "int",
+        40,
+    ),
+    "skill_retrieval_incremental_notice_max_chars": (
+        ("discovery", "incremental_notice_max_chars"),
+        "int",
+        4000,
+    ),
 }
 _SKILL_RETRIEVAL_CONFIG_KEYS = tuple(_SKILL_RETRIEVAL_CONFIG_SPECS.keys())
 
@@ -1067,8 +1061,20 @@ def _coerce_config_panel_value(value: Any, value_type: str, default: Any) -> Any
             return max(0.0, float(value))
         except (TypeError, ValueError):
             return default
-    if value_type == "root_categories":
-        return coerce_root_categories_value(value, allow_path=False) or ""
+    if value_type == "ratio":
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if 0.0 < parsed <= 1.0 else default
+    if value_type == "output_chars":
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_output_chars must be an integer from 512 to 48000") from exc
+        if not 512 <= parsed <= 48_000:
+            raise ValueError("max_output_chars must be from 512 to 48000")
+        return parsed
     return str(value if value is not None else default)
 
 
@@ -1099,8 +1105,6 @@ def _flatten_symphony_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
         value = _get_nested_config_value(symphony, path, default)
         if value_type == "bool":
             flat[key] = "true" if bool(value) else "false"
-        elif value_type == "root_categories":
-            flat[key] = root_categories_to_text(value)
         else:
             flat[key] = str(value)
     flat.update(_flatten_skill_retrieval_for_config_panel(raw))
@@ -1115,8 +1119,6 @@ def _flatten_skill_retrieval_for_config_panel(raw: dict[str, Any]) -> dict[str, 
         value = _get_nested_config_value(section, path, default)
         if value_type == "bool":
             flat[key] = "true" if bool(value) else "false"
-        elif value_type == "root_categories":
-            flat[key] = root_categories_to_text(value)
         else:
             flat[key] = str(value)
     return flat
@@ -2640,8 +2642,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             }.items():
                 if value_type == "bool":
                     default_text = "true" if default else "false"
-                elif value_type == "root_categories":
-                    default_text = root_categories_to_text(default)
                 else:
                     default_text = str(default)
                 payload.setdefault(key, default_text)

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../services/webClient';
+import { useMaxWidth } from '../../hooks';
 import {
   COMPONENT_CENTER_ATTRACTION_STRENGTH,
   computeConnectedComponents,
@@ -108,6 +109,7 @@ export type SkillGraphPanelHandle = {
 
 type SkillGraphPanelProps = {
   onReadingChange?: (reading: boolean) => void;
+  onBuildAccepted?: (mode: SymphonyBuildMode) => void;
   externalError?: string | null;
   onExternalErrorClear?: () => void;
 };
@@ -688,7 +690,7 @@ function buildLogSignature(entries?: BuildLogEntry[]): string {
 }
 
 export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanelProps>(function SkillGraphPanel(
-  { onReadingChange, externalError, onExternalErrorClear },
+  { onReadingChange, onBuildAccepted, externalError, onExternalErrorClear },
   ref,
 ) {
   const { t } = useTranslation();
@@ -721,9 +723,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
   const [detailDrawerBounds, setDetailDrawerBounds] = useState({ top: 0, right: 0, height: 0 });
-  const [isCompactDetail, setIsCompactDetail] = useState(
-    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 1535px)').matches,
-  );
+  const isCompactDetail = useMaxWidth('graph');
   const [query, setQuery] = useState('');
   const [minConfidence, setMinConfidence] = useState(DEFAULT_MIN_CONFIDENCE);
   const [loading, setLoading] = useState(false);
@@ -740,14 +740,6 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const buildProgressStatusRef = useRef<BuildProgress['status'] | undefined>(undefined);
   const [autoFitRequest, setAutoFitRequest] = useState(0);
   const [zoomScale, setZoomScale] = useState(1);
-
-  useEffect(() => {
-    const media = window.matchMedia('(max-width: 1535px)');
-    const updateCompactDetail = () => setIsCompactDetail(media.matches);
-    updateCompactDetail();
-    media.addEventListener('change', updateCompactDetail);
-    return () => media.removeEventListener('change', updateCompactDetail);
-  }, []);
 
   useLayoutEffect(() => {
     if (!isCompactDetail) return undefined;
@@ -1056,6 +1048,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         throw new Error(localizedServerDetail(data.detail, 'skills.graph.errors.refreshFailed', t));
       }
       externalBuildRunningRef.current = true;
+      onBuildAccepted?.(mode);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       externalBuildRunningRef.current = false;
@@ -1069,7 +1062,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
       }));
       throw error;
     }
-  }, [applyBuildLog, onExternalErrorClear, t]);
+  }, [applyBuildLog, onBuildAccepted, onExternalErrorClear, t]);
 
   const cancelBuild = useCallback(async () => {
     setCancellingBuild(true);

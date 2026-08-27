@@ -69,6 +69,9 @@ from jiuwenswarm.server.runtime.attachments.upload_storage import safe_upload_fi
 logger = logging.getLogger(__name__)
 
 _WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# Builtin jiuwenswarm create only: sandbox env so agentserver can locate
+# the host workspace bind path (``/home/agentos/users/<user_id>``).
+USER_DIRECTORY_ENV_KEY = "JIUWENSWARM_USER_DIRECTORY"
 
 # Gateway-side file transfer limits (design: stricter than YuanRong 512MB).
 _AGENT_FILE_PATH_ROOT = "/home/agentos"
@@ -106,6 +109,55 @@ def _is_ws_connect_retryable(exc: BaseException) -> bool:
         return True
     text = str(exc).lower()
     for token in _WS_CONNECT_RETRYABLE_TEXT_TOKENS:
+        if token in text:
+            return True
+    return False
+
+
+# AgentServer 请求阶段网络层错误的文本特征：WebSocketAgentServerClient 将
+# 连接断开 / 收包失败 / unary 超时统一包装成 RuntimeError，只能按文本识别。
+_AGENT_NETWORK_ERROR_TEXT_TOKENS = (
+    "connection closed",
+    "connection refused",
+    "temporarily unavailable",
+    "http 502",
+    "http 503",
+    "http 504",
+    "unreachable",
+    "请求超时",
+    "connection reset",
+)
+
+# 断连清理的有限重试：断连后先等 disconnect_cleanup_timeout_seconds，再按固定
+# 间隔最多重试几次，覆盖「chat 尾部 release / 延迟 cancel 的 interrupt 与
+# 「断连+timeout」同秒到期」等短暂竞态；超限后交回 600s idle reaper 兜底。
+_DISCONNECT_CLEANUP_RETRY_INTERVAL_SECONDS = 1.0
+_DISCONNECT_CLEANUP_MAX_ATTEMPTS = 3
+# pop_if_idle 的固定 idle 宽限（秒）：真正的安全守卫是连接数==0 + task_count==0
+# + READY，宽限只需覆盖 release 的 touch 落地竞态，秒级即可。
+_DISCONNECT_CLEANUP_IDLE_GRACE_SECONDS = 1.0
+
+
+def _is_agent_network_error(exc: BaseException) -> bool:
+    """True when *exc* indicates an AgentServer network-layer failure.
+
+    覆盖两类场景：
+    - 连接阶段：``_connect_ws_until_ready`` 重试耗尽后抛出的原始网络异常
+      （ConnectionError / Timeout / OSError / 502 等）；
+    - 请求阶段：WebSocketAgentServerClient 包装的 ``RuntimeError``（连接
+      断开、非流式请求超时）。
+
+    业务层错误（ValueError、duplicate request_id 等非网络 RuntimeError）
+    返回 False，交由原有路径处理。
+    """
+    if isinstance(exc, (ConnectionError, TimeoutError, asyncio.TimeoutError, OSError)):
+        return True
+    status = getattr(exc, "status_code", None)
+    if status in _WS_CONNECT_RETRYABLE_HTTP_STATUS:
+        return True
+    text = str(exc).lower()
+    for token in _AGENT_NETWORK_ERROR_TEXT_TOKENS:
+        # 部分中文 token 在 lower() 后不受影响，直接子串匹配
         if token in text:
             return True
     return False
@@ -253,22 +305,6 @@ def build_inline_runtime_spec(image_info: ImageInfo) -> AgentRuntimeSpec:
             f"runtime_spec is required from registry for agent_type={image_info.image_name}"
         )
     return dict(raw_spec)  # type: ignore[return-value]
-
-
-def _extract_runtime_spec_port(runtime_spec: Mapping[str, Any]) -> int | None:
-    """从 runtime_spec ``rootfs.ports``（如 ``["tcp:18092"]``）取第一个端口."""
-    rootfs = runtime_spec.get("rootfs")
-    ports = rootfs.get("ports") if isinstance(rootfs, Mapping) else None
-    if not isinstance(ports, (list, tuple)):
-        return None
-    for entry in ports:
-        text = str(entry or "")
-        candidate = text.rsplit(":", 1)[-1] if ":" in text else text
-        try:
-            return int(candidate)
-        except ValueError:
-            continue
-    return None
 
 
 def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) -> str:
@@ -442,57 +478,100 @@ class AgentOSRouterClient(AgentServerClient):
     async def _delayed_cleanup(self, user_id: str) -> None:
         """连接断开后，若用户仍无连接且 agent 真的空闲，删除其 jiuwenswarm agent。
 
-        和 :meth:`_reap_idle_once` 走同一条 pop_if_idle 路径（status=READY、
-        task_count==0、last_active_at 距今超过本超时），避免在 in-flight 的
-        chat/SSH 还未释放时强制 kill。超时时长由
-        ``disconnect_cleanup_timeout_seconds`` 配置，<= 0 表示关闭该路径。
+        和 :meth:`_reap_idle_once` 走同一条 pop_if_idle 路径（READY、
+        task_count==0、空闲超过宽限），避免在 in-flight 的 chat/SSH 还未释放时
+        强制 kill。超时时长由 ``disconnect_cleanup_timeout_seconds`` 配置，<= 0
+        表示关闭该路径。
+
+        断连后先等 ``timeout``，再以固定间隔做有限次尝试，每次尝试都重新检查连接数与空闲状态。
+        由于此流程涉及到的计时竞态条件过于复杂，暂时不做每个场景的精准处理。
+        超限放弃后交回 600s idle reaper 兜底。
         """
         timeout = self._disconnect_cleanup_timeout_seconds
         try:
             await asyncio.sleep(timeout)
         except asyncio.CancelledError:
             return
-        # 二次检查：用户可能已重连
-        if self._agent_manager.get_user_connection_count(user_id) > 0:
-            return
-        try:
-            runtimes = await self._agent_manager.list_user_agents(user_id)
-        except Exception:
-            logger.exception(
-                "[AgentOSRouter] delayed cleanup list_user_agents failed: user=%s",
-                user_id,
-            )
-            return
-        for runtime in runtimes:
-            if runtime.info.agent_type != BUILTIN_AGENT_TYPE:
-                continue
-            key_values: dict[str, Any] | None = None
-            if "session_id" in self._agent_manager.key_fields:
-                session_id = runtime.info.metadata.get("session_id", "")
-                if session_id:
-                    key_values = {"session_id": session_id}
+        for attempt in range(1, _DISCONNECT_CLEANUP_MAX_ATTEMPTS + 1):
+            # 二次检查：用户可能已重连（重连时上层也会 cancel 本任务）
+            if self._agent_manager.get_user_connection_count(user_id) > 0:
+                return
             try:
-                # 走 pop_if_idle：task_count>0 / 非 READY / 未达空闲阈值时
-                # 直接返回 False，确保不会误杀活动中的 agent。
-                deleted = await self.delete_agent(
-                    user_id,
-                    runtime.info.agent_type,
-                    key_values=key_values,
-                    idle_timeout_seconds=timeout,
-                )
+                runtimes = await self._agent_manager.list_user_agents(user_id)
             except Exception:
                 logger.exception(
-                    "[AgentOSRouter] delayed cleanup delete failed: user=%s agent_type=%s",
+                    "[AgentOSRouter] delayed cleanup list_user_agents failed: user=%s",
                     user_id,
-                    runtime.info.agent_type,
                 )
-                continue
-            if deleted:
-                logger.info(
-                    "[AgentOSRouter] delayed cleanup deleted agent: user=%s agent_type=%s",
+                return
+
+            pending = False
+            for runtime in runtimes:
+                if runtime.info.agent_type != BUILTIN_AGENT_TYPE:
+                    continue
+                key_values: dict[str, Any] | None = None
+                session_id = str(runtime.info.metadata.get("session_id") or "")
+                sandbox_id = str(runtime.info.sandbox_id or "")
+                if "session_id" in self._agent_manager.key_fields:
+                    if session_id:
+                        key_values = {"session_id": session_id}
+                if runtime.task_count > 0:
+                    # in-flight 请求持有（chat.interrupt 延迟 cancel 等）：
+                    # 等它 release 后再评估，本轮先标记继续重试。
+                    pending = True
+                    continue
+                try:
+                    # pop_if_idle 做最终守卫：task_count>0 / 非 READY / 空闲
+                    # 不满宽限时返回 False，不会误杀活动中的 agent。
+                    deleted = await self.delete_agent(
+                        user_id,
+                        runtime.info.agent_type,
+                        key_values=key_values,
+                        idle_timeout_seconds=_DISCONNECT_CLEANUP_IDLE_GRACE_SECONDS,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[AgentOSRouter] delayed cleanup delete failed: "
+                        "user=%s agent_type=%s sandbox_id=%s",
+                        user_id,
+                        runtime.info.agent_type,
+                        sandbox_id,
+                    )
+                    pending = True
+                    continue
+                if deleted:
+                    logger.info(
+                        "[AgentOSRouter] delayed cleanup deleted agent: "
+                        "user=%s session_id=%s sandbox_id=%s agent_type=%s",
+                        user_id,
+                        session_id,
+                        sandbox_id,
+                        runtime.info.agent_type,
+                    )
+                else:
+                    # pop_if_idle 仍拒绝（busy / 非 READY / idle 不足）：重试。
+                    pending = True
+
+            if not pending:
+                return
+            if attempt >= _DISCONNECT_CLEANUP_MAX_ATTEMPTS:
+                logger.warning(
+                    "[AgentOSRouter] delayed cleanup retry budget exhausted: "
+                    "user=%s attempts=%s",
                     user_id,
-                    runtime.info.agent_type,
+                    attempt,
                 )
+                return
+            logger.info(
+                "[AgentOSRouter] delayed cleanup retrying: user=%s attempt=%s wait_s=%s",
+                user_id,
+                attempt,
+                _DISCONNECT_CLEANUP_RETRY_INTERVAL_SECONDS,
+            )
+            try:
+                await asyncio.sleep(_DISCONNECT_CLEANUP_RETRY_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                return
 
     def get_current_agent_type(self, user_id: str) -> str:
         """Return the user's current agent_type (default ``jiuwenswarm``)."""
@@ -916,6 +995,50 @@ class AgentOSRouterClient(AgentServerClient):
             except Exception:
                 logger.warning("[AgentOSRouter] close agent ws failed", exc_info=True)
 
+    @staticmethod
+    def _runtime_log_fields(runtime: AgentRuntime) -> dict[str, Any]:
+        info = runtime.info
+        sandbox_id = str(info.sandbox_id or "")
+        return {
+            "user_id": info.user_id,
+            "session_id": str(info.metadata.get("session_id") or ""),
+            "sandbox_id": sandbox_id,
+            "agent_type": info.agent_type,
+            "instance": sandbox_id,
+        }
+
+    @staticmethod
+    def _envelope_log_fields(envelope: E2AEnvelope) -> dict[str, Any]:
+        return {
+            "user_id": str(envelope.user_id or ""),
+            "session_id": str(envelope.session_id or ""),
+            "request_id": str(envelope.request_id or ""),
+            "channel": str(envelope.channel or ""),
+            "method": str(envelope.method or ""),
+        }
+
+    def _log_route(
+        self,
+        event: str,
+        envelope: E2AEnvelope,
+        runtime: AgentRuntime | None = None,
+        *,
+        level: int = logging.INFO,
+        error: str = "",
+    ) -> None:
+        """Emit a route-level log line with plain logger (no log_agentos)."""
+        fields = self._envelope_log_fields(envelope)
+        if runtime is not None:
+            fields.update(self._runtime_log_fields(runtime))
+            fields["user_id"] = fields["user_id"] or str(runtime.info.user_id or "")
+            fields["session_id"] = fields["session_id"] or str(
+                runtime.info.metadata.get("session_id") or ""
+            )
+        if error:
+            fields["error"] = error
+        details = " ".join(f"{key}={value}" for key, value in fields.items() if value)
+        logger.log(level, "[AgentOSRouter] route event=%s %s", event, details)
+
     async def send_request(
         self,
         envelope: E2AEnvelope,
@@ -933,12 +1056,42 @@ class AgentOSRouterClient(AgentServerClient):
             return self._routing_error_response(envelope, str(exc))
         try:
             runtime.attach_to_envelope(envelope)
+            if not self._uses_direct_yuanrong(runtime.info.agent_type):
+                return self._routing_error_response(
+                    envelope,
+                    f"agent_type={runtime.info.agent_type} does not use websocket; "
+                    "use 3rdagent.switch / SSH",
+                )
             # create 后通过 YuanRong frontend WS 代理直连 instance，不走 invoke。
             try:
                 ws_client = await self._get_ws_client(runtime)
             except ValueError as exc:
                 return self._routing_error_response(envelope, str(exc))
-            return await ws_client.send_request(envelope, timeout=timeout)
+            except Exception as exc:
+                if not _is_agent_network_error(exc):
+                    raise
+                error = f"agent server unreachable: {exc}"
+                self._log_route(
+                    "route.error", envelope, runtime, level=logging.WARNING, error=error
+                )
+                await self._cleanup_agent_on_network_failure(
+                    runtime, reason=type(exc).__name__
+                )
+                return self._routing_error_response(envelope, error)
+            self._log_route("route.unary", envelope, runtime)
+            try:
+                return await ws_client.send_request(envelope, timeout=timeout)
+            except Exception as exc:
+                if not _is_agent_network_error(exc):
+                    raise
+                error = f"agent server request failed: {exc}"
+                self._log_route(
+                    "route.error", envelope, runtime, level=logging.WARNING, error=error
+                )
+                await self._cleanup_agent_on_network_failure(
+                    runtime, reason=type(exc).__name__
+                )
+                return self._routing_error_response(envelope, error)
         finally:
             await self._agent_manager.release(runtime.key)
 
@@ -953,14 +1106,47 @@ class AgentOSRouterClient(AgentServerClient):
             return
         try:
             runtime.attach_to_envelope(envelope)
+            if not self._uses_direct_yuanrong(runtime.info.agent_type):
+                yield self._routing_error_chunk(
+                    envelope,
+                    f"agent_type={runtime.info.agent_type} does not use websocket; "
+                    "use 3rdagent.switch / SSH",
+                )
+                return
             # create 后通过 YuanRong frontend WS 代理直连 instance，不走 invoke。
             try:
                 ws_client = await self._get_ws_client(runtime)
             except ValueError as exc:
                 yield self._routing_error_chunk(envelope, str(exc))
                 return
-            async for chunk in ws_client.send_request_stream(envelope):
-                yield chunk
+            except Exception as exc:
+                if not _is_agent_network_error(exc):
+                    raise
+                error = f"agent server unreachable: {exc}"
+                self._log_route(
+                    "route.error", envelope, runtime, level=logging.WARNING, error=error
+                )
+                await self._cleanup_agent_on_network_failure(
+                    runtime, reason=type(exc).__name__
+                )
+                yield self._routing_error_chunk(envelope, error)
+                return
+            self._log_route("route.stream", envelope, runtime)
+            try:
+                async for chunk in ws_client.send_request_stream(envelope):
+                    yield chunk
+            except Exception as exc:
+                if not _is_agent_network_error(exc):
+                    raise
+                error = f"agent server request failed: {exc}"
+                self._log_route(
+                    "route.error", envelope, runtime, level=logging.WARNING, error=error
+                )
+                await self._cleanup_agent_on_network_failure(
+                    runtime, reason=type(exc).__name__
+                )
+                yield self._routing_error_chunk(envelope, error)
+                return
         finally:
             await self._agent_manager.release(runtime.key)
 
@@ -1479,26 +1665,32 @@ class AgentOSRouterClient(AgentServerClient):
         return reaped
 
     async def _create_agent(self, agent_info: AgentInfo) -> AgentInfo:
+        workspace = resolve_agent_workspace(
+            agent_info.user_id,
+            workspace_root=self._workspace_root,
+        )
         # runtime_spec 获取方式因 agent_type 而异
+        env_vars: dict[str, str] | None = None
         if agent_info.agent_type == BUILTIN_AGENT_TYPE:
             # jiuwenswarm: 不从注册中心获取镜像信息，使用内置 runtime_spec
-            import socket
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.bind(("127.0.0.1", 0))
-                port = int(sock.getsockname()[1])
+            port = 18092
             runtime_spec: dict[str, Any] = {
                 "sandbox_type": "supervisor",
                 "runtime": "python3.11",
                 "rootfs": {
                     "imageurl": f"{BUILTIN_AGENT_TYPE}-agent-runtime:latest",
                     "user": "agentos",
-                    "ports": [f"tcp:{port}"]
                 },
                 "cmds": [["sh", "-c", f"exec jiuwenswarm-agentserver --port {port}"]],
                 "cpu": int(os.environ.get("AGENTOS_BUILTIN_AGENT_CPU", "2000")),
                 "memory": int(os.environ.get("AGENTOS_BUILTIN_AGENT_MEMORY", "4096"))
             }
-            env_vars = {"AGENT_SERVER_HOST": "127.0.0.1", "AGENT_SERVER_PORT": f"{port}"}
+            # 不注入 AGENT_SERVER_HOST: 留空让沙箱内 agentserver 自行检测沙箱本地
+            # 非 loopback IP(ISOLATED 模式 bind veth 地址,外部可达;见
+            # app_agentserver._resolve_bind_host)。单机版默认仍 127.0.0.1。
+            env_vars = {
+                USER_DIRECTORY_ENV_KEY: workspace,
+            }
             # create 后 Gateway 通过 frontend WS 代理直连该端口（不走 invoke）。
             extra_metadata: dict[str, Any] = {"agent_port": port}
         else:
@@ -1511,14 +1703,13 @@ class AgentOSRouterClient(AgentServerClient):
                 else None
             )
             extra_metadata = {"image_info": dict(image_info.metadata)}
-            agent_port = _extract_runtime_spec_port(runtime_spec)
-            if agent_port is not None:
-                extra_metadata["agent_port"] = agent_port
+            # 3rdagent 走 SSH，不连 agentserver WS；create 的 rootfs 不传 ports。
+            rootfs = runtime_spec.get("rootfs")
+            if isinstance(rootfs, dict) and "ports" in rootfs:
+                runtime_spec["rootfs"] = {
+                    key: value for key, value in rootfs.items() if key != "ports"
+                }
 
-        workspace = resolve_agent_workspace(
-            agent_info.user_id,
-            workspace_root=self._workspace_root,
-        )
         sandbox = await self._yuanrong.create_sandbox(
             namespace=self._yuanrong.agent_namespace,
             name=f"{agent_info.user_id}+{agent_info.agent_type}",
@@ -1624,6 +1815,49 @@ class AgentOSRouterClient(AgentServerClient):
         await self._release_agent_resources(agent_info, best_effort=True)
         return True
 
+    async def _cleanup_agent_on_network_failure(
+        self,
+        runtime: AgentRuntime,
+        *,
+        reason: str,
+    ) -> None:
+        """AgentServer 网络层错误后的强制清理。
+
+        instance 已不可达（连接重试耗尽 / 请求超时 / 连接断开）时复用
+        :meth:`delete_agent` 的强制删除路径（不检查 task_count / idle）：
+        关闭 WS 直连 → 删除 YuanRong 沙箱 → 移除内存 runtime → 注销注册中心
+        instance 条目。后续请求会触发重新建沙箱，避免死沙箱与僵尸注册条目。
+        """
+        info = runtime.info
+        session_id = str(info.metadata.get("session_id") or "")
+        sandbox_id = str(info.sandbox_id or "")
+        logger.warning(
+            "[AgentOSRouter] sandbox cleanup on network failure: "
+            "user_id=%s session_id=%s sandbox_id=%s agent_type=%s reason=%s",
+            info.user_id,
+            session_id,
+            sandbox_id,
+            info.agent_type,
+            reason,
+        )
+        key_values: dict[str, Any] | None = None
+        if "session_id" in self._agent_manager.key_fields and session_id:
+            key_values = {"session_id": session_id}
+        try:
+            await self.delete_agent(
+                info.user_id,
+                info.agent_type,
+                key_values=key_values,
+            )
+        except Exception:  # noqa: BLE001 - cleanup must not mask the route error
+            logger.exception(
+                "[AgentOSRouter] network-failure cleanup failed: "
+                "user_id=%s agent_type=%s sandbox_id=%s",
+                info.user_id,
+                info.agent_type,
+                sandbox_id,
+            )
+
     async def _release_agent_resources(
         self,
         agent_info: AgentInfo,
@@ -1660,6 +1894,28 @@ class AgentOSRouterClient(AgentServerClient):
         )
 
     async def _register_agent(self, agent_info: AgentInfo) -> None:
+        # 网络失败清理（delete_agent 强制路径）可能先于本后台任务执行：注册前
+        # 确认内存 runtime 仍存在（强制删除会 pop 掉 runtime），避免清理注销后
+        # 又把僵尸 instance 条目写回注册中心。
+        session_id = str(agent_info.metadata.get("session_id") or "")
+        key_values: dict[str, Any] | None = None
+        if "session_id" in self._agent_manager.key_fields and session_id:
+            key_values = {"session_id": session_id}
+        live = await self._agent_manager.get_agent(
+            agent_info.user_id,
+            agent_info.agent_type,
+            key_values=key_values,
+        )
+        if live is None:
+            logger.info(
+                "[AgentOSRouter] registry register skipped (agent already "
+                "cleaned up): user_id=%s session_id=%s sandbox_id=%s agent_type=%s",
+                agent_info.user_id,
+                session_id,
+                str(agent_info.sandbox_id or ""),
+                agent_info.agent_type,
+            )
+            return
         try:
             await self._registry.register_agent(agent_info)
         except Exception:

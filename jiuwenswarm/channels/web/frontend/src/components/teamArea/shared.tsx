@@ -92,6 +92,7 @@ export type TeamAreaProps = BaseTeamAreaProps & (
     onMemberSelect?: (memberId: string) => void;
     onArtifactSelect?: (artifactId: string) => void;
     onCollapse?: () => void;
+    shouldFullscreen?: boolean;
   }
 );
 

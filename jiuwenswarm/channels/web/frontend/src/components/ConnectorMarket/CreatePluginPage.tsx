@@ -5,7 +5,7 @@ import { webRequest } from '../../services/webClient';
 import { useConnectorStore } from '../../stores/connectorStore';
 import { usePluginPackageStore } from '../../stores/pluginPackageStore';
 import { getSkillAvatar } from '../../utils/skillAvatar';
-import { computeMySkills, buildInstalledSkillNames } from '../../utils/mySkills';
+import { computeMySkills, buildInstalledSkillNames, filterEnabledMySkills } from '../../utils/mySkills';
 import { EntityAvatar } from './EntityAvatar';
 import { PickerModal, type PickerItem } from './PickerModal';
 
@@ -20,12 +20,17 @@ interface SkillItem {
   source?: string;
   is_builtin?: boolean;
   is_builtin_source?: boolean;
+  // filterEnabledMySkills 判定"已启用"要用到——跟技能管理页"我的技能"tab 默认只显示已启用
+  // 技能同一份规则，2026-08-25 之前这里没有这个字段，弹窗里会把已停用的技能也列出来。
+  enabled?: boolean;
 }
 
-/** skills.list 响应里的 plugins 字段——只取 computeMySkills 需要的 skills 名单，跟
- * SkillPanel/index.tsx 的 InstalledPluginItem 是同一个后端形状，这里不需要其余字段。 */
+/** skills.list 响应里的 plugins 字段——只取 computeMySkills/buildInstalledSkillNames 需要的
+ * skills 名单，跟 SkillPanel/index.tsx 的 InstalledPluginItem 是同一个后端形状，这里不需要
+ * 其余字段。skills 里每一项可能是纯字符串，也可能是 `{name, version}` 对象，两种形状都要处理
+ * （2026-08-25 之前这里声明成 string[]，跟实际形状不符，buildInstalledSkillNames 因此漏判）。 */
 interface InstalledPluginItem {
-  skills: string[];
+  skills: (string | { name: string; version?: string | null })[];
 }
 
 interface CreatePluginPageProps {
@@ -153,8 +158,12 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
   const selectedSkills = skills.filter((s) => skillIds.includes(s.name));
   const selectedMcps = connectors.filter((c) => mcpIds.includes(c.name));
 
-  // 复用 SkillPanel/index.tsx"我的技能"tab 同一套判定规则，见 utils/mySkills.ts 头注释。
-  const myPickerSkills = useMemo(() => computeMySkills(skills, installedSkillNames), [skills, installedSkillNames]);
+  // 复用 SkillPanel/index.tsx"我的技能"tab 同一套判定规则（含默认只显示已启用），见
+  // utils/mySkills.ts 头注释。
+  const myPickerSkills = useMemo(
+    () => filterEnabledMySkills(computeMySkills(skills, installedSkillNames), installedSkillNames),
+    [skills, installedSkillNames]
+  );
 
   async function handleSubmit() {
     setSubmitting(true);

@@ -623,38 +623,65 @@ def test_role_skills_seed_only_the_team_skill_rail() -> None:
     assert not (toolkit.params or {})
 
 
-def test_swarm_skill_retrieval_tools_use_global_skill_manager(
+def test_swarm_skill_retrieval_tools_use_live_context_inventory(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """Skill retrieval indexes globally installed skills, not member workspace skills."""
-    calls: list[str | None] = []
-
-    class FakeSkillManager:
-        def __init__(self, workspace_dir: str | None = None) -> None:
-            calls.append(workspace_dir)
+    """Skill retrieval receives the live library and visibility providers."""
+    captured: dict[str, object] = {}
 
     class FakeToolkit:
         def __init__(
             self,
-            manager: FakeSkillManager,
-            visible_skill_names: object | None = None,
+            *,
+            skill_directories: object,
+            source_by_name: object,
+            visible_skill_names: object,
+            disabled_skills: object = None,
+            session_scope: str = "default",
+            config_base: dict[str, Any] | None = None,
+            **_kwargs: object,
         ) -> None:
-            self.manager = manager
-            self.visible_skill_names = visible_skill_names
+            captured["skill_directories"] = skill_directories
+            captured["disabled_skills"] = disabled_skills
+            captured["source_by_name"] = source_by_name
+            captured["visible_skill_names"] = visible_skill_names
+            captured["session_scope"] = session_scope
+            captured["config_base"] = config_base
 
         @staticmethod
         def get_tools() -> list:
             return []
 
-    monkeypatch.setattr(tools, "is_skill_retrieval_enabled", lambda: True)
-    monkeypatch.setattr(tools, "SkillManager", FakeSkillManager)
+    monkeypatch.setattr(
+        tools,
+        "is_skill_retrieval_enabled",
+        lambda _config_base=None: True,
+    )
     monkeypatch.setattr(tools, "SkillRetrievalToolkit", FakeToolkit)
 
     factory = resolve_factory(get_catalog()[registry.SKILL_RETRIEVAL].factory_ref)
-    built = factory({}, SwarmBuildContext())
+    global_skills_dir = tmp_path / "global-skills"
+    global_skills_dir.mkdir()
+    built = factory(
+        {},
+        SwarmBuildContext(global_skills_dir=str(global_skills_dir)),
+    )
 
     assert built == []
-    assert calls == [None]
+    directories = captured["skill_directories"]
+    disabled = captured["disabled_skills"]
+    sources = captured["source_by_name"]
+    visible = captured["visible_skill_names"]
+    assert callable(directories)
+    assert callable(sources)
+    assert callable(visible)
+    assert directories() == [str(global_skills_dir)]
+    assert disabled is tools.load_execution_disabled_skills
+    assert isinstance(sources(), dict)
+    assert visible() == set()
+    assert captured["session_scope"] == "default:team:member"
+    assert captured["config_base"] is None
 
 
 def _install_library_skill(library_dir: Path, name: str) -> None:
@@ -739,38 +766,41 @@ def test_swarm_list_skill_composes_member_team_and_global_visibility(
     assert tools.visible_skill_names_for_list_skill(ctx) == {"alpha", "beta"}
 
 
-def test_swarm_skill_retrieval_prompt_uses_global_skill_manager(
+def test_swarm_skill_retrieval_prompt_uses_same_live_inventory(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The retrieval prompt must match the same global index as the retrieval tools."""
+    """The retrieval prompt uses the same live inventory as the retrieval tool."""
+    monkeypatch.setenv(
+        "SYMPHONY_SKILL_RETRIEVAL_ROOT",
+        str(tmp_path / "skillfs-artifacts"),
+    )
     workspace_root = str(tmp_path / "member-workspace")
-    calls: list[str | None] = []
-
-    class FakeSkillManager:
-        def __init__(self, workspace_dir: str | None = None) -> None:
-            calls.append(workspace_dir)
+    global_skills_dir = tmp_path / "global-skills"
+    skill_dir = global_skills_dir / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: Demo Skill\ndescription: live demo\n---\n",
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits.is_skill_retrieval_enabled",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.skill.skill_manager.SkillManager",
-        FakeSkillManager,
+        lambda _config_base=None: True,
     )
 
     factory = resolve_factory(get_catalog()[registry.SKILL_RETRIEVAL_PROMPT].factory_ref)
     rail = factory(
         {},
         SwarmBuildContext(
-            global_skills_dir=str(tmp_path / "global-skills"),
+            global_skills_dir=str(global_skills_dir),
             workspace=types.SimpleNamespace(root_path=workspace_root),
         ),
     )
 
     assert rail is not None
-    assert calls == [None]
+    assert rail._prompt_skillfs is not None
+    assert set(rail._prompt_skillfs.selection_cards()) == {"demo-skill"}
 
 
 @pytest.mark.parametrize("role", ["leader", "teammate"])
