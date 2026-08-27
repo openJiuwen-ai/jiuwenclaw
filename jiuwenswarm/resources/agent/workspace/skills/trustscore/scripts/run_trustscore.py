@@ -37,6 +37,8 @@ class DistractorRequest:
 
 def configure_logging() -> None:
     logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
     result_logger.propagate = False
     if not result_logger.handlers:
         handler = logging.StreamHandler(sys.stdout)
@@ -328,31 +330,37 @@ def run_trustscore(args: argparse.Namespace) -> dict[str, Any]:
     client = OpenAI(**client_args)
 
     question = read_text(args.question, args.question_file, "question")
-    answer = chat_text(
-        client,
-        args.model,
-        [
-            {"role": "system", "content": "Answer the user's question directly and concisely."},
-            {"role": "user", "content": question},
-        ],
-    )
-    paraphrases = generate_paraphrases(
-        client,
-        question,
-        args.generator_model,
-        max(args.paraphrase_num, args.mcq_num),
-        BaseModel,
-    )
-    distractors = generate_distractors(
-        client,
-        DistractorRequest(
-            question=question,
-            answer=answer,
-            model=args.generator_model,
-            count=args.distractor_num,
-        ),
-        BaseModel,
-    )
+    try:
+        answer = chat_text(
+            client,
+            args.model,
+            [
+                {"role": "system", "content": "Answer the user's question directly and concisely."},
+                {"role": "user", "content": question},
+            ],
+        )
+        paraphrases = generate_paraphrases(
+            client,
+            question,
+            args.generator_model,
+            max(args.paraphrase_num, args.mcq_num),
+            BaseModel,
+        )
+        distractors = generate_distractors(
+            client,
+            DistractorRequest(
+                question=question,
+                answer=answer,
+                model=args.generator_model,
+                count=args.distractor_num,
+            ),
+            BaseModel,
+        )
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"TrustScore model call failed: {exc}") from exc
+
     question_pool = unique_items([question] + paraphrases)
     mcq_questions, mcq_answers = generate_mcqs(
         question_pool,
@@ -361,7 +369,10 @@ def run_trustscore(args: argparse.Namespace) -> dict[str, Any]:
         args.mcq_num,
         args.seed,
     )
-    mcq_predictions = answer_mcqs(client, args.model, mcq_questions)
+    try:
+        mcq_predictions = answer_mcqs(client, args.model, mcq_questions)
+    except Exception as exc:
+        raise RuntimeError(f"TrustScore MCQ answering failed: {exc}") from exc
     trustscore, predicted_options = compute_consistency_score(
         mcq_predictions,
         mcq_questions,
