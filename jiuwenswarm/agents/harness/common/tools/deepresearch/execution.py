@@ -29,10 +29,6 @@ logger = logging.getLogger(__name__)
 EXECUTION_SCHEMA = "openjiuwen.deepresearch.execute.v1"
 _STATE_SCHEMA_VERSION = 1
 _IN_FLIGHT_PHASES = frozenset({"starting", "resuming_feedback", "resuming_outline"})
-_DETAIL_KEYWORDS = re.compile(
-    r"精简|简略|简要|简洁|概要|速览|专业|详细|深入|全面|详尽|完整",
-    re.IGNORECASE,
-)
 _QUESTION_NUMBER_PREFIX = re.compile(r"^\s*\d+[.、)]\s*")
 _OUTLINE_SECTION = re.compile(r"^\s*###\s+P\d+\s*:\s*(.+?)\s*$", re.MULTILINE)
 _JSON_FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -247,27 +243,6 @@ def _append_timing_window(
     return next_state
 
 
-def _detail_interaction(state: dict[str, Any]) -> dict[str, Any]:
-    return _result(
-        "interaction",
-        state,
-        interaction={
-            "query": "请选择研究报告的详略度",
-            "return_json": True,
-            "questions": [
-                {
-                    "header": "报告详略度",
-                    "question": "您希望这份报告是通用版还是专业版？",
-                    "options": [
-                        {"label": "专业版（包含深度分析和详细评测）"},
-                        {"label": "通用版（仅包含核心结论和快速对比）"},
-                    ],
-                }
-            ],
-        },
-    )
-
-
 def _decode_user_input(value: Any) -> Any:
     if isinstance(value, str):
         try:
@@ -298,25 +273,6 @@ def _terminal_interaction_status(value: Any) -> str:
         return ""
     status = str(decoded.get("status") or "").strip().lower()
     return status if status in {"error", "cancelled"} else ""
-
-
-def _detail_query(query: str, user_input: Any) -> str:
-    """Append the same detail requirement that the original Skill used."""
-    response = _parse_response(user_input)
-    if response.status == "skipped" or not response.answers:
-        return query
-    answer = response.answers[0]
-    values = [*answer.selected_options]
-    if answer.custom_input:
-        values.append(answer.custom_input)
-    selected = " ".join(values)
-    if "专业版" in selected:
-        requirement = "请生成专业版报告"
-    elif "通用版" in selected or "精简版" in selected:
-        requirement = "请生成精简版报告"
-    else:
-        requirement = selected.strip()
-    return f"{query}（{requirement}）" if requirement else query
 
 
 def _split_questions(raw: Any) -> list[str]:
@@ -941,39 +897,6 @@ async def deepresearch_execute(query: str, file_name: str = "") -> dict[str, Any
         kind = phase if phase != "error" else "error"
         return _result(kind, state, content="DeepResearch 任务已经结束。")
 
-    if phase == "new" and not _DETAIL_KEYWORDS.search(str(state.get("query") or "")):
-        state = _persist(context, state, "wait_report_detail")
-        return _detail_interaction(state)
-    if phase == "wait_report_detail":
-        terminal_status = _terminal_interaction_status(context.user_input)
-        if terminal_status:
-            state = _persist(context, state, terminal_status)
-            content = (
-                "DeepResearch 任务已取消。"
-                if terminal_status == "cancelled"
-                else "报告详略度交互失败，DeepResearch 任务已停止。"
-            )
-            return _result(terminal_status, state, content=content)
-        try:
-            final_query = _detail_query(
-                str(state.get("query") or query), context.user_input
-            )
-        except AskUserResponseError as exc:
-            return _terminal_error(
-                context,
-                state,
-                error_code="interaction_invalid",
-                content=f"报告详略度结果无效：{exc}",
-            )
-        state = _persist(context, state, "starting", query=final_query)
-        outcome = await _call_sdk(
-            context,
-            action="start",
-            query=final_query,
-            conversation_id=str(state.get("conversation_id") or ""),
-            file_name=str(state.get("file_name") or file_name),
-        )
-        return await _handle_outcome(context, state, outcome, action="start")
     if phase == "new":
         state = _persist(context, state, "starting")
         outcome = await _call_sdk(

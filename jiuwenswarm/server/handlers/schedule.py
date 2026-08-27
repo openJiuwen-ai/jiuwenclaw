@@ -11,6 +11,7 @@ from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.common.e2a.wire_codec import encode_agent_response_for_wire
 from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.server.context import RequestContext
+from jiuwenswarm.server.handlers.session import _coerce_int
 from jiuwenswarm.server.handlers._shared import (
     _resolve_model,
     _apply_resolved_mode_to_request,
@@ -111,9 +112,10 @@ async def handle_schedule_request(ctx: RequestContext, action: str) -> None:
         elif action == "logs":
             task_id = params.get("task_id", "")
             log_type = params.get("log_type", "current")
-            history_index = params.get("history_index", -1)
-            offset = params.get("offset", 0)
-            limit = params.get("limit", 500)
+            # 归一化数字型参数
+            history_index = _coerce_int(params.get("history_index"), -1)
+            offset = _coerce_int(params.get("offset"), 0)
+            limit = _coerce_int(params.get("limit"), 500)
             payload = await ctx.services.scheduler_service.get_scheduled_task_logs(
                 task_id, log_type, history_index, offset, limit
             )

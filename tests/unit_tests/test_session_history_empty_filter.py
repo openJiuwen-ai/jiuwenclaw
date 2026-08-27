@@ -136,6 +136,11 @@ def test_has_persistable_assistant_payload_keeps_usage_events():
     ) is True
     assert session_history._has_persistable_assistant_payload(
         content_text="",
+        event_type="chat.llm_usage",
+        extra={"usage_metadata": {"input_tokens": 1000, "output_tokens": 50, "total_tokens": 1050}},
+    ) is True
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
         event_type="chat.usage_summary",
         extra={},
     ) is False
