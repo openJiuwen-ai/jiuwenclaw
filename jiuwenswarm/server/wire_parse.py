@@ -71,6 +71,38 @@ def _mask_query_for_log(data: dict[str, Any]) -> dict[str, Any]:
     return {**data, "params": masked_params}
 
 
+def _log_inbound_payload(raw: str | bytes, data: dict[str, Any]) -> None:
+    """Log large catalog syncs as metadata while preserving other diagnostics."""
+    params = data.get("params")
+    if (
+        data.get("req_method") == ReqMethod.SYNC_AGENTS_CONFIGS.value
+        and isinstance(params, dict)
+    ):
+        agents = params.get("agents")
+        agent_count = len(agents) if isinstance(agents, list) else None
+        logger.info(
+            "[AgentWebSocketServer] Inbound raw payload: <summary> "
+            "request_id=%s channel_id=%s method=%s revision=%s "
+            "service_id=%s agent_count=%s raw_units=%s raw_type=%s",
+            data.get("request_id"),
+            data.get("channel_id"),
+            data.get("req_method"),
+            params.get("revision"),
+            params.get("service_id"),
+            agent_count,
+            len(raw),
+            type(raw).__name__,
+            extra={"user_visible": "critical"},
+        )
+        return
+
+    logger.info(
+        "[AgentWebSocketServer] Inbound raw payload: %s",
+        _mask_query_for_log(data),
+        extra={"user_visible": "critical"},
+    )
+
+
 def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
     """将 Gateway 发送的 JSON 载荷解析为 AgentRequest."""
     req_method = data.get("req_method")
@@ -133,11 +165,7 @@ def parse_inbound(raw: str | bytes) -> ParseResult:
     """
     try:
         data = json.loads(raw)
-        logger.info(
-            "[AgentWebSocketServer] Inbound raw payload: %s",
-            _mask_query_for_log(data),
-            extra={'user_visible': 'critical'},
-        )
+        _log_inbound_payload(raw, data)
     except json.JSONDecodeError as e:
         return ParseResult(
             error_wire=encode_json_parse_error_wire(
