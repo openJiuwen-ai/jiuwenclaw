@@ -13,10 +13,8 @@ r"""Windows 沙箱一次性环境准备.
 判断是否已完成, 重复执行无副作用.
 
 安装入口:
-  - 桌面安装器 (已提权) 调用 ``jiuwenswarm.exe --desktop-run-win-setup --install``
-    在本进程完成准备, 运行时不再弹 UAC / python.exe.
-  - 显式 CLI ``python -m jiuwenbox.supervisor.win_setup --install`` 在非管理员
-    下仍会 ShellExecuteW(runas); 运行时 ``ensure_windows_setup`` 不再走这条路.
+  - 桌面安装器 (已提权) 调 ``--desktop-run-win-setup --install --force --recreate-user``.
+  - 显式 CLI 非管理员仍会 ShellExecuteW(runas); 运行时不再走这条路.
 """
 
 from __future__ import annotations
@@ -28,6 +26,7 @@ import os
 import secrets
 import sys
 import threading
+import time
 import argparse
 from pathlib import Path
 from ctypes import wintypes
@@ -45,6 +44,8 @@ _kernel32: ctypes.WinDLL | None = None
 _shell32: ctypes.WinDLL | None = None
 # userenv.dll (DeleteProfileW — 删 profile 目录 + ProfileList 注册项).
 _userenv: ctypes.WinDLL | None = None
+# 并发创建沙箱时只允许一次 install / UAC, 避免连弹提权框并互删刚建的用户.
+_INSTALL_LOCK = threading.RLock()
 
 
 def _require_windows() -> None:
@@ -433,6 +434,17 @@ class UserInfo1(ctypes.Structure):
 
 
 USER_PRIV_USER = 1  # noqa: N816 - Win32 常量
+# lmerr.h: 沙箱用户重建/校验用.
+NERR_USER_NOT_FOUND = 2221  # noqa: N816 - Win32 常量
+NERR_USER_EXISTS = 2224  # noqa: N816 - Win32 常量
+# CryptProtectData 机器绑定; 旧版 flags=0 换 Windows 用户后无法解密.
+CRYPTPROTECT_LOCAL_MACHINE = 0x4  # noqa: N816 - Win32 常量
+
+# 沙箱用户缺失或无法登录时的修复提示 (运行时无管理员权限, 不能 NetUserAdd).
+_SANDBOX_USER_REPAIR = (
+    "请重新运行安装包, 或管理员执行 "
+    "jiuwenswarm.exe --desktop-run-win-setup --install --force --recreate-user"
+)
 
 
 def _generate_password() -> str:
@@ -449,11 +461,72 @@ def _generate_password() -> str:
     return secrets.token_urlsafe(48)
 
 
-def _create_sandbox_user(password: str) -> bool:
+def _sandbox_user_exists() -> bool:
+    """SAM 中是否仍有 jbx-sandbox. 与注册表 installed=1 / DPAPI 密码独立."""
+    netapi32 = _get_netapi32()
+    buf = ctypes.c_void_p()
+    ret = netapi32.NetUserGetInfo(
+        None, const.SANDBOX_USER_NAME, 0, ctypes.byref(buf),
+    )
+    try:
+        return ret == 0
+    finally:
+        if buf:
+            netapi32.NetApiBufferFree(buf)
+
+
+def _logon_sandbox_user(password: str) -> bool:
+    """用给定密码 LogonUserW 校验 jbx-sandbox 能否登录 (不加载 profile)."""
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    token = ctypes.c_void_p()
+    logon_provider_default = 0  # noqa: N806 - Win32 常量
+    # 登录类型优先 NETWORK (3) 非 INTERACTIVE (2): 本函数只校验密码不加载 profile.
+    # INTERACTIVE 首次登录会物理建 C:\Users\jbx-sandbox 目录 + 挂载 NTUSER.DAT.
+    logon_network = 3  # noqa: N806 - Win32 常量
+    logon_interactive = 2  # noqa: N806 - Win32 常量
+    ok = advapi32.LogonUserW(
+        const.SANDBOX_USER_NAME, None, password,
+        logon_network, logon_provider_default,
+        ctypes.byref(token),
+    )
+    if not ok:
+        network_err = ctypes.get_last_error()
+        logger.debug(
+            "jbx-sandbox network logon 失败 (WinError %d), 回退 interactive 校验密码",
+            network_err,
+        )
+        ok = advapi32.LogonUserW(
+            const.SANDBOX_USER_NAME, None, password,
+            logon_interactive, logon_provider_default,
+            ctypes.byref(token),
+        )
+    if ok:
+        try:
+            ctypes.WinDLL("kernel32").CloseHandle(token)
+        except OSError:
+            pass
+        return True
+    return False
+
+
+def _save_sandbox_user_password(password: str) -> None:
+    """DPAPI 加密密码写入 HKLM (机器绑定, 本机任意用户可解密)."""
+    try:
+        import win32crypt  # type: ignore[import-not-found]
+        enc = win32crypt.CryptProtectData(
+            password.encode("utf-8"), "jbx-sandbox-pw", None, None, None,
+            CRYPTPROTECT_LOCAL_MACHINE,
+        )
+        _reg_set_str(const.REG_VALUE_SANDBOX_USER_PW, enc.hex())
+    except ImportError:  # pragma: no cover
+        logger.warning("pywin32 缺失, 沙箱用户密码未加密存储 (仅开发环境)")
+
+
+def _create_sandbox_user(password: str, *, retries: int = 1) -> bool:
     """创建 jbx-sandbox 本地用户 (幂等: 已存在则跳过).
 
-    Returns: True=本次新建用户 (password 已设为用户密码); False=用户已存在
-    (未改密码, 调用方应用 DPAPI 旧密码而非本次传入的 password 存注册表).
+    retries>1 用于刚 NetUserDel 后的 pending-delete (Add 返回 2224).
+    Returns: True=本次新建; False=已存在 (未改密码, 调用方用 DPAPI 旧密码).
     """
     netapi32 = _get_netapi32()
     info = UserInfo1()
@@ -468,23 +541,46 @@ def _create_sandbox_user(password: str) -> bool:
     info.usri1_flags = const.SANDBOX_USER_FLAGS
     info.usri1_script_path = None
 
-    err = wintypes.DWORD(0)
-    ret = netapi32.NetUserAdd(
-        None, const.USER_INFO_1_LEVEL, ctypes.byref(info), ctypes.byref(err),
-    )
-    # NERR_UserExists = 2224 (lmerr.h).
-    if ret == 0:
-        logger.info("创建沙箱用户 %s 成功", const.SANDBOX_USER_NAME)
-        return True
-    elif ret == 2224:
-        # 用户已存在不重设密码: 随机密码下本次生成的新密码与实际不一致, 不能用它存 DPAPI (否则重现 1326).
-        # 调用方应读 DPAPI 旧密码存注册表, 读不到时由 _verify_or_reset 重设.
-        logger.info("沙箱用户 %s 已存在, 跳过 (不重设密码, 用 DPAPI 旧密码)", const.SANDBOX_USER_NAME)
-        return False
-    else:
-        raise RuntimeError(
-            f"NetUserAdd 失败: ret={ret} err={err.value}"
+    attempts = max(1, retries)
+    last_ret = 0
+    last_err = 0
+    for attempt in range(attempts):
+        err = wintypes.DWORD(0)
+        ret = netapi32.NetUserAdd(
+            None, const.USER_INFO_1_LEVEL, ctypes.byref(info), ctypes.byref(err),
         )
+        if ret == 0:
+            logger.info("创建沙箱用户 %s 成功", const.SANDBOX_USER_NAME)
+            return True
+        if ret == NERR_USER_EXISTS:
+            if attempt + 1 < attempts:
+                logger.warning(
+                    "NetUserAdd 用户已存在 (可能 pending-delete), 0.5s 后重试 (%d/%d)",
+                    attempt + 1, attempts,
+                )
+                time.sleep(0.5)
+                continue
+            # 用户已存在不重设密码: 随机密码下本次生成的新密码与实际不一致, 不能用它存 DPAPI (否则重现 1326).
+            # 调用方应读 DPAPI 旧密码存注册表, 读不到时由 _verify_or_reset 重设.
+            logger.info(
+                "沙箱用户 %s 已存在, 跳过 (不重设密码, 用 DPAPI 旧密码)",
+                const.SANDBOX_USER_NAME,
+            )
+            return False
+        last_ret, last_err = ret, err.value
+        if attempt + 1 < attempts:
+            logger.warning(
+                "NetUserAdd 失败 ret=%d err=%d, 0.5s 后重试 (%d/%d)",
+                ret, err.value, attempt + 1, attempts,
+            )
+            time.sleep(0.5)
+            continue
+        raise RuntimeError(
+            f"NetUserAdd 失败: ret={last_ret} err={last_err}"
+        )
+    raise RuntimeError(
+        f"NetUserAdd 失败: ret={last_ret} err={last_err}"
+    )
 
 
 def _set_user_password(user_name: str, password: str) -> None:
@@ -595,7 +691,27 @@ def _lookup_user_sid(user_name: str) -> str:
 
 
 def _lookup_current_user_sid() -> str | None:
-    """得到当前已登录用户的 SID 字符串 (install 授权过程的用途)."""
+    """当前进程 TokenUser SID; 域账户不能靠 LookupAccountName(getpass.getuser())."""
+    try:
+        import win32api  # type: ignore[import-not-found]
+        import win32con  # type: ignore[import-not-found]
+        import win32security  # type: ignore[import-not-found]
+        token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(), win32con.TOKEN_QUERY,
+        )
+        try:
+            info = win32security.GetTokenInformation(
+                token, win32security.TokenUser,
+            )
+            user = info[0] if isinstance(info, (tuple, list)) else info
+            return win32security.ConvertSidToStringSid(user)
+        finally:
+            try:
+                win32api.CloseHandle(token)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        logger.debug("取当前用户 Token SID 失败, 回落 LookupAccountName", exc_info=True)
     try:
         import getpass as _getpass
         return _lookup_user_sid(_getpass.getuser())
@@ -790,8 +906,8 @@ def _load_policy_preinstall_paths(policy_path: str) -> list[str]:
 def _load_policy_acl_paths(policy_path: str) -> list[str]:
     """从 windows-policy.yaml 读所有需要施加 ACE 的用户配置路径."""
     import yaml as _yaml
-    with open(policy_path, encoding="utf-8") as f:
-        data = _yaml.safe_load(f) or {}
+    from jiuwenbox.server.policy_engine import read_policy_text
+    data = _yaml.safe_load(read_policy_text(policy_path)) or {}
     win_fs = ((data.get("windows") or {}).get("filesystem") or {})
     keys = ("allow_read", "deny_read", "allow_write", "deny_write")
     paths: list[str] = []
@@ -940,13 +1056,12 @@ def _elevate_and_run_install(
     proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
     proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
     policy_path: str | None = None,
+    recreate_user: bool = False,
 ) -> int:
     """通过 UAC 拉起提权子进程执行 install, 并同步阻塞等待其完成.
 
-    转发 force / preinstall_paths / proxy_port_* / policy_path 参数到提权子进程
-    (review MAJOR #9: 旧版只传 --install, force=True 从非管理员进程调用会静默
-    no-op). policy_path 让提权子进程读 policy 的 read_acl_preinstall + tool_paths
-    合并预装 (用户改 tool_paths 后 --force 重装用).
+    转发 force / recreate_user / preinstall_paths / proxy_port_* / policy_path
+    到提权子进程 (review MAJOR #9: 旧版只传 --install, force=True 会静默 no-op).
 
     同步机制: 沿用旧版能正常弹 UAC 的 ShellExecuteW (它返回 HINSTANCE, 拿不到
     子进程 handle, 无法直接 WaitForSingleObject 等进程). 改用一个命名 Event:
@@ -962,7 +1077,13 @@ def _elevate_and_run_install(
     """
     shell32 = _get_shell32()
     kernel32 = get_kernel32()
-    py = (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip() or sys.executable
+    # 冻结 exe 直接 runas 自身: pythonw launcher 会被桌面 taskkill /T 杀掉.
+    if getattr(sys, "frozen", False):
+        py = sys.executable
+        parts = ["--desktop-run-win-setup", const.INSTALL_SUBCOMMAND]
+    else:
+        py = (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip() or sys.executable
+        parts = ["-m", "jiuwenbox.supervisor.win_setup", const.INSTALL_SUBCOMMAND]
     # 每次调用生成唯一 event 名, 避免多 box-server 实例/并发 install 串扰.
     event_name = f"Global\\JiuwenBox-Install-Done-{secrets.token_hex(8)}"
     # 主进程先创建非信号态 Event (子进程将 OpenEvent 同名并 SetEvent).
@@ -975,11 +1096,10 @@ def _elevate_and_run_install(
             f"创建 install 同步 Event 失败 (CreateEventW WinError {err})"
         )
 
-    parts = [
-        "-m", "jiuwenbox.supervisor.win_setup", const.INSTALL_SUBCOMMAND,
-    ]
     if force:
         parts.append("--force")
+    if recreate_user:
+        parts.append("--recreate-user")
     parts.append("--proxy-port-start")
     parts.append(str(proxy_port_start))
     parts.append("--proxy-port-end")
@@ -1003,11 +1123,11 @@ def _elevate_and_run_install(
     if policy_path:
         parts.append("--policy-path")
         parts.append(policy_path)
-    uac_file, params = _uac_shell_execute_target(py, parts)
+    if getattr(sys, "frozen", False) and py == sys.executable:
+        uac_file, params = py, " ".join(_quote_arg(p) for p in parts)
+    else:
+        uac_file, params = _uac_shell_execute_target(py, parts)
 
-    # 诊断: 打出 UAC 展示文件 + payload + event 名 + 完整命令行, 便于排查
-    # "install 子进程没进 _main / 没法 SetEvent" 类问题 (install_force.log 空时
-    # 靠这条日志反推子进程到底收到什么).
     logger.info(
         "install 提权调用: uac=%s payload=%s event=%s cmd='%s %s'",
         uac_file, py, event_name, uac_file, params,
@@ -1167,6 +1287,7 @@ def install(
     proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
     proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
     policy_path: str | None = None,
+    recreate_user: bool = False,
 ) -> None:
     """执行一次性安装 (需管理员权限).
 
@@ -1181,6 +1302,9 @@ def install(
             (review MAJOR #7: 旧版硬编码默认端口, 忽略 policy).
         policy_path: windows-policy.yaml 路径; install 时读其 read_acl_preinstall
             + tool_paths 合并进预装路径. 用户改 tool_paths 后 --force 重装用.
+        recreate_user: True 时无论机器上是否已有沙箱, 都先删 jbx-sandbox
+            用户/组/profile 再重建. 桌面安装器每次重装 exe 传入; 运行时
+            --force 补预装不传, 以免误删正在使用的账户.
     """
     _require_windows()
     # 若给了 policy_path, 读其 read_acl_preinstall + tool_paths 合并进预装路径.
@@ -1200,8 +1324,13 @@ def install(
             proxy_port_start=proxy_port_start,
             proxy_port_end=proxy_port_end,
             policy_path=policy_path,
+            recreate_user=recreate_user,
         )
         return
+
+    # exe 重装必须跳过幂等: 已 installed=1 也要删用户重建.
+    if recreate_user:
+        force = True
 
     # 幂等检查.
     if not force and reg_get_str(const.REG_VALUE_INSTALLED) == "1":
@@ -1218,12 +1347,65 @@ def install(
     steps_done: set[str] = set()
     try:
         # 1. 创建用户 + 组 (致命).
+        if recreate_user:
+            steps_done.add("recreate_user")
+            logger.info(
+                "exe 重装: 无论是否已有沙箱, 先删除 jbx-sandbox 用户/组/profile 再重建",
+            )
+            if _sandbox_user_exists():
+                try:
+                    logger.info("重装前卸载 WFP/防火墙…")
+                    from jiuwenbox.supervisor import win_wfp
+                    win_wfp.uninstall_wfp_filters()
+                    win_wfp.uninstall_firewall_rule_fallback()
+                    logger.info("重装前 WFP/防火墙已卸载")
+                except Exception:  # noqa: BLE001
+                    logger.warning("重装前卸载 WFP/防火墙失败", exc_info=True)
+                logger.info("开始删除已有 jbx-sandbox 用户/profile")
+                _remove_sandbox_user_and_profile()
+                logger.info("已有 jbx-sandbox 删除流程结束")
+            else:
+                logger.info("jbx-sandbox 已不存在, 跳过删除/卸 WFP, 直接新建")
+                _reg_set_str(const.REG_VALUE_INSTALLED, "")
+                _reg_set_str(const.REG_VALUE_SANDBOX_USER_PW, "")
+                _reg_set_str(const.REG_VALUE_SANDBOX_USER_SID, "")
         new_password = _generate_password()
-        created = _create_sandbox_user(new_password)
+        created = _create_sandbox_user(
+            new_password, retries=5 if recreate_user else 1,
+        )
+        if recreate_user and not created:
+            # 用户仍被占用时 NetUserDel 可能没删掉, 再删一次后重建.
+            logger.warning("删除后沙箱用户仍存在, 再次尝试删除并重建")
+            _remove_sandbox_user_and_profile()
+            created = _create_sandbox_user(new_password, retries=5)
         if created:
             # 新建用户: 用本次随机密码存 DPAPI.
             password = new_password
             steps_done.add("user_created")  # 本次新建, 失败回滚删用户安全
+        elif recreate_user:
+            # 删不掉 (进程占用等): 重设密码并对齐本次 DPAPI, 避免新用户解不开旧密文.
+            # 若账户其实已删 (pending-delete 后 GetInfo/SetInfo 变 2221), 改为再创建.
+            password = new_password
+            try:
+                _set_user_password(const.SANDBOX_USER_NAME, password)
+                logger.warning(
+                    "无法删除已有 jbx-sandbox 用户, 已重设密码并对齐 DPAPI",
+                )
+                steps_done.add("user_existed")
+            except Exception as exc:  # noqa: BLE001
+                if f"ret={NERR_USER_NOT_FOUND}" not in str(exc):
+                    raise
+                logger.warning(
+                    "删除后 NetUserSetInfo 用户不存在 (2221), 改为新建",
+                )
+                created = _create_sandbox_user(new_password, retries=5)
+                if not created:
+                    raise RuntimeError(
+                        "无法重建 jbx-sandbox 用户: 删除后账户仍不存在或 "
+                        "处于 pending-delete. " + _SANDBOX_USER_REPAIR
+                    ) from exc
+                password = new_password
+                steps_done.add("user_created")
         else:
             # 用户已存在: 不能用本次新密码 (与实际不一致 → 1326). 读 DPAPI 旧密码保持一致;
             # 读不到 (旧版 "000000" 升级/DPAPI 损坏) 则用新随机密码 NetUserSetInfo 重设对齐.
@@ -1249,16 +1431,7 @@ def install(
         # 2. 查 SID 并存注册表.
         sid = _lookup_user_sid(const.SANDBOX_USER_NAME)
         _reg_set_str(const.REG_VALUE_SANDBOX_USER_SID, sid)
-        # 密码用 DPAPI 加密 (机器绑定) 存 HKLM 注册表, 重启后 get_sandbox_user_password 解密读回.
-        # 新建用户用本次随机密码, 已存在用户用 DPAPI 旧密码 (保持与实际一致).
-        try:
-            import win32crypt  # type: ignore[import-not-found]
-            enc = win32crypt.CryptProtectData(
-                password.encode("utf-8"), "jbx-sandbox-pw", None, None, None, 0,
-            )
-            _reg_set_str(const.REG_VALUE_SANDBOX_USER_PW, enc.hex())
-        except ImportError:  # pragma: no cover
-            logger.warning("pywin32 缺失, 沙箱用户密码未加密存储 (仅开发环境)")
+        _save_sandbox_user_password(password)
 
         # 合成 SID 缓存.
         from jiuwenbox.supervisor import win_acl
@@ -1432,6 +1605,12 @@ def install(
             )
 
         # 5. 全部致命步骤通过, 写完成标记; 清进度标记 (断点续传已无用)。
+        # 写 installed=1 前必须能用本次密码登录, 避免 installed=1 + 用户不存在/密码不对 → 运行时 1326.
+        if not _logon_sandbox_user(password):
+            raise RuntimeError(
+                "jbx-sandbox 创建后 LogonUserW 失败, 不写 installed=1. "
+                + _SANDBOX_USER_REPAIR
+            )
         _reg_set_str(const.REG_VALUE_INSTALLED, "1")
         _reg_set_str(const.REG_VALUE_READ_ACL_PROGRESS, "")
         # 记录本次预装的路径集, 供 ensure_windows_setup 增量检测: 用户改了
@@ -1534,7 +1713,8 @@ def ensure_acl_policy_paths_authorized(
     """确保 deny/allow 路径已预授 WRITE_DAC.
 
     _create_windows 创建沙箱时调. 运行时不再弹 UAC: 未授权且当前不是管理员
-    时只记日志; 已是管理员则本进程 install() 补授权.
+    时只记日志; 已是管理员则本进程只补授 WRITE_DAC, 不整段 install()
+    (避免每个新 workspace 都重装 WFP, 首次对话卡 30s+).
     """
     _require_windows()
     if reg_get_str(const.REG_VALUE_INSTALLED) != "1":
@@ -1575,16 +1755,36 @@ def ensure_acl_policy_paths_authorized(
         return
     logger.info(
         "检测到新增 deny/allow 路径未预授 WRITE_DAC: %s. "
-        "当前进程已是管理员, 本进程补授权 (不弹 UAC).",
+        "当前进程已是管理员, 本进程只补授 WRITE_DAC (不整段重装).",
         sorted(need_elevate),
     )
-    install(
-        force=True,
-        preinstall_paths=[],
-        proxy_port_start=proxy_port_start,
-        proxy_port_end=proxy_port_end,
-        policy_path=policy_path,
-    )
+    _grant_write_dac_to_current_user(need_elevate)
+
+
+def _grant_write_dac_to_current_user(paths: set[str]) -> None:
+    """给当前用户对 paths 预授 WRITE_DAC|READ_CONTROL, 不调 install()."""
+    sid = _lookup_current_user_sid()
+    if not sid:
+        logger.warning("无法解析当前用户 SID, 跳过 WRITE_DAC 补授: %s", sorted(paths))
+        return
+    from jiuwenbox.supervisor import win_acl as _wa, win_constants as _wc
+    granted: set[str] = set()
+    for p in sorted(paths):
+        if not os.path.exists(p):
+            logger.debug("WRITE_DAC 路径不存在, 跳过: %s", p)
+            continue
+        try:
+            _wa.grant_ace(
+                p, sid,
+                rights=_wc.WRITE_DAC | _wc.READ_CONTROL,
+                mode="ALLOW", recursive=True,
+            )
+            granted.add(p)
+            logger.info("grant WRITE_DAC|READ_CONTROL 给当前用户: %s", p)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("grant WRITE_DAC 失败 (非致命): %s=%s", p, exc)
+    if granted:
+        _record_acl_policy_paths(granted)
 
 
 def ensure_windows_setup(
@@ -1597,9 +1797,8 @@ def ensure_windows_setup(
     """运行时入口: 确保安装已完成 (幂等).
 
     由 ProcessRuntime.create / app.py lifespan 在 win32 分支调用.
-    运行时不再弹 UAC / python.exe: 一次性准备由桌面安装器
-    ``jiuwenswarm.exe --desktop-run-win-setup --install`` 在已提权进程里完成.
-    若尚未安装且当前进程不是管理员, 记录错误并失败, 而不是 ShellExecuteW(runas).
+    一次性准备由安装器 ``--desktop-run-win-setup --install --force --recreate-user`` 完成.
+    尚未安装且非管理员时失败, 不弹 UAC.
 
     Args:
         preinstall_paths: 读 ACL 预装路径 (根 policy 的
@@ -1687,22 +1886,11 @@ def ensure_windows_setup(
                         "jiuwenswarm.exe --desktop-run-win-setup --install --force.",
                         sorted(new_paths), sorted(new_acl_paths),
                     )
-            # 密码一致性验证: install 回滚不彻底时 jbx-sandbox 可能残留旧密码, 注册表密码与实际不一致 → 1326.
-            # 幂等检查只看 installed=1 发现不了. 用 LogonUserW 测登录, 失败则自动重设密码 (创建者有权限). 避免反复 1326.
+            # installed=1 不能保证账户还在 / 密码还能登录.
             _verify_or_reset_sandbox_user_password()
             return
-        # installed != "1" 或 force=True: 本进程安装. 非管理员不再弹 UAC.
-        if not _is_admin():
-            logger.error(
-                "Windows 沙箱尚未安装且当前进程无管理员权限; 运行时不再弹 UAC. "
-                "请重新运行安装包 (安装器已提权并完成沙箱准备), 或管理员执行 "
-                "jiuwenswarm.exe --desktop-run-win-setup --install"
-            )
-            raise RuntimeError(
-                "Windows sandbox is not installed. Re-run the installer "
-                "(it prepares the sandbox while elevated), or run "
-                "jiuwenswarm.exe --desktop-run-win-setup --install as Administrator."
-            )
+        # installed != "1" 或 force=True. 非管理员走 install() 内的一次 UAC
+        # (仅首次/损坏态; 已安装且用户存在不会到这里, 不会每次建沙箱弹框).
         install(
             force=force,
             preinstall_paths=preinstall_paths,
@@ -1715,66 +1903,64 @@ def ensure_windows_setup(
         raise
 
 
-def _verify_or_reset_sandbox_user_password() -> None:
-    """验证 jbx-sandbox 密码与注册表一致, 不一致则重设.
+def ensure_sandbox_user_can_logon() -> None:
+    """创建沙箱前确认 jbx-sandbox 可登录; lifespan 失败时这里再拦一层."""
+    _verify_or_reset_sandbox_user_password()
 
-    install 失败回滚时 NetUserDel 可能没删干净 (权限/进程占用), 用户残留旧
-    密码, 注册表 DPAPI 密码与之不一致 → CreateProcessWithLogonW WinError 1326.
-    幂等检查看不到. 这里 LogonUserW 测登录, 失败则用 NetUserSetInfo 重设密码
-    为注册表值. xxx 是 jbx-sandbox 创建者, 有权重设. 随机密码 (token_urlsafe)
-    过 Windows 密码复杂度策略, 重设不会撞 ret=87.
-    """
+
+def _verify_or_reset_sandbox_user_password() -> None:
+    """验证 jbx-sandbox 账户存在且密码与注册表一致. 账户缺失时提权重建一次."""
+    if not _sandbox_user_exists():
+        with _INSTALL_LOCK:
+            if not _sandbox_user_exists():
+                logger.warning(
+                    "jbx-sandbox 用户不存在 (注册表可能仍为 installed=1), 尝试重建",
+                )
+                try:
+                    install(force=True, recreate_user=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("重建 jbx-sandbox 失败. %s: %s", _SANDBOX_USER_REPAIR, exc)
+                    raise RuntimeError(
+                        "Windows sandbox user jbx-sandbox is missing "
+                        "(installed=1 but the SAM account was deleted). "
+                        + _SANDBOX_USER_REPAIR
+                    ) from exc
+                if not _sandbox_user_exists():
+                    raise RuntimeError(
+                        "Windows sandbox user jbx-sandbox is missing "
+                        "(rebuild finished but the SAM account is still absent). "
+                        + _SANDBOX_USER_REPAIR
+                    )
     password = get_sandbox_user_password()
     if not password:
         return
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    token = ctypes.c_void_p()
-    logon_provider_default = 0  # noqa: N806 - Win32 常量
-    # 登录类型优先 NETWORK (3) 非 INTERACTIVE (2): 本函数只校验密码不加载 profile.
-    # INTERACTIVE 首次登录会物理建 C:\Users\jbx-sandbox 目录 + 挂载 NTUSER.DAT. NETWORK 轻量, 不建目录.
-    # 兜底: 本地策略拒绝 network logon 时回退 INTERACTIVE (仅此异常路径才可能建 profile). 见 win_exec.two_hop_spawn.
-    logon_network = 3  # noqa: N806 - Win32 常量
-    logon_interactivate = 2  # noqa: N806 - Win32 常量
-    ok = advapi32.LogonUserW(
-        const.SANDBOX_USER_NAME, None, password,
-        logon_network, logon_provider_default,
-        ctypes.byref(token),
-    )
-    if not ok:
-        network_err = ctypes.get_last_error()
-        # network logon 被策略拒 (常见 WinError 1327/1385/1326): 回退交互式.
-        logger.debug(
-            "jbx-sandbox network logon 失败 (WinError %d), 回退 interactive 校验密码",
-            network_err,
-        )
-        ok = advapi32.LogonUserW(
-            const.SANDBOX_USER_NAME, None, password,
-            logon_interactivate, logon_provider_default,
-            ctypes.byref(token),
-        )
-    if ok:
-        try:
-            ctypes.WinDLL("kernel32").CloseHandle(token)
-        except OSError:
-            pass
+    if _logon_sandbox_user(password):
         logger.debug("jbx-sandbox 密码一致性验证通过")
         return
     err = ctypes.get_last_error()
-    # WinError 1326 = ERROR_LOGON_FAILURE (密码不一致), 1327 = 账户限制等.
-    # 失败就重设密码 (NetUserSetInfo), 让其与注册表一致.
+    # WinError 1326 = ERROR_LOGON_FAILURE (密码不一致或账户异常).
     logger.warning(
         "jbx-sandbox 密码验证失败 (LogonUserW WinError %d), 重设密码以对齐注册表",
         err,
     )
     try:
         _set_user_password(const.SANDBOX_USER_NAME, password)
-        logger.info("jbx-sandbox 密码已重设, 与注册表一致")
     except Exception as exc:  # noqa: BLE001
         logger.error(
-            "jbx-sandbox 密码重设失败 (运行时非管理员可能无权, 请以管理员运行 "
-            "'python -m jiuwenbox.supervisor.win_setup --install --force'): %s",
+            "jbx-sandbox 密码重设失败 (运行时非管理员可能无权). %s: %s",
+            _SANDBOX_USER_REPAIR,
             exc,
         )
+        raise RuntimeError(
+            "jbx-sandbox logon failed and the password could not be reset. "
+            + _SANDBOX_USER_REPAIR
+        ) from exc
+    if not _logon_sandbox_user(password):
+        raise RuntimeError(
+            "jbx-sandbox password was reset but LogonUserW still fails. "
+            + _SANDBOX_USER_REPAIR
+        )
+    logger.info("jbx-sandbox 密码已重设, 与注册表一致")
 
 
 def get_sandbox_user_sid() -> str | None:
@@ -1784,7 +1970,7 @@ def get_sandbox_user_sid() -> str | None:
 
 
 def get_sandbox_user_password() -> str | None:
-    """从注册表读 jbx-sandbox 用户密码 (DPAPI 解密)."""
+    """从注册表读 jbx-sandbox 用户密码 (DPAPI 解密). 解失败返回 None."""
     _require_windows()
     enc_hex = reg_get_str(const.REG_VALUE_SANDBOX_USER_PW)
     if not enc_hex:
@@ -1820,7 +2006,8 @@ def _install_rollback(steps_done: "set[str]") -> None:
         下次 install 已存在用户分支读旧密码对齐 (避免 1326).
 
     Args:
-        steps_done: install 主体记录的已成功步骤集合, 含 "user" / "wfp".
+        steps_done: install 主体记录的已成功步骤集合, 含
+            ``user_created`` / ``user_existed`` / ``recreate_user`` / ``wfp``.
     """
     _require_windows()
     if not _is_admin():
@@ -1835,11 +2022,14 @@ def _install_rollback(steps_done: "set[str]") -> None:
             win_wfp.uninstall_firewall_rule_fallback()
         except Exception:  # noqa: BLE001
             logger.warning("局部回滚卸载 WFP/防火墙失败", exc_info=True)
-    # 回滚用户 + 组 (幂等: 不存在跳过). 仅当本次 install 新建了用户 (user_created)
-    # 才删 — 用户已存在 (user_existed, force 重装) 时不删, 避免误删既有账户
-    # 影响并发沙箱. review #4: 首次 install 失败 (created=True) 删本次新建用户正确;
-    # force 重装失败时保留用户 (密码/SID 可能被本次改过, 下次 install 已存在分支对齐).
-    if "user_created" in steps_done:
+    # 仅本次新建且非 recreate_user 才删用户. recreate 已删旧账户, 再删会留下
+    # installed=1 但 SAM 无账户.
+    if "user_created" in steps_done and "recreate_user" in steps_done:
+        logger.info(
+            "局部回滚: exe 重装已删旧账户, 保留本次新建的 %s, 避免机器无沙箱用户",
+            const.SANDBOX_USER_NAME,
+        )
+    elif "user_created" in steps_done:
         netapi32 = _get_netapi32()
         ret = netapi32.NetUserDel(None, const.SANDBOX_USER_NAME)
         if ret not in (0, 2221):  # 2221 = NERR_UserNotFound (幂等)
@@ -2018,23 +2208,8 @@ def _gc_applied_acl_paths(paths: list[str], current_norm: "set[str]") -> list[st
     return kept
 
 
-def uninstall() -> None:
-    """卸载: 删除 WFP filter + profile + 用户 + 注册表标记 (管理员)."""
-    _require_windows()
-    if not _is_admin():
-        _elevate_uninstall()
-        return
-    try:
-        from jiuwenbox.supervisor import win_wfp
-        win_wfp.uninstall_wfp_filters()
-        # 降级路径 (PowerShell New-NetFirewallRule) 装的防火墙规则也卸载:
-        # WFP 主路径失败走降级时这两条规则残留会永久 Block 沙箱用户出站. 旧版漏卸载降级规则 (review B2).
-        win_wfp.uninstall_firewall_rule_fallback()
-    except Exception:  # noqa: BLE001
-        logger.warning("WFP/防火墙卸载失败", exc_info=True)
-    # 删 profile (目录 + ProfileList 注册项) 必须在 NetUserDel 之前: 删用户后 LookupAccountName 查不到 SID,
-    # 但 DeleteProfileW 按 SID 字符串仍可工作. 先用缓存 SID 调 DeleteProfileW, 再兜底清 C:\Users\jbx-sandbox* 拋留目录.
-    # SID 取值: 注册表缓存优先, 读不到 (install 早期失败回滚) 则 LookupAccountName 实时取当前 SID (P1-9).
+def _remove_sandbox_user_and_profile() -> None:
+    """删 jbx-sandbox 用户/组/profile 及注册表密码 SID (幂等, 需管理员). 不卸 WFP."""
     sid_str = get_sandbox_user_sid()
     if not sid_str:
         try:
@@ -2042,11 +2217,16 @@ def uninstall() -> None:
         except Exception:  # noqa: BLE001
             sid_str = None
     if sid_str:
-        _delete_profile_by_sid(sid_str)
-    _purge_stale_profile_dirs()
-    # 删用户 + 组 (best-effort: 不存在则跳过). 原实现注释说"保留账户避免残留密码"
-    # 不删用户, 但这导致 reinstall 时用户密码与注册表密码不一致 (见 1326).
-    # 改为彻底删用户/组, reinstall 干净重建.
+        logger.info("DeleteProfileW sid=%s", sid_str)
+        try:
+            _delete_profile_by_sid(sid_str)
+        except Exception:  # noqa: BLE001
+            logger.warning("DeleteProfileW 失败, 继续删 SAM 账户", exc_info=True)
+    logger.info("清理残留 profile 目录")
+    try:
+        _purge_stale_profile_dirs()
+    except Exception:  # noqa: BLE001
+        logger.warning("清理残留 profile 失败, 继续删 SAM 账户", exc_info=True)
     netapi32 = _get_netapi32()
     ret = netapi32.NetUserDel(None, const.SANDBOX_USER_NAME)
     # 0 = 成功; 2221 = NERR_UserNotFound (已不存在, 幂等). 旧版误用 2201
@@ -2068,6 +2248,23 @@ def uninstall() -> None:
     _reg_set_str(const.REG_VALUE_INSTALLED, "")
     _reg_set_str(const.REG_VALUE_SANDBOX_USER_PW, "")
     _reg_set_str(const.REG_VALUE_SANDBOX_USER_SID, "")
+
+
+def uninstall() -> None:
+    """卸载: 删除 WFP filter + profile + 用户 + 注册表标记 (管理员)."""
+    _require_windows()
+    if not _is_admin():
+        _elevate_uninstall()
+        return
+    try:
+        from jiuwenbox.supervisor import win_wfp
+        win_wfp.uninstall_wfp_filters()
+        # 降级路径 (PowerShell New-NetFirewallRule) 装的防火墙规则也卸载:
+        # WFP 主路径失败走降级时这两条规则残留会永久 Block 沙箱用户出站. 旧版漏卸载降级规则 (review B2).
+        win_wfp.uninstall_firewall_rule_fallback()
+    except Exception:  # noqa: BLE001
+        logger.warning("WFP/防火墙卸载失败", exc_info=True)
+    _remove_sandbox_user_and_profile()
     logger.info("Windows 沙箱卸载完成")
 
 
@@ -2131,6 +2328,7 @@ def _main(argv: list[str]) -> int:
     install 支持的可选参数 (review MAJOR #9: 旧版不接, 导致 force/端口/
     preinstall 从命令行无法传入):
       --force                  强制重装
+      --recreate-user          先删已有 jbx-sandbox 再重建
       --proxy-port-start N     WFP Permit 放行的 loopback 端口范围起点
       --proxy-port-end   N     范围终点
       --preinstall-paths JSON  读 ACL 预装路径列表 (JSON 编码字符串)
@@ -2186,6 +2384,10 @@ def _main(argv: list[str]) -> int:
     )
     p_install.add_argument("--force", action="store_true", help="强制重装")
     p_install.add_argument(
+        "--recreate-user", action="store_true",
+        help="先删已有 jbx-sandbox 再重建 (安装器重装用; 运行时补预装不要加)",
+    )
+    p_install.add_argument(
         "--proxy-port-start", type=int,
         default=const.DEFAULT_PROXY_PORT_RANGE_START,
     )
@@ -2237,6 +2439,7 @@ def _main(argv: list[str]) -> int:
                 proxy_port_start=args.proxy_port_start,
                 proxy_port_end=args.proxy_port_end,
                 policy_path=args.policy_path,
+                recreate_user=args.recreate_user,
             )
         except BaseException:
             _notify()
