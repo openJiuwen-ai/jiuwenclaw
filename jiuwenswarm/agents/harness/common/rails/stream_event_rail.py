@@ -13,7 +13,7 @@ import asyncio
 import copy
 import json
 import re
-from typing import Any, List, Optional
+from typing import Any, List, Mapping, Optional
 
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import (
@@ -730,6 +730,11 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 ctx.inputs.tool_args = cleaned_args
             is_task_tool_resume = (
                 ctx.inputs.tool_name == "task_tool"
+                # extract_call_goal 保持原类型风格：arguments 为 JSON 字符串时
+                # cleaned_args 也是 str，无 .get——必须先判 Mapping，否则
+                # before_tool_call 整体炸掉（emit/bind/inflight 登记全跳过，
+                # 前端丢工具卡）
+                and isinstance(cleaned_args, Mapping)
                 and isinstance(cleaned_args.get("query"), InteractiveInput)
             )
             if not is_task_tool_resume:

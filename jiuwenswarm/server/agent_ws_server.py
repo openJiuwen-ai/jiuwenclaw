@@ -508,7 +508,9 @@ def _is_restorable_history_record(record: Any) -> bool:
         mode = record.get("mode", "")
         if mode in ("team", "team.plan", "code.team"):
             channel_id = record.get("channel_id", "")
-            if channel_id not in ("web", "tui"):
+            # desktop 渠道的用户消息是真实用户输入，必须与 web/tui 同规放行——
+            # 否则桌面团队会话重启后用户问题气泡丢失
+            if channel_id not in ("web", "tui", "desktop"):
                 return False
         return has_content or has_media
 

@@ -218,3 +218,29 @@ def test_append_history_tool_result_empty_payload_skipped(tmp_path, monkeypatch)
     _t.sleep(0.3)
     data = session_history.load_history_records("s-empty-tr")
     assert data == []
+
+
+def test_dedup_records_last_wins_keeps_distinct_bubbles():
+    """多气泡：同 id 但 bubble_seq 不同的 chat.final 各泡保留；
+    同泡快照重写仍 last-wins（语义不变）。"""
+    records = [
+        {"id": "r1:assistant", "event_type": "chat.final", "content": "泡0草稿", "bubble_seq": 0},
+        {"id": "r1:assistant", "event_type": "chat.final", "content": "泡0完整", "bubble_seq": 0},
+        {"id": "r1:assistant", "event_type": "chat.final", "content": "泡1", "bubble_seq": 1},
+        {"id": "r1:assistant", "event_type": "chat.final", "content": "泡2", "bubble_seq": 2},
+    ]
+    out = session_history._dedup_records_last_wins(records)
+    contents = [r["content"] for r in out]
+    assert contents == ["泡0完整", "泡1", "泡2"]
+
+
+def test_dedup_records_last_wins_legacy_records_without_bubble_seq_unchanged():
+    """存量无 bubble_seq 的同 id chat.final 仍 last-wins。"""
+    records = [
+        {"id": "r1:assistant", "event_type": "chat.final", "content": "草稿"},
+        {"id": "r1:assistant", "event_type": "chat.final", "content": "完整"},
+        {"id": "r1:assistant", "event_type": "chat.tool_result", "content": "工具"},
+    ]
+    out = session_history._dedup_records_last_wins(records)
+    contents = [r["content"] for r in out]
+    assert contents == ["完整", "工具"]
