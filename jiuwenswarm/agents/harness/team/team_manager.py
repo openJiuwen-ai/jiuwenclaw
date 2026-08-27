@@ -148,6 +148,20 @@ def sync_team_observability() -> None:
     if unified_active:
         _observability_active = True
         _runtime_managed_observability = True
+        # Same gap as single-agent: unified runtime must still host the
+        # shared TrajectorySpanProcessor for skill / team evolution rails.
+        try:
+            from jiuwenswarm.agents.harness.observability_runtime import (
+                ensure_trajectory_span_processor_attached,
+            )
+
+            ensure_trajectory_span_processor_attached()
+        except Exception as exc:
+            logger.warning(
+                "[TeamObservability] failed to attach trajectory processor "
+                "on unified path: %s",
+                exc,
+            )
         return
     if _runtime_managed_observability:
         _observability_active = False
