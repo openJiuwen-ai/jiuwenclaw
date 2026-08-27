@@ -44,6 +44,38 @@ def test_install_expert_org_adapters_noop_without_setters() -> None:
     install_expert_org_adapters(SimpleNamespace())  # should not raise
 
 
+def test_register_expert_adapter_installer_sets_lazy_installer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _Org:
+        def set_expert_adapter_installer(self, installer) -> None:
+            captured["installer"] = installer
+
+    class _TeamRuntime:
+        organization_runtime_manager = _Org()
+
+    class _Runner:
+        pass
+
+    runner = _Runner()
+    import openjiuwen.agent_teams.runtime as runtime_mod
+    import openjiuwen.core.runner.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "GLOBAL_RUNNER", runner)
+    monkeypatch.setattr(runtime_mod, "TeamRuntimeManager", lambda: _TeamRuntime())
+
+    from jiuwenswarm.agents.harness.team.expert_org.wiring import (
+        install_expert_org_adapters,
+        register_expert_adapter_installer,
+    )
+
+    register_expert_adapter_installer()
+    assert captured["installer"] is install_expert_org_adapters
+    assert getattr(runner, "_team_runtime_manager") is not None
+
+
 @pytest.mark.asyncio
 async def test_launcher_shares_db_from_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     shared_db = object()

@@ -8,6 +8,7 @@ __all__ = [
     "JiuwenExpertGroupCatalog",
     "JiuwenExpertTeamLauncher",
     "install_expert_org_adapters",
+    "register_expert_adapter_installer",
 ]
 
 
@@ -24,4 +25,10 @@ def __getattr__(name: str):
         from jiuwenswarm.agents.harness.team.expert_org.wiring import install_expert_org_adapters
 
         return install_expert_org_adapters
+    if name == "register_expert_adapter_installer":
+        from jiuwenswarm.agents.harness.team.expert_org.wiring import (
+            register_expert_adapter_installer,
+        )
+
+        return register_expert_adapter_installer
     raise AttributeError(name)

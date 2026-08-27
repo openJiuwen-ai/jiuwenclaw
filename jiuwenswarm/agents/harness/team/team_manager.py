@@ -263,15 +263,6 @@ def _runner_team_runtime_manager(runner: Any) -> Any:
 
         manager = TeamRuntimeManager()
         setattr(runner, attr_name, manager)
-    org_runtime = getattr(manager, "organization_runtime_manager", None)
-    set_installer = getattr(org_runtime, "set_expert_adapter_installer", None)
-    if callable(set_installer):
-        from jiuwenswarm.agents.harness.team.expert_org.wiring import (
-            install_expert_org_adapters,
-        )
-
-        # Register only the callable; Catalog/Launcher are built on first org tool use.
-        set_installer(install_expert_org_adapters)
     return manager
 
 

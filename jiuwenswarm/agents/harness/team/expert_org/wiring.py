@@ -7,6 +7,26 @@ from __future__ import annotations
 from typing import Any
 
 _ADAPTERS_FLAG = "_jiuwen_expert_org_adapters_ready"
+_RUNNER_TEAM_RUNTIME_ATTR = "_team_runtime_manager"
+
+
+def register_expert_adapter_installer() -> None:
+    """Register the lazy adapter installer on ``GLOBAL_RUNNER`` org runtime.
+
+    Call once at process/team bootstrap. Does not build Catalog/Launcher; those
+    are constructed on first ``list_expert_groups`` / ``create_and_invite``.
+    """
+    from openjiuwen.agent_teams.runtime import TeamRuntimeManager
+    from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+
+    manager = vars(GLOBAL_RUNNER).get(_RUNNER_TEAM_RUNTIME_ATTR)
+    if manager is None:
+        manager = TeamRuntimeManager()
+        setattr(GLOBAL_RUNNER, _RUNNER_TEAM_RUNTIME_ATTR, manager)
+    org_runtime = getattr(manager, "organization_runtime_manager", None)
+    set_installer = getattr(org_runtime, "set_expert_adapter_installer", None)
+    if callable(set_installer):
+        set_installer(install_expert_org_adapters)
 
 
 def install_expert_org_adapters(org_runtime: Any) -> None:
@@ -36,4 +56,4 @@ def install_expert_org_adapters(org_runtime: Any) -> None:
     setattr(org_runtime, _ADAPTERS_FLAG, True)
 
 
-__all__ = ["install_expert_org_adapters"]
+__all__ = ["install_expert_org_adapters", "register_expert_adapter_installer"]
