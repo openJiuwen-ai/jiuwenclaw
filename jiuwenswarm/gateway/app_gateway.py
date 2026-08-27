@@ -71,6 +71,16 @@ reset_free_search_runtime_flags()
 
 logger = logging.getLogger("jiuwenswarm.gateway")
 
+
+def _uses_external_agent_config() -> bool:
+    """企业版或外置 Runtime 托管：配置经 Manager→ConfigReceiver→runtime_notify，不经 Gateway push。"""
+    from jiuwenswarm.gateway.edition import is_gateway_enterprise
+
+    if is_gateway_enterprise():
+        return True
+    return bool(os.getenv("GATEWAY_RUNTIME_MANAGER_URL", "").strip())
+
+
 # Keep gateway idle-finalize fallback aligned with ACP channel default.
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
 _AGENT_PREWARM_EXCLUDED_CHANNELS = frozenset({"acp", "a2a"})
@@ -1714,10 +1724,15 @@ async def _run_with_telemetry(
     for env_key in _CONFIG_SET_ENV_MAP.values():
         tip_val = get_local_config(env_key)
         env_dict[env_key] = tip_val if tip_val is not None else ""
-    client.set_or_update_server_config(
-        config=dict(full_cfg or {}),
-        env=env_dict,
-    )
+    if not _uses_external_agent_config():
+        client.set_or_update_server_config(
+            config=dict(full_cfg or {}),
+            env=env_dict,
+        )
+    else:
+        logger.info(
+            "[App] external agent config: skip set_or_update_server_config at startup"
+        )
 
     if isinstance(heartbeat_cfg, dict):
         cfg_every = heartbeat_cfg.get("every")
@@ -1832,53 +1847,59 @@ async def _run_with_telemetry(
             "VISION_API_BASE",
             "VISION_API_KEY",
         }
+        external_agent_config = _uses_external_agent_config()
         try:
-            # 发送给 AgentServer 前解密扩展敏感配置
-            decrypted_config = decrypt_extensions_sensitive_for_agent(config_payload or {})
-            client.set_or_update_server_config(
-                config=dict(decrypted_config),
-                env=dict(env_updates or {}),
-            )
-
-            reload_env = e2a_from_agent_fields(
-                request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
-                channel_id="",
-                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-                params={
-                    # config: full config snapshot after save; Agent should prefer this over local yaml.
-                    "config": dict(decrypted_config),
-                    # env: incremental environment updates; missing keys mean unchanged.
-                    "env": dict(env_updates or {}),
-                    **dict(reload_options or {}),
-                },
-            )
-            reload_resp = await client.send_request(reload_env)
-            if not getattr(reload_resp, "ok", False):
-                err_payload = getattr(reload_resp, "payload", None) or {}
-                err_msg = (
-                    err_payload.get("error")
-                    if isinstance(err_payload, dict)
-                    else err_payload
+            if not external_agent_config:
+                # 发送给 AgentServer 前解密扩展敏感配置
+                decrypted_config = decrypt_extensions_sensitive_for_agent(config_payload or {})
+                client.set_or_update_server_config(
+                    config=dict(decrypted_config),
+                    env=dict(env_updates or {}),
                 )
-                err_str = str(err_msg or "")
-                # ValidationError 是配置格式问题，不需要重启 gateway
-                if any(kw in err_str for kw in ("ValidationError", "validation error", "Field required")):
-                    logger.warning("[App] agent.reload_config validation error (non-fatal): %s", err_str)
-                    return False
-                raise RuntimeError(f"agent.reload_config rejected: {err_msg}")
 
-            _schedule_agent_prewarm_sync(
-                "agent-prewarm-sync-after-config",
-                delay_seconds=3.0,
-            )
-
-            if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
-                restart_env = e2a_from_agent_fields(
-                    request_id=f"browser-restart-{uuid_module.uuid4().hex[:8]}",
+                reload_env = e2a_from_agent_fields(
+                    request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
                     channel_id="",
-                    req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+                    req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                    params={
+                        # config: full config snapshot after save; Agent should prefer this over local yaml.
+                        "config": dict(decrypted_config),
+                        # env: incremental environment updates; missing keys mean unchanged.
+                        "env": dict(env_updates or {}),
+                        **dict(reload_options or {}),
+                    },
                 )
-                await client.send_request(restart_env)
+                reload_resp = await client.send_request(reload_env)
+                if not getattr(reload_resp, "ok", False):
+                    err_payload = getattr(reload_resp, "payload", None) or {}
+                    err_msg = (
+                        err_payload.get("error")
+                        if isinstance(err_payload, dict)
+                        else err_payload
+                    )
+                    err_str = str(err_msg or "")
+                    # ValidationError 是配置格式问题，不需要重启 gateway
+                    if any(kw in err_str for kw in ("ValidationError", "validation error", "Field required")):
+                        logger.warning("[App] agent.reload_config validation error (non-fatal): %s", err_str)
+                        return False
+                    raise RuntimeError(f"agent.reload_config rejected: {err_msg}")
+
+                _schedule_agent_prewarm_sync(
+                    "agent-prewarm-sync-after-config",
+                    delay_seconds=3.0,
+                )
+
+                if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
+                    restart_env = e2a_from_agent_fields(
+                        request_id=f"browser-restart-{uuid_module.uuid4().hex[:8]}",
+                        channel_id="",
+                        req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+                    )
+                    await client.send_request(restart_env)
+            else:
+                logger.debug(
+                    "[App] external agent config: skip agent.reload_config in _on_config_saved"
+                )
 
             # 主动推荐：enabled 变更时同步 proactive.tick job（创建/删除）
             proactive_keys = {
@@ -1896,13 +1917,22 @@ async def _run_with_telemetry(
             _schedule_gateway_restart(restart_request)
             return False
 
-    callback_result = _on_config_saved(
-        set(_CONFIG_SET_ENV_MAP.values()) | _CONFIG_YAML_KEYS,
-        env_updates=dict(env_dict),
-        config_payload=dict(full_cfg or {})
-    )
-    if inspect.isawaitable(callback_result):
-        await callback_result
+    sync_on_startup = os.getenv("SYNC_CONFIG_ON_STARTUP", "TRUE").strip().upper() not in {
+        "FALSE",
+        "0",
+        "NO",
+        "OFF",
+    }
+    if sync_on_startup:
+        callback_result = _on_config_saved(
+            set(_CONFIG_SET_ENV_MAP.values()) | _CONFIG_YAML_KEYS,
+            env_updates=dict(env_dict),
+            config_payload=dict(full_cfg or {}),
+        )
+        if inspect.isawaitable(callback_result):
+            await callback_result
+    else:
+        logger.info("[App] SYNC_CONFIG_ON_STARTUP=false, skip startup agent.reload_config")
 
     web_channel = None
     tui_channel = None

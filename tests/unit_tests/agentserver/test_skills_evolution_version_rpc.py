@@ -154,6 +154,77 @@ async def test_generate_evolution_merge_version_fingerprint_gate(tmp_path, monke
     assert skill_md.read_text(encoding="utf-8").startswith("---")
 
 
+def test_extra_trusted_dirs_for_skill_md(tmp_path):
+    skill_md = tmp_path / "office-claw" / "skills" / "beer" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("# beer\n", encoding="utf-8")
+    extra = evolution_version_ctl.extra_trusted_dirs_for_skill_md(str(skill_md))
+    assert str((tmp_path / "office-claw" / "skills").resolve()) in extra
+    assert str(skill_md.parent.resolve()) in extra
+
+
+@pytest.mark.anyio
+async def test_generate_evolution_merge_version_seeds_skill_path_trusted_dirs(
+    tmp_path, monkeypatch
+):
+    skills_dir = _write_skill(tmp_path, "demo-skill")
+    skill_md = tmp_path / "skills" / "demo-skill" / "SKILL.md"
+    captured: list[list[str]] = []
+
+    class _Rail:
+        def __init__(self) -> None:
+            self._engine = SimpleNamespace(trusted_dirs=[])
+
+        def set_trusted_dirs(self, dirs: list[str] | None) -> None:
+            captured.append(list(dirs or []))
+            self._engine.trusted_dirs = list(dirs or [])
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = object()  # pylint: disable=protected-access
+    adapter._model = object()  # pylint: disable=protected-access
+    adapter._permission_rail = _Rail()  # pylint: disable=protected-access
+    monkeypatch.setattr(adapter, "_resolve_skill_dirs", lambda: [str(skills_dir)])
+    monkeypatch.setattr(adapter, "_bind_request_env_overlay", lambda: (None, None))
+    monkeypatch.setattr(adapter, "_reset_request_env_bindings", lambda *_a, **_k: None)
+    monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "cn")
+    monkeypatch.setattr(adapter, "_resolve_model_name", lambda: "test-model")
+    monkeypatch.setattr(adapter, "ensure_instance", AsyncMock())
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.evolution_version.prepare_rebuild_followup",
+        AsyncMock(
+            return_value={
+                "ok": True,
+                "followup_prompt": "rebuild",
+                "rebuild_context": {
+                    "skill_md_path": str(skill_md),
+                    "archive_pair": True,
+                },
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.evolution_version.finalize_rebuild_followup",
+        AsyncMock(
+            return_value={"ok": True, "new_version": "1.0.1", "cleared": True}
+        ),
+    )
+
+    async def _rewrite(_prompt: str, **_kwargs: Any) -> bool:
+        skill_md.write_text("# rebuilt\n", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(adapter, "_execute_merge_version_rewrite", _rewrite)
+
+    result = await adapter.generate_evolution_merge_version(
+        {"name": "demo-skill", "skill_path": str(skill_md)}
+    )
+    assert result["success"] is True
+    assert captured
+    merged = captured[-1]
+    assert str(skills_dir.resolve()) in merged
+    assert str(skill_md.parent.resolve()) in merged
+
+
 def test_queue_auto_rebuild_respects_skill_evolution_action(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
     monkeypatch.setattr(adapter, "_resolve_skill_dirs", lambda: [])
