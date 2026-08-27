@@ -58,6 +58,7 @@ from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
     build_code_system_prompt,
 )
 from jiuwenswarm.agents.harness.code.rails import (
+    CodingArtifactPostProcessRail,
     CodeTaskPlanningRail,
     PlanApprovalInterruptRail,
 )
@@ -90,6 +91,22 @@ from jiuwenswarm.common.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_config_bool(value: Any, *, default: bool = False) -> bool:
+    """Parse YAML and environment-backed boolean config values."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    return default
+
 
 # ---------------------------------------------------------------------------
 # Static plan mode system prompt note (KV-cache-friendly: same content every turn)
@@ -360,6 +377,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         "ContextProcessorRail",
         "ContextOverflowRecoveryRail",
         "SysOperationRail", "CodingMemoryRail",
+        "CodingArtifactPostProcessRail",
         "AgentModeRail", "StructuredAskUserRail", "ConfirmInterruptRail",
         "FileSystemRail",  # 别名
     })
@@ -370,6 +388,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._lsp_rail: LspRail | None = None
         self._project_memory_rail: ProjectMemoryRail | None = None
         self._coding_memory_rail: CodingMemoryRail | None = None
+        self._coding_artifact_post_process_rail: CodingArtifactPostProcessRail | None = None
         self._worktree_rail: WorktreeRail | None = None
         # 单点 source-of-truth, 让 sysop_builder 的"主写入根"分支
         # (project_dir vs get_agent_workspace_dir) 落到 code-agent 这一支。
@@ -587,6 +606,16 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         Code 模式固定包含 LspRail、ProjectMemoryRail、CodingMemoryRail。
         """
+        mode_config = config_base.get("modes", {}).get("code", {})
+        artifact_config = mode_config.get("artifact_post_process") or {}
+        coauthor_header_enabled = (
+            _parse_config_bool(
+                artifact_config.get("coauthor_header"),
+            )
+            if isinstance(artifact_config, dict)
+            else False
+        )
+
         # 固定 Rails — code 模式特有
         rail_infos = [
             _RailBuildInfo("_request_summary_rail", self._build_request_summary_rail),
@@ -594,6 +623,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_skill_retrieval_prompt_rail", self._build_skill_retrieval_prompt_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
+            _RailBuildInfo(
+                "_coding_artifact_post_process_rail",
+                self._build_coding_artifact_post_process_rail,
+                {"coauthor_header_enabled": coauthor_header_enabled},
+            ),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_lsp_rail", self._build_lsp_rail_via_config),
             _RailBuildInfo("_project_memory_rail", self._build_project_memory_rail),
@@ -631,7 +665,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         # 动态 Rails — 从 config.yaml::modes.code.rails 读取
         # 跳过已在固定列表中的 rail，避免重复注册
-        mode_config = config_base.get("modes", {}).get("code", {})
         configured_rails = mode_config.get("rails") or []
 
         for rail_name in configured_rails:
@@ -718,6 +751,22 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             )
         except Exception as exc:
             logger.warning("[JiuwenSwarmCodeAdapter] CodeAgentModeRail create failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _build_coding_artifact_post_process_rail(
+        *, coauthor_header_enabled: bool = False,
+    ) -> CodingArtifactPostProcessRail | None:
+        """Build code-only artifact post-processing without todo lifecycle hooks."""
+        try:
+            return CodingArtifactPostProcessRail(
+                coauthor_header_enabled=coauthor_header_enabled,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuwenSwarmCodeAdapter] CodingArtifactPostProcessRail create failed: %s",
+                exc,
+            )
             return None
 
     @staticmethod
