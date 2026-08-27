@@ -2195,7 +2195,7 @@
     "overwriteConfirm": "是否覆盖保存？",
     "messages": {
       "installing": "安装中：{{name}}...",
-      "installed": "已安装：{{spec}}",
+      "installed": "已安装：{{name}}",
       "imported": "已导入：{{name}}",
       "uninstalled": "已卸载：{{pluginName}}",
       "skillNetInstalled": "已安装：{{name}}",

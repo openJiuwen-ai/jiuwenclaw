@@ -1078,7 +1078,7 @@ export function SkillPanel({
       // 后端 PR#5336: skills.swarmskillshub.recommend → POST /api/v1/recommend
       // 支持 category_id、plugin_type、top_k、market_url 参数
       const params = withSession({
-        top_k: 100,
+        top_k: 50,
         market_url: 'http://119.8.233.112:8080',
         ...(category !== 'all' ? { category_id: category } : {}),
       });

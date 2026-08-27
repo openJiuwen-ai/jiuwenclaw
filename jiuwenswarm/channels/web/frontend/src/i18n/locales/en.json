@@ -2198,7 +2198,7 @@
     "overwriteConfirm": "Overwrite existing?",
     "messages": {
       "installing": "Installing: {{name}}...",
-      "installed": "Installed: {{spec}}",
+      "installed": "Installed: {{name}}",
       "imported": "Imported: {{name}}",
       "uninstalled": "Uninstalled: {{pluginName}}",
       "skillNetInstalled": "Installed: {{name}}",
