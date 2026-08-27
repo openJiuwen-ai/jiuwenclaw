@@ -125,18 +125,26 @@ _MODEL_RELOAD_ENV_KEYS = {
     "MODEL_NAME",
     "API_BASE",
     "API_KEY",
+}
+_MULTIMODAL_RELOAD_ENV_KEYS = {
     "VIDEO_PROVIDER",
     "VIDEO_MODEL_NAME",
     "VIDEO_API_BASE",
     "VIDEO_API_KEY",
+    "VIDEO_ENDPOINT_PROFILE",
     "AUDIO_PROVIDER",
     "AUDIO_MODEL_NAME",
     "AUDIO_API_BASE",
     "AUDIO_API_KEY",
+    "AUDIO_ENDPOINT_PROFILE",
     "VISION_PROVIDER",
     "VISION_MODEL_NAME",
     "VISION_API_BASE",
     "VISION_API_KEY",
+    "VISION_ENDPOINT_PROFILE",
+    "VISION_ENABLED",
+    "AUDIO_ENABLED",
+    "VIDEO_ENABLED",
 }
 
 
@@ -159,6 +167,8 @@ class _ConfigChangeSet:
         scopes: set[str] = set()
         if _MODEL_RELOAD_ENV_KEYS & set(self.env_updates):
             scopes.add("model")
+        if _MULTIMODAL_RELOAD_ENV_KEYS & set(self.env_updates):
+            scopes.add("multimodal")
         for key in self.yaml_updated:
             key_text = str(key)
             if key_text in {"models.defaults"} or key_text.startswith("models."):
@@ -867,18 +877,27 @@ _CONFIG_SET_ENV_MAP = {
     "video_model": "VIDEO_MODEL_NAME",
     "video_provider": "VIDEO_PROVIDER",
     "video_endpoint_profile": "VIDEO_ENDPOINT_PROFILE",
+    "video_vendor_key": "VIDEO_VENDOR_KEY",
+    "video_plan": "VIDEO_PLAN",
+    "video_enabled": "VIDEO_ENABLED",
     # audio 模型
     "audio_api_base": "AUDIO_API_BASE",
     "audio_api_key": "AUDIO_API_KEY",
     "audio_model": "AUDIO_MODEL_NAME",
     "audio_provider": "AUDIO_PROVIDER",
     "audio_endpoint_profile": "AUDIO_ENDPOINT_PROFILE",
+    "audio_vendor_key": "AUDIO_VENDOR_KEY",
+    "audio_plan": "AUDIO_PLAN",
+    "audio_enabled": "AUDIO_ENABLED",
     # vision 模型
     "vision_api_base": "VISION_API_BASE",
     "vision_api_key": "VISION_API_KEY",
     "vision_model": "VISION_MODEL_NAME",
     "vision_provider": "VISION_PROVIDER",
     "vision_endpoint_profile": "VISION_ENDPOINT_PROFILE",
+    "vision_vendor_key": "VISION_VENDOR_KEY",
+    "vision_plan": "VISION_PLAN",
+    "vision_enabled": "VISION_ENABLED",
     # 其他
     "email_address": "EMAIL_ADDRESS",
     "email_token": "EMAIL_TOKEN",

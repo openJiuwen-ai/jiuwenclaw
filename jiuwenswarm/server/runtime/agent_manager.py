@@ -1183,11 +1183,10 @@ class AgentManager:
         使用 ``self._reload_lock`` 串行化, 避免高频触发(如批量 MCP 增删)时多个
         reload 并发叠加, 同时重建大量 agent 实例导致内存暴涨被 OOM kill.
 
-        ``reload_scopes`` 含 ``"model"`` 时, 模型配置属于所有 channel 共享的
-        全局配置段, 此时忽略 ``target_channel_id`` 的窄化, fan-out 到全部
-        channel——否则 web 保存模型后只有 web 通道被热更新, IM 长连接通道
-        (xiaoyi 等)的 session adapter 会继续用旧错误模型, 直到用户手动
-        /new_session 才恢复.
+        ``reload_scopes`` 含 ``"model"`` 或 ``"multimodal"`` 时, 配置属于所有
+        channel 共享的全局配置段, 此时忽略 ``target_channel_id`` 的窄化,
+        fan-out 到全部 channel。否则 web 保存后只有 web 通道被热更新,
+        IM 长连接通道的 session adapter 会继续使用旧配置。
         """
         async with self._reload_lock:
             self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
@@ -1200,15 +1199,16 @@ class AgentManager:
 
             target_channel = str(target_channel_id or "").strip() or None
             target_session = str(target_session_id or "").strip() or None
-            # model 是全局共享配置: 变更时必须广播到所有 channel, 否则非触发
-            # 通道(如 IM 长连接 xiaoyi)的 agent 不会收到热更新, 旧模型残留。
+            # 对话模型和多模态工具都是全局共享配置，必须广播到所有 channel。
             scope_set = set(reload_scopes) if reload_scopes else set()
             model_scope = "model" in scope_set
-            effective_target_channel = None if model_scope else target_channel
-            if target_channel and model_scope:
+            global_scope = bool(scope_set & {"model", "multimodal"})
+            effective_target_channel = None if global_scope else target_channel
+            if target_channel and global_scope:
                 logger.info(
-                    "[AgentManager] model config changed via channel=%s; fan-out reload "
-                    "to all channels (model is global)",
+                    "[AgentManager] global config scopes=%s changed via channel=%s; "
+                    "fan-out reload to all channels",
+                    sorted(scope_set & {"model", "multimodal"}),
                     target_channel,
                 )
             effective_config = config
@@ -1256,6 +1256,8 @@ class AgentManager:
                     }
                     if target_session:
                         reload_kwargs["target_session_id"] = target_session
+                    if scope_set:
+                        reload_kwargs["reload_scopes"] = scope_set
                     await agent.reload_agent_config(**reload_kwargs)
                 try:
                     team_config = effective_config if isinstance(effective_config, dict) else get_config()
