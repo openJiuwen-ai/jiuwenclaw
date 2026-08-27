@@ -5,6 +5,7 @@ import {
   draftFromA2AIngressSnapshot,
   isA2AIngressTransitioning,
   normalizeA2AIngressHistory,
+  normalizeA2AOutboundDispatchHistory,
   normalizeA2AIngressSnapshot,
   shouldAcceptA2AIngressResponse,
   toA2AIngressPatch,
@@ -93,18 +94,102 @@ test('A2A ingress ignores obsolete refresh responses', () => {
 });
 
 test('A2A ingress history accepts lifecycle metadata and rejects malformed rows', () => {
-  assert.deepEqual(normalizeA2AIngressHistory({
-    items: [{
-      request_id: 'req-1', context_id: 'ctx-1', message_id: 'msg-1', operation: 'message',
-      status: 'completed', started_at: 10, finished_at: 10.2, duration_ms: 200, error: null,
-    }],
-    total: 1,
-  }), {
-    items: [{
-      request_id: 'req-1', context_id: 'ctx-1', message_id: 'msg-1', operation: 'message',
-      status: 'completed', started_at: 10, finished_at: 10.2, duration_ms: 200, error: null,
-    }],
-    total: 1,
-  });
+  assert.deepEqual(
+    normalizeA2AIngressHistory({
+      items: [
+        {
+          request_id: 'req-1',
+          context_id: 'ctx-1',
+          message_id: 'msg-1',
+          operation: 'message',
+          status: 'completed',
+          started_at: 10,
+          finished_at: 10.2,
+          duration_ms: 200,
+          error: null,
+        },
+      ],
+      total: 1,
+    }),
+    {
+      items: [
+        {
+          request_id: 'req-1',
+          context_id: 'ctx-1',
+          message_id: 'msg-1',
+          operation: 'message',
+          status: 'completed',
+          started_at: 10,
+          finished_at: 10.2,
+          duration_ms: 200,
+          error: null,
+        },
+      ],
+      total: 1,
+    },
+  );
   assert.equal(normalizeA2AIngressHistory({ items: [{ request_id: '', status: 'completed' }] }), null);
+});
+
+test('A2A outbound history accepts dispatch metadata without result bodies', () => {
+  assert.deepEqual(
+    normalizeA2AOutboundDispatchHistory({
+      items: [
+        {
+          dispatch_id: 'disp-1',
+          agent_id: 'agent-1',
+          mode: 'sync',
+          status: 'completed',
+          remote_task_id: 'task-1',
+          created_at: '2026-08-27T01:00:00Z',
+          updated_at: '2026-08-27T01:00:02Z',
+          accepted_at: '2026-08-27T01:00:01Z',
+          finished_at: '2026-08-27T01:00:02Z',
+          error_code: null,
+          error_summary: null,
+        },
+      ],
+      total: 1,
+    }),
+    {
+      items: [
+        {
+          dispatch_id: 'disp-1',
+          agent_id: 'agent-1',
+          mode: 'sync',
+          status: 'completed',
+          remote_task_id: 'task-1',
+          created_at: '2026-08-27T01:00:00Z',
+          updated_at: '2026-08-27T01:00:02Z',
+          accepted_at: '2026-08-27T01:00:01Z',
+          finished_at: '2026-08-27T01:00:02Z',
+          error_code: null,
+          error_summary: null,
+        },
+      ],
+      total: 1,
+    },
+  );
+});
+
+test('A2A outbound history skips malformed rows without discarding valid records', () => {
+  const history = normalizeA2AOutboundDispatchHistory({
+    items: [
+      { dispatch_id: 'bad-status', agent_id: 'agent-1', mode: 'sync', status: 'future_status', created_at: '2026-08-27T01:00:00Z' },
+      {
+        dispatch_id: 'disp-1',
+        agent_id: 'agent-1',
+        mode: 'async',
+        status: 'timed_out',
+        created_at: '2026-08-27T01:00:00Z',
+        updated_at: '2026-08-27T01:00:10Z',
+      },
+    ],
+    total: 2,
+  });
+
+  assert.equal(history?.items.length, 1);
+  assert.equal(history?.items[0].dispatch_id, 'disp-1');
+  assert.equal(history?.items[0].updated_at, '2026-08-27T01:00:10Z');
+  assert.equal(history?.total, 2);
 });
