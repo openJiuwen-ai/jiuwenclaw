@@ -2117,6 +2117,24 @@ async def process_team_message_stream(
                 sync_write=True,
             )
         _persist_team_file_monitor_roots(session_id, team_spec)
+        # Drop unreachable MCPs before the team runtime starts so one bad MCP
+        # can't cancel the whole stream via openjiuwen's fail-fast raise.
+        # Log only; the dialog proceeds without the dropped MCP.
+        try:
+            from jiuwenswarm.agents.swarm.assembly import preflight_team_mcps
+            dropped_mcps = await preflight_team_mcps(team_spec)
+            if dropped_mcps:
+                logger.warning(
+                    "[TeamHelpers] dropped unreachable team MCPs (dialog "
+                    "continues): names=%s session_id=%s",
+                    dropped_mcps, session_id,
+                )
+        except Exception as preflight_exc:  # noqa: BLE001 — never block the stream
+            logger.warning(
+                "[TeamHelpers] team MCP preflight failed (continuing): "
+                "session_id=%s error=%s",
+                session_id, preflight_exc,
+            )
     except Exception as exc:
         logger.exception("[TeamHelpers] TeamAgent create failed: %s", exc)
         yield AgentResponseChunk(
