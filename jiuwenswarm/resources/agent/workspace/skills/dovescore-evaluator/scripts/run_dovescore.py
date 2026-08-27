@@ -6,12 +6,20 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 logger = logging.getLogger(__name__)
+DEFAULT_TIMEOUT_SECONDS = 300
+DEFAULT_MAX_INPUT_CHARS = 20000
+
+
+class EvaluationTimeoutError(TimeoutError):
+    """Raised when DoveScore evaluation exceeds the configured deadline."""
 
 
 def _emit_result(rendered: str) -> None:
@@ -29,14 +37,37 @@ def _read_text(value: str | None, file_path: str | None, label: str) -> str:
     if value and file_path:
         raise ValueError(f"Pass either --{label} or --{label}-file, not both.")
     if file_path:
-        return Path(file_path).expanduser().read_text(encoding="utf-8")
+        return _safe_workspace_path(file_path, f"{label}-file").read_text(encoding="utf-8")
     if value:
         return value
     raise ValueError(f"Missing input: pass --{label} or --{label}-file.")
 
 
+def _safe_workspace_path(raw_path: str, label: str) -> Path:
+    root = Path.cwd().resolve()
+    path = Path(raw_path)
+    if not raw_path or path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"Unsafe --{label} path: {raw_path!r}")
+    candidate = (root / path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"--{label} path escapes the current workspace: {raw_path!r}") from exc
+    return candidate
+
+
 def _flatten_text(text: str) -> str:
     return " ".join(text.split())
+
+
+def _check_input_size(source: str, target: str, max_input_chars: int) -> None:
+    total_chars = len(source) + len(target)
+    if total_chars > max_input_chars:
+        raise ValueError(
+            "Source and target are too large for this safety limit: "
+            f"{total_chars} chars > {max_input_chars}. "
+            "Pass --max-input-chars to raise the limit intentionally."
+        )
 
 
 def _json_ready(value: Any) -> Any:
@@ -59,12 +90,39 @@ def _emit_json_result(result: dict[str, Any], output: str | None, pretty: bool) 
     rendered = json.dumps(result, ensure_ascii=False, indent=indent)
     try:
         if output:
-            Path(output).expanduser().write_text(rendered + "\n", encoding="utf-8")
+            output_path = _safe_workspace_path(output, "output")
+            output_path.write_text(rendered + "\n", encoding="utf-8")
     except OSError as exc:
         logger.error("Failed to write output file: %s", exc)
         return 2
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 2
     _emit_result(rendered)
     return 0
+
+
+@contextmanager
+def _evaluation_deadline(timeout_seconds: int):
+    if timeout_seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handle_timeout(_signum: int, _frame: Any) -> None:
+        raise EvaluationTimeoutError(
+            f"DoveScore evaluation timed out after {timeout_seconds} seconds."
+        )
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
 def _score_value(result: dict[str, Any], key: str) -> float | None:
@@ -153,7 +211,22 @@ def parse_args() -> argparse.Namespace:
         help="OpenAI API key. Defaults to DOVESCORE_API_KEY or OPENAI_API_KEY.",
     )
     parser.add_argument("--backbone", default="gpt-4o-mini", help="OpenAI model name.")
-    parser.add_argument("--output", help="Optional path to write JSON result.")
+    parser.add_argument(
+        "--output",
+        help="Optional JSON output path under the current workspace.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=int(os.getenv("DOVESCORE_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))),
+        help="Maximum seconds for non-demo DoveScore evaluation.",
+    )
+    parser.add_argument(
+        "--max-input-chars",
+        type=int,
+        default=int(os.getenv("DOVESCORE_MAX_INPUT_CHARS", str(DEFAULT_MAX_INPUT_CHARS))),
+        help="Maximum combined source and target characters for cost control.",
+    )
     parser.add_argument(
         "--demo",
         action="store_true",
@@ -182,6 +255,11 @@ def main() -> int:
     try:
         source = _flatten_text(_read_text(args.source, args.source_file, "source"))
         target = _flatten_text(_read_text(args.target, args.target_file, "target"))
+        if args.timeout_seconds <= 0:
+            raise ValueError("--timeout-seconds must be greater than 0.")
+        if args.max_input_chars <= 0:
+            raise ValueError("--max-input-chars must be greater than 0.")
+        _check_input_size(source, target, args.max_input_chars)
     except (OSError, ValueError) as exc:
         logger.error("%s", exc)
         return 2
@@ -208,10 +286,11 @@ def main() -> int:
     evaluator_args = SimpleNamespace(api_key=args.api_key, backbone=args.backbone)
     evaluator = DoveScoreEvaluator(evaluator_args)
     try:
-        result = _summarize_result(
-            _json_ready(evaluator.evaluate(source, target)),
-            args.include_details,
-        )
+        with _evaluation_deadline(args.timeout_seconds):
+            result = _summarize_result(
+                _json_ready(evaluator.evaluate(source, target)),
+                args.include_details,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.error("DoveScore evaluation failed: %s", exc)
         return 2

@@ -54,6 +54,9 @@ Set the API key as `OPENAI_API_KEY` or pass it with `--api-key`. The default bac
 python scripts/run_dovescore.py --source-file source.txt --target-file target.txt
 ```
 
+File inputs and `--output` must be relative paths inside the current workspace.
+Absolute paths and paths containing `..` are rejected.
+
 3. For short text, direct arguments are acceptable:
 
 ```bash
@@ -69,6 +72,8 @@ python scripts/run_dovescore.py --demo
 5. Report the overall score first, then explain event accuracy, order consistency, descriptive accuracy, and any extracted facts that clarify the judgment.
 6. If the user needs machine-readable output, pass `--output result.json`.
 7. Use `--include-details` only when the user asks for extracted events, descriptives, or per-fact debugging details.
+8. Keep the default safety limits unless the user intentionally requests a larger run:
+   `--timeout-seconds 300` and `--max-input-chars 20000`.
 
 ## Output Fields
 

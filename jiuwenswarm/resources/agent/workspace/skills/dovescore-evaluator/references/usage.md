@@ -39,6 +39,9 @@ Long text:
 python scripts/run_dovescore.py --source-file source.txt --target-file target.txt --output result.json
 ```
 
+For safety, `--source-file`, `--target-file`, and `--output` must be relative paths
+inside the current workspace. Absolute paths and paths containing `..` are rejected.
+
 Include raw extracted events and descriptives:
 
 ```bash
@@ -53,6 +56,20 @@ Custom model:
 ```bash
 python scripts/run_dovescore.py --source-file source.txt --target-file target.txt --backbone gpt-4o-mini
 ```
+
+Safety limits:
+
+```bash
+python scripts/run_dovescore.py \
+  --source-file source.txt \
+  --target-file target.txt \
+  --timeout-seconds 300 \
+  --max-input-chars 20000
+```
+
+`--timeout-seconds` bounds non-demo evaluation time. `--max-input-chars` caps the
+combined source and target size so large accidental inputs do not trigger
+unexpected model cost.
 
 UI-safe demo:
 
