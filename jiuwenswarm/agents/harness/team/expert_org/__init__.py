@@ -6,6 +6,7 @@ from __future__ import annotations
 
 __all__ = [
     "JiuwenExpertGroupCatalog",
+    "JiuwenExpertTeamLauncher",
 ]
 
 
@@ -14,4 +15,8 @@ def __getattr__(name: str):
         from jiuwenswarm.agents.harness.team.expert_org.catalog import JiuwenExpertGroupCatalog
 
         return JiuwenExpertGroupCatalog
+    if name == "JiuwenExpertTeamLauncher":
+        from jiuwenswarm.agents.harness.team.expert_org.launcher import JiuwenExpertTeamLauncher
+
+        return JiuwenExpertTeamLauncher
     raise AttributeError(name)
