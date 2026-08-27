@@ -5742,8 +5742,8 @@ class SkillManager:
                 return child
         return None
 
+    @staticmethod
     def _install_teamskills_hub_first_copy(
-        self,
         *,
         skill_dir: Path,
         dest: Path,

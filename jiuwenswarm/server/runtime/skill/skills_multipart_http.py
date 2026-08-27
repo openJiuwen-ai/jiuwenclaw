@@ -98,9 +98,9 @@ def _agent_server_ws_uri() -> str:
     url = (os.getenv("AGENT_SERVER_URL") or "").strip()
     if url:
         if url.startswith("http://"):
-            return "ws://" + url[len("http://") :]
+            return "ws://" + url[len("http://"):]
         if url.startswith("https://"):
-            return "wss://" + url[len("https://") :]
+            return "wss://" + url[len("https://"):]
         return url
     host = (os.getenv("AGENT_SERVER_HOST") or "127.0.0.1").strip() or "127.0.0.1"
     port = (os.getenv("AGENT_SERVER_PORT") or os.getenv("AGENT_PORT") or "18092").strip()
@@ -235,7 +235,8 @@ def _parse_knowledge_upload_fields(
     if has_link:
         params["link"] = link
     else:
-        assert isinstance(file_field, dict)
+        if not isinstance(file_field, dict):
+            raise SkillRpcError(ERROR_SKILL_INVALID_PACKAGE, "缺少 file 字段")
         upload_dir = Path(tempfile.mkdtemp(prefix="jiuwenswarm_knowledge_upload_"))
         filename = str(file_field.get("filename") or "document.bin")
         safe_name = Path(filename).name or "document.bin"

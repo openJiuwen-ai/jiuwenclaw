@@ -1660,9 +1660,7 @@ class JiuWenSwarm:
                 payload = {"success": True}
             elif (
                 handler_name == "handle_skills_create_from_knowledge"
-                and isinstance(payload, dict)
-                and payload.get("result_type") == "followup"
-                and payload.get("success")
+                and self._is_skills_create_from_knowledge_followup(payload)
             ):
                 payload = await self._run_skills_create_from_knowledge_silent(
                     request, payload
@@ -1694,6 +1692,13 @@ class JiuWenSwarm:
     @staticmethod
     def _is_skills_rebuild_followup(payload: Any) -> bool:
         """判断 skills.rebuild 响应是否需要静默 follow-up."""
+        if not isinstance(payload, dict):
+            return False
+        return payload.get("result_type") == "followup" and bool(payload.get("success"))
+
+    @staticmethod
+    def _is_skills_create_from_knowledge_followup(payload: Any) -> bool:
+        """判断 skills.create_from_knowledge 响应是否需要静默 follow-up."""
         if not isinstance(payload, dict):
             return False
         return payload.get("result_type") == "followup" and bool(payload.get("success"))
