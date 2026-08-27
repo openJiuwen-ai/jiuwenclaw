@@ -1,4 +1,4 @@
-:root[data-theme="default"][data-color-mode="light"] {
+:root[data-theme='default'][data-color-mode='light'] {
   /* Surfaces */
   --color-surface-page: #f5f7f9;
   --color-surface-page-rgb: 245, 247, 249;
@@ -65,7 +65,7 @@
   --color-action-secondary-text: #3f3f46;
   --color-brand-secondary: #0d9488;
   --color-tool-tab-active-bg: #ededed;
-  --color-tool-tab-hover-bg: #FAFAFA;
+  --color-tool-tab-hover-bg: #fafafa;
   --color-artifact-toolbar-icon: #191919;
   --color-artifact-toolbar-icon-disabled: #c0c0c0;
   --color-artifact-toolbar-divider: #e5e5e5;
@@ -141,7 +141,7 @@
   --color-skill-capsule-active: #0066ff;
   --color-team-event-surface: var(--color-surface-elevated);
   --color-team-event-summary-surface: transparent;
-  --color-sidebar-nav-hover: #FAFAFA;
+  --color-sidebar-nav-hover: #fafafa;
   --color-sidebar-nav-active: #e6e6e6;
   --color-sidebar-nav-active-hover: #dedee0;
   --color-sidebar-action-hover: #e6e6e6;
@@ -214,10 +214,11 @@
   --color-extension-input-border: #cccccc;
   --color-task-index-surface: #f2f2f2;
   --color-task-card-surface: #fafafa;
-  --color-task-progress: #67C57E;
+  --color-task-progress: #67c57e;
   --color-task-progress-track: #e0e0e0;
   --color-task-column-label: #595959;
   --color-team-overflow-surface: #edf1ff;
+  --color-member-card-badge-surface: #e1e8fd;
   --color-team-detail-surface: #f8fafc;
   --color-team-detail-text: #5d6675;
   --color-team-detail-label: #9aa3af;

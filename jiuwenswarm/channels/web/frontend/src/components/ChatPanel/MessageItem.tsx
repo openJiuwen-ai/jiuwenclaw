@@ -751,14 +751,14 @@ export const MessageItem = memo(function MessageItem({
     className={clsx(
       'flex animate-rise',
       isUser ? 'justify-end' : 'justify-start',
-      withAssistantAvatar && 'assistant-row'
+      withAssistantAvatar && 'assistant-row',
+      withAssistantAvatar && !showAvatar && 'assistant-row--no-avatar'
     )}>
-      {withAssistantAvatar && (
-        // 始终保留头像占位，与 team 布局一致，避免连续气泡时整列消失。
-        <div className="assistant-row__avatar" aria-hidden={!showAvatar} data-testid="chat-panel-assistant-row-avatar">
-          {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
+      {withAssistantAvatar && showAvatar ? (
+        <div className="assistant-row__avatar" data-testid="chat-panel-assistant-row-avatar">
+          <TeamMemberAvatar member="team_leader" />
         </div>
-      )}
+      ) : null}
       <div
         className={clsx(
           'chat-bubble-wrapper max-w-[82%] min-w-0',

@@ -3148,6 +3148,7 @@ function AppContent() {
                     setSingleAgentPanelActiveTab={setSingleAgentPanelActiveTab}
                     setSingleAgentPanelSelectedArtifactId={setSingleAgentPanelSelectedArtifactId}
                     shouldFullscreen={shouldFullscreen}
+                    onCloseFloating={() => setToolPanelHidden(true)}
                   />
                 )}
               </div>
