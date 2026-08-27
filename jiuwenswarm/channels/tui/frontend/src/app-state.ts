@@ -167,6 +167,8 @@ export interface AppSnapshot {
   selectedAgentosModel: string | null;
   /** 全局选中的 agentos 备份模型 provider（仅展示用，头部 Provider 行）；空表示未取到 */
   selectedAgentosProvider: string;
+  /** 注入用 key（model_name#global_idx）；后端 model_key 缺省时回退到 selectedAgentosModel */
+  selectedAgentosModelKey: string | null;
   preferredLanguage: PreferredLanguage;
   sessionTitle: string;
   statusLineText: string | null;
@@ -398,6 +400,10 @@ export class CliPiAppState {
    */
   private selectedAgentosModel: string | null = null;
   private selectedAgentosProvider: string = "";
+  // 注入用 key（model_name#global_idx），仅用于 chat.send 的 model_name 参数，
+  // 后端 _resolve_model_by_name 据此精确命中同名 agentos 条目，避免纯名误路由到
+  // defaults。展示一律用 selectedAgentosModel（纯名）。无后端 model_key 时回退到纯名。
+  private selectedAgentosModelKey: string | null = null;
   private preferredLanguage: PreferredLanguage = "zh";
   private memoryWarnings: {
     path: string;
@@ -1153,6 +1159,7 @@ export class CliPiAppState {
       modelInfo: this.modelInfo,
       selectedAgentosModel: this.selectedAgentosModel,
       selectedAgentosProvider: this.selectedAgentosProvider,
+      selectedAgentosModelKey: this.selectedAgentosModelKey,
       preferredLanguage: this.preferredLanguage,
       sessionTitle: this.sessionTitle,
       statusLineText: this.statusLineText,
@@ -2088,6 +2095,7 @@ export class CliPiAppState {
     if (this.selectedAgentosModel !== null) {
       this.selectedAgentosModel = null;
       this.selectedAgentosProvider = "";
+      this.selectedAgentosModelKey = null;
       this.emitChange();
     }
   };
@@ -2096,13 +2104,26 @@ export class CliPiAppState {
    * 全局选中 agentos 备份模型（请求级注入）。与 setModel 互斥：
    * 选 agentos 不改 modelInfo（启动默认不变），仅记录注入名；
    * setModel 会清空本字段。
+   *
+   * name 为展示用纯名；key 为后端 model_key（model_name#global_idx），供
+   * chat.send 精确注入同名 agentos 条目，缺省时回退到 name。
    */
-  readonly setSelectedAgentosModel = (name: string | null, provider?: string): void => {
+  readonly setSelectedAgentosModel = (
+    name: string | null,
+    provider?: string,
+    key?: string | null,
+  ): void => {
     const trimmed = name ? name.trim() : "";
     const next = trimmed || null;
-    if (this.selectedAgentosModel !== next || this.selectedAgentosProvider !== (provider ?? "")) {
+    const nextKey = key ? key.trim() || null : null;
+    if (
+      this.selectedAgentosModel !== next
+      || this.selectedAgentosProvider !== (provider ?? "")
+      || this.selectedAgentosModelKey !== (next ? nextKey : null)
+    ) {
       this.selectedAgentosModel = next;
       this.selectedAgentosProvider = next ? (provider ?? "") : "";
+      this.selectedAgentosModelKey = next ? nextKey : null;
       this.emitChange();
     }
   };
@@ -2205,8 +2226,12 @@ export class CliPiAppState {
       ...(planEntrySource ? { plan_entry_source: planEntrySource } : {}),
       ...(skills?.length ? { skills } : {}),
       // agentos 备份模型：请求级注入 model_name，AgentServer 据此路由到 agentos 缓存条目。
-      // 为空时省略，沿用启动默认模型。
-      ...(this.selectedAgentosModel ? { model_name: this.selectedAgentosModel } : {}),
+      // 为空时省略，沿用启动默认模型。优先用后端 model_key（model_name#global_idx），
+      // 后端 _resolve_model_by_name 据 #global_idx 精确命中同名 agentos 条目；
+      // 无 key 时回退纯名（同名时会被解析到 defaults，仅作兼容兜底）。
+      ...((this.selectedAgentosModelKey || this.selectedAgentosModel)
+        ? { model_name: this.selectedAgentosModelKey || this.selectedAgentosModel }
+        : {}),
     };
     // Pre-check: reject messages whose serialized frame exceeds 7 MB (gateway
     // server max_size is 8 MB; leave 1 MB margin for JSON overhead).

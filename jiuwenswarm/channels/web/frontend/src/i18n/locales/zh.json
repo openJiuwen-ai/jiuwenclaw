@@ -1399,6 +1399,11 @@
       "triggeredSessions": "执行记录",
       "noTriggeredSessions": "暂无触发记录"
     },
+    "empty": {
+      "createButton": "创建定时任务",
+      "templateSectionTitle": "任务模板",
+      "templateMore": "更多"
+    },
     "history": {
       "comingSoon": "该功能即将上线"
     },

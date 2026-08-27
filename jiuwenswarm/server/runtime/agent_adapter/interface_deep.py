@@ -5025,33 +5025,42 @@ class JiuWenSwarmDeepAdapter:
 
         1. Pure ``model_name`` — returns the ``is_default=true`` entry registered
            under the bare name, if any.
-        2. ``{model_name}#{index}`` whose ``#index`` matches the backend
-           ``name_counter`` scheme — returned directly from ``_model_cache``.
-        3. ``{model_name}#{index}`` whose ``#index`` was minted by the channel
-           with its own (global) numbering and so is absent from
-           ``_model_cache`` — the channel-supplied index is read as a global
-           list position and converted to the real cache_key via
+        2. ``{model_name}#{index}`` whose ``#index`` is the channel-supplied
+           global list position (e.g. Web's ``origin_index`` from models.list).
+           It is converted to the real per-name cache_key via
            ``_global_index_to_cache_key``; if no entry is registered at that
            global position (out of range) or the mapped key has since been
            evicted, a warning is logged and the default model is returned
            rather than silently falling back to the first same-name entry
            (which would mis-resolve an agentos same-name entry to the defaults
            entry and send the wrong api_base/api_key).
+
+        Note: the ``#index`` is *always* treated as a global position. An
+        earlier version first tried ``requested in self._model_cache`` (whose
+        keys use the per-name ``name_counter`` scheme
+        ``{model_name}#{per_name_idx}``); when a channel-supplied global index
+        happened to collide with a per-name index of a *different* same-name
+        entry, that lookup silently returned the wrong entry. Routing every
+        ``#``-bearing request through the global map removes that collision
+        while keeping the pure-name path (format 1) intact.
         """
         requested = (requested_model_name or "").strip()
         if not requested:
             # ask_user_interrupt 等中断恢复请求不带 model_name，
             # 回退到 session 上次应用的模型，而非 config.yaml 默认占位模型。
             return getattr(self, "_last_resolved_model", None) or self._model
-        # 精确匹配（#index 格式，或已注册纯 model_name key 的默认模型）
-        if requested in self._model_cache:
-            return self._model_cache[requested]
-        # 纯 model_name 查找（_model_name_to_keys 的 key 是纯名）
-        keys = self._model_name_to_keys.get(requested)
-        if keys:
-            resolved = self._model_cache.get(keys[0])
-            if resolved is not None:
-                return resolved
+        # 含 # 的请求一律走全局 origin_index 换算（见上文 Note），避免 per-name
+        # cache_key 与通道侧全局 index 碰撞时误命中另一同名条目。
+        if "#" not in requested:
+            # 纯 model_name 精确命中（仅 is_default=true 的条目注册了纯名 key）
+            if requested in self._model_cache:
+                return self._model_cache[requested]
+            # 纯 model_name 查找（_model_name_to_keys 的 key 是纯名）
+            keys = self._model_name_to_keys.get(requested)
+            if keys:
+                resolved = self._model_cache.get(keys[0])
+                if resolved is not None:
+                    return resolved
         # 通道侧使用全局 origin_index；将其换算成后端 per-name cache key。
         if "#" in requested:
             bare_name, _, index_part = requested.rpartition("#")

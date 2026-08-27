@@ -1399,6 +1399,11 @@
       "triggeredSessions": "Run history",
       "noTriggeredSessions": "No trigger records"
     },
+    "empty": {
+      "createButton": "Create scheduled task",
+      "templateSectionTitle": "Templates",
+      "templateMore": "More"
+    },
     "history": {
       "comingSoon": "Coming soon"
     },

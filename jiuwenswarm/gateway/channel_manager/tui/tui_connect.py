@@ -3086,33 +3086,49 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         _agentos_blocks = _agentos_blocks if isinstance(_agentos_blocks, list) else []
         _agentos_matched_name = ""
         _agentos_matched_provider = ""
+        _agentos_matched_global_idx: int | None = None
         logger.info(
             "[cli command.model] agentos 匹配: target=%s, blocks=%d, raw_has_agentos=%s",
             target, len(_agentos_blocks), _agentos_blocks is not None and len(_agentos_blocks) > 0,
         )
-        for _ab in _agentos_blocks:
-            if not isinstance(_ab, dict):
+        # 遍历合并后的 defaults+agentos 列表（与 AgentServer _build_model_cache_from_defaults
+        # 同源、同序），按 global_idx 定位命中的 agentos 条目。回包 current 带
+        # ``{model_name}#{global_idx}``，供前端注入 chat.send 的 model_name，
+        # 后端 _resolve_model_by_name 据此精确命中 agentos 缓存条目——否则同名时
+        # 纯 model_name 会被解析到 defaults 首条（is_default=true），误路由。
+        for _gi, _e in enumerate(get_default_models(_raw_cfg)):
+            if not isinstance(_e, dict):
                 continue
-            _ab_mcc = _ab.get("model_client_config") or {}
-            if not (isinstance(_ab_mcc, dict) and _ab_mcc.get("model_name")):
+            _e_mco = _e.get("model_config_obj") or {}
+            if not (isinstance(_e_mco, dict) and _e_mco.get("_source") == "agentos"):
                 continue
-            _ab_name = resolve_env_vars(str(_ab_mcc.get("model_name", "")))
-            _ab_alias = resolve_env_vars(str(_ab.get("alias", ""))) if _ab.get("alias") else ""
+            _e_mcc = _e.get("model_client_config") or {}
+            if not (isinstance(_e_mcc, dict) and _e_mcc.get("model_name")):
+                continue
+            _ab_name = resolve_env_vars(str(_e_mcc.get("model_name", "")))
+            _ab_alias = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
             logger.info(
-                "[cli command.model] agentos 条目: name=%s alias=%s vs target=%s",
-                _ab_name, _ab_alias, target,
+                "[cli command.model] agentos 条目: name=%s alias=%s vs target=%s global_idx=%d",
+                _ab_name, _ab_alias, target, _gi,
             )
             if _ab_name == target or (_ab_alias and _ab_alias == target):
                 _agentos_matched_name = _ab_name
-                _agentos_matched_provider = resolve_env_vars(str(_ab_mcc.get("client_provider", "")))
+                _agentos_matched_provider = resolve_env_vars(str(_e_mcc.get("client_provider", "")))
+                _agentos_matched_global_idx = _gi
                 break
-        if _agentos_matched_name:
+        if _agentos_matched_name and _agentos_matched_global_idx is not None:
+            # 注入名带 #global_idx，与 Web 的 model_name#origin_index 契约一致；
+            # 后端 _resolve_model_by_name 走 _global_index_to_cache_key 换算精确命中
+            # 同名 defaults/agentos 中的指定条目。current 仍为纯名供前端展示，
+            # model_key 专供 chat.send 的 model_name 注入。
+            _agentos_inject_key = f"{_agentos_matched_name}#{_agentos_matched_global_idx}"
             logger.info(
                 "[cli command.model] 切换 agentos 备份模型（请求级注入，不 reload）: %s",
-                _agentos_matched_name,
+                _agentos_inject_key,
             )
             await channel.send_response(ws, req_id, ok=True, payload={
                 "current": _agentos_matched_name,
+                "model_key": _agentos_inject_key,
                 "provider": _agentos_matched_provider,
                 "requested": target,
                 "type": "switched_agentos",

@@ -82,8 +82,10 @@ export interface CommandContext {
   markPlanEntryFromSlashCommand?: () => void;
   setModel: (name: string) => void;
   /** 全局选中 agentos 备份模型（请求级注入）；传 null 清空，恢复启动默认。
-   *  provider 可选，仅用于头部 Provider 行展示。 */
-  setSelectedAgentosModel?: (name: string | null, provider?: string) => void;
+   *  provider 可选，仅用于头部 Provider 行展示。
+   *  key 可选，为后端 model_key（model_name#global_idx），供 chat.send 精确
+   *  注入同名 agentos 条目；缺省时回退到 name。 */
+  setSelectedAgentosModel?: (name: string | null, provider?: string, key?: string | null) => void;
   setPreferredLanguage: (language: PreferredLanguage) => void;
   setThemeName: (theme: ThemeName) => void;
   setAccentColor: (color: AccentColorName) => void;

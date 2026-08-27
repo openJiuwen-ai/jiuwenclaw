@@ -5151,6 +5151,7 @@ export class AppScreen implements Component, Focusable {
       }
       const payload = await this.state.request<{
         current?: string;
+        model_key?: string;
         requested?: string;
         applied?: boolean;
         type?: string;
@@ -5159,10 +5160,12 @@ export class AppScreen implements Component, Focusable {
       }>("command.model", reqParams);
       // agentos 备份模型：后端走"请求级注入"路径，回包 type=switched_agentos。
       // 不改 config、不抢启动默认，仅全局记录选中名，后续 chat.send 注入 model_name。
+      // model_key（model_name#global_idx）用于精确注入同名 agentos 条目，避免
+      // 纯名被后端解析到同名 defaults 首条；current 为纯名仅作展示。
       // defaults 模型仍走 setModel（更新当前模型回显 + config reload）。
       if (payload.type === "switched_agentos" || payload.is_agentos === true) {
         const agentosName = payload.current ?? modelName;
-        this.state.setSelectedAgentosModel(agentosName, payload.provider);
+        this.state.setSelectedAgentosModel(agentosName, payload.provider, payload.model_key);
         this.state.addItem(
           addInfo(
             this.state.getSnapshot().sessionId,

@@ -15,7 +15,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { useTranslation } from 'react-i18next';
-import { useChatStore, useSessionStore } from '../../stores';
+import { useChatStore, useSessionStore, modelSelectKey } from '../../stores';
 import type { ModelEntry } from '../../types';
 import { webRequest } from '../../services/webClient';
 import {
@@ -2922,7 +2922,11 @@ function AgentosModelSection({
                 disabled={!isConnected || !activeSessionId}
                 onClick={() => {
                   if (activeSessionId) {
-                    setSelectedModelName(activeSessionId, model.alias || model.model_name);
+                    // 传 modelSelectKey（含 #origin_index）而非纯显示名：
+                    // getEffectiveModelName 据此精确命中同名 defaults/agentos 中的
+                    // 指定条目；传纯名会精确失配、回退到同名首个（恒 defaults），
+                    // 导致选中的 agentos 备份模型被误路由到 defaults 模型。
+                    setSelectedModelName(activeSessionId, modelSelectKey(model));
                     onSwitched?.();
                   }
                 }}
