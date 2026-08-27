@@ -37,6 +37,7 @@ from jiuwenswarm.common.utils import (
     prepare_workspace,
     reset_free_search_runtime_flags,
 )
+from jiuwenswarm.server.workspace_initialization import should_prepare_workspace
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
@@ -44,8 +45,9 @@ _config_file = _workspace_dir / "config" / "config.yaml"
 _new_workspace = _workspace_dir / "agent" / "workspace"
 _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 
-# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
-if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
+# Initialize if config doesn't exist, a legacy workspace needs migration, or any
+# standard workspace context file is missing.
+if should_prepare_workspace(_config_file, _new_workspace, _old_workspace):
     prepare_workspace(overwrite=False)
 
 # 无条件补装缺失的内置技能（幂等，解决升级后技能不补装问题）
