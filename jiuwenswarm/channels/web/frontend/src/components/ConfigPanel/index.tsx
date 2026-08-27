@@ -1538,6 +1538,7 @@ const MODEL_PROVIDER_OPTIONS = [
   "DashScope",
   "SiliconFlow",
   "InferenceAffinity",
+  "MiniMax",
   "DeepSeek",
 ] as const;
 
