@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from openjiuwen.harness.schema.task import TodoItem, TodoStatus
 
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from jiuwenswarm.common.schema.agent import AgentRequest
@@ -63,6 +65,56 @@ def _make_adapter(**state: object) -> JiuWenSwarmDeepAdapter:
     for name, value in state.items():
         setattr(adapter, name, value)
     return adapter
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_todos_uses_public_tool_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel unfinished todos through TodoModifyTool.invoke, not its internals."""
+    from jiuwenswarm.agents.harness.common.tools.todo_compat import (
+        CompatibleTodoModifyTool,
+    )
+
+    todos = [
+        TodoItem(id="pending", status=TodoStatus.PENDING),
+        TodoItem(id="running", status=TodoStatus.IN_PROGRESS),
+        TodoItem(id="done", status=TodoStatus.COMPLETED),
+    ]
+    todo_tool = CompatibleTodoModifyTool(operation=MagicMock())
+    todo_tool.load_todos = AsyncMock(return_value=todos)
+    todo_tool.save_todos = AsyncMock()
+    todo_tool.invoke = AsyncMock(wraps=todo_tool.invoke)
+
+    resource_mgr = MagicMock()
+    resource_mgr.get_tool.return_value = todo_tool
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.Runner.resource_mgr",
+        resource_mgr,
+    )
+
+    ability_manager = MagicMock()
+    ability_manager.get.return_value = MagicMock(id="todo_modify")
+    instance = MagicMock(ability_manager=ability_manager, card=None)
+    formatted_todos = [{"id": "pending", "status": "cancelled"}]
+    rail = MagicMock()
+    rail._format_todos_for_frontend.return_value = formatted_todos
+    adapter = _make_adapter(_instance=instance, _stream_event_rail=rail)
+
+    result = await adapter._cancel_pending_todos("session-1")
+
+    todo_tool.invoke.assert_awaited_once()
+    invoke_args, invoke_kwargs = todo_tool.invoke.await_args
+    assert invoke_args == ({"action": "cancel", "ids": ["pending", "running"]},)
+    assert invoke_kwargs["session"].get_session_id() == "session-1"
+    todo_tool.save_todos.assert_awaited_once_with("session-1", todos)
+    assert [todo.status for todo in todos] == [
+        TodoStatus.CANCELLED,
+        TodoStatus.CANCELLED,
+        TodoStatus.COMPLETED,
+    ]
+    rail._format_todos_for_frontend.assert_called_once_with(todos)
+    assert result == formatted_todos
 
 
 @pytest.mark.asyncio
@@ -286,6 +338,63 @@ async def test_interaction_cancel_skips_pause_when_no_goal() -> None:
 
 
 @pytest.mark.asyncio
+async def test_interaction_cancel_stops_scheduler_task_before_cancel_round() -> None:
+    """A synchronous task_tool subagent must not block the interrupt response."""
+    child_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+
+    async def _run_child() -> None:
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            raise
+
+    child_task = asyncio.create_task(_run_child())
+    await child_started.wait()
+
+    scheduler = SimpleNamespace(_running_tasks={"round-task": (None, child_task)})
+    instance = MagicMock()
+    instance._interaction_started = True
+    instance._loop_controller = SimpleNamespace(_task_scheduler=scheduler)
+    instance.goal_manager = None
+
+    async def _cancel_round(*, reason: str) -> bool:
+        assert reason == "user_cancel"
+        await asyncio.wait_for(child_cancelled.wait(), timeout=0.2)
+        return True
+
+    instance.cancel_round = AsyncMock(side_effect=_cancel_round)
+
+    rail = MagicMock()
+    rail.get_cancelled_tool_results.return_value = []
+    adapter = _make_adapter(
+        _active_session_ids={"sess-task-tool": 1},
+        _stream_event_rail=rail,
+        _instance=instance,
+    )
+    adapter._cancel_pending_todos = AsyncMock(return_value=None)
+    adapter._cancel_session_agent_tasks = AsyncMock(return_value=0)
+
+    try:
+        response = await asyncio.wait_for(
+            adapter.process_interrupt(_build_cancel_request("sess-task-tool")),
+            timeout=0.5,
+        )
+    finally:
+        if not child_task.done():
+            child_task.cancel()
+        await asyncio.gather(child_task, return_exceptions=True)
+
+    assert child_task.cancelled()
+    adapter._cancel_session_agent_tasks.assert_not_awaited()
+    instance.cancel_round.assert_awaited_once_with(reason="user_cancel")
+    assert response.payload["event_type"] == "chat.interrupt_result"
+    assert response.payload["success"] is True
+
+
+@pytest.mark.asyncio
 async def test_interaction_cancel_appends_cancelled_tools_to_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,6 +531,7 @@ def test_reset_runtime_cron_context_resets_shell_session(
         "_CRON_TOOL_METADATA",
         "_CRON_TOOL_SESSION_ID",
         "_CRON_TOOL_CHANNEL_ID",
+        "_CRON_TOOL_USER_ID",
     ):
         monkeypatch.setattr(
             f"jiuwenswarm.server.runtime.agent_adapter.interface_deep.{var_name}",
@@ -437,11 +547,10 @@ def test_reset_runtime_cron_context_resets_shell_session(
             mode=MagicMock(),
             bound=MagicMock(),
             shell=shell_token,
+            user_id=MagicMock(),
         )
     )
     reset_shell_mock.assert_called_once_with(shell_token)
-
-
 def test_bind_runtime_cron_context_fills_locked_session_project_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

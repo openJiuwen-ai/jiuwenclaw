@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 
 # 基于 get_agent_workspace_dir()（~/.jiuwenswarm/agent/workspace），
 # 跟随 JIUWENSWARM_DATA_DIR 做多实例隔离，与 config.yaml 保持同一基准。
+from jiuwenswarm.common.mode_matrix import NEW_CANONICAL_MODES
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 _STATE_FILE = get_agent_workspace_dir() / "cli_trusted_dirs_state.json"
@@ -259,12 +260,16 @@ MODE_ALIASES: dict[str, str] = {
     "plan": "agent",
     "fast": "agent",
     "code": "code.normal",
+    "team.plan": "team.plan.normal",
 }
 
 # plan / fast 已合并为单一 agent 模式；agent.plan / agent.fast 作为历史别名仍可接受，归一到 agent。
+# 追加 8 个新三段命名 canonical（agent.work.* / agent.code.* / team.work.* / team.code.*）：
+# 它们是既成 canonical，resolve_mode 原样放行、不做归一化。
 VALID_MODES = frozenset({
-    "agent", "agent.plan", "agent.fast", "code.plan", "code.normal", "code.team", "team", "team.plan",
-})
+    "agent", "agent.plan", "agent.fast", "code.plan", "code.normal", "code.team", "team",
+    "team.plan", "team.plan.normal", "team.plan.code",
+}) | set(NEW_CANONICAL_MODES)
 
 # Sources that require the answer to be sent via ``chat.send`` (streaming) to
 # resume the paused agent task.  Other sources use ``chat.user_answer``.
@@ -312,7 +317,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mode", default="code.normal",
-        help="Execution mode: agent|code|team|team.plan|code.plan|code.normal|code.team"
+        help="Execution mode: agent|code|team|team.plan|team.plan.normal|team.plan.code|"
+             "code.plan|code.normal|code.team|agent.work.normal|agent.work.plan|"
+             "agent.code.normal|agent.code.plan|team.work.normal|team.work.plan|"
+             "team.code.normal|team.code.plan"
              " (default: code.normal).",
     )
     p.add_argument(
@@ -467,7 +475,8 @@ async def _run_interactive_loop(
     # chat.final but the team keeps working (creating workflows, delegating
     # to members, etc.). Only chat.processing_status(is_processing=False)
     # or team.error should terminate the CLI stream.
-    team_mode = request.get("params", {}).get("mode", "") in ("team", "team.plan", "code.team")
+    from jiuwenswarm.common.mode_matrix import is_team_mode
+    team_mode = is_team_mode(request.get("params", {}).get("mode"))
     # When the team leader replies with text but creates no tasks (e.g. a
     # simple greeting), the server's team-completion logic never fires
     # (is_team_completed() returns None for zero tasks), so the stream
@@ -484,7 +493,14 @@ async def _run_interactive_loop(
     # We track plan_exited (set when plan.mode_exited is received) to
     # distinguish "agent finished implementing after approval" from "agent
     # ended turn with text, waiting for user follow-up".
-    plan_mode = request.get("params", {}).get("mode", "") in ("code.plan", "agent", "agent.plan")
+    # 旧 plan 串 code.plan / agent.plan（legacy 别名，由后端 deprecate_mode
+    # 映射到新 plan canonical）+ 新三段命名 plan canonical（agent.work.plan /
+    # agent.code.plan / team.work.plan / team.code.plan）。裸 "agent" 不再视为
+    # plan：deprecate_mode("agent") -> agent.work.normal（normal，非 plan）。
+    plan_mode = request.get("params", {}).get("mode", "") in (
+        "code.plan", "agent.plan",
+        "agent.work.plan", "agent.code.plan", "team.work.plan", "team.code.plan",
+    )
     plan_exited = False
     # When we send an interrupt-resume answer (chat.send with source), the
     # previous stream's trailing chat.final / processing_status(False) may
@@ -938,7 +954,8 @@ async def _run_jsonl_loop(
     renderer: JsonlRenderer,
     request: dict,
 ) -> int:
-    team_mode = request.get("params", {}).get("mode", "") in ("team", "team.plan", "code.team")
+    from jiuwenswarm.common.mode_matrix import is_team_mode
+    team_mode = is_team_mode(request.get("params", {}).get("mode"))
     await client.send_request(request)
     while True:
         data = await client.recv()
@@ -973,7 +990,8 @@ async def _run_json_loop(
     renderer: JsonRenderer,
     request: dict,
 ) -> int:
-    team_mode = request.get("params", {}).get("mode", "") in ("team", "team.plan", "code.team")
+    from jiuwenswarm.common.mode_matrix import is_team_mode
+    team_mode = is_team_mode(request.get("params", {}).get("mode"))
     await client.send_request(request)
     has_error = False
     while True:
@@ -1085,7 +1103,8 @@ def run_chat(args: argparse.Namespace) -> int:
     if error is not None:
         return error
 
-    is_team_mode = args.mode in ("team", "team.plan", "code.team")
+    from jiuwenswarm.common.mode_matrix import is_team_mode as is_team_runtime_mode
+    is_team_mode = is_team_runtime_mode(args.mode)
     supports_user_interaction = False
 
     if args.prompt:

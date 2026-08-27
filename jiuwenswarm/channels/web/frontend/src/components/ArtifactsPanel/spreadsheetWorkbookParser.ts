@@ -2,6 +2,7 @@ import ExcelJS, { type Border, type Cell, type Color, type Fill, type Font, type
 import JSZip from 'jszip';
 import { SaxesParser, type SaxesTagNS } from 'saxes';
 import SSF from 'ssf';
+import { officeFontStack } from './officeFontStack';
 import { SPREADSHEET_ARCHIVE_LIMITS, inspectOoxmlArchive } from './ooxmlArchiveLimits';
 import {
   parseCellRange,
@@ -14,6 +15,8 @@ import {
   type SpreadsheetSheetData,
   type SpreadsheetWorkbookData,
 } from './spreadsheetPreviewModel';
+
+export { officeFontStack } from './officeFontStack';
 
 type ExtendedColor = Partial<Color> & {
   indexed?: number;
@@ -477,7 +480,7 @@ function styleToCss(style: Partial<Style>, palette: string[]): SpreadsheetCellSt
 
 function applyFont(css: SpreadsheetCellStyle, font: Partial<Font> | undefined, palette: string[]): void {
   if (!font) return;
-  if (font.name) css.fontFamily = font.name;
+  if (font.name) css.fontFamily = officeFontStack(font.name);
   if (font.size) {
     css.fontSize = `${pointsToPixels(font.size)}px`;
     // Tailwind's text-size utility also sets a fixed 16px line-height. That

@@ -6,11 +6,12 @@ JiuwenSwarm provides a comprehensive logging system to record system operation s
 
 ### 1.1 Storage Location
 
-By default, JiuwenSwarm log files are stored in the following location:
+JiuwenSwarm has two independent logging systems, stored in different directories:
 
-```
-~/.jiuwenswarm/agent/.logs/
-```
+| Log Directory | System | Description |
+|---------|---------|------|
+| `~/.jiuwenswarm/agent/.logs/` | JiuwenSwarm application-layer logs | Records application-layer logs for the gateway, channels, agent server, etc. Managed by `jiuwenswarm/common/utils.py`, configured in the `logging:` section of `config.yaml` |
+| `~/.jiuwenswarm/logs/logs/` | OpenJiuwen framework-layer logs | Records framework-layer logs for runners, sessions, LLM, memory, tools, etc. Managed by the OpenJiuwen framework's own logging system, configured in a separate logging configuration file |
 
 ### 1.2 Log File Classification
 
@@ -22,21 +23,40 @@ The logging system categorizes logs by component type and stores them in differe
 | `channel.log` | Channel-related logs, including all modules under `channels` |
 | `agent_server.log` | Agent server logs, including modules under `agents` and `.server` |
 | `full.log` | Aggregation of all component logs |
-| `desktop.log` | Desktop application logs |
 | `permissions.log` | Permission-related logs |
 | `ws-dev.log` | Web service development mode logs |
 
-### 1.3 Log Content Types
+**Archived Logs**: When a log file reaches 20MB, it rotates automatically. Archived files are named `{filename}_{YYYYMMDD_HHMMSS}.log`, e.g., `full_20260519_153045.log`. The system keeps up to 20 archived files; older ones are deleted.
+
+### 1.3 OpenJiuwen Framework-layer Logs (logs/logs/)
+
+Framework-layer logs are categorized by functional module and support a sub-directory structure:
+
+| Log File/Directory | Content |
+|-------------|---------|
+| `run/jiuwen.log` | Main runtime log (common logs for all modules) |
+| `runner.log` | Task runner logs |
+| `session.log` | Session management logs |
+| `llm.log` | LLM invocation logs |
+| `memory.log` | Memory system logs |
+| `sys_operation.log` | System operation logs |
+| `tool.log` | Tool invocation logs |
+| `team.log` | Team collaboration logs |
+| `interface/jiuwen_interface.log` | Interface-layer logs |
+| `interface/jiuwen_prompt_builder_interface.log` | Prompt builder interface logs |
+| `performance/jiuwen_performance.log` | Performance logs |
+
+### 1.4 Log Content Types
 
 The logging system has two main content types:
 
-#### 1.3.1 General Logs
+#### 1.4.1 General Logs
 
 General logs are categorized by component and record system operation status, error messages, debugging information, etc.:
 - Implemented using the standard Python logging module
 - Stored in different files based on component types (see Section 1.2)
 
-#### 1.3.2 Audit Logs
+#### 1.4.2 Audit Logs
 
 Audit logs record sandbox operation details in structured JSONL format, including:
 - Command execution (`exec_command`)
@@ -52,11 +72,7 @@ For sandbox operation audit logs, the storage location can be specified through 
 
 ## 2. Viewing Logs
 
-### 2.1 Frontend Log Viewing
-
-![jiuwenswarm frontend logs](../assets/images/jiuwenswarm前端日志.png)
-
-### 2.2 Real-time Log Viewing
+### 2.1 Real-time Log Viewing
 
 Use the `tail` command to view logs in real-time:
 
@@ -68,7 +84,7 @@ tail -f ~/.jiuwenswarm/agent/.logs/full.log
 tail -f ~/.jiuwenswarm/agent/.logs/gateway.log
 ```
 
-### 2.3 Viewing Historical Logs
+### 2.2 Viewing Historical Logs
 
 Use `cat` to view logs:
 
@@ -77,7 +93,7 @@ Use `cat` to view logs:
 cat ~/.jiuwenswarm/agent/.logs/full.log
 ```
 
-### 2.4 Log Searching
+### 2.3 Log Searching
 
 Use the `grep` command to search log content:
 
@@ -89,7 +105,7 @@ grep -i "error" ~/.jiuwenswarm/agent/.logs/full.log
 grep "2026-05-19 15:" ~/.jiuwenswarm/agent/.logs/full.log
 ```
 
-### 2.5 Viewing Audit Logs
+### 2.4 Viewing Audit Logs
 
 ```bash
 # View audit logs
@@ -103,16 +119,18 @@ jq '.' /var/log/jiuwenbox/9284a4bf-870-20260515T112345.audit.log
 
 The logging system adopts the following rotation strategy:
 
-- **Size Limit**: Default maximum 20MB per log file (configurable via `max_bytes`)
-- **Retention Count**: Default 20 log files retained (configurable via `backup_count`)
+- **Size Limit**: Default maximum 20MB per log file (20 × 1024 × 1024 = 20,971,520 bytes; hardcoded constant, not configurable via config.yaml)
+- **Retention Count**: Default 20 log files retained (hardcoded constant, not configurable via config.yaml)
 - **Automatic Rotation**: When a log file reaches the size limit, a new file is automatically created and old files are archived
-- **Naming Format**: Archived files are named `{filename}.{index}`, e.g., `gateway.log.1`
+- **Naming Format**: Archived files are named `{filename}_{YYYYMMDD_HHMMSS}.log`, e.g., `gateway_20260519_153045.log`
+
+> **Note**: To modify rotation parameters (max_bytes, backup_count), you need to modify the source code constants in `jiuwenswarm/common/utils.py` at lines 47-48.
 
 ## 4. Log System Architecture
 
 ### 4.1 Core Modules
 
-- **Log Configuration**: `setup_logger` function in `jiuwenclaw/common/utils.py`
+- **Log Configuration**: `setup_logger` function in `jiuwenswarm/common/utils.py`
 - **Audit Logs**: `jiuwenbox/src/jiuwenbox/server/audit_logger.py`
 - **Default Log Implementation**: `openjiuwen/core/common/logging/default/default_impl.py`
 
@@ -128,19 +146,19 @@ The logging system adopts the following rotation strategy:
 
 ### 5.1 Configuration File
 
-Log levels are mainly configured through the `logging` section in the `config.yaml` file:
+Log levels are configured through the `logging` section in the `config.yaml` file:
 
 ```yaml
 logging:
-  level: INFO            # Default log level
+  level: INFO            # Default log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)
   console_level: INFO    # Console log level
   gateway: INFO          # Gateway component log level
   channel: INFO          # Channel component log level
   agent_server: INFO     # Agent server log level
   full: INFO             # Full log level
-  max_bytes: 20971520    # Log file size limit (20MB)
-  backup_count: 20       # Number of log files to retain
 ```
+
+> **Note**: Log rotation parameters (max_bytes, backup_count) are hardcoded constants and cannot be configured via config.yaml. To adjust them, modify the source code in `jiuwenswarm/common/utils.py` at lines 47-48.
 
 ### 5.2 Environment Variables
 
@@ -150,13 +168,7 @@ The console log level can be overridden through environment variables:
 LOG_LEVEL=DEBUG jiuwenswarm-start
 ```
 
-### 5.3 Command Line Parameters
-
-When starting the service, log level can be specified via parameters:
-
-```bash
-jiuwenswarm-start --log-level DEBUG
-```
+> **Note**: After modifying log configuration, you need to restart the service for changes to take effect.
 
 ## 6. Log Levels
 
@@ -175,7 +187,7 @@ JiuwenSwarm supports standard Python logging levels:
 The log format includes timestamp, log level, module name, and log message:
 
 ```
-2026-05-19 15:30:45.123 INFO jiuwenclaw.app: Service started successfully
+2026-05-19 15:30:45.123 INFO jiuwenswarm.app: Service started successfully
 ```
 
 ### 7.1 Audit Log Format
@@ -204,9 +216,13 @@ Audit logs use structured JSON format:
 **Problem**: Log files grow too quickly and occupy too much disk space
 
 **Solution**:
-- Lower log level to reduce log output
-- Decrease `max_bytes` configuration to reduce individual log file size
-- Decrease `backup_count` configuration to reduce the number of retained log files
+- Lower log level to reduce log output (modify `logging.level` in config.yaml)
+- Periodically clean up archived log files (manual cleanup or scheduled tasks)
+- To adjust rotation parameters, modify the hardcoded constants in `jiuwenswarm/common/utils.py` at lines 47-48:
+  ```python
+  _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024  # Modify this to change single file size
+  _LOG_FILE_BACKUP_COUNT = 20             # Modify this to change the number of archives
+  ```
 
 ### 8.2 No Log Output
 
@@ -237,5 +253,9 @@ Audit logs use structured JSON format:
 
 - Main configuration file: `~/.jiuwenswarm/config/config.yaml`
 - Environment variable file: `~/.jiuwenswarm/config/.env`
-- Log system implementation: `jiuwenclaw/common/utils.py`
+- Log system implementation: `jiuwenswarm/common/utils.py`
 - Audit log implementation: `jiuwenbox/src/jiuwenbox/server/audit_logger.py`
+
+For more information, see:
+- [Configuration](Configuration.md) - system configuration and model provider setup
+- [Debug Trace](DebugTrace.md) - per-run debugging trace (complementary to system-level logs)

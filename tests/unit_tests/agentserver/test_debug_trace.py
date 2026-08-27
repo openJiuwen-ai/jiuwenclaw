@@ -103,6 +103,35 @@ class TestPaths:
         monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
         assert paths_mod.debug_trace_dir("code.normal") == tmp_path / ".code" / "traces"
 
+    def test_original_agent_plan_keeps_agent_dir_after_code_profile_resolution(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
+        mode = paths_mod.resolve_debug_trace_mode("code.plan", "agent.plan")
+
+        assert paths_mod.debug_trace_file(mode, "sess") == (
+            tmp_path / ".agent" / "traces" / "dump-agent-sess.txt"
+        )
+
+    def test_plain_web_agent_in_code_profile_remains_code_dump(self):
+        assert paths_mod.resolve_debug_trace_mode("code.normal", "agent") == "code.normal"
+
+    def test_explicit_code_plan_remains_code_dump(self):
+        assert paths_mod.resolve_debug_trace_mode("code.plan", "code.plan") == "code.plan"
+
+    def test_original_agent_plan_uses_agent_debug_settings(self, monkeypatch):
+        monkeypatch.setattr(
+            debug_config,
+            "_load_debug_trace_config",
+            lambda: {
+                "agent": {"enabled": True},
+                "code": {"enabled": False},
+            },
+        )
+        mode = paths_mod.resolve_debug_trace_mode("code.plan", "agent.plan")
+
+        assert resolve_debug_trace_settings(mode=mode, request_debug=False).enabled is True
+
     def test_file_names(self, monkeypatch, tmp_path):
         monkeypatch.setattr(paths_mod, "get_user_workspace_dir", lambda: tmp_path)
         assert paths_mod.debug_trace_file("agent.plan", "sess").name == "dump-agent-sess.txt"
@@ -255,6 +284,34 @@ class TestDebugTraceLoggerFeed:
         assert "input_tokens=100" in out and "model_name=GLM-5.2" in out
 
 
+    def test_answer_chunk_dropped_when_model_output_off(self, tmp_path):
+        # include_model_output=False must suppress the trailing `answer`
+        # chunk too — it re-sends the whole reply and is classified as
+        # text, so without this guard the reply leaks into the dump as a
+        # category=text JSON blob even though llm_output was suppressed.
+        s = debug_config.DebugTraceSettings(
+            mode="code.normal",
+            enabled=True,
+            dump_enabled=True,
+            otel_enabled=False,
+            include_model_output=False,
+        )
+        lg = DebugTraceLogger(
+            file_path=tmp_path / "dump.txt",
+            mode="code.normal",
+            session_id="sess",
+            request_id="req-1",
+            settings=s,
+        )
+        lg.start_run()
+        lg.feed(_chunk("llm_output", {"content": "streamed reply"}))
+        lg.feed(_chunk("answer", {"content": "streamed reply"}))
+        lg.end_run(status="ok")
+        out = _read(lg)
+        assert "streamed reply" not in out
+        assert "category=text" not in out
+
+
 # ── session registry (cross-task logger recovery) ──────────────────────────
 class TestSessionRegistry:
     """Dispatch sites run in the DeepAgent supervisor task, where the per-request
@@ -314,43 +371,257 @@ class TestSessionRegistry:
             lg.flush()  # close the dump file opened on construction
 
 
-# ── OTel get_team_span global fallback ─────────────────────────────────────
+# ── OTel root-span fallback ────────────────────────────────────────────────
+def _root_span(name: str = "root"):
+    """Minimal stand-in for a recording root span."""
+    return SimpleNamespace(name=name, is_recording=lambda: True)
+
+
 class TestOtelTeamSpanFallback:
-    """The get_team_span monkeypatch returns _CURRENT_ROOT_SPAN when the
-    per-request ContextVar is invisible (agent runs in a session-setup supervisor
-    task), so OtelCallbackHandler finds a parent and emits child spans."""
+    """Team-span lookups fall back to the run's registered root span when the
+    per-request ContextVar is invisible (the agent runs in a session-setup
+    supervisor task), so the rail and callback parent lookup still find a parent.
+    """
 
     def test_patch_is_installed(self):
-        # ALL consumers must be patched: callback_handler (llm/tool spans) AND
-        # rail (agent.<type>.invoke spans — returns early when get_team_span is None).
-        import openjiuwen.agent_teams.observability.callback_handler as ch
-        import openjiuwen.agent_teams.observability.rail as rail
+        # Newer openjiuwen resolves team/root spans through get_root_span /
+        # get_team_span (no private _team_span_ctx). Import installs wrappers
+        # that fall back to the session-keyed _ROOT_SPANS registry.
+        import openjiuwen.agent_teams.observability.span_context as sc
         import jiuwenswarm.agents.harness.agent_observability as obs  # triggers install
 
-        # Patched bindings are tracked in the module-level _team_span_patched set
-        # (the wrapper is itself the key — it becomes the next lookup's orig, so
-        # re-install is idempotent).
-        assert ch.get_team_span in obs._team_span_patched
-        assert rail.get_team_span in obs._team_span_patched
+        assert getattr(sc.get_team_span, obs._SDK_ROOT_SPAN_FALLBACK_ATTR, False)
+        assert getattr(sc.get_root_span, obs._SDK_ROOT_SPAN_FALLBACK_ATTR, False)
 
-    def test_fallback_returns_current_root_span(self):
-        # _team_span_ctx ContextVar is unset in the test process -> orig returns
-        # None -> the patched get_team_span falls back to _CURRENT_ROOT_SPAN.
-        import openjiuwen.agent_teams.observability.callback_handler as ch
+    def test_fallback_returns_the_running_root_span(self):
+        # ContextVar/registry unset in the test process -> the lookup falls
+        # back to the single run in flight.
+        import openjiuwen.agent_teams.observability.span_context as sc
         import jiuwenswarm.agents.harness.agent_observability as obs
 
-        obs._CURRENT_ROOT_SPAN = "ROOT_SENTINEL"
+        span = _root_span()
+        obs._ROOT_SPANS["sess-A"] = span
         try:
-            assert ch.get_team_span() == "ROOT_SENTINEL"
+            assert sc.get_team_span() is span
         finally:
-            obs._CURRENT_ROOT_SPAN = None
+            obs._ROOT_SPANS.clear()
 
-    def test_fallback_none_when_no_global_and_contextvar_empty(self):
-        import openjiuwen.agent_teams.observability.callback_handler as ch
+    def test_fallback_none_when_no_run_and_contextvar_empty(self):
+        import openjiuwen.agent_teams.observability.span_context as sc
         import jiuwenswarm.agents.harness.agent_observability as obs
 
-        obs._CURRENT_ROOT_SPAN = None
-        assert ch.get_team_span() is None
+        obs._ROOT_SPANS.clear()
+        assert sc.get_team_span() is None
+
+    def test_one_session_closing_does_not_blind_another_still_running(self):
+        """Overlapping sessions must not share a single fallback slot.
+
+        A run that ended used to clear the slot outright, so a run still going
+        lost its team span mid-flight — from that moment its sub-agents got no
+        agent span and landed flat under the dispatching agent.
+        """
+        import openjiuwen.agent_teams.observability.span_context as sc
+        import jiuwenswarm.agents.harness.agent_observability as obs
+
+        running = _root_span("still-running")
+        finished = _root_span("finished")
+        obs._ROOT_SPANS.clear()
+        obs._ROOT_SPANS["sess-A"] = running
+        obs._ROOT_SPANS["sess-B"] = finished
+        try:
+            obs.close_agent_run_span(finished, session_id="sess-B")
+            assert sc.get_team_span() is running
+        finally:
+            obs._ROOT_SPANS.clear()
+
+    def test_ambiguous_runs_resolve_to_nothing_rather_than_the_wrong_trace(self):
+        """Two runs in flight with no session id in reach: refuse to guess."""
+        import openjiuwen.agent_teams.observability.span_context as sc
+        import jiuwenswarm.agents.harness.agent_observability as obs
+
+        obs._ROOT_SPANS.clear()
+        obs._ROOT_SPANS["sess-A"] = _root_span("a")
+        obs._ROOT_SPANS["sess-B"] = _root_span("b")
+        try:
+            assert sc.get_team_span() is None
+        finally:
+            obs._ROOT_SPANS.clear()
+
+    def test_run_is_resolved_by_session_id_when_available(self, monkeypatch):
+        """With the session id in context, each run resolves to its own span."""
+        import openjiuwen.agent_teams.observability.span_context as sc
+        import jiuwenswarm.agents.harness.agent_observability as obs
+        from openjiuwen.agent_teams import context as team_context
+
+        mine = _root_span("mine")
+        obs._ROOT_SPANS.clear()
+        obs._ROOT_SPANS["sess-A"] = _root_span("other")
+        obs._ROOT_SPANS["sess-B"] = mine
+        monkeypatch.setattr(team_context, "get_session_id", lambda: "sess-B")
+        try:
+            assert sc.get_team_span() is mine
+        finally:
+            obs._ROOT_SPANS.clear()
+
+
+def test_llm_span_lookup_falls_back_to_root_span():
+    """The open llm.call span stays findable from the supervisor task.
+
+    ``ActiveSpanTracker._find_llm_span`` resolves the trace through
+    ``get_root_span``. Without the session-keyed fallback wrapper it returns
+    None when the ContextVar is invisible, so ``on_llm_output`` never finds the
+    span it must close and the LLM span is exported with input but no
+    completion / usage.
+    """
+    import openjiuwen.agent_teams.observability.span_context as sc
+    import jiuwenswarm.agents.harness.agent_observability as obs
+
+    trace_id = 0x1234
+
+    class _Span:
+        """Hashable span stub — ActiveSpanTracker keeps spans in a set."""
+
+        def __init__(self, name: str, span_id: int, parent: Any = None) -> None:
+            self.name = name
+            self.context = SimpleNamespace(trace_id=trace_id, span_id=span_id)
+            self.parent = parent.context if parent is not None else None
+
+        def is_recording(self) -> bool:
+            return True
+
+    root_span = _Span("agent.code.normal.sess-1", 0x1)
+    # The llm span hangs off the root span, as one opened with the root as
+    # parent does — that link is what the tracker matches on when the callback
+    # carries no LLM call id.
+    llm_span = _Span("llm.call", 0x2, parent=root_span)
+
+    tracker = sc.ActiveSpanTracker()
+    tracker.on_start(llm_span)
+    previous_tracker = sc.get_active_span_tracker()
+    sc.set_active_span_tracker(tracker)
+    obs._ROOT_SPANS["sess-1"] = root_span
+    try:
+        assert sc.get_current_llm_span() is llm_span
+        assert sc.pop_current_llm_span() is llm_span
+    finally:
+        obs._ROOT_SPANS.clear()
+        sc.set_active_span_tracker(previous_tracker)
+
+
+def test_run_output_is_stamped_on_the_root_span():
+    """The final answer lands on the root span as the trace-level output.
+
+    The rail only fills this for a team LEADER, so a single-agent trace would
+    otherwise show an empty output at its top level.
+    """
+    import jiuwenswarm.agents.harness.agent_observability as obs
+
+    stamped: dict[str, str] = {}
+    span = SimpleNamespace(set_attribute=lambda key, value: stamped.update({key: value}))
+
+    obs._stamp_run_output(span, "final answer")
+
+    assert stamped == {"langfuse.observation.output": "final answer"}
+
+
+def test_run_output_stamp_skips_empty_answer():
+    """An aborted / errored run leaves the output attribute unset."""
+    import jiuwenswarm.agents.harness.agent_observability as obs
+
+    def _fail(key, value):
+        raise AssertionError(f"must not stamp {key}={value}")
+
+    obs._stamp_run_output(SimpleNamespace(set_attribute=_fail), "")
+
+
+def test_single_agent_team_marker_gives_the_agent_its_own_span_tier():
+    """A single agent must carry the synthetic team marker the rail keys off.
+
+    Without it ``ObservabilityRail.before_invoke`` returns early, the agent gets
+    no span on the single-round path, and a task-tool sub-agent's invoke span
+    ends up flat under the run's root span instead of nested under it.
+    """
+    import jiuwenswarm.agents.harness.agent_observability as obs
+
+    agent = SimpleNamespace(team_name="")
+    obs.mark_single_agent_team(agent)
+
+    assert agent.team_name == obs.SINGLE_AGENT_TEAM_NAME
+
+
+def test_single_agent_team_marker_leaves_a_real_team_member_alone():
+    """A spawned teammate already has its team; never overwrite it."""
+    import jiuwenswarm.agents.harness.agent_observability as obs
+
+    agent = SimpleNamespace(team_name="research_team")
+    obs.mark_single_agent_team(agent)
+
+    assert agent.team_name == "research_team"
+
+
+def test_subagent_hook_traces_every_dispatch_path(monkeypatch):
+    """Any subagent created through create_subagent gets an observability rail.
+
+    The builtin ``task_tool`` creates its subagent inside the SDK, so only a
+    hook at creation reaches it — attaching from the ``/debug`` capture wrapper
+    alone left normal runs with no subagent spans.
+    """
+    import jiuwenswarm.agents.harness.agent_observability as obs
+    from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+    from openjiuwen.harness.deep_agent import DeepAgent
+
+    class _Subagent:
+        def __init__(self):
+            self.rails = []
+            self.team_name = ""
+
+        def configured_rails(self):
+            return list(self.rails)
+
+        def add_rail(self, rail):
+            self.rails.append(rail)
+
+    created = _Subagent()
+    monkeypatch.setattr(
+        DeepAgent, "create_subagent", lambda self, *a, **k: created, raising=False
+    )
+    monkeypatch.setattr(obs, "maybe_observability_rail", ObservabilityRail, raising=False)
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.observability.rail.maybe_observability_rail",
+        ObservabilityRail,
+    )
+
+    obs.install_subagent_observability_hook()
+    returned = DeepAgent.create_subagent(object(), "explore_agent", "sess-1")
+
+    assert returned is created
+    assert sum(isinstance(r, ObservabilityRail) for r in created.rails) == 1
+
+    # Idempotent: re-installing must not stack wrappers, and a second creation
+    # must not add a second rail.
+    obs.install_subagent_observability_hook()
+    DeepAgent.create_subagent(object(), "explore_agent", "sess-1")
+    assert sum(isinstance(r, ObservabilityRail) for r in created.rails) == 1
+
+
+def test_assemble_run_answer_does_not_double_count_the_repeated_final():
+    """An ``answer`` chunk re-sends the whole reply the deltas already carried."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        _assemble_run_answer,
+    )
+
+    assert _assemble_run_answer(["hello ", "world"], "hello world") == "hello world"
+
+
+def test_assemble_run_answer_keeps_a_flushed_tail():
+    """A cut-short round flushes only its tail as chat.final — keep both parts."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        _assemble_run_answer,
+    )
+
+    assert _assemble_run_answer(["hello "], "world") == "hello world"
+    assert _assemble_run_answer([], "only final") == "only final"
+    assert _assemble_run_answer([], "") == ""
 
 
 # ── truncation / redaction ─────────────────────────────────────────────────
@@ -593,7 +864,6 @@ class TestAgentObservabilityForce:
     def _reset(self):
         import jiuwenswarm.agents.harness.agent_observability as ao
         ao._agent_observability_active = False
-        ao._agent_owns_provider = False
         ao._force_ever_enabled = False
 
     def test_force_inits_and_sticky_blocks_teardown(self, monkeypatch):
@@ -601,12 +871,14 @@ class TestAgentObservabilityForce:
         import openjiuwen.agent_teams.observability as obs
         self._reset()
         calls = {"init": 0, "shutdown": 0}
+        initialized = {"value": False}
         monkeypatch.setattr(ao, "get_config", lambda: {"agent_observability": {"enabled": False}})
-        monkeypatch.setattr(obs, "is_initialized", lambda: False)
+        monkeypatch.setattr(obs, "is_initialized", lambda: initialized["value"])
         monkeypatch.setattr(obs, "ObservabilityConfig", lambda **kw: kw)
 
-        def fake_init(_cfg):
+        def fake_init(_cfg, **_kwargs):
             calls["init"] += 1
+            initialized["value"] = True
 
         monkeypatch.setattr(obs, "init_observability", fake_init)
         monkeypatch.setattr(
@@ -629,7 +901,6 @@ class TestAgentObservabilityForce:
         calls = {"shutdown": 0}
         # simulate a config-gated active provider (force never used)
         ao._agent_observability_active = True
-        ao._agent_owns_provider = True
         ao._force_ever_enabled = False
         monkeypatch.setattr(ao, "get_config", lambda: {"agent_observability": {"enabled": False}})
         monkeypatch.setattr(
@@ -911,12 +1182,12 @@ class TestSubagentCapture:
         assert getattr(TaskTool, "debug_trace_patch_applied", False) is True
 
     def test_ensure_observability_rail_attaches_when_obs_up(self, monkeypatch):
-        # When observability is initialized, _ensure_observability_rail must
+        # When observability is initialized, attach_subagent_observability must
         # add_rail() an ObservabilityRail onto the subagent (run-time attachment,
         # since build-time is unreliable when obs isn't up yet).
         import types
 
-        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
+        import jiuwenswarm.agents.harness.agent_observability as subagent_capture
 
         sentinel = types.SimpleNamespace(name="OBS_RAIL")
 
@@ -940,13 +1211,13 @@ class TestSubagentCapture:
             def add_rail(self, rail):
                 added.append(rail)
 
-        subagent_capture._ensure_observability_rail(FakeSub())
+        subagent_capture.attach_subagent_observability(FakeSub())
         assert added == [sentinel]
 
     def test_ensure_observability_rail_skips_when_already_attached(self, monkeypatch):
         import types, sys
 
-        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
+        import jiuwenswarm.agents.harness.agent_observability as subagent_capture
 
         class FakeObsRail:
             pass
@@ -967,13 +1238,13 @@ class TestSubagentCapture:
             def add_rail(self, rail):
                 added.append(rail)
 
-        subagent_capture._ensure_observability_rail(FakeSub())
+        subagent_capture.attach_subagent_observability(FakeSub())
         assert added == []  # idempotent: not re-added
 
     def test_ensure_observability_rail_noop_when_obs_off(self, monkeypatch):
         import types, sys
 
-        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
+        import jiuwenswarm.agents.harness.agent_observability as subagent_capture
 
         fake_mod = types.ModuleType("fake_obs_rail")
         fake_mod.ObservabilityRail = type("ObservabilityRail", (), {})
@@ -989,6 +1260,5 @@ class TestSubagentCapture:
             def add_rail(self, rail):
                 added.append(rail)
 
-        subagent_capture._ensure_observability_rail(FakeSub())
+        subagent_capture.attach_subagent_observability(FakeSub())
         assert added == []  # no-op when observability is off
-

@@ -124,8 +124,10 @@ async def test_code_task_planning_rail_injects_task_reminder_attachment_after_th
     assert "#verify. [pending] Verify the fix" in reminder.content
 
     rendered = agent.prompt_attachment_manager.render(reminders)
-    assert '<prompt-attachment type="todo_reminder">' in rendered
-    assert "<system-reminder>" in rendered
+    assert "The following dynamic context is currently active" in rendered
+    assert reminder.content in rendered
+    assert "<prompt-attachment" not in rendered
+    assert "<system-reminder>" not in rendered
 
 
 @pytest.mark.asyncio

@@ -89,6 +89,7 @@ def build_permission_rail(
     from openjiuwen.harness.security.models import PermissionConfirmResponse
 
     from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
+        SKILLS_REBUILD_SILENT,
         TOOL_PERMISSION_CHANNEL_ID,
     )
     from jiuwenswarm.common.config import get_config
@@ -207,6 +208,20 @@ def build_permission_rail(
         async def _request_permission_confirmation(
             req: PermissionConfirmationRequest,
         ) -> PermissionConfirmResponse | str | None:
+            # skills.rebuild 静默 follow-up 使用临时 session，无法弹 UI 审批；
+            # 若返回 "interrupt"，Agent 会停在 bash/write 上却仍被当成重建成功。
+            if SKILLS_REBUILD_SILENT.get():
+                tool_name = getattr(getattr(req, "tool_call", None), "name", "") or ""
+                logger.info(
+                    "[InterruptHelpers] auto-approve permission for silent skills.rebuild tool=%s",
+                    tool_name,
+                )
+                return PermissionConfirmResponse(
+                    approved=True,
+                    auto_confirm=False,
+                    feedback="",
+                )
+
             channel = TOOL_PERMISSION_CHANNEL_ID.get() or "web"
             if channel != "acp":
                 return "interrupt"
@@ -288,6 +303,9 @@ def build_permission_rail(
                 )
             return None
 
+        def _is_silent_skills_rebuild_session() -> bool:
+            return bool(SKILLS_REBUILD_SILENT.get())
+
         async def _permission_scene_hook(
             inp: PermissionSceneHookInput,
         ) -> tuple[str, ...] | None:
@@ -296,6 +314,10 @@ def build_permission_rail(
                 check_avatar_permission,
                 _resolve_owner_scope_level,
             )
+
+            # skills.rebuild 静默 Agent 无法弹权限卡片；在 tiered 判定前直接放行。
+            if _is_silent_skills_rebuild_session():
+                return ("approve",)
 
             perm_ctx = TOOL_PERMISSION_CONTEXT.get()
 
@@ -351,6 +373,14 @@ def build_permission_rail(
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
         def _get_permissions_snapshot():
+            # skills.rebuild 静默路径：返回 full_access，避免 ASK 中断。
+            if SKILLS_REBUILD_SILENT.get():
+                return {
+                    "enabled": True,
+                    "mode": "full_access",
+                    "defaults": {"*": "allow"},
+                    "file_guard": {"enabled": False},
+                }
             cfg = get_config()
             return cfg.get("permissions") if isinstance(cfg, dict) else {}
 
@@ -405,8 +435,14 @@ def _normalize_tool_args(raw: Any) -> dict | None:
 
 def _is_ask_user_interrupt_value(value_obj: Any) -> bool:
     tool_name = str(_read_value_field(value_obj, "tool_name", "") or "").strip()
-    if tool_name == "ask_user":
-        return True
+    # Prefer the explicit tool identity whenever it is available.  Many tools
+    # (for example memory_search) have a plain ``query`` argument, so treating
+    # every query-only interrupt as ask_user misroutes permission responses.
+    if tool_name:
+        return tool_name == "ask_user"
+
+    # Legacy ask_user interrupt payloads may not carry tool_name.  Keep the
+    # structural fallbacks below only for those identity-less payloads.
     if hasattr(value_obj, "payload_schema") and hasattr(value_obj, "questions"):
         return True
     if isinstance(value_obj, dict) and "payload_schema" in value_obj and "questions" in value_obj:

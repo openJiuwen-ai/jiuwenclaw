@@ -147,9 +147,9 @@
    ============================================ */
 
 .sidebar--icon-rail {
-  width: 64px;
-  max-width: 64px;
-  min-width: 64px;
+  width: 72px;
+  max-width: 72px;
+  min-width: 72px;
   flex-shrink: 0;
   align-items: center;
   padding: 0;
@@ -228,11 +228,11 @@
 }
 
 .icon-rail-nav-item--active:hover {
-  background: var(--color-sidebar-nav-active-hover);
+  background: var(--color-sidebar-nav-active);
 }
 
 .icon-rail-more-panel {
-  position: fixed;
+  position: absolute;
   top: 0;
   bottom: 0;
   left: 64px;
@@ -311,16 +311,6 @@
   min-height: 8px;
 }
 
-.icon-rail-help-button {
-  min-height: 36px;
-  margin-bottom: 2px;
-  color: var(--color-text-secondary);
-}
-
-.icon-rail-help-button:hover {
-  color: var(--color-text-primary);
-}
-
-.icon-rail-help-button + .icon-rail-nav-item {
+.icon-rail-settings-button {
   margin-bottom: 12px;
 }

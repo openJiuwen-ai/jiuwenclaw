@@ -16,7 +16,7 @@ import requests
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenswarm.common.config import get_config
-from jiuwenswarm.common.utils import get_config_file
+from jiuwenswarm.common.utils import env_url, get_config_file
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import apply_video_model_config_from_yaml
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_requests_verify
 
@@ -171,7 +171,7 @@ def _glm_video_understanding_sync(req: VideoUnderstandingRequest) -> str:
                 f"No video API credentials. Config file: {get_config_file()}\n"
                 "Set models.video.model_config with api_key and api_base, or set ZHIPU_API_KEY."
             )
-        api_url = os.environ.get("ZHIPU_API_URL", "https://open.bigmodel.cn/api/paas/v4/chat/completions").strip()
+        api_url = env_url("ZHIPU_API_URL", "https://open.bigmodel.cn/api/paas/v4/chat/completions")
     
     video_url = _video_path_to_url(req.video_path)
     

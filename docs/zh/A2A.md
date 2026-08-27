@@ -157,3 +157,9 @@ curl -sS -N -X POST "http://127.0.0.1:${A2A_SERVER_PORT:-19100}${A2A_SERVER_PATH
 
 - 鉴权、限流、超时与观测指标：由网关或前置代理统一补强时，保持 `A2AChannel` 只做协议与消息映射为宜。
 - `jiuwenswarm/resources/.env.template` 未预置 A2A/ACP 键时，可在本地 `.env` 手工追加（与 §2 一致）。
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

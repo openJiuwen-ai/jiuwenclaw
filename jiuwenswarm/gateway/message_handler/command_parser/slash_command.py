@@ -46,6 +46,18 @@ class ModeSubcommand(str, Enum):
     CODE_PLAN = "code.plan"
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
+    TEAM_PLAN = "team.plan"
+    TEAM_PLAN_NORMAL = "team.plan.normal"
+    TEAM_PLAN_CODE = "team.plan.code"
+    # 新三段命名 canonical（P2 引入；旧成员保留）。
+    AGENT_WORK_NORMAL = "agent.work.normal"
+    AGENT_WORK_PLAN = "agent.work.plan"
+    AGENT_CODE_NORMAL = "agent.code.normal"
+    AGENT_CODE_PLAN = "agent.code.plan"
+    TEAM_WORK_NORMAL = "team.work.normal"
+    TEAM_WORK_PLAN = "team.work.plan"
+    TEAM_CODE_NORMAL = "team.code.normal"
+    TEAM_CODE_PLAN = "team.code.plan"
 
 
 _VALID_MODE_LINES: frozenset[str] = frozenset(
@@ -354,7 +366,7 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
     SlashCommandEntry(
         id="mode",
         canonical_text=f"{GatewaySlashCommand.MODE.value} agent|code|team|agent.plan|agent.fast|code.plan|"
-                       f"code.normal|code.team|team.plan",
+                       f"code.normal|code.team|team.plan|team.plan.normal|team.plan.code",
         scope="gateway",
         req_method=None,
         notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）；"
@@ -442,6 +454,77 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
               "GET/PAUSE/CLEAR returns status immediately.",
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# 快捷面板命令清单（Web 前端「输入 / 唤起面板」用，commands.list 下发）
+# ---------------------------------------------------------------------------
+
+BUILTIN_COMMANDS_META: tuple[dict[str, Any], ...] = (
+    {
+        "name": "btw",
+        "description": "快速侧问，不打断主对话（基于当前上下文）",
+        "usage": "/btw <question>",
+        "example": "/btw what does git status do?",
+        "kind": "built-in",
+        "takesArgs": True,
+        "scope": "agent",
+        "execution": "rpc",
+        "req_method": "command.btw",
+        # 侧问依赖当前会话上下文，欢迎页（无真实 session）不可用
+        "requires_session": True,
+        "available_modes": None,  # None 表示全模式可用
+    },
+    {
+        "name": "compact",
+        "description": "压缩对话历史，保留摘要以节省上下文",
+        "usage": "/compact",
+        "example": None,
+        "kind": "built-in",
+        "takesArgs": False,
+        "scope": "agent",
+        "execution": "rpc",
+        "req_method": "command.compact",
+        # 压缩的是会话历史，无会话即无意义
+        "requires_session": True,
+        "available_modes": None,
+    },
+    {
+        # Web 侧复用现有 Plan 开关与 chat.send，可只打开模式，也可直接发送规划描述。
+        "name": "plan",
+        "description": "切换计划模式（只读规划 → 审批 → 执行）",
+        "usage": "/plan [open|<description>]",
+        "example": "/plan outline the migration steps",
+        "kind": "built-in",
+        "takesArgs": True,
+        "scope": "agent",
+        "execution": "chat.send_with_mode",
+        "mode": "agent.plan",
+        "plan_entry_source": "slash_command",
+        # 纯本地开关翻转，欢迎页（NEW_CONVERSATION_ID）也能用，开关随首次发送迁移
+        "requires_session": False,
+        "available_modes": None,
+    },
+)
+
+
+def list_builtin_commands(params: dict | None = None) -> dict:
+    """返回快捷面板要展示的命令清单（静态元数据，无 IO）。
+
+    params(可选):
+        work_mode: str — 当前工作模式，用于按 available_modes 过滤可用命令
+    返回:
+        {"commands": [command_meta, ...]}
+    """
+    params = params or {}
+    work_mode = params.get("work_mode")
+    out = []
+    for cmd in BUILTIN_COMMANDS_META:
+        am = cmd.get("available_modes")
+        if am is not None and work_mode and work_mode not in am:
+            continue
+        out.append(dict(cmd))
+    return {"commands": out}
 
 
 def _skill_source_tag(item: dict[str, Any]) -> str:

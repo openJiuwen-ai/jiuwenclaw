@@ -21,6 +21,7 @@ import {
   registerConfirmedTaskCreation,
   type TaskProgressBaseline,
 } from '../features/teamTaskProgressBaseline';
+import { isTeamAgentMode, stripPlanSuffix } from '../features/planMode/wireMode';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
@@ -51,10 +52,11 @@ const DEFAULT_MODE: AgentMode = 'agent';
 
 function normalizeAgentMode(mode: unknown): AgentMode {
   if (typeof mode !== 'string') return DEFAULT_MODE;
-  const normalized = mode.trim().toLowerCase();
-  if (normalized === 'team') return 'team';
+  if (isTeamAgentMode(mode)) return 'team';
+  // 后端 session.mode 可能是新命名 `agent.{work|code}.plan`，先剥掉 plan 后缀
+  // 再归一化（旧 `team.plan.*` / `team.code.*` 已被上面的 isTeamAgentMode 拦截）。
+  const normalized = stripPlanSuffix(mode.trim().toLowerCase());
   if (normalized === 'auto_harness') return 'auto_harness';
-  // plan / fast 已合并为单一 agent（历史 agent.plan / agent.fast 归一）。
   return 'agent';
 }
 
@@ -86,10 +88,49 @@ export function resolveEffectiveModel(
 ): ModelEntry | null {
   if (chatAvailableModels.length === 0) return null;
   const displayed = selectedModelName || defaultModelName;
+  // selectedModelName 可能存的是展示名（用户从下拉框选择时存的是 alias），
+  // 也可能存的是真实 API id（后端 session.metadata.model 回传恢复时是
+  // model_name，例如 Zen 免费模型的 "deepseek-v4-flash-free"）。两者都要能
+  // 命中同一个 entry，否则后端回传 model_name 后无法匹配有 alias 的免费
+  // 模型，会回退到 chatAvailableModels[0]（首个配置模型），表现为"对话
+  // 完成后下拉框自动切回配置的模型"。
   return (
+    chatAvailableModels.find(
+      (m) => m.alias === displayed || m.model_name === displayed,
+    ) ??
     chatAvailableModels.find((m) => (m.alias || m.model_name) === displayed) ??
     chatAvailableModels[0]
   );
+}
+
+/**
+ * Resolve the model shown by the chat selector.
+ *
+ * 单 Agent 与集群（team）模式共用同一套解析：都展示会话自选的模型，
+ * 失配时回退默认模型（见 resolveEffectiveModel）。
+ */
+export function resolveChatModelSelection(
+  chatAvailableModels: ModelEntry[],
+  selectedModelName: string | null,
+  defaultModelName: string | null,
+): ModelEntry | null {
+  return resolveEffectiveModel(
+    chatAvailableModels,
+    selectedModelName,
+    defaultModelName,
+  );
+}
+
+/** Resolve a configured display name to the model ID required by backend RPCs. */
+export function resolveConfiguredModelName(
+  availableModels: ModelEntry[],
+  configuredModelName: string | null,
+): string | null {
+  const normalizedName = configuredModelName?.trim();
+  if (!normalizedName) return null;
+  return availableModels.find(
+    (model) => model.alias === normalizedName || model.model_name === normalizedName,
+  )?.model_name ?? null;
 }
 
 const FINAL_EVENT_DUPLICATE_WINDOW_MS = 60_000;
@@ -219,6 +260,19 @@ interface TeamMember {
   name?: string;
   execution_status?: string | null;
   mode?: string;
+  /** TeamRole 值：leader / teammate / human_agent / bridge_agent / worker */
+  role?: string;
+  /** 外部 CLI 后端名（claude / codex / ...），普通成员为空 */
+  cli_agent?: string | null;
+}
+
+/** 增量成员事件里的空字段不得覆盖已知值：返回 next，空则回退 prev。 */
+function keepKnownMemberField(
+  next: string | null | undefined,
+  prev: string | null | undefined
+): string | undefined {
+  if (typeof next === 'string' && next.trim() !== '') return next;
+  return typeof prev === 'string' && prev.trim() !== '' ? prev : undefined;
 }
 
 export type HumanShareStatus = 'pending' | 'joined' | 'left';
@@ -269,6 +323,8 @@ export interface SessionRuntime {
   mode: AgentMode;
   selectedModelName: string | null;
   projectDirectory: string | null;
+  /** 新会话草稿值；真实 Session 创建后由后端 metadata 的权威值覆盖。 */
+  persistSession: boolean;
   contextCompressionRate: number;
   contextCompressionBefore: number | null;
   contextCompressionAfter: number | null;
@@ -281,8 +337,18 @@ export interface SessionRuntime {
   teamMemberExecutionEvents: TeamMemberExecutionEvent[];
   teamMemberContextCompression: Record<string, TeamMemberContextCompressionState>;
   teamHistoryMessages: Message[];
-  /** 当前会话输入栏已选中的技能名（用于随消息发送） */
+  /** 当前会话输入栏已选中的技能名（用于随消息发送，发送后清空——一次性语义） */
   selectedSkills: string[];
+  /** skill-creator 统一入口等场景的会话级元数据，随 chat.send 发送后清除 */
+  metadata?: Record<string, unknown>;
+  /**
+   * 本会话期间持续启用的插件id/MCP名，由输入框"+"菜单"扩展"面板的开关控制。与
+   * selectedSkills 不同：这两个字段发 chat.send 后不清空，会一直带在每条消息里，直到用户在
+   * 面板里手动关闭开关。插件字段名 plugin_names 后端尚未定义（backend-requests.md 需求11，
+   * 前端乐观发送，后端目前忽略）；mcp 字段名是 MCP 接口文档 v2 §6.2 的权威定义。
+   */
+  enabledPlugins: string[];
+  enabledMcps: string[];
 }
 
 function createEmptyRuntime(): SessionRuntime {
@@ -293,6 +359,7 @@ function createEmptyRuntime(): SessionRuntime {
       try { return localStorage.getItem(MODEL_STORAGE_KEY); } catch { return null; }
     })(),
     projectDirectory: null,
+    persistSession: false,
     contextCompressionRate: 0,
     contextCompressionBefore: null,
     contextCompressionAfter: null,
@@ -306,6 +373,9 @@ function createEmptyRuntime(): SessionRuntime {
     teamMemberContextCompression: {},
     teamHistoryMessages: [],
     selectedSkills: [],
+    metadata: undefined,
+    enabledPlugins: [],
+    enabledMcps: [],
   };
 }
 
@@ -320,7 +390,7 @@ interface SessionState {
   availableModels: ModelEntry[];
   /** 过滤 is_default=true 的模型，供聊天窗口 ModelSelector 使用 */
   chatAvailableModels: ModelEntry[];
-  /** 后端配置的默认模型（alias 优先），供新建会话取用，不受任何会话手动切换模型影响 */
+  /** 后端配置的默认模型 ID，供集群模式和新建会话取用，不受任何会话手动切换模型影响 */
   defaultModelName: string | null;
 
   // B 类 session 级字段
@@ -349,6 +419,7 @@ interface SessionState {
   // B 类 actions（加 sessionId）
   setMode: (sessionId: string, mode: AgentMode) => void;
   setProjectDirectory: (sessionId: string, directory: string | null) => void;
+  setPersistSession: (sessionId: string, enabled: boolean) => void;
   setTeamTaskEvents: (sessionId: string, events: TeamTaskEvent[]) => void;
   addTeamTaskEvent: (sessionId: string, event: TeamTaskEvent) => void;
   setTeamTasks: (sessionId: string, tasks: TeamTask[]) => void;
@@ -365,6 +436,20 @@ interface SessionState {
   removeSelectedSkill: (sessionId: string, skill: string) => void;
   /** 输入栏已选技能：清空 */
   clearSelectedSkills: (sessionId: string) => void;
+  /** 设置/清除会话级元数据（skill-creator 统一入口等场景） */
+  setSessionMetadata: (sessionId: string, metadata: Record<string, unknown> | null) => void;
+  /** 本会话启用插件：追加（去重） */
+  addEnabledPlugin: (sessionId: string, pluginId: string) => void;
+  /** 本会话启用插件：移除指定项 */
+  removeEnabledPlugin: (sessionId: string, pluginId: string) => void;
+  /** 本会话启用插件：清空 */
+  clearEnabledPlugins: (sessionId: string) => void;
+  /** 本会话启用MCP：追加（去重） */
+  addEnabledMcp: (sessionId: string, mcpName: string) => void;
+  /** 本会话启用MCP：移除指定项 */
+  removeEnabledMcp: (sessionId: string, mcpName: string) => void;
+  /** 本会话启用MCP：清空 */
+  clearEnabledMcps: (sessionId: string) => void;
   addTeamMember: (sessionId: string, member: TeamMember) => void;
   updateTeamMemberStatus: (sessionId: string, memberId: string, newStatus: string, timestamp?: number) => void;
   setTeamHumanShareCommands: (sessionId: string, commands: HumanShareCommand[]) => void;
@@ -427,16 +512,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const state = get();
     const runtime = state.runtimes[sessionId];
     if (!runtime) return null;
-    if (runtime.mode === 'team') return state.defaultModelName;
     // 不再原样吐出 runtime.selectedModelName（可能是模型改名后失配的陈旧字符串），
     // 而是走与 UI 显示（ModelSelector）相同的解析逻辑，确保发给后端的 model_name
-    // 参数与界面上显示的模型永远一致（bug003）。
+    // 参数与界面上显示的模型永远指向同一个 entry（bug003）。
+    // 单 Agent 与集群（team）模式统一走同一套解析——集群模式下用户同样可以自选模型，
+    // 后端 team_helpers 会把它透传给未显式配置 per-agent model 的团队成员。
+    //
+    // 注意：这里返回的是 model_name 而非 alias。后端 _model_cache 以 model_name 为
+    // key 查找（包括 Zen 免费模型如 "laguna-s-2.1-free"）；alias 只是展示名（如
+    // "Laguna S 2.1"），后端无法据此解析，会回退到默认模型。
     const resolved = resolveEffectiveModel(
       state.chatAvailableModels,
       runtime.selectedModelName,
       state.defaultModelName,
     );
-    return resolved ? (resolved.alias || resolved.model_name) : runtime.selectedModelName;
+    return resolved ? resolved.model_name : runtime.selectedModelName;
   },
 
   removeRuntime: (sessionId) => {
@@ -459,6 +549,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const nextRuntime: SessionRuntime = {
         ...baseRuntime,
         mode: normalizedSession.mode || baseRuntime.mode,
+        persistSession: normalizedSession.persist_session === true,
         teamHistoryMessages: baseRuntime.teamHistoryMessages,
       };
       return {
@@ -527,6 +618,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, projectDirectory: directory },
+        },
+      };
+    });
+  },
+
+  setPersistSession: (sessionId, enabled) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, persistSession: Boolean(enabled) },
         },
       };
     });
@@ -898,6 +1002,109 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
   },
 
+  setSessionMetadata: (sessionId, metadata) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, metadata: metadata ?? undefined },
+        },
+      };
+    });
+  },
+
+  addEnabledPlugin: (sessionId, pluginId) => {
+    const normalized = pluginId.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      if (runtime.enabledPlugins.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledPlugins: [...runtime.enabledPlugins, normalized] },
+        },
+      };
+    });
+  },
+
+  removeEnabledPlugin: (sessionId, pluginId) => {
+    const normalized = pluginId.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (!runtime.enabledPlugins.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledPlugins: runtime.enabledPlugins.filter((s) => s !== normalized) },
+        },
+      };
+    });
+  },
+
+  clearEnabledPlugins: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.enabledPlugins.length === 0) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledPlugins: [] },
+        },
+      };
+    });
+  },
+
+  addEnabledMcp: (sessionId, mcpName) => {
+    const normalized = mcpName.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      if (runtime.enabledMcps.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledMcps: [...runtime.enabledMcps, normalized] },
+        },
+      };
+    });
+  },
+
+  removeEnabledMcp: (sessionId, mcpName) => {
+    const normalized = mcpName.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (!runtime.enabledMcps.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledMcps: runtime.enabledMcps.filter((s) => s !== normalized) },
+        },
+      };
+    });
+  },
+
+  clearEnabledMcps: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.enabledMcps.length === 0) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledMcps: [] },
+        },
+      };
+    });
+  },
+
   addTeamMember: (sessionId, member) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -908,13 +1115,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (existingIndex >= 0) {
         const updatedMembers = [...runtime.teamMembers];
         const existingMember = updatedMembers[existingIndex];
+        // 每类成员事件只带自己关心的字段（如 team.member.spawned 不带 name），
+        // 直接展开覆盖会把已知的展示名/模式抹成 undefined，界面就退回显示
+        // member_id。空值一律不覆盖已有值，规则同 ToolPanel 的 mergeById。
         updatedMembers[existingIndex] = {
           ...existingMember,
           ...member,
-          status:
-            typeof member.status === 'string' && member.status.trim() !== ''
-              ? member.status
-              : existingMember.status,
+          name: keepKnownMemberField(member.name, existingMember.name),
+          status: keepKnownMemberField(member.status, existingMember.status) ?? '',
+          execution_status: keepKnownMemberField(
+            member.execution_status,
+            existingMember.execution_status
+          ),
+          mode: keepKnownMemberField(member.mode, existingMember.mode),
+          role: keepKnownMemberField(member.role, existingMember.role),
+          cli_agent: keepKnownMemberField(member.cli_agent, existingMember.cli_agent),
         };
         return {
           runtimes: {
@@ -1170,17 +1385,35 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   setAvailableModels: (models, activeModel) => {
-    set(() => {
-      const chatModels = models.filter((m) => m.is_default !== false);
-      // 优先使用后端返回的 activeModel（默认模型），其次取第一个；有别名时存别名
+    set((state) => {
+      const defaultModels = models.filter((m) => m.is_default !== false);
+      // 过滤为空时回退到全量列表，保证聊天下拉框始终有可选项（例如用户自配模型
+      // 均未设为 is_default、且关闭了 Opencode Zen 免费模型时，不至于无模型可选）。
+      const chatModels = defaultModels.length > 0 ? defaultModels : models;
+      // 优先使用后端返回的 activeModel（默认模型），其次取第一个；状态统一保存真实
+      // model_name，alias 只用于界面展示。各会话 runtime 的 selectedModelName 不在这里
+      // 重置——单 Agent 和集群会话都是用户自选状态，模型列表刷新（models.updated）不应
+      // 冲掉；陈旧失配的名字由 getEffectiveModelName 走 resolveEffectiveModel 兜底解析。
       const matchedModel = activeModel ? chatModels.find((m) => m.model_name === activeModel) : null;
-      const selected = matchedModel
-        ? (matchedModel.alias || matchedModel.model_name)
-        : (chatModels[0] ? (chatModels[0].alias || chatModels[0].model_name) : null);
+      const selected = (matchedModel ?? chatModels[0])?.model_name ?? null;
       if (selected) {
         try { localStorage.setItem(MODEL_STORAGE_KEY, selected); } catch { /* noop */ }
       }
-      return { availableModels: models, chatAvailableModels: chatModels, defaultModelName: selected };
+      // 默认模型变化时，同步未发送的新建会话（'new'，见 newConversationLifecycle 的
+      // NEW_CONVERSATION_ID；此处用字面量避免循环依赖）的模型选择：仅当其当前选择
+      // 恰为旧默认模型（说明来自默认而非用户手动选择）时才替换为新默认，用户手动
+      // 选择的模型不受影响。已创建的真实会话 runtime 依然不在此处重置。
+      const runtimes = { ...state.runtimes };
+      const pendingNewRuntime = runtimes['new'];
+      if (
+        pendingNewRuntime
+        && selected
+        && state.defaultModelName
+        && pendingNewRuntime.selectedModelName === state.defaultModelName
+      ) {
+        runtimes['new'] = { ...pendingNewRuntime, selectedModelName: selected };
+      }
+      return { availableModels: models, chatAvailableModels: chatModels, defaultModelName: selected, runtimes };
     });
   },
 

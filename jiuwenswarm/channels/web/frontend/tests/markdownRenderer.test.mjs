@@ -10,7 +10,7 @@ import { repairCollapsedGfmTables } from '../node_modules/.cache/markdown-render
 
 test('repairs only structurally valid collapsed GFM tables', () => {
   assert.equal(repairCollapsedGfmTables('| 项目 | 页码 | | --- | --- | | 简介 | 1 |'), '| 项目 | 页码 |\n| --- | --- |\n| 简介 | 1 |');
-  assert.equal(repairCollapsedGfmTables('|a|b||---|---||1|2|'), '|a|b |\n| ---|--- |\n| 1|2|');
+  assert.equal(repairCollapsedGfmTables('|a|b||---|---||1|2|'), '|a|b|\n|---|---|\n|1|2|');
 
   const multiline = '| 项目 | 页码 |\n| --- | --- |\n| 简介 | 1 |';
   assert.equal(repairCollapsedGfmTables(multiline), multiline);
@@ -78,6 +78,7 @@ test('selects adapters by language and explicit streaming policy', () => {
   const streamingSvg = getFencedCodeAdapter({ language: 'svg', code: '<svg>', complete: false });
   assert.equal(streamingSvg?.language, 'svg');
   assert.equal(streamingSvg?.renderWhileStreaming, true);
+  assert.equal(getFencedCodeAdapter({ language: 'xml', code: '<svg />', complete: true }), null);
   assert.equal(getFencedCodeAdapter({ language: 'html', code: '<main>', complete: true }), null);
 });
 

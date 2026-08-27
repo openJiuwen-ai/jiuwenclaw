@@ -2,6 +2,8 @@ import ast
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -133,15 +135,21 @@ async def test_oversized_server_push_preserves_push_marker(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
+    stream_closed = False
+
     class FakeAgent:
         async def process_message_stream(self, request):
-            for index in range(2):
-                yield AgentResponseChunk(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    payload={"content": str(index)},
-                    is_complete=False,
-                )
+            nonlocal stream_closed
+            try:
+                for index in range(2):
+                    yield AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={"content": str(index)},
+                        is_complete=False,
+                    )
+            finally:
+                stream_closed = True
 
     server = agent_ws_server.AgentWebSocketServer.__new__(
         agent_ws_server.AgentWebSocketServer
@@ -161,6 +169,13 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
 
     foreground_manager = ForegroundManager()
     server._agent_manager = foreground_manager
+    server._heartbeat_runtime = SimpleNamespace(
+        is_available=True,
+        admission=SimpleNamespace(
+            begin_user=AsyncMock(),
+            end_user=AsyncMock(),
+        )
+    )
 
     async def get_agent(channel_id):
         return FakeAgent()
@@ -194,6 +209,7 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
     await server._handle_stream(FakeWebSocket(), request, asyncio.Lock())
 
     assert send_count == 1
+    assert stream_closed is True
     assert foreground_manager.events == ["begin", "end"]
 
 

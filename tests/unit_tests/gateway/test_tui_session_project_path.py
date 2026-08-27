@@ -18,6 +18,8 @@ from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
 
 
 class _TuiChannel:
+    channel_id = "tui"
+
     def __init__(self) -> None:
         self.local_handlers: dict[str, dict[str, object]] = {}
         self.responses: list[dict] = []
@@ -232,6 +234,40 @@ async def test_session_create_uses_server_allocated_project_path_for_resume(
 
     # 模拟 /resume current-dir：刚创建会话应命中（排除当前 sid 的逻辑由 list handler 负责）
     assert tui_session_matches_project_dir(data, project_dir) is True
+
+
+@pytest.mark.asyncio
+async def test_session_delete_delegates_heartbeat_lifecycle_to_agentserver() -> None:
+    class Agent:
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def send_request(self, env):  # noqa: ANN001
+            self.requests.append(env)
+            return SimpleNamespace(ok=True, payload={"session_id": "tui-session"})
+
+    channel = _TuiChannel()
+    agent = Agent()
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=channel,
+            agent_client=agent,
+            message_handler=object(),
+            path="/tui",
+        )
+    )
+
+    await channel.local_handlers["/tui"]["session.delete"](
+        object(),
+        "req-delete",
+        {"session_id": "tui-session"},
+        "current",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert len(agent.requests) == 1
+    assert agent.requests[0].method == "session.delete"
+    assert agent.requests[0].params == {"session_id": "tui-session"}
 
 
 @pytest.mark.asyncio

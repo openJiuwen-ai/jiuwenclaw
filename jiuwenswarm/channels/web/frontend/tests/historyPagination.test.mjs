@@ -98,6 +98,35 @@ test('continues automatic prefetch after a successful retry', async () => {
   assert.deepEqual(appliedPages, [3]);
 });
 
+test('prefetches later pages that contain additional Subagent activities', async () => {
+  const requestedPages = [];
+  const appliedActivityCounts = [];
+
+  const outcome = await prefetchHistoryPages({
+    initialLoadedPages: 1,
+    initialTotalPages: 2,
+    isCurrent: () => true,
+    fetchPage: async pageIdx => {
+      requestedPages.push(pageIdx);
+      return {
+        pageIdx,
+        totalPages: 2,
+        result: {
+          subagentReplay: [{ kind: 'activity', payload: { seq: pageIdx } }],
+        },
+      };
+    },
+    applyPage: page => {
+      appliedActivityCounts.push(page.result.subagentReplay.length);
+    },
+    waitForNextPaint: async () => {},
+  });
+
+  assert.equal(outcome, 'completed');
+  assert.deepEqual(requestedPages, [2]);
+  assert.deepEqual(appliedActivityCounts, [1]);
+});
+
 test('does not expose retry while a request is active or history is complete', () => {
   assert.equal(
     shouldShowHistoryRetry({

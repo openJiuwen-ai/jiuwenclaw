@@ -149,7 +149,16 @@ def _parse_skill_md(path: Path) -> dict[str, Any] | None:
 
 
 def _get_all_skills() -> tuple[set[str], list[dict[str, Any]]]:
-    """Discover all available skills (local + builtin) by scanning disk."""
+    """Discover available skills by scanning disk, filtered to "usable now".
+
+    只暴露用户当下能真正使用的 skill = 已安装且 enabled=true。具体剔除：
+    - 未安装：已卸载的目录磁盘上不在（不进集合）；builtin 目录里尚未安装的
+      跳过（installed=False，不进候选池，也不进校验集合）。
+    - 已安装但被禁用：skill 级禁用（enabled=false）与"插件禁用但未 reload"
+      两种状态只动 state、目录仍在原位，磁盘扫描会照扫到，故交叉 state 把
+      它们一并剔除。插件级禁用并 reload 过的目录被物理移进 _disabled_plugins
+      （下划线开头），已被 startswith("_") 跳过，这里不重复处理。
+    """
     try:
         from jiuwenswarm.common.utils import get_agent_skills_dir, get_builtin_skills_dir
         skills_dir = get_agent_skills_dir()
@@ -180,6 +189,25 @@ def _get_all_skills() -> tuple[set[str], list[dict[str, Any]]]:
                 skills.append(meta)
                 if is_installed:
                     installed_names.add(meta["name"])
+
+        # 只推"能用"的：候选池与校验集合都只保留已安装的 skill。builtin 未安装
+        # 的不进候选池（用户当下用不了），也不进校验集合（LLM 即便选了也会被 reject）。
+        skills = [s for s in skills if s.get("installed")]
+
+        # 交叉 state：剔除已安装但被禁用（enabled=false）的 skill。涵盖 skill 级
+        # 禁用与"插件禁用但未 reload"两种目录仍在原位的状态。
+        try:
+            from jiuwenswarm.server.runtime.skill.skilldev import (
+                load_execution_disabled_skills,
+            )
+            disabled = set(load_execution_disabled_skills())
+        except Exception as exc:
+            logger.debug("[ProactiveEngine] load disabled skills failed: %s", exc)
+            disabled = set()
+        if disabled:
+            skills = [s for s in skills if s.get("name") not in disabled]
+
+        installed_names = {s.get("name") for s in skills if s.get("name")}
         return installed_names, skills
     except Exception as exc:
         logger.warning("[ProactiveEngine] skill list load failed: %s", exc)

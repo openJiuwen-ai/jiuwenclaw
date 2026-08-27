@@ -17,6 +17,7 @@ import urllib3
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_requests_verify
+from jiuwenswarm.common.utils import env_url
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -353,7 +354,7 @@ def _perplexity_search_sync(query: str, max_results: int, timeout_seconds: int) 
     }
     response = _http_request(
         "POST",
-        os.environ.get("PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
+        env_url("PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
         headers={"Authorization": f"Bearer {perplexity_key}", "Content-Type": "application/json"},
         json=payload,
         timeout=timeout_seconds,
@@ -432,7 +433,7 @@ def _bocha_search_sync(query: str, max_results: int, timeout_seconds: int) -> di
 
     response = _http_request(
         "POST",
-        os.environ.get("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
+        env_url("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
         headers={"Authorization": f"Bearer {bocha_key}", "Content-Type": "application/json"},
         json={"query": query, "summary": True, "count": max_results},
         timeout=timeout_seconds,
@@ -453,7 +454,7 @@ def _serper_search_sync(query: str, max_results: int, timeout_seconds: int) -> d
 
     response = _http_request(
         "POST",
-        os.environ.get("SERPER_API_URL", "https://google.serper.dev/search"),
+        env_url("SERPER_API_URL", "https://google.serper.dev/search"),
         headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
         json={"q": query, "num": max_results},
         timeout=timeout_seconds,
@@ -482,7 +483,7 @@ def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
     }
     response = _http_request(
         "POST",
-        os.environ.get("JINA_API_URL", "https://deepsearch.jina.ai/v1/chat/completions"),
+        env_url("JINA_API_URL", "https://deepsearch.jina.ai/v1/chat/completions"),
         headers={"Authorization": f"Bearer {jina_key}", "Content-Type": "application/json"},
         json=payload,
         timeout=timeout_seconds,

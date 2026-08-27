@@ -4,11 +4,8 @@
 
 import importlib
 import os
-import sys
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from jiuwenswarm.common import utils
 
@@ -288,6 +285,20 @@ class TestUserWorkspace:
         # This test requires more complex mocking due to file operations
         # Simplified version
         pass
+
+
+def test_prepare_workspace_does_not_copy_legacy_heartbeat_template(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / ".jiuwenswarm"
+
+    utils.prepare_workspace(
+        overwrite=False,
+        preferred_language="en",
+        workspace_dir=workspace_dir,
+    )
+
+    assert not (workspace_dir / "agent" / "workspace" / "HEARTBEAT.md").exists()
 
 
 class TestConstants:

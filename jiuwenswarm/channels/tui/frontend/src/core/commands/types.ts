@@ -113,13 +113,13 @@ export interface CommandContext {
   ) => void;
   enterStatusView?: (tab?: StatusViewTab) => void;
   /**
-   * Open a file in the user's external editor. Blocks (synchronously) until
-   * the editor window closes — the TUI is frozen (non-operable) for the
-   * duration, mirroring Claude Code's editFileInEditor. When the editor
-   * exits, onDone is called so the caller can emit the "Opened memory file
-   * at <path>" line exactly once, after the user is done editing.
+   * Open a file in the user's external editor. The promise resolves after the
+   * editor closes. While it is open the TUI is frozen (non-operable),
+   * mirroring Claude Code's editFileInEditor. When the editor exits, onDone is
+   * called so the caller can report completion exactly once. A false result
+   * means neither the configured nor fallback editor launched.
    */
-  openInEditor?: (filePath: string, onDone?: () => void) => void;
+  openInEditor?: (filePath: string, onDone?: (success?: boolean) => void) => Promise<void>;
   /** Open a folder in system file explorer (Windows: explorer, macOS: open -R, Linux: xdg-open).
    * Returns true if an explorer was launched; false if no GUI explorer is
    * available (e.g. headless Linux server), so the caller can fall back to
@@ -145,6 +145,26 @@ export interface CommandContext {
   hasServerTask?: () => boolean;
   /** TaskLifecyclePort：等待型取消；只供 /switch 等生命周期动作使用。 */
   cancelAndWaitForIdle?: (options?: CancelAndWaitOptions) => Promise<void>;
+  /** Start a TUI-side PR watch: re-run /autofix-pr on an interval until green.
+   *  `autoApprove` grants run-scoped auto-approval; it must be applied inside
+   *  startPrWatch (after the prior watch's onStopped clears it, before the first
+   *  round is sent) so round 1 is auto-approved too. `preferredLanguage` localizes
+   *  the watch's own user-visible messages. */
+  startPrWatch?: (config: {
+    repo: string;
+    prNumber: string;
+    platform: string;
+    intervalMs?: number;
+    autoApprove?: boolean;
+    preferredLanguage?: PreferredLanguage;
+  }) => void;
+  /** Stop the active PR watch; returns true if one was running. */
+  stopPrWatch?: () => boolean;
+  /** Whether a PR watch is currently active. */
+  isPrWatchActive?: () => boolean;
+  /** Grant/revoke run-scoped auto-approval of tool-permission prompts (used by
+   *  /autofix-pr to auto-approve commands for the duration of a run). */
+  setAutofixAutoApprove?: (on: boolean) => void;
 }
 
 export interface SlashCommand {
@@ -162,6 +182,8 @@ export interface SlashCommand {
   argGuide?: string;
   /** 在/help中隐藏，但仍可执行 */
   hidden?: boolean;
+  /** 仅在后端开启技能自演进时显示在 help/补全中；直接输入仍可执行。 */
+  requiresSkillEvolution?: boolean;
   isSafeConcurrent?: boolean;
   kind: CommandKind;
   action: (ctx: CommandContext, args: string) => void | Promise<void>;

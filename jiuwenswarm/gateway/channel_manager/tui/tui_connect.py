@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import os
 import secrets
-import shutil
 import sys
 import time
 from dataclasses import dataclass
@@ -36,6 +36,7 @@ from jiuwenswarm.common.config import (
     update_preferred_language_in_config,
     update_swarmflow_budget_in_config,
     update_swarmflow_enabled_in_config,
+    update_skill_evolution_enabled_in_config,
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
@@ -51,6 +52,44 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
 )
 
 logger = logging.getLogger(__name__)
+
+_HARMONYOS_DEV_INIT_TASKS_ATTR = "_jiuwenswarm_harmonyos_dev_init_tasks"
+_TUI_EXPLICIT_EXIT_CANCEL_GRACE_SECONDS = 1.0
+
+
+def _get_harmonyos_dev_init_tasks(
+    ws: Any, *, create: bool
+) -> set[asyncio.Task[Any]] | None:
+    """Return the Dev Init tasks owned by a websocket."""
+    tasks = getattr(ws, _HARMONYOS_DEV_INIT_TASKS_ATTR, None)
+    if isinstance(tasks, set):
+        return tasks
+    if not create:
+        return None
+    tasks = set()
+    try:
+        setattr(ws, _HARMONYOS_DEV_INIT_TASKS_ATTR, tasks)
+    except Exception:
+        logger.debug(
+            "[harmonyos.dev_init] websocket does not support task tracking",
+            exc_info=True,
+        )
+        return None
+    return tasks
+
+
+async def _cancel_harmonyos_dev_init_tasks(ws: Any) -> None:
+    """Cancel and drain Dev Init tasks owned by a websocket."""
+    tracked = _get_harmonyos_dev_init_tasks(ws, create=False)
+    if tracked is None:
+        return
+    tasks = [task for task in tracked if isinstance(task, asyncio.Task)]
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    tracked.clear()
 
 
 class _ModelOpError(Exception):
@@ -223,6 +262,8 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "skills.toggle",
         "skills.install",
         "skills.import_local",
+        "skills.import_upload",
+        "skills.create_from_knowledge",
         "skills.marketplace.add",
         "skills.marketplace.remove",
         "skills.marketplace.toggle",
@@ -240,23 +281,34 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "skills.teamskillshub.validate",
         "skills.teamskillshub.pack",
         "skills.teamskillshub.search",
+        "skills.swarmskillshub.recommend",
         "skills.teamskillshub.install",
         "skills.teamskillshub.publish",
         "skills.teamskillshub.delete",
+        "skills.swarmskillshub.detail",
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
-        "symphony.build_score",
-        "symphony.pause_build",
-        "symphony.score_status",
-        "symphony.graph",
-        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
         "plugins.enable",
         "plugins.disable",
         "plugins.reload",
+        "agent_templates.list",
+        "agent_templates.show",
+        "agent_templates.file.list",
+        "agent_templates.file.read",
+        "agent_templates.create",
+        "agent_templates.import_local",
+        "agent_templates.install",
+        "agent_templates.uninstall",
+        "plugin_packages.list",
+        "plugin_packages.show",
+        "plugin_packages.create",
+        "plugin_packages.import_local",
+        "plugin_packages.install",
+        "plugin_packages.uninstall",
         "permissions.tools.get",
         "permissions.tools.update",
         "permissions.tools.delete",
@@ -327,6 +379,8 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "skills.toggle",
         "skills.install",
         "skills.import_local",
+        "skills.import_upload",
+        "skills.create_from_knowledge",
         "skills.marketplace.add",
         "skills.marketplace.remove",
         "skills.marketplace.toggle",
@@ -344,23 +398,34 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "skills.teamskillshub.validate",
         "skills.teamskillshub.pack",
         "skills.teamskillshub.search",
+        "skills.swarmskillshub.recommend",
         "skills.teamskillshub.install",
         "skills.teamskillshub.publish",
         "skills.teamskillshub.delete",
+        "skills.swarmskillshub.detail",
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
-        "symphony.build_score",
-        "symphony.pause_build",
-        "symphony.score_status",
-        "symphony.graph",
-        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
         "plugins.enable",
         "plugins.disable",
         "plugins.reload",
+        "agent_templates.list",
+        "agent_templates.show",
+        "agent_templates.file.list",
+        "agent_templates.file.read",
+        "agent_templates.create",
+        "agent_templates.import_local",
+        "agent_templates.install",
+        "agent_templates.uninstall",
+        "plugin_packages.list",
+        "plugin_packages.show",
+        "plugin_packages.create",
+        "plugin_packages.import_local",
+        "plugin_packages.install",
+        "plugin_packages.uninstall",
         "permissions.tools.get",
         "permissions.tools.update",
         "permissions.tools.delete",
@@ -416,6 +481,11 @@ class CliHandlersBindParams:
     on_config_saved: Any = None
     path: str = "/tui"
     cron_controller: Any = None
+    heartbeat_controller: Any = None
+    # AgentServer ConfigAdapter reuses the mature TUI command implementation
+    # inside the target user directory.  It must not proxy command.model back
+    # to Gateway a second time.
+    force_local_config: bool = False
 
 
 @dataclass
@@ -427,6 +497,8 @@ class CliRouteBindParams:
     path: str = "/tui"
     channel_id: str = "tui"
     cron_controller: Any = None
+    # 新 Heartbeat(线程续跑)controller,TUI 通道支持 heartbeat.job.* 调用。
+    heartbeat_controller: Any = None
     # V2: 委托 ws 注册的 TuiChannel 实例。GatewayServer 仍作 /tui ws 宿主 + 入站帧解析，
     # 但把 ws + RoutingKey 委托注册进 TuiChannel 的五维索引，出站由 ChannelManager
     # 派发到 TuiChannel.send（按 delivery.ws_id 物理寻址）。
@@ -472,7 +544,6 @@ _CLI_CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
     "teamskills_market_url": "TEAM_SKILLS_HUB_BASE_URL",
     "teamskills_user_token": "TEAM_SKILLS_HUB_USER_TOKEN",
     "teamskills_system_token": "TEAM_SKILLS_HUB_SYSTEM_TOKEN",
@@ -487,6 +558,7 @@ _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
     "preferred_language": update_preferred_language_in_config,
     "enable_swarmflow": update_swarmflow_enabled_in_config,
     "swarmflow_budget": update_swarmflow_budget_in_config,
+    "skill_evolution": update_skill_evolution_enabled_in_config,
     # Auto-Harness config items (stored in ~/.jiuwenswarm/auto-harness/config.yaml)
     # 用户名同时设置 git.user_name, fork_owner, gitcode.username（三者合一）
     "auto_harness_git_user_name": _update_auto_harness_git_user_name,
@@ -592,8 +664,8 @@ def _build_config_schema() -> list[dict]:
          "options": ["zh", "en"], "source": "yaml", "default": "zh"},
         {"key": "auto_recap_enabled", "label": "自动回顾", "group": "Features",
          "type": "toggle", "source": "yaml", "default": "true"},
-        {"key": "evolution_auto_scan", "label": "自动扫描技能", "group": "Features",
-         "type": "toggle", "source": "env", "default": "false"},
+        {"key": "skill_evolution", "label": "技能演进与创建", "group": "Features",
+         "type": "toggle", "source": "yaml", "default": "false"},
         # Auto-Harness (定时任务配置) - 合并为三项
         {"key": "auto_harness_git_user_name", "label": "用户名", "group": "Auto-Harness",
          "type": "string", "source": "yaml", "default": empty,
@@ -792,9 +864,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     on_config_saved = bind.on_config_saved
     path = bind.path
     cron_controller_ref = bind.cron_controller
+    heartbeat_controller_ref = bind.heartbeat_controller
+    force_local_config = bind.force_local_config
     from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
 
     third_agent = bind.third_agent if bind.third_agent is not None else get_unsupported_third_agent()
+    harmonyos_dev_init_tasks: dict[tuple[int, str], asyncio.Task[Any]] = {}
 
     async def _config_get(ws, req_id, params, session_id):
         payload = {
@@ -834,6 +909,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             _jiuwen_team_cfg = _team_cfg.get("jiuwen_team") or {}
             _swarmflow_enabled = bool(_jiuwen_team_cfg.get("enable_swarmflow", False))
             payload["enable_swarmflow"] = "true" if _swarmflow_enabled else "false"
+            # swarmflow budget ceiling (integer token limit; absent/None → unbounded)
+            _swarmflow_budget = _jiuwen_team_cfg.get("swarmflow_budget")
+            if _swarmflow_budget is not None:
+                payload["swarmflow_budget"] = str(_swarmflow_budget)
+            evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
+            payload["skill_evolution"] = (
+                "true" if evolution_cfg.get("skill_evolution", False) else "false"
+            )
 
             # Resolve model-related fields from config.yaml.
             # When models.defaults list is in use, it is the canonical source
@@ -895,6 +978,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("preferred_language", "zh")
+            payload.setdefault("skill_evolution", "false")
         
         # Auto-Harness config values (from ~/.jiuwenswarm/auto-harness/config.yaml)
         # 合并显示：用户名、邮箱、Access Token 三项
@@ -1343,8 +1427,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         )
 
     async def _session_list(ws, req_id, params, session_id, user_id=None):
-        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import fetch_agent_unary
 
         limit = 20
         if isinstance(params, dict):
@@ -1356,40 +1440,32 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         limit = max(1, min(limit, 200))
 
         real_client = _resolve_agent_client(agent_client)
+        # Preserve the pre-refactor single-user startup/offline behavior: the
+        # TUI can render an empty history before its AgentServer client exists.
         if real_client is None:
-            await channel.send_response(
-                ws, req_id, ok=True, payload={"sessions": []}
-            )
+            await channel.send_response(ws, req_id, ok=True, payload={"sessions": []})
             return
-        env = e2a_from_agent_fields(
-            request_id=req_id,
-            channel_id="tui",
-            session_id=session_id,
+        ok, payload = await fetch_agent_unary(
+            agent_client=real_client,
             req_method=ReqMethod.SESSION_LIST,
             params=params or {},
-            is_stream=False,
-            timestamp=time.time(),
             user_id=user_id,
+            session_id=session_id,
+            channel_id="tui",
+            label="session.list",
         )
-        try:
-            resp = await _send_tui_agent_request(
-                real_client, env, label="session.list",
-            )
-        except AgentRequestTimeoutError:
+        if not ok:
             await channel.send_response(
                 ws,
                 req_id,
                 ok=False,
-                error=AGENT_SERVER_TIMEOUT_ERROR,
-                code=AGENT_SERVER_TIMEOUT_CODE,
+                error=str(payload.get("error") or "session.list failed"),
+                code=str(payload.get("code") or "SERVICE_UNAVAILABLE"),
             )
             return
-        if not resp.ok:
-            await channel.send_response(ws, req_id, ok=False, error="session.list failed")
-            return
         all_sessions = (
-            resp.payload.get("sessions", [])
-            if isinstance(resp.payload, dict)
+            payload.get("sessions", [])
+            if isinstance(payload, dict)
             else []
         )
         # 过滤掉 None/非 dict/无效 session_id，防止前端 SelectList.render() 崩溃
@@ -1399,14 +1475,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 continue
             raw_sid = s.get("session_id")
             if isinstance(raw_sid, str):
-                session_id = raw_sid.strip()
+                normalized_session_id = raw_sid.strip()
             elif raw_sid is not None:
-                session_id = str(raw_sid).strip()
+                normalized_session_id = str(raw_sid).strip()
             else:
-                session_id = ""
-            if not session_id:
+                normalized_session_id = ""
+            if not normalized_session_id:
                 continue
-            s["session_id"] = session_id
+            s["session_id"] = normalized_session_id
             normalized_sessions.append(s)
         all_sessions = normalized_sessions
         # 按项目目录过滤 + 排除当前会话（对齐 /resume 行为）
@@ -1488,18 +1564,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
             )
             return
-        real_client = _resolve_agent_client(agent_client)
-        if real_client is None:
-            await channel.send_response(
-                ws,
-                req_id,
-                ok=False,
-                error="AgentServer is unavailable",
-                code="SERVICE_UNAVAILABLE",
-            )
-            return
-        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
         create_params = dict(params)
         requested_session_id = str(create_params.get("session_id") or "").strip()
@@ -1509,47 +1575,186 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             create_params["session_id"] = requested_session_id
         else:
             create_params.pop("session_id", None)
+            # Phase 3: the cwd → code project binding is resolved by the target
+            # AgentServer in its injected user directory; the Gateway only mints
+            # the prewarm claim token and forwards the raw params.
+            create_params.setdefault("create_token", secrets.token_hex(16))
+        await proxy_unary_request(
+            channel=channel,
+            agent_client=_resolve_agent_client(agent_client),
+            ws=ws,
+            req_id=req_id,
+            params=create_params,
+            session_id=None,
+            user_id=user_id or getattr(ws, "_gateway_user_id", None),
+            req_method=ReqMethod.SESSION_CREATE,
+            label="session.create",
+            default_error_code="SESSION_CREATE_FAILED",
+        )
+
+    async def _session_rebind_project(ws, req_id, params, session_id, user_id=None):
+        """TUI 专用：``/workspace set`` 切换工作目录时同步重绑当前 session 的 project。
+
+        会话运行态与 metadata 写入权由 AgentServer 持有，始终经 E2A 转发到
+        AgentServer 的 ``session.rebind_project`` handler（分离部署 / user_id 隔离
+        目录时，Gateway 本地写不会落到正确会话目录）。AgentOS 下 AgentServer
+        不可达时返回可重试错误；单用户 WebSocket 客户端与 AgentServer 共享目录，
+        恢复迁移前的本地重绑路径以保持离线可用性。
+        """
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import (
+            is_legacy_shared_directory_client,
+        )
+
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        target = str(params.get("session_id") or session_id or "").strip()
+        if not target:
+            await channel.send_response(
+                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
+            )
+            return
+        candidate_dir = str(params.get("project_dir") or "").strip()
+        if not candidate_dir:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project_dir is required", code="BAD_REQUEST"
+            )
+            return
+
+        forward_params = {
+            "session_id": target,
+            "project_dir": candidate_dir,
+            **{k: v for k, v in params.items() if k not in ("session_id", "project_dir")},
+        }
+        real_client = _resolve_agent_client(agent_client)
+        # A remote non-AgentOS extension (for example YuanRong) also has an
+        # isolated user directory.  Only the stock local WebSocket client may
+        # use the historical shared-directory fallback.
+        legacy_shared_dir = is_legacy_shared_directory_client(real_client)
+
+        async def _rebind_from_shared_dir() -> None:
+            """Pre-AgentOS behavior, valid only when both processes share one dir."""
             from jiuwenswarm.server.runtime.session.project_store import (
                 find_or_create_code_project_for_tui_params,
             )
-            project = find_or_create_code_project_for_tui_params(create_params)
-            if project is not None:
-                create_params["project_id"] = project.project_id
-                create_params["project_dir"] = project.project_dir
-                create_params["work_mode"] = project.work_mode
-            create_params.setdefault("create_token", secrets.token_hex(16))
-        env = e2a_from_agent_fields(
-            request_id=req_id,
-            channel_id="tui",
-            req_method=ReqMethod.SESSION_CREATE,
-            params=create_params,
-            is_stream=False,
-            timestamp=time.time(),
-            user_id=user_id or getattr(ws, "_gateway_user_id", None),
-        )
-        try:
-            response = await _send_tui_agent_request(
-                real_client, env, label="session.create"
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                get_session_metadata,
+                rebind_session_project,
             )
-        except Exception as exc:  # noqa: BLE001
+
+            if not get_session_metadata(target):
+                await channel.send_response(
+                    ws, req_id, ok=False, error="session not found", code="NOT_FOUND"
+                )
+                return
+            try:
+                project = find_or_create_code_project_for_tui_params(
+                    {"project_dir": candidate_dir}
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[tui] session.rebind_project: resolve project failed: %s", exc
+                )
+                await channel.send_response(
+                    ws, req_id, ok=False, error=str(exc), code="PROJECT_RESOLVE_FAILED"
+                )
+                return
+            if project is None:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="project_dir must be a non-empty absolute path",
+                    code="BAD_REQUEST",
+                )
+                return
+            updated = rebind_session_project(
+                session_id=target,
+                project_id=project.project_id,
+                project_dir=project.project_dir,
+                work_mode=project.work_mode,
+            )
+            if not updated:
+                await channel.send_response(
+                    ws, req_id, ok=False, error="session not found", code="NOT_FOUND"
+                )
+                return
             await channel.send_response(
-                ws, req_id, ok=False, error=str(exc), code="SERVICE_UNAVAILABLE"
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "session_id": target,
+                    "project_id": project.project_id,
+                    "project_dir": project.project_dir,
+                    "project_name": project.name,
+                    "work_mode": project.work_mode,
+                },
+            )
+
+        # 与 e2a_proxy 的判定语义对齐：兼容/扩展 client 可能不暴露
+        # ``server_ready``，缺省视为可达，只有显式 False 才视为不可达。
+        if real_client is None or getattr(real_client, "server_ready", True) is False:
+            if legacy_shared_dir:
+                await _rebind_from_shared_dir()
+                return
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="AgentServer is unavailable", code="SERVICE_UNAVAILABLE",
             )
             return
-        payload = dict(response.payload or {}) if isinstance(response.payload, dict) else {}
+        try:
+            env = e2a_from_agent_fields(
+                request_id=req_id,
+                channel_id="tui",
+                session_id=target,
+                req_method=ReqMethod.SESSION_REBIND_PROJECT,
+                params=forward_params,
+                is_stream=False,
+                timestamp=time.time(),
+                user_id=user_id or getattr(ws, "_gateway_user_id", None),
+            )
+            resp = await _send_tui_agent_request(
+                real_client, env, label="session.rebind_project",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[tui] session.rebind_project forward to agent failed: %s", exc
+            )
+            if legacy_shared_dir:
+                await _rebind_from_shared_dir()
+                return
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="SERVICE_UNAVAILABLE",
+            )
+            return
+        pl = resp.payload if isinstance(resp.payload, dict) else {}
+        if resp.ok:
+            await channel.send_response(ws, req_id, ok=True, payload=pl)
+            return
+        err = pl.get("error", "session.rebind_project failed")
+        code = pl.get("code") or None
+        if isinstance(code, str) and not code.strip():
+            code = None
         await channel.send_response(
-            ws,
-            req_id,
-            ok=bool(response.ok),
-            payload=payload if response.ok else None,
-            error=None if response.ok else str(payload.get("error") or "session.create failed"),
-            code=None if response.ok else str(payload.get("code") or "SESSION_CREATE_FAILED"),
+            ws, req_id, ok=False, error=str(err), code=code,
         )
 
+
     async def _session_delete(ws, req_id, params, session_id, user_id=None):
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
-        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        """删除一个 session（统一薄代理 E2A 转发 + 单用户共享目录适配器 fallback）。
+
+        Phase 4 整合：手写 E2A 与本地删除收敛到 ``proxy_unary_request``——
+        AgentOS 下 AgentServer 不可达返回可重试错误；单用户 WebSocket 客户端
+        不可达时由薄代理跑 SessionAdapter 的文件级删除（共享目录等价，保持
+        迁移前离线可用性）；client 未构造（ac=None）返回 SERVICE_UNAVAILABLE。
+        """
         from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1562,113 +1767,38 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
             )
             return
-        real_client = (
-            agent_client.get("value")
-            if isinstance(agent_client, dict)
-            else agent_client
+        await proxy_unary_request(
+            channel=channel,
+            agent_client=_resolve_agent_client(agent_client),
+            ws=ws,
+            req_id=req_id,
+            params=params,
+            session_id=session_id,
+            user_id=user_id,
+            req_method=ReqMethod.SESSION_DELETE,
+            label="session.delete",
         )
-        if real_client is not None:
-            try:
-                env = e2a_from_agent_fields(
-                    request_id=req_id,
-                    channel_id="tui",
-                    session_id=session_id,
-                    req_method=ReqMethod.SESSION_DELETE,
-                    params=params,
-                    is_stream=False,
-                    timestamp=time.time(),
-                    user_id=user_id,
-                )
-                resp = await _send_tui_agent_request(
-                    real_client, env, label="session.delete",
-                )
-                if resp.ok:
-                    pl = resp.payload if isinstance(resp.payload, dict) else {}
-                    await channel.send_response(ws, req_id, ok=True, payload=pl)
-                    return
-                pl = resp.payload if isinstance(resp.payload, dict) else {}
-                err = pl.get("error", "session.delete failed")
-                code = pl.get("code") or None
-                if isinstance(code, str) and not code.strip():
-                    code = None
-                await channel.send_response(
-                    ws,
-                    req_id,
-                    ok=False,
-                    error=str(err),
-                    code=code,
-                )
-                return
-            except Exception as e:
-                logger.warning("[cli session.delete] forward to agent failed, fallback local: %s", e)
-
-        metadata = get_session_metadata(target)
-        if str(metadata.get("mode") or "").strip().lower() == "team":
-            await channel.send_response(
-                ws,
-                req_id,
-                ok=False,
-                error="team session delete requires agent server",
-                code="AGENT_UNAVAILABLE",
-            )
-            return
-        from jiuwenswarm.common.utils import get_agent_sessions_dir
-        from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
-
-        session_dir, invalid_reason = resolve_session_dir(
-            target, sessions_root=get_agent_sessions_dir()
-        )
-        if session_dir is None:
-            await channel.send_response(
-                ws, req_id, ok=False, error=invalid_reason or "invalid session_id", code="BAD_REQUEST"
-            )
-            return
-        if not session_dir.exists():
-            await channel.send_response(
-                ws, req_id, ok=False, error="session not found", code="NOT_FOUND"
-            )
-            return
-        if not session_dir.is_dir():
-            await channel.send_response(
-                ws,
-                req_id,
-                ok=False,
-                error="session is not a directory",
-                code="BAD_REQUEST",
-            )
-            return
-
-        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
-            evict_session_kv_cache,
-        )
-
-        try:
-            await evict_session_kv_cache(
-                session_id=target,
-                parent_session_id=target,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[cli session.delete] KV cache evict hook failed during local fallback; "
-                "continuing: session_id=%s error=%s",
-                target,
-                exc,
-            )
-        shutil.rmtree(session_dir)
-        await channel.send_response(ws, req_id, ok=True, payload={"session_id": target})
 
     async def _forward_rewind_e2a(params: ForwardRewindE2AParams) -> bool:
         """Try to forward a rewind request to AgentServer via E2A.
 
         Returns True if the request was successfully handled by AgentServer.
-        Returns False if E2A is unavailable or AgentServer returned an error,
-        so the caller should fall back to local-only processing.
+        In AgentOS, failures are returned to the client and never fall back to
+        the Gateway deployment directory.  The legacy local fallback remains
+        available only for the single-user WebSocket client.
         """
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.gateway.routing.e2a_proxy import (
+            is_legacy_shared_directory_client,
+        )
 
         real_client = _resolve_agent_client(agent_client)
         if real_client is None:
-            return False
+            await channel.send_response(
+                params.ws, params.req_id, ok=False,
+                error="AgentServer is unavailable", code="SERVICE_UNAVAILABLE",
+            )
+            return True
 
         try:
             env = e2a_from_agent_fields(
@@ -1690,11 +1820,71 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 return True
             pl = resp.payload if isinstance(resp.payload, dict) else {}
             err = pl.get("error", params.error_label)
+            if not is_legacy_shared_directory_client(real_client):
+                await channel.send_response(
+                    params.ws, params.req_id, ok=False, error=str(err),
+                    code=pl.get("code") or "BAD_REQUEST",
+                )
+                return True
             logger.warning("[cli %s] AgentServer returned error, fallback local: %s", params.error_label, err)
             return False
         except Exception as e:
+            if not is_legacy_shared_directory_client(real_client):
+                await channel.send_response(
+                    params.ws, params.req_id, ok=False, error=str(e),
+                    code="SERVICE_UNAVAILABLE",
+                )
+                return True
             logger.warning("[cli %s] forward to agent failed, fallback local: %s", params.error_label, e)
             return False
+
+    async def _forward_tui_unary(
+        ws, req_id, params, session_id, user_id, *, req_method, label
+    ) -> bool:
+        """Forward a TUI user-state operation; only legacy mode may fall back."""
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.gateway.routing.e2a_proxy import (
+            is_legacy_shared_directory_client,
+        )
+
+        real_client = _resolve_agent_client(agent_client)
+        if real_client is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="AgentServer is unavailable",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return True
+        try:
+            env = e2a_from_agent_fields(
+                request_id=req_id,
+                channel_id="tui",
+                session_id=session_id,
+                req_method=req_method,
+                params=params if isinstance(params, dict) else {},
+                is_stream=False,
+                timestamp=time.time(),
+                user_id=user_id,
+            )
+            response = await _send_tui_agent_request(real_client, env, label=label)
+        except Exception as exc:  # noqa: BLE001
+            if not is_legacy_shared_directory_client(real_client):
+                await channel.send_response(
+                    ws, req_id, ok=False, error=str(exc), code="SERVICE_UNAVAILABLE"
+                )
+                return True
+            return False
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        if response.ok:
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+            return True
+        if not is_legacy_shared_directory_client(real_client):
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=str(payload.get("error") or f"{label} failed"),
+                code=payload.get("code") or "BAD_REQUEST",
+            )
+            return True
+        return False
 
     async def _compact_partial_via_e2a(
         target_sid: str,
@@ -1790,8 +1980,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         except Exception as e:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
-    async def _history_list_turns(ws, req_id, params, session_id):
+    async def _history_list_turns(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.agents.harness.common.session_ops_service import list_session_turns
+        from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(params, dict):
             params = {}
@@ -1800,6 +1991,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(
                 ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
             )
+            return
+        forward_params = dict(params)
+        forward_params["session_id"] = target_sid
+        if await _forward_tui_unary(
+            ws, req_id, forward_params, target_sid, user_id,
+            req_method=ReqMethod.HISTORY_LIST_TURNS, label="history.list_turns",
+        ):
             return
         try:
             result = list_session_turns(session_id=target_sid)
@@ -1868,9 +2066,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         except Exception as e:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
-    async def _session_restore_files(ws, req_id, params, session_id):
+    async def _session_restore_files(ws, req_id, params, session_id, user_id=None):
         """session.restore_files: 仅恢复文件，不截断对话."""
         from jiuwenswarm.agents.harness.common.session_ops_service import restore_session_files
+        from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1895,6 +2094,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(
                 ws, req_id, ok=False, error="turn_index must be an integer", code="BAD_REQUEST"
             )
+            return
+        forward_params = dict(params)
+        forward_params["session_id"] = target_sid
+        forward_params["turn_index"] = turn_index
+        if await _forward_tui_unary(
+            ws, req_id, forward_params, target_sid, user_id,
+            req_method=ReqMethod.SESSION_RESTORE_FILES, label="session.restore_files",
+        ):
             return
         try:
             result = restore_session_files(session_id=target_sid, turn_index=turn_index)
@@ -1937,6 +2144,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             )
             return
 
+        from jiuwenswarm.gateway.routing.e2a_proxy import is_agentos_routing_client
+
+        real_client = _resolve_agent_client(agent_client)
+        agentos_routing = is_agentos_routing_client(real_client)
         try:
             llm_summary, summarized_count = await _compact_partial_via_e2a(
                 target_sid, turn_index, direction, user_id=user_id
@@ -1950,11 +2161,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
 
-        real_client = (
-            agent_client.get("value")
-            if isinstance(agent_client, dict)
-            else agent_client
-        )
         if real_client is not None:
             try:
                 env = e2a_from_agent_fields(
@@ -1984,7 +2190,19 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     return
                 logger.warning("[cli command.rewind_compact] E2A failed: %s", resp.payload)
             except Exception as e:
+                if agentos_routing:
+                    await channel.send_response(
+                        ws, req_id, ok=False, error=str(e), code="SERVICE_UNAVAILABLE"
+                    )
+                    return
                 logger.warning("[cli command.rewind_compact] E2A failed, fallback local: %s", e)
+
+        if agentos_routing:
+            await channel.send_response(
+                ws, req_id, ok=False, error="AgentServer is unavailable",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
 
         # Fallback: local truncation + record writing
         try:
@@ -2005,187 +2223,60 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _session_rename(ws, req_id, params, session_id, user_id=None):
-        """优先经 E2A 转发至 AgentWebSocketServer._handle_session_rename；无 agent 或转发失败时本地回退。"""
-        from jiuwenswarm.server.runtime.session.session_rename import apply_session_rename
-        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        """优先经 E2A 转发至 AgentServer；单用户共享目录不可达时由薄代理跑
+        SessionAdapter（``apply_session_rename`` 同一中立门面）本地回退。"""
         from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
-        real_client = _resolve_agent_client(agent_client)
-        if real_client is not None:
-            try:
-                env = e2a_from_agent_fields(
-                    request_id=req_id,
-                    channel_id="tui",
-                    session_id=session_id,
-                    req_method=ReqMethod.SESSION_RENAME,
-                    params=params if isinstance(params, dict) else {},
-                    is_stream=False,
-                    timestamp=time.time(),
-                    user_id=user_id,
-                )
-                resp = await _send_tui_agent_request(
-                    real_client, env, label="session.rename",
-                )
-                if resp.ok:
-                    pl = resp.payload if isinstance(resp.payload, dict) else {}
-                    await channel.send_response(ws, req_id, ok=True, payload=pl)
-                    return
-                pl = resp.payload if isinstance(resp.payload, dict) else {}
-                err = pl.get("error", "session.rename failed")
-                code = pl.get("code") or None
-                if isinstance(code, str) and not code.strip():
-                    code = None
-                await channel.send_response(
-                    ws, req_id, ok=False, error=str(err), code=code
-                )
-                return
-            except Exception as e:
-                logger.warning(
-                    "[cli session.rename] forward to agent failed, fallback local: %s",
-                    e,
-                )
-
-        ok, payload, err, code = apply_session_rename(
-            params,
-            session_id,
-            init_channel_id="tui",
-        )
-        if ok:
-            await channel.send_response(ws, req_id, ok=True, payload=payload or {})
-        else:
-            await channel.send_response(
-                ws,
-                req_id,
-                ok=False,
-                error=err or "session.rename failed",
-                code=code,
-            )
-
-    async def _session_color_set(ws, req_id, params, session_id):
-        """设置 session 的 accent_color。"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            get_session_metadata,
-            _write_metadata_sync,
-            _read_metadata,
+        await proxy_unary_request(
+            channel=channel,
+            agent_client=_resolve_agent_client(agent_client),
+            ws=ws,
+            req_id=req_id,
+            params=params if isinstance(params, dict) else {},
+            session_id=session_id,
+            user_id=user_id,
+            req_method=ReqMethod.SESSION_RENAME,
+            label="session.rename",
         )
 
-        if not isinstance(params, dict):
-            await channel.send_response(
-                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
-            )
-            return
-        target = str(params.get("session_id") or session_id).strip()
-        if not target:
-            await channel.send_response(
-                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
-            )
-            return
+    async def _session_color_set(ws, req_id, params, session_id, user_id=None):
+        """设置/查询 session 的 accent_color（统一薄代理：AgentServer 注入目录 metadata）。
 
-        color = params.get("color")
-        valid_colors = ["default", "blue", "green", "pink", "purple", "red", "yellow"]
+        Phase 2 起经 e2a_proxy 转发 SessionAdapter（SESSION_COLOR_SET）；单用户
+        WebSocket 客户端在 AgentServer 不可达时由薄代理回落到 Gateway 本地执行
+        同一适配器（共享目录），保持迁移前的离线可用性。
+        """
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
-        if color is None:
-            # 查询模式
-            metadata = get_session_metadata(target)
-            accent_color = metadata.get("accent_color", "default") if metadata else "default"
-            await channel.send_response(
-                ws, req_id, ok=True,
-                payload={"session_id": target, "accent_color": accent_color}
-            )
-            return
-
-        if str(color) not in valid_colors:
-            await channel.send_response(
-                ws, req_id, ok=False, error=f"invalid color: {color}", code="BAD_REQUEST"
-            )
-            return
-
-        # 设置模式 - 同步写入确保跨进程可见
-        metadata = _read_metadata(target)
-        metadata["accent_color"] = str(color)
-        _write_metadata_sync(target, metadata)
-        await channel.send_response(
-            ws, req_id, ok=True,
-            payload={"session_id": target, "accent_color": str(color)}
+        await proxy_unary_request(
+            channel=channel,
+            agent_client=_resolve_agent_client(agent_client),
+            ws=ws,
+            req_id=req_id,
+            params=params if isinstance(params, dict) else {},
+            session_id=session_id,
+            user_id=user_id,
+            req_method=ReqMethod.SESSION_COLOR_SET,
+            label="session.color_set",
         )
 
-    async def _session_preview(ws, req_id, params, session_id):
-        """获取 session 预览信息，包括最新几条完整对话内容。"""
-        from jiuwenswarm.server.runtime.session.session_history import load_history_records
+    async def _session_preview(ws, req_id, params, session_id, user_id=None):
+        """获取 session 预览信息（统一薄代理：AgentServer 注入目录 history 白名单过滤）。"""
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
-        if not isinstance(params, dict):
-            await channel.send_response(
-                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
-            )
-            return
-        target = str(params.get("session_id") or session_id).strip()
-        if not target:
-            await channel.send_response(
-                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
-            )
-            return
-
-        # 预览消息数量，默认 30 条
-        preview_count = 30
-        raw_count = params.get("count")
-        if isinstance(raw_count, int):
-            preview_count = max(1, min(raw_count, 100))
-        elif isinstance(raw_count, str) and raw_count.strip().isdigit():
-            preview_count = max(1, min(int(raw_count.strip()), 100))
-
-        # 读取历史记录（自动兼容 history.json 和 history.jsonl）
-        preview_messages = []
-        try:
-            raw = load_history_records(target)
-            if isinstance(raw, list):
-                # history.json 的写入很宽松：interface.py 中所有 event_type 以 "chat." 开头
-                # 的记录（外加 team.message）都会以 role="assistant" 落盘，因此历史里混有大量
-                # 非对话内容。预览只需展示真正代表"对话"的两类，用白名单显式放行：
-                #   - chat.final ：assistant 的完整最终回复（单人模式与团队成员回复都用它）
-                #   - team.message：团队消息
-                # 刻意排除（均非完整对话文本，纳入会造成碎片化/重复/噪声）：
-                #   - chat.delta（流式增量片段，内容已包含在 chat.final 中）
-                #   - chat.reasoning（思考过程）/ chat.tool_call / chat.tool_update / chat.tool_result
-                #   - chat.error / chat.processing_status / chat.usage_* / chat.media / chat.file 等
-                # 注：用白名单而非黑名单，是为了让将来新增的 chat.* 状态类型不会意外混入预览。
-                _chat_event_types = frozenset({
-                    "chat.final",  # assistant 最终回复
-                    "team.message",  # team 消息
-                })
-
-                def _is_previewable(item):
-                    if not isinstance(item, dict):
-                        return False
-                    role = item.get("role")
-                    content = item.get("content")
-                    has_content = isinstance(content, str) and bool(content.strip())
-                    if role == "user":
-                        return has_content
-                    # 非 user 记录只放行白名单内的对话类型（不依赖 role，
-                    # 以兼容团队成员回复可能带 teammate 等非 assistant role 的情况）
-                    event_type = item.get("event_type")
-                    if event_type in _chat_event_types:
-                        return has_content
-                    return False
-
-                previewable = [item for item in raw if _is_previewable(item)]
-                # 取时间顺序下最新的 N 条（保持原顺序：旧的在上、新的在下）
-                recent = previewable[-preview_count:]
-                for msg in recent:
-                    role = msg.get("role", "unknown")
-                    content = msg.get("content", "")
-                    event_type = msg.get("event_type", "")
-                    preview_messages.append({
-                        "role": role,
-                        "content": content if isinstance(content, str) else "",
-                        "event_type": event_type,
-                    })
-        except Exception as exc:
-            logger.warning("[session.preview] read history failed: %s", exc)
-
-        await channel.send_response(
-            ws, req_id, ok=True,
-            payload={"session_id": target, "preview_messages": preview_messages}
+        await proxy_unary_request(
+            channel=channel,
+            agent_client=_resolve_agent_client(agent_client),
+            ws=ws,
+            req_id=req_id,
+            params=params if isinstance(params, dict) else {},
+            session_id=session_id,
+            user_id=user_id,
+            req_method=ReqMethod.SESSION_PREVIEW,
+            label="session.preview",
         )
 
     async def _chat_send(ws, req_id, params, session_id):
@@ -2206,42 +2297,55 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _tui_disconnect_request(ws, req_id, params, session_id):
+        await _cancel_harmonyos_dev_init_tasks(ws)
         payload = {"accepted": True, "session_id": session_id}
-        try:
-            await channel.send_response(ws, req_id, ok=True, payload=payload)
-        except Exception:
-            logger.debug("[tui.disconnect] response skipped on closed ws", exc_info=True)
-
         mh = bind.message_handler
         sid = (session_id or "").strip()
         owns_session = True
         is_bound_to_client = getattr(channel, "is_session_bound_to_client", None)
         if callable(is_bound_to_client):
             owns_session = bool(is_bound_to_client("tui", sid, ws))
+        cleanup_handed_off = not (mh is not None and sid and owns_session)
         if mh is not None and sid and owns_session:
-            cleaned = await mh.cancel_agent_sessions_on_disconnect(
-                [("tui", sid)],
-                user_id=getattr(ws, "_gateway_user_id", None),
+            schedule_cleanup = getattr(
+                mh, "schedule_cancel_agent_sessions_on_disconnect", None
             )
-            if not cleaned:
+            try:
+                if callable(schedule_cleanup):
+                    await schedule_cleanup(
+                        [("tui", sid)],
+                        delay_seconds=_TUI_EXPLICIT_EXIT_CANCEL_GRACE_SECONDS,
+                        user_id=getattr(ws, "_gateway_user_id", None),
+                    )
+                    cleanup_handed_off = True
+                else:
+                    cleanup_handed_off = bool(
+                        await mh.cancel_agent_sessions_on_disconnect(
+                            [("tui", sid)],
+                            user_id=getattr(ws, "_gateway_user_id", None),
+                        )
+                    )
+            except Exception:
                 logger.warning(
-                    "[tui.disconnect] immediate cleanup failed; "
+                    "[tui.disconnect] cleanup handoff failed; "
                     "transport-close fallback remains enabled: session_id=%s",
                     sid,
+                    exc_info=True,
                 )
-                return
-            # Only suppress the transport-close fallback after the immediate
-            # cleanup has completed.  The TUI process can disappear after the
-            # acknowledgement and cancel this handler; marking the websocket
-            # earlier would make _tui_disconnect skip the only remaining
-            # cleanup path and leak the session runtime.
+
+        # The delayed cleanup is registered before acknowledging the exit.
+        # A replacement TUI binding cancels it, so cleanup from the old window
+        # cannot race with and cancel the newly started session.
+        if cleanup_handed_off:
             try:
                 setattr(ws, "_jiuwenswarm_tui_user_exit", True)
             except Exception:
-                logger.debug(
-                    "[tui.disconnect] mark completed user exit failed",
-                    exc_info=True,
-                )
+                logger.debug("[tui.disconnect] mark user exit failed", exc_info=True)
+
+        try:
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except Exception:
+            logger.debug("[tui.disconnect] response skipped on closed ws", exc_info=True)
 
     async def _chat_user_answer(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
@@ -2266,10 +2370,256 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 payload["page_idx"] = params.get("page_idx")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
-    async def _command_model(ws, req_id, params, session_id, user_id=None):
-        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
+    async def _harmonyos_dev_init(ws, req_id, params, session_id, user_id=None):
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        raw_operation_id = params.get("operationId")
+        operation_id = str(raw_operation_id or req_id).strip()
+        if (
+            not operation_id
+            or len(operation_id) > 128
+            or not all(char.isalnum() or char in "-_." for char in operation_id)
+        ):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid HarmonyOS Dev Init operationId",
+                code="BAD_REQUEST",
+            )
+            return
 
+        task_key = (id(ws), operation_id)
+        existing = harmonyos_dev_init_tasks.get(task_key)
+        if existing is not None and not existing.done():
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=f"HarmonyOS Dev Init operation is already running: {operation_id}",
+                code="CONFLICT",
+            )
+            return
+
+        run_params = dict(params)
+        run_params.pop("operationId", None)
+        tracked_tasks = _get_harmonyos_dev_init_tasks(ws, create=True)
+        if tracked_tasks is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="websocket does not support HarmonyOS Dev Init task tracking",
+                code="INTERNAL_ERROR",
+            )
+            return
+
+        async def _run_harmonyos_dev_init_operation() -> None:
+            try:
+                from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+                from jiuwenswarm.common.schema.message import ReqMethod
+                from jiuwenswarm.gateway.routing.e2a_proxy import (
+                    is_legacy_shared_directory_client,
+                )
+
+                pl: dict[str, Any] = {}
+                real_client = _resolve_agent_client(agent_client)
+                try:
+                    if real_client is None:
+                        await channel.send_response(
+                            ws, req_id, ok=False,
+                            error="AgentServer is unavailable",
+                            code="SERVICE_UNAVAILABLE",
+                        )
+                        return
+                    env = e2a_from_agent_fields(
+                        request_id=req_id,
+                        channel_id="tui",
+                        session_id=session_id,
+                        req_method=ReqMethod.HARMONYOS_DEV_INIT,
+                        params=run_params,
+                        is_stream=False,
+                        timestamp=time.time(),
+                        user_id=user_id or getattr(ws, "_gateway_user_id", None),
+                    )
+                    # dev_init 是长时操作（npm install 可达数分钟），豁免 TUI unary
+                    # 超时上限，生命周期由本任务的取消机制控制。
+                    response = await send_agent_request_with_timeout(
+                        real_client,
+                        env,
+                        label="tui harmonyos.dev_init",
+                        timeout_seconds=None,
+                    )
+                except Exception as exc:
+                    # 单用户共享目录回退：默认本地 WebSocket client 与 Gateway
+                    # 共用 ~/.jiuwenswarm，传输层不可达时在 Gateway 进程内直接
+                    # 执行（与迁移前行为一致）。远程/AgentOS client 不回退，
+                    # 向上抛错。业务失败（AgentServer 已正常执行并返回
+                    # ok=False）不走此回退，避免本地重复执行长时操作。
+                    if not is_legacy_shared_directory_client(real_client):
+                        raise
+                    logger.warning(
+                        "[harmonyos.dev_init] E2A unavailable, fall back to local "
+                        "execution: %s",
+                        exc,
+                    )
+                    from jiuwenswarm.server.runtime.harmonyos.harmonyos_dev import (
+                        run_harmonyos_dev_init,
+                    )
+
+                    pl = await run_harmonyos_dev_init(dict(run_params))
+                else:
+                    if response.payload is not None and isinstance(response.payload, dict):
+                        pl = response.payload
+                    if not response.ok:
+                        raise RuntimeError(
+                            str(pl.get("error") or "harmonyos.dev_init failed")
+                        )
+                await channel.send_response(ws, req_id, ok=True, payload=pl)
+            except asyncio.CancelledError:
+                logger.info(
+                    "[harmonyos.dev_init] cancelled: operation_id=%s", operation_id
+                )
+                with contextlib.suppress(Exception):
+                    await channel.send_response(
+                        ws,
+                        req_id,
+                        ok=False,
+                        error="HarmonyOS Dev Init operation was cancelled",
+                        code="CANCELLED",
+                    )
+                raise
+            except Exception as exc:
+                logger.warning("[harmonyos.dev_init] failed: %s", exc)
+                with contextlib.suppress(Exception):
+                    await channel.send_response(
+                        ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+                    )
+            finally:
+                current = asyncio.current_task()
+                if harmonyos_dev_init_tasks.get(task_key) is current:
+                    harmonyos_dev_init_tasks.pop(task_key, None)
+
+        task = asyncio.create_task(
+            _run_harmonyos_dev_init_operation(),
+            name=f"harmonyos-dev-init:{operation_id}",
+        )
+        harmonyos_dev_init_tasks[task_key] = task
+
+        def _forget_task(done_task: asyncio.Task[Any]) -> None:
+            if harmonyos_dev_init_tasks.get(task_key) is done_task:
+                harmonyos_dev_init_tasks.pop(task_key, None)
+
+        task.add_done_callback(_forget_task)
+        tracked_tasks.add(task)
+        task.add_done_callback(tracked_tasks.discard)
+
+    async def _harmonyos_dev_init_cancel(ws, req_id, params, session_id):
+        del session_id
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        operation_id = str(params.get("operationId") or "").strip()
+        if (
+            not operation_id
+            or len(operation_id) > 128
+            or not all(char.isalnum() or char in "-_." for char in operation_id)
+        ):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid HarmonyOS Dev Init operationId",
+                code="BAD_REQUEST",
+            )
+            return
+
+        task = harmonyos_dev_init_tasks.get((id(ws), operation_id))
+        if task is None or task.done():
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "operationId": operation_id,
+                    "cancelRequested": False,
+                    "cancelled": bool(task and task.cancelled()),
+                },
+            )
+            return
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "operationId": operation_id,
+                "cancelRequested": True,
+                "cancelled": task.cancelled(),
+            },
+        )
+
+    async def _harmonyos_project_init(ws, req_id, params, session_id, user_id=None):
+        """HarmonyOS 项目检查（Phase 3：项目上下文持久化在目标 AgentServer 注入目录）。
+
+        Phase 4 整合：统一薄代理 E2A 转发（HarmonyOSAdapter）；单用户共享目录
+        不可达时由薄代理跑同一适配器（保持离线可用）。
+        """
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
+
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        await proxy_unary_request(
+            channel=channel,
+            agent_client=_resolve_agent_client(agent_client),
+            ws=ws,
+            req_id=req_id,
+            params=dict(params),
+            session_id=session_id,
+            user_id=user_id or getattr(ws, "_gateway_user_id", None),
+            req_method=ReqMethod.HARMONYOS_PROJECT_INIT,
+            label="harmonyos.project_init",
+            default_error_code="INTERNAL_ERROR",
+        )
+
+    async def _command_model(ws, req_id, params, session_id, user_id=None):
+        from jiuwenswarm.common.schema.message import ReqMethod
+        # The legacy implementation below reads/writes config.yaml directly.
+        # Any remote AgentServer has its own user directory.  Only the default
+        # local WebSocket client shares Gateway's directory and can use the
+        # legacy implementation below.
+        from jiuwenswarm.gateway.routing.e2a_proxy import (
+            is_legacy_shared_directory_client,
+            proxy_unary_request,
+        )
+
+        resolved_client = _resolve_agent_client(agent_client)
+        if (
+            not force_local_config
+            and resolved_client is not None
+            and not is_legacy_shared_directory_client(resolved_client)
+        ):
+            await proxy_unary_request(
+                channel=channel, agent_client=resolved_client, ws=ws,
+                req_id=req_id, params=params if isinstance(params, dict) else {},
+                session_id=session_id,
+                user_id=user_id or getattr(ws, "_gateway_user_id", None),
+                req_method=ReqMethod.COMMAND_MODEL, label="command.model",
+            )
+            return
+
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         if not isinstance(params, dict):
             params = {}
         action = params.get("action")
@@ -2656,15 +3006,18 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 payload["current"] = _first_alias or _first_name or os.getenv("MODEL_NAME", "unknown")
                 payload["current_model_name"] = _first_name or os.getenv("MODEL_NAME", "unknown")
 
-                def _model_meta(i: int, e: dict) -> dict:
+                def _model_meta(i: int, e: dict, *, is_agentos: bool = False) -> dict:
                     mcc = e.get("model_client_config") or {}
                     mco = e.get("model_config_obj") or {}
                     _alias = e.get("alias", "")
                     _resolved_alias = resolve_env_vars(str(_alias)) if _alias else ""
                     _model_name = resolve_env_vars(str(mcc.get("model_name", "")))
                     _api_key = resolve_env_vars(str(mcc.get("api_key", "")))
+                    # agentos 条目 index 用 "a" 前缀编码，与 defaults 的纯数字 index 区分，
+                    # 避免切换时按 index 命中错位。is_current 仅 defaults 首位为 true
+                    # （agentos 永不抢默认，不会是 current）。
                     return {
-                        "index": i,
+                        "index": f"a{i}" if is_agentos else i,
                         "name": _resolved_alias or _model_name,
                         "alias": _resolved_alias,
                         "model_name": _model_name,
@@ -2673,13 +3026,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         "reasoning_level": resolve_env_vars(str(mco.get("reasoning_level", ""))),
                         # 同名模型冲突时用于区分：仅展示末4位，避免泄露过多 key 信息
                         "api_key_suffix": _api_key[-4:] if _api_key else "",
-                        "is_current": i == 0,
+                        "is_current": (i == 0 and not is_agentos),
+                        "is_agentos": is_agentos,
                     }
 
-                payload["models"] = [
+                _models_list = [
                     _model_meta(i, e)
                     for i, e in enumerate(_defs) if isinstance(e, dict)
                 ]
+                # 追加 agentos 备份模型：与 defaults 并列展示、同等可选可切换，
+                # 但 is_current 恒 False、is_agentos True 供前端区分渲染与切换路径
+                _agentos_raw = (_raw.get("models") or {}).get("agentos")
+                _agentos_list = _agentos_raw if isinstance(_agentos_raw, list) else []
+                for _ai, _ab in enumerate(_agentos_list):
+                    if not isinstance(_ab, dict):
+                        continue
+                    _ab_mcc = _ab.get("model_client_config")
+                    if not (isinstance(_ab_mcc, dict) and _ab_mcc.get("model_name")):
+                        continue
+                    _models_list.append(_model_meta(_ai, _ab, is_agentos=True))
+                payload["models"] = _models_list
             else:
                 payload["current"] = os.getenv("MODEL_NAME", "unknown")
             await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -2691,6 +3057,40 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             target, model_index, params,
         )
         _switch_result: dict = {}
+        # ── agentos 备份模型切换：不改 config、不重排 defaults、不 reload ──
+        # agentos 走"请求级 model_name 注入"机制（与 Web 的 ModelSelector 一致），
+        # 仅全局回显选中名，后续 chat.send 由前端注入 model_name，AgentServer
+        # _resolve_model_for_request 命中 agentos 缓存条目。故此处立即回包，
+        # 不触发 AGENT_RELOAD_CONFIG。仅当 target 命中 models.agentos 条目时走此路径。
+        _raw_cfg = get_config_raw()
+        _agentos_blocks = (_raw_cfg.get("models") or {}).get("agentos")
+        _agentos_blocks = _agentos_blocks if isinstance(_agentos_blocks, list) else []
+        _agentos_matched_name = ""
+        for _ab in _agentos_blocks:
+            if not isinstance(_ab, dict):
+                continue
+            _ab_mcc = _ab.get("model_client_config") or {}
+            if not (isinstance(_ab_mcc, dict) and _ab_mcc.get("model_name")):
+                continue
+            _ab_name = resolve_env_vars(str(_ab_mcc.get("model_name", "")))
+            _ab_alias = resolve_env_vars(str(_ab.get("alias", ""))) if _ab.get("alias") else ""
+            if _ab_name == target or (_ab_alias and _ab_alias == target):
+                _agentos_matched_name = _ab_name
+                break
+        if _agentos_matched_name:
+            logger.info(
+                "[cli command.model] 切换 agentos 备份模型（请求级注入，不 reload）: %s",
+                _agentos_matched_name,
+            )
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "current": _agentos_matched_name,
+                "requested": target,
+                "type": "switched_agentos",
+                "applied": True,
+                "is_agentos": True,
+            })
+            return
+        # ── defaults 模型切换：原逻辑（重排 defaults 首位 + is_default + reload） ──
         try:
             def _switch_mutate(data):
                 models = data.get("models")
@@ -2954,14 +3354,47 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             setattr(ws, "_gateway_agent_type", switched)
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
-    channel.register_local_handler(path, "config.get", _config_get)
-    channel.register_local_handler(path, "config.set", _config_set)
-    channel.register_local_handler(path, "config.validate_model", _config_validate_model)
-    channel.register_local_handler(path, "models.list", _models_list)
+    async def _proxy_config_request(ws, req_id, params, session_id, user_id=None, *, req_method):
+        """Keep CLI configuration on the current AgentServer user directory."""
+        from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
+
+        await proxy_unary_request(
+            channel=channel,
+            agent_client=_resolve_agent_client(agent_client),
+            ws=ws,
+            req_id=req_id,
+            params=params if isinstance(params, dict) else {},
+            session_id=session_id,
+            user_id=user_id,
+            req_method=req_method,
+            label="config",
+        )
+
+    def _register_config_proxy(method_name, req_method, local_handler):
+        async def _handler(ws, req_id, params, session_id, user_id=None):
+            # 单用户共享目录：本地执行（保留 on_config_saved 热更新与 TUI 专用键语义）。
+            # AgentOS 多用户：经 E2A 在目标 AgentServer 注入目录执行（与 command.model 同模式）。
+            from jiuwenswarm.gateway.routing.e2a_proxy import is_legacy_shared_directory_client
+
+            resolved_client = _resolve_agent_client(agent_client)
+            if resolved_client is None or is_legacy_shared_directory_client(resolved_client):
+                await local_handler(ws, req_id, params, session_id)
+                return
+            await _proxy_config_request(
+                ws, req_id, params, session_id, user_id, req_method=req_method
+            )
+        channel.register_local_handler(path, method_name, _handler)
+
+    from jiuwenswarm.common.schema.message import ReqMethod as _ConfigReq
+    _register_config_proxy("config.get", _ConfigReq.CONFIG_GET, _config_get)
+    _register_config_proxy("config.set", _ConfigReq.CONFIG_SET, _config_set)
+    _register_config_proxy("config.validate_model", _ConfigReq.CONFIG_VALIDATE_MODEL, _config_validate_model)
+    _register_config_proxy("models.list", _ConfigReq.MODELS_LIST, _models_list)
     channel.register_local_handler(path, "3rdagent.list", _3rdagent_list)
     channel.register_local_handler(path, "3rdagent.switch", _3rdagent_switch)
     channel.register_local_handler(path, "session.list", _session_list)
     channel.register_local_handler(path, "session.create", _session_create)
+    channel.register_local_handler(path, "session.rebind_project", _session_rebind_project)
     channel.register_local_handler(path, "session.delete", _session_delete)
     channel.register_local_handler(path, "session.rename", _session_rename)
     channel.register_local_handler(path, "session.color_set", _session_color_set)
@@ -2978,112 +3411,87 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.user_answer", _chat_user_answer)
     channel.register_local_handler(path, "chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_local_handler(path, "history.get", _history_get)
+    channel.register_local_handler(path, "harmonyos.dev_init", _harmonyos_dev_init)
+    channel.register_local_handler(
+        path, "harmonyos.dev_init_cancel", _harmonyos_dev_init_cancel
+    )
+    channel.register_local_handler(path, "harmonyos.project_init", _harmonyos_project_init)
     channel.register_local_handler(path, "command.model", _command_model)
 
     # ── Hooks RPC handlers ─────────────────────────────────────────────
-    async def _hooks_list(ws, req_id, params, session_id):
-        from jiuwenswarm.common.hooks_config import load_hooks_config
-        try:
-            hooks_config = load_hooks_config(get_config())
-            summary = hooks_config.get_event_summary()
-            await channel.send_response(ws, req_id, ok=True,
-                                        payload={
-                                            "events": summary,
-                                            "disable_all_hooks": hooks_config.disable_all_hooks,
-                                            "source": "config.yaml",
-                                        })
-        except Exception as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+    async def _hooks_list(ws, req_id, params, session_id, user_id=None):
+        # 单用户共享目录：本地读取 config.yaml（hooks 属用户态配置，共享目录等价；
+        # AgentServer 未启动/断连时保持可用）。AgentOS：经 E2A 在目标注入目录执行。
+        from jiuwenswarm.gateway.routing.e2a_proxy import is_legacy_shared_directory_client
+
+        resolved_client = _resolve_agent_client(agent_client)
+        if resolved_client is None or is_legacy_shared_directory_client(resolved_client):
+            from jiuwenswarm.common.hooks_config import load_hooks_config
+
+            try:
+                hooks_config = load_hooks_config(get_config())
+                summary = hooks_config.get_event_summary()
+                await channel.send_response(
+                    ws, req_id, ok=True,
+                    payload={
+                        "events": summary,
+                        "disable_all_hooks": hooks_config.disable_all_hooks,
+                        "source": "config.yaml",
+                    },
+                )
+            except Exception as exc:
+                await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
+
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
+
+        await proxy_unary_request(
+            channel=channel,
+            agent_client=_resolve_agent_client(agent_client),
+            ws=ws,
+            req_id=req_id,
+            params={},
+            session_id=session_id,
+            user_id=user_id or getattr(ws, "_gateway_user_id", None),
+            req_method=ReqMethod.HOOKS_LIST,
+            label="hooks.list",
+        )
 
     channel.register_local_handler(path, "hooks.list", _hooks_list)
 
     # ── Memory RPC handlers ────────────────────────────────────────────
-    from jiuwenswarm.agents.harness.common.memory_rpc import (
-        handle_memory_list,
-        handle_memory_edit,
-        handle_memory_status,
-        handle_memory_toggle,
-        handle_memory_open,
-    )
-    from jiuwenswarm.common.utils import get_agent_workspace_dir
+    # Phase 3: memory data and its workspace path belong to the target
+    # AgentServer.  Gateway/TUI only preserves the RPC protocol and forwards
+    # the authenticated routing user_id.  In legacy single-user mode the
+    # e2a_proxy transparently falls back to the in-process MemoryAdapter
+    # (shared ~/.jiuwenswarm); AgentOS mode returns a retryable error when
+    # the target AgentServer is unreachable.
+    def _register_memory_proxy(method_name, req_method):
+        async def _handler(ws, req_id, params, session_id, user_id=None) -> None:
+            """TUI memory 管理转发：与其余用户业务入口统一走 e2a_proxy 薄代理
+            （不可达/超时/失败错误映射一致，TUI 通道超时策略经 envelope.channel 生效）。"""
+            from jiuwenswarm.gateway.routing.e2a_proxy import proxy_unary_request
 
-    def _resolve_project_dir(params):
-        project_dir = params.get("project_dir")
-        if isinstance(project_dir, str) and project_dir:
-            return project_dir
-        trusted_dirs = params.get("trusted_dirs")
-        if isinstance(trusted_dirs, list) and trusted_dirs:
-            return str(trusted_dirs[0])
-        cwd = params.get("cwd")
-        if isinstance(cwd, str) and cwd:
-            return cwd
-        return None
+            await proxy_unary_request(
+                channel=channel,
+                agent_client=_resolve_agent_client(agent_client),
+                ws=ws,
+                req_id=req_id,
+                params=params if isinstance(params, dict) else {},
+                session_id=session_id,
+                user_id=user_id,
+                req_method=req_method,
+                label=req_method.value,
+            )
+        channel.register_local_handler(path, method_name, _handler)
 
-    async def _memory_list(ws, req_id, params, session_id):
-        workspace = str(get_agent_workspace_dir())
-        mode = params.get("mode", "plan")
-        project_dir = _resolve_project_dir(params)
-        if project_dir:
-            params = {**params, "project_dir": project_dir}
-        try:
-            result = await handle_memory_list(workspace, mode, params)
-            await channel.send_response(ws, req_id, ok=True, payload=result)
-        except Exception as exc:
-            logger.warning("[memory.list] %s", exc)
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-
-    async def _memory_edit(ws, req_id, params, session_id):
-        workspace = str(get_agent_workspace_dir())
-        project_dir = _resolve_project_dir(params)
-        if project_dir:
-            params = {**params, "project_dir": project_dir}
-        try:
-            result = await handle_memory_edit(workspace, params)
-            await channel.send_response(ws, req_id, ok=True, payload=result)
-        except Exception as exc:
-            logger.warning("[memory.edit] %s", exc)
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-
-    async def _memory_status(ws, req_id, params, session_id):
-        workspace = str(get_agent_workspace_dir())
-        mode = params.get("mode", "plan")
-        project_dir = _resolve_project_dir(params)
-        if project_dir:
-            params = {**params, "project_dir": project_dir}
-        try:
-            result = await handle_memory_status(workspace, mode, params)
-            await channel.send_response(ws, req_id, ok=True, payload=result)
-        except Exception as exc:
-            logger.warning("[memory.status] %s", exc)
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-
-    async def _memory_toggle(ws, req_id, params, session_id):
-        workspace = str(get_agent_workspace_dir())
-        mode = params.get("mode", "plan")
-        try:
-            result = await handle_memory_toggle(workspace, mode, params)
-            await channel.send_response(ws, req_id, ok=True, payload=result)
-        except Exception as exc:
-            logger.warning("[memory.toggle] %s", exc)
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-
-    async def _memory_open(ws, req_id, params, session_id):
-        workspace = str(get_agent_workspace_dir())
-        project_dir = _resolve_project_dir(params)
-        if project_dir:
-            params = {**params, "project_dir": project_dir}
-        try:
-            result = await handle_memory_open(workspace, params)
-            await channel.send_response(ws, req_id, ok=True, payload=result)
-        except Exception as exc:
-            logger.warning("[memory.open] %s", exc)
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-
-    channel.register_local_handler(path, "memory.list", _memory_list)
-    channel.register_local_handler(path, "memory.edit", _memory_edit)
-    channel.register_local_handler(path, "memory.status", _memory_status)
-    channel.register_local_handler(path, "memory.toggle", _memory_toggle)
-    channel.register_local_handler(path, "memory.open", _memory_open)
+    from jiuwenswarm.common.schema.message import ReqMethod as _MemoryReq
+    _register_memory_proxy("memory.list", _MemoryReq.MEMORY_LIST)
+    _register_memory_proxy("memory.edit", _MemoryReq.MEMORY_EDIT)
+    _register_memory_proxy("memory.status", _MemoryReq.MEMORY_STATUS)
+    _register_memory_proxy("memory.toggle", _MemoryReq.MEMORY_TOGGLE)
+    _register_memory_proxy("memory.open", _MemoryReq.MEMORY_OPEN)
 
     # ── Cron RPC handlers ────────────────────────────────────────────
 
@@ -3138,7 +3546,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             logger.warning("[cron.job.get] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
-    async def _cron_job_create(ws, req_id, params, session_id):
+    async def _cron_job_create(ws, req_id, params, session_id, user_id=None):
         cc = _get_cron()
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
@@ -3147,11 +3555,25 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         try:
+            from jiuwenswarm.gateway.routing.e2a_proxy import (
+                is_agentos_routing_client,
+                is_legacy_shared_directory_client,
+            )
+
             if session_id:
                 params["session_id"] = session_id
-            # project_dir 默认值：TUI 前端已自动注入；仅当「未传」时从当前会话 metadata 兜底
-            # 注意：显式传空串 "" 等价于归默认项目，不可覆盖——用 key presence 区分
-            if "project_dir" not in params and session_id:
+            # 与 Web _cron_job_create 对齐：写入创建者，执行时透传 AgentOS X-Session-Context。
+            uid = str(user_id or getattr(ws, "_gateway_user_id", None) or "").strip()
+            if uid:
+                params["user_id"] = uid
+            is_agentos = is_agentos_routing_client(_resolve_agent_client(agent_client))
+            # 共享目录单用户才可在 Gateway 读取 session metadata 补齐项目目录。
+            # AgentOS 用户 session 不在 Gateway 部署目录，不能在这里作本地反查。
+            if (
+                is_legacy_shared_directory_client(_resolve_agent_client(agent_client))
+                and "project_dir" not in params
+                and session_id
+            ):
                 try:
                     from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
                     meta = get_session_metadata(session_id, cache_bust=True)
@@ -3161,13 +3583,48 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                             params["project_dir"] = pd.strip()
                 except Exception:  # noqa: BLE001
                     pass
+            if is_agentos:
+                from jiuwenswarm.gateway.routing.e2a_proxy import (
+                    resolve_agent_cron_project_binding,
+                )
+
+                bound, binding = await resolve_agent_cron_project_binding(
+                    agent_client=_resolve_agent_client(agent_client), params=params,
+                    user_id=uid or None, channel_id="tui", session_id=session_id,
+                )
+                if not bound:
+                    await channel.send_response(
+                        ws, req_id, ok=False,
+                        error=str(binding.get("error") or "cron project binding failed"),
+                        code=str(binding.get("code") or "SERVICE_UNAVAILABLE"),
+                    )
+                    return
+                resolved_project_id = binding.get("project_id")
+                resolved_work_mode = binding.get("work_mode")
+                if (
+                    not isinstance(resolved_project_id, str)
+                    or not isinstance(resolved_work_mode, str)
+                    or not resolved_work_mode.strip()
+                ):
+                    await channel.send_response(
+                        ws, req_id, ok=False,
+                        error="invalid cron project binding",
+                        code="BAD_REQUEST",
+                    )
+                    return
+                params.update({
+                    "project_id": resolved_project_id,
+                    "work_mode": resolved_work_mode,
+                })
+                params.pop("project_dir", None)
+                params["_agentos_project_binding_verified"] = True
             job = await cc.create_job(params)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except Exception as exc:
             logger.warning("[cron.job.create] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
 
-    async def _cron_job_update(ws, req_id, params, session_id):
+    async def _cron_job_update(ws, req_id, params, session_id, user_id=None):
         cc = _get_cron()
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
@@ -3184,6 +3641,71 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
             return
         try:
+            from jiuwenswarm.gateway.routing.e2a_proxy import is_agentos_routing_client
+
+            patch = dict(patch)
+            # 归属校验：与 Web _get_owned_cron_job 语义一致（空 user_id 保持单用户旧行为；
+            # 带 user_id 时禁止跨用户读取/更新，包括归属为空的历史 job）。
+            uid = str(user_id or getattr(ws, "_gateway_user_id", None) or "").strip()
+            existing = None
+            if uid:
+                existing = await cc.get_job(job_id)
+                if (
+                    existing is None
+                    or str(getattr(existing, "user_id", "") or "").strip() != uid
+                ):
+                    await channel.send_response(
+                        ws, req_id, ok=False, error="job not found", code="NOT_FOUND"
+                    )
+                    return
+            # 仅当 patch 涉及 project 字段时才解析项目绑定（避免非项目字段的
+            # update 因用户侧项目解析失败而被整体拒绝；单用户不 resolve）。
+            has_project_fields = "project_id" in patch or "project_dir" in patch
+            if (
+                is_agentos_routing_client(_resolve_agent_client(agent_client))
+                and has_project_fields
+            ):
+                from jiuwenswarm.gateway.routing.e2a_proxy import (
+                    resolve_agent_cron_project_binding,
+                )
+
+                if existing is None:
+                    existing = await cc.get_job(job_id)
+                binding_params = dict(patch)
+                binding_params.setdefault(
+                    "work_mode", getattr(existing, "work_mode", "") or "code"
+                )
+                bound, binding = await resolve_agent_cron_project_binding(
+                    agent_client=_resolve_agent_client(agent_client), params=binding_params,
+                    user_id=uid or None, channel_id="tui",
+                    session_id=getattr(existing, "session_id", None),
+                )
+                if not bound:
+                    await channel.send_response(
+                        ws, req_id, ok=False,
+                        error=str(binding.get("error") or "cron project binding failed"),
+                        code=str(binding.get("code") or "SERVICE_UNAVAILABLE"),
+                    )
+                    return
+                resolved_project_id = binding.get("project_id")
+                resolved_work_mode = binding.get("work_mode")
+                if (
+                    not isinstance(resolved_project_id, str)
+                    or not isinstance(resolved_work_mode, str)
+                    or not resolved_work_mode.strip()
+                ):
+                    await channel.send_response(
+                        ws, req_id, ok=False,
+                        error="invalid cron project binding",
+                        code="BAD_REQUEST",
+                    )
+                    return
+                patch.update({
+                    "project_id": resolved_project_id,
+                    "work_mode": resolved_work_mode,
+                })
+                patch.pop("project_dir", None)
+                patch["_agentos_project_binding_verified"] = True
             job = await cc.update_job(job_id, patch)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError as exc:
@@ -3312,9 +3834,350 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "cron.job.preview", _cron_job_preview)
     channel.register_local_handler(path, "cron.job.run_now", _cron_job_run_now)
 
+    # ── Heartbeat RPC handlers(线程续跑,与 cron 独立) ────────────────
+    from jiuwenswarm.gateway.heartbeat import HeartbeatServiceUnavailableError
+
+    def _get_heartbeat():
+        """Resolve heartbeat_controller from ref dict or direct instance."""
+        if isinstance(heartbeat_controller_ref, dict):
+            return heartbeat_controller_ref.get("value")
+        return heartbeat_controller_ref
+
+    async def _heartbeat_unavailable(ws, req_id, error="heartbeat not available"):
+        await channel.send_response(
+            ws, req_id, ok=False, error=str(error), code="SERVICE_UNAVAILABLE"
+        )
+
+    async def _hb_job_list(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        try:
+            result = await hc.list_jobs(
+                params if isinstance(params, dict) else {},
+                access_session_id=session_id,
+                user_id=str(user_id or ""),
+            )
+            await channel.send_response(ws, req_id, ok=True, payload={"jobs": result.get("jobs", [])})
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except HeartbeatServiceUnavailableError as exc:
+            await _heartbeat_unavailable(ws, req_id, exc)
+        except Exception as exc:
+            logger.warning("[heartbeat.job.list] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_meta(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        try:
+            result = await hc.get_meta(user_id=str(user_id or ""))
+        except HeartbeatServiceUnavailableError as exc:
+            await _heartbeat_unavailable(ws, req_id, exc)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=result)
+
+    async def _hb_job_get(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        try:
+            job = await hc.get_job(
+                job_id,
+                access_session_id=session_id,
+                user_id=str(user_id or ""),
+            )
+            if job is None:
+                await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+                return
+            await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except HeartbeatServiceUnavailableError as exc:
+            await _heartbeat_unavailable(ws, req_id, exc)
+        except Exception as exc:
+            logger.warning("[heartbeat.job.get] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_create(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        # TUI 自动继承当前 channel_id=tui + session_id;source=tui_rpc。
+        create_params = {
+            **params,
+            "channel_id": "tui",
+            "session_id": session_id,
+            "source": "tui_rpc",
+        }
+        try:
+            job = await hc.create_job(
+                create_params,
+                user_id=str(user_id or getattr(ws, "_gateway_user_id", None) or ""),
+            )
+            await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except HeartbeatServiceUnavailableError as exc:
+            await _heartbeat_unavailable(ws, req_id, exc)
+        except Exception as exc:
+            logger.warning("[heartbeat.job.create] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_update(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        patch = params.get("patch")
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        if not isinstance(patch, dict):
+            await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
+            return
+        try:
+            job = await hc.update_job(
+                job_id,
+                patch,
+                access_session_id=session_id,
+                user_id=str(user_id or getattr(ws, "_gateway_user_id", None) or ""),
+            )
+            await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except HeartbeatServiceUnavailableError as exc:
+            await _heartbeat_unavailable(ws, req_id, exc)
+        except Exception as exc:
+            logger.warning("[heartbeat.job.update] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_delete(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        try:
+            result = await hc.delete_job(
+                job_id,
+                access_session_id=session_id,
+                user_id=str(user_id or getattr(ws, "_gateway_user_id", None) or ""),
+            )
+            await channel.send_response(ws, req_id, ok=True, payload=result)
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except RuntimeError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="CONFLICT")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except HeartbeatServiceUnavailableError as exc:
+            await _heartbeat_unavailable(ws, req_id, exc)
+        except Exception as exc:
+            logger.warning("[heartbeat.job.delete] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_toggle(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            await channel.send_response(ws, req_id, ok=False, error="enabled must be boolean", code="BAD_REQUEST")
+            return
+        try:
+            job = await hc.toggle_job(
+                job_id,
+                enabled,
+                access_session_id=session_id,
+                user_id=str(user_id or getattr(ws, "_gateway_user_id", None) or ""),
+            )
+            await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except HeartbeatServiceUnavailableError as exc:
+            await _heartbeat_unavailable(ws, req_id, exc)
+        except Exception as exc:
+            logger.warning("[heartbeat.job.toggle] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_preview(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        count = 5
+        raw_count = params.get("count")
+        if isinstance(raw_count, int) and raw_count > 0:
+            count = raw_count
+        try:
+            result = await hc.preview_job(
+                job_id,
+                count=count,
+                access_session_id=session_id,
+                user_id=str(user_id or getattr(ws, "_gateway_user_id", None) or ""),
+            )
+            await channel.send_response(ws, req_id, ok=True, payload=result)
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except HeartbeatServiceUnavailableError as exc:
+            await _heartbeat_unavailable(ws, req_id, exc)
+        except Exception as exc:
+            logger.warning("[heartbeat.job.preview] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_run_now(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        reschedule = params.get("reschedule", False)
+        if not isinstance(reschedule, bool):
+            await channel.send_response(ws, req_id, ok=False, error="reschedule must be boolean", code="BAD_REQUEST")
+            return
+        try:
+            result = await hc.run_now(
+                job_id,
+                reschedule=reschedule,
+                access_session_id=session_id,
+                user_id=str(user_id or getattr(ws, "_gateway_user_id", None) or ""),
+            )
+            await channel.send_response(ws, req_id, ok=True, payload=result)
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except HeartbeatServiceUnavailableError as exc:
+            await _heartbeat_unavailable(ws, req_id, exc)
+        except Exception as exc:
+            logger.warning("[heartbeat.job.run_now] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_cancel(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        pause_schedule = params.get("pause_schedule", False)
+        if not isinstance(pause_schedule, bool):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="pause_schedule must be boolean",
+                code="BAD_REQUEST",
+            )
+            return
+        try:
+            result = await hc.cancel_run(
+                job_id,
+                pause_schedule=pause_schedule,
+                access_session_id=session_id,
+                user_id=str(user_id or getattr(ws, "_gateway_user_id", None) or ""),
+            )
+            await channel.send_response(ws, req_id, ok=True, payload=result)
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except HeartbeatServiceUnavailableError as exc:
+            await _heartbeat_unavailable(ws, req_id, exc)
+        except Exception as exc:
+            logger.warning("[heartbeat.job.cancel] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    channel.register_local_handler(path, "heartbeat.job.list", _hb_job_list)
+    channel.register_local_handler(path, "heartbeat.job.meta", _hb_job_meta)
+    channel.register_local_handler(path, "heartbeat.job.get", _hb_job_get)
+    channel.register_local_handler(path, "heartbeat.job.create", _hb_job_create)
+    channel.register_local_handler(path, "heartbeat.job.update", _hb_job_update)
+    channel.register_local_handler(path, "heartbeat.job.delete", _hb_job_delete)
+    channel.register_local_handler(path, "heartbeat.job.toggle", _hb_job_toggle)
+    channel.register_local_handler(path, "heartbeat.job.preview", _hb_job_preview)
+    channel.register_local_handler(path, "heartbeat.job.run_now", _hb_job_run_now)
+    channel.register_local_handler(path, "heartbeat.job.cancel", _hb_job_cancel)
+
 
 def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
     def _install(channel: Any) -> None:
+        # ``GatewayServer`` multiplexes ACP and TUI routes and therefore does
+        # not have a class-level channel_id like ``TuiChannel``.  The CLI
+        # handlers below use the value when building E2A envelopes; install a
+        # route-local value before registering them.
+        if not str(getattr(channel, "channel_id", "") or "").strip():
+            setattr(channel, "channel_id", bind.channel_id)
         register_cli_handlers(
             CliHandlersBindParams(
                 channel=channel,
@@ -3324,17 +4187,23 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
                 on_config_saved=bind.on_config_saved,
                 path=bind.path,
                 cron_controller=bind.cron_controller,
+                heartbeat_controller=bind.heartbeat_controller,
             )
         )
 
     async def _tui_disconnect(
         _ws: Any,
-        stale_session_keys: list[tuple[str, str]],
-        stale_request_keys: list[tuple[str, str]] | None = None,
+        stale_session_keys: list[tuple[str, ...]],
+        stale_request_keys: list[tuple[str, ...]] | None = None,
     ) -> None:
+        await _cancel_harmonyos_dev_init_tasks(_ws)
+        mh = bind.message_handler
+        cleanup = getattr(mh, "unregister_ws_subscriptions", None)
+        ws_id = str(getattr(_ws, "_jiuwen_ws_id", "") or "").strip()
+        if callable(cleanup) and ws_id:
+            await cleanup(bind.channel_id, ws_id)
         if bool(getattr(_ws, "_jiuwenswarm_tui_user_exit", False)):
             return
-        mh = bind.message_handler
         if mh is None:
             return
         # NOTE: do not early-return on empty stale_session_keys; in-flight streams

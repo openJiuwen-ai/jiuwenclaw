@@ -24,7 +24,7 @@ import {
   linearPosition,
   spanFromBaseline,
 } from '../node_modules/.cache/spreadsheet-preview/chartGeometry.js';
-import { parseSpreadsheetWorkbook } from '../node_modules/.cache/spreadsheet-preview/spreadsheetWorkbookParser.js';
+import { officeFontStack, parseSpreadsheetWorkbook } from '../node_modules/.cache/spreadsheet-preview/spreadsheetWorkbookParser.js';
 
 test('recognizes OOXML workbooks but leaves legacy XLS files unsupported', () => {
   assert.equal(previewKind({ name: 'report.xlsx' }), 'spreadsheet');
@@ -40,6 +40,49 @@ test('recognizes OOXML workbooks but leaves legacy XLS files unsupported', () =>
   );
   assert.equal(previewKind({ name: 'legacy.xls' }), 'unsupported');
   assert.equal(previewKind({ name: 'data.csv' }), 'text');
+});
+
+test('previews only explicitly supported browser image formats', () => {
+  const supportedExtensions = [
+    'apng',
+    'avif',
+    'bmp',
+    'cur',
+    'gif',
+    'ico',
+    'jpe',
+    'jfif',
+    'jpeg',
+    'jpg',
+    'pjp',
+    'pjpeg',
+    'png',
+    'svg',
+    'webp',
+  ];
+  for (const extension of supportedExtensions) {
+    assert.equal(previewKind({ name: `image.${extension}`, mimeType: 'application/octet-stream' }), 'image');
+  }
+
+  const supportedMimeTypes = [
+    'image/apng',
+    'image/avif',
+    'image/bmp',
+    'image/gif',
+    'image/jpeg',
+    'image/png',
+    'image/svg+xml',
+    'image/vnd.microsoft.icon',
+    'image/webp',
+    'image/x-icon',
+  ];
+  for (const mimeType of supportedMimeTypes) {
+    assert.equal(previewKind({ name: 'image.bin', mimeType }), 'image');
+  }
+
+  assert.equal(previewKind({ name: 'image.tif', mimeType: 'image/tiff' }), 'unsupported');
+  assert.equal(previewKind({ name: 'image.tiff', mimeType: 'image/tiff' }), 'unsupported');
+  assert.equal(previewKind({ name: 'image.bin', mimeType: 'image/heic' }), 'unsupported');
 });
 
 test('uses signed download URLs without decoding them into local file paths', () => {
@@ -168,6 +211,29 @@ test('parses workbook sheets, formatting, merges and cached formula results', as
   const themeStyle = parsed.styles[themeCell.styleId];
   assert.equal(themeStyle.color, '#000000');
   assert.equal(themeStyle.backgroundColor, '#FFFFFF');
+});
+
+test('uses the shared Office font stack for unavailable workbook fonts', async () => {
+  assert.equal(
+    officeFontStack('Aptos', '宋体'),
+    '"Aptos", "Microsoft YaHei", "宋体", "PingFang SC", "HarmonyOS Sans SC", "HarmonyOS Sans", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", sans-serif',
+  );
+  assert.equal(
+    officeFontStack('Aptos', '游ゴシック'),
+    '"Aptos", "游ゴシック", "Microsoft YaHei", "PingFang SC", "HarmonyOS Sans SC", "HarmonyOS Sans", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "SimSun", sans-serif',
+  );
+
+  const source = new ExcelJS.Workbook();
+  const sheet = source.addWorksheet('Fonts');
+  sheet.getCell('A1').value = 'Preview text';
+  sheet.getCell('A1').font = { name: 'NotInstalledFontPro-Bold' };
+
+  const parsed = await parseSpreadsheetWorkbook(await source.xlsx.writeBuffer());
+  const cell = parsed.sheets[0].rows[0].cells[0];
+  assert.equal(
+    parsed.styles[cell.styleId].fontFamily,
+    '"NotInstalledFontPro-Bold", "Microsoft YaHei", "PingFang SC", "HarmonyOS Sans SC", "HarmonyOS Sans", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "SimSun", sans-serif',
+  );
 });
 
 test('keeps a formula visible when the workbook has no cached result', async () => {

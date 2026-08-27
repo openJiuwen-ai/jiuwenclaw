@@ -1,4 +1,5 @@
 import { addError, addInfo } from "./core/commands/helpers.js";
+import { PrWatchController } from "./core/commands/builtins/autofix-pr.watch.js";
 import type { CommandContext, PreferredLanguage } from "./core/commands/types.js";
 import type {
   HandoffPort,
@@ -30,8 +31,12 @@ import {
   type HarnessExtensionReady,
   type HarnessActivateInteraction,
 } from "./core/event-handlers.js";
-import { isTeamMode, type ClientMode } from "./core/modes.js";
+import { isTeamMode, normalizeToClientMode, type ClientMode } from "./core/modes.js";
 import { isEventFrame, type EventFrame, type FileAttachment } from "./core/protocol.js";
+import {
+  PLAN_ENTRY_SOURCE_SLASH_COMMAND,
+  type PlanEntrySource,
+} from "./core/plan-entry-source.js";
 import {
   StreamingState,
   type ContextCompressionStats,
@@ -67,6 +72,7 @@ import {
   getCurrentCwd,
 } from "./core/tui-trusted-dirs-store.js";
 import { loadTuiConfig } from "./core/tui-config-store.js";
+import { runStatusLineCommand } from "./core/statusline-runner.js";
 import { generateCreateToken } from "./core/session-state.js";
 import {
   applyWorkflowUpdate,
@@ -84,11 +90,16 @@ import {
   type WorkflowRun,
 } from "./core/workflows.js";
 import type { PendingHumanPrompt } from "./core/event-handlers.js";
-import { execFile, spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { spawnSync } from "node:child_process";
+
+// A just-exited TUI can remain bound briefly while its WebSocket close is
+// observed by the gateway. Retry only this startup-specific ownership race.
+const BOOT_SESSION_IN_USE_RETRY_DELAYS_MS = [100, 200, 400, 800, 800, 800, 800];
+
+function isTransientSessionInUseError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.toLowerCase().includes("already active in another window");
+}
 
 export interface ModelUsageEntry {
   model: string;
@@ -146,6 +157,8 @@ export interface AppSnapshot {
   workflowRuns: WorkflowRun[];
   pendingHumanPrompts: Map<string, PendingHumanPrompt>;
   evolutionStatus: "idle" | "running";
+  /** 后端 config.get 成功读取到的技能自演进展示开关。 */
+  skillEvolutionEnabled: boolean;
   contextCompression: ContextCompressionStats | null;
   contextWindowLimit: number | null;
   contextUsedPercentage: number | null;
@@ -191,6 +204,13 @@ function normalizePreferredLanguage(value: unknown): PreferredLanguage {
   return typeof value === "string" && value.trim().toLowerCase() === "en" ? "en" : "zh";
 }
 
+/** config.get 将技能自演进开关展平为 skill_evolution；未知/缺失值必须保持关闭。 */
+function parseSkillEvolutionEnabled(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value !== "string") return false;
+  return ["true", "1", "yes", "on", "enabled"].includes(value.trim().toLowerCase());
+}
+
 const LOCAL_FILE_SEARCH_TOOL_NAMES = new Set([
   "grep",
   "rg",
@@ -224,7 +244,7 @@ const DEFERRED_TRANSCRIPT_EVENTS = new Set([
 ]);
 
 function isPlanClientMode(mode: ClientMode): boolean {
-  return mode === "agent.plan" || mode === "code.plan" || mode === "team.plan";
+  return mode.endsWith(".plan");
 }
 
 // ── Auto-recap (自动回顾) 常量 ──
@@ -234,37 +254,6 @@ const AUTO_RECAP_IDLE_THRESHOLD_MS = 5 * 60_000;
 const AUTO_RECAP_CHECK_INTERVAL_MS = 30_000;
 const ACTIVE_TURN_RECONNECT_TIMEOUT_MS = 60_000;
 const ACTIVE_NETWORK_CHECK_INTERVAL_MS = 8_000;
-
-function probeTcp(host: string, port: number, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = createConnection({ host, port });
-    let settled = false;
-    const finish = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      socket.removeAllListeners();
-      socket.destroy();
-      resolve(ok);
-    };
-    socket.setTimeout(timeoutMs);
-    socket.once("connect", () => finish(true));
-    socket.once("timeout", () => finish(false));
-    socket.once("error", () => finish(false));
-  });
-}
-
-async function hasExternalNetwork(): Promise<boolean> {
-  if (process.env.JIUWENSWARM_SKIP_NETWORK_CHECK === "1" || process.env.JIUWENSWARM_SKIP_NETWORK_CHECK === "true") {
-    return true;
-  }
-  const probes = [
-    probeTcp("223.5.5.5", 53, 1500),
-    probeTcp("114.114.114.114", 53, 1500),
-    probeTcp("1.1.1.1", 443, 1500),
-  ];
-  const results = await Promise.all(probes);
-  return results.some(Boolean);
-}
 
 function isLocalFileSearchTool(name: string): boolean {
   return LOCAL_FILE_SEARCH_TOOL_NAMES.has(name.trim().toLowerCase());
@@ -332,6 +321,7 @@ export class CliPiAppState {
    * `session.create` 原子恢复或登记，并明确绕过预热。
    */
   private bootSessionId: string | null = null;
+  private readonly bootPersistSession: boolean = false;
   /** 幂等守卫：boot session creation 只在首次 connection.ack 触发一次（重连/重发不重试）。 */
   private bootSessionHandled = false;
   /** connection.ack 到来时放行启动会话创建；构造期即存在，避免 connected 回调抢跑。 */
@@ -340,7 +330,7 @@ export class CliPiAppState {
   private bootSessionCreation: Promise<void> | null = null;
   /** 普通启动的幂等创建 token；重连期间保持稳定。 */
   private readonly bootCreateToken = generateCreateToken();
-  private mode: ClientMode = "code.normal";
+  private mode: ClientMode = "agent.code.normal";
   private themeName: ThemeName = getCurrentThemeName();
   private accentColor: AccentColorName = getCurrentAccentColor();
   private transcriptMode: "compact" | "detailed" = "compact";
@@ -362,6 +352,8 @@ export class CliPiAppState {
   private workflowRuns: WorkflowRun[] = [];
   private pendingHumanPrompts: Map<string, PendingHumanPrompt> = new Map();
   private evolutionStatus: "idle" | "running" = "idle";
+  /** 配置读取失败时保持 false，避免前端暴露不可用的演进命令。 */
+  private skillEvolutionEnabled = false;
   private contextCompression: ContextCompressionStats | null = null;
   private contextWindowLimit: number | null = null;
   private contextUsedPercentage: number | null = null;
@@ -407,7 +399,6 @@ export class CliPiAppState {
   private activeTurnReconnectNoticeShown = false;
   private lastStreamActivityAt: number | null = null;
   private streamStallNoticeTimer: ReturnType<typeof setTimeout> | null = null;
-  private streamStallNoticeShown = false;
   private streamStalled = false;
   /** 静默中断当前任务时置 true，抑制 chat.interrupt_result 的 UI 通知。 */
   private suppressInterruptResult = false;
@@ -436,7 +427,7 @@ export class CliPiAppState {
   private activeCommandRequestId: string | null = null;
   /** 当前正在执行的命令名称，用于追踪不可中断命令。 */
   private runningCommand: string | null = null;
-  private pendingPlanEntrySource: "slash_command" | null = null;
+  private pendingPlanEntrySource: PlanEntrySource | null = null;
   private lastVisibleUserRequest: VisibleUserRequest | null = null;
   /** 保存 askQuestions 之前的 streamingState，用于在对话框关闭后恢复。 */
   private streamingStateBeforeQuestion: StreamingState | null = null;
@@ -449,6 +440,12 @@ export class CliPiAppState {
   private autoRecapState: "idle" | "pending" | "generated" = "idle";
   /** 周期检查空闲状态的定时器。 */
   private autoRecapTimer: ReturnType<typeof setInterval> | null = null;
+  /** Active TUI-side PR watch, if any (see startPrWatch). */
+  private prWatchController: PrWatchController | null = null;
+  /** Run-scoped grant: auto-approve tool-permission prompts during a /autofix-pr
+   *  run. Set when the user grants it at the start; cleared when the run ends
+   *  (single-round turn end, watch stop) or is interrupted (Ctrl+C, session reset). */
+  private autofixAutoApprove = false;
   /** 是否启用自动回顾（从 config.yaml 读取，默认 true）。 */
   private autoRecapEnabled: boolean = true;
   private ripgrepAvailable: boolean | null = null;
@@ -469,6 +466,14 @@ export class CliPiAppState {
   private reauthPort: ReauthenticationPort | null = null;
   /** UiLifecyclePort；统一顶层关闭路径。 */
   private uiLifecycle: UiLifecyclePort | null = null;
+  /**
+   * Remote 模式：--url 指向远端服务器时为 true。
+   * 本地 PC 路径不可被远端沙箱访问，故请求时不发送本地 project_dir/cwd/trusted_dirs，
+   * 改用 {@link remoteProjectDir}（服务器侧 /home/<user-id>）作为 workspace。
+   */
+  private isRemote = false;
+  /** Remote 模式下的服务器侧 project_dir：/home/<user-id>；非 remote 时为空串。 */
+  private remoteProjectDir = "";
   /** interrupt_result 事件订阅器；等待型取消按 requestId 关联。 */
   private interruptResultListeners = new Set<
     (requestId: string, sessionId: string, success: boolean, message?: string) => void
@@ -498,6 +503,11 @@ export class CliPiAppState {
       this.emitChange();
     },
     setPendingQuestion: (question) => {
+      // Run-scoped auto-approve: during a /autofix-pr run the user pre-authorized,
+      // silently approve tool-permission prompts instead of surfacing the card.
+      if (question && this.autofixAutoApprove && this.tryAutoApprovePermission(question)) {
+        return;
+      }
       this.pendingQuestion = question;
     },
     setLastError: (error) => {
@@ -634,14 +644,18 @@ export class CliPiAppState {
   constructor(
     private readonly wsClient: WsClient,
     cliSession?: string,
+    cliPersistSession?: boolean,
     supervision?: {
       handoffPort?: HandoffPort | null;
       taskLifecycle?: TaskLifecyclePort | null;
       reauthPort?: ReauthenticationPort | null;
       uiLifecycle?: UiLifecyclePort | null;
+      isRemote?: boolean;
+      remoteProjectDir?: string;
     },
   ) {
-    this.sessionId = cliSession || "new";
+    this.sessionId = cliSession || generateCreateToken();
+    this.bootPersistSession = Boolean(cliPersistSession);
     this.bootSessionId = cliSession ? cliSession : null;
     const startGate = new Promise<void>((resolve) => {
       this.bootSessionStart = resolve;
@@ -668,6 +682,8 @@ export class CliPiAppState {
     this.taskLifecycle = supervision?.taskLifecycle ?? null;
     this.reauthPort = supervision?.reauthPort ?? null;
     this.uiLifecycle = supervision?.uiLifecycle ?? null;
+    this.isRemote = supervision?.isRemote ?? false;
+    this.remoteProjectDir = supervision?.remoteProjectDir ?? "";
   }
 
   start(): void {
@@ -728,6 +744,14 @@ export class CliPiAppState {
     this.wsClient.disconnect();
   }
 
+  private setSkillEvolutionEnabled(enabled: boolean): void {
+    if (this.skillEvolutionEnabled === enabled) {
+      return;
+    }
+    this.skillEvolutionEnabled = enabled;
+    this.emitChange();
+  }
+
   private async fetchModelInfo(): Promise<void> {
     try {
       const [configPayload, modelsPayload, memoryPayload] = await Promise.allSettled([
@@ -755,6 +779,7 @@ export class CliPiAppState {
         ? models.find((m) => m.model_name === activeModelName)
         : models[0];
       this.preferredLanguage = normalizePreferredLanguage(config.preferred_language);
+      this.setSkillEvolutionEnabled(parseSkillEvolutionEnabled(config.skill_evolution));
       this.autoRecapEnabled = config.auto_recap_enabled !== "false";
       // 同步 auto-recap timer：WS 连接后才拿到配置，需根据实际值启停 timer
       if (this.autoRecapEnabled) {
@@ -857,6 +882,16 @@ export class CliPiAppState {
     const wasActiveResponseStream = this.hasActiveResponseStream();
     this.streamingState = state;
     this.handleStreamingStateChanged(wasActiveResponseStream);
+    // Single-round /autofix-pr: the run ends when the turn goes idle, so drop the
+    // auto-approve grant. A watch owns the grant across its rounds' idle gaps, so
+    // skip while a watch is active (it clears via onStopped instead).
+    if (
+      state === StreamingState.Idle &&
+      this.autofixAutoApprove &&
+      !this.prWatchController?.active
+    ) {
+      this.autofixAutoApprove = false;
+    }
   }
 
   private noteStreamActivity(): void {
@@ -865,7 +900,6 @@ export class CliPiAppState {
     }
     this.lastStreamActivityAt = Date.now();
     this.streamStalled = false;
-    this.streamStallNoticeShown = false;
     this.scheduleStreamStallWatchdog();
   }
 
@@ -891,7 +925,6 @@ export class CliPiAppState {
   private clearStreamStallWatchdog(): void {
     this.clearStreamStallTimers();
     this.lastStreamActivityAt = null;
-    this.streamStallNoticeShown = false;
     this.streamStalled = false;
   }
 
@@ -899,18 +932,14 @@ export class CliPiAppState {
     if (!this.hasActiveResponseStream()) {
       return;
     }
-    if (await hasExternalNetwork()) {
-      this.lastStreamActivityAt = Date.now();
-      this.scheduleStreamStallWatchdog();
-      return;
-    }
-    if (this.streamStallNoticeShown) {
-      return;
-    }
-    this.streamStallNoticeShown = true;
-    this.failActiveTurnAfterConnectionLoss(
-      "Network appears offline while the task is running. Stopped the current TUI response; reconnect and retry.",
-    );
+    // 到达此处时 connectionStatus 必为 "connected"（hasActiveResponseStream 已隐含，
+    // 且本函数 fire 于定时器回调、其间无 await 改写该字段）。ws 仍 connected 即认为
+    // 本地服务（Gateway/AgentServer）还活着、任务在跑只是暂未吐帧，故续期不报错。
+    // air-gapped 内网里 ws 恒 connected，故永远续期，消除公网探针必然失败导致的误报。
+    // 公网用户真断网时 ws 会先变 reconnecting（见 handleConnectionStatusChanged，走 60s
+    // 重连看门狗），本函数在 reconnecting 下不会被调到，故公网保护语义不变。
+    this.lastStreamActivityAt = Date.now();
+    this.scheduleStreamStallWatchdog();
   }
 
   private frameBelongsToActiveSession(frame: EventFrame): boolean {
@@ -1105,6 +1134,7 @@ export class CliPiAppState {
       })),
       pendingHumanPrompts: new Map(this.pendingHumanPrompts),
       evolutionStatus: this.evolutionStatus,
+      skillEvolutionEnabled: this.skillEvolutionEnabled,
       contextCompression: this.contextCompression ? { ...this.contextCompression } : null,
       contextWindowLimit: this.contextWindowLimit,
       contextUsedPercentage: this.contextUsedPercentage,
@@ -1258,7 +1288,93 @@ export class CliPiAppState {
       cancelAndWaitForIdle: (opts) => this.taskLifecycle
         ? this.taskLifecycle.cancelAndWaitForIdle(opts)
         : Promise.reject(new Error("Task lifecycle port not available")),
+      startPrWatch: this.startPrWatch,
+      stopPrWatch: this.stopPrWatch,
+      isPrWatchActive: this.isPrWatchActive,
+      setAutofixAutoApprove: this.setAutofixAutoApprove,
     };
+  }
+
+  /** Start a TUI-side PR watch (replacing any existing one). */
+  readonly startPrWatch = (config: {
+    repo: string;
+    prNumber: string;
+    platform: string;
+    intervalMs?: number;
+    autoApprove?: boolean;
+    preferredLanguage?: PreferredLanguage;
+  }): void => {
+    const { autoApprove, preferredLanguage, ...watchConfig } = config;
+    this.prWatchController?.stop("被新的 watch 取代", { silent: true });
+    // Apply the run-scoped grant here — after the prior watch's onStopped has
+    // cleared it, but before start() synchronously sends the first round — so
+    // round 1 is auto-approved too. (Setting it in the command before this call
+    // would be wiped by the replaced watch's onStopped.)
+    if (autoApprove) this.autofixAutoApprove = true;
+    this.prWatchController = new PrWatchController(
+      {
+        sendMessage: (prompt) => this.sendMessage(prompt, undefined, this.mode, { logAsUser: false }),
+        isBusy: () => {
+          const s = this.getSnapshot();
+          return s.isProcessing || s.cancellableWork || Boolean(s.pendingQuestion);
+        },
+        isConnected: () => this.connectionStatus === "connected",
+        notify: (message, isError) =>
+          this.addItem((isError ? addError : addInfo)(this.sessionId, message, isError ? undefined : "i")),
+        preferredLanguage: preferredLanguage ?? this.preferredLanguage,
+        onStopped: () => {
+          // Watch ended (green / merged / closed / fuse / replaced) → drop the
+          // run-scoped auto-approve grant so the next run asks again.
+          this.autofixAutoApprove = false;
+        },
+      },
+      watchConfig,
+    );
+    this.prWatchController.start();
+  };
+
+  /** Stop the active PR watch; returns true if one was running. */
+  readonly stopPrWatch = (): boolean => {
+    if (!this.prWatchController?.active) return false;
+    this.prWatchController.stop(this.preferredLanguage === "zh" ? "用户手动停止" : "stopped by user");
+    this.prWatchController = null;
+    return true;
+  };
+
+  readonly isPrWatchActive = (): boolean => Boolean(this.prWatchController?.active);
+
+  /** Grant/revoke run-scoped auto-approval of tool-permission prompts. */
+  readonly setAutofixAutoApprove = (on: boolean): void => {
+    this.autofixAutoApprove = on;
+  };
+
+  /**
+   * If this is a tool-permission prompt and we can confidently identify its
+   * "allow once" option, approve it automatically (the user pre-authorized) and
+   * return true. Scoped to permission_interrupt only — ask_user / confirm / plan
+   * prompts are genuine decisions and must still reach the user. If the option
+   * shape is not what we expect, return false so the card renders normally
+   * (fail toward asking, never toward a blind wrong answer).
+   */
+  private tryAutoApprovePermission(question: PendingQuestion): boolean {
+    if (question.source !== "permission_interrupt") return false;
+    const options = question.questions?.[0]?.options;
+    if (!Array.isArray(options) || options.length === 0) return false;
+    // "Allow once" = an allow option that is NOT "always allow" (which would
+    // persist beyond the run). zh: 本次允许 / 总是允许; en: Allow once / Always allow.
+    const isAllow = (l: string) => l.includes("允许") || /^allow\b/i.test(l.trim());
+    const isAlwaysAllow = (l: string) =>
+      l.includes("总是允许") || /^always allow\b/i.test(l.trim());
+    const allowOnce = options.find((o) => isAllow(o.label) && !isAlwaysAllow(o.label));
+    if (!allowOnce) return false;
+    this.pendingQuestion = question; // submitQuestionAnswers reads this
+    this.addItem(
+      addInfo(this.sessionId, `※ /autofix-pr 自动批准命令：${allowOnce.label}`, "※"),
+    );
+    this.submitQuestionAnswers([
+      { selected_options: [allowOnce.label], custom_input: allowOnce.label },
+    ]);
+    return true;
   }
 
   getUsageSummary(): SessionUsageSummary {
@@ -1400,6 +1516,25 @@ export class CliPiAppState {
     return this.reauthPort;
   }
 
+  /**
+   * 计算随请求发送的本地上下文路径（project_dir/cwd/trusted_dirs）。
+   * Remote 模式下本地 PC 路径不可被远端沙箱访问，故只发送服务器侧 /home/<user-id>
+   * 作为 project_dir/cwd，不发送 trusted_dirs；非 remote 时沿用本地 trusted_dirs/cwd。
+   */
+  private resolveRequestPaths(): {
+    projectDir: string;
+    cwd: string;
+    trustedDirs: string[];
+  } {
+    if (this.isRemote && this.remoteProjectDir) {
+      return { projectDir: this.remoteProjectDir, cwd: this.remoteProjectDir, trustedDirs: [] };
+    }
+    const trustedDirs = getTrustedDirs();
+    const projectDir = getCurrentProjectDir() || process.cwd();
+    const cwd = getCurrentCwd() || projectDir;
+    return { projectDir, cwd, trustedDirs };
+  }
+
   readonly sendEventOnly = (
     method: string,
     params: Record<string, unknown>,
@@ -1407,9 +1542,7 @@ export class CliPiAppState {
   ): string => {
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
     const send = () => {
-      const trustedDirs = getTrustedDirs();
-      const projectDir = getCurrentProjectDir() || process.cwd();
-      const cwd = getCurrentCwd() || projectDir;
+      const { projectDir, cwd, trustedDirs } = this.resolveRequestPaths();
       this.wsClient.send({
         type: "req",
         id,
@@ -1447,9 +1580,7 @@ export class CliPiAppState {
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
     // 记录当前命令请求 ID，以便 Ctrl+C 时能立即取消 WS 请求
     this.activeCommandRequestId = id;
-    const trustedDirs = getTrustedDirs();
-    const projectDir = getCurrentProjectDir() || process.cwd();
-    const cwd = getCurrentCwd() || projectDir;
+    const { projectDir, cwd, trustedDirs } = this.resolveRequestPaths();
     try {
       const response = await this.wsClient.request(
         id,
@@ -1465,6 +1596,20 @@ export class CliPiAppState {
         },
         timeoutMs ?? 30000,
       );
+      if (method === "config.get") {
+        const payload = response.payload;
+        const enabled =
+          payload && typeof payload === "object" && !Array.isArray(payload)
+            ? parseSkillEvolutionEnabled((payload as Record<string, unknown>).skill_evolution)
+            : false;
+        this.setSkillEvolutionEnabled(enabled);
+      } else if (
+        method === "config.set" &&
+        Object.prototype.hasOwnProperty.call(params, "skill_evolution")
+      ) {
+        // config.set 响应只确认写盘；重新读取权威 payload，保证 hot reload 后 UI 与后端一致。
+        void this.fetchModelInfo();
+      }
       return response.payload as T;
     } finally {
       // 请求完成后清理追踪（无论成功/失败/取消）
@@ -1867,6 +2012,10 @@ export class CliPiAppState {
       this.localPendingQuestion.reject(new Error("input flow was interrupted"));
       this.localPendingQuestion = null;
     }
+    // A watch is tied to the current PR/session; a new/cleared session drops it.
+    this.prWatchController?.stop("会话已重置", { silent: true });
+    this.prWatchController = null;
+    this.autofixAutoApprove = false;
     this.entries = [];
     this.pendingQuestion = null;
     this.lastError = null;
@@ -1911,7 +2060,7 @@ export class CliPiAppState {
   };
 
   readonly markPlanEntryFromSlashCommand = (): void => {
-    this.pendingPlanEntrySource = "slash_command";
+    this.pendingPlanEntrySource = PLAN_ENTRY_SOURCE_SLASH_COMMAND;
   };
 
   readonly setModel = (name: string): void => {
@@ -2104,6 +2253,9 @@ export class CliPiAppState {
 
   /** 向服务端请求中断当前 session 的任务；成功发送前不宣称"已中断"。 */
   cancel(options?: { showNotice?: boolean }): boolean {
+    // User intervention (Ctrl+C / other) revokes the run-scoped auto-approve
+    // grant — subsequent tool prompts must reach the user again.
+    this.autofixAutoApprove = false;
     if (this.connectionStatus !== "connected") {
       if (options?.showNotice !== false) {
         this.addItem(addError(this.sessionId, "Unable to interrupt task while disconnected"));
@@ -3188,7 +3340,7 @@ export class CliPiAppState {
   private buildStatusLineJsonInput(): Record<string, unknown> {
     const snapshot = this.getSnapshot();
     const usage = this.getUsageSummary();
-    const cwd = getCurrentCwd() || process.cwd();
+    const { cwd, trustedDirs } = this.resolveRequestPaths();
     return {
       session_id: snapshot.sessionId,
       session_name: snapshot.sessionTitle,
@@ -3212,7 +3364,7 @@ export class CliPiAppState {
       evolution_status: snapshot.evolutionStatus,
       active_subtask_count: snapshot.activeSubtasks.length,
       todo_count: snapshot.todos.length,
-      trusted_dirs: getTrustedDirs(),
+      trusted_dirs: trustedDirs,
       usage: {
         total_input_tokens: usage.total_input_tokens,
         total_output_tokens: usage.total_output_tokens,
@@ -3240,57 +3392,22 @@ export class CliPiAppState {
     }
     const jsonInput = JSON.stringify(this.buildStatusLineJsonInput());
     const cmd = sl.command;
-    const isWindows = process.platform === "win32";
-
     try {
-      if (isWindows) {
-        // On Windows: pipe stdin (like POSIX) so `jq -r '.field'` works directly.
-        // Also write a temp file and export JIUWENSWARM_SL_FILE as a fallback for
-        // `$(cat "$JIUWENSWARM_SL_FILE")` style commands (sh -c can't $(cat) stdin).
-        const tmpFile = join(tmpdir(), "jiuwenswarm-sl.json");
-        writeFileSync(tmpFile, jsonInput, "utf8");
-        const msysPath = tmpFile
-          .split(sep)
-          .join("/")
-          .replace(/^([A-Za-z]):/, (_, d) => "/" + d.toLowerCase());
-        const patchedCmd = cmd.replace(/\$\(cat\)/g, `$(cat "${msysPath}")`);
-        const fullCmd = `export JIUWENSWARM_SL_FILE="${msysPath}"; ${patchedCmd}`;
-
-        const child = execFile(
-          "sh",
-          ["-c", fullCmd],
-          { timeout: 3_000, maxBuffer: 10_240, cwd: getCurrentCwd() || process.cwd() },
-          (err, stdout) => {
-            if (err) return;
-            const text = stdout.trim().replace(/\r\n/g, "\n");
-            if (text !== this.statusLineText) {
-              this.statusLineText = text || null;
-              this.emitChange();
-            }
-          },
-        );
-        // Pipe stdin so commands that read stdin directly (jq, python, etc.) work
-        // on Windows the same way they do on POSIX — aligning with Claude Code behavior.
-        child.stdin?.end(jsonInput);
-      } else {
-        // On POSIX, stdin piping works correctly in sh -c.
-        const child = execFile(
-          "sh",
-          ["-c", cmd],
-          { timeout: 3_000, maxBuffer: 10_240 },
-          (err, stdout) => {
-            if (err) return;
-            const text = stdout.trim().replace(/\r\n/g, "\n");
-            if (text !== this.statusLineText) {
-              this.statusLineText = text || null;
-              this.emitChange();
-            }
-          },
-        );
-        child.stdin?.end(jsonInput);
-      }
+      runStatusLineCommand(
+        cmd,
+        jsonInput,
+        getCurrentCwd() || process.cwd(),
+        (err, stdout) => {
+          if (err) return;
+          const text = stdout.trim().replace(/\r\n/g, "\n");
+          if (text !== this.statusLineText) {
+            this.statusLineText = text || null;
+            this.emitChange();
+          }
+        },
+      );
     } catch {
-      // Silently ignore — sh may not be in PATH on Windows
+      // Ignore launch errors; invalid commands should not disrupt the TUI.
     }
   }
 
@@ -3372,21 +3489,41 @@ export class CliPiAppState {
     const target = this.bootSessionId;
     const previousMode = this.mode;
     try {
-      const res = await this.requestAgentServer<{
+      type BootSessionResult = {
         session_id?: string;
         mode?: string;
         created?: boolean;
-      }>(
-        "session.create",
-        {
-          ...(target ? { session_id: target } : { create_token: this.bootCreateToken }),
-          previous_session_id: "",
-          previous_mode: previousMode,
-          mode: previousMode,
-        },
-        undefined,
-        false,
-      );
+      };
+      let res: BootSessionResult;
+      let retryIndex = 0;
+      while (true) {
+        try {
+          res = await this.requestAgentServer<BootSessionResult>(
+            "session.create",
+            {
+              ...(target ? { session_id: target } : { create_token: this.bootCreateToken }),
+              ...(!target && this.bootPersistSession ? { persist_session: true } : {}),
+              previous_session_id: "",
+              previous_mode: previousMode,
+              mode: previousMode,
+            },
+            undefined,
+            false,
+          );
+          break;
+        } catch (error) {
+          if (
+            target === null
+            || !isTransientSessionInUseError(error)
+            || retryIndex >= BOOT_SESSION_IN_USE_RETRY_DELAYS_MS.length
+          ) {
+            throw error;
+          }
+          const delayMs = BOOT_SESSION_IN_USE_RETRY_DELAYS_MS[retryIndex];
+          retryIndex += 1;
+          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
       const createdId = res?.session_id;
       if (typeof createdId !== "string" || !createdId) {
         throw new Error("session.create did not return a session id");
@@ -3394,7 +3531,7 @@ export class CliPiAppState {
       const placeholderId = this.sessionId;
       const pendingVisibleRequest = this.lastVisibleUserRequest;
       this.updateSession(createdId);
-      if (target === null && placeholderId === "new") {
+      if (target === null && placeholderId !== createdId) {
         this.entries = this.entries.map((entry) =>
           entry.sessionId === placeholderId ? { ...entry, sessionId: createdId } : entry,
         );
@@ -3405,7 +3542,13 @@ export class CliPiAppState {
       }
       const resolvedMode = res?.mode;
       if (typeof resolvedMode === "string" && resolvedMode) {
-        this.setMode(resolvedMode as ClientMode);
+        // 后端可能回旧 canonical 串（历史 session 重连），走 normalizeToClientMode
+        // 归一到新串；未知串丢弃，避免 ``as`` 强转把旧串写入 this.mode 让
+        // isTeamMode / isPlanClientMode / formatModeForDisplay 误判。
+        const normalized = normalizeToClientMode(resolvedMode);
+        if (normalized) {
+          this.setMode(normalized);
+        }
       }
       if (target !== null) {
         this.safeRestoreHistory(createdId);

@@ -50,24 +50,24 @@ export const ProactiveRecommendationCard: React.FC<ProactiveRecommendationCardPr
   const label = t(`config.proactive.typeLabel.${proactiveType}`, { defaultValue: t('config.proactive.typeLabel.skill_recommend') });
 
   return (
-    <div className="proactive-recommendation-card animate-fade-in">
-      <div className={`proactive-card bg-gradient-to-br ${config.gradient} border ${config.border} rounded-lg p-4`}>
+    <div className="proactive-recommendation-card animate-fade-in" data-testid="chat-panel-proactive-recommendation-card">
+      <div className={`proactive-card bg-gradient-to-br ${config.gradient} border ${config.border} rounded-lg p-4`} data-testid="chat-panel-proactive-recommendation-inner" data-variant={proactiveType}>
         {/* Header with icon and label */}
-        <div className="flex items-center gap-2 mb-3">
-          <Icon className={`w-5 h-5 ${config.iconColor}`} strokeWidth={2} />
-          <span className={`text-sm font-semibold ${config.labelColor}`}>
+        <div className="flex items-center gap-2 mb-3" data-testid="chat-panel-proactive-recommendation-header">
+          <Icon className={`w-5 h-5 ${config.iconColor}`} strokeWidth={2} data-testid="chat-panel-proactive-recommendation-icon" />
+          <span className={`text-sm font-semibold ${config.labelColor}`} data-testid="chat-panel-proactive-recommendation-label">
             {label}
           </span>
         </div>
 
         {/* Content */}
-        <div className="proactive-card-content prose prose-sm max-w-none">
+        <div className="proactive-card-content prose prose-sm max-w-none" data-testid="chat-panel-proactive-recommendation-content">
           <ReactMarkdown>{message.content}</ReactMarkdown>
         </div>
 
         {/* Timestamp */}
         {message.timestamp && (
-          <div className="flex items-center gap-3 text-sm mt-2 text-text-muted">
+          <div className="flex items-center gap-3 text-sm mt-2 text-text-muted" data-testid="chat-panel-proactive-recommendation-timestamp">
             <span>{formatTimestamp(message.timestamp)}</span>
           </div>
         )}

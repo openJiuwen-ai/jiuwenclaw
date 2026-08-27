@@ -12,6 +12,7 @@ from typing import Any
 from openjiuwen.agent_teams.paths import get_agent_teams_home
 
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.server.runtime.opencode_zen import get_zen_free_model_entries
 
 logger = logging.getLogger(__name__)
 
@@ -212,26 +213,36 @@ def _resolve_default_model_config(
 ) -> dict[str, Any]:
     models_raw = config_base.get("models", {})
     if not isinstance(models_raw, dict):
-        return {}
+        models_raw = {}
 
     defaults_raw = models_raw.get("defaults")
-    if isinstance(defaults_raw, list):
+    defaults_list = defaults_raw if isinstance(defaults_raw, list) else []
+
+    requested = (requested_model_name or "").strip()
+    if requested:
         # When the caller (chat page) provides a requested model name, prefer
         # the entry whose ``model_client_config.model_name`` matches it so
         # team members without an explicit ``modes.team.agents.*.model`` fall
         # back to the page-selected model instead of the first list item.
-        requested = (requested_model_name or "").strip()
-        if requested:
-            for item in defaults_raw:
-                if not isinstance(item, dict):
-                    continue
-                mcc = item.get("model_client_config") or {}
-                if isinstance(mcc, dict) and mcc.get("model_name") == requested:
-                    return item
-
-        for item in defaults_raw:
-            if isinstance(item, dict):
+        for item in defaults_list:
+            if not isinstance(item, dict):
+                continue
+            mcc = item.get("model_client_config") or {}
+            if isinstance(mcc, dict) and mcc.get("model_name") == requested:
                 return item
+
+        # The selected model may be a Zen free model that is appended to
+        # ``models.list`` at runtime but never written into ``models.defaults``
+        # (see ``opencode_zen``). Match it from the in-memory Zen cache so a
+        # page-selected free model still drives the whole team's fallback model.
+        for item in get_zen_free_model_entries():
+            mcc = item.get("model_client_config") or {}
+            if isinstance(mcc, dict) and mcc.get("model_name") == requested:
+                return item
+
+    for item in defaults_list:
+        if isinstance(item, dict):
+            return item
 
     legacy_default = models_raw.get("default")
     if isinstance(legacy_default, dict):
@@ -463,16 +474,9 @@ def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
     return predefined_members
 
 
-def _resolve_enable_permissions(config_base: dict[str, Any], team_raw: dict[str, Any]) -> bool:
-    """Resolve the effective team-permission toggle.
-
-    The effective value is ``permissions.enabled`` (global) AND
-    ``enable_permissions`` (team-level). Both must be true for
-    TeamPermissionRail to mount on teammates.
-    """
-    global_enabled = bool((config_base.get("permissions") or {}).get("enabled", False))
-    team_enabled = bool(team_raw.get("enable_permissions", False))
-    return global_enabled and team_enabled
+def _resolve_enable_permissions(config_base: dict[str, Any]) -> bool:
+    """Use the global permission switch for every Team runtime."""
+    return bool((config_base.get("permissions") or {}).get("enabled", False))
 
 
 def _apply_swarmflow_budget(spec_dict: dict[str, Any], raw_value: Any) -> None:
@@ -551,7 +555,7 @@ def load_team_spec_dict(
     spec_dict["teammate_mode"] = team_raw.get("teammate_mode", "build_mode")
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
-    spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
+    spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base)
     _apply_swarmflow_budget(spec_dict, team_raw.get("swarmflow_budget"))
     spec_dict["leader"] = _build_leader_spec(team_raw)
     spec_dict["agents"] = agents

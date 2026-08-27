@@ -18,11 +18,18 @@ function isClosingFence(line: string, fence: OpenFence): boolean {
   return pattern.test(line);
 }
 
-function normalizeTableRow(segment: string): string {
-  let row = segment.trim();
-  if (!row.startsWith('|')) row = `| ${row}`;
-  if (!row.endsWith('|')) row = `${row} |`;
-  return row;
+function splitCollapsedTableRows(line: string): string[] {
+  const rows: string[] = [];
+  let rowStart = 0;
+
+  for (const boundary of line.matchAll(/\|\s*\|/g)) {
+    const boundaryStart = boundary.index;
+    rows.push(line.slice(rowStart, boundaryStart + 1));
+    rowStart = boundaryStart + boundary[0].length - 1;
+  }
+
+  rows.push(line.slice(rowStart));
+  return rows;
 }
 
 function getTableCells(row: string): string[] {
@@ -41,7 +48,7 @@ function repairCollapsedTableLine(line: string): string | null {
   if (!lineMatch || !/\|\s*\|/.test(lineMatch[2])) return null;
 
   const indent = lineMatch[1];
-  const rows = lineMatch[2].split(/\|\s*\|/).map(normalizeTableRow);
+  const rows = splitCollapsedTableRows(lineMatch[2]);
   if (rows.length < 3) return null;
 
   const cellsByRow = rows.map(getTableCells);

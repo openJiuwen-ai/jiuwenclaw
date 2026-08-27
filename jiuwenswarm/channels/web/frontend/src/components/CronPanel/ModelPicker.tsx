@@ -12,12 +12,13 @@ interface ModelPickerProps {
 }
 
 // 定时任务抽屉里的"模型"选择器。视觉和交互照搬会话界面输入框工具栏的模型选择器
-// （InputArea.tsx 的 ModelSelector 2117-2260）：同一套 .chat-mode-select pill + portal 下拉、
+// （InputArea.tsx 的 ModelSelector）：同一套 .chat-mode-select pill + portal 下拉、
 // 同一份 ModelProviderIcon 厂商图标，跟同行的 ModeSelector 视觉/交互保持一致。
 // 数据源仍是 sessionStore.availableModels（会话级配置的模型清单），但跟会话那边的 ModelSelector
 // 不同——会话那边是直接绑死 activeSessionId 的 session 级状态，抽屉里需要一个独立于会话的
 // 受控字段（编辑已有任务时展示的是该任务自己存的 model_name，不是当前会话选中的模型），
-// 所以这里照抄样式和交互，不能照搬组件实例。
+// 所以这里照抄样式和交互，不能照搬组件实例。单 Agent 与集群（team）任务均可选模型，
+// 后端执行时统一按 job.model_name 透传给 chat.send。
 export default function ModelPicker({ value, onChange, disabled = false }: ModelPickerProps) {
   const { t } = useTranslation();
   const availableModels = useSessionStore((s) => s.availableModels);
@@ -58,7 +59,7 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
   };
 
   return (
-    <div ref={rootRef} className={clsx('chat-mode-select', open && 'chat-mode-select--open')}>
+    <div ref={rootRef} className={clsx('chat-mode-select', open && 'chat-mode-select--open')} data-testid="cron-model-picker-root">
       <button
         type="button"
         className="chat-mode-select__trigger"
@@ -67,7 +68,7 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
         title={t('chat.modelSelector.tooltip')}
         aria-haspopup="menu"
         aria-expanded={open}
-        data-testid="cron-model-picker"
+        data-testid="cron-model-picker-trigger"
       >
         {selected ? (
           <span className="chat-mode-select__value">
@@ -97,15 +98,16 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
           ref={menuPortalRef}
           className="chat-mode-select__menu model-select__menu"
           role="menu"
+          data-testid="cron-model-menu"
           style={menuDirection === 'up'
             ? { position: 'fixed', bottom: window.innerHeight - menuAnchor.top + 10, left: menuAnchor.left, zIndex: 9999 }
             : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
           }
         >
           {availableModels.length === 0 ? (
-            <div className="px-2 py-2 text-xs text-text-muted">{t('cron.modelPicker.empty')}</div>
+            <div className="px-2 py-2 text-xs text-text-muted" data-testid="cron-model-empty">{t('cron.modelPicker.empty')}</div>
           ) : (
-            <div className="model-select__section-header">{t('cron.modelPicker.configured')}</div>
+            <div className="model-select__section-header" data-testid="cron-model-menu-section-header">{t('cron.modelPicker.configured')}</div>
           )}
           {availableModels.map((m) => {
             const key = m.model_name;
@@ -121,6 +123,7 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
                 )}
                 role="menuitemradio"
                 aria-checked={active}
+                data-testid={`cron-model-option-${key}`}
               >
                 <span className="chat-mode-select__option-main">
                   <span className="chat-mode-select__icon" aria-hidden="true">

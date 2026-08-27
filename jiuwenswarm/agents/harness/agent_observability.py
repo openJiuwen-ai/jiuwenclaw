@@ -23,9 +23,8 @@ Shared-provider caveat (important):
     and ``init_observability`` is a no-op if already initialized. In a process
     where BOTH team and agent observability are enabled, whichever runs first
     wins; the other silently reuses it (its exporter/endpoint/service_name are
-    ignored). To stay safe in that case we track ``_agent_owns_provider``:
-    agent shutdown only tears down the provider when the agent actually
-    created it, and never tears down a provider the team subsystem depends on.
+    ignored). Provider demands are coordinated by ``observability_runtime`` so
+    agent shutdown never tears down a provider the team subsystem depends on.
 """
 
 from __future__ import annotations
@@ -33,8 +32,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.config import (
+    get_config,
+    get_skill_evolution_enabled,
+)
 from jiuwenswarm.common.utils import get_user_workspace_dir
+from jiuwenswarm.agents.harness.observability_runtime import (
+    acquire_observability_demand,
+    build_observability_config,
+    release_observability_demand,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,70 +51,122 @@ logger = logging.getLogger(__name__)
 # on each single-agent request.
 _agent_observability_active: bool = False
 
-# Process-global "current run's root span", set/cleared by open/close_agent_run_span.
-# The per-request _team_span_ctx ContextVar can't reach the round tasks (agent
-# execution runs in a session-setup supervisor task), so OtelCallbackHandler's
-# get_team_span() returns None there and child spans are skipped. The monkeypatch
-# below makes get_team_span fall back to this global so the callback finds a parent
-# regardless of task/context boundary.
-_CURRENT_ROOT_SPAN: Any = None
+# Root spans of the runs currently in flight, keyed by session id.
+#
+# The per-request root ContextVar can't reach the round tasks (agent execution
+# runs in a session-setup supervisor task), so SDK lookups that only see the
+# ContextVar return None there. The wrappers installed below fall back to this
+# registry, which works regardless of task/context boundary.
+#
+# Keyed rather than a single "current run" slot because sessions overlap: a
+# process serves several chats at once, and a single slot made them fight over
+# it. Whoever finished first cleared it, so a run still in progress silently
+# lost its agent-tier spans from that moment on (its sub-agents landed flat
+# under the dispatching agent) — and before that, whoever opened last owned the
+# slot, so the other run's spans would have joined the wrong trace.
+_ROOT_SPANS: dict[str, Any] = {}
 
-# get_team_span bindings already wrapped by _install_team_span_global_fallback,
-# keyed on the wrapper itself (it becomes the next lookup's orig) so repeat
-# calls stay idempotent without stamping an attribute on the function object.
-_team_span_patched: set[Any] = set()
+# Marker set on the wrapped ``get_root_span`` / ``get_team_span`` callables so
+# install stays idempotent and tests can assert the fallback is in place.
+_SDK_ROOT_SPAN_FALLBACK_ATTR = "_jiuwenswarm_root_span_fallback"
+
+
+def _is_recording(span: Any) -> bool:
+    """Report whether *span* is still open, tolerating stubs without the API."""
+    try:
+        return bool(span is not None and span.is_recording())
+    except Exception:
+        return False
+
+
+def _resolve_root_span() -> Any:
+    """Return the root span of the run the calling task belongs to, or None.
+
+    Resolution is by session id first: ``get_session_id`` is set by the SDK
+    around agent execution, so it is readable from the tasks the ContextVar
+    cannot reach — which is exactly where this fallback is needed.
+
+    When no session id is in reach, a single run in flight is unambiguous and
+    answers. Several in flight with no way to tell them apart returns None
+    rather than a guess: attaching one run's spans to another run's trace is
+    worse than the span being missing.
+    """
+    session_id = ""
+    try:
+        from openjiuwen.agent_teams.context import get_session_id
+
+        session_id = get_session_id() or ""
+    except Exception as exc:
+        logger.debug("[AgentObservability] session id lookup failed: %s", exc)
+
+    span = _ROOT_SPANS.get(session_id)
+    if _is_recording(span):
+        return span
+
+    live = [candidate for candidate in list(_ROOT_SPANS.values()) if _is_recording(candidate)]
+    if len(live) == 1:
+        return live[0]
+    return None
 
 
 def _install_team_span_global_fallback() -> None:
-    """Patch get_team_span in EVERY consumer module to fall back to _CURRENT_ROOT_SPAN.
+    """Wrap SDK root/team span lookups with the session-keyed ``_ROOT_SPANS`` fallback.
 
-    Each SDK consumer did ``from span_context import get_team_span``, so each has
-    its own binding that must be rebound separately:
-      * callback_handler — creates llm/tool spans (parent lookup).
-      * rail (ObservabilityRail) — creates the agent.<type>.invoke spans; it
-        *returns early* when get_team_span() is None, which is why the agent-tier
-        spans (incl. sub-agent's agent.<type>.invoke) were missing.
-      * monitor_handler — team-only (harmless to patch; team_span is ContextVar-visible
-        there so the fallback never triggers).
-    Team mode is unaffected: its team_span is ContextVar-visible, so the original
-    lookup returns non-None and the fallback never triggers. Single active
-    single-agent run assumed (multi-session concurrency: last-opened wins).
-    Best-effort, idempotent, never raises.
+    Newer openjiuwen moved team-span state into
+    ``extensions.observability.span_context.get_root_span`` (session registry +
+    ContextVar). ``get_team_span`` is a thin facade over that. Wrapping both
+    the extension accessor and the team facade keeps:
+
+    * ``get_team_span()`` (rail / callback parent lookup), and
+    * ``ActiveSpanTracker`` parent resolution (via ``get_root_span``),
+
+    able to see the single-agent root even when the ContextVar is invisible to
+    the supervisor task.
+
+    Best-effort, idempotent, never raises — observability must never break a run.
     """
-    import importlib
+    try:
+        from openjiuwen.agent_teams.observability import span_context as team_sc
+        from openjiuwen.extensions.observability import span_context as ext_sc
+    except Exception as exc:
+        logger.debug("[AgentObservability] skip team-span fallback install: %s", exc)
+        return
 
-    for mod_path in (
-        "openjiuwen.agent_teams.observability.callback_handler",
-        "openjiuwen.agent_teams.observability.rail",
-        "openjiuwen.agent_teams.observability.monitor_handler",
-    ):
+    original = getattr(ext_sc, "get_root_span", None)
+    if original is None or getattr(original, _SDK_ROOT_SPAN_FALLBACK_ATTR, False):
+        return
+
+    def get_root_span_with_fallback(*, session_id: str | None = None):
         try:
-            mod = importlib.import_module(mod_path)
-        except Exception as exc:
-            logger.debug(
-                "[AgentObservability] skip team-span fallback patch for %s: %s",
-                mod_path, exc,
-            )
-            continue
-        orig = getattr(mod, "get_team_span", None)
-        if orig is None or orig in _team_span_patched:
-            continue
-
-        def _get_team_span_with_global(team_name=None, _orig=orig):  # type: ignore[no-untyped-def]
-            span = _orig(team_name)
-            if span is None:
-                return _CURRENT_ROOT_SPAN
+            span = original(session_id=session_id)
+        except TypeError:
+            span = original()
+        if _is_recording(span):
             return span
+        return _resolve_root_span()
 
-        _team_span_patched.add(_get_team_span_with_global)
-        mod.get_team_span = _get_team_span_with_global
+    setattr(get_root_span_with_fallback, _SDK_ROOT_SPAN_FALLBACK_ATTR, True)
+    ext_sc.get_root_span = get_root_span_with_fallback
+    team_sc.get_root_span = get_root_span_with_fallback
+    # callback_handler imports get_root_span by name at module load; rebind that
+    # early binding too, otherwise LLM/tool parent lookup still sees the unwrapped
+    # accessor when the handler was imported before this install ran.
+    try:
+        from openjiuwen.extensions.observability import callback_handler as ch
+
+        ch.get_root_span = get_root_span_with_fallback
+    except Exception as exc:
+        logger.debug("[AgentObservability] callback_handler rebind skipped: %s", exc)
+
+    def get_team_span_with_fallback(team_name: str | None = None):
+        del team_name
+        return get_root_span_with_fallback()
+
+    setattr(get_team_span_with_fallback, _SDK_ROOT_SPAN_FALLBACK_ATTR, True)
+    team_sc.get_team_span = get_team_span_with_fallback
 
 
 _install_team_span_global_fallback()
-# True only when THIS module called ``init_observability()`` and therefore owns
-# the shared global TracerProvider. When the team subsystem (or a prior run)
-# already initialized it, this is False and shutdown must leave it intact.
-_agent_owns_provider: bool = False
 # Sticky flag: once any single-agent request has force-enabled observability
 # (e.g. a ``/debug`` run with ``debug_trace.<mode>.otel_enabled``), we never
 # auto-teardown the provider for the rest of the process. OTel allows only one
@@ -129,95 +188,88 @@ def sync_agent_observability(*, force: bool = False) -> None:
     * enabled -> disabled : ``shutdown_agent_observability()``
     * unchanged           : no-op
 
+    Evolution also requests the provider when the explicit switch is disabled.
+
     ``force=True`` (set by a ``/debug`` run when ``debug_trace.<mode>.otel_enabled``
     is true) treats ``want_enabled`` as true regardless of config, so a debug
     request can pull up OTel even when ``agent_observability.enabled`` is false.
     Once force is ever used, the provider stays up for the process (sticky — see
     ``_force_ever_enabled``) to avoid init/shutdown churn across alternating
-    requests; the normal config hot-reload teardown is unchanged otherwise.
+    requests; the normal config hot-reload teardown is unchanged when evolution
+    is disabled.
     """
-    global _agent_observability_active, _agent_owns_provider, _force_ever_enabled
+    global _agent_observability_active, _force_ever_enabled
 
-    cfg = get_config().get("agent_observability", {}) or {}
-    want_enabled = bool(cfg.get("enabled", False)) or force
+    config = get_config()
+    cfg = config.get("agent_observability", {}) or {}
+    evolution_requested = get_skill_evolution_enabled(config)
+    want_enabled = (
+        bool(cfg.get("enabled", False))
+        or evolution_requested
+        or force
+        or _force_ever_enabled
+    )
     if force:
         _force_ever_enabled = True
 
-    if want_enabled and not _agent_observability_active:
-        try:
-            from openjiuwen.agent_teams.observability import (
-                ObservabilityConfig,
-                init_observability,
-                is_initialized,
-            )
+    # Single-agent spans carry a redundant agentteam.* block; drop it. Scoped
+    # to single-agent runs — real team members keep their team attrs.
+    if want_enabled:
+        _apply_single_agent_team_attr_suppression()
 
-            if is_initialized():
-                # Another subsystem (e.g. team) already owns the provider.
-                # Reuse it so the global OtelCallbackHandler keeps emitting
-                # LLM/tool spans for this single agent too — do NOT re-init.
-                _agent_observability_active = True
-                _agent_owns_provider = False
+    if not want_enabled:
+        if _agent_observability_active:
+            shutdown_agent_observability()
+        return
+
+    try:
+        traces_dir = str(cfg.get("traces_dir") or get_user_workspace_dir() / ".trace")
+        obs_cfg = build_observability_config(
+            cfg,
+            service_name="jiuwenswarm-agent",
+            traces_dir=traces_dir,
+        )
+        provider_existed = acquire_observability_demand(
+            "agent",
+            observability_config=obs_cfg,
+        )
+        was_active = _agent_observability_active
+        _agent_observability_active = True
+        if not was_active:
+            if provider_existed:
                 logger.info(
                     "[AgentObservability] reusing existing observability provider "
                     "(owned by another subsystem)"
                 )
-                return
-
-            obs_cfg = ObservabilityConfig(
-                enabled=True,
-                service_name=cfg.get("service_name", "jiuwenswarm-agent"),
-                exporter=cfg.get("exporter", "otlp_grpc"),
-                endpoint=cfg.get("endpoint", "http://localhost:4317"),
-                sample_rate=cfg.get("sample_rate", 1.0),
-                attribute_value_max_length=cfg.get("attribute_value_max_length", 10240),
-                redact_prompts=cfg.get("redact_prompts", False),
-                redact_completions=cfg.get("redact_completions", False),
-                langfuse_public_key=cfg.get("langfuse_public_key", ""),
-                langfuse_secret_key=cfg.get("langfuse_secret_key", ""),
-                traces_dir=cfg.get("traces_dir") or str(get_user_workspace_dir() / ".trace"),
-                file_retention_days=cfg.get("file_retention_days", 7),
-            )
-            init_observability(obs_cfg)
-            _agent_observability_active = True
-            _agent_owns_provider = True
-            if obs_cfg.exporter == "file":
+            elif cfg.get("exporter", "otlp_grpc") == "file":
                 logger.info(
                     "[AgentObservability] enabled: exporter=%s traces_dir=%s",
-                    obs_cfg.exporter, obs_cfg.traces_dir,
+                    cfg.get("exporter", "otlp_grpc"),
+                    traces_dir,
                 )
             else:
                 logger.info(
                     "[AgentObservability] enabled: exporter=%s endpoint=%s",
-                    obs_cfg.exporter, obs_cfg.endpoint,
+                    cfg.get("exporter", "otlp_grpc"),
+                    cfg.get("endpoint", "http://localhost:4317"),
                 )
-        except Exception as exc:
-            logger.warning("[AgentObservability] init failed: %s", exc)
-
-    elif not want_enabled and _agent_observability_active and not _force_ever_enabled:
-        shutdown_agent_observability()
+    except Exception as exc:
+        _agent_observability_active = False
+        if evolution_requested:
+            raise RuntimeError(
+                "Agent evolution observability initialization failed"
+            ) from exc
+        logger.warning("[AgentObservability] init failed: %s", exc)
 
 
 def shutdown_agent_observability() -> None:
     """Shutdown single-agent observability (on disable or process exit)."""
-    global _agent_observability_active, _agent_owns_provider
+    global _agent_observability_active
     if not _agent_observability_active:
         return
-
-    if not _agent_owns_provider:
-        # Provider is owned by the team subsystem (or another run); tearing it
-        # down here would break team tracing. Just drop our activation flag.
-        _agent_observability_active = False
-        logger.info(
-            "[AgentObservability] disabled (provider owned elsewhere, left intact)"
-        )
-        return
-
     try:
-        from openjiuwen.agent_teams.observability import shutdown_observability
-
-        shutdown_observability()
+        release_observability_demand("agent")
         _agent_observability_active = False
-        _agent_owns_provider = False
         logger.info("[AgentObservability] disabled")
     except Exception as exc:
         logger.warning("[AgentObservability] shutdown failed: %s", exc)
@@ -240,6 +292,199 @@ def shutdown_agent_observability() -> None:
 #         ... Runner.run_agent_streaming / Runner.run_agent ...
 #     finally:
 #         close_agent_run_span(handle)
+# Synthetic team name for the non-team run paths. Registered with
+# ``set_team_span`` for the root span, and stamped on the agents themselves by
+# :func:`mark_single_agent_team` — the observability rail keys its agent-tier
+# spans off ``agent.team_name``.
+SINGLE_AGENT_TEAM_NAME = "single-agent"
+
+
+def mark_single_agent_team(agent: Any) -> None:
+    """Stamp the synthetic team marker the observability rail keys off.
+
+    ``ObservabilityRail.before_invoke`` returns early for an agent with no
+    ``team_name``, and a single-round agent (``enable_task_loop=False``) gets
+    its span from that hook alone — ``before_task_iteration`` never fires. A
+    single agent has no team, so without this marker it produces **no
+    agent-tier span at all**: its llm/tool spans and any sub-agent's
+    ``agent.<type>.invoke`` span both attach straight to the run's root span,
+    which is what flattens a task-tool sub-agent into the agent layer instead
+    of nesting it under the dispatching agent.
+
+    ``team_name`` is a plain attribute on DeepAgent. An agent that already
+    carries one is a real team member and is left alone. Best-effort: tracing
+    setup must never break a run.
+
+    Args:
+        agent: The DeepAgent instance about to run (main agent or sub-agent).
+    """
+    if agent is None:
+        return
+    if getattr(agent, "team_name", ""):
+        return
+    try:
+        agent.team_name = SINGLE_AGENT_TEAM_NAME
+    except Exception as exc:
+        logger.debug("[AgentObservability] set team_name on agent failed: %s", exc)
+
+
+# Idempotency marker so the patch below is applied at most once per process.
+_RAIL_TEAMATTR_PATCH_ATTR = "jiuwenswarm_single_agent_attr_patch"
+
+# Private rail method this module rebinds via getattr/setattr.
+_RAIL_STAMP_METHOD = "_stamp_agent_attributes"
+
+
+def _apply_single_agent_team_attr_suppression() -> None:
+    """Drop the ``agentteam.*`` block from single-agent spans.
+
+    Patches ``ObservabilityRail._stamp_agent_attributes`` to rebind a
+    single-agent span's ``set_attribute`` so any ``agentteam.*`` key (incl. the
+    inline input/output) is discarded; real team members use the original.
+    """
+    try:
+        from openjiuwen.agent_teams.observability import rail as _rail
+        from openjiuwen.extensions.observability.semconv import (
+            LANGFUSE_OBSERVATION_TYPE,
+            LANGFUSE_SESSION_ID,
+        )
+    except Exception as exc:  # pragma: no cover - openjiuwen unavailable
+        logger.debug("[AgentObservability] rail patch import failed: %s", exc)
+        return
+
+    rail_cls = _rail.ObservabilityRail
+    if getattr(rail_cls, _RAIL_TEAMATTR_PATCH_ATTR, False):
+        return  # already patched
+
+    _orig_stamp = getattr(rail_cls, _RAIL_STAMP_METHOD)
+    _team_attr_prefix = "agentteam."
+
+    @staticmethod
+    def _stamped(span, *, agent, member_name, team_name, session_id, is_leader):
+        if team_name != SINGLE_AGENT_TEAM_NAME:
+            # Real team member: original stamping.
+            _orig_stamp(
+                span, agent=agent, member_name=member_name, team_name=team_name,
+                session_id=session_id, is_leader=is_leader,
+            )
+            return
+
+        # Rebind this span's set_attribute to drop agentteam.* keys. The rail's
+        # later inline input/output stamps hit the same span, so they're caught too.
+        try:
+            orig_set_attribute = span.set_attribute
+
+            def _filter_attribute(key, value):
+                if isinstance(key, str) and key.startswith(_team_attr_prefix):
+                    return
+                orig_set_attribute(key, value)
+
+            span.set_attribute = _filter_attribute  # type: ignore[method-assign]
+        except Exception as exc:
+            logger.debug(
+                "[AgentObservability] set_attribute rebind failed: %s", exc
+            )
+            _orig_stamp(
+                span, agent=agent, member_name=member_name, team_name=team_name,
+                session_id=session_id, is_leader=is_leader,
+            )
+            return
+
+        # Keep the two non-agentteam attrs; everything else the original would
+        # set is agentteam.* and gets dropped by the filter above.
+        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "agent")
+        if session_id:
+            span.set_attribute(LANGFUSE_SESSION_ID, session_id)
+
+    setattr(rail_cls, _RAIL_STAMP_METHOD, _stamped)
+    setattr(rail_cls, _RAIL_TEAMATTR_PATCH_ATTR, True)
+
+
+def attach_subagent_observability(subagent: Any) -> None:
+    """Give *subagent* its own agent-tier span for the run that dispatches it.
+
+    Without a rail of its own a sub-agent produces no ``agent.<type>.invoke``
+    span, so its llm/tool spans attach to the **dispatching** agent's span —
+    the sub-agent's whole run then reads as if the parent had made those calls,
+    with nothing under the ``task_tool`` span it actually ran inside.
+
+    Attaching at build time is unreliable: the parent agent is constructed
+    once, typically before observability is initialized, so
+    ``maybe_observability_rail()`` would return None. By dispatch time
+    observability is up, and ``add_rail`` still lands before the sub-agent's
+    first ``_ensure_initialized()`` registers its hooks.
+
+    Idempotent, and a no-op when observability is off or *subagent* lacks the
+    DeepAgent rail API. Best-effort: tracing must never break a run.
+
+    Args:
+        subagent: The freshly created sub-agent DeepAgent.
+    """
+    if subagent is None:
+        return
+    try:
+        from openjiuwen.agent_teams.observability.rail import (
+            ObservabilityRail,
+            maybe_observability_rail,
+        )
+
+        rail = maybe_observability_rail()
+        if rail is None:
+            return  # observability not initialized -> nothing to trace
+        configured = subagent.configured_rails() if hasattr(subagent, "configured_rails") else []
+        if any(isinstance(r, ObservabilityRail) for r in configured):
+            return  # already attached — never add a second one
+        if hasattr(subagent, "add_rail"):
+            subagent.add_rail(rail)
+    except Exception as exc:
+        logger.debug("[AgentObservability] attach subagent rail failed: %s", exc)
+
+    # Released openjiuwen guards ObservabilityRail.before_invoke with
+    # ``if not team_name: return``, which no sub-agent can satisfy on its own.
+    # Harmless on newer versions, where that guard is gone.
+    mark_single_agent_team(subagent)
+
+
+# Marker stamped on the wrapper below so a second install recognizes its own
+# work and leaves it alone. The ``jiuwenswarm`` prefix is what keeps it from
+# colliding with anything the SDK puts on the same function object, so the name
+# carries no leading underscore: it is read from outside the wrapper.
+_SUBAGENT_HOOK_MARKER_ATTR = "jiuwenswarm_observability_hooked"
+
+
+def install_subagent_observability_hook() -> None:
+    """Trace every sub-agent, whichever tool dispatched it.
+
+    ``DeepAgent.create_subagent`` is the one point all dispatch paths share —
+    the SDK's builtin ``task_tool``, this platform's custom agent tool, and
+    background sub-agents. Wrapping it there is what makes tracing independent
+    of the dispatcher; hooking a single tool covers only that tool (the
+    ``/debug`` capture wrapper used to be the only place a rail was attached,
+    so a normal run produced no sub-agent spans at all).
+
+    Idempotent — a second call sees the wrapper already installed. Best-effort:
+    never raises, and a failure only costs sub-agent spans.
+    """
+    try:
+        from openjiuwen.harness.deep_agent import DeepAgent
+    except Exception as exc:
+        logger.debug("[AgentObservability] subagent hook install skipped: %s", exc)
+        return
+
+    original = getattr(DeepAgent, "create_subagent", None)
+    if original is None or getattr(original, _SUBAGENT_HOOK_MARKER_ATTR, False):
+        return
+
+    def create_subagent_with_observability(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        """Create the sub-agent, then give it its own observability rail."""
+        subagent = original(self, *args, **kwargs)
+        attach_subagent_observability(subagent)
+        return subagent
+
+    setattr(create_subagent_with_observability, _SUBAGENT_HOOK_MARKER_ATTR, True)
+    DeepAgent.create_subagent = create_subagent_with_observability
+
+
 def _build_run_span_name(*, mode: str, session_id: str) -> str:
     """Build a hierarchical OTel span name: ``agent.<mode>.<session_id>``.
 
@@ -271,12 +516,16 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
     try:
         from opentelemetry.trace import SpanKind
 
-        from openjiuwen.agent_teams.observability import (
+        from openjiuwen.extensions.observability.setup import (
             get_tracer,
             is_initialized,
         )
-        from openjiuwen.agent_teams.observability.semconv import LANGFUSE_SESSION_ID
-        from openjiuwen.agent_teams.observability.span_context import set_team_span
+        from openjiuwen.extensions.observability.semconv import LANGFUSE_SESSION_ID
+        from openjiuwen.agent_teams.observability.span_context import (
+            set_current_session_id,
+            set_root_span,
+            set_team_span,
+        )
 
         if not is_initialized():
             return None
@@ -290,14 +539,14 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
         # Tag the mode so traces can be filtered in Langfuse without parsing
         # the span name.
         span.set_attribute("jiuwenswarm.mode", mode or "")
-        # Register as the team span so OtelCallbackHandler's parent lookup
-        # (get_team_span fallback) finds it for LLM/tool span creation.
-        set_team_span(span, team_name="single-agent")
-        # Also publish as the process-global current span: the supervisor task
-        # doesn't inherit the ContextVar, so the get_team_span fallback (installed
-        # at import) returns this for OtelCallbackHandler's parent lookup.
-        global _CURRENT_ROOT_SPAN
-        _CURRENT_ROOT_SPAN = span
+        # Register as the team/root span so parent lookup finds it for LLM/tool
+        # span creation. Pass session_id into the SDK registry as well as our
+        # local fallback table — supervisor tasks may not inherit ContextVars.
+        sid = session_id or ""
+        set_team_span(span, team_name=SINGLE_AGENT_TEAM_NAME)
+        set_root_span(span, session_id=sid)
+        set_current_session_id(sid)
+        _ROOT_SPANS[sid] = span
         logger.info("[AgentObservability] root span opened: name=%s", name)
         return span
     except Exception as exc:
@@ -305,19 +554,63 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
         return None
 
 
-def close_agent_run_span(handle: Any, *, session_id: str = "") -> None:
-    """End the root span opened by :func:`open_agent_run_span` and clear it."""
-    # Clear the global fallback span (harmless if already None).
-    global _CURRENT_ROOT_SPAN
-    _CURRENT_ROOT_SPAN = None
+def _stamp_run_output(handle: Any, output: str) -> None:
+    """Write the run's final answer onto the root span as the trace output.
+
+    Team mode fills the equivalent attribute on its ``team.<name>`` span from
+    the leader's iteration result (``ObservabilityRail.after_task_iteration``),
+    which keys off ``TeamRole.LEADER`` and therefore never fires for a single
+    agent — leaving the Langfuse trace with an empty top-level output. The
+    single-agent counterpart is the run's final answer, stamped here.
+
+    Redaction follows the active ``ObservabilityConfig`` so ``redact_completions``
+    covers this attribute exactly as it covers llm/agent span outputs.
+
+    Args:
+        handle: The still-recording root span.
+        output: Final answer text; empty means nothing to stamp.
+    """
+    if not output:
+        return
+    from openjiuwen.extensions.observability.redaction import redact_completion
+    from openjiuwen.extensions.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
+    # Aliased: the module-level ``get_config`` is JiuwenSwarm's own settings
+    # reader, and this SDK-side one returns the active ObservabilityConfig.
+    from openjiuwen.agent_teams.observability.setup import get_config as get_observability_config
+
+    config = get_observability_config()
+    text = redact_completion(output, config) if config else output
+    handle.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, text)
+
+
+def close_agent_run_span(handle: Any, *, session_id: str = "", output: str = "") -> None:
+    """End the root span opened by :func:`open_agent_run_span` and clear it.
+
+    Args:
+        handle: Opaque handle from :func:`open_agent_run_span`; None is a no-op.
+        session_id: Session the run belonged to; its registry entry is dropped.
+        output: The run's final answer, stamped as the trace-level output.
+            Empty (aborted / errored run) leaves the attribute unset.
+    """
+    # Drop this run's fallback entry — and only this run's. Sessions overlap,
+    # so clearing whatever happens to be registered would blind a run that is
+    # still going (its sub-agents would lose their spans mid-run).
+    if _ROOT_SPANS.get(session_id or "") is handle:
+        _ROOT_SPANS.pop(session_id or "", None)
     if handle is None:
         return
     try:
         from openjiuwen.agent_teams.observability.span_context import (
             cascade_close_children,
+            clear_root_span,
             clear_team_span,
             flush_child_spans,
         )
+
+        try:
+            _stamp_run_output(handle, output)
+        except Exception as exc:
+            logger.debug("[AgentObservability] stamp run output failed: %s", exc)
 
         # End any still-open child LLM/tool spans (e.g. run aborted mid-call).
         # Two nets are needed for the single-agent path:
@@ -328,22 +621,35 @@ def close_agent_run_span(handle: Any, *, session_id: str = "") -> None:
         #      ActiveSpanTracker). The single-agent runner opens LLM spans inside
         #      its own child context, so their ContextVar state is not visible
         #      here; the tracker closes them by trace_id regardless of context.
-        # Must run BEFORE handle.end()/clear_team_span(): flush_child_spans reads
-        # the team span ContextVar to resolve this trace's id, and scopes the
-        # close to our trace only (flush_spans_for_trace), so concurrent runs are
-        # not affected.
+        # Both must run BEFORE clear_team_span(): flush_child_spans reads the
+        # team span ContextVar to resolve this trace's id, and scopes the close
+        # to our trace only (flush_spans_for_trace), so concurrent runs are not
+        # affected.
+        #
+        # Ordering note — the root span is ended BETWEEN the two nets, not after
+        # them: ``flush_spans_for_trace`` spares only spans whose name starts
+        # with ``team.`` (Team mode's root), so our ``agent.<mode>.<sid>`` root
+        # would otherwise be swept up as a leaked child — reported as an ORPHAN
+        # warning, force-ended by the tracker, and then re-ended here ("Calling
+        # end() on an ended span"). Ending it first makes it non-recording, which
+        # the tracker skips, so the root keeps its own end time and status while
+        # the net still catches genuinely leaked children.
         try:
             cascade_close_children()
         except Exception as exc:
             logger.debug("[AgentObservability] cascade_close_children failed: %s", exc)
         try:
+            handle.end()
+        except Exception as exc:
+            logger.debug("[AgentObservability] end root span failed: %s", exc)
+        try:
             flush_child_spans()
         except Exception as exc:
             logger.debug("[AgentObservability] flush_child_spans failed: %s", exc)
         try:
-            handle.end()
+            clear_root_span(session_id=session_id or "", expected_span=handle)
         except Exception as exc:
-            logger.debug("[AgentObservability] end root span failed: %s", exc)
+            logger.debug("[AgentObservability] clear_root_span failed: %s", exc)
         clear_team_span()
     except Exception as exc:
         logger.warning("[AgentObservability] close root span failed: %s", exc)

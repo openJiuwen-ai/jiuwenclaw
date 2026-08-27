@@ -4,7 +4,7 @@ import { ProcessTerminal, TUI } from "@mariozechner/pi-tui";
 import { parseArgs } from "node:util";
 import { CliPiAppState } from "./app-state.js";
 import { CommandService } from "./core/commands/CommandService.js";
-import { createBuiltinCommands } from "./core/commands/registry.js";
+import { createBuiltinCommands, isHarmonyOSCommandsEnabled } from "./core/commands/registry.js";
 import { WsClient } from "./core/ws-client.js";
 import { AppScreen } from "./ui/app-screen.js";
 import { HandoffPortImpl } from "./core/supervision/handoff-port.js";
@@ -19,6 +19,7 @@ const { values } = parseArgs({
     url: { type: "string", default: "ws://127.0.0.1:19001/tui" },
     session: { type: "string" },
     token: { type: "string", default: "" },
+    "persist-session": { type: "boolean", default: false },
     "user-id": { type: "string", default: "" },
     help: { type: "boolean", short: "h" },
   },
@@ -32,6 +33,8 @@ Options:
   --url <url>       Gateway CLI WebSocket URL (default: ws://127.0.0.1:19001/tui)
   --session <id>    Resume or create a specific session by id. id 需匹配
                     [A-Za-z0-9._-]、长度 ≤ 128（作为目录名落盘，受文件系统限制）
+  --persist-session 启用会话级永续记忆。仅首次 session.create 生效，
+                    默认为关闭。
   --token <token>   Authentication token
   --user-id <id>    User identifier for the session
   -h, --help        Show this help
@@ -74,7 +77,28 @@ if (!process.env.JIUWENSWARM_TUI_HEADLESS && (!process.stdin.isTTY || !process.s
   process.exit(1);
 }
 
-const wsClient = new WsClient(values.url ?? "ws://127.0.0.1:19001/tui", values.token ?? "", values["user-id"] ?? "");
+const wsUrl = values.url ?? "ws://127.0.0.1:19001/tui";
+const wsUserId = values["user-id"] ?? "";
+
+/**
+ * Remote 模式：--url 指向非本机（非 127.0.0.1/localhost）的服务器时启用。
+ * 本地 PC 无法被远端 agentserver（沙箱）访问，故不发送本地 project_dir/cwd/trusted_dirs，
+ * 改用服务器侧 /home/agentos/<user-id> 作为 workspace（沙箱里可写）。
+ */
+function isRemoteUrl(url: string): boolean {
+  try {
+    const host = new URL(url).host.toLowerCase();
+    return host !== "127.0.0.1" && host !== "localhost" && !host.startsWith("127.0.0.1:");
+  } catch {
+    return false;
+  }
+}
+
+const isRemote = isRemoteUrl(wsUrl);
+// remote 模式下的服务器侧 workspace/project_dir：/home/agentos/<user-id>。
+const remoteProjectDir = isRemote && wsUserId ? `/home/agentos/${wsUserId}` : "";
+
+const wsClient = new WsClient(wsUrl, values.token ?? "", wsUserId);
 
 // 读取 launcher 注入的监督协议快照（非托管启动时 supervised=false）。
 const supervisionEnv = readSupervisionEnv();
@@ -115,14 +139,21 @@ function buildUiLifecycle(): UiLifecyclePortImpl {
 // AppState 构造函数会接收已构造的端口；这里先用占位引用，构造后回填。
 let uiLifecycle = buildUiLifecycle();
 
-const appState = new CliPiAppState(wsClient, values.session, {
-  // 在构造 AppState 之前无法直接构造 TaskLifecyclePort/HandoffPort/ReauthPort
-  // （它们依赖 AppState 的方法）；这里先传 null，构造后回填。
-  handoffPort: null,
-  taskLifecycle: null,
-  reauthPort: null,
-  uiLifecycle,
-});
+const appState = new CliPiAppState(
+  wsClient,
+  values.session,
+  values["persist-session"],
+  {
+    // 在构造 AppState 之前无法直接构造 TaskLifecyclePort/HandoffPort/ReauthPort
+    // （它们依赖 AppState 的方法）；这里先传 null，构造后回填。
+    handoffPort: null,
+    taskLifecycle: null,
+    reauthPort: null,
+    uiLifecycle,
+    isRemote,
+    remoteProjectDir,
+  },
+);
 
 // AppState 已构造完成，现在构造依赖 AppState 的端口并回填。
 const taskLifecycle = new TaskLifecyclePortImpl({
@@ -154,7 +185,12 @@ wsClient.onAuthExpired = () => {
 };
 
 const commandService = new CommandService();
-commandService.register(createBuiltinCommands({ switchEnabled: supervisionEnv.supervised }));
+commandService.register(
+  createBuiltinCommands({
+    harmonyosEnabled: isHarmonyOSCommandsEnabled(),
+    switchEnabled: supervisionEnv.supervised,
+  }),
+);
 
 /** 正常退出 CLI 前显式通知服务端；异常崩溃不走该路径。 */
 async function notifyDisconnectBeforeExit(): Promise<void> {

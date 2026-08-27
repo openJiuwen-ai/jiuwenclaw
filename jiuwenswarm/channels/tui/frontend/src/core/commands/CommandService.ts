@@ -56,6 +56,8 @@ export class CommandService {
   private aliases = new Map<string, string>();
   private topLevelCommands: SlashCommand[] = [];
   private installedSkills: InstalledSkillEntry[] = [];
+  /** 配置未成功读取前保持关闭，避免演进命令意外暴露。 */
+  private skillEvolutionEnabled = false;
 
   /**
    * Optional callback invoked whenever the installed-skills cache is successfully
@@ -69,6 +71,34 @@ export class CommandService {
     for (const command of commands) {
       this.registerCommand(command);
     }
+    this.applySkillEvolutionVisibility();
+  }
+
+  /**
+   * 更新技能自演进命令的展示状态。
+   * 返回值用于让 UI 仅在状态变化时重建补全 provider。
+   */
+  setSkillEvolutionEnabled(enabled: boolean): boolean {
+    if (this.skillEvolutionEnabled === enabled) {
+      return false;
+    }
+    this.skillEvolutionEnabled = enabled;
+    this.applySkillEvolutionVisibility();
+    return true;
+  }
+
+  private applySkillEvolutionVisibility(): void {
+    const visit = (commands: readonly SlashCommand[]): void => {
+      for (const command of commands) {
+        if (command.requiresSkillEvolution) {
+          command.hidden = !this.skillEvolutionEnabled;
+        }
+        if (command.subCommands) {
+          visit(command.subCommands);
+        }
+      }
+    };
+    visit(this.topLevelCommands);
   }
 
   private registerCommand(command: SlashCommand): void {
@@ -136,7 +166,12 @@ export class CommandService {
       // 注：/<skill> 已在 app-screen.handleSubmit 的行首分流里落到普通消息分支
       //（content 原样发送 + 提取 skills_to_use），不再改写成 /skills use。
       // 能走到这里的说明第一个 token 既非注册命令也非已装 skill → 未知命令。
-      ctx.addItem(makeItem(ctx.sessionId, "error", `Unknown command: /${parsed.name || ""}`));
+      // 展示时保留用户原样的「/」与首 token（含斜杠后空格），避免 `/ skill-creator`
+      // 被显示成 `/skill-creator` 而误读成「技能不存在」。
+      const trimmedRaw = raw.trim();
+      const display =
+        trimmedRaw.match(/^\/\s*\S+/)?.[0] ?? `/${parsed.name || ""}`;
+      ctx.addItem(makeItem(ctx.sessionId, "error", `Unknown command: ${display}`));
       return;
     }
     try {
