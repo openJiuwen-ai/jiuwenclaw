@@ -24,7 +24,6 @@ deploy_runtime() {
     ensure_secret_configmap
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
-    success "AGENT_RUNTIME_PORT: ${DEPLOY_VARS["AGENT_RUNTIME_PORT"]}"
 }
 
 uninstall_runtime() {

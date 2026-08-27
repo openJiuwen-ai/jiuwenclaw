@@ -94,6 +94,21 @@ class PermissionsConfigRepository:
     async def get_body(self) -> dict[str, Any]:
         return await self._inner.get_body()
 
+    async def upsert_body(
+        self,
+        body: dict[str, Any],
+        *,
+        source: str = "manager",
+    ) -> SectionDocument:
+        """Manager WS upsert：整段替换 body 并递增 revision。"""
+        existing = await self.get()
+        document = SectionDocument(
+            body=dict(body),
+            source=source,
+            revision=(int(existing.revision) + 1 if existing else 1),
+        )
+        return await self._inner.upsert(document)
+
     async def replace(self, body: dict[str, Any]) -> SectionDocument:
         return await self._inner.replace(body)
 

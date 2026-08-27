@@ -9,6 +9,9 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
+from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
+
+from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import parse_iso_datetime, utc_now
 from ...models.config_effective_policy_models import (
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
@@ -63,13 +66,13 @@ def _validate_scope(scope_type: str, scope_id: str) -> tuple[str, str]:
 
 
 async def update_config_default_template_mapping_record(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     mapping_id: int,
     updates: dict[str, Any],
     jiuwenclaw_id: str,
 ) -> dict[str, Any] | None:
     request = ConfigDefaultTemplateMappingUpdateRequest.model_validate(updates)
-    existing = await get_row_for_instance(handler, _TABLE, mapping_id, jiuwenclaw_id)
+    existing = await get_row_for_instance(repo, mapping_id)
     if existing is None:
         return None
 
@@ -85,18 +88,18 @@ async def update_config_default_template_mapping_record(
     if "scope_id" in field_updates and field_updates["scope_id"] is not None:
         field_updates["scope_id"] = str(field_updates["scope_id"]).strip()
 
-    merged_type = field_updates.get("scope_type", getattr(existing, "scope_type", None))
-    merged_id = field_updates.get("scope_id", getattr(existing, "scope_id", None))
+    merged_type = field_updates.get("scope_type", existing.get("scope_type"))
+    merged_id = field_updates.get("scope_id", existing.get("scope_id"))
     _validate_scope(str(merged_type), str(merged_id))
 
     if not field_updates:
         raise ValueError("请求未包含任何可更新的业务字段")
 
     field_updates["updated_at"] = utc_now()
-    updated = await handler.update(_TABLE, {"id": mapping_id}, field_updates)
+    updated = await repo.update_by_row_id(mapping_id, field_updates)
     if updated is None:
         return None
-    return {"id": getattr(updated, "id")}
+    return {"id": updated.get("id")}
 
 
 def _build_row_from_sync_mapping(
@@ -133,9 +136,9 @@ class ConfigDefaultTemplateMappingService:
         jiuwenclaw_id: str,
         mapping: dict[str, Any],
     ) -> dict[str, Any]:
+        repo = require_enterprise_repository(_TABLE)
         result = await apply_create_from_row_builder(
-            self._handler,
-            _TABLE,
+            repo,
             section=_SECTION,
             jiuwenclaw_id=jiuwenclaw_id,
             record=mapping,
@@ -155,8 +158,9 @@ class ConfigDefaultTemplateMappingService:
         row_id: Any,
         updates: dict[str, Any],
     ) -> None:
+        repo = require_enterprise_repository(_TABLE)
         await apply_update_by_id(
-            self._handler,
+            repo,
             section=_SECTION,
             jiuwenclaw_id=jiuwenclaw_id,
             row_id=row_id,
@@ -170,11 +174,11 @@ class ConfigDefaultTemplateMappingService:
         )
 
     async def delete(self, jiuwenclaw_id: str, row_id: Any) -> None:
+        _ = jiuwenclaw_id
+        repo = require_enterprise_repository(_TABLE)
         await apply_delete_by_id(
-            self._handler,
+            repo,
             section=_SECTION,
-            table=_TABLE,
-            jiuwenclaw_id=jiuwenclaw_id,
             row_id=row_id,
         )
         logger.info(

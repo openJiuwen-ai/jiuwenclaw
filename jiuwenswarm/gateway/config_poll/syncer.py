@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+from jiuwenswarm.gateway.cron.enterprise_gate import get_bound_jiuwenclaw_id
 
 from .appliers import TABLE_APPLIERS, TableApplyContext
 from .db import POLL_TABLES, list_table_records, row_snapshot
@@ -25,7 +25,7 @@ class ConfigPollSyncer:
         self._last_rows: dict[str, dict[str, str]] = {}
 
     async def run_once(self) -> None:
-        jiuwenclaw_id = gateway_db.resolve_jiuwenclaw_id()
+        jiuwenclaw_id = get_bound_jiuwenclaw_id()
         if not jiuwenclaw_id:
             logger.debug("[ConfigPoll] skip: jiuwenclaw_id unset")
             return

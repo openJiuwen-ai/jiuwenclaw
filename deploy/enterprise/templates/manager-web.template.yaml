@@ -33,7 +33,7 @@ spec:
             - name: MANAGER_WEB_IDP_TARGET
               value: "http://<<IDENTITY_NAME>>:<<IDENTITY_REST_PORT>>"
             - name: MANAGER_WEB_GATEWAY_SSE
-              value: "http://<<GATEWAY_NAME>>:<<GATEWAY_HTTP_PORT>>/web/invoke"
+              value: "http://<<GATEWAY_NAME>>:<<GATEWAY_PORT>>/web/invoke"
             - name: MANAGER_WEB_USER_SERVER_TARGET
               value: "http://<<WEB_NAME>>:<<WEB_WS_PORT>>"
             - name: TZ
