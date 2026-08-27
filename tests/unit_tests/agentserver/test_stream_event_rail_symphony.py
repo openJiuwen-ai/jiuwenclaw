@@ -4,6 +4,7 @@ import pytest
 
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+from openjiuwen.symphony.discovery import SkillDCICommandResult
 
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
     JiuSwarmStreamEventRail,
@@ -14,7 +15,6 @@ from jiuwenswarm.agents.harness.common.rails.symphony import (
 from jiuwenswarm.agents.harness.common.tool_progress_context import (
     current_tool_progress,
 )
-from jiuwenswarm.symphony.agent import AgenticToolResult
 
 
 class _StreamSession:
@@ -252,23 +252,24 @@ async def test_stream_event_rail_continues_after_symphony_skill_gap_result():
 
 
 @pytest.mark.asyncio
-async def test_stream_event_rail_uses_agentic_tool_detailed_output_as_raw_output():
+async def test_stream_event_rail_emits_skill_index_result_as_raw_output():
     rail = JiuSwarmStreamEventRail()
     session = _StreamSession()
-    detailed_output = {
-        "success": True,
-        "result": "# Skill Branch Explore",
-        "skill_tree": {
-            "query": "skill_branch_explore: OfficeDocs",
-            "steps": [{"order": 0, "node_id": "OfficeDocs"}],
-            "candidates": [],
-        },
+    diagnostics = {
+        "command": 'rg -il "office|documents" /',
+        "cwd": "/",
+        "output": "[skill] documents/META.md  desc: Document Writer",
+        "observed_skill_ids": ["documents"],
+        "candidate_count": 1,
+        "error": False,
+        "truncated": False,
+        "runtime": "SkillDCI.SkillFSToolkit",
     }
-    result = AgenticToolResult(
-        {"success": True, "result": "# Skill Branch Explore"},
-        detailed_output=detailed_output,
+    result = SkillDCICommandResult(
+        diagnostics["output"],
+        detailed_output=diagnostics,
     )
-    ctx = _ctx(session, "skill_branch_explore", tool_result=result)
+    ctx = _ctx(session, "skill_index", tool_result=result)
 
     await rail.before_tool_call(ctx)
     await rail.after_tool_call(ctx)
@@ -278,8 +279,9 @@ async def test_stream_event_rail_uses_agentic_tool_detailed_output_as_raw_output
         for chunk in session.chunks
         if chunk.type == "tool_result"
     ]
-    assert tool_results[0]["raw_output"] == detailed_output
-    assert "skill_tree" not in tool_results[0]["result"]
+    assert tool_results[0]["result"] == str(result)
+    assert tool_results[0]["raw_output"] == diagnostics
+    assert tool_results[0]["raw_output"]["observed_skill_ids"] == ["documents"]
 
 
 @pytest.mark.asyncio

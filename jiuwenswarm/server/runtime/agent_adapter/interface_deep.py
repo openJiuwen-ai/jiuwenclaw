@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 from collections import Counter
+from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_config_service import AgentDefinition
 
 import yaml
-from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
@@ -206,6 +207,8 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
     CircuitBreakerConfig,
 )
+from jiuwenswarm.common.context_window import parse_positive_int, resolve_context_window_tokens
+
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.stage_timer import StageTimer
@@ -293,7 +296,9 @@ from jiuwenswarm.agents.harness.common.tools import (
     SendFileToolkit,
     SkillRetrievalToolkit,
     SkillToolkit,
+    build_model_discovery_settings,
     is_skill_retrieval_enabled,
+    skill_sources_from_manager,
     SymphonyToolkit,
 )
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
@@ -540,9 +545,7 @@ _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
 )
 _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
     {
-        "skill_index_build",
-        "skill_branch_explore",
-        "skill_branch_peek",
+        "skill_index",
     }
 )
 # Total ``_update_runtime_config`` cost above which its per-stage breakdown is
@@ -787,14 +790,33 @@ def init_permission_engine(*_args: Any, **_kwargs: Any) -> None:
 
 
 def _mcc_looks_usable(mcc: dict) -> bool:
-    """检查 model_client_config 是否包含有效的 API 凭据。"""
+    """检查 model_client_config 是否包含有效的 API 凭据。
+
+    新声明下凭据判定以 auth_mode 为准：
+    - auth_mode=openai_account_oauth 或 api_mode=responses：OAuth 路径，不要求 api_key。
+    - auth_mode=none 或 custom_headers(无 key)：按该认证模式判断(不要求 api_key)。
+    - 否则(默认 api_key 模式，含 OpenAI / Anthropic)：要求 api_base + api_key。
+    兼容旧配置：client_provider=OpenAIAccount 别名也视为 OAuth。
+    """
     api_base = str(mcc.get("api_base", "") or "").strip()
     if not api_base or is_placeholder_api_base(api_base):
         return False
 
+    auth_mode = str(mcc.get("auth_mode") or "").strip().lower()
+    api_mode = str(mcc.get("api_mode") or "").strip().lower()
+    # OAuth 路径：新式 auth_mode=openai_account_oauth 或旧式 provider 名 OpenAIAccount。
     provider = mcc.get("client_provider", "")
     provider = getattr(provider, "value", provider)
-    if is_openai_account_provider(str(provider or "")):
+    if (
+        auth_mode == "openai_account_oauth"
+        or api_mode == "responses"
+        or is_openai_account_provider(str(provider or ""))
+    ):
+        return True
+
+    # none / custom_headers 无 key 的认证模式：只要 api_base 在即可。
+    if auth_mode in ("none", "custom_headers"):
+        # custom_headers 通常仍需自定义头，但凭据层面不算 api_key 必填。
         return True
 
     api_key = str(mcc.get("api_key", "") or "").strip()
@@ -820,25 +842,24 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
     if not mcc_fields.get("client_provider"):
         mcc_fields["client_provider"] = "OpenAI"
 
-    # AgentOS 备份模型：mco 含内部标记 ``_source == "agentos"``（由
-    # ``get_default_models`` 注入）。其 ``max_tokens`` 是用户可读的"输入侧
-    # 上下文窗口"别名，仅作用于 ``ContextEngineConfig.context_window_tokens``
-    # （上下文压缩阈值，由 ``_deep_agent_context_engine_config`` 的 per-model
-    # 覆盖路径喂入，不发往厂商）。
-    # 但 core 的 ``ModelRequestConfig`` 也有同名字段 ``max_tokens``，那是"输出
-    # token 上限"语义、会发往厂商。``reasoning_injector._build_model_request_kwargs``
-    # 已在公共出口处对 agentos 统一 pop 了 max_tokens（防它进输出侧字段，覆盖
-    # build_model_from_entry / config.validate_model 等所有路径），故此处 kwargs
-    # 里的 max_tokens 已被清掉。这里从原始 mco 重新取该值，作为**普通属性**
-    # ``_agentos_ctx_window`` 挂到 ``Model`` 实例上（不是 ModelRequestConfig 的
-    # extra！）。之所以不能用 ModelRequestConfig 的 extra：core 的 base_model_client
-    # 在发起请求时用 ``model_config.model_dump(exclude={...})`` 把 extra 一并透传
-    # 给 SDK（base_model_client.py:_build_request_params），extra 里的内部键会被
-    # SDK 当成未知 kwarg 抛错。Model 是普通 Python 类（非 pydantic），挂普通属性
-    # 不会进 model_dump，故不流到厂商。``_deep_agent_context_engine_config`` 路径 A
-    # 从该 Model 普通属性读值，供同名多条目精确"选中哪个用哪个的 max_tokens"。
-    # defaults 无此标记，行为完全不变。
-    is_agentos = isinstance(mco, dict) and mco.get("_source") == "agentos"
+    # ``context_window``（模型支持的上下文总长度）可配在任意模型条目的 mco 里
+    # （defaults / agentos / video / audio / vision / image_gen 均可），经
+    # ``build_reasoning_model_request_kwargs`` 摊开进入 kwargs，进 core 的
+    # ``ModelRequestConfig`` 供 core 人员取值。
+    # 是否在出口 pop 取决于 core 是否已把 context_window 加为 ModelRequestConfig
+    # 正式字段（见 ``reasoning_injector.core_has_context_window_field``，自动适配）：
+    # - core 未加字段（过渡期）：context_window 进 extra 会被
+    #   ``base_model_client._build_request_params`` 经 ``model_dump`` 透传给厂商
+    #   SDK 报 unexpected keyword argument -> reasoning_injector 公共出口 pop 防发厂商。
+    # - core 已加字段：context_window 作正式字段，core 自行 exclude 不发厂商、
+    #   ``self.model_config.context_window`` 可读 -> 不 pop，留给 core。
+    # 出口 pop 不再守 _source=="agentos"：所有条目一视同仁，defaults 配了
+    # context_window 同样过渡期 pop 防发厂商。agentos 条目的 mco 含内部标记
+    # ``_source == "agentos"``（由 ``get_default_models`` 注入），仅用于前端
+    # is_agentos 置灰只读展示，不再参与 context_window 出口判断。
+    # 不再挂 ``_agentos_ctx_window`` 普通属性：旧机制是把 context_window 喂给
+    # ``ContextEngineConfig.context_window_tokens``（压缩阈值）的桥接，已拆除
+    # （见 ``_deep_agent_context_engine_config``）。
     request_kwargs = build_reasoning_model_request_kwargs(
         model_client_config=mcc_fields,
         model_config_obj=mco,
@@ -846,15 +867,6 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
     )
     m_config = ModelRequestConfig(**request_kwargs)
     model = Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
-    if is_agentos:
-        ctx_win = parse_int(mco.get("max_tokens"), None) if isinstance(mco, dict) else None
-        if ctx_win is not None:
-            # 挂到 Model 普通属性，绝不进 ModelRequestConfig 的 extra（防 model_dump 泄漏到 SDK）。
-            # 用 setattr 而非 model._agentos_ctx_window = ... ：Model 是 openjiuwen 客户端类，
-            # 直接点号赋值会触发 G.CLS.11 protected-access；setattr 是通用 API，静态扫描不跟踪
-            # 属性名，与本文件 _instance 挂属性（L1685）等既有写法一致。运行时语义等价、
-            # 仍不进 pydantic model_dump。
-            setattr(model, "_agentos_ctx_window", ctx_win)
     return model
 
 
@@ -870,55 +882,54 @@ def parse_int(value: Any, default: int) -> int:
 
 def _deep_agent_context_engine_config(
     react_cfg: dict[str, Any] | None,
-    full_config: dict[str, Any] | None = None,
-    model_name: str | None = None,
-    model: Any = None,
 ) -> ContextEngineConfig:
     """Build the agent-core Context Engine configuration.
 
-    Processor-only fields such as ``round_level_compressor_config`` are
-    filtered out, while every field owned by ``ContextEngineConfig`` is
-    preserved.  The selected AgentOS model may override the configured context
-    window without leaking ``max_tokens`` into the provider request.
+    仅承接 ContextEngine 自身配置；KV cache affinity 由独立
+    ``react.kv_cache_affinity_config`` 管理。
+
+    context_window（模型支持的上下文总长度）由 ``_build_model_from_entry`` 放进
+    core 的 ``ModelRequestConfig``，再由 ReActAgent 注入当前 ContextEngine 的模型级
+    元数据。本函数只承接全局覆盖和显式模型映射；最终优先级为全局值 > 当前 AgentOS
+    模型值 > 显式映射 > core 按模型名解析 / 兜底。
     """
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
     cec = cec if isinstance(cec, dict) else {}
-
+    cw_tokens = parse_positive_int(cec.get("context_window_tokens"))
+    model_context_windows = cec.get("model_context_window_tokens")
+    if isinstance(model_context_windows, dict):
+        valid_model_context_windows = {}
+        for model_name, raw_window in model_context_windows.items():
+            if not isinstance(model_name, str):
+                continue
+            parsed_window = parse_positive_int(raw_window)
+            if parsed_window is not None:
+                valid_model_context_windows[model_name] = parsed_window
+        model_context_windows = valid_model_context_windows
+        if not model_context_windows:
+            model_context_windows = None
+    else:
+        model_context_windows = None
+    recall = cec.get("compression_recall_config")
+    recall = recall if isinstance(recall, dict) else {}
     defaults = ReActAgentConfig().context_engine_config
     supported = {
         key: value
         for key, value in cec.items()
         if key in ContextEngineConfig.model_fields
     }
-    # Preserve the established tolerant behavior for malformed window values.
-    if "context_window_tokens" in supported:
-        supported["context_window_tokens"] = parse_int(
-            supported["context_window_tokens"], None
+    # 显式设置的上下文窗口上限；非法值回退 None（由 agent-core 按模型解析）。
+    supported["context_window_tokens"] = cw_tokens
+    if "model_context_window_tokens" in ContextEngineConfig.model_fields:
+        supported["model_context_window_tokens"] = model_context_windows
+    # 压缩召回：压缩时归档原始消息，供模型按需召回。
+    if "compression_recall_config" in ContextEngineConfig.model_fields:
+        supported["compression_recall_config"] = CompressionRecallConfig(
+            enabled=bool(recall.get("enabled", False)),
+            chunk_size_tokens=parse_int(recall.get("chunk_size_tokens"), 3000),
+            chunk_overlap_tokens=parse_int(recall.get("chunk_overlap_tokens"), 300),
         )
-
-    # Prefer the selected Model object so duplicate AgentOS entries with the
-    # same model name cannot borrow another entry's max_tokens value.
-    agentos_cw: int | None = None
-    if model is not None:
-        agentos_cw = parse_int(getattr(model, "_agentos_ctx_window", None), None)
-    elif full_config and model_name:
-        agentos_raw = (full_config.get("models") or {}).get("agentos")
-        agentos_list = agentos_raw if isinstance(agentos_raw, list) else []
-        for block in agentos_list:
-            if not isinstance(block, dict):
-                continue
-            model_client_config = block.get("model_client_config") or {}
-            if (
-                isinstance(model_client_config, dict)
-                and model_client_config.get("model_name") == model_name
-            ):
-                model_config = block.get("model_config_obj") or {}
-                agentos_cw = parse_int(model_config.get("max_tokens"), None)
-                break
-    if agentos_cw is not None:
-        supported["context_window_tokens"] = agentos_cw
-
     return ContextEngineConfig.model_validate(
         {
             **defaults.model_dump(),
@@ -932,9 +943,13 @@ def _deep_agent_kv_cache_affinity_config(
     model: Model | None = None,
 ) -> KVCacheAffinityConfig:
     """Build the ReActAgent KV cache affinity config from jiuwenswarm config."""
+    # 取 model.model_client_config 供新式 extensions.kv_cache.mode 判别；
+    # model_provider 兼容旧 AscendAffinity 别名。
+    mcc = getattr(model, "model_client_config", None)
     return build_kv_cache_affinity_config(
         react_cfg,
         provider=model_provider(model),
+        model_client_config=mcc,
     )
 
 
@@ -1211,6 +1226,7 @@ class JiuWenSwarmDeepAdapter:
         self._model_request_config: ModelRequestConfig | None = None
         self._last_resolved_model: Model | None = None
         self._active_request_model: Model | None = None
+        self._selected_model_context_window_tokens: int | None = None
         self._config_base_cache: dict[str, Any] | None = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
@@ -1318,7 +1334,18 @@ class JiuWenSwarmDeepAdapter:
         self._symphony_orchestration_rail = None
         self._skill_retrieval_tools_registered: bool = False
         self._skill_retrieval_tools: list[Any] = []
+        self._skill_retrieval_toolkit: SkillRetrievalToolkit | None = None
+        self._skill_retrieval_environment: Any | None = None
         self._skill_retrieval_prompt_rail: SkillRetrievalPromptRail | None = None
+        # Frozen when this adapter/session is created. Config reloads are
+        # persisted for future sessions without changing the current tool or
+        # prompt prefix halfway through a conversation.
+        self._skill_retrieval_session_enabled: bool | None = None
+        self._initial_skill_retrieval_model_name: str = ""
+        self._skill_retrieval_context_model_name: str = ""
+        self._skill_retrieval_context_window_tokens: int | None = None
+        self._skill_retrieval_settings: Any | None = None
+        self._restored_skill_retrieval_profile: dict[str, Any] | None = None
         self._skill_manager: SkillManager | None = None
         self._a2x_client: Any | None = None
         self._a2x_config: dict[str, Any] = {}
@@ -1353,6 +1380,20 @@ class JiuWenSwarmDeepAdapter:
         # (reconcile_session_mcp). init-registered config.yaml MCPs are NOT in
         # this set — reconcile only adds/removes its own, never touching init's.
         self._session_selected_mcp: set[str] = set()
+        # Names supplied by the first chat.send while this session child is
+        # still being assembled. They affect Skill scan roots only, allowing
+        # the retrieval snapshot to see bundled Skills before MCP registration;
+        # they deliberately do not mark an MCP as registered/selected.
+        self._pending_skill_scan_mcp_names: set[str] = set()
+        # MCP Skill names that participated in the immutable retrieval snapshot
+        # when this session child was assembled. A warm-pool child starts with
+        # an empty snapshot because session.create does not yet know chat.send's
+        # MCP selection.
+        self._initial_skill_scan_mcp_names: frozenset[str] = frozenset()
+        # Claimed under the parent adapter's per-session lock by the first MCP
+        # reconcile. Until then the child is speculative/unused and may be
+        # replaced when the first chat reveals different frozen MCP inputs.
+        self._session_mcp_reconcile_started: bool = False
         self._auto_harness_service: Optional[AutoHarnessService] = None
         self._dreaming_started = False
         self._dreaming_mode: str = "agent"
@@ -1440,6 +1481,211 @@ class JiuWenSwarmDeepAdapter:
     def _session_adapter_key(session_id: str | None) -> str:
         sid = str(session_id or "").strip()
         return sid or "default"
+
+    @staticmethod
+    def _skill_retrieval_profile_path(session_id: str | None) -> Path:
+        sid = JiuWenSwarmDeepAdapter._session_adapter_key(session_id)
+        runtime_path = get_runtime_state_path(sid)
+        digest = hashlib.sha256(
+            sid.encode("utf-8", errors="surrogatepass")
+        ).hexdigest()[:16]
+        return runtime_path.with_name(
+            f"{runtime_path.stem}.{digest}.skill-retrieval.json"
+        )
+
+    @staticmethod
+    def _skill_retrieval_profile_checksum(profile: Mapping[str, Any]) -> str:
+        unsigned = dict(profile)
+        unsigned.pop("profile_checksum", None)
+        payload = json.dumps(
+            unsigned,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _load_skill_retrieval_session_profile(
+        cls,
+        session_id: str | None,
+    ) -> dict[str, Any] | None:
+        path = cls._skill_retrieval_profile_path(session_id)
+        sid = cls._session_adapter_key(session_id)
+
+        def _unrecoverable(reason: str) -> dict[str, Any]:
+            logger.warning(
+                "Skill retrieval profile is not recoverable: session_id=%s reason=%s",
+                sid,
+                reason,
+            )
+            return {
+                "schema_version": 1,
+                "session_id": sid,
+                "enabled": False,
+                "profile_recovery_error": reason,
+            }
+
+        try:
+            if not path.is_file():
+                return None
+            if path.stat().st_size > 16 * 1024 * 1024:
+                return _unrecoverable("profile_too_large")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+                return _unrecoverable("invalid_profile_schema")
+            checksum = str(payload.get("profile_checksum") or "")
+            if (
+                len(checksum) != 64
+                or checksum != cls._skill_retrieval_profile_checksum(payload)
+            ):
+                return _unrecoverable("profile_checksum_mismatch")
+            if str(payload.get("session_id") or "") != sid:
+                return _unrecoverable("session_id_mismatch")
+            from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
+                is_valid_skill_retrieval_session_profile,
+            )
+
+            if not is_valid_skill_retrieval_session_profile(payload):
+                return _unrecoverable("invalid_profile_payload")
+            return payload
+        except (OSError, ValueError, TypeError):
+            return _unrecoverable("unreadable_profile")
+
+    def _persist_skill_retrieval_session_profile(self) -> None:
+        toolkit = self._skill_retrieval_toolkit
+        if not self._is_session_scoped_adapter:
+            return
+        if toolkit is None:
+            # A global-off session still freezes the legacy choice. Never
+            # replace an already restored profile with a newly inferred one.
+            if self._restored_skill_retrieval_profile is not None:
+                return
+            profile: dict[str, Any] = {"schema_version": 1}
+        else:
+            profile_builder = getattr(toolkit, "session_profile", None)
+            if not callable(profile_builder):
+                return
+            profile = dict(profile_builder())
+        profile.update(
+            {
+                "session_id": self._session_adapter_key(self._parent_session_id),
+                "enabled": bool(self._skill_retrieval_session_enabled),
+                "requested_model_name": self._initial_skill_retrieval_model_name,
+                "model_name": self._skill_retrieval_context_model_name,
+                "context_window_tokens": self._skill_retrieval_context_window_tokens,
+                "initial_mcp_names": sorted(
+                    getattr(self, "_initial_skill_scan_mcp_names", frozenset())
+                ),
+            }
+        )
+        profile["profile_checksum"] = self._skill_retrieval_profile_checksum(
+            profile
+        )
+        path = self._skill_retrieval_profile_path(self._parent_session_id)
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(profile, ensure_ascii=True, sort_keys=True))
+            os.replace(temporary, path)
+            os.chmod(path, 0o600)
+        except OSError:
+            logger.warning(
+                "Unable to persist Skill retrieval profile: session_id=%s",
+                self._parent_session_id,
+                exc_info=True,
+            )
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _discard_skill_retrieval_session_profile(self) -> None:
+        try:
+            self._skill_retrieval_profile_path(self._parent_session_id).unlink(
+                missing_ok=True
+            )
+        except OSError:
+            logger.warning(
+                "Unable to discard Skill retrieval profile: session_id=%s",
+                self._parent_session_id,
+                exc_info=True,
+            )
+
+    def skill_retrieval_status_fields(self) -> dict[str, Any]:
+        """Return the child adapter fields exposed to session status callers."""
+        return {
+            "enabled": bool(self._skill_retrieval_session_enabled)
+            and is_skill_retrieval_enabled(self._config_base_cache),
+            "model_name": self._skill_retrieval_context_model_name,
+        }
+
+    def skill_retrieval_model_profile_matches(
+        self,
+        requested_model_name: str | None,
+    ) -> bool:
+        """Whether this child can retain its frozen model retrieval profile."""
+        return self._skill_retrieval_model_profile_matches(requested_model_name)
+
+    def restore_skill_retrieval_session(
+        self,
+        profile: dict[str, Any] | None,
+        initial_mcp_names: set[str],
+        requested_model_name: str | None,
+    ) -> None:
+        """Restore immutable Skill and MCP inputs before child construction."""
+        self._pending_skill_scan_mcp_names = set(initial_mcp_names)
+        self._initial_skill_scan_mcp_names = frozenset(initial_mcp_names)
+        self._restored_skill_retrieval_profile = profile
+        if profile is not None:
+            self._skill_retrieval_context_model_name = str(
+                profile.get("model_name") or ""
+            )
+            try:
+                restored_window = int(profile.get("context_window_tokens") or 0)
+            except (TypeError, ValueError):
+                restored_window = 0
+            self._skill_retrieval_context_window_tokens = (
+                restored_window if restored_window > 0 else None
+            )
+        self._set_initial_skill_retrieval_model(
+            profile.get("requested_model_name")
+            if profile is not None
+            else requested_model_name
+        )
+
+    def mark_session_mcp_reconcile_started(self) -> None:
+        """Claim this child for the session's immutable first MCP snapshot."""
+        self._session_mcp_reconcile_started = True
+
+    def persist_skill_retrieval_session_profile(self) -> None:
+        """Persist this child's frozen Skill retrieval profile sidecar."""
+        self._persist_skill_retrieval_session_profile()
+
+    def clear_pending_skill_scan_mcp_names(
+        self,
+        pending_scan_names: set[str],
+    ) -> None:
+        """Consume construction-time MCP scan hints before a rail refresh."""
+        pending_holder = self._pending_skill_scan_mcp_names
+        if isinstance(pending_holder, set):
+            pending_holder.difference_update(pending_scan_names)
+        else:
+            self._pending_skill_scan_mcp_names = set()
+
+    def discard_transient_skill_retrieval_session_profile(self) -> None:
+        """Discard an optimistic sidecar unless it came from stored state."""
+        if self._restored_skill_retrieval_profile is None:
+            self._discard_skill_retrieval_session_profile()
 
     def _new_session_scoped_adapter(self, session_id: str) -> "JiuWenSwarmDeepAdapter":
         """Create a child adapter that owns one DeepAgent for a single session."""
@@ -1707,6 +1953,52 @@ class JiuWenSwarmDeepAdapter:
         sid = self._session_adapter_key(session_id)
         return self._session_adapters.get(sid)
 
+    def get_skill_retrieval_status_profile(
+        self,
+        session_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Return a live session's frozen retrieval profile without creating it."""
+
+        adapter = (
+            self
+            if self._is_session_scoped_adapter
+            else self._get_cached_session_adapter(session_id)
+        )
+        if adapter is None:
+            profile = self._load_skill_retrieval_session_profile(session_id)
+            if profile is None:
+                return None
+            profile = dict(profile)
+            profile.update(
+                {
+                    "profile_scope": "session",
+                    "session_id": self._session_adapter_key(session_id),
+                }
+            )
+            return profile
+        toolkit = getattr(adapter, "_skill_retrieval_toolkit", None)
+        if toolkit is None:
+            profile = dict(
+                getattr(adapter, "_restored_skill_retrieval_profile", None)
+                or self._load_skill_retrieval_session_profile(session_id)
+                or {}
+            )
+            if not profile:
+                return None
+        else:
+            profile_builder = getattr(toolkit, "session_profile", None)
+            if not callable(profile_builder):
+                return None
+            profile = dict(profile_builder())
+        profile.update(
+            {
+                "profile_scope": "session",
+                "session_id": self._session_adapter_key(session_id),
+                **adapter.skill_retrieval_status_fields(),
+            }
+        )
+        return profile
+
     def _iter_session_adapters_for_reload(
         self,
         target_session_id: str | None = None,
@@ -1739,6 +2031,7 @@ class JiuWenSwarmDeepAdapter:
             return
         try:
             get_runtime_state_path(session_id).unlink(missing_ok=True)
+            self._skill_retrieval_profile_path(session_id).unlink(missing_ok=True)
         except Exception:
             logger.debug(
                 "[JiuWenSwarmDeepAdapter] remove runtime_state failed: session_id=%s",
@@ -1897,7 +2190,12 @@ class JiuWenSwarmDeepAdapter:
                         exc,
                     )
                     return False
-                self._drop_session_adapter_cache_entry(sid, remove_lock=False)
+                # Idle eviction releases memory, not the logical session.
+                self._drop_session_adapter_cache_entry(
+                    sid,
+                    remove_lock=False,
+                    remove_runtime_state=False,
+                )
                 remove_lock_after_release = True
                 cleaned = True
         if remove_lock_after_release and self._is_session_lock_idle(sid, lock):
@@ -1920,22 +2218,101 @@ class JiuWenSwarmDeepAdapter:
         waiters = getattr(lock, "_waiters", None)
         return any(not waiter.cancelled() for waiter in list(waiters or ()))
 
-    async def _get_or_create_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter":
+    async def _get_or_create_session_adapter(
+        self,
+        session_id: str | None,
+        *,
+        model_name: str | None = None,
+        pending_mcp_scan_names: set[str] | None = None,
+        history_before_request_id: str | None = None,
+    ) -> "JiuWenSwarmDeepAdapter":
         """Return the session-owned adapter, creating and initializing it once."""
         if self._is_session_scoped_adapter:
             self._touch_session_adapter(session_id)
             return self
 
         sid = self._session_adapter_key(session_id)
+        requested_mcp_scan_names = (
+            set(pending_mcp_scan_names) if pending_mcp_scan_names is not None else None
+        )
         lock = self._session_adapter_locks.setdefault(sid, asyncio.Lock())
         async with lock:
             existing = self._session_adapters.get(sid)
             if existing is not None:
+                first_mcp_reconcile = requested_mcp_scan_names is not None and not bool(
+                    getattr(
+                        existing,
+                        "_session_mcp_reconcile_started",
+                        False,
+                    )
+                )
+                frozen_mcp_scan_names = set(
+                    getattr(
+                        existing,
+                        "_initial_skill_scan_mcp_names",
+                        frozenset(),
+                    )
+                    or ()
+                )
+                should_replace_unused = (
+                    first_mcp_reconcile
+                    and bool(
+                        getattr(
+                            existing,
+                            "_skill_retrieval_session_enabled",
+                            False,
+                        )
+                    )
+                    and (
+                        frozen_mcp_scan_names != requested_mcp_scan_names
+                        or not existing.skill_retrieval_model_profile_matches(
+                            model_name
+                        )
+                    )
+                )
+                if should_replace_unused:
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] replacing unused session "
+                        "adapter before first MCP reconcile: session_id=%s "
+                        "frozen_mcp=%s requested_mcp=%s",
+                        sid,
+                        sorted(frozen_mcp_scan_names),
+                        sorted(requested_mcp_scan_names),
+                    )
+                    await existing.cleanup()
+                    self._drop_session_adapter_cache_entry(
+                        sid,
+                        remove_lock=False,
+                    )
+                    existing = None
+
+            if existing is not None:
+                if requested_mcp_scan_names is not None:
+                    # Claim the immutable first-chat snapshot while the parent
+                    # session lock is still held. Concurrent sends may reconcile
+                    # live MCPs later, but cannot dispose the child underneath
+                    # this first caller.
+                    existing.mark_session_mcp_reconcile_started()
                 await self._reload_session_adapter_if_stale(sid, existing)
                 self._touch_session_adapter(sid)
                 return existing
 
             adapter = self._new_session_scoped_adapter(sid)
+            restored_profile = self._load_skill_retrieval_session_profile(sid)
+            restored_mcp_names = (
+                {
+                    str(name).strip()
+                    for name in restored_profile.get("initial_mcp_names", [])
+                    if str(name).strip()
+                }
+                if restored_profile is not None
+                else set(requested_mcp_scan_names or ())
+            )
+            adapter.restore_skill_retrieval_session(
+                restored_profile,
+                restored_mcp_names,
+                model_name,
+            )
             config = (
                 dict(self._session_instance_config)
                 if isinstance(self._session_instance_config, dict)
@@ -1948,6 +2325,7 @@ class JiuWenSwarmDeepAdapter:
                 sub_mode=self._session_instance_sub_mode,
                 **self._session_instance_extra_create_kwargs(),
             )
+            adapter.persist_skill_retrieval_session_profile()
             instance_ready_at = time.monotonic()
 
             await adapter.start_interaction(session_id=sid)
@@ -1973,6 +2351,7 @@ class JiuWenSwarmDeepAdapter:
                 await warmup_session_context(
                     deep_agent=getattr(adapter, "_instance", None),
                     session_id=sid,
+                    history_before_request_id=history_before_request_id,
                 )
             except Exception as exc:
                 logger.warning(
@@ -1981,6 +2360,8 @@ class JiuWenSwarmDeepAdapter:
                     sid,
                     exc,
                 )
+            if requested_mcp_scan_names is not None or restored_profile is not None:
+                adapter.mark_session_mcp_reconcile_started()
             self._touch_session_adapter(sid)
             # Cold-start cost of a session's first turn, split so a slow one can
             # be attributed to agent assembly vs. interaction startup.
@@ -3311,7 +3692,12 @@ class JiuWenSwarmDeepAdapter:
         return removed_any
 
     async def reconcile_session_mcp(
-        self, session_id: str | None, needed: list[str] | None
+        self,
+        session_id: str | None,
+        needed: list[str] | None,
+        *,
+        model_name: str | None = None,
+        history_before_request_id: str | None = None,
     ) -> None:
         """Reconcile this session's MCP set to ``needed`` (idempotent diff).
 
@@ -3321,15 +3707,33 @@ class JiuWenSwarmDeepAdapter:
         both clear that set; init-registered config.yaml MCPs are never in it,
         so they survive. MCP-server forms (stdio/remote/hybrid) register/
         unregister; cli/skill-only forms surface via ``_skill_scan_dirs``
-        (also filtered by ``_session_selected_mcp``), picked up by the
-        refresh_skill_rails on change.
+        (filtered by the live selection after cold-start assembly), picked up
+        by the refresh_skill_rails on change. Because reconcile can be the
+        first session-child creation point, it also forwards the current
+        request's disk-history boundary into context warmup.
         """
         needed_set = {str(n).strip() for n in (needed or []) if isinstance(n, str) and str(n).strip()}
-        child = await self._get_or_create_session_adapter(session_id)
+        child = await self._get_or_create_session_adapter(
+            session_id,
+            model_name=model_name,
+            pending_mcp_scan_names=needed_set,
+            history_before_request_id=history_before_request_id,
+        )
         if child._instance is None:
+            pending_holder = getattr(
+                child,
+                "_pending_skill_scan_mcp_names",
+                None,
+            )
+            if isinstance(pending_holder, set):
+                pending_holder.clear()
             return
         selected = child._session_selected_mcp
+        pending_scan_names = set(
+            getattr(child, "_pending_skill_scan_mcp_names", set())
+        )
         changed = False
+        failed_names: set[str] = set()
         # Add: in needed but not yet self-loaded.
         for name in needed_set - selected:
             try:
@@ -3337,6 +3741,7 @@ class JiuWenSwarmDeepAdapter:
                 selected.add(name)
                 changed = True
             except Exception as exc:  # noqa: BLE001
+                failed_names.add(name)
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] reconcile add '%s' failed: %s",
                     name, exc,
@@ -3357,10 +3762,16 @@ class JiuWenSwarmDeepAdapter:
                 )
             selected.discard(name)
             changed = True
+        # The pending set was only a construction-time scan hint. Clear it
+        # after real registration/unregistration has established the live set.
+        # If registration failed, refreshing now also removes the optimistic
+        # bundled Skill roots from the ordinary SkillUseRail.
+        child.clear_pending_skill_scan_mcp_names(pending_scan_names)
+
         # A cli/skill MCP's bundled skills surface via _skill_scan_dirs (filtered
         # by _session_selected_mcp), not register_mcp_by_name (no server entry).
         # Refresh so the rail picks up the new selection.
-        if changed:
+        if changed or pending_scan_names:
             try:
                 await child.refresh_skill_rails()
             except Exception as exc:  # noqa: BLE001
@@ -3368,6 +3779,12 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] refresh_skill_rails after "
                     "reconcile failed: %s", exc,
                 )
+        if failed_names:
+            # A construction-time MCP hint may put unavailable bundled Skills in
+            # the immutable appendix. Keep the live-session freeze, but do not
+            # persist that optimistic snapshot after a transient registration
+            # failure. A restored profile remains the authoritative state.
+            child.discard_transient_skill_retrieval_session_profile()
 
     def _start_mcp_prewarm(self) -> None:
         """后台预热 connected MCP 的进程级连接缓存（仅 web root adapter）。
@@ -3892,32 +4309,171 @@ class JiuWenSwarmDeepAdapter:
                 )
 
     def _create_skill_retrieval_tools(self) -> list[Any]:
-        """Create Agentic skill retrieval tools using the current visible-skill provider.
-
-        Declared shared: skill retrieval reads a process-wide skill index, and
-        splitting it per session adapter would give each one its own view of a
-        catalogue that is meant to be common.
-        """
-        if not is_skill_retrieval_enabled():
+        """Create the session-local installed-Skill reference directory tool."""
+        if not self._skill_retrieval_tools_enabled_for_runtime(
+            self._config_base_cache
+        ):
             logger.info("[JiuWenSwarmDeepAdapter] SkillRetrievalToolkit skipped: disabled")
             return []
-        skill_retrieval_toolkit = SkillRetrievalToolkit(
-            manager=self._skill_manager,
-            visible_skill_names=self._visible_skill_names_for_list_skill,
-        )
-        tools = mark_stateless(skill_retrieval_toolkit.get_tools())
+        skill_retrieval_toolkit = self._get_or_create_skill_retrieval_toolkit()
+        tools = skill_retrieval_toolkit.get_tools()
         logger.info(
             "[JiuWenSwarmDeepAdapter] SkillRetrievalToolkit built: tools=%s",
             [tool.card.name for tool in tools],
         )
         return tools
 
+    def _skill_retrieval_session_scope(self) -> str:
+        return self._parent_session_id or f"adapter-{id(self):x}"
+
+    def _set_initial_skill_retrieval_model(self, model_name: str | None) -> None:
+        """Set the requested model used to freeze a new session's 1% budget."""
+
+        if self._initial_skill_retrieval_model_name:
+            return
+        self._initial_skill_retrieval_model_name = str(model_name or "").strip()
+
+    def _skill_retrieval_model_profile_matches(
+        self,
+        requested_model_name: str | None,
+    ) -> bool:
+        """Whether an unused warm child already has the requested 1% profile."""
+
+        requested = str(requested_model_name or "").strip()
+        if not requested:
+            return True
+        selected_model = self._resolve_model_by_name(requested)
+        if selected_model is None:
+            return not self._skill_retrieval_context_model_name
+        actual_name = str(
+            getattr(getattr(selected_model, "model_config", None), "model_name", "")
+            or ""
+        ).strip()
+        settings = build_model_discovery_settings(
+            self._config_base_cache,
+            model=selected_model,
+        )
+        return (
+            actual_name == self._skill_retrieval_context_model_name
+            and settings.context_window_tokens
+            == self._skill_retrieval_context_window_tokens
+        )
+
+    def _freeze_skill_retrieval_context_window(
+        self,
+        config_base: dict[str, Any],
+        default_model: Model,
+    ) -> None:
+        """Resolve the selected model's context window once for this session."""
+
+        if self._skill_retrieval_context_window_tokens is not None:
+            return
+
+        selected_model = (
+            self._resolve_model_by_name(self._initial_skill_retrieval_model_name)
+            or default_model
+        )
+        model_name = str(
+            getattr(getattr(selected_model, "model_config", None), "model_name", "")
+            or ""
+        ).strip()
+        settings = build_model_discovery_settings(config_base, model=selected_model)
+        self._skill_retrieval_context_model_name = model_name
+        self._skill_retrieval_context_window_tokens = settings.context_window_tokens
+        self._skill_retrieval_settings = settings
+
+    def _live_skill_retrieval_disabled_skills(self) -> list[str]:
+        """Return the persisted deny-list used to materialize the live SkillFS.
+
+        Skill-management RPCs and chat sessions can be served by different
+        adapter instances that share the state file but not the manager's
+        in-memory ``_state`` snapshot. Reload before every SkillFS refresh so a
+        toggle made through the UI is reflected by the next inventory command.
+        The full disabled list is safe here because the filesystem scan itself
+        intersects it with Skills that are currently present.
+        """
+
+        manager = self._skill_manager
+        if manager is None:
+            return []
+        reload_state = getattr(manager, "reload_state", None)
+        if callable(reload_state):
+            try:
+                reload_state()
+            except Exception:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] failed to reload Skill state "
+                    "before retrieval",
+                    exc_info=True,
+                )
+        list_disabled = getattr(manager, "list_disabled_skills", None)
+        if not callable(list_disabled):
+            list_disabled = getattr(
+                manager,
+                "list_execution_disabled_skills",
+                None,
+            )
+        if not callable(list_disabled):
+            return []
+        try:
+            return [str(name) for name in list_disabled() if str(name).strip()]
+        except Exception:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] failed to read disabled Skills "
+                "before retrieval",
+                exc_info=True,
+            )
+            return []
+
+    def _get_or_create_skill_retrieval_toolkit(self) -> SkillRetrievalToolkit:
+        toolkit = self._skill_retrieval_toolkit
+        if toolkit is not None:
+            return toolkit
+        toolkit = SkillRetrievalToolkit(
+            # Match SkillUseRail exactly: selected MCP-bundled Skills are part
+            # of this session's directory, while unselected MCPs stay hidden.
+            skill_directories=self._skill_scan_dirs,
+            # Shared taxonomy generations are built only from JiuwenSwarm's
+            # stable installed inventory. Session-selected MCP Skills remain
+            # visible through the live provider above and appear in a stale
+            # taxonomy under /newly_installed_skills.
+            index_skill_directories=lambda: [str(get_agent_skills_dir())],
+            disabled_skills=self._live_skill_retrieval_disabled_skills,
+            source_by_name=lambda: (
+                skill_sources_from_manager(self._skill_manager)
+                if self._skill_manager is not None
+                else {}
+            ),
+            session_scope=self._skill_retrieval_session_scope(),
+            config_base=self._config_base_cache,
+            settings=getattr(self, "_skill_retrieval_settings", None),
+            auto_build_index=True,
+            frozen_profile=getattr(self, "_restored_skill_retrieval_profile", None),
+        )
+        self._skill_retrieval_toolkit = toolkit
+        self._skill_retrieval_environment = toolkit.environment
+        self._persist_skill_retrieval_session_profile()
+        return toolkit
+
     @staticmethod
-    def _skill_retrieval_tools_enabled_for_runtime(
+    def _resolve_skill_retrieval_session_enabled(
         config_base: dict[str, Any] | None = None,
     ) -> bool:
-        """Return whether runtime tool sync should expose Agentic skill retrieval tools."""
-        return is_skill_retrieval_enabled()
+        return is_skill_retrieval_enabled(config_base)
+
+    def _skill_retrieval_tools_enabled_for_runtime(
+        self,
+        config_base: dict[str, Any] | None = None,
+    ) -> bool:
+        """Return the session profile under the current global kill switch."""
+
+        if self._skill_retrieval_session_enabled is None:
+            self._skill_retrieval_session_enabled = (
+                self._resolve_skill_retrieval_session_enabled(config_base)
+            )
+        return self._skill_retrieval_session_enabled and is_skill_retrieval_enabled(
+            config_base
+        )
 
     def _sync_skill_retrieval_tools_for_runtime(
         self,
@@ -3935,6 +4491,8 @@ class JiuWenSwarmDeepAdapter:
         self._skill_retrieval_tools = tools
         self._skill_retrieval_tools_registered = registered
         if not enabled:
+            self._skill_retrieval_toolkit = None
+            self._skill_retrieval_environment = None
             self._drop_tool_names_from_runtime(_SKILL_RETRIEVAL_TOOL_NAMES)
 
     async def _sync_skill_retrieval_prompt_rail_for_runtime(
@@ -3977,6 +4535,53 @@ class JiuWenSwarmDeepAdapter:
             )
         finally:
             self._skill_retrieval_prompt_rail = None
+
+    @staticmethod
+    def _skill_retrieval_build_profile(
+        config_base: dict[str, Any] | None,
+    ) -> tuple[bool, Path]:
+        """Resolve the effective build permission and root before a reload."""
+
+        from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
+            is_skill_retrieval_index_enabled,
+            skill_retrieval_artifact_root,
+        )
+
+        allowed = is_skill_retrieval_enabled(
+            config_base
+        ) and is_skill_retrieval_index_enabled(config_base)
+        return allowed, skill_retrieval_artifact_root(config_base)
+
+    async def _cancel_skill_retrieval_build_after_reload(
+        self,
+        previous_profile: tuple[bool, Path],
+        config_base: dict[str, Any],
+    ) -> None:
+        """Stop an old-root taxonomy build when its permission is removed."""
+
+        previous_allowed, previous_root = previous_profile
+        current_allowed, current_root = self._skill_retrieval_build_profile(config_base)
+        if not previous_allowed or (
+            current_allowed and previous_root == current_root
+        ):
+            return
+        try:
+            from jiuwenswarm.symphony.skill_retrieval import SkillTaxonomyRuntime
+
+            await asyncio.to_thread(
+                SkillTaxonomyRuntime(
+                    records_provider=lambda: (),
+                    index_root=previous_root,
+                    config_base=config_base,
+                ).cancel
+            )
+        except Exception:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] unable to cancel the disabled Skill "
+                "taxonomy build at %s",
+                previous_root,
+                exc_info=True,
+            )
 
     def _sync_multimodal_tools_for_runtime(self) -> None:
         """Sync multimodal tool registration after config reload."""
@@ -4342,6 +4947,11 @@ class JiuWenSwarmDeepAdapter:
         self._model = self._model_cache[default_name]
         self._model_client_config = self._model.model_client_config
         self._model_request_config = self._model.model_config
+        self._selected_model_context_window_tokens = getattr(
+            self._model_request_config,
+            "context_window",
+            None,
+        )
         self._last_models_config_fingerprint = new_fp
         return self._model
 
@@ -4696,6 +5306,17 @@ class JiuWenSwarmDeepAdapter:
         deep_config = getattr(self._instance, "deep_config", None)
         if deep_config is not None:
             deep_config.model = model
+        self._selected_model_context_window_tokens = getattr(
+            model.model_config,
+            "context_window",
+            None,
+        )
+        update_model_context = getattr(self._instance, "update_model_context", None)
+        if callable(update_model_context):
+            update_model_context(
+                model_name=model.model_config.model_name,
+                context_window_tokens=self._selected_model_context_window_tokens,
+            )
         self._model_request_config = model.model_config
         # 记录最近一次解析并应用的模型，供 ask_user_interrupt 等不带 model_name
         # 的中断恢复请求回退使用，避免回退到 config.yaml 默认占位模型。
@@ -4703,9 +5324,17 @@ class JiuWenSwarmDeepAdapter:
         self._active_request_model = model
 
     @staticmethod
-    def _resolve_skill_mode(config: dict[str, Any]) -> str:
+    def _resolve_skill_mode(
+        config: dict[str, Any],
+        config_base: dict[str, Any] | None = None,
+        retrieval_enabled: bool | None = None,
+    ) -> str:
         """Validate configured skill mode and fallback safely on invalid values."""
-        if is_skill_retrieval_enabled():
+        if (
+            is_skill_retrieval_enabled(config_base)
+            if retrieval_enabled is None
+            else retrieval_enabled
+        ):
             return SkillUseRail.SKILL_MODE_AUTO_LIST
         raw_skill_mode = config.get("skill_mode", SkillUseRail.SKILL_MODE_ALL)
         valid_modes = {
@@ -4721,27 +5350,6 @@ class JiuWenSwarmDeepAdapter:
             SkillUseRail.SKILL_MODE_ALL,
         )
         return SkillUseRail.SKILL_MODE_ALL
-
-    def _visible_skill_names_for_list_skill(self) -> set[str]:
-        """Return the skill names exposed by the matching SkillUseRail setup."""
-        skills_dir = get_agent_skills_dir()
-        disabled_skills = set(
-            self._skill_manager.list_execution_disabled_skills()
-            if self._skill_manager is not None
-            else []
-        )
-        visible: set[str] = set()
-        try:
-            for child in sorted(skills_dir.iterdir(), key=lambda path: path.name.lower()):
-                if not child.is_dir() or child.name.startswith("_") or child.name.startswith("."):
-                    continue
-                if child.name in disabled_skills:
-                    continue
-                if (child / "SKILL.md").is_file():
-                    visible.add(child.name)
-        except OSError as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] failed to scan visible skills: %s", exc)
-        return visible
 
     @staticmethod
     def _build_response_prompt_rail() -> ResponsePromptRail | None:
@@ -5361,7 +5969,15 @@ class JiuWenSwarmDeepAdapter:
         sees connected MCP skills immediately.
         """
         try:
-            skill_mode = self._resolve_skill_mode(config)
+            skill_mode = self._resolve_skill_mode(
+                config,
+                self._config_base_cache,
+                retrieval_enabled=(
+                    self._skill_retrieval_tools_enabled_for_runtime(
+                        self._config_base_cache
+                    )
+                ),
+            )
             logger.info("[JiuWenSwarmDeepAdapter] current skill_mode: %s", skill_mode)
             skills_dirs = self._skill_scan_dirs()
             skill_rail = SkillUseRail(
@@ -5383,9 +5999,10 @@ class JiuWenSwarmDeepAdapter:
         Centralized so _build_skill_rail (init) and refresh_skill_rails
         (reload) compute the same roots. Only a session-scoped child scans MCP
         skill dirs, filtered to its ``_session_selected_mcp`` set (populated by
-        reconcile_session_mcp from chat.send's ``mcp`` field) — so a cli/
-        skill MCP's bundled skills are invisible to the agent until the user
-        selects it this session. The root adapter never scans MCP skill dirs:
+        reconcile_session_mcp from chat.send's ``mcp`` field). During a cold
+        first chat, the construction-only pending set is included as well so
+        bundled Skills precede retrieval's frozen snapshot without pretending
+        the MCP is already registered. The root adapter never scans MCP dirs:
         cli/skill MCPs are session-level only, and the TUI channel does not
         support them, so the root's view of them must be empty (previously it
         scanned ALL connected MCP dirs, leaking cli/skill skills into rewind/
@@ -5395,11 +6012,13 @@ class JiuWenSwarmDeepAdapter:
         if not getattr(self, "_is_session_scoped_adapter", False):
             return roots
         try:
-            selected = getattr(self, "_session_selected_mcp", None)
+            selected = set(getattr(self, "_session_selected_mcp", set()) or ())
+            selected.update(
+                getattr(self, "_pending_skill_scan_mcp_names", set()) or ()
+            )
             for entry in self._skill_manager._mcp_skills_dirs():
-                if selected is not None:
-                    if str(entry.get("name", "")).strip() not in selected:
-                        continue
+                if str(entry.get("name", "")).strip() not in selected:
+                    continue
                 d = str(entry.get("dir", "") or "").strip()
                 if d and d not in roots:
                     roots.append(d)
@@ -5912,13 +6531,17 @@ class JiuWenSwarmDeepAdapter:
         return True
 
     def _build_skill_retrieval_prompt_rail(self) -> SkillRetrievalPromptRail | None:
-        """Build lightweight agentic skill retrieval prompt guidance."""
-        if not is_skill_retrieval_enabled():
+        """Build Skill directory guidance and per-session reminders."""
+        if not self._skill_retrieval_tools_enabled_for_runtime(
+            self._config_base_cache
+        ):
             return None
         try:
+            toolkit = self._get_or_create_skill_retrieval_toolkit()
             return SkillRetrievalPromptRail(
-                manager=self._skill_manager,
-                visible_skill_names=self._visible_skill_names_for_list_skill,
+                toolkit=toolkit,
+                session_scope=self._skill_retrieval_session_scope(),
+                config_base=self._config_base_cache,
             )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillRetrievalPromptRail create failed: %s", exc)
@@ -6358,9 +6981,6 @@ class JiuWenSwarmDeepAdapter:
             ),
             context_engine_config=_deep_agent_context_engine_config(
                 config,
-                full_config=config_base,
-                model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
-                model=model,
             ),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
@@ -6419,10 +7039,9 @@ class JiuWenSwarmDeepAdapter:
             )
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills
-        # from activate_package() / load_harness_config().  When agentic
-        # retrieval is enabled, _resolve_skill_mode() forces AUTO_LIST; the
-        # SkillRetrievalPromptRail then hides list_skill and the native skills
-        # prompt while keeping skill_tool/read_file available.
+        # from activate_package() / load_harness_config(). When directory
+        # retrieval is enabled, AUTO_LIST keeps SkillTool live while the
+        # Symphony rail owns discovery and prompt disclosure.
         if self._skill_rail is None:
             self._skill_rail = self._build_skill_rail(
                 config,
@@ -6430,7 +7049,15 @@ class JiuWenSwarmDeepAdapter:
             )
         else:
             # Update existing rail's skill_mode if changed.
-            new_skill_mode = self._resolve_skill_mode(config)
+            new_skill_mode = self._resolve_skill_mode(
+                config,
+                config_base or self._config_base_cache,
+                retrieval_enabled=(
+                    self._skill_retrieval_tools_enabled_for_runtime(
+                        config_base or self._config_base_cache
+                    )
+                ),
+            )
             if self._skill_rail.skill_mode != new_skill_mode:
                 self._skill_rail.skill_mode = new_skill_mode
             # Update disabled_skills.
@@ -6678,12 +7305,17 @@ class JiuWenSwarmDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] skill tools registration failed: %s", exc)
 
-        if is_skill_retrieval_enabled():
+        if self._skill_retrieval_tools_enabled_for_runtime(
+            self._config_base_cache
+        ):
             try:
                 self._skill_retrieval_tools = self._create_skill_retrieval_tools()
                 skill_retrieval_tool_names: list[str] = []
                 for tool in self._skill_retrieval_tools:
-                    self._register_shared_tool(tool)
+                    # skill_index owns session-frozen scale, taxonomy revision,
+                    # and visibility state, so it must never share the first
+                    # session's instance through the process-wide bare id.
+                    self._register_agent_owned_tool(tool, self._tool_owner_id())
                     tool_cards.append(tool.card)
                     skill_retrieval_tool_names.append(tool.card.name)
                 self._skill_retrieval_tools_registered = bool(self._skill_retrieval_tools)
@@ -6904,6 +7536,13 @@ class JiuWenSwarmDeepAdapter:
         load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
         config_base = get_config()
         self._config_base_cache = config_base.copy()
+        if self._skill_retrieval_session_enabled is None:
+            restored_profile = self._restored_skill_retrieval_profile
+            self._skill_retrieval_session_enabled = (
+                bool(restored_profile.get("enabled"))
+                if restored_profile is not None
+                else self._resolve_skill_retrieval_session_enabled(config_base)
+            )
         self._refresh_multimodal_configs(config_base)
         config = config_base.get("react", {}).copy()
         self._config_cache = config.copy()
@@ -6927,6 +7566,11 @@ class JiuWenSwarmDeepAdapter:
             return
 
         model = self._create_model(config_base)
+        if (
+            self._is_session_scoped_adapter
+            and self._skill_retrieval_tools_enabled_for_runtime(config_base)
+        ):
+            self._freeze_skill_retrieval_context_window(config_base, model)
         if self._is_session_scoped_adapter:
             await self._try_init_a2x_client(config_base)
         agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
@@ -6959,8 +7603,8 @@ class JiuWenSwarmDeepAdapter:
             tools=tool_cards if tool_cards else [],
             subagents=configured_subagents,
             rails=rails_list if rails_list else [],
-            # Expose only tool_search initially; ordinary tools are marked
-            # deferred and indexed by ProgressiveToolRail at startup.
+            # Keep explicitly direct tools (including the enabled installed-Skill
+            # directory) visible; defer and index the remaining ordinary tools.
             progressive_tool_enabled=get_progressive_tool_enabled(config_base),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
             enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
@@ -6979,9 +7623,6 @@ class JiuWenSwarmDeepAdapter:
             **common_kwargs,
             context_engine_config=_deep_agent_context_engine_config(
                 config,
-                full_config=config_base,
-                model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
-                model=model,
             ),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             vision_model_config=self._vision_model_config,
@@ -7173,6 +7814,9 @@ class JiuWenSwarmDeepAdapter:
                     own_sid,
                 )
                 return
+        previous_skill_retrieval_build_profile = (
+            self._skill_retrieval_build_profile(self._config_base_cache)
+        )
         if self._instance is None:
             if self._is_session_scoped_adapter:
                 raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
@@ -7181,6 +7825,10 @@ class JiuWenSwarmDeepAdapter:
             # snapshot still has to move forward and the live session adapters
             # still have to be reloaded.
             config_base = await self._apply_reload_config_snapshot(config_base, env_overrides)
+            await self._cancel_skill_retrieval_build_after_reload(
+                previous_skill_retrieval_build_profile,
+                config_base,
+            )
             await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
             logger.info(
                 "[JiuWenSwarmDeepAdapter] 配置已热更新（root 实例未构建，仅刷新缓存并级联 session adapter）"
@@ -7188,6 +7836,10 @@ class JiuWenSwarmDeepAdapter:
             return
 
         config_base = await self._apply_reload_config_snapshot(config_base, env_overrides)
+        await self._cancel_skill_retrieval_build_after_reload(
+            previous_skill_retrieval_build_profile,
+            config_base,
+        )
         config = self._config_cache.copy()
 
         model = self._create_model(config_base)
@@ -10361,7 +11013,10 @@ class JiuWenSwarmDeepAdapter:
             AgentResponse 包含执行结果
         """
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id,
+                history_before_request_id=request.request_id,
+            )
             try:
                 return await session_adapter.process_message_impl(request, inputs)
             finally:
@@ -10722,7 +11377,10 @@ class JiuWenSwarmDeepAdapter:
         # "entering runner streaming" line so the pre-dispatch work is visible.
         stream_impl_started_at = time.monotonic()
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id,
+                history_before_request_id=request.request_id,
+            )
             try:
                 async for chunk in session_adapter.process_message_stream_impl(request, inputs):
                     yield chunk
@@ -10751,7 +11409,11 @@ class JiuWenSwarmDeepAdapter:
 
         # Team 模式处理
         if is_team_mode(mode):
-            from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
+            from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+                bind_team_heartbeat_service,
+                process_team_message_stream,
+                reset_team_heartbeat_service,
+            )
 
             resolved_model = self._resolve_model_for_request(request)
             self._apply_model_to_react_agent(resolved_model)
@@ -10825,8 +11487,15 @@ class JiuWenSwarmDeepAdapter:
                 or self._workspace_dir,
             )
 
+            token_heartbeat_service = bind_team_heartbeat_service(
+                getattr(self, "_heartbeat_service", None)
+            )
             try:
-                async for chunk in process_team_message_stream(request, inputs, self._instance):
+                async for chunk in process_team_message_stream(
+                    request,
+                    inputs,
+                    self._instance,
+                ):
                     yield chunk
             finally:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
@@ -10834,6 +11503,7 @@ class JiuWenSwarmDeepAdapter:
                 )
 
                 reset_current_multimodal_image_files(image_files_token)
+                reset_team_heartbeat_service(token_heartbeat_service)
                 TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
                 cleanup_permission_context(token_perm)
             return
@@ -11908,20 +12578,14 @@ class JiuWenSwarmDeepAdapter:
         # 回退：DeepAgent 未返回 context_window_tokens 时，用 ContextUtils 解析模型上下文窗口上限
         if context_window_tokens is None:
             try:
-                from openjiuwen.core.context_engine.context.context_utils import ContextUtils
                 model_name = (
                     getattr(self._model_request_config, "model_name", "") or ""
                     if self._model_request_config else ""
                 )
-                # 与 ContextEngine 一致：显式配置的 context_window_tokens 优先于按模型名解析
-                cw_override = _deep_agent_context_engine_config(
-                    self._config_cache,
-                    full_config=self._config_base_cache,
+                cw_fallback = resolve_context_window_tokens(
                     model_name=model_name,
-                ).context_window_tokens
-                cw_fallback = ContextUtils.resolve_context_max(
-                    model_name=model_name,
-                    fallback_context_window_tokens=cw_override,
+                    context_engine_config=self._config_cache,
+                    model_context_window_override=self._selected_model_context_window_tokens,
                 )
                 if cw_fallback > 0:
                     context_window_tokens = cw_fallback
@@ -13004,12 +13668,15 @@ class JiuWenSwarmDeepAdapter:
             occupancy_rate = usage.get("usage_percent", 0)
         except Exception as exc:
             logger.debug("[JiuWenSwarmDeepAdapter] DeepAgent.get_context_usage failed: %s", exc)
-            from openjiuwen.core.context_engine.context.context_utils import ContextUtils
             model_name = (
                 getattr(self._model_request_config, "model_name", "") or ""
                 if self._model_request_config else ""
             )
-            context_window_limit = ContextUtils.resolve_context_max(model_name=model_name)
+            context_window_limit = resolve_context_window_tokens(
+                model_name=model_name,
+                context_engine_config=self._config_cache,
+                model_context_window_override=self._selected_model_context_window_tokens,
+            )
             if context_window_limit > 0:
                 occupancy_rate = round(total_tokens / context_window_limit * 100, 1)
 

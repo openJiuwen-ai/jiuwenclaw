@@ -148,7 +148,10 @@ _IMPORT_LOCAL_FORBIDDEN_DIRS_ENV = "IMPORT_LOCAL_FORBIDDEN_DIRS"
 # 本地导入结构校验：SKILL.md 开头（仅允许前置空行）必须是 --- frontmatter。
 _SKILL_FRONTMATTER_RE = re.compile(r"^(?:\s*\n)*---\s*\n(.*?)\n---\s*\n?(.*)", re.DOTALL)
 _ONLINE_SEARCH_RRF_K = 60
-_ONLINE_SEARCH_SOURCE_ORDER = {"skillnet": 0, "clawhub": 1}
+_ONLINE_SEARCH_SOURCE_ORDER = {"skillnet": 0, "teamskillshub": 1, "clawhub": 2}
+_ONLINE_SEARCH_SOURCE_TIMEOUT = 30.0
+_TEAM_SKILL_PLUGIN_TYPES = {"swarmskill", "swarm-skill", "teamskills", "team-skill"}
+_SINGLE_SKILL_PLUGIN_TYPES = {"skill"}
 
 
 def _maybe_disable_insecure_warning() -> None:
@@ -1327,40 +1330,384 @@ class SkillManager:
             "disabled_skills": sorted(disabled),
         }
 
-    async def handle_skills_retrieval_status(self, params: dict) -> dict:
-        """返回本地 skill retrieval 索引状态."""
-        from jiuwenswarm.symphony.skill_retrieval import get_skill_retrieval_status
+    def _skill_retrieval_records(self):
+        """Return the same live enabled inventory used by Agent discovery."""
 
-        return await asyncio.to_thread(get_skill_retrieval_status, self)
+        from openjiuwen.symphony.discovery import scan_skill_directories
+        from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
+            skill_sources_from_manager,
+        )
+
+        return scan_skill_directories(
+            [str(self._skills_dir)],
+            disabled_skills=self.list_execution_disabled_skills(),
+            source_by_name=skill_sources_from_manager(self),
+        ).items
+
+    def _skill_taxonomy_runtime(self, records_provider=None):
+        from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
+            skill_retrieval_artifact_root,
+        )
+        from jiuwenswarm.symphony.skill_retrieval import SkillTaxonomyRuntime
+
+        return SkillTaxonomyRuntime(
+            records_provider=records_provider or self._skill_retrieval_records,
+            index_root=skill_retrieval_artifact_root(),
+        )
+
+    @staticmethod
+    def _skill_retrieval_mode() -> str:
+        from jiuwenswarm.common.config import get_config
+
+        config = get_config() or {}
+        symphony = config.get("symphony") if isinstance(config, dict) else {}
+        retrieval = (
+            symphony.get("skill_retrieval") if isinstance(symphony, dict) else {}
+        )
+        raw = (
+            str(retrieval.get("mode") or "auto").strip().lower()
+            if isinstance(retrieval, dict)
+            else "auto"
+        )
+        return "flat" if raw == "flat" else "auto"
+
+    async def handle_skills_retrieval_status(self, params: dict) -> dict:
+        """Return the live flat/indexed directory and optional build status."""
+
+        params = params if isinstance(params, dict) else {}
+        session_profile = params.get("_session_profile")
+        session_profile = session_profile if isinstance(session_profile, dict) else None
+        from dataclasses import replace
+
+        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
+            build_discovery_settings,
+            is_skill_retrieval_enabled,
+            is_skill_retrieval_index_enabled,
+            resolve_skill_retrieval_strategy,
+            skill_retrieval_artifact_root,
+            skill_sources_from_manager,
+        )
+        from openjiuwen.symphony.discovery import SkillFS, scan_skill_directories
+
+        disabled = {str(name) for name in self.list_execution_disabled_skills()}
+        all_documents = await asyncio.to_thread(
+            scan_skill_directories,
+            [str(self._skills_dir)],
+            source_by_name=skill_sources_from_manager(self),
+        )
+        visible_documents = tuple(
+            record
+            for record in all_documents.items
+            if record.worker_id not in disabled
+        )
+        config = get_config() or {}
+        configured_enabled = is_skill_retrieval_enabled(config)
+        configured_index_enabled = is_skill_retrieval_index_enabled(config)
+        enabled = configured_enabled
+        index_enabled = configured_index_enabled
+        artifact_root = skill_retrieval_artifact_root()
+        settings = build_discovery_settings(config)
+        flat_directory = SkillFS(
+            lambda: visible_documents,
+            settings=replace(settings, use_existing_index=False),
+            artifact_root=artifact_root,
+            index_root=artifact_root,
+        )
+        snapshot = flat_directory.prompt_snapshot()
+        candidate_scale = "small" if snapshot.all_candidates_included else "large"
+        directory = flat_directory
+        if enabled and index_enabled and candidate_scale == "large":
+            directory = SkillFS(
+                lambda: visible_documents,
+                settings=replace(settings, use_existing_index=True),
+                artifact_root=artifact_root,
+                index_root=artifact_root,
+            )
+        build = await asyncio.to_thread(
+            self._skill_taxonomy_runtime(lambda: visible_documents).status,
+        )
+        artifact = directory.artifact
+        profile_scope = "default"
+        profile_session_id = ""
+        profile_model_name = ""
+        pinned_index_revision = ""
+        estimated_candidate_tokens = snapshot.estimated_candidate_tokens
+        candidate_budget_tokens = snapshot.candidate_budget_tokens
+        layout = artifact.layout
+        index_state = artifact.index_state
+        searchable_count = len(visible_documents)
+        profile_recovery_error = ""
+        if session_profile is not None:
+            profile_scope = "session"
+            profile_session_id = str(session_profile.get("session_id") or "")
+            profile_model_name = str(session_profile.get("model_name") or "")
+            pinned_index_revision = str(
+                session_profile.get("pinned_index_revision") or ""
+            )
+            enabled = configured_enabled and bool(session_profile.get("enabled"))
+            index_enabled = bool(session_profile.get("index_enabled"))
+            if session_profile.get("candidate_scale") in {"small", "large"}:
+                candidate_scale = str(session_profile["candidate_scale"])
+            estimated_candidate_tokens = max(
+                0,
+                int(
+                    session_profile.get("estimated_candidate_tokens")
+                    or estimated_candidate_tokens
+                ),
+            )
+            candidate_budget_tokens = max(
+                1,
+                int(
+                    session_profile.get("candidate_budget_tokens")
+                    or candidate_budget_tokens
+                ),
+            )
+            if session_profile.get("layout") in {"flat", "tree"}:
+                layout = str(session_profile["layout"])
+            if session_profile.get("index_state") in {
+                "missing",
+                "fresh",
+                "stale",
+                "not-required",
+            }:
+                index_state = str(session_profile["index_state"])
+            searchable_count = max(
+                0,
+                int(session_profile.get("searchable_count") or searchable_count),
+            )
+            profile_recovery_error = str(
+                session_profile.get("profile_recovery_error") or ""
+            )
+        else:
+            models = config.get("models") if isinstance(config, dict) else {}
+            defaults = models.get("defaults") if isinstance(models, dict) else None
+            if isinstance(defaults, list):
+                entry = next(
+                    (
+                        item
+                        for item in defaults
+                        if isinstance(item, dict) and item.get("is_default") is True
+                    ),
+                    next((item for item in defaults if isinstance(item, dict)), {}),
+                )
+                client = entry.get("model_client_config") or {}
+                if isinstance(client, dict):
+                    profile_model_name = str(client.get("model_name") or "")
+        public_index_state = (
+            "not-required" if enabled and candidate_scale == "small" else index_state
+        )
+        requested_strategy = (
+            str(session_profile.get("effective_strategy") or "")
+            if session_profile is not None
+            else ""
+        )
+        effective_strategy = "legacy"
+        if enabled:
+            effective_strategy = (
+                requested_strategy
+                if requested_strategy
+                in {"small_full", "large_flat", "indexed", "indexed_stale"}
+                else resolve_skill_retrieval_strategy(
+                    enabled=True,
+                    candidate_scale=candidate_scale,
+                    layout=layout,
+                    index_state=public_index_state,
+                )
+            )
+        index_recommended = (
+            enabled and candidate_scale == "large" and not index_enabled
+        )
+        build_supported = (
+            configured_enabled
+            and configured_index_enabled
+            and candidate_scale == "large"
+        )
+        logs = build.get("logs") if isinstance(build.get("logs"), list) else []
+        return {
+            "enabled": enabled,
+            "index_enabled": index_enabled,
+            "mode": self._skill_retrieval_mode(),
+            "candidate_scale": candidate_scale,
+            "estimated_candidate_tokens": estimated_candidate_tokens,
+            "candidate_budget_tokens": candidate_budget_tokens,
+            "effective_strategy": effective_strategy,
+            "layout": layout,
+            "index_state": public_index_state,
+            "index_required": index_recommended,
+            "index_recommended": index_recommended,
+            "build_supported": build_supported,
+            "build_status": str(build.get("status") or "idle"),
+            "build_stage": str(build.get("stage") or ""),
+            "build_progress": float(build.get("progress") or 0.0),
+            "build_message": str(build.get("message") or ""),
+            "build_error": str(build.get("error") or ""),
+            "build_id": str(build.get("build_id") or ""),
+            "build_logs": logs[-50:],
+            "index_exists": bool(build.get("index_exists")),
+            "fresh": bool(build.get("fresh")),
+            "indexed_count": int(build.get("indexed_count") or 0),
+            "installed_count": all_documents.count,
+            "installed_enabled_count": len(visible_documents),
+            "searchable_count": searchable_count,
+            "tool_name": "skill_index",
+            "profile_scope": profile_scope,
+            "profile_session_id": profile_session_id,
+            "profile_model_name": profile_model_name,
+            "pinned_index_revision": pinned_index_revision,
+            "profile_recovery_error": profile_recovery_error,
+        }
 
     async def handle_skills_retrieval_index_build(self, params: dict) -> dict:
-        """构建或复用本地 skill retrieval 索引."""
-        from jiuwenswarm.symphony.skill_retrieval.build_coordinator import start_skill_index_build
+        """Explicitly start Symphony's background taxonomy builder."""
 
-        params = params or {}
-        force = bool(params.get("force", False))
-        source = str(params.get("source") or "web").strip() or "web"
-        return await asyncio.to_thread(start_skill_index_build, self, force=force, source=source)
+        status = await self.handle_skills_retrieval_status(params)
+        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
+            is_skill_retrieval_enabled,
+            is_skill_retrieval_index_enabled,
+        )
+
+        config = get_config() or {}
+        if not is_skill_retrieval_enabled(config):
+            return {
+                "success": False,
+                "error_code": "skill_retrieval_disabled",
+                "effective_strategy": "legacy",
+                "build_status": status["build_status"],
+                "detail": "Enable Skill retrieval before building its taxonomy.",
+            }
+        if not is_skill_retrieval_index_enabled(config):
+            return {
+                "success": False,
+                "error_code": "skill_index_disabled",
+                "effective_strategy": status["effective_strategy"],
+                "build_status": status["build_status"],
+                "detail": "Enable the Skill taxonomy switch before building it.",
+            }
+        if status["candidate_scale"] == "small":
+            return {
+                "success": False,
+                "error_code": "skill_index_not_needed",
+                "effective_strategy": "small_full",
+                "build_status": status["build_status"],
+                "detail": (
+                    "The complete Skill metadata snapshot fits below the configured "
+                    "threshold; no taxonomy build is needed."
+                ),
+            }
+
+        raw_force = (params or {}).get("force", False)
+        force = (
+            raw_force.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(raw_force, str)
+            else bool(raw_force)
+        )
+        try:
+            payload = await asyncio.to_thread(
+                self._skill_taxonomy_runtime().start_build,
+                force=force,
+            )
+        except Exception as exc:
+            logger.exception("Unable to start Skill taxonomy build")
+            return {
+                "success": False,
+                "mode": self._skill_retrieval_mode(),
+                "effective_strategy": status["effective_strategy"],
+                "build_status": "failed",
+                "detail": str(exc),
+            }
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        return {
+            "success": bool(payload.get("success")),
+            "background": bool(payload.get("success")),
+            "mode": self._skill_retrieval_mode(),
+            "effective_strategy": status["effective_strategy"],
+            "build_status": str(data.get("state") or "running"),
+            "build_id": str(data.get("build_id") or ""),
+            "detail": str(payload.get("result") or ""),
+        }
 
     async def handle_skills_retrieval_index_cancel(self, params: dict) -> dict:
-        """请求取消本地 skill retrieval 索引构建."""
-        from jiuwenswarm.symphony.skill_retrieval import cancel_skill_index_build
+        """Cancel the taxonomy builder without touching its previous index.
 
-        return await asyncio.to_thread(cancel_skill_index_build, self)
+        Cancellation remains available after either switch is disabled because
+        it is cleanup, not taxonomy construction or consumption.
+        """
+
+        build_id = str((params or {}).get("build_id") or "").strip() or None
+        try:
+            payload = await asyncio.to_thread(
+                self._skill_taxonomy_runtime().cancel,
+                build_id=build_id,
+            )
+        except Exception as exc:
+            logger.exception("Unable to cancel Skill taxonomy build")
+            return {
+                "success": False,
+                "mode": self._skill_retrieval_mode(),
+                "build_status": "failed",
+                "build_id": build_id or "",
+                "detail": str(exc),
+            }
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        return {
+            "success": bool(payload.get("success")),
+            "mode": self._skill_retrieval_mode(),
+            "build_status": str(data.get("state") or "idle"),
+            "build_id": str(data.get("build_id") or ""),
+            "detail": str(payload.get("result") or ""),
+        }
 
     async def handle_skills_retrieval_search(self, params: dict) -> dict:
-        """基于本地索引检索已安装 skills."""
-        from jiuwenswarm.symphony.skill_retrieval import retrieve_skills
+        """Search installed Skills through the same directory Tool used by Agents."""
+        from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
+            SkillRetrievalToolkit,
+            skill_sources_from_manager,
+        )
 
         query = str((params or {}).get("query") or "").strip()
-        return await asyncio.to_thread(retrieve_skills, query, self)
+        if not query:
+            return {
+                "success": False,
+                "mode": self._skill_retrieval_mode(),
+                "detail": "query must not be empty",
+                "matches": [],
+            }
+        toolkit = SkillRetrievalToolkit(
+            skill_directories=[str(self._skills_dir)],
+            disabled_skills=self.list_execution_disabled_skills,
+            source_by_name=lambda: skill_sources_from_manager(self),
+        )
+        result = await toolkit.skill_index(
+            operation="search",
+            query=query,
+            paths=["/"],
+            match="content",
+            result="files",
+            pipeline=[{"operation": "limit", "lines": 10}],
+        )
+        diagnostics = dict(result.detailed_output)
+        return {
+            "success": not bool(diagnostics.get("error")),
+            "mode": self._skill_retrieval_mode(),
+            "query": query,
+            "result": str(result),
+            "detailed_output": diagnostics,
+        }
 
     async def handle_skills_retrieval_tree(self, params: dict) -> dict:
-        """返回本地 skill retrieval 树索引概览."""
-        from jiuwenswarm.symphony.skill_retrieval import get_skill_retrieval_tree
+        """Keep the legacy tree-view RPC closed; Agents browse with list."""
 
-        language = str((params or {}).get("language") or "cn").strip() or "cn"
-        return await asyncio.to_thread(get_skill_retrieval_tree, self, language=language)
+        del params
+        return {
+            "success": False,
+            "mode": self._skill_retrieval_mode(),
+            "unsupported": True,
+            "tree_supported": False,
+            "nodes": [],
+            "detail": "Browse the Skill taxonomy through skill_index list operations.",
+        }
 
     async def handle_skills_graph_build(self, params: dict) -> dict:
         """Start a background Skill Graph build."""
@@ -1807,7 +2154,7 @@ class SkillManager:
 
     @staticmethod
     def _normalize_online_search_identifier(source: str, identifier: str) -> str:
-        """Build a conservative identity key for safe result merging."""
+        """Build a source-scoped identity key for conservative deduplication."""
         value = str(identifier or "").strip()
         if not value:
             return f"{source}:"
@@ -1816,13 +2163,24 @@ class SkillManager:
             scheme = "https" if parsed.hostname and parsed.hostname.lower() == "github.com" else parsed.scheme.lower()
             host = parsed.netloc.lower()
             path = parsed.path.rstrip("/") or "/"
-            return f"url:{scheme}://{host}{path}"
+            return f"{source}:url:{scheme}://{host}{path}"
         return f"{source}:{value.casefold()}"
+
+    @staticmethod
+    def _classify_team_skill_plugin_type(plugin_type: Any) -> bool | None:
+        """Map source-specific plugin types to the stable API classification."""
+        normalized = str(plugin_type or "").strip().casefold()
+        if normalized in _TEAM_SKILL_PLUGIN_TYPES:
+            return True
+        if normalized in _SINGLE_SKILL_PLUGIN_TYPES:
+            return False
+        return None
 
     @staticmethod
     def _normalize_online_search_item(source: str, item: dict[str, Any], rank: int) -> dict[str, Any]:
         if source == "skillnet":
             name = str(item.get("skill_name") or item.get("name") or "").strip()
+            display_name = str(item.get("display_name") or name).strip() or name
             description = str(item.get("skill_description") or item.get("description") or "").strip()
             identifier = str(item.get("skill_url") or item.get("url") or "").strip()
             version = ""
@@ -1832,8 +2190,10 @@ class SkillManager:
                 native_score = item.get("stars")
             category = str(item.get("category") or "").strip()
             updated_at = 0
+            is_team_skill = False
         elif source == "clawhub":
-            name = str(item.get("display_name") or item.get("slug") or "").strip()
+            name = str(item.get("slug") or item.get("name") or "").strip()
+            display_name = str(item.get("display_name") or name).strip() or name
             description = str(item.get("summary") or "").strip()
             identifier = str(item.get("slug") or "").strip()
             version = str(item.get("version") or "").strip()
@@ -1843,16 +2203,42 @@ class SkillManager:
             native_score = item.get("score")
             category = ""
             updated_at = item.get("updated_at") or 0
+            is_team_skill = False
+        elif source == "teamskillshub":
+            identifier = str(item.get("asset_id") or item.get("identifier") or "").strip()
+            name = str(item.get("name") or identifier).strip() or identifier
+            display_name = str(item.get("display_name") or name).strip() or name
+            description = str(item.get("summary") or item.get("description") or "").strip()
+            version = str(item.get("version") or item.get("latest_version") or "").strip()
+            author = str(item.get("author") or item.get("publisher_name") or "").strip()
+            native_score = item.get("native_score")
+            if native_score is None:
+                native_score = item.get("install_count")
+            category = str(item.get("category") or item.get("category_name") or "").strip()
+            updated_at = item.get("updated_at") or item.get("update_time") or 0
+            raw_team_skill = item.get("is_team_skill")
+            if isinstance(raw_team_skill, bool):
+                is_team_skill = raw_team_skill
+            else:
+                classified = SkillManager._classify_team_skill_plugin_type(item.get("plugin_type"))
+                if classified is None:
+                    raise ValueError(
+                        "unsupported teamskillshub plugin_type: "
+                        f"{item.get('plugin_type')!r}"
+                    )
+                is_team_skill = classified
         else:
             raise ValueError(f"unsupported online search source: {source}")
 
         normalized: dict[str, Any] = {
             "source": source,
             "name": name,
+            "display_name": display_name,
             "description": description,
             "identifier": identifier,
             "version": version,
             "author": author,
+            "is_team_skill": is_team_skill,
             "native_score": native_score,
             "category": category,
             "updated_at": updated_at,
@@ -1884,7 +2270,11 @@ class SkillManager:
             for rank, raw_item in enumerate(source_results[source], start=1):
                 if not isinstance(raw_item, dict):
                     continue
-                item = cls._normalize_online_search_item(source, raw_item, rank)
+                try:
+                    item = cls._normalize_online_search_item(source, raw_item, rank)
+                except ValueError as exc:
+                    logger.warning("忽略无法归一化的在线技能结果: source=%s error=%s", source, exc)
+                    continue
                 if not item["identifier"] and not item["name"]:
                     continue
                 identity_value = item["identifier"] or item["name"]
@@ -1907,6 +2297,7 @@ class SkillManager:
         for item in items:
             item["exact_match"] = normalized_query in {
                 str(item.get("name") or "").strip().casefold(),
+                str(item.get("display_name") or "").strip().casefold(),
                 str(item.get("identifier") or "").strip().casefold(),
             }
             item["matched_source_count"] = len(
@@ -1926,10 +2317,17 @@ class SkillManager:
         return items[:limit]
 
     async def handle_skills_online_search(self, params: dict) -> dict:
-        """Search the fixed online sources used by the Skills Online Search surface."""
-        query = str(params.get("q", "")).strip()
+        """Search every currently available third-party source for Skills Marketplace."""
+        params = params or {}
+        query = str(params.get("query") if params.get("query") is not None else params.get("q", "")).strip()
         if not query:
-            return {"success": False, "partial": False, "items": [], "sources": [], "detail": "缺少参数: q"}
+            return {
+                "success": False,
+                "partial": False,
+                "items": [],
+                "sources": [],
+                "detail": "缺少参数: query",
+            }
         try:
             limit = int(params.get("limit", 20))
         except (TypeError, ValueError):
@@ -1943,10 +2341,8 @@ class SkillManager:
         limit = min(max(limit, 1), 50)
         calls: list[tuple[str, Awaitable[dict[str, Any]]]] = [
             (
-                "skillnet",
-                self.handle_skills_skillnet_search(
-                    {"q": query, "limit": limit, "mode": "keyword"}
-                ),
+                "teamskillshub",
+                self.handle_skills_team_skills_hub_search({"q": query, "limit": limit}),
             )
         ]
         source_statuses: list[dict[str, Any]] = []
@@ -1967,16 +2363,22 @@ class SkillManager:
                 }
             )
 
-        payloads = await asyncio.gather(*(call for _, call in calls), return_exceptions=True)
+        payloads = await asyncio.gather(
+            *(asyncio.wait_for(call, timeout=_ONLINE_SEARCH_SOURCE_TIMEOUT) for _, call in calls),
+            return_exceptions=True,
+        )
         source_results: dict[str, list[dict[str, Any]]] = {}
         for (source, _), payload in zip(calls, payloads):
             if isinstance(payload, asyncio.CancelledError):
                 raise payload
             if isinstance(payload, Exception):
                 logger.error("在线技能聚合搜索失败: source=%s error=%s", source, payload)
-                source_statuses.append(
-                    {"source": source, "status": "error", "count": 0, "detail": str(payload)[:500]}
-                )
+                status: dict[str, Any] = {"source": source, "status": "error", "count": 0}
+                if isinstance(payload, TimeoutError):
+                    status["detail_key"] = "skills.onlineSearch.sourceTimeout"
+                else:
+                    status["detail"] = str(payload)[:500]
+                source_statuses.append(status)
                 continue
             if not payload.get("success"):
                 source_statuses.append(
@@ -1997,7 +2399,7 @@ class SkillManager:
         any_success = any(item.get("status") == "success" for item in source_statuses)
         any_error = any(item.get("status") == "error" for item in source_statuses)
         return {
-            "success": any_success,
+            "success": any_success or not any_error,
             "partial": any_success and any_error,
             "query": query,
             "items": self._aggregate_online_search_results(query, source_results, limit),
@@ -2805,17 +3207,28 @@ class SkillManager:
                     continue
                 asset_id = str(item.get("asset_id", "")).strip()
                 name = str(item.get("name", "")).strip() or asset_id
-                version_raw = str(item.get("latest_version", "")).strip()
+                plugin_type = str(item.get("plugin_type", "")).strip().casefold()
+                is_team_skill = self._classify_team_skill_plugin_type(plugin_type)
+                if is_team_skill is None:
+                    logger.warning(
+                        "忽略未知类型的 Team Skills Hub 搜索结果: asset_id=%s plugin_type=%r",
+                        asset_id,
+                        plugin_type,
+                    )
+                    continue
                 normalized.append(
                     {
                         "asset_id": asset_id,
                         "name": name,
                         "display_name": str(item.get("display_name", "")).strip() or name,
                         "summary": str(item.get("short_desc", "")).strip(),
-                        "version": version_raw or None,
-                        "updated_at": self._normalize_teamskills_hub_updated_at(
-                            item.get("update_time")
-                        ),
+                        "version": str(item.get("latest_version", "")).strip(),
+                        "author": str(item.get("publisher_name", "")).strip(),
+                        "category": str(item.get("category_name", "")).strip(),
+                        "native_score": item.get("install_count"),
+                        "updated_at": int(item.get("update_time") or 0),
+                        "plugin_type": plugin_type,
+                        "is_team_skill": is_team_skill,
                     }
                 )
             return {

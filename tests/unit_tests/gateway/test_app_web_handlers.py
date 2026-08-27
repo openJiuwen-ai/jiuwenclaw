@@ -738,6 +738,39 @@ class FakeOpenAIAccountModelCatalog:
 
 
 @pytest.mark.asyncio
+async def test_models_list_returns_exact_vendor_identity(monkeypatch) -> None:
+    from jiuwenswarm.server.runtime import opencode_zen
+
+    monkeypatch.setattr(app_web_handlers, "get_config", lambda: {"models": {}})
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_default_models",
+        lambda _config: [{
+            "model_client_config": {
+                "model_name": "qwen3.8-max",
+                "api_base": "https://example.com/v1",
+                "api_key": "secret",
+                "client_provider": "OpenAI",
+                "vendor_key": "alibaba",
+                "plan": "token_plan",
+            },
+            "model_config_obj": {"temperature": 0.95},
+            "alias": "qwen3.8-max",
+            "is_default": True,
+        }],
+    )
+    monkeypatch.setattr(opencode_zen, "get_zen_free_model_entries", lambda: [])
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["models.list"](object(), "req-models", {}, "session-1")
+
+    model = channel.responses[-1]["payload"]["models"][0]
+    assert model["vendor_key"] == "alibaba"
+    assert model["plan"] == "token_plan"
+
+
+@pytest.mark.asyncio
 async def test_models_list_includes_cached_zen_free_models(monkeypatch) -> None:
     """Free models are in-memory entries but must remain selectable in new sessions."""
     from jiuwenswarm.server.runtime import opencode_zen
@@ -1167,6 +1200,8 @@ async def test_models_replace_all_applies_scoped_reload_before_responding(monkey
                     "api_key": "secret",
                     "model_provider": "OpenAI",
                     "is_default": True,
+                    "vendor_key": "alibaba",
+                    "plan": "token_plan",
                 }
             ]
         },
@@ -1180,11 +1215,49 @@ async def test_models_replace_all_applies_scoped_reload_before_responding(monkey
     await task
 
     assert persisted
+    persisted_mcc = persisted[0][0]["model_client_config"]
+    assert persisted_mcc["vendor_key"] == "alibaba"
+    assert persisted_mcc["plan"] == "token_plan"
     assert reload_options_seen[-1]["target_channel_id"] == "web"
     assert reload_options_seen[-1]["reload_scopes"] == ["model"]
     assert channel.responses[-1]["id"] == "req-models"
     assert channel.responses[-1]["ok"] is True
     assert channel.responses[-1]["payload"]["applied_without_restart"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("vendor_key", "plan", "expected_error"),
+    [
+        ("alibaba", "unsupported_plan", "plan must be one of"),
+        (None, "token_plan", "vendor_key is required when plan is set"),
+    ],
+)
+async def test_models_replace_all_rejects_invalid_vendor_identity(vendor_key, plan, expected_error):
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["models.replace_all"](
+        object(),
+        "req-models-invalid-provider",
+        {
+            "models": [{
+                "model_name": "model-one",
+                "api_base": "https://example.com/v1",
+                "api_key": "secret",
+                "model_provider": "OpenAI",
+                "is_default": True,
+                "vendor_key": vendor_key,
+                "plan": plan,
+            }],
+        },
+        "sess-1",
+    )
+
+    response = channel.responses[-1]
+    assert response["ok"] is False
+    assert response["code"] == "BAD_REQUEST"
+    assert expected_error in response["error"]
 
 
 @pytest.mark.asyncio
@@ -2030,8 +2103,8 @@ def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
             "orchestration": {"mode": "fast"},
             "skill_retrieval": {
                 "enabled": True,
-                "build": {"branching_factor": 64},
-                "retrieve": {"top_k": 5, "flatten_tree": True},
+                "index": {"enabled": True},
+                "discovery": {"max_results": 17},
             },
         }
     }
@@ -2042,9 +2115,9 @@ def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
     assert "symphony_dynamic_graph_enabled" not in flat
     assert "symphony_orchestration_mode" not in flat
     assert flat["skill_retrieval_enabled"] == "true"
-    assert flat["skill_retrieval_build_branching_factor"] == "64"
-    assert "skill_retrieval_retrieve_top_k" not in flat
-    assert flat["skill_retrieval_retrieve_flatten_tree"] == "true"
+    assert flat["skill_retrieval_index_enabled"] == "true"
+    assert flat["skill_retrieval_max_results"] == "17"
+    assert "skill_retrieval_build_branching_factor" not in flat
 
 
 @pytest.mark.asyncio
@@ -2079,13 +2152,15 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
             "symphony_enabled": "true",
             "symphony_dynamic_graph_enabled": "false",
             "skill_retrieval_enabled": "false",
-            "skill_retrieval_retrieve_flatten_tree": "true",
+            "skill_retrieval_index_enabled": "true",
         },
         "sess-3",
     )
 
     assert recorded_symphony == [{"enabled": True}]
-    assert recorded_skill_retrieval == [{"enabled": False, "retrieve": {"flatten_tree": True}}]
+    assert recorded_skill_retrieval == [
+        {"enabled": False, "index": {"enabled": True}}
+    ]
     assert channel.responses[-1] == {
         "id": "req-3",
         "ok": True,
@@ -2093,7 +2168,7 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
             "updated": [
                 "symphony_enabled",
                 "skill_retrieval_enabled",
-                "skill_retrieval_retrieve_flatten_tree",
+                "skill_retrieval_index_enabled",
             ],
             "applied_without_restart": True,
         },

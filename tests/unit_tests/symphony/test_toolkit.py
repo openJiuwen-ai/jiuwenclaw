@@ -382,12 +382,14 @@ def test_get_tools_exposes_only_graph_named_contracts():
 
     assert properties["mode"]["enum"] == ["fast", "beam"]
     assert "language" not in properties
-    assert "most relevant" in properties["candidate_skill_ids"]["description"]
+    assert "shortlisted" in properties["candidate_skill_ids"]["description"]
     assert "fast is the default" in properties["mode"]["description"]
-    assert "any trigger condition" in compose_tool.card.description
-    assert "skill_branch_explore requires a follow-up call" in compose_tool.card.description
-    assert "never pass every explored Skill" in compose_tool.card.description
-    assert "none of the three trigger conditions is true" in compose_tool.card.description
+    assert "requires multiple installed skills" in compose_tool.card.description
+    assert (
+        "recommendation alone do not require this tool" in compose_tool.card.description
+    )
+    assert "only shortlisted exact skill IDs" in compose_tool.card.description
+    assert "skill_branch_explore" not in compose_tool.card.description
     assert all("Symphony" not in tool.card.description for tool in tools)
     assert all(
         "Symphony" not in property_schema.get("description", "")

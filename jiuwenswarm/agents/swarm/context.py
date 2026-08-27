@@ -77,6 +77,8 @@ class SwarmBuildContext(BuildContext):
             This live handle is intentionally omitted from serialized seeds and
             reacquired from the receiving JiuwenSwarm process.
         config: The resolved ``config.yaml`` mapping (``get_config()``).
+        skill_retrieval_toolkit: Per-member, non-serializable Symphony
+            discovery runtime shared by skill_index and its prompt rail.
 
     Note:
         Backward incompatible: the ``team_skills_dir`` field and its seed key
@@ -102,6 +104,7 @@ class SwarmBuildContext(BuildContext):
     trajectory_span_processor: Any = None
     heartbeat_job_service: Any = None
     config: dict[str, Any] | None = None
+    skill_retrieval_toolkit: Any = None
 
     def resolve_member_skill_visibility_path(self) -> str | None:
         """Resolve the current member's Skill visibility metadata file path.
@@ -195,7 +198,9 @@ class SwarmBuildContext(BuildContext):
             mode=seed.get("mode") or "team",
             project_dir=seed.get("project_dir"),
             trusted_dirs=seed.get("trusted_dirs"),
-            disable_teammate_worktree=bool(seed.get("disable_teammate_worktree", False)),
+            disable_teammate_worktree=bool(
+                seed.get("disable_teammate_worktree", False)
+            ),
             team_id=seed.get("team_id", ""),
             team_ws_root=seed.get("team_ws_root"),
             team_skill_visibility_path=seed.get("team_skill_visibility_path"),
