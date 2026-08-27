@@ -66,6 +66,9 @@ from jiuwenswarm.agents.harness.common.rails import (
     StructuredAskUserRail,
 )
 from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
+from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+    is_enterprise_runtime,
+)
 from jiuwenswarm.agents.harness.common.tools import (
     SkillToolkit,
 )
@@ -471,7 +474,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # 权限护栏由 openjiuwen PermissionInterruptRail + ToolPermissionHost 接管；
         # 无需初始化 jiuwenswarm 内置 PermissionEngine（已弃用）。
 
-        rails_list = self._build_agent_rails(config, config_base, mode="code")
+        rails_list = self._build_agent_rails(
+            config,
+            config_base,
+            mode=mode,
+            sub_mode=sub_mode,
+        )
 
         sys_operation = self._create_sys_operation()
         if sys_operation is None:
@@ -582,6 +590,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             config_base: dict[str, Any],
             *,
             mode: str = "code",
+            sub_mode: str | None = None,
     ) -> list[Any]:
         """Build rails for code mode: fixed rails + dynamic rails from config.
 
@@ -628,6 +637,21 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _RailBuildInfo("_code_agent_rail", self._build_code_agent_rail),
             _RailBuildInfo("_code_plan_approval_rail", self._build_plan_approval_rail),
         ]
+
+        normalized_sub_mode = str(sub_mode or "normal").strip().lower() or "normal"
+        # The CodeAdapter may be rebuilt through JiuWenSwarm.create_instance(),
+        # whose compatibility default is mode="agent" even when this adapter
+        # already owns a Code session.  Sub-mode is the reliable profile key:
+        # normal/plan are single-Agent, while Team profiles are assembled by
+        # the declarative swarm provider and must not register this rail twice.
+        if normalized_sub_mode in {"normal", "plan"} and not is_enterprise_runtime():
+            rail_infos.insert(
+                4,
+                _RailBuildInfo(
+                    "_a2a_outbound_toolkit_rail",
+                    self._build_a2a_outbound_toolkit_rail,
+                ),
+            )
 
         # 动态 Rails — 从 config.yaml::modes.code.rails 读取
         # 跳过已在固定列表中的 rail，避免重复注册
@@ -1524,7 +1548,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             self._agent_workspace_dir,
         )
 
-        rails = self._build_agent_rails(react_config, config_base, mode="code")
+        rails = self._build_agent_rails(
+            react_config,
+            config_base,
+            mode="code",
+            sub_mode="team",
+        )
         added_rails = sum(1 for rail in rails if _queue_rail_if_missing(agent, rail))
 
         subagents, _should_add_general = self._build_configured_subagents(model, react_config, config_base)
