@@ -69,7 +69,11 @@ python scripts/run_dovescore.py \
 
 `--base-url` can point to an OpenAI-compatible provider, gateway, or self-hosted
 server such as vLLM. It also defaults from `DOVESCORE_BASE_URL` or
-`OPENAI_BASE_URL`.
+`OPENAI_BASE_URL`, then from common JiuwenSwarm model env vars such as
+`API_BASE` or `MODEL_API_BASE`.
+
+API keys are resolved in this order: `--api-key`, `DOVESCORE_API_KEY`,
+`OPENAI_API_KEY`, `API_KEY`, then `MODEL_API_KEY`.
 
 Safety limits:
 

@@ -29,7 +29,9 @@ export OPENAI_API_KEY="your-api-key"
 
 默认模型为 `gpt-4o-mini`，也可以在运行 `scripts/run_dovescore.py` 时通过 `--backbone` 指定其他模型。
 如果使用 OpenAI-compatible endpoint，可以通过 `--base-url`、`DOVESCORE_BASE_URL`
-或 `OPENAI_BASE_URL` 指定服务地址。
+或 `OPENAI_BASE_URL` 指定服务地址。脚本也兼容 JiuwenSwarm/agent
+框架中常见的通用环境变量：`API_KEY` / `MODEL_API_KEY` 和
+`API_BASE` / `MODEL_API_BASE`。
 
 ## Requirements
 
@@ -47,7 +49,9 @@ pip install -e /path/to/DoveScore
 
 Set the API key as `OPENAI_API_KEY` or pass it with `--api-key`. The default
 backbone is `gpt-4o-mini`. For OpenAI-compatible APIs, pass `--base-url` or set
-`DOVESCORE_BASE_URL` / `OPENAI_BASE_URL`.
+`DOVESCORE_BASE_URL` / `OPENAI_BASE_URL`. The runner also falls back to common
+JiuwenSwarm model environment variables: `API_KEY`, `MODEL_API_KEY`,
+`API_BASE`, and `MODEL_API_BASE`.
 
 ## Workflow
 

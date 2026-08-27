@@ -22,6 +22,14 @@ class EvaluationTimeoutError(TimeoutError):
     """Raised when DoveScore evaluation exceeds the configured deadline."""
 
 
+def _first_env(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
 def _emit_result(rendered: str) -> None:
     result_logger = logging.getLogger("dovescore.result")
     if not result_logger.handlers:
@@ -207,14 +215,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-file", help="UTF-8 file containing target text.")
     parser.add_argument(
         "--api-key",
-        default=os.getenv("DOVESCORE_API_KEY") or os.getenv("OPENAI_API_KEY"),
-        help="OpenAI API key. Defaults to DOVESCORE_API_KEY or OPENAI_API_KEY.",
+        default=_first_env("DOVESCORE_API_KEY", "OPENAI_API_KEY", "API_KEY", "MODEL_API_KEY"),
+        help=(
+            "OpenAI-compatible API key. Defaults to DOVESCORE_API_KEY, "
+            "OPENAI_API_KEY, API_KEY, or MODEL_API_KEY."
+        ),
     )
     parser.add_argument("--backbone", default="gpt-4o-mini", help="OpenAI model name.")
     parser.add_argument(
         "--base-url",
-        default=os.getenv("DOVESCORE_BASE_URL") or os.getenv("OPENAI_BASE_URL"),
-        help="OpenAI-compatible API base URL.",
+        default=_first_env("DOVESCORE_BASE_URL", "OPENAI_BASE_URL", "API_BASE", "MODEL_API_BASE"),
+        help=(
+            "OpenAI-compatible API base URL. Defaults to DOVESCORE_BASE_URL, "
+            "OPENAI_BASE_URL, API_BASE, or MODEL_API_BASE."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -287,8 +301,8 @@ def main() -> int:
 
     if not args.api_key:
         logger.error(
-            "Missing API key. Set OPENAI_API_KEY or DOVESCORE_API_KEY, "
-            "or pass --api-key."
+            "Missing API key. Set DOVESCORE_API_KEY, OPENAI_API_KEY, API_KEY, "
+            "MODEL_API_KEY, or pass --api-key."
         )
         return 2
 
