@@ -1734,8 +1734,8 @@ overflow: hidden;
 }
 
 .chat-config-icon--settings {
-  -webkit-mask-image: url('../../assets/sidebar/config.svg');
-  mask-image: url('../../assets/sidebar/config.svg');
+  -webkit-mask-image: url('../../assets/settings/navigation/models.svg');
+  mask-image: url('../../assets/settings/navigation/models.svg');
 }
 
 .chat-config-icon--folder {
