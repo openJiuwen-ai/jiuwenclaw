@@ -1234,7 +1234,7 @@ export default defineConfig({
   },
   server: {
     host: true,
-    allowedHosts: ['jiuwenswarm.local'],
+    allowedHosts: ['127.0.0.1'],
     port: frontendPort,
     strictPort: true,
     proxy: {
@@ -1248,7 +1248,7 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/skillhub-api/, '/api/v1'),
       },
       '/ws': {
-        target: webTarget,
+        target: webTarget, 
         ws: true,
         changeOrigin: true,
         configure: (proxy) => {
