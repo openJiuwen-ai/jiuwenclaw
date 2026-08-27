@@ -3403,7 +3403,7 @@ zmq = [
 [[package]]
 name = "openjiuwen-deepsearch"
 version = "0.2.0"
-source = { git = "https://gitcode.com/openJiuwen/deepsearch.git?subdirectory=deepsearch&rev=dev-stable#7dd18ea09b6e9a97bf05e37e001d0ec0c961ab68" }
+source = { git = "https://gitcode.com/openJiuwen/deepsearch.git?subdirectory=deepsearch&rev=dev-stable#54e0404d26a255d654d51863fd279a64e3e8dc4f" }
 dependencies = [
     { name = "aiolimiter" },
     { name = "beautifulsoup4" },

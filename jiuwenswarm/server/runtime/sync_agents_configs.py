@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -210,15 +211,66 @@ def synthesize_config(
     return result
 
 
+def _collect_shared_skill_disk_names(env: dict[str, Any]) -> str:
+    """扫描 env 声明的共享 skill 目录，返回排序去重的 skill 名清单（用于 content_hash）。
+
+    office agent 的 ENABLED_SKILLS 被 suppress 成 ''（allow-all），其有效 skill 集
+    = 共享目录磁盘内容；装/卸 skill 只改目录子项、不改 env 本身，导致
+    compute_content_hash 算出相同 hash → sidecar 判 "unchanged" → 跳过 reload →
+    运行中会话的 SkillUseRail 永不重建（interface_deep.py:8146 重建块不执行）。
+    把该清单纳入 content_hash，使装/卸 skill 能让 hash 变化 → "updated" → reload
+    → SkillUseRail 重建。env 无 JIUWENSWARM_SHARED_SKILLS_DIRS 时返回 ""（无磁盘 I/O）。
+    """
+    if not isinstance(env, dict):
+        return ""
+    # 兼容 JIUWENSWARM_* / JIUWENCLAW_* 别名（relay 可能发任一形式）
+    raw = ""
+    for key in ("JIUWENSWARM_SHARED_SKILLS_DIRS", "JIUWENCLAW_SHARED_SKILLS_DIRS"):
+        val = env.get(key)
+        if val:
+            raw = str(val)
+            break
+    if not raw.strip():
+        return ""
+
+    from jiuwenswarm.common.utils import parse_shared_skills_dirs_raw
+
+    dirs = parse_shared_skills_dirs_raw(raw)  # 按 os.pathsep 切分，去重，绝对化
+    names: set[str] = set()
+    for d in dirs:
+        try:
+            for entry in os.scandir(d):
+                if not (entry.is_dir() or entry.is_symlink()):
+                    continue
+                if entry.name.startswith("_"):
+                    continue
+                # 与 rail/relay 口径一致：仅算含 SKILL.md 的子目录
+                if not os.path.isfile(os.path.join(entry.path, "SKILL.md")):
+                    continue
+                names.add(entry.name)
+        except OSError:
+            continue
+    return ",".join(sorted(names))
+
+
 def compute_content_hash(
     *,
     config: dict[str, Any],
     env: dict[str, Any],
     runtime: dict[str, Any],
 ) -> str:
-    """Stable SHA-256 of config + env + runtime JSON."""
+    """Stable SHA-256 of config + env + runtime + shared-skill disk names JSON.
+
+    shared_skill_disk_names 捕获共享 skill 目录的磁盘 skill 集（office allow-all
+    agent 的有效 skill 集），使装/卸 skill 能让 hash 变化、触发 reload+rail 重建。
+    """
     payload = json.dumps(
-        {"config": config, "env": env, "runtime": runtime},
+        {
+            "config": config,
+            "env": env,
+            "runtime": runtime,
+            "shared_skill_disk_names": _collect_shared_skill_disk_names(env),
+        },
         sort_keys=True,
         separators=(",", ":"),
         default=str,

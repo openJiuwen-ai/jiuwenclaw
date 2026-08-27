@@ -14,6 +14,7 @@ import zipfile
 from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -21,6 +22,9 @@ import pytest
 from jiuwenswarm.agents.harness.common.tools.deepresearch import tools as dt
 from jiuwenswarm.agents.harness.common.tools.deepresearch.runtime import (
     DeepResearchRuntimeError,
+)
+from jiuwenswarm.agents.harness.common.tools.deepresearch.stream_router import (
+    MAX_CHUNK_TEXT_CHARS,
 )
 from jiuwenswarm.common.local_env_config import (
     bind_task_env_overlay,
@@ -560,11 +564,98 @@ async def test_repeated_cancellation_finishes_reap_and_untrack_before_reraising(
 
 
 @pytest.mark.asyncio
-async def test_stdout_pending_buffer_is_bounded():
+async def test_stdout_pending_buffer_enforces_legacy_limit():
+    legacy_limit = 16 * 1024 * 1024
+    stream = _Reader(b"x" * (legacy_limit + 1))
+
+    with patch.object(dt.logger, "error") as error:
+        with pytest.raises(ValueError, match="deepresearch_stdout_limit_exceeded"):
+            async for _line in dt._iter_ndjson_lines(stream):
+                pass
+
+    assert error.call_args.args[1:3] == (
+        legacy_limit + 1,
+        legacy_limit,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stdout_pending_buffer_is_bounded_and_logs_dimensions():
     stream = _Reader(b"x" * (dt.DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES + 1))
-    with pytest.raises(ValueError, match="deepresearch_stdout_limit_exceeded"):
-        async for _line in dt._iter_ndjson_lines(stream):
-            pass
+    with patch.object(dt.logger, "error") as error:
+        with pytest.raises(ValueError, match="deepresearch_stdout_limit_exceeded"):
+            async for _line in dt._iter_ndjson_lines(stream):
+                pass
+
+    assert error.call_args.args[1:3] == (
+        dt.DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES + 1,
+        dt.DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exception_message", "expected_reason", "expected_exc_info"),
+    [
+        (
+            "deepresearch_stdout_limit_exceeded",
+            "deepresearch_stdout_limit_exceeded",
+            True,
+        ),
+        (
+            "deepresearch_router_limit_exceeded",
+            "deepresearch_router_limit_exceeded",
+            True,
+        ),
+        ("exception-secret-that-must-not-be-logged", "unclassified", False),
+    ],
+)
+async def test_stream_failure_logs_safe_reason_and_correlation(
+    exception_message: str, expected_reason: str, expected_exc_info: bool
+):
+    proc = _Proc([])
+    route = {
+        "request_id": "REQ-123",
+        "channel_id": "CHANNEL-123",
+        "session_id": "SESSION-123",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    patches = _stream_patches(proc, route=route)
+
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        logged_error = stack.enter_context(patch.object(dt.logger, "error"))
+        stack.enter_context(
+            patch.object(
+                dt,
+                "_consume_stream",
+                new=AsyncMock(side_effect=ValueError(exception_message)),
+            )
+        )
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(
+                action="resume",
+                conversation_id="CONVERSATION-123",
+                node="user_feedback_processor",
+                query="query-secret-that-must-not-be-logged",
+            )
+        )
+
+    assert outcome["error_code"] == "stream_failed"
+    assert outcome["error"] == "DeepResearch stream failed: ValueError"
+    assert logged_error.call_args.args[1:] == (
+        "ValueError",
+        expected_reason,
+        "REQ-123",
+        "SESSION-123",
+        "CONVERSATION-123",
+    )
+    assert logged_error.call_args.kwargs == {"exc_info": expected_exc_info}
+    logged_call = repr(logged_error.call_args)
+    assert "query-secret-that-must-not-be-logged" not in logged_call
+    assert "exception-secret-that-must-not-be-logged" not in logged_call
 
 
 @pytest.mark.asyncio
@@ -1233,6 +1324,70 @@ async def test_completed_marker_accepts_formal_sdk_end_result_when_section_done_
         "report_delivered": True,
         "report_chars": len("# Final"),
     }
+
+
+@pytest.mark.asyncio
+async def test_completed_marker_delivers_large_sdk_end_result(tmp_path: Path):
+    """Large final results are terminal artifacts, not process-display text."""
+    final_result = {
+        "response_content": "# Final",
+        "content": "x" * MAX_CHUNK_TEXT_CHARS,
+    }
+    end_content = json.dumps(final_result)
+    proc = _Proc(
+        [
+            json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+            json.dumps(
+                {
+                    "agent": "end",
+                    "section_idx": "0",
+                    "event": "summary_response",
+                    "content": end_content,
+                }
+            ),
+            json.dumps(
+                {
+                    "__deepsearch_status__": "completed",
+                    "conversation_id": "C1",
+                    "final_result": final_result,
+                }
+            ),
+        ]
+    )
+    route = {
+        "request_id": "R1",
+        "channel_id": "CH1",
+        "session_id": "S1",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    patches = _stream_patches(proc, route=route)
+
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=AsyncMock())
+        )
+        write_artifacts = stack.enter_context(
+            patch.object(
+                dt,
+                "_write_report_artifacts_stream",
+                new=AsyncMock(return_value={"md": str(tmp_path / "r.md")}),
+            )
+        )
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(action="start", query="q")
+        )
+
+    assert len(end_content) > MAX_CHUNK_TEXT_CHARS
+    assert outcome == {
+        "status": "completed",
+        "conversation_id": "C1",
+        "report_delivered": True,
+        "report_chars": len("# Final"),
+    }
+    write_artifacts.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1968,6 +2123,57 @@ async def test_stage_three_remains_in_progress_when_research_fails():
     assert any(
         task["task_id"] == "deepresearch_stage_3" and task["status"] == "in_progress"
         for task in updates[-1]["tasks"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_brief_process_content_reaches_gateway_reasoning():
+    detail = "证据详情：Redis 适合共享状态，SQLite 适合本地持久化。"
+    proc = _Proc(
+        [
+            json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+            json.dumps(
+                {
+                    "agent": "brief_info_collector",
+                    "event": "message",
+                    "reasoning_content": "正在判断证据覆盖范围",
+                    "content": detail,
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps({"__deepsearch_status__": "error", "error": "failed"}),
+        ]
+    )
+    route = {
+        "request_id": "R",
+        "channel_id": "CH",
+        "session_id": "S",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    push = AsyncMock()
+    patches = _stream_patches(proc, route=route)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=push)
+        )
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(action="start", query="q")
+        )
+
+    assert outcome["status"] == "error"
+    reasoning_payloads = [
+        call.args[0]["payload"]
+        for call in push.send_push.await_args_list
+        if call.args[0]["payload"].get("event_type") == "chat.reasoning"
+    ]
+    assert any(
+        payload.get("task_id") == "deepresearch_stage_3"
+        and payload.get("stream_source_id") == "dr_brief_info_collector"
+        and payload.get("content") == detail
+        for payload in reasoning_payloads
     )
 
 

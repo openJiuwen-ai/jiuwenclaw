@@ -411,7 +411,8 @@ def test_service_members_matches_actual_handler_usage() -> None:
     sources = [py for py in sorted(handlers_dir.glob("*.py")) if py.name != "__init__.py"]
     sources.append(handlers_dir.parent / "pipeline.py")
     def _is_ctx_services(node: ast.AST) -> bool:
-        """该节点是否就是 ``ctx.services``。"""
+        if isinstance(node, ast.Name) and node.id == "services":
+            return True
         return (
             isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Name)
@@ -459,4 +460,65 @@ def test_service_members_matches_actual_handler_usage() -> None:
     assert not leaked, (
         f"业务层直接访问了受保护成员：{['ctx.services.' + n for n in leaked]}"
         f" —— 改用 SERVICE_MEMBERS 登记的公有名，私有名只应出现在 context.py 的映射里。"
+    )
+
+
+def test_server_has_no_dangling_self_attribute_calls() -> None:
+    import ast
+    import inspect
+
+    from jiuwenswarm.server import agent_ws_server as mod
+
+    tree = ast.parse(inspect.getsource(mod))
+    cls = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "AgentWebSocketServer"
+    )
+
+    defined: set[str] = {
+        m.name for m in cls.body
+        if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for node in ast.walk(cls):
+        # self.x = ...
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    defined.add(target.attr)
+        # self.x: T = ...
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Attribute)
+            and isinstance(node.target.value, ast.Name)
+            and node.target.value.id == "self"
+        ):
+            defined.add(node.target.attr)
+    # 类属性（含 ClassVar）
+    for m in cls.body:
+        if isinstance(m, ast.AnnAssign) and isinstance(m.target, ast.Name):
+            defined.add(m.target.id)
+        if isinstance(m, ast.Assign):
+            for target in m.targets:
+                if isinstance(target, ast.Name):
+                    defined.add(target.id)
+
+    used = {
+        node.attr: node.lineno
+        for node in ast.walk(cls)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+
+    dangling = sorted(
+        (lineno, name) for name, lineno in used.items() if name not in defined
+    )
+    assert not dangling, (
+        "以下 self.X 在类上找不到定义，运行到即 AttributeError（多半是 helper 搬走了、"
+        "调用方留在原地）：\n  "
+        + "\n  ".join(f"agent_ws_server.py:{ln}  self.{n}" for ln, n in dangling)
     )
