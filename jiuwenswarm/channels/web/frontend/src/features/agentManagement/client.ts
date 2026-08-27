@@ -39,9 +39,20 @@ function rethrowAgentError(error: unknown): never {
 
 function extractPendingConnectors(error: unknown): string[] | undefined {
   const payload = error instanceof AgentManagementError ? error.payload : undefined;
-  if (!payload || typeof payload !== 'object') return undefined;
-  const pending = (payload as { pending_connectors?: unknown }).pending_connectors;
-  return Array.isArray(pending) && pending.every(item => typeof item === 'string') && pending.length > 0 ? pending : undefined;
+  if (payload && typeof payload === 'object') {
+    const pending = (payload as { pending_connectors?: unknown }).pending_connectors;
+    if (Array.isArray(pending) && pending.every(item => typeof item === 'string') && pending.length > 0) return pending;
+  }
+
+  // The current Gateway error projection keeps the contract's human-readable
+  // message but drops the failed payload. Preserve the install flow when that
+  // projection is encountered; unrelated errors do not match this exact form.
+  const message = error instanceof Error ? error.message : String(error || '');
+  const names = /^connector not connected:\s*(.+)$/i.exec(message.trim())?.[1]
+    ?.split(',')
+    .map(name => name.trim())
+    .filter(Boolean);
+  return names && names.length > 0 ? names : undefined;
 }
 
 async function enrichCatalogTags(items: ReturnType<typeof normalizeAgentTemplateListItem>[]) {
@@ -128,7 +139,6 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
       try {
         const local = await connectorApi.list('local');
         return local
-          .filter(item => item.connectionState === 'connected')
           .map(item => ({
             id: item.name,
             name: item.displayName || item.name,

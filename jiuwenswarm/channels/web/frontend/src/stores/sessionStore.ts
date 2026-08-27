@@ -26,9 +26,36 @@ import { isTeamAgentMode, stripPlanSuffix } from '../features/planMode/wireMode'
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
 const AGENT_SELECTION_STORAGE_KEY = 'jiuwenclaw_agent_selection';
+const TRANSIENT_NEW_CONVERSATION_ID = 'new';
+
+function clearStoredAgentSelection(sessionId: string): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const stored = localStorage.getItem(AGENT_SELECTION_STORAGE_KEY);
+    if (!stored) return;
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    const selections = { ...(parsed as Record<string, unknown>) };
+    if (!Object.prototype.hasOwnProperty.call(selections, sessionId)) return;
+    delete selections[sessionId];
+    if (Object.keys(selections).length === 0) {
+      localStorage.removeItem(AGENT_SELECTION_STORAGE_KEY);
+    } else {
+      localStorage.setItem(AGENT_SELECTION_STORAGE_KEY, JSON.stringify(selections));
+    }
+  } catch {
+    // Browser storage can be unavailable in private/restricted contexts.
+  }
+}
 
 function loadAgentSelectionIntent(sessionId: string): AgentSelectionIntent {
   if (typeof localStorage === 'undefined') return { kind: 'keep' };
+  if (sessionId === TRANSIENT_NEW_CONVERSATION_ID) {
+    // The draft session lives only in memory. Clear keys written by older builds
+    // so a previous Agent cannot leak into the next new conversation.
+    clearStoredAgentSelection(sessionId);
+    return { kind: 'keep' };
+  }
   try {
     const stored = localStorage.getItem(AGENT_SELECTION_STORAGE_KEY);
     if (!stored) return { kind: 'keep' };
@@ -45,6 +72,10 @@ function loadAgentSelectionIntent(sessionId: string): AgentSelectionIntent {
 
 function saveAgentSelectionIntent(sessionId: string, intent: AgentSelectionIntent) {
   if (typeof localStorage === 'undefined') return;
+  if (sessionId === TRANSIENT_NEW_CONVERSATION_ID) {
+    clearStoredAgentSelection(sessionId);
+    return;
+  }
   try {
     const stored = localStorage.getItem(AGENT_SELECTION_STORAGE_KEY);
     const parsed: unknown = stored ? JSON.parse(stored) : {};

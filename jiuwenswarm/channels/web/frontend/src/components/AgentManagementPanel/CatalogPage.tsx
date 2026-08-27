@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import type { AgentCatalogItem, RequestStatus } from '../../features/agentManagement';
 import { DefinitionCard } from './DefinitionCard';
 
-const PAGE_SIZE = 12;
+const PAGE_SIZE = 15;
 const CATEGORIES = ['ProductDevelopment', 'Marketing', 'Efficiency', 'DataAnalysis', 'ContentCreation', 'SafetyCompliance', 'Communication', 'Other'];
 
 type CatalogPageProps = {
@@ -90,7 +90,7 @@ export function CatalogPage({
 
       {status === 'loading' ? (
         <div className={`agent-management-card-grid ${isMine ? 'is-mine' : ''}`} aria-label={t('common.loading')}>
-          {Array.from({ length: isMine ? 6 : 12 }, (_, index) => (
+          {Array.from({ length: PAGE_SIZE }, (_, index) => (
             <SkeletonCard key={index} />
           ))}
         </div>

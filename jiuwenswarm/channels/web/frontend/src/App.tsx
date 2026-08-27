@@ -2011,7 +2011,14 @@ function AppContent({
       currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
     );
     setHistoryLoadingMore(false);
+    const pendingAgentSelection = shouldRestorePendingNewConversation
+      && pendingNewRuntime?.agentSelectionIntent.kind === 'select'
+      ? pendingNewRuntime.agentSelectionIntent
+      : null;
     resetNewConversationRuntime({ mode: nextMode, selectedModelName, projectDir });
+    if (pendingAgentSelection) {
+      useSessionStore.getState().setAgentSelectionIntent(NEW_CONVERSATION_ID, pendingAgentSelection);
+    }
     if (options.initialInputValue) {
       useChatStore.getState().setInputValue(NEW_CONVERSATION_ID, options.initialInputValue);
     }

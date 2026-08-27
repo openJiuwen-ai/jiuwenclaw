@@ -146,6 +146,17 @@ def _marketplace_index(entries: list[dict]) -> dict[str, dict]:
     return out
 
 
+def _read_readme_details(pkg_dir: Path) -> str:
+    """Return README.md text, or empty string."""
+    readme = pkg_dir / "README.md"
+    if not readme.is_file():
+        return ""
+    try:
+        return readme.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
 def _parse_skill_frontmatter(skill_md: Path) -> dict[str, Any]:
     """Parse SKILL.md YAML frontmatter for name/description (best-effort)."""
     try:
@@ -990,12 +1001,9 @@ def _require_tags(params: dict) -> list[dict[str, str]]:
             raise ValueError("invalid tag")
         zh = item.get("zh")
         en = item.get("en")
-        if (
-            not isinstance(zh, str)
-            or not zh.strip()
-            or not isinstance(en, str)
-            or not en.strip()
-        ):
+        if not isinstance(zh, str) or not zh.strip():
+            raise ValueError("invalid tag: zh/en must be non-empty strings")
+        if not isinstance(en, str) or not en.strip():
             raise ValueError("invalid tag: zh/en must be non-empty strings")
         entry = {"zh": zh.strip(), "en": en.strip()}
         key = (entry["zh"], entry["en"])

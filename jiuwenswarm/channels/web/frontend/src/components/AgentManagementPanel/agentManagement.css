@@ -327,9 +327,12 @@
 }
 
 .agent-management-card__body {
-  display: block;
+  display: flex;
   width: 100%;
   height: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
   border: 0;
   background: transparent;
   padding: 23px;
@@ -339,6 +342,8 @@
 
 .agent-management-card__heading {
   display: flex;
+  height: 56px;
+  flex: 0 0 56px;
   align-items: flex-start;
   gap: 16px;
   min-width: 0;
@@ -525,11 +530,6 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
-}
-
-.agent-management-avatar__letter {
-  font-size: 18px;
-  font-weight: 700;
 }
 
 .agent-management-tag,
@@ -861,6 +861,16 @@
   padding: 0 16px;
   font-size: 14px;
   line-height: 22px;
+}
+
+.agent-management-detail-capability-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.agent-management-detail-capability-grid .agent-management-capability-card {
+  min-height: 116px;
 }
 
 .agent-management-detail-capability-group + .agent-management-detail-capability-group {
@@ -1751,6 +1761,64 @@
   outline: 0;
 }
 
+.agent-management-selected-capabilities .agent-management-capability-card {
+  height: 156px;
+  min-height: 156px;
+  flex-direction: column;
+  gap: 16px;
+  border: 0;
+  border-radius: var(--radius-md);
+  padding: 24px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.agent-management-selected-capabilities .agent-management-capability-card__heading {
+  display: flex;
+  width: 100%;
+  height: 48px;
+  min-width: 0;
+  flex: 0 0 48px;
+  align-items: center;
+  gap: 16px;
+}
+
+.agent-management-selected-capabilities .agent-management-capability-card__heading strong {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  font-size: 18px;
+  line-height: 28px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-management-selected-capabilities .agent-management-capability-card__icon {
+  width: 48px;
+  height: 48px;
+  flex-basis: 48px;
+  border-radius: 10px;
+  font-size: 20px;
+}
+
+.agent-management-selected-capabilities .agent-management-capability-card > small {
+  display: -webkit-box;
+  width: 100%;
+  height: 44px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 22px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.agent-management-selected-capabilities .agent-management-capability-card__remove {
+  width: 32px;
+  height: 32px;
+  flex-basis: 32px;
+}
+
 .agent-management-selection-overlay {
   position: fixed;
   inset: 0;
@@ -2235,6 +2303,7 @@
 
   .agent-management-card-grid,
   .agent-management-detail-capabilities,
+  .agent-management-detail-capability-grid,
   .agent-management-prompt-list,
   .agent-management-skill-options,
   .agent-management-selected-capabilities,

@@ -55,7 +55,47 @@ function getFriendlyErrorMessage(error: unknown, fallback: string, translate: (k
     ? String((error as { code?: unknown }).code || '')
     : '';
   if (code === 'agent_detail_empty') return translate('agentManagement.states.detailError');
-  const connector = /^connector not connected:\s*(.+)$/i.exec(message.trim())?.[1];
+  const normalizedMessage = message.trim();
+  if (code === 'REQUEST_TIMEOUT') return translate('network.requestTimeout');
+  if (code === 'WS_NOT_READY') return translate('network.connectionUnavailable');
+  if (code === 'WS_DISCONNECTED') return translate('network.connectionClosed');
+  if (code === 'REQUEST_ABORTED') return translate('network.requestAborted');
+  if (/^agent_template package already exists in (?:local|built_in|resources):/i.test(normalizedMessage)) {
+    return translate('agentManagement.states.duplicateName');
+  }
+  if (/^agent_template package not found:/i.test(normalizedMessage)) {
+    return translate('agentManagement.states.agentUnavailable');
+  }
+  if (/^agent_template package (?:missing\/corrupt manifest\.json|wrong package_type|conflict):/i.test(normalizedMessage)) {
+    return translate('agentManagement.states.agentDefinitionUnavailable');
+  }
+  if (/^(?:skill not found:|invalid skill name:|missing or invalid skills$)/i.test(normalizedMessage)) {
+    return translate('agentManagement.states.skillUnavailable');
+  }
+  if (/^(?:mcp .* not found|invalid mcp name:|missing or invalid mcps$)/i.test(normalizedMessage)) {
+    return translate('agentManagement.states.mcpUnavailable');
+  }
+  if (/^(?:invalid quick input:|missing or invalid quickInputs$)/i.test(normalizedMessage)) {
+    return translate('agentManagement.states.promptInvalid');
+  }
+  if (/^(?:invalid tag|missing or invalid tags$)/i.test(normalizedMessage)) {
+    return translate('agentManagement.states.tagInvalid');
+  }
+  const invalidField = /^missing or invalid (name|description|persona)$/i.exec(normalizedMessage)?.[1];
+  if (invalidField) return translate(`agentManagement.form.errors.${invalidField}Required`);
+  if (/^invalid params$/i.test(normalizedMessage)) {
+    return translate('agentManagement.states.formInvalid');
+  }
+  if (/^file not found:/i.test(normalizedMessage)) {
+    return translate('agentManagement.files.fileUnavailable');
+  }
+  if (/^file too large:/i.test(normalizedMessage)) {
+    return translate('agentManagement.files.fileTooLarge');
+  }
+  if (/^file not previewable:/i.test(normalizedMessage)) {
+    return translate('agentManagement.files.notPreviewable');
+  }
+  const connector = /^connector not connected:\s*(.+)$/i.exec(normalizedMessage)?.[1];
   if (connector) return translate('agentManagement.states.connectorUnavailableNamed', { connector });
   if (error instanceof AgentManagementError) {
     return fallback;
@@ -371,7 +411,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
     setActionNotice(null);
     setView('create');
     if (state.skillsStatus === 'idle') void loadSkills();
-    if (mcpStatus === 'idle') void loadMcps();
+    void loadMcps();
   };
 
   const handleCreate = async () => {
@@ -462,6 +502,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
             error={createError}
             onChange={setDraft}
             onReloadSkills={loadSkills}
+            onReloadMcps={loadMcps}
             onCancel={() => {
               setActionError(null);
               setActionNotice(null);
@@ -521,6 +562,9 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
             <span className="sr-only">{t('agentManagement.searchLabel')}</span>
             <input
               type="search"
+              name="agent-management-search"
+              autoComplete="off"
+              disabled={connectorFlowId !== null}
               value={isMine ? mineQuery : query}
               onChange={event => (isMine ? (setMineQuery(event.target.value), setMinePage(1)) : (setQuery(event.target.value), setCatalogPage(1)))}
               placeholder={t(isMine ? 'agentManagement.searchMine' : 'agentManagement.searchCatalog')}

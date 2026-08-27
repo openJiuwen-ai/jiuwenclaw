@@ -2,7 +2,7 @@ import { ArrowLeft, Send, Trash2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
-import { getAgentAvatarUrl, type AgentDetail, type DefinitionFileEntry, type RequestStatus } from '../../features/agentManagement';
+import { getAgentAvatarUrl, type AgentCapability, type AgentDetail, type DefinitionFileEntry, type RequestStatus } from '../../features/agentManagement';
 import { DefinitionFilePreview } from './DefinitionFilePreview';
 
 type DefinitionDetailPageProps = {
@@ -40,7 +40,23 @@ function Avatar({ name, avatarUrl }: { name: string; avatarUrl: string | null })
   );
 }
 
-function CapabilityList({ title, items }: { title: string; items: Array<{ id: string; name: string }> }) {
+function ChipList({ title, items }: { title: string; items: Array<{ id: string; name: string }> }) {
+  if (items.length === 0) return null;
+  return (
+    <section className="agent-management-detail-capability-group">
+      <h2>{title}</h2>
+      <div className="agent-management-chip-row">
+        {items.map(item => (
+          <span key={item.id} className="agent-management-chip">
+            {item.name}
+          </span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function CapabilityList({ title, items }: { title: string; items: AgentCapability[] }) {
   if (items.length === 0) return null;
   return (
     <section className="agent-management-detail-capability-group">
@@ -114,8 +130,6 @@ export function DefinitionDetailPage({
   const canUse = detail.installed && detail.connectionState === 'connected' && detail.enabled !== false;
   const needsConnection = detail.installed && detail.connectionState !== 'connected';
   const canPreviewFiles = detail.source === 'local' || detail.installed;
-  const skillItems = [...detail.skills, ...detail.tools, ...detail.rails];
-
   return (
     <div className="agent-management-detail" data-testid="agent-detail">
       <button type="button" className="agent-management-back" onClick={onBack}>
@@ -212,8 +226,10 @@ export function DefinitionDetailPage({
       </section>
 
       <div className="agent-management-detail-capabilities">
-        <CapabilityList title={t('agentManagement.detail.tags')} items={detail.tags.map(tag => ({ id: tag.id, name: tag.label }))} />
-        <CapabilityList title={t('agentManagement.detail.skills')} items={skillItems} />
+        <ChipList title={t('agentManagement.detail.tags')} items={detail.tags.map(tag => ({ id: tag.id, name: tag.label }))} />
+        <CapabilityList title={t('agentManagement.detail.skills')} items={detail.skills} />
+        <CapabilityList title={t('agentManagement.detail.tools')} items={detail.tools} />
+        <CapabilityList title={t('agentManagement.detail.rails')} items={detail.rails} />
         <CapabilityList title={t('agentManagement.detail.mcps')} items={detail.mcps} />
       </div>
 

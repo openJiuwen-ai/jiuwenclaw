@@ -1902,6 +1902,11 @@ overflow: hidden;
   box-shadow: var(--effect-shadow-lg);
 }
 
+.chat-agent-picker--up {
+  top: auto;
+  bottom: 0;
+}
+
 .chat-agent-picker__tabs {
   display: flex;
   gap: 18px;
@@ -1984,6 +1989,7 @@ overflow: hidden;
 
 .chat-agent-picker__list {
   display: flex;
+  flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
   gap: 2px;
@@ -2066,6 +2072,7 @@ overflow: hidden;
 }
 
 .chat-agent-picker__footer {
+  flex: 0 0 auto;
   margin-top: 6px;
   border-top: 1px solid var(--color-border-default);
   padding-top: 6px;

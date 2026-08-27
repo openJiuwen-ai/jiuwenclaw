@@ -17,6 +17,7 @@ type AgentEditorProps = {
   error: string | null;
   onChange: (draft: AgentDraft) => void;
   onReloadSkills: () => void;
+  onReloadMcps: () => void;
   onCancel: () => void;
   onSave: () => void;
 };
@@ -38,6 +39,7 @@ export function AgentEditor({
   error,
   onChange,
   onReloadSkills,
+  onReloadMcps,
   onCancel,
   onSave,
 }: AgentEditorProps) {
@@ -55,7 +57,6 @@ export function AgentEditor({
   const [customTagInput, setCustomTagInput] = useState('');
   const [mcpType, setMcpType] = useState('');
   const [mcpTypeOpen, setMcpTypeOpen] = useState(false);
-  const [mcpTab, setMcpTab] = useState<'mine' | 'market'>('market');
   const [skillDraft, setSkillDraft] = useState<string[]>(draft.skillRefs);
   const [mcpDraft, setMcpDraft] = useState<string[]>(draft.mcpRefs);
   const tagPickerRef = useRef<HTMLDivElement>(null);
@@ -79,10 +80,9 @@ export function AgentEditor({
   const selectedMcps = mcpOptions.filter(mcp => draft.mcpRefs.includes(mcp.id));
   const filteredSkills = skillOptions.filter(skill => `${skill.name} ${skill.description}`.toLocaleLowerCase().includes(skillQuery.trim().toLocaleLowerCase()));
   const filteredMcps = mcpOptions.filter(mcp => {
-    const matchesTab = mcpTab === 'mine' ? mcp.source === 'customize' : mcp.source === 'built_in';
     const matchesQuery = `${mcp.name} ${mcp.description}`.toLocaleLowerCase().includes(mcpQuery.trim().toLocaleLowerCase());
     const matchesType = !mcpType || mcp.integrationType === mcpType;
-    return matchesTab && matchesQuery && matchesType;
+    return matchesQuery && matchesType;
   });
   const selectedMcpType = MCP_TYPE_OPTIONS.find(([value]) => value === mcpType);
 
@@ -178,7 +178,6 @@ export function AgentEditor({
     setMcpQuery('');
     setMcpType('');
     setMcpTypeOpen(false);
-    setMcpTab('market');
     setMcpDialogOpen(true);
   };
 
@@ -400,11 +399,14 @@ export function AgentEditor({
             <div className="agent-management-selected-capabilities">
               {selectedMcps.map(mcp => (
                 <article className="agent-management-capability-card" key={mcp.id}>
-                  <span className="agent-management-capability-card__icon">{mcp.name.slice(0, 1).toUpperCase()}</span>
-                  <span><strong>{mcp.name}</strong><small>{mcp.description}</small></span>
-                  <button type="button" className="agent-management-capability-card__remove" aria-label={t('agentManagement.form.removeMcp', { name: mcp.name })} onClick={() => update({ mcpRefs: draft.mcpRefs.filter(id => id !== mcp.id) })}>
-                    <Trash2 size={16} aria-hidden="true" />
-                  </button>
+                  <div className="agent-management-capability-card__heading">
+                    <span className="agent-management-capability-card__icon">{mcp.name.slice(0, 1).toUpperCase()}</span>
+                    <strong>{mcp.name}</strong>
+                    <button type="button" className="agent-management-capability-card__remove" aria-label={t('agentManagement.form.removeMcp', { name: mcp.name })} onClick={() => update({ mcpRefs: draft.mcpRefs.filter(id => id !== mcp.id) })}>
+                      <Trash2 size={16} aria-hidden="true" />
+                    </button>
+                  </div>
+                  <small>{mcp.description}</small>
                 </article>
               ))}
             </div>
@@ -430,9 +432,12 @@ export function AgentEditor({
               <div className="agent-management-selected-capabilities">
                 {selectedSkills.map(skill => (
                   <article className="agent-management-capability-card" key={skill.id}>
-                    <span className="agent-management-capability-card__icon">{skill.name.slice(0, 1).toUpperCase()}</span>
-                    <span><strong>{skill.name}</strong><small>{skill.description}</small></span>
-                    <button type="button" className="agent-management-capability-card__remove" aria-label={t('agentManagement.form.removeSkill', { name: skill.name })} onClick={() => update({ skillRefs: draft.skillRefs.filter(id => id !== skill.id) })}><Trash2 size={16} aria-hidden="true" /></button>
+                    <div className="agent-management-capability-card__heading">
+                      <span className="agent-management-capability-card__icon">{skill.name.slice(0, 1).toUpperCase()}</span>
+                      <strong>{skill.name}</strong>
+                      <button type="button" className="agent-management-capability-card__remove" aria-label={t('agentManagement.form.removeSkill', { name: skill.name })} onClick={() => update({ skillRefs: draft.skillRefs.filter(id => id !== skill.id) })}><Trash2 size={16} aria-hidden="true" /></button>
+                    </div>
+                    <small>{skill.description}</small>
                   </article>
                 ))}
               </div>
@@ -475,10 +480,6 @@ export function AgentEditor({
         <div className="agent-management-selection-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSkillDialogOpen(false); }}>
           <section ref={skillDialogRef} className="agent-management-selection-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-skill-dialog-title">
             <header><h2 id="agent-skill-dialog-title">{t('agentManagement.form.selectSkill')}</h2><button type="button" onClick={() => setSkillDialogOpen(false)} aria-label={t('common.cancel')}><X size={16} aria-hidden="true" /></button></header>
-            <div className="agent-management-selection-tabs" role="tablist" aria-label={t('agentManagement.form.selectSkill')}>
-              <button type="button" className="agent-management-selection-tab is-active" role="tab" aria-selected="true">{t('agentManagement.form.mySkills')}</button>
-              <span className="agent-management-selection-tab" role="tab" aria-selected="false" aria-disabled="true">{t('agentManagement.form.skillMarket')}</span>
-            </div>
             <label className="agent-management-selection-search">
               <Search size={16} aria-hidden="true" />
               <input type="search" value={skillQuery} onChange={event => setSkillQuery(event.target.value)} placeholder={t('agentManagement.form.selectionSearchPlaceholder')} />
@@ -502,10 +503,6 @@ export function AgentEditor({
         <div className="agent-management-selection-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setMcpDialogOpen(false); }}>
           <section ref={mcpDialogRef} className="agent-management-selection-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-mcp-dialog-title">
             <header><h2 id="agent-mcp-dialog-title">{t('agentManagement.form.selectMcp')}</h2><button type="button" onClick={() => setMcpDialogOpen(false)} aria-label={t('common.cancel')}><X size={16} aria-hidden="true" /></button></header>
-            <div className="agent-management-selection-tabs" role="tablist" aria-label={t('agentManagement.form.selectMcp')}>
-              <button type="button" className={`agent-management-selection-tab${mcpTab === 'mine' ? ' is-active' : ''}`} role="tab" aria-selected={mcpTab === 'mine'} onClick={() => setMcpTab('mine')}>{t('agentManagement.form.myMcp')}</button>
-              <button type="button" className={`agent-management-selection-tab${mcpTab === 'market' ? ' is-active' : ''}`} role="tab" aria-selected={mcpTab === 'market'} onClick={() => setMcpTab('market')}>{t('agentManagement.form.mcpMarket')}</button>
-            </div>
             <div className="agent-management-selection-controls">
               <div className="agent-management-selection-filter" ref={mcpTypeRef}>
                 <button type="button" className="agent-management-selection-filter__trigger" aria-haspopup="listbox" aria-expanded={mcpTypeOpen} onClick={() => setMcpTypeOpen(open => !open)}>
@@ -524,7 +521,7 @@ export function AgentEditor({
             </div>
             <div className={`agent-management-selection-dialog__body${mcpStatus === 'success' && filteredMcps.length === 0 ? ' is-empty' : ''}`}>
               {mcpStatus === 'loading' ? <p className="agent-management-form-muted">{t('common.loading')}</p> : null}
-              {mcpStatus === 'error' ? <p className="agent-management-form-muted">{t('agentManagement.form.mcpError')}</p> : null}
+              {mcpStatus === 'error' ? <div className="agent-management-form-error"><span>{t('agentManagement.form.mcpError')}</span><button type="button" onClick={onReloadMcps}>{t('common.retry')}</button></div> : null}
               {mcpStatus === 'success' && filteredMcps.length === 0 ? <div className="agent-management-selection-empty-state"><p>{t('agentManagement.form.mcpEmpty')}</p></div> : null}
               {mcpStatus === 'success' && filteredMcps.length > 0 ? <div className="agent-management-selection-grid">{filteredMcps.map(mcp => {
                 const selected = mcpDraft.includes(mcp.id);

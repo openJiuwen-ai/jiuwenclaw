@@ -2814,7 +2814,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 </button>
                 {agentPickerOpen && (
                   <div
-                    className="chat-agent-picker"
+                    className={clsx('chat-agent-picker', attachMenuDirection === 'up' && 'chat-agent-picker--up')}
                     role="menu"
                     aria-label={t('chat.agent')}
                     onMouseEnter={() => setAgentPickerOpen(true)}
@@ -2887,7 +2887,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                               }}
                             >
                               <span className="chat-agent-picker__avatar" aria-hidden="true">
-                                {avatarUrl ? <img src={avatarUrl} alt="" /> : item.displayName.slice(0, 1)}
+                                {avatarUrl ? <img src={avatarUrl} alt="" /> : item.displayName.trim().slice(0, 1).toUpperCase() || '?'}
                               </span>
                               <span className="chat-agent-picker__item-name">{item.displayName}</span>
                               {isSelected ? <span className="chat-agent-picker__check" aria-hidden="true">✓</span> : null}
@@ -3248,7 +3248,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 {selectedAgent && getAgentAvatarUrl(selectedAgent) ? (
                   <img src={getAgentAvatarUrl(selectedAgent) || ''} alt="" />
                 ) : (
-                  (selectedAgent?.displayName || selectedAgentId).slice(0, 1)
+                  (selectedAgent?.displayName || selectedAgentId).trim().slice(0, 1).toUpperCase() || '?'
                 )}
               </span>
               <span className="chat-agent-tag__label">{selectedAgent?.displayName || selectedAgentId}</span>
