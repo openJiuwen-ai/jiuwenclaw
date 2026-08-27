@@ -53,6 +53,46 @@ def get_trajectory_span_processor() -> Any:
         return _TRAJECTORY_SPAN_PROCESSOR
 
 
+def ensure_trajectory_span_processor_attached() -> bool:
+    """Attach the shared trajectory processor to the active OTel provider.
+
+    Idempotent: ``ObservabilityRuntime.add_span_processors`` skips processors
+    already registered by object identity. Safe to call from both the unified
+    telemetry path and the legacy ``acquire_observability_demand`` path.
+    Returns ``True`` when a processor is present on an initialized provider.
+    """
+    processor = get_trajectory_span_processor()
+    if processor is None:
+        return False
+
+    from openjiuwen.agent_teams.observability.setup import (
+        get_config,
+        init_observability,
+        is_initialized,
+    )
+
+    if not is_initialized():
+        return False
+
+    config = get_config()
+    if config is None:
+        return False
+
+    init_kwargs = {"additional_span_processors": (processor,)}
+    compatible_kwargs = filter_unsupported_kwargs(init_observability, init_kwargs)
+    dropped = set(init_kwargs) - set(compatible_kwargs)
+    if dropped:
+        logger.warning(
+            "openjiuwen init_observability does not accept %s; "
+            "trajectory capture cannot attach on unified path",
+            ", ".join(sorted(dropped)),
+        )
+        return False
+
+    init_observability(config, **compatible_kwargs)
+    return True
+
+
 def build_observability_config(
     config: Mapping[str, Any],
     *,
@@ -99,6 +139,9 @@ def acquire_observability_demand(
         from openjiuwen.agent_teams.observability import is_initialized
 
         if runtime in _ACTIVE_RUNTIMES and is_initialized():
+            # Provider may have been created by unified telemetry without the
+            # trajectory processor; re-ensure attachment on every demand.
+            ensure_trajectory_span_processor_attached()
             return True
 
         from openjiuwen.agent_teams.observability import init_observability
@@ -115,6 +158,10 @@ def acquire_observability_demand(
                 ", ".join(sorted(dropped)),
             )
         init_observability(observability_config, **compatible_kwargs)
+        # When the provider already existed (e.g. unified telemetry), the kwargs
+        # above may have been a no-op on older SDKs; force an explicit attach.
+        if provider_existed:
+            ensure_trajectory_span_processor_attached()
         if not is_initialized():
             raise RuntimeError(
                 f"{runtime} observability initialization did not create a provider"
