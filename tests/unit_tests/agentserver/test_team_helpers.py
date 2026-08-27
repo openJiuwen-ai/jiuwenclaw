@@ -65,6 +65,7 @@ class _InactiveTeamRuntimeManagerMixin:
     def __init__(self) -> None:
         self._seen_team_events: dict[str, bool] = {}
         self._workflow_completed: dict[str, bool] = {}
+        self._round_complete_emitted: dict[str, bool] = {}
 
     def mark_seen_team_events(self, session_id: str) -> None:
         self._seen_team_events[session_id] = True
@@ -74,6 +75,13 @@ class _InactiveTeamRuntimeManagerMixin:
 
     def reset_seen_team_events(self, session_id: str) -> None:
         self._seen_team_events.pop(session_id, None)
+
+    def claim_round_complete(self, session_id: str) -> bool:
+        # Inactive runtime must never authorize a completion broadcast.
+        return False
+
+    def reset_round_complete(self, session_id: str) -> None:
+        self._round_complete_emitted.pop(session_id, None)
 
     def mark_workflow_completed(self, session_id: str) -> None:
         self._workflow_completed[session_id] = True
@@ -3240,6 +3248,118 @@ async def test_leader_final_keeps_unsettled_round_open(monkeypatch, blocker):
 
 
 @pytest.mark.anyio
+async def test_member_settle_edge_closes_stream_without_second_leader_final(monkeypatch):
+    """Repro for the 10:41 hang: the leader's chat.final arrives while a member
+    is still busy (first settle check False -> stream stays open), then a member
+    transitions to ready — the member-settle edge re-evaluates settle and closes
+    the stream with exactly one is_complete, without a second leader chat.final.
+    """
+    broadcasted: list[dict] = []
+    closed: list[str] = []
+
+    async def _hanging_stream(**kwargs):
+        try:
+            # Leader final arrives while a member is busy -> first settle check
+            # is False, so the stream must stay open (no is_complete yet).
+            yield {"event_type": "chat.final", "content": "等待回复"}
+            # Member transitions to ready -> the settle edge must fire and close.
+            yield {
+                "event_type": "team.member",
+                "event": {
+                    "type": "team.member.status_changed",
+                    "member_id": "run1:analyst",
+                    "old_status": "busy",
+                    "new_status": "ready",
+                },
+            }
+            await asyncio.Event().wait()  # hang if the edge does not fire
+        finally:
+            closed.append("closed")
+
+    class _FakeMessageManager:
+        @staticmethod
+        async def has_unread_messages(*, include_broadcast: bool) -> bool:
+            return False
+
+    class _FakeMonitorHandler:
+        _monitor = SimpleNamespace(
+            _team_agent=SimpleNamespace(
+                team_backend=SimpleNamespace(message_manager=_FakeMessageManager())
+            )
+        )
+
+        def __init__(self) -> None:
+            self._calls = 0
+
+        async def get_team_snapshot(self):
+            # First settle check (leader chat.final): a member is busy -> not settled.
+            # Subsequent check (member->ready edge): all members ready -> settled.
+            self._calls += 1
+            if self._calls <= 1:
+                return {"members": [{"member_id": "run1:analyst", "status": "busy"}], "tasks": []}
+            return {"members": [{"member_id": "run1:analyst", "status": "ready"}], "tasks": []}
+
+    shared_monitor = _FakeMonitorHandler()
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def clear_active_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def get_monitor_handler(session_id: str):
+            return shared_monitor
+
+        @staticmethod
+        def get_workflow_handler(session_id: str):
+            return None
+
+        @staticmethod
+        def claim_round_complete(session_id: str) -> bool:
+            return True
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+    monkeypatch.setattr(team_helpers, "_run_agent_team_streaming", _hanging_stream)
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(team_helpers, "append_history_record", lambda **kwargs: None)
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        lambda channel_id, session_id, event: broadcasted.append(event),
+    )
+
+    await asyncio.wait_for(
+        _TeamHelpersTestApi.consume_stream_with_query(
+            "officeclaw",
+            "sess-member-settle",
+            SimpleNamespace(team_name="demo-team"),
+            "你好",
+        ),
+        timeout=0.5,
+    )
+
+    # Exactly one is_complete frame, emitted by the member->ready edge.
+    is_complete = [
+        e for e in broadcasted
+        if e.get("event_type") == "chat.processing_status" and e.get("is_complete")
+    ]
+    assert len(is_complete) == 1
+    # Exactly one leader chat.final (the one that arrived while busy); the
+    # member->ready edge must NOT require a second leader chat.final.
+    finals = [e for e in broadcasted if e.get("event_type") == "chat.final"]
+    assert len(finals) == 1
+    # The stream closed (member-settle edge fired, did not hang).
+    assert closed == ["closed"]
+
+
+@pytest.mark.anyio
 async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(monkeypatch):
     broadcasted: list[dict] = []
     ready_calls: list[tuple[str, str]] = []
@@ -3376,22 +3496,20 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
     )
 
     assert ready_calls == [("sess-leader-only", "demo-team")]
-    # After team.runtime_ready is broadcast, seen_team_events=True so
-    # chat.final events are suppressed; team.completed emits
-    # chat.processing_status(is_complete=True) instead.
+    # The inactive runtime never settles (_team_round_settled is False: the
+    # manager exposes no monitor_handler) and never authorises completion
+    # (claim_round_complete returns False). Until the team settles, NO
+    # is_complete frame may be emitted — the "before-settle" invariant of
+    # the per-round dedup contract.
     assert [event["event_type"] for event in broadcasted] == [
         "chat.processing_status",
         "team.runtime_ready",
         "chat.usage_metadata",
         'chat.final',
-        'chat.processing_status',
         'chat.reasoning',
         'chat.tool_call',
         'chat.final',
-        'chat.processing_status',
         'chat.final',
-        'chat.processing_status',
-        "chat.processing_status",
         'team.completed',
     ]
     usage_event = next(
@@ -3419,14 +3537,21 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
     # Round-start processing_status
     assert broadcasted[0]["is_processing"] is True
     assert broadcasted[0]["is_complete"] is False
-    # Round-end processing_status (from team.completed)
-    assert broadcasted[-2]["is_processing"] is False
-    assert broadcasted[-2]["is_complete"] is True
-    for index, event in enumerate(broadcasted):
-        if event.get("event_type") == "chat.final":
-            next_event = broadcasted[index + 1]
-            assert next_event["event_type"] == "chat.processing_status"
-            assert next_event["is_processing"] is False
+    # Explicit "before-settle" invariant: no is_complete frame is emitted
+    # while the round is unsettled — the leader chat.final keeps the round
+    # open (helper returns False) and the team.completed poll path is
+    # blocked by claim_round_complete.
+    is_complete_frames = [
+        event
+        for event in broadcasted
+        if event.get("event_type") == "chat.processing_status"
+        and event.get("is_complete") is True
+    ]
+    assert is_complete_frames == []
+    # The post-loop team.completed marker is still broadcast as the round's
+    # terminal control event (carries no is_complete payload — the dedup
+    # only governs processing_status(is_complete=True) frames).
+    assert broadcasted[-1]["event_type"] == "team.completed"
 
 
 @pytest.mark.anyio
@@ -4980,3 +5105,145 @@ async def test_consume_stream_does_not_inject_session_id_into_other_events(monke
     delta_events = [e for e in broadcasted if e.get("event_type") == "chat.delta"]
     assert len(delta_events) == 1
     assert "session_id" not in delta_events[0]
+
+
+@pytest.mark.anyio
+async def test_round_complete_dedup_claim_then_reset():
+    """claim_round_complete returns True once per round, False after; reset re-arms."""
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    # Lightest path: bypass __init__, set only the dict under test.
+    # If test_team_manager_registry.py has a real fixture, prefer it.
+    tm = TeamManager.__new__(TeamManager)
+    tm._round_complete_emitted = {}
+
+    assert tm.claim_round_complete("s1") is True   # first claim
+    assert tm.claim_round_complete("s1") is False   # second claim same round → idempotent
+    tm.reset_round_complete("s1")
+    assert tm.claim_round_complete("s1") is True    # re-armed after reset
+    tm.reset_round_complete("never-existed")        # no-op, no KeyError
+
+
+@pytest.mark.anyio
+async def test_finish_round_if_settled_broadcasts_once_when_settled(monkeypatch):
+    class _FakeMessageManager:
+        @staticmethod
+        async def has_unread_messages(*, include_broadcast: bool) -> bool:
+            return False
+    class _FakeMonitorHandler:
+        _monitor = SimpleNamespace(
+            _team_agent=SimpleNamespace(
+                team_backend=SimpleNamespace(message_manager=_FakeMessageManager())
+            )
+        )
+        async def get_team_snapshot(self):
+            return {"members": [{"member_id": "leader", "status": "ready"}], "tasks": []}
+    class _FakeManager:
+        _claimed = {}
+        @staticmethod
+        def get_monitor_handler(session_id):
+            return _FakeMonitorHandler()
+        @staticmethod
+        def get_workflow_handler(session_id):
+            return None
+        @staticmethod
+        def claim_round_complete(session_id):
+            if _FakeManager._claimed.get(session_id):
+                return False
+            _FakeManager._claimed[session_id] = True
+            return True
+        @staticmethod
+        def reset_round_complete(session_id):
+            _FakeManager._claimed.pop(session_id, None)
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    broadcasts: list[dict] = []
+    monkeypatch.setattr(team_helpers, "_broadcast_event", lambda *a, **k: broadcasts.append(k.get("payload") or a[-1]))
+
+    finish = getattr(team_helpers, "_finish_round_if_settled")
+    closed = await finish("officeclaw", "sess", 1, reason="test")
+    assert closed is True
+    is_complete = [p for p in broadcasts if isinstance(p, dict) and p.get("event_type") == "chat.processing_status" and p.get("is_complete")]
+    assert len(is_complete) == 1
+
+
+@pytest.mark.anyio
+async def test_finish_round_if_settled_no_broadcast_when_not_settled(monkeypatch):
+    class _FakeMonitorHandler:
+        async def get_team_snapshot(self):
+            return {"members": [{"member_id": "leader", "status": "busy"}], "tasks": []}
+    class _FakeManager:
+        @staticmethod
+        def get_monitor_handler(session_id):
+            return _FakeMonitorHandler()
+        @staticmethod
+        def get_workflow_handler(session_id):
+            return None
+        @staticmethod
+        def claim_round_complete(session_id):
+            raise AssertionError("must not claim when not settled")
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    broadcasts: list[dict] = []
+    monkeypatch.setattr(team_helpers, "_broadcast_event", lambda *a, **k: broadcasts.append(k.get("payload") or a[-1]))
+
+    finish = getattr(team_helpers, "_finish_round_if_settled")
+    closed = await finish("officeclaw", "sess", 1, reason="test")
+    assert closed is False
+    assert broadcasts == []
+
+
+@pytest.mark.anyio
+async def test_team_round_settled_empty_board_blocked_when_toggle_false(monkeypatch):
+    class _FakeMessageManager:
+        @staticmethod
+        async def has_unread_messages(*, include_broadcast: bool) -> bool:
+            return False
+    class _FakeMonitorHandler:
+        _monitor = SimpleNamespace(
+            _team_agent=SimpleNamespace(
+                team_backend=SimpleNamespace(message_manager=_FakeMessageManager())
+            )
+        )
+        async def get_team_snapshot(self):
+            return {"members": [{"member_id": "leader", "status": "ready"}], "tasks": []}
+    class _FakeManager:
+        @staticmethod
+        def get_monitor_handler(session_id):
+            return _FakeMonitorHandler()
+        @staticmethod
+        def get_workflow_handler(session_id):
+            return None
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(team_helpers, "_taskless_completion_enabled", lambda session_id: False)
+
+    assert not await _TeamHelpersTestApi.team_round_settled("officeclaw", "sess-toggle")
+
+
+@pytest.mark.anyio
+async def test_team_round_settled_empty_board_passes_when_toggle_true(monkeypatch):
+    class _FakeMessageManager:
+        @staticmethod
+        async def has_unread_messages(*, include_broadcast: bool) -> bool:
+            return False
+    class _FakeMonitorHandler:
+        _monitor = SimpleNamespace(
+            _team_agent=SimpleNamespace(
+                team_backend=SimpleNamespace(message_manager=_FakeMessageManager())
+            )
+        )
+        async def get_team_snapshot(self):
+            return {"members": [{"member_id": "leader", "status": "ready"}], "tasks": []}
+    class _FakeManager:
+        @staticmethod
+        def get_monitor_handler(session_id):
+            return _FakeMonitorHandler()
+        @staticmethod
+        def get_workflow_handler(session_id):
+            return None
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(team_helpers, "_taskless_completion_enabled", lambda session_id: True)
+
+    assert await _TeamHelpersTestApi.team_round_settled("officeclaw", "sess-toggle")
