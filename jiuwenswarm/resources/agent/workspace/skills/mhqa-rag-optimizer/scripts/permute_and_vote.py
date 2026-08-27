@@ -36,6 +36,7 @@ def _emit_result(rendered: str) -> None:
     result_logger.propagate = False
     result_logger.info("%s", rendered)
 
+
 _SYSTEM_PROMPT = (
     "You are a helpful assistant. Answer the question based only on the "
     "provided documents. Be concise: output the answer and nothing else."

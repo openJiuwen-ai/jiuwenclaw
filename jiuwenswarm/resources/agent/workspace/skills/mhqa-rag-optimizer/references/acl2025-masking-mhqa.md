@@ -72,7 +72,7 @@ Where `GAW` is the grouped attention weight from answer tokens `a` to document t
 
 ---
 
-## Implications for JiuwenClaw RAG Pipeline
+## Implications for JiuwenSwarm RAG Pipeline
 
 | Finding | Actionable Implication |
 |---------|----------------------|

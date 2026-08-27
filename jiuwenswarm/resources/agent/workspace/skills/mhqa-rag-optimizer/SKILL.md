@@ -1,10 +1,6 @@
 ---
 name: mhqa-rag-optimizer
-version: 1.0.0
-author: wenyu-huang
 description: Improve multi-hop question answering accuracy by reordering retrieved documents in forward reasoning-chain order before passing them to the LM. Based on findings from "Masking in Multi-hop QA" (ACL 2025). Use when a question requires synthesising evidence from multiple sources or when RAG answer quality is poor on compositional questions.
-tags: [rag, multi-hop, qa, reasoning, document-ordering]
-allowed_tools: [webSearch, readFile]
 ---
 
 # MHQA RAG Optimizer
@@ -36,7 +32,7 @@ MHQA RAG Optimizer 是一个面向 **多跳问答（Multi-hop QA）** 的 RAG �
 
 ### 1. 安装与启用
 
-在 JiuwenClaw 前端 **技能** 页面安装内置技能 `mhqa-rag-optimizer` 即可。本技能 **无需** 修改 `config/config.yaml` 或额外服务配置；加载后由 Agent 按下方 Workflow 执行上下文重排与作答。
+在 JiuwenSwarm 前端 **技能** 页面安装内置技能 `mhqa-rag-optimizer` 即可。本技能 **无需** 修改 `config/config.yaml` 或额外服务配置；加载后由 Agent 按下方 Workflow 执行上下文重排与作答。
 
 ### 2. 环境变量（使用 `permute_and_vote.py` 脚本时）
 
@@ -46,7 +42,7 @@ MHQA RAG Optimizer 是一个面向 **多跳问答（Multi-hop QA）** 的 RAG �
 | `OPENAI_BASE_URL` | 可选，OpenAI 兼容 API 基地址 | 无 |
 | `MHQA_MODEL` | 默认模型名称 | `gpt-4o-mini` |
 
-Agent 直接在对话中重排文档并生成答案时，使用 JiuwenClaw 已配置的模型即可，**不依赖** 上述环境变量。
+Agent 直接在对话中重排文档并生成答案时，使用 JiuwenSwarm 已配置的模型即可，**不依赖** 上述环境变量。
 
 ### 3. 脚本依赖
 
@@ -83,7 +79,7 @@ python scripts/permute_and_vote.py \
 
 ## 背景与原理
 
-本 skill 基于 ACL 2025 论文《Masking in Multi-hop QA: An Analysis of How Language Models Perform with Context Permutation》（Wenyu Huang et al.）的核心发现，将其转化为可在 JiuwenClaw RAG 流程中直接使用的提示与上下文编排策略。
+本 skill 基于 ACL 2025 论文《Masking in Multi-hop QA: An Analysis of How Language Models Perform with Context Permutation》（Wenyu Huang et al.）的核心发现，将其转化为可在 JiuwenSwarm RAG 流程中直接使用的提示与上下文编排策略。
 
 **核心发现：**
 
