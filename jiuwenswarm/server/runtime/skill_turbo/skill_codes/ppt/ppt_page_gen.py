@@ -1772,13 +1772,13 @@ def _validate_no_escaped_content(html: str) -> bool:
     # slide 闭合后到 </body> 之前的区域不应有内容块标签
     tail = html[slide_end:body_close]
     # 匹配内容块标签（开标签或闭合标签），排除注释内的
-    _ESCAPED_CONTENT_TAGS_RE = re.compile(
+    _escaped_content_tags_re = re.compile(
         r"</?(?:main|section|footer|header|article|aside)\b",
         re.IGNORECASE,
     )
     # 去除 HTML 注释内容后再检测，避免注释里的标签误报
     tail_no_comments = re.sub(r"<!--.*?-->", "", tail, flags=re.DOTALL)
-    if _ESCAPED_CONTENT_TAGS_RE.search(tail_no_comments):
+    if _escaped_content_tags_re.search(tail_no_comments):
         return False
     return True
 
