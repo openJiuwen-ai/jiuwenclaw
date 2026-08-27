@@ -42,7 +42,7 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
-        mount = f".team/{self._team_id}/" if self._team_id else ".team/"
+        mount = ".team/"
         sample = str(Path(self._root_dir) / "prd-review-memo.md")
         content = (
             "# Team Workspace Artifact Paths\n\n"
@@ -55,8 +55,8 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
             "deliver the file and must not replace `send_file_to_user`.\n"
             "- After `send_file_to_user` succeeds, report the real absolute filesystem path under the team "
             "workspace absolute root, not the `.team/...` mount path.\n"
-            "- If a generated artifact path contains `.team/<team>/team-workspace/`, remove that mount prefix and "
-            "join the remaining file name under the team workspace absolute root before sending and reporting it.\n"
+            "- The mount is already the shared workspace root; do not add a team id or `team-workspace` "
+            "segment after `.team/`.\n"
             f"- Example absolute path to pass to `send_file_to_user`: `{sample}`\n"
         )
         self.system_prompt_builder.add_section(

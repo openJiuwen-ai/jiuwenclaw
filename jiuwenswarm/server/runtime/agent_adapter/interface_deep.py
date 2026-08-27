@@ -470,6 +470,7 @@ from jiuwenswarm.common.utils import (
     resolve_tenant_sessions_dir,
     reset_free_search_runtime_flags,
     resolve_agent_registered_skill_dirs,
+    merge_shared_skills_trusted_dirs,
     load_yaml_dict,
     resolve_shipped_template_config_path,
 )
@@ -8442,6 +8443,15 @@ class JiuWenSwarmDeepAdapter:
             finally:
                 self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
 
+            # configure() 把旧 rail 移入 _stale_rails、新 rail 入 _pending_rails 并
+            # 置 _initialized=False，但真正的换装（unregister stale + init pending
+            # 进 dispatch 列表）在 _ensure_initialized 中懒触发，其入口仅在
+            # invoke/stream。office 服务路径不走 invoke/stream，导致换装永不执行、
+            # 旧 SkillUseRail 继续服务、新装 skill 对运行中会话不可见。此处显式
+            # 触发换装，与创建期 ensure_initialized() 调用一致；_needs_workspace_init
+            # 守卫重 init，已初始化的工作区不会重建，无长阻塞。
+            await self._instance.ensure_initialized()
+
             first_unregister_error: Exception | None = None
             rail_cache_attrs = (
                 "_progressive_tool_rail",
@@ -11880,6 +11890,7 @@ class JiuWenSwarmDeepAdapter:
 
             rebuild_context = prepared.get("rebuild_context") or {}
             skill_md_path = rebuild_context.get("skill_md_path") or resolved_skill_md
+            self._apply_rebuild_permission_trusted_dirs(skill_md_path)
             before_fp = evolution_version_ctl.skill_md_fingerprint(skill_md_path)
             prompt = str(prepared.get("followup_prompt") or "")
             rebuild_ok = await self._execute_merge_version_rewrite(
@@ -11927,6 +11938,32 @@ class JiuWenSwarmDeepAdapter:
         finally:
             self._reset_request_env_bindings(ns_token, overlay_token)
 
+    def _apply_rebuild_permission_trusted_dirs(self, skill_md_path: str | None) -> None:
+        """Allow write_file/edit_file on the rebuild SKILL.md even without HITL.
+
+        Rebuild RPC often has ``session_id=None``. Path-layer write defaults to
+        ask outside workspace; ASK without HITL becomes interrupt and leaves
+        SKILL.md unchanged.
+        """
+        permission_rail = getattr(self, "_permission_rail", None)
+        setter = getattr(permission_rail, "set_trusted_dirs", None)
+        extra = evolution_version_ctl.extra_trusted_dirs_for_skill_md(skill_md_path)
+        if permission_rail is None or not callable(setter):
+            return
+        existing: list[str] = []
+        engine = getattr(permission_rail, "_engine", None)
+        for item in getattr(engine, "trusted_dirs", None) or []:
+            text = str(item).strip()
+            if text:
+                existing.append(text)
+        try:
+            setter(merge_shared_skills_trusted_dirs(existing + extra))
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] rebuild permission trusted_dirs seed failed",
+                exc_info=True,
+            )
+
     async def _execute_merge_version_rewrite(
         self,
         prompt: str,
@@ -11938,7 +11975,23 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             return False
         try:
-            await Runner.run_agent(agent=self._instance, inputs={"query": prompt})
+            from openjiuwen.core.session.agent import create_agent_session
+
+            # Fresh session so default_session checkpoint HITL is not treated as resume.
+            session = create_agent_session(
+                session_id=f"evolution-rebuild-{uuid.uuid4().hex[:12]}",
+                card=getattr(self._instance, "card", None),
+            )
+            result = await Runner.run_agent(
+                agent=self._instance,
+                inputs={"query": prompt},
+                session=session,
+            )
+            if isinstance(result, dict) and result.get("result_type") == "interrupt":
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] merge-version rewrite interrupted"
+                )
+                return False
             return True
         except Exception as exc:
             logger.warning(
