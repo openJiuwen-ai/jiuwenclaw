@@ -7936,6 +7936,10 @@ class JiuWenSwarmDeepAdapter:
             should_enable_general_agent = should_add_general_agent and (
                 sub_mode == "plan" or (isinstance(mode, str) and mode.startswith("agent"))
             )
+            from jiuwenswarm.agents.harness.observability_runtime import (
+                get_trajectory_span_processor,
+            )
+
             common_kwargs = dict(
                 model=model,
                 card=agent_card,
@@ -7955,7 +7959,8 @@ class JiuWenSwarmDeepAdapter:
                 ),
                 sys_operation=sys_operation,
                 language=self._resolve_runtime_language(),
-                auto_create_workspace=False
+                auto_create_workspace=False,
+                trajectory_span_processor=get_trajectory_span_processor(),
             )
 
             # agent_ras YAML passthrough (Agent RAS owns loop detection / recovery).

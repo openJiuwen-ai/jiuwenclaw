@@ -244,6 +244,20 @@ def sync_agent_observability(*, force: bool = False) -> None:
         _agent_observability_active = True
         _agent_owns_provider = False
         _runtime_managed_agent_observability = True
+        # Unified telemetry owns the TracerProvider but historically omitted
+        # TrajectorySpanProcessor; attach it so SkillEvolutionRail can drain.
+        try:
+            from jiuwenswarm.agents.harness.observability_runtime import (
+                ensure_trajectory_span_processor_attached,
+            )
+
+            ensure_trajectory_span_processor_attached()
+        except Exception as exc:
+            logger.warning(
+                "[AgentObservability] failed to attach trajectory processor "
+                "on unified path: %s",
+                exc,
+            )
         return
     if force:
         _force_ever_enabled = True
