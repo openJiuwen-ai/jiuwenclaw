@@ -68,8 +68,13 @@ def _canonical_seedream_size(raw: Any) -> str | None:
 def normalize_plugin_skill_args(
     func_name: str, params: dict[str, Any]
 ) -> tuple[dict[str, Any], str | None]:
-    """Coerce seedream size / drop Pro max_images. Returns (params, error)."""
+    """Coerce seedream size / drop Pro max_images / wrap seedance text content."""
     out = dict(params)
+    if func_name == "seedanceMiniTask":
+        content = out.get("content")
+        if isinstance(content, str) and content.strip():
+            out["content"] = [{"type": "text", "text": content.strip()}]
+        return out, None
     if func_name not in _SEEDREAM_FUNCS:
         return out, None
 
@@ -112,19 +117,50 @@ def parse_plugin_json_payload(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _looks_like_http_url(value: str) -> bool:
+    lower = value.strip().lower()
+    return lower.startswith("http://") or lower.startswith("https://")
+
+
+def _payload_dicts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    bags: list[dict[str, Any]] = [payload]
+    nested = payload.get("content")
+    if isinstance(nested, dict):
+        bags.append(nested)
+    for bag in list(bags):
+        items = bag.get("items")
+        if isinstance(items, list):
+            bags.extend(item for item in items if isinstance(item, dict))
+    return bags
+
+
+def _payload_item_strings(payload: dict[str, Any]) -> list[str]:
+    texts: list[str] = []
+    for bag in (payload, payload.get("content") if isinstance(payload.get("content"), dict) else {}):
+        if not isinstance(bag, dict):
+            continue
+        items = bag.get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, str) and item.strip():
+                texts.append(item.strip())
+    return texts
+
+
 def extract_seedance_task_id(result: dict[str, Any]) -> str:
     """Read task_id from seedanceMiniTask invoke result."""
     payload = parse_plugin_json_payload(result.get("content"))
     if not payload and isinstance(result, dict):
         payload = {k: v for k, v in result.items() if k != "frames"}
-    nested = payload.get("content") if isinstance(payload.get("content"), dict) else {}
-    for candidate in (payload, nested):
-        if not isinstance(candidate, dict):
-            continue
+    for candidate in _payload_dicts(payload):
         for key in ("task_id", "id", "taskId"):
             value = str(candidate.get(key) or "").strip()
-            if value:
+            if value and not _looks_like_http_url(value):
                 return value
+    for text in _payload_item_strings(payload):
+        if not _looks_like_http_url(text):
+            return text
     return ""
 
 
@@ -133,15 +169,30 @@ def extract_seedance_query_state(result: dict[str, Any]) -> tuple[str, str]:
     payload = parse_plugin_json_payload(result.get("content"))
     if not payload and isinstance(result, dict):
         payload = {k: v for k, v in result.items() if k != "frames"}
-    nested = payload.get("content") if isinstance(payload.get("content"), dict) else {}
-    status = str(payload.get("status") or nested.get("status") or "").strip().lower()
-    video_url = str(
-        nested.get("video_url")
-        or nested.get("videoUrl")
-        or payload.get("video_url")
-        or payload.get("videoUrl")
-        or ""
-    ).strip()
+    status = ""
+    video_url = ""
+    for candidate in _payload_dicts(payload):
+        if not status:
+            status = str(candidate.get("status") or "").strip().lower()
+        if not video_url:
+            video_url = str(
+                candidate.get("video_url") or candidate.get("videoUrl") or ""
+            ).strip()
+        nested = candidate.get("content")
+        if isinstance(nested, dict):
+            if not status:
+                status = str(nested.get("status") or "").strip().lower()
+            if not video_url:
+                video_url = str(
+                    nested.get("video_url") or nested.get("videoUrl") or ""
+                ).strip()
+        if status and video_url:
+            break
+    if not video_url:
+        for text in _payload_item_strings(payload):
+            if _looks_like_http_url(text):
+                video_url = text
+                break
     return status, video_url
 
 
@@ -200,7 +251,7 @@ def validate_plugin_skill_args(func_name: str, params: dict[str, Any]) -> str | 
 def invoke_tool_description() -> str:
     """ToolCard description aligned with skills/*.md call contracts."""
     return (
-        "经桌面 CloudWsRelay 复用 /ws/link 调用云端 PluginSkillExec 能力，"
+        "调用云端 PluginSkillExec 能力，"
         "或 functionName=agent_as_a_tool 调用远程 Agent。"
         "调用形态与 skill 文档一致：顶层 functionName 固定为 PluginSkillExecTool，"
         "真实能力写在 arguments.functionName，并带对应 bundleName 与业务参数。"

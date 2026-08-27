@@ -397,6 +397,34 @@ async def test_task_tool_resume_does_not_reemit_tool_start_events():
 
 
 @pytest.mark.asyncio
+async def test_before_tool_call_tolerates_string_arguments():
+    """tc.arguments 为未解析 JSON 字符串（GLM tool_call 原始形态）时 before_tool_call 不炸：
+    extract_call_goal 保持原类型风格（str 进 str 出），is_task_tool_resume 判定必须
+    先过 isinstance(Mapping) 守卫——否则回调整体异常，emit/bind/inflight 登记全跳过
+    （task_tool spawn browser_agent 丢工具卡）。"""
+    session = _FakeSession()
+    tool_call = SimpleNamespace(
+        id="tool-task-2",
+        name="task_tool",
+        arguments='{"subagent_type": "browser_agent", "task_description": "打开页面"}',
+    )
+    ctx = AgentCallbackContext(
+        agent=None,
+        session=session,
+        inputs=ToolCallInputs(
+            tool_call=tool_call,
+            tool_name="task_tool",
+            tool_args=tool_call.arguments,
+        ),
+    )
+
+    await _TestRail().before_tool_call(ctx)
+
+    tool_calls = [output for output in session.outputs if output.type == "tool_call"]
+    assert len(tool_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_task_tool_first_call_still_emits_tool_start_events():
     session = _FakeSession()
     tool_call = SimpleNamespace(

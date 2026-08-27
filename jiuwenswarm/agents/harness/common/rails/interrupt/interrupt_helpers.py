@@ -367,13 +367,32 @@ def build_permission_rail(
                 return ("approve",)
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
-        def _get_permissions_snapshot():
-            cfg = get_config()
-            return cfg.get("permissions") if isinstance(cfg, dict) else {}
+        def _get_permissions_snapshot(session_id: str | None = None):
+            from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import (
+                get_permissions_with_session_overlay,
+            )
+
+            return get_permissions_with_session_overlay(session_id=session_id)
+
+        def _persist_session_allow_rule(
+            permissions: dict[str, Any], session_id: str | None = None
+        ) -> bool:
+            from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import (
+                persist_session_allow_rule,
+            )
+
+            try:
+                return bool(
+                    persist_session_allow_rule(permissions, session_id=session_id)
+                )
+            except Exception as exc:
+                logger.warning("[InterruptHelpers] persist_session_allow_rule failed: %s", exc)
+                return False
 
         host = ToolPermissionHost(
             get_permissions_snapshot=_get_permissions_snapshot,
             persist_allow_rule=_persist_allow_rule,
+            persist_session_allow_rule=_persist_session_allow_rule,
             resolve_workspace_dir=get_workspace_dir,
             permission_yaml_path=get_config_file(),
             request_permission_confirmation=_request_permission_confirmation,

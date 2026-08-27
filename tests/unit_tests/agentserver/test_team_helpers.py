@@ -4397,6 +4397,77 @@ def test_persist_member_tool_event_writes_attributed_history(
     assert len(persisted) == 2
 
 
+def test_persist_member_tool_event_extracts_tool_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """路径字段在 content 截断前提取入 extra.tool_paths（不截断）。
+
+    write_file 入参的 content 全文必超 512 被截断成残缺 JSON，前端概览面板
+    的产物提取依赖 tool_paths 旁路。call 相位从 args（dict/JSON 字符串）、
+    result 相位从 repr 文本正则提取。
+    """
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        team_helpers, "append_history_record", lambda **kw: persisted.append(kw)
+    )
+
+    # call 相位：dict 入参
+    team_helpers._persist_member_tool_event(
+        "web", "s1",
+        {
+            "event_type": "chat.tool_call",
+            "member_name": "member1",
+            "tool_call": {
+                "tool_name": "write_file",
+                "tool_call_id": "call-1",
+                "arguments": {
+                    "file_path": "D:\\xiaoyiwork\\tank-battle\\index.html",
+                    "content": "<html>" + "x" * 600,
+                },
+            },
+        },
+    )
+    # call 相位：JSON 字符串入参（含 files 数组）
+    team_helpers._persist_member_tool_event(
+        "web", "s1",
+        {
+            "event_type": "chat.tool_call",
+            "member_name": "member1",
+            "tool_call": {
+                "tool_name": "read_file",
+                "tool_call_id": "call-2",
+                "arguments": '{"files": ["a/b.md", "c.txt"], "query": "无关文本"}',
+            },
+        },
+    )
+    # result 相位：repr 文本里的 'file_path': '...'
+    team_helpers._persist_member_tool_event(
+        "web", "s1",
+        {
+            "event_type": "chat.tool_result",
+            "member_name": "member1",
+            "tool_name": "write_file",
+            "tool_call_id": "call-1",
+            "result": "success=True data={'file_path': 'D:/xiaoyiwork/tank-battle/index.html', 'bytes_written': 28876} error=None",
+        },
+    )
+    # 无路径字段 → 不带 tool_paths 键
+    team_helpers._persist_member_tool_event(
+        "web", "s1",
+        {
+            "event_type": "chat.tool_call",
+            "member_name": "member1",
+            "tool_call": {"tool_name": "view_task", "tool_call_id": "call-3", "arguments": {"action": "list"}},
+        },
+    )
+
+    assert len(persisted) == 4
+    assert persisted[0]["extra"]["tool_paths"] == ["D:\\xiaoyiwork\\tank-battle\\index.html"]
+    assert persisted[1]["extra"]["tool_paths"] == ["a/b.md", "c.txt"]
+    assert persisted[2]["extra"]["tool_paths"] == ["D:/xiaoyiwork/tank-battle/index.html"]
+    assert "tool_paths" not in persisted[3]["extra"]
+
+
 class _RecordingTeamManager(_InactiveTeamRuntimeManagerMixin):
     """记录 broadcast_event 的测试管理器（finally 段需要的 runtime 清理方法置空）。"""
 
@@ -4519,3 +4590,44 @@ async def test_workflow_round_does_not_break_early(monkeypatch):
 
     deltas = [e for e in manager.events if e.get("event_type") == "chat.delta"]
     assert [e.get("content") for e in deltas] == ["总结", "成员收尾"]
+
+
+@pytest.mark.asyncio
+async def test_native_final_suppresses_completion_synthesis(monkeypatch):
+    """leader 答案以 answer chunk（原生 chat.final）与 task_completion（同文全文）
+    两种形态各到一次——合成兜底在「本周期已发原生 final」时必须跳过，
+    否则同文双发；下一周期无原生 final 时合成仍应生效
+    （周期标记已复位）。"""
+    manager = _RecordingTeamManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+
+    def _fake_parse(chunk):
+        ctype = getattr(chunk, "type", None)
+        if ctype == "team.member":
+            return {
+                "event_type": "team.member",
+                "event": {"type": "team.member.status_changed", "member_id": "m1"},
+            }
+        if ctype == "answer":
+            return {"event_type": "chat.final", "content": chunk.payload}
+        return None  # task_completion 被 parse 丢弃（生产行为）
+
+    monkeypatch.setattr(team_helpers, "parse_stream_chunk", _fake_parse)
+
+    async def _fake_stream(**kwargs):
+        # 团队事件先行（防纯文本回合即时收尾提前断流，干扰断言）
+        yield SimpleNamespace(type="team.member", payload={}, role=TeamRole.LEADER)
+        # 周期一：原生 final + 同文 task_completion → 只应广播一次 final
+        yield SimpleNamespace(type="answer", payload="同文答案", role=None)
+        yield _completion_chunk("同文答案")
+        # 周期二：无原生 final → 合成兜底仍应生效（验证周期标记已复位）
+        yield _completion_chunk("第二轮只有 completion")
+
+    monkeypatch.setattr(team_helpers.Runner, "run_agent_team_streaming", _fake_stream)
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web", "sess-dup", SimpleNamespace(team_name="spec-team"), "问",
+    )
+
+    finals = [e for e in manager.events if e.get("event_type") == "chat.final"]
+    assert [e.get("content") for e in finals] == ["同文答案", "第二轮只有 completion"]

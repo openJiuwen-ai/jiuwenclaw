@@ -271,6 +271,24 @@ class SendFileToolkit:
             from jiuwenswarm.server.runtime.session.session_history import (
                 append_history_record,
             )
+            # 团队模式下成员经 send_file 直推（不经 team 流，吃不到 team_helpers 的
+            # 成员归因）——从成员执行上下文读 member_name（agent_teams 在成员协程内
+            # set_member_id），让推送帧与落盘记录都能归到成员子聊天框。
+            # leader / 非 team 会话读不到（""），行为与之前完全一致。
+            member_name = ""
+            try:
+                from openjiuwen.core.common.logging import get_member_id
+
+                member_name = str(get_member_id() or "").strip()
+            except Exception as exe:
+                member_name = ""
+                logger.warning(
+                    "[SendFileToolkit] 获取 member_name 失败，不阻断发文件: %s",
+                    exe,
+                )
+            history_extra: dict[str, Any] = {"files": files_payload}
+            if member_name:
+                history_extra["member_name"] = member_name
             append_history_record(
                 session_id=self.session_id,
                 request_id=self.request_id,
@@ -279,7 +297,8 @@ class SendFileToolkit:
                 event_type="chat.file",
                 content="",
                 timestamp=time.time(),
-                extra={"files": files_payload},
+                extra=history_extra,
+                mode="team" if member_name else None,
             )
 
             msg = {
@@ -289,6 +308,7 @@ class SendFileToolkit:
                 "payload": {
                     "event_type": "chat.file",
                     "files": files_payload,
+                    **({"member_name": member_name} if member_name else {}),
                 },
                 "is_complete": False,
             }

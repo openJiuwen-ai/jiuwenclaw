@@ -31,6 +31,7 @@ from jiuwenswarm.server.e2a_transports import (
     TRANSPORT_PROTOCOL_ERRORS,
     WsMessageTransport,
 )
+from jiuwenswarm.common.e2a.wire_trace import trace_inbound
 from jiuwenswarm.server.gui_rpc import get_gui_rpc_client
 from jiuwenswarm.server.gui_rpc.client import GuiRpcClientError
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
@@ -511,7 +512,9 @@ def _is_restorable_history_record(record: Any) -> bool:
         mode = record.get("mode", "")
         if mode in ("team", "team.plan", "code.team"):
             channel_id = record.get("channel_id", "")
-            if channel_id not in ("web", "tui"):
+            # desktop 渠道的用户消息是真实用户输入，必须与 web/tui 同规放行——
+            # 否则桌面团队会话重启后用户问题气泡丢失
+            if channel_id not in ("web", "tui", "desktop"):
                 return False
         return has_content or has_media
 
@@ -1647,6 +1650,7 @@ class AgentWebSocketServer:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
             data = json.loads(raw)
+            trace_inbound(data)
         except json.JSONDecodeError as e:
             wire = encode_json_parse_error_wire(
                 request_id="",

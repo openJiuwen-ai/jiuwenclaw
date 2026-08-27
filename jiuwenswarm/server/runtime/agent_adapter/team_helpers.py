@@ -2075,8 +2075,18 @@ async def _consume_stream_with_query(
     received_chunks = 0
     first_model_output_at: float | None = None
     emitted_ask_user_request_ids: set[str] = set()
-    # 本轮 leader 累计正文（合成 chat.final 的快照内容用；逐轮重置）
+    # 本轮 leader 累计正文（合成 chat.final 的兜底内容；leader final 落定即重置，
+    # 防跨轮污染——流是跨用户轮次长寿命的，不重置会把前轮文本带进下一轮气泡）
     leader_round_text = ""
+    # leader 发言/思考的泡序号（多气泡分卡边界：同一用户轮内 leader 多次发言各成一卡；
+    # reasoning chunk 带当轮 seq，前端按 seq 把思考归到对应发言卡）
+    leader_bubble_seq = 0
+    # 当前「发言 → task_completion」周期内是否已广播过 leader chat.final：
+    # leader 的答案会以 answer chunk（原生 final）与 controller_output/task_completion
+    # （同文全文）两种形态各到一次——合成兜底前查此标记，已发过就跳过，
+    # 否则同文双发（多气泡时间线下两个 final 各开一卡 → 重复展示、历史双写）；
+    # 每次 task_completion 判定后复位，不影响后续无原生 final 的纯文本回合
+    leader_final_emitted = False
     # 纯文本回合的即时收尾标记：仅当本轮无任何团队活动（无团队事件/无工具调用/
     # 无成员产出）且 leader 以 task_completion 收尾时置位——下一轮循环开头 break
     # （运行时暂停，下次发送 resume_from_pause 热恢复）。leader 先答、成员后报的
@@ -2190,12 +2200,20 @@ async def _consume_stream_with_query(
             if parsed is None and is_leader:
                 completion_text = _leader_task_completion_text(chunk)
                 if completion_text:
-                    parsed = {
-                        "event_type": "chat.final",
-                        "content": leader_round_text or completion_text,
-                        "role": TeamRole.LEADER.value,
-                    }
-                    final_from_completion = True
+                    if leader_final_emitted:
+                        # 本周期已广播过原生 chat.final：task_completion 携带的是
+                        # 同一段答案全文，再合成即同文双发——跳过并复位周期标记
+                        leader_final_emitted = False
+                    else:
+                        parsed = {
+                            "event_type": "chat.final",
+                            # 本轮全文优先（task_completion 携带）；delta 累积 buffer 仅兜底
+                            "content": completion_text or leader_round_text,
+                            "role": TeamRole.LEADER.value,
+                        }
+                        final_from_completion = True
+                        # 合成即重置：buffer 已完成本轮使命
+                        leader_round_text = ""
             if parsed is not None:
                 # Time to first token: the first frame actually produced by a
                 # model (reasoning counts — on a thinking model it comes first).
@@ -2234,9 +2252,13 @@ async def _consume_stream_with_query(
                     # 标记 role=leader，使 _build_logical_targets() 走 godview 兜底
                     # （leader 不在 _ROLE_FANOUT 中，落到 [godview]）。
                     parsed["role"] = TeamRole.LEADER.value
-                    # 累计本轮 leader 正文（task_completion 合成 chat.final 的快照内容）
+                    # 累计本轮 leader 正文（task_completion 合成 chat.final 的兜底内容）
                     if parsed.get("event_type") == "chat.delta":
                         leader_round_text += str(parsed.get("content") or "")
+                    # 多气泡：leader 的 reasoning 打当轮泡序号——
+                    # 思考先于发言到达，前端按 seq 把思考归到"紧接着的发言卡"
+                    if parsed.get("event_type") == "chat.reasoning":
+                        parsed["bubble_seq"] = leader_bubble_seq
                 if parsed.get("event_type") == "chat.tool_call":
                     saw_tool_call = True
                 parsed = _truncate_team_tool_result_event(parsed)
@@ -2367,6 +2389,17 @@ async def _consume_stream_with_query(
                         (not tm_.has_seen_team_events(session_id))
                         or tm_.is_workflow_completed(session_id)
                     )
+                    # 多气泡：leader 每次发言各打一卡序号——
+                    # 客户端同 seq 覆盖（重试去重）、新 seq 封段开新卡；
+                    # 随载荷进历史落盘 extra，刷新后按段恢复
+                    if is_leader:
+                        # 标记本周期已发 final（含合成），轮末 task_completion
+                        # 据此跳过重复合成
+                        leader_final_emitted = True
+                        parsed["bubble_seq"] = leader_bubble_seq
+                        leader_bubble_seq += 1
+                        # 原生 final 同样意味着本轮落定：重置累积 buffer
+                        leader_round_text = ""
                     # Deliver the final content before announcing that the
                     # round is complete. Clients may stop consuming the stream
                     # as soon as processing_status(False) arrives.
@@ -2904,6 +2937,63 @@ def _persist_member_final_output(
     )
 
 
+# 与前端 tool-presentation.FILE_PATH_KEYS 对齐的路径字段名（用于成员工具记录
+# 的产物/参考路径旁路提取，）
+_TOOL_PATH_KEYS = (
+    "file_path", "filePath", "filepath", "path", "target_file", "targetPath",
+    "filename", "fileName", "file", "outputPath", "output_path", "save_path",
+    "saved_path", "pdf_path", "image_path", "dest_path", "new_path",
+)
+# repr/文本形态（result 相位）里的 "key": "value" / 'key': 'value' 提取
+_TOOL_PATH_RE = re.compile(
+    r"[\"'](" + "|".join(_TOOL_PATH_KEYS) + r")[\"']\s*:\s*[\"']([^\"'\n]{1,512})[\"']"
+)
+
+
+def _looks_like_tool_path(value: str) -> bool:
+    """路径形态粗判：含分隔符或扩展名；过滤普通文本值。"""
+    if not value or len(value) > 512 or "\n" in value:
+        return False
+    if "/" in value or "\\" in value:
+        return True
+    return bool(re.search(r"\.[A-Za-z0-9]{1,8}$", value))
+
+
+def _extract_tool_record_paths(args_raw: Any, result_text: str) -> list[str]:
+    """从工具入参（dict/JSON 字符串）与结果文本里提取文件路径，有序去重、封顶 8 条。
+
+    call 相位入参在截断前是完整的（dict 或 JSON 字符串）；result 相位结果是
+    repr/文本形态，用正则提取。供概览面板产物/参考提取的旁路（content 截断后
+    JSON 残缺时的结构化兜底）。
+    """
+    paths: list[str] = []
+
+    def _push(value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        v = value.strip()
+        if _looks_like_tool_path(v) and v not in paths and len(paths) < 8:
+            paths.append(v)
+
+    args = args_raw
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (ValueError, TypeError):
+            args = None
+    if isinstance(args, dict):
+        for key in _TOOL_PATH_KEYS:
+            _push(args.get(key))
+        for grouped in (args.get("files"), args.get("paths")):
+            if isinstance(grouped, list):
+                for item in grouped:
+                    _push(item)
+    if result_text:
+        for match in _TOOL_PATH_RE.finditer(result_text):
+            _push(match.group(2))
+    return paths
+
+
 def _persist_member_tool_event(
         channel_id: str | None,
         session_id: str,
@@ -2942,7 +3032,15 @@ def _persist_member_tool_event(
             else ""
         )
     else:
+        args_raw = None
         result_text = str(tool_payload.get("result") or parsed.get("result") or "")
+    # 路径字段在截断前单独提取入 extra（不截断）：write_file 等工具入参的
+    # content 全文必超 512 被截断，残缺 JSON 让前端概览面板的产物/参考
+    # 提取失路；tool_paths 作为结构化旁路兜底
+    tool_paths = _extract_tool_record_paths(
+        args_raw if event_type == "chat.tool_call" else None,
+        result_text if event_type == "chat.tool_result" else "",
+    )
     if len(result_text) > 512:
         result_text = result_text[:512] + "…"
     timestamp = time.time()
@@ -2958,6 +3056,7 @@ def _persist_member_tool_event(
             "member_name": member_name,
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
+            **({"tool_paths": tool_paths} if tool_paths else {}),
         },
         mode="team",
     )

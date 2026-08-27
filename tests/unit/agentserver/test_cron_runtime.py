@@ -1039,3 +1039,48 @@ async def test_cron_backend_routes_non_privileged_device_tool_without_check(
         "FileUploadForClaw"
     ]
     assert cron_tools.create_payloads[0]["xiaoyi_push_id"] == "push-1"
+
+class TestExtractLegacyParamsKindCronClearsDeleteAfterRun:
+    """间隔/周期 schedule 必须清除一次性 delete_after_run。
+
+    回归：一次性任务（kind=at + delete_after_run=true）改成间隔后，
+    遗留的 delete_after_run 会让调度器在首次触发后把任务标记为过期禁用。
+    """
+
+    def test_kind_cron_expr_clears_delete_after_run_even_when_true(self) -> None:
+        context = SimpleNamespace(channel_id="web", session_id="sess-1")
+        payload = {
+            "schedule": {"kind": "cron", "expr": "*/30 * * * *"},
+            "payload": {"kind": "agentTurn", "message": "该喝水啦！记得去喝杯水 💧"},
+            "delivery": {"mode": "announce"},
+            "deleteAfterRun": True,
+        }
+
+        out = _extract_legacy_params(payload, context=context, require_schedule=False)
+
+        assert out["delete_after_run"] is False
+        assert out["cron_expr"] == "*/30 * * * *"
+
+    def test_cron_expr_without_kind_clears_delete_after_run(self) -> None:
+        context = SimpleNamespace(channel_id="web", session_id="sess-1")
+        payload = {
+            "schedule": {"expr": "*/15 * * * *"},
+            "payload": {"kind": "agentTurn", "message": "提醒"},
+            "deleteAfterRun": True,
+        }
+
+        out = _extract_legacy_params(payload, context=context, require_schedule=False)
+
+        assert out["delete_after_run"] is False
+
+    def test_payload_only_patch_keeps_explicit_delete_after_run(self) -> None:
+        """不带 cron 表达式的 patch 不强制清除，保留显式传入的值。"""
+        context = SimpleNamespace(channel_id="web", session_id="sess-1")
+        payload = {
+            "payload": {"kind": "agentTurn", "message": "新提醒内容"},
+            "deleteAfterRun": True,
+        }
+
+        out = _extract_legacy_params(payload, context=context, require_schedule=False)
+
+        assert out["delete_after_run"] is True

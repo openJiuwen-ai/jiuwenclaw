@@ -685,8 +685,8 @@ class ProcessRuntime(RuntimeAdapter):
 
     @staticmethod
     def _load_policy(policy_path: Path) -> SecurityPolicy:
-        with open(policy_path) as f:
-            data = yaml.safe_load(f)
+        from jiuwenbox.server.policy_engine import read_policy_text
+        data = yaml.safe_load(read_policy_text(policy_path))
         return SecurityPolicy.model_validate(data)
 
     def _ensure_launcher_dir(self, sandbox_id: str) -> Path:
@@ -3267,9 +3267,10 @@ class ProcessRuntime(RuntimeAdapter):
         password = win_setup.get_sandbox_user_password()
         if not password:
             raise RuntimeError(
-                "无法读取 jbx-sandbox 用户密码; 请先以管理员身份运行 "
-                "'python -m jiuwenbox.supervisor.win_setup --install'"
+                "无法读取 jbx-sandbox 用户密码; 请重新运行安装包, 或管理员执行 "
+                "jiuwenswarm.exe --desktop-run-win-setup --install --force --recreate-user"
             )
+        win_setup.ensure_sandbox_user_can_logon()
         proxy_start = policy.windows.proxy.port_range_start
         proxy_end = policy.windows.proxy.port_range_end
         # 分配 TCP loopback 控制端口 (OS 自动分配空闲端口), env 注入给 runner,

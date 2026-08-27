@@ -78,6 +78,20 @@ DESKTOP_PRESERVED_ENV_KEYS = (
     "FRONTEND_PORT",
 )
 
+# claw_desktop spawn 注入的 invoke mcp/run 凭据；须在 DESKTOP_PRESERVED_ENV_KEYS
+# 之外单独列出，避免 jiuwenswarm desktop_app._build_child_env 被要求带上这些键。
+DESKTOP_PRESERVED_INVOKE_ENV_KEYS = (
+    "AGENT_RUNTIME_MCP_RUN",
+    "CLAW_BUSINESS_CREDENTIAL",
+    "CLAW_XIAOYI_UID",
+    "CLAW_XIAOYI_AK",
+    "CLAW_XIAOYI_SK",
+    "CLAW_XIAOYI_AGENT_ID",
+    "AGENT_RUNTIME_DEVICE_ID",
+    "CLAW_DEVICE_HOSTNAME",
+    "CLAW_DEVICE_SANDBOX_SYSTEM",
+)
+
 # Flag set by jiuwenswarm-start when it injects the resolved port group into
 # child env. Mirrors JIUWENSWARM_DESKTOP=1 for the CLI launcher path (issue #2749).
 CLI_PORTS_ENV_FLAG = "JIUWENSWARM_CLI_PORTS"
@@ -96,9 +110,10 @@ def load_dotenv_runtime(dotenv_path: str | Path | None, *, override: bool = True
 
     Plain processes behave exactly like ``load_dotenv``. Under
     ``JIUWENSWARM_DESKTOP=1`` or ``JIUWENSWARM_CLI_PORTS=1``, any of
-    ``DESKTOP_PRESERVED_ENV_KEYS`` already present in ``os.environ`` are
-    restored after loading so the launcher's resolved port group survives
-    ``override=True`` (avoids banner vs Gateway bind mismatch, issue #2749).
+    ``DESKTOP_PRESERVED_ENV_KEYS`` / ``DESKTOP_PRESERVED_INVOKE_ENV_KEYS``
+    already present in ``os.environ`` are restored after loading so the
+    launcher's resolved port group and spawn-injected invoke credentials
+    survive ``override=True``.
 
     Also drops ``AGENT_SERVER_URL`` in those modes: Gateway prefers that URL
     over ``AGENT_SERVER_PORT``, so a stale value from .env/shell would bypass
@@ -108,8 +123,9 @@ def load_dotenv_runtime(dotenv_path: str | Path | None, *, override: bool = True
     from dotenv import load_dotenv
 
     preserve = _should_preserve_session_ports()
+    saved_keys = DESKTOP_PRESERVED_ENV_KEYS + DESKTOP_PRESERVED_INVOKE_ENV_KEYS
     saved = (
-        {k: os.environ[k] for k in DESKTOP_PRESERVED_ENV_KEYS if k in os.environ}
+        {k: os.environ[k] for k in saved_keys if k in os.environ}
         if preserve
         else {}
     )
@@ -307,6 +323,7 @@ def load_instance_bootstrap_by_name(name: str) -> Path | None:
 __all__ = [
     "CLI_PORTS_ENV_FLAG",
     "DESKTOP_PRESERVED_ENV_KEYS",
+    "DESKTOP_PRESERVED_INVOKE_ENV_KEYS",
     "parse_dotenv_early",
     "load_dotenv_runtime",
     "get_parsed_dotenv",

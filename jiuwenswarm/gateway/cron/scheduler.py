@@ -138,7 +138,7 @@ def _extract_text_from_stream_payload(payload: dict | None) -> str | None:
     return None
 
 
-from jiuwenswarm.common.cron_team_completion import (
+from jiuwenswarm.common.cron_team_completion import (  # noqa: E402
     apply_cron_team_round_event,
     cron_team_round_should_end,
     is_cron_leader_placeholder_text as _is_cron_leader_placeholder_text,
@@ -210,6 +210,12 @@ def _extract_text_from_agent_payload(payload: dict | None) -> str:
     text = payload.get("text")
     if isinstance(text, str) and text:
         return text
+    for _key in ("result", "output", "message", "answer", "data"):
+        _val = payload.get(_key)
+        if isinstance(_val, str) and _val.strip():
+            return _val
+        if _val is not None:
+            return str(_val)
     return ""
 
 
@@ -269,6 +275,7 @@ class CronSchedulerService:
         self._seq = 0
         self._runs: dict[str, CronRunState] = {}  # run_id -> state
         self._run_tasks: dict[str, asyncio.Task] = {}
+        self._concurrency_sem = asyncio.Semaphore(2)  # max 2 concurrent cron tasks
         self._last_store_mtime: float = 0.0
         self._store_poll_interval: float = 5.0  # seconds
 
@@ -1041,7 +1048,7 @@ class CronSchedulerService:
             finally:
                 state.finished_at = self._now_fn()
                 is_cancelled_ghost = state.error == "cancelled"
-                should_deliver_result = bool(state.result_text) and not is_cancelled_ghost
+                should_deliver_result = bool(state.result_text) and not is_cancelled_ghost  # noqa: F841  # pre-existing
                 # Ensure failed runs also produce result_text so push logic can deliver it.
                 # But for cancelled ghost tasks, skip — no result should be pushed for
                 # a job the user has removed.
@@ -1074,7 +1081,11 @@ class CronSchedulerService:
                         "push_update", job.id, run_id,
                     )
 
-        task = asyncio.create_task(_run_agent(), name=f"cron-run-{job.id}")
+        async def _run_agent_guarded() -> None:
+            async with self._concurrency_sem:
+                await _run_agent()
+
+        task = asyncio.create_task(_run_agent_guarded(), name=f"cron-run-{job.id}")
         self._run_tasks[run_id] = task
 
     async def _mark_last_session_ready(self, job: CronJob, exec_session_id: str) -> None:
@@ -1163,15 +1174,11 @@ class CronSchedulerService:
             # _on_push_update 的 "empty result_text" 跳过 → 真实结果永不补发、
             # 占位永久留在界面。这里降级为失败并生成可见文案，触发 error 兜底通道。
             if ok and not text:
-                payload_keys = (
-                    list(resp.payload.keys())
-                    if isinstance(resp.payload, dict)
-                    else type(resp.payload).__name__
-                )
                 logger.warning(
-                    "[Cron] unary succeeded but result_text empty request_id=%s payload_keys=%s",
+                    "[Cron] unary succeeded but result_text empty request_id=%s payload=%s payload_type=%s",
                     getattr(envelope, "request_id", ""),
-                    payload_keys,
+                    resp.payload,
+                    type(resp.payload).__name__,
                 )
                 return "[cron] 任务执行完成但未返回结果内容", False
             return text, ok

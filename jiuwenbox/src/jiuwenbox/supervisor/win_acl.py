@@ -253,6 +253,12 @@ def grant_ace(
         const.RECURSIVE_ACE_FLAGS if recursive else 0
     )
 
+    if recursive and _path_is_heavy_acl_target(path):
+        _set_ace_no_propagate(
+            path, sid_obj, rights=int(rights), mode=mode, inheritable=True,
+        )
+        return
+
     sd = win32security.GetNamedSecurityInfo(
         path,
         win32security.SE_FILE_OBJECT,
@@ -303,6 +309,12 @@ def grant_aces(
             else const.ACCESS_DENIED_ACE_TYPE
         )
         new_aces.append((ace_type, inherit_flags, int(rights), sid_obj))
+    if recursive and _path_is_heavy_acl_target(path):
+        for sid, rights, mode in aces:
+            _set_ace_no_propagate(
+                path, sid, rights=int(rights), mode=mode, inheritable=True,
+            )
+        return
     sd = win32security.GetNamedSecurityInfo(
         path,
         win32security.SE_FILE_OBJECT,
@@ -406,7 +418,36 @@ _HEAVY_DIR_NAMES = frozenset({
     "service worker",
     "cacheddata",
     "crashpad",
+    "desktop",
+    "documents",
+    "downloads",
+    "pictures",
+    "videos",
+    "music",
+    "onedrive",
 })
+
+
+def _path_is_heavy_acl_target(path: str) -> bool:
+    """Desktop / python-win 等大体量目录: 只改自身 DACL."""
+    if not path:
+        return False
+    try:
+        if not os.path.isdir(path):
+            return False
+    except OSError:
+        return False
+    name = os.path.basename(path.rstrip("\\/")).lower()
+    if name in _HEAVY_DIR_NAMES:
+        return True
+    try:
+        home = os.path.normcase(str(Path.home().resolve()))
+        key = os.path.normcase(str(Path(path).expandvars().expanduser().resolve()))
+        return key == home
+    except OSError:
+        return False
+
+
 _DESKTOP_DATA_READ_RIGHTS = const.ALLOW_READ_EXECUTE_RIGHTS
 _DESKTOP_DATA_DENY_RIGHTS = const.DENY_READ_RIGHTS | const.DENY_WRITE_RIGHTS
 

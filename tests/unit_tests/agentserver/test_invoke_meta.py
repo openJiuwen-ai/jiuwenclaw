@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unit tests for invoke_meta (mcp/run OA path + local CloudWsRelay)."""
+"""Unit tests for invoke_meta (product mcp/run businessCredential handshake)."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from jiuwenswarm.agents.harness.common.tools.invoke_meta.invoke_tool import Invo
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.plugin_skill_catalog import (
     extract_seedance_query_state,
     extract_seedance_task_id,
+    invoke_tool_description,
     normalize_plugin_skill_args,
     want_seedance_wait,
 )
@@ -33,6 +34,8 @@ from jiuwenswarm.agents.harness.common.tools.invoke_meta.workspace_context impor
 @pytest.fixture(autouse=True)
 def _clear_mcp_run_env(monkeypatch):
     monkeypatch.delenv("AGENT_RUNTIME_MCP_RUN", raising=False)
+    monkeypatch.setenv("CLAW_BUSINESS_CREDENTIAL", "test-cred")
+    monkeypatch.delenv("CLAW_XIAOYI_UID", raising=False)
 
 
 @pytest.fixture()
@@ -123,7 +126,7 @@ def test_load_external_tools(tools_workspace: Path):
 @pytest.mark.asyncio
 async def test_invoke_device_plugin_rejected(tools_workspace: Path, monkeypatch):
     set_effective_request_workspace_dir(str(tools_workspace))
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     tool = InvokeTool()
     result = await tool.invoke(
         {
@@ -138,7 +141,7 @@ async def test_invoke_device_plugin_rejected(tools_workspace: Path, monkeypatch)
 @pytest.mark.asyncio
 async def test_invoke_plugin_routes_to_cloud_client(tools_workspace: Path, monkeypatch):
     set_effective_request_workspace_dir(str(tools_workspace))
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
 
     mock_invoke = AsyncMock(
         return_value={
@@ -174,7 +177,7 @@ async def test_invoke_plugin_routes_to_cloud_client(tools_workspace: Path, monke
 
 @pytest.mark.asyncio
 async def test_invoke_rejects_invented_bundle(monkeypatch):
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     tool = InvokeTool()
     result = await tool.invoke(
         {
@@ -193,7 +196,7 @@ async def test_invoke_rejects_invented_bundle(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_invoke_rejects_wrong_bundle_for_seedream(monkeypatch):
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     tool = InvokeTool()
     result = await tool.invoke(
         {
@@ -211,7 +214,7 @@ async def test_invoke_rejects_wrong_bundle_for_seedream(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_invoke_rejects_seedream_without_prompt(monkeypatch):
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     tool = InvokeTool()
     result = await tool.invoke(
         {
@@ -229,7 +232,7 @@ async def test_invoke_rejects_seedream_without_prompt(monkeypatch):
 @pytest.mark.asyncio
 async def test_invoke_nested_function_name_without_wrapper(monkeypatch):
     """Skill-doc inner args only: arguments.functionName present, top-level omitted."""
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     captured: dict[str, Any] = {}
 
     mock_invoke = AsyncMock(
@@ -275,7 +278,7 @@ async def test_invoke_nested_function_name_without_wrapper(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_invoke_rejects_invalid_seedream_size(monkeypatch):
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     tool = InvokeTool()
     result = await tool.invoke(
         {
@@ -294,7 +297,7 @@ async def test_invoke_rejects_invalid_seedream_size(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_invoke_lite_rejects_bad_max_images(monkeypatch):
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     tool = InvokeTool()
     result = await tool.invoke(
         {
@@ -313,7 +316,7 @@ async def test_invoke_lite_rejects_bad_max_images(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_invoke_plugin_skill_exec_tool_unwraps(monkeypatch):
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     captured: dict[str, Any] = {}
 
     mock_invoke = AsyncMock(
@@ -350,6 +353,58 @@ async def test_invoke_plugin_skill_exec_tool_unwraps(monkeypatch):
     assert isinstance(spec, ExternalToolSpec)
     assert spec.plugin_id == "com.atomicservice.5765880207845681341"
     assert spec.tool_name == "seedreamLite4Skill"
+
+
+def test_invoke_tool_description_omits_internal_transport():
+    desc = invoke_tool_description()
+    assert "PluginSkillExec" in desc
+    assert "CloudWsRelay" not in desc
+    assert "/ws/link" not in desc
+
+
+@pytest.mark.asyncio
+async def test_invoke_logs_mcp_run_transport(monkeypatch):
+    mcp = "wss://lfhagmirror.hwcloudtest.cn:18449/agent-runtime-service-ws/v1/mcp/run"
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", mcp)
+    logged: list[str] = []
+
+    def _info(msg: str, *args: Any, **kwargs: Any) -> None:
+        logged.append(msg % args if args else str(msg))
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            return {"success": True, "content": "ok"}
+
+    with (
+        patch(
+            "jiuwenswarm.agents.harness.common.tools.invoke_meta.invoke_tool.logger.info",
+            side_effect=_info,
+        ),
+        patch(
+            "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+            _FakeCloudClient,
+        ),
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": {
+                    "functionName": "seedreamLite4Skill",
+                    "bundleName": "com.atomicservice.5765880207845681341",
+                    "prompt": "a dog",
+                },
+            }
+        )
+
+    assert result.get("success") is True
+    text = "\n".join(logged)
+    assert "plugin via mcp/run" in text
+    assert mcp in text
+    assert "plugin via relay" not in text
 
 
 @pytest.mark.asyncio
@@ -443,47 +498,7 @@ def test_is_final_frame_stream_type_final():
     assert CloudPluginClient._is_final_frame({"event": "text", "content": "{}"}) is False
 
 
-def test_build_local_relay_headers_prefer_env(monkeypatch):
-    monkeypatch.setenv("CLAW_XIAOYI_AK", "ak-env")
-    monkeypatch.setenv("CLAW_XIAOYI_SK", "sk-env")
-    monkeypatch.setenv("CLAW_XIAOYI_AGENT_ID", "ag-env")
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime._xiaoyi_channel",
-        lambda: {},
-    )
-    from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
-        build_local_relay_headers,
-    )
-
-    headers = build_local_relay_headers()
-    assert headers["x-relay-role"] == "plugin"
-    assert headers["x-access-key"] == "ak-env"
-    assert headers["x-agent-id"] == "ag-env"
-    assert "x-sign" in headers
-    assert "x-ts" in headers
-
-
-def test_build_local_relay_headers_include_role(monkeypatch):
-    monkeypatch.delenv("CLAW_XIAOYI_AK", raising=False)
-    monkeypatch.delenv("CLAW_XIAOYI_SK", raising=False)
-    monkeypatch.delenv("CLAW_XIAOYI_AGENT_ID", raising=False)
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime._xiaoyi_channel",
-        lambda: {"ak": "ak1", "sk": "sk1", "agent_id": "ag1"},
-    )
-    from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
-        build_local_relay_headers,
-    )
-
-    headers = build_local_relay_headers()
-    assert headers["x-relay-role"] == "plugin"
-    assert headers["x-access-key"] == "ak1"
-    assert headers["x-agent-id"] == "ag1"
-    assert "x-sign" in headers
-    assert "x-ts" in headers
-
-
-def test_mcp_run_url_preferred_over_relay(monkeypatch):
+def test_resolve_plugin_runtime_url_from_mcp_run_env(monkeypatch):
     from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
         is_mcp_run_url,
         resolve_plugin_runtime_url,
@@ -499,56 +514,99 @@ def test_mcp_run_url_preferred_over_relay(monkeypatch):
     assert "/agent-runtime-service-ws/v1/mcp/run" in resolved
 
 
-def test_relay_url_when_mcp_run_unset(monkeypatch):
+def test_resolve_plugin_runtime_url_empty_when_unset(monkeypatch):
     from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
-        is_mcp_run_url,
         resolve_plugin_runtime_url,
     )
 
     monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://127.0.0.1:19690")
-    resolved = resolve_plugin_runtime_url()
-    assert resolved == "ws://127.0.0.1:19690"
-    assert not is_mcp_run_url(resolved)
+    assert resolve_plugin_runtime_url() == ""
 
 
-def test_mcp_run_oa_headers(monkeypatch):
+@pytest.mark.asyncio
+async def test_invoke_requires_mcp_run_url_ignores_relay(monkeypatch):
+    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://127.0.0.1:19690")
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "PluginSkillExecTool",
+            "arguments": {
+                "functionName": "seedreamLite4Skill",
+                "bundleName": "com.atomicservice.5765880207845681341",
+                "prompt": "a dog",
+            },
+        }
+    )
+    assert result.get("success") is False
+    assert "AGENT_RUNTIME_MCP_RUN" in str(result.get("error") or "")
+
+
+@pytest.mark.asyncio
+async def test_invoke_requires_business_credential_ignores_oa_key(monkeypatch):
     monkeypatch.setenv(
         "AGENT_RUNTIME_MCP_RUN",
         "wss://host:18449/agent-runtime-service-ws/v1/mcp/run",
     )
-    monkeypatch.setenv("AGENT_RUNTIME_UID", "30086000686785686")
+    monkeypatch.delenv("CLAW_BUSINESS_CREDENTIAL", raising=False)
     monkeypatch.setenv("OA_API_KEY", "test-key")
     monkeypatch.setenv("OA_REQUEST_FROM", "jiuwenclaw")
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "PluginSkillExecTool",
+            "arguments": {
+                "functionName": "seedreamLite4Skill",
+                "bundleName": "com.atomicservice.5765880207845681341",
+                "prompt": "a dog",
+            },
+        }
+    )
+    assert result.get("success") is False
+    assert "CLAW_BUSINESS_CREDENTIAL" in str(result.get("error") or "")
     from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
         build_runtime_headers,
     )
 
     headers = build_runtime_headers(extra={"x-plugin-session-id": "pluginabc"})
-    assert headers["x-api-key"] == "test-key"
-    assert headers["x-uid"] == "30086000686785686"
+    assert "x-api-key" not in headers
+    assert "x-request-from" not in headers
+    assert "x-sandbox-id" not in headers
     assert headers["x-plugin-session-id"] == "pluginabc"
-    assert headers["x-request-from"] == "jiuwenclaw"
-    assert "x-relay-role" not in headers
-    assert "x-access-key" not in headers
 
 
-def test_relay_headers_still_local_auth(monkeypatch):
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://127.0.0.1:19690")
-    monkeypatch.setenv("CLAW_XIAOYI_AK", "ak-env")
-    monkeypatch.setenv("CLAW_XIAOYI_SK", "sk-env")
-    monkeypatch.setenv("CLAW_XIAOYI_AGENT_ID", "ag-env")
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime._xiaoyi_channel",
-        lambda: {},
+def test_uid_prefers_claw_xiaoyi_uid(monkeypatch):
+    monkeypatch.setenv("CLAW_XIAOYI_UID", "claw-uid")
+    monkeypatch.setenv("AGENT_RUNTIME_UID", "lab-uid")
+    from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
+        resolve_runtime_uid,
     )
+
+    assert resolve_runtime_uid() == "claw-uid"
+
+
+def test_mcp_run_product_headers_prefer_business_credential(monkeypatch):
+    monkeypatch.setenv(
+        "AGENT_RUNTIME_MCP_RUN",
+        "wss://host:18449/agent-runtime-service-ws/v1/mcp/run",
+    )
+    monkeypatch.setenv("CLAW_BUSINESS_CREDENTIAL", "cred-1")
+    monkeypatch.setenv("CLAW_XIAOYI_UID", "uid-product")
+    monkeypatch.setenv("AGENT_RUNTIME_DEVICE_ID", "dev-product")
+    monkeypatch.setenv("OA_API_KEY", "should-not-use")
     from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
         build_runtime_headers,
     )
 
-    headers = build_runtime_headers(url="ws://127.0.0.1:19690")
-    assert headers["x-relay-role"] == "plugin"
-    assert headers["x-access-key"] == "ak-env"
+    headers = build_runtime_headers(extra={"x-plugin-session-id": "pluginabc"})
+    assert headers["businessCredential"] == "cred-1"
+    assert headers["x-uid"] == "uid-product"
+    assert headers["x-device-id"] == "dev-product"
+    assert headers["x-plugin-session-id"] == "pluginabc"
+    assert "x-hag-trace-id" in headers
     assert "x-api-key" not in headers
+    assert "x-request-from" not in headers
+    assert "x-sandbox-id" not in headers
+    assert "x-relay-role" not in headers
 
 
 def test_mcp_run_extra_info_uses_request_txt_device(monkeypatch):
@@ -591,6 +649,12 @@ def test_needs_insecure_ssl_for_test_host_and_ip():
 def test_extract_seedance_task_id_from_json_content():
     assert extract_seedance_task_id({"content": '{"task_id":"cgt-1"}'}) == "cgt-1"
     assert extract_seedance_task_id({"content": {"id": "cgt-2"}}) == "cgt-2"
+    assert (
+        extract_seedance_task_id(
+            {"content": '{"items":[{"id":"cgt-20260826000744-5bttn"}]}'}
+        )
+        == "cgt-20260826000744-5bttn"
+    )
 
 
 def test_extract_seedance_query_state():
@@ -603,6 +667,35 @@ def test_extract_seedance_query_state():
     )
     assert status == "succeeded"
     assert url == "https://cdn.example/a.mp4"
+
+
+def test_extract_seedance_query_state_from_items():
+    status, url = extract_seedance_query_state(
+        {
+            "content": json.dumps(
+                {
+                    "items": [
+                        {
+                            "id": "cgt-20260826000744-5bttn",
+                            "status": "succeeded",
+                            "video_url": "https://cdn.example/a.mp4",
+                        }
+                    ]
+                }
+            )
+        }
+    )
+    assert status == "succeeded"
+    assert url == "https://cdn.example/a.mp4"
+
+
+def test_normalize_seedance_string_content_to_text_array():
+    out, err = normalize_plugin_skill_args(
+        "seedanceMiniTask",
+        {"content": "一只在月光下奔跑的狐狸", "duration": 10},
+    )
+    assert err is None
+    assert out["content"] == [{"type": "text", "text": "一只在月光下奔跑的狐狸"}]
 
 
 def test_want_seedance_wait_defaults_true():
@@ -624,7 +717,7 @@ def _seedance_task_args(**extra: Any) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_invoke_seedance_auto_polls_until_video_url(monkeypatch):
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     monkeypatch.setenv("SEEDANCE_POLL_INTERVAL", "0")
     monkeypatch.setenv("SEEDANCE_POLL_TIMEOUT", "30")
     names: list[str] = []
@@ -636,16 +729,29 @@ async def test_invoke_seedance_auto_polls_until_video_url(monkeypatch):
         async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
             names.append(spec.tool_name)
             if spec.tool_name == "seedanceMiniTask":
-                return {"success": True, "content": json.dumps({"task_id": "cgt-1"})}
+                return {
+                    "success": True,
+                    "content": json.dumps({"items": [{"id": "cgt-1"}]}),
+                }
             query_count = names.count("seedanceMiniTaskQuery")
             if query_count == 1:
-                return {"success": True, "content": json.dumps({"status": "running"})}
+                return {
+                    "success": True,
+                    "content": json.dumps(
+                        {"items": [{"id": "cgt-1", "status": "running"}]}
+                    ),
+                }
             return {
                 "success": True,
                 "content": json.dumps(
                     {
-                        "status": "succeeded",
-                        "content": {"video_url": "https://cdn.example/a.mp4"},
+                        "items": [
+                            {
+                                "id": "cgt-1",
+                                "status": "succeeded",
+                                "video_url": "https://cdn.example/a.mp4",
+                            }
+                        ]
                     }
                 ),
             }
@@ -668,7 +774,7 @@ async def test_invoke_seedance_auto_polls_until_video_url(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_invoke_seedance_wait_false_skips_poll(monkeypatch):
-    monkeypatch.setenv("XIAOYI_RELAY_WS_URL", "ws://example.test/relay")
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     names: list[str] = []
 
     class _FakeCloudClient:
@@ -695,6 +801,43 @@ async def test_invoke_seedance_wait_false_skips_poll(monkeypatch):
     assert result.get("success") is True
     assert names == ["seedanceMiniTask"]
     assert "cgt-9" in str(result.get("content", ""))
+
+
+@pytest.mark.asyncio
+async def test_invoke_seedance_string_content_reaches_plugin(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    seen: list[dict[str, Any]] = []
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            seen.append(dict(arguments))
+            return {
+                "success": True,
+                "content": json.dumps({"items": [{"id": "cgt-str"}]}),
+            }
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": _seedance_task_args(
+                    wait=False,
+                    content="一只在月光下奔跑的狐狸",
+                ),
+            }
+        )
+
+    assert result.get("success") is True
+    assert "须提供 arguments.content 数组" not in str(result.get("error") or "")
+    assert seen
+    assert seen[0]["content"] == [{"type": "text", "text": "一只在月光下奔跑的狐狸"}]
 
 
 def test_design_system_prompt_includes_video_workflow():

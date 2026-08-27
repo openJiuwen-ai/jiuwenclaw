@@ -339,20 +339,21 @@ acp_agents:
 #     max_iterations: 300
 #
 agents:
-  # 统一元工具 invoke：云插件直连 mcp/run，或经桌面 CloudWsRelay 复用 /ws/link（默认开启）
+  # 统一元工具 invoke：云插件直连 mcp/run（默认开启）
+  # 产品（小艺 Work）：桌面 spawn 注入 AGENT_RUNTIME_MCP_RUN / CLAW_BUSINESS_CREDENTIAL /
+  #   CLAW_XIAOYI_UID / 设备字段，用户无需写 .env
+  # 握手头：businessCredential + x-uid + x-device-id + 随机 x-hag-trace-id（无 OA 头）
+  # 缺 URL 或缺凭证时该次工具调用失败，不中断会话
   # 环境变量：
-  #   AGENT_RUNTIME_MCP_RUN       — 直连完整插件 WS URL（优先于本机中转，不拼接路径）
-  #                                  例：wss://host:18449/agent-runtime-service-ws/v1/mcp/run
-  #   XIAOYI_RELAY_WS_URL          — 本机中转（缺省 ws://127.0.0.1:19690；桌面 spawn 注入）
-  #   AGENT_RUNTIME_BASEURL       — agent_as_a_tool 分支（可选）
-  #   AGENT_RUNTIME_UID           — 数字业务 uid（握手 x-uid 与 extraInfo.userInfo.uid）
-  #   OA_API_KEY / OA_REQUEST_FROM / OA_SANDBOX_ID / OA_HAG_TRACE_ID — mcp/run OA 头
+  #   AGENT_RUNTIME_MCP_RUN       — 完整插件 WS URL（不拼接路径）
+  #   CLAW_BUSINESS_CREDENTIAL    — mcp/run 握手凭证
+  #   CLAW_XIAOYI_UID             — 握手 x-uid（优先）；否则 AGENT_RUNTIME_UID / 渠道 uid
+  #   AGENT_RUNTIME_BASEURL       — agent_as_a_tool（可选）
   #   AGENT_RUNTIME_WS_TIMEOUT    — 插件等待超时秒数（缺省 120）
   # 云端能力以 skill 文档为准（白名单校验，禁止臆造 bundleName）：
   #   生图  seedreamLite4Skill|SeedreamPro4Skill + bundleName=com.atomicservice.5765880207845681341
-  #   生视频 seedanceMiniTask|seedanceMiniTaskQuery + 同上 bundleName
+  #   生视频 seedanceMiniTask|seedanceMiniTaskQuery + 同上；默认轮询到成片
   #   图像理解 imageUnderStandStream + bundleName=xiaoyi
-  # mcp/run 鉴权为 OA 头；本机中转鉴权由桌面 relay 握手承担
   invoke_tool:
     enabled: true
 
@@ -893,7 +894,7 @@ channels:
 #
 # 三种动作: allow / ask / deny
 permissions:
-  enabled: false
+  enabled: true
   schema: tiered_policy
   permission_mode: normal
 
@@ -1030,6 +1031,22 @@ permissions:
       tools: [bash, mcp_exec_command, create_terminal]
       pattern: "chown *"
       severity: HIGH
+    - id: shell_ask_remove_item
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "Remove-Item *"
+      severity: HIGH
+    - id: shell_ask_ri
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "ri *"
+      severity: HIGH
+    - id: shell_ask_rmdir
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "rmdir *"
+      severity: HIGH
+    - id: shell_ask_erase
+      tools: [bash, powershell, mcp_exec_command, create_terminal]
+      pattern: "erase *"
+      severity: HIGH
     - id: shell_ask_sensitive_file_reads
       tools: [bash, mcp_exec_command, create_terminal]
       pattern: 're:(?i)(^|[\s;&|()])((cat|type|less|more|head|tail|grep|find|Get-Content|Select-String)\b[^;&|]*(id_rsa|id_ed25519|\.pem\b|\.pfx\b|\.key\b|\.kube/config|\.aws/(credentials|config)|\.npmrc\b|\.env(\.[A-Za-z0-9_-]+)?\b|authorized_keys|\.ssh/))'
@@ -1046,13 +1063,13 @@ permissions:
   file_guard:
     enabled: true
     defaults:
-      read: ask
-      write: ask
+      read: allow
+      write: allow
       exec: ask
     workspace:
       read: allow
       write: allow
-      exec: ask
+      exec: allow
     paths:
       - path: "**/.ssh/**"
         match: glob
@@ -1364,7 +1381,7 @@ modes:
 # sandbox.enabled: true 时才 install + 创建沙箱进程 (opt-in, 避免开箱即拉起)。
 # ============================================================
 sandbox:
-  enabled: true
+  enabled: false
   startup_mode: internal
   url: http://127.0.0.1:8321
   type: jiuwenbox

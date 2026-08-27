@@ -14,6 +14,7 @@ from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_response_for_wire,
 )
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.e2a.wire_trace import trace_outbound
 from jiuwenswarm.common.ws_limits import AGENT_WS_SEND_BUDGET_BYTES
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ async def _transport_send(ws: Any, data: str) -> None:
 
 async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
     """Send one bounded wire payload, replacing oversized data with an error."""
+    trace_outbound(wire)
     serialized = json.dumps(wire, ensure_ascii=False)
     actual_bytes = len(serialized.encode("utf-8"))
     if actual_bytes <= AGENT_WS_SEND_BUDGET_BYTES:

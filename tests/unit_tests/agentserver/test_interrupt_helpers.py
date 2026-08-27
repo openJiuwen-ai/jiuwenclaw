@@ -168,6 +168,13 @@ def test_scene_hook_leaves_other_tools_to_engine():
     assert outcome is None
 
 
+def test_build_permission_rail_wires_session_persist_hook():
+    rail = build_permission_rail({"permissions": {"enabled": True}})
+    assert rail is not None
+    assert rail._host.persist_session_allow_rule is not None
+    assert rail._host.get_permissions_snapshot is not None
+
+
 def test_build_multi_questions_ignores_string_options():
     """Regression for #2331: options='a,b' must not become character options + Other."""
     from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
