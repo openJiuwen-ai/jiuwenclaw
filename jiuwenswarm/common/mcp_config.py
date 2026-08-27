@@ -1061,6 +1061,21 @@ async def _discover_and_cache_office_claw_mcp_schema(
 
 
 _OFFICE_CLAW_MCP_MANIFEST_ENV = "OFFICE_CLAW_MCP_MANIFEST_PATH"
+_OFFICE_CLAW_MCP_MANIFEST_SWITCH_ENV = "JIUWENSWARM_MCP_MANIFEST"
+_OFFICE_CLAW_MCP_MANIFEST_OFF = frozenset({"0", "false", "no", "off"})
+
+
+def _office_claw_mcp_manifest_enabled() -> bool:
+    """Toggle for the manifest fast path (default on).
+
+    Set ``JIUWENSWARM_MCP_MANIFEST=0/false/no/off`` to disable and fall
+    back to live spawn discovery — identical to the behavior before this
+    feature was introduced.
+    """
+    return (
+        str(os.environ.get(_OFFICE_CLAW_MCP_MANIFEST_SWITCH_ENV, "") or "").strip().lower()
+        not in _OFFICE_CLAW_MCP_MANIFEST_OFF
+    )
 
 
 def _office_claw_mcp_manifest_fingerprint_matches(
@@ -1103,6 +1118,8 @@ def _load_office_claw_mcp_manifest(
     Returns ``None`` when the manifest is absent/unreadable or the fingerprint
     does not match, so callers fall back to live discovery.
     """
+    if not _office_claw_mcp_manifest_enabled():
+        return None
     manifest_path = str(os.environ.get(_OFFICE_CLAW_MCP_MANIFEST_ENV, "") or "").strip()
     if not manifest_path:
         return None
