@@ -11,8 +11,6 @@ export {
   resolveChatModelSelection,
   resolveConfiguredModelName,
   resolveEffectiveModel,
-  modelSelectKey,
-  modelDisplayName,
 } from './sessionStore';
 export { PROJECT_SESSION_PAGE_SIZE, useWorkspaceStore } from './workspaceStore';
 export { useHarnessStore } from './harnessStore';
