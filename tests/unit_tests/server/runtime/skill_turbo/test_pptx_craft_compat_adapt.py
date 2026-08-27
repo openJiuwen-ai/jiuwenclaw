@@ -11,6 +11,9 @@ import pytest
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_page_gen import (
     _build_content_template_fill_prompt,
     _extract_designer_section,
+    _uses_content_template_fill,
+    _uses_structural_template_fill,
+    _validate_custom_content_template_fill_output,
 )
 from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import skill_turbo
 
@@ -150,8 +153,56 @@ def test_content_fill_prompt_custom_vs_preset_page_content_rules():
 
     assert "一个且仅一个首层根容器" not in custom_prompt
     assert "至少两个直接子块" in custom_prompt
+    assert "THEME_CSS_VARIABLES" in custom_prompt
+    assert "只允许替换 3 类占位符" not in custom_prompt
+    assert "只替换三处占位符" not in custom_prompt
     assert "一个且仅一个首层根容器" in preset_prompt
     assert "至少两个直接子块" not in preset_prompt
+    assert "只允许替换 3 类占位符" in preset_prompt
+
+
+_RESEARCH_OUTLINE = """**类型**：content
+**标题**：测试内容页
+**研究需求**：✅
+**页研究查询**：foo
+"""
+
+
+def test_uses_content_template_fill_allows_custom():
+    assert _uses_content_template_fill("custom", "content", _RESEARCH_OUTLINE) is True
+    assert _uses_content_template_fill("business-classic", "content", _RESEARCH_OUTLINE) is True
+    assert _uses_structural_template_fill("custom", "cover") is True
+    assert _uses_content_template_fill("custom", "cover", _RESEARCH_OUTLINE) is False
+
+
+def test_validate_custom_content_fill_theme_and_placeholders():
+    # _is_valid_html 要求长度 >= 200；_validate_slide_dom 要求 class="...ppt-slide"
+    pad = "<!-- pad -->" * 20
+    seed = (
+        '<!DOCTYPE html><html><head><style id="theme-contract">'
+        "{{THEME_CSS_VARIABLES}}</style></head><body>"
+        f"{pad}"
+        '<div class="ppt-slide"><div class="content-safe">'
+        "<header><h1>{{PAGE_TITLE}}</h1></header>"
+        '<main class="page-main flex-1">{{PAGE_CONTENT}}</main>'
+        "<footer><p>{{PAGE_FOOTER}}</p></footer>"
+        "</div></div></body></html>"
+    )
+    filled_ok = seed.replace("{{THEME_CSS_VARIABLES}}", "--color-text:#111;")
+    filled_ok = filled_ok.replace("{{PAGE_TITLE}}", "标题")
+    filled_ok = filled_ok.replace(
+        "{{PAGE_CONTENT}}",
+        '<section class="flex-shrink-0">a</section>'
+        '<div class="flex-1 min-h-0">b</div>',
+    )
+    filled_ok = filled_ok.replace("{{PAGE_FOOTER}}", "来源")
+    ok, reason = _validate_custom_content_template_fill_output(seed, filled_ok)
+    assert ok, reason
+
+    filled_theme_left = filled_ok.replace("--color-text:#111;", "{{THEME_CSS_VARIABLES}}")
+    ok2, reason2 = _validate_custom_content_template_fill_output(seed, filled_theme_left)
+    assert not ok2
+    assert reason2 == "unfilled_placeholders"
 
 
 @pytest.mark.asyncio

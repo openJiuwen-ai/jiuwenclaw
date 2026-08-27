@@ -140,7 +140,7 @@ _CONTENT_FILL_DENSITY_CHECKLIST = """### PAGE_CONTENT 密度硬约束（填槽�
 
 
 _PRESET_STYLE_IDS = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
-# Stage 6 §3.5/§3.6：预设四风格 + custom 的结构页走官方模板预铺填槽，禁止整页自由重写。
+# Stage 6 §3.5/§3.6：预设四风格 + custom 走官方模板预铺填槽（结构页 + 内容页）。
 _AGENDA_TEMPLATE_FILL_STYLE_IDS = _PRESET_STYLE_IDS | {"custom"}
 _STRUCTURAL_TEMPLATE_PAGE_TYPES: dict[str, str] = {
     "cover": "cover",
@@ -206,8 +206,8 @@ def _outline_needs_research(outline_page: str) -> bool:
 
 
 def _uses_content_template_fill(style_id: str, page_type: str, outline_page: str) -> bool:
-    """预设四风格内容页：官方 content-template 预铺后仅填槽。"""
-    if style_id not in _PRESET_STYLE_IDS:
+    """四预设 ∪ custom 内容页：官方 content-template 预铺后仅填槽。"""
+    if style_id not in _AGENDA_TEMPLATE_FILL_STYLE_IDS:
         return False
     if page_type in _STRUCTURAL_TEMPLATE_PAGE_TYPES:
         return False
@@ -220,11 +220,6 @@ def _uses_structural_template_fill(style_id: str, page_type: str) -> bool:
         page_type in _STRUCTURAL_TEMPLATE_PAGE_TYPES
         and style_id in _AGENDA_TEMPLATE_FILL_STYLE_IDS
     )
-
-
-def _uses_agenda_template_fill(style_id: str, page_type: str) -> bool:
-    """普通分支下 agenda 是否走官方 agenda-template 预铺填槽。"""
-    return _uses_structural_template_fill(style_id, page_type) and page_type == "agenda"
 
 
 def _resolve_style_page_template_path(
@@ -619,6 +614,30 @@ def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> 
     return True, ""
 
 
+def _validate_custom_content_template_fill_output(
+    seed_html: str, filled_html: str
+) -> tuple[bool, str]:
+    """custom 内容页填槽轻量校验（对齐结构页；不做 head 全等 / chrome repair）。"""
+    if not _is_valid_html(filled_html):
+        return False, "invalid_html"
+    if _has_unfilled_placeholders(filled_html):
+        return False, "unfilled_placeholders"
+    seed_main_tag = _extract_main_open_tag(seed_html)
+    filled_main_tag = _extract_main_open_tag(filled_html)
+    if not seed_main_tag or seed_main_tag != filled_main_tag:
+        return False, "main_tag_changed"
+    main_inner_html = _extract_main_inner_html(filled_html)
+    if not main_inner_html.strip():
+        return False, "empty_page_content"
+    if "{{PAGE_CONTENT}}" in main_inner_html:
+        return False, "page_content_unfilled"
+    if not _validate_slide_dom(filled_html):
+        return False, "invalid_dom"
+    if not _validate_chart_height_chain(filled_html):
+        return False, "invalid_chart_height_chain"
+    return True, ""
+
+
 def _build_content_layout_template(page_type: str) -> str:
     layout = _PAGE_LAYOUT_TEMPLATES.get(page_type, "")
     if not layout:
@@ -650,7 +669,7 @@ def _build_content_template_fill_prompt(
     total_pages: int = 0,
     rewrite_hint: str = "",
 ) -> str:
-    """预设四风格内容页：content-template 预铺后仅填三处占位符。"""
+    """内容页 content-template 预铺填槽 prompt（四预设三槽；custom 含 THEME_*）。"""
     user_query_section = ""
     if user_query:
         user_query_section = (
@@ -667,12 +686,17 @@ def _build_content_template_fill_prompt(
         total_pages or page_number,
     )
     designer_section = ""
-    # 填槽路径始终注入密度短清单（及可选图表短片段）；无 designer 原文时仍用清单。
     designer_md = _extract_designer_section(
         designer_md_text or "",
         include_charts=page_type in _CHART_CANDIDATE_TYPES,
         for_content_template_fill=True,
     )
+    if style_id == "custom" and designer_md:
+        designer_md = designer_md.replace(
+            "- 只替换三处占位符；禁止先写 YAML 预算、开 subagent 或重写整页骨架。",
+            "- 替换模板中实际出现的占位符（含 THEME_* 与 PAGE_*）；"
+            "禁止先写 YAML 预算、开 subagent 或重写整页骨架。",
+        )
     if designer_md:
         designer_section = f"\n## skill designer 约束（仅作用于 `{{PAGE_CONTENT}}`）\n{designer_md}\n"
     layout_template = _build_content_layout_template(page_type)
@@ -683,8 +707,6 @@ def _build_content_template_fill_prompt(
             f"{rewrite_hint}\n"
             "⚠️ 仅修复上述不通过项，不要改动其他正常部分。\n"
         )
-    # custom content-template：page-main 已是根容器，PAGE_CONTENT 须 ≥2 直接子块；
-    # 四预设仍用唯一首层根容器（与现行预设脚手架一致）。
     if style_id == "custom":
         page_content_rule = (
             "5. `{{PAGE_CONTENT}}` 必须作为 `<main class=\"page-main\">` 的至少两个直接子块"
@@ -692,38 +714,81 @@ def _build_content_template_fill_prompt(
             "（如 `flex-shrink-0` / `flex-1 min-h-0`）；需要分栏时只在其中一个直接子块内部"
             "使用 grid/flex-row，禁止再用唯一根容器包住全部内容\n"
         )
+        task_line = (
+            f"## 任务：填充第 {page_number} 页 custom content-template 官方模板\n"
+        )
+        fill_rules = (
+            "## 填充规则（对齐 Stage 6 §3.6，严格遵守）\n"
+            "1. 已预铺 `custom/content-template.html` 脚手架：逐字保留 `.ppt-slide` 硬约束、"
+            "`.content-safe` / `.page-header` / `.page-main` / `.page-footer`、"
+            "`@layer utilities` 与 theme-contract 插槽结构\n"
+            "2. 仅替换实际出现的占位符：`{{THEME_CSS_VARIABLES}}`、`{{THEME_CSS_RULES}}`、"
+            "`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`；未提供的主题槽替换为空\n"
+            "3. `{{PAGE_TITLE}}` 只填写本页标题文字；不得改 `<h1>` / `.page-title` 的 class\n"
+            "4. `{{PAGE_FOOTER}}` 只填写来源/备注；不得追加运行页码\n"
+            f"{page_content_rule}"
+            "6. 不得修改预铺模板 `<main>` 的 class；所有布局变化仅在 `{{PAGE_CONTENT}}` 内完成\n"
+            "7. PAGE_* 占位符须填有意义内容；THEME 槽无内容时替换为空；"
+            "禁止用 `—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位` 敷衍 PAGE_*\n"
+            "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；"
+            "禁止额外手写第二套图表初始化框架\n"
+            "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
+        )
+        chrome_section = (
+            "## 框架约束\n"
+            "- 框架与 `@layer utilities`、theme-contract **插槽结构**逐字保留；"
+            "允许填入 `{{THEME_CSS_VARIABLES}}` / `{{THEME_CSS_RULES}}`\n"
+            "- 允许改动：主题槽、`<title>`/`<h1>` 文字、`<main>` 内部、footer 首个 `<p>` 文字\n"
+            "- 禁止增删/重排框架节点，禁止改框架 class，禁止把内容挪到 header/footer/`<head>`\n"
+            "- 不要“重新生成一版更美观的同款页面”\n\n"
+        )
+        seed_caption = (
+            "## 预铺模板 HTML（只填槽，勿重写框架；须填满模板中实际出现的 {{...}}）\n"
+        )
     else:
         page_content_rule = (
             "5. `{{PAGE_CONTENT}}` 必须替换为一个且仅一个首层根容器，"
             "根容器必须带 `w-full flex-1 min-h-0`\n"
         )
+        task_line = (
+            f"## 任务：填充第 {page_number} 页预设风格 content-template 官方模板\n"
+        )
+        fill_rules = (
+            "## 填充规则（对齐 Stage 6 §3.5，严格遵守）\n"
+            "1. **字面拷贝已完成**：下方 HTML 即官方 `content-template.html` 预铺结果；"
+            "禁止重写整页、禁止改标题栏/页脚/CSS/`@layer utilities`/装饰/SVG/Tailwind class 顺序\n"
+            "2. **只允许替换 3 类占位符**：`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`\n"
+            "3. `{{PAGE_TITLE}}` 只填写本页标题文字；不得改 `<h1>` 的 class、字号、字重、字体、装饰线、padding\n"
+            "4. `{{PAGE_FOOTER}}` 只填写来源/备注；不得追加运行页码\n"
+            f"{page_content_rule}"
+            "6. 不得修改预铺模板 `<main>` 的 class；所有布局变化仅在 `{{PAGE_CONTENT}}` 内完成\n"
+            "7. 每个占位符必须填有意义内容；禁止空串、`—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位`\n"
+            "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；禁止额外手写第二套图表初始化框架\n"
+            "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
+        )
+        chrome_section = (
+            "## Page Chrome 硬锁（违反将导致校验失败 `content_template_chrome_changed`）\n"
+            "- **Chrome = 除 `{{PAGE_CONTENT}}` 以外的一切**：`<head>`（含 script/link/style/`tailwind.config`）、"
+            "`.content-safe` 到 `<main>` 之前的 header 带、`<main>` 开标签、footer 骨架\n"
+            "- **允许改动的仅是占位符文本**：\n"
+            "  - `<title>` / `<h1>` 内文字 ← `{{PAGE_TITLE}}`\n"
+            "  - footer 内首个 `<p>` 文字 ← `{{PAGE_FOOTER}}`\n"
+            "  - `<main>` **内部** HTML ← `{{PAGE_CONTENT}}`\n"
+            "- **禁止**增删/重排 chrome 节点，禁止改 chrome 上的 class/style/属性/注释/空白结构，"
+            "禁止把图表、卡片、遮罩、装饰线挪到 header/footer/`<head>`\n"
+            "- **操作方式**：以预铺 HTML 为底稿，只做三处字符串级替换后原样输出；"
+            "不要“重新生成一版更美观的同款页面”\n"
+            "- **自检**：输出前对比预铺稿——若除上述三处文本/main 内部外仍有任何差异，必须撤回重填\n\n"
+        )
+        seed_caption = (
+            "## 预铺模板 HTML（只填槽，勿重写；Chrome 必须与下方稿逐字节一致，除三处占位符外）\n"
+        )
     return (
         f"{user_query_section}"
-        f"## 任务：填充第 {page_number} 页预设风格 content-template 官方模板\n"
+        f"{task_line}"
         f"style_id=`{style_id}`，模板=`content-template.html`。你是模板填充师，不是自由排版设计师。\n\n"
-        "## 填充规则（对齐 Stage 6 §3.5，严格遵守）\n"
-        "1. **字面拷贝已完成**：下方 HTML 即官方 `content-template.html` 预铺结果；"
-        "禁止重写整页、禁止改标题栏/页脚/CSS/`@layer utilities`/装饰/SVG/Tailwind class 顺序\n"
-        "2. **只允许替换 3 类占位符**：`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`\n"
-        "3. `{{PAGE_TITLE}}` 只填写本页标题文字；不得改 `<h1>` 的 class、字号、字重、字体、装饰线、padding\n"
-        "4. `{{PAGE_FOOTER}}` 只填写来源/备注；不得追加运行页码\n"
-        f"{page_content_rule}"
-        "6. 不得修改预铺模板 `<main>` 的 class；所有布局变化仅在 `{{PAGE_CONTENT}}` 内完成\n"
-        "7. 每个占位符必须填有意义内容；禁止空串、`—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位`\n"
-        "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；禁止额外手写第二套图表初始化框架\n"
-        "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
-        "## Page Chrome 硬锁（违反将导致校验失败 `content_template_chrome_changed`）\n"
-        "- **Chrome = 除 `{{PAGE_CONTENT}}` 以外的一切**：`<head>`（含 script/link/style/`tailwind.config`）、"
-        "`.content-safe` 到 `<main>` 之前的 header 带、`<main>` 开标签、footer 骨架\n"
-        "- **允许改动的仅是占位符文本**：\n"
-        "  - `<title>` / `<h1>` 内文字 ← `{{PAGE_TITLE}}`\n"
-        "  - footer 内首个 `<p>` 文字 ← `{{PAGE_FOOTER}}`\n"
-        "  - `<main>` **内部** HTML ← `{{PAGE_CONTENT}}`\n"
-        "- **禁止**增删/重排 chrome 节点，禁止改 chrome 上的 class/style/属性/注释/空白结构，"
-        "禁止把图表、卡片、遮罩、装饰线挪到 header/footer/`<head>`\n"
-        "- **操作方式**：以预铺 HTML 为底稿，只做三处字符串级替换后原样输出；"
-        "不要“重新生成一版更美观的同款页面”\n"
-        "- **自检**：输出前对比预铺稿——若除上述三处文本/main 内部外仍有任何差异，必须撤回重填\n\n"
+        f"{fill_rules}"
+        f"{chrome_section}"
         "## 风格文件（正文区配色/字体/组件权威；不得把风格元数据写成观众可见文字）\n"
         f"{style_text}\n\n"
         "## 大纲 — 本页规划\n"
@@ -736,7 +801,7 @@ def _build_content_template_fill_prompt(
         f"{designer_section}"
         f"{layout_template}\n"
         f"{rewrite_section}"
-        "## 预铺模板 HTML（只填槽，勿重写；Chrome 必须与下方稿逐字节一致，除三处占位符外）\n"
+        f"{seed_caption}"
         f"{seed_html}\n"
     )
 
@@ -3713,14 +3778,10 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
         )
         return html
 
-    async def _generate_agenda_template_fill(self, ctx: PageGenContext) -> str:
-        """预设/custom agenda：官方模板预铺 + 仅填 {{}}。"""
-        return await self._generate_structural_template_fill(ctx, "agenda")
-
     async def _generate_content_template_fill(
         self, ctx: PageGenContext, *, rewrite_hint: str = ""
     ) -> tuple[str, str, str]:
-        """预设四风格内容页：官方 content-template 预铺 + 仅填三处占位符。
+        """四预设 ∪ custom 内容页：官方 content-template 预铺填槽。
 
         返回 (校验通过的 html 或空串, 最后一次产物 html 或空串, 失败 reason 或空串)。
         """
@@ -3760,11 +3821,21 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                     rewrite_hint=rewrite_hint,
                 ),
                 system_prompt=(
-                    "你是 PPT 内容页模板填充师，不是设计师。"
-                    "唯一任务：在预铺 HTML 上替换 {{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}} 三处占位符。"
-                    "Page Chrome（head/header/`<main>` 开标签/footer 骨架/class/script/style）必须与预铺稿保持一致；"
-                    "改 chrome 会触发 content_template_chrome_changed 校验失败。"
-                    "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
+                    (
+                        "你是 PPT 内容页模板填充师，不是设计师。"
+                        "替换预铺 HTML 中实际出现的占位符（含 {{THEME_CSS_VARIABLES}}、"
+                        "{{THEME_CSS_RULES}}、{{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}}；"
+                        "未提供的主题槽填空）。保留框架 class/@layer/theme-contract 插槽结构；"
+                        "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
+                    )
+                    if ctx.style_id == "custom"
+                    else (
+                        "你是 PPT 内容页模板填充师，不是设计师。"
+                        "唯一任务：在预铺 HTML 上替换 {{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}} 三处占位符。"
+                        "Page Chrome（head/header/`<main>` 开标签/footer 骨架/class/script/style）必须与预铺稿保持一致；"
+                        "改 chrome 会触发 content_template_chrome_changed 校验失败。"
+                        "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
+                    )
                 ),
                 node_name=f"p8_1_content_fill_{ctx.page_num}",
                 concurrent=True,
@@ -3788,8 +3859,15 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
         html = _strip_unsupported_fullpage_overlays(html)
         html = _strip_chart_header_unit(html)
         html = _fix_chart_height_chain(html)
-        ok, reason = _validate_content_template_fill_output(seed_html, html)
-        if not ok and reason in _REPAIRABLE_CONTENT_TEMPLATE_REASONS:
+        if ctx.style_id == "custom":
+            ok, reason = _validate_custom_content_template_fill_output(seed_html, html)
+        else:
+            ok, reason = _validate_content_template_fill_output(seed_html, html)
+        if (
+            ctx.style_id != "custom"
+            and not ok
+            and reason in _REPAIRABLE_CONTENT_TEMPLATE_REASONS
+        ):
             repaired = _repair_content_template_chrome(seed_html, html)
             if repaired:
                 repaired = _fix_echarts_svg_renderer(repaired)
