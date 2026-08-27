@@ -435,6 +435,7 @@ def test_build_inputs_injects_project_dir_as_trusted_when_workspace_read_allow(m
     )
     asyncio.run(interface_module.JiuWenSwarm().process_message(request))
     assert fake_adapter.seen_inputs["trusted_dirs"] == [os.path.abspath("/tmp/project")]
+    assert '"trusted_dirs"' not in fake_adapter.seen_inputs["query"]
 
 
 def test_build_inputs_skips_injection_when_workspace_read_ask(monkeypatch):
@@ -469,6 +470,7 @@ def test_build_inputs_preserves_explicit_trusted_dirs_even_when_read_ask(monkeyp
     )
     asyncio.run(interface_module.JiuWenSwarm().process_message(request))
     assert fake_adapter.seen_inputs["trusted_dirs"] == ["/tmp/explicit"]
+    assert '"trusted_dirs"' in fake_adapter.seen_inputs["query"]
 
 
 def test_build_inputs_skips_injection_when_workspace_access_raises(monkeypatch):
@@ -486,6 +488,28 @@ def test_build_inputs_skips_injection_when_workspace_access_raises(monkeypatch):
     )
     asyncio.run(interface_module.JiuWenSwarm().process_message(request))
     assert "trusted_dirs" not in fake_adapter.seen_inputs
+
+
+def test_build_inputs_explicit_trusted_dirs_still_in_user_message_when_read_allow(monkeypatch):
+    interface_module, fake_adapter = _prepare_build_inputs_trusted_dirs_test(monkeypatch)
+    monkeypatch.setattr(
+        interface_module,
+        "get_permissions_file_guard_workspace_access",
+        lambda: {"read": "allow", "write": "allow", "exec": "allow"},
+    )
+    request = AgentRequest(
+        request_id="req-explicit-allow",
+        channel_id="tui",
+        session_id="tui_session",
+        params={
+            "query": "hello",
+            "project_dir": "/tmp/project",
+            "trusted_dirs": ["/tmp/explicit"],
+        },
+    )
+    asyncio.run(interface_module.JiuWenSwarm().process_message(request))
+    assert fake_adapter.seen_inputs["trusted_dirs"] == ["/tmp/explicit"]
+    assert '"trusted_dirs"' in fake_adapter.seen_inputs["query"]
 
 
 def test_build_inputs_propagates_user_interaction_capability(monkeypatch):
