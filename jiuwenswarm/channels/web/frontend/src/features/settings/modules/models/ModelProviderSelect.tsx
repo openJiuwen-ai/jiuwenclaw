@@ -64,6 +64,7 @@ export function ModelProviderSelect({
   value,
   protocol,
   catalog,
+  includeOpenAIAccount = true,
   disabled,
   invalid,
   onChange,
@@ -73,6 +74,7 @@ export function ModelProviderSelect({
   value: string;
   protocol: ModelProtocol;
   catalog: VendorPresetMap;
+  includeOpenAIAccount?: boolean;
   disabled: boolean;
   invalid: boolean;
   onChange: (value: string) => void;
@@ -106,10 +108,12 @@ export function ModelProviderSelect({
     );
     return [
       ...presets,
-      { kind: 'account', value: OPENAI_ACCOUNT_SELECTION, plan: 'other' },
+      ...(includeOpenAIAccount
+        ? ([{ kind: 'account', value: OPENAI_ACCOUNT_SELECTION, plan: 'other' }] satisfies ProviderOption[])
+        : []),
       { kind: 'custom', value: CUSTOM_VENDOR_SELECTION, plan: 'other' },
     ];
-  }, [catalog, protocol]);
+  }, [catalog, includeOpenAIAccount, protocol]);
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const options = useMemo(
