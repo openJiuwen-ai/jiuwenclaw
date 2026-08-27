@@ -62,9 +62,9 @@ def _parse_invoke_inputs(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         raise ValueError("arguments 必须是对象")
     params = dict(params)
 
-    # Prefer top-level functionName (InvokeTool schema). Skill docs use
-    # invoke("PluginSkillExecTool", {functionName, bundleName, ...}); models often
-    # omit the wrapper and only put the real capability on arguments.functionName.
+    # Prefer top-level functionName (InvokeTool schema). Models often omit
+    # the PluginSkillExecTool wrapper and only put the real capability on
+    # arguments.functionName.
     func_name = str(inputs.get("functionName") or inputs.get("funcName") or "").strip()
     if not func_name:
         nested = str(params.get("functionName") or params.get("funcName") or "").strip()
@@ -78,7 +78,7 @@ def _parse_invoke_inputs(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 def _normalize_plugin_skill_call(
     func_name: str, params: dict[str, Any]
 ) -> tuple[str, dict[str, Any], bool]:
-    """Map skill-doc form invoke(PluginSkillExecTool, {functionName, bundleName, ...}).
+    """Map invoke(PluginSkillExecTool, {functionName, bundleName, ...}).
 
     Returns (resolved_function_name, params, via_plugin_skill_exec).
     """

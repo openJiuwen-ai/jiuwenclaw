@@ -8,7 +8,7 @@ import asyncio
 import json
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.agent_runtime_client import (
@@ -28,7 +28,11 @@ CLOUD_PLUGIN_ERRORS = {
 
 
 def _needs_insecure_ssl(url: str) -> bool:
-    """Skip TLS verify for test-domain WSS and raw IP (IP address mismatch)."""
+    """Skip TLS verify for test-domain WSS and raw IP.
+
+    Same host rules as desktop isInsecureHost. mcp/run is a direct Python
+    websockets connection (not via Electron), so this process must decide again.
+    """
     import re
     from urllib.parse import urlparse
 
@@ -57,25 +61,15 @@ def _insecure_ssl():
 class CloudPluginContext:
     """端侧上下文信息（DM 传入）。"""
 
-    # session 信息
     session_id: str = ""
     interaction_id: int = 0
-    message_name: str = ""
     device_id: str = ""
-
-    # deviceInfo
     device_name: str = ""
     device_type: str = ""
     sys_version: str = ""
 
-    # clientContext
-    agent_id: str = ""
-    agent_login_session_id: str = ""
-    current_agent_attachment: list[Any] = field(default_factory=list)
-    service_center_data: list[dict[str, Any]] = field(default_factory=list)
-
     def to_extra_info(self) -> dict[str, Any]:
-        """构造 extraInfo（对齐 skills/request.txt）。"""
+        """构造 extraInfo（设备/会话上下文）。"""
         from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
             build_plugin_skill_extra_info,
         )
@@ -113,10 +107,10 @@ class CloudPluginClient(AgentRuntimeClient):
 
     def __init__(
             self,
-            base_url: str = os.environ.get("AGENT_RUNTIME_MCP_RUN", ""),
+            base_url: str = "",
             session_id: str | None = None,
             *,
-            timeout: float = float(os.getenv("AGENT_RUNTIME_WS_TIMEOUT", "120.0")),
+            timeout: float | None = None,
     ) -> None:
         from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
             resolve_plugin_runtime_url,
@@ -126,11 +120,13 @@ class CloudPluginClient(AgentRuntimeClient):
         self.session_id = session_id or ""
         # 单次插件调用的 sessionId
         self.plugin_session_id: str = f"plugin{uuid.uuid4().hex}"
+        if timeout is None:
+            timeout = float(os.getenv("AGENT_RUNTIME_WS_TIMEOUT", "120.0") or "120.0")
         super().__init__(resolved, timeout=timeout)
 
     @staticmethod
     def final_response(frames, spec):
-        # 合并 text 帧；response.txt 无 success 字段时以 event 为准
+        # 合并 text 帧；无 success 字段时以 event 为准
         contents = []
         for f in frames:
             event = str(f.get("event", "") or "")
@@ -277,12 +273,12 @@ class CloudPluginClient(AgentRuntimeClient):
             context: CloudPluginContext | None = None,
             **kwargs: Any
     ) -> dict[str, Any]:
-        """构造请求体（对齐 skills/request.txt）。"""
+        """构造请求体（extraInfo + functionName/arguments）。"""
         from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
             build_plugin_skill_extra_info,
         )
 
-        # arguments 内再带一份 bundleName/functionName（与样例一致）
+        # arguments 内再带一份 bundleName/functionName
         call_args = dict(arguments)
         call_args.setdefault("bundleName", spec.plugin_id)
         call_args.setdefault("functionName", spec.tool_name)
@@ -381,8 +377,8 @@ class CloudPluginClient(AgentRuntimeClient):
         frames = await self._receive_frames(ws_ctx, message, spec)
         rsp = self.final_response(frames, spec)
         logger.info(
-            "[session=%s] [%s] [CloudPluginClient] pluginId=%s toolName=%s final processing result: %s",
-            self.session_id, self.plugin_session_id, plugin_id, tool_name, rsp
+            "[session=%s] [%s] [CloudPluginClient] pluginId=%s toolName=%s success=%s",
+            self.session_id, self.plugin_session_id, plugin_id, tool_name, rsp.get("success"),
         )
         return rsp
 
@@ -408,11 +404,6 @@ class CloudPluginClient(AgentRuntimeClient):
         try:
             async with ws_ctx as ws:
                 await ws.send(message)
-                # INFO：失败联调需要对照 skills/request.txt；体可能较长但比 DEBUG 可查
-                logger.info(
-                    "[session=%s] [%s] [CloudPluginClient] Send message: %s",
-                    self.session_id, self.plugin_session_id, message
-                )
 
                 while True:
                     raw = await self._recv_single_frame(ws)

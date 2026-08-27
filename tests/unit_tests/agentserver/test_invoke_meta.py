@@ -445,7 +445,7 @@ async def test_invoke_agent_routes_to_runtime(monkeypatch):
     assert result.get("result") == "agent-ok"
 
 
-def test_build_request_body_aligns_skills_request(monkeypatch):
+def test_build_request_body_includes_extra_info(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_UID", "uid-1")
     monkeypatch.setenv("AGENT_RUNTIME_DEVICE_ID", "dev-1")
     monkeypatch.setenv("CLAW_DEVICE_HOSTNAME", "DESKTOP-PC")
@@ -609,7 +609,7 @@ def test_mcp_run_product_headers_prefer_business_credential(monkeypatch):
     assert "x-relay-role" not in headers
 
 
-def test_mcp_run_extra_info_uses_request_txt_device(monkeypatch):
+def test_mcp_run_extra_info_uses_pc_device_fallback(monkeypatch):
     monkeypatch.setenv(
         "AGENT_RUNTIME_MCP_RUN",
         "wss://host:18449/agent-runtime-service-ws/v1/mcp/run",
@@ -627,10 +627,10 @@ def test_mcp_run_extra_info_uses_request_txt_device(monkeypatch):
     device = extra["context"]["deviceInfo"]
     assert extra["context"]["userInfo"]["uid"] == "30086000686785686"
     assert extra["session"]["sessionId"] == "sess-mcp"
-    assert device["deviceName"] == "HAD-W32"
-    assert device["ohosApiVersion"] == 26
-    assert device["x-device-type"] == "2in1"
-    assert device["sysVersion"].startswith("OpenHarmony")
+    assert device["deviceName"] == "sandbox_pc"
+    assert device["ohosApiVersion"] == 0
+    assert device["x-device-type"] == "pc"
+    assert device["sysVersion"] == ""
 
 
 def test_needs_insecure_ssl_for_test_host_and_ip():

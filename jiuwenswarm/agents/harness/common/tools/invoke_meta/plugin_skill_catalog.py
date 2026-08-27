@@ -1,31 +1,31 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Known PluginSkillExecTool cloud capabilities from skills/*.md."""
+"""Known PluginSkillExecTool cloud capabilities (functionName to bundleName)."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
-# bundleName for Seedream image + Seedance video (skills/seedance-image-gen.md, seedance-video-gen.md)
+# bundleName for Seedream image + Seedance video
 _ATOMIC_BUNDLE = "com.atomicservice.5765880207845681341"
-# bundleName for image understanding (skills/xiaoyi-image-understanding.md)
+# bundleName for image understanding
 _XIAOYI_BUNDLE = "xiaoyi"
 
 # functionName (arguments.functionName) → required bundleName
 PLUGIN_SKILL_CATALOG: dict[str, str] = {
-    # 生图 seedream-image-gen / seedance-image-gen.md
+    # 生图 Seedream
     "seedreamLite4Skill": _ATOMIC_BUNDLE,
     "SeedreamPro4Skill": _ATOMIC_BUNDLE,
-    # 生视频 seedance-video-gen.md
+    # 生视频 Seedance
     "seedanceMiniTask": _ATOMIC_BUNDLE,
     "seedanceMiniTaskQuery": _ATOMIC_BUNDLE,
-    # 图像理解 xiaoyi-image-understanding.md
+    # 图像理解
     "imageUnderStandStream": _XIAOYI_BUNDLE,
 }
 
 _CATALOG_HELP = (
-    "仅允许 skill 文档中的云端能力，禁止臆造 bundleName/functionName。\n"
+    "仅允许白名单中的云端能力，禁止臆造 bundleName/functionName。\n"
     "生图：functionName=seedreamLite4Skill|SeedreamPro4Skill，"
     f"bundleName={_ATOMIC_BUNDLE}，必填 prompt；"
     "size 仅 1K|2K（1024x1024→1K，2048x2048→2K）；"
@@ -51,7 +51,7 @@ _SEEDREAM_SIZE_MAP = {
 
 
 def _canonical_seedream_size(raw: Any) -> str | None:
-    """Map skill-doc / pixel aliases to 1K|2K. None = omitted or invalid."""
+    """Map pixel aliases to 1K|2K. None = omitted or invalid."""
     if raw is None:
         return None
     if isinstance(raw, bool):
@@ -249,11 +249,11 @@ def validate_plugin_skill_args(func_name: str, params: dict[str, Any]) -> str | 
 
 
 def invoke_tool_description() -> str:
-    """ToolCard description aligned with skills/*.md call contracts."""
+    """ToolCard description for PluginSkillExecTool cloud capabilities."""
     return (
         "调用云端 PluginSkillExec 能力，"
         "或 functionName=agent_as_a_tool 调用远程 Agent。"
-        "调用形态与 skill 文档一致：顶层 functionName 固定为 PluginSkillExecTool，"
+        "调用形态：顶层 functionName 固定为 PluginSkillExecTool，"
         "真实能力写在 arguments.functionName，并带对应 bundleName 与业务参数。"
         "禁止臆造 image-generation / text-to-image / ai-draw / generate 等名称。\n"
         f"{_CATALOG_HELP}\n"

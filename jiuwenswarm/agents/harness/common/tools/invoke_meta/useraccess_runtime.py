@@ -17,16 +17,6 @@ _CLAW_UID_ENV = "CLAW_XIAOYI_UID"
 _CREDENTIAL_ENV = "CLAW_BUSINESS_CREDENTIAL"
 _DEVICE_ID_ENVS = ("AGENT_RUNTIME_DEVICE_ID", "X_DEVICE_ID")
 
-# skills/request.txt HarmonyOS deviceInfo when mcp/run has no desktop getDeviceInfo.
-_REQUEST_TXT_DEVICE_INFO: dict[str, Any] = {
-    "deviceName": "HAD-W32",
-    "ohosApiVersion": 26,
-    "romVersion": "HAD-W24 7.0.0.38(ENTC293E19R2P1log)",
-    "sysVersion": "OpenHarmony-7.0.0.38(Beta2)",
-    "x-device-id": "25847210-0e59-81f6-89f8-44adafe6bad1",
-    "x-device-type": "2in1",
-}
-
 
 def is_mcp_run_url(url: str) -> bool:
     """True when URL is the Runtime mcp/run WS (including agent-runtime-service-ws)."""
@@ -129,10 +119,10 @@ def build_plugin_skill_extra_info(
     session_id: str | None = None,
     interaction_id: int = 0,
 ) -> dict[str, Any]:
-    """Build extraInfo aligned with skills/request.txt.
+    """Build extraInfo for PluginSkillExec mcp/run.
 
     uid 与握手 x-uid 同源（CLAW_XIAOYI_UID / AGENT_RUNTIME_UID / 渠道 uid）。
-    有桌面 CLAW_DEVICE_* / device id 时用桌面设备信息；否则用 request.txt 鸿蒙缺省。
+    有桌面 CLAW_DEVICE_* / device id 时用桌面设备信息；否则用 PC 缺省（sandbox_pc）。
     """
     uid = resolve_runtime_uid()
     device_id = resolve_runtime_device_id()
@@ -164,20 +154,15 @@ def build_plugin_skill_extra_info(
     except Exception:  # noqa: BLE001
         pass
 
-    use_request_txt_device = not (hostname or sandbox_system or device_id)
-    if use_request_txt_device:
-        device_info: dict[str, Any] = dict(_REQUEST_TXT_DEVICE_INFO)
-        session_device_id = str(device_info.get("x-device-id") or "")
-    else:
-        device_info = {
-            "deviceName": hostname or "sandbox_pc",
-            "ohosApiVersion": 0,
-            "romVersion": "",
-            "sysVersion": sandbox_system or "",
-            "x-device-id": device_id,
-            "x-device-type": sandbox_system or "pc",
-        }
-        session_device_id = device_id
+    device_info = {
+        "deviceName": hostname or "sandbox_pc",
+        "ohosApiVersion": 0,
+        "romVersion": "",
+        "sysVersion": sandbox_system or "",
+        "x-device-id": device_id,
+        "x-device-type": sandbox_system or "pc",
+    }
+    session_device_id = device_id
 
     return {
         "context": {
@@ -200,6 +185,7 @@ def build_cloud_plugin_context(
     agent_id: str | None = None,
 ) -> Any:
     """Compatibility wrapper: return CloudPluginContext when possible."""
+    _ = agent_id
     from jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client import (
         CloudPluginContext,
     )
@@ -210,15 +196,10 @@ def build_cloud_plugin_context(
     return CloudPluginContext(
         session_id=str(session.get("sessionId") or ""),
         interaction_id=int(session.get("interactionId") or 0),
-        message_name="",
         device_id=str(session.get("deviceId") or ""),
         device_name=str(device.get("deviceName") or ""),
         device_type=str(device.get("x-device-type") or ""),
         sys_version=str(device.get("sysVersion") or ""),
-        agent_id=str(agent_id or ""),
-        agent_login_session_id="",
-        current_agent_attachment=[],
-        service_center_data=[],
     )
 
 

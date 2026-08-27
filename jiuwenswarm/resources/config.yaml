@@ -350,7 +350,7 @@ agents:
   #   CLAW_XIAOYI_UID             — 握手 x-uid（优先）；否则 AGENT_RUNTIME_UID / 渠道 uid
   #   AGENT_RUNTIME_BASEURL       — agent_as_a_tool（可选）
   #   AGENT_RUNTIME_WS_TIMEOUT    — 插件等待超时秒数（缺省 120）
-  # 云端能力以 skill 文档为准（白名单校验，禁止臆造 bundleName）：
+  # 云端能力以白名单为准（禁止臆造 bundleName）：
   #   生图  seedreamLite4Skill|SeedreamPro4Skill + bundleName=com.atomicservice.5765880207845681341
   #   生视频 seedanceMiniTask|seedanceMiniTaskQuery + 同上；默认轮询到成片
   #   图像理解 imageUnderStandStream + bundleName=xiaoyi
