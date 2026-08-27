@@ -196,10 +196,15 @@ function CompletedWorkChip({
         className={clsx(
           'completed-work-row',
           'completed-work-row--team',
-          variant === 'streak' && 'completed-work-row--nested'
+          variant === 'streak' && 'completed-work-row--nested',
+          !showAvatar && 'completed-work-row--team-no-avatar'
         )}
       >
-        <div className="pt-0.5">{showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}</div>
+        {showAvatar ? (
+          <div className="pt-0.5">
+            <TeamMemberAvatar member="team_leader" />
+          </div>
+        ) : null}
         {chip}
       </div>
     );
@@ -209,12 +214,15 @@ function CompletedWorkChip({
     <div
       className={clsx(
         'completed-work-row',
-        variant === 'streak' && 'completed-work-row--nested'
+        variant === 'streak' && 'completed-work-row--nested',
+        !showAvatar && 'completed-work-row--no-avatar'
       )}
     >
-      <div className="completed-work-row__avatar">
-        {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
-      </div>
+      {showAvatar ? (
+        <div className="completed-work-row__avatar">
+          <TeamMemberAvatar member="team_leader" />
+        </div>
+      ) : null}
       {chip}
     </div>
   );
@@ -313,11 +321,15 @@ function ReasoningSegmentBlock({
   if (teamLayout) {
     return (
       <div
-        className="reasoning-row reasoning-row--team"
+        className={clsx('reasoning-row', 'reasoning-row--team', !showAvatar && 'reasoning-row--team-no-avatar')}
         data-testid="chat-panel-reasoning-block"
         data-variant="team"
       >
-        <div className="pt-0.5">{showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}</div>
+        {showAvatar ? (
+          <div className="pt-0.5">
+            <TeamMemberAvatar member="team_leader" />
+          </div>
+        ) : null}
         {content}
       </div>
     );
@@ -325,13 +337,15 @@ function ReasoningSegmentBlock({
 
   return (
     <div
-      className="reasoning-row"
+      className={clsx('reasoning-row', !showAvatar && 'reasoning-row--no-avatar')}
       data-testid="chat-panel-reasoning-block"
       data-variant="default"
     >
-      <div className="reasoning-row__avatar">
-        {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
-      </div>
+      {showAvatar ? (
+        <div className="reasoning-row__avatar">
+          <TeamMemberAvatar member="team_leader" />
+        </div>
+      ) : null}
       {content}
     </div>
   );

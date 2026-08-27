@@ -396,15 +396,16 @@ export function ToolGroupDisplay({
     <div
       className={clsx(
         'tool-group-frame',
-        teamLayout && 'tool-group-frame--team'
+        teamLayout && 'tool-group-frame--team',
+        !showAvatar && 'tool-group-frame--no-avatar'
       )}
       data-testid="chat-panel-tool-group"
     >
-      <div className="pt-0.5 tool-group-frame__avatar" data-testid="chat-panel-tool-group-avatar">
-        {showAvatar ? (
+      {showAvatar ? (
+        <div className="pt-0.5 tool-group-frame__avatar" data-testid="chat-panel-tool-group-avatar">
           <TeamMemberAvatar member="team_leader" />
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       <div className="min-w-0">
         <div className="tool-tree" data-testid="chat-panel-tool-tree">
           {notices.length > 0 && (

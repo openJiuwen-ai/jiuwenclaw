@@ -1,14 +1,12 @@
 /**
  * OAuth 工具函数（支持 GitCode + GitHub 双 provider）
  *
+ * GitCode 使用 Authorization Code 流程（response_type=code → code 换 token），
+ * Client ID / Client Secret 均内置默认值（开箱即用），可用 .env.local 覆盖。
+ * 用户无需配置任何环境变量。token 兑换通过 Vite 代理 /gitcode-api/oauth/token。
+ *
  * 提供 OAuth 登录 URL 构建、回调处理、token/用户信息存取等功能。
  * 被 App.tsx（回调处理）和 SkillPanel（登录弹窗）共用。
- *
- * 配置方式：在 frontend 目录下创建 .env.local 文件，设置：
- *   VITE_GITCODE_OAUTH_CLIENT_ID=你的GitCode Client ID
- *   VITE_GITCODE_OAUTH_CLIENT_SECRET=你的GitCode Client Secret
- *   VITE_GITHUB_OAUTH_CLIENT_ID=你的GitHub Client ID
- *   VITE_GITHUB_OAUTH_CLIENT_SECRET=你的GitHub Client Secret
  *
  * Vite 代理：
  *   /gitcode-api/ → gitcode.com（token 兑换 + 用户信息）
@@ -23,13 +21,17 @@ const USER_KEY = 'marketplace_oauth_user';
 // 临时记录当前正在进行的 OAuth provider（跳转前写、回调时读）
 const ACTIVE_PROVIDER_KEY = 'marketplace_oauth_active_provider';
 
-// ── GitCode OAuth App 配置（从环境变量读取） ──
-const GITCODE_OAUTH_CLIENT_ID = import.meta.env.VITE_GITCODE_OAUTH_CLIENT_ID || '';
-const GITCODE_OAUTH_CLIENT_SECRET = import.meta.env.VITE_GITCODE_OAUTH_CLIENT_SECRET || '';
+// ── GitCode OAuth App 配置 ──
+// Client ID / Secret 均内置默认值，开箱即用无需配置 .env.local；可用环境变量覆盖。
+const GITCODE_OAUTH_CLIENT_ID = import.meta.env.VITE_GITCODE_OAUTH_CLIENT_ID || '0d93d55ec0c24827a85fe47f360e5e7b';
+const GITCODE_OAUTH_CLIENT_SECRET = import.meta.env.VITE_GITCODE_OAUTH_CLIENT_SECRET || '14e84c559c784ff58c07329667f497eb';
 
-// ── GitHub OAuth App 配置（从环境变量读取） ──
-const GITHUB_OAUTH_CLIENT_ID = import.meta.env.VITE_GITHUB_OAUTH_CLIENT_ID || '';
-const GITHUB_OAUTH_CLIENT_SECRET = import.meta.env.VITE_GITHUB_OAUTH_CLIENT_SECRET || '';
+// ── GitHub OAuth App 配置 ──
+// Client ID / Secret 均内置默认值，开箱即用无需配置 .env.local；可用环境变量覆盖。
+const GITHUB_OAUTH_CLIENT_ID = import.meta.env.VITE_GITHUB_OAUTH_CLIENT_ID || 'Ov23liABZdfqKNW2Ju0r';
+const GITHUB_OAUTH_CLIENT_SECRET = import.meta.env.VITE_GITHUB_OAUTH_CLIENT_SECRET || '85ea2d38d694d977dbca5ab3aeff58957fb2e5c2';
+
+const OAUTH_REDIRECT_URI = 'http://127.0.0.1:5173/oauth/callback';
 
 // ── 类型 ──
 export type OAuthProvider = 'gitcode' | 'github';
@@ -43,7 +45,7 @@ export type OAuthUser = {
 };
 
 // ── 配置检查 ──
-/** 检查 GitCode OAuth 是否已配置 */
+/** 检查 GitCode OAuth 是否已配置（Client ID/Secret 均内置默认值，通常恒为 true） */
 export function isOAuthConfigured(): boolean {
   return isGitCodeConfigured() || isGitHubConfigured();
 }
@@ -76,22 +78,19 @@ export function getStoredOAuthUser(): OAuthUser | null {
 }
 
 // ── 构建 OAuth 登录 URL ──
-/** 构建 GitCode OAuth 登录 URL */
+/** 构建 GitCode OAuth 登录 URL（Authorization Code：回调带 code，再换 token） */
 export function buildGitCodeOAuthUrl(): string {
   if (!isGitCodeConfigured()) {
     throw new Error('GitCode OAuth 未配置，请在 .env.local 中设置 VITE_GITCODE_OAUTH_CLIENT_ID 和 VITE_GITCODE_OAUTH_CLIENT_SECRET');
   }
-  const redirectUri = window.location.origin + '/oauth/callback';
+  const redirectUri = OAUTH_REDIRECT_URI;
   const state = Math.random().toString(36).slice(2) + Date.now().toString(36);
   return `https://gitcode.com/oauth/authorize?client_id=${GITCODE_OAUTH_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=user_info&state=${state}`;
 }
 
 /** 构建 GitHub OAuth 登录 URL */
 export function buildGitHubOAuthUrl(): string {
-  if (!isGitHubConfigured()) {
-    throw new Error('GitHub OAuth 未配置，请在 .env.local 中设置 VITE_GITHUB_OAUTH_CLIENT_ID 和 VITE_GITHUB_OAUTH_CLIENT_SECRET');
-  }
-  const redirectUri = window.location.origin + '/oauth/callback';
+  const redirectUri = OAUTH_REDIRECT_URI;
   const state = Math.random().toString(36).slice(2) + Date.now().toString(36);
   // scope=user 比 read:user 更轻量，足以获取用户身份和头像
   return `https://github.com/login/oauth/authorize?client_id=${GITHUB_OAUTH_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=user&state=${state}`;
@@ -110,9 +109,10 @@ export async function processOAuthCallback(): Promise<boolean> {
   const params = new URLSearchParams(window.location.search);
   const code = params.get('code');
   const error = params.get('error');
+  const errorDescription = params.get('error_description');
 
   if (error) {
-    // 清理 URL
+    sessionStorage.setItem('oauth_error', errorDescription || error || 'OAuth authorization failed');
     window.history.replaceState({}, '', window.location.pathname);
     return true;
   }
@@ -143,7 +143,7 @@ async function processGitCodeCallback(code: string): Promise<boolean> {
   tokenForm.append('client_secret', GITCODE_OAUTH_CLIENT_SECRET);
   tokenForm.append('code', code);
   tokenForm.append('grant_type', 'authorization_code');
-  tokenForm.append('redirect_uri', window.location.origin + '/oauth/callback');
+  tokenForm.append('redirect_uri', OAUTH_REDIRECT_URI);
 
   const tokenResp = await fetch('/gitcode-api/oauth/token', {
     method: 'POST',
@@ -193,7 +193,7 @@ async function processGitCodeCallback(code: string): Promise<boolean> {
   return true;
 }
 
-/** 处理 GitHub OAuth 回调：code → access_token → 用户信息 */
+/** 处理 GitHub OAuth 回调（Authorization Code）：code → access_token → 用户信息 */
 async function processGitHubCallback(code: string): Promise<boolean> {
   if (!isGitHubConfigured()) {
     sessionStorage.setItem('oauth_error', 'GitHub OAuth 未配置，请检查 .env.local 中的 VITE_GITHUB_OAUTH_CLIENT_ID 和 VITE_GITHUB_OAUTH_CLIENT_SECRET');
@@ -206,7 +206,7 @@ async function processGitHubCallback(code: string): Promise<boolean> {
   tokenForm.append('client_id', GITHUB_OAUTH_CLIENT_ID);
   tokenForm.append('client_secret', GITHUB_OAUTH_CLIENT_SECRET);
   tokenForm.append('code', code);
-  tokenForm.append('redirect_uri', window.location.origin + '/oauth/callback');
+  tokenForm.append('redirect_uri', OAUTH_REDIRECT_URI);
 
   const tokenResp = await fetch('/github-oauth/login/oauth/access_token', {
     method: 'POST',

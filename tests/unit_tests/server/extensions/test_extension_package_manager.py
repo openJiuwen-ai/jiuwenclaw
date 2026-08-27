@@ -370,6 +370,41 @@ class TestCreateInstallUninstall:
             {"connector": "feishu"},
         ]
 
+    def test_create_writes_and_reads_tags_and_quick_inputs(
+        self, extension_workspace: Path
+    ) -> None:
+        catalog.create_agent_template(
+            {
+                "id": "mine",
+                "name": "N",
+                "description": "D",
+                "persona": "P",
+                "skills": [],
+                "quickInputs": ["问题一", "问题二"],
+                "tags": [
+                    {"zh": "产品研发", "en": "Product Development"},
+                    {"zh": "自定义领域", "en": "自定义领域"},
+                    {"zh": "产品研发", "en": "Product Development"},
+                ],
+            }
+        )
+        pkg = extension_workspace / "plugins" / AGENT_TEMPLATES / "local" / "mine"
+        manifest = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["name"] == "N"
+        assert manifest["display_name"] == {"zh": "N", "en": "N"}
+        assert manifest["tags"] == [
+            {"zh": "产品研发", "en": "Product Development"},
+            {"zh": "自定义领域", "en": "自定义领域"},
+        ]
+        assert manifest["quick_inputs"] == [
+            {"zh": "问题一", "en": "问题一"},
+            {"zh": "问题二", "en": "问题二"},
+        ]
+        shown = catalog.show_agent_template("mine")
+        assert shown is not None
+        assert shown["tags"] == manifest["tags"]
+        assert shown["quickInputs"] == manifest["quick_inputs"]
+
     @pytest.mark.parametrize("kind", _KINDS)
     @pytest.mark.parametrize("conflict", ["local", "built_in", "resources"])
     def test_create_rejects_same_id(
@@ -727,6 +762,7 @@ class TestListShowAndFileRead:
             extra_manifest={
                 "display_name": {"zh": "专家", "en": "Expert"},
                 "display_description": {"zh": "简介", "en": "Desc"},
+                "description": "Manifest detail",
                 "quick_inputs": [{"zh": "问我", "en": "Ask me"}],
                 "tools": [
                     {
@@ -744,6 +780,7 @@ class TestListShowAndFileRead:
         shown = catalog.show_agent_template("named")
         assert shown is not None
         assert shown["displayName"] == {"zh": "专家", "en": "Expert"}
+        assert shown["details"] == "Manifest detail"
         assert shown["quickInputs"] == [{"zh": "问我", "en": "Ask me"}]
         assert "quick_inputs" not in shown
         assert shown["tools"] == [

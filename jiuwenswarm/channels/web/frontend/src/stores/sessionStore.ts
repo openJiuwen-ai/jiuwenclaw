@@ -20,10 +20,82 @@ import {
   registerConfirmedTaskCreation,
   type TaskProgressBaseline,
 } from '../features/teamTaskProgressBaseline';
+import type { AgentSelectionIntent } from '../features/agentManagement/types';
 import { isTeamAgentMode, stripPlanSuffix } from '../features/planMode/wireMode';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
+const AGENT_SELECTION_STORAGE_KEY = 'jiuwenclaw_agent_selection';
+const TRANSIENT_NEW_CONVERSATION_ID = 'new';
+
+function clearStoredAgentSelection(sessionId: string): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const stored = localStorage.getItem(AGENT_SELECTION_STORAGE_KEY);
+    if (!stored) return;
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    const selections = { ...(parsed as Record<string, unknown>) };
+    if (!Object.prototype.hasOwnProperty.call(selections, sessionId)) return;
+    delete selections[sessionId];
+    if (Object.keys(selections).length === 0) {
+      localStorage.removeItem(AGENT_SELECTION_STORAGE_KEY);
+    } else {
+      localStorage.setItem(AGENT_SELECTION_STORAGE_KEY, JSON.stringify(selections));
+    }
+  } catch {
+    // Browser storage can be unavailable in private/restricted contexts.
+  }
+}
+
+function loadAgentSelectionIntent(sessionId: string): AgentSelectionIntent {
+  if (typeof localStorage === 'undefined') return { kind: 'keep' };
+  if (sessionId === TRANSIENT_NEW_CONVERSATION_ID) {
+    // The draft session lives only in memory. Clear keys written by older builds
+    // so a previous Agent cannot leak into the next new conversation.
+    clearStoredAgentSelection(sessionId);
+    return { kind: 'keep' };
+  }
+  try {
+    const stored = localStorage.getItem(AGENT_SELECTION_STORAGE_KEY);
+    if (!stored) return { kind: 'keep' };
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { kind: 'keep' };
+    const selectedId = (parsed as Record<string, unknown>)[sessionId];
+    return typeof selectedId === 'string' && selectedId.trim()
+      ? { kind: 'select', id: selectedId }
+      : { kind: 'keep' };
+  } catch {
+    return { kind: 'keep' };
+  }
+}
+
+function saveAgentSelectionIntent(sessionId: string, intent: AgentSelectionIntent) {
+  if (typeof localStorage === 'undefined') return;
+  if (sessionId === TRANSIENT_NEW_CONVERSATION_ID) {
+    clearStoredAgentSelection(sessionId);
+    return;
+  }
+  try {
+    const stored = localStorage.getItem(AGENT_SELECTION_STORAGE_KEY);
+    const parsed: unknown = stored ? JSON.parse(stored) : {};
+    const selections = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? { ...(parsed as Record<string, unknown>) }
+      : {};
+    if (intent.kind === 'select' && intent.id.trim()) {
+      selections[sessionId] = intent.id;
+    } else {
+      delete selections[sessionId];
+    }
+    if (Object.keys(selections).length === 0) {
+      localStorage.removeItem(AGENT_SELECTION_STORAGE_KEY);
+    } else {
+      localStorage.setItem(AGENT_SELECTION_STORAGE_KEY, JSON.stringify(selections));
+    }
+  } catch {
+    // Browser storage can be unavailable in private/restricted contexts.
+  }
+}
 
 function loadModeFromStorage(): AgentMode {
   if (typeof localStorage === 'undefined') return DEFAULT_MODE;
@@ -334,6 +406,8 @@ export interface SessionRuntime {
   selectedSkills: string[];
   /** skill-creator 统一入口等场景的会话级元数据，随 chat.send 发送后清除 */
   metadata?: Record<string, unknown>;
+  /** 当前会话的智能体挂载草稿；keep 表示不修改后端当前挂载 */
+  agentSelectionIntent: AgentSelectionIntent;
   /**
    * 本会话期间持续启用的插件id/MCP名，由输入框"+"菜单"扩展"面板的开关控制。与
    * selectedSkills 不同：这两个字段发 chat.send 后不清空，会一直带在每条消息里，直到用户在
@@ -344,7 +418,7 @@ export interface SessionRuntime {
   enabledMcps: string[];
 }
 
-function createEmptyRuntime(): SessionRuntime {
+function createEmptyRuntime(sessionId?: string): SessionRuntime {
   return {
     mode: loadModeFromStorage(),
     selectedModelName: (() => {
@@ -367,6 +441,7 @@ function createEmptyRuntime(): SessionRuntime {
     teamHistoryMessages: [],
     selectedSkills: [],
     metadata: undefined,
+    agentSelectionIntent: sessionId ? loadAgentSelectionIntent(sessionId) : { kind: 'keep' },
     enabledPlugins: [],
     enabledMcps: [],
   };
@@ -429,6 +504,9 @@ interface SessionState {
   clearSelectedSkills: (sessionId: string) => void;
   /** 设置/清除会话级元数据（skill-creator 统一入口等场景） */
   setSessionMetadata: (sessionId: string, metadata: Record<string, unknown> | null) => void;
+  /** 输入栏智能体选择：选择、清空或恢复为不修改 */
+  setAgentSelectionIntent: (sessionId: string, intent: AgentSelectionIntent) => void;
+  clearAgentSelectionIntent: (sessionId: string) => void;
   /** 本会话启用插件：追加（去重） */
   addEnabledPlugin: (sessionId: string, pluginId: string) => void;
   /** 本会话启用插件：移除指定项 */
@@ -481,7 +559,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   ensureRuntime: (sessionId) => {
     const existing = get().runtimes[sessionId];
     if (existing) return existing;
-    const runtime = createEmptyRuntime();
+    const runtime = createEmptyRuntime(sessionId);
     set((state) => ({
       runtimes: { ...state.runtimes, [sessionId]: runtime },
     }));
@@ -531,7 +609,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
       const sessionId = normalizedSession.session_id;
       const existingRuntime = state.runtimes[sessionId];
-      const baseRuntime = existingRuntime || createEmptyRuntime();
+      const baseRuntime = existingRuntime || createEmptyRuntime(sessionId);
       const nextRuntime: SessionRuntime = {
         ...baseRuntime,
         mode: normalizedSession.mode || baseRuntime.mode,
@@ -584,13 +662,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setMode: (sessionId, mode) => {
     const normalizedMode = normalizeAgentMode(mode);
     saveModeToStorage(normalizedMode);
+    if (normalizedMode !== 'agent') {
+      saveAgentSelectionIntent(sessionId, { kind: 'clear' });
+    }
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      const agentSelectionIntent = normalizedMode === 'agent'
+        ? runtime.agentSelectionIntent
+        : { kind: 'clear' as const };
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, mode: normalizedMode },
+          [sessionId]: { ...runtime, mode: normalizedMode, agentSelectionIntent },
         },
       };
     });
@@ -987,6 +1071,36 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, metadata: metadata ?? undefined },
+        },
+      };
+    });
+  },
+
+  setAgentSelectionIntent: (sessionId, intent) => {
+    saveAgentSelectionIntent(sessionId, intent);
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime(sessionId);
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, agentSelectionIntent: intent },
+        },
+      };
+    });
+  },
+
+  clearAgentSelectionIntent: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || runtime.agentSelectionIntent.kind === 'keep') return state;
+      // A selected Agent is a session-level attachment, not a one-shot input hint.
+      // Keep the visible selection after a successful send; only a clear intent is
+      // consumed after the server has applied the detach request.
+      if (runtime.agentSelectionIntent.kind === 'select') return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, agentSelectionIntent: { kind: 'keep' } },
         },
       };
     });

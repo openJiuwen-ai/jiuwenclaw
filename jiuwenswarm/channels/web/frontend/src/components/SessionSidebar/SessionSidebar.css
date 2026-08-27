@@ -33,6 +33,12 @@
   overflow: visible;
 }
 
+.shell--agent-management .sidebar--icon-rail {
+  width: 72px;
+  max-width: 72px;
+  min-width: 72px;
+}
+
 /* Logo in icon rail — SVG handles gradient + mark */
 .icon-rail-logo {
   width: 28px;

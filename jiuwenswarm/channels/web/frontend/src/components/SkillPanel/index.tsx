@@ -25,8 +25,6 @@ import {
   getStoredOAuthToken,
   getStoredOAuthProvider,
   buildOAuthUrl,
-  isGitCodeConfigured,
-  isGitHubConfigured,
   type OAuthProvider,
 } from "../../utils/gitcodeOAuth";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
@@ -501,6 +499,7 @@ export function SkillPanel({
   const [publishNoticeVisible, setPublishNoticeVisible] = useState(true);
   const [oauthLoginOpen, setOauthLoginOpen] = useState(false);
   const [oauthError, setOauthError] = useState<string | null>(null);
+  const [oauthLoadingProvider, setOauthLoadingProvider] = useState<OAuthProvider | null>(null);
   const [selectedHubSkill, setSelectedHubSkill] = useState<MarketplacePluginItem | null>(null);
   const [hubDetail, setHubDetail] = useState<any>(null);
   const [hubDetailState, setHubDetailState] = useState<LoadState>("idle");
@@ -1155,6 +1154,15 @@ export function SkillPanel({
     if (oauthRedirect === 'publish' && skillName) {
       sessionStorage.removeItem('oauth_redirect');
       sessionStorage.removeItem('oauth_redirect_skill');
+      const oauthError = sessionStorage.getItem('oauth_error');
+      if (oauthError) {
+        sessionStorage.removeItem('oauth_error');
+        sessionStorage.removeItem('oauth_redirect_nav');
+        setOauthError(oauthError);
+        setOauthLoginOpen(true);
+        return;
+      }
+      setActiveTab('my');
       fetchSkillDetail(skillName).then(() => {
         setPublishDrawerOpen(true);
       });
@@ -1700,16 +1708,8 @@ export function SkillPanel({
   // 跳转到 OAuth 授权页（当前页跳转，登录后回调 /oauth/callback?code=xxx）
   // provider: 'gitcode' | 'github'
   const handleOAuthLogin = useCallback((provider: OAuthProvider = 'gitcode') => {
-    const configured = provider === 'github' ? isGitHubConfigured() : isGitCodeConfigured();
-    if (!configured) {
-      setOauthError(
-        provider === 'github'
-          ? t('skills.oauthLogin.githubNotConfigured')
-          : t('skills.oauthLogin.notConfigured')
-      );
-      return;
-    }
     setOauthError(null);
+    setOauthLoadingProvider(provider);
     sessionStorage.setItem('oauth_redirect', 'publish');
     sessionStorage.setItem('oauth_redirect_nav', 'skills');
     // 保存当前技能名，OAuth 回调后恢复详情页
@@ -3467,7 +3467,7 @@ export function SkillPanel({
         </div>
       )}
       {/* 发布技能右侧弹窗 */}
-      {publishDrawerOpen && selectedSkill && (() => {
+      {publishDrawerOpen && selectedSkill && getStoredOAuthToken() && (() => {
         const isPublishDisabled = !publishSkillName || !publishVersion || !publishDisplayName;
         return (
         <>
@@ -3733,38 +3733,52 @@ export function SkillPanel({
               <button
                 type="button"
                 onClick={() => handleOAuthLogin('gitcode')}
+                disabled={oauthLoadingProvider === 'gitcode'}
                 className="flex items-center justify-center gap-2 rounded-[16px] text-sm whitespace-nowrap transition-colors w-full mb-3"
                 style={{
                   height: '40px',
                   backgroundColor: '#191919',
                   color: '#fff',
-                  cursor: 'pointer',
+                  cursor: oauthLoadingProvider === 'gitcode' ? 'not-allowed' : 'pointer',
+                  opacity: oauthLoadingProvider === 'gitcode' ? 0.6 : 1,
                 }}
               >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M8 6L2 12L8 18M16 6L22 12L16 18" />
-                </svg>
-                {t('skills.oauthLogin.gitcodeLogin')}
+                {oauthLoadingProvider === 'gitcode' ? (
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 6L2 12L8 18M16 6L22 12L16 18" />
+                  </svg>
+                )}
+                {oauthLoadingProvider === 'gitcode' ? t('skills.oauthLogin.loading') : t('skills.oauthLogin.gitcodeLogin')}
               </button>
               {/* GitHub 登录按钮（始终显示，未配置时点击会提示） */}
               <button
                 type="button"
                 onClick={() => handleOAuthLogin('github')}
+                disabled={oauthLoadingProvider === 'github'}
                 className="flex items-center justify-center gap-2 rounded-[16px] text-sm whitespace-nowrap transition-colors w-full"
                 style={{
                   height: '40px',
                   backgroundColor: '#fff',
                   color: '#191919',
                   border: '1px solid #191919',
-                  cursor: 'pointer',
+                  cursor: oauthLoadingProvider === 'github' ? 'not-allowed' : 'pointer',
+                  opacity: oauthLoadingProvider === 'github' ? 0.6 : 1,
                 }}
               >
-                {/* GitHub icon */}
-                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                  <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.009-.868-.014-1.703-2.782.605-3.369-1.342-3.369-1.342-.454-1.155-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.339-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.203 2.398.1 2.651.641.7 1.029 1.595 1.029 2.688 0 3.848-2.338 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0022 12.017C22 6.484 17.522 2 12 2z" />
-                </svg>
-                {t('skills.oauthLogin.githubLogin')}
+                {oauthLoadingProvider === 'github' ? (
+                  <div className="w-4 h-4 border-2 border-black/30 border-t-black rounded-full animate-spin" />
+                ) : (
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.009-.868-.014-1.703-2.782.605-3.369-1.342-3.369-1.342-.454-1.155-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.339-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.203 2.398.1 2.651.641.7 1.029 1.595 1.029 2.688 0 3.848-2.338 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0022 12.017C22 6.484 17.522 2 12 2z" />
+                  </svg>
+                )}
+                {oauthLoadingProvider === 'github' ? t('skills.oauthLogin.loading') : t('skills.oauthLogin.githubLogin')}
               </button>
+              <p className="mt-4 text-xs text-text-muted text-center">
+                {t('skills.oauthLogin.callbackHint')}
+              </p>
               {oauthError && (
                 <p className="mt-4 text-xs text-[var(--color-feedback-error)] text-center">
                   {oauthError}

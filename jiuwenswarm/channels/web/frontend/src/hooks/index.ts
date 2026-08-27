@@ -11,5 +11,6 @@ export {
   useMinWidth,
   useResponsiveLayout,
   useResponsivePanelResize,
+  useWelcomeBubblePosition,
 } from './useResponsive';
 export { useFullscreenPanel } from './useFullscreenPanel';

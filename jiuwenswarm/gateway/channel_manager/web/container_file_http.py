@@ -8,6 +8,7 @@ import base64
 import json
 import logging
 import mimetypes
+import time
 from typing import TYPE_CHECKING, Annotated, Any, Mapping
 from urllib.parse import quote
 
@@ -133,9 +134,85 @@ def _auth_headers_from_request(request: Request) -> dict[str, str]:
 
 def _resolve_user_id(request: Request, explicit: str | None = None) -> str:
     if explicit and str(explicit).strip():
-        return str(explicit).strip()
-    header_uid = request.headers.get("x-user-id") or request.headers.get("X-User-Id")
-    return str(header_uid or "").strip()
+        uid = str(explicit).strip()
+    else:
+        header_uid = request.headers.get("x-user-id") or request.headers.get("X-User-Id")
+        uid = str(header_uid or "").strip()
+    if uid:
+        request.state.agentos_user_id = uid
+    return uid
+
+
+def _bind_file_api_session(request: Request, session_id: str) -> None:
+    sid = str(session_id or "").strip()
+    if sid:
+        request.state.agentos_session_id = sid
+
+
+def _file_api_ids(request: Request) -> tuple[str, str]:
+    uid = str(getattr(request.state, "agentos_user_id", "") or "").strip()
+    if not uid:
+        uid = str(request.query_params.get("user_id") or "").strip()
+    if not uid:
+        uid = str(request.headers.get("x-user-id") or request.headers.get("X-User-Id") or "").strip()
+    sid = str(getattr(request.state, "agentos_session_id", "") or "").strip()
+    if not sid:
+        sid = str(request.query_params.get("session_id") or "").strip()
+    return uid, sid
+
+
+_FILE_API_DONE_KEYS = (
+    "user_id",
+    "session_id",
+    "channel",
+    "method",
+    "path",
+    "status",
+    "latency_ms",
+    "error",
+    "uid_empty",
+)
+
+
+def _format_file_api_done(**fields: Any) -> str:
+    parts = ["[WebChannel] file-api.done"]
+    for key in _FILE_API_DONE_KEYS:
+        if key not in fields:
+            continue
+        value = fields[key]
+        if value in (None, ""):
+            continue
+        parts.append(f"{key}={value}")
+    return " ".join(parts)
+
+
+def _log_file_api_done(
+    request: Request,
+    *,
+    status: int,
+    latency_ms: int,
+    error: str = "",
+) -> None:
+    uid, sid = _file_api_ids(request)
+    fields: dict[str, Any] = {
+        "user_id": uid,
+        "session_id": sid,
+        "channel": "file-api",
+        "method": request.method,
+        "path": request.url.path,
+        "status": status,
+        "latency_ms": latency_ms,
+    }
+    if not uid:
+        fields["uid_empty"] = "yes"
+    if error:
+        fields["error"] = error
+    level = logging.INFO if status < 400 else logging.WARNING
+    logger.log(
+        level,
+        _format_file_api_done(**fields),
+        extra={"session_id": sid} if sid else {},
+    )
 
 
 def _is_markdown_name(name: str) -> bool:
@@ -269,6 +346,28 @@ def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
 
     prefix = FILE_API_PREFIX
 
+    @app.middleware("http")
+    async def _file_api_access_log(request: Request, call_next):  # type: ignore[no-untyped-def]
+        if not str(request.url.path or "").startswith(prefix):
+            return await call_next(request)
+        started = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            _log_file_api_done(
+                request,
+                status=500,
+                latency_ms=max(0, int((time.monotonic() - started) * 1000)),
+                error=type(exc).__name__,
+            )
+            raise
+        _log_file_api_done(
+            request,
+            status=int(getattr(response, "status_code", 500) or 500),
+            latency_ms=max(0, int((time.monotonic() - started) * 1000)),
+        )
+        return response
+
     async def _list_container_dir(
         request: Request,
         params: ListFilesQuery,
@@ -285,6 +384,7 @@ def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
             return _error_json(error="max_depth must be >= 0", code="BAD_REQUEST", status_code=400)
 
         sid = str(params.session_id or "").strip()
+        _bind_file_api_session(request, sid)
         agent_type = params.agent_type if isinstance(params.agent_type, str) else None
         try:
             items = await client.list_container_files(
@@ -329,6 +429,7 @@ def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
         if not uid:
             return _error_json(error="user_id is required", code="BAD_REQUEST", status_code=400)
         sid = str(params.session_id or "").strip()
+        _bind_file_api_session(request, sid)
         path = params.path.strip()
         agent_type = params.agent_type if isinstance(params.agent_type, str) else None
 
@@ -478,6 +579,7 @@ def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
         if not uid:
             return _error_json(error="user_id is required", code="BAD_REQUEST", status_code=400)
         sid = str(params.session_id or "").strip()
+        _bind_file_api_session(request, sid)
         path = params.path.strip()
         agent_type = params.agent_type if isinstance(params.agent_type, str) else None
 
@@ -535,6 +637,7 @@ def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
             }
         )
         sid = str(form.session_id or "").strip()
+        _bind_file_api_session(request, sid)
         uid = _resolve_user_id(request, form.user_id)
         if not uid:
             return _error_json(error="user_id is required", code="BAD_REQUEST", status_code=400)
@@ -610,6 +713,7 @@ def attach_container_file_routes(app: FastAPI, channel: WebChannel) -> None:
             return _error_json(error="only_markdown_supported", code="BAD_REQUEST", status_code=400)
 
         sid = str(body.get("session_id") or "").strip()
+        _bind_file_api_session(request, sid)
         uid = _resolve_user_id(
             request,
             body.get("user_id") if isinstance(body.get("user_id"), str) else None,
