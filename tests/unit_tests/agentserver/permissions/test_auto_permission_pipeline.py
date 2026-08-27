@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.before_tool as before_tool_module
+import jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.invocation_context as invocation_context_module
 import jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.reviewer_override_consume as override_module
+import jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts as facts_module
 import pytest
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall
+from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.handler import ResumeContext, ToolInterruptHandler
@@ -32,6 +37,13 @@ from jiuwenswarm.agents.harness.common.rails.permissions.auto_reviewer import (
     AutoReviewer,
     ReviewerOutcome,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.artifact_path_post_gate import (
+    ArtifactCandidateState,
+    ArtifactPathCandidate,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.artifact_path_provenance import (
+    SessionArtifactPathProvenance,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.openjiuwen_contract import (
     classify_permission_result,
 )
@@ -44,10 +56,20 @@ from jiuwenswarm.agents.harness.common.rails.permissions.permission_interrupt_ra
 from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue import (
     RootPermissionQueue,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
+    RootDecisionContext,
+    RootIntentTurn,
+    RootIntentTurnKind,
+    bind_root_decision_context,
+    reset_root_decision_context,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue_rail import (
     RootPermissionQueueRail,
     bind_root_permission_request,
     reset_root_permission_request,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.reviewer_stream_metadata import (
+    peek_reviewer_tool_result_metadata,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.session_deny import (
     SessionDenyStore,
@@ -56,12 +78,15 @@ from jiuwenswarm.agents.harness.common.rails.permissions.tool_capabilities impor
     install_permission_file_semantics,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts import (
+    DecisionRoute,
     build_tool_decision_facts,
 )
+from jiuwenswarm.agents.harness.common.tools.command_runtime import CommandRuntimePaths
 from tests.unit_tests.agentserver.permissions.auto_permission_test_support import (
     FakeBaseRail,
     StaticPolicyEvaluator,
     StaticReviewerClient,
+    _strong_sandbox,
 )
 
 
@@ -95,25 +120,28 @@ def _real_lsp_rail(
     *,
     workspace_level: str,
     file_guard_enabled: bool = True,
+    explicit_tool_ask: bool = False,
 ):
+    permissions = {
+        "enabled": True,
+        "schema": "tiered_policy",
+        "mode": "auto",
+        "defaults": {"*": "ask"},
+        "file_guard": {
+            "enabled": file_guard_enabled,
+            "defaults": {"read": "ask", "write": "ask", "exec": "ask"},
+            "workspace": {
+                "read": workspace_level,
+                "write": workspace_level,
+                "exec": "ask",
+            },
+        },
+    }
+    if explicit_tool_ask:
+        permissions["tools"] = {"lsp": "ask"}
     rail = build_permission_rail(
         {
-            "permissions": {
-                "enabled": True,
-                "schema": "tiered_policy",
-                "mode": "auto",
-                "defaults": {"*": "ask"},
-                "tools": {"lsp": "ask"},
-                "file_guard": {
-                    "enabled": file_guard_enabled,
-                    "defaults": {"read": "ask", "write": "ask", "exec": "ask"},
-                    "workspace": {
-                        "read": workspace_level,
-                        "write": workspace_level,
-                        "exec": "ask",
-                    },
-                },
-            }
+            "permissions": permissions,
         },
         enable_auto_permission=True,
         workspace_root=tmp_path,
@@ -139,6 +167,578 @@ async def test_task_tool_ask_is_control_silent_after_engine(tmp_path) -> None:
     assert len(policy.calls) == 1
     assert reviewer.requests == []
     assert base.calls == []
+
+
+async def test_domain_reviewer_receives_model_purpose_claim(tmp_path) -> None:
+    rail, _policy, reviewer, _base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+    facts = build_tool_decision_facts(
+        "skill_tool",
+        {"skill_name": "hot-news-pptx"},
+        workspace_root=tmp_path,
+        original_args_were_valid_object=True,
+    )
+    route = DecisionRoute(
+        level="ask",
+        reason="domain_policy_skill_readonly",
+        source="semantic_reviewer",
+    )
+
+    result = await rail._handle_domain_route(
+        facts,
+        domain_route=route,
+        policy_level="ask",
+        session_id="session-a",
+        request_id="request-a",
+        tool_call_id="call-a",
+        now=0.0,
+        user_input=None,
+        original_user_intent=None,
+        model_purpose_claim="read the requested skill",
+    )
+
+    assert result.handled is True
+    assert reviewer.requests[-1].review_evidence["model_purpose_claim"] == (
+        "read the requested skill"
+    )
+
+
+async def test_purpose_claim_uses_host_invocation_after_send_resolution(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rail, _policy, reviewer, _base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+    host_args = {
+        "description": "host-owned purpose",
+        "abs_file_path_list": [str(tmp_path / "report.csv")],
+        "target_channels": ["web"],
+    }
+    observed: list[dict[str, object]] = []
+    real_resolver = before_tool_module.resolve_model_purpose_claim
+
+    def replace_with_host(_args, _kwargs, invocation):
+        return SimpleNamespace(
+            invocation=replace(invocation, tool_args=host_args),
+            identity=None,
+            error="send_file_authorization_context_missing",
+        )
+
+    def record_claim(arguments):
+        observed.append(dict(arguments))
+        return real_resolver(arguments)
+
+    monkeypatch.setattr(
+        before_tool_module,
+        "_resolve_trusted_send_identity",
+        replace_with_host,
+    )
+    monkeypatch.setattr(
+        before_tool_module,
+        "resolve_model_purpose_claim",
+        record_claim,
+    )
+
+    await rail.before_tool_call(
+        tool_name="send_file_to_user",
+        tool_args={"description": "compatibility purpose"},
+        session_id="session-a",
+    )
+
+    assert observed == [host_args]
+    assert reviewer.requests == []
+
+
+async def test_semantic_artifact_round_trip_becomes_later_reviewer_evidence(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        invocation_context_module,
+        "current_command_runtime_paths",
+        lambda **_kwargs: CommandRuntimePaths(
+            current_cwd=tmp_path,
+            project_root=tmp_path,
+            workspace_root=tmp_path,
+            agent_workspace_root=tmp_path,
+        ),
+    )
+    base = FakeBaseRail()
+    reviewer = StaticReviewerClient(
+        outcome=ReviewerOutcome.ALLOW_ONCE,
+        reason_code="task_aligned_code",
+        artifact_paths=("report.csv",),
+    )
+    ledger = SessionArtifactPathProvenance("session-a")
+    rail = AutoPermissionInterruptRail(
+        base_rail=base,
+        permission_config={"enabled": True, "mode": "auto"},
+        workspace_root=tmp_path,
+        policy_evaluator=StaticPolicyEvaluator(
+            PolicyEvaluation(level="ask", reason="default_ask")
+        ),
+        auto_reviewer=AutoReviewer(client=reviewer),
+        session_artifact_paths=ledger,
+    )
+    session = _Session()
+    create_ctx = _runtime_ctx(
+        session,
+        tool_name="mcp_exec_command",
+        tool_args={
+            "command": "python -c \"open('report.csv','w').write('ok')\"",
+            "description": "  create the requested report  ",
+            "call_goal": "ignored fallback",
+            "workdir": str(tmp_path),
+        },
+    )
+    intent_token = bind_root_decision_context(
+        RootDecisionContext(
+            "session-a",
+            "request-a",
+            "web",
+            (
+                RootIntentTurn(
+                    request_id="request-a",
+                    kind=RootIntentTurnKind.FRESH,
+                    text="Create report.csv, then inspect and deliver it.",
+                ),
+            ),
+        )
+    )
+    try:
+        result = await rail.before_tool_call(create_ctx)
+    finally:
+        reset_root_decision_context(intent_token)
+
+    assert result is None
+    assert reviewer.requests[-1].review_evidence["model_purpose_claim"] == (
+        "  create the requested report  "
+    )
+    assert create_ctx.inputs.tool_call.arguments["description"] == (
+        "  create the requested report  "
+    )
+    assert "call_goal" not in create_ctx.inputs.tool_call.arguments
+    output = tmp_path / "report.csv"
+    output.write_text("ok", encoding="utf-8")
+    create_ctx.inputs.tool_result = json.dumps({"exit_code": 0})
+    await rail.after_tool_call(create_ctx)
+    assert ledger.contains(root_session_id="session-a", path=output)
+
+    reviewer.artifact_paths = ()
+    inspect_ctx = _runtime_ctx(
+        session,
+        tool_name="mcp_exec_command",
+        tool_args={
+            "command": "wc -l report.csv",
+            "call_goal": "inspect the generated report",
+            "workdir": str(tmp_path),
+        },
+    )
+    intent_token = bind_root_decision_context(
+        RootDecisionContext(
+            "session-a",
+            "request-b",
+            "web",
+            (
+                RootIntentTurn(
+                    request_id="request-b",
+                    kind=RootIntentTurnKind.FRESH,
+                    text="Inspect the generated report.csv.",
+                ),
+            ),
+        )
+    )
+    try:
+        second_result = await rail.before_tool_call(inspect_ctx)
+    finally:
+        reset_root_decision_context(intent_token)
+
+    assert second_result is None
+    assert reviewer.requests[-1].review_evidence["model_purpose_claim"] == (
+        "inspect the generated report"
+    )
+    assert reviewer.requests[-1].review_evidence[
+        "trusted_session_artifact_paths"
+    ] == ["report.csv"]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_result_class"),
+    [
+        (ReviewerOutcome.ALLOW_ONCE, "allowed"),
+        (ReviewerOutcome.MANUAL, "interrupt"),
+        (ReviewerOutcome.DENY, "denied"),
+    ],
+)
+async def test_artifact_evidence_preserves_reviewer_outcome(
+    tmp_path,
+    outcome: str,
+    expected_result_class: str,
+) -> None:
+    output = tmp_path / "report.csv"
+    output.write_text("draft", encoding="utf-8")
+    ledger = SessionArtifactPathProvenance("session-a")
+    recorded = ledger.record_verified(
+        state=ArtifactCandidateState(
+            session_id="session-a",
+            tool_name="write_file",
+            tool_call_id="producer-call",
+            workspace_root=str(tmp_path),
+            effective_workdir=str(tmp_path),
+            candidates=(
+                ArtifactPathCandidate(
+                    path=str(output),
+                    requires_grounding=False,
+                ),
+            ),
+            grounding_texts=(),
+            facts=None,
+        )
+    )
+    assert recorded.accepted == 1
+    reviewer = StaticReviewerClient(outcome=outcome)
+    rail = AutoPermissionInterruptRail(
+        base_rail=FakeBaseRail(),
+        permission_config={"enabled": True, "mode": "auto"},
+        workspace_root=tmp_path,
+        policy_evaluator=StaticPolicyEvaluator(
+            PolicyEvaluation(level="ask", reason="default_ask")
+        ),
+        auto_reviewer=AutoReviewer(client=reviewer),
+        session_artifact_paths=ledger,
+    )
+    ctx = _runtime_ctx(
+        _Session(),
+        tool_name="write_file",
+        tool_args={"path": str(output), "content": "final"},
+    )
+    intent_token = bind_root_decision_context(
+        RootDecisionContext(
+            "session-a",
+            "request-a",
+            "web",
+            (
+                RootIntentTurn(
+                    request_id="request-a",
+                    kind=RootIntentTurnKind.FRESH,
+                    text="Finalize the generated report.csv.",
+                ),
+            ),
+        )
+    )
+    try:
+        if outcome == ReviewerOutcome.MANUAL:
+            with pytest.raises(AbortError):
+                await rail.before_tool_call(ctx)
+            result_class = "interrupt"
+        else:
+            result = await rail.before_tool_call(ctx)
+            result_class = (
+                "allowed" if result is None else classify_permission_result(result)
+            )
+    finally:
+        reset_root_decision_context(intent_token)
+
+    assert result_class == expected_result_class
+    assert len(reviewer.requests) == 1
+    request = reviewer.requests[0]
+    assert request.allowed_outcomes == ("allow_once", "manual", "deny")
+    assert request.review_evidence["trusted_session_artifact_paths"] == ["report.csv"]
+    if outcome == ReviewerOutcome.ALLOW_ONCE:
+        metadata = peek_reviewer_tool_result_metadata(
+            ctx.extra,
+            tool_call_id="call-1",
+        )
+        assert metadata is not None
+        assert metadata["decision_source"] == "auto_reviewer"
+
+
+async def test_bash_nonroot_workdir_does_not_register_same_named_root_file(
+    tmp_path,
+) -> None:
+    root_output = tmp_path / "report.csv"
+    root_output.write_text("unrelated", encoding="utf-8")
+    workdir = tmp_path / "subdir"
+    workdir.mkdir()
+    actual_output = workdir / "report.csv"
+    reviewer = StaticReviewerClient(
+        outcome=ReviewerOutcome.ALLOW_ONCE,
+        reason_code="task_aligned_code",
+        artifact_paths=("subdir/report.csv",),
+    )
+    ledger = SessionArtifactPathProvenance("session-a")
+    rail = AutoPermissionInterruptRail(
+        base_rail=FakeBaseRail(),
+        permission_config={"enabled": True, "mode": "auto"},
+        workspace_root=tmp_path,
+        sandbox=replace(
+            _strong_sandbox(),
+            execution_workspace_root=tmp_path.as_posix(),
+        ),
+        policy_evaluator=StaticPolicyEvaluator(
+            PolicyEvaluation(level="ask", reason="default_ask")
+        ),
+        auto_reviewer=AutoReviewer(client=reviewer),
+        session_artifact_paths=ledger,
+    )
+    session = _Session()
+    create_ctx = _runtime_ctx(
+        session,
+        tool_name="bash",
+        tool_args={
+            "command": "python -c \"open('report.csv','w').write('ok')\"",
+            "cwd": str(workdir),
+            "shell_type": "bash",
+        },
+    )
+    intent_token = bind_root_decision_context(
+        RootDecisionContext(
+            "session-a",
+            "request-a",
+            "web",
+            (
+                RootIntentTurn(
+                    request_id="request-a",
+                    kind=RootIntentTurnKind.FRESH,
+                    text="Create subdir/report.csv and inspect it.",
+                ),
+            ),
+        )
+    )
+    try:
+        result = await rail.before_tool_call(create_ctx)
+    finally:
+        reset_root_decision_context(intent_token)
+
+    assert result is None
+    assert create_ctx.inputs.tool_call.arguments["workdir"] == str(workdir)
+    assert "cwd" not in create_ctx.inputs.tool_call.arguments
+    assert reviewer.requests[-1].review_evidence["effective_workdir"] == "subdir"
+    actual_output.write_text("ok", encoding="utf-8")
+    create_ctx.inputs.tool_result = json.dumps({"exit_code": 0})
+    await rail.after_tool_call(create_ctx)
+    assert ledger.contains(root_session_id="session-a", path=actual_output)
+    assert not ledger.contains(root_session_id="session-a", path=root_output)
+
+    reviewer.artifact_paths = ()
+    inspect_ctx = _runtime_ctx(
+        session,
+        tool_name="bash",
+        tool_args={
+            "command": "wc -l report.csv",
+            "workdir": str(workdir),
+            "shell_type": "bash",
+        },
+    )
+    intent_token = bind_root_decision_context(
+        RootDecisionContext(
+            "session-a",
+            "request-b",
+            "web",
+            (
+                RootIntentTurn(
+                    request_id="request-b",
+                    kind=RootIntentTurnKind.FRESH,
+                    text="Inspect the generated subdir/report.csv.",
+                ),
+            ),
+        )
+    )
+    try:
+        second_result = await rail.before_tool_call(inspect_ctx)
+    finally:
+        reset_root_decision_context(intent_token)
+
+    assert second_result is None
+    assert reviewer.requests[-1].review_evidence[
+        "trusted_session_artifact_paths"
+    ] == ["subdir/report.csv"]
+
+
+async def test_background_bash_does_not_register_existing_artifact_candidate(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "report.csv"
+    output.write_text("pre-existing", encoding="utf-8")
+    monkeypatch.setattr(
+        facts_module,
+        "extract_accesses_native",
+        lambda *_args, **_kwargs: [(output, "write", "redirect")],
+    )
+    reviewer = StaticReviewerClient(
+        outcome=ReviewerOutcome.ALLOW_ONCE,
+        artifact_paths=("report.csv",),
+    )
+    ledger = SessionArtifactPathProvenance("session-a")
+    rail = AutoPermissionInterruptRail(
+        base_rail=FakeBaseRail(),
+        permission_config={"enabled": True, "mode": "auto"},
+        workspace_root=tmp_path,
+        sandbox=replace(
+            _strong_sandbox(),
+            execution_workspace_root=tmp_path.as_posix(),
+        ),
+        policy_evaluator=StaticPolicyEvaluator(
+            PolicyEvaluation(level="ask", reason="default_ask")
+        ),
+        auto_reviewer=AutoReviewer(client=reviewer),
+        session_artifact_paths=ledger,
+    )
+    ctx = _runtime_ctx(
+        _Session(),
+        tool_name="bash",
+        tool_args={
+            "command": "printf ok > report.csv",
+            "workdir": str(tmp_path),
+            "run_in_background": True,
+            "shell_type": "bash",
+        },
+    )
+
+    result = await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = ToolOutput(
+        success=True,
+        data={"pid": 123, "status": "started"},
+    )
+    await rail.after_tool_call(ctx)
+
+    assert result is None
+    assert not ledger.contains(root_session_id="session-a", path=output)
+
+
+async def test_unfrozen_bash_workdir_suppresses_parser_write_candidate(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_output = tmp_path / "report.csv"
+    root_output.write_text("unrelated", encoding="utf-8")
+    runtime_cwd = tmp_path / "subdir"
+    runtime_cwd.mkdir()
+    monkeypatch.setattr(
+        invocation_context_module,
+        "current_command_runtime_paths",
+        lambda **_kwargs: CommandRuntimePaths(
+            current_cwd=runtime_cwd,
+            project_root=tmp_path,
+            workspace_root=tmp_path,
+            agent_workspace_root=tmp_path,
+        ),
+    )
+    monkeypatch.setattr(
+        facts_module,
+        "extract_accesses_native",
+        lambda *_args, **_kwargs: [(root_output, "write", "redirect")],
+    )
+    reviewer = StaticReviewerClient(outcome=ReviewerOutcome.ALLOW_ONCE)
+    ledger = SessionArtifactPathProvenance("session-a")
+    rail = AutoPermissionInterruptRail(
+        base_rail=FakeBaseRail(),
+        permission_config={"enabled": True, "mode": "auto"},
+        workspace_root=tmp_path,
+        sandbox=replace(
+            _strong_sandbox(),
+            execution_workspace_root=tmp_path.as_posix(),
+        ),
+        policy_evaluator=StaticPolicyEvaluator(
+            PolicyEvaluation(level="ask", reason="default_ask")
+        ),
+        auto_reviewer=AutoReviewer(client=reviewer),
+        session_artifact_paths=ledger,
+    )
+    outside = tmp_path.parent / "outside"
+    ctx = _runtime_ctx(
+        _Session(),
+        tool_name="bash",
+        tool_args={
+            "command": "printf ok > report.csv",
+            "cwd": str(outside),
+            "shell_type": "bash",
+        },
+    )
+
+    result = await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = ToolOutput(success=True, data={"content": ""})
+    await rail.after_tool_call(ctx)
+
+    assert result is None
+    assert reviewer.requests[-1].review_evidence["effective_workdir"] == ""
+    assert not ledger.contains(root_session_id="session-a", path=root_output)
+
+
+async def test_exec_access_is_not_registered_as_host_artifact(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "analyze.py"
+    script.write_text("print('ok')", encoding="utf-8")
+    monkeypatch.setattr(
+        facts_module,
+        "extract_accesses_native",
+        lambda *_args, **_kwargs: [(script, "exec", "command")],
+    )
+    reviewer = StaticReviewerClient(outcome=ReviewerOutcome.ALLOW_ONCE)
+    ledger = SessionArtifactPathProvenance("session-a")
+    rail = AutoPermissionInterruptRail(
+        base_rail=FakeBaseRail(),
+        permission_config={"enabled": True, "mode": "auto"},
+        workspace_root=tmp_path,
+        policy_evaluator=StaticPolicyEvaluator(
+            PolicyEvaluation(level="ask", reason="default_ask")
+        ),
+        auto_reviewer=AutoReviewer(client=reviewer),
+        session_artifact_paths=ledger,
+    )
+    ctx = _runtime_ctx(
+        _Session(),
+        tool_name="mcp_exec_command",
+        tool_args={"command": "python analyze.py"},
+    )
+
+    result = await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = json.dumps({"exit_code": 0})
+    await rail.after_tool_call(ctx)
+
+    assert result is None
+    assert not ledger.contains(root_session_id="session-a", path=script)
+
+
+async def test_oversized_semantic_payload_goes_manual_without_reviewer_call(
+    tmp_path,
+) -> None:
+    rail, _policy, reviewer, _base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+    intent_token = bind_root_decision_context(
+        RootDecisionContext(
+            "session-a",
+            "request-a",
+            "web",
+            (
+                RootIntentTurn(
+                    request_id="request-a",
+                    kind=RootIntentTurnKind.FRESH,
+                    text="Run the supplied script in the project workspace.",
+                ),
+            ),
+        )
+    )
+    try:
+        result = await rail.before_tool_call(
+            tool_name="mcp_exec_command",
+            tool_args={"command": "printf x\n" + "x" * (33 * 1024)},
+            session_id="session-a",
+        )
+    finally:
+        reset_root_decision_context(intent_token)
+
+    assert classify_permission_result(result) == "interrupt"
+    assert reviewer.requests == []
 
 
 async def test_real_engine_deny_precedes_task_tool_control_silent(tmp_path) -> None:
@@ -184,6 +784,54 @@ async def test_code_control_tools_are_silent_before_allow_capable_paths(
 
     assert result is None
     assert len(policy.calls) == 1
+    assert reviewer.requests == []
+    assert base.calls == []
+
+
+async def test_edit_file_reviewer_receives_complete_diff(tmp_path) -> None:
+    rail, _policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="edit_file",
+        tool_args={
+            "file_path": str(tmp_path / "README.md"),
+            "old_string": "old",
+            "new_string": "new",
+        },
+        session_id="session-a",
+    )
+
+    assert result is None
+    assert len(reviewer.requests) == 1
+    assert reviewer.requests[0].review_evidence["reviewable_payload"] == {
+        "old_string": "old",
+        "new_string": "new",
+        "replace_all": False,
+    }
+    assert base.calls == []
+
+
+async def test_incomplete_edit_payload_goes_manual_without_reviewer_call(
+    tmp_path,
+) -> None:
+    rail, _policy, reviewer, base = _rail(
+        tmp_path,
+        PolicyEvaluation(level="ask", reason="default_ask"),
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="edit_file",
+        tool_args={
+            "file_path": str(tmp_path / "README.md"),
+            "new_string": "new",
+        },
+        session_id="session-a",
+    )
+
+    assert classify_permission_result(result) == "interrupt"
     assert reviewer.requests == []
     assert base.calls == []
 
@@ -249,6 +897,78 @@ async def test_lsp_workspace_read_bypasses_reviewer_and_manual_base(tmp_path) ->
     assert reviewer.requests == []
     assert "deterministic_allow" in repr(ctx.extra)
     assert "reviewer_lifecycle" in repr(ctx.extra)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_args"),
+    [
+        ("read_file", {"file_path": "README.md"}),
+        ("list_files", {"path": "src", "show_hidden": False}),
+        ("grep", {"pattern": "main", "path": "src"}),
+    ],
+)
+async def test_default_ask_structured_workspace_read_skips_reviewer(
+    tmp_path,
+    tool_name: str,
+    tool_args: dict[str, object],
+) -> None:
+    rail = build_permission_rail(
+        {
+            "permissions": {
+                "enabled": True,
+                "schema": "tiered_policy",
+                "mode": "auto",
+                "defaults": {"*": "ask"},
+                "file_guard": {
+                    "enabled": True,
+                    "defaults": {"read": "ask", "write": "ask", "exec": "ask"},
+                    "workspace": {
+                        "read": "allow",
+                        "write": "ask",
+                        "exec": "ask",
+                    },
+                },
+            }
+        },
+        enable_auto_permission=True,
+        workspace_root=tmp_path,
+    )
+    reviewer = StaticReviewerClient(outcome=ReviewerOutcome.ALLOW_ONCE)
+    rail.auto_reviewer = AutoReviewer(client=reviewer)
+    ctx = _runtime_ctx(
+        _Session(),
+        tool_name=tool_name,
+        tool_args=tool_args,
+    )
+
+    result = await rail.before_tool_call(ctx)
+
+    assert result is None
+    assert reviewer.requests == []
+    metadata = repr(ctx.extra)
+    assert "structured_workspace_read_allow" in metadata
+    assert "'reviewer_called': False" in metadata
+    assert "'reviewer_lifecycle': 'not_called'" in metadata
+
+
+async def test_explicit_lsp_tool_ask_still_calls_reviewer(tmp_path) -> None:
+    rail, reviewer = _real_lsp_rail(
+        tmp_path,
+        workspace_level="allow",
+        explicit_tool_ask=True,
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="lsp",
+        tool_args={
+            "operation": "documentSymbol",
+            "file_path": (tmp_path / "src" / "main.py").as_posix(),
+        },
+        session_id="session-a",
+    )
+
+    assert result is None
+    assert len(reviewer.requests) == 1
 
 
 async def test_invalid_lsp_input_does_not_use_fast_path(tmp_path) -> None:
@@ -730,7 +1450,11 @@ async def test_ineligible_auto_manual_never_reaches_core_session_remember(
 
     assert session.get_state(INTERRUPT_AUTO_CONFIRM_KEY) in (None, {})
 
-    known_args = {"file_path": str(tmp_path / "report.md")}
+    known_args = {
+        "file_path": str(tmp_path / "report.md"),
+        "old_string": "old",
+        "new_string": "new",
+    }
     known_ctx = _runtime_ctx(session, tool_name="edit_file", tool_args=known_args)
     result = await rail.before_tool_call(known_ctx)
 

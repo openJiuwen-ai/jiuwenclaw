@@ -5,6 +5,7 @@ from __future__ import annotations
 # TEST ONLY: URL fixtures use reserved domains and are evaluated as plain policy
 # data without external network I/O.
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -114,7 +115,7 @@ def test_policy_and_guard_precedence(
     ("policy_level", "expected_source"),
     [
         ("ask", SEMANTIC_REVIEW_SOURCE),
-        ("allow", SEMANTIC_REVIEW_SOURCE),
+        ("allow", MANUAL_REVIEW_SOURCE),
         ("deny", HARD_BLOCK_SOURCE),
     ],
 )
@@ -137,10 +138,24 @@ def test_simple_shell_remains_semantically_reviewable(
     assert route.source == expected_source
 
 
-def test_too_complex_shell_is_manual_only(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "command",
+    (
+        "printf '%s' \"$(pwd)\"",
+        (
+            "value='alpha beta'; printf '%s\\n' \"$value\" | "
+            "sed 's/beta/gamma/' > semantic_e2e.txt && "
+            "cat semantic_e2e.txt 2>/dev/null"
+        ),
+    ),
+)
+def test_complex_shell_remains_semantically_reviewable(
+    tmp_path: Path,
+    command: str,
+) -> None:
     facts = _facts(
         "mcp_exec_command",
-        {"command": "printf '%s' \"$(pwd)\""},
+        {"command": command},
         tmp_path,
     )
 
@@ -151,12 +166,11 @@ def test_too_complex_shell_is_manual_only(tmp_path: Path) -> None:
         workspace_root=tmp_path,
     )
 
-    assert route.source == MANUAL_REVIEW_SOURCE
-    assert route.reason == "core_accesses_unknown"
-    assert route.allowed_outcomes == ("manual", "deny")
+    assert route.source == SEMANTIC_REVIEW_SOURCE
+    assert route.allowed_outcomes == ("allow_once", "manual", "deny")
 
 
-def test_parse_unavailable_shell_is_manual_only(
+def test_parse_unavailable_shell_remains_semantically_reviewable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -174,8 +188,8 @@ def test_parse_unavailable_shell_is_manual_only(
         workspace_root=tmp_path,
     )
 
-    assert route.source == MANUAL_REVIEW_SOURCE
-    assert route.reason == "core_accesses_unknown"
+    assert route.source == SEMANTIC_REVIEW_SOURCE
+    assert route.allowed_outcomes == ("allow_once", "manual", "deny")
 
 
 def test_shell_parser_exception_is_manual_only(
@@ -194,13 +208,39 @@ def test_shell_parser_exception_is_manual_only(
 
     route = reviewer_route(
         facts,
-        policy_level="allow",
+        policy_level="ask",
         guard_result="not_applicable",
         workspace_root=tmp_path,
     )
 
     assert route.source == MANUAL_REVIEW_SOURCE
     assert route.reason == "core_accesses_unknown"
+
+
+def test_verified_shell_with_unknown_core_accesses_uses_narrow_semantic_fallback(
+    tmp_path: Path,
+) -> None:
+    facts = replace(
+        _facts("mcp_exec_command", {"command": "python -c 'print(1)'"}, tmp_path),
+        accesses_known=False,
+    )
+
+    ask_route = reviewer_route(
+        facts,
+        policy_level="ask",
+        guard_result="not_applicable",
+        workspace_root=tmp_path,
+    )
+    allow_route = reviewer_route(
+        facts,
+        policy_level="allow",
+        guard_result="not_applicable",
+        workspace_root=tmp_path,
+    )
+
+    assert ask_route.source == SEMANTIC_REVIEW_SOURCE
+    assert allow_route.source == MANUAL_REVIEW_SOURCE
+    assert allow_route.reason == "core_accesses_unknown"
 
 
 @pytest.mark.parametrize(

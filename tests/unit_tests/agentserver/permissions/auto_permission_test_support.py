@@ -70,11 +70,13 @@ class StaticReviewerClient:
         confidence: float = 0.95,
         reason_code: str = "workspace_read",
         rationale: str = "workspace-local read",
+        artifact_paths: tuple[str, ...] = (),
     ) -> None:
         self.outcome = outcome
         self.confidence = confidence
         self.reason_code = reason_code
         self.rationale = rationale
+        self.artifact_paths = artifact_paths
         self.requests: list[object] = []
 
     async def assess(self, request: object) -> str:
@@ -93,6 +95,8 @@ class StaticReviewerClient:
             )
             if required_unknowns:
                 payload["acknowledged_unknowns"] = list(required_unknowns)
+        if self.artifact_paths:
+            payload["artifact_paths"] = list(self.artifact_paths)
         if self.outcome == ReviewerOutcome.MANUAL:
             payload.update(
                 {

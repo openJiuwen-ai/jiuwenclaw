@@ -125,18 +125,36 @@ export function AutoReviewerDetails({ reviewer }: { reviewer?: AutoReviewerMetad
     ? t(
         `chatUi.autoReviewer.details.reasonValues.${
           FAILURE_STATUSES.has(status) ? 'denied' : MANUAL_ACTION_STATUSES.has(status) ? 'manual' : status === 'in_progress' ? 'inProgress' : 'approved'
-        }`
+        }`,
       )
     : undefined;
   const manualGuidance = reviewerNeedsManualAction(reviewer)
     ? (displayText(reviewer.user_review_hint) ?? t('chatUi.autoReviewer.details.manualGuidanceFallback'))
     : undefined;
   const rows = [
-    [t('chatUi.autoReviewer.details.source'), sourceLabel],
-    [t('chatUi.autoReviewer.details.risk'), t(`chatUi.autoReviewer.details.riskValues.${reviewerRiskLevel(reviewer)}`)],
-    [t('chatUi.autoReviewer.details.reason'), details.reason ?? genericReason],
-    [t('chatUi.autoReviewer.details.hint'), manualGuidance],
-  ].filter((row): row is [string, string] => Boolean(row[1]));
+    {
+      key: 'source',
+      label: t('chatUi.autoReviewer.details.source'),
+      value: sourceLabel,
+    },
+    {
+      key: 'risk',
+      label: t('chatUi.autoReviewer.details.risk'),
+      value: t(`chatUi.autoReviewer.details.riskValues.${reviewerRiskLevel(reviewer)}`),
+    },
+    {
+      key: 'reason',
+      label: t('chatUi.autoReviewer.details.reason'),
+      value: details.reason ?? genericReason,
+      fullWidth: true,
+    },
+    {
+      key: 'hint',
+      label: t('chatUi.autoReviewer.details.hint'),
+      value: manualGuidance,
+      fullWidth: true,
+    },
+  ].filter((row): row is typeof row & { value: string } => Boolean(row.value));
   if (!rows.length) return null;
   return (
     <div className="mt-3 rounded-lg border border-border bg-card p-3 text-xs" data-testid="auto-reviewer-details">
@@ -145,8 +163,8 @@ export function AutoReviewerDetails({ reviewer }: { reviewer?: AutoReviewerMetad
         <AutoReviewerStatusBadge reviewer={reviewer} />
       </div>
       <div className="grid gap-1 sm:grid-cols-2">
-        {rows.map(([label, value]) => (
-          <div className="min-w-0" key={label}>
+        {rows.map(({ key, label, value, fullWidth }) => (
+          <div className={clsx('min-w-0', fullWidth && 'col-span-full')} data-detail-field={key} key={key}>
             <span className="text-text-muted">{label}: </span>
             <span className="break-words text-text">{value}</span>
           </div>

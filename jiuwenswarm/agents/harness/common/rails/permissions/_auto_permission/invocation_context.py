@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -396,15 +397,24 @@ def _replace_invocation_tool_args(
 def _normalize_command_invocation_for_execution(
     invocation: ToolInvocation,
     kwargs: dict[str, Any],
+    *,
+    permission_workspace_root: str | Path | None = None,
 ) -> tuple[ToolInvocation, str]:
-    """Freeze mcp_exec_command's effective workdir into its execution args."""
+    """Freeze supported command workdirs into their effective execution args."""
 
-    if invocation.tool_name != "mcp_exec_command":
+    if invocation.tool_name not in {"bash", "mcp_exec_command"}:
         return invocation, ""
     normalized_args = normalize_invocation_tool_args(
         invocation.tool_name,
         invocation.tool_args,
     )
+    if invocation.tool_name == "bash":
+        return _normalize_bash_invocation_for_execution(
+            invocation,
+            kwargs,
+            normalized_args,
+            permission_workspace_root=permission_workspace_root,
+        )
     if not normalized_args or "cwd" in normalized_args:
         return invocation, "command_workdir_contract_invalid"
     try:
@@ -415,6 +425,48 @@ def _normalize_command_invocation_for_execution(
     except (OSError, RuntimeError, TypeError, ValueError):
         return invocation, "command_workdir_contract_invalid"
     execution_args = {**normalized_args, "workdir": str(resolved)}
+    try:
+        _write_invocation_tool_args(invocation, kwargs, execution_args)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return invocation, "command_workdir_writeback_failed"
+    return _replace_invocation_tool_args(invocation, execution_args), ""
+
+
+def _normalize_bash_invocation_for_execution(
+    invocation: ToolInvocation,
+    kwargs: dict[str, Any],
+    normalized_args: dict[str, Any],
+    *,
+    permission_workspace_root: str | Path | None,
+) -> tuple[ToolInvocation, str]:
+    """Canonicalize a workspace-local bash workdir without blocking other scopes."""
+
+    if not normalized_args:
+        return invocation, ""
+    raw_workdir = normalized_args.get("workdir")
+    if (raw_workdir is None or raw_workdir == "") and "cwd" in normalized_args:
+        raw_workdir = normalized_args.get("cwd")
+    if permission_workspace_root is None:
+        return invocation, ""
+    try:
+        root = Path(permission_workspace_root).expanduser().resolve(strict=False)
+        runtime_cwd = current_command_runtime_paths().current_cwd
+        if raw_workdir is None or raw_workdir == "":
+            candidate = runtime_cwd
+        elif isinstance(raw_workdir, str):
+            candidate = Path(raw_workdir).expanduser()
+            if not candidate.is_absolute():
+                candidate = runtime_cwd / candidate
+        else:
+            return invocation, ""
+        resolved = candidate.resolve(strict=False)
+        resolved.relative_to(root)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return invocation, ""
+    execution_args = {
+        key: value for key, value in normalized_args.items() if key != "cwd"
+    }
+    execution_args["workdir"] = str(resolved)
     try:
         _write_invocation_tool_args(invocation, kwargs, execution_args)
     except (AttributeError, RuntimeError, TypeError, ValueError):

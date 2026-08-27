@@ -15,6 +15,7 @@ import json
 from typing import Any, Mapping
 
 _CALL_GOAL_KEYS = ("call_goal", "callGoal")
+_MODEL_PURPOSE_CLAIM_KEYS = ("description", *_CALL_GOAL_KEYS)
 
 _VERB_BY_TOOL: dict[str, str] = {
     "write": "写入", "write_file": "写入", "write_text_file": "写入",
@@ -68,7 +69,7 @@ _SKILL_ARG_KEYS = ("skill_name", "skillName", "name")
 _CALL_GOAL_SCHEMA: dict[str, Any] = {
     "type": "string",
     "description": (
-        "一句简短中文，说明这次工具调用要达成的目标（仅界面展示），"
+        "一句简短中文，说明这次工具调用要达成的目标（用于界面展示，也可能作为不可信证据送交权限审查），"
         "例如「调研 openJiuwen 官网信息」「创建三子棋对战团队」「通知 player-x 落子」。"
         "不要只写工具名或裸 URL；不影响工具实际执行。"
         "与工具自带的 display_name（成员/团队展示名）以及 send_message.summary 都不是同一个字段，"
@@ -97,6 +98,17 @@ def _as_mapping(arguments: Any) -> dict[str, Any]:
         except (ValueError, TypeError):
             return {}
     return {}
+
+
+def resolve_model_purpose_claim(arguments: Any) -> str:
+    """Resolve the exact untrusted model-authored purpose claim for review."""
+
+    args = _as_mapping(arguments)
+    for key in _MODEL_PURPOSE_CLAIM_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
 
 
 def _first_string(args: Mapping[str, Any], keys: tuple[str, ...]) -> str:

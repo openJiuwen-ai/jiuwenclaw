@@ -140,7 +140,25 @@ def reviewer_route(
     if guard == "terminal_manual":
         return _manual("terminal_manual")
 
-    structural_reason = _structural_manual_reason(facts)
+    if requires_manual_execution_provider_review(
+        facts.tool_name,
+        tool_category=facts.capability.category,
+    ):
+        return _manual(EXECUTION_PROVIDER_CONTRACT_UNVERIFIED)
+
+    allow_unknown_shell_accesses = bool(
+        policy == ASK_LEVEL
+        and facts.capability.category == "shell"
+        and facts.command
+        and not requires_manual_execution_provider_review(
+            facts.tool_name,
+            tool_category=facts.capability.category,
+        )
+    )
+    structural_reason = _structural_manual_reason(
+        facts,
+        allow_unknown_shell_accesses=allow_unknown_shell_accesses,
+    )
     if structural_reason:
         return _manual(structural_reason)
 
@@ -149,12 +167,6 @@ def reviewer_route(
             return _deny(domain_route.reason or "domain_policy_deny")
         if domain_route.requires_manual:
             return _manual(domain_route.reason or "domain_policy_manual")
-
-    if requires_manual_execution_provider_review(
-        facts.tool_name,
-        tool_category=facts.capability.category,
-    ):
-        return _manual(EXECUTION_PROVIDER_CONTRACT_UNVERIFIED)
 
     if (
         facts.capability.category == "shell"
@@ -208,10 +220,18 @@ def reviewer_route(
     return _semantic()
 
 
-def _structural_manual_reason(facts: ToolDecisionFacts) -> str:
+def _structural_manual_reason(
+    facts: ToolDecisionFacts,
+    *,
+    allow_unknown_shell_accesses: bool = False,
+) -> str:
     if not facts.arguments_valid_object:
         return "arguments_not_object"
-    if facts.capability.category == "path" and not facts.accesses_known:
+    if (
+        facts.capability.category in {"path", "shell"}
+        and not facts.accesses_known
+        and not allow_unknown_shell_accesses
+    ):
         return "core_accesses_unknown"
     if facts.capability.alias_conflict:
         return "alias_conflict"
@@ -230,10 +250,10 @@ def _shell_payload_is_reviewable(
     *,
     policy_level: str,
 ) -> bool:
-    """Allow semantic review only when Core exposes a usable simple AST."""
+    """Allow ASK semantic review when the Core parser call itself is available."""
 
     if (
-        policy_level not in {ASK_LEVEL, ALLOW_LEVEL}
+        policy_level != ASK_LEVEL
         or facts.capability.category != "shell"
         or not facts.arguments_valid_object
     ):
@@ -245,14 +265,10 @@ def _shell_payload_is_reviewable(
     ):
         return False
     try:
-        parsed = parse_shell_for_permission(facts.command)
+        parse_shell_for_permission(facts.command)
     except (OSError, RuntimeError, TypeError, ValueError):
         return False
-    return bool(
-        parsed.kind == "simple"
-        and parsed.subcommands
-        and all(subcommand.argv for subcommand in parsed.subcommands)
-    )
+    return True
 
 
 def _is_public_search(facts: ToolDecisionFacts) -> bool:

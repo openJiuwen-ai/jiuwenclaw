@@ -11,6 +11,10 @@ from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.artifa
     has_user_file_delivery_prohibition,
     is_file_delivery_action,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.artifact_path_provenance import (
+    clear_artifact_candidate_state,
+    publish_artifact_candidate_state,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
     file_delivery_constraint_text,
     original_user_intent as resolve_original_user_intent,
@@ -38,6 +42,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.review
     _is_allow_once_confirmation,
     _is_rejection_confirmation,
     _parse_confirmation_payload,
+    _reviewer_route_audit_extra,
     _should_degrade_auto_confirm,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.runtime_result import (
@@ -103,6 +108,7 @@ from jiuwenswarm.server.runtime.sandbox_no_host_fallback import (
 from jiuwenswarm.agents.harness.common.rails.permissions.permission_interrupt_rail import (
     has_pre_permission_hard_rejection,
 )
+from jiuwenswarm.common.tool_display import resolve_model_purpose_claim
 
 _NON_PERMISSION_CONTROL_SILENT_TOOLS = frozenset(
     {"enter_plan_mode", "exit_plan_mode", "switch_mode"}
@@ -131,6 +137,7 @@ class AutoPermissionBeforeToolMixin:
         clear_send_file_execution_grant()
         clear_trusted_search_producer()
         invocation = _extract_invocation(args, kwargs)
+        clear_artifact_candidate_state(invocation.ctx)
         if has_pre_permission_hard_rejection(invocation.ctx):
             return None
         context_extra = getattr(invocation.ctx, "extra", None)
@@ -151,12 +158,17 @@ class AutoPermissionBeforeToolMixin:
         )
         if trusted_send_resolution is not None:
             invocation = trusted_send_resolution.invocation
+        model_purpose_claim = resolve_model_purpose_claim(invocation.tool_args)
         original_args_were_valid_object = _args_were_valid_json_object(
             invocation.tool_args
         )
         invocation = _repair_invocation_args_for_execution(invocation)
         invocation, command_contract_error = (
-            _normalize_command_invocation_for_execution(invocation, kwargs)
+            _normalize_command_invocation_for_execution(
+                invocation,
+                kwargs,
+                permission_workspace_root=self.workspace_root,
+            )
         )
         normalized_args = normalize_invocation_tool_args(
             invocation.tool_name,
@@ -263,6 +275,34 @@ class AutoPermissionBeforeToolMixin:
                 facts=facts,
                 decision_source=decision_source,
             )
+            is_grounded_execution = facts.tool_category != "shell" or bool(
+                facts.effective_workdir
+            )
+            should_publish_artifact_candidate = (
+                self.session_artifact_paths is not None
+                and classify_permission_result(result) == "allow"
+            )
+            if (
+                should_publish_artifact_candidate
+                and is_grounded_execution
+            ):
+                publish_artifact_candidate_state(
+                    invocation.ctx,
+                    session_id=session_id,
+                    tool_name=facts.tool_name,
+                    tool_call_id=tool_call_id,
+                    workspace_root=self.workspace_root,
+                    host_write_paths=facts.artifact_write_paths,
+                    untrusted_args=facts.untrusted_args,
+                    command=facts.raw_command,
+                    include_semantic=(
+                        decision_source == "auto_reviewer"
+                    ),
+                    effective_workdir=facts.effective_workdir,
+                    facts=facts,
+                )
+            else:
+                clear_artifact_candidate_state(invocation.ctx)
             if (
                 invocation_resume is not None
                 and decision_source == "manual_approval"
@@ -563,6 +603,7 @@ class AutoPermissionBeforeToolMixin:
                 user_input=user_input,
                 original_user_intent=original_user_intent,
                 domain_route=None,
+                model_purpose_claim=model_purpose_claim,
                 channel_kind=channel_kind,
                 runtime_ctx=invocation.ctx,
             )
@@ -753,6 +794,7 @@ class AutoPermissionBeforeToolMixin:
                 now=now,
                 user_input=user_input,
                 original_user_intent=original_user_intent,
+                model_purpose_claim=model_purpose_claim,
                 channel_kind=channel_kind,
                 runtime_ctx=invocation.ctx,
             )
@@ -783,12 +825,16 @@ class AutoPermissionBeforeToolMixin:
                 decision_source="policy_evaluator",
             )
 
-        if (
-            facts.tool_name == "lsp"
-            and not path_policy_requires_approval
-            and terminal_low_risk_route(facts) is not None
-        ):
-            reason = "lsp_terminal_low_risk_allow"
+        structured_read_route = terminal_low_risk_route(
+            facts,
+            policy_level=policy_evaluation.level,
+            default_ask=policy_evaluation.default_ask,
+            structured_read_guard_level=(
+                policy_evaluation.structured_read_guard_level
+            ),
+        )
+        if structured_read_route is not None:
+            reason = structured_read_route.reason
             self._record_reviewer_success_metadata(
                 invocation.ctx,
                 facts,
@@ -797,6 +843,7 @@ class AutoPermissionBeforeToolMixin:
                 metadata={
                     "decision_source": "deterministic_guard",
                     "final_reviewer_status": "deterministic_allow",
+                    "reviewer_called": False,
                     "reviewer_lifecycle": "not_called",
                     "reviewer_outcome": "allow_once",
                     "reviewer_reason_code": reason,
@@ -808,6 +855,11 @@ class AutoPermissionBeforeToolMixin:
                 decision=ALLOW_LEVEL,
                 reason=reason,
                 degraded=False,
+                extra=_reviewer_route_audit_extra(
+                    structured_read_route,
+                    policy_level=policy_evaluation.level,
+                    reviewer_called=False,
+                ),
             )
             return runtime_result(None, decision_source="deterministic_guard")
 
@@ -826,21 +878,6 @@ class AutoPermissionBeforeToolMixin:
                 None,
                 decision_source="manual_approval",
                 explicit_send_authorization=True,
-            )
-
-        if (
-            not path_policy_requires_approval
-            and terminal_low_risk_route(facts) is not None
-        ):
-            self._emit_audit(
-                facts,
-                decision="allow",
-                reason="terminal_low_risk_allow",
-                degraded=False,
-            )
-            return runtime_result(
-                None,
-                decision_source="deterministic_guard",
             )
 
         if policy_evaluation.level == ALLOW_LEVEL:

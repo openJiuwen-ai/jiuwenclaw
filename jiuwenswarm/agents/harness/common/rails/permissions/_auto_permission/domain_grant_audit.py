@@ -69,6 +69,7 @@ class AutoPermissionDomainGrantAuditMixin:
         now: float,
         user_input: Any,
         original_user_intent: OriginalUserIntentEvidence | None,
+        model_purpose_claim: str = "",
         channel_kind: str = "web",
         runtime_ctx: Any | None = None,
     ) -> PermissionHandlingResult:
@@ -84,6 +85,7 @@ class AutoPermissionDomainGrantAuditMixin:
                 user_input=user_input,
                 original_user_intent=original_user_intent,
                 domain_route=domain_route,
+                model_purpose_claim=model_purpose_claim,
                 guard_result="scoped_candidate",
                 channel_kind=channel_kind,
                 runtime_ctx=runtime_ctx,

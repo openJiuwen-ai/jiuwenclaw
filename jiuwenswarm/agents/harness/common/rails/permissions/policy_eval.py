@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 _MAX_EXTERNAL_PATHS = 64
 _MAX_EXTERNAL_PATH_LENGTH = 4096
 _MAX_EXTERNAL_PATHS_TOTAL_LENGTH = 16384
+_STRUCTURED_WORKSPACE_READ_TOOLS = frozenset(
+    {"grep", "list_files", "lsp", "read_file"}
+)
+_DEFAULT_ASK_RULE = "tiered_policy:defaults.*"
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,8 @@ class PolicyEvaluation:
     source: str = "permission_engine"
     path_result: SendFilePathGuardResult | None = None
     external_paths: tuple[str, ...] = ()
+    default_ask: bool = False
+    structured_read_guard_level: str = "unevaluated"
 
 
 class OpenJiuwenPolicyEvaluator:
@@ -113,6 +119,16 @@ class OpenJiuwenPolicyEvaluator:
             else:
                 engine_decision = _evaluation_from_permission_result(result)
 
+        default_ask = _is_default_engine_ask(
+            engine,
+            tool_name=normalized_tool_name,
+            tool_args=tool_args,
+        )
+        structured_read_guard_level = _structured_read_guard_level(
+            engine,
+            tool_name=normalized_tool_name,
+            tool_args=tool_args,
+        )
         path_result = None
         if normalized_tool_name == SEND_FILE_TOOL_NAME:
             path_result = self._path_guard_evaluator.evaluate(
@@ -126,6 +142,8 @@ class OpenJiuwenPolicyEvaluator:
             engine_decision,
             _evaluation_from_path_result(path_result),
             path_result=path_result,
+            default_ask=default_ask,
+            structured_read_guard_level=structured_read_guard_level,
         )
 
     def _normalize_tool_name(self, tool_name: str) -> str:
@@ -287,6 +305,69 @@ def _evaluation_from_permission_result(result: Any) -> PolicyEvaluation:
     )
 
 
+def _is_default_engine_ask(
+    engine: Any,
+    *,
+    tool_name: str,
+    tool_args: dict[str, Any],
+) -> bool:
+    """Prove that Pipeline A ASK came only from the tiered default rule."""
+
+    evaluator = getattr(engine, "evaluate_global_policy_directly", None)
+    if not callable(evaluator):
+        return False
+    try:
+        result = evaluator(
+            tool_name,
+            tool_args,
+            include_external_directory=False,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        logger.exception("[PolicyEval] direct global policy evaluation failed")
+        return False
+    if not isinstance(result, tuple) or len(result) != 2:
+        return False
+    permission, matched_rule = result
+    return (
+        _permission_level_value(permission) == ASK_LEVEL
+        and str(matched_rule or "") == _DEFAULT_ASK_RULE
+    )
+
+
+def _structured_read_guard_level(
+    engine: Any,
+    *,
+    tool_name: str,
+    tool_args: dict[str, Any],
+) -> str:
+    """Reuse Core's current file guard for the structured-read eligibility proof."""
+
+    if tool_name not in _STRUCTURED_WORKSPACE_READ_TOOLS:
+        return "unevaluated"
+    sentinel = object()
+    checker = getattr(engine, "_file_guard", sentinel)
+    if checker is sentinel:
+        return "unevaluable"
+    if checker is None:
+        return "neutral"
+    evaluate = getattr(checker, "evaluate", None)
+    if not callable(evaluate):
+        return "unevaluable"
+    try:
+        result = evaluate(tool_name, tool_args)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        logger.exception("[PolicyEval] structured read file guard failed")
+        return "unevaluable"
+    if result is None:
+        return "allow"
+    level = _permission_level_value(getattr(result, "permission", None))
+    return (
+        level
+        if level in {ALLOW_LEVEL, ASK_LEVEL, DENY_LEVEL}
+        else "unevaluable"
+    )
+
+
 def _validated_external_paths(value: Any) -> tuple[str, ...] | None:
     if value is None:
         return ()
@@ -328,6 +409,8 @@ def _evaluation_from_path_result(
 def _strictest_evaluation(
     *evaluations: PolicyEvaluation | None,
     path_result: SendFilePathGuardResult | None,
+    default_ask: bool = False,
+    structured_read_guard_level: str = "unevaluated",
 ) -> PolicyEvaluation:
     candidates = [evaluation for evaluation in evaluations if evaluation is not None]
     precedence = {ALLOW_LEVEL: 0, ASK_LEVEL: 1, DENY_LEVEL: 2}
@@ -348,4 +431,6 @@ def _strictest_evaluation(
         source=strictest.source,
         path_result=path_result,
         external_paths=tuple(external_paths),
+        default_ask=default_ask,
+        structured_read_guard_level=structured_read_guard_level,
     )

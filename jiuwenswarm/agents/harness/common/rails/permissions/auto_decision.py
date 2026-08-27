@@ -9,6 +9,13 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from jsonschema import ValidationError as JsonSchemaValidationError
+from jsonschema import validate as validate_json_schema
+from openjiuwen.harness.prompts.tools.filesystem import (
+    get_grep_input_params,
+    get_list_dir_input_params,
+    get_read_file_input_params,
+)
 from openjiuwen.harness.tools.lsp_tool import LspToolInput
 from pydantic import TypeAdapter, ValidationError
 
@@ -79,6 +86,14 @@ BROWSER_INSPECTION_OPERATIONS = (
     "wait_for",
 )
 _LSP_INPUT_ADAPTER = TypeAdapter(LspToolInput)
+_STRUCTURED_WORKSPACE_READ_SCHEMAS = {
+    "grep": get_grep_input_params,
+    "list_files": get_list_dir_input_params,
+    "read_file": get_read_file_input_params,
+}
+_STRUCTURED_WORKSPACE_READ_TOOLS = frozenset(
+    {*_STRUCTURED_WORKSPACE_READ_SCHEMAS, "lsp"}
+)
 
 
 def deterministic_guard_route(
@@ -400,31 +415,66 @@ def _closed_internal_args_valid(facts: ToolDecisionFacts, network: Any) -> bool:
     return True
 
 
-def terminal_low_risk_route(facts: ToolDecisionFacts) -> DecisionRoute | None:
+def terminal_low_risk_route(
+    facts: ToolDecisionFacts,
+    *,
+    policy_level: str = ALLOW_LEVEL,
+    default_ask: bool = False,
+    structured_read_guard_level: str = "allow",
+) -> DecisionRoute | None:
     """Return the closed low-risk path-read route before base ASK."""
     if deterministic_guard_route(facts) is not None:
         return None
-    if (
-        facts.external_paths
-        or facts.write_paths
-        or not facts.accesses_known
+    unsupported_facts = any(
+        (
+            facts.tool_name not in _STRUCTURED_WORKSPACE_READ_TOOLS,
+            facts.capability.facts_source != "host_static",
+            facts.capability.alias_conflict,
+            not facts.arguments_valid_object,
+            facts.capability.category != "path",
+            facts.capability.operation_family != "workspace_read",
+            facts.capability.risk_tier != "low",
+            facts.capability.high_flex,
+            facts.capability.static_side_effects,
+            bool(facts.external_paths),
+            bool(facts.write_paths),
+            not facts.accesses_known,
+            structured_read_guard_level not in {"allow", "neutral"},
+        )
+    )
+    policy_allows = policy_level == ALLOW_LEVEL or (
+        policy_level == ASK_LEVEL and default_ask
+    )
+    if unsupported_facts or not policy_allows:
+        return None
+    try:
+        if facts.tool_name == "lsp":
+            _LSP_INPUT_ADAPTER.validate_python(dict(facts.untrusted_args))
+        else:
+            schema_factory = _STRUCTURED_WORKSPACE_READ_SCHEMAS[facts.tool_name]
+            validate_json_schema(
+                instance=dict(facts.untrusted_args),
+                schema=schema_factory("en"),
+            )
+    except (
+        JsonSchemaValidationError,
+        KeyError,
+        TypeError,
+        ValueError,
+        ValidationError,
     ):
         return None
-    if facts.tool_name == "lsp":
-        try:
-            _LSP_INPUT_ADAPTER.validate_python(dict(facts.untrusted_args))
-        except (TypeError, ValueError, ValidationError):
-            return None
-        if not _lsp_read_paths_within_workspace(facts):
-            return None
-    if facts.capability.category == "path":
-        if facts.capability.risk_tier == "low" and not facts.capability.static_side_effects:
-            return DecisionRoute(ALLOW_LEVEL, "terminal_low_risk_allow", "hard_guard")
-    return None
+    if not _read_paths_within_workspace(facts):
+        return None
+    return DecisionRoute(
+        ALLOW_LEVEL,
+        "structured_workspace_read_allow",
+        "deterministic_guard",
+    )
 
 
-def _lsp_read_paths_within_workspace(facts: ToolDecisionFacts) -> bool:
-    """Prove every canonical LSP read remains under the runtime workspace."""
+def _read_paths_within_workspace(facts: ToolDecisionFacts) -> bool:
+    """Prove every canonical structured read remains under primary workspace."""
 
     if not facts.workspace_root or not facts.read_paths:
         return False

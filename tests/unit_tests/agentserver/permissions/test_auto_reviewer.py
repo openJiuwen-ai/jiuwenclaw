@@ -23,6 +23,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission import
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.auto_reviewer import (
     AUTO_REVIEW_REASON_SUMMARY_LIMIT,
+    ISOLATED_AUTO_REVIEWER_PROMPT,
     AutoReviewer,
     IsolatedModelReviewerClient,
     ReviewerActionView,
@@ -405,6 +406,63 @@ async def test_auto_reviewer_deny_does_not_require_unknown_acknowledgements(
 
     assert assessment.outcome == ReviewerOutcome.DENY
     assert assessment.acknowledged_unknowns == ()
+
+
+async def test_auto_reviewer_accepts_bounded_artifact_paths(tmp_path: Path) -> None:
+    _, candidate = _candidate(tmp_path)
+    request = _build_request(candidate=candidate, policy_reason="policy_ask")
+    client = StaticReviewerClient(
+        _valid_response(
+            request,
+            outcome=ReviewerOutcome.ALLOW_ONCE,
+            extra={
+                "artifact_paths": [
+                    "outputs/report.csv",
+                    "outputs/report.csv",
+                    "summary.md",
+                ]
+            },
+        )
+    )
+
+    assessment = await AutoReviewer(client=client).assess(request)
+
+    assert assessment.outcome == ReviewerOutcome.ALLOW_ONCE
+    assert assessment.artifact_paths == ("outputs/report.csv", "summary.md")
+
+
+@pytest.mark.parametrize(
+    "artifact_paths",
+    [
+        "outputs/report.csv",
+        ["/tmp/report.csv"],
+        ["../report.csv"],
+        ["outputs/*.csv"],
+        ["$WORKSPACE/report.csv"],
+        ["outputs/"],
+        ["x" * 513],
+        [f"outputs/{index}.csv" for index in range(9)],
+        pytest.param(["\ud800"], id="lone-surrogate"),
+    ],
+)
+async def test_auto_reviewer_rejects_invalid_artifact_paths(
+    tmp_path: Path,
+    artifact_paths: object,
+) -> None:
+    _, candidate = _candidate(tmp_path)
+    request = _build_request(candidate=candidate, policy_reason="policy_ask")
+    client = StaticReviewerClient(
+        _valid_response(
+            request,
+            outcome=ReviewerOutcome.ALLOW_ONCE,
+            extra={"artifact_paths": artifact_paths},
+        )
+    )
+
+    assessment = await AutoReviewer(client=client).assess(request)
+
+    assert assessment.outcome == ReviewerOutcome.MANUAL
+    assert assessment.fallback_reason == "invalid_artifact_paths"
 
 
 async def test_auto_reviewer_discards_manual_fields_from_allow_once(
@@ -1641,6 +1699,442 @@ def test_auto_review_request_is_locked_down_and_sanitized(tmp_path: Path) -> Non
     assert not hasattr(action_view, "permission_host")
     assert not hasattr(action_view, "approval_callback")
     assert not hasattr(action_view, "mutable_permission_config")
+
+
+async def test_reviewer_payload_preserves_raw_complete_multiline_command(
+    tmp_path: Path,
+) -> None:
+    command = (
+        "\n\u2003python - <<'PY'\n"
+        "token = 'sk-synthetic-test-secret'\n"
+        f"output = '{tmp_path}/outputs/report.csv'\n"
+        "print(output)\n"
+        "PY\n"
+        "rm -f outputs/stale.tmp 2>/dev/null\n\u2003"
+    )
+    facts = build_facts(
+        "mcp_exec_command",
+        {"command": command},
+        workspace_root=tmp_path,
+    )
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    )
+
+    payload = action_view.to_json_dict()["review_evidence"]["reviewable_payload"][
+        "command"
+    ]
+    assert action_view.payload_complete is True
+    assert payload == command
+    assert "sk-synthetic-test-secret" in payload
+    assert f"{tmp_path}/outputs/report.csv" in payload
+    assert "2>/dev/null" in payload
+
+    model = RecordingIsolatedReviewerModel()
+    await IsolatedModelReviewerClient(model=model).assess(action_view)
+    model_request = json.loads(model.calls[0][0][1]["content"])["request"]
+    assert model_request["review_evidence"]["reviewable_payload"]["command"] == (
+        command
+    )
+
+
+def test_reviewer_exposes_host_resolved_workspace_relative_workdir(
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "subdir"
+    facts = build_facts(
+        "mcp_exec_command",
+        {"command": "write('report.csv')", "workdir": str(workdir)},
+        workspace_root=tmp_path,
+    )
+
+    request = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    ).to_json_dict()
+
+    assert request["review_evidence"]["effective_workdir"] == "subdir"
+
+
+def test_reviewer_payload_surrogate_fails_atomically(tmp_path: Path) -> None:
+    facts = build_facts(
+        "code",
+        {"code": "print('\\ud800')".replace("\\ud800", "\ud800")},
+        workspace_root=tmp_path,
+    )
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    )
+
+    assert action_view.payload_complete is False
+    assert action_view.payload_error == "reviewer_payload_unrepresentable"
+    assert action_view.review_evidence["reviewable_payload"] == {}
+
+
+@pytest.mark.parametrize(
+    ("old_string", "new_string", "replace_all", "expected_replace_all"),
+    [
+        ("old", "new", None, False),
+        ("", "new", False, False),
+        ("old", "", True, True),
+    ],
+)
+def test_edit_file_payload_preserves_complete_diff_and_default(
+    tmp_path: Path,
+    old_string: str,
+    new_string: str,
+    replace_all: bool | None,
+    expected_replace_all: bool,
+) -> None:
+    args: dict[str, object] = {
+        "file_path": "README.md",
+        "old_string": old_string,
+        "new_string": new_string,
+    }
+    if replace_all is not None:
+        args["replace_all"] = replace_all
+    facts = build_facts("edit_file", args, workspace_root=tmp_path)
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    )
+
+    assert action_view.payload_complete is True
+    assert action_view.review_evidence["reviewable_payload"] == {
+        "old_string": old_string,
+        "new_string": new_string,
+        "replace_all": expected_replace_all,
+    }
+
+
+@pytest.mark.parametrize(
+    "args, expected_error",
+    [
+        (
+            {"file_path": "README.md", "new_string": "new"},
+            "reviewer_payload_incomplete",
+        ),
+        (
+            {"file_path": "README.md", "old_string": "old"},
+            "reviewer_payload_incomplete",
+        ),
+        (
+            {
+                "file_path": "README.md",
+                "old_string": 1,
+                "new_string": "new",
+            },
+            "reviewer_payload_invalid",
+        ),
+        (
+            {
+                "file_path": "README.md",
+                "old_string": "old",
+                "new_string": "new",
+                "replace_all": "yes",
+            },
+            "reviewer_payload_invalid",
+        ),
+    ],
+)
+def test_edit_file_payload_invalid_fields_fail_atomically(
+    tmp_path: Path,
+    args: dict[str, object],
+    expected_error: str,
+) -> None:
+    facts = build_facts("edit_file", args, workspace_root=tmp_path)
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    )
+
+    assert action_view.payload_complete is False
+    assert action_view.payload_error == expected_error
+    assert action_view.review_evidence["reviewable_payload"] == {}
+
+
+def test_edit_file_payload_and_purpose_share_atomic_budget(tmp_path: Path) -> None:
+    old_string = "旧值"
+    new_string = "new"
+    claim = "edit requested value"
+    facts = build_facts(
+        "edit_file",
+        {
+            "file_path": "README.md",
+            "old_string": old_string,
+            "new_string": new_string,
+        },
+        workspace_root=tmp_path,
+    )
+    exact_size = sum(
+        len(value.encode("utf-8"))
+        for value in (old_string, new_string, "false", claim)
+    )
+
+    exact = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+        model_purpose_claim=claim,
+        reviewer_payload_max_bytes=exact_size,
+    )
+    over = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+        model_purpose_claim=claim,
+        reviewer_payload_max_bytes=exact_size - 1,
+    )
+
+    assert exact.payload_complete is True
+    assert exact.review_evidence["model_purpose_claim"] == claim
+    assert over.payload_complete is False
+    assert over.payload_error == "reviewer_payload_too_large"
+    assert over.review_evidence["reviewable_payload"] == {}
+    assert "model_purpose_claim" not in over.review_evidence
+
+
+def test_edit_file_unencodable_diff_fails_atomically(tmp_path: Path) -> None:
+    facts = build_facts(
+        "edit_file",
+        {
+            "file_path": "README.md",
+            "old_string": "old",
+            "new_string": "\ud800",
+        },
+        workspace_root=tmp_path,
+    )
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    )
+
+    assert action_view.payload_complete is False
+    assert action_view.payload_error == "reviewer_payload_unrepresentable"
+    assert action_view.review_evidence["reviewable_payload"] == {}
+
+
+def test_reviewer_payload_fails_atomically_when_over_limit(tmp_path: Path) -> None:
+    facts = build_facts(
+        "mcp_exec_command",
+        {"command": "printf x\n" + "x" * 64},
+        workspace_root=tmp_path,
+    )
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+        model_purpose_claim="purpose",
+        reviewer_payload_max_bytes=32,
+    )
+
+    assert action_view.payload_complete is False
+    assert action_view.payload_error == "reviewer_payload_too_large"
+    assert action_view.review_evidence["reviewable_payload"] == {}
+    assert "model_purpose_claim" not in action_view.review_evidence
+
+
+def test_reviewer_exposes_exact_untrusted_purpose_claim_separately(
+    tmp_path: Path,
+) -> None:
+    command = "printf report"
+    claim = "  inspect the generated report  "
+    facts = build_facts(
+        "mcp_exec_command",
+        {"command": command, "description": claim},
+        workspace_root=tmp_path,
+    )
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+        model_purpose_claim=claim,
+        reviewer_payload_max_bytes=len(command.encode()) + len(claim.encode()),
+    )
+
+    evidence = action_view.to_json_dict()["review_evidence"]
+    assert action_view.payload_complete is True
+    assert evidence["model_purpose_claim"] == claim
+    assert evidence["reviewable_payload"] == {"command": command}
+    assert "description" not in evidence["reviewable_payload"]
+
+    over_limit = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+        model_purpose_claim=claim,
+        reviewer_payload_max_bytes=len(command.encode()) + len(claim.encode()) - 1,
+    )
+    assert over_limit.payload_error == "reviewer_payload_too_large"
+    assert "model_purpose_claim" not in over_limit.review_evidence
+
+
+def test_reviewer_payload_hard_max_cannot_be_configured_upward(
+    tmp_path: Path,
+) -> None:
+    facts = build_facts(
+        "mcp_exec_command",
+        {"command": "x" * (33 * 1024)},
+        workspace_root=tmp_path,
+    )
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+        reviewer_payload_max_bytes=64 * 1024,
+    )
+
+    assert action_view.payload_complete is False
+    assert action_view.payload_error == "reviewer_payload_too_large"
+
+
+def test_shell_summary_parser_failure_keeps_complete_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_parser(_command: str):
+        raise RuntimeError("unsupported grammar")
+
+    monkeypatch.setattr(
+        auto_reviewer_module,
+        "parse_shell_for_permission",
+        fail_parser,
+    )
+    facts = build_facts(
+        "mcp_exec_command",
+        {"command": "python -c 'print(1)'"},
+        workspace_root=tmp_path,
+    )
+
+    action_view = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+    )
+
+    assert action_view.payload_complete is True
+    assert action_view.review_evidence["command"]["operators"] == []
+    assert action_view.review_evidence["command"]["programs"] == []
+    assert action_view.review_evidence["reviewable_payload"]["command"] == (
+        "python -c 'print(1)'"
+    )
+
+
+def test_reviewer_contract_omits_ambiguous_inputs_and_referenced_script_outputs() -> None:
+    assert "model_purpose_claim is an UNTRUSTED, model-authored claim" in (
+        ISOLATED_AUTO_REVIEWER_PROMPT
+    )
+    assert "If a path's input/output role is ambiguous, omit it" in (
+        ISOLATED_AUTO_REVIEWER_PROMPT
+    )
+    assert "Never list pure inputs" in ISOLATED_AUTO_REVIEWER_PROMPT
+    assert "paths inferred only from a referenced script" in (
+        ISOLATED_AUTO_REVIEWER_PROMPT
+    )
+    assert "accepted into the current-session artifact ledger" in (
+        ISOLATED_AUTO_REVIEWER_PROMPT
+    )
+    assert "it grants no authority" in ISOLATED_AUTO_REVIEWER_PROMPT
+    assert "Unshown script bodies and side effects remain unreviewed" in (
+        ISOLATED_AUTO_REVIEWER_PROMPT
+    )
+    assert "not a predetermined outcome" in ISOLATED_AUTO_REVIEWER_PROMPT
+    assert "upload behavior, or login" not in ISOLATED_AUTO_REVIEWER_PROMPT
+    assert "send_file_to_user" not in ISOLATED_AUTO_REVIEWER_PROMPT
+    assert "you may consider allow_once" not in ISOLATED_AUTO_REVIEWER_PROMPT
+
+
+def test_reviewer_exposes_only_relevant_session_artifact_evidence(
+    tmp_path: Path,
+) -> None:
+    facts = build_facts(
+        "read_file",
+        {"path": "outputs/report.csv"},
+        workspace_root=tmp_path,
+    )
+
+    request = build_reviewer_action_view(
+        facts,
+        policy_level="ask",
+        policy_reason="policy_ask",
+        allowed_outcomes=("allow_once", "manual", "deny"),
+        no_auto_allow_reason="",
+        original_user_intent=None,
+        domain_route=None,
+        trusted_session_artifact_paths=("outputs/report.csv",),
+    ).to_json_dict()
+
+    assert request["review_evidence"]["trusted_session_artifact_paths"] == [
+        "outputs/report.csv"
+    ]
 
 
 async def test_auto_reviewer_timeout_falls_back_to_manual(tmp_path: Path) -> None:

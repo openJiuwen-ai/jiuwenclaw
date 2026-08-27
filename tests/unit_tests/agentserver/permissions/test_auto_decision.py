@@ -58,8 +58,79 @@ def test_generic_mcp_uri_risks_are_evidence_not_terminal_authority(tmp_path: Pat
 
 
 def test_core_known_workspace_read_can_be_terminal_low_risk(tmp_path: Path) -> None:
-    facts = _facts("read_file", {"path": "README.md"}, tmp_path)
+    facts = _facts("read_file", {"file_path": "README.md"}, tmp_path)
     assert terminal_low_risk_route(facts) is not None
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_args"),
+    [
+        ("read_file", {"file_path": "README.md", "offset": 1}),
+        ("list_files", {"path": "src", "show_hidden": False}),
+        ("grep", {"pattern": "main", "path": "src", "ignore_case": True}),
+    ],
+)
+def test_closed_structured_workspace_reads_accept_default_ask(
+    tmp_path: Path,
+    tool_name: str,
+    tool_args: dict[str, object],
+) -> None:
+    facts = _facts(tool_name, tool_args, tmp_path)
+
+    route = terminal_low_risk_route(
+        facts,
+        policy_level="ask",
+        default_ask=True,
+        structured_read_guard_level="allow",
+    )
+
+    assert route is not None
+    assert route.reason == "structured_workspace_read_allow"
+    assert route.source == "deterministic_guard"
+
+
+@pytest.mark.parametrize(
+    ("policy_level", "default_ask", "guard_level"),
+    [
+        ("ask", False, "allow"),
+        ("ask", True, "ask"),
+        ("ask", True, "deny"),
+        ("ask", True, "unevaluable"),
+    ],
+)
+def test_structured_workspace_read_requires_positive_policy_evidence(
+    tmp_path: Path,
+    policy_level: str,
+    default_ask: bool,
+    guard_level: str,
+) -> None:
+    facts = _facts("read_file", {"file_path": "README.md"}, tmp_path)
+
+    assert terminal_low_risk_route(
+        facts,
+        policy_level=policy_level,
+        default_ask=default_ask,
+        structured_read_guard_level=guard_level,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_args"),
+    [
+        ("read_file", {"file_path": "README.md", "offset": "first"}),
+        ("grep", {"path": "src"}),
+        ("grep", {"pattern": "main", "output_mode": "unknown"}),
+        ("glob", {"pattern": "**/*.py", "path": "src"}),
+    ],
+)
+def test_invalid_or_excluded_structured_reads_do_not_fast_allow(
+    tmp_path: Path,
+    tool_name: str,
+    tool_args: dict[str, object],
+) -> None:
+    facts = _facts(tool_name, tool_args, tmp_path)
+
+    assert terminal_low_risk_route(facts) is None
 
 
 def test_valid_workspace_lsp_can_be_terminal_low_risk(tmp_path: Path) -> None:
@@ -112,6 +183,22 @@ def test_external_lsp_path_is_not_terminal_low_risk_without_engine_hint(
             "operation": "documentSymbol",
             "file_path": external_path,
         },
+        tmp_path,
+    )
+
+    assert terminal_low_risk_route(facts) is None
+
+
+def test_structured_read_symlink_escape_is_not_terminal_low_risk(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    link = tmp_path / "linked"
+    link.symlink_to(outside, target_is_directory=True)
+    facts = _facts(
+        "read_file",
+        {"file_path": (link / "secret.txt").as_posix()},
         tmp_path,
     )
 
