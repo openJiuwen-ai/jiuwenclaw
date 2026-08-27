@@ -16,11 +16,13 @@ def _reset_skill_warmup_task():
     mod._skill_index_warmup_task = None
     mod._skill_index_warmup_roots_cache = []
     mod._skill_index_warmup_enabled_cache = None
+    mod._startup_warmup_task = None
     yield
     task = mod._skill_index_warmup_task
     mod._skill_index_warmup_task = None
     mod._skill_index_warmup_roots_cache = []
     mod._skill_index_warmup_enabled_cache = None
+    mod._startup_warmup_task = None
     if task is not None and not task.done():
         task.cancel()
 
@@ -266,3 +268,70 @@ async def test_start_skill_index_warmup_force_cancels_inflight(
     await asyncio.sleep(0)
     gate.set()
     assert cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_schedule_skill_index_warmup_after_sync_skips_same_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    mod = pytest.importorskip("jiuwenswarm.server.agent_ws_server")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    started: list[bool] = []
+
+    def _record(*, force: bool = False) -> None:
+        started.append(force)
+
+        async def _done() -> None:
+            return None
+
+        mod._skill_index_warmup_task = asyncio.get_running_loop().create_task(_done())
+
+    monkeypatch.setattr(mod, "_start_skill_index_warmup", _record)
+    params = {
+        "agents": [
+            {
+                "agent_id": "office",
+                "env": {"JIUWENSWARM_SHARED_SKILLS_DIRS": str(shared)},
+            }
+        ]
+    }
+    mod.schedule_skill_index_warmup_after_sync(sync_params=params)
+    await asyncio.sleep(0)
+    mod.schedule_skill_index_warmup_after_sync(sync_params=params)
+    assert started == [False]
+
+
+@pytest.mark.asyncio
+async def test_schedule_skill_index_warmup_after_sync_skips_when_inflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    mod = pytest.importorskip("jiuwenswarm.server.agent_ws_server")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    started: list[bool] = []
+    gate = asyncio.Event()
+
+    async def _slow() -> None:
+        await gate.wait()
+
+    def _record(*, force: bool = False) -> None:
+        started.append(force)
+        mod._skill_index_warmup_task = asyncio.get_running_loop().create_task(_slow())
+
+    monkeypatch.setattr(mod, "_start_skill_index_warmup", _record)
+    params = {
+        "agents": [
+            {
+                "agent_id": "office",
+                "env": {"JIUWENSWARM_SHARED_SKILLS_DIRS": str(shared)},
+            }
+        ]
+    }
+    mod.schedule_skill_index_warmup_after_sync(sync_params=params)
+    mod.schedule_skill_index_warmup_after_sync(sync_params=params, force=True)
+    gate.set()
+    await asyncio.sleep(0)
+    assert started == [False]

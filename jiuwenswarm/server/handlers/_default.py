@@ -522,11 +522,13 @@ async def _handle_unary_impl(
 ) -> None:
     """非流式处理：调用 process_message，返回一条 E2AResponse 线 JSON。"""
     # 兜底确保 checkpointer 就绪: start() 里改为后台预热后, 首条请求可能赶在
-    # 预热完成前到达。ensure_persistent_checkpointer 内部 lock+ready 幂等, 预热
-    # 完成时秒过; 未完成则阻塞至完成 (避免用到未就绪的 checkpointer)。
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
+    # 预热完成前到达。不要在事件循环上同步 import interface_deep（会和
+    # to_thread 预热抢 import 锁、饿死 WS recv）。
+    from jiuwenswarm.server.agent_ws_server import (
+        ensure_interface_deep_and_checkpointer,
+    )
 
-    await ensure_persistent_checkpointer()
+    await ensure_interface_deep_and_checkpointer()
     channel_id = request.channel_id or "default"
 
     if _uses_tenant_pool(request):
@@ -644,9 +646,11 @@ async def _handle_stream_impl(
 ) -> None:
     """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
     # 兜底确保 checkpointer 就绪 (见 _handle_unary 同名注释)。
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
+    from jiuwenswarm.server.agent_ws_server import (
+        ensure_interface_deep_and_checkpointer,
+    )
 
-    await ensure_persistent_checkpointer()
+    await ensure_interface_deep_and_checkpointer()
     channel_id = request.channel_id or "default"
     session_id = request.session_id or "default"
     current_task = asyncio.current_task()
