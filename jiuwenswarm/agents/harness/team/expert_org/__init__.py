@@ -7,6 +7,7 @@ from __future__ import annotations
 __all__ = [
     "JiuwenExpertGroupCatalog",
     "JiuwenExpertTeamLauncher",
+    "install_expert_org_adapters",
 ]
 
 
@@ -19,4 +20,8 @@ def __getattr__(name: str):
         from jiuwenswarm.agents.harness.team.expert_org.launcher import JiuwenExpertTeamLauncher
 
         return JiuwenExpertTeamLauncher
+    if name == "install_expert_org_adapters":
+        from jiuwenswarm.agents.harness.team.expert_org.wiring import install_expert_org_adapters
+
+        return install_expert_org_adapters
     raise AttributeError(name)
