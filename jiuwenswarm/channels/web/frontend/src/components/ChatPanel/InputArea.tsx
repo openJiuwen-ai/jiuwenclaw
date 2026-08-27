@@ -3354,7 +3354,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           )} */}
 
           <ModelSelector
-            disabled={isProcessing || activeSessionId !== NEW_CONVERSATION_ID}
+            disabled={isProcessing || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}
           />
 
           <button
