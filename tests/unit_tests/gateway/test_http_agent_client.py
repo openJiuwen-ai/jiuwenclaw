@@ -63,6 +63,32 @@ def test_assemble_session_rename_fills_path_and_drops_used_keys():
     assert assembled.json_body == {"title": "new"}
 
 
+def test_assemble_session_create_strips_session_id_from_body():
+    """Agent rejects params.session_id on create; envelope sid must not leak into body."""
+    env = e2a_from_agent_fields(
+        request_id="r-create",
+        channel_id="web",
+        session_id="sess_temp_client_id",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={
+            "create_token": "tok-1",
+            "mode": "agent",
+            "session_id": "sess_temp_client_id",
+            "title": "new chat",
+        },
+        is_stream=False,
+    )
+    assembled = assemble_rest_request(env, base_url="http://127.0.0.1:8766")
+    assert assembled.verb == "POST"
+    assert assembled.url == "http://127.0.0.1:8766/api/v1/sessions"
+    assert assembled.json_body is not None
+    assert "session_id" not in assembled.json_body
+    assert assembled.json_body["create_token"] == "tok-1"
+    assert assembled.json_body["mode"] == "agent"
+    # 身份仍可上头，不进 params
+    assert assembled.headers.get("X-Session-Id") == "sess_temp_client_id"
+
+
 def test_assemble_history_stream_uses_stream_path_and_query():
     env = e2a_from_agent_fields(
         request_id="r3",
