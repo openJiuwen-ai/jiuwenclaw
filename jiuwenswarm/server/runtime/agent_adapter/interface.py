@@ -2627,13 +2627,20 @@ class JiuWenSwarm:
                                         yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
                                         a2ui_pending_render_sent = True
                                     continue
-                                durable_pending_final_chunks.append(payload_content)
+                                # 成员 delta 不进主应答待落盘 buffer——防成员文本被
+                                # 后续冲刷混进 leader 的历史记录（与下方豁免同规）
+                                if not data.payload.get("member_name"):
+                                    durable_pending_final_chunks.append(payload_content)
                                 should_record = False
                             elif et == "chat.reasoning":
                                 durable_pending_reasoning_chunks.append(payload_content)
                                 should_record = False
                             elif et == "chat.tool_call":
-                                _persist_pending_final_text()
+                                # 成员帧不触发主应答待落盘冲刷——否则成员的工具调用会把
+                                # leader 累计的 delta 提前落盘成无主重复记录（与下方
+                                # member_name 落盘豁免同规）
+                                if not data.payload.get("member_name"):
+                                    _persist_pending_final_text()
                             elif et == "chat.final":
                                 if isinstance(data.payload, dict):
                                     ensure_final_mode_inplace(data.payload)
@@ -2656,6 +2663,12 @@ class JiuWenSwarm:
                                     continue
                                 durable_pending_final_chunks = []
 
+                            # 团队成员帧（member_name 归属）的落盘所有权在 team_helpers
+                            # （_persist_member_final_output/_persist_member_tool_event，
+                            # 带成员归因与内容规则）；通用路径跳过防双写——否则成员
+                            # chat.final 双份、tool_result 多出 content 为空的冗余记录。
+                            if should_record and data.payload.get("member_name"):
+                                should_record = False
                             if should_record:
                                 payload_dict = dict(data.payload)
                                 extra_fields = {k: v for k, v in payload_dict.items() if
@@ -2755,13 +2768,17 @@ class JiuWenSwarm:
                                     yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
                                     a2ui_pending_render_sent = True
                                 continue
-                            durable_pending_final_chunks.append(payload_content)
+                            # 成员 delta 不进主应答待落盘 buffer（与 chunk 分支同规）
+                            if not data.get("member_name"):
+                                durable_pending_final_chunks.append(payload_content)
                             should_record = False
                         elif et == "chat.reasoning":
                             durable_pending_reasoning_chunks.append(payload_content)
                             should_record = False
                         elif et == "chat.tool_call":
-                            _persist_pending_final_text()
+                            # 成员帧不触发主应答待落盘冲刷（与 chunk 分支同规）
+                            if not data.get("member_name"):
+                                _persist_pending_final_text()
                         elif et == "chat.final":
                             if suppress_a2ui_stream or a2ui_split is not None:
                                 first_a2ui_suppression = not suppress_a2ui_stream
@@ -2782,6 +2799,10 @@ class JiuWenSwarm:
                                 continue
                             durable_pending_final_chunks = []
 
+                        # 团队成员帧（member_name 归属）由 team_helpers 成员归因落盘负责，
+                        # 通用路径跳过防双写（与上方 chunk 分支同规）
+                        if should_record and data.get("member_name"):
+                            should_record = False
                         if should_record:
                             extra_fields = {k: v for k, v in data.items() if k not in ("event_type", "content")}
                             if et == EventType.TEAM_MESSAGE.value and "event" in data:

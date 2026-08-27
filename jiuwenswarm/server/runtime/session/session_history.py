@@ -263,12 +263,23 @@ def _dedup_records_last_wins(records: list[dict[str, Any]]) -> list[dict[str, An
 
     只收敛 event_type=="chat.final"：tool_call/tool_result 等记录合法共享
     回合 rid（同 id 多条是正常形态），不能误收。
+
+    多气泡（leader 同轮多次发言）：各泡 chat.final 带 ``bubble_seq``，共享 id
+    但语义上是不同卡片——去重键带上 bubble_seq（同一泡的快照重写仍 last-wins，
+    不同泡互不收敛）。无 bubble_seq 的存量记录行为不变。
     """
+    def _dedup_key(record: dict[str, Any]) -> str:
+        record_id = str(record.get("id") or "").strip()
+        bubble_seq = record.get("bubble_seq")
+        if bubble_seq is not None:
+            return f"{record_id}#b{bubble_seq}"
+        return record_id
+
     last_index_by_id: dict[str, int] = {}
     for index, record in enumerate(records):
         if str(record.get("event_type") or "") != "chat.final":
             continue
-        record_id = str(record.get("id") or "").strip()
+        record_id = _dedup_key(record)
         if record_id:
             last_index_by_id[record_id] = index
     if not last_index_by_id:
@@ -278,7 +289,7 @@ def _dedup_records_last_wins(records: list[dict[str, Any]]) -> list[dict[str, An
         for index, record in enumerate(records)
         if str(record.get("event_type") or "") != "chat.final"
         or not str(record.get("id") or "").strip()
-        or last_index_by_id[str(record["id"])] == index
+        or last_index_by_id[_dedup_key(record)] == index
     ]
 
 
