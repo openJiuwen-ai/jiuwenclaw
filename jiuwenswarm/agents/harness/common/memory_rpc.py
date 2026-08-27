@@ -111,6 +111,17 @@ def _is_runtime_memory_path(abs_path: str, workspace: str, project_dir: str | No
     return False
 
 
+# Memory files editable when they sit directly at the workspace / project root
+# (everything under an allowed dir is already covered by _is_in_allowed_dirs).
+_ROOT_EDITABLE_MEMORY_FILES = (
+    "JIUWENSWARM.md",
+    "JIUWENSWARM.local.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+)
+
+
 def _validate_edit_path(raw_path: str, workspace: str, project_dir: str | None = None) -> tuple[bool, str]:
     normalized = raw_path.replace("\\", "/")
     expanded = os.path.expanduser(normalized)
@@ -133,7 +144,9 @@ def _validate_edit_path(raw_path: str, workspace: str, project_dir: str | None =
         return (True, abs_path)
 
     basename = os.path.basename(abs_path)
-    if basename in ("JIUWENSWARM.md", "JIUWENSWARM.local.md"):
+    # Compat files (AGENTS.md / CLAUDE.md) are loaded by ProjectMemoryRail, so
+    # /memory lists them; allow opening them from the workspace/project root too.
+    if basename in _ROOT_EDITABLE_MEMORY_FILES:
         parent = os.path.dirname(abs_path)
         workspace_norm = os.path.normpath(workspace)
         if os.name == "nt":

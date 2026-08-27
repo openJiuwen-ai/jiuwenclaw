@@ -184,9 +184,14 @@ def test_input_resolve_extracts_from_params_and_context() -> None:
     memory = CodeProjectMemoryInput.resolve({}, ctx)
     assert memory.project_dir == "/tmp/proj"
     assert memory.additional_directories == []
+    assert memory.compat_files is True
     assert CodeProjectMemoryInput.resolve(
         {"additional_directories": ["/x"]}, ctx
     ).additional_directories == ["/x"]
+    assert (
+        CodeProjectMemoryInput.resolve({"compat_files": False}, ctx).compat_files
+        is False
+    )
 
 
 def test_attribute_fields_are_params_env_fields_are_context() -> None:
@@ -266,6 +271,21 @@ def test_config_specs_bakes_attribute_params() -> None:
     )
 
 
+def test_config_specs_bakes_project_memory_compat_files() -> None:
+    """``react.project_memory.compat_files`` gates AGENTS.md / CLAUDE.md loading."""
+    register_swarm_providers()
+    from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
+
+    rails, _ = build_member_capability_specs({}, "code.team", "leader")
+    by_type = {spec.type: spec.params for spec in rails}
+    assert by_type[registry.CODE_PROJECT_MEMORY]["compat_files"] is True
+
+    config = {"react": {"project_memory": {"compat_files": False}}}
+    rails, _ = build_member_capability_specs(config, "code.team", "leader")
+    by_type = {spec.type: spec.params for spec in rails}
+    assert by_type[registry.CODE_PROJECT_MEMORY]["compat_files"] is False
+    
+    
 def test_config_specs_maps_canonical_evolution_by_swarm_role() -> None:
     """The product switch mounts role-specific rails and only leader auto-save."""
     from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs

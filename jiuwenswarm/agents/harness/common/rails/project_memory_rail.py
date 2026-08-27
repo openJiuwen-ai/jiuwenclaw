@@ -41,11 +41,16 @@ class ProjectMemoryRail(DeepAgentRail):
 
     * **Project root**: ``JIUWENSWARM.md``, ``JIUWENSWARM.local.md``,
       ``.jiuwen/JIUWENSWARM.md``, ``.jiuwen/rules/*.md``
+    * **Compat (other coding agents)**: ``AGENTS.md``, ``CLAUDE.md``,
+      ``CLAUDE.local.md``, ``.claude/rules/*.md`` -- disable with
+      ``compat_files=False``
     * **User level**: ``~/.jiuwen/JIUWENSWARM.md``, ``~/.jiuwen/rules/*.md``
     * **Managed**: ``/etc/jiuwen/JIUWENSWARM.md``, ``/etc/jiuwen/rules/*.md``
     * **Additional dirs**: explicit project-memory directories passed to the rail
 
     Priority (low -> high): ``managed < user < project (root -> cwd) < local``.
+    Compat files sit inside the project/local layers but are merged before their
+    ``JIUWENSWARM.*`` counterparts, so JIUWENSWARM content always wins.
     """
 
     WRITE_LIKE_TOOLS = frozenset({
@@ -71,6 +76,7 @@ class ProjectMemoryRail(DeepAgentRail):
         language: str = "cn",
         max_chars: int = 60_000,
         additional_directories: tuple[str, ...] | None = None,
+        compat_files: bool = True,
     ) -> None:
         super().__init__()
         # NOTE: 父类 DeepAgentRail.set_workspace() 会把 self.workspace 替换成
@@ -80,6 +86,7 @@ class ProjectMemoryRail(DeepAgentRail):
         self._language: str = language
         self._max_chars: int = max_chars
         self._additional_directories: tuple[str, ...] = tuple(additional_directories or ())
+        self._compat_files: bool = bool(compat_files)
         self._system_prompt_builder = None
 
     # ------------------------------------------------------------------
@@ -155,6 +162,7 @@ class ProjectMemoryRail(DeepAgentRail):
                 workspace=workspace_path,
                 target_path=workspace_path,
                 additional_directories=self._additional_directories,
+                compat_files=self._compat_files,
             )
         except (OSError, ValueError, TypeError) as exc:
             # 不能让 rail 崩坏 model call；但要把根因留在日志里，方便排查。

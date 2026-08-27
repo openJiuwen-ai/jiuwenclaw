@@ -11,6 +11,9 @@ Current scope
 -------------
 * multi-layer discovery: managed -> user -> project (root -> cwd) -> local
 * fixed-filename + glob-based scanning (+ optional additional directories)
+* compat sources (``AGENTS.md`` / ``CLAUDE.md`` / ``.claude/rules/*.md``) loaded
+  at lower precedence than the ``JIUWENSWARM.*`` files; ``compat_files=False``
+  turns them off
 * nested git worktree handling
 * symlink-safe de-duplication
 * ``@include`` expansion on standalone text lines
@@ -67,6 +70,24 @@ LOCAL_MEMORY_FILES: tuple[tuple[str, str], ...] = (
 
 PROJECT_MEMORY_GLOBS: tuple[str, ...] = (
     ".jiuwen/rules/*.md",
+)
+
+# Instruction files written for other coding agents. Read-only compatibility:
+# jiuwenswarm never writes them (/init still only writes JIUWENSWARM.*), it just
+# stops ignoring repos that carry nothing else. Merged *before* the
+# JIUWENSWARM.* entries of the same layer, so JIUWENSWARM.* content lands last
+# and wins.
+COMPAT_PROJECT_MEMORY_FILES: tuple[tuple[str, str], ...] = (
+    ("AGENTS.md", "project"),
+    ("CLAUDE.md", "project"),
+)
+
+COMPAT_LOCAL_MEMORY_FILES: tuple[tuple[str, str], ...] = (
+    ("CLAUDE.local.md", "local"),
+)
+
+COMPAT_PROJECT_MEMORY_GLOBS: tuple[str, ...] = (
+    ".claude/rules/*.md",
 )
 
 USER_MEMORY_FILES: tuple[str, ...] = (
@@ -130,7 +151,7 @@ class _DiscoveryCacheEntry:
     watch_snapshot: tuple[tuple[str, bool, bool, int | None, int | None], ...]
 
 
-_DISCOVERY_CACHE: dict[tuple[str, str, tuple[str, ...]], _DiscoveryCacheEntry] = {}
+_DISCOVERY_CACHE: dict[tuple[str, str, tuple[str, ...], bool], _DiscoveryCacheEntry] = {}
 _CACHE_LOCK = RLock()
 
 
@@ -176,12 +197,19 @@ def discover_and_load_memory_files(
     workspace: str,
     target_path: str | None = None,
     additional_directories: Iterable[str] | None = None,
+    compat_files: bool = True,
 ) -> list[LoadedMemoryFile]:
     """Discover and load every applicable memory file.
 
     Order (low priority first):
         managed -> user -> project (root -> cwd, each directory contributes) -> local
+
+    Within the project/local layers, compat sources (``AGENTS.md`` /
+    ``CLAUDE.md`` / ``CLAUDE.local.md`` / ``.claude/rules/*.md``) are scanned
+    before their ``JIUWENSWARM.*`` counterparts, so JIUWENSWARM content is
+    merged last and overrides. Pass ``compat_files=False`` to skip them.
     """
+    compat_files = bool(compat_files)
     workspace_path = Path(workspace)
     workspace_key = _safe_resolve(workspace_path)
     target_key = _safe_resolve(Path(target_path or workspace_key))
@@ -189,7 +217,7 @@ def discover_and_load_memory_files(
         additional_directories,
         workspace=Path(workspace_key),
     )
-    cache_key = (workspace_key, target_key, normalized_additional_dirs)
+    cache_key = (workspace_key, target_key, normalized_additional_dirs, compat_files)
 
     with _CACHE_LOCK:
         cached = _DISCOVERY_CACHE.get(cache_key)
@@ -238,6 +266,10 @@ def discover_and_load_memory_files(
         watch_paths=watch_paths,
     )
 
+    project_entries = _project_file_entries(compat_files)
+    local_entries = _local_file_entries(compat_files)
+    project_globs = _project_glob_patterns(compat_files)
+
     project_root = find_project_root(workspace_key) or Path(workspace_key)
     if project_root is not None:
         try:
@@ -269,7 +301,7 @@ def discover_and_load_memory_files(
             if not skip_project:
                 _scan_relative_files(
                     base_dir=d,
-                    entries=PROJECT_MEMORY_FILES,
+                    entries=project_entries,
                     out=files,
                     seen=seen,
                     target_path=target_key,
@@ -277,7 +309,7 @@ def discover_and_load_memory_files(
                 )
                 _scan_relative_globs(
                     base_dir=d,
-                    patterns=PROJECT_MEMORY_GLOBS,
+                    patterns=project_globs,
                     kind="project",
                     out=files,
                     seen=seen,
@@ -286,7 +318,7 @@ def discover_and_load_memory_files(
                 )
             _scan_relative_files(
                 base_dir=d,
-                entries=LOCAL_MEMORY_FILES,
+                entries=local_entries,
                 out=files,
                 seen=seen,
                 target_path=target_key,
@@ -298,7 +330,7 @@ def discover_and_load_memory_files(
         watch_paths.add(_safe_resolve(extra_dir))
         _scan_relative_files(
             base_dir=extra_dir,
-            entries=PROJECT_MEMORY_FILES,
+            entries=project_entries,
             out=files,
             seen=seen,
             target_path=target_key,
@@ -306,7 +338,7 @@ def discover_and_load_memory_files(
         )
         _scan_relative_globs(
             base_dir=extra_dir,
-            patterns=PROJECT_MEMORY_GLOBS,
+            patterns=project_globs,
             kind="project",
             out=files,
             seen=seen,
@@ -315,7 +347,7 @@ def discover_and_load_memory_files(
         )
         _scan_relative_files(
             base_dir=extra_dir,
-            entries=LOCAL_MEMORY_FILES,
+            entries=local_entries,
             out=files,
             seen=seen,
             target_path=target_key,
@@ -390,6 +422,27 @@ def get_large_memory_files(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _project_file_entries(compat_files: bool) -> tuple[tuple[str, str], ...]:
+    """Project-layer filenames, compat entries first (lowest within the layer)."""
+    if not compat_files:
+        return PROJECT_MEMORY_FILES
+    return (*COMPAT_PROJECT_MEMORY_FILES, *PROJECT_MEMORY_FILES)
+
+
+def _local_file_entries(compat_files: bool) -> tuple[tuple[str, str], ...]:
+    """Local-layer filenames, compat entries first (lowest within the layer)."""
+    if not compat_files:
+        return LOCAL_MEMORY_FILES
+    return (*COMPAT_LOCAL_MEMORY_FILES, *LOCAL_MEMORY_FILES)
+
+
+def _project_glob_patterns(compat_files: bool) -> tuple[str, ...]:
+    """Project-layer rule globs, compat patterns first."""
+    if not compat_files:
+        return PROJECT_MEMORY_GLOBS
+    return (*COMPAT_PROJECT_MEMORY_GLOBS, *PROJECT_MEMORY_GLOBS)
 
 
 def _normalize_additional_directories(
@@ -942,6 +995,9 @@ def _short(path: str) -> str:
 
 __all__ = [
     "ADDITIONAL_DIRECTORIES_ENV",
+    "COMPAT_LOCAL_MEMORY_FILES",
+    "COMPAT_PROJECT_MEMORY_FILES",
+    "COMPAT_PROJECT_MEMORY_GLOBS",
     "DEFAULT_MAX_CHARS",
     "GitWorktreeInfo",
     "LoadedMemoryFile",

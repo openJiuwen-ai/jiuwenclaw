@@ -366,6 +366,18 @@ def _additional_directories(config: dict[str, Any]) -> list[str]:
     return []
 
 
+def _project_memory_compat_files(config: dict[str, Any]) -> bool:
+    """Resolve whether AGENTS.md / CLAUDE.md compat files are loaded (default on)."""
+    raw = _config_section(_config_section(config, "react"), "project_memory").get(
+        "compat_files"
+    )
+    if raw is None:
+        return True
+    if isinstance(raw, str):
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(raw)
+
+
 def _permission_model_name(config: dict[str, Any]) -> str:
     """Resolve the permission rail's model name from config."""
     return (
@@ -432,7 +444,8 @@ _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     registry.CONTEXT_PROCESSOR: _context_processor_params,
     registry.MODEL_ANOMALY_DETECTION: _model_anomaly_detection_params,
     registry.CODE_PROJECT_MEMORY: lambda c: {
-        "additional_directories": _additional_directories(c)
+        "additional_directories": _additional_directories(c),
+        "compat_files": _project_memory_compat_files(c),
     },
     registry.PERMISSION_INTERRUPT: _permission_params,
     registry.TEAM_PERMISSION: lambda c: {

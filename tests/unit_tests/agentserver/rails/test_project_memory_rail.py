@@ -208,7 +208,12 @@ async def test_refreshes_after_file_change():
 
 
 @pytest.mark.asyncio
-async def test_ignores_legacy_runtime_files():
+async def test_loads_agents_md_and_ignores_unsupported_runtime_files():
+    """AGENTS.md / CLAUDE.md are compat sources; .cursorrules stays ignored.
+
+    Reverses the previous ``test_ignores_legacy_runtime_files`` stance: a repo
+    carrying only AGENTS.md used to inject nothing at all.
+    """
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
@@ -220,7 +225,129 @@ async def test_ignores_legacy_runtime_files():
         rail.init(agent)
         await rail.before_model_call(ctx=_make_ctx(agent))
 
-        assert await _project_memory_section(agent) is None
+        body = await _project_memory_body(agent, "en")
+        assert "AGENTS-RULE" in body
+        assert "CURSOR-RULE" not in body
+
+
+@pytest.mark.asyncio
+async def test_loads_claude_md():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _touch(root, ".git/HEAD", "")
+        _touch(root, "CLAUDE.md", "CLAUDE-RULE")
+
+        rail = ProjectMemoryRail(workspace=str(root), language="en")
+        agent = _make_agent_with_builder()
+        rail.init(agent)
+        await rail.before_model_call(ctx=_make_ctx(agent))
+
+        body = await _project_memory_body(agent, "en")
+        assert "CLAUDE-RULE" in body
+
+
+@pytest.mark.asyncio
+async def test_jiuwenswarm_md_overrides_compat_files():
+    """Compat files merge before JIUWENSWARM.md so JIUWENSWARM content wins."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _touch(root, ".git/HEAD", "")
+        _touch(root, "AGENTS.md", "AGENTS-RULE")
+        _touch(root, "CLAUDE.md", "CLAUDE-RULE")
+        _touch(root, "JIUWENSWARM.md", "JIUWEN-RULE")
+
+        rail = ProjectMemoryRail(workspace=str(root), language="en")
+        agent = _make_agent_with_builder()
+        rail.init(agent)
+        await rail.before_model_call(ctx=_make_ctx(agent))
+
+        body = await _project_memory_body(agent, "en")
+        assert body.index("AGENTS-RULE") < body.index("JIUWEN-RULE")
+        assert body.index("CLAUDE-RULE") < body.index("JIUWEN-RULE")
+
+
+@pytest.mark.asyncio
+async def test_claude_md_importing_agents_md_loads_it_once():
+    """The usual one-line ``CLAUDE.md`` -> ``@AGENTS.md`` pair must not double-load."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _touch(root, ".git/HEAD", "")
+        _touch(root, "AGENTS.md", "AGENTS-RULE")
+        _touch(root, "CLAUDE.md", "@AGENTS.md\n")
+
+        rail = ProjectMemoryRail(workspace=str(root), language="en")
+        agent = _make_agent_with_builder()
+        rail.init(agent)
+        await rail.before_model_call(ctx=_make_ctx(agent))
+
+        body = await _project_memory_body(agent, "en")
+        assert body.count("AGENTS-RULE") == 1
+        assert "@AGENTS.md" not in body
+
+
+@pytest.mark.asyncio
+async def test_claude_local_md_sits_in_local_layer():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _touch(root, ".git/HEAD", "")
+        _touch(root, "JIUWENSWARM.md", "PROJECT-LINE")
+        _touch(root, "CLAUDE.local.md", "CLAUDE-LOCAL-LINE")
+        _touch(root, "JIUWENSWARM.local.md", "LOCAL-LINE")
+
+        rail = ProjectMemoryRail(workspace=str(root), language="en")
+        agent = _make_agent_with_builder()
+        rail.init(agent)
+        await rail.before_model_call(ctx=_make_ctx(agent))
+
+        body = await _project_memory_body(agent, "en")
+        assert body.index("PROJECT-LINE") < body.index("CLAUDE-LOCAL-LINE")
+        assert body.index("CLAUDE-LOCAL-LINE") < body.index("LOCAL-LINE")
+
+
+@pytest.mark.asyncio
+async def test_reads_claude_rules_glob_dir():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _touch(root, ".git/HEAD", "")
+        _touch(root, ".claude/rules/01_style.md", "CLAUDE-STYLE-RULE")
+        _touch(root, ".jiuwen/rules/01_style.md", "JIUWEN-STYLE-RULE")
+
+        rail = ProjectMemoryRail(workspace=str(root), language="en")
+        agent = _make_agent_with_builder()
+        rail.init(agent)
+        await rail.before_model_call(ctx=_make_ctx(agent))
+
+        body = await _project_memory_body(agent, "en")
+        assert "CLAUDE-STYLE-RULE" in body
+        assert body.index("CLAUDE-STYLE-RULE") < body.index("JIUWEN-STYLE-RULE")
+
+
+@pytest.mark.asyncio
+async def test_compat_files_can_be_disabled():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _touch(root, ".git/HEAD", "")
+        _touch(root, "AGENTS.md", "AGENTS-RULE")
+        _touch(root, "CLAUDE.md", "CLAUDE-RULE")
+        _touch(root, "CLAUDE.local.md", "CLAUDE-LOCAL-RULE")
+        _touch(root, ".claude/rules/01_style.md", "CLAUDE-STYLE-RULE")
+        _touch(root, "JIUWENSWARM.md", "JIUWEN-RULE")
+
+        rail = ProjectMemoryRail(
+            workspace=str(root),
+            language="en",
+            compat_files=False,
+        )
+        agent = _make_agent_with_builder()
+        rail.init(agent)
+        await rail.before_model_call(ctx=_make_ctx(agent))
+
+        body = await _project_memory_body(agent, "en")
+        assert "JIUWEN-RULE" in body
+        assert "AGENTS-RULE" not in body
+        assert "CLAUDE-RULE" not in body
+        assert "CLAUDE-LOCAL-RULE" not in body
+        assert "CLAUDE-STYLE-RULE" not in body
 
 
 @pytest.mark.asyncio

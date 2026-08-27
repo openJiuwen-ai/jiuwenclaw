@@ -1633,7 +1633,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             return None
 
     def _build_project_memory_rail(self) -> ProjectMemoryRail | None:
-        """Build ProjectMemoryRail to auto-load JIUWENSWARM.md / CLAUDE.md etc.
+        """Build ProjectMemoryRail to auto-load JIUWENSWARM.md / AGENTS.md / CLAUDE.md etc.
 
         Code 模式专属 — 受 modes.code.memory.enabled 开关控制。
         确保能检索到 /init 命令创建 JIUWENSWARM.md 的目录（当前工作目录）。
@@ -1669,17 +1669,21 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             else:
                 additional_dirs = []
 
+            compat_files = self._resolve_project_memory_compat_files()
+
             rail = ProjectMemoryRail(
                 workspace=workspace,
                 language=language,
                 additional_directories=tuple(additional_dirs),
+                compat_files=compat_files,
             )
             logger.info(
                 "[JiuwenSwarmCodeAdapter] ProjectMemoryRail create success "
-                "(workspace=%s, language=%s, additional_dirs=%d)",
+                "(workspace=%s, language=%s, additional_dirs=%d, compat_files=%s)",
                 workspace,
                 language,
                 len(additional_dirs),
+                compat_files,
             )
             return rail
         except Exception as exc:  # noqa: BLE001
@@ -1687,6 +1691,21 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 "[JiuwenSwarmCodeAdapter] ProjectMemoryRail create failed: %s", exc,
             )
             return None
+
+    def _resolve_project_memory_compat_files(self) -> bool:
+        """Resolve react.project_memory.compat_files (AGENTS.md / CLAUDE.md), default on."""
+        section = self._config_cache.get("project_memory")
+        if not isinstance(section, dict):
+            section = {}
+        raw = self._instance_overrides.get(
+            "project_memory_compat_files",
+            section.get("compat_files"),
+        )
+        if raw is None:
+            return True
+        if isinstance(raw, str):
+            return raw.strip().lower() not in {"0", "false", "no", "off"}
+        return bool(raw)
 
     def _build_worktree_rail_via_config(self) -> WorktreeRail | None:
         """Build WorktreeRail for code mode.

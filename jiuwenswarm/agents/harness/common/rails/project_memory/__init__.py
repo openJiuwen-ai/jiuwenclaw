@@ -2,6 +2,9 @@
 """Project memory helpers (file discovery + PromptSection factory)."""
 from jiuwenswarm.agents.harness.common.rails.project_memory.files import (
     ADDITIONAL_DIRECTORIES_ENV,
+    COMPAT_LOCAL_MEMORY_FILES,
+    COMPAT_PROJECT_MEMORY_FILES,
+    COMPAT_PROJECT_MEMORY_GLOBS,
     DEFAULT_MAX_CHARS,
     LOCAL_MEMORY_FILES,
     LoadedMemoryFile,
@@ -36,6 +39,9 @@ __all__ = [
     "PROJECT_MEMORY_FILES",
     "PROJECT_MEMORY_GLOBS",
     "LOCAL_MEMORY_FILES",
+    "COMPAT_PROJECT_MEMORY_FILES",
+    "COMPAT_PROJECT_MEMORY_GLOBS",
+    "COMPAT_LOCAL_MEMORY_FILES",
     "USER_MEMORY_FILES",
     "USER_MEMORY_GLOBS",
     "MANAGED_MEMORY_FILES",

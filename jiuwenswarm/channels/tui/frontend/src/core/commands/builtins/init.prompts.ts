@@ -59,6 +59,7 @@ These files are auto-loaded into every coding-mode session by ProjectMemoryRail,
   - JIUWENSWARM.md: ${yesNo(existing.jiuwenswarmMd)} ${existing.jiuwenswarmMd ? "— you MUST read it first, propose a diff, then use `ask_user` with `questions` to ask the user whether to apply. Example: `ask_user(query='Update JIUWENSWARM.md?', questions=[{question: 'JIUWENSWARM.md already exists. What would you like to do?', header: 'Update', options: [{label: 'Apply update', description: 'Merge the proposed changes into the existing file'}, {label: 'Skip (keep current)', description: 'Leave the file unchanged and continue'}], multi_select: false}])`. If user chooses 'Apply update', use Edit to apply the diff; if 'Skip', leave the file unchanged and continue. NEVER silently overwrite." : ""}
    - JIUWENSWARM.local.md: ${yesNo(existing.jiuwenswarmLocalMd)} ${existing.jiuwenswarmLocalMd ? "— propose additions via Edit only, never overwrite." : ""}
    - Legacy reference files (do NOT delete or rewrite; you may link to them): CLAUDE.md=${yesNo(existing.claudeMd)}, CLAUDE.local.md=${yesNo(existing.claudeLocalMd)}, AGENTS.md=${yesNo(existing.agentsMd)}, OPENJIUWEN.md=${yesNo(existing.openjiuwenMd)}, .cursorrules=${yesNo(existing.cursorRules)}, .github/copilot-instructions.md=${yesNo(existing.copilotInstructions)}
+     AGENTS.md / CLAUDE.md / CLAUDE.local.md / .claude/rules/*.md are already auto-loaded by ProjectMemoryRail (below JIUWENSWARM.md in priority), so do NOT copy their content into JIUWENSWARM.md — it would be injected twice. The others (.cursorrules, .github/copilot-instructions.md, .windsurfrules, .clinerules) are NOT loaded.
 4. **When the explore sub-agent runs bash commands**, always prefix with \`cd ${rootDir} && ...\` or use \`git -C ${rootDir}\` — sub-agent CWD is not guaranteed to equal \`${rootDir}\`.
 5. **Always prefer \`task_tool\` with \`subagent_type: "explore_agent"\` when it is available.** If \`task_tool\` is unavailable for this turn, silently FALL BACK to \`glob\` / \`grep\` / \`read_file\` / \`bash\` yourself.
 6. **Default to a single \`task_tool\` / \`explore_agent\` call.** If the repository is clearly large, a monorepo, or one pass does not gather enough signal, you may split the work across multiple explore sub-agents; only parallelize when there is a clear benefit, to avoid duplicate scanning and noisy result merging.
@@ -149,7 +150,7 @@ Consume queue entries whose \`target == "JIUWENSWARM.md"\`.
 - Testing quirks (e.g., "run single test with \`pytest -k ...\`")
 - Repo etiquette (branch naming, PR conventions, commit message style)
 - Required env vars, setup steps
-- Important parts from existing AI coding tool configs if they exist (AGENTS.md, .cursor/rules, .cursorrules, .github/copilot-instructions.md, .windsurfrules, .clinerules) — extract key rules, not just link to them
+- Important parts from existing AI coding tool configs that are NOT auto-loaded, if they exist (.cursor/rules, .cursorrules, .github/copilot-instructions.md, .windsurfrules, .clinerules) — extract key rules, not just link to them. Skip AGENTS.md / CLAUDE.md: ProjectMemoryRail already loads them.
 - Non-obvious gotchas, architectural decisions worth knowing
 - A brief **See also** section. Use plain markdown links for short references, or \`@path/to/file\` includes when a longer source document should stay authoritative:
     ${legacyIncludesEn(existing)}
@@ -208,7 +209,7 @@ Remind the user:
 Then suggest optimizations as a short checklist, only those relevant to this repo:
 - If tests are missing / sparse: suggest setting up a framework so the assistant can verify its own changes.
 - If no formatter / lint config was found: suggest adding one with a one-line reason.
-- If Step 2 found legacy AI config files (CLAUDE.md, AGENTS.md, etc.) not referenced in JIUWENSWARM.md: suggest consolidating via plain links or follow-up cleanup.
+- If Step 2 found AI config files that are NOT auto-loaded (.cursorrules, .github/copilot-instructions.md, .windsurfrules, .clinerules) and their rules are not in JIUWENSWARM.md: suggest consolidating or a follow-up cleanup. AGENTS.md / CLAUDE.md need no consolidation — they are loaded as-is.
 - **Always include**: "Run \`/compact\` after reviewing to trim this init session from history."
 `;
 }

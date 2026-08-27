@@ -182,17 +182,22 @@ class CodeProjectMemoryInput(ConstructionInput):
         default_factory=list,
         description="Extra memory directories from config (react.project_memory) or env.",
     )
+    compat_files: bool = param_field(
+        default=True,
+        description="Also load AGENTS.md / CLAUDE.md compat files "
+        "(react.project_memory.compat_files).",
+    )
 
 
 @harness_element(
     kind=ElementKind.RAIL,
     name=CODE_PROJECT_MEMORY,
-    description="Project memory rail (auto-loads JIUWENSWARM.md / CLAUDE.md and any "
-    "additional configured directories).",
+    description="Project memory rail (auto-loads JIUWENSWARM.md, the AGENTS.md / "
+    "CLAUDE.md compat files, and any additional configured directories).",
     input_model=CodeProjectMemoryInput,
 )
 def build_code_project_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
-    """Build ProjectMemoryRail (auto-loads JIUWENSWARM.md / CLAUDE.md etc.)."""
+    """Build ProjectMemoryRail (auto-loads JIUWENSWARM.md / AGENTS.md / CLAUDE.md etc.)."""
     from jiuwenswarm.agents.harness.common.rails import ProjectMemoryRail
 
     try:
@@ -201,6 +206,7 @@ def build_code_project_memory(params: dict[str, Any], ctx: SwarmBuildContext) ->
             workspace=inp.project_dir,
             language=inp.language,
             additional_directories=tuple(inp.additional_directories),
+            compat_files=inp.compat_files,
         )
     except Exception as exc:
         logger.warning("[swarm.code_project_memory] create failed: %s", exc)
