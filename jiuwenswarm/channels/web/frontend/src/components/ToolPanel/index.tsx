@@ -134,7 +134,7 @@ export function ToolPanel({
   onCloseFloating,
 }: ToolPanelProps) {
   const { t } = useTranslation();
-  const { isConnected } = useSessionStore();
+  const isConnected = useSessionStore((state) => state.isConnected);
   const activeSessionId = useChatStore(s => s.activeSessionId);
   const mode = useSessionStore(s => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
   const resolvedSessionId = sessionId ?? activeSessionId ?? '';
