@@ -14,6 +14,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
     get_read_history_path,
     history_exists,
     load_history_records,
+    resolve_session_dir,
     write_history_records,
     _write_records_to_path,
 )
@@ -85,8 +86,20 @@ def fork_session(
     channel_id: str = "tui",
 ) -> dict[str, Any]:
     sessions_dir = get_agent_sessions_dir()
-    source_dir = sessions_dir / source_session_id
-    target_dir = sessions_dir / target_session_id
+    # session.fork is reachable through the AgentServer RPC boundary. Resolve
+    # both IDs before touching the filesystem so a caller cannot use an
+    # absolute or parent-traversing component to read outside the sessions
+    # root or create a directory elsewhere on the host.
+    source_dir, source_error = resolve_session_dir(
+        source_session_id, create=False, sessions_root=sessions_dir
+    )
+    target_dir, target_error = resolve_session_dir(
+        target_session_id, create=False, sessions_root=sessions_dir
+    )
+    if source_dir is None:
+        raise ValueError(source_error or "invalid source_session_id")
+    if target_dir is None:
+        raise ValueError(target_error or "invalid target_session_id")
 
     if not source_dir.exists():
         raise ValueError("source session not found")
@@ -969,6 +982,7 @@ async def warmup_session_context(
     *,
     deep_agent: "DeepAgent",
     session_id: str,
+    history_before_request_id: str | None = None,
 ) -> bool:
     """Restart-safe restore of context_engine messages from on-disk history.
 
@@ -978,10 +992,12 @@ async def warmup_session_context(
     "能看到历史列表但继续对话失忆"。
 
     在新建 session adapter（``start_interaction`` 之后）调用：若内存 context
-    缺失且磁盘上有历史记录，则将全量 history 转换为 openjiuwen 消息并灌回
-    context_engine。与 ``rewind_session_context`` 的区别：不截断 history、
-    不清理 Session state（agent/workflow 状态已由 checkpointer 在 pre_run
-    恢复）、不强写 checkpointer（消息持久化本就由 history.jsonl 承担）。
+    缺失且磁盘上有历史记录，则将 history 转换为 openjiuwen 消息并灌回
+    context_engine。chat.send 会先落盘当前用户消息再创建 adapter，因此传入
+    ``history_before_request_id`` 时只恢复该请求之前的记录，避免当前消息同时
+    作为历史和实时 query 注入。与 ``rewind_session_context`` 的区别：不改写
+    history、不清理 Session state（agent/workflow 状态已由 checkpointer 在
+    pre_run 恢复）、不强写 checkpointer（消息持久化本就由 history.jsonl 承担）。
     """
     react_agent = getattr(deep_agent, "react_agent", None)
     if react_agent is None:
@@ -1005,6 +1021,13 @@ async def warmup_session_context(
 
     if not isinstance(history_records, list) or not history_records:
         return False
+
+    boundary_request_id = str(history_before_request_id or "").strip()
+    if boundary_request_id:
+        for index, record in enumerate(history_records):
+            if str(record.get("request_id") or "").strip() == boundary_request_id:
+                history_records = history_records[:index]
+                break
 
     context_messages, skipped = _build_context_messages_from_history(history_records)
     if not context_messages:
