@@ -28,6 +28,8 @@ export OPENAI_API_KEY="your-api-key"
 ```
 
 默认模型为 `gpt-4o-mini`，也可以在运行 `scripts/run_dovescore.py` 时通过 `--backbone` 指定其他模型。
+如果使用 OpenAI-compatible endpoint，可以通过 `--base-url`、`DOVESCORE_BASE_URL`
+或 `OPENAI_BASE_URL` 指定服务地址。
 
 ## Requirements
 
@@ -43,7 +45,9 @@ For local development from a DoveScore checkout, this is also acceptable:
 pip install -e /path/to/DoveScore
 ```
 
-Set the API key as `OPENAI_API_KEY` or pass it with `--api-key`. The default backbone is `gpt-4o-mini`.
+Set the API key as `OPENAI_API_KEY` or pass it with `--api-key`. The default
+backbone is `gpt-4o-mini`. For OpenAI-compatible APIs, pass `--base-url` or set
+`DOVESCORE_BASE_URL` / `OPENAI_BASE_URL`.
 
 ## Workflow
 
@@ -61,6 +65,16 @@ Absolute paths and paths containing `..` are rejected.
 
 ```bash
 python scripts/run_dovescore.py --source "source text" --target "target text"
+```
+
+For OpenAI-compatible endpoints:
+
+```bash
+python scripts/run_dovescore.py \
+  --source "source text" \
+  --target "target text" \
+  --backbone your-model-name \
+  --base-url "http://your-server:8000/v1"
 ```
 
 4. For a UI-safe contrast demo that does not require dependencies or an API key, run:

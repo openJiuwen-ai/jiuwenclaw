@@ -212,6 +212,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--backbone", default="gpt-4o-mini", help="OpenAI model name.")
     parser.add_argument(
+        "--base-url",
+        default=os.getenv("DOVESCORE_BASE_URL") or os.getenv("OPENAI_BASE_URL"),
+        help="OpenAI-compatible API base URL.",
+    )
+    parser.add_argument(
         "--output",
         help="Optional JSON output path under the current workspace.",
     )
@@ -265,11 +270,15 @@ def main() -> int:
         return 2
 
     try:
+        from openai import OpenAI
         from DoveScore import DoveScoreEvaluator
+        from DoveScore.default_decomposer import DefaultDecomposer
+        from DoveScore.default_factchecker import DefaultFactChecker
+        from DoveScore.default_sorter import DefaultSorter
     except ImportError as exc:
         logger.error(
             "DoveScore is not installed. Install it with "
-            "`pip install git+https://github.com/dannalily/DoveScore.git` "
+            "`pip install openai git+https://github.com/dannalily/DoveScore.git` "
             "or install a local DoveScore checkout with "
             "`pip install -e /path/to/DoveScore`."
         )
@@ -283,7 +292,17 @@ def main() -> int:
         )
         return 2
 
-    evaluator_args = SimpleNamespace(api_key=args.api_key, backbone=args.backbone)
+    client_args: dict[str, Any] = {"api_key": args.api_key, "timeout": args.timeout_seconds}
+    if args.base_url:
+        client_args["base_url"] = args.base_url
+    client = OpenAI(**client_args)
+    evaluator_args = SimpleNamespace(
+        api_key=args.api_key,
+        backbone=args.backbone,
+        decomposer=DefaultDecomposer(args.backbone, client),
+        factchecker=DefaultFactChecker(args.backbone, client),
+        sorter=DefaultSorter(args.backbone, client),
+    )
     evaluator = DoveScoreEvaluator(evaluator_args)
     try:
         with _evaluation_deadline(args.timeout_seconds):

@@ -57,6 +57,20 @@ Custom model:
 python scripts/run_dovescore.py --source-file source.txt --target-file target.txt --backbone gpt-4o-mini
 ```
 
+OpenAI-compatible endpoint:
+
+```bash
+python scripts/run_dovescore.py \
+  --source-file source.txt \
+  --target-file target.txt \
+  --backbone your-model-name \
+  --base-url "http://your-server:8000/v1"
+```
+
+`--base-url` can point to an OpenAI-compatible provider, gateway, or self-hosted
+server such as vLLM. It also defaults from `DOVESCORE_BASE_URL` or
+`OPENAI_BASE_URL`.
+
 Safety limits:
 
 ```bash
