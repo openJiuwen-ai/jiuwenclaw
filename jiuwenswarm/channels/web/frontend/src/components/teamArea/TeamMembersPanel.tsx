@@ -512,26 +512,22 @@ const MemberOverviewCard = memo(function MemberOverviewCard({
 
   return (
     <div
-      onClick={onClick}
-      role="button"
-      tabIndex={0}
-      onKeyDown={e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          onClick?.();
-        }
-      }}
       data-testid="team-area-member-overview-card"
       data-variant={member.member_id}
-      className="relative flex h-[240px] flex-col gap-3 overflow-hidden rounded-[8px] border-[1.5px] border-border bg-card p-4 text-left hover:border-[var(--color-action-primary)] transition-colors cursor-pointer"
+      className="relative flex h-[240px] flex-col gap-3 overflow-hidden rounded-[8px] border-[1.5px] border-border bg-card p-4 text-left hover:border-[var(--color-action-primary)] transition-colors"
     >
-      <span
-        className="absolute left-0 top-0 flex h-[18px] w-[18px] items-center justify-center text-[12px] leading-[18px] text-text bg-[var(--color-member-card-badge-surface)] rounded-tl-[4px] rounded-br-[8px] rounded-tr-none rounded-bl-none"
-        data-testid="team-area-member-overview-card-sequence"
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex items-center gap-3 text-left cursor-pointer"
+        data-testid="team-area-member-overview-card-header"
       >
-        {sequence}
-      </span>
-      <div className="flex items-center gap-3">
+        <span
+          className="absolute left-0 top-0 flex h-[18px] w-[18px] items-center justify-center text-[12px] leading-[18px] text-text bg-[var(--color-member-card-badge-surface)] rounded-tl-[4px] rounded-br-[8px] rounded-tr-none rounded-bl-none"
+          data-testid="team-area-member-overview-card-sequence"
+        >
+          {sequence}
+        </span>
         <div className="relative shrink-0">
           <TeamMemberAvatar member={member.member_id} alt={displayName} className="h-10 w-10 rounded-full" imageClassName="rounded-full" />
         </div>
@@ -557,7 +553,7 @@ const MemberOverviewCard = memo(function MemberOverviewCard({
         ) : (
           <PendingIcon className="w-4 h-4 shrink-0 text-text-muted" />
         )}
-      </div>
+      </button>
       <div className="min-w-0 flex-1 overflow-hidden">
         <ProcessListCard items={processItems} expandedIds={expandedProcessIds} onToggle={toggleProcess} maxListHeight="100%" />
       </div>

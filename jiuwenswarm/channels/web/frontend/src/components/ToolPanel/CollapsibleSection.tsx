@@ -97,7 +97,10 @@ export function CollapsibleSection({
           </span>
           {showCollapseButton && (
             <button
-              onClick={handleToggleCollapse}
+              onClick={e => {
+                e.stopPropagation();
+                handleToggleCollapse();
+              }}
               data-testid={`${dataTestId}-collapse-button`}
               className="rounded p-1 text-text-muted hover:bg-secondary hover:text-text"
             >

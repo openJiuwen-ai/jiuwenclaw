@@ -37,6 +37,7 @@ import { useCodeGitDiffWatch } from '../../features/code-mode/useCodeGitDiffWatc
 import { type SingleAgentToolTab } from '../../features/singleAgentPanelState';
 import { SubagentExpandedPanel } from '../subagent/SubagentExpandedPanel';
 import { useSubagentStore } from '../../stores/subagentStore';
+import { useMinWidth } from '../../hooks/useResponsive';
 import './ToolPanel.css';
 
 /** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
@@ -255,8 +256,10 @@ export function ToolPanel({
   const loadingTeamHistorySessionRef = useRef<string | null>(null);
   const floatingPanelRef = useRef<HTMLDivElement>(null);
 
+  const isUltraWide = useMinWidth('ultraWide');
+
   useEffect(() => {
-    if (!onCloseFloating) return;
+    if (!onCloseFloating || isUltraWide) return;
     const handler = (e: MouseEvent) => {
       const el = floatingPanelRef.current;
       if (!el) return;
@@ -270,7 +273,7 @@ export function ToolPanel({
       window.clearTimeout(timer);
       document.removeEventListener('mousedown', handler);
     };
-  }, [onCloseFloating]);
+  }, [onCloseFloating, isUltraWide]);
 
   useEffect(() => {
     if (mode !== 'team' || !isConnected || !sessionId || !(sessionId.startsWith('sess_') || sessionId.startsWith('web_'))) {

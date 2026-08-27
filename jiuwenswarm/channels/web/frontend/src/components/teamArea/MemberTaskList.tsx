@@ -1,5 +1,4 @@
 import { useTranslation } from 'react-i18next';
-import { Check } from 'lucide-react';
 import { Chevron, formatTime, getTaskStatusLabel, StatusIcon, type MemberTask, type TaskStatus } from './shared';
 
 export type MemberTaskListItem = Pick<MemberTask, 'id' | 'title' | 'detail' | 'status' | 'raw' | 'updatedAt'> & {
@@ -49,9 +48,7 @@ export function MemberTaskListBar({ tasks, expanded, onToggle }: { tasks: Member
         <span className="text-sm font-semibold text-text">{t('team.memberTasks')}</span>
         {latestTask && (
           <div className="flex min-w-0 items-center gap-2">
-            <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-ok text-text-inverse">
-              <Check size={10} strokeWidth={2.5} />
-            </span>
+            <StatusIcon status={latestTask.status as TaskStatus} />
             <span className="truncate text-sm text-muted-strong">{latestTask.title}</span>
           </div>
         )}
