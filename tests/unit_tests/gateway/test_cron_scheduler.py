@@ -1649,3 +1649,86 @@ class TestExtractTextFromAgentPayload:
     def test_error_int_value_returns_empty_string(self):
         result = self._call({"error": 42})
         assert result == ""
+
+class TestUpdateJobA2aDeleteAfterRun:
+    """update_job_a2a 修正 delete_after_run 的一次性语义。
+
+    回归：一次性任务改成间隔表达式后，遗留的 delete_after_run=true
+    会让调度器在首次触发后把任务标记为过期并禁用。
+    """
+
+    @staticmethod
+    def _make_controller(tmp_path):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from jiuwenswarm.gateway.cron.controller import CronController
+
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        scheduler = SimpleNamespace(reload=AsyncMock(), _events=[], _runs={})
+        return CronController(store=store, scheduler=scheduler), store
+
+    @pytest.mark.asyncio
+    async def test_update_to_interval_expr_clears_delete_after_run(self, tmp_path):
+        """一次性任务改成间隔表达式后，遗留的 delete_after_run 必须被清除。"""
+        cc, store = self._make_controller(tmp_path)
+        job = await store.create_job(
+            name="喝水提醒",
+            cron_expr="0 15 26 8 *",
+            timezone="Asia/Shanghai",
+            description="该喝水啦！记得去喝杯水",
+            targets="web",
+            delete_after_run=True,
+        )
+
+        await cc.update_job_a2a(
+            job.id,
+            {"schedule": {"kind": "cron", "expr": "*/30 * * * *"}},
+        )
+
+        stored = await store.get_job(job.id)
+        assert stored is not None
+        assert stored.delete_after_run is False
+        assert stored.cron_expr == "*/30 * * * *"
+        assert stored.enabled is True
+
+    @pytest.mark.asyncio
+    async def test_update_explicit_delete_after_run_false(self, tmp_path):
+        """显式传 deleteAfterRun=false 时应写入存储（此前 update 完全忽略该参数）。"""
+        cc, store = self._make_controller(tmp_path)
+        job = await store.create_job(
+            name="一次性任务",
+            cron_expr="0 15 26 8 *",
+            timezone="Asia/Shanghai",
+            description="提醒",
+            targets="web",
+            delete_after_run=True,
+        )
+
+        await cc.update_job_a2a(job.id, {"deleteAfterRun": False})
+
+        stored = await store.get_job(job.id)
+        assert stored is not None
+        assert stored.delete_after_run is False
+
+    @pytest.mark.asyncio
+    async def test_update_to_at_still_forces_delete_after_run_true(self, tmp_path):
+        """改成 kind=at 仍强制一次性语义（5 段 cron 无年份，需触发后删除）。"""
+        cc, store = self._make_controller(tmp_path)
+        job = await store.create_job(
+            name="间隔任务",
+            cron_expr="*/30 * * * *",
+            timezone="Asia/Shanghai",
+            description="提醒",
+            targets="web",
+            delete_after_run=False,
+        )
+
+        await cc.update_job_a2a(
+            job.id,
+            {"schedule": {"kind": "at", "at": "2026-12-25T09:00:00+08:00"}},
+        )
+
+        stored = await store.get_job(job.id)
+        assert stored is not None
+        assert stored.delete_after_run is True

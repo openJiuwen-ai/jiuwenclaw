@@ -898,6 +898,8 @@ class CronController:
             mode_val = str(patch_params.get("mode") or "").strip()
             if mode_val:
                 patch["mode"] = mode_val
+        if patch_params.get("deleteAfterRun") is not None:
+            patch["delete_after_run"] = bool(patch_params.get("deleteAfterRun"))
         schedule = patch_params.get("schedule")
         if isinstance(schedule, dict):
             schedule_kind = str(schedule.get("kind") or "").strip().lower()
@@ -916,6 +918,9 @@ class CronController:
                 patch["delete_after_run"] = True
             elif schedule.get("expr"):
                 patch["cron_expr"] = str(schedule["expr"]).strip()
+                # 周期/间隔表达式与一次性语义矛盾：清除遗留的 delete_after_run，
+                # 否则一次性任务改成间隔后，首次触发仍会被调度器标记过期并禁用。
+                patch["delete_after_run"] = False
         payload = patch_params.get("payload")
         if isinstance(payload, dict) and payload.get("message") is not None:
             patch["description"] = str(payload["message"]).strip()
