@@ -109,10 +109,10 @@ declare -A DEPLOY_VARS=(
     ["COLLECT_LOG_MASK_ENABLED"]="false"
     ["DB_TYPE"]="sqlite"
     ["DEPLOYMENT_MODE"]="standalone"
-    ["GATEWAY_HTTP_PORT"]="19001"
-    ["GATEWAY_WS_PORT"]="19000"
-    # Manager → Gateway 配置同步 HTTP（manager_config_receiver）
+    ["WEB_PORT"]="19000"
+    ["GATEWAY_PORT"]="19001"
     ["GATEWAY_CONFIG_HTTP_PORT"]="8775"
+    ["GATEWAY_WEB_HTTP_PORT"]="19002"
     ["ENABLE_EXTERNAL_OBS"]="false"
     ["ENABLE_EXTERNAL_NFS"]="false"
     ["ENABLE_EXTERNAL_PVC"]="false"

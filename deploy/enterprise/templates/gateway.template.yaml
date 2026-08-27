@@ -75,9 +75,11 @@ spec:
           # args: ["jiuwenswarm-gateway; echo '[debug-keepalive] gateway exited rc=$?, sleeping'; sleep infinity"]
           ports:
             - name: web-ws
-              containerPort: <<GATEWAY_WS_PORT>>
-            - name: http
-              containerPort: <<GATEWAY_HTTP_PORT>>
+              containerPort: <<WEB_PORT>>
+            - name: acp-ws
+              containerPort: <<GATEWAY_PORT>>
+            - name: web-http
+              containerPort: <<GATEWAY_WEB_HTTP_PORT>>
             - name: config-http
               containerPort: <<GATEWAY_CONFIG_HTTP_PORT>>
           # active-standby：仅 PRIMARY Ready，保证 ClusterIP 流量打到主
@@ -151,11 +153,14 @@ spec:
     app: <<GATEWAY_NAME>>
   ports:
     - name: web-ws
-      port: <<GATEWAY_WS_PORT>>
-      targetPort: <<GATEWAY_WS_PORT>>
-    - name: http
-      port: <<GATEWAY_HTTP_PORT>>
-      targetPort: <<GATEWAY_HTTP_PORT>>
+      port: <<WEB_PORT>>
+      targetPort: <<WEB_PORT>>
+    - name: acp-ws
+      port: <<GATEWAY_PORT>>
+      targetPort: <<GATEWAY_PORT>>
+    - name: web-http
+      port: <<GATEWAY_WEB_HTTP_PORT>>
+      targetPort: <<GATEWAY_WEB_HTTP_PORT>>
     - name: config-http
       port: <<GATEWAY_CONFIG_HTTP_PORT>>
       targetPort: <<GATEWAY_CONFIG_HTTP_PORT>>
