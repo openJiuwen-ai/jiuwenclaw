@@ -8,8 +8,43 @@ from typing import Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.harness.schema.task import TodoItem, TodoStatus
+from openjiuwen.harness.schema.task import STATUS_ICONS, TodoItem, TodoStatus
+from openjiuwen.harness.tools.todo import TodoCreateTool as _OpenJiuWenTodoCreateTool
 from openjiuwen.harness.tools.todo import TodoModifyTool as _OpenJiuWenTodoModifyTool
+
+
+class CompatibleTodoCreateTool(_OpenJiuWenTodoCreateTool):
+    """Create todos as pending registration items, not auto-started executions.
+
+    Upstream ``TodoCreateTool`` marks the first new task ``in_progress`` and tells
+    the model to "Immediately execute" it. That fires ``task.start`` in
+    ``TaskExecutionRail`` even for pure "add a todo" user requests, which scopes
+    the confirmation reply away from the main chat bubble.
+    """
+
+    def _format_create_result(self, todos: list[TodoItem]) -> str:
+        result = f"Successfully created {len(todos)} task(s):\n"
+        for todo in todos:
+            status_icon = STATUS_ICONS.get(todo.status, "[ ]")
+            model_info = f" (model: {todo.selected_model_id})" if todo.selected_model_id else ""
+            result += f"  {status_icon} task_id: {todo.id} , content: {todo.content}{model_info}\n"
+        result += (
+            "\nTasks saved as pending. Start execution by calling work tools; "
+            "use todo_modify to mark completed or cancelled."
+        )
+        return result.strip()
+
+    async def _create_from_list(self, session_id: str, tasks_data: list[dict[str, Any]]) -> str:
+        await super()._create_from_list(session_id, tasks_data)
+        todos = await self.load_todos(session_id)
+        demoted = False
+        for todo in todos:
+            if todo.status == TodoStatus.IN_PROGRESS:
+                todo.status = TodoStatus.PENDING
+                demoted = True
+        if demoted:
+            await self.save_todos(session_id, todos)
+        return self._format_create_result(todos)
 
 
 class CompatibleTodoModifyTool(_OpenJiuWenTodoModifyTool):
@@ -85,10 +120,21 @@ class CompatibleTodoModifyTool(_OpenJiuWenTodoModifyTool):
         return "; ".join(parts) or "No task changes applied"
 
 
-def install_todo_modify_compat_patch() -> None:
-    """Patch OpenJiuWen exports so TaskPlanningRail uses the compatible tool."""
+def install_todo_compat_patch() -> None:
+    """Patch OpenJiuWen exports so rails use the compatible todo tools."""
     import openjiuwen.harness.tools as tools_module
     import openjiuwen.harness.tools.todo as todo_module
 
+    tools_module.TodoCreateTool = CompatibleTodoCreateTool
     tools_module.TodoModifyTool = CompatibleTodoModifyTool
+    todo_module.TodoCreateTool = CompatibleTodoCreateTool
     todo_module.TodoModifyTool = CompatibleTodoModifyTool
+
+
+def install_todo_modify_compat_patch() -> None:
+    """Backward-compatible alias for older call sites."""
+    install_todo_compat_patch()
+
+
+# Patch before downstream modules import TodoCreateTool / TodoModifyTool.
+install_todo_compat_patch()

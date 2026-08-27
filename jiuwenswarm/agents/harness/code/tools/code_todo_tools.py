@@ -10,12 +10,14 @@ from typing import Optional
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.tools.todo import (
-    TodoCreateTool,
     TodoGetTool,
     TodoListTool,
     TodoLockManager,
-    TodoModifyTool,
     TodoTool,
+)
+from jiuwenswarm.agents.harness.common.tools.todo_compat import (
+    CompatibleTodoCreateTool as TodoCreateTool,
+    CompatibleTodoModifyTool as TodoModifyTool,
 )
 
 from jiuwenswarm.agents.harness.code.prompt.code_todo_tool_prompts import (

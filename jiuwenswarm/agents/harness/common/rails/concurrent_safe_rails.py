@@ -33,11 +33,13 @@ from openjiuwen.harness.tools.filesystem import (
     WriteFileTool,
 )
 from openjiuwen.harness.tools.todo import (
-    TodoCreateTool,
     TodoItem,
     TodoListTool,
-    TodoModifyTool,
     TodoStatus,
+)
+from jiuwenswarm.agents.harness.common.tools.todo_compat import (
+    CompatibleTodoCreateTool as TodoCreateTool,
+    CompatibleTodoModifyTool as TodoModifyTool,
 )
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
