@@ -3005,11 +3005,12 @@
       "cancelRun": "停止本次运行",
       "pause": "暂停",
       "resume": "恢复",
-      "resumeFromCompletedHint": "任务已完成或到期，点击恢复将按当前调度重新激活（需先编辑为未来时间）",
+      "resumeFromCompletedHint": "任务已完成或到期，需先在「编辑」里把调度／停止条件改成未来时间，任务会自动重新激活",
       "delete": "删除",
       "deleteConfirm": "确定删除心跳任务「{{name}}」吗？",
       "filterLabel": "状态",
       "filterAll": "全部",
+      "filterActive": "活跃",
       "searchPlaceholder": "按名称或提示词搜索",
       "emptyFiltered": "没有符合筛选条件的心跳任务",
       "nextRunAt": "下次触发：{{time}}",
@@ -3018,8 +3019,14 @@
       "createMenu": {
         "manual": "手动创建",
         "viaChat": "通过聊天创建",
-        "viaChatPrompt": "帮我创建心跳提醒："
+        "viaChatPrompt": "帮我在当前会话创建心跳提醒："
       }
+    },
+    "pagination": {
+      "pageSize": "每页显示",
+      "total": "共 {{total}} 条",
+      "prev": "上一页",
+      "next": "下一页"
     },
     "toast": {
       "paused": "已暂停后续计划",

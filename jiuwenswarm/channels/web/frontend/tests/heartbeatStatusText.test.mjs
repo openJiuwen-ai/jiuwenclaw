@@ -8,6 +8,7 @@ import {
   heartbeatCancelMessageKey,
   heartbeatLastRunStatusLabelKey,
   canHeartbeatRunNow,
+  canHeartbeatToggleEnable,
 } from '../node_modules/.cache/heartbeat-status-text/components/HeartbeatPanel/heartbeatStatusText.js';
 
 test('heartbeatStatusVariant maps every backend status to a display variant', () => {
@@ -74,4 +75,15 @@ test('canHeartbeatRunNow: disabled statuses are all rejected', () => {
 
 test('canHeartbeatRunNow: enabled=false always rejected even if status is scheduled', () => {
   assert.equal(canHeartbeatRunNow(false, 'scheduled'), false);
+});
+
+test('canHeartbeatToggleEnable: terminal statuses disable the resume button', () => {
+  assert.equal(canHeartbeatToggleEnable('completed'), false);
+  assert.equal(canHeartbeatToggleEnable('expired'), false);
+});
+
+test('canHeartbeatToggleEnable: non-terminal statuses keep the toggle enabled', () => {
+  assert.equal(canHeartbeatToggleEnable('scheduled'), true);
+  assert.equal(canHeartbeatToggleEnable('running'), true);
+  assert.equal(canHeartbeatToggleEnable('disabled'), true);
 });

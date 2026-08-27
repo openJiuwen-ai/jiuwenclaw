@@ -3008,11 +3008,12 @@
       "cancelRun": "Cancel this run",
       "pause": "Pause",
       "resume": "Resume",
-      "resumeFromCompletedHint": "Job completed or expired. Click to reactivate with its current schedule (edit to a future time first)",
+      "resumeFromCompletedHint": "Job completed or expired. Edit its schedule/stop conditions to a future time first — it will reactivate automatically",
       "delete": "Delete",
       "deleteConfirm": "Delete heartbeat job \"{{name}}\"?",
       "filterLabel": "Status",
       "filterAll": "All",
+      "filterActive": "Active",
       "searchPlaceholder": "Search by name or prompt",
       "emptyFiltered": "No heartbeat jobs match this filter",
       "nextRunAt": "Next run: {{time}}",
@@ -3021,8 +3022,14 @@
       "createMenu": {
         "manual": "Create manually",
         "viaChat": "Create via chat",
-        "viaChatPrompt": "Help me create a heartbeat reminder: "
+        "viaChatPrompt": "Help me create a heartbeat reminder in the current session: "
       }
+    },
+    "pagination": {
+      "pageSize": "Per page",
+      "total": "{{total}} total",
+      "prev": "Previous",
+      "next": "Next"
     },
     "toast": {
       "paused": "Future schedule paused",
