@@ -45,6 +45,14 @@ def configure_logging() -> None:
     result_logger.setLevel(logging.INFO)
 
 
+def first_env(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
 def read_text(value: str | None, file_path: str | None, label: str) -> str:
     if value and file_path:
         raise ValueError(f"Pass either --{label} or --{label}-file, not both.")
@@ -465,13 +473,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--api-key",
-        default=os.environ.get("TRUSTSCORE_API_KEY") or os.environ.get("OPENAI_API_KEY"),
-        help="API key. Defaults to TRUSTSCORE_API_KEY or OPENAI_API_KEY.",
+        default=first_env("TRUSTSCORE_API_KEY", "OPENAI_API_KEY", "API_KEY", "MODEL_API_KEY"),
+        help=(
+            "OpenAI-compatible API key. Defaults to TRUSTSCORE_API_KEY, "
+            "OPENAI_API_KEY, API_KEY, or MODEL_API_KEY."
+        ),
     )
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("OPENAI_BASE_URL"),
-        help="OpenAI-compatible API base URL.",
+        default=first_env("TRUSTSCORE_BASE_URL", "OPENAI_BASE_URL", "API_BASE", "MODEL_API_BASE"),
+        help=(
+            "OpenAI-compatible API base URL. Defaults to TRUSTSCORE_BASE_URL, "
+            "OPENAI_BASE_URL, API_BASE, or MODEL_API_BASE."
+        ),
     )
     parser.add_argument("--mcq-num", type=int, default=20, help="Number of MCQs to evaluate.")
     parser.add_argument(
@@ -526,7 +540,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Missing input: pass --model.")
     if not args.api_key:
         raise ValueError(
-            "Missing API key. Set OPENAI_API_KEY or TRUSTSCORE_API_KEY, or pass --api-key."
+            "Missing API key. Set TRUSTSCORE_API_KEY, OPENAI_API_KEY, API_KEY, "
+            "MODEL_API_KEY, or pass --api-key."
         )
     if args.mcq_num <= 0:
         raise ValueError("--mcq-num must be greater than 0.")

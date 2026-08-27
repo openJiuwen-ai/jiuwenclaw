@@ -31,7 +31,10 @@ export OPENAI_API_KEY="your-api-key"
 export OPENAI_BASE_URL="https://your-provider.example/v1"
 ```
 
-也可以在命令行里传入 `--api-key` 和 `--base-url`。默认使用 `OPENAI_API_KEY`，也支持 `TRUSTSCORE_API_KEY`。
+也可以在命令行里传入 `--api-key` 和 `--base-url`。默认使用
+`TRUSTSCORE_API_KEY` / `OPENAI_API_KEY` 和 `TRUSTSCORE_BASE_URL` /
+`OPENAI_BASE_URL`，同时兼容 JiuwenSwarm/agent 框架中常见的通用环境变量：
+`API_KEY` / `MODEL_API_KEY` 和 `API_BASE` / `MODEL_API_BASE`。
 
 ## Quick Start
 

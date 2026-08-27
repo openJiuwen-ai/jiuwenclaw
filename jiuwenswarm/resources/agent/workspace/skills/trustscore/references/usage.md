@@ -6,7 +6,8 @@
 
 - `--question` 或 `--question-file`: 要测试的问题。
 - `--model`: 被评估的 OpenAI-compatible chat model 名称。
-- API key: `OPENAI_API_KEY`、`TRUSTSCORE_API_KEY` 或 `--api-key`。
+- API key: `--api-key`、`TRUSTSCORE_API_KEY`、`OPENAI_API_KEY`、
+  `API_KEY` 或 `MODEL_API_KEY`。
 
 ## 输出
 
@@ -55,6 +56,10 @@ python scripts/run_trustscore.py \
   --model your-model-name \
   --base-url "https://your-provider.example/v1"
 ```
+
+`--base-url` 也可以从 `TRUSTSCORE_BASE_URL`、`OPENAI_BASE_URL`、`API_BASE`
+或 `MODEL_API_BASE` 读取。`API_KEY`、`MODEL_API_KEY`、`API_BASE` 和
+`MODEL_API_BASE` 用于兼容 JiuwenSwarm/agent 框架里的通用模型配置环境变量。
 
 Safety limits:
 
