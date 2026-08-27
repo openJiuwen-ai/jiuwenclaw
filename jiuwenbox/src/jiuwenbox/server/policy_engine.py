@@ -18,6 +18,26 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 
+def read_policy_text(path: str | Path) -> str:
+    """读 policy YAML: UTF-8, 失败再试系统中文编码."""
+    raw = Path(path).read_bytes()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    for enc in ("utf-8-sig", "gb18030", "mbcs"):
+        try:
+            text = raw.decode(enc)
+            logger.warning(
+                "policy 文件 %s 不是 UTF-8, 已按 %s 解码; 下次写入将改为 UTF-8",
+                path, enc,
+            )
+            return text
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 class PolicyValidationError(Exception):
     """Raised when a policy fails validation."""
 
@@ -296,7 +316,7 @@ class PolicyEngine:
         resolved = self.resolve_policy(policy)
         policy_path = self.policies_dir / f"{sandbox_id}_sandbox_policy.yaml"
 
-        with open(policy_path, "w") as f:
+        with open(policy_path, "w", encoding="utf-8", newline="\n") as f:
             yaml.safe_dump(resolved, f, default_flow_style=False, allow_unicode=True)
 
         logger.info("Wrote sandbox policy to %s", policy_path)
@@ -305,8 +325,7 @@ class PolicyEngine:
     @staticmethod
     def load_policy_from_file(path: str | Path) -> SecurityPolicy:
         """Load a SecurityPolicy from a YAML file."""
-        with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+        data = yaml.safe_load(read_policy_text(path))
         return SecurityPolicy.model_validate(data)
 
     def get_sandbox_policy_path(self, sandbox_id: str) -> Path | None:

@@ -109,7 +109,6 @@ def _cleanup_stale_win_proxy_ports(
             continue
     if not stale_pids:
         return
-    # 获取进程名, 避免误杀非 python 进程 (win_proxy 只可能由 python 进程占).
     for pid, ports in stale_pids.items():
         try:
             name_result = subprocess.run(
@@ -121,12 +120,14 @@ def _cleanup_stale_win_proxy_ports(
             proc_name = name_result.stdout.decode("utf-8", errors="replace").strip()
         except Exception:  # noqa: BLE001
             proc_name = ""
-        # P2-20: 旧版严格 == "python" 漏杀 python3.13/pythonw (uv venv 的 python 名).
-        # 改 startswith("python") 覆盖 python/python3/python3.13/pythonw 等. 端口范围
-        # 已限定 (win_proxy 60080-60089), 误杀系统 python 风险极低 (该端口范围专属).
-        if not proc_name.lower().startswith("python"):
+        # 桌面包进程名是 jiuwenswarm, 不只 python*.
+        name_l = proc_name.lower()
+        if not (
+            name_l.startswith("python")
+            or name_l in ("jiuwenswarm", "jiuwenbox", "jiuwenbox-server")
+        ):
             logger.warning(
-                "[JiuwenBoxRunner] 端口 %s 被非 python 进程 PID=%d (%s) 占用, 跳过清理",
+                "[JiuwenBoxRunner] 端口 %s 被非沙箱进程 PID=%d (%s) 占用, 跳过清理",
                 ports, pid, proc_name or "<unknown>",
             )
             continue

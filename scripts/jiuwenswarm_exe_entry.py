@@ -223,6 +223,15 @@ def _unshadow_frozen_jiuwenbox_namespace() -> None:
 
 def _run_win_setup() -> None:
     """安装器已提权时调用: 在本进程内跑 win_setup, 不再 ShellExecuteW(runas)."""
+    # import 失败时也能确认安装器调到了这里.
+    try:
+        log_dir = Path(os.environ.get("JIUWENSWARM_DATA_DIR", Path.home() / ".jiuwenswarm")) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "win_setup_invoke.log").write_text(
+            f"argv={sys.argv!r}\ncwd={os.getcwd()}\n", encoding="utf-8",
+        )
+    except OSError:
+        pass
     _unshadow_frozen_jiuwenbox_namespace()
     from jiuwenbox.supervisor.win_setup import _main as win_setup_main
 

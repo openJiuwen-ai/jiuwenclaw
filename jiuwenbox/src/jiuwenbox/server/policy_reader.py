@@ -17,7 +17,7 @@ import yaml
 from jiuwenbox.bundled_configs import base_policy_path
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import SecurityPolicy
-from jiuwenbox.server.policy_engine import PolicyEngine
+from jiuwenbox.server.policy_engine import PolicyEngine, read_policy_text
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -167,9 +167,8 @@ class PolicyReader:
         """
         base_path = base_policy_path()
         try:
-            with open(base_path, encoding="utf-8") as f:
-                base_data = yaml.safe_load(f) or {}
-        except (OSError, yaml.YAMLError) as exc:
+            base_data = yaml.safe_load(read_policy_text(base_path)) or {}
+        except (OSError, yaml.YAMLError, UnicodeDecodeError) as exc:
             # OSError = 文件不可读/不存在; yaml.YAMLError = 语法错误 (如双引号内
             # 非法 \U 转义). 基底随 wheel 打包一般不坏, 但兜底回落 SecurityPolicy
             # 默认值, 不阻断启动 (与 is_proxy_only 的 except 范式一致).
@@ -190,9 +189,8 @@ class PolicyReader:
 
         # 有副本: 合并基底 + 副本 (副本用户配置叠加基底; list 追加, dict 深合并).
         try:
-            with open(self.policy_path, encoding="utf-8") as f:
-                override_data = yaml.safe_load(f) or {}
-        except (OSError, yaml.YAMLError) as exc:
+            override_data = yaml.safe_load(read_policy_text(self.policy_path)) or {}
+        except (OSError, yaml.YAMLError, UnicodeDecodeError) as exc:
             # OSError = 副本不可读; yaml.YAMLError = 副本语法错误 (如双引号内 Windows 路径 C:\Users\... 的 \U 被当转义).
             # 副本是用户可写文件易被手改坏. 回落基底而非抛异常 (否则抛到 app.py 外层致 win_proxy 不启动 + 沙箱用空 policy, P1-14).
             # WS 接口写的副本经 safe_dump 不会触发 (plain scalar 不解析 \U).
@@ -227,9 +225,8 @@ class PolicyReader:
         if not self.policy_path.exists():
             return False
         try:
-            with open(self.policy_path) as f:
-                data = yaml.safe_load(f)
-        except (OSError, yaml.YAMLError):
+            data = yaml.safe_load(read_policy_text(self.policy_path))
+        except (OSError, yaml.YAMLError, UnicodeDecodeError):
             return False
         if not isinstance(data, dict):
             return False
