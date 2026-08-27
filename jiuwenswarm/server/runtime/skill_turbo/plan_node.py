@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any, Union
+from typing import Any, Literal, Union
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AbortError 唯一触点：openjiuwen 的 HITL 中断异常。
@@ -36,11 +36,17 @@ from openjiuwen.core.runner.callback import AbortError
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["AbortError", "PlanNode"]
+LLMOutputVisibility = Literal["public", "internal"]
+
+__all__ = ["AbortError", "LLMOutputVisibility", "PlanNode"]
 
 
 class PlanNode(ABC):
     """规划节点 -- 递归结构，子类实现 async _execute，run 自带 fallback。"""
+
+    # None 表示继承父节点；根节点未声明时默认 public。
+    # 子类仅在模型输出属于内部中间结果时显式声明 internal。
+    llm_output_visibility: LLMOutputVisibility | None = None
 
     def __init__(
         self,
@@ -61,6 +67,7 @@ class PlanNode(ABC):
         self._call_tool_callback: Callable[..., Awaitable[Any]] | None = None
         self._call_llm_callback: Callable[..., Awaitable[str]] | None = None
         self._stream_llm_callback: Callable[..., AsyncIterator[str]] | None = None
+        self._effective_llm_output_visibility: LLMOutputVisibility = "public"
         self._fallback_callback: (
             Callable[[PlanNode, dict[str, Any], Exception], Awaitable[Any]] | None
         ) = None
@@ -118,7 +125,18 @@ class PlanNode(ABC):
         should_suppress_subplan_start_banner: (
             Callable[[PlanNode, dict[str, Any]], Awaitable[bool]] | None
         ) = None,
+        inherited_llm_output_visibility: LLMOutputVisibility = "public",
     ) -> None:
+        if inherited_llm_output_visibility not in {"public", "internal"}:
+            raise ValueError(
+                "inherited_llm_output_visibility 必须是 'public' 或 'internal'"
+            )
+        declared_visibility = self.llm_output_visibility
+        if declared_visibility not in {None, "public", "internal"}:
+            raise ValueError("llm_output_visibility 必须是 None、'public' 或 'internal'")
+        self._effective_llm_output_visibility = (
+            declared_visibility or inherited_llm_output_visibility
+        )
         self._has_tool_callback = has_tool
         self._call_tool_callback = use_tool
         self._call_llm_callback = call_llm
@@ -145,6 +163,7 @@ class PlanNode(ABC):
                 after_subplan_execute=after_subplan_execute,
                 should_skip_subplan_execute=should_skip_subplan_execute,
                 should_suppress_subplan_start_banner=should_suppress_subplan_start_banner,
+                inherited_llm_output_visibility=self._effective_llm_output_visibility,
             )
 
     def log(self, level: str, message: str, *args: Any) -> None:
@@ -200,6 +219,7 @@ class PlanNode(ABC):
             system_prompt=system_prompt,
             node_name=node_name or self.plan_name,
             concurrent=concurrent,
+            output_visibility=self._effective_llm_output_visibility,
         )
 
     async def stream_llm(
@@ -231,6 +251,7 @@ class PlanNode(ABC):
             system_prompt=system_prompt,
             node_name=node_name or self.plan_name,
             concurrent=concurrent,
+            output_visibility=self._effective_llm_output_visibility,
         ):
             yield chunk
 
