@@ -82,8 +82,47 @@ export interface ModelEntry {
    * 新增条目不带此字段。
    */
   origin_index?: number;
+  /**
+   * 厂商选择器的预设 key（如 "alibaba"/"baidu"）。提示性字段：
+   * 不参与后端校验，仅用于前端回显图标 / 重新选中预设。由 vendors.list
+   * 返回的预设表与 models.list 的回带字段对应。
+   */
+  vendor_key?: string;
+  /** 该条目所属的 plan 分桶（'token_plan'|'coding_plan'|'custom_api'|'custom'）。提示性。 */
+  plan?: string;
   /** 免费模型标识（如 Opencode Zen 免费模型）。前端据此归入"免费模型"分组；非免费模型不带此字段。 */
   is_free?: boolean;
+}
+
+/** 厂商预设：vendors.list RPC 返回的单个厂商卡片。 */
+export interface VendorPreset {
+  vendor_key: string;
+  display_name: string;
+  plan: string;
+  client_provider: string;
+  api_base: string;
+  default_model: string;
+  model_options: string[];
+  icon_key: string;
+  models_endpoint: string | null;
+  models_needs_key: boolean;
+  /** Anthropic 格式是否可选(仅当 anthropic_base 非空时为 true)。
+   * 选 Anthropic 格式时:落库 client_provider='Anthropic'、api_base=anthropic_base,
+   * core 用 AnthropicModelClient 走 /v1/messages。 */
+  supports_anthropic: boolean;
+  anthropic_base: string | null;
+  /** Anthropic 格式落库用的 provider 值(= 'Anthropic');supports_anthropic=false 时为 null。 */
+  anthropic_client_provider: string | null;
+}
+
+/** vendors.list RPC 返回的载荷：按 plan 分组的厂商预设。 */
+export type VendorPresetMap = Record<'token_plan' | 'coding_plan' | 'custom_api', VendorPreset[]>;
+
+/** vendors.fetch_models RPC 返回的载荷。 */
+export interface VendorFetchModelsResult {
+  models: string[];
+  source: 'remote' | 'preset';
+  reason?: string;
 }
 
 export interface OffloadFileListResponse {
