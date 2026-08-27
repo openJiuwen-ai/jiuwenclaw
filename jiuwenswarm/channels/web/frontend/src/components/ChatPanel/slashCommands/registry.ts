@@ -124,13 +124,14 @@ const compactCommand: SlashCommand = {
 
 /**
  * /plan —— 翻转 planStore 的 Plan 开关（纯本地，不调后端）。
+ * 面板选中或精确输入 `/plan` 时立即翻转，带参数的文本不进入此路径。
  * 开启时置 explicitEntry，下一条真实消息带 agent.plan + plan_entry_source；
  * 集群（team）不支持，与工具栏开关一致。
  */
 const planCommand: SlashCommand = {
   name: 'plan',
   requiresSession: false,
-  execute: async (ctx, args) => {
+  execute: async (ctx) => {
     // 集群不支持：仅回提示；正常开关静默（状态已由工具栏可视化）
     if (ctx.mode === 'team') {
       ctx.addMessage(
@@ -141,20 +142,14 @@ const planCommand: SlashCommand = {
     }
     const store = usePlanStore.getState();
     store.ensureRuntime(ctx.sessionId);
-    const request = args.trim();
-    if (!request && store.isActive(ctx.sessionId)) {
+    if (store.isActive(ctx.sessionId)) {
       store.setActive(ctx.sessionId, false);
-    } else {
-      if (!store.isActive(ctx.sessionId)) {
-        store.setActive(ctx.sessionId, true, {
-          explicitEntry: true,
-          entrySource: 'slash_command',
-        });
-      }
-      if (request && request !== 'open') {
-        ctx.submitMessage?.(request);
-      }
+      return;
     }
+    store.setActive(ctx.sessionId, true, {
+      explicitEntry: true,
+      entrySource: 'slash_command',
+    });
   },
 };
 

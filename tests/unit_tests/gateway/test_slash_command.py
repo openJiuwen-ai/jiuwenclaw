@@ -352,7 +352,9 @@ def test_web_slash_picker_command_contract() -> None:
     assert commands[0]["req_method"] == "command.btw"
     assert commands[1]["req_method"] == "command.compact"
     assert commands[2]["execution"] == "chat.send_with_mode"
-    assert commands[2]["takesArgs"] is True
+    assert commands[2]["takesArgs"] is False
+    assert commands[2]["usage"] == "/plan"
+    assert commands[2]["example"] is None
     assert commands[2]["plan_entry_source"] == "slash_command"
 
 

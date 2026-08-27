@@ -490,13 +490,13 @@ BUILTIN_COMMANDS_META: tuple[dict[str, Any], ...] = (
         "available_modes": None,
     },
     {
-        # Web 侧复用现有 Plan 开关与 chat.send，可只打开模式，也可直接发送规划描述。
+        # Web 侧复用现有 Plan 开关：面板选中后立即翻转，不向输入框插入命令。
         "name": "plan",
         "description": "切换计划模式（只读规划 → 审批 → 执行）",
-        "usage": "/plan [open|<description>]",
-        "example": "/plan outline the migration steps",
+        "usage": "/plan",
+        "example": None,
         "kind": "built-in",
-        "takesArgs": True,
+        "takesArgs": False,
         "scope": "agent",
         "execution": "chat.send_with_mode",
         "mode": "agent.plan",

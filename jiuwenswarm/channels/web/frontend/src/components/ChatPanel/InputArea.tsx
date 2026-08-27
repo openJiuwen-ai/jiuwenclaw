@@ -48,6 +48,7 @@ import {
   type SlashCommand,
   type SlashCommandContext,
 } from './slashCommands/registry';
+import { shouldExecuteRegisteredSlashCommand } from './slashCommands/semantics';
 import { getSkillAvatar } from '../../utils/skillAvatar';
 import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import { ExtensionPickerPanel } from './ExtensionPickerPanel';
@@ -1544,7 +1545,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (trimmedBase.startsWith('/')) {
       const { name, args } = parseSlashLine(trimmedBase);
       const cmd = findSlashCommand(name);
-      if (cmd) {
+      if (cmd && shouldExecuteRegisteredSlashCommand(name, args)) {
         const slashSid = useChatStore.getState().activeSessionId;
         if (isListening) stopListening();
         if (slashSid) useChatStore.getState().setInputValue(slashSid, '');
@@ -1793,8 +1794,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         return;
       }
       const slashCmd = findSlashCommand(value);
-      // 无参命令（/plan、/compact）：选中即执行，不插入文本、不再等回车
-      // —— 与「输入 /plan + 回车」走同一执行路径（含 NEW_CONVERSATION_ID 提示）。
+      // 无参命令（/plan、/compact）：选中即执行，不插入文本、不再等回车。
+      // `/plan hi` 这类手工输入不走此选中路径，提交时会被当作普通消息。
       if (slashCmd && slashTakesArgs === false) {
         const trigger = getCurrentComposerTrigger();
         if (trigger) {
