@@ -868,6 +868,25 @@ def _validate_outline_markdown_basic(
                 f"实际 {content_count}"
             )
 
+    # 总页数校验：max(page_numbers) 应等于 page_count + 2(封面/结束) + 结构页数
+    # 防止 intent 阶段 page_count 算错导致总页数与用户要求不一致
+    if expected_content_pages is not None:
+        spr = str(structural_page_request or "none").strip().lower()
+        if isinstance(structural_page_count, int) and structural_page_count > 0:
+            structural_num = structural_page_count
+        elif spr != "none":
+            structural_num = 1
+        else:
+            structural_num = 0
+        expected_total = expected_content_pages + 2 + structural_num
+        actual_total = max(page_numbers) if page_numbers else 0
+        if actual_total != expected_total:
+            raise ContentPlanError(
+                f"P4.3 outline 总页数应为 {expected_total}"
+                f"（内容页{expected_content_pages} + 封面/结束2 + 结构页{structural_num}），"
+                f"实际最大页码为 {actual_total}"
+            )
+
     # 遵从 pptx-craft outline-planner Stage 3 产物验证：
     # 首页类型为 cover，末页类型为 ending（conclusion/transition 为别名）
     _struct_pages = _split_outline_pages(stripped)
