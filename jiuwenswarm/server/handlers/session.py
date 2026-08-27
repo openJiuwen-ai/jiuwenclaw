@@ -782,7 +782,8 @@ async def handle_history_get(ctx: RequestContext) -> None:
     request = ctx.request
     params = request.params if isinstance(request.params, dict) else {}
     session_id = params.get("session_id")
-    page_idx = params.get("page_idx")
+    # 归一化数字型参数
+    page_idx = _coerce_int(params.get("page_idx"), 0)
     data = get_conversation_history(session_id=session_id, page_idx=page_idx)
     if data is None:
         resp = AgentResponse(
@@ -806,7 +807,8 @@ async def handle_history_get_stream(ctx: RequestContext) -> None:
     request = ctx.request
     params = request.params if isinstance(request.params, dict) else {}
     session_id = params.get("session_id")
-    page_idx = params.get("page_idx")
+    # 归一化数字型参数
+    page_idx = _coerce_int(params.get("page_idx"), 0)
     data = get_conversation_history(session_id=session_id, page_idx=page_idx)
     if data is None:
         err_chunk = AgentResponseChunk(

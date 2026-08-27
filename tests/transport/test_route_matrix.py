@@ -447,3 +447,43 @@ def _capture_sink_warnings(fn) -> list[str]:
     finally:
         logger.removeHandler(handler)
     return seen
+
+
+def test_query_string_numeric_params_are_coerced_like_ws() -> None:
+    from jiuwenswarm.server.handlers.session import _coerce_int
+
+    for ws_value, http_value in [(1, "1"), (20, "20"), (500, "500"), (0, "0")]:
+        assert _coerce_int(ws_value, -999) == _coerce_int(http_value, -999), (
+            f"WS 传 {ws_value!r} 与 HTTP 传 {http_value!r} 归一化结果不一致 —— "
+            f"同一个方法两个传输会有不同行为。"
+        )
+
+
+def test_history_handlers_coerce_page_idx() -> None:
+    import ast
+    import inspect
+    from jiuwenswarm.server.handlers import session as session_mod
+
+    tree = ast.parse(inspect.getsource(session_mod))
+    targets = {"handle_history_get", "handle_history_get_stream"}
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.AsyncFunctionDef) and node.name in targets):
+            continue
+        found.add(node.name)
+        src = ast.unparse(node)
+        assert "_coerce_int(params.get('page_idx')" in src.replace('"', "'"), (
+            f"{node.name} 未对 page_idx 做归一化 —— HTTP query 传下来是字符串，"
+            f"get_conversation_history 的 isinstance(page_idx, int) 会判它非法。"
+        )
+    assert found == targets, f"未找到全部 handler：缺 {targets - found}"
+
+
+def test_schedule_logs_coerces_numeric_params() -> None:
+    import inspect
+    from jiuwenswarm.server.handlers import schedule as schedule_mod
+
+    src = inspect.getsource(schedule_mod)
+    for name, default in (("history_index", "-1"), ("offset", "0"), ("limit", "500")):
+        expected = f'_coerce_int(params.get("{name}"), {default})'
+        assert expected in src, f"schedule logs 未归一化 {name} —— 期望 `{expected}`"
