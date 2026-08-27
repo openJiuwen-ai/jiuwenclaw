@@ -84,7 +84,11 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     api_target = ""
     ws_target = ""
     web_http_target = ""
+    idp_target = ""
+    manager_api_target = ""
     ws_disable_compress = False
+    embedding_enabled = False
+    user_web_mode = "personal"
     logger = logging.getLogger(__name__)
 
     _HOP_BY_HOP_HEADERS = {
@@ -532,6 +536,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 pass
 
     def _dispatch_proxy(self) -> bool:
+        # 用户面认证和目录请求仍走同源地址，由本服务转发到集群内的 Identity/Manager。
+        path = urlparse(self.path).path
+        if path == "/idp" or path.startswith("/idp/"):
+            return self._proxy_named_http(self.idp_target, "/idp")
+        if path == "/manager-api" or path.startswith("/manager-api/"):
+            return self._proxy_named_http(self.manager_api_target, "/manager-api", "/api")
         # /api/sessions* is handled by _is_web_http_route (Gateway Web HTTP), not WebChannel.
         if self._is_web_http_route():
             self._proxy_web_http()
@@ -559,6 +569,30 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             return True
         return False
 
+    def _proxy_named_http(self, target: str, prefix: str, replacement: str = "") -> bool:
+        if not target:
+            self.send_error(502, "proxy target not configured")
+            return True
+        original_path = self.path
+        parsed = urlparse(original_path)
+        path = parsed.path
+        if path == prefix:
+            path = replacement or "/"
+        elif replacement:
+            path = replacement + path[len(prefix):]
+        else:
+            path = path[len(prefix):] or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        self.path = path
+        self.__dict__["api_target"] = target
+        try:
+            self._proxy_http()
+        finally:
+            self.path = original_path
+            self.__dict__.pop("api_target", None)
+        return True
+
     def _proxy_web_http(self) -> None:
         if not self.web_http_target:
             self.send_error(502, "web http proxy target not configured")
@@ -574,6 +608,17 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self._proxy_web_http()
             return
         if self._dispatch_proxy():
+            return
+        if self._is_document_request():
+            index = Path(self.directory or os.getcwd()) / "index.html"
+            body = index.read_text(encoding="utf-8").replace(
+                "__JIUWEN_USER_WEB_EMBEDDING__", "true" if self.user_web_mode == "enterprise" else "false"
+            ).replace("__JIUWEN_USER_WEB_MODE__", self.user_web_mode).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         super().do_GET()
 
@@ -621,6 +666,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def log_error(self, format: str, *args) -> None:  # noqa: A002
         self.logger.error("%s - %s", self.address_string(), format % args)
+
+    def _is_document_request(self) -> bool:
+        path = urlparse(self.path).path
+        return path in ("/", "/index.html") and "text/html" in self.headers.get("Accept", "")
 
     def send_head(self):
         parsed = urlparse(self.path)
@@ -792,6 +841,14 @@ def main() -> None:
 
     _ConfiguredHandler.api_target = api_target
     _ConfiguredHandler.ws_target = ws_target
+    _ConfiguredHandler.idp_target = os.getenv("USER_WEB_IDP_TARGET", "").strip()
+    _ConfiguredHandler.manager_api_target = os.getenv("USER_WEB_MANAGER_TARGET", "").strip()
+    configured_mode = os.getenv("USER_WEB_MODE", "").strip().lower()
+    if configured_mode not in {"personal", "enterprise"}:
+        legacy_embedding = os.getenv("ENABLE_USER_WEB_EMBEDDING", "")
+        configured_mode = "enterprise" if legacy_embedding.strip().lower() == "true" else "personal"
+    _ConfiguredHandler.user_web_mode = configured_mode
+    _ConfiguredHandler.embedding_enabled = configured_mode == "enterprise"
     _ConfiguredHandler.web_http_target = web_http_target
     _ConfiguredHandler.ws_disable_compress = args.ws_disable_compress
     _ConfiguredHandler.logger = logger
