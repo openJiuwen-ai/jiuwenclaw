@@ -827,6 +827,9 @@ _FORWARD_REQ_METHODS = frozenset({
     "issue.state.list",
     "issue.matrix",
     "issue.delete",
+    # 主动推荐反馈（点赞/点踩）：经 E2A 转发到 AgentServer 的
+    # _handle_proactive_feedback，写入 recommendation.json 的 feedback_buffer。
+    "proactive.feedback",
 })
 
 _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
@@ -972,6 +975,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "agents.tools_list",
     "external_cli.detect",
     "external_cli.codex_install_status",
+    "proactive.feedback",
 })
 
 # 配置信息：config.get 返回、config.set 可修改的键（前端 param 名 -> 环境变量名）

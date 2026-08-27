@@ -3025,7 +3025,7 @@ class JiuWenSwarm:
                 return
             extra_fields = _attach_reasoning_content({
                 k: v for k, v in request.params.items()
-                if k in ("source", "proactive_type", "proactive_target", "automation")
+                if k in ("source", "proactive_type", "proactive_target", "automation", "proactive_rec_id")
             })
             if not isinstance(extra_fields, dict):
                 extra_fields = {}
@@ -3488,6 +3488,7 @@ class JiuWenSwarm:
                                     "proactive_type",
                                     "proactive_target",
                                     "automation",
+                                    "proactive_rec_id",
                                 ):
                                     if pk not in extra_fields and pk in request.params:
                                         extra_fields[pk] = request.params[pk]
@@ -3673,6 +3674,7 @@ class JiuWenSwarm:
                                 "proactive_type",
                                 "proactive_target",
                                 "automation",
+                                "proactive_rec_id",
                             ):
                                 if pk not in extra_fields and pk in request.params:
                                     extra_fields[pk] = request.params[pk]
@@ -3812,6 +3814,7 @@ class JiuWenSwarm:
                 "proactive_type",
                 "proactive_target",
                 "automation",
+                "proactive_rec_id",
             ):
                 if key in request.params:
                     history_metadata[key] = request.params[key]

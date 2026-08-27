@@ -1828,6 +1828,9 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.PROACTIVE_TICK:
                 await self._handle_proactive_tick(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.PROACTIVE_FEEDBACK:
+                await self._handle_proactive_feedback(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.COMMAND_WORKFLOWS:
                 await self._handle_command_workflows(ws, request, send_lock)
                 return
@@ -2089,6 +2092,10 @@ class AgentWebSocketServer:
                                 await send_wire_payload(ws, wire)
                 return
             await self._ensure_auto_team_binding_for_chat(request)
+            # chat.send 入口采集隐式反馈：用户在推荐后的文本回复关联到最近推荐。
+            # best-effort，失败绝不影响主 chat 流（见方法实现）。
+            if request.req_method == ReqMethod.CHAT_SEND:
+                await self._try_record_implicit_feedback(request)
             if request.is_stream:
                 await self._handle_stream(ws, request, send_lock)
             else:
@@ -2212,6 +2219,58 @@ class AgentWebSocketServer:
         except Exception as exc:
             logger.warning(
                 "[AgentWebSocketServer] KVC chat-finish hook failed; preserving chat: "
+                "session_id=%s error=%s",
+                request.session_id,
+                exc,
+            )
+
+    async def _try_record_implicit_feedback(self, request: AgentRequest) -> None:
+        """Best-effort 采集隐式反馈：用户在收到推荐后的文本回复。
+
+        主动推荐送达后，用户若直接用文本回复（"简洁点""不需要"…）而不是点卡片
+        上的赞/踩按钮，这条回复就是隐式反馈。把它关联到该会话最近一条推荐，
+        交由 ``record_implicit_feedback`` 做情感分类后入 buffer，供下次 tick 梯度更新。
+
+        与 ``_record_kvc_chat_started`` 同款 best-effort：任何异常只 log debug，
+        绝不阻断主 chat 流。只在 ``chat.send`` 且来源不是 proactive 自己触发的
+        推荐指令时才介入（``source=proactive_recommendation`` 是系统主动塞给主
+        agent 的指令，不是用户说的话，见 proactive_adapter 触发处）。
+        """
+        try:
+            params = request.params if isinstance(request.params, dict) else {}
+            # proactive 自己触发主 agent 的指令带 source=proactive_recommendation，
+            # 那不是用户输入，跳过
+            if str(params.get("source") or "").strip() == "proactive_recommendation":
+                return
+            session_id = str(request.session_id or params.get("session_id") or "").strip()
+            if not session_id:
+                return
+            query = _request_query_text(request)
+            if not query:
+                return
+
+            from jiuwenswarm.agents.harness.common.recommendation.feedback_collector import (
+                find_latest_recommendation,
+                record_implicit_feedback,
+            )
+
+            # max_age_seconds=0 砍掉时间窗：不靠时间硬挡"无关反馈"——是否相关、是否
+            # 产生梯度交给梯度更新器的模型判断（看 rec_content + user_reply 语义）。
+            # 配合 record_feedback 的"同 rec_id 只采紧跟第一条、后续不覆盖"逻辑，
+            # 每条推荐只关联它之后紧跟的第一条用户回复。
+            latest = find_latest_recommendation(session_id, max_age_seconds=0)
+            if latest is None:
+                return
+            rec_id = latest.get("id")
+            if not rec_id:
+                return
+
+            # 已对该 rec_id 给过显式反馈（赞/踩）的话，record_feedback 的去重逻辑
+            # 会自动丢弃隐式补充——无需在此预判。
+            record_implicit_feedback(rec_id, query)
+        except Exception as exc:
+            logger.debug(
+                "[AgentWebSocketServer] implicit feedback hook failed; preserving chat: "
                 "session_id=%s error=%s",
                 request.session_id,
                 exc,
@@ -4882,6 +4941,60 @@ class AgentWebSocketServer:
                     ok=False,
                     payload={"error": str(e)},
                 )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_proactive_feedback(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Handle proactive.feedback request from frontend.
+
+        Receives user feedback (like/dislike) on proactive recommendations.
+        Stores feedback in buffer for next tick to update strategy gradients.
+        """
+        try:
+            params = request.params or {}
+            rec_id = params.get("rec_id")
+            feedback_type = params.get("feedback_type")
+            # 前端从 message 上带的推荐元数据，history 尚未写入时兜底填充反馈记录。
+            rec_type = str(params.get("rec_type") or params.get("proactive_type") or "")
+            rec_target = str(params.get("rec_target") or params.get("proactive_target") or "")
+
+            if not rec_id or feedback_type not in ("explicit_like", "explicit_dislike"):
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={
+                        "error": (
+                            "Invalid params: rec_id and feedback_type "
+                            "(explicit_like|explicit_dislike) required"
+                        ),
+                    },
+                )
+            else:
+                from jiuwenswarm.agents.harness.common.recommendation.feedback_collector import (
+                    RecMeta,
+                    record_explicit_feedback,
+                )
+                record_explicit_feedback(
+                    rec_id, feedback_type,
+                    meta=RecMeta(rec_type=rec_type, rec_target=rec_target),
+                )
+
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={"status": "feedback_recorded", "rec_id": rec_id},
+                )
+        except Exception as e:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
