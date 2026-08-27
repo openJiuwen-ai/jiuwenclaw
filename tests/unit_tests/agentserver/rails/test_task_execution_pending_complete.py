@@ -83,3 +83,46 @@ async def test_pending_to_completed_emits_start_then_complete(monkeypatch) -> No
     assert "stage4_research" in rail._todo_started
     assert "stage5_style" in rail._todo_started
     assert "stage6_generate" in rail._todo_started
+
+
+@pytest.mark.asyncio
+async def test_replaced_todo_list_completes_started_ids(monkeypatch) -> None:
+    """todo_create with new ids must close the previous in-progress start."""
+    rail = TaskExecutionRail()
+    session = _FakeSession()
+    rail._todo_map_before_tool = {
+        "pptx_stage_1": _task("Stage 1: 需求澄清与环境检测", "in_progress", 0, 4),
+        "pptx_stage_2": _task("Stage 2: 内容设计", "pending", 1, 4),
+    }
+    rail._todo_started.add("pptx_stage_1")
+    rail._active_tasks["todo:pptx_stage_1"] = SimpleNamespace(
+        task_id="todo:pptx_stage_1",
+        task_content="Stage 1: 需求澄清与环境检测",
+        source="todo",
+        start_time=0.0,
+    )
+    monkeypatch.setattr(
+        rail,
+        "_load_todo_from_json",
+        lambda _sid: [
+            {"id": "stage1", "content": "阶段1：需求澄清 & 环境检测", "status": "in_progress"},
+            {"id": "stage2", "content": "阶段2：内容设计", "status": "pending"},
+        ],
+    )
+    ctx = SimpleNamespace(
+        session=session,
+        inputs=SimpleNamespace(request_id="req-replace"),
+    )
+    await rail._sync_todo_and_emit_transitions(ctx)
+
+    types = [getattr(ev, "type", None) for ev in session.events]
+    assert types[0] == "task.start"
+    assert types[1] == "task.complete"
+    assert types[-1] == "task.update"
+    start = getattr(session.events[0], "payload", {})
+    complete = getattr(session.events[1], "payload", {})
+    assert start["task_id"] == "todo:stage1"
+    assert complete["task_id"] == "todo:pptx_stage_1"
+    assert complete["status"] == "skipped"
+    assert "todo:pptx_stage_1" not in rail._active_tasks
+
