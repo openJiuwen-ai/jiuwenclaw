@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -29,6 +30,32 @@ from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
 
 logger = logging.getLogger(__name__)
+
+# Full-catalog sync_agents_configs is multi-MB. Logging the dict (and parsing it
+# on the asyncio thread) starves ws.recv. Keep a compact line; parse large
+# payloads in a worker thread.
+_PARSE_OFFLOOP_MIN_BYTES = 32 * 1024
+
+
+def _raw_nbytes(raw: str | bytes) -> int:
+    if isinstance(raw, (bytes, bytearray)):
+        return len(raw)
+    return len(raw.encode("utf-8", "replace"))
+
+
+def _inbound_method(data: dict[str, Any]) -> str:
+    method = data.get("req_method") or data.get("method")
+    return str(method) if method else ""
+
+
+def _inbound_agent_count(data: dict[str, Any]) -> int | None:
+    params = data.get("params")
+    if not isinstance(params, dict):
+        return None
+    agents = params.get("agents")
+    if isinstance(agents, list):
+        return len(agents)
+    return None
 
 _SYSTEM_PROMPT_USER_HISTORY_PATTERN = re.compile(
     r"(\[[^\]\n]*用户\]\s*)(.*?)(\s*\[/对话历史\])", re.DOTALL
@@ -133,11 +160,24 @@ def parse_inbound(raw: str | bytes) -> ParseResult:
     """
     try:
         data = json.loads(raw)
-        logger.info(
-            "[AgentWebSocketServer] Inbound raw payload: %s",
-            _mask_query_for_log(data),
-            extra={'user_visible': 'critical'},
-        )
+        nbytes = _raw_nbytes(raw)
+        n_agents = _inbound_agent_count(data)
+        if nbytes >= _PARSE_OFFLOOP_MIN_BYTES or n_agents is not None:
+            logger.info(
+                "[AgentWebSocketServer] Inbound raw payload: request_id=%s "
+                "method=%s bytes=%s agents=%s",
+                data.get("request_id"),
+                _inbound_method(data),
+                nbytes,
+                n_agents,
+                extra={"user_visible": "critical"},
+            )
+        else:
+            logger.info(
+                "[AgentWebSocketServer] Inbound raw payload: %s",
+                _mask_query_for_log(data),
+                extra={"user_visible": "critical"},
+            )
     except json.JSONDecodeError as e:
         return ParseResult(
             error_wire=encode_json_parse_error_wire(
@@ -194,3 +234,10 @@ def parse_inbound(raw: str | bytes) -> ParseResult:
                 err_resp, response_id=env.request_id or ""
             )
         )
+
+
+async def parse_inbound_async(raw: str | bytes) -> ParseResult:
+    """Like :func:`parse_inbound`, but parse large frames off the event loop."""
+    if _raw_nbytes(raw) >= _PARSE_OFFLOOP_MIN_BYTES:
+        return await asyncio.to_thread(parse_inbound, raw)
+    return parse_inbound(raw)

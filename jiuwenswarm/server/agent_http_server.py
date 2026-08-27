@@ -412,9 +412,9 @@ class AgentHTTPServer:
         需要完整的解析与解析错误处理。结构化入口请用 :meth:`_dispatch_request`。
         解析规则在 ``server/wire_parse.py``
         """
-        from jiuwenswarm.server.wire_parse import parse_inbound
+        from jiuwenswarm.server.wire_parse import parse_inbound_async
 
-        result = parse_inbound(raw)
+        result = await parse_inbound_async(raw)
         if not result.ok:
             await self._make_ctx(sink, None).sink.send_wire(result.error_wire)
             return
