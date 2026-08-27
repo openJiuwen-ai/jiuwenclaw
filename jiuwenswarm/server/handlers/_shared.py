@@ -273,7 +273,7 @@ async def bootstrap_preconditions(request: AgentRequest):
     来源                                         内容
     ==========================================  ============================
     ``_handle_unary``                            ``bind_incoming_request``（身份 + W3C trace 上下文）
-    ``_handle_unary_impl``                       ``await ensure_persistent_checkpointer()``
+    ``_handle_unary_impl``                       ``await ensure_interface_deep_and_checkpointer()``
     ==========================================  ============================
 
     把它们并入主表时，这两件事会**静默消失**：checkpointer 未就绪会影响连接引导，
@@ -286,8 +286,8 @@ async def bootstrap_preconditions(request: AgentRequest):
 
     顺序与原链路一致：先绑定，再等 checkpointer。
     """
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-        ensure_persistent_checkpointer,
+    from jiuwenswarm.server.agent_ws_server import (
+        ensure_interface_deep_and_checkpointer,
     )
     from jiuwenswarm.telemetry.context_propagation import (
         bind_incoming_request,
@@ -296,9 +296,8 @@ async def bootstrap_preconditions(request: AgentRequest):
 
     binding = bind_incoming_request(request)
     try:
-        # 兜底确保 checkpointer 就绪：start() 里是后台预热，首条请求可能赶在预热完成前
-        # 到达。内部 lock+ready 幂等，预热完成时秒过。
-        await ensure_persistent_checkpointer()
+        # 后台预热未完成时 await 预热任务，不要在事件循环上同步 import。
+        await ensure_interface_deep_and_checkpointer()
         yield
     finally:
         reset_incoming_request(binding)
