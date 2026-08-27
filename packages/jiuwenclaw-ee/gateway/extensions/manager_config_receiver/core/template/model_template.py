@@ -9,6 +9,9 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
+from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
+
+from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import parse_iso_datetime, utc_now
 from ...models.template_models import MODEL_TEMPLATE_TABLE_DEF
 from ...schemas.template_schemas import ModelTemplateUpdateRequest
@@ -51,33 +54,22 @@ def _normalize_model_types(value: Any) -> list[str]:
     return normalized
 
 
-def _template_pk(jiuwenclaw_id: str, template_id: str) -> dict[str, str]:
-    return {
-        "jiuwenclaw_id": jiuwenclaw_id,
-        "template_id": _normalize_template_id(template_id),
-    }
-
-
 async def _get_row_for_instance(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     template_id: str,
-    jiuwenclaw_id: str,
-) -> Any | None:
-    return await handler.get(_TABLE, _template_pk(jiuwenclaw_id, template_id))
+) -> dict[str, Any] | None:
+    return await repo.get(template_id=_normalize_template_id(template_id))
 
 
 async def update_model_template(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     template_id: str,
     request: ModelTemplateUpdateRequest,
     *,
-    jiuwenclaw_id: str,
-    existing: Any | None = None,
+    existing: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     tid = _normalize_template_id(template_id)
-    row = existing if existing is not None else await _get_row_for_instance(
-        handler, tid, jiuwenclaw_id
-    )
+    row = existing if existing is not None else await _get_row_for_instance(repo, tid)
     if row is None:
         return None
 
@@ -97,23 +89,21 @@ async def update_model_template(
         raise ValueError("请求未包含任何可更新的业务字段")
 
     updates["updated_at"] = utc_now()
-    updated = await handler.update(_TABLE, _template_pk(jiuwenclaw_id, tid), updates)
+    updated = await repo.update({"template_id": tid}, updates)
     if updated is None:
         return None
-    return {"template_id": str(getattr(updated, "template_id", tid))}
+    return {"template_id": str(updated.get("template_id", tid))}
 
 
 async def delete_model_template(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     template_id: str,
-    *,
-    jiuwenclaw_id: str,
 ) -> bool:
     tid = _normalize_template_id(template_id)
-    existing = await _get_row_for_instance(handler, tid, jiuwenclaw_id)
+    existing = await _get_row_for_instance(repo, tid)
     if existing is None:
         return False
-    return await handler.delete(_TABLE, _template_pk(jiuwenclaw_id, tid))
+    return await repo.delete(template_id=tid)
 
 
 def _build_row_from_template(
@@ -149,32 +139,32 @@ def _build_row_from_template(
 
 
 async def _upsert_model_template_from_sync(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     template: dict[str, Any],
     *,
     jiuwenclaw_id: str,
 ) -> None:
     now = utc_now()
     tid = _normalize_template_id(template.get("template_id"))
-    existing = await _get_row_for_instance(handler, tid, jiuwenclaw_id)
+    existing = await _get_row_for_instance(repo, tid)
     row_data = _build_row_from_template(
         template, jiuwenclaw_id=jiuwenclaw_id, now=now
     )
     if existing is None:
-        await handler.create(_TABLE, row_data)
+        await repo.create(row_data)
         return
-    created_at = getattr(existing, "created_at", None)
+    created_at = existing.get("created_at")
     if created_at is not None:
         row_data["created_at"] = created_at
     updates = {
-        k: v for k, v in row_data.items() if k not in ("jiuwenclaw_id", "template_id")
+        key: value for key, value in row_data.items() if key not in ("jiuwenclaw_id", "template_id")
     }
     updates["updated_at"] = utc_now()
-    await handler.update(_TABLE, _template_pk(jiuwenclaw_id, tid), updates)
+    await repo.update({"template_id": tid}, updates)
 
 
 async def _sync_model_templates_records(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     templates: list[dict[str, Any]],
     *,
     jiuwenclaw_id: str,
@@ -186,14 +176,13 @@ async def _sync_model_templates_records(
             raise ValueError("model_templates.sync templates must be objects")
         tid = _normalize_template_id(item.get("template_id"))
         incoming_ids.add(tid)
-        await _upsert_model_template_from_sync(handler, item, jiuwenclaw_id=jiuwenclaw_id)
+        await _upsert_model_template_from_sync(repo, item, jiuwenclaw_id=jiuwenclaw_id)
         synced += 1
     deleted = 0
-    existing_rows = await handler.list_records(_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
-    for row in existing_rows:
-        tid = str(getattr(row, "template_id", "") or "")
+    for row in await repo.list():
+        tid = str(row.get("template_id") or "")
         if tid and tid not in incoming_ids:
-            if await delete_model_template(handler, tid, jiuwenclaw_id=jiuwenclaw_id):
+            if await delete_model_template(repo, tid):
                 deleted += 1
     return {"synced_count": synced, "deleted_count": deleted}
 
@@ -209,8 +198,9 @@ class ModelTemplateService:
     ) -> dict[str, Any]:
         if not isinstance(template, dict):
             raise ValueError("model_templates.create requires template object")
+        repo = require_enterprise_repository(_TABLE)
         await _upsert_model_template_from_sync(
-            self._handler, template, jiuwenclaw_id=jiuwenclaw_id
+            repo, template, jiuwenclaw_id=jiuwenclaw_id
         )
         result = {
             "template_id": _normalize_template_id(template.get("template_id")),
@@ -233,9 +223,8 @@ class ModelTemplateService:
             raise ValueError("model_templates.update requires non-empty updates")
         req = ModelTemplateUpdateRequest.model_validate(updates)
         tid = _normalize_template_id(template_id)
-        row = await update_model_template(
-            self._handler, tid, req, jiuwenclaw_id=jiuwenclaw_id
-        )
+        repo = require_enterprise_repository(_TABLE)
+        row = await update_model_template(repo, tid, req)
         if row is None:
             raise ValueError(f"model template template_id={tid!r} not found")
         logger.info(
@@ -247,7 +236,8 @@ class ModelTemplateService:
         if template_id is None:
             raise ValueError("model_templates.delete requires template_id")
         tid = _normalize_template_id(template_id)
-        await delete_model_template(self._handler, tid, jiuwenclaw_id=jiuwenclaw_id)
+        repo = require_enterprise_repository(_TABLE)
+        await delete_model_template(repo, tid)
         logger.info(
             "[ManagerConfigReceiver] model_templates delete template_id=%s",
             tid,

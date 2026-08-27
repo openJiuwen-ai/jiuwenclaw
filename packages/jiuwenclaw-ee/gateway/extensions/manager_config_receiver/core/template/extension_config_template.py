@@ -9,6 +9,9 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
+from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
+
+from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import parse_iso_datetime, utc_now
 from ...models.template_models import EXTENSION_CONFIG_TEMPLATE_TABLE_DEF
 from ...schemas.template_schemas import (
@@ -69,39 +72,28 @@ def _validate_hook_config(
     return data
 
 
-def _template_pk(jiuwenclaw_id: str, template_id: str) -> dict[str, str]:
-    return {
-        "jiuwenclaw_id": jiuwenclaw_id,
-        "template_id": _normalize_template_id(template_id),
-    }
-
-
 async def _get_row_for_instance(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     template_id: str,
-    jiuwenclaw_id: str,
-) -> Any | None:
-    return await handler.get(_TABLE, _template_pk(jiuwenclaw_id, template_id))
+) -> dict[str, Any] | None:
+    return await repo.get(template_id=_normalize_template_id(template_id))
 
 
 async def update_extension_config_template(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     template_id: str,
     request: ExtensionConfigTemplateUpdateRequest,
     *,
-    jiuwenclaw_id: str,
-    existing: Any | None = None,
+    existing: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     tid = _normalize_template_id(template_id)
-    row = existing if existing is not None else await _get_row_for_instance(
-        handler, tid, jiuwenclaw_id
-    )
+    row = existing if existing is not None else await _get_row_for_instance(repo, tid)
     if row is None:
         return None
 
     updates = request.model_dump(exclude_unset=True)
     hook_type = _validate_hook_type(
-        str(updates.get("hook_type") or getattr(row, "hook_type", ""))
+        str(updates.get("hook_type") or row.get("hook_type", ""))
     )
     if "hook_type" in updates and updates["hook_type"] is not None:
         updates["hook_type"] = hook_type
@@ -118,23 +110,21 @@ async def update_extension_config_template(
         raise ValueError("请求未包含任何可更新的业务字段")
 
     updates["updated_at"] = utc_now()
-    updated = await handler.update(_TABLE, _template_pk(jiuwenclaw_id, tid), updates)
+    updated = await repo.update({"template_id": tid}, updates)
     if updated is None:
         return None
-    return {"template_id": str(getattr(updated, "template_id", tid))}
+    return {"template_id": str(updated.get("template_id", tid))}
 
 
 async def delete_extension_config_template(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     template_id: str,
-    *,
-    jiuwenclaw_id: str,
 ) -> bool:
     tid = _normalize_template_id(template_id)
-    existing = await _get_row_for_instance(handler, tid, jiuwenclaw_id)
+    existing = await _get_row_for_instance(repo, tid)
     if existing is None:
         return False
-    return await handler.delete(_TABLE, _template_pk(jiuwenclaw_id, tid))
+    return await repo.delete(template_id=tid)
 
 
 def _build_row_from_template(
@@ -167,32 +157,32 @@ def _build_row_from_template(
 
 
 async def _upsert_extension_config_template_from_sync(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     template: dict[str, Any],
     *,
     jiuwenclaw_id: str,
 ) -> None:
     now = utc_now()
     tid = _normalize_template_id(template.get("template_id"))
-    existing = await _get_row_for_instance(handler, tid, jiuwenclaw_id)
+    existing = await _get_row_for_instance(repo, tid)
     row_data = _build_row_from_template(
         template, jiuwenclaw_id=jiuwenclaw_id, now=now
     )
     if existing is None:
-        await handler.create(_TABLE, row_data)
+        await repo.create(row_data)
         return
-    created_at = getattr(existing, "created_at", None)
+    created_at = existing.get("created_at")
     if created_at is not None:
         row_data["created_at"] = created_at
     updates = {
         k: v for k, v in row_data.items() if k not in ("jiuwenclaw_id", "template_id")
     }
     updates["updated_at"] = utc_now()
-    await handler.update(_TABLE, _template_pk(jiuwenclaw_id, tid), updates)
+    await repo.update({"template_id": tid}, updates)
 
 
 async def _sync_extension_config_templates_records(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     templates: list[dict[str, Any]],
     *,
     jiuwenclaw_id: str,
@@ -205,17 +195,14 @@ async def _sync_extension_config_templates_records(
         tid = _normalize_template_id(item.get("template_id"))
         incoming_ids.add(tid)
         await _upsert_extension_config_template_from_sync(
-            handler, item, jiuwenclaw_id=jiuwenclaw_id
+            repo, item, jiuwenclaw_id=jiuwenclaw_id
         )
         synced += 1
     deleted = 0
-    existing_rows = await handler.list_records(_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
-    for row in existing_rows:
-        tid = str(getattr(row, "template_id", "") or "")
+    for row in await repo.list():
+        tid = str(row.get("template_id") or "")
         if tid and tid not in incoming_ids:
-            if await delete_extension_config_template(
-                handler, tid, jiuwenclaw_id=jiuwenclaw_id
-            ):
+            if await delete_extension_config_template(repo, tid):
                 deleted += 1
     return {"synced_count": synced, "deleted_count": deleted}
 
@@ -231,8 +218,9 @@ class ExtensionConfigTemplateService:
     ) -> dict[str, Any]:
         if not isinstance(template, dict):
             raise ValueError("extension_config_templates.create requires template object")
+        repo = require_enterprise_repository(_TABLE)
         await _upsert_extension_config_template_from_sync(
-            self._handler, template, jiuwenclaw_id=jiuwenclaw_id
+            repo, template, jiuwenclaw_id=jiuwenclaw_id
         )
         result = {
             "template_id": _normalize_template_id(template.get("template_id")),
@@ -255,9 +243,10 @@ class ExtensionConfigTemplateService:
             raise ValueError("extension_config_templates.update requires non-empty updates")
         req = ExtensionConfigTemplateUpdateRequest.model_validate(updates)
         tid = _normalize_template_id(template_id)
-        existing = await _get_row_for_instance(self._handler, tid, jiuwenclaw_id)
+        repo = require_enterprise_repository(_TABLE)
+        existing = await _get_row_for_instance(repo, tid)
         row = await update_extension_config_template(
-            self._handler, tid, req, jiuwenclaw_id=jiuwenclaw_id, existing=existing
+            repo, tid, req, existing=existing
         )
         if row is None:
             raise ValueError(f"extension config template template_id={tid!r} not found")
@@ -270,9 +259,8 @@ class ExtensionConfigTemplateService:
         if template_id is None:
             raise ValueError("extension_config_templates.delete requires template_id")
         tid = _normalize_template_id(template_id)
-        await delete_extension_config_template(
-            self._handler, tid, jiuwenclaw_id=jiuwenclaw_id
-        )
+        repo = require_enterprise_repository(_TABLE)
+        await delete_extension_config_template(repo, tid)
         logger.info(
             "[ManagerConfigReceiver] extension_config_templates delete template_id=%s",
             tid,

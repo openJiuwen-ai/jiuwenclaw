@@ -1,11 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""Gateway 实例生命周期：响应 Manager purge 指令并清理 GDB 实例级数据。
-
-对齐 Manager ``manager_server.core.instance.instance_data_lifecycle.purge_gateway_instance_data``：
-删除实例时 Manager 调用本扩展 HTTP 接口
-``POST /api/v1/instance-data-lifecycle``（body ``op=purge``；实例 id 取 ``JIUWENCLAW_ID``）。
-"""
+"""Gateway 实例生命周期：响应 Manager purge 指令并清理 GDB 实例级数据。"""
 
 from __future__ import annotations
 
@@ -14,12 +9,20 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
+from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
+
+from ...infrastructure.repository_access import (
+    require_channel_repository,
+    require_cron_job_enterprise_repository,
+    require_enterprise_repository,
+    require_logging_repository,
+    require_permissions_repository,
+)
+
 logger = logging.getLogger(__name__)
 
 _LIST_ALL_CAP = 10_000
 
-# 按 jiuwenclaw_id 隔离的业务表（删除实例时整实例 purge）。
-# 与 table_init.ALL_TABLE_DEFINITIONS 中实例级表对齐；不含 gateway_*_keypair（本机密钥）。
 INSTANCE_PURGE_TABLES: tuple[str, ...] = (
     "model_template",
     "embedding_template",
@@ -40,30 +43,56 @@ INSTANCE_PURGE_TABLES: tuple[str, ...] = (
 
 _MANAGER_SIGN_PUBKEY_TABLE = "manager_sign_pubkey"
 
+_EXCLUDED_FROM_ENTERPRISE_BULK_PURGE: frozenset[str] = frozenset({
+    "channel_config",
+    "logging_config",
+    "permissions_config",
+    "cron_job",
+    "task_memory_config",
+})
 
-async def _delete_rows_for_instance(
-    handler: DBHandler,
-    table: str,
-    jiuwenclaw_id: str,
-) -> int:
-    rows = await handler.list_records(
-        table,
-        {"jiuwenclaw_id": jiuwenclaw_id},
-        limit=_LIST_ALL_CAP,
-        offset=0,
+_enterprise_purge_tables: list[str] = []
+for _table in INSTANCE_PURGE_TABLES:
+    if _table not in _EXCLUDED_FROM_ENTERPRISE_BULK_PURGE:
+        _enterprise_purge_tables.append(_table)
+_ENTERPRISE_PURGE_TABLES: frozenset[str] = frozenset(_enterprise_purge_tables)
+
+
+async def _purge_cron_job_table() -> int:
+    return await _purge_enterprise_repository(
+        require_cron_job_enterprise_repository()
     )
+
+
+async def _purge_enterprise_table(table: str) -> int:
+    return await _purge_enterprise_repository(require_enterprise_repository(table))
+
+
+async def _purge_enterprise_repository(repo: EnterpriseRecordRepository) -> int:
+    key_fields = repo.key_fields
+    if not key_fields:
+        return 1 if await repo.delete() else 0
+
     deleted = 0
-    for row in rows:
-        row_id = getattr(row, "id", None)
-        if row_id is None:
+    for row in await repo.list(limit=_LIST_ALL_CAP):
+        key_parts = {field: row[field] for field in key_fields if field in row}
+        if len(key_parts) != len(key_fields):
             continue
-        if await handler.delete(table, {"id": row_id}):
+        if await repo.delete(key_parts):
+            deleted += 1
+    return deleted
+
+
+async def _purge_channel_config() -> int:
+    repo = require_channel_repository()
+    deleted = 0
+    for config in await repo.list(limit=_LIST_ALL_CAP):
+        if await repo.delete(config.channel_id):
             deleted += 1
     return deleted
 
 
 async def purge_jiuwenclaw_instance_data_on_handler(
-    handler: DBHandler,
     jiuwenclaw_id: str,
 ) -> dict[str, int]:
     """删除 Gateway 本地库中指定 ``jiuwenclaw_id`` 的全部实例数据（幂等）。"""
@@ -73,12 +102,29 @@ async def purge_jiuwenclaw_instance_data_on_handler(
 
     deleted_counts: dict[str, int] = {}
 
-    for table in INSTANCE_PURGE_TABLES:
-        count = await _delete_rows_for_instance(handler, table, jid)
+    for table in _ENTERPRISE_PURGE_TABLES:
+        count = await _purge_enterprise_table(table)
         if count:
             deleted_counts[table] = count
 
-    if await handler.delete(_MANAGER_SIGN_PUBKEY_TABLE, {"jiuwenclaw_id": jid}):
+    channel_count = await _purge_channel_config()
+    if channel_count:
+        deleted_counts["channel_config"] = channel_count
+
+    if await require_logging_repository().delete():
+        deleted_counts["logging_config"] = 1
+
+    if await require_permissions_repository().delete():
+        deleted_counts["permissions_config"] = 1
+
+    if await require_enterprise_repository("task_memory_config").delete():
+        deleted_counts["task_memory_config"] = 1
+
+    cron_count = await _purge_cron_job_table()
+    if cron_count:
+        deleted_counts["cron_job"] = cron_count
+
+    if await require_enterprise_repository(_MANAGER_SIGN_PUBKEY_TABLE).delete():
         deleted_counts[_MANAGER_SIGN_PUBKEY_TABLE] = 1
 
     logger.info(
@@ -94,9 +140,7 @@ class InstanceDataLifecycleService:
         self._handler = handler
 
     async def purge(self, jiuwenclaw_id: str) -> dict[str, Any]:
-        counts = await purge_jiuwenclaw_instance_data_on_handler(
-            self._handler, jiuwenclaw_id
-        )
+        counts = await purge_jiuwenclaw_instance_data_on_handler(jiuwenclaw_id)
         logger.info(
             "[ManagerConfigReceiver] instance_data_lifecycle purge jiuwenclaw_id=%s counts=%s",
             jiuwenclaw_id,

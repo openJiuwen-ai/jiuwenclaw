@@ -9,6 +9,9 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
+from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
+
+from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import (
     apply_template_ref_to_updates,
     normalize_template_ref,
@@ -36,13 +39,13 @@ logger = logging.getLogger(__name__)
 
 
 async def update_config_effective_service_policy_record(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     policy_id: int,
     updates: dict[str, Any],
     jiuwenclaw_id: str,
 ) -> dict[str, Any] | None:
     request = ConfigEffectiveServicePolicyUpdateRequest.model_validate(updates)
-    existing = await get_row_for_instance(handler, _TABLE, policy_id, jiuwenclaw_id)
+    existing = await get_row_for_instance(repo, policy_id)
     if existing is None:
         return None
 
@@ -59,10 +62,10 @@ async def update_config_effective_service_policy_record(
 
     field_updates = apply_template_ref_to_updates(field_updates, existing_row=existing)
     field_updates["updated_at"] = utc_now()
-    updated = await handler.update(_TABLE, {"id": policy_id}, field_updates)
+    updated = await repo.update_by_row_id(policy_id, field_updates)
     if updated is None:
         return None
-    return {"id": getattr(updated, "id")}
+    return {"id": updated.get("id")}
 
 
 def _build_row_from_sync_policy(
@@ -97,9 +100,9 @@ class ConfigEffectiveServicePolicyService:
         jiuwenclaw_id: str,
         policy: dict[str, Any],
     ) -> dict[str, Any]:
+        repo = require_enterprise_repository(_TABLE)
         result = await apply_create_from_row_builder(
-            self._handler,
-            _TABLE,
+            repo,
             section=_SECTION,
             jiuwenclaw_id=jiuwenclaw_id,
             record=policy,
@@ -117,8 +120,9 @@ class ConfigEffectiveServicePolicyService:
         row_id: Any,
         updates: dict[str, Any],
     ) -> None:
+        repo = require_enterprise_repository(_TABLE)
         await apply_update_by_id(
-            self._handler,
+            repo,
             section=_SECTION,
             jiuwenclaw_id=jiuwenclaw_id,
             row_id=row_id,
@@ -132,11 +136,11 @@ class ConfigEffectiveServicePolicyService:
         )
 
     async def delete(self, jiuwenclaw_id: str, row_id: Any) -> None:
+        _ = jiuwenclaw_id
+        repo = require_enterprise_repository(_TABLE)
         await apply_delete_by_id(
-            self._handler,
+            repo,
             section=_SECTION,
-            table=_TABLE,
-            jiuwenclaw_id=jiuwenclaw_id,
             row_id=row_id,
         )
         logger.info(

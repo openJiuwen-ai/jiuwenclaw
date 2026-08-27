@@ -42,6 +42,20 @@ class EnterpriseRecordRepository:
     def key_fields(self) -> tuple[str, ...]:
         return self._spec.key_fields
 
+    def for_table(
+        self,
+        store_name: str,
+        *,
+        spec: EnterpriseRecordSpec | None = None,
+    ) -> EnterpriseRecordRepository:
+        """复用同一 ``PersistentStore`` 与实例 scope，访问另一张企业表。"""
+        return EnterpriseRecordRepository(
+            self._store,
+            store_name,
+            instance_id=self._instance_id,
+            spec=spec,
+        )
+
     def _scope_filters(self) -> dict[str, Any]:
         field = self._spec.scope_field
         if not field or not self._instance_id:
@@ -144,6 +158,35 @@ class EnterpriseRecordRepository:
         parts = dict(key_parts or {})
         parts.update(kwargs)
         return await self._store.delete(self._store_name, self.identity(parts))
+
+    async def get_by_row_id(self, row_id: int) -> dict[str, Any] | None:
+        """按自增 ``id`` 取行，并校验实例 scope（Manager WS update/delete）。"""
+        row = await self._store.get(self._store_name, {"id": int(row_id)})
+        if row is None:
+            return None
+        scope = self._scope_filters()
+        for key, value in scope.items():
+            if row.get(key) != value:
+                return None
+        return row
+
+    async def update_by_row_id(
+        self,
+        row_id: int,
+        updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if await self.get_by_row_id(row_id) is None:
+            return None
+        return await self._store.update(
+            self._store_name,
+            {"id": int(row_id)},
+            dict(updates),
+        )
+
+    async def delete_by_row_id(self, row_id: int) -> bool:
+        if await self.get_by_row_id(row_id) is None:
+            return False
+        return await self._store.delete(self._store_name, {"id": int(row_id)})
 
     async def sync_by_business_key(
         self,
