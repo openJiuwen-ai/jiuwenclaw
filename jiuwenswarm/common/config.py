@@ -1348,6 +1348,8 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
             "api_key": os.getenv("API_KEY", ""),
             "model_name": os.getenv("MODEL_NAME", ""),
             "client_provider": os.getenv("MODEL_PROVIDER", ""),
+            # endpoint_profile：仅 OpenAI 协议生效的端点方言；Anthropic 时忽略。
+            "endpoint_profile": os.getenv("ENDPOINT_PROFILE", "") or "",
             "custom_headers": _parse_custom_headers(os.getenv("CUSTOM_HEADERS", None)),
             "timeout": 1800,
             "verify_ssl": False,
@@ -1437,6 +1439,7 @@ def ensure_defaults_list_in_config() -> list[dict[str, Any]]:
                     "api_key": "${API_KEY}",
                     "model_name": "${MODEL_NAME}",
                     "client_provider": "${MODEL_PROVIDER}",
+                    "endpoint_profile": "${ENDPOINT_PROFILE:-openai}",
                 },
                 "model_config_obj": {"temperature": 0.95},
                 "is_default": True,

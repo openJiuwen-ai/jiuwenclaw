@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_config_service import AgentDefinition
 
 import yaml
-from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
@@ -207,6 +207,8 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
     CircuitBreakerConfig,
 )
+from jiuwenswarm.common.context_window import parse_positive_int, resolve_context_window_tokens
+
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.stage_timer import StageTimer
@@ -788,14 +790,33 @@ def init_permission_engine(*_args: Any, **_kwargs: Any) -> None:
 
 
 def _mcc_looks_usable(mcc: dict) -> bool:
-    """检查 model_client_config 是否包含有效的 API 凭据。"""
+    """检查 model_client_config 是否包含有效的 API 凭据。
+
+    新声明下凭据判定以 auth_mode 为准：
+    - auth_mode=openai_account_oauth 或 api_mode=responses：OAuth 路径，不要求 api_key。
+    - auth_mode=none 或 custom_headers(无 key)：按该认证模式判断(不要求 api_key)。
+    - 否则(默认 api_key 模式，含 OpenAI / Anthropic)：要求 api_base + api_key。
+    兼容旧配置：client_provider=OpenAIAccount 别名也视为 OAuth。
+    """
     api_base = str(mcc.get("api_base", "") or "").strip()
     if not api_base or is_placeholder_api_base(api_base):
         return False
 
+    auth_mode = str(mcc.get("auth_mode") or "").strip().lower()
+    api_mode = str(mcc.get("api_mode") or "").strip().lower()
+    # OAuth 路径：新式 auth_mode=openai_account_oauth 或旧式 provider 名 OpenAIAccount。
     provider = mcc.get("client_provider", "")
     provider = getattr(provider, "value", provider)
-    if is_openai_account_provider(str(provider or "")):
+    if (
+        auth_mode == "openai_account_oauth"
+        or api_mode == "responses"
+        or is_openai_account_provider(str(provider or ""))
+    ):
+        return True
+
+    # none / custom_headers 无 key 的认证模式：只要 api_base 在即可。
+    if auth_mode in ("none", "custom_headers"):
+        # custom_headers 通常仍需自定义头，但凭据层面不算 api_key 必填。
         return True
 
     api_key = str(mcc.get("api_key", "") or "").strip()
@@ -864,28 +885,51 @@ def _deep_agent_context_engine_config(
 ) -> ContextEngineConfig:
     """Build the agent-core Context Engine configuration.
 
-    Processor-only fields such as ``round_level_compressor_config`` are
-    filtered out, while every field owned by ``ContextEngineConfig`` is
-    preserved. Per-model ``context_window`` is carried by
-    ``ModelRequestConfig``; this function only applies global Context Engine
-    settings.
+    仅承接 ContextEngine 自身配置；KV cache affinity 由独立
+    ``react.kv_cache_affinity_config`` 管理。
+
+    context_window（模型支持的上下文总长度）由 ``_build_model_from_entry`` 放进
+    core 的 ``ModelRequestConfig``，再由 ReActAgent 注入当前 ContextEngine 的模型级
+    元数据。本函数只承接全局覆盖和显式模型映射；最终优先级为全局值 > 当前 AgentOS
+    模型值 > 显式映射 > core 按模型名解析 / 兜底。
     """
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
     cec = cec if isinstance(cec, dict) else {}
-
+    cw_tokens = parse_positive_int(cec.get("context_window_tokens"))
+    model_context_windows = cec.get("model_context_window_tokens")
+    if isinstance(model_context_windows, dict):
+        valid_model_context_windows = {}
+        for model_name, raw_window in model_context_windows.items():
+            if not isinstance(model_name, str):
+                continue
+            parsed_window = parse_positive_int(raw_window)
+            if parsed_window is not None:
+                valid_model_context_windows[model_name] = parsed_window
+        model_context_windows = valid_model_context_windows
+        if not model_context_windows:
+            model_context_windows = None
+    else:
+        model_context_windows = None
+    recall = cec.get("compression_recall_config")
+    recall = recall if isinstance(recall, dict) else {}
     defaults = ReActAgentConfig().context_engine_config
     supported = {
         key: value
         for key, value in cec.items()
         if key in ContextEngineConfig.model_fields
     }
-    # Preserve the established tolerant behavior for malformed window values.
-    if "context_window_tokens" in supported:
-        supported["context_window_tokens"] = parse_int(
-            supported["context_window_tokens"], None
+    # 显式设置的上下文窗口上限；非法值回退 None（由 agent-core 按模型解析）。
+    supported["context_window_tokens"] = cw_tokens
+    if "model_context_window_tokens" in ContextEngineConfig.model_fields:
+        supported["model_context_window_tokens"] = model_context_windows
+    # 压缩召回：压缩时归档原始消息，供模型按需召回。
+    if "compression_recall_config" in ContextEngineConfig.model_fields:
+        supported["compression_recall_config"] = CompressionRecallConfig(
+            enabled=bool(recall.get("enabled", False)),
+            chunk_size_tokens=parse_int(recall.get("chunk_size_tokens"), 3000),
+            chunk_overlap_tokens=parse_int(recall.get("chunk_overlap_tokens"), 300),
         )
-
     return ContextEngineConfig.model_validate(
         {
             **defaults.model_dump(),
@@ -899,9 +943,13 @@ def _deep_agent_kv_cache_affinity_config(
     model: Model | None = None,
 ) -> KVCacheAffinityConfig:
     """Build the ReActAgent KV cache affinity config from jiuwenswarm config."""
+    # 取 model.model_client_config 供新式 extensions.kv_cache.mode 判别；
+    # model_provider 兼容旧 AscendAffinity 别名。
+    mcc = getattr(model, "model_client_config", None)
     return build_kv_cache_affinity_config(
         react_cfg,
         provider=model_provider(model),
+        model_client_config=mcc,
     )
 
 
@@ -1178,6 +1226,7 @@ class JiuWenSwarmDeepAdapter:
         self._model_request_config: ModelRequestConfig | None = None
         self._last_resolved_model: Model | None = None
         self._active_request_model: Model | None = None
+        self._selected_model_context_window_tokens: int | None = None
         self._config_base_cache: dict[str, Any] | None = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
@@ -2180,6 +2229,7 @@ class JiuWenSwarmDeepAdapter:
         *,
         model_name: str | None = None,
         pending_mcp_scan_names: set[str] | None = None,
+        history_before_request_id: str | None = None,
     ) -> "JiuWenSwarmDeepAdapter":
         """Return the session-owned adapter, creating and initializing it once."""
         if self._is_session_scoped_adapter:
@@ -2306,6 +2356,7 @@ class JiuWenSwarmDeepAdapter:
                 await warmup_session_context(
                     deep_agent=getattr(adapter, "_instance", None),
                     session_id=sid,
+                    history_before_request_id=history_before_request_id,
                 )
             except Exception as exc:
                 logger.warning(
@@ -3651,6 +3702,7 @@ class JiuWenSwarmDeepAdapter:
         needed: list[str] | None,
         *,
         model_name: str | None = None,
+        history_before_request_id: str | None = None,
     ) -> None:
         """Reconcile this session's MCP set to ``needed`` (idempotent diff).
 
@@ -3661,13 +3713,16 @@ class JiuWenSwarmDeepAdapter:
         so they survive. MCP-server forms (stdio/remote/hybrid) register/
         unregister; cli/skill-only forms surface via ``_skill_scan_dirs``
         (filtered by the live selection after cold-start assembly), picked up
-        by the refresh_skill_rails on change.
+        by the refresh_skill_rails on change. Because reconcile can be the
+        first session-child creation point, it also forwards the current
+        request's disk-history boundary into context warmup.
         """
         needed_set = {str(n).strip() for n in (needed or []) if isinstance(n, str) and str(n).strip()}
         child = await self._get_or_create_session_adapter(
             session_id,
             model_name=model_name,
             pending_mcp_scan_names=needed_set,
+            history_before_request_id=history_before_request_id,
         )
         if child._instance is None:
             pending_holder = getattr(
@@ -4911,6 +4966,11 @@ class JiuWenSwarmDeepAdapter:
         self._model = self._model_cache[default_name]
         self._model_client_config = self._model.model_client_config
         self._model_request_config = self._model.model_config
+        self._selected_model_context_window_tokens = getattr(
+            self._model_request_config,
+            "context_window",
+            None,
+        )
         self._last_models_config_fingerprint = new_fp
         return self._model
 
@@ -5303,6 +5363,17 @@ class JiuWenSwarmDeepAdapter:
         deep_config = getattr(self._instance, "deep_config", None)
         if deep_config is not None:
             deep_config.model = model
+        self._selected_model_context_window_tokens = getattr(
+            model.model_config,
+            "context_window",
+            None,
+        )
+        update_model_context = getattr(self._instance, "update_model_context", None)
+        if callable(update_model_context):
+            update_model_context(
+                model_name=model.model_config.model_name,
+                context_window_tokens=self._selected_model_context_window_tokens,
+            )
         self._model_request_config = model.model_config
         # 记录最近一次解析并应用的模型，供 ask_user_interrupt 等不带 model_name
         # 的中断恢复请求回退使用，避免回退到 config.yaml 默认占位模型。
@@ -10999,7 +11070,10 @@ class JiuWenSwarmDeepAdapter:
             AgentResponse 包含执行结果
         """
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id,
+                history_before_request_id=request.request_id,
+            )
             try:
                 return await session_adapter.process_message_impl(request, inputs)
             finally:
@@ -11360,7 +11434,10 @@ class JiuWenSwarmDeepAdapter:
         # "entering runner streaming" line so the pre-dispatch work is visible.
         stream_impl_started_at = time.monotonic()
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id,
+                history_before_request_id=request.request_id,
+            )
             try:
                 async for chunk in session_adapter.process_message_stream_impl(request, inputs):
                     yield chunk
@@ -11389,7 +11466,11 @@ class JiuWenSwarmDeepAdapter:
 
         # Team 模式处理
         if is_team_mode(mode):
-            from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
+            from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+                bind_team_heartbeat_service,
+                process_team_message_stream,
+                reset_team_heartbeat_service,
+            )
 
             resolved_model = self._resolve_model_for_request(request)
             self._apply_model_to_react_agent(resolved_model)
@@ -11463,8 +11544,15 @@ class JiuWenSwarmDeepAdapter:
                 or self._workspace_dir,
             )
 
+            token_heartbeat_service = bind_team_heartbeat_service(
+                getattr(self, "_heartbeat_service", None)
+            )
             try:
-                async for chunk in process_team_message_stream(request, inputs, self._instance):
+                async for chunk in process_team_message_stream(
+                    request,
+                    inputs,
+                    self._instance,
+                ):
                     yield chunk
             finally:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
@@ -11472,6 +11560,7 @@ class JiuWenSwarmDeepAdapter:
                 )
 
                 reset_current_multimodal_image_files(image_files_token)
+                reset_team_heartbeat_service(token_heartbeat_service)
                 TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
                 cleanup_permission_context(token_perm)
             return
@@ -12546,18 +12635,14 @@ class JiuWenSwarmDeepAdapter:
         # 回退：DeepAgent 未返回 context_window_tokens 时，用 ContextUtils 解析模型上下文窗口上限
         if context_window_tokens is None:
             try:
-                from openjiuwen.core.context_engine.context.context_utils import ContextUtils
                 model_name = (
                     getattr(self._model_request_config, "model_name", "") or ""
                     if self._model_request_config else ""
                 )
-                # 与 ContextEngine 一致：显式配置的 context_window_tokens 优先于按模型名解析
-                cw_override = _deep_agent_context_engine_config(
-                    self._config_cache,
-                ).context_window_tokens
-                cw_fallback = ContextUtils.resolve_context_max(
+                cw_fallback = resolve_context_window_tokens(
                     model_name=model_name,
-                    fallback_context_window_tokens=cw_override,
+                    context_engine_config=self._config_cache,
+                    model_context_window_override=self._selected_model_context_window_tokens,
                 )
                 if cw_fallback > 0:
                     context_window_tokens = cw_fallback
@@ -13640,12 +13725,15 @@ class JiuWenSwarmDeepAdapter:
             occupancy_rate = usage.get("usage_percent", 0)
         except Exception as exc:
             logger.debug("[JiuWenSwarmDeepAdapter] DeepAgent.get_context_usage failed: %s", exc)
-            from openjiuwen.core.context_engine.context.context_utils import ContextUtils
             model_name = (
                 getattr(self._model_request_config, "model_name", "") or ""
                 if self._model_request_config else ""
             )
-            context_window_limit = ContextUtils.resolve_context_max(model_name=model_name)
+            context_window_limit = resolve_context_window_tokens(
+                model_name=model_name,
+                context_engine_config=self._config_cache,
+                model_context_window_override=self._selected_model_context_window_tokens,
+            )
             if context_window_limit > 0:
                 occupancy_rate = round(total_tokens / context_window_limit * 100, 1)
 

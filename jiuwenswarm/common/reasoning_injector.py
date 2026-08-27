@@ -9,6 +9,7 @@ from jiuwenswarm.common.reasoning_config import (
     ReasoningEffort,
     normalize_reasoning_level,
     resolve_reasoning_target,
+    resolve_sampling_override,
 )
 
 
@@ -112,11 +113,22 @@ def inject_reasoning_params(
     model_config_dict = _model_config_to_dict(model_config_obj)
     level = normalize_reasoning_level(model_config_dict.get("reasoning_level"))
     runtime_model_config = _runtime_config_copy(model_config_dict)
+    # 强制采样参数覆盖:某些厂商(如 Moonshot/api.moonshot.cn 的 kimi-k2.6)
+    # 对 temperature/top_p 有硬性约束,传 core 默认值(0.95)或用户填的任意其它值
+    # 都会 400。此处按 api_base 识别后强制写死,无视用户填值——因为传别的必死,
+    # 无协商余地。必须早于 reasoning 的 level early-return,否则无 reasoning_level
+    # 的普通调用(绝大多数)不会走到下面的 target 注入分支。
+    override = resolve_sampling_override(
+        model_client_config.get("api_base") or model_client_config.get("base_url")
+    )
+    if override:
+        runtime_model_config.update(override)
     if level is None:
         return runtime_model_config
 
     target = resolve_reasoning_target(
         client_provider=model_client_config.get("client_provider"),
+        endpoint_profile=model_client_config.get("endpoint_profile"),
         api_base=(
             model_client_config.get("api_base")
             or model_client_config.get("base_url")
@@ -160,10 +172,24 @@ def _build_model_request_kwargs(
     #   经 model_dump 透传给厂商 SDK 报 unexpected keyword argument -> 需 pop。
     # - core 已加字段：context_window 作正式字段，core 自行 exclude 不发厂商、
     #   self.model_config.context_window 可读 -> 不得 pop（否则切掉 core 想读的值）。
-    # 不再守 _source=="agentos"：所有条目一视同仁，defaults 配了 context_window
-    # 同样需要过渡期 pop 防发厂商。
-    if not core_has_context_window_field():
-        request_kwargs.pop("context_window", None)
+    if "context_window" in request_kwargs:
+        if not core_has_context_window_field():
+            request_kwargs.pop("context_window", None)
+        else:
+            raw_context_window = request_kwargs.get("context_window")
+            if raw_context_window is not None:
+                try:
+                    normalized_context_window = (
+                        None
+                        if isinstance(raw_context_window, bool)
+                        else int(raw_context_window)
+                    )
+                except (TypeError, ValueError):
+                    normalized_context_window = None
+                if normalized_context_window is None or normalized_context_window <= 0:
+                    request_kwargs.pop("context_window", None)
+                else:
+                    request_kwargs["context_window"] = normalized_context_window
     request_kwargs["model"] = _resolve_model_name(model_name, model_config_obj)
     return request_kwargs
 

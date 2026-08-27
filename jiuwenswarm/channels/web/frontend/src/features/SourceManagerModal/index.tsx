@@ -18,7 +18,7 @@ export function SourceManagerModal({
   onNavigateToConfig,
 }: SourceManagerModalProps) {
   const { t } = useTranslation();
-  const [selectedSource, setSelectedSource] = useState<SourceType>("skillnet");
+  const [selectedSource, setSelectedSource] = useState<SourceType>("clawhub");
   const [clawhubToken, setClawhubToken] = useState("");
   const [tokenLoading, setTokenLoading] = useState(false);
   const [tokenSaving, setTokenSaving] = useState(false);
@@ -129,7 +129,7 @@ export function SourceManagerModal({
                 onClick={() => setSelectedSource("skillnet")}
                 data-testid="source-manager-modal-source-tab-skillnet"
                 aria-pressed={selectedSource === "skillnet"}
-                className={`flex-1 py-3 px-4 rounded-lg border  ${
+                className={`hidden flex-1 py-3 px-4 rounded-lg border  ${
                   selectedSource === "skillnet"
                     ? "border-text bg-[var(--color-source-selected-surface)] text-text"
                     : "border-border bg-card text-text-muted hover:border-gray-400"
