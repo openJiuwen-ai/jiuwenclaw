@@ -146,8 +146,8 @@ JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox health
 | --- | --- | --- |
 | `id` | string | 沙箱 ID |
 | `phase` | string | 沙箱状态，取值为 `provisioning`、`ready`、`stopped`、`error`、`deleting` |
-| `runtime` | string | 当前固定为 `process` |
-| `pid` | integer/null | 沙箱生命周期进程 PID |
+| `sandbox_runtime` | string | 沙箱后端：`process`（bubblewrap）或 `conch` |
+| `pid` | integer/null | `process` 后端为生命周期进程 PID；`conch` 后端无 host PID，固定为 `null` |
 | `created_at` | string | 创建时间 |
 | `started_at` | string/null | 启动时间 |
 | `error_message` | string/null | 错误信息 |
@@ -160,7 +160,7 @@ JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox health
 {
   "id": "abc123def456",
   "phase": "ready",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": 12345,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:30:01.000000+00:00",
@@ -245,6 +245,17 @@ print(resp.json())
 | `policy` | object/null | 否 | 覆盖或追加的 policy 数据 |
 | `policy_mode` | string | 否 | `override` 或 `append`，默认 `override` |
 | `sandbox_id` | string/null | 否 | 可选，指定沙箱 ID。长度 4~16，仅允许小写字母、数字、减号（`-`）和下划线（`_`）。省略或空字符串时服务端自动生成（形如 `6011f5ca-76a`）。格式非法返回 400；与已有 ID 冲突返回 409 |
+| `sandbox_runtime` | string/null | 否 | 沙箱后端。省略、空字符串或 `bwrap` → `sandbox_runtime=process`；`conch` → `sandbox_runtime=conch`。其它值返回 400 |
+
+说明：
+
+- Conch 创建时读取有效 policy 的 `conch` 段（`template_id`、`filesystem_policy.bind_mounts`、`network`、可选成对的 `run_as_user` / `run_as_group`）。
+- `conch.template_id` 解析顺序：有效 policy → 环境变量 `JIUWENBOX_CONCH_TEMPLATE_ID` → 不传（由 conchd `sandbox.default_template_id` 决定）。
+- `conch.run_as_user` / `conch.run_as_group`：可选成对；create 时在宿主机解析为 uid:gid（纯数字直通，名字走 `pwd`/`grp`）。未配置则保持 conch-agent 身份。未知名/越界 **400**。与顶层 `process.run_as_*` 无关；改身份需重建沙箱。
+- `conch.network` 仅支持 IPv4/CIDR 的 `default` + `allowed_ips` / `blocked_ips`（无域名/端口/IPv6）；映射到 Conch `allowOut`/`denyOut`/`allowIn`/`denyIn`，并由 `egress.default` 推导 SDK 内部的 `allow_internet_access`（不对用户暴露）。
+- `ingress.default: deny` 且 `allowed_ips` 为空时，适配层仅在发给 Conch 的 `denyIn` 注入 `0.0.0.0/0`，**不会**写入用户可见/持久化的 jiuwenbox policy。
+- SDK 未安装、conchd 不可达或 template 不存在等属于 runtime 启动错误：仍返回 `201`，`phase=error`，`error_message` 说明原因。非法 `sandbox_runtime` / 非法 Conch bind mount / 非法网络地址 / 非法 `run_as_*` 返回 `400`。
+- Conch 不支持 `POST .../stop`（返回 `409`）。销毁用 `DELETE`；`POST .../restart` 为同 ID 冷重建（delete + create）；`start` 可在非运行态下按当前 policy 重建。
 
 Python 请求示例：
 
@@ -272,7 +283,7 @@ print(resp.json())
 {
   "id": "my-sb_01",
   "phase": "ready",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": 12345,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:30:01.000000+00:00",
@@ -307,7 +318,7 @@ print(resp.json())
   {
     "id": "abc123def456",
     "phase": "ready",
-    "runtime": "process",
+    "sandbox_runtime": "process",
     "pid": 12345,
     "created_at": "2026-04-25T11:30:00.000000",
     "started_at": "2026-04-25T11:30:01.000000+00:00",
@@ -341,7 +352,7 @@ print(resp.json())
 {
   "id": "abc123def456",
   "phase": "ready",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": 12345,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:30:01.000000+00:00",
@@ -396,7 +407,7 @@ print(resp.json())
 {
   "id": "abc123def456",
   "phase": "ready",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": 12345,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:31:00.000000+00:00",
@@ -411,6 +422,8 @@ print(resp.json())
 接口：`POST /api/v1/sandboxes/{sandbox_id}/stop`
 
 用途：停止沙箱。
+
+对 `runtime=conch` 的沙箱返回 **409**（Conch 无 stop；请用 `DELETE` 销毁，或用 `restart` 冷重建）。
 
 Python 请求示例：
 
@@ -429,7 +442,7 @@ print(resp.json())
 {
   "id": "abc123def456",
   "phase": "stopped",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": null,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:31:00.000000+00:00",
@@ -444,6 +457,8 @@ print(resp.json())
 接口：`POST /api/v1/sandboxes/{sandbox_id}/restart`
 
 用途：重启沙箱。
+
+对 `runtime=conch`：因无 stop，实现为冷重建（先 `delete` 再按同 ID / 当前 policy `create`）。
 
 Python 请求示例：
 
@@ -462,7 +477,7 @@ print(resp.json())
 {
   "id": "abc123def456",
   "phase": "ready",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": 22345,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:32:00.000000+00:00",
@@ -896,19 +911,23 @@ print(resp.json())
 
 接口：`PUT /api/v1/policies/{sandbox_id}`
 
-用途：动态更新指定沙箱的 `network.egress` / `network.ingress`。
-请求体字段与创建沙箱一致（`policy` + `policy_mode`）。
-本期仅支持改 ingress/egress；`network.mode` / `uplink` 以及其它 policy 段会返回 400。
-对 `network.mode: isolated` 且正在运行的沙箱会热更新 netns 内 iptables；已停止的沙箱只落盘，下次 start 生效。`host` 模式返回 400。
+用途：按沙箱 runtime 动态更新网络规则。
+
+- `runtime=process`：只接受 `policy.network.egress` / `policy.network.ingress`（与既有 bwrap 行为一致）。
+- `runtime=conch`：只接受 `policy.conch.network.egress` / `policy.conch.network.ingress`。
+- `override` 只替换请求中提供的方向；未提供方向保持不变。`append` 合并列表；方向内 `default` 仅当请求显式给出时覆盖。
+- Conch 热更新始终把合并后的完整 `conch.network` 映射为五个 Conch 字段后做 full-replace `update_network`（不能把 append fragment 直接发给 SDK）。运行中沙箱先应用 runtime 规则，再落盘；落盘失败会 best-effort 回滚 runtime。STOPPED/ERROR 只持久化，下次 start 生效。
+- 仅对新连接生效；已建立连接不会因热更新断开。
+- 响应中的 `conch.network` 含 `default`，不含 `allow_internet_access` / 合成 `0.0.0.0/0`。
 
 请求字段：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `policy` | object | 是 | 本期须含 `network`，且 `egress` / `ingress` 至少提供一个 |
+| `policy` | object | 是 | process 沙箱须含 `network`；conch 沙箱须含 `conch.network`；`egress` / `ingress` 至少提供一个 |
 | `policy_mode` | string | 否 | `override`（默认）或 `append`，语义与创建沙箱相同 |
 
-Python 请求示例：
+Python 请求示例（process）：
 
 ```python
 import requests
@@ -937,21 +956,42 @@ print(resp.status_code)
 print(resp.json())
 ```
 
+Conch 示例：
+
+```python
+resp = requests.put(
+    f"http://127.0.0.1:8321/api/v1/policies/{sandbox_id}",
+    json={
+        "policy_mode": "append",
+        "policy": {
+            "conch": {
+                "network": {
+                    "egress": {
+                        "blocked_ips": ["192.0.2.10"],
+                    }
+                }
+            }
+        },
+    },
+    timeout=30,
+)
+```
+
 成功时返回更新后的完整 `SecurityPolicy` JSON（与 `GET /policies/{sandbox_id}` 同形）。
 
 ### 批量更新所有沙箱网络策略
 
 接口：`PUT /api/v1/policies`
 
-用途：对当前所有已注册沙箱应用与单沙箱接口相同的网络规则更新。
+用途：对当前所有已注册沙箱应用网络规则更新。
 请求体非法时整请求 400，不落任何沙箱。
-`host` 模式沙箱记入 `skipped`；单个沙箱热更新失败记入 `failed`，不阻断其余沙箱。
+批量请求可同时带 `network` 与 `conch.network`；每个沙箱只消费与其 runtime 匹配的片段，缺少对应片段的沙箱记入 `skipped`。`host` 模式 process 沙箱记入 `skipped`；单个沙箱热更新失败记入 `failed`，不阻断其余沙箱。
 
-请求体在 `PUT /api/v1/policies/{sandbox_id}` 的基础上多一个可选字段：
+请求体可同时包含 `policy.network` 与 `policy.conch`。额外可选字段：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `policy` | object | 是 | 同单沙箱接口，须含 `network`，且 `egress` / `ingress` 至少提供一个 |
+| `policy` | object | 是 | 可含 `network` 和/或 `conch.network`；每个沙箱只消费匹配片段 |
 | `policy_mode` | string | 否 | `override`（默认）或 `append` |
 | `update_default_policy` | bool | 否 | 默认 `false`。为 `true` 时同一套规则也会写入 server 的**默认沙箱策略**，使**此后新建**的沙箱复用更新过的策略 |
 
@@ -970,8 +1010,8 @@ print(resp.json())
   会被静默忽略（不报错），单沙箱更新永远不会改动默认策略。
 - **`override` 会清空未列出的字段**：`override` 是整方向替换，请求体里没写的
   键会落回模型默认值（列表清空、`default` 变回 `deny`）。作用在默认策略上时
-  这是全局影响，例如内置默认策略的 `allowed_domains` / `allowed_ports` 都会被
-  抹掉。想做增量修改请用 `append`；想整体替换请把该方向的字段写全。
+  这是全局影响。想做增量修改请用 `append`；想整体替换请把该方向的字段写全。
+- process 片段写入 `self.policy.network`，conch 片段写入 `self.policy.conch.network`。
 
 Python 请求示例：
 
@@ -988,6 +1028,13 @@ resp = requests.put(
                 "egress": {
                     "blocked_ips": ["203.0.113.50/32"],
                 },
+            },
+            "conch": {
+                "network": {
+                    "egress": {
+                        "blocked_ips": ["192.0.2.10"],
+                    }
+                }
             },
         },
     },
