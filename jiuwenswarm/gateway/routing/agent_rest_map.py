@@ -21,6 +21,11 @@ DEFAULT_HTTP_PORT = 8766
 _PATH_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _WRITE_VERBS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
+# Agent ``session.create`` 拒绝 params.session_id（恢复会话走 session.switch）。
+# 与北向 ``bind_http_session`` / Web outbound 同约定：信封顶层 session_id 可进
+# ``X-Session-Id``，但不得写入 REST body（路径也无 {session_id}）。
+_METHODS_WITHOUT_PARAM_SESSION_ID = frozenset({"session.create"})
+
 # method → (verb, path relative to /api/v1). 特殊 chat.* / history stream 在 assemble 里处理。
 # 键同时覆盖本仓 ReqMethod 与 Agent HTTP ROUTES 若有字符串漂移的别名。
 _ROUTE_ROWS: tuple[tuple[str, str, str], ...] = (
@@ -306,7 +311,10 @@ def assemble_rest_request(envelope: E2AEnvelope, *, base_url: str) -> AssembledR
 
     verb, template, rpc = _lookup_route(method, is_stream=bool(envelope.is_stream))
     values: dict[str, Any] = dict(envelope.params or {})
-    if envelope.session_id and not values.get("session_id"):
+    if method in _METHODS_WITHOUT_PARAM_SESSION_ID:
+        # 勿 setdefault 信封 session_id；并剥掉 params 里误带的客户端临时 id。
+        values.pop("session_id", None)
+    elif envelope.session_id and not values.get("session_id"):
         values["session_id"] = envelope.session_id
 
     filled, used = _fill_path(template, values)

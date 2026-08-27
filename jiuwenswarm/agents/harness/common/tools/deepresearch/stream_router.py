@@ -51,6 +51,13 @@ _SECTION_PROCESS_NODES = {
     "collector_summary",
     "sub_reporter",
 }
+# Brief mode performs report-wide collection/review outside the per-section
+# process branch.  Their ordinary ``content`` carries the evidence detail that
+# users expect in the expanded reasoning view, not final report prose.
+_BRIEF_PROCESS_CONTENT_NODES = {
+    "brief_info_collector",
+    "brief_evidence_reviewer",
+}
 _FINAL_REPORT_NODES = {
     "reporter",
     "vlm_chart_generator",
@@ -72,6 +79,7 @@ MAX_SECTION_COUNT = 256
 MAX_STATE_ENTRIES = 256
 MAX_IDENTIFIER_CHARS = 1024
 MAX_CHUNK_TEXT_CHARS = 1_048_576
+MAX_TERMINAL_RESULT_TEXT_CHARS = 16 * 1024 * 1024
 MAX_ACCUMULATED_TEXT_CHARS = 1_048_576
 MAX_JSON_DEPTH = 64
 MAX_JSON_NODES = 16_384
@@ -155,7 +163,9 @@ def _validate_identifier(value: Any) -> str:
     return text
 
 
-def _validate_json_shape(value: Any) -> int:
+def _validate_json_shape(
+    value: Any, *, max_text_chars: int = MAX_CHUNK_TEXT_CHARS
+) -> int:
     """Bound container traversal without recursion or copying caller data."""
     stack: list[tuple[Any, int, bool]] = [(value, 0, False)]
     active: set[int] = set()
@@ -170,10 +180,10 @@ def _validate_json_shape(value: Any) -> int:
         if nodes > MAX_JSON_NODES or depth > MAX_JSON_DEPTH:
             raise ValueError(ROUTER_LIMIT_ERROR)
         if isinstance(current, str):
-            if len(current) > MAX_CHUNK_TEXT_CHARS:
+            if len(current) > max_text_chars:
                 raise ValueError(ROUTER_LIMIT_ERROR)
             text_chars += len(current)
-            if text_chars > MAX_CHUNK_TEXT_CHARS:
+            if text_chars > max_text_chars:
                 raise ValueError(ROUTER_LIMIT_ERROR)
             continue
         if not isinstance(current, (dict, list, tuple)):
@@ -307,15 +317,24 @@ def _node_frames_for_chunk(
     frames: list[dict] = []
     if starts_node and event != "done":
         frames.append(_node_reasoning(stage, agent, display, f"{display[0]}开始\n"))
-    reasoning = _chunk_reasoning_content(chunk, content)
-    if reasoning:
-        frames.append(_node_reasoning(stage, agent, display, _as_text(reasoning)))
+    if agent in _BRIEF_PROCESS_CONTENT_NODES:
+        process_parts = _raw_process_parts(chunk, content, agent=agent)
+    else:
+        reasoning = _chunk_reasoning_content(chunk, content)
+        process_parts = [_as_text(reasoning)] if reasoning else []
+    for process_content in process_parts:
+        frames.append(_node_reasoning(stage, agent, display, process_content))
     if completes_node:
         frames.append(_node_reasoning(stage, agent, display, f"{display[0]}完成\n"))
     return frames, starts_node, completes_node
 
 
-def _validate_router_input(chunk: dict, state: RouterState) -> None:
+def _validate_router_input(
+    chunk: dict,
+    state: RouterState,
+    *,
+    terminal_result_content: bool = False,
+) -> None:
     if not isinstance(chunk, dict):
         raise ValueError(ROUTER_INVALID_ERROR)
     for key in ("agent", "section_idx", "message_id", "conversation_id"):
@@ -326,7 +345,9 @@ def _validate_router_input(chunk: dict, state: RouterState) -> None:
     incoming_text_chars = 0
     for key in ("content", "reasoning_content"):
         value = chunk.get(key)
-        if value is not None:
+        if value is not None and not (
+            terminal_result_content and key == "content"
+        ):
             incoming_text_chars += _validate_json_shape(value)
     if len(state.active_nodes) > MAX_STATE_ENTRIES:
         raise ValueError(ROUTER_LIMIT_ERROR)
@@ -760,7 +781,17 @@ def _is_successful_workflow_end(chunk: dict, agent: str, event: str) -> bool:
         or str(chunk.get("section_idx", "0")).strip() not in {"", "0"}
     ):
         return False
-    result = _as_json_object(chunk.get("content"))
+    content = chunk.get("content")
+    _validate_json_shape(
+        content,
+        max_text_chars=MAX_TERMINAL_RESULT_TEXT_CHARS,
+    )
+    result = _as_json_object(content)
+    if result is not None:
+        _validate_json_shape(
+            result,
+            max_text_chars=MAX_TERMINAL_RESULT_TEXT_CHARS,
+        )
     return bool(
         result
         and isinstance(result.get("response_content"), str)
@@ -871,16 +902,30 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     status marker(__deepsearch_status__)不在此处理(由 tool 主循环识别);interrupted marker
     本体由 tool 主循环捕获后整块传给 build_interrupt_prompt(marker 参数)。
     """
-    _validate_router_input(chunk, state)
+    if not isinstance(chunk, dict):
+        raise ValueError(ROUTER_INVALID_ERROR)
+    agent = _validate_identifier(chunk.get("agent", ""))
+    event = str(chunk.get("event", "")).strip()
+    section_idx = _validate_identifier(chunk.get("section_idx", "0")) or "0"
+    # The successful EndNode embeds the complete final result in ``content``.
+    # It is a workflow boundary, not process text for the frontend, so keep it
+    # under the terminal 16 MiB protocol bound without applying the 1 MiB
+    # process-display accumulator limit.
+    successful_workflow_end = _is_successful_workflow_end(chunk, agent, event)
+
+    _validate_router_input(
+        chunk,
+        state,
+        terminal_result_content=successful_workflow_end,
+    )
     frames: list[dict] = []
     if "__deepsearch_status__" in chunk:
         return frames
+    if successful_workflow_end:
+        return start_final_report_processing(state)
 
-    agent = _validate_identifier(chunk.get("agent", ""))
-    event = str(chunk.get("event", "")).strip()
     content = chunk.get("content", "")
     message_type = str(chunk.get("message_type", "")).strip()
-    section_idx = _validate_identifier(chunk.get("section_idx", "0")) or "0"
     target_stage = 3 if agent in _SECTION_PROCESS_NODES and section_idx != "0" else _NODE_STAGE.get(agent)
     key = _node_key(agent, section_idx)
     display = NODE_DISPLAY_INFO.get(agent)
@@ -947,14 +992,6 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
             "stream_source_id": "dr_outline",
             "content": "大纲已根据您的修改重新生成，自动确认继续研究",
         })
-        return frames
-
-    # DeepSearch emits a successful top-level EndNode result before the runner's
-    # terminal marker.  It is the formal workflow boundary even when an SDK
-    # version omits one of the parallel sub_reporter ``done`` events.  Section
-    # ``end``/``SECTION END`` frames are excluded by section_idx and content.
-    if _is_successful_workflow_end(chunk, agent, event):
-        frames.extend(start_final_report_processing(state))
         return frames
 
     if not agent or agent in _SKIP_NODES:

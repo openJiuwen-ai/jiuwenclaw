@@ -762,9 +762,91 @@ class TaskExecutionRail(DeepAgentRail):
             await self._sync_todo_and_emit_transitions(ctx)
             return
 
+        await self._auto_advance_pending_to_in_progress(ctx)
+
         if tool_name in self.ARTIFACT_DETECTION_TOOLS:
             await self._trigger_artifact_hooks(ctx)
             return
+
+    async def _auto_advance_pending_to_in_progress(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Auto-advance the current pending task to in_progress when a work tool is called.
+
+        When the LLM calls a non-todo work tool and the bound active task is still
+        ``pending``, we automatically transition it to ``in_progress`` — no
+        ``todo_modify`` call needed.  This eliminates todo-only LLM rounds that
+        would otherwise be spent just flipping status from pending to in_progress.
+        """
+        active_id = _ACTIVE_TASK_ID.get()
+        if not active_id:
+            return
+        raw_id = active_id.removeprefix("todo:")
+        task = self._todo_map.get(raw_id)
+        if not task or task.get("status") not in self._BINDING_PENDING:
+            return
+
+        session = ctx.session
+        if session is None:
+            return
+
+        session_id = session.get_session_id()
+        parent_request_id = self._extract_request_id(ctx)
+
+        todo_path = self._get_todo_workspace_path(session_id)
+        if todo_path is None or not todo_path.exists():
+            return
+
+        try:
+            with open(todo_path, "r", encoding="utf-8") as f:
+                items = json.load(f)
+            if not isinstance(items, list):
+                return
+        except (OSError, ValueError):
+            return
+
+        changed = False
+        for item in items:
+            if item.get("id") == raw_id and str(
+                item.get("status", "pending")
+            ).lower() in self._BINDING_PENDING:
+                item["status"] = "in_progress"
+                changed = True
+                break
+
+        if not changed:
+            return
+
+        try:
+            with open(todo_path, "w", encoding="utf-8") as f:
+                json.dump(items, f, ensure_ascii=False, indent=2)
+        except OSError:
+            logger.warning(
+                "[TaskExecutionRail] auto_advance: failed to write "
+                "todo.json session_id=%s task_id=%s",
+                session_id,
+                raw_id,
+            )
+            return
+
+        if raw_id not in self._todo_started:
+            task["status"] = "in_progress"
+            await self._emit_task_start_event(
+                session, raw_id, task, parent_request_id, source="todo",
+            )
+            self._todo_started.add(raw_id)
+
+        self._todo_map[raw_id]["status"] = "in_progress"
+        _ACTIVE_TASK_ID.set(f"todo:{raw_id}")
+
+        await self._emit_task_update_event(session, parent_request_id)
+
+        logger.info(
+            "[TaskExecutionRail] auto_advance: pending→in_progress "
+            "session_id=%s task_id=%s",
+            session_id,
+            raw_id,
+        )
 
     async def _trigger_artifact_hooks(
         self, ctx: AgentCallbackContext
