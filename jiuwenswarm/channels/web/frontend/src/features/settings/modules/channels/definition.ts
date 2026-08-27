@@ -6,5 +6,11 @@ export const channelsModule: SettingsModuleDefinition = {
   id: 'channels',
   titleKey: 'settingsPanel.categories.channels',
   icon: settingsNavigationIcons.channels,
-  sections: [{ id: 'channels', items: [{ id: 'channels-panel', component: 'custom', render: ChannelsModule }] }],
+  sections: [
+    {
+      id: 'channels',
+      separatedRows: true,
+      items: [{ id: 'channels-panel', component: 'custom', render: ChannelsModule }],
+    },
+  ],
 };

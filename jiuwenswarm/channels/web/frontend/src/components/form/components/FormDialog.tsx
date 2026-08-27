@@ -95,6 +95,7 @@ export function FormDialog({
           <div>{secondaryAction}</div>
           <div className="form-dialog__actions">
             <Button
+              size="sm"
               disabled={submitting}
               onClick={onCancel}
               data-testid={testIdPrefix ? `${testIdPrefix}-cancel-btn` : undefined}
@@ -104,6 +105,7 @@ export function FormDialog({
             </Button>
             <Button
               variant="primary"
+              size="sm"
               loading={submitting || confirmLoading}
               disabled={confirmDisabled}
               onClick={onConfirm}

@@ -57,10 +57,10 @@ export function SettingsConfirmDialog({
           ) : null}
         </div>
         <footer className="settings-confirm-dialog__footer">
-          <Button disabled={confirming} onClick={onCancel}>
+          <Button size="sm" disabled={confirming} onClick={onCancel}>
             {cancelLabel ?? t('common.cancel')}
           </Button>
-          <Button variant={confirmVariant} loading={confirming} onClick={onConfirm}>
+          <Button variant={confirmVariant} size="sm" loading={confirming} onClick={onConfirm}>
             {confirmLabel ?? t('common.confirm')}
           </Button>
         </footer>

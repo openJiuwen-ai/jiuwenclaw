@@ -5,11 +5,13 @@ export function SettingsSection({
   title,
   description,
   action,
+  separatedRows = false,
   children,
 }: {
   title?: ReactNode;
   description?: ReactNode;
   action?: ReactNode;
+  separatedRows?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -23,7 +25,9 @@ export function SettingsSection({
           {action ? <div className="settings-section__heading-action">{action}</div> : null}
         </div>
       ) : null}
-      <div className="settings-section__items">{children}</div>
+      <div className={`settings-section__items${separatedRows ? '' : ' settings-section__items--grouped'}`}>
+        {children}
+      </div>
     </section>
   );
 }

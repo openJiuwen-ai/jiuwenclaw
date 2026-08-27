@@ -37,3 +37,30 @@
   display: grid;
   gap: 16px;
 }
+
+.settings-section__items--grouped {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-settings-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-card);
+}
+
+.settings-section__items--grouped > .settings-page__item {
+  gap: 0;
+}
+
+.settings-section__items--grouped > .settings-page__item + .settings-page__item,
+.settings-section__items--grouped > .settings-page__item > .setting-row + .setting-row {
+  border-top: 1px solid var(--color-settings-border);
+}
+
+.settings-section__items--grouped > .settings-page__item > .setting-row {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.settings-section__items--grouped .settings-page__readonly-notice {
+  padding: 12px 16px 0;
+}

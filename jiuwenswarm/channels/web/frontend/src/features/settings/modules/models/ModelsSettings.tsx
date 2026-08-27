@@ -319,9 +319,9 @@ export function ModelsSettings() {
         <div className="settings-model-card__copy">
           <div className="settings-model-card__title-row">
             <h3 title={presentation.customName}>{presentation.customName}</h3>
-            {isPrimary ? <Tag variant="success">{t('settingsPanel.models.primary')}</Tag> : null}
+            {isPrimary ? <Tag variant="info">{t('settingsPanel.models.primary')}</Tag> : null}
             {isDuplicate && model.is_default ? (
-              <Tag variant="info">{t('settingsPanel.models.groupDefault')}</Tag>
+              <Tag variant="neutral">{t('settingsPanel.models.groupDefault')}</Tag>
             ) : null}
             {readOnly ? <Tag variant="neutral">{t('settingsPanel.models.agentOsReadonly')}</Tag> : null}
           </div>
@@ -330,6 +330,7 @@ export function ModelsSettings() {
         <div className="settings-model-card__actions">
           {canSetPrimary ? (
             <Button
+              className="settings-model-card__text-action"
               variant="quiet"
               size="sm"
               disabled={actionsDisabled}
@@ -340,6 +341,7 @@ export function ModelsSettings() {
           ) : null}
           {!readOnly && isDuplicate && !model.is_default ? (
             <Button
+              className="settings-model-card__text-action"
               variant="quiet"
               size="sm"
               disabled={actionsDisabled}
@@ -407,6 +409,7 @@ export function ModelsSettings() {
     <>
       <SettingsSection
         title={t('settingsPanel.models.primaryModels')}
+        separatedRows
         action={
           <Button variant="primary" disabled={actionsDisabled} onClick={() => openModelDialog({})}>
             {t('settingsPanel.models.addModel')}
@@ -481,10 +484,6 @@ export function ModelsSettings() {
                     </button>
                     {renderModelCard(defaultItem.model, defaultItem.index, defaultOrdinal)}
                     <div id={groupContentId} className="settings-model-group__alternatives" hidden={!isExpanded}>
-                      <div className="settings-model-group__alternatives-heading">
-                        <strong>{t('settingsPanel.models.otherConfigurations')}</strong>
-                        <span>{t('settingsPanel.models.otherConfigurationsDescription')}</span>
-                      </div>
                       <div className="settings-model-group__items">
                         {alternativeItems.map((item) =>
                           renderModelCard(item.model, item.index, group.items.indexOf(item) + 1),

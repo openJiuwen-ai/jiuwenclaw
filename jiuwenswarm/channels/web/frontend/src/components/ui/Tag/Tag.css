@@ -5,7 +5,6 @@
   align-items: center;
   justify-content: center;
   width: max-content;
-  min-width: 64px;
   height: 18px;
   padding: 0 8px;
   font: inherit;
@@ -13,7 +12,7 @@
   font-weight: 400;
   line-height: 18px;
   white-space: nowrap;
-  border-radius: 4px;
+  border-radius: 2px;
 }
 
 .ui-tag--success {
@@ -22,8 +21,8 @@
 }
 
 .ui-tag--info {
-  color: var(--color-feedback-info);
-  background: var(--color-feedback-info-subtle);
+  color: var(--color-tag-info-text);
+  background: var(--color-tag-info-surface);
 }
 
 .ui-tag--warning {
@@ -37,6 +36,6 @@
 }
 
 .ui-tag--neutral {
-  color: var(--color-text-secondary);
-  background: var(--color-surface-muted);
+  color: var(--color-tag-neutral-text);
+  background: var(--color-tag-neutral-surface);
 }

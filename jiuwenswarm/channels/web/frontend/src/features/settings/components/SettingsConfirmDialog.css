@@ -78,3 +78,7 @@
   gap: 8px;
   padding: 0 24px 24px;
 }
+
+.settings-confirm-dialog__footer .ui-button {
+  min-width: 84px;
+}

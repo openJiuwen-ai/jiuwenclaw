@@ -1242,7 +1242,7 @@ test('SettingRow exposes a business-agnostic subSettings slot for dependent rows
   assert.doesNotMatch(settingRow, /memory|forbidden|enabled|config|save/i);
   assert.match(settingRowCss, /\.setting-row__main--control-top/);
   assert.match(settingRowCss, /\.setting-row__sub-settings::before/);
-  assert.match(settingRowCss, /right: 24px;[\s\S]*left: 24px;/);
+  assert.match(settingRowCss, /right: 16px;[\s\S]*left: 16px;/);
   assert.match(settingRowCss, /\.setting-row__sub-settings > \.setting-row/);
   assert.match(collapsibleText, /content\.scrollHeight > lineHeight \* maxLines/);
   assert.match(collapsibleText, /new ResizeObserver\(updateOverflow\)/);
@@ -1292,20 +1292,20 @@ test('Settings tags use the shared UI Tag component and semantic variants', () =
 
   assert.match(generalSettings, /<Tag\s+variant=\{connectionVariant\}\s+role="status">/s);
   assert.match(generalSettings, /const connectionVariant:\s*TagVariant/);
-  assert.match(modelsSettings, /<Tag\s+variant="success">\{t\('settingsPanel\.models\.primary'\)\}<\/Tag>/);
-  assert.match(modelsSettings, /<Tag\s+variant="info">\{t\('settingsPanel\.models\.groupDefault'\)\}<\/Tag>/);
+  assert.match(modelsSettings, /<Tag\s+variant="info">\{t\('settingsPanel\.models\.primary'\)\}<\/Tag>/);
+  assert.match(modelsSettings, /<Tag\s+variant="neutral">\{t\('settingsPanel\.models\.groupDefault'\)\}<\/Tag>/);
   assert.match(modelsSettings, /<Tag\s+variant="neutral">\{t\('settingsPanel\.models\.agentOsReadonly'\)\}<\/Tag>/);
   assert.match(uiIndex, /export \{ Tag, type TagProps, type TagVariant \} from '\.\/Tag\/Tag'/);
   assert.match(tagSource, /export type TagVariant = 'success' \| 'info' \| 'warning' \| 'danger' \| 'neutral'/);
   assert.match(
     tagCss,
-    /\.ui-tag\s*\{[^}]*display:\s*inline-flex[^}]*justify-content:\s*center[^}]*width:\s*max-content[^}]*min-width:\s*64px[^}]*height:\s*18px[^}]*padding:\s*0 8px[^}]*font-size:\s*12px[^}]*font-weight:\s*400[^}]*line-height:\s*18px[^}]*border-radius:\s*4px/s,
+    /\.ui-tag\s*\{[^}]*display:\s*inline-flex[^}]*justify-content:\s*center[^}]*width:\s*max-content[^}]*height:\s*18px[^}]*padding:\s*0 8px[^}]*font-size:\s*12px[^}]*font-weight:\s*400[^}]*line-height:\s*18px[^}]*border-radius:\s*2px/s,
   );
   assert.match(
     tagCss,
     /\.ui-tag--success\s*\{[^}]*var\(--color-feedback-success-text\)[^}]*var\(--color-feedback-success-toast\)/s,
   );
-  assert.match(tagCss, /\.ui-tag--info\s*\{[^}]*var\(--color-feedback-info\)[^}]*var\(--color-feedback-info-subtle\)/s);
+  assert.match(tagCss, /\.ui-tag--info\s*\{[^}]*var\(--color-tag-info-text\)[^}]*var\(--color-tag-info-surface\)/s);
   assert.match(
     tagCss,
     /\.ui-tag--warning\s*\{[^}]*var\(--color-feedback-warning\)[^}]*var\(--color-feedback-warning-subtle\)/s,
@@ -1314,7 +1314,12 @@ test('Settings tags use the shared UI Tag component and semantic variants', () =
     tagCss,
     /\.ui-tag--danger\s*\{[^}]*var\(--color-feedback-danger\)[^}]*var\(--color-feedback-danger-subtle\)/s,
   );
-  assert.match(tagCss, /\.ui-tag--neutral\s*\{[^}]*var\(--color-text-secondary\)[^}]*var\(--color-surface-muted\)/s);
+  assert.match(tagCss, /\.ui-tag--neutral\s*\{[^}]*var\(--color-tag-neutral-text\)[^}]*var\(--color-tag-neutral-surface\)/s);
+  assert.match(modelsSettings, /className="settings-model-card__text-action"/);
+  assert.match(
+    settingsPageCss,
+    /\.settings-model-card__actions \.settings-model-card__text-action\s*\{[^}]*color:\s*var\(--color-settings-link\)/s,
+  );
   assert.doesNotMatch(
     settingsPageCss,
     /settings-page__badge|settings-general__connection|settings-model-card__group-default|settings-model-card__readonly/,
@@ -1325,16 +1330,30 @@ test('Settings tags use the shared UI Tag component and semantic variants', () =
   assert.match(lightTheme, /--color-feedback-success-toast:\s*#d5f2dc;/i);
   assert.match(lightTheme, /--color-feedback-info:\s*#2563eb;/i);
   assert.match(lightTheme, /--color-feedback-info-subtle:\s*rgba\(59, 130, 246, 0\.08\);/i);
+  assert.match(lightTheme, /--color-tag-info-text:\s*#0f5ed4;/i);
+  assert.match(lightTheme, /--color-tag-info-surface:\s*#deecff;/i);
+  assert.match(lightTheme, /--color-tag-neutral-text:\s*#191919;/i);
+  assert.match(lightTheme, /--color-tag-neutral-surface:\s*#f5f5f5;/i);
 });
 
 test('Settings high-fidelity visual contract remains wired to exact assets and spacing', () => {
   const settingsPageCss = source('src/features/settings/SettingsPage.css');
+  const settingsPageLayout = source('src/features/settings/SettingsPageLayout.tsx');
+  const registryTypes = source('src/features/settings/registry/types.ts');
+  const buttonCss = source('src/components/ui/Button/Button.css');
   const lightTheme = source('src/styles/themes/default/light.css');
+  const settingsSection = source('src/features/settings/components/SettingsSection.tsx');
+  const settingsSectionCss = source('src/features/settings/components/SettingsSection.css');
   const settingRowCss = source('src/features/settings/components/SettingRow.css');
   const formCss = source('src/components/form/components/Form.css');
+  const formDialog = source('src/components/form/components/FormDialog.tsx');
+  const formDialogCss = source('src/components/form/components/FormDialog.css');
+  const settingsConfirmDialog = source('src/features/settings/components/SettingsConfirmDialog.tsx');
+  const settingsConfirmDialogCss = source('src/features/settings/components/SettingsConfirmDialog.css');
   const channelsCss = source('src/features/settings/modules/channels/SettingsChannelsPanel.css');
   const channelsPanel = source('src/features/settings/modules/channels/SettingsChannelsPanel.tsx');
   const channelsModule = source('src/features/settings/modules/channels/index.ts');
+  const channelsDefinition = source('src/features/settings/modules/channels/definition.ts');
   const channelList = source('src/features/settings/modules/channels/components/ChannelListSection.tsx');
   const channelDialog = source('src/features/settings/modules/channels/components/ChannelConfigDialog.tsx');
   const feishuForm = source('src/features/settings/modules/channels/forms/FeishuChannelForm.tsx');
@@ -1342,11 +1361,13 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
   const channelFormItems = source('src/features/settings/modules/channels/channelFormItems.ts');
   const channelRequirements = source('src/features/settings/modules/channels/channelRequirements.ts');
   const modelsSettings = source('src/features/settings/modules/models/ModelsSettings.tsx');
+  const modelsDefinition = source('src/features/settings/modules/models/definition.ts');
   const modelDialog = source('src/features/settings/modules/models/ModelDialog.tsx');
   const modelProviderSelect = source('src/features/settings/modules/models/ModelProviderSelect.tsx');
   const modelProviderIcon = source('src/components/ModelProviderIcon/index.tsx');
   const providerAssets = source('src/assets/providers/index.ts');
   const settingsAssets = source('src/assets/settings/index.ts');
+  const generalDefinition = source('src/features/settings/modules/general/definition.ts');
   const sidebar = source('src/components/SessionSidebar/index.tsx');
   const appSettingsIcon = source('src/assets/settings/app-navigation/settings.svg');
 
@@ -1362,9 +1383,60 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
   );
   assert.match(settingsPageCss, /width:\s*min\(1104px,\s*100%\)/);
   assert.match(settingsPageCss, /\.settings-page__item\s*\{[^}]*display:\s*grid[^}]*gap:\s*16px/s);
+  assert.match(settingsPageLayout, /separatedRows=\{section\.separatedRows === true\}/);
+  assert.match(registryTypes, /separatedRows\?: boolean/);
+  assert.doesNotMatch(registryTypes, /groupedRows/);
+  assert.match(settingsSection, /separatedRows = false/);
+  assert.match(settingsSection, /separatedRows \? '' : ' settings-section__items--grouped'/);
+  assert.match(
+    settingsSectionCss,
+    /\.settings-section__items--grouped\s*\{[^}]*gap:\s*0[^}]*border:\s*1px solid var\(--color-settings-border\)[^}]*border-radius:\s*var\(--radius-xl\)[^}]*background:\s*var\(--color-surface-card\)/s,
+  );
+  assert.match(
+    settingsSectionCss,
+    /\.settings-section__items--grouped > \.settings-page__item \+ \.settings-page__item,[\s\S]*border-top:\s*1px solid var\(--color-settings-border\)/,
+  );
+  assert.doesNotMatch(generalDefinition, /groupedRows|separatedRows/);
+  assert.match(modelsDefinition, /id: 'model-manager',[\s\S]{0,80}separatedRows: true/);
+  assert.match(channelsDefinition, /id: 'channels',[\s\S]{0,80}separatedRows: true/);
+  assert.match(modelsSettings, /<SettingsSection[\s\S]{0,120}separatedRows/);
+  assert.match(channelList, /<SettingsSection separatedRows>/);
+  assert.match(
+    buttonCss,
+    /\.ui-button--icon-only\s*\{[^}]*width:\s*32px[^}]*height:\s*32px[^}]*border:\s*0[^}]*background:\s*transparent/s,
+  );
+  assert.match(
+    buttonCss,
+    /\.ui-button\s*\{[^}]*min-height:\s*32px[^}]*padding:\s*4px 24px[^}]*font-size:\s*14px[^}]*font-weight:\s*400[^}]*line-height:\s*22px[^}]*border:\s*1px solid var\(--color-button-border\)[^}]*border-radius:\s*var\(--radius-full\)/s,
+  );
+  assert.match(
+    buttonCss,
+    /\.ui-button--sm\s*\{[^}]*min-height:\s*28px[^}]*padding:\s*4px 16px[^}]*font-size:\s*12px[^}]*line-height:\s*18px/s,
+  );
   assert.match(
     settingsPageCss,
-    /\.settings-page \.ui-button--icon-only\s*\{[^}]*width:\s*32px[^}]*height:\s*32px[^}]*border:\s*0[^}]*background:\s*transparent/s,
+    /\.settings-page \.settings-inline-input \.ui-button\s*\{[^}]*flex:\s*0 0 auto[^}]*white-space:\s*nowrap/s,
+  );
+  assert.match(buttonCss, /\.ui-button--icon-only\s*\{[^}]*border-radius:\s*8px/s);
+  assert.match(
+    buttonCss,
+    /\.ui-button--primary\s*\{[^}]*color:\s*var\(--color-control-emphasis-text\)[^}]*border-color:\s*var\(--color-control-emphasis\)[^}]*background:\s*var\(--color-control-emphasis\)/s,
+  );
+  assert.doesNotMatch(
+    settingsPageCss,
+    /\.settings-page \.ui-button(?:--(?:primary|quiet|warning|danger|sm|icon-only))?\s*\{/,
+  );
+  assert.equal((formDialog.match(/<Button\s+[\s\S]*?size="sm"/g) ?? []).length >= 2, true);
+  assert.match(formDialogCss, /\.form-dialog__actions \.ui-button\s*\{[^}]*min-width:\s*84px/s);
+  assert.equal((settingsConfirmDialog.match(/<Button[^>]*size="sm"/g) ?? []).length, 2);
+  assert.match(
+    settingsConfirmDialogCss,
+    /\.settings-confirm-dialog__footer \.ui-button\s*\{[^}]*min-width:\s*84px/s,
+  );
+  assert.match(lightTheme, /--color-settings-switch-checked:\s*#1476ff;/i);
+  assert.match(
+    settingsPageCss,
+    /\.settings-page \.ui-switch--checked\s*\{[^}]*border-color:\s*var\(--color-settings-switch-checked\)[^}]*background:\s*var\(--color-settings-switch-checked\)/s,
   );
   assert.match(
     settingsPageCss,
@@ -1376,7 +1448,7 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
   );
   assert.match(
     settingsPageCss,
-    /\.settings-model-group\s*\{[^}]*border:\s*1px solid var\(--color-settings-border\)[^}]*border-radius:\s*12px[^}]*background:\s*var\(--color-surface-card\)/s,
+    /\.settings-model-group\s*\{[^}]*border:\s*1px solid var\(--color-settings-border\)[^}]*border-radius:\s*var\(--radius-xl\)[^}]*background:\s*var\(--color-surface-card\)/s,
   );
   assert.match(
     settingsPageCss,
@@ -1388,8 +1460,13 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
   assert.doesNotMatch(settingsPageCss, /@media\s*\(max-width:\s*1280px\)\s*\{[^}]*\.settings-model-card/s);
   assert.match(lightTheme, /--color-feedback-success-toast:\s*#[\da-f]{6};/i);
   assert.match(lightTheme, /--color-feedback-danger-toast:\s*#[\da-f]{6};/i);
-  assert.match(settingRowCss, /min-height:\s*102px/);
-  assert.match(settingRowCss, /padding:\s*24px/);
+  assert.match(settingRowCss, /min-height:\s*80px/);
+  assert.match(settingRowCss, /padding:\s*16px/);
+  assert.match(settingRowCss, /\.setting-row__title\s*\{[^}]*font-size:\s*14px[^}]*line-height:\s*22px/s);
+  assert.match(
+    settingsPageCss,
+    /\.settings-model-card\s*\{[^}]*grid-template-columns:\s*40px minmax\(0, 1fr\) auto[^}]*min-height:\s*80px[^}]*padding:\s*16px[^}]*border-radius:\s*var\(--radius-xl\)/s,
+  );
   assert.match(settingRowCss, /container:\s*setting-row\s*\/\s*inline-size/);
   assert.match(settingRowCss, /@container\s+setting-row\s*\(max-width:\s*30rem\)/);
   assert.doesNotMatch(settingRowCss, /@media\s*\(max-width:\s*960px\)/);
@@ -1440,7 +1517,11 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
   assert.match(channelsCss, /width:\s*min\(560px,\s*calc\(100vw - 32px\)\)/);
   assert.match(
     channelsCss,
-    /\.settings-channels-panel__channel-card\s*\{[^}]*min-height:\s*102px[^}]*gap:\s*20px[^}]*padding:\s*24px[^}]*border:\s*1px solid var\(--color-settings-border\)[^}]*border-radius:\s*var\(--radius-lg\)/s,
+    /\.settings-channels-panel__channel-list,[\s\S]*gap:\s*0[^}]*border:\s*1px solid var\(--color-settings-border\)[^}]*border-radius:\s*var\(--radius-xl\)/,
+  );
+  assert.match(
+    channelsCss,
+    /\.settings-channels-panel__channel-card\s*\{[^}]*min-height:\s*80px[^}]*gap:\s*20px[^}]*padding:\s*16px[^}]*border:\s*0[^}]*border-radius:\s*0[^}]*background:\s*transparent/s,
   );
   assert.match(
     channelsCss,
@@ -1452,7 +1533,7 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
   );
   assert.match(
     channelsCss,
-    /\.settings-page \.ui-button\.settings-channels-panel__configure-button\s*\{[^}]*width:\s*auto[^}]*min-width:\s*84px[^}]*height:\s*28px[^}]*min-height:\s*28px[^}]*border:\s*1px solid var\(--color-settings-action-border\)[^}]*border-radius:\s*var\(--radius-full\)/s,
+    /\.settings-page \.ui-button\.settings-channels-panel__configure-button\s*\{[^}]*width:\s*auto[^}]*min-width:\s*84px[^}]*height:\s*28px[^}]*min-height:\s*28px[^}]*border:\s*1px solid var\(--color-button-border\)[^}]*border-radius:\s*var\(--radius-full\)/s,
   );
   assert.match(channelsCss, /\.settings-channels-panel__accounts\s*\{[^}]*margin-top:\s*22px[^}]*gap:\s*16px/s);
   assert.match(
@@ -1466,7 +1547,8 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
     channelsCss,
     /\.settings-page \.ui-button\.settings-channels-panel__account-action\s*\{[^}]*width:\s*32px[^}]*height:\s*32px[^}]*padding:\s*8px[^}]*border:\s*0[^}]*background:\s*transparent/s,
   );
-  assert.match(lightTheme, /--color-settings-action-border:\s*#595959;/i);
+  assert.match(lightTheme, /--color-button-border:\s*#595959;/i);
+  assert.match(lightTheme, /--color-button-hover:\s*#fafafa;/i);
   assert.doesNotMatch(channelsModule, /descriptionKey/);
   assert.match(channelList, /<article[^>]*className=\{`settings-channels-panel__channel-card/s);
   assert.doesNotMatch(channelList, /<button[^>]*className=\{`settings-channels-panel__channel-card/s);

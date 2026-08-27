@@ -65,6 +65,7 @@ export interface SettingsSectionDefinition {
   id: string;
   titleKey?: I18nKey;
   descriptionKey?: I18nKey;
+  separatedRows?: boolean;
   items: readonly SettingItemDefinition[];
 }
 export interface SettingsModuleDefinition {

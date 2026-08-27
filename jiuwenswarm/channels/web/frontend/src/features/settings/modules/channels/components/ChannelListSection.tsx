@@ -46,7 +46,7 @@ export function ChannelListSection({
   const guideLanguage: ChannelGuideLanguage = i18n.language.startsWith('zh') ? 'zh' : 'en';
 
   return (
-    <SettingsSection>
+    <SettingsSection separatedRows>
       <div className="settings-channels-panel__list-body" data-testid="settings-channels-panel-list">
         {loading ? (
           <div className="settings-channels-panel__skeleton" data-testid="settings-channels-panel-list-skeleton">

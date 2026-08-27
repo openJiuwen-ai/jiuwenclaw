@@ -86,3 +86,6 @@
   display: flex;
   gap: 8px;
 }
+.form-dialog__actions .ui-button {
+  min-width: 84px;
+}

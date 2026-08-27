@@ -179,6 +179,7 @@ export function SettingsPageLayout({
                   key={section.id}
                   title={section.titleKey ? t(section.titleKey) : undefined}
                   description={section.descriptionKey ? t(section.descriptionKey) : undefined}
+                  separatedRows={section.separatedRows === true}
                 >
                   {items.map(({ item, access }) => (
                     <SettingsItem key={item.id} item={item} access={access} />

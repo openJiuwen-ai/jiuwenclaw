@@ -98,8 +98,6 @@
       "expandGroup": "展开模型组 {{model}} 的其他配置",
       "collapseGroup": "收起模型组 {{model}} 的其他配置",
       "groupDefault": "组内默认",
-      "otherConfigurations": "其他配置",
-      "otherConfigurationsDescription": "选择一条配置替换当前组内默认",
       "setPrimary": "设为主模型",
       "setGroupDefault": "设为组内默认",
       "setGroupDefaultConfirm": "设为组内默认后，直接使用模型名称“{{model}}”且未指定别名时，将使用此配置；同组原默认配置会被取消。确定继续吗？",

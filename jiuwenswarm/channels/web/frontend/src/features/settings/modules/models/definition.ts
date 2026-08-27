@@ -15,6 +15,7 @@ export const modelsModule: SettingsModuleDefinition = {
     },
     {
       id: 'model-manager',
+      separatedRows: true,
       items: [{ id: 'model-manager', component: 'custom', render: ModelsSettings }],
     },
   ],

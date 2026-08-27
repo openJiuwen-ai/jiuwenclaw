@@ -98,8 +98,6 @@
       "expandGroup": "Expand other configurations in the {{model}} model group",
       "collapseGroup": "Collapse other configurations in the {{model}} model group",
       "groupDefault": "Group default",
-      "otherConfigurations": "Other configurations",
-      "otherConfigurationsDescription": "Choose a configuration to replace the current group default",
       "setPrimary": "Make primary",
       "setGroupDefault": "Make group default",
       "setGroupDefaultConfirm": "After this becomes the group default, requests using the model name “{{model}}” without an alias will use this configuration. The previous default in this group will be cleared. Continue?",

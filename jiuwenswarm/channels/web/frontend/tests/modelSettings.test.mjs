@@ -420,7 +420,7 @@ test('model Settings sources use the required RPCs without hardcoded vendor opti
   assert.match(page, /const reloadModels = useCallback[\s\S]*await loadModels\(\)/);
   assert.match(
     page,
-    /<SettingsSection\s+title=\{t\('settingsPanel\.models\.primaryModels'\)\}\s+action=\{\s*<Button variant="primary"[\s\S]{0,180}settingsPanel\.models\.addModel[\s\S]{0,40}<\/Button>\s*\}/,
+    /<SettingsSection\s+title=\{t\('settingsPanel\.models\.primaryModels'\)\}\s+separatedRows\s+action=\{\s*<Button variant="primary"[\s\S]{0,180}settingsPanel\.models\.addModel[\s\S]{0,40}<\/Button>\s*\}/,
   );
   assert.match(page, /setDialog\(nextDialog\);\s*void loadCatalog\(\)/);
   assert.match(page, /type SaveModelsOptions = \{ errorScope\?: SettingsSaveErrorScope \};/);
@@ -514,7 +514,7 @@ test('grouped models use an accessible accordion and keep only the group default
     page,
     /const canSetPrimary = !readOnly && !isPrimary && \(!isDuplicate \|\| model\.is_default === true\)/,
   );
-  assert.match(page, /\{canSetPrimary \? \(\s*<Button[\s\S]{0,240}settingsPanel\.models\.setPrimary/);
+  assert.match(page, /\{canSetPrimary \? \(\s*<Button[\s\S]{0,320}settingsPanel\.models\.setPrimary/);
   assert.match(
     page,
     /<button[\s\S]{0,240}className="settings-model-group__header"[\s\S]{0,240}aria-expanded=\{isExpanded\}[\s\S]{0,160}aria-controls=\{groupContentId\}/,
@@ -531,16 +531,10 @@ test('grouped models use an accessible accordion and keep only the group default
   assert.match(settingsCss, /\.settings-model-group__header:hover\s*\{[^}]*var\(--color-surface-hover\)/s);
   assert.match(settingsCss, /\.settings-model-group__toggle-icon--expanded\s*\{[^}]*rotate\(90deg\)/s);
   assert.match(settingsCss, /\.settings-model-group > \.settings-model-card--grouped,/);
-  assert.match(settingsCss, /\.settings-model-group__alternatives\s*\{[^}]*var\(--color-settings-card-subtle\)/s);
-  assert.equal(zh.settingsPanel.models.otherConfigurations, '其他配置');
+  assert.match(settingsCss, /\.settings-model-group__alternatives\s*\{[^}]*var\(--color-surface-card\)/s);
   assert.equal(zh.settingsPanel.models.groupMeta, '模型组 · {{count}} 个配置');
-  assert.equal(zh.settingsPanel.models.otherConfigurationsDescription, '选择一条配置替换当前组内默认');
-  assert.equal(en.settingsPanel.models.otherConfigurations, 'Other configurations');
   assert.equal(en.settingsPanel.models.groupMeta, 'Model group · {{count}} configurations');
-  assert.equal(
-    en.settingsPanel.models.otherConfigurationsDescription,
-    'Choose a configuration to replace the current group default',
-  );
+  assert.doesNotMatch(page, /settings-model-group__alternatives-heading/);
 });
 
 test('model dialog uses provider terminology and validates as part of confirmation', () => {
@@ -573,7 +567,7 @@ test('model dialog uses provider terminology and validates as part of confirmati
   assert.match(confirmDialog, /<Button variant=\{confirmVariant\}/);
   assert.match(button, /'primary' \| 'secondary' \| 'quiet' \| 'warning' \| 'danger'/);
   assert.match(buttonCss, /\.ui-button--warning[\s\S]*--color-feedback-warning-subtle/);
-  assert.match(settingsCss, /\.settings-page \.ui-button--warning[\s\S]*--color-feedback-warning-subtle/);
+  assert.doesNotMatch(settingsCss, /\.settings-page \.ui-button--warning\s*\{/);
   assert.doesNotMatch(dialog, /secondaryAction=|formDescription/);
   assert.ok(dialog.indexOf("name: 'vendor_selection'") < dialog.indexOf("name: 'protocol'"));
   assert.ok(dialog.indexOf("name: 'protocol'") < dialog.indexOf("name: 'api_base'"));
