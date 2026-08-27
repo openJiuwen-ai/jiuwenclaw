@@ -40,6 +40,10 @@ spec:
               value: "0.0.0.0"
             - name: ENTERPRISE_WEB_WS_PORT
               value: "<<WEB_WS_PORT>>"
+            - name: GATEWAY_URL
+              value: "http://<<GATEWAY_NAME>>:<<WEB_PORT>>"
+            - name: GATEWAY_WEB_HTTP_URL
+              value: "http://<<GATEWAY_NAME>>:<<GATEWAY_WEB_HTTP_PORT>>"
             - name: WS_ORIGIN_CHECK_ENABLED
               value: "<<WS_ORIGIN_CHECK_ENABLED>>"
             - name: WS_ALLOWED_ORIGINS
