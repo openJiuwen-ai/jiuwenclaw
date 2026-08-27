@@ -52,7 +52,7 @@ import {
   type DesktopLocalFilesEventDetail,
   type LocalFilePick,
 } from '../../features/workspace/localFilePicker';
-import { useDesktopLocalFilePickerReady } from '../../hooks';
+import { useDesktopLocalFilePickerReady, useWelcomeBubblePosition } from '../../hooks';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -970,32 +970,11 @@ export function ChatPanel({
   ]);
 
   // 根据 chat-panel 宽度动态调整 welcome bubble 的 right 值
-  useEffect(() => {
-    const panel = panelShellRef.current;
-    const bubble = bubbleRef.current;
-    if (!panel || !bubble || typeof ResizeObserver === 'undefined') return;
-
-    const updateBubbleRight = () => {
-      const width = panel.offsetWidth;
-      let rightValue: number;
-      if (width >= 1130) {
-        rightValue = -114;
-      } else if (width >= 1000) {
-        rightValue = -55;
-      } else if (width >= 800) {
-        rightValue = -10;
-      } else {
-        rightValue = -10;
-      }
-      bubble.style.right = `${rightValue}px`;
-    };
-
-    updateBubbleRight();
-
-    const observer = new ResizeObserver(updateBubbleRight);
-    observer.observe(panel);
-    return () => observer.disconnect();
-  }, []);
+  useWelcomeBubblePosition({
+    panelRef: panelShellRef,
+    bubbleRef,
+    active: !hasConversation,
+  });
 
   // 检测鼠标滚轮事件，即使没有滚动条也能触发加载更多
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
