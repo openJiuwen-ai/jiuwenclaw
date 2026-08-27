@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
 import json
 import logging
 import time
@@ -340,20 +339,6 @@ def format_conch_create_failure(
     )
 
 
-def _install_conch_error_message_patch() -> None:
-    """Prefer richer HTTP error bodies over the SDK's code/error-only message."""
-    import conch.sandbox as sandbox_mod  # type: ignore[import-not-found]
-
-    if getattr(sandbox_mod, "_jiuwenbox_error_message_patched", False):
-        return
-
-    def _patched(exc: BaseException) -> str:
-        return format_conch_control_plane_error(exc)
-
-    sandbox_mod._request_exception_message = _patched  # type: ignore[attr-defined]
-    sandbox_mod._jiuwenbox_error_message_patched = True  # type: ignore[attr-defined]
-
-
 @dataclass
 class _ConchBackgroundJob:
     job_id: str
@@ -405,7 +390,6 @@ def _import_conch() -> _ConchSdk:
             "`pip install -e <path-to-Conch/sdk>` and ensure CONCH_SDK_CONFIG "
             "points at a valid SDK config."
         ) from exc
-    _install_conch_error_message_patch()
     _conch_sdk = _ConchSdk(
         sandbox=Sandbox,
         command_exit_exception=CommandExitException,
@@ -979,8 +963,9 @@ class ConchRuntime(RuntimeAdapter):
             return RuntimeFileOpResult(ok=False, error="io_error", detail=detail)
         try:
             # CommandResult.stdout is text; base64 is ASCII-safe.
+            # binascii.Error / UnicodeEncodeError are ValueError subclasses.
             content = base64.b64decode(result.stdout.encode("ascii"), validate=True)
-        except (binascii.Error, UnicodeEncodeError, ValueError) as exc:
+        except ValueError as exc:
             return RuntimeFileOpResult(
                 ok=False,
                 error="io_error",

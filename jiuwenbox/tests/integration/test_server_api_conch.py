@@ -710,7 +710,6 @@ class TestConchSandboxRuntime:
     def test_run_as_identity_exec_and_upload_ownership(client):
         """Configured run_as_* drops guest processes and new files to host-resolved uid:gid."""
         _require_conch_template_env()
-        import os
 
         uid = os.getuid()
         gid = os.getgid()
