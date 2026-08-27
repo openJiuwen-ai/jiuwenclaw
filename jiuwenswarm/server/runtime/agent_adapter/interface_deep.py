@@ -2209,6 +2209,7 @@ class JiuWenSwarmDeepAdapter:
         *,
         model_name: str | None = None,
         pending_mcp_scan_names: set[str] | None = None,
+        history_before_request_id: str | None = None,
     ) -> "JiuWenSwarmDeepAdapter":
         """Return the session-owned adapter, creating and initializing it once."""
         if self._is_session_scoped_adapter:
@@ -2335,6 +2336,7 @@ class JiuWenSwarmDeepAdapter:
                 await warmup_session_context(
                     deep_agent=getattr(adapter, "_instance", None),
                     session_id=sid,
+                    history_before_request_id=history_before_request_id,
                 )
             except Exception as exc:
                 logger.warning(
@@ -3680,6 +3682,7 @@ class JiuWenSwarmDeepAdapter:
         needed: list[str] | None,
         *,
         model_name: str | None = None,
+        history_before_request_id: str | None = None,
     ) -> None:
         """Reconcile this session's MCP set to ``needed`` (idempotent diff).
 
@@ -3690,13 +3693,16 @@ class JiuWenSwarmDeepAdapter:
         so they survive. MCP-server forms (stdio/remote/hybrid) register/
         unregister; cli/skill-only forms surface via ``_skill_scan_dirs``
         (filtered by the live selection after cold-start assembly), picked up
-        by the refresh_skill_rails on change.
+        by the refresh_skill_rails on change. Because reconcile can be the
+        first session-child creation point, it also forwards the current
+        request's disk-history boundary into context warmup.
         """
         needed_set = {str(n).strip() for n in (needed or []) if isinstance(n, str) and str(n).strip()}
         child = await self._get_or_create_session_adapter(
             session_id,
             model_name=model_name,
             pending_mcp_scan_names=needed_set,
+            history_before_request_id=history_before_request_id,
         )
         if child._instance is None:
             pending_holder = getattr(
@@ -10982,7 +10988,10 @@ class JiuWenSwarmDeepAdapter:
             AgentResponse 包含执行结果
         """
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id,
+                history_before_request_id=request.request_id,
+            )
             try:
                 return await session_adapter.process_message_impl(request, inputs)
             finally:
@@ -11343,7 +11352,10 @@ class JiuWenSwarmDeepAdapter:
         # "entering runner streaming" line so the pre-dispatch work is visible.
         stream_impl_started_at = time.monotonic()
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id,
+                history_before_request_id=request.request_id,
+            )
             try:
                 async for chunk in session_adapter.process_message_stream_impl(request, inputs):
                     yield chunk
