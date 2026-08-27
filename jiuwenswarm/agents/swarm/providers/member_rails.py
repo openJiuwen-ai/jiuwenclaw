@@ -39,6 +39,9 @@ from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import (
 from jiuwenswarm.agents.harness.common.rails.disabled_tools_rail import (
     DisabledToolsRail,
 )
+from jiuwenswarm.agents.harness.common.rails.a2a_outbound_toolkit_rail import (
+    A2AOutboundToolkitRail,
+)
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
@@ -69,6 +72,7 @@ CONTEXT_PROCESSOR = "swarm.context_processor"
 PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
 SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
+A2A_OUTBOUND_TOOLKIT = "swarm.a2a_outbound_toolkit"
 TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
 DISABLED_TOOLS = "swarm.disabled_tools"
 
@@ -148,6 +152,57 @@ def _build_symphony_orchestration_rail(
     if getattr(context, "role", "") != "leader":
         return None
     return SymphonyOrchestrationRail()
+
+
+class A2AOutboundToolkitInput(ConstructionInput):
+    """Stable Gateway route for a Team member's outbound A2A calls."""
+
+    session_id: str = context_field(
+        attr="session_id",
+        default="",
+        description="Originating Team session id.",
+    )
+    channel: str = context_field(
+        attr="channel",
+        default="default",
+        description="Resolved Gateway channel key.",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=A2A_OUTBOUND_TOOLKIT,
+    description="Exposes the registered external A2A Agent toolkit to Team members.",
+    input_model=A2AOutboundToolkitInput,
+)
+def _build_a2a_outbound_toolkit_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> A2AOutboundToolkitRail | None:
+    """Build the shared A2A rail with a route stable across member tasks."""
+    from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+        is_enterprise_runtime,
+    )
+
+    if is_enterprise_runtime():
+        return None
+    inp = A2AOutboundToolkitInput.resolve(params, context)
+    session_id = str(inp.session_id or "").strip()
+    channel = str(inp.channel or "default").strip() or "default"
+
+    def _runtime_route() -> tuple[str, str]:
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+            get_runtime_tool_channel_id,
+            get_runtime_tool_session_id,
+        )
+
+        live_session = str(get_runtime_tool_session_id() or "").strip()
+        if live_session:
+            live_channel = str(get_runtime_tool_channel_id() or "").strip()
+            return live_session, live_channel or channel
+        return session_id, channel
+
+    return A2AOutboundToolkitRail(runtime_route=_runtime_route)
 
 
 class DisabledToolsInput(ConstructionInput):
@@ -482,6 +537,7 @@ __all__ = [
     "PLUGIN_RAILS",
     "SKILL_RETRIEVAL_PROMPT",
     "SYMPHONY_ORCHESTRATION_PROMPT",
+    "A2A_OUTBOUND_TOOLKIT",
     "DISABLED_TOOLS",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
