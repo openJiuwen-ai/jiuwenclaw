@@ -936,18 +936,11 @@ class MessageHandler(ABC):
             else:
                 unresolved_rids.append(rid)
 
-        # Stop gateway stream consumers first — never block on AgentServer RPC.
-        tasks_to_stop = [task for _rid, task, _sess, _mode in candidates]
-        for task in tasks_to_stop:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks_to_stop, return_exceptions=True)
-        # 走集中化 pop+broadcast：新消息顶替旧流式任务后，须让跨窗口配置保存锁
-        # 感知运行态变化（否则前端保存锁卡在最后一次广播值，仅靠重连自愈）。
-        await self._pop_stream_tracking_and_broadcast(
-            [rid for rid, _, _, _ in candidates],
-        )
-
+        # 南向 HTTP 不能先 abort Gateway 的 SSE 再 interrupt：Agent 会
+        # output_detached，而旧 LLM 还在喷 token；下一轮 attach_output 会把
+        # 尾巴打上新 request_id，前端看起来像气泡粘黏。先 interrupt（旧 lease
+        # 仍在），再取消 Gateway consumer。WS 南向同样安全：残余仍走旧 rid。
+        # ``cancel_gateway_tasks=False`` 会在 interrupt 返回后再取消 stream task。
         for old_sid, mode in sid_mode.items():
             cancel_msg = self._clone_message_for_session_cancel(msg, old_sid, mode=mode)
             await self._cancel_agent_work_for_session(
@@ -958,6 +951,19 @@ class MessageHandler(ABC):
                 cancel_gateway_tasks=False,
                 agent_notify="await",
             )
+
+        leftover_tasks = [
+            task for _rid, task, _sess, _mode in candidates if not task.done()
+        ]
+        if leftover_tasks:
+            for task in leftover_tasks:
+                task.cancel()
+            await asyncio.gather(*leftover_tasks, return_exceptions=True)
+        leftover_rids = [
+            rid for rid, _, _, _ in candidates if rid in self._stream_tasks
+        ]
+        if leftover_rids:
+            await self._pop_stream_tracking_and_broadcast(leftover_rids)
 
         if unresolved_rids:
             logger.warning(
