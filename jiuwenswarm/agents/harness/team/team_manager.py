@@ -323,6 +323,11 @@ class TeamManager:
         # is received.  When True, chat.final is no longer suppressed
         # even if seen_team_events is True.
         self._workflow_completed: dict[str, bool] = {}
+        # session_id → True once the is_complete frame for the current round
+        # has been claimed.  Lets both the edge path and the poll path
+        # (team.completed) dedup to exactly one processing_status(is_complete)
+        # broadcast per round.  Reset at round start.
+        self._round_complete_emitted: dict[str, bool] = {}
 
     def has_stream_task(self, session_id: str) -> bool:
         return session_id in self._stream_tasks
@@ -389,6 +394,22 @@ class TeamManager:
     def reset_seen_team_events(self, session_id: str) -> None:
         """Reset the flag at the start of a new conversation round."""
         self._seen_team_events.pop(session_id, None)
+
+    def claim_round_complete(self, session_id: str) -> bool:
+        """Check-and-set per-round completion.
+
+        True if this call is the first to claim completion for the round
+        (caller broadcasts the is_complete frame). False if already
+        claimed (idempotent: skip the broadcast). Reset by
+        ``reset_round_complete`` at round start.
+        """
+        if self._round_complete_emitted.get(session_id):
+            return False
+        self._round_complete_emitted[session_id] = True
+        return True
+
+    def reset_round_complete(self, session_id: str) -> None:
+        self._round_complete_emitted.pop(session_id, None)
 
     def mark_workflow_completed(self, session_id: str) -> None:
         """Mark that the workflow has reached a terminal status."""
