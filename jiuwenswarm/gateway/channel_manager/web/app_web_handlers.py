@@ -1780,6 +1780,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             lambda: a2a_manager.outbound_dispatch_get(str(params.get("dispatch_id") or "")),
         )
 
+    async def _a2a_outbound_dispatch_list(ws, req_id, params, session_id):
+        try:
+            limit = int(params.get("limit", 200))
+        except (TypeError, ValueError):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="limit must be an integer",
+                code="A2A_OUTBOUND_STORE_INVALID",
+            )
+            return
+        limit = max(1, min(limit, 200))
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_dispatch_list(limit=limit),
+        )
+
     channel.register_method("a2a.outbound.settings.get", _a2a_outbound_settings_get)
     channel.register_method("a2a.outbound.settings.update", _a2a_outbound_settings_update)
     channel.register_method("a2a.outbound.discover", _a2a_outbound_discover)
@@ -1792,6 +1811,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         "a2a.outbound.confirm_revision", _a2a_outbound_confirm_revision
     )
     channel.register_method("a2a.outbound.delete", _a2a_outbound_delete)
+    channel.register_method("a2a.outbound.dispatch.list", _a2a_outbound_dispatch_list)
     channel.register_method("a2a.outbound.dispatch.get", _a2a_outbound_dispatch_get)
 
     from jiuwenswarm.common.schema.message import Message, EventType

@@ -250,6 +250,7 @@ async def test_sync_dispatch_returns_normalized_final_message() -> None:
 @pytest.mark.asyncio
 async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget() -> None:
     served = asyncio.Event()
+    received_requests = []
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -261,6 +262,7 @@ async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget()
                     content_length = int(line.split(":", 1)[1].strip())
                     break
             request = json.loads((await reader.readexactly(content_length)).decode())
+            received_requests.append(request)
             response = {
                 "jsonrpc": "2.0",
                 "id": request["id"],
@@ -334,6 +336,7 @@ async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget()
 
     assert result["status"] == "completed"
     assert result["result"]["text"] == "slow final"
+    assert received_requests[0]["params"]["configuration"]["returnImmediately"] is True
 
 
 @pytest.mark.asyncio
@@ -370,7 +373,40 @@ async def test_sync_dispatch_polls_an_accepted_task_to_terminal() -> None:
 
     assert result["status"] == "completed"
     assert result["result"]["text"] == "polled answer"
+    assert client.sent_requests[0][0].configuration.return_immediately is True
     assert len(client.get_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_dispatch_gets_prompt_rejection_before_terminal_wait() -> None:
+    class _UnavailableExecutorClient(_FakeClient):
+        async def send_message(self, request, *, context=None):
+            self.sent_requests.append((request, context))
+            if request.configuration.return_immediately:
+                raise RuntimeError("executor unavailable")
+            await asyncio.Event().wait()
+            yield  # pragma: no cover - keeps this an async generator
+
+    client = _UnavailableExecutorClient()
+    dispatcher, repository = await _dispatcher(client)
+    await repository.update_agent(
+        "agent-1",
+        lambda current: replace(current, sync_wait_seconds=1),
+    )
+
+    result = await asyncio.wait_for(
+        dispatcher.dispatch(
+            agent_id="agent-1",
+            task="do research",
+            mode="sync",
+            source_session_id="s1",
+        ),
+        timeout=0.2,
+    )
+
+    assert result["status"] == "dispatch_failed"
+    assert result["error_code"] == A2AOutboundErrorCode.DISPATCH_REJECTED.value
+    assert client.sent_requests[0][0].configuration.return_immediately is True
 
 
 @pytest.mark.asyncio

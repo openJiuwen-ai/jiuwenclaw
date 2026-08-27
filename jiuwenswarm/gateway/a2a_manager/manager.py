@@ -172,6 +172,9 @@ class A2AManager:
     async def outbound_dispatch_get(self, dispatch_id: str) -> dict[str, Any]:
         return await self._require_outbound().get_dispatch(dispatch_id)
 
+    async def outbound_dispatch_list(self, *, limit: int = 200) -> dict[str, Any]:
+        return await self._require_outbound().list_dispatches(limit=limit)
+
     async def outbound_find_agents(
         self,
         *,

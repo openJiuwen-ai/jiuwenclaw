@@ -381,7 +381,10 @@ class A2AOutboundDispatcher:
                     parts=[Part(text=task_text)],
                 ),
                 configuration=SendMessageConfiguration(
-                    return_immediately=dispatch.mode is A2AOutboundDispatchMode.ASYNC
+                    # Both modes need the remote acceptance/rejection result promptly.
+                    # Sync mode waits locally by polling the accepted task below instead
+                    # of asking the remote HTTP request to stay open for the whole task.
+                    return_immediately=True
                 ),
             )
 
