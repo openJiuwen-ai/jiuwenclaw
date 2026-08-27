@@ -27,6 +27,7 @@ from jiuwenswarm.common.device_rpc.models import DeviceCommandResponse
 from jiuwenswarm.common.gui_rpc.models import GuiRpcResponse
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.server.ws_send import send_wire_payload
+from jiuwenswarm.common.e2a.wire_trace import trace_inbound
 from jiuwenswarm.server.gui_rpc import get_gui_rpc_client
 from jiuwenswarm.server.gui_rpc.client import GuiRpcClientError
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
@@ -1597,6 +1598,7 @@ class AgentWebSocketServer:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
             data = json.loads(raw)
+            trace_inbound(data)
         except json.JSONDecodeError as e:
             wire = encode_json_parse_error_wire(
                 request_id="",
