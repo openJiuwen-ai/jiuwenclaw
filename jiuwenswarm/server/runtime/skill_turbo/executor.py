@@ -123,6 +123,60 @@ logger = logging.getLogger(__name__)
 # LLM 最大输出 token 数；可通过 LLM_MAX_TOKENS 环境变量覆盖，默认 65536
 _DEFAULT_LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "65536"))
 
+
+def resolve_skill_turbo_thinking_kwargs(
+    thinking: str | None,
+    model_client: Any,
+) -> dict[str, Any]:
+    """Optional thinking inject for SkillTurbo LLM calls.
+
+    ``thinking is None`` → empty dict (no adapt, identical to legacy invoke/stream).
+    Unsupported / degraded → empty dict (never abort).
+    """
+    if thinking is None:
+        return {}
+    from jiuwenswarm.common.thinking.adapter import adapt_thinking
+    from jiuwenswarm.common.thinking.types import kwargs_digest, thaw_llm_call_kwargs
+
+    profile = adapt_thinking(thinking, model_client)
+    if not profile.injected or not profile.llm_call_kwargs:
+        if profile.degraded:
+            logger.info(
+                "[SkillTurboExecutor] thinking not injected thinking=%s model=%r reason=%s",
+                profile.thinking,
+                profile.model_name,
+                profile.reason,
+            )
+        return {}
+    kwargs = thaw_llm_call_kwargs(profile.llm_call_kwargs)
+    logger.info(
+        "[SkillTurboExecutor] thinking inject thinking=%s model=%r digest=%s",
+        profile.thinking,
+        profile.model_name,
+        kwargs_digest(kwargs),
+    )
+    return kwargs
+
+
+def is_skill_turbo_thinking_param_error(exc: BaseException) -> bool:
+    """Heuristic: API/client rejected thinking-related call kwargs."""
+    if isinstance(exc, TypeError):
+        return True
+    msg = str(exc).lower()
+    needles = (
+        "extra_body",
+        "thinking",
+        "enable_thinking",
+        "reasoning_effort",
+        "unexpected keyword",
+        "invalid_request",
+        "bad request",
+        "validation error",
+        "unrecognized",
+    )
+    return any(n in msg for n in needles)
+
+
 # ──────────────────────── 全局上下文变量 ────────────────────────
 # Session管理（用于发送事件）
 _session_var: ContextVar[Session | None] = ContextVar("skill_turbo_session", default=None)
@@ -1735,6 +1789,7 @@ class SkillTurboExecutor:
         *,
         node_name: str = "unknown",
         concurrent: bool = False,
+        thinking: str | None = None,
     ) -> str:
         """
         调用 LLM（使用Rail机制）。
@@ -1746,6 +1801,7 @@ class SkillTurboExecutor:
             concurrent: 是否处于并发上下文中。True 时 Executor 自动生成
                 stream_source_id，并注入到本次产生的 llm_reasoning / llm_usage
                 事件，方便前端按调用分桶。
+            thinking: 可选语义 thinking；None 时不调用 adapt、请求体与改前一致。
 
         Returns:
             LLM 响应文本
@@ -1781,6 +1837,8 @@ class SkillTurboExecutor:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        thinking_kwargs = resolve_skill_turbo_thinking_kwargs(thinking, client)
+
         trace_session_token = self._set_llm_interface_log_session()
         try:
             await self._run_rail_hook('before_model_call', ctx)
@@ -1788,7 +1846,24 @@ class SkillTurboExecutor:
             # 使用 Model.invoke() 调用 LLM（受实例级 Semaphore 限流保护）
             logger.debug("[SkillTurboExecutor] call_llm max_tokens=%s node=%s", _DEFAULT_LLM_MAX_TOKENS, node_name)
             async with self._llm_concurrency_guard():
-                response = await client.invoke(messages, max_tokens=_DEFAULT_LLM_MAX_TOKENS)
+                try:
+                    response = await client.invoke(
+                        messages,
+                        max_tokens=_DEFAULT_LLM_MAX_TOKENS,
+                        **thinking_kwargs,
+                    )
+                except Exception as inv_exc:
+                    if thinking_kwargs and is_skill_turbo_thinking_param_error(inv_exc):
+                        logger.warning(
+                            "[SkillTurboExecutor] thinking params rejected, bare retry once: %s",
+                            inv_exc,
+                        )
+                        response = await client.invoke(
+                            messages,
+                            max_tokens=_DEFAULT_LLM_MAX_TOKENS,
+                        )
+                    else:
+                        raise
 
             # llm_usage 事件注入 source_id
             await self._emit_llm_usage(
@@ -1860,6 +1935,7 @@ class SkillTurboExecutor:
         system_prompt: str = "",
         node_name: str = "unknown",
         concurrent: bool = False,
+        thinking: str | None = None,
     ) -> AsyncIterator[str]:
         """
         流式调用 LLM（使用Rail机制）。
@@ -1873,6 +1949,7 @@ class SkillTurboExecutor:
             concurrent: 是否处于并发上下文中。True 时 Executor 自动生成
                 stream_source_id，并注入到本次产生的 llm_reasoning / llm_usage
                 事件，方便前端按调用分桶。
+            thinking: 可选语义 thinking；None 时不调用 adapt、请求体与改前一致。
 
         Yields:
             str: 流式文本片段（普通文本内容）
@@ -1909,6 +1986,8 @@ class SkillTurboExecutor:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        thinking_kwargs = resolve_skill_turbo_thinking_kwargs(thinking, client)
+
         accumulated_message = ""
         trace_session_token = self._set_llm_interface_log_session()
         try:
@@ -1917,7 +1996,30 @@ class SkillTurboExecutor:
             # 使用 Model.stream() 流式调用 LLM
             # 流式调用整个生命周期都占用一个 LLM "槽位"，因此用 Semaphore 包裹整个流。
             async with self._llm_concurrency_guard():
-                async for chunk in client.stream(messages, max_tokens=_DEFAULT_LLM_MAX_TOKENS):
+                async def _iter_chunks():
+                    try:
+                        async for chunk in client.stream(
+                            messages,
+                            max_tokens=_DEFAULT_LLM_MAX_TOKENS,
+                            **thinking_kwargs,
+                        ):
+                            yield chunk
+                    except Exception as stream_exc:
+                        if thinking_kwargs and is_skill_turbo_thinking_param_error(stream_exc):
+                            logger.warning(
+                                "[SkillTurboExecutor] thinking params rejected, "
+                                "bare retry once: %s",
+                                stream_exc,
+                            )
+                            async for chunk in client.stream(
+                                messages,
+                                max_tokens=_DEFAULT_LLM_MAX_TOKENS,
+                            ):
+                                yield chunk
+                        else:
+                            raise
+
+                async for chunk in _iter_chunks():
                     # usage_metadata 通常只在最后一个 chunk 有值，避免对每个 chunk 都调用
                     chunk_usage = getattr(chunk, "usage_metadata", None)
                     if chunk_usage:

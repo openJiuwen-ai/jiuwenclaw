@@ -8,7 +8,11 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
+from jiuwenswarm.server.runtime.skill_turbo.plan_node import (
+    AbortError,
+    DisableThinkingMixin,
+    PlanNode,
+)
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_common import PptCommon
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.utils.bash_utils import (
     BashExecError,
@@ -37,8 +41,11 @@ def _extract_designer_section(
 
     文件 IO 由 PrepareNode 通过 read_file 工具完成后传入 text，
     skill_code 中禁止直接做文件 IO（校验器禁止 open/read_text 等）。
+
+    for_content_template_fill=True（Stage 6 填槽）：不注入从零设计长章与 24k
+    预算全书，改用密度短清单；图表候选页另附图表短片段。
     """
-    if not text:
+    if not text and not for_content_template_fill:
         return ""
 
     def _extract_bounded_section(header: str, end_markers: tuple[str, ...]) -> str:
@@ -53,6 +60,20 @@ def _extract_designer_section(
                 candidates.append(pos)
         end = min(candidates) if candidates else len(text)
         return text[start:end].rstrip()
+
+    if for_content_template_fill:
+        parts = [_CONTENT_FILL_DENSITY_CHECKLIST]
+        if include_charts and text:
+            chart_section = _extract_bounded_section(
+                "## 图表与数据可视化",
+                ("\n### 激活 content-template", "\n## 图片使用规范"),
+            )
+            if chart_section:
+                parts.append(chart_section)
+        return "\n\n".join(parts)
+
+    if not text:
+        return ""
 
     sections = [
         # 只认现行 designer.md：预算为加粗正文 **E. …**，终点「阶段 4」。
@@ -83,7 +104,7 @@ def _extract_designer_section(
             "## 图表与数据可视化",
             ("\n### 激活 content-template", "\n## 图片使用规范"),
         )
-        if chart_section and not for_content_template_fill:
+        if chart_section:
             chart_section = chart_section.replace(
                 "渲染器、`animation:false`、字体栈合并与容器高度兜底已由模板 CSS 与 "
                 "CHART_SCAFFOLD 固化并强制执行；以下为骨架无法替你决策、需要自觉遵守的规则。",
@@ -100,15 +121,22 @@ def _extract_designer_section(
         logger.warning("[P8.0] designer.md 未匹配到新版关键章节")
         return ""
 
-    if for_content_template_fill:
-        return "\n\n".join(selected)
-
     return (
         "兼容说明：以下 designer 规范中的 Grid 示例在本链路必须用等价 Flex 权重实现；"
         "不得违反当前提示词的 CSS Grid 禁令，但页面预算、纵向占用率、逐列验收、"
         "真实语义内容和图表规则保持不变。\n\n"
         + "\n\n".join(selected)
     )
+
+
+# Stage 6 content 填槽用：替代 designer「E. 预算」全书（含 YAML/subagent，与填槽冲突）。
+_CONTENT_FILL_DENSITY_CHECKLIST = """### PAGE_CONTENT 密度硬约束（填槽）
+- 主区须填满：禁止大块空 `flex-1` 纯色或仅一行点缀。
+- 高度链：可伸展容器带 `min-h-0`；子块用 `flex-shrink-0` / `flex-1 min-h-0` 分工。
+- 数量与字号：卡片/要点克制（常见 ≤6 卡、核心点 ≤6）；正文 ≥14px，说明 ≥11px。
+- 图表候选页优先激活模板内 `CHART_SCAFFOLD`，禁止另起第二套初始化框架。
+- 只替换三处占位符；禁止先写 YAML 预算、开 subagent 或重写整页骨架。"""
+
 
 
 _PRESET_STYLE_IDS = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
@@ -630,12 +658,8 @@ def _build_content_template_fill_prompt(
             f"{user_query}\n"
             f"⚠️ 用户 query 中的页数/总量要求已由大纲规划完成，本步骤**仅填充第 {page_number} 页内容页模板**。\n\n"
         )
-    outline_full_section = ""
-    if outline_full.strip() and outline_full.strip() != outline_page.strip():
-        outline_full_section = (
-            "### 大纲全文（仅用于核对本页章节与上下文，不得混入其他页内容）\n"
-            f"{outline_full}\n\n"
-        )
+    # outline_full 故意不注入：本页 outline_page + research 已够；全文易胀 prompt、诱长推理。
+    _ = outline_full
     page_type = _detect_page_type(outline_page)
     page_number_rule = _build_visible_page_number_rule(
         user_query,
@@ -643,14 +667,14 @@ def _build_content_template_fill_prompt(
         total_pages or page_number,
     )
     designer_section = ""
-    if designer_md_text:
-        designer_md = _extract_designer_section(
-            designer_md_text,
-            include_charts=page_type in _CHART_CANDIDATE_TYPES,
-            for_content_template_fill=True,
-        )
-        if designer_md:
-            designer_section = f"\n## skill designer 约束（仅作用于 `{{PAGE_CONTENT}}`）\n{designer_md}\n"
+    # 填槽路径始终注入密度短清单（及可选图表短片段）；无 designer 原文时仍用清单。
+    designer_md = _extract_designer_section(
+        designer_md_text or "",
+        include_charts=page_type in _CHART_CANDIDATE_TYPES,
+        for_content_template_fill=True,
+    )
+    if designer_md:
+        designer_section = f"\n## skill designer 约束（仅作用于 `{{PAGE_CONTENT}}`）\n{designer_md}\n"
     layout_template = _build_content_layout_template(page_type)
     rewrite_section = ""
     if rewrite_hint:
@@ -704,7 +728,6 @@ def _build_content_template_fill_prompt(
         f"{style_text}\n\n"
         "## 大纲 — 本页规划\n"
         f"{outline_page}\n\n"
-        f"{outline_full_section}"
         "## 研究报告 — 本页素材\n"
         f"{research_page}\n"
         f"{_build_image_section(image_map_page)}\n"
@@ -3362,7 +3385,7 @@ class PrepareNode(PlanNode):
         }
 
 
-class PageWorkerNode(PlanNode):
+class PageWorkerNode(DisableThinkingMixin, PlanNode):
     """P8.1 — 按新版 pptx-craft 规则并发生成并校验每页 HTML。"""
 
     def __init__(self) -> None:

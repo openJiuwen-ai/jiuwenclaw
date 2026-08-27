@@ -76,15 +76,16 @@ _DESIGNER_MD_FIXTURE = """
 """.strip()
 
 
-def _minimal_fill_prompt(*, style_id: str) -> str:
+def _minimal_fill_prompt(*, style_id: str, outline_page: str = "- type: content\n  title: 测试页", **kwargs) -> str:
     return _build_content_template_fill_prompt(
         page_number=3,
         style_id=style_id,
         style_text="style stub",
-        outline_page="- type: content\n  title: 测试页",
+        outline_page=outline_page,
         research_page="research stub",
-        outline_full="outline stub",
+        outline_full="OUTLINE_FULL_MARKER 不应出现在填槽 prompt",
         seed_html="<html><main>{{PAGE_CONTENT}}</main></html>",
+        **kwargs,
     )
 
 
@@ -96,6 +97,51 @@ def test_extract_designer_section_matches_current_anchors():
     assert "MARKER_FORBIDDEN_LEAK" not in extracted
     assert "MARKER_STAGE4_LEAK" not in extracted
     assert "## 禁止事项" not in extracted
+
+
+def test_extract_designer_section_content_fill_uses_density_checklist_not_long_chapters():
+    extracted = _extract_designer_section(
+        _DESIGNER_MD_FIXTURE,
+        include_charts=True,
+        for_content_template_fill=True,
+    )
+
+    assert "PAGE_CONTENT 密度硬约束" in extracted
+    assert "CHART_SCAFFOLD" in extracted
+    assert "MARKER_BUDGET_CONTRACT" not in extracted
+    assert "MARKER_FLEX" not in extracted
+    assert "MARKER_LAYOUT" not in extracted
+    assert "MARKER_VISUAL" not in extracted
+    assert "MARKER_CRITICAL" not in extracted
+    assert "## 图表与数据可视化" in extracted
+
+
+def test_content_fill_prompt_omits_outline_full_and_long_designer_chapters():
+    prompt = _minimal_fill_prompt(
+        style_id="business-classic",
+        outline_page="**类型**：trend\n**标题**：趋势页",
+        designer_md_text=_DESIGNER_MD_FIXTURE,
+    )
+
+    assert "OUTLINE_FULL_MARKER" not in prompt
+    assert "大纲全文" not in prompt
+    assert "PAGE_CONTENT 密度硬约束" in prompt
+    assert "MARKER_FLEX" not in prompt
+    assert "MARKER_LAYOUT" not in prompt
+    assert "MARKER_VISUAL" not in prompt
+    assert "MARKER_CRITICAL" not in prompt
+    assert "## 图表与数据可视化" in prompt  # trend 为图表候选页
+
+
+def test_content_fill_prompt_non_chart_page_skips_chart_section():
+    prompt = _minimal_fill_prompt(
+        style_id="business-classic",
+        outline_page="**类型**：case\n**标题**：案例页",
+        designer_md_text=_DESIGNER_MD_FIXTURE,
+    )
+    assert "PAGE_CONTENT 密度硬约束" in prompt
+    assert "## 图表与数据可视化" not in prompt
+    assert "OUTLINE_FULL_MARKER" not in prompt
 
 
 def test_content_fill_prompt_custom_vs_preset_page_content_rules():
