@@ -188,6 +188,8 @@ def _default_conch_block() -> dict:
         "vcpu_num": None,
         "vcpu_max": None,
         "ram_mb": None,
+        "run_as_user": None,
+        "run_as_group": None,
         "env": {},
         "filesystem_policy": {"bind_mounts": []},
         "network": {
@@ -320,6 +322,35 @@ class TestConchSandboxTypeAlways:
             assert resp.status_code == 400, (policy, resp.text)
 
     @staticmethod
+    def test_conch_run_as_rejects_half_pair_and_unknown_user(client):
+        cases = [
+            {"conch": {"run_as_user": "sandbox"}},
+            {"conch": {"run_as_group": "sandbox"}},
+            {
+                "conch": {
+                    "run_as_user": "__jiuwenbox_no_such_user__",
+                    "run_as_group": "0",
+                }
+            },
+            {
+                "conch": {
+                    "run_as_user": "0",
+                    "run_as_group": "4294967295",
+                }
+            },
+        ]
+        for policy in cases:
+            resp = client.post(
+                "/api/v1/sandboxes",
+                json={
+                    "sandbox_runtime": "conch",
+                    "policy_mode": "append",
+                    "policy": policy,
+                },
+            )
+            assert resp.status_code == 400, (policy, resp.text)
+
+    @staticmethod
     def test_get_nonexistent_sandbox_returns_404(client):
         resp = client.get("/api/v1/sandboxes/nonexistent-sbx")
         assert resp.status_code == 404
@@ -387,8 +418,12 @@ class TestConchSandboxRuntime:
 
     @staticmethod
     def test_create_with_vcpu_ram_and_conch_env(client):
-        """Policy conch.vcpu_*/ram_mb/env persist; API env overrides conch.env; top-level environment ignored."""
+        """Policy conch.vcpu_*/ram_mb/env persist; guest sees matching CPUs/RAM; env override rules hold."""
         _require_conch_template_env()
+
+        vcpu_num = 2
+        vcpu_max = 2
+        ram_mb = 2048
 
         create = client.post(
             "/api/v1/sandboxes",
@@ -396,9 +431,9 @@ class TestConchSandboxRuntime:
                 policy={
                     "environment": {"TOP_ONLY": "should-not-appear"},
                     "conch": {
-                        "vcpu_num": 2,
-                        "vcpu_max": 2,
-                        "ram_mb": 2048,
+                        "vcpu_num": vcpu_num,
+                        "vcpu_max": vcpu_max,
+                        "ram_mb": ram_mb,
                         "env": {
                             "CONCH_POLICY_ENV": "from-policy",
                             "SHARED_ENV": "from-policy",
@@ -418,13 +453,40 @@ class TestConchSandboxRuntime:
         sandbox_id = body["id"]
 
         policy = client.get(f"/api/v1/policies/{sandbox_id}").json()
-        assert policy["conch"]["vcpu_num"] == 2
-        assert policy["conch"]["vcpu_max"] == 2
-        assert policy["conch"]["ram_mb"] == 2048
+        assert policy["conch"]["vcpu_num"] == vcpu_num
+        assert policy["conch"]["vcpu_max"] == vcpu_max
+        assert policy["conch"]["ram_mb"] == ram_mb
         assert policy["conch"]["env"]["CONCH_POLICY_ENV"] == "from-policy"
         assert policy["conch"]["env"]["SHARED_ENV"] == "from-policy"
         # Create-request env is applied at SDK create time, not written into conch.env.
         assert "API_ENV" not in policy["conch"]["env"]
+
+        resource_probe = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec",
+            json={
+                "command": [
+                    "sh",
+                    "-c",
+                    "printf 'NPROC=%s\\n' \"$(nproc)\"; "
+                    "awk '/^MemTotal:/ {printf \"MEM_KB=%s\\n\", $2}' /proc/meminfo",
+                ],
+            },
+        )
+        assert resource_probe.status_code == 200, resource_probe.text
+        assert resource_probe.json()["exit_code"] == 0, resource_probe.json()
+        resource_out = resource_probe.json()["stdout"]
+        nproc_match = re.search(r"(?m)^NPROC=(\d+)$", resource_out)
+        mem_match = re.search(r"(?m)^MEM_KB=(\d+)$", resource_out)
+        assert nproc_match, resource_out
+        assert mem_match, resource_out
+        assert int(nproc_match.group(1)) == vcpu_num, resource_out
+        # Guest MemTotal is usually slightly below configured RAM (kernel reserved).
+        mem_kb = int(mem_match.group(1))
+        expected_kb = ram_mb * 1024
+        assert expected_kb * 85 // 100 <= mem_kb <= expected_kb, (
+            f"guest MemTotal {mem_kb} KiB not within 85%-100% of policy "
+            f"ram_mb={ram_mb} ({expected_kb} KiB); stdout={resource_out!r}"
+        )
 
         env_probe = client.post(
             f"/api/v1/sandboxes/{sandbox_id}/exec",
@@ -643,6 +705,63 @@ class TestConchSandboxRuntime:
         )
         assert searched.status_code == 200, searched.text
         assert searched.json().get("items")
+
+    @staticmethod
+    def test_run_as_identity_exec_and_upload_ownership(client):
+        """Configured run_as_* drops guest processes and new files to host-resolved uid:gid."""
+        _require_conch_template_env()
+        import os
+
+        uid = os.getuid()
+        gid = os.getgid()
+
+        create = client.post(
+            "/api/v1/sandboxes",
+            json=_conch_create_json(
+                policy={
+                    "conch": {
+                        "run_as_user": str(uid),
+                        "run_as_group": str(gid),
+                    }
+                }
+            ),
+        )
+        assert create.status_code == 201, create.text
+        body = create.json()
+        assert body["phase"] == "ready", body
+        sandbox_id = body["id"]
+
+        id_resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec",
+            json={"command": ["sh", "-c", "id -u; id -g"]},
+        )
+        assert id_resp.status_code == 200, id_resp.text
+        assert id_resp.json()["exit_code"] == 0, id_resp.json()
+        lines = [line.strip() for line in id_resp.json()["stdout"].splitlines() if line.strip()]
+        assert lines[:2] == [str(uid), str(gid)], lines
+
+        upload_path = f"/tmp/conch-run-as-{sandbox_id}.bin"
+        upload = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/upload",
+            params={"sandbox_path": upload_path},
+            files={"file": ("owned.bin", b"\x00\x01\xff", "application/octet-stream")},
+        )
+        assert upload.status_code == 204, upload.text
+
+        owned = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec",
+            json={"command": ["stat", "-c", "%u:%g", upload_path]},
+        )
+        assert owned.status_code == 200, owned.text
+        assert owned.json()["exit_code"] == 0, owned.json()
+        assert owned.json()["stdout"].strip() == f"{uid}:{gid}"
+
+        download = client.get(
+            f"/api/v1/sandboxes/{sandbox_id}/download",
+            params={"sandbox_path": upload_path},
+        )
+        assert download.status_code == 200, download.text
+        assert download.content == b"\x00\x01\xff"
 
     @staticmethod
     def test_stop_rejected_restart_and_delete(client):

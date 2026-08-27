@@ -2626,6 +2626,7 @@ def get_sandbox_endpoint() -> dict[str, Any]:
 
     当 ``type=jiuwenbox-conch`` 时额外返回:
     - ``template_id`` (字符串; 可能为空, 由 enable / 建 card 再硬校验)
+    - 若 yaml 中存在: ``user`` / ``group`` (原样透传到 policy.conch.run_as_*)
 
     Raises:
         ValueError: yaml 里 ``preserve_file_sharing_mode`` 写了非法值时, 直接
@@ -2652,6 +2653,10 @@ def get_sandbox_endpoint() -> dict[str, Any]:
                 result[key] = sandbox[key]
     if sandbox_type == _SANDBOX_TYPE_JIUWENBOX_CONCH:
         result["template_id"] = str(sandbox.get("template_id") or "").strip()
+        if "user" in sandbox:
+            result["user"] = sandbox["user"]
+        if "group" in sandbox:
+            result["group"] = sandbox["group"]
     return result
 
 

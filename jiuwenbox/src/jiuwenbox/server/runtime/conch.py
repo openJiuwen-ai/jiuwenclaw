@@ -9,6 +9,9 @@ stop; ``stop()`` raises and callers should delete or restart (cold recreate).
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -31,6 +34,7 @@ from jiuwenbox.server.conch_policy import (
     map_conch_network_policy,
     map_conch_volume_mounts,
     merge_conch_create_env,
+    resolve_conch_run_as,
     resolve_conch_template_id,
 )
 from jiuwenbox.server.runtime.base import (
@@ -49,6 +53,143 @@ _CONCH_DELETE_POLL_INTERVAL_SECONDS = 0.5
 _CONCH_RECREATE_ATTEMPTS = 5
 _CONCH_DELETE_ATTEMPTS = 5
 _CONCH_DELETE_RETRY_SECONDS = 0.5
+_GUEST_PYTHON = "python3"
+
+# Guest helper exit codes shared by file ops via commands.run.
+_FILE_EXIT_NOT_FOUND = 44
+_FILE_EXIT_IS_DIRECTORY = 45
+_FILE_EXIT_NOT_A_DIRECTORY = 46
+
+_PRIVDROP_SCRIPT = """
+import json, os, sys
+uid = int(sys.argv[1])
+gid = int(sys.argv[2])
+cmd = json.loads(sys.argv[3])
+try:
+    os.setgroups([])
+    os.setgid(gid)
+    os.setuid(uid)
+except OSError as exc:
+    print(f"jiuwenbox: cannot switch to {uid}:{gid}: {exc}", file=sys.stderr)
+    raise SystemExit(126)
+os.execvp(cmd[0], cmd)
+""".strip()
+
+_WRITE_FILE_SCRIPT = """
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_bytes(sys.stdin.buffer.read())
+""".strip()
+
+_READ_FILE_SCRIPT = """
+import base64
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.exists():
+    sys.exit(44)
+if path.is_dir():
+    sys.exit(45)
+sys.stdout.buffer.write(base64.b64encode(path.read_bytes()))
+""".strip()
+
+_LIST_DIR_SCRIPT = """
+import datetime
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+recursive = sys.argv[2] == "1"
+max_depth = None if sys.argv[3] == "" else int(sys.argv[3])
+include_files = sys.argv[4] == "1"
+include_dirs = sys.argv[5] == "1"
+
+if not root.exists():
+    sys.exit(44)
+if not root.is_dir():
+    sys.exit(46)
+
+if recursive:
+    entries = root.rglob("*")
+else:
+    entries = root.iterdir()
+
+items = []
+for entry in entries:
+    try:
+        stat = entry.stat()
+    except OSError:
+        continue
+    rel_parts = entry.relative_to(root).parts
+    if max_depth is not None and len(rel_parts) > max_depth:
+        continue
+    is_dir = entry.is_dir()
+    if is_dir and not include_dirs:
+        continue
+    if not is_dir and not include_files:
+        continue
+    items.append({
+        "name": entry.name,
+        "path": str(entry),
+        "size": 0 if is_dir else stat.st_size,
+        "is_directory": is_dir,
+        "modified_time": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        "type": "dir" if is_dir else (os.path.splitext(entry.name)[1] or "file"),
+        "permissions": None,
+    })
+items.sort(key=lambda item: item["path"])
+print(json.dumps(items, ensure_ascii=False))
+""".strip()
+
+_SEARCH_FILES_SCRIPT = """
+import datetime
+import fnmatch
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+pattern = sys.argv[2]
+exclude_patterns = json.loads(sys.argv[3])
+
+if not root.exists():
+    sys.exit(44)
+if not root.is_dir():
+    sys.exit(46)
+
+items = []
+for entry in root.rglob("*"):
+    if not entry.is_file():
+        continue
+    rel = str(entry.relative_to(root))
+    if not (fnmatch.fnmatch(entry.name, pattern) or fnmatch.fnmatch(rel, pattern)):
+        continue
+    if any(
+        fnmatch.fnmatch(entry.name, item) or fnmatch.fnmatch(rel, item)
+        for item in exclude_patterns
+    ):
+        continue
+    try:
+        stat = entry.stat()
+    except OSError:
+        continue
+    items.append({
+        "name": entry.name,
+        "path": str(entry),
+        "size": stat.st_size,
+        "is_directory": False,
+        "modified_time": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        "type": os.path.splitext(entry.name)[1] or "file",
+        "permissions": None,
+    })
+items.sort(key=lambda item: item["path"])
+print(json.dumps(items, ensure_ascii=False))
+""".strip()
 
 
 def _is_conch_not_found(exc: BaseException) -> bool:
@@ -73,6 +214,144 @@ def _is_conch_delete_retryable(exc: BaseException) -> bool:
         or ("chain '" in text and "does not exist" in text)
         or ("cni-" in text and "does not exist" in text)
     )
+
+
+# Extra JSON keys some conchd builds attach beyond code/error.
+_CONCH_ERROR_DETAIL_KEYS = (
+    "details",
+    "detail",
+    "reason",
+    "field",
+    "fields",
+    "param",
+    "parameter",
+    "invalid_fields",
+    "violations",
+    "issues",
+    "cause",
+    "hint",
+)
+
+
+def format_conch_control_plane_error(exc: BaseException) -> str:
+    """Build a control-plane error string, keeping extra JSON fields when present.
+
+    The Conch SDK normally surfaces only ``code`` + ``error``. When the HTTP
+    response (or an exception cause) still carries richer JSON, include it so
+    callers can see *which* argument failed.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        cause = getattr(exc, "__cause__", None)
+        if cause is not None:
+            response = getattr(cause, "response", None)
+
+    if response is None:
+        return str(exc)
+
+    parts: list[str] = []
+    status = getattr(response, "status_code", None)
+    if status is not None:
+        parts.append(f"HTTP {status}")
+
+    body: Any = None
+    try:
+        body = response.json()
+    except (ValueError, TypeError):
+        text = (getattr(response, "text", None) or "").strip()
+        if text:
+            parts.append(text[:2000])
+        return "; ".join(parts) if parts else str(exc)
+
+    if isinstance(body, dict):
+        code = body.get("code")
+        error = body.get("error") or body.get("message")
+        if code and error:
+            parts.append(f"{code}: {error}")
+        elif error:
+            parts.append(str(error))
+        elif code:
+            parts.append(str(code))
+        for key in _CONCH_ERROR_DETAIL_KEYS:
+            if key not in body:
+                continue
+            value = body[key]
+            if value in (None, "", [], {}):
+                continue
+            parts.append(f"{key}={value!r}" if not isinstance(value, str) else f"{key}={value}")
+    elif body is not None:
+        parts.append(str(body)[:2000])
+
+    return "; ".join(parts) if parts else str(exc)
+
+
+def summarize_conch_create_args(
+    *,
+    sandbox_id: str,
+    template_id: str | None,
+    resource_kwargs: dict[str, Any],
+    volume_mounts: list[dict[str, Any]] | None,
+    network: dict[str, Any] | None,
+    create_env: dict[str, str] | None,
+) -> dict[str, Any]:
+    """Return a redacted summary of the create payload sent to conchd."""
+    mounts: list[dict[str, Any]] = []
+    for mount in volume_mounts or []:
+        mounts.append(
+            {
+                "source": mount.get("source"),
+                "path": mount.get("path"),
+                "readonly": mount.get("readonly"),
+            }
+        )
+    return {
+        "sandbox_id": sandbox_id,
+        "template_id": template_id,
+        **resource_kwargs,
+        "volume_mounts": mounts,
+        "network": network,
+        "env_keys": sorted((create_env or {}).keys()),
+    }
+
+
+def format_conch_create_failure(
+    exc: BaseException,
+    *,
+    sandbox_id: str,
+    template_id: str | None,
+    resource_kwargs: dict[str, Any],
+    volume_mounts: list[dict[str, Any]] | None,
+    network: dict[str, Any] | None,
+    create_env: dict[str, str] | None,
+) -> str:
+    """Human-readable create failure: conchd message + the args we sent."""
+    remote = format_conch_control_plane_error(exc)
+    args = summarize_conch_create_args(
+        sandbox_id=sandbox_id,
+        template_id=template_id,
+        resource_kwargs=resource_kwargs,
+        volume_mounts=volume_mounts,
+        network=network,
+        create_env=create_env,
+    )
+    return (
+        f"Conch create failed for sandbox {sandbox_id!r}: {remote}; "
+        f"create_args={json.dumps(args, ensure_ascii=False, default=str)}"
+    )
+
+
+def _install_conch_error_message_patch() -> None:
+    """Prefer richer HTTP error bodies over the SDK's code/error-only message."""
+    import conch.sandbox as sandbox_mod  # type: ignore[import-not-found]
+
+    if getattr(sandbox_mod, "_jiuwenbox_error_message_patched", False):
+        return
+
+    def _patched(exc: BaseException) -> str:
+        return format_conch_control_plane_error(exc)
+
+    sandbox_mod._request_exception_message = _patched  # type: ignore[attr-defined]
+    sandbox_mod._jiuwenbox_error_message_patched = True  # type: ignore[attr-defined]
 
 
 @dataclass
@@ -126,6 +405,7 @@ def _import_conch() -> _ConchSdk:
             "`pip install -e <path-to-Conch/sdk>` and ensure CONCH_SDK_CONFIG "
             "points at a valid SDK config."
         ) from exc
+    _install_conch_error_message_patch()
     _conch_sdk = _ConchSdk(
         sandbox=Sandbox,
         command_exit_exception=CommandExitException,
@@ -154,27 +434,22 @@ def _parse_conch_timestamp(value: str | None, fallback: datetime) -> datetime:
         return fallback
 
 
-def _entry_to_item(entry: Any) -> dict[str, Any]:
-    path = getattr(entry, "path", "") or ""
-    name = getattr(entry, "name", "") or Path(path).name
-    is_directory = bool(getattr(entry, "is_directory", False))
-    file_type = getattr(entry, "type", None)
-    type_value = None
-    if file_type is not None:
-        type_value = getattr(file_type, "value", str(file_type))
-    elif is_directory:
-        type_value = "dir"
-    else:
-        type_value = "file"
-    return {
-        "name": name,
-        "path": path,
-        "size": int(getattr(entry, "size", 0) or 0),
-        "is_directory": is_directory,
-        "modified_time": getattr(entry, "modified_time", "") or None,
-        "type": type_value,
-        "permissions": getattr(entry, "permissions", "") or None,
-    }
+def wrap_run_as_command(command: list[str], uid: int, gid: int) -> list[str]:
+    """Wrap ``command`` so guest python drops to ``uid:gid`` before execvp.
+
+    Uses argv (not shell) for uid/gid and ``json.dumps(command)`` to avoid injection.
+    """
+    if not command:
+        raise ValueError("command must not be empty")
+    return [
+        _GUEST_PYTHON,
+        "-S",
+        "-c",
+        _PRIVDROP_SCRIPT,
+        str(uid),
+        str(gid),
+        json.dumps(command),
+    ]
 
 
 class ConchRuntime(RuntimeAdapter):
@@ -187,6 +462,7 @@ class ConchRuntime(RuntimeAdapter):
         self._lifecycle_lock = asyncio.Lock()
         self._sandboxes: dict[str, Any] = {}
         self._create_env: dict[str, dict[str, str]] = {}
+        self._run_as: dict[str, tuple[int, int]] = {}
         self._background_jobs: dict[str, dict[str, _ConchBackgroundJob]] = {}
         self._policy_paths: dict[str, Path] = {}
 
@@ -211,6 +487,7 @@ class ConchRuntime(RuntimeAdapter):
         # Conch env comes from policy.conch.env (+ create API env override).
         # Top-level SecurityPolicy.environment is bwrap-only and must not merge.
         create_env = merge_conch_create_env(policy.conch.env, env)
+        run_as = resolve_conch_run_as(policy)
 
         sdk = _import_conch()
 
@@ -224,13 +501,30 @@ class ConchRuntime(RuntimeAdapter):
                 **resource_kwargs,
             )
 
-        async with self._lifecycle_lock:
-            handle = await asyncio.to_thread(_create)
+        try:
+            async with self._lifecycle_lock:
+                handle = await asyncio.to_thread(_create)
+        except Exception as exc:
+            raise RuntimeError(
+                format_conch_create_failure(
+                    exc,
+                    sandbox_id=sandbox_id,
+                    template_id=template_id,
+                    resource_kwargs=resource_kwargs,
+                    volume_mounts=volume_mounts,
+                    network=network,
+                    create_env=create_env,
+                )
+            ) from exc
         async with self._lock:
             self._sandboxes[sandbox_id] = handle
             self._create_env[sandbox_id] = create_env
             self._policy_paths[sandbox_id] = Path(policy_path)
             self._background_jobs.setdefault(sandbox_id, {})
+            if run_as is not None:
+                self._run_as[sandbox_id] = run_as
+            else:
+                self._run_as.pop(sandbox_id, None)
         return None
 
     async def stop(self, sandbox_id: str, timeout: float = 10.0) -> None:
@@ -372,6 +666,7 @@ class ConchRuntime(RuntimeAdapter):
             handle = self._sandboxes.pop(sandbox_id, None)
             self._create_env.pop(sandbox_id, None)
             self._policy_paths.pop(sandbox_id, None)
+            self._run_as.pop(sandbox_id, None)
             jobs = self._background_jobs.pop(sandbox_id, {})
 
         for job in jobs.values():
@@ -455,8 +750,9 @@ class ConchRuntime(RuntimeAdapter):
         handle = await self._require_handle(sandbox_id)
         if not request.command:
             raise ValueError("command must not be empty")
-        cmd = request.command[0]
-        args = list(request.command[1:])
+        command = await self._prepare_command(sandbox_id, list(request.command))
+        cmd = command[0]
+        args = list(command[1:])
         stdin = request.stdin_data
         sdk = _import_conch()
 
@@ -503,8 +799,10 @@ class ConchRuntime(RuntimeAdapter):
                 command=list(request.command),
                 error_message="command must not be empty",
             )
-        cmd = request.command[0]
-        args = list(request.command[1:])
+        original_command = list(request.command)
+        command = await self._prepare_command(sandbox_id, original_command)
+        cmd = command[0]
+        args = list(command[1:])
         sdk = _import_conch()
 
         def _start() -> Any:
@@ -526,13 +824,13 @@ class ConchRuntime(RuntimeAdapter):
             if "already" in lower or "duplicate" in lower or "conflict" in lower:
                 return BackgroundExecResult(
                     started=False,
-                    command=list(request.command),
+                    command=original_command,
                     job_id=request.job_id,
                     error_message=message,
                 )
             return BackgroundExecResult(
                 started=False,
-                command=list(request.command),
+                command=original_command,
                 job_id=request.job_id,
                 error_message=message,
             )
@@ -542,7 +840,7 @@ class ConchRuntime(RuntimeAdapter):
         job = _ConchBackgroundJob(
             job_id=request.job_id,
             sandbox_id=sandbox_id,
-            command=list(request.command),
+            command=original_command,
             pid=pid_int,
             workdir=request.workdir,
             command_handle=command_handle,
@@ -558,7 +856,7 @@ class ConchRuntime(RuntimeAdapter):
             started=True,
             job_id=request.job_id,
             pid=pid_int,
-            command=list(request.command),
+            command=original_command,
             running=True,
             exit_code=None,
         )
@@ -640,51 +938,54 @@ class ConchRuntime(RuntimeAdapter):
         mkdir_parents: bool = True,
         mode: int | None = None,
     ) -> RuntimeFileOpResult:
-        del mkdir_parents, mode  # Conch files.write has no mode/mkdir controls.
-        handle = await self._require_handle(sandbox_id)
-        sdk = _import_conch()
-
-        def _write() -> None:
-            handle.files.write(sandbox_path, content)
-
-        try:
-            await asyncio.to_thread(_write)
-        except sdk.not_found_error as exc:
-            return RuntimeFileOpResult(ok=False, error="not_found", detail=str(exc))
-        except sdk.invalid_argument_error as exc:
-            return RuntimeFileOpResult(ok=False, error="invalid_argument", detail=str(exc))
-        except sdk.sandbox_error as exc:
-            return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
-        except Exception as exc:
-            return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
-        return RuntimeFileOpResult(ok=True)
+        del mkdir_parents, mode  # helpers always mkdir parents; Conch has no mode.
+        result = await self.exec(
+            sandbox_id,
+            RuntimeExecRequest(
+                command=[_GUEST_PYTHON, "-S", "-c", _WRITE_FILE_SCRIPT, sandbox_path],
+                stdin_data=content,
+            ),
+        )
+        if result.exit_code == 0:
+            return RuntimeFileOpResult(ok=True)
+        detail = (result.stderr or result.stdout or f"exit {result.exit_code}").strip()
+        return RuntimeFileOpResult(ok=False, error="io_error", detail=detail)
 
     async def read_file(
         self,
         sandbox_id: str,
         sandbox_path: str,
     ) -> RuntimeFileOpResult:
-        handle = await self._require_handle(sandbox_id)
-        sdk = _import_conch()
-
-        def _read() -> bytes:
-            return handle.files.read(sandbox_path, format="bytes")
-
+        result = await self.exec(
+            sandbox_id,
+            RuntimeExecRequest(
+                command=[_GUEST_PYTHON, "-S", "-c", _READ_FILE_SCRIPT, sandbox_path],
+            ),
+        )
+        if result.exit_code == _FILE_EXIT_NOT_FOUND:
+            return RuntimeFileOpResult(
+                ok=False,
+                error="not_found",
+                detail=result.stderr or sandbox_path,
+            )
+        if result.exit_code == _FILE_EXIT_IS_DIRECTORY:
+            return RuntimeFileOpResult(
+                ok=False,
+                error="is_directory",
+                detail=result.stderr or sandbox_path,
+            )
+        if result.exit_code != 0:
+            detail = (result.stderr or result.stdout or f"exit {result.exit_code}").strip()
+            return RuntimeFileOpResult(ok=False, error="io_error", detail=detail)
         try:
-            content = await asyncio.to_thread(_read)
-        except sdk.not_found_error as exc:
-            return RuntimeFileOpResult(ok=False, error="not_found", detail=str(exc))
-        except sdk.invalid_argument_error as exc:
-            return RuntimeFileOpResult(ok=False, error="invalid_argument", detail=str(exc))
-        except IsADirectoryError as exc:
-            return RuntimeFileOpResult(ok=False, error="is_directory", detail=str(exc))
-        except sdk.sandbox_error as exc:
-            message = str(exc).lower()
-            if "directory" in message:
-                return RuntimeFileOpResult(ok=False, error="is_directory", detail=str(exc))
-            return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
-        except Exception as exc:
-            return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
+            # CommandResult.stdout is text; base64 is ASCII-safe.
+            content = base64.b64decode(result.stdout.encode("ascii"), validate=True)
+        except (binascii.Error, UnicodeEncodeError, ValueError) as exc:
+            return RuntimeFileOpResult(
+                ok=False,
+                error="io_error",
+                detail=f"failed to decode file content: {exc}",
+            )
         return RuntimeFileOpResult(ok=True, content=content)
 
     async def list_dir(
@@ -697,36 +998,56 @@ class ConchRuntime(RuntimeAdapter):
         include_files: bool = True,
         include_dirs: bool = True,
     ) -> RuntimeFileOpResult:
-        handle = await self._require_handle(sandbox_id)
         if recursive:
             depth = max_depth if max_depth is not None else _CONCH_LIST_DEFAULT_MAX_DEPTH
+            depth_arg = str(depth)
         else:
-            depth = 1
-        sdk = _import_conch()
-
-        def _list() -> list[Any]:
-            return handle.files.list(sandbox_path, depth=depth)
-
+            depth_arg = ""
+        result = await self.exec(
+            sandbox_id,
+            RuntimeExecRequest(
+                command=[
+                    _GUEST_PYTHON,
+                    "-S",
+                    "-c",
+                    _LIST_DIR_SCRIPT,
+                    sandbox_path,
+                    "1" if recursive else "0",
+                    depth_arg,
+                    "1" if include_files else "0",
+                    "1" if include_dirs else "0",
+                ],
+            ),
+        )
+        if result.exit_code == _FILE_EXIT_NOT_FOUND:
+            return RuntimeFileOpResult(
+                ok=False,
+                error="not_found",
+                detail=result.stderr or sandbox_path,
+            )
+        if result.exit_code == _FILE_EXIT_NOT_A_DIRECTORY:
+            return RuntimeFileOpResult(
+                ok=False,
+                error="not_a_directory",
+                detail=result.stderr or sandbox_path,
+            )
+        if result.exit_code != 0:
+            detail = (result.stderr or result.stdout or f"exit {result.exit_code}").strip()
+            return RuntimeFileOpResult(ok=False, error="io_error", detail=detail)
         try:
-            entries = await asyncio.to_thread(_list)
-        except sdk.not_found_error as exc:
-            return RuntimeFileOpResult(ok=False, error="not_found", detail=str(exc))
-        except sdk.invalid_argument_error as exc:
-            return RuntimeFileOpResult(ok=False, error="invalid_argument", detail=str(exc))
-        except sdk.sandbox_error as exc:
-            return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
-        except Exception as exc:
-            return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
-
-        items: list[dict[str, Any]] = []
-        for entry in entries:
-            item = _entry_to_item(entry)
-            if item["is_directory"]:
-                if include_dirs:
-                    items.append(item)
-            elif include_files:
-                items.append(item)
-        items.sort(key=lambda row: str(row.get("path") or ""))
+            items = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            return RuntimeFileOpResult(
+                ok=False,
+                error="io_error",
+                detail=f"invalid list output: {exc}",
+            )
+        if not isinstance(items, list):
+            return RuntimeFileOpResult(
+                ok=False,
+                error="io_error",
+                detail="list output must be a JSON array",
+            )
         return RuntimeFileOpResult(ok=True, items=items)
 
     async def search_files(
@@ -737,39 +1058,77 @@ class ConchRuntime(RuntimeAdapter):
         *,
         exclude_patterns: list[str] | None = None,
     ) -> RuntimeFileOpResult:
-        handle = await self._require_handle(sandbox_id)
         if not patterns:
-            return RuntimeFileOpResult(ok=False, error="invalid_argument", detail="patterns required")
-        # Conch search accepts a single pattern; join alternatives with '|' is not
-        # supported, so use the first pattern (API currently exposes one pattern).
-        pattern = patterns[0]
-        sdk = _import_conch()
-
-        def _search() -> list[Any]:
-            return handle.files.search(
-                sandbox_path,
-                pattern,
-                exclude_patterns=exclude_patterns,
+            return RuntimeFileOpResult(
+                ok=False,
+                error="invalid_argument",
+                detail="patterns required",
             )
-
+        # Conch search accepts a single pattern; API currently exposes one pattern.
+        pattern = patterns[0]
+        result = await self.exec(
+            sandbox_id,
+            RuntimeExecRequest(
+                command=[
+                    _GUEST_PYTHON,
+                    "-S",
+                    "-c",
+                    _SEARCH_FILES_SCRIPT,
+                    sandbox_path,
+                    pattern,
+                    json.dumps(exclude_patterns or []),
+                ],
+            ),
+        )
+        if result.exit_code == _FILE_EXIT_NOT_FOUND:
+            return RuntimeFileOpResult(
+                ok=False,
+                error="not_found",
+                detail=result.stderr or sandbox_path,
+            )
+        if result.exit_code == _FILE_EXIT_NOT_A_DIRECTORY:
+            return RuntimeFileOpResult(
+                ok=False,
+                error="not_a_directory",
+                detail=result.stderr or sandbox_path,
+            )
+        if result.exit_code != 0:
+            detail = (result.stderr or result.stdout or f"exit {result.exit_code}").strip()
+            return RuntimeFileOpResult(ok=False, error="io_error", detail=detail)
         try:
-            entries = await asyncio.to_thread(_search)
-        except sdk.not_found_error as exc:
-            return RuntimeFileOpResult(ok=False, error="not_found", detail=str(exc))
-        except sdk.invalid_argument_error as exc:
-            return RuntimeFileOpResult(ok=False, error="invalid_argument", detail=str(exc))
-        except sdk.sandbox_error as exc:
-            return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
-        except Exception as exc:
-            return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
-
-        items = [_entry_to_item(entry) for entry in entries]
-        items.sort(key=lambda row: str(row.get("path") or ""))
+            items = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            return RuntimeFileOpResult(
+                ok=False,
+                error="io_error",
+                detail=f"invalid search output: {exc}",
+            )
+        if not isinstance(items, list):
+            return RuntimeFileOpResult(
+                ok=False,
+                error="io_error",
+                detail="search output must be a JSON array",
+            )
         return RuntimeFileOpResult(ok=True, items=items)
 
     async def _get_handle(self, sandbox_id: str) -> Any | None:
         async with self._lock:
             return self._sandboxes.get(sandbox_id)
+
+    async def _get_run_as(self, sandbox_id: str) -> tuple[int, int] | None:
+        async with self._lock:
+            return self._run_as.get(sandbox_id)
+
+    async def _prepare_command(
+        self,
+        sandbox_id: str,
+        command: list[str],
+    ) -> list[str]:
+        run_as = await self._get_run_as(sandbox_id)
+        if run_as is None:
+            return command
+        uid, gid = run_as
+        return wrap_run_as_command(command, uid, gid)
 
     async def _require_handle(self, sandbox_id: str) -> Any:
         handle = await self._get_handle(sandbox_id)

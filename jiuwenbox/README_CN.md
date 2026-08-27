@@ -415,11 +415,12 @@ bwrap / ProcessRuntime **忽略**本段。创建 Conch 沙箱时由 `ConchRuntim
 | `vcpu_num` | 省略/`null` | 可选；VM 启动 vCPU 数（`>= 1`）。省略则用 SDK/`sdk-config.yaml` 默认 |
 | `vcpu_max` | 省略/`null` | 可选；vCPU 上限，须 `>= vcpu_num`；单独设置而无 `vcpu_num` 会校验失败 |
 | `ram_mb` | 省略/`null` | 可选；VM 内存 MB（`>= 1`） |
+| `run_as_user` / `run_as_group` | 省略/`null` | 可选成对字段；create 时在**宿主机**解析为 uid:gid（纯数字直通，名字走 `pwd`/`grp`）。未配置则保持 conch-agent 身份。未知名 **400**（不回退 nobody）。与顶层 `process.run_as_*` 无关 |
 | `env` | `{}` | Conch guest 环境变量。**不是**顶层 `environment`。create API 的 `env` 会覆盖同名 key |
 | `filesystem_policy.bind_mounts` | `[]` | 映射为 Conch `volume_mounts`（`host_path`→`source`，`sandbox_path`→`path`，`mode=ro`→`readonly`） |
 | `network` | allow-all | IPv4 `allowed_ips` / `blocked_ips` + `default`；可热更新。不支持 domains/ports |
 
-更改 `vcpu_*` / `ram_mb` / `env` 需重建沙箱（不支持热更新）。
+更改 `vcpu_*` / `ram_mb` / `env` / `run_as_*` 需重建沙箱（不支持热更新）。Guest 需有 `python3`；exec 与文件 API 经 `commands.run`，配置了 `run_as_*` 时叠加 setuid/setgid 降权。
 
 ```yaml
 conch:
@@ -427,6 +428,8 @@ conch:
   vcpu_num: 2
   vcpu_max: 4
   ram_mb: 4096
+  # run_as_user: sandbox
+  # run_as_group: sandbox
   env:
     FOO: bar
   filesystem_policy:
@@ -593,6 +596,7 @@ sandbox:
 | `sandbox.url` | URL 字符串 | `http://127.0.0.1:8321` | jiuwenbox 管理 API 端点。TCP 用 `http://host:port`；UDS 用 `unix:///abs/socket/path`（与 `JIUWENBOX_LISTEN` 配置的形态一致） |
 | `sandbox.type` | 字符串 | `jiuwenbox` | `jiuwenbox`（bwrap/process）、`jiuwenbox-conch`（同一 HTTP + Conch；provider 仍复用 jiuwenbox）、`yuanrong` |
 | `sandbox.template_id` | 字符串 | （无） | **`jiuwenbox-conch` 必填**，写入 `policy.conch.template_id` |
+| `sandbox.user` / `sandbox.group` | 字符串 | （无） | 可选成对；`jiuwenbox-conch` 下原样写入 `policy.conch.run_as_user` / `run_as_group`，由 jiuwenbox-server 在宿主机解析。名字解析依赖 jiuwenbox 进程可见的 passwd/group；容器化且未映射时建议直接写数字字符串 |
 | `sandbox.startup_mode` | `internal` / `external` | `internal` | `internal`：agent-server 启动时自动 spawn `jiuwenbox-server` 子进程并落盘最终生效的 `url`（端口被占用时自动换端口）；`external`：jiuwenswarm 完全不碰 jiuwenbox 进程，要求按本 README 顶部的方式提前自己启动。Conch 推荐 `external` |
 | `sandbox.policy_file` | 文件名 / 路径 | `code-agent-policy.yaml` | 仅给文件名 → 自动定位到 `jiuwenbox/configs/<name>`；包含 `/` `\` 或 `~` 时按整路径解析。**仅在 `startup_mode=internal` 下生效**——`external` 模式下 policy 由用户自启动时的 `JIUWENBOX_DEFAULT_POLICY_PATH` 决定 |
 | `sandbox.preserve_file_sharing_mode` | `mount` | `mount` | host 共享路径通过 bind/volume 注入沙箱。`jiuwenbox-conch` 下进入 `policy.conch.filesystem_policy.bind_mounts` |
@@ -609,6 +613,8 @@ sandbox:
   url: http://127.0.0.1:8321
   startup_mode: external
   template_id: <conch-template>
+  # user: "1000"      # optional; pair with group → policy.conch.run_as_*
+  # group: "1000"
   policy_file: code-agent-policy.yaml
   enabled: true
   preserve_file_sharing_mode: mount

@@ -116,11 +116,12 @@ bwrap deployments do not need the SDK.
 | `template_id` | Conch template (also overridable via `JIUWENBOX_CONCH_TEMPLATE_ID`) |
 | `vcpu_num` / `vcpu_max` | Optional VM vCPU boot count and max; omit → SDK/`sdk-config.yaml` defaults |
 | `ram_mb` | Optional VM memory in MB; omit → SDK default |
+| `run_as_user` / `run_as_group` | Optional pair; host resolves names/digits to uid:gid at create. Omit both → conch-agent identity. Unknown names → **400** (no nobody fallback). Independent of top-level `process.run_as_*` |
 | `env` | Guest env for Conch create. **Not** the top-level `environment` (bwrap-only). Create API `env` overrides same keys |
 | `filesystem_policy.bind_mounts` | Host dirs → Conch `volume_mounts` |
 | `network` | IPv4 allow/deny ingress/egress (hot-updatable) |
 
-Changing `vcpu_*` / `ram_mb` / `env` requires recreating the sandbox (not hot-updated).
+Changing `vcpu_*` / `ram_mb` / `env` / `run_as_*` requires recreating the sandbox (not hot-updated). Guest needs `python3`; exec and file APIs use `commands.run`, with setuid/setgid wrapping when `run_as_*` is set.
 
 Example:
 
@@ -130,6 +131,8 @@ conch:
   vcpu_num: 2
   vcpu_max: 4
   ram_mb: 4096
+  # run_as_user: sandbox
+  # run_as_group: sandbox
   env:
     FOO: bar
   filesystem_policy:

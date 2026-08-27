@@ -677,12 +677,21 @@ def create_sandbox_sysop_card(
                 else {}
             )
             bind_mounts = list(fs_raw.get("bind_mounts") or [])
-            policy = {
-                "conch": {
-                    "template_id": template_id,
-                    "filesystem_policy": {"bind_mounts": bind_mounts},
-                }
+            conch_policy: dict[str, Any] = {
+                "template_id": template_id,
+                "filesystem_policy": {"bind_mounts": bind_mounts},
             }
+            run_as_user = str(endpoint.get("user") or "").strip()
+            run_as_group = str(endpoint.get("group") or "").strip()
+            if run_as_user or run_as_group:
+                if not run_as_user or not run_as_group:
+                    raise ValueError(
+                        "sandbox.user and sandbox.group must both be set for "
+                        "jiuwenbox-conch (or both omitted)"
+                    )
+                conch_policy["run_as_user"] = run_as_user
+                conch_policy["run_as_group"] = run_as_group
+            policy = {"conch": conch_policy}
             extra_params: dict[str, Any] = {
                 "policy": policy,
                 "policy_mode": "append",

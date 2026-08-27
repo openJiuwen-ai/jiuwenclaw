@@ -350,6 +350,9 @@ timeout: {}
 #   - template_id may also come from JIUWENBOX_CONCH_TEMPLATE_ID or conchd default
 #   - vcpu_num / vcpu_max / ram_mb: optional VM sizing; omit or null → SDK/sdk-config defaults
 #   - env: Conch guest env vars (NOT top-level `environment`, which is bwrap-only)
+#   - run_as_user / run_as_group: optional pair; host resolves names/digits to uid:gid
+#     at create (not process.run_as_*). Omit both → conch-agent identity. Unknown
+#     names fail create with 400 (no nobody fallback). Guest ops use setuid/setgid.
 #   - bind_mounts map to Conch volume_mounts (host_path/source, sandbox_path/path)
 #   - network uses default/allowed_ips/blocked_ips (IPv4 only); domains/ports forbidden
 conch:
@@ -357,6 +360,8 @@ conch:
   # vcpu_num: null
   # vcpu_max: null
   # ram_mb: null
+  # run_as_user: sandbox
+  # run_as_group: sandbox
   env: {}
   filesystem_policy:
     bind_mounts: []

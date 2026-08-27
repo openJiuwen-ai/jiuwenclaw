@@ -11,6 +11,7 @@ import yaml
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import NetworkRulePolicy, SecurityPolicy
+from jiuwenbox.server.conch_policy import ConchRunAsError, resolve_conch_run_as
 from jiuwenbox.server.runtime.errors import PolicyValidationError
 from jiuwenbox.server.workspace import SANDBOX_WORKSPACE, JIUWENBOX_HOME
 
@@ -254,6 +255,10 @@ class PolicyEngine:
                     f"conch bind mount sandbox_path is duplicated: {mount.sandbox_path}"
                 )
             seen_guest_paths.add(mount.sandbox_path)
+        try:
+            resolve_conch_run_as(policy)
+        except ConchRunAsError as exc:
+            raise PolicyValidationError(str(exc)) from exc
         # Network fields are validated by ConchNetworkPolicy pydantic validators.
         return warnings
 

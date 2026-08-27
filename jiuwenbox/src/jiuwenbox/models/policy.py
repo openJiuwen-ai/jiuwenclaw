@@ -867,6 +867,10 @@ class ConchPolicy(BaseModel):
     vcpu_num: int | None = None
     vcpu_max: int | None = None
     ram_mb: int | None = None
+    # Optional guest identity; resolved on the host to uid/gid at create time.
+    # Pair required: both set or both omitted. Distinct from process.run_as_*.
+    run_as_user: str | None = None
+    run_as_group: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     filesystem_policy: ConchFilesystemPolicy = Field(default_factory=ConchFilesystemPolicy)
     network: ConchNetworkPolicy = Field(default_factory=ConchNetworkPolicy)
@@ -909,6 +913,37 @@ class ConchPolicy(BaseModel):
             raise ValueError(f"conch.{info.field_name} must be >= 1, got {number}")
         return number
 
+    @field_validator("run_as_user", "run_as_group", mode="before")
+    @classmethod
+    def normalize_optional_run_as_name(cls, value: object, info) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError(
+                f"conch.{info.field_name} must be a string or non-negative integer, "
+                "not a boolean"
+            )
+        if isinstance(value, int):
+            if value < 0:
+                raise ValueError(
+                    f"conch.{info.field_name} must be a non-negative integer, got {value}"
+                )
+            return str(value)
+        if isinstance(value, float) and value.is_integer():
+            number = int(value)
+            if number < 0:
+                raise ValueError(
+                    f"conch.{info.field_name} must be a non-negative integer, got {value}"
+                )
+            return str(number)
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        raise ValueError(
+            f"conch.{info.field_name} must be a string or non-negative integer, "
+            f"got {type(value).__name__}"
+        )
+
     @field_validator("env", mode="before")
     @classmethod
     def normalize_env(cls, value: object) -> dict[str, str]:
@@ -943,6 +978,16 @@ class ConchPolicy(BaseModel):
             raise ValueError(
                 f"conch.vcpu_max must be >= conch.vcpu_num "
                 f"({self.vcpu_num}), got {self.vcpu_max}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_run_as_pair(self) -> ConchPolicy:
+        user_set = self.run_as_user is not None
+        group_set = self.run_as_group is not None
+        if user_set != group_set:
+            raise ValueError(
+                "conch.run_as_user and conch.run_as_group must both be set or both omitted"
             )
         return self
 

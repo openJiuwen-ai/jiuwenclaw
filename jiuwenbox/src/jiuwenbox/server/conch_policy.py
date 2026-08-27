@@ -15,6 +15,13 @@ from jiuwenbox.models.policy import (
 
 JIUWENBOX_CONCH_TEMPLATE_ID_ENV = "JIUWENBOX_CONCH_TEMPLATE_ID"
 
+# Linux uid_t/gid_t are 32-bit; (uid_t)-1 / (gid_t)-1 is reserved as invalid.
+_CONCH_POSIX_ID_MAX = 2**32 - 2
+
+
+class ConchRunAsError(ValueError):
+    """Raised when conch.run_as_user / run_as_group cannot be resolved on the host."""
+
 
 def resolve_conch_template_id(policy: SecurityPolicy) -> str | None:
     """Resolve Conch template id: policy field, then env, else None for conchd default."""
@@ -25,6 +32,59 @@ def resolve_conch_template_id(policy: SecurityPolicy) -> str | None:
     if env_template_id:
         return env_template_id
     return None
+
+
+def _resolve_posix_id(value: str, *, kind: str) -> int:
+    """Resolve a user/group name or digit string to a numeric id on the host.
+
+    ASCII digit-only strings are treated as raw ids (chown-style), not names.
+    """
+    if value.isdigit():
+        number = int(value)
+        if number > _CONCH_POSIX_ID_MAX:
+            raise ConchRunAsError(
+                f"conch.run_as_{kind} id {number} is out of range "
+                f"(max {_CONCH_POSIX_ID_MAX})"
+            )
+        return number
+    try:
+        if kind == "user":
+            import pwd
+
+            return int(pwd.getpwnam(value).pw_uid)
+        import grp
+
+        return int(grp.getgrnam(value).gr_gid)
+    except KeyError as exc:
+        raise ConchRunAsError(
+            f"conch.run_as_{kind} {value!r} could not be resolved on the host"
+        ) from exc
+    except ImportError as exc:
+        raise ConchRunAsError(
+            "POSIX user/group database is unavailable; "
+            "cannot resolve conch.run_as_user / conch.run_as_group"
+        ) from exc
+
+
+def resolve_conch_run_as(policy: SecurityPolicy | ConchPolicy) -> tuple[int, int] | None:
+    """Resolve optional ``run_as_user`` / ``run_as_group`` to ``(uid, gid)``.
+
+    Returns ``None`` when both fields are unset. Pairing is enforced by
+    ``ConchPolicy``; this helper only performs host name/id lookup.
+    """
+    conch = policy.conch if isinstance(policy, SecurityPolicy) else policy
+    user = conch.run_as_user
+    group = conch.run_as_group
+    if user is None and group is None:
+        return None
+    if user is None or group is None:
+        # Defensive: model validator should already reject half-set pairs.
+        raise ConchRunAsError(
+            "conch.run_as_user and conch.run_as_group must both be set or both omitted"
+        )
+    uid = _resolve_posix_id(user, kind="user")
+    gid = _resolve_posix_id(group, kind="group")
+    return uid, gid
 
 
 def build_conch_resource_kwargs(conch: ConchPolicy) -> dict[str, Any]:
