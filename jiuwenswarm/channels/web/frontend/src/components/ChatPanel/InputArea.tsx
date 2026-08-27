@@ -1,4 +1,4 @@
-import {
+﻿import {
   useState,
   useRef,
   useCallback,
@@ -31,6 +31,7 @@ import {
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
+import { requestSettingsModule } from '../../features/settings/settingsNavigation';
 import { AgentMode, MediaItem, ModelEntry, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
@@ -49,9 +50,9 @@ import {
   type SlashCommandContext,
 } from './slashCommands/registry';
 import { shouldExecuteRegisteredSlashCommand } from './slashCommands/semantics';
-import { getSkillAvatar } from '../../utils/skillAvatar';
 import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import { ExtensionPickerPanel } from './ExtensionPickerPanel';
+import { SkillPickerPanel } from './SkillPickerPanel';
 import { Switch } from '../Switch';
 import { ExtensionIcon } from '../ConnectorMarket/icons';
 import {
@@ -617,6 +618,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [attachMenuDirection, setAttachMenuDirection] = useState<'up' | 'down'>('down');
   const [extensionPanelOpen, setExtensionPanelOpen] = useState(false);
   const [extensionAnchor, setExtensionAnchor] = useState<DOMRect | null>(null);
+  const [skillPanelOpen, setSkillPanelOpen] = useState(false);
+  const [skillAnchor, setSkillAnchor] = useState<DOMRect | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   const insertSkillChipRef = useRef<(skillName: string) => void>(() => undefined);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
@@ -631,6 +634,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const composerFrameRef = useRef<HTMLDivElement>(null);
   const composerSuggestionMenuRef = useRef<HTMLDivElement>(null);
   const compactingSessionIdsRef = useRef<Set<string>>(new Set());
+  const skillMenuItemRef = useRef<HTMLButtonElement>(null);
+  const skillPanelRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuOpenedByLongPressRef = useRef(false);
@@ -1339,20 +1344,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (!attachMenuOpen) return;
 
     const handlePointerDown = (event: PointerEvent) => {
-      // ExtensionPickerPanel.tsx 扩展面板里点"连接"弹出的授权弹窗（ConnectTokenModal/
-      // CliAuthModal）是单独 portal 到 document.body 的兄弟节点，既不在 attachMenuRef/
-      // attachMenuPortalRef 里，也不在 extensionPanelRef 里——不跳过的话点弹窗内部会被这里
-      // 也判成"点了外面"，把一级"+"菜单和二级扩展面板一起关掉，弹窗因为状态挂在扩展面板组件
-      // 里也跟着卸载消失（2026-08-25 用户反馈，同一根因见 ExtensionPickerPanel.tsx 头部
-      // pointerdown 处理的注释）。
-      if ((event.target as HTMLElement | null)?.closest?.('[data-connector-auth-modal]')) return;
       if (
         !attachMenuRef.current?.contains(event.target as Node) &&
         !attachMenuPortalRef.current?.contains(event.target as Node) &&
-        !extensionPanelRef.current?.contains(event.target as Node)
+        !extensionPanelRef.current?.contains(event.target as Node) &&
+        !skillPanelRef.current?.contains(event.target as Node)
       ) {
         setAttachMenuOpen(false);
         setExtensionPanelOpen(false);
+        setSkillPanelOpen(false);
       }
     };
 
@@ -2741,10 +2741,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   setAttachMenuAnchor(rect);
                   setAttachMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
                 }
-                setAttachMenuOpen((open) => !open);
-                setExtensionPanelOpen(false);
-              }}
-              disabled={attachTriggerDisabled}
+               setAttachMenuOpen((open) => !open);
+               setExtensionPanelOpen(false);
+                setSkillPanelOpen(false);
+             }}
+             disabled={attachTriggerDisabled}
               className={cx(
                 'chat-input-btn chat-input-btn--add-file',
                 attachTriggerDisabled && 'chat-input-btn--disabled',
@@ -2784,39 +2785,65 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     </span>
                     <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                   </span>
-                </button>
+               </button>
+                {/* 插件/MCP 装备目前后端在集群模式下不生效（JiuWenSwarmDeepAdapter
+                    ._ensure_chat_extensions 对 team 模式直接短路，见
+                    interface_deep.py），继续展示这个入口只会让用户以为选了插件/MCP 会生效，
+                    实际发出去也是白发。集群模式下直接不渲染这个入口，跟旁边 SkillSelector
+                    （!isTeamMode 判断）保持同样的处理方式。 */}
+                {!isTeamMode && (
+                  <button
+                    ref={extensionMenuItemRef}
+                    type="button"
+                    className="chat-mode-select__option"
+                    role="menuitem"
+                    aria-haspopup="menu"
+                    aria-expanded={extensionPanelOpen}
+                    onClick={() => {
+                      if (!extensionPanelOpen && extensionMenuItemRef.current) {
+                        setExtensionAnchor(extensionMenuItemRef.current.getBoundingClientRect());
+                      }
+                      setExtensionPanelOpen((open) => !open);
+                      setSkillPanelOpen(false);
+                    }}
+                  >
+                    <span className="chat-mode-select__option-main">
+                      <span className="chat-mode-select__icon chat-mode-select__icon--lg" aria-hidden="true">
+                        <ExtensionIcon />
+                      </span>
+                      <span className="chat-mode-select__label">{t('chat.extension')}</span>
+                    </span>
+                    <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
+                    </svg>
+                  </button>
+                )}
+                <div className="chat-mode-select__divider" role="separator" />
                 <button
-                  ref={extensionMenuItemRef}
+                  ref={skillMenuItemRef}
                   type="button"
                   className="chat-mode-select__option"
                   role="menuitem"
                   aria-haspopup="menu"
-                  aria-expanded={extensionPanelOpen}
+                  aria-expanded={skillPanelOpen}
                   onClick={() => {
-                    if (!extensionPanelOpen && extensionMenuItemRef.current) {
-                      setExtensionAnchor(extensionMenuItemRef.current.getBoundingClientRect());
+                    if (!skillPanelOpen && skillMenuItemRef.current) {
+                      setSkillAnchor(skillMenuItemRef.current.getBoundingClientRect());
                     }
-                    setExtensionPanelOpen((open) => !open);
+                    setSkillPanelOpen((open) => !open);
+                    setExtensionPanelOpen(false);
                   }}
                 >
                   <span className="chat-mode-select__option-main">
-                    {/* 手绘拼图图标（ConnectorMarket/icons.tsx）在这个菜单里视觉上比旁边
-                        FileText/Target/ClipboardList 这些 lucide 图标显得更小（用户 2026-08-19
-                        反馈），单独放大到 18px。真正生效的是 CSS 里的 --lg 修饰 class（见
-                        ChatPanel.css `.chat-mode-select__icon svg { width/height: 14px }`
-                        这条共享基础规则的选择器特异度是 class+元素，Tailwind 任意值 class 在
-                        SVG 自身上加宽高属性/class 特异度更低会被它盖掉，实测确认过），不是这里
-                        ExtensionIcon 的 className。 */}
-                    <span className="chat-mode-select__icon chat-mode-select__icon--lg" aria-hidden="true">
-                      <ExtensionIcon />
+                    <span className="chat-mode-select__icon" aria-hidden="true">
+                      <span className="chat-config-icon chat-config-icon--skill" />
                     </span>
-                    <span className="chat-mode-select__label">{t('chat.extension')}</span>
+                    <span className="chat-mode-select__label">{t(isTeamMode ? 'chat.swarmSkills' : 'chat.skills')}</span>
                   </span>
                   <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
                   </svg>
                 </button>
-                {(canUsePlanMenu || canUseGoalMenu) && <div className="chat-mode-select__divider" role="separator" />}
                 {canUsePlanMenu && (() => {
                   // 对称地：已有未完成目标时不能选计划；对话进行中（isProcessing）时也先禁掉，
                   // 避免在当前这轮还没结束时又叠加切一次模式。这条"打开"方向的限制沿用原逻辑；
@@ -2922,11 +2949,22 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               </div>,
               document.body
             )}
-            {extensionPanelOpen && extensionAnchor && (
-              <ExtensionPickerPanel
-                anchorRect={extensionAnchor}
-                panelRef={extensionPanelRef}
-                onClose={() => setExtensionPanelOpen(false)}
+           {extensionPanelOpen && extensionAnchor && (
+             <ExtensionPickerPanel
+               anchorRect={extensionAnchor}
+               panelRef={extensionPanelRef}
+               onClose={() => setExtensionPanelOpen(false)}
+             />
+           )}
+            {skillPanelOpen && skillAnchor && (
+              <SkillPickerPanel
+                anchorRect={skillAnchor}
+                panelRef={skillPanelRef}
+                isTeamMode={isTeamMode}
+                onClose={() => setSkillPanelOpen(false)}
+                onNavigateToSkills={onNavigateToSkills}
+                onInsertSkill={insertSkillChip}
+                onRemoveSkill={removeSkillChip}
               />
             )}
           </div>
@@ -3027,12 +3065,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             )}
           </div>
           <PermissionSelector permissionsEnabled={permissionsEnabled} onSavePermission={onSavePermission} />
-
-          {!isTeamMode && <SkillSelector
-            onNavigateToSkills={onNavigateToSkills}
-            onInsertSkill={insertSkillChip}
-            onRemoveSkill={removeSkillChip}
-          />}
 
           {goalTagVisible && (
             <div className="chat-goal-tag" data-testid="chat-panel-goal-tag">
@@ -3174,13 +3206,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       {showWorkContextRow ? (
         <div ref={workMenuRef} className="chat-work-context-row" data-testid="chat-panel-work-context-row">
           <div className={clsx('chat-work-select', workMenuOpen === 'project' && 'chat-work-select--open')} data-testid="chat-panel-work-select">
-            <div
-              role="button"
-              tabIndex={0}
-              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isWorkContextLocked) setWorkMenuOpen((open) => open === 'project' ? null : 'project'); } }}
+            <button
+              type="button"
               className={clsx('chat-work-select__trigger', displayedProject && 'chat-work-select__trigger--selected')}
               data-testid="chat-panel-work-select-trigger"
               onClick={() => !isWorkContextLocked && setWorkMenuOpen((open) => open === 'project' ? null : 'project')}
+              disabled={isWorkContextLocked}
               title={displayedProject?.project_dir || (isWorkContextLocked ? t('multiSession.project.lockedProjectTitle') : t('multiSession.project.chooseProjectDirectory'))}
             >
               <WorkIcon name="folder" className="chat-work-select__root-icon" />
@@ -3210,7 +3241,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
                 </svg>
               )}
-            </div>
+            </button>
             {workMenuOpen === 'project' && !isWorkContextLocked ? (
               <div className={clsx('chat-work-select__menu', hasInputProjectOptions && 'chat-work-select__menu--projects')} role="menu" data-testid="chat-panel-work-select-menu">
                 {!hasInputProjectOptions ? (
@@ -3624,7 +3655,7 @@ function ModelSelector({
 
   const handleAddModel = () => {
     setIsOpen(false);
-    window.dispatchEvent(new CustomEvent<string>('jiuwen:nav', { detail: 'configpanel' }));
+    requestSettingsModule('models');
   };
 
   return (
@@ -3891,277 +3922,6 @@ function PermissionSelector({
         />
       )}
     </>
-  );
-}
-
-/** 输入栏右侧的「技能」下拉，展示已安装技能（结构与技能页卡片保持一致） */
-function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
-  onNavigateToSkills?: () => void;
-  onInsertSkill?: (skillName: string) => void;
-  onRemoveSkill?: (skillName: string) => void;
-}) {
-  const { t } = useTranslation();
-  const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const selectedSkills = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.selectedSkills ?? []);
-  const [isOpen, setIsOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [skills, setSkills] = useState<InputAreaSkillItem[]>([]);
-  const [plugins, setPlugins] = useState<InputAreaInstalledPlugin[]>([]);
-  const [searchQuery, setSearchQuery] = useState('');
-  const menuRef = useRef<HTMLDivElement>(null);
-  const menuPortalRef = useRef<HTMLDivElement>(null);
-  const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null);
-  const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
-
-  const installedSkillMap = useMemo(() => {
-    const map = new Map<string, InputAreaInstalledPlugin>();
-    plugins.forEach((plugin) => {
-      plugin.skills.forEach((skillName) => {
-        if (!map.has(skillName)) map.set(skillName, plugin);
-      });
-    });
-    return map;
-  }, [plugins]);
-
-  const isSkillInstalled = useCallback(
-    (skill: InputAreaSkillItem): boolean =>
-      skill.installed === true ||
-      installedSkillMap.has(skill.name) ||
-      skill.source === 'local' ||
-      skill.source === 'project',
-    [installedSkillMap],
-  );
-
-  const installedSkills = useMemo(
-    () => skills.filter((s) => isSkillInstalled(s) && s.enabled !== false),
-    [skills, isSkillInstalled],
-  );
-
-  // 按名称/描述过滤
-  const filteredSkills = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return installedSkills;
-    return installedSkills.filter((s) => {
-      const name = s.name.toLowerCase();
-      const displayName = (s.display_name || '').toLowerCase();
-      const desc = (s.description || '').toLowerCase();
-      return name.includes(q) || displayName.includes(q) || desc.includes(q);
-    });
-  }, [installedSkills, searchQuery]);
-
-  const fetchInstalledSkills = useCallback(async () => {
-    if (!activeSessionId) return;
-    setLoading(true);
-    setErrorMessage(null);
-    try {
-      const data = await webRequest<{
-        skills?: InputAreaSkillItem[];
-        plugins?: InputAreaInstalledPlugin[];
-      }>(
-        'skills.list',
-        { with_installed: true },
-        { timeoutMs: 30_000 },
-      );
-      setSkills(data.skills || []);
-      setPlugins(data.plugins || []);
-    } catch (err) {
-      console.error('Failed to load installed skills:', err);
-      setErrorMessage(t('skills.listError'));
-    } finally {
-      setLoading(false);
-    }
-  }, [activeSessionId, t]);
-
-  useEffect(() => {
-    if (isOpen) {
-      void fetchInstalledSkills();
-    } else {
-      // 关闭时清空搜索词
-      setSearchQuery('');
-    }
-  }, [isOpen, fetchInstalledSkills]);
-
-  // 点击外部关闭下拉
-  useEffect(() => {
-    if (!isOpen) return;
-    const handlePointerDown = (event: PointerEvent) => {
-      if (
-        !menuRef.current?.contains(event.target as Node) &&
-        !menuPortalRef.current?.contains(event.target as Node)
-      ) {
-        setIsOpen(false);
-      }
-    };
-    document.addEventListener('pointerdown', handlePointerDown);
-    return () => document.removeEventListener('pointerdown', handlePointerDown);
-  }, [isOpen]);
-
-  // 滚动/缩放时重新计算菜单位置
-  useEffect(() => {
-    if (!isOpen) return;
-    const updateAnchor = () => {
-      if (menuRef.current) {
-        const rect = menuRef.current.getBoundingClientRect();
-        setMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
-        setMenuAnchor(rect);
-      }
-    };
-    window.addEventListener('scroll', updateAnchor, true);
-    window.addEventListener('resize', updateAnchor);
-    return () => {
-      window.removeEventListener('scroll', updateAnchor, true);
-      window.removeEventListener('resize', updateAnchor);
-    };
-  }, [isOpen]);
-
-  const handleOpenSkillsPage = useCallback(() => {
-    setIsOpen(false);
-    onNavigateToSkills?.();
-  }, [onNavigateToSkills]);
-
-  // 点击技能项：已选则移除，未选则追加；保持下拉开启，便于多选
-  const handleToggleSkill = useCallback((skillName: string) => {
-    const sid = useChatStore.getState().activeSessionId;
-    if (!sid) return;
-    const store = useSessionStore.getState();
-    if (selectedSkills.includes(skillName)) {
-      store.removeSelectedSkill(sid, skillName);
-      onRemoveSkill?.(skillName);
-    } else {
-      store.addSelectedSkill(sid, skillName);
-      onInsertSkill?.(skillName);
-    }
-  }, [selectedSkills, onInsertSkill, onRemoveSkill]);
-
-  return (
-    <div
-      ref={menuRef}
-      className={clsx('chat-skill-select', isOpen && 'chat-skill-select--open')}
-      data-testid="chat-panel-skill-select-root"
-    >
-      <button
-        type="button"
-        className="chat-skill-select__trigger"
-        onClick={() => {
-          if (!isOpen && menuRef.current) {
-            const rect = menuRef.current.getBoundingClientRect();
-            setMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
-            setMenuAnchor(rect);
-          }
-          setIsOpen((open) => !open);
-        }}
-        aria-haspopup="menu"
-        aria-expanded={isOpen}
-        title={t('chat.skillsToggle')}
-        data-testid="chat-panel-skill-select-trigger"
-      >
-        <span className="chat-mode-select__value">
-          <span className="chat-mode-select__icon" aria-hidden="true">
-            <span className="chat-config-icon chat-config-icon--skill" />
-          </span>
-          <span className="chat-mode-select__label">{t('chat.skills')}</span>
-        </span>
-        <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
-        </svg>
-      </button>
-
-      {isOpen && menuAnchor && createPortal(
-        <div
-          ref={menuPortalRef}
-          className="chat-skill-select__menu"
-          role="menu"
-          data-testid="chat-panel-skill-select-menu"
-          style={menuDirection === 'up'
-            ? { position: 'fixed', bottom: window.innerHeight - menuAnchor.top + 10, left: menuAnchor.left, zIndex: 9999 }
-            : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
-          }
-        >
-          {/* 顶部搜索框 */}
-          <div className="chat-skill-select__search" data-testid="chat-panel-skill-select-search">
-            <svg className="chat-skill-select__search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM17.5 17.5l-3.7-3.7" />
-            </svg>
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={t('chat.skillsSearchPlaceholder')}
-              className="chat-skill-select__search-input"
-              data-testid="chat-panel-skill-select-search-input"
-            />
-          </div>
-
-          {loading && (
-            <div className="chat-skill-select__state" data-testid="chat-panel-skill-select-state" data-variant="loading">{t('skills.detailLoading')}</div>
-          )}
-          {!loading && errorMessage && (
-            <div className="chat-skill-select__state" data-testid="chat-panel-skill-select-state" data-variant="error">{errorMessage}</div>
-          )}
-          {!loading && !errorMessage && installedSkills.length === 0 && (
-            <div className="chat-skill-select__state" data-testid="chat-panel-skill-select-state" data-variant="no-installed">{t('chat.noInstalledSkills')}</div>
-          )}
-          {!loading && !errorMessage && installedSkills.length > 0 && filteredSkills.length === 0 && (
-            <div className="chat-skill-select__state" data-testid="chat-panel-skill-select-state" data-variant="no-matches">{t('skills.noMatches')}</div>
-          )}
-          {!loading && !errorMessage && filteredSkills.length > 0 && (
-            <>
-              <div className="chat-skill-select__list" data-testid="chat-panel-skill-select-list">
-                {filteredSkills.map((skill) => {
-                  const avatar = getSkillAvatar(skill.name);
-                  const isSelected = selectedSkills.includes(skill.name);
-                  return (
-                    <button
-                      type="button"
-                      key={skill.name}
-                      onClick={() => handleToggleSkill(skill.name)}
-                      className={clsx(
-                        'chat-skill-select__item',
-                        isSelected && 'chat-skill-select__item--selected',
-                      )}
-                      aria-pressed={isSelected}
-                      data-testid="chat-panel-skill-select-item"
-                      data-variant={skill.name}
-                      title={isSelected ? t('chat.skillsRemove') : t('chat.skillsAdd')}
-                    >
-                      <div className={`chat-skill-select__avatar ${avatar.color}`} data-testid="chat-panel-skill-select-item-avatar">
-                        {avatar.firstChar}
-                      </div>
-                      <div className="chat-skill-select__item-main" data-testid="chat-panel-skill-select-item-main">
-                        <div className="chat-skill-select__item-name" data-testid="chat-panel-skill-select-item-name">{skill.display_name || skill.name}</div>
-                        <div className="chat-skill-select__item-desc" data-testid="chat-panel-skill-select-item-desc">
-                          {skill.description || t('skills.noDescription')}
-                        </div>
-                      </div>
-                      {isSelected && (
-                        <svg className="chat-skill-select__item-check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
-                        </svg>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          )}
-
-          {/* 底部「技能管理」入口 */}
-          <div className="chat-skill-select__footer" data-testid="chat-panel-skill-select-footer">
-            <button
-              type="button"
-              onClick={handleOpenSkillsPage}
-              className="chat-skill-select__manage-btn"
-              data-testid="chat-panel-skill-select-manage"
-            >
-              <span className="chat-config-icon chat-config-icon--settings chat-skill-select__manage-icon" aria-hidden="true" />
-              <span>{t('chat.skillsManage')}</span>
-            </button>
-          </div>
-        </div>,
-        document.body
-      )}
-    </div>
   );
 }
 
