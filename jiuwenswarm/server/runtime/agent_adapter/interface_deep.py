@@ -353,6 +353,7 @@ from jiuwenswarm.common.config import (
     resolve_env_vars,
 )
 from jiuwenswarm.common.mcp_config import (
+    build_mcp_credential_resolver,
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
     preflight_mcp_server_reachable,
@@ -3383,20 +3384,7 @@ class JiuWenSwarmDeepAdapter:
         doesn't re-register a duplicate MCP server (process leak).
         """
         name = str(entry.get("name", "")).strip()
-        resolver = None
-        if name:
-            try:
-                from jiuwenswarm.server.runtime.mcp.credential import CredentialStore
-                store = CredentialStore()
-                stored = store.get_all(name)
-                if stored:
-
-                    def resolver(key: str) -> str | None:
-                        if key in stored:
-                            return stored[key]
-                        return os.environ.get(key)
-            except Exception:  # noqa: BLE001
-                pass  # no store / not an MCP — leave placeholders as-is
+        resolver = build_mcp_credential_resolver(name)
         return build_mcp_server_config(entry, server_id_scope="jiuwenswarm", credential_resolver=resolver)
 
     @staticmethod

@@ -61,6 +61,8 @@ export type AgentMode =
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
 export type Permission = 'default' | 'full_access';
 
+export type ModelPlan = 'token_plan' | 'coding_plan' | 'custom_api';
+
 export interface ModelEntry {
   model_name: string;
   api_base: string;
@@ -72,8 +74,6 @@ export interface ModelEntry {
   context_window_tokens?: number;
   /** 同 model_name 组内的默认勾选标识 */
   is_default?: boolean;
-  /** agentos 备份模型标记：与 defaults 并列可选可切换，但不抢启动默认 */
-  is_agentos?: boolean;
   /** 可选别名，用于快捷切换模型（如 "gpt" → "gpt-4o"） */
   alias?: string;
   /** 用于原子性重命名操作，指定原模型名 */
@@ -84,43 +84,37 @@ export interface ModelEntry {
    * 新增条目不带此字段。
    */
   origin_index?: number;
-  /**
-   * 厂商选择器的预设 key（如 "alibaba"/"baidu"）。提示性字段：
-   * 不参与后端校验，仅用于前端回显图标 / 重新选中预设。由 vendors.list
-   * 返回的预设表与 models.list 的回带字段对应。
-   */
+  /** 服务端厂商预设标识；与 plan 共同定位一次加载周期内的预设。 */
   vendor_key?: string;
-  /** 该条目所属的 plan 分桶（'token_plan'|'coding_plan'|'custom_api'|'custom'）。提示性。 */
-  plan?: string;
+  /** 服务端返回的套餐分组。前端只透传，不自行推断或持久化生成。 */
+  plan?: ModelPlan;
+  /** OpenAI 兼容接口的端点方言；Anthropic 协议不携带此字段。 */
+  endpoint_profile?: string;
   /** 免费模型标识（如 Opencode Zen 免费模型）。前端据此归入"免费模型"分组；非免费模型不带此字段。 */
   is_free?: boolean;
+  /** AgentOS 备份模型只读标识；此类条目不参与 models.replace_all。 */
+  is_agentos?: boolean;
 }
 
-/** 厂商预设：vendors.list RPC 返回的单个厂商卡片。 */
 export interface VendorPreset {
   vendor_key: string;
   display_name: string;
-  plan: string;
+  plan: ModelPlan;
   client_provider: string;
   api_base: string;
+  endpoint_profile?: string | null;
   default_model: string;
   model_options: string[];
   icon_key: string;
   models_endpoint: string | null;
   models_needs_key: boolean;
-  /** Anthropic 格式是否可选(仅当 anthropic_base 非空时为 true)。
-   * 选 Anthropic 格式时:落库 client_provider='Anthropic'、api_base=anthropic_base,
-   * core 用 AnthropicModelClient 走 /v1/messages。 */
   supports_anthropic: boolean;
   anthropic_base: string | null;
-  /** Anthropic 格式落库用的 provider 值(= 'Anthropic');supports_anthropic=false 时为 null。 */
   anthropic_client_provider: string | null;
 }
 
-/** vendors.list RPC 返回的载荷：按 plan 分组的厂商预设。 */
-export type VendorPresetMap = Record<'token_plan' | 'coding_plan' | 'custom_api', VendorPreset[]>;
+export type VendorPresetMap = Record<ModelPlan, VendorPreset[]>;
 
-/** vendors.fetch_models RPC 返回的载荷。 */
 export interface VendorFetchModelsResult {
   models: string[];
   source: 'remote' | 'preset';
@@ -139,44 +133,4 @@ export interface OffloadFileContentResponse {
   filename: string;
   content: string;
   path: string;
-}
-
-export interface PackageInfo {
-  id: string;
-  extension_name: string;
-  runtime_path: string;
-  config_path: string;
-  created_at: string;
-  activated_at?: string;
-  is_active: boolean;
-  version_label?: string;
-  description?: string;
-}
-
-export interface NativeVersionInfo {
-  id: 'native';
-  extension_name: 'Native Agent';
-  is_active: boolean;
-}
-
-export interface PackagesPayload {
-  packages: PackageInfo[];
-  native_version: NativeVersionInfo;
-  active_package_ids: string[];
-  last_updated?: string;
-}
-
-export interface ActivatePayload {
-  activated_package_id: string;
-  extension_name: string;
-  runtime_path: string;
-  config_path: string;
-  message: string;
-  loaded_resources?: string[];
-}
-
-export interface DeactivatePayload {
-  deactivated_package_id: string;
-  extension_name: string;
-  message: string;
 }

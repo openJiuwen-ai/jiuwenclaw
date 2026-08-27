@@ -189,6 +189,49 @@ def test_editing_alias_only_keeps_other_placeholders_intact():
     assert out[0]["alias"] == "openai-flagship"
 
 
+def test_vendor_key_round_trips_without_disturbing_placeholders():
+    raw = _raw_entry_with_placeholder()
+    resolved = _resolved_entry_for(raw, api_key_plain="sk-real-secret", api_base="https://api.example.com")
+    parsed = [{
+        "model_name": "openai/gpt-5.6-terra",
+        "api_base": "https://openrouter.ai/api/v1",
+        "api_key": "sk-real-secret",
+        "model_provider": "OpenAI",
+        "temperature": 0.95,
+        "timeout": 1800,
+        "verify_ssl": False,
+        "is_default": True,
+        "alias": "router",
+        "origin_index": 0,
+        "vendor_key": "openrouter",
+    }]
+
+    out = _merge_models_for_replace_all(parsed, [raw], [resolved], crypto=_StubCrypto())
+
+    assert out[0]["model_client_config"]["vendor_key"] == "openrouter"
+    assert out[0]["model_client_config"]["api_key"] == "${API_KEY}"
+
+
+def test_new_vendor_model_persists_vendor_key():
+    parsed = [{
+        "model_name": "openai/gpt-5.6-terra",
+        "api_base": "https://openrouter.ai/api/v1",
+        "api_key": "sk-new",
+        "model_provider": "OpenAI",
+        "temperature": 0.95,
+        "timeout": 1800,
+        "verify_ssl": False,
+        "is_default": True,
+        "alias": "router",
+        "origin_index": None,
+        "vendor_key": "openrouter",
+    }]
+
+    out = _merge_models_for_replace_all(parsed, [], [], crypto=_StubCrypto())
+
+    assert out[0]["model_client_config"]["vendor_key"] == "openrouter"
+
+
 def test_changing_api_key_encrypts_new_value_and_drops_placeholder():
     raw = _raw_entry_with_placeholder()
     resolved = _resolved_entry_for(raw, api_key_plain="sk-real-secret", api_base="https://api.example.com")

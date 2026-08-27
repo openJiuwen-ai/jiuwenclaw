@@ -8,7 +8,6 @@ import { create } from 'zustand';
 import {
   Session,
   AgentMode,
-  WebConnectionState,
   ModelEntry,
   Message,
   ContextCompressionRuntime,
@@ -202,12 +201,6 @@ function dedupeTeamMemberExecutionEvents(
     deduped.push(event);
   }
   return deduped;
-}
-
-interface ConnectionStats {
-  state: WebConnectionState;
-  inflight: number;
-  lastError: string | null;
 }
 
 interface MemoryUsage {
@@ -411,7 +404,6 @@ interface SessionState {
   sessions: Session[];
   isConnected: boolean;
   availableTools: string[];
-  connectionStats: ConnectionStats;
   memoryUsage: MemoryUsage;
   availableModels: ModelEntry[];
   /** 过滤 is_default=true 的模型，供聊天窗口 ModelSelector 使用 */
@@ -436,7 +428,6 @@ interface SessionState {
   removeSession: (sessionId: string) => void;
   setConnected: (connected: boolean) => void;
   setAvailableTools: (tools: string[]) => void;
-  setConnectionStats: (stats: Partial<ConnectionStats>) => void;
   setContextCompressionStats: (sessionId: string, stats: Partial<ContextCompressionStats> | null) => void;
   setMemoryUsage: (memoryUsage: Partial<MemoryUsage> | null) => void;
   setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
@@ -504,11 +495,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
   isConnected: false,
   availableTools: [],
-  connectionStats: {
-    state: 'idle',
-    inflight: 0,
-    lastError: null,
-  },
   memoryUsage: {
     rssMb: null,
     usedPercent: null,
@@ -674,15 +660,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setAvailableTools: (tools) => {
     set({ availableTools: tools });
-  },
-
-  setConnectionStats: (stats) => {
-    set((state) => ({
-      connectionStats: {
-        ...state.connectionStats,
-        ...stats,
-      },
-    }));
   },
 
   setContextCompressionStats: (sessionId, stats) => {

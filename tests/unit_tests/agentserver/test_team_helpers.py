@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -95,6 +95,171 @@ def test_agent_group_selection_rejects_switch(
             params={"agent_group_name": "group-b"},
             is_first_request=True,
         )
+
+
+def test_team_skill_selection_contract() -> None:
+    assert team_helpers._resolve_team_skill_selection({}) is None
+    assert team_helpers._resolve_team_skill_selection({"skills": []}) == []
+    assert team_helpers._resolve_team_skill_selection(
+        {"skills": [" review ", "review", "security"]}
+    ) == ["review", "security"]
+
+    for invalid in (None, "review", [""], [1], ["../review"]):
+        with pytest.raises(ValueError):
+            team_helpers._resolve_team_skill_selection({"skills": invalid})
+
+
+@pytest.mark.parametrize("params", [None, {}, {"skills": []}])
+def test_agent_group_skill_selection_preserves_package_skills(
+    params: dict[str, Any] | None,
+) -> None:
+    assert team_helpers._resolve_team_skill_selection(
+        params,
+        agent_group_name="review-group",
+    ) is None
+
+
+@pytest.mark.parametrize("skills", [["review"], [" review ", "security"]])
+def test_agent_group_skill_selection_rejects_extra_skills(skills: list[str]) -> None:
+    with pytest.raises(ValueError, match="skills cannot be selected"):
+        team_helpers._resolve_team_skill_selection(
+            {"skills": skills},
+            agent_group_name="review-group",
+        )
+
+
+@pytest.mark.parametrize("skills", [None, "review", {}])
+def test_agent_group_skill_selection_still_requires_a_list(skills: Any) -> None:
+    with pytest.raises(ValueError, match="skills must be a list"):
+        team_helpers._resolve_team_skill_selection(
+            {"skills": skills},
+            agent_group_name="review-group",
+        )
+
+
+@pytest.mark.anyio
+async def test_apply_team_skill_selection_is_visible_to_all_members(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from openjiuwen.agent_teams.skill.visibility import SCOPE_TEAM, read_skill_visibility
+
+    from jiuwenswarm.server.runtime.skill.skill_manager import (
+        _compose_workspace_skill_visibility,
+    )
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "technical-review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: technical-review\ndescription: Review proposals\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(team_helpers, "get_agent_skills_dir", lambda: skills_root)
+
+    reloads: list[str] = []
+
+    class _Manager:
+        @staticmethod
+        async def reload_team_skill_views(session_id: str) -> int:
+            reloads.append(session_id)
+            return 2
+
+    team_path = tmp_path / "team-workspace" / "skills-visibility.json"
+    spec = SimpleNamespace(
+        team_name="review-team",
+        build_context=SimpleNamespace(team_skill_visibility_path=str(team_path)),
+    )
+
+    await team_helpers._apply_team_skill_selection(
+        team_manager=_Manager(),
+        session_id="session-review",
+        team_spec=spec,
+        skill_names=["technical-review"],
+    )
+
+    visibility = read_skill_visibility(
+        team_path,
+        scope=SCOPE_TEAM,
+        entity_id="review-team",
+    )
+    assert visibility.allow == ["technical-review"]
+    assert visibility.deny == []
+    assert reloads == ["session-review"]
+
+    for member_name in ("leader", "architect", "risk-reviewer"):
+        enabled, disabled = _compose_workspace_skill_visibility(
+            member_path=tmp_path / member_name / "skills-visibility.json",
+            member_id=member_name,
+            team_path=team_path,
+            team_id="review-team",
+        )
+        assert enabled == {"technical-review"}
+        assert "technical-review" not in disabled
+
+    # An explicit empty selection clears Team-level narrowing and restores the
+    # visibility layer's default "inherit the library" behavior.
+    await team_helpers._apply_team_skill_selection(
+        team_manager=_Manager(),
+        session_id="session-review",
+        team_spec=spec,
+        skill_names=[],
+    )
+    cleared = read_skill_visibility(
+        team_path,
+        scope=SCOPE_TEAM,
+        entity_id="review-team",
+    )
+    assert cleared.allow == []
+    assert cleared.deny == []
+
+
+@pytest.mark.anyio
+async def test_apply_team_skill_selection_rejects_unavailable_skill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setattr(team_helpers, "get_agent_skills_dir", lambda: skills_root)
+    team_path = tmp_path / "team-workspace" / "skills-visibility.json"
+    spec = SimpleNamespace(
+        team_name="review-team",
+        build_context=SimpleNamespace(team_skill_visibility_path=str(team_path)),
+    )
+
+    with pytest.raises(ValueError, match="team skill not installed"):
+        await team_helpers._apply_team_skill_selection(
+            team_manager=object(),
+            session_id="session-review",
+            team_spec=spec,
+            skill_names=["missing-skill"],
+        )
+    assert not team_path.exists()
+
+
+def test_validate_installed_team_skills_rejects_globally_disabled_skill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from jiuwenswarm.server.runtime import skill as skill_runtime
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "disabled-review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: disabled-review\ndescription: Disabled\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(team_helpers, "get_agent_skills_dir", lambda: skills_root)
+    monkeypatch.setattr(
+        skill_runtime,
+        "load_execution_disabled_skills",
+        lambda: ["disabled-review"],
+    )
+
+    with pytest.raises(ValueError, match="team skill is disabled"):
+        team_helpers._validate_installed_team_skills(["disabled-review"])
 
 
 def test_persist_team_history_event_keeps_human_spawn_details(
@@ -2043,6 +2208,249 @@ async def test_interactive_team_followup_hands_admission_to_round_state(monkeypa
     )
     assert manager.is_round_active("sess-team-user") is False
     assert admission.is_user_active("sess-team-user") is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["team", "code.team"])
+@pytest.mark.parametrize(
+    ("stored_group", "requested_group", "active"),
+    [
+        pytest.param("", "review-group", False, id="first-request"),
+        pytest.param("review-group", None, True, id="inherited-followup"),
+        pytest.param("review-group", "review-group", True, id="explicit-followup"),
+        pytest.param("review-group", None, False, id="cold-recovery"),
+    ],
+)
+async def test_process_team_message_stream_rejects_agent_group_with_skills(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    stored_group: str,
+    requested_group: str | None,
+    active: bool,
+) -> None:
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def has_stream_task(session_id: str) -> bool:
+            return active
+
+    manager = _FakeManager()
+    manager.get_swarm_enriched_team_spec = AsyncMock()
+    manager.interact = AsyncMock()
+    apply_selection = AsyncMock()
+    start_round = AsyncMock()
+    persist_metadata = Mock()
+    persist_roots = Mock()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+    monkeypatch.setattr(
+        team_helpers,
+        "get_session_metadata",
+        lambda *args, **kwargs: {"agent_group_name": stored_group},
+    )
+    monkeypatch.setattr(team_helpers, "_apply_team_skill_selection", apply_selection)
+    monkeypatch.setattr(team_helpers, "_start_team_stream_round", start_round)
+    monkeypatch.setattr(team_helpers, "update_session_metadata", persist_metadata)
+    monkeypatch.setattr(team_helpers, "_persist_team_file_monitor_roots", persist_roots)
+
+    params = {"mode": mode, "skills": ["technical-review"]}
+    if requested_group is not None:
+        params["agent_group_name"] = requested_group
+    request = SimpleNamespace(
+        session_id="sess-group-skill-conflict",
+        request_id="req-group-skill-conflict",
+        channel_id="web",
+        metadata=None,
+        params=params,
+    )
+    chunks = [
+        chunk
+        async for chunk in team_helpers.process_team_message_stream(
+            request, {"query": "review this proposal"}, object()
+        )
+    ]
+
+    assert len(chunks) == 2
+    assert chunks[0].payload == {
+        "event_type": "chat.error",
+        "error": "skills cannot be selected when an agent_group_name is selected or bound",
+    }
+    assert chunks[0].is_complete is False
+    assert chunks[-1].is_complete is True
+    manager.get_swarm_enriched_team_spec.assert_not_awaited()
+    manager.interact.assert_not_awaited()
+    apply_selection.assert_not_awaited()
+    start_round.assert_not_awaited()
+    persist_metadata.assert_not_called()
+    persist_roots.assert_not_called()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("skills_params", [{}, {"skills": []}], ids=["omitted", "empty"])
+@pytest.mark.parametrize("state", ["first-request", "followup", "cold-recovery"])
+async def test_process_team_message_stream_keeps_agent_group_skills(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    skills_params: dict[str, Any],
+    state: str,
+) -> None:
+    from openjiuwen.agent_teams.skill.visibility import SCOPE_TEAM, set_skill_visibility
+
+    first_request = state == "first-request"
+    active = state == "followup"
+    team_path = tmp_path / "team-workspace" / "skills-visibility.json"
+    set_skill_visibility(
+        team_path,
+        scope=SCOPE_TEAM,
+        entity_id="unit-team",
+        allow=["packaged-review"],
+        deny=["disabled-review"],
+    )
+    original_visibility = team_path.read_bytes()
+    spec = SimpleNamespace(
+        team_name="unit-team",
+        build_context=SimpleNamespace(team_skill_visibility_path=str(team_path)),
+        agents={
+            name: SimpleNamespace(skills=["packaged-review"])
+            for name in ("leader", "reviewer")
+        },
+    )
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def has_stream_task(session_id: str) -> bool:
+            return active
+
+    manager = _FakeManager()
+    manager.get_swarm_enriched_team_spec = AsyncMock(return_value=spec)
+    manager.interact = AsyncMock(return_value=(True, None))
+    manager.reload_team_skill_views = AsyncMock()
+    apply_selection = AsyncMock(wraps=team_helpers._apply_team_skill_selection)
+    start_round = AsyncMock(return_value=asyncio.Queue())
+    persist_metadata = Mock()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+    monkeypatch.setattr(
+        team_helpers,
+        "get_session_metadata",
+        lambda *args, **kwargs: (
+            {} if first_request else {"agent_group_name": "review-group"}
+        ),
+    )
+    monkeypatch.setattr(team_helpers, "_apply_team_skill_selection", apply_selection)
+    monkeypatch.setattr(team_helpers, "_start_team_stream_round", start_round)
+    monkeypatch.setattr(team_helpers, "update_session_metadata", persist_metadata)
+    monkeypatch.setattr(team_helpers, "_persist_team_file_monitor_roots", Mock())
+    monkeypatch.setattr(
+        team_helpers, "_handle_team_slash_command", AsyncMock(return_value=None)
+    )
+
+    params = {"mode": "team", **skills_params}
+    if first_request:
+        params["agent_group_name"] = "review-group"
+    request = SimpleNamespace(
+        session_id="sess-group-skills-preserved",
+        request_id="req-group-skills-preserved",
+        channel_id="web",
+        metadata=None,
+        params=params,
+    )
+    chunks = [
+        chunk
+        async for chunk in team_helpers.process_team_message_stream(
+            request, {"query": "review this proposal"}, object()
+        )
+    ]
+
+    assert chunks[-1].is_complete is True
+    assert not any(
+        chunk.payload and chunk.payload.get("event_type") == "chat.error"
+        for chunk in chunks
+    )
+    manager.get_swarm_enriched_team_spec.assert_awaited_once()
+    spec_kwargs = manager.get_swarm_enriched_team_spec.await_args.kwargs
+    assert spec_kwargs.get("agent_group_name") == "review-group"
+    apply_selection.assert_not_awaited()
+    manager.reload_team_skill_views.assert_not_awaited()
+    assert team_path.read_bytes() == original_visibility
+    assert all(member.skills == ["packaged-review"] for member in spec.agents.values())
+    if active:
+        manager.interact.assert_awaited_once()
+        start_round.assert_not_awaited()
+    else:
+        start_round.assert_awaited_once()
+        manager.interact.assert_not_awaited()
+    if first_request:
+        persist_metadata.assert_called_once_with(
+            session_id=request.session_id,
+            agent_group_name="review-group",
+            touch_last_message_at=False,
+            cache_bust=True,
+            sync_write=True,
+        )
+    else:
+        persist_metadata.assert_not_called()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("skills", [["technical-review"], []], ids=["select", "clear"])
+async def test_process_team_message_stream_applies_selected_skills_before_followup(
+    monkeypatch: pytest.MonkeyPatch,
+    skills: list[str],
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def has_stream_task(session_id: str) -> bool:
+            return True
+
+        @staticmethod
+        async def get_swarm_enriched_team_spec(**kwargs):
+            return SimpleNamespace(team_name="unit-team")
+
+        @staticmethod
+        async def interact(session_id: str, query: str):
+            calls.append({"interact": session_id, "query": _delivered_content(query)})
+            return True, None
+
+    manager = _FakeManager()
+
+    async def _record_selection(**kwargs: Any) -> None:
+        calls.append(
+            {
+                "selection": kwargs["skill_names"],
+                "session_id": kwargs["session_id"],
+                "manager": kwargs["team_manager"],
+            }
+        )
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+    monkeypatch.setattr(team_helpers, "_apply_team_skill_selection", _record_selection)
+    monkeypatch.setattr(team_helpers, "get_session_metadata", lambda *args, **kwargs: {})
+
+    request = SimpleNamespace(
+        session_id="sess-team-skills",
+        request_id="req-team-skills",
+        channel_id="web",
+        metadata=None,
+        params={"mode": "team", "skills": skills},
+    )
+    chunks = []
+    async for chunk in team_helpers.process_team_message_stream(
+        request,
+        {"query": "review this proposal"},
+        object(),
+    ):
+        chunks.append(chunk)
+
+    assert calls[0] == {
+        "selection": skills,
+        "session_id": "sess-team-skills",
+        "manager": manager,
+    }
+    assert calls[1] == {
+        "interact": "sess-team-skills",
+        "query": "review this proposal",
+    }
+    assert chunks[-1].is_complete is True
 
 
 @pytest.mark.anyio
