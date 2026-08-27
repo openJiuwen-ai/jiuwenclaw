@@ -281,6 +281,7 @@
     "placeholderTeamModeProcessing": "集群模式处理中，输入新指令会并行执行...",
     "placeholderVoice": "正在听取语音...",
     "welcomeLogoAlt": "WorkSwarm 标志",
+    "welcomeBubbleText": "HI~我是你的专属桌面智能搭子，随时待命陪你摸鱼解闷~",
     "welcomeHeading": "你好，我是WorkSwarm，很高兴认识你！",
     "welcomeSuggestions": {
       "journey": "让我们开启一段新的旅程吧！",

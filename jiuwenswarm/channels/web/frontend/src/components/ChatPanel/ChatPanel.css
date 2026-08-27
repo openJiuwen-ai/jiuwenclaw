@@ -9,6 +9,7 @@
 
 .chat-panel-shell {
   position: relative;
+  container-type: inline-size;
 }
 
 /* ===========================
@@ -80,6 +81,7 @@
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  cursor: pointer;
 }
 
 .chat-header-icon-btn {
@@ -3671,6 +3673,7 @@ overflow: hidden;
 
 /* Welcome screen */
 .chat-welcome {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -3688,15 +3691,34 @@ overflow: hidden;
 
 .chat-welcome__banner {
   position: absolute;
-  top: -124px;
-  right: -129px;
-  width: 300px;
-  height: 150px;
   max-width: 100%;
   display: block;
   object-fit: contain;
   pointer-events: none;
   z-index: 10;
+}
+
+.chat-welcome__banner--bubble {
+  top: -30px;
+  right: -114px;
+  z-index: 12;
+  background: var(--color-surface-card);
+  border-radius: 16px;
+  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+  width: 186px;
+  height: auto;
+  padding: 12px 16px;
+  font-size: 14px;
+  color: var(--color-chat-supporting-text);
+  transition: right 0.3s ease, top 0.3s ease;
+}
+
+.chat-welcome__banner--bee {
+  top: -120px;
+  right: -16px;
+  width: 200px;
+  height: auto;
+  z-index: 11;
 }
 
 .chat-welcome__heading {
@@ -3707,6 +3729,15 @@ overflow: hidden;
   margin: 0 0 20px 0;
   text-align: left;
   align-self: flex-start;
+}
+
+@container (max-width: 799px) {
+  .chat-welcome__heading-highlight {
+    display: block;
+  }
+  .chat-welcome__banner--bubble {
+    top: 18px;
+  }
 }
 
 .chat-welcome__subtext {

@@ -1001,6 +1001,13 @@ body.workspace-resize-active iframe {
     margin-inline: auto;
   }
 
+  .chat-content--welcome {
+    min-height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
   @media (min-width: 1600px) {
     .chat-panel-shell--team-floating .chat-scroll:not(:has(.chat-content--welcome)) {
       padding-right: 364px;
@@ -1015,13 +1022,6 @@ body.workspace-resize-active iframe {
       width: calc(816px + 364px);
       padding-right: 364px;
     }
-  }
-
-  .chat-content--welcome {
-    min-height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
   }
 
   /* Tool cards (legacy single) */

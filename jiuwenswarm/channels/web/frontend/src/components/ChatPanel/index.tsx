@@ -32,7 +32,7 @@ import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember, type TeamMemberIdentity } from '../../utils/teamMemberAvatar';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
-import welcomeBanner from '../../assets/home-banner-workswarm.svg';
+import beeBanner from '../../assets/蜜蜂.svg';
 import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
@@ -461,14 +461,14 @@ function WelcomeHeading() {
   if (isZh) {
     return (
       <>
-        WorkSwarm 轻松解决工作每个问题！
+        <span className="chat-welcome__heading-highlight">WorkSwarm</span> 轻松解决工作每个问题！
       </>
     );
   }
 
   return (
     <>
-      WorkSwarm makes work easier!
+      <span className="chat-welcome__heading-highlight">WorkSwarm</span> makes work easier!
     </>
   );
 }
@@ -774,6 +774,8 @@ export function ChatPanel({
   ));
   const teamHumanShareCommands = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHumanShareCommands ?? []);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const panelShellRef = useRef<HTMLDivElement>(null);
+  const bubbleRef = useRef<HTMLDivElement>(null);
   const inputAreaRef = useRef<InputAreaHandle>(null);
   const desktopFileDropAcceptUntilRef = useRef(0);
   const lastConsumedDesktopDropIdRef = useRef<string | null>(null);
@@ -956,6 +958,34 @@ export function ChatPanel({
     historyPrepending,
     updateHistoryLayoutSnapshot,
   ]);
+
+  // 根据 chat-panel 宽度动态调整 welcome bubble 的 right 值
+  useEffect(() => {
+    const panel = panelShellRef.current;
+    const bubble = bubbleRef.current;
+    if (!panel || !bubble || typeof ResizeObserver === 'undefined') return;
+
+    const updateBubbleRight = () => {
+      const width = panel.offsetWidth;
+      let rightValue: number;
+      if (width >= 1130) {
+        rightValue = -114;
+      } else if (width >= 1000) {
+        rightValue = -55;
+      } else if (width >= 800) {
+        rightValue = -10;
+      } else {
+        rightValue = -10;
+      }
+      bubble.style.right = `${rightValue}px`;
+    };
+
+    updateBubbleRight();
+
+    const observer = new ResizeObserver(updateBubbleRight);
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, []);
 
   // 检测鼠标滚轮事件，即使没有滚动条也能触发加载更多
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
@@ -1225,6 +1255,7 @@ export function ChatPanel({
 
   return (
     <div
+      ref={panelShellRef}
       className={`chat-panel-shell flex flex-col h-full ${teamAreaExpanded === false ? 'chat-panel-shell--team-floating' : ''}`}
       data-testid="chat-panel"
       onDragEnter={handleDesktopFileDragEnter}
@@ -1362,9 +1393,10 @@ export function ChatPanel({
             </>
           ) : (
             <div className="chat-welcome" data-testid="chat-panel-welcome">
+              <div ref={bubbleRef} className="chat-welcome__banner chat-welcome__banner--bubble" data-testid="chat-panel-welcome-banner-bubble">{t('chat.welcomeBubbleText')}</div>
               <h2 className="chat-welcome__heading" data-testid="chat-panel-welcome-heading"><WelcomeHeading /></h2>
               <div className="chat-welcome__composer" data-testid="chat-panel-welcome-composer">
-                <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} data-testid="chat-panel-welcome-banner" />
+                <img className="chat-welcome__banner chat-welcome__banner--bee" src={beeBanner} alt={t('chat.welcomeLogoAlt')} data-testid="chat-panel-welcome-banner" />
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />
