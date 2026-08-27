@@ -182,20 +182,22 @@ async def _stream_graph(
             "depth": depth,
         }
     ]
-    events.extend(
-        {
-            "event_type": "personal_context.context.nodes",
-            "nodes": nodes[index : index + 200],
-        }
-        for index in range(0, len(nodes), 200)
-    )
-    events.extend(
-        {
-            "event_type": "personal_context.context.edges",
-            "edges": edges[index : index + 200],
-        }
-        for index in range(0, len(edges), 200)
-    )
+    for start in range(0, len(nodes), 200):
+        stop = start + 200
+        events.append(
+            {
+                "event_type": "personal_context.context.nodes",
+                "nodes": nodes[start:stop],
+            }
+        )
+    for start in range(0, len(edges), 200):
+        stop = start + 200
+        events.append(
+            {
+                "event_type": "personal_context.context.edges",
+                "edges": edges[start:stop],
+            }
+        )
     events.append(
         {
             "event_type": "personal_context.context.end",
