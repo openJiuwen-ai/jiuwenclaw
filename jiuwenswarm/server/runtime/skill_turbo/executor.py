@@ -177,6 +177,38 @@ def is_skill_turbo_thinking_param_error(exc: BaseException) -> bool:
     return any(n in msg for n in needles)
 
 
+# ──────────────────────── LLM 输出可见性控制 ────────────────────────
+# skill_turbo 的 LLM 调用均为流水线内部编排（素材充裕度/搜索 query/研究计划/
+# 覆盖度/大纲/研究报告等）。其正文若经 llm_output 事件转发，会在
+# stream_event_rail 的 subagent_parent_session 路由下写进用户可见主流，
+# 被 interface_deep L15512 无条件转成 chat.delta 刷屏（如 stage6 的
+# {"material_richness":...} JSON、stage8 的 [{page_number,...}] 研究计划）。
+#
+# 产物（outline.md / research-P{N}.md / 幻灯片 HTML）由节点 write_file 落盘后，
+# 经 SkillTurboArtifactRail（注册于 _rails）→ artifact.generated 事件 →
+# 前端「工作产物」tab/卡片独立展示，对话流刷 LLM 原始正文纯属冗余。
+#
+# 因此默认全静默 llm_output 正文转发：业务代码仍 yield/return 完整文本，
+# 解析/校验/重试逻辑不变；reasoning/usage/node.started 横幅均独立通道不受影响。
+#
+# 环境开关：SKILL_TURBO_FORWARD_LLM_OUTPUT=1 可恢复旧行为（调试/灰度用）。
+_FORWARD_LLM_OUTPUT: bool = os.getenv("SKILL_TURBO_FORWARD_LLM_OUTPUT", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+
+def _should_forward_llm_output(node_name: str) -> bool:
+    """是否将 skill_turbo LLM 正文经 llm_output 事件转发到用户对话流。
+
+    默认 False（全静默）。设 _FORWARD_LLM_OUTPUT=True 时恢复全转发，
+    供调试/灰度回退。产物可见性由 write_file→artifact.generated 通道保证。
+    """
+    return _FORWARD_LLM_OUTPUT
+
+
 # ──────────────────────── 全局上下文变量 ────────────────────────
 # Session管理（用于发送事件）
 _session_var: ContextVar[Session | None] = ContextVar("skill_turbo_session", default=None)
@@ -1900,7 +1932,8 @@ class SkillTurboExecutor:
             result = response.content
 
             # 处理正文内容并注入 source_id（与 reasoning 保持一致）
-            if result and session:
+            # 默认不转发：skill_turbo LLM 正文属内部编排产物，不进output流式输出
+            if result and session and _should_forward_llm_output(node_name):
                 output_payload: dict[str, Any] = {
                     "content": str(result),
                     "plan_name": self._display_name(node_name),
@@ -2065,7 +2098,8 @@ class SkillTurboExecutor:
                         accumulated_message += text_chunk
 
                         # 通过 session stream 发送正文 delta（与 reasoning 保持一致）
-                        if session:
+                        # 默认不转发：skill_turbo LLM 正文属内部编排产物，不进流式输出
+                        if session and _should_forward_llm_output(node_name):
                             output_payload: dict[str, Any] = {
                                 "content": str(text_chunk),
                                 "plan_name": self._display_name(node_name),
