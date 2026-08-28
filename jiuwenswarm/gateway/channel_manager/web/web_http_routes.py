@@ -59,6 +59,131 @@ _CONFIG_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     ),
 )
 
+_A2A_INGRESS_ROUTES: tuple[WebHttpMappedRoute, ...] = (
+    WebHttpMappedRoute("GET", "/a2a/ingress", "a2a.ingress.get", "a2a", "读取 A2A 入站服务状态"),
+    WebHttpMappedRoute(
+        "GET", "/a2a/ingress/history", "a2a.ingress.history", "a2a", "读取 A2A 入站请求处理历史",
+        query_keys=("limit",),
+    ),
+    WebHttpMappedRoute(
+        "PATCH", "/a2a/ingress", "a2a.ingress.update", "a2a", "保存 A2A 入站配置",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/a2a/ingress:enable", "a2a.ingress.enable", "a2a", "启用 A2A 入站服务",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/a2a/ingress:disable", "a2a.ingress.disable", "a2a", "停用 A2A 入站服务",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST", "/a2a/ingress:reload", "a2a.ingress.reload", "a2a", "重载 A2A 入站服务",
+        accept_body=True,
+    ),
+)
+
+_A2A_OUTBOUND_ROUTES: tuple[WebHttpMappedRoute, ...] = (
+    WebHttpMappedRoute(
+        "GET",
+        "/a2a/outbound/settings",
+        "a2a.outbound.settings.get",
+        "a2a",
+        "读取 A2A 出站设置",
+    ),
+    WebHttpMappedRoute(
+        "PATCH",
+        "/a2a/outbound/settings",
+        "a2a.outbound.settings.update",
+        "a2a",
+        "更新 A2A 出站设置",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST",
+        "/a2a/outbound/discover",
+        "a2a.outbound.discover",
+        "a2a",
+        "发现并预览第三方 A2A Agent",
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST",
+        "/a2a/outbound/agents",
+        "a2a.outbound.register",
+        "a2a",
+        "显式注册第三方 A2A Agent",
+        accept_body=True,
+        created=True,
+    ),
+    WebHttpMappedRoute(
+        "GET",
+        "/a2a/outbound/agents",
+        "a2a.outbound.list",
+        "a2a",
+        "列出已注册第三方 A2A Agent",
+    ),
+    WebHttpMappedRoute(
+        "GET",
+        "/a2a/outbound/agents/{agent_id}",
+        "a2a.outbound.get",
+        "a2a",
+        "读取第三方 A2A Agent 注册项",
+        path_to_param={"agent_id": "agent_id"},
+    ),
+    WebHttpMappedRoute(
+        "PATCH",
+        "/a2a/outbound/agents/{agent_id}",
+        "a2a.outbound.update",
+        "a2a",
+        "更新第三方 A2A Agent 注册项",
+        path_to_param={"agent_id": "agent_id"},
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST",
+        "/a2a/outbound/agents/{agent_id}:refresh",
+        "a2a.outbound.refresh",
+        "a2a",
+        "刷新第三方 A2A Agent Card",
+        path_to_param={"agent_id": "agent_id"},
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "POST",
+        "/a2a/outbound/agents/{agent_id}:confirm-revision",
+        "a2a.outbound.confirm_revision",
+        "a2a",
+        "确认第三方 Agent Card 关键变化",
+        path_to_param={"agent_id": "agent_id"},
+        accept_body=True,
+    ),
+    WebHttpMappedRoute(
+        "DELETE",
+        "/a2a/outbound/agents/{agent_id}",
+        "a2a.outbound.delete",
+        "a2a",
+        "删除第三方 A2A Agent 注册项",
+        path_to_param={"agent_id": "agent_id"},
+    ),
+    WebHttpMappedRoute(
+        "GET",
+        "/a2a/outbound/dispatches",
+        "a2a.outbound.dispatch.list",
+        "a2a",
+        "列出 A2A 出站派发处理历史",
+        query_keys=("limit",),
+    ),
+    WebHttpMappedRoute(
+        "GET",
+        "/a2a/outbound/dispatches/{dispatch_id}",
+        "a2a.outbound.dispatch.get",
+        "a2a",
+        "读取 A2A 出站派发状态",
+        path_to_param={"dispatch_id": "dispatch_id"},
+    ),
+)
+
 _MODELS_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     WebHttpMappedRoute(
         "GET", "/models", "models.list",
@@ -128,6 +253,8 @@ _CRON_ROUTES: tuple[WebHttpMappedRoute, ...] = (
 
 SETTINGS_ROUTES: tuple[WebHttpMappedRoute, ...] = (
     *_CONFIG_ROUTES,
+    *_A2A_INGRESS_ROUTES,
+    *_A2A_OUTBOUND_ROUTES,
     *_MODELS_ROUTES,
     *_LOCALE_ROUTES,
     *_CRON_ROUTES,

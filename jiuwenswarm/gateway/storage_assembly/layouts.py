@@ -93,6 +93,27 @@ def _json_and_db(
     return StoreLayout(file=file, db=DbLayout(table=table))
 
 
+def _json_only(
+    rel: str,
+    *,
+    persistent_root: Path | None,
+    shape: Literal["map", "list"] = "map",
+    key_fields: tuple[str, ...] = (),
+) -> StoreLayout | None:
+    """形态：仅个人版独立 JSON；企业装配时不注册。"""
+    if persistent_root is None:
+        return None
+    return StoreLayout(
+        file=FileLayout(
+            path=str(persistent_root / rel),
+            format="json",
+            shape=shape,
+            key_fields=key_fields,
+        ),
+        db=None,
+    )
+
+
 def _json_and_db_at_path(
     table: str,
     path: Path,
@@ -135,6 +156,19 @@ _YAML_ONLY_SECTIONS: dict[str, _YamlSectionSpec] = {
     "a2ui_config": ("/a2ui", (), ""),
 }
 
+_JSON_ONLY_STORES: dict[str, _JsonAndDbSpec] = {
+    "a2a_outbound_agent": (
+        "a2a_outbound_agents.json",
+        "map",
+        ("agent_id",),
+    ),
+    "a2a_outbound_dispatch": (
+        "a2a_outbound_dispatches.json",
+        "map",
+        ("dispatch_id",),
+    ),
+}
+
 _JSON_AND_DB_STORES: dict[str, _JsonAndDbSpec] = {
     "session_map": ("session_map.json", "map", ("identity_key",)),
 }
@@ -169,6 +203,16 @@ def _build_layouts(
     layouts: dict[str, StoreLayout] = {}
 
     layouts["cron_job"] = _legacy_gateway_cron_job_layout(cron_jobs_path_template)
+
+    for name, (rel, shape, key_fields) in _JSON_ONLY_STORES.items():
+        layout = _json_only(
+            rel,
+            persistent_root=persistent_root,
+            shape=shape,
+            key_fields=key_fields,
+        )
+        if layout is not None:
+            layouts[name] = layout
 
     for name, (rel, shape, key_fields) in _JSON_AND_DB_STORES.items():
         if name == "session_map":

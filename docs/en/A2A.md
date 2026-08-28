@@ -1,8 +1,8 @@
 # A2A Integration Guide
 
-This page explains the Gateway-side **A2A Server** (`A2AChannel`): implementation location, configuration, mapping to internal `Message`/E2A, and local verification commands. For outbound A2A (agent calling external services), see section 7.
+This page explains the Gateway-side **A2A ingress service**: its management surface, configuration, mapping to internal `Message`/E2A, and end-to-end verification. For outbound A2A (agent calling external services), see section 7.
 
-> **Implementation**: `jiuwenswarm/gateway/channel_manager/protocol/a2a/a2a_connect.py` (`A2AChannel` + `a2a-sdk`). **Entrypoint process**: `python -m jiuwenswarm.gateway.app_gateway` (registered and started in `jiuwenswarm/gateway/app_gateway.py`). In case of mismatch, source code is the source of truth.
+> **Runtime owner**: `jiuwenswarm/gateway/a2a_manager/manager.py` (`A2AManager`). **Protocol adapter**: `jiuwenswarm/gateway/channel_manager/protocol/a2a/a2a_connect.py` (`A2AChannel` + `a2a-sdk`). **Entrypoint process**: `python -m jiuwenswarm.gateway.app_gateway`. In case of mismatch, source code is the source of truth.
 
 ---
 
@@ -11,8 +11,9 @@ This page explains the Gateway-side **A2A Server** (`A2AChannel`): implementatio
 | Location | Role |
 |------|------|
 | **docs/en/A2A.md** (this page) | Integration and dev debugging: modules, config, mapping, verification |
+| `jiuwenswarm/gateway/a2a_manager/` | Ingress config, persistence, lifecycle state machine, and management snapshots |
 | `jiuwenswarm/gateway/channel_manager/protocol/a2a/a2a_connect.py` | A2A HTTP service, `AgentCard`, request/response to `Message` conversion |
-| `jiuwenswarm/gateway/app_gateway.py` | Env loading, `A2AChannel` construction, `channel_manager.register_channel` |
+| `jiuwenswarm/gateway/app_gateway.py` | Assembles `A2AManager`, registers management APIs, and starts/stops it with Gateway |
 | `jiuwenswarm/gateway/message_handler/message_handler.py` | Gateway↔AgentServer E2A exchange and internal `Message` orchestration |
 | `jiuwenswarm/gateway/channel_manager/channel_manager.py` | Channel registration and `robot_messages` → `Channel.send` dispatch |
 | [E2A-protocol.md](E2A-protocol.md) | Inner protocol between Gateway and AgentServer |
@@ -31,7 +32,7 @@ This page explains the Gateway-side **A2A Server** (`A2AChannel`): implementatio
 | Item | Web | ACP | A2A (current) |
 |------|-----|-----|-------------|
 | Bindings | `WEB_HOST` / `WEB_PORT` / `WEB_PATH` | `ACP_GATEWAY_*` | `A2A_SERVER_*` |
-| Config source | Env + CLI (`--host`, etc.) | Env only | Env only |
+| Config source | Env + CLI (`--host`, etc.) | Env only | `.env` compatibility + Web management API |
 | `.env` loading | `app_gateway` calls `load_dotenv(get_env_file())`, i.e. `~/.jiuwenswarm/config/.env` | same | same |
 
 ---
@@ -64,6 +65,8 @@ uv sync --extra a2a
 
 AgentServer connectivity still follows existing gateway config (for example `AGENT_SERVER_URL`) and is independent from the A2A listening endpoint.
 
+While Gateway is running, use **More Settings → A2A Dispatch Center** in the Web UI to inspect status, save configuration, enable, disable, or reload ingress without restarting Gateway. This page currently manages inbound listening only; it does not provide external-agent discovery, outbound calls, or automatic dispatch.
+
 When `A2A_SERVER_ENABLED=true` but `jiuwenswarm[a2a]` (or `uv sync --extra a2a`) is not installed, Gateway startup remains non-blocking; A2A channel startup failure is reported in logs with actionable install hints.
 
 ---
@@ -74,6 +77,21 @@ When `A2A_SERVER_ENABLED=true` but `jiuwenswarm[a2a]` (or `uv sync --extra a2a`)
 - **Agent Card**: `http://{host}:{port}/.well-known/agent-card.json` (path defined by `A2AChannelConfig.card_path`, default `/.well-known/agent-card.json`)
 
 `AgentCard` is built in `A2AChannel.start()`: `supported_interfaces[0].url` points to the JSON-RPC endpoint above; `capabilities.streaming` and skills are defined in code.
+
+### 4.1 Management API
+
+Gateway Web HTTP listens on `WEB_PORT + 2` by default (`19002`). Its ingress management endpoints are:
+
+| HTTP | Path | Purpose |
+|------|------|---------|
+| `GET` | `/api/v1/a2a/ingress` | Read desired config, effective listener, and runtime state |
+| `GET` | `/api/v1/a2a/ingress/history` | Read ingress request history; query `limit` accepts the latest 1–200 records |
+| `PATCH` | `/api/v1/a2a/ingress` | Save config; include `apply: true` to apply it immediately |
+| `POST` | `/api/v1/a2a/ingress:enable` | Persist enabled state and start listening |
+| `POST` | `/api/v1/a2a/ingress:disable` | Persist disabled state and stop listening |
+| `POST` | `/api/v1/a2a/ingress:reload` | Rebuild the listener from persisted config |
+
+Snapshots use `desired_*` for persisted targets and `effective_*` for the actual listener. Failures include stable error codes and display-safe summaries. Binding to `0.0.0.0` produces an exposure warning in the UI.
 
 ---
 
@@ -131,25 +149,16 @@ Inbound A2A `message.parts` are mapped into internal `Message.params.query` and 
 
 ---
 
-## 8. Local Verification (Examples)
+## 8. End-to-End Verification
 
-Non-streaming:
+[`demo/a2a_ingress_e2e.py`](../../demo/a2a_ingress_e2e.py) at the repository root uses a live Gateway, AgentServer, and the official `a2a-sdk` to verify hot enable/disable, reload onto a different port, Agent Card updates, `SendMessage`, and `SendStreamingMessage`. Start the complete backend, then run from the repository root:
 
-```bash
-curl -sS -X POST "http://127.0.0.1:${A2A_SERVER_PORT:-19100}${A2A_SERVER_PATH:-/a2a}" \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":"t1","method":"SendMessage","params":{"message":{"messageId":"m1","contextId":"c1","role":"ROLE_USER","parts":[{"text":"ping"}]}}}'
+```powershell
+.\.venv\Scripts\python.exe .\demo\a2a_ingress_e2e.py `
+  --jsonl .\demo\a2a_ingress_e2e_result.jsonl
 ```
 
-Streaming:
-
-```bash
-curl -sS -N -X POST "http://127.0.0.1:${A2A_SERVER_PORT:-19100}${A2A_SERVER_PATH:-/a2a}" \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":"t2","method":"SendStreamingMessage","params":{"message":{"messageId":"m2","contextId":"c2","role":"ROLE_USER","parts":[{"text":"ping"}]}}}'
-```
-
-Start both AgentServer and Gateway, and ensure `A2A_SERVER_ENABLED=true`.
+The script restores the pre-run A2A configuration on exit. See [`demo/README.md`](../../demo/README.md) for multi-instance ports, overrides, and JSONL evidence details.
 
 ---
 

@@ -1419,6 +1419,7 @@ class WebHandlersBindParams:
     cron_controller: Any = None
     cron_registry: Any = None
     updater_service: UpdaterService | None = None
+    a2a_manager: Any = None
 
 
 def _attribute_session_project(
@@ -1588,6 +1589,236 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     cron_controller = bind.cron_controller
     cron_registry = bind.cron_registry or bind.cron_controller
     updater_service = bind.updater_service
+    a2a_manager = bind.a2a_manager
+
+    async def _send_a2a_snapshot(ws, req_id, operation) -> None:
+        if a2a_manager is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="A2A ingress manager is unavailable", code="A2A_BIND_FAILED"
+            )
+            return
+        try:
+            snapshot = await operation()
+        except Exception as exc:  # noqa: BLE001
+            code = str(getattr(exc, "code", "A2A_BIND_FAILED"))
+            payload = a2a_manager.snapshot().to_dict()
+            await channel.send_response(ws, req_id, ok=False, payload=payload, error=str(exc), code=code)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=snapshot.to_dict())
+
+    async def _a2a_snapshot_async(manager):
+        return manager.snapshot()
+
+    async def _a2a_ingress_get(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, lambda: _a2a_snapshot_async(a2a_manager))
+
+    async def _a2a_ingress_history(ws, req_id, params, session_id):
+        if a2a_manager is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="A2A ingress manager is unavailable", code="A2A_BIND_FAILED"
+            )
+            return
+        try:
+            limit = int(params.get("limit", 100))
+        except (TypeError, ValueError):
+            await channel.send_response(
+                ws, req_id, ok=False, error="limit must be an integer", code="A2A_CONFIG_INVALID"
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=a2a_manager.history(limit))
+
+    async def _a2a_ingress_update(ws, req_id, params, session_id):
+        payload = params.get("config", params)
+        if not isinstance(payload, dict):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="config must be an object",
+                code="A2A_CONFIG_INVALID",
+            )
+            return
+        patch = dict(payload)
+        patch.pop("apply", None)
+        await _send_a2a_snapshot(
+            ws, req_id, lambda: a2a_manager.update(patch, apply=bool(params.get("apply", False)))
+        )
+
+    async def _a2a_ingress_enable(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, a2a_manager.enable)
+
+    async def _a2a_ingress_disable(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, a2a_manager.disable)
+
+    async def _a2a_ingress_reload(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, a2a_manager.reload)
+
+    channel.register_method("a2a.ingress.get", _a2a_ingress_get)
+    channel.register_method("a2a.ingress.history", _a2a_ingress_history)
+    channel.register_method("a2a.ingress.update", _a2a_ingress_update)
+    channel.register_method("a2a.ingress.enable", _a2a_ingress_enable)
+    channel.register_method("a2a.ingress.disable", _a2a_ingress_disable)
+    channel.register_method("a2a.ingress.reload", _a2a_ingress_reload)
+
+    async def _send_a2a_outbound(ws, req_id, operation) -> None:
+        if a2a_manager is None or not a2a_manager.outbound_available:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="A2A 出站管理服务当前不可用。",
+                code="A2A_OUTBOUND_STORE_INVALID",
+            )
+            return
+        try:
+            payload = await operation()
+        except Exception as exc:  # noqa: BLE001
+            from jiuwenswarm.gateway.a2a_manager.outbound import (
+                A2AOutboundError,
+                A2AOutboundErrorCode,
+                safe_error_summary,
+            )
+
+            if isinstance(exc, A2AOutboundError):
+                code = exc.code.value
+                error = exc.summary
+            else:
+                code = A2AOutboundErrorCode.STORE_INVALID.value
+                error = safe_error_summary(A2AOutboundErrorCode.STORE_INVALID)
+            await channel.send_response(
+                ws, req_id, ok=False, error=error, code=code
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _a2a_outbound_discover(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_discover(
+                str(params.get("url") or ""),
+                str(params["card_path"]) if params.get("card_path") is not None else None,
+            ),
+        )
+
+    async def _a2a_outbound_settings_get(ws, req_id, params, session_id):
+        await _send_a2a_outbound(ws, req_id, a2a_manager.outbound_get_settings)
+
+    async def _a2a_outbound_settings_update(ws, req_id, params, session_id):
+        enabled = params.get("allow_loopback_http")
+        if not isinstance(enabled, bool):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="allow_loopback_http must be a boolean",
+                code="A2A_CONFIG_INVALID",
+            )
+            return
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_update_settings(
+                allow_loopback_http=enabled
+            ),
+        )
+
+    async def _a2a_outbound_register(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws, req_id, lambda: a2a_manager.outbound_register(dict(params))
+        )
+
+    async def _a2a_outbound_list(ws, req_id, params, session_id):
+        await _send_a2a_outbound(ws, req_id, a2a_manager.outbound_list)
+
+    async def _a2a_outbound_get(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws, req_id, lambda: a2a_manager.outbound_get(str(params.get("agent_id") or ""))
+        )
+
+    async def _a2a_outbound_update(ws, req_id, params, session_id):
+        payload = dict(params)
+        agent_id = str(payload.pop("agent_id", ""))
+        await _send_a2a_outbound(
+            ws, req_id, lambda: a2a_manager.outbound_update(agent_id, payload)
+        )
+
+    async def _a2a_outbound_refresh(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws, req_id, lambda: a2a_manager.outbound_refresh(str(params.get("agent_id") or ""))
+        )
+
+    async def _a2a_outbound_confirm_revision(ws, req_id, params, session_id):
+        accept = params.get("accept")
+        if not isinstance(accept, bool):
+            from jiuwenswarm.gateway.a2a_manager.outbound import (
+                A2AOutboundErrorCode,
+                safe_error_summary,
+            )
+
+            code = A2AOutboundErrorCode.STORE_INVALID
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=safe_error_summary(code),
+                code=code.value,
+            )
+            return
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_confirm_revision(
+                str(params.get("agent_id") or ""),
+                accept=accept,
+            ),
+        )
+
+    async def _a2a_outbound_delete(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws, req_id, lambda: a2a_manager.outbound_delete(str(params.get("agent_id") or ""))
+        )
+
+    async def _a2a_outbound_dispatch_get(ws, req_id, params, session_id):
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_dispatch_get(str(params.get("dispatch_id") or "")),
+        )
+
+    async def _a2a_outbound_dispatch_list(ws, req_id, params, session_id):
+        try:
+            limit = int(params.get("limit", 200))
+        except (TypeError, ValueError):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="limit must be an integer",
+                code="A2A_OUTBOUND_STORE_INVALID",
+            )
+            return
+        limit = max(1, min(limit, 200))
+        await _send_a2a_outbound(
+            ws,
+            req_id,
+            lambda: a2a_manager.outbound_dispatch_list(limit=limit),
+        )
+
+    channel.register_method("a2a.outbound.settings.get", _a2a_outbound_settings_get)
+    channel.register_method("a2a.outbound.settings.update", _a2a_outbound_settings_update)
+    channel.register_method("a2a.outbound.discover", _a2a_outbound_discover)
+    channel.register_method("a2a.outbound.register", _a2a_outbound_register)
+    channel.register_method("a2a.outbound.list", _a2a_outbound_list)
+    channel.register_method("a2a.outbound.get", _a2a_outbound_get)
+    channel.register_method("a2a.outbound.update", _a2a_outbound_update)
+    channel.register_method("a2a.outbound.refresh", _a2a_outbound_refresh)
+    channel.register_method(
+        "a2a.outbound.confirm_revision", _a2a_outbound_confirm_revision
+    )
+    channel.register_method("a2a.outbound.delete", _a2a_outbound_delete)
+    channel.register_method("a2a.outbound.dispatch.list", _a2a_outbound_dispatch_list)
+    channel.register_method("a2a.outbound.dispatch.get", _a2a_outbound_dispatch_get)
 
     from jiuwenswarm.common.schema.message import Message, EventType
 

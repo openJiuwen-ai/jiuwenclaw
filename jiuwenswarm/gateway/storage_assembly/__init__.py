@@ -11,6 +11,7 @@ from jiuwenswarm.gateway.storage_assembly.manager_ws_bridge import (
     wire_manager_ws_table_store,
 )
 from jiuwenswarm.gateway.storage_assembly.setup import (
+    create_a2a_outbound_repository,
     create_a2ui_config_repository,
     create_browser_config_repository,
     create_channel_config_repository,
@@ -39,6 +40,7 @@ __all__ = [
     "GatewayDbConnection",
     "assert_replicas_db_compat",
     "build_gateway_store_registry",
+    "create_a2a_outbound_repository",
     "clear_manager_ws_table_store",
     "create_a2ui_config_repository",
     "create_browser_config_repository",
