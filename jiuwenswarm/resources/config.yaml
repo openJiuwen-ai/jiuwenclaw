@@ -1409,6 +1409,11 @@ modes:
     rails:
     tools:
   code:
+    artifact_post_process:
+      # 为生成的代码文件添加语言对应的 header 注释：
+      # "Co-authored by OfficeAce Coding Agent"。可通过 .env 开关控制，默认关闭。
+      coauthor_header: ${JIUWENSWARM_CODE_COAUTHOR_HEADER_ENABLED:-false}
+
     # 记忆开关 — 控制 CodingMemoryRail 和 ProjectMemoryRail 加载
     # 关闭后，coding_memory_read/write/edit 工具不可用，项目记忆文件不自动加载
     memory:
@@ -1418,7 +1423,8 @@ modes:
     # 固定 Rails（以下 Rails 已在代码中固定挂载，无需在此配置）：
     #   RuntimePromptRail, ResponsePromptRail, JiuSwarmStreamEventRail, SecurityRail,
     #   PermissionInterruptRail, SysOperationRail(FileSystemRail), LspRail,
-    #   AgentModeRail, StructuredAskUserRail, ConfirmInterruptRail, ContextProcessorRail
+    #   CodingArtifactPostProcessRail, AgentModeRail, StructuredAskUserRail,
+    #   ConfirmInterruptRail, ContextProcessorRail
     # 注意：ProjectMemoryRail, CodingMemoryRail 受 memory.enabled 开关控制，
     #       开关关闭时不加载，开关开启时固定挂载。
     rails:
