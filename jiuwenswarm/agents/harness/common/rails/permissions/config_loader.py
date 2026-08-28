@@ -8,13 +8,9 @@ from jiuwenswarm.common.local_env_config import is_enterprise
 import asyncio
 import contextvars
 import copy
-import json
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Any, Callable, Literal
-
-import aiosqlite
 
 logger = logging.getLogger(__name__)
 
@@ -413,7 +409,7 @@ def _gateway_db_available() -> bool:
     try:
         from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 
-        return bool(gateway_db.resolve_gateway_db_path())
+        return gateway_db.is_gateway_db_available()
     except Exception:  # noqa: BLE001
         return False
 
@@ -445,47 +441,7 @@ async def _upsert_permissions_config_to_db(
 ) -> None:
     from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 
-    jid = gateway_db.resolve_jiuwenclaw_id()
-    if not jid:
-        raise ValueError("JIUWENCLAW_ID is required for enterprise permissions persist")
-
-    db_path = gateway_db.resolve_gateway_db_path()
-    if not db_path:
-        raise RuntimeError("gateway db not available")
-
-    now = _utc_now().isoformat()
-    body_json = json.dumps(body, ensure_ascii=False)
-
-    async with aiosqlite.connect(db_path) as conn:
-        async with conn.execute(
-            f"SELECT id, revision FROM {PERMISSIONS_CONFIG_TABLE} WHERE jiuwenclaw_id = ?",
-            (jid,),
-        ) as cursor:
-            existing = await cursor.fetchone()
-        if existing is not None:
-            revision = int(existing[1] or 1) + 1
-            await conn.execute(
-                f"""
-                UPDATE {PERMISSIONS_CONFIG_TABLE}
-                SET body = ?, source = ?, revision = ?, updated_at = ?
-                WHERE jiuwenclaw_id = ?
-                """,
-                (body_json, source, revision, now, jid),
-            )
-        else:
-            await conn.execute(
-                f"""
-                INSERT INTO {PERMISSIONS_CONFIG_TABLE}
-                (jiuwenclaw_id, body, source, revision, created_at, updated_at)
-                VALUES (?, ?, ?, 1, ?, ?)
-                """,
-                (jid, body_json, source, now, now),
-            )
-        await conn.commit()
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    await gateway_db.upsert_permissions_config(body, source=source)
 
 
 def _event_loop_is_running() -> bool:
