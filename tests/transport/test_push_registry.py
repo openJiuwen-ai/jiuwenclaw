@@ -143,7 +143,10 @@ def test_send_push_without_ws_and_without_subscribers_is_quiet() -> None:
     assert get_push_registry().subscriber_count() == 0, "前置：注册表应是干净的"
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
 
-    asyncio.run(server.send_push({"request_id": "r1", "channel_id": "web", "payload": {}}))
+    delivered = asyncio.run(
+        server.send_push({"request_id": "r1", "channel_id": "web", "payload": {}})
+    )
+    assert delivered == 0
 
 
 def test_events_stream_route_is_registered(http_server) -> None:
@@ -226,39 +229,40 @@ def test_events_stream_delivers_push_end_to_end(http_server) -> None:
     assert remaining == 0, "客户端断开后订阅者必须被摘除，否则 registry 会堆积死连接"
 
 
-def test_ws_uses_fixed_subscriber_id_so_new_connection_replaces_old() -> None:
-    from jiuwenswarm.server.transports.push_registry import (
-        WS_PUSH_SUBSCRIBER_ID,
-        get_push_registry,
-    )
+def test_ws_unique_subscriber_ids_survive_short_connection_disconnect() -> None:
+    """短连接断开不得清空仍存活长连接的推送订阅（旧固定 gateway-ws 单槽的根因）。"""
+    from jiuwenswarm.server.transports.push_registry import get_push_registry
 
     reg = get_push_registry()
-    first, second = _RecordingSink(), _RecordingSink()
-    reg.register(WS_PUSH_SUBSCRIBER_ID, first)
-    reg.register(WS_PUSH_SUBSCRIBER_ID, second)
+    long_lived, short_lived = _RecordingSink(), _RecordingSink()
+    long_id, short_id = "gateway-ws:long", "gateway-ws:short"
+    reg.register(long_id, long_lived, drop_on_stall=False)
+    reg.register(short_id, short_lived, drop_on_stall=False)
     try:
-        assert reg.subscriber_count() == 1, "两条 WS 连接不应各占一个订阅位"
+        assert reg.subscriber_count() == 2
+        # 短连接断开只清自己
+        reg.unregister(short_id)
+        assert reg.subscriber_count() == 1
         asyncio.run(reg.push({"request_id": "r1"}))
     finally:
-        reg.unregister(WS_PUSH_SUBSCRIBER_ID)
+        reg.unregister(long_id)
+        reg.unregister(short_id)
 
-    assert first.wires == [], "先连的那条不该再收到推送"
-    assert len(second.wires) == 1, "推送应只到最后注册的那条连接"
+    assert short_lived.wires == [], "已断开的短连接不应再收到推送"
+    assert len(long_lived.wires) == 1, "长连接在短连接断开后仍应收到 send_push"
 
 
 def test_ws_push_sink_keeps_connection_registered_when_send_fails() -> None:
     from jiuwenswarm.server.agent_ws_server import _GatewayWSPushSink
-    from jiuwenswarm.server.transports.push_registry import (
-        WS_PUSH_SUBSCRIBER_ID,
-        get_push_registry,
-    )
+    from jiuwenswarm.server.transports.push_registry import get_push_registry
 
     class _BoomWs:
         async def send(self, _payload):
             raise RuntimeError("socket 断了")
 
     reg = get_push_registry()
-    reg.register(WS_PUSH_SUBSCRIBER_ID, _GatewayWSPushSink(_BoomWs(), asyncio.Lock()))
+    sub_id = "gateway-ws:boom-test"
+    reg.register(sub_id, _GatewayWSPushSink(_BoomWs(), asyncio.Lock()), drop_on_stall=False)
     try:
         delivered = asyncio.run(reg.push({"request_id": "r1"}))
         assert delivered == 0, "发送失败不应计入送达数"
@@ -266,7 +270,7 @@ def test_ws_push_sink_keeps_connection_registered_when_send_fails() -> None:
             "发送失败不得注销 WS 订阅者 —— 否则一次瞬时失败会让 Gateway 直到重连才恢复推送"
         )
     finally:
-        reg.unregister(WS_PUSH_SUBSCRIBER_ID)
+        reg.unregister(sub_id)
 
 
 def test_all_sinks_share_one_send_budget_semantics() -> None:
@@ -458,13 +462,9 @@ def test_events_stream_registers_only_after_generator_starts() -> None:
 def test_ws_subscriber_is_never_dropped_on_slow_send(monkeypatch) -> None:
     """WS 订阅者**不得**因发送慢被注销 —— 这是 ``_GatewayWSPushSink`` 的既有契约。
 
-    ``gateway-ws`` 是固定 id 的**单槽位**：一旦被摘掉，长连接不会重新注册，
-    前端就此永久收不到推送、且零报错，只能重启服务恢复
-    （验证清单 §0 记录过这个事故）。
-
-    因此给推送投递加超时时，WS 侧必须整体豁免（``drop_on_stall=False``）——
+    给推送投递加超时后，WS 侧必须整体豁免（``drop_on_stall=False``）——
     否则一次慢发送（大帧、背压、排在连接级 ``send_lock`` 后面）就会触发注销，
-    把这个事故重新引入。
+    导致 ``send_file`` / ``chat.file`` 推送静默丢失。
     """
     from jiuwenswarm.server.transports import push_registry as pr_mod
 
@@ -484,15 +484,12 @@ def test_ws_subscriber_is_never_dropped_on_slow_send(monkeypatch) -> None:
     async def scenario() -> tuple[int, int]:
         reg = pr_mod.PushRegistry()
         sink = _SlowButAliveSink()
-        reg.register(pr_mod.WS_PUSH_SUBSCRIBER_ID, sink, drop_on_stall=False)
+        reg.register("gateway-ws:slow", sink, drop_on_stall=False)
         delivered = await reg.push({"request_id": "p1"})
         return delivered, reg.subscriber_count()
 
     delivered, remaining = asyncio.run(scenario())
-    assert remaining == 1, (
-        "WS 订阅者被注销了 —— 固定 id 单槽位一旦被摘，长连接不会重新注册，"
-        "前端将永久收不到推送且只能重启恢复。"
-    )
+    assert remaining == 1, "WS 订阅者不得因慢发送被注销"
     assert delivered == 1, "慢发送最终成功时应计入送达，不能因超时被丢弃"
 
 
@@ -512,3 +509,27 @@ def test_ws_registration_opts_out_of_stall_drop() -> None:
             f"{module.__name__} 注册 gateway-ws 时未传 drop_on_stall=False —— "
             f"慢发送会把 Gateway 踢出推送名单。"
         )
+        assert "make_ws_push_subscriber_id" in src, (
+            f"{module.__name__} 必须使用每连接唯一订阅 id，"
+            f"避免短连接断开清空长连接推送槽。"
+        )
+
+
+def test_make_ws_push_subscriber_id_is_unique_per_ws_object() -> None:
+    from jiuwenswarm.server.transports.push_registry import make_ws_push_subscriber_id
+
+    a, b = object(), object()
+    assert make_ws_push_subscriber_id(a) != make_ws_push_subscriber_id(b)
+    assert make_ws_push_subscriber_id(a).startswith("gateway-ws:")
+
+
+def test_send_push_returns_zero_without_subscribers() -> None:
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+    from jiuwenswarm.server.transports.push_registry import get_push_registry
+
+    assert get_push_registry().subscriber_count() == 0
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    delivered = asyncio.run(
+        server.send_push({"request_id": "r1", "channel_id": "web", "payload": {}})
+    )
+    assert delivered == 0
