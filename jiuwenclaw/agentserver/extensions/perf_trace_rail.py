@@ -61,6 +61,11 @@ _session_id: ContextVar[str] = ContextVar("perf_session_id", default="")
 _starts: ContextVar[dict | None] = ContextVar("perf_starts", default=None)
 # 请求级迭代计数（before_task_iteration 递增）
 _iter: ContextVar[int] = ContextVar("perf_iter", default=0)
+# invoke 重入深度计数（before_invoke 递增、after_invoke 递减）。
+# 生产中存在同一 ContextVar 上下文内 before_invoke 被嵌套触发的情况（已实跑确认）；
+# 用深度计数让重入幂等：最外层才初始化状态 / 打 start，嵌套进入静默，避免
+# 重复 start 行 + elapsed_ms=-1.0 + iter 串号。
+_invoke_depth: ContextVar[int] = ContextVar("perf_invoke_depth", default=0)
 
 _ENABLED = os.getenv("PERF_TRACE_ENABLED", "true").strip().lower() not in (
     "false", "0", "no", "off",
@@ -326,6 +331,13 @@ class PerfTraceRail(DeepAgentRail):
     async def before_invoke(self, ctx: Any) -> None:
         if not _ENABLED:
             return
+        depth = _invoke_depth.get()
+        _invoke_depth.set(depth + 1)
+        if depth > 0:
+            # 嵌套重入：最外层已初始化状态并打过 start，这里静默返回，
+            # 不覆盖 _starts / 不重置 _iter，避免 mark 丢失导致 elapsed_ms=-1.0
+            # 与 iter 串号。after_invoke 按 depth 配对，只在最外层退出时打 end。
+            return
         tid = _resolve_trace_id(ctx)
         _trace_id.set(tid)
         _session_id.set(_resolve_session_id(ctx))
@@ -337,6 +349,13 @@ class PerfTraceRail(DeepAgentRail):
     @_hook_safe
     async def after_invoke(self, ctx: Any) -> None:
         if not _ENABLED:
+            return
+        depth = _invoke_depth.get()
+        if depth > 0:
+            _invoke_depth.set(depth - 1)
+        if depth != 1:
+            # 仅最外层退出（depth 从 1→0）时打 end。嵌套退出静默，
+            # 或 depth<=0（orphan after，无对应 before）时不打，避免 elapsed_ms=-1.0。
             return
         logger.info(
             "[perf] %s phase=invoke end elapsed_ms=%.1f",
