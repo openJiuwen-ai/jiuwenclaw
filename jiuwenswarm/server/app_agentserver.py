@@ -45,6 +45,8 @@ from jiuwenswarm.common.utils import (
     update_config,
     migrate_legacy_user_config_if_needed,
 )
+# Needed before workspace update_config gate (module top-level uses is_enterprise).
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 migrate_legacy_user_config_if_needed()
 
