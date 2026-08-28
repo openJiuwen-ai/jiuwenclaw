@@ -7,8 +7,11 @@ and building permission rails.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
@@ -39,6 +42,198 @@ SKILL_EVOLUTION_APPROVAL_TOOL_KINDS = {
     "evolve_skill_experiences": "evolve",
     "simplify_skill_experiences": "simplify",
 }
+
+_RUNTIME_TRUSTED_DIR_MARKER = "_jiuwenswarm_runtime_trusted_dir"
+_RUNTIME_TRUSTED_DIRS_STATE_ATTR = "_jiuwenswarm_runtime_trusted_dirs_state"
+
+
+def _normalize_runtime_path(raw_path: Any) -> str | None:
+    if raw_path is None:
+        return None
+    raw = str(raw_path).strip()
+    if not raw:
+        return None
+    try:
+        normalized = Path(raw).expanduser().resolve(strict=False).as_posix().rstrip("/")
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return normalized or None
+
+
+def merge_permission_trusted_dirs(
+    trusted_dirs: Any,
+    project_dir: Any = None,
+) -> list[str]:
+    """Normalize runtime trusted directories and include the project directory."""
+    values: list[Any] = []
+    if isinstance(trusted_dirs, (str, Path)):
+        values.append(trusted_dirs)
+    elif trusted_dirs:
+        try:
+            values.extend(trusted_dirs)
+        except TypeError:
+            values.append(trusted_dirs)
+    if project_dir:
+        values.append(project_dir)
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_runtime_path(value)
+        if normalized is None:
+            continue
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(normalized)
+    return result
+
+
+def _agent_core_shell_tools() -> list[str]:
+    """Return agent-core's registered shell tool names."""
+    from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
+        _SHELL_TOOLS,
+    )
+
+    return sorted(_SHELL_TOOLS)
+
+
+def _agent_core_interpreter_sink_names() -> tuple[str, ...]:
+    """Return agent-core's interpreter sink names used by shell guarding."""
+    from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
+        _INTERPRETER_SINK_NAMES,
+    )
+
+    return tuple(sorted(_INTERPRETER_SINK_NAMES))
+
+
+def _runtime_script_command_pattern(directory: str) -> str:
+    """Match a single direct script invocation rooted below ``directory``.
+
+    This intentionally does not match ``powershell -Command ...`` or shell
+    chains.  Such commands remain subject to the interpreter-sink and builtin
+    command guardrails.
+    """
+    escaped_directory = re.escape(directory)
+    interpreters = "|".join(
+        re.escape(interpreter)
+        for interpreter in _agent_core_interpreter_sink_names()
+    )
+    interpreter_prefix = (
+        rf"(?:{interpreters})(?:\.exe)?"
+        rf"(?:[ \t]+(?:-File|/c|/k))?[ \t]+"
+    )
+    script_path = rf"[\"']?{escaped_directory}/[^\"';&|<>`$]+[\"']?"
+    return rf"re:^(?:{interpreter_prefix})?{script_path}(?:[ \t]+[^;&|<>`$]*)?$"
+
+
+def build_trusted_dirs_permission_config(
+    permissions: dict[str, Any] | None,
+    trusted_dirs: Any,
+    project_dir: Any = None,
+) -> dict[str, Any]:
+    """Add runtime trusted directory path and direct-script allow rules.
+
+    The returned config is a deep copy.  Runtime entries are marked so a
+    subsequent request can replace the previous request's directory set
+    without accumulating stale permissions.
+    """
+    config = deepcopy(permissions) if isinstance(permissions, dict) else {}
+    directories = merge_permission_trusted_dirs(trusted_dirs, project_dir)
+
+    file_guard = config.get("file_guard")
+    if not isinstance(file_guard, dict):
+        file_guard = {}
+    file_guard["enabled"] = True
+    raw_paths = file_guard.get("paths")
+    existing_paths = raw_paths if isinstance(raw_paths, list) else []
+    retained_paths: list[Any] = []
+    trusted_keys = {path.casefold() for path in directories}
+    for entry in existing_paths:
+        if not isinstance(entry, dict):
+            retained_paths.append(entry)
+            continue
+        if entry.get(_RUNTIME_TRUSTED_DIR_MARKER):
+            continue
+        entry_path = _normalize_runtime_path(entry.get("path"))
+        if entry_path is not None and entry_path.casefold() in trusted_keys:
+            # A runtime trusted directory is authoritative for all three axes.
+            continue
+        retained_paths.append(entry)
+
+    runtime_paths = [
+        {
+            "path": directory,
+            "match": "prefix",
+            "read": "allow",
+            "write": "allow",
+            "exec": "allow",
+            _RUNTIME_TRUSTED_DIR_MARKER: True,
+        }
+        for directory in directories
+    ]
+    file_guard["paths"] = runtime_paths + retained_paths
+    config["file_guard"] = file_guard
+
+    raw_rules = config.get("rules")
+    existing_rules = raw_rules if isinstance(raw_rules, list) else []
+    retained_rules = [
+        rule
+        for rule in existing_rules
+        if not (
+            isinstance(rule, dict)
+            and rule.get(_RUNTIME_TRUSTED_DIR_MARKER)
+        )
+    ]
+    runtime_rules: list[dict[str, Any]] = []
+    for directory in directories:
+        suffix = hashlib.sha256(directory.casefold().encode("utf-8")).hexdigest()[:16]
+        runtime_rules.append(
+            {
+                "id": f"jiuwenswarm_runtime_trusted_script_{suffix}",
+                "description": (
+                    "Allow direct execution of scripts below a runtime trusted "
+                    "directory"
+                ),
+                "tools": _agent_core_shell_tools(),
+                "match_type": "command",
+                "pattern": _runtime_script_command_pattern(directory),
+                "action": "allow",
+                _RUNTIME_TRUSTED_DIR_MARKER: True,
+            }
+        )
+    config["rules"] = runtime_rules + retained_rules
+    return config
+
+
+def apply_permission_trusted_dirs(
+    permission_rail: Any,
+    trusted_dirs: Any,
+    project_dir: Any = None,
+) -> list[str]:
+    """Apply runtime trusted directory permissions to an existing rail."""
+    if permission_rail is None:
+        return merge_permission_trusted_dirs(trusted_dirs, project_dir)
+
+    merged = merge_permission_trusted_dirs(trusted_dirs, project_dir)
+    runtime_state = getattr(
+        permission_rail, _RUNTIME_TRUSTED_DIRS_STATE_ATTR, None
+    )
+    if isinstance(runtime_state, list):
+        runtime_state[:] = merged
+
+    engine = getattr(permission_rail, "_engine", None)
+    current = getattr(engine, "config", None)
+    if not isinstance(current, dict):
+        current = getattr(permission_rail, "_static_config", {})
+    effective = build_trusted_dirs_permission_config(
+        current if isinstance(current, dict) else {},
+        merged,
+    )
+    permission_rail.update_config(effective)
+    permission_rail.set_trusted_dirs(merged)
+    return merged
 
 
 def has_interrupt_resume_payload(params: Any) -> bool:
@@ -367,12 +562,18 @@ def build_permission_rail(
                 return ("approve",)
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
+        runtime_trusted_dirs_state: list[str] = []
+
         def _get_permissions_snapshot(session_id: str | None = None):
             from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import (
                 get_permissions_with_session_overlay,
             )
 
-            return get_permissions_with_session_overlay(session_id=session_id)
+            snapshot = get_permissions_with_session_overlay(session_id=session_id)
+            return build_trusted_dirs_permission_config(
+                snapshot,
+                runtime_trusted_dirs_state,
+            )
 
         def _persist_session_allow_rule(
             permissions: dict[str, Any], session_id: str | None = None
@@ -405,6 +606,11 @@ def build_permission_rail(
             llm=llm,
             model_name=model_name,
             host=host,
+        )
+        setattr(
+            permission_rail,
+            _RUNTIME_TRUSTED_DIRS_STATE_ATTR,
+            runtime_trusted_dirs_state,
         )
         logger.info(
             "[InterruptHelpers] PermissionInterruptRail created successfully with tool_names=%s",
