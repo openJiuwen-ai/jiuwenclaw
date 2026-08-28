@@ -26,7 +26,7 @@ def test_get_rail_manager_requires_scope():
 
 
 def test_rail_manager_pool_isolates_tenants(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
 
     def _workspace(service_id: str, agent_id: str | None = None) -> Path:
         mapping = {

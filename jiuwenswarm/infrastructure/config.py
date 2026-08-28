@@ -2,6 +2,7 @@
 """jiuwenswarm 基础设施配置（优先读环境变量 / 仓库根 ``.env`` 已由进程加载）。"""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import os
 
@@ -29,7 +30,7 @@ class Settings:
         # Backward-compatible alias for existing call sites / tests.
         self.gateway_log_masking_enabled = self.log_masking_enabled
         self.log_to_file_enabled: bool = _env_bool("LOG_TO_FILE_ENABLED", default=True)
-        self.agent_runtime: str = os.getenv("AGENT_RUNTIME", "").strip()
+        self.is_enterprise: bool = is_enterprise()
 
 
 settings = Settings()

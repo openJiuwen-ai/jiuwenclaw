@@ -3,6 +3,7 @@
 """企业级 cron 门控与路由三元组工具。"""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import logging
 import os
@@ -15,11 +16,6 @@ logger = logging.getLogger(__name__)
 STICKY_IDENTITY_FIELDS = frozenset(
     {"group_id", "bot_id", "user_id", "jiuwenclaw_id", "job_id", "created_at"}
 )
-
-
-def is_enterprise_edition() -> bool:
-    """产品形态：``AGENT_RUNTIME`` 非空。不单独决定企业 cron 开门。"""
-    return bool(os.getenv("AGENT_RUNTIME", "").strip())
 
 
 def get_bound_jiuwenclaw_id() -> str | None:
@@ -164,7 +160,6 @@ __all__ = (
     "enterprise_cron_enabled",
     "extract_routing_triple",
     "get_bound_jiuwenclaw_id",
-    "is_enterprise_edition",
     "job_matches_routing",
     "routing_triple_complete",
     "strip_sticky_identity_fields",

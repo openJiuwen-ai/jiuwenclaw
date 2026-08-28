@@ -18,13 +18,13 @@ from jiuwenswarm.gateway.config_poll.syncer import ConfigPollSyncer
 
 
 def test_config_poll_disabled_without_agent_runtime(monkeypatch) -> None:
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     monkeypatch.delenv("GATEWAY_CONFIG_POLL_ENABLED", raising=False)
     assert config_poll_enabled() is False
 
 
 def test_config_poll_enabled_with_agent_runtime(monkeypatch) -> None:
-    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.delenv("GATEWAY_CONFIG_POLL_ENABLED", raising=False)
     with patch(
         "jiuwenswarm.gateway.config_poll.scheduler.get_config",
@@ -35,7 +35,7 @@ def test_config_poll_enabled_with_agent_runtime(monkeypatch) -> None:
 
 
 def test_config_poll_respects_yaml_enabled_false(monkeypatch) -> None:
-    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.delenv("GATEWAY_CONFIG_POLL_ENABLED", raising=False)
     with patch(
         "jiuwenswarm.gateway.config_poll.scheduler.get_config",

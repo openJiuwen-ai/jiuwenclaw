@@ -14,6 +14,7 @@ from jiuwenswarm.server.runtime.reload_result import (
     log_reload_config_changes,
 )
 from jiuwenswarm.common.local_env_config import (
+    is_enterprise,
     EnvNsIdError,
     apply_env_removals,
     apply_process_baseline_gaps,
@@ -496,8 +497,8 @@ class TenantAgentPool:
                     )
 
                 import os
-                # AGENT_RUNTIME: stable string instance id (legacy "aid_sid" form).
-                agent_runtime = os.getenv("AGENT_RUNTIME", "").strip()
+                # 企业版：stable string instance id (legacy "aid_sid" form).
+                agent_runtime = is_enterprise()
                 manager_agent_id = (
                     f"{agent_id}_{service_id}" if agent_runtime else request_agent_id
                 )

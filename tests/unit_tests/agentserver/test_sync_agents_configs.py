@@ -368,25 +368,25 @@ class TestExportAgentEnviron:
             service_id="default",
             agent_id="office",
         )
-        os.environ["AGENT_RUNTIME"] = "1"
+        os.environ["JIUWENSWARM_EDITION"] = "enterprise"
         os.environ["PATH"] = "/usr/bin"
 
         exported = export_agent_environ("default", "office")
         assert exported["MODEL_NAME"] == "export-model"
         assert exported["API_KEY"] == "k"
-        assert exported["AGENT_RUNTIME"] == "1"
+        assert exported["JIUWENSWARM_EDITION"] == "enterprise"
         assert exported["PATH"] == "/usr/bin"
 
 
 # ---------------------------------------------------------------------------
-# 8. AGENT_RUNTIME rewrite vs env ns ids
+# 8. enterprise rewrite vs env ns ids
 # ---------------------------------------------------------------------------
 
 
 class TestAgentRuntimeEnvNs:
     @staticmethod
     def test_manager_writes_default_office_not_office_default():
-        os.environ["AGENT_RUNTIME"] = "1"
+        os.environ["JIUWENSWARM_EDITION"] = "enterprise"
         manager = AgentManager(
             agent_id="office_default",
             service_id="default",

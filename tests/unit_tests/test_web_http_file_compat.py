@@ -23,7 +23,7 @@ from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebC
 
 @pytest.fixture()
 def file_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     agent_root = tmp_path / "agent"
     workspace = agent_root / "workspace"
     workspace.mkdir(parents=True)
@@ -132,7 +132,7 @@ def test_download_token_and_range(file_client, tmp_path: Path, monkeypatch: pyte
 
 
 def test_share_enterprise_uses_history_store(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("AGENT_RUNTIME", "kub")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     store = ChatHistoryStore.memory()
     set_default_store(store)
     channel = WebChannel(WebChannelConfig(host="127.0.0.1", port=0), RobotMessageRouter())
@@ -155,7 +155,7 @@ def test_share_enterprise_uses_history_store(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_push_lands_on_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("AGENT_RUNTIME", "kub")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("JIUWENSWARM_WEB_RECEIVED_FILES", str(tmp_path / "recv"))
     monkeypatch.setenv("JIUWENSWARM_FILE_DOWNLOAD_SECRET", "t" * 32)
     WebFileDownloadManager.reset_instance()
@@ -184,7 +184,7 @@ def test_push_sanitizes_path_traversal_filename(tmp_path: Path, monkeypatch: pyt
         received_files_dir,
     )
 
-    monkeypatch.setenv("AGENT_RUNTIME", "kub")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     recv = tmp_path / "recv"
     monkeypatch.setenv("JIUWENSWARM_WEB_RECEIVED_FILES", str(recv))
     channel = WebChannel(WebChannelConfig(host="127.0.0.1", port=0), RobotMessageRouter())

@@ -1234,7 +1234,7 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
 @pytest.mark.asyncio
 async def test_runtime_rail_multi_tenant_workspace_dirs(monkeypatch):
     """测试注入 workspace_dir 时 _resolve_agent_workspace_and_config 返回正确路径。"""
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
 
     builder = SystemPromptBuilder(language="cn")
     workspace_root = Path("/tmp/test_jiuwenswarm/workspace_abc/agent/workspace")

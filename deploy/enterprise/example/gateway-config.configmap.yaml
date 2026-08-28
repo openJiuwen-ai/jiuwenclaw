@@ -154,7 +154,7 @@ data:
       max_iterations: 10
       model_name: ${MODEL_NAME:-deepseek-chat}
       skill_mode: all
-      # 同轮多个受控 tool 的批次内并发（AGENT_RUNTIME 下不走 update_config merge，需写在部署配置中）
+      # 同轮多个受控 tool 的批次内并发（企业版下不走 update_config merge，需写在部署配置中）
       concurrency:
         enabled: true
         tool_limits:
@@ -361,7 +361,7 @@ data:
       health_check_interval: ${REDIS_HEALTH_CHECK_INTERVAL:-30}
     gateway:
       # 产品形态：personal | enterprise；企业部署保持 enterprise
-      edition: ${GATEWAY_EDITION:-enterprise}
+      edition: ${JIUWENSWARM_EDITION:-enterprise}
       # AgentServer client mode.
       # websocket: default ws client
       # yuanrong: provided by AgentServerClientExtension
