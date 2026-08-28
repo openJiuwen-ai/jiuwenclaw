@@ -25,6 +25,7 @@ import sys
 from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
 parse_dotenv_early("jiuwenswarm-agentserver")
 
+from jiuwenswarm.common.local_env_config import is_enterprise
 from jiuwenswarm.common.utils import (
     get_env_file,
     get_logs_dir,
@@ -129,7 +130,7 @@ if not _loaded_logging_yaml:
 
 # Load env from user workspace config/.env
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
-from jiuwenswarm.common.local_env_config import ingest_bare_business_into_tip, is_enterprise
+from jiuwenswarm.common.local_env_config import ingest_bare_business_into_tip
 
 ingest_bare_business_into_tip()
 reset_free_search_runtime_flags()
