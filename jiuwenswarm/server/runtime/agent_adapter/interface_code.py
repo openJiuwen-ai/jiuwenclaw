@@ -52,7 +52,10 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _deep_agent_kv_cache_affinity_config,
     parse_int,
 )
-from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    apply_permission_trusted_dirs,
+    build_permission_rail,
+)
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
@@ -1102,16 +1105,20 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
-        # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
-        # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
+        # PermissionInterruptRail: per-request trusted_dirs/project_dir 注入，
+        # 使这些子树的文件读写执行及目录内脚本直执行按 allow 处理。
         # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
         permission_rail = getattr(self, "_permission_rail", None)
         if permission_rail is not None:
             try:
-                permission_rail.set_trusted_dirs(runtime_config.trusted_dirs)
+                apply_permission_trusted_dirs(
+                    permission_rail,
+                    runtime_config.trusted_dirs,
+                    runtime_config.project_dir or self._project_dir,
+                )
             except Exception:
                 logger.debug(
-                    "[JiuwenSwarmCodeAdapter] permission_rail.set_trusted_dirs failed",
+                    "[JiuwenSwarmCodeAdapter] permission_rail trusted_dirs update failed",
                     exc_info=True,
                 )
         self._write_runtime_state(

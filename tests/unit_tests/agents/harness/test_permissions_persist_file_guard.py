@@ -70,7 +70,7 @@ def test_persist_cli_trusted_directory_writes_file_guard(config_yaml, tmp_path):
         and str(p.get("path", "")).replace("\\", "/").rstrip("/") == dir_norm
         and p.get("read") == "allow"
         and p.get("write") == "allow"
-        and p.get("exec") == "ask"
+        and p.get("exec") == "allow"
         for p in fg["paths"]
     )
     ext = perms.get("external_directory") or {}

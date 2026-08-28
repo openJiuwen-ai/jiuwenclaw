@@ -448,6 +448,9 @@ permissions:
   enabled: false
   schema: tiered_policy
   permission_mode: normal
+  shell_guard:
+    unknown_structure: false
+    interpreter_sink: false
 
   defaults:
     "*": "allow"
