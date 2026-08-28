@@ -15,7 +15,7 @@ from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebC
 
 @pytest.fixture()
 def history_client(tmp_path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("AGENT_RUNTIME", "kub")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     store = ChatHistoryStore.memory()
     set_default_store(store)
     channel = WebChannel(WebChannelConfig(host="127.0.0.1", port=0), RobotMessageRouter())
@@ -59,7 +59,7 @@ async def test_api_sessions_list_and_detail(history_client):
 
 
 def test_api_sessions_empty_when_no_store(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     # Force unavailable default by pointing mysql without host via empty memory reset.
     store = ChatHistoryStore(settings=None, memory=False)
     set_default_store(store)

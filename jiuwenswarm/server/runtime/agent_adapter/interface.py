@@ -24,7 +24,7 @@ from typing import Any, AsyncIterator, Tuple
 from datetime import datetime, timedelta, timezone
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
-from jiuwenswarm.common.local_env_config import promote_staged_env
+from jiuwenswarm.common.local_env_config import promote_staged_env, is_enterprise
 from jiuwenswarm.server.runtime.reload_result import ReloadResult
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     AgentAdapter,
@@ -847,7 +847,7 @@ def _enterprise_file_download_hint(language: str) -> str:
 
 def _normalize_files_for_agent_prompt(files: dict | list | Any) -> dict | list | Any:
     """企业态：有 url 时去掉 Gateway 本地 path，避免 Agent 优先 read_file 失败。"""
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    if not is_enterprise():
         return files
     if isinstance(files, list):
         normalized: list[Any] = []
@@ -938,7 +938,7 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
             msg_data["sender"] = sender_name
     if channel not in ["cron", "heartbeat"]:
         msg_data["files_updated_by_user"] = json.dumps(files, ensure_ascii=False)
-        if os.getenv("AGENT_RUNTIME", "").strip() and files:
+        if is_enterprise() and files:
             msg_data["file_handling_hint"] = _enterprise_file_download_hint(language)
     if supplementary_info:
         msg_data["supplementary_info"] = supplementary_info
@@ -961,7 +961,7 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
         "files_updated_by_user": json.dumps(files, ensure_ascii=False),
         "type": "user input",
     }
-    if os.getenv("AGENT_RUNTIME", "").strip() and files and channel not in ["cron", "heartbeat"]:
+    if is_enterprise() and files and channel not in ["cron", "heartbeat"]:
         user_message_context["file_handling_hint"] = _enterprise_file_download_hint(language)
     if skills_to_use:
         user_message_context["skills_to_use"] = skills_to_use
@@ -1005,7 +1005,7 @@ class JiuWenSwarm:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
         # 多租户：user_workspace_dir 为租户根（service_{sid}/agent_{aid}），再拼相对 workspace/sessions
-        enterprise = bool(os.getenv("AGENT_RUNTIME", "").strip())
+        enterprise = is_enterprise()
         self._agent_id = agent_id if enterprise else None
         self._service_id = service_id if enterprise else None
         tenant_root = user_workspace_dir or (workspace_dir if enterprise else None)
@@ -1489,7 +1489,7 @@ class JiuWenSwarm:
         # 传递 extension_config（供 Rails 消费；仅企业版）
         # 优先从 metadata 读取，fallback 到 params（Gateway WebSocket 请求中放在 params）
         ext_config = None
-        if os.getenv("AGENT_RUNTIME", "").strip():
+        if is_enterprise():
             if request.metadata and "extension_config" in request.metadata:
                 ext_config = request.metadata["extension_config"]
             elif isinstance(params, dict) and "extension_config" in params:
@@ -1576,7 +1576,7 @@ class JiuWenSwarm:
 
         # 返回原始 query（未经 build_user_prompt 包装）
         # Team 模式需要使用原始 query，而不是 JSON 包装后的 prompt
-        if os.getenv("AGENT_RUNTIME", "").strip():
+        if is_enterprise():
             logger.info(
                 "[JiuWenSwarm] _build_inputs returning inputs keys=%s",
                 list(inputs.keys()),
@@ -1854,7 +1854,7 @@ class JiuWenSwarm:
         handler = getattr(self._skill_manager, handler_name)
         try:
             params = dict(request.params) if isinstance(request.params, dict) else {}
-            if handler_name in _SKILLS_WEB_HANDLERS and os.getenv("AGENT_RUNTIME", "").strip():
+            if handler_name in _SKILLS_WEB_HANDLERS and is_enterprise():
                 if self._service_id and not str(params.get("service_id") or "").strip():
                     params["service_id"] = self._service_id
                 if self._agent_id and not str(params.get("agent_id") or "").strip():
@@ -1872,7 +1872,7 @@ class JiuWenSwarm:
             if handler_name == "handle_skills_skillnet_install" and payload.get("pending"):
                 _reload_after_skills = False
             if _enterprise_web_handler and payload.get("success") is not False:
-                if os.getenv("AGENT_RUNTIME", "").strip():
+                if is_enterprise():
                     await self.refresh_enabled_skills_from_db()
             elif _reload_after_skills and payload.get("success") is not False:
                 await self.create_instance()

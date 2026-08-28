@@ -8,6 +8,7 @@ on the Gateway host and served via Gateway ``GET /file-api/download``.
 """
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import logging
 import os
@@ -22,7 +23,7 @@ async def push_file_to_web_and_get_token(
     session_id: str,
 ) -> dict[str, Any] | None:
     """Copy a local file into Gateway received dir and return download metadata."""
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    if not is_enterprise():
         return None
 
     try:

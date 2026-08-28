@@ -8,6 +8,7 @@ internal structure.
 """
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import logging
 import os
@@ -171,8 +172,8 @@ def create_adapter(
         RuntimeError: If SDK is unknown.
     """
     sdk_name = sdk or resolve_sdk_choice()
-    # 企业多租户：仅在 AGENT_RUNTIME 下把 workspace / 租户 ID 传给 adapter
-    enterprise = bool(os.getenv("AGENT_RUNTIME", "").strip())
+    # 企业多租户：仅企业版下把 workspace / 租户 ID 传给 adapter
+    enterprise = is_enterprise()
     enterprise_workspace = workspace_dir if enterprise else None
     enterprise_agent_id = agent_id if enterprise else None
     enterprise_service_id = service_id if enterprise else None

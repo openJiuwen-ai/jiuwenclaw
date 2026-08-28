@@ -2,6 +2,7 @@
 """日志脱敏引擎：内置规则、按 priority DESC 顺序应用已编译规则。"""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import logging
 import os
@@ -241,9 +242,7 @@ class LogMaskingEngine:
         - 单机版：无行或编译失败时回退内置规则。
         - 企业版（``db_authoritative=True`` 或已有可编译规则）：完全以库为准，空库即空规则。
         """
-        enterprise = bool(settings.agent_runtime.strip()) or bool(
-            os.getenv("AGENT_RUNTIME", "").strip()
-        )
+        enterprise = is_enterprise()
 
         if db_authoritative:
             cls._db_authoritative = True
@@ -269,7 +268,7 @@ class LogMaskingEngine:
     ) -> None:
         """从 Gateway 库加载 enabled 规则并刷新**本进程**单例引擎。
 
-        单机版（``AGENT_RUNTIME`` 未设置）不访问 GDB，直接使用内置规则。
+        单机版（``JIUWENSWARM_EDITION`` 非企业版）不访问 GDB，直接使用内置规则。
         企业版在 ``JIUWENCLAW_ID`` / ``JIUWENSWARM_ID`` 未就绪时保留内置规则。
         读库走本地 ``enterprise_config.gateway_db``，不依赖 ``packages/jiuwenclaw-ee``。
 
@@ -278,9 +277,7 @@ class LogMaskingEngine:
         - ``True``：强制以库为准（WS sync / 用户改规则后），空库即空规则；
         - ``False``：仅刷新编译结果，不改变权威来源标记。
         """
-        enterprise = bool(settings.agent_runtime.strip()) or bool(
-            os.getenv("AGENT_RUNTIME", "").strip()
-        )
+        enterprise = is_enterprise()
         if not enterprise:
             cls.reload_from_rows([])
         else:

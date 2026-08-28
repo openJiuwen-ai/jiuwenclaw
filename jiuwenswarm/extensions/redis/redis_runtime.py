@@ -6,6 +6,7 @@
 """
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import asyncio
 import importlib
@@ -157,10 +158,10 @@ async def init_gateway_redis_from_config(full_cfg: dict[str, Any] | None) -> Non
         logger.debug("[GatewayRedis] deployment_mode=standalone; skip Redis init (§3.3.4)")
         return
 
-    # 企业版特性：仅 AGENT_RUNTIME 开启时启用主备 Redis
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    # 企业版特性：仅企业版开启时启用主备 Redis
+    if not is_enterprise():
         logger.debug(
-            "[GatewayRedis] deployment_mode=active-standby but AGENT_RUNTIME unset; skip Redis init"
+            "[GatewayRedis] deployment_mode=active-standby but not enterprise edition; skip Redis init"
         )
         return
 

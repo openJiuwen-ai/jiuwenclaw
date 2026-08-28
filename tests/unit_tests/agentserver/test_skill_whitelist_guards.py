@@ -17,9 +17,9 @@ from jiuwenswarm.common.utils import (
 
 @pytest.fixture
 def agent_runtime_env(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     yield
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
 
 
 def test_is_skill_whitelist_tenant_rejects_empty_ids(agent_runtime_env) -> None:
@@ -35,7 +35,7 @@ def test_is_skill_whitelist_tenant_legacy_tenants(agent_runtime_env) -> None:
 
 
 def test_is_skill_whitelist_tenant_requires_agent_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     assert is_skill_whitelist_tenant("real-agent", "real-svc") is False
 
 

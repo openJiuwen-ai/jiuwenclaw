@@ -108,7 +108,7 @@ def test_job_matches_routing_and() -> None:
 
 
 def test_enterprise_cron_enabled_requires_jiuwenclaw_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.delenv("JIUWENCLAW_ID", raising=False)
     with patch(
         "jiuwenswarm.gateway.cron.enterprise_gate.get_bound_jiuwenclaw_id",

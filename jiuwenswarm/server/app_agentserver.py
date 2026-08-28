@@ -48,7 +48,7 @@ if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.
 else:
     # 企业级多 Pod 共享 PVC：各 AgentServer 启动时 merge 写 config.yaml 会与并发读竞态。
     # 配置由部署侧/init 写入 PVC，运行时经 Gateway reload_config 热更新，不在此 merge。
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    if not is_enterprise():
         update_config()
 
 # Pin openjiuwen log dir before any openjiuwen-heavy imports
@@ -129,7 +129,7 @@ if not _loaded_logging_yaml:
 
 # Load env from user workspace config/.env
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
-from jiuwenswarm.common.local_env_config import ingest_bare_business_into_tip
+from jiuwenswarm.common.local_env_config import ingest_bare_business_into_tip, is_enterprise
 
 ingest_bare_business_into_tip()
 reset_free_search_runtime_flags()
@@ -263,7 +263,7 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
     except Exception:  # noqa: BLE001
         logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
 
-    if os.getenv("AGENT_RUNTIME", "").strip():
+    if is_enterprise():
         try:
             from jiuwenswarm.agents.harness.common.memory.config import (
                 reload_embed_config_from_gateway_db,
@@ -274,7 +274,7 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
         except Exception:  # noqa: BLE001
             logger.warning("[AgentServer] embed_config cold load skipped", exc_info=True)
 
-    if os.getenv("AGENT_RUNTIME", "").strip():
+    if is_enterprise():
         try:
             from jiuwenswarm.agents.harness.common.memory.config import (
                 reload_task_memory_config_from_gateway_db,
@@ -285,7 +285,7 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
         except Exception:  # noqa: BLE001
             logger.warning("[AgentServer] task_memory_config cold load skipped", exc_info=True)
 
-    if os.getenv("AGENT_RUNTIME", "").strip():
+    if is_enterprise():
         try:
             from jiuwenswarm.agents.harness.common.memory.config import (
                 reload_memory_config_from_gateway_db,
@@ -296,7 +296,7 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
         except Exception:  # noqa: BLE001
             logger.warning("[AgentServer] memory_config cold load skipped", exc_info=True)
 
-    if os.getenv("AGENT_RUNTIME", "").strip():
+    if is_enterprise():
         try:
             from jiuwenswarm.common.utils import reload_logging_levels
 
@@ -305,7 +305,7 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
         except Exception:  # noqa: BLE001
             logger.warning("[AgentServer] logging_config cold load skipped", exc_info=True)
 
-    if os.getenv("AGENT_RUNTIME", "").strip():
+    if is_enterprise():
         try:
             from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
                 reload_permissions_from_gateway_db,

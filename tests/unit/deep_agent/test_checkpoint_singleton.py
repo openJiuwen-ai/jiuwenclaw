@@ -42,7 +42,7 @@ def _make_adapter() -> JiuWenSwarmDeepAdapter:
 @pytest.mark.asyncio
 async def test_set_checkpoint_initializes_once(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("CHECKPOINT_DB_TYPE", raising=False)
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     mock_checkpointer = MagicMock(name="checkpointer")
     adapter = _make_adapter()
 
@@ -74,7 +74,7 @@ async def test_set_checkpoint_initializes_once(monkeypatch, tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_set_checkpoint_reuses_mysql_engine(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("CHECKPOINT_DB_TYPE", "mysql")
     mock_engine = MagicMock(name="mysql_engine")
     mock_checkpointer = MagicMock(name="checkpointer")
@@ -132,7 +132,7 @@ def test_gateway_db_pool_kwargs_runtime_env_fallback(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_build_mysql_engine_reuses_process_singleton(monkeypatch):
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("GATEWAY_DB_HOST", "db.example")
     mock_engine = MagicMock(name="mysql_engine")
     iface._shared_mysql_checkpoint_engine = mock_engine
@@ -149,7 +149,7 @@ async def test_build_mysql_engine_reuses_process_singleton(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_build_postgresql_engine_reuses_process_singleton(monkeypatch):
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("GATEWAY_DB_HOST", "db.example")
     mock_engine = MagicMock(name="pg_engine")
     iface._shared_postgresql_checkpoint_engine = mock_engine
