@@ -9,6 +9,7 @@ import {
   normalizeAgentFileTree,
 } from '../node_modules/.cache/agent-management/adapter.js';
 import { buildDefinitionSelectionPayload, buildDefinitionSelectionPayloadForMode } from '../node_modules/.cache/agent-management/port.js';
+import { isAgentUploadFilename } from '../node_modules/.cache/agent-management/upload.js';
 import { agentManagementReducer, initialAgentManagementState } from '../node_modules/.cache/agent-management/state.js';
 import { resolveAgentTagPayload } from '../node_modules/.cache/agent-management/tagOptions.js';
 import { buildCatalogViewModel, findFirstPreviewableFile, mergeAgentDetailWithCatalog } from '../node_modules/.cache/agent-management/viewModel.js';
@@ -153,6 +154,13 @@ test('selection payload preserves keep, clear and select semantics', () => {
   assert.deepEqual(buildDefinitionSelectionPayload({ kind: 'select', id: 'content-creator' }), {
     agent_template_name: 'content-creator',
   });
+});
+
+test('Agent upload accepts only zip and tar archives', () => {
+  assert.equal(isAgentUploadFilename('agent.ZIP'), true);
+  assert.equal(isAgentUploadFilename('agent.tar'), true);
+  assert.equal(isAgentUploadFilename('agent.tar.gz'), false);
+  assert.equal(isAgentUploadFilename('agent.rar'), false);
 });
 
 test('selection payload is restricted to ordinary Agent mode', () => {

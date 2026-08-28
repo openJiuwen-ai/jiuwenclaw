@@ -1953,6 +1953,218 @@
   flex-basis: 32px;
 }
 
+.agent-management-upload-dialog {
+  display: flex;
+  width: min(550px, calc(100vw - 48px));
+  height: min(460px, calc(100vh - 48px));
+  max-height: calc(100vh - 48px);
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-xl);
+  padding: 24px;
+}
+
+.agent-management-upload-dialog > header,
+.agent-management-upload-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.agent-management-upload-dialog > header {
+  justify-content: space-between;
+}
+
+.agent-management-upload-dialog > header h2 {
+  margin: 0;
+  color: var(--color-text-strong);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.agent-management-upload-dialog:focus {
+  outline: 0;
+  box-shadow: none;
+}
+
+.agent-management-upload-dialog > header button {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-management-upload-dialog > header button:hover,
+.agent-management-upload-dialog > header button:focus-visible {
+  background: var(--color-action-secondary);
+  color: var(--color-text-strong);
+  outline: 0;
+}
+
+.agent-management-upload-dialog__hint {
+  display: flex;
+  min-height: 56px;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-chat-accent-subtle);
+  color: var(--color-text-primary);
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.agent-management-upload-dialog__hint svg {
+  flex: 0 0 14px;
+  margin-top: 2px;
+  color: var(--color-chat-accent);
+}
+
+.agent-management-upload-picker {
+  display: flex;
+  min-height: 212px;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px dashed var(--color-border-default);
+  border-radius: var(--radius-xl);
+  background: var(--color-tag-neutral-surface);
+  color: var(--color-text-secondary);
+  padding: 24px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.agent-management-upload-picker:hover,
+.agent-management-upload-picker:focus-visible,
+.agent-management-upload-picker.is-dragging {
+  border-color: var(--color-border-hover);
+  outline: 0;
+}
+
+.agent-management-upload-picker.has-error {
+  border-color: var(--color-border-danger);
+}
+
+.agent-management-upload-picker > span {
+  color: var(--color-chat-supporting-text);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.agent-management-upload-picker__selected {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+}
+
+.agent-management-upload-picker__selected > svg {
+  flex: 0 0 22px;
+  color: var(--color-text-secondary);
+}
+
+.agent-management-upload-picker__selected > div {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.agent-management-upload-picker__selected p,
+.agent-management-upload-picker__selected small {
+  display: block;
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-management-upload-picker__selected p {
+  color: var(--color-text-primary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.agent-management-upload-picker__selected small {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.agent-management-upload-picker__selected button {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-management-upload-picker__selected button:hover,
+.agent-management-upload-picker__selected button:focus-visible {
+  background: var(--color-action-secondary);
+  color: var(--color-text-strong);
+  outline: 0;
+}
+
+.agent-management-upload-picker__spinner {
+  animation: agent-management-upload-spin 1s linear infinite;
+}
+
+.agent-management-upload-dialog__error {
+  margin: -12px 0 0;
+  color: var(--color-feedback-danger);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.agent-management-upload-dialog > footer .agent-management-button {
+  min-height: 32px;
+  border-radius: var(--radius-full);
+  padding-right: 16px;
+  padding-left: 16px;
+}
+
+.agent-management-upload-dialog > footer .agent-management-button--primary {
+  border-color: var(--color-text-strong);
+  background: var(--color-text-strong);
+  color: var(--color-text-inverse);
+}
+
+.agent-management-upload-dialog > footer .agent-management-button--primary:hover:not(:disabled) {
+  border-color: var(--color-text-primary);
+  background: var(--color-text-primary);
+}
+
+@keyframes agent-management-upload-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .agent-management-selection-overlay {
   position: fixed;
   inset: 0;
