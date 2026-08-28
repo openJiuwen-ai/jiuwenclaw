@@ -41,9 +41,13 @@ class _ChannelProbe:
         self.start_calls = 0
         self.stop_calls = 0
         self.request_observer = None
+        self.runtime_error_observer = None
 
     def set_request_observer(self, callback) -> None:
         self.request_observer = callback
+
+    def set_runtime_error_observer(self, callback) -> None:
+        self.runtime_error_observer = callback
 
     async def start(self) -> None:
         self.start_calls += 1
@@ -525,6 +529,13 @@ async def test_update_apply_false_separates_desired_and_effective_addresses():
     assert snapshot.effective_port == 19100
     assert snapshot.desired_rpc_url.endswith(":19123/a2a")
     assert snapshot.effective_rpc_url.endswith(":19100/a2a")
+    assert snapshot.desired_extended_card_url.endswith(
+        ":19123/agent/authenticatedExtendedCard"
+    )
+    assert snapshot.effective_extended_card_url.endswith(
+        ":19100/agent/authenticatedExtendedCard"
+    )
+    assert snapshot.effective_extended_card_path == "/agent/authenticatedExtendedCard"
     assert snapshot.desired_protocol_version == "1.0.0"
     assert snapshot.desired_app_name == "JiuwenSwarm Gateway A2A Server"
     assert snapshot.desired_expose_reasoning is True
@@ -568,6 +579,62 @@ async def test_update_apply_false_warns_when_desired_bind_is_public():
     snapshot = await manager.update({"host": "0.0.0.0"})
 
     assert snapshot.exposure_warning is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("host", "warns"),
+    [
+        ("127.0.0.1", False),
+        ("::1", False),
+        ("localhost", False),
+        ("0.0.0.0", True),
+        ("::", True),
+        ("192.168.1.20", True),
+        ("gateway.example.com", True),
+    ],
+)
+async def test_exposure_warning_covers_every_non_loopback_bind(host, warns):
+    manager = A2AManager(
+        _ChannelManagerProbe(),
+        object(),
+        A2AIngressConfig(),
+        repository=_ConfigRepositoryProbe(),
+        channel_factory=lambda config, router: _ChannelProbe(config, router),
+    )
+
+    snapshot = await manager.update({"host": host})
+
+    assert (snapshot.exposure_warning is not None) is warns
+
+
+@pytest.mark.asyncio
+async def test_manager_transitions_to_error_after_started_channel_crashes():
+    channel_manager = _ChannelManagerProbe()
+    channels = []
+
+    def factory(config, router):
+        channel = _ChannelProbe(config, router)
+        channels.append(channel)
+        return channel
+
+    manager = A2AManager(
+        channel_manager,
+        object(),
+        A2AIngressConfig(),
+        repository=_ConfigRepositoryProbe(),
+        channel_factory=factory,
+    )
+    running = await manager.enable()
+    assert running.state.value == "running"
+
+    await channels[0].runtime_error_observer(RuntimeError("late server crash"))
+
+    snapshot = manager.snapshot()
+    assert snapshot.state.value == "error"
+    assert "A2A ingress server stopped unexpectedly" in snapshot.last_error
+    assert manager.channel is None
+    assert channel_manager.unregistered == ["a2a"]
 
 
 @pytest.mark.asyncio

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import hashlib
 import logging
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -49,6 +51,7 @@ MAX_RESULT_ARTIFACTS = 32
 DEFAULT_GLOBAL_CONCURRENCY = 16
 DEFAULT_AGENT_CONCURRENCY = 4
 DEFAULT_QUERY_INTERVAL_SECONDS = 1.0
+DEFAULT_RETENTION_CHECK_INTERVAL_SECONDS = 3600.0
 
 
 class _ClientLike(Protocol):
@@ -110,6 +113,7 @@ class A2AOutboundDispatcher:
         global_concurrency: int = DEFAULT_GLOBAL_CONCURRENCY,
         agent_concurrency: int = DEFAULT_AGENT_CONCURRENCY,
         query_interval_seconds: float = DEFAULT_QUERY_INTERVAL_SECONDS,
+        retention_check_interval_seconds: float = DEFAULT_RETENTION_CHECK_INTERVAL_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._repository = repository
@@ -119,12 +123,17 @@ class A2AOutboundDispatcher:
         self._global_limit = max(1, int(global_concurrency))
         self._agent_limit = max(1, int(agent_concurrency))
         self._query_interval = max(0.0, float(query_interval_seconds))
+        self._retention_check_interval = max(
+            0.0, float(retention_check_interval_seconds)
+        )
         self._monotonic = monotonic
         self._capacity_lock = asyncio.Lock()
         self._global_active = 0
         self._agent_active: dict[str, int] = {}
         self._query_locks = KeyedLockPool()
         self._last_query_monotonic: dict[str, float] = {}
+        self._last_retention_monotonic: float | None = None
+        self._retention_task: asyncio.Task[None] | None = None
 
     def set_allow_loopback_http(self, enabled: bool) -> None:
         self._discovery.set_allow_loopback_http(enabled)
@@ -136,6 +145,7 @@ class A2AOutboundDispatcher:
         limit: int = 5,
     ) -> dict[str, Any]:
         normalized_query = str(query or "").strip().lower()
+        query_terms = self._search_terms(normalized_query)
         required = {
             str(value).strip().lower()
             for value in (required_skills or ())
@@ -158,24 +168,26 @@ class A2AOutboundDispatcher:
                 )
                 if token
             }
-            if required and not all(
-                any(required_item in token for token in skill_tokens)
-                for required_item in required
-            ):
+            if required and not required.issubset(skill_tokens):
                 continue
             searchable = " ".join(
                 [agent.display_name, str(card.get("description") or "")]
                 + [
                     " ".join(
-                        str(skill.get(key) or "")
-                        for key in ("id", "name", "description")
+                        [
+                            *(
+                                str(skill.get(key) or "")
+                                for key in ("id", "name", "description")
+                            ),
+                            *(str(tag) for tag in skill.get("tags") or []),
+                        ]
                     )
                     for skill in skills
                 ]
             ).lower()
-            score = sum(1 for token in normalized_query.split() if token in searchable)
-            if normalized_query and score == 0:
-                continue
+            score = sum(1 for term in query_terms if term in searchable)
+            if normalized_query and normalized_query in searchable:
+                score += 2
             matches.append(
                 (
                     score,
@@ -192,7 +204,23 @@ class A2AOutboundDispatcher:
             )
         matches.sort(key=lambda item: (-item[0], item[1]["name"].lower()))
         items = [item for _, item in matches[:normalized_limit]]
-        return {"items": items, "total": len(items)}
+        return {
+            "items": items,
+            "total": len(matches),
+            "matched_total": sum(1 for score, _ in matches if score > 0),
+        }
+
+    @staticmethod
+    def _search_terms(query: str) -> set[str]:
+        """Tokenize English identifiers and Chinese text without external NLP."""
+        terms: set[str] = set()
+        for token in re.findall(
+            r"[a-z0-9]+(?:[-_.][a-z0-9]+)*|[\u3400-\u9fff]+", query.lower()
+        ):
+            terms.add(token)
+            if all("\u3400" <= char <= "\u9fff" for char in token) and len(token) > 2:
+                terms.update(token[index : index + 2] for index in range(len(token) - 1))
+        return terms
 
     async def dispatch(
         self,
@@ -215,6 +243,7 @@ class A2AOutboundDispatcher:
         if not session_id:
             raise A2AOutboundError(A2AOutboundErrorCode.DISPATCH_REJECTED)
         agent = await self._require_callable_agent(agent_id)
+        self._schedule_cleanup_dispatches()
 
         dispatch_id = f"disp_{uuid.uuid4().hex}"
         message_id = f"msg_{uuid.uuid4().hex}"
@@ -533,23 +562,22 @@ class A2AOutboundDispatcher:
 
     async def _build_client(self, agent: A2AOutboundAgent) -> _ClientLike:
         credential = self._credentials.get(agent.credential_ref)
-        if agent.agent_card.get("securityRequirements") and not credential:
+        if self._credential_required(agent.agent_card) and not credential:
             raise A2AOutboundError(A2AOutboundErrorCode.AUTH_REQUIRED)
         if self._client_builder is not None:
             return await self._client_builder(agent, credential)
         target = await self._discovery.validate_network_target(
             agent.selected_interface.url
         )
-        headers: dict[str, str] = {}
-        if credential:
-            headers["Authorization"] = (
-                credential
-                if credential.lower().startswith("bearer ")
-                else f"Bearer {credential}"
-            )
+        headers, params, cookies = self._credential_transport_options(
+            agent.agent_card,
+            credential,
+        )
         http_client = httpx.AsyncClient(
             transport=create_pinned_transport({target.host: target.pinned_address}),
             headers=headers,
+            params=params,
+            cookies=cookies,
             follow_redirects=False,
             trust_env=False,
             timeout=httpx.Timeout(
@@ -583,6 +611,114 @@ class A2AOutboundDispatcher:
         except Exception:
             await http_client.aclose()
             raise
+
+    def _schedule_cleanup_dispatches(self) -> None:
+        now = self._monotonic()
+        last = self._last_retention_monotonic
+        if last is not None and now - last < self._retention_check_interval:
+            return
+        if self._retention_task is not None and not self._retention_task.done():
+            return
+        self._last_retention_monotonic = now
+        task = asyncio.create_task(
+            self._run_retention_cleanup(), name="a2a-outbound-retention"
+        )
+        self._retention_task = task
+        task.add_done_callback(self._clear_retention_task)
+
+    def _clear_retention_task(self, task: asyncio.Task[None]) -> None:
+        if self._retention_task is task:
+            self._retention_task = None
+
+    async def _run_retention_cleanup(self) -> None:
+        try:
+            deleted = await self._repository.cleanup_dispatches()
+            if deleted:
+                logger.info(
+                    "a2a.outbound retention cleanup deleted=%s",
+                    deleted,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("a2a.outbound retention cleanup failed")
+
+    @staticmethod
+    def _credential_required(card: dict[str, Any]) -> bool:
+        requirements = card.get("securityRequirements") or []
+        return bool(requirements) and not any(
+            isinstance(requirement, dict) and not requirement
+            for requirement in requirements
+        )
+
+    @staticmethod
+    def _credential_transport_options(
+        card: dict[str, Any], credential: str
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+        """Build credential placement from the Agent Card security contract."""
+        requirements = card.get("securityRequirements") or []
+        if not requirements or not credential:
+            return {}, {}, {}
+        schemes = card.get("securitySchemes") or {}
+        for requirement in requirements:
+            if not isinstance(requirement, dict):
+                continue
+            if not requirement:
+                return {}, {}, {}
+            headers: dict[str, str] = {}
+            params: dict[str, str] = {}
+            cookies: dict[str, str] = {}
+            supported = True
+            for scheme_name in requirement:
+                scheme = schemes.get(scheme_name)
+                if not isinstance(scheme, dict):
+                    if str(scheme_name).lower() == "bearer":
+                        scheme = {"httpAuthSecurityScheme": {"scheme": "bearer"}}
+                    else:
+                        supported = False
+                        break
+                api_key = scheme.get("apiKeySecurityScheme")
+                http_auth = scheme.get("httpAuthSecurityScheme")
+                if isinstance(api_key, dict):
+                    name = str(api_key.get("name") or "").strip()
+                    location = str(api_key.get("location") or "").strip().lower()
+                    if not name or location not in {"header", "query", "cookie"}:
+                        supported = False
+                        break
+                    {"header": headers, "query": params, "cookie": cookies}[location][
+                        name
+                    ] = credential
+                elif isinstance(http_auth, dict):
+                    auth_scheme = str(http_auth.get("scheme") or "").strip().lower()
+                    if auth_scheme == "bearer":
+                        headers["Authorization"] = (
+                            credential
+                            if credential.lower().startswith("bearer ")
+                            else f"Bearer {credential}"
+                        )
+                    elif auth_scheme == "basic":
+                        encoded = (
+                            credential[6:].strip()
+                            if credential.lower().startswith("basic ")
+                            else base64.b64encode(credential.encode()).decode()
+                        )
+                        headers["Authorization"] = f"Basic {encoded}"
+                    else:
+                        supported = False
+                        break
+                elif (
+                    "oauth2SecurityScheme" in scheme
+                    or "openIdConnectSecurityScheme" in scheme
+                ):
+                    headers["Authorization"] = (
+                        credential
+                        if credential.lower().startswith("bearer ")
+                        else f"Bearer {credential}"
+                    )
+                else:
+                    supported = False
+                    break
+            if supported:
+                return headers, params, cookies
+        raise A2AOutboundError(A2AOutboundErrorCode.AUTH_REQUIRED)
 
     async def _require_callable_agent(self, agent_id: str) -> A2AOutboundAgent:
         agent = await self._repository.get_agent(str(agent_id or "").strip())
@@ -719,7 +855,10 @@ class A2AOutboundDispatcher:
                 self._artifact_summary(item)
                 for item in list(task.artifacts)[:MAX_RESULT_ARTIFACTS]
             ]
-            if self._map_task_state(task.status.state) is A2AOutboundDispatchStatus.COMPLETED:
+            if (
+                self._map_task_state(task.status.state)
+                is A2AOutboundDispatchStatus.COMPLETED
+            ):
                 result = self._promote_artifact_text(result)
         return _NormalizedRemote(
             self._map_task_state(task.status.state),
@@ -813,8 +952,6 @@ class A2AOutboundDispatcher:
             "agent_id": dispatch.agent_id,
             "mode": dispatch.mode.value,
             "status": dispatch.status.value,
-            "remote_task_id": dispatch.remote_task_id,
-            "remote_context_id": dispatch.remote_context_id,
             "created_at": dispatch.created_at,
             "accepted_at": dispatch.accepted_at,
             "finished_at": dispatch.finished_at,

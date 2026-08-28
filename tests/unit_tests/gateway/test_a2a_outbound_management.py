@@ -312,6 +312,31 @@ async def test_noncritical_refresh_applies_new_card_revision_immediately() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "availability"),
+    [
+        (A2AOutboundErrorCode.CARD_INVALID, "incompatible"),
+        (A2AOutboundErrorCode.CARD_FETCH_FAILED, "unreachable"),
+    ],
+)
+async def test_refresh_distinguishes_incompatible_from_unreachable(
+    monkeypatch, error_code, availability
+) -> None:
+    registry, _, _ = _registry(_card())
+    preview = await registry.discover("https://agent.example.com")
+    created = await registry.register({"discovery_id": preview["discovery_id"]})
+
+    async def fail_refresh(*_args, **_kwargs):
+        raise A2AOutboundError(error_code)
+
+    monkeypatch.setattr(registry._discovery, "discover", fail_refresh)
+    refreshed = await registry.refresh_agent(created["agent_id"])
+
+    assert refreshed["availability"] == availability
+    assert refreshed["last_error_code"] == error_code.value
+
+
+@pytest.mark.asyncio
 async def test_discovery_expiry_uses_injected_clock() -> None:
     now = [datetime(2026, 8, 26, tzinfo=timezone.utc)]
     registry, _, _ = _registry(_card(), now_factory=lambda: now[0])

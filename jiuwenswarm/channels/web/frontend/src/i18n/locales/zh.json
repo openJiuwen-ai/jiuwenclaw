@@ -684,7 +684,7 @@
       "port": "监听端口",
       "rpc_path": "RPC 路径",
       "card_path": "Agent Card 路径",
-      "extended_card_path": "扩展 Card 路径",
+      "extended_card_path": "公开 Agent Card 别名路径（无认证）",
       "protocol_version": "协议版本",
       "app_name": "Agent 名称",
       "app_description": "Agent 描述",

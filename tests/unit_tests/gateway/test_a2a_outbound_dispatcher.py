@@ -99,6 +99,27 @@ def _agent(agent_id: str = "agent-1") -> A2AOutboundAgent:
     )
 
 
+def _weather_agent() -> A2AOutboundAgent:
+    return replace(
+        _agent("weather-agent"),
+        display_name="A2A Weather Demo Agent",
+        agent_card={
+            "name": "A2A Weather Demo Agent",
+            "description": "查询指定城市的天气演示数据",
+            "skills": [
+                {
+                    "id": "weather-query",
+                    "name": "天气查询",
+                    "description": "查询指定城市的天气",
+                    "tags": ["weather", "天气", "查询", "demo"],
+                }
+            ],
+            "defaultInputModes": ["text/plain"],
+            "defaultOutputModes": ["text/plain"],
+        },
+    )
+
+
 class _FakeClient:
     def __init__(self, events=(), *, tasks=(), block_after_events: bool = False):
         self.events = list(events)
@@ -215,14 +236,48 @@ async def test_find_agents_returns_only_callable_minimal_catalog() -> None:
     client = _FakeClient()
     dispatcher, repository = await _dispatcher(client)
     await repository.create_agent(replace(_agent("disabled"), enabled=False))
+    await repository.create_agent(
+        replace(_agent("agent-2"), display_name="Research Agent Two")
+    )
 
     result = await dispatcher.find_agents(
-        query="research summary", required_skills=["research"], limit=5
+        query="research summary", required_skills=["research"], limit=1
     )
 
     assert [item["agent_id"] for item in result["items"]] == ["agent-1"]
+    assert result["total"] == 2
+    assert result["matched_total"] == 2
     assert "url" not in result["items"][0]
     assert "credential_ref" not in result["items"][0]
+    assert (await dispatcher.find_agents(required_skills=["search"], limit=5))[
+        "items"
+    ] == []
+
+
+@pytest.mark.asyncio
+async def test_find_agents_natural_language_ranks_without_hiding_catalog() -> None:
+    dispatcher, repository = await _dispatcher(_FakeClient())
+    await repository.create_agent(_weather_agent())
+
+    generic = await dispatcher.find_agents(query="可用的智能体", limit=5)
+
+    assert {item["agent_id"] for item in generic["items"]} == {
+        "agent-1",
+        "weather-agent",
+    }
+    assert generic["total"] == 2
+    assert generic["matched_total"] == 0
+
+    weather = await dispatcher.find_agents(query="请帮我查询天气", limit=5)
+
+    assert weather["items"][0]["agent_id"] == "weather-agent"
+    assert weather["total"] == 2
+    assert weather["matched_total"] == 1
+
+    strict = await dispatcher.find_agents(
+        query="可用的智能体", required_skills=["weather"], limit=5
+    )
+    assert [item["agent_id"] for item in strict["items"]] == ["weather-agent"]
 
 
 @pytest.mark.asyncio
@@ -249,11 +304,80 @@ async def test_sync_dispatch_returns_normalized_final_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget() -> None:
+async def test_dispatch_runs_rate_limited_retention_cleanup(monkeypatch) -> None:
+    client = _FakeClient([_message_event("final answer")])
+    dispatcher, repository = await _dispatcher(client)
+    cleanup_calls = 0
+    original_cleanup = repository.cleanup_dispatches
+
+    async def cleanup_once(**kwargs):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        return await original_cleanup(**kwargs)
+
+    monkeypatch.setattr(repository, "cleanup_dispatches", cleanup_once)
+
+    await dispatcher.dispatch(
+        agent_id="agent-1",
+        task="work",
+        mode="sync",
+        source_session_id="s1",
+    )
+    while cleanup_calls == 0:
+        await asyncio.sleep(0)
+    await dispatcher.dispatch(
+        agent_id="agent-1",
+        task="work again",
+        mode="sync",
+        source_session_id="s1",
+    )
+
+    assert cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_retention_cleanup_never_blocks_dispatch(monkeypatch) -> None:
+    client = _FakeClient([_message_event("final answer")])
+    dispatcher, repository = await _dispatcher(client)
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def blocked_cleanup(**_kwargs):
+        cleanup_started.set()
+        await release_cleanup.wait()
+        return 0
+
+    monkeypatch.setattr(repository, "cleanup_dispatches", blocked_cleanup)
+
+    result = await asyncio.wait_for(
+        dispatcher.dispatch(
+            agent_id="agent-1",
+            task="work",
+            mode="sync",
+            source_session_id="s1",
+        ),
+        timeout=0.5,
+    )
+    await cleanup_started.wait()
+
+    assert result["status"] == "completed"
+    cleanup_task = dispatcher._retention_task
+    assert cleanup_task is not None and not cleanup_task.done()
+
+    release_cleanup.set()
+    await cleanup_task
+
+
+@pytest.mark.asyncio
+async def test_real_http_stream_can_outlive_connect_timeout_within_sync_budget() -> (
+    None
+):
     served = asyncio.Event()
     received_requests = []
 
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def handle(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
         try:
             header_bytes = await reader.readuntil(b"\r\n\r\n")
             header_text = header_bytes.decode("iso-8859-1")
@@ -426,7 +550,8 @@ async def test_async_dispatch_requires_remote_task_id_then_query_converges() -> 
     )
 
     assert accepted["status"] == "accepted"
-    assert accepted["remote_task_id"] == "remote-task"
+    assert "remote_task_id" not in accepted
+    assert "remote_context_id" not in accepted
     assert "a2a_get_dispatch" in accepted["next_action"]
     assert completed["status"] == "completed"
     assert completed["result"]["text"] == "async answer"
@@ -457,7 +582,8 @@ async def test_sync_timeout_keeps_known_ids_queryable() -> None:
     )
 
     assert result["status"] == "timed_out"
-    assert result["remote_task_id"] == "remote-task"
+    assert "remote_task_id" not in result
+    assert "remote_context_id" not in result
     assert "a2a_get_dispatch" in result["next_action"]
     persisted = await repository.get_dispatch(result["dispatch_id"])
     assert persisted is not None and not persisted.is_terminal
@@ -503,6 +629,70 @@ async def test_required_remote_auth_without_credential_is_not_left_submitting() 
     assert result["status"] == "auth_required"
     assert result["error_code"] == A2AOutboundErrorCode.AUTH_REQUIRED.value
     assert client.sent_requests == []
+
+
+@pytest.mark.parametrize(
+    ("scheme", "expected"),
+    [
+        (
+            {"httpAuthSecurityScheme": {"scheme": "bearer"}},
+            ({"Authorization": "Bearer secret"}, {}, {}),
+        ),
+        (
+            {"httpAuthSecurityScheme": {"scheme": "basic"}},
+            ({"Authorization": "Basic dXNlcjpwYXNz"}, {}, {}),
+        ),
+        (
+            {"apiKeySecurityScheme": {"location": "header", "name": "X-API-Key"}},
+            ({"X-API-Key": "secret"}, {}, {}),
+        ),
+        (
+            {"apiKeySecurityScheme": {"location": "query", "name": "api_key"}},
+            ({}, {"api_key": "secret"}, {}),
+        ),
+        (
+            {"apiKeySecurityScheme": {"location": "cookie", "name": "session"}},
+            ({}, {}, {"session": "secret"}),
+        ),
+    ],
+)
+def test_client_credentials_follow_agent_card_security_scheme(scheme, expected):
+    credential = (
+        "user:pass"
+        if scheme.get("httpAuthSecurityScheme", {}).get("scheme") == "basic"
+        else "secret"
+    )
+    card = {
+        "securityRequirements": [{"auth": []}],
+        "securitySchemes": {"auth": scheme},
+    }
+
+    assert (
+        A2AOutboundDispatcher._credential_transport_options(card, credential)
+        == expected
+    )
+
+
+def test_client_rejects_unsupported_mtls_credential_contract():
+    card = {
+        "securityRequirements": [{"mtls": []}],
+        "securitySchemes": {"mtls": {"mtlsSecurityScheme": {}}},
+    }
+
+    with pytest.raises(A2AOutboundError) as error:
+        A2AOutboundDispatcher._credential_transport_options(card, "secret")
+
+    assert error.value.code is A2AOutboundErrorCode.AUTH_REQUIRED
+
+
+def test_empty_security_requirement_allows_anonymous_access():
+    card = {
+        "securityRequirements": [{"bearer": []}, {}],
+        "securitySchemes": {"bearer": {"httpAuthSecurityScheme": {"scheme": "bearer"}}},
+    }
+
+    assert A2AOutboundDispatcher._credential_required(card) is False
+    assert A2AOutboundDispatcher._credential_transport_options(card, "") == ({}, {}, {})
 
 
 @pytest.mark.asyncio
@@ -654,18 +844,23 @@ async def test_rail_registers_on_first_model_call_after_gateway_becomes_ready() 
     }
     prompt = agent.system_prompt_builder.sections["a2a_outbound_usage"].content["cn"]
     assert '"\n' not in prompt
-    assert "a2a_find_agents" in prompt
+    assert 'a2a_find_agents(query="", required_skills=[])' in prompt
+    assert "query 只用于相关性排序" in prompt
 
 
 @pytest.mark.asyncio
 async def test_toolkit_binds_session_and_exposes_no_url_or_credentials() -> None:
     toolkit = A2AOutboundToolkit(_Backend(), runtime_route=lambda: ("session-1", "web"))
     result = await toolkit.dispatch_task("agent-1", "task", "sync")
-    dispatch_tool = {tool.card.name: tool for tool in toolkit.get_tools()}[
-        "a2a_dispatch_task"
-    ]
+    tools = {tool.card.name: tool for tool in toolkit.get_tools()}
+    find_tool = tools["a2a_find_agents"]
+    dispatch_tool = tools["a2a_dispatch_task"]
 
     assert result["session_id"] == "session-1"
+    assert "query only ranks candidates" in find_tool.card.description
+    assert find_tool.card.input_params["properties"]["query"]["default"] == ""
+    assert find_tool.card.input_params["properties"]["required_skills"]["default"] == []
+    assert find_tool.card.input_params["additionalProperties"] is False
     properties = dispatch_tool.card.input_params["properties"]
     assert not ({"url", "headers", "credential", "timeout"} & set(properties))
 

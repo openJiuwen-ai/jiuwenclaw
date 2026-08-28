@@ -15,12 +15,15 @@ export interface A2AIngressSnapshot {
   desired_expose_reasoning: boolean;
   desired_rpc_url: string;
   desired_card_url: string;
+  desired_extended_card_url: string;
   effective_host: string | null;
   effective_port: number | null;
   effective_rpc_path: string | null;
   effective_card_path: string | null;
+  effective_extended_card_path: string | null;
   effective_rpc_url: string | null;
   effective_card_url: string | null;
+  effective_extended_card_url: string | null;
   exposure_warning: string | null;
   started_at: number | null;
   last_error: string | null;
@@ -135,12 +138,15 @@ export function normalizeA2AIngressSnapshot(value: unknown): A2AIngressSnapshot 
     desired_expose_reasoning: payload.desired_expose_reasoning !== false,
     desired_rpc_url: asString(payload.desired_rpc_url),
     desired_card_url: asString(payload.desired_card_url),
+    desired_extended_card_url: asString(payload.desired_extended_card_url),
     effective_host: typeof payload.effective_host === 'string' ? payload.effective_host : null,
     effective_port: typeof payload.effective_port === 'number' ? payload.effective_port : null,
     effective_rpc_path: typeof payload.effective_rpc_path === 'string' ? payload.effective_rpc_path : null,
     effective_card_path: typeof payload.effective_card_path === 'string' ? payload.effective_card_path : null,
+    effective_extended_card_path: typeof payload.effective_extended_card_path === 'string' ? payload.effective_extended_card_path : null,
     effective_rpc_url: typeof payload.effective_rpc_url === 'string' ? payload.effective_rpc_url : null,
     effective_card_url: typeof payload.effective_card_url === 'string' ? payload.effective_card_url : null,
+    effective_extended_card_url: typeof payload.effective_extended_card_url === 'string' ? payload.effective_extended_card_url : null,
     exposure_warning: typeof payload.exposure_warning === 'string' ? payload.exposure_warning : null,
     started_at: typeof payload.started_at === 'number' ? payload.started_at : null,
     last_error: typeof payload.last_error === 'string' ? payload.last_error : null,
@@ -155,12 +161,12 @@ export function normalizeA2AIngressHistory(value: unknown): A2AIngressHistory | 
   const statuses = new Set<A2AIngressRequestStatus>(['processing', 'completed', 'failed', 'canceled']);
   const items: A2AIngressRequestRecord[] = [];
   for (const rawItem of payload.items) {
-    if (!rawItem || typeof rawItem !== 'object') return null;
+    if (!rawItem || typeof rawItem !== 'object') continue;
     const item = rawItem as Record<string, unknown>;
     const requestId = asString(item.request_id).trim();
     const status = asString(item.status) as A2AIngressRequestStatus;
     const startedAt = asNumber(item.started_at, Number.NaN);
-    if (!requestId || !statuses.has(status) || !Number.isFinite(startedAt)) return null;
+    if (!requestId || !statuses.has(status) || !Number.isFinite(startedAt)) continue;
     items.push({
       request_id: requestId,
       context_id: typeof item.context_id === 'string' ? item.context_id : null,

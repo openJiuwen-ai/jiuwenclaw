@@ -93,7 +93,7 @@ test('A2A ingress ignores obsolete refresh responses', () => {
   assert.equal(shouldAcceptA2AIngressResponse(3, 4), false);
 });
 
-test('A2A ingress history accepts lifecycle metadata and rejects malformed rows', () => {
+test('A2A ingress history accepts lifecycle metadata and skips malformed rows', () => {
   assert.deepEqual(
     normalizeA2AIngressHistory({
       items: [
@@ -128,7 +128,31 @@ test('A2A ingress history accepts lifecycle metadata and rejects malformed rows'
       total: 1,
     },
   );
-  assert.equal(normalizeA2AIngressHistory({ items: [{ request_id: '', status: 'completed' }] }), null);
+  assert.deepEqual(
+    normalizeA2AIngressHistory({
+      items: [
+        { request_id: '', status: 'completed' },
+        { request_id: 'req-valid', status: 'processing', started_at: 20 },
+      ],
+      total: 2,
+    }),
+    {
+      items: [
+        {
+          request_id: 'req-valid',
+          context_id: null,
+          message_id: null,
+          operation: 'message',
+          status: 'processing',
+          started_at: 20,
+          finished_at: null,
+          duration_ms: null,
+          error: null,
+        },
+      ],
+      total: 2,
+    },
+  );
 });
 
 test('A2A outbound history accepts dispatch metadata without result bodies', () => {

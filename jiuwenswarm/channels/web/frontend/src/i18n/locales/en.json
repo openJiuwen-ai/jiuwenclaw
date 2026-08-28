@@ -691,7 +691,7 @@
       "port": "Bind port",
       "rpc_path": "RPC path",
       "card_path": "Agent Card path",
-      "extended_card_path": "Extended Card path",
+      "extended_card_path": "Public Agent Card alias path (no authentication)",
       "protocol_version": "Protocol version",
       "app_name": "Agent name",
       "app_description": "Agent description",

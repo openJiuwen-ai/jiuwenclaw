@@ -170,18 +170,27 @@ class A2AOutboundToolkit:
         return [
             make_tool(
                 "a2a_find_agents",
-                "Search only registered and currently callable external A2A Agents. "
-                "Call this before dispatching; never invent an agent_id or remote URL.",
+                "List registered and currently callable external A2A Agents. On the first "
+                "call, omit query or pass an empty query to inspect the catalog. query only "
+                "ranks candidates and never hides callable Agents; required_skills is the "
+                "strict exact-match filter. Never invent an agent_id or remote URL.",
                 {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string"},
+                        "query": {
+                            "type": "string",
+                            "description": "Optional task keywords for ranking. Use an empty string to list the callable catalog.",
+                            "default": "",
+                        },
                         "required_skills": {
                             "type": "array",
                             "items": {"type": "string"},
+                            "description": "Optional exact skill IDs, names, or tags; all values must match.",
+                            "default": [],
                         },
                         "limit": {"type": "integer", "minimum": 1, "maximum": 20},
                     },
+                    "additionalProperties": False,
                 },
                 self.find_agents,
             ),

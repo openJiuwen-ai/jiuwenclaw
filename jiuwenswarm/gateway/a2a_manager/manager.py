@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import time
 from collections import deque
@@ -33,6 +34,16 @@ from .outbound import (
 logger = logging.getLogger(__name__)
 
 _TERMINAL_REQUEST_STATUSES = frozenset({"completed", "failed", "canceled"})
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = str(host or "").strip().strip("[]").rstrip(".").lower()
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 class _ManagedA2AChannel(Protocol):
@@ -235,19 +246,30 @@ class A2AManager:
             desired_expose_reasoning=config.expose_reasoning,
             desired_rpc_url=f"{desired_base_url}{config.rpc_path}",
             desired_card_url=f"{desired_base_url}{config.card_path}",
+            desired_extended_card_url=(
+                f"{desired_base_url}{config.extended_card_path}"
+            ),
             effective_host=effective.host if effective else None,
             effective_port=effective.port if effective else None,
             effective_rpc_path=effective.rpc_path if effective else None,
             effective_card_path=effective.card_path if effective else None,
+            effective_extended_card_path=(
+                effective.extended_card_path if effective else None
+            ),
             effective_rpc_url=(
                 f"{effective_base_url}{effective.rpc_path}" if effective else None
             ),
             effective_card_url=(
                 f"{effective_base_url}{effective.card_path}" if effective else None
             ),
+            effective_extended_card_url=(
+                f"{effective_base_url}{effective.extended_card_path}"
+                if effective
+                else None
+            ),
             exposure_warning=(
-                "A2A ingress is bound to all network interfaces; configure network access controls."
-                if config.host == "0.0.0.0"
+                "A2A ingress is bound to a non-loopback interface; configure network access controls."
+                if not _is_loopback_host(config.host)
                 else None
             ),
             started_at=self._started_at,
@@ -382,6 +404,13 @@ class A2AManager:
         set_request_observer = getattr(channel, "set_request_observer", None)
         if callable(set_request_observer):
             set_request_observer(self._record_request_event)
+        set_runtime_error_observer = getattr(
+            channel, "set_runtime_error_observer", None
+        )
+        if callable(set_runtime_error_observer):
+            set_runtime_error_observer(
+                lambda exc: self._record_runtime_error(channel, exc)
+            )
         self._channel_manager.register_channel(channel)
         self._channel = channel
         self._starting_config = effective_config
@@ -471,6 +500,25 @@ class A2AManager:
             if self._start_task is task:
                 self._record_start_error(exc)
         logger.error("a2a.ingress start failed: %s", exc, exc_info=exc)
+
+    async def _record_runtime_error(
+        self, channel: _ManagedA2AChannel, exc: BaseException
+    ) -> None:
+        async with self._lock:
+            if self._channel is not channel:
+                return
+            await self._dispose_channel_locked()
+            self._record_start_error(
+                A2AIngressError(
+                    "A2A_RUNTIME_FAILED",
+                    "A2A ingress server stopped unexpectedly",
+                )
+            )
+        logger.error(
+            "a2a.ingress runtime failed: %s",
+            exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
 
     def _record_start_error(self, exc: Exception) -> None:
         error = self._as_operation_error(exc)

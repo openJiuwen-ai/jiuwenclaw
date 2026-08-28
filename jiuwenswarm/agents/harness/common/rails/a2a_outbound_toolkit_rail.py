@@ -93,18 +93,20 @@ class A2AOutboundToolkitRail(DeepAgentRail):
             """## A2A 出站工具
 
 需要调用外部 A2A Agent 时：
-1. 先用 a2a_find_agents 查询已注册且可用的候选；
-2. 选择与任务技能匹配的 agent_id；
-3. 需要立即取得答案时用 sync，长任务或不阻塞当前轮次时用 async；
-4. async 返回后仅用 a2a_get_dispatch(dispatch_id) 查询，不自行构造远端请求。"""
+1. 首次用 a2a_find_agents(query="", required_skills=[]) 列出已注册且可用的目录；不要用“可用的智能体”等泛化描述做首查；
+2. query 只用于相关性排序，不会隐藏可调用候选；仅在明确需要某项能力时使用精确 required_skills 过滤；
+3. 从返回目录中选择与任务技能匹配的 agent_id；
+4. 需要立即取得答案时用 sync，长任务或不阻塞当前轮次时用 async；
+5. async 返回后仅用 a2a_get_dispatch(dispatch_id) 查询，不自行构造远端请求。"""
             if language == "cn"
             else """## A2A outbound tools
 
 When calling an external A2A Agent:
-1. First use a2a_find_agents to list registered, callable candidates.
-2. Select a skill-matching agent_id.
-3. Use sync for an immediate answer and async for long-running work.
-4. After async dispatch, query only with a2a_get_dispatch(dispatch_id); never construct a remote request."""
+1. First use a2a_find_agents(query="", required_skills=[]) to list the callable catalog; do not start with a generic phrase such as "available agents".
+2. query ranks but never hides callable candidates; use exact required_skills only for explicit capability constraints.
+3. Select a skill-matching agent_id from the returned catalog.
+4. Use sync for an immediate answer and async for long-running work.
+5. After async dispatch, query only with a2a_get_dispatch(dispatch_id); never construct a remote request."""
         )
         self._prompt_builder.add_section(
             PromptSection(

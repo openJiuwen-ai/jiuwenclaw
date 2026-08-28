@@ -273,6 +273,11 @@ class A2AOutboundRegistry:
             except A2AOutboundError as exc:
                 error_code = exc.code.value
                 error_summary = exc.summary
+                failed_availability = (
+                    A2AOutboundAvailability.INCOMPATIBLE
+                    if exc.code is A2AOutboundErrorCode.CARD_INVALID
+                    else A2AOutboundAvailability.UNREACHABLE
+                )
                 updated = await self._repository.update_agent(
                     agent_id,
                     lambda item: replace(
@@ -280,7 +285,7 @@ class A2AOutboundRegistry:
                         availability=(
                             A2AOutboundAvailability.REVIEW_REQUIRED
                             if item.pending_revision
-                            else A2AOutboundAvailability.UNREACHABLE
+                            else failed_availability
                         ),
                         last_checked_at=utc_now_text(),
                         last_error_code=error_code,
