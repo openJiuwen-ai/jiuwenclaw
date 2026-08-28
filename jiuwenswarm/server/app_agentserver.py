@@ -35,6 +35,11 @@ from jiuwenswarm.common.utils import (
     update_config,
     migrate_legacy_user_config_if_needed,
 )
+# is_enterprise() is read at workspace-init (L51) before the main .env load;
+# local_env_config has no module-level side effects and JIUWENSWARM_EDITION is a
+# SPAWN_ENV_KEYS process var (not a .env business key), so importing here is safe
+# and the edition flag is already in os.environ at process start.
+from jiuwenswarm.common.local_env_config import ingest_bare_business_into_tip, is_enterprise
 
 migrate_legacy_user_config_if_needed()
 
@@ -129,7 +134,6 @@ if not _loaded_logging_yaml:
 
 # Load env from user workspace config/.env
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
-from jiuwenswarm.common.local_env_config import ingest_bare_business_into_tip, is_enterprise
 
 ingest_bare_business_into_tip()
 reset_free_search_runtime_flags()
