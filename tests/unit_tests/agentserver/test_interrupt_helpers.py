@@ -6,6 +6,7 @@ import pytest
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     build_permission_rail,
     convert_interactions_to_ask_user_question,
+    convert_interactions_to_ask_user_questions,
 )
 
 
@@ -113,6 +114,64 @@ def test_legacy_skill_evolution_approval_metadata_is_classified():
     assert result["approval_kind"] == "evolve"
 
 
+def test_convert_interactions_to_ask_user_questions_keeps_all_valid_items_in_order():
+    """A batched interrupt must not drop later approval requests."""
+    interactions = [
+        {
+            "id": "permission-1",
+            "value": {
+                "message": "**工具 `write_file` 需要授权才能执行**",
+                "tool_name": "write_file",
+            },
+        },
+        {
+            "id": "ask-user-2",
+            "value": {
+                "questions": [{"question": "继续吗？", "header": "确认"}],
+            },
+        },
+        {"id": "", "value": {"message": "invalid without id"}},
+    ]
+
+    payloads = convert_interactions_to_ask_user_questions(interactions)
+
+    assert [payload["request_id"] for payload in payloads] == [
+        "permission-1",
+        "ask-user-2",
+    ]
+    assert [payload["source"] for payload in payloads] == [
+        "permission_interrupt",
+        "ask_user_interrupt",
+    ]
+
+
+def test_convert_interactions_to_ask_user_questions_prefers_structured_duplicate_id():
+    """The permission shell around ask_user must not become a second card."""
+    interactions = [
+        {
+            "id": "ask-user-1",
+            "value": {
+                "message": "**工具 `ask_user` 需要授权才能执行**",
+                "tool_name": "ask_user",
+            },
+        },
+        {
+            "id": "ask-user-1",
+            "value": {
+                "questions": [{"question": "请选择语言", "header": "语言"}],
+                "tool_name": "ask_user",
+            },
+        },
+    ]
+
+    payloads = convert_interactions_to_ask_user_questions(interactions)
+
+    assert len(payloads) == 1
+    assert payloads[0]["request_id"] == "ask-user-1"
+    assert payloads[0]["source"] == "ask_user_interrupt"
+    assert payloads[0]["questions"][0]["question"] == "请选择语言"
+
+
 def _scene_hook_input(normalized_tool_name: str, user_input):
     from openjiuwen.harness.security.host import PermissionSceneHookInput
 
@@ -214,3 +273,26 @@ def test_build_multi_questions_appends_other_for_valid_options():
     )
 
     assert [opt["label"] for opt in questions[0]["options"]] == ["A", "B", "Other"]
+
+
+def test_build_multi_questions_preserves_tool_metadata_for_permission_cards():
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+        _build_multi_questions,
+    )
+
+    questions = _build_multi_questions(
+        [
+            {
+                "question": "需要授权",
+                "header": "权限审批: bash",
+                "options": [{"label": "本次允许"}],
+                "tool_call_id": "call-1",
+                "tool_name": "bash",
+                "tool_args": {"command": "python D:\\小艺claw\\test.py"},
+            }
+        ]
+    )
+
+    assert questions[0]["tool_call_id"] == "call-1"
+    assert questions[0]["tool_name"] == "bash"
+    assert questions[0]["tool_args"] == {"command": "python D:\\小艺claw\\test.py"}

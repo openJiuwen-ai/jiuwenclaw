@@ -158,6 +158,70 @@ from jiuwenswarm.server.reverse_rpc import (
 
 logger = logging.getLogger(__name__)
 
+
+def format_permission_wire_diagnostic(
+    *,
+    request_id: str,
+    sequence: int,
+    payload: dict[str, Any],
+    wire: dict[str, Any],
+) -> str:
+    """Format a compact diagnostic record for permission interaction frames.
+
+    Keep command arguments out of this record. The purpose is to locate a
+    dropped frame across the AgentServer → desktop boundaries, not to duplicate
+    potentially sensitive tool input in the application log.
+    """
+    wire_body = wire.get("body") if isinstance(wire.get("body"), dict) else {}
+    wire_delta = wire_body.get("delta") if isinstance(wire_body.get("delta"), dict) else {}
+    questions = payload.get("questions")
+    wire_questions = wire_delta.get("questions")
+    first_question = (
+        questions[0]
+        if isinstance(questions, list) and questions and isinstance(questions[0], dict)
+        else {}
+    )
+
+    def _identifier(*keys: str) -> str:
+        for key in keys:
+            value = payload.get(key)
+            if value is None:
+                value = first_question.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return ""
+
+    identifier_fields = (
+        ("payload_approval_id", _identifier("approval_id", "approvalId")),
+        (
+            "payload_approval_kind",
+            _identifier(
+                "approval_kind",
+                "approvalKind",
+                "plan_approval_kind",
+                "planApprovalKind",
+            ),
+        ),
+        ("payload_request_id", _identifier("request_id", "requestId")),
+        ("payload_tool_call_id", _identifier("tool_call_id", "toolCallId")),
+    )
+    identifiers = " ".join(
+        f"{name}={value}" for name, value in identifier_fields if value
+    )
+    return (
+        "[GUI_AGENT_DIAG] phase=AGENT_APPROVAL_WIRE_SEND "
+        f"request_id={request_id} sequence={sequence} "
+        f"event_type={payload.get('event_type') or '(empty)'} "
+        f"source={payload.get('source') or '(empty)'} "
+        f"question_count={len(questions) if isinstance(questions, list) else 0} "
+        f"wire_event_type={wire_body.get('event_type') or '(empty)'} "
+        f"wire_source={wire_delta.get('source') or '(empty)'} "
+        f"wire_question_count={len(wire_questions) if isinstance(wire_questions, list) else 0} "
+        f"wire_response_kind={wire.get('response_kind') or '(empty)'} "
+        f"wire_is_final={wire.get('is_final')}"
+    ) + (f" {identifiers}" if identifiers else "")
+
+
 # 后台权限重载任务引用集合,防止 fire-and-forget 任务被 GC 提前回收。
 # task 完成后自动从集合移除(Python 官方推荐模式)。
 _background_permission_reload_tasks: set[asyncio.Task] = set()
@@ -3017,6 +3081,19 @@ class AgentWebSocketServer:
                     response_id=request.request_id,
                     sequence=chunk_count - 1,
                 )
+                chunk_payload = getattr(chunk, "payload", None)
+                if (
+                    isinstance(chunk_payload, dict)
+                    and chunk_payload.get("event_type") == "chat.ask_user_question"
+                ):
+                    logger.info(
+                        format_permission_wire_diagnostic(
+                            request_id=request.request_id,
+                            sequence=chunk_count - 1,
+                            payload=chunk_payload,
+                            wire=wire,
+                        )
+                    )
                 # 诊断：打印前 3 个和每 50 个 chunk 的发送情况
                 if chunk_count <= 3 or chunk_count % 50 == 0:
                     _pl = getattr(chunk, "payload", None) or {}

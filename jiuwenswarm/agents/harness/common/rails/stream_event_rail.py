@@ -35,6 +35,7 @@ from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     convert_interactions_to_ask_user_question,
+    convert_interactions_to_ask_user_questions,
 )
 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
     strip_image_content_from_model_context,
@@ -946,7 +947,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         result: Any,
         exception: Any = None,
     ) -> bool:
-        payload = None
+        payloads: list[dict] = []
         if isinstance(result, dict) and result.get("result_type") == "interrupt":
             state_outputs = result.get("state")
             if isinstance(state_outputs, list):
@@ -954,24 +955,27 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     getattr(output, "payload", output)
                     for output in state_outputs
                 ]
-                payload = convert_interactions_to_ask_user_question(interactions)
+                payloads = convert_interactions_to_ask_user_questions(interactions)
 
-        if payload is None:
+        if not payloads:
             interrupt = _extract_tool_interrupt(result) or _extract_tool_interrupt(exception)
             if interrupt is None:
                 return False
             payload = _ask_user_question_payload_from_interrupt(tool_call, interrupt, tool_name)
-        if not payload:
+            if payload:
+                payloads = [payload]
+        if not payloads:
             logger.debug("[StreamEventRail] ask_user interrupt payload unavailable")
             return False
         try:
-            await session.write_stream(
-                OutputSchema(
-                    type="chat.ask_user_question",
-                    index=0,
-                    payload=payload,
+            for payload in payloads:
+                await session.write_stream(
+                    OutputSchema(
+                        type="chat.ask_user_question",
+                        index=0,
+                        payload=payload,
+                    )
                 )
-            )
             return True
         except Exception:
             logger.debug("ask_user question emit failed", exc_info=True)
