@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Clipboard, Download, FileText, Folder } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
 import type { DefinitionFileEntry, RequestStatus } from '../../features/agentManagement';
 import { isPreviewableFile } from '../../features/agentManagement';
+import { CodePreview } from '../ArtifactsPanel/CodePreview';
+import { MarkdownRenderer } from '../MarkdownRenderer';
 
 type DefinitionFilePreviewProps = {
   files: DefinitionFileEntry[];
@@ -20,6 +20,12 @@ type DefinitionFilePreviewProps = {
 
 function getLabel(path: string): string {
   return path.replace(/\/$/, '').split('/').filter(Boolean).pop() || path;
+}
+
+function splitMarkdownFrontMatter(content: string): { frontMatter: string | null; body: string } {
+  const match = /^(?:\uFEFF)?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);
+  if (!match) return { frontMatter: null, body: content };
+  return { frontMatter: match[1], body: content.slice(match[0].length) };
 }
 
 function findExpandedDirectories(entries: DefinitionFileEntry[]): Set<string> {
@@ -105,6 +111,9 @@ export function DefinitionFilePreview({
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const selectedIsPreviewable = selectedFilePath ? isPreviewableFile(selectedFilePath) : false;
+  const selectedIsMarkdown = selectedFilePath ? /\.mdx?$/.test(selectedFilePath.toLowerCase()) : false;
+  const selectedIsPython = selectedFilePath?.toLowerCase().endsWith('.py') ?? false;
+  const markdownParts = useMemo(() => splitMarkdownFrontMatter(fileContent?.content || ''), [fileContent]);
   const formattedContent = useMemo(() => {
     if (!fileContent || !fileContent.relativePath.toLowerCase().endsWith('.json')) return fileContent?.content || '';
     try {
@@ -216,10 +225,19 @@ export function DefinitionFilePreview({
               ) : null}
               {fileStatus === 'success' &&
               fileContent &&
-              (selectedFilePath.toLowerCase().endsWith('.md') || selectedFilePath.toLowerCase().endsWith('.mdx')) ? (
-                <article className="prose prose-sm max-w-none agent-management-markdown">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{fileContent.content || ' '}</ReactMarkdown>
+              selectedIsMarkdown ? (
+                <article className="agent-management-markdown">
+                  {markdownParts.frontMatter ? <pre className="agent-management-markdown__frontmatter">{markdownParts.frontMatter}</pre> : null}
+                  <MarkdownRenderer
+                    content={markdownParts.body || ' '}
+                    className="prose prose-sm max-w-none agent-management-markdown__body"
+                  />
                 </article>
+              ) : null}
+              {fileStatus === 'success' && fileContent && selectedIsPython ? (
+                <div className="agent-management-code-preview">
+                  <CodePreview content={fileContent.content} name={getLabel(fileContent.relativePath)} />
+                </div>
               ) : null}
               {fileStatus === 'success' && fileContent && selectedFilePath.toLowerCase().endsWith('.json') ? (
                 <pre className="agent-management-code">{formattedContent || ' '}</pre>
