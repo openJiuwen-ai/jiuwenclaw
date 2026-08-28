@@ -58,5 +58,15 @@ spec:
           value: "<<IDENTITY_SEED_ADMIN>>"
         - name: IDENTITY_SEED_USER1
           value: "<<IDENTITY_SEED_USER1>>"
+        - name: IDENTITY_FEDERATION_DEMO_ENABLED
+          value: "<<IDENTITY_FEDERATION_DEMO_ENABLED>>"
+        - name: IDENTITY_FEDERATION_PUBLIC_PATH_PREFIX
+          value: "<<IDENTITY_FEDERATION_PUBLIC_PATH_PREFIX>>"
+        - name: IDENTITY_FEDERATION_REQUEST_TTL
+          value: "<<IDENTITY_FEDERATION_REQUEST_TTL>>"
+        - name: IDENTITY_FEDERATION_CODE_TTL
+          value: "<<IDENTITY_FEDERATION_CODE_TTL>>"
+        - name: IDENTITY_FEDERATION_DEMO_ADMIN_GROUP
+          value: "<<IDENTITY_FEDERATION_DEMO_ADMIN_GROUP>>"
         - name: TZ
           value: "<<TIMEZONE>>"

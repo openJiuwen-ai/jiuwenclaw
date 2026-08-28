@@ -72,9 +72,9 @@ main() {
     DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]="true"
     gen_web_file
     assert_equal \
-        "1" \
+        "0" \
         "$(yq eval-all '[select(.metadata.name == "jiuwenclaw-web-nodeport")] | length' "${CONFIG["WEB_FILE"]}")" \
-        "enterprise mode must retain the configured User Web NodePort"
+        "enterprise mode must not expose the User Web NodePort"
 
     DEPLOY_VARS["IS_UP_MANAGER_WEB"]="false"
     if (check_user_web_mode_config) >/dev/null 2>&1; then
@@ -101,6 +101,32 @@ main() {
         "$(yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "IDENTITY_PUBLIC_KEY_URL").value' "${CONFIG["MANAGER_SERVER_FILE"]}")" \
         "Manager Server must receive the Identity public-key URL"
 
+    CONFIG["IDENTITY_FILE"]="${test_dir}/identity.yaml"
+    render_config_template \
+        "${CONFIG["IDENTITY_TEMPLATE_FILE"]}" \
+        "${CONFIG["IDENTITY_FILE"]}" \
+        "DEPLOY_VARS"
+    assert_equal \
+        "false" \
+        "$(yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "IDENTITY_FEDERATION_DEMO_ENABLED").value' "${CONFIG["IDENTITY_FILE"]}")" \
+        "Identity federation Demo must remain disabled by default"
+    assert_equal \
+        "/idp" \
+        "$(yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "IDENTITY_FEDERATION_PUBLIC_PATH_PREFIX").value' "${CONFIG["IDENTITY_FILE"]}")" \
+        "Identity federation browser URLs must use the Manager Web IDP prefix"
+    assert_equal \
+        "300" \
+        "$(yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "IDENTITY_FEDERATION_REQUEST_TTL").value' "${CONFIG["IDENTITY_FILE"]}")" \
+        "Identity federation request TTL must be rendered"
+    assert_equal \
+        "60" \
+        "$(yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "IDENTITY_FEDERATION_CODE_TTL").value' "${CONFIG["IDENTITY_FILE"]}")" \
+        "Identity federation code TTL must be rendered"
+    assert_equal \
+        "enterprise-admins" \
+        "$(yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "IDENTITY_FEDERATION_DEMO_ADMIN_GROUP").value' "${CONFIG["IDENTITY_FILE"]}")" \
+        "Identity federation admin group must be rendered"
+
     CONFIG["MANAGER_WEB_FILE"]="${test_dir}/manager-web.yaml"
     render_config_template \
         "${CONFIG["MANAGER_WEB_TEMPLATE_FILE"]}" \
@@ -110,8 +136,43 @@ main() {
         "0" \
         "$(yq eval-all '[select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "IDENTITY_PUBLIC_KEY_URL")] | length' "${CONFIG["MANAGER_WEB_FILE"]}")" \
         "Manager Web must not receive the unused public-key URL"
+    assert_equal \
+        "http://jiuwenclaw-web:5173" \
+        "$(yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "MANAGER_WEB_USER_WEB_TARGET").value' "${CONFIG["MANAGER_WEB_FILE"]}")" \
+        "Manager Web must route /chat to the User Web HTTP service"
+    assert_equal \
+        "http://jiuwenclaw-gateway:19002" \
+        "$(yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "MANAGER_WEB_GATEWAY_HTTP_TARGET").value' "${CONFIG["MANAGER_WEB_FILE"]}")" \
+        "Manager Web must route HTTP/SSE to the Gateway Web HTTP service"
+    assert_equal \
+        "http://jiuwenclaw-gateway:19000" \
+        "$(yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "MANAGER_WEB_GATEWAY_WS_TARGET").value' "${CONFIG["MANAGER_WEB_FILE"]}")" \
+        "Manager Web must route WebSocket to the Gateway WebSocket service"
+    assert_equal \
+        "0" \
+        "$(yq eval-all '[select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "MANAGER_WEB_GATEWAY_SSE" or .name == "MANAGER_WEB_USER_SERVER_TARGET")] | length' "${CONFIG["MANAGER_WEB_FILE"]}")" \
+        "obsolete Manager Web proxy variables must not be rendered"
+    assert_equal \
+        "5173" \
+        "$(yq eval-all 'select(.kind == "Service" and .metadata.name == "jiuwenclaw-web").spec.ports[] | select(.name == "http").port' "${CONFIG["WEB_FILE"]}")" \
+        "User Web ClusterIP service must expose its HTTP port"
+
+    CONFIG["GATEWAY_FILE"]="${test_dir}/gateway.yaml"
+    render_config_template \
+        "${CONFIG["GATEWAY_TEMPLATE_FILE"]}" \
+        "${CONFIG["GATEWAY_FILE"]}" \
+        "DEPLOY_VARS"
+    assert_equal \
+        "1" \
+        "$(yq eval-all '[select(.kind == "Service" and .metadata.name == "jiuwenclaw-gateway").spec.ports[] | select(.port == 19001)] | length' "${CONFIG["GATEWAY_FILE"]}")" \
+        "Gateway Service must expose its shared HTTP and ACP listener only once"
+    assert_equal \
+        "http" \
+        "$(yq eval-all 'select(.kind == "Service" and .metadata.name == "jiuwenclaw-gateway").spec.ports[] | select(.port == 19001).name' "${CONFIG["GATEWAY_FILE"]}")" \
+        "Gateway shared listener must use the HTTP service port"
 
     ensure_secret_configmap() { :; }
+    delete_k8s_resource() { :; }
     exec_cmd() { :; }
     wait_k8s_resource_ready() { :; }
     success() { :; }

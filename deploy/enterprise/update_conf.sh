@@ -8,7 +8,8 @@ rm -f "${DEST_FILE}"
 cp -f "${SRC_FILE}" "${DEST_FILE}"
 
 yq eval '.gateway.agent_client.type = "jiuwen"' -i "${DEST_FILE}"
-yq eval '.gateway.edition = "${JIUWENSWARM_EDITION:-enterprise}"' -i "${DEST_FILE}"
+JIUWENSWARM_EDITION="${JIUWENSWARM_EDITION:-enterprise}" \
+    yq eval '.gateway.edition = strenv(JIUWENSWARM_EDITION)' -i "${DEST_FILE}"
 yq eval '.gateway.session_map_scope = "<<GATEWAY_SESSION_MAP_SCOPE>>"' -i "${DEST_FILE}"
 yq eval '.channels.feishu = {}' -i "${DEST_FILE}"
 yq eval '.react.max_iterations = "<<AGENT_SERVER_REACT_MAX_ITER>>"' -i "${DEST_FILE}"

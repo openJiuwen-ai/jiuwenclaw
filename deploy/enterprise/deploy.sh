@@ -97,7 +97,7 @@ main() {
     if [[ -z "${DEPLOY_VARS["USER_WEB_MODE"]:-}" ]]; then
         if [[ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]:-false}" == "true" ]]; then
             DEPLOY_VARS["USER_WEB_MODE"]="enterprise"
-            warn "ENABLE_USER_WEB_EMBEDDING is deprecated; use USER_WEB_MODE=enterprise"
+            warning "ENABLE_USER_WEB_EMBEDDING is deprecated; use USER_WEB_MODE=enterprise"
         else
             DEPLOY_VARS["USER_WEB_MODE"]="personal"
         fi

@@ -68,6 +68,14 @@ def _default_dist_dir() -> Path:
     return dist_dir
 
 
+def _inject_user_web_runtime_config(document: str, mode: str) -> str:
+    """Inject runtime mode values without modifying JavaScript property names."""
+    return document.replace("__JIUWEN_USER_WEB_MODE_VALUE__", mode).replace(
+        "__JIUWEN_USER_WEB_EMBEDDING_VALUE__",
+        "true" if mode == "enterprise" else "false",
+    )
+
+
 class _SpaStaticHandler(SimpleHTTPRequestHandler):
     """Static file handler with SPA fallback to index.html."""
 
@@ -561,6 +569,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _is_web_http_route(self) -> bool:
         """Paths served by Gateway Web HTTP; proxy when Ingress still points at Web static."""
         path = urlparse(self.path).path
+        if path == "/gateway-api" or path.startswith("/gateway-api/"):
+            return True
         if path.startswith("/file-api/") or path.startswith("/share-api/"):
             return True
         if path == "/api/sessions" or path.startswith("/api/sessions/"):
@@ -597,11 +607,16 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         if not self.web_http_target:
             self.send_error(502, "web http proxy target not configured")
             return
+        original_path = self.path
+        parsed_path = urlparse(original_path).path
+        if parsed_path == "/gateway-api" or parsed_path.startswith("/gateway-api/"):
+            self.path = f"/api{original_path[len('/gateway-api'):]}"
         self.__dict__["api_target"] = self.web_http_target
         try:
             self._proxy_http()
         finally:
             self.__dict__.pop("api_target", None)
+            self.path = original_path
 
     def do_GET(self) -> None:  # noqa: N802
         if self._is_web_http_route():
@@ -611,9 +626,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             return
         if self._is_document_request():
             index = Path(self.directory or os.getcwd()) / "index.html"
-            body = index.read_text(encoding="utf-8").replace(
-                "__JIUWEN_USER_WEB_EMBEDDING__", "true" if self.user_web_mode == "enterprise" else "false"
-            ).replace("__JIUWEN_USER_WEB_MODE__", self.user_web_mode).encode("utf-8")
+            body = _inject_user_web_runtime_config(
+                index.read_text(encoding="utf-8"), self.user_web_mode
+            ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -860,7 +875,7 @@ def main() -> None:
     logger.info("[jiuwenswarm-web] /api -> %s", api_target)
     logger.info("[jiuwenswarm-web] /ws  -> %s", ws_target)
     logger.info(
-        "[jiuwenswarm-web] /file-api,/share-api,/api/sessions*,/api/v1* -> %s",
+        "[jiuwenswarm-web] /gateway-api,/file-api,/share-api,/api/sessions*,/api/v1* -> %s",
         web_http_target,
     )
     logger.info("[jiuwenswarm-web] ws disable compress: %s", args.ws_disable_compress)
