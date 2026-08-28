@@ -236,7 +236,7 @@ class A2AOutboundDispatcher:
         ):
             terms.add(token)
             if all("\u3400" <= char <= "\u9fff" for char in token) and len(token) > 2:
-                terms.update(token[index : index + 2] for index in range(len(token) - 1))
+                terms.update(token[index:index + 2] for index in range(len(token) - 1))
         return terms
 
     async def dispatch(

@@ -439,6 +439,16 @@ class MessageHandler(ABC):
         else:
             waiter.set_exception(error)
 
+    @staticmethod
+    def _is_external_channel_cancel(msg: "Message | None") -> bool:
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        return (
+            msg is not None
+            and msg.channel_id == "a2a"
+            and msg.req_method == ReqMethod.CHAT_CANCEL
+        )
+
     def _schedule_external_channel_cancel(self, msg: "Message") -> None:
         async def cancel_and_finish() -> None:
             try:
@@ -4581,11 +4591,7 @@ class MessageHandler(ABC):
                 break
             except Exception as exc:
                 external_cancel_error = exc
-                if (
-                    msg is not None
-                    and msg.channel_id == "a2a"
-                    and msg.req_method == ReqMethod.CHAT_CANCEL
-                ):
+                if self._is_external_channel_cancel(msg):
                     logger.exception(
                         "[MessageHandler] A2A cancel preprocessing failed: id=%s",
                         msg.id,
@@ -4593,12 +4599,9 @@ class MessageHandler(ABC):
                     continue
                 raise
             finally:
-                if (
-                    msg is not None
-                    and msg.channel_id == "a2a"
-                    and msg.req_method == ReqMethod.CHAT_CANCEL
-                    and not external_cancel_handed_off
-                ):
+                if self._is_external_channel_cancel(
+                    msg
+                ) and not external_cancel_handed_off:
                     self._finish_external_channel_cancel(
                         msg.id,
                         external_cancel_error

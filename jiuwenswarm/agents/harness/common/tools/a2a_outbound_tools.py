@@ -183,7 +183,10 @@ class A2AOutboundToolkit:
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Optional task keywords for ranking. Use an empty string to list the callable catalog.",
+                            "description": (
+                                "Optional task keywords for ranking. Use an empty "
+                                "string to list the callable catalog."
+                            ),
                             "default": "",
                         },
                         "required_skills": {

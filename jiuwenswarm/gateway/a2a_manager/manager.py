@@ -464,7 +464,7 @@ class A2AManager:
                 ):
                     propagate_cancellation = True
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("a2a.ingress start task cleanup failed", exc_info=True)
         try:
             await channel.stop()
         finally:

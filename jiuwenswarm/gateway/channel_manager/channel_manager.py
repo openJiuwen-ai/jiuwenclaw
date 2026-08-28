@@ -102,7 +102,7 @@ class ChannelManager(ABC):
         )
         if not self._get_channel_by_id(msg.channel_id):
             logger.info(f"[ChannelManager] Channel: {msg.channel_id} closed, cancel this user message.")
-            return
+            return None
 
         from jiuwenswarm.common.schema.message import ReqMethod
 

@@ -1275,9 +1275,12 @@ async def test_reverse_rpc_emits_cancel_notification_when_tool_is_canceled(
     manager = get_acp_output_manager()
     manager.reset_state()
     pushes = []
+    dispatch_sent = asyncio.Event()
 
     async def send_push(wire):
         pushes.append(wire)
+        if wire["body"]["method"] == A2A_TOOL_DISPATCH_TASK:
+            dispatch_sent.set()
         if wire["body"]["method"] == A2A_TOOL_CANCEL_CALL:
             rpc_id = wire["body"]["id"]
             manager.complete_jsonrpc_response(
@@ -1290,22 +1293,30 @@ async def test_reverse_rpc_emits_cancel_notification_when_tool_is_canceled(
             A2A_TOOL_DISPATCH_TASK,
             {"task": "secret"},
             session_id="s1",
+            timeout=1.0,
             log_params=False,
             cancel_method=A2A_TOOL_CANCEL_CALL,
         )
     )
-    while not pushes:
-        await asyncio.sleep(0)
-    pending.cancel()
+    try:
+        await asyncio.wait_for(dispatch_sent.wait(), timeout=0.5)
+        pending.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
-        await pending
-    assert [item["body"]["method"] for item in pushes] == [
-        A2A_TOOL_DISPATCH_TASK,
-        A2A_TOOL_CANCEL_CALL,
-    ]
-    assert pushes[1]["body"]["params"]["jsonrpc_id"] == pushes[0]["body"]["id"]
-    manager.reset_state()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert [item["body"]["method"] for item in pushes] == [
+            A2A_TOOL_DISPATCH_TASK,
+            A2A_TOOL_CANCEL_CALL,
+        ]
+        assert (
+            pushes[1]["body"]["params"]["jsonrpc_id"]
+            == pushes[0]["body"]["id"]
+        )
+    finally:
+        if not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        manager.reset_state()
 
 
 @pytest.mark.asyncio
