@@ -8,7 +8,11 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
+from jiuwenswarm.server.runtime.skill_turbo.plan_node import (
+    AbortError,
+    DisableThinkingMixin,
+    PlanNode,
+)
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_common import PptCommon
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.utils.bash_utils import (
     BashExecError,
@@ -37,8 +41,11 @@ def _extract_designer_section(
 
     文件 IO 由 PrepareNode 通过 read_file 工具完成后传入 text，
     skill_code 中禁止直接做文件 IO（校验器禁止 open/read_text 等）。
+
+    for_content_template_fill=True（Stage 6 填槽）：不注入从零设计长章与 24k
+    预算全书，改用密度短清单；图表候选页另附图表短片段。
     """
-    if not text:
+    if not text and not for_content_template_fill:
         return ""
 
     def _extract_bounded_section(header: str, end_markers: tuple[str, ...]) -> str:
@@ -53,6 +60,20 @@ def _extract_designer_section(
                 candidates.append(pos)
         end = min(candidates) if candidates else len(text)
         return text[start:end].rstrip()
+
+    if for_content_template_fill:
+        parts = [_CONTENT_FILL_DENSITY_CHECKLIST]
+        if include_charts and text:
+            chart_section = _extract_bounded_section(
+                "## 图表与数据可视化",
+                ("\n### 激活 content-template", "\n## 图片使用规范"),
+            )
+            if chart_section:
+                parts.append(chart_section)
+        return "\n\n".join(parts)
+
+    if not text:
+        return ""
 
     sections = [
         # 只认现行 designer.md：预算为加粗正文 **E. …**，终点「阶段 4」。
@@ -83,7 +104,7 @@ def _extract_designer_section(
             "## 图表与数据可视化",
             ("\n### 激活 content-template", "\n## 图片使用规范"),
         )
-        if chart_section and not for_content_template_fill:
+        if chart_section:
             chart_section = chart_section.replace(
                 "渲染器、`animation:false`、字体栈合并与容器高度兜底已由模板 CSS 与 "
                 "CHART_SCAFFOLD 固化并强制执行；以下为骨架无法替你决策、需要自觉遵守的规则。",
@@ -100,9 +121,6 @@ def _extract_designer_section(
         logger.warning("[P8.0] designer.md 未匹配到新版关键章节")
         return ""
 
-    if for_content_template_fill:
-        return "\n\n".join(selected)
-
     return (
         "兼容说明：以下 designer 规范中的 Grid 示例在本链路必须用等价 Flex 权重实现；"
         "不得违反当前提示词的 CSS Grid 禁令，但页面预算、纵向占用率、逐列验收、"
@@ -111,8 +129,18 @@ def _extract_designer_section(
     )
 
 
+# Stage 6 content 填槽用：替代 designer「E. 预算」全书（含 YAML/subagent，与填槽冲突）。
+_CONTENT_FILL_DENSITY_CHECKLIST = """### PAGE_CONTENT 密度硬约束（填槽）
+- 主区须填满：禁止大块空 `flex-1` 纯色或仅一行点缀。
+- 高度链：可伸展容器带 `min-h-0`；子块用 `flex-shrink-0` / `flex-1 min-h-0` 分工。
+- 数量与字号：卡片/要点克制（常见 ≤6 卡、核心点 ≤6）；正文 ≥14px，说明 ≥11px。
+- 图表候选页优先激活模板内 `CHART_SCAFFOLD`，禁止另起第二套初始化框架。
+- 只替换三处占位符；禁止先写 YAML 预算、开 subagent 或重写整页骨架。"""
+
+
+
 _PRESET_STYLE_IDS = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
-# Stage 6 §3.5/§3.6：预设四风格 + custom 的结构页走官方模板预铺填槽，禁止整页自由重写。
+# Stage 6 §3.5/§3.6：预设四风格 + custom 走官方模板预铺填槽（结构页 + 内容页）。
 _AGENDA_TEMPLATE_FILL_STYLE_IDS = _PRESET_STYLE_IDS | {"custom"}
 _STRUCTURAL_TEMPLATE_PAGE_TYPES: dict[str, str] = {
     "cover": "cover",
@@ -158,8 +186,10 @@ _H1_INNER_TEXT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _CONTENT_SAFE_OPEN_RE = re.compile(r'<div class="content-safe"', re.IGNORECASE)
+# footer 块：必须位于 </main> 之后，避免误匹配内容区 flex-shrink-0 + <p> 的卡片。
+# 用捕获组(footer_div)只提取 footer div 本身，不含 </main> 与 main 内容之间的文本。
 _FOOTER_BLOCK_RE = re.compile(
-    r'<div class="[^"]*\bflex-shrink-0\b[^"]*"[^>]*>\s*<p\b[^>]*>.*?</p>\s*</div>',
+    r'</main>.*?(<div class="[^"]*\bflex-shrink-0\b[^"]*"[^>]*>\s*<p\b[^>]*>.*?</p>\s*</div>)',
     re.IGNORECASE | re.DOTALL,
 )
 _P_INNER_TEXT_RE = re.compile(r"(<p\b[^>]*>)(.*?)(</p>)", re.IGNORECASE | re.DOTALL)
@@ -178,8 +208,8 @@ def _outline_needs_research(outline_page: str) -> bool:
 
 
 def _uses_content_template_fill(style_id: str, page_type: str, outline_page: str) -> bool:
-    """预设四风格内容页：官方 content-template 预铺后仅填槽。"""
-    if style_id not in _PRESET_STYLE_IDS:
+    """四预设 ∪ custom 内容页：官方 content-template 预铺后仅填槽。"""
+    if style_id not in _AGENDA_TEMPLATE_FILL_STYLE_IDS:
         return False
     if page_type in _STRUCTURAL_TEMPLATE_PAGE_TYPES:
         return False
@@ -192,11 +222,6 @@ def _uses_structural_template_fill(style_id: str, page_type: str) -> bool:
         page_type in _STRUCTURAL_TEMPLATE_PAGE_TYPES
         and style_id in _AGENDA_TEMPLATE_FILL_STYLE_IDS
     )
-
-
-def _uses_agenda_template_fill(style_id: str, page_type: str) -> bool:
-    """普通分支下 agenda 是否走官方 agenda-template 预铺填槽。"""
-    return _uses_structural_template_fill(style_id, page_type) and page_type == "agenda"
 
 
 def _resolve_style_page_template_path(
@@ -318,8 +343,10 @@ def _build_structural_template_fill_prompt(
                 "禁止部分有、部分空\n"
                 "   - 若模板无独立 PAGE 槽：页码信息统一写入 `{{AGENDA_N_DESC}}`"
                 "（全部带或不全部带，保持一致），来源为 outline 内容概要\n"
-                "5. **条目数 ≠ 默认 4**：仅允许按模板注释增删同构条目槽位并同步编号；"
-                "不得改其他结构或发明新布局\n"
+                "5. **条目数必须等于大纲内容章节（组）数**：目录条目取自大纲各内容页分组，"
+                "一一对应，禁止把两个章节合并为一条来迁就 4 条默认槽位；"
+                "条目多于 4 时按模板注释「可按实际增删」复制同构条目行并顺延编号；"
+                "`{{AGENDA_DESC}}` 中「共 N 章/部分」等表述必须与实际条目数一致\n"
             ),
             "section": (
                 "1. **字面拷贝已完成**：下方 HTML 即官方 `section-template.html` 预铺结果；"
@@ -417,6 +444,218 @@ def _extract_head_block(html: str) -> str:
     return match.group(0) if match else ""
 
 
+# custom 模板 head 内的占位符标签块：填槽后必然被替换，比对前需移除
+_PLACEHOLDER_STYLE_BLOCK_RE = re.compile(
+    r'<style\s+id="(?:theme-contract|theme-rules)"[^>]*>.*?</style>',
+    re.DOTALL | re.IGNORECASE,
+)
+_PLACEHOLDER_ATTR_RE = re.compile(
+    r'\s*(?:data-pptx-image-(?:present|policy)|data-pptx-role)'
+    r'\s*=\s*"[^"]*"',
+    re.IGNORECASE,
+)
+_PLACEHOLDER_TAG_RE = re.compile(
+    r'\{\{[A-Z][A-Z0-9_]*\}\}',
+    re.IGNORECASE,
+)
+# HTML 注释 + CSS 注释（custom 脚手架的说明注释会被 LLM 删除，属合法差异）
+_HEAD_HTML_COMMENT_RE = re.compile(r"<!--.*?-->|/\*.*?\*/", re.DOTALL)
+# __LOCAL_ASSET__ 注入行（导出期按页注入，非页面契约）
+_LOCAL_ASSET_LINK_RE = re.compile(
+    r'<link[^>]*href="__LOCAL_ASSET__[^"]*"[^>]*/?\s*>',
+    re.IGNORECASE,
+)
+
+
+def _head_chrome_signature(html: str) -> str:
+    """head chrome 签名：归一化空白 + title 内文占位化后的 head 全文。
+
+    结构页/内容页模板填槽的 chrome（head 内 tailwind.config、防溢出 CSS、
+    CDN script/link）要求逐字一致，唯一合法差异是每页 <title> 文字。
+    该签名用于与 seed 模板比对，检测 LLM 违规改 chrome 或流式输出污染
+    （bad case 46 的 page-1 `%20` 转义、page-9 config 断裂均落在 head）。
+
+    custom 风格模板的 head 含 ``{{THEME_CSS_VARIABLES}}`` /
+    ``{{THEME_CSS_RULES}}`` / ``{{STRUCTURAL_IMAGE_*}}`` 等占位符，
+    LLM 填槽后必然替换它们（设计意图），替换后 head 文本与 seed 不一致。
+    比对前移除占位符标签块（``<style id="theme-contract">`` /
+    ``<style id="theme-rules">``）、``{{...}}`` 占位符、HTML/CSS 注释、
+    ``__LOCAL_ASSET__`` 注入行及 ``data-pptx-image-*`` 属性，
+    只比较结构性 chrome（CDN 引用、硬约束 CSS、style 标签结构）。
+    """
+    head = _extract_head_block(html)
+    # 移除 custom 占位符标签块（theme-contract / theme-rules）
+    head = _PLACEHOLDER_STYLE_BLOCK_RE.sub("", head)
+    # 移除 {{...}} 占位符（seed 中保留、filled 中已替换均归一化为空）
+    head = _PLACEHOLDER_TAG_RE.sub("", head)
+    # 移除 HTML 注释和 CSS 注释（LLM 删除/保留属合法差异）
+    head = _HEAD_HTML_COMMENT_RE.sub("", head)
+    # 移除 __LOCAL_ASSET__ 注入行（导出期按页注入）
+    head = _LOCAL_ASSET_LINK_RE.sub("", head)
+    # 移除 data-pptx-image-* 属性（custom 模板占位符属性，填槽后值变化）
+    head = _PLACEHOLDER_ATTR_RE.sub("", head)
+    return _normalize_template_whitespace(
+        _normalize_title_tag_text_only(head)
+    )
+
+
+def _structural_chrome_matches_seed(seed_html: str, filled_html: str) -> bool:
+    """结构页填槽后 head chrome 必须与 seed 模板逐字一致（title 文字除外）。
+
+    返回 False 表示 chrome 被改动或输出损坏，应触发重试而非落盘。
+    """
+    seed_head = _head_chrome_signature(seed_html)
+    filled_head = _head_chrome_signature(filled_html)
+    return bool(seed_head) and seed_head == filled_head
+
+
+# --- 跨页 head 指纹投票（P8.1 gather 后） ---
+# 检测目标：LLM 流式输出被污染（bad case 35 page-7、46 首尾页）。
+# 指纹只取跨页"理应一致"的不变量，避免 custom 风格各页合法差异误报：
+# head 内共享 CDN URL 集合（script src / link href，剔除本地资产替换
+# __LOCAL_ASSET__:tailwind__ --导出阶段按页可选注入，非页面契约）
+_HEAD_URL_ATTR_RE = re.compile(
+    r"<(?:script|link)\b[^>]*?(?:src|href)\s*=\s*[\"']([^\"']+)[\"']",
+    re.IGNORECASE,
+)
+_LOCAL_ASSET_URL_PREFIX = "__LOCAL_ASSET__"
+
+
+def _extract_head_url_fingerprint(html: str) -> frozenset[str]:
+    """head 内共享 CDN URL 集合（剔除 __LOCAL_ASSET__ 本地替换与 title）。"""
+    head = _extract_head_block(html)
+    if not head:
+        return frozenset()
+    urls = (
+        u for u in _HEAD_URL_ATTR_RE.findall(head)
+        if not u.startswith(_LOCAL_ASSET_URL_PREFIX)
+    )
+    return frozenset(urls)
+
+
+# agenda 条目编号模式：>01< ~ >09<（模板内编号 span）
+_AGENDA_ITEM_NUM_RE = re.compile(r">0([1-9])<")
+# 大纲中研究需求 ✅ 行模式
+_OUTLINE_RESEARCH_REQ_RE = re.compile(r"\*\*研究需求\*\*.*?✅")
+
+
+def _count_outline_content_chapters(outline_text: str) -> int:
+    """从大纲中统计内容页数（研究需求为 ✅ 的页面）。"""
+    pages = _split_md_pages(outline_text)
+    if not pages:
+        return 0
+    count = 0
+    for _, block in pages.items():
+        if _OUTLINE_RESEARCH_REQ_RE.search(block):
+            count += 1
+    return count
+
+
+def _find_agenda_page_num(outline_text: str) -> int:
+    """从大纲中找到 agenda 页的页码，未找到返回 0。"""
+    pages = _split_md_pages(outline_text)
+    for page_num, block in pages.items():
+        for line in block.splitlines():
+            if "**类型**" in line and "agenda" in line.lower():
+                return page_num
+    return 0
+
+
+def _count_agenda_items(html: str) -> int:
+    """从 agenda 页 HTML 中统计条目数（按编号 01-09 去重计数）。"""
+    return len(set(_AGENDA_ITEM_NUM_RE.findall(html or "")))
+
+
+def _validate_agenda_item_count(
+    outline_text: str,
+    page_htmls: list[dict[str, Any]],
+) -> list[int]:
+    """校验 agenda 页条目数与大纲内容章节数是否一致。
+
+    返回条目数不匹配的 agenda 页码列表（空列表表示通过/不适用）。
+    """
+    agenda_page = _find_agenda_page_num(outline_text)
+    if not agenda_page:
+        return []
+
+    content_chapters = _count_outline_content_chapters(outline_text)
+    if content_chapters == 0:
+        return []
+
+    for p in page_htmls:
+        if int(p.get("page_num", 0)) == agenda_page:
+            item_count = _count_agenda_items(str(p.get("html") or ""))
+            if item_count != content_chapters:
+                logger.warning(
+                    "[P8.1] agenda 条目数(%d) ≠ 大纲内容章节数(%d) page=%d",
+                    item_count, content_chapters, agenda_page,
+                )
+                return [agenda_page]
+            break
+    return []
+
+
+def _vote_head_fingerprints(
+    pages: list[dict[str, Any]],
+) -> list[int]:
+    """跨页 head 指纹投票：返回偏离多数派的页码列表。
+
+    原理（bad case 35/46 校准）：
+    - 多数派 URL 集 = 出现于 >半数页的 head 内 CDN URL（剔除
+      __LOCAL_ASSET__ 导出期注入与页面自加渲染色等合法差异）
+    - 报告条件：page 含多数派之外的"多余 URL" --流式输出损坏复制的
+      特征（bad case 35 page-7 的 head 同时含损坏与完好两份 CDN 引用）
+    - 仅缺失多数 URL 不报告：custom 脚手架结构页合法缺少
+      fontawesome 等资源（bad case 35 的 page-1/page-15）
+    - <3 页无票可投（单例结构页由 seed 比对负责）
+    """
+    deviant: list[int] = []
+    valid = [p for p in pages if str(p.get("html") or "")]
+
+    if len(valid) < 3:
+        return deviant
+
+    urls_by_page = {id(p): _extract_head_url_fingerprint(str(p["html"])) for p in valid}
+    # 多数派 URL 集 = 出现于 >半数页的 URL（skill_codes 禁止 import collections，用 dict 计数）
+    url_counter: dict[str, int] = {}
+    for sig in urls_by_page.values():
+        for u in sig:
+            url_counter[u] = url_counter.get(u, 0) + 1
+    majority_urls = frozenset(
+        u for u, cnt in url_counter.items() if cnt * 2 > len(valid)
+    )
+    # 无多数 URL（全散）时投票不生效
+    if not majority_urls:
+        return deviant
+
+    # 签名 = (是否缺失多数 URL, 是否含多余 URL)
+    def _sig(page: dict[str, Any]) -> tuple[bool, bool]:
+        urls = urls_by_page[id(page)]
+        missing_majority = bool(majority_urls - urls)
+        extra_urls = bool(urls - majority_urls)
+        return missing_majority, extra_urls
+
+    counter: dict[tuple[bool, bool], list[dict[str, Any]]] = {}
+    for page in valid:
+        counter.setdefault(_sig(page), []).append(page)
+
+    for key, members in counter.items():
+        _, extra_urls = key
+        if not extra_urls:
+            continue
+        for page in members:
+            deviant.append(int(page.get("page_num", 0)))
+            logger.warning(
+                "[P8.1] head 指纹投票偏离多数派（疑似流式输出损坏）"
+                " page=%s majority=%d/%d extra_urls=%s",
+                page.get("page_num"),
+                max(len(m) for m in counter.values()),
+                len(valid),
+                sorted(urls_by_page[id(page)] - majority_urls),
+            )
+    return deviant
+
+
 def _extract_header_block(html: str) -> str:
     content_safe_match = _CONTENT_SAFE_OPEN_RE.search(html or "")
     main_match = _MAIN_OPEN_TAG_RE.search(html or "")
@@ -429,7 +668,8 @@ def _extract_footer_block(html: str) -> str:
     matches = list(_FOOTER_BLOCK_RE.finditer(html or ""))
     if not matches:
         return ""
-    return matches[-1].group(0)
+    # 模板结构保证 </main> 之后只有一个 footer div，取第一个匹配即可。
+    return matches[0].group(1)
 
 
 def _normalize_footer_text_only(html: str) -> str:
@@ -476,6 +716,9 @@ def _replace_main_inner_html(html: str, new_inner: str) -> str:
 
 _REPAIRABLE_CONTENT_TEMPLATE_REASONS = frozenset({
     "content_template_chrome_changed",
+    "head_chrome_changed",
+    "header_chrome_changed",
+    "footer_chrome_changed",
     "main_tag_changed",
 })
 
@@ -525,6 +768,9 @@ def _repair_content_template_chrome(seed_html: str, filled_html: str) -> str | N
     if "{{PAGE_FOOTER}}" in out:
         out = out.replace("{{PAGE_FOOTER}}", footer_inner)
     else:
+        # fallback：seed 模板无 {{PAGE_FOOTER}} 占位符时，直接在 footer div 的
+        # <p> 标签内替换文本。_P_INNER_TEXT_RE 只匹配 count=1（footer block 内
+        # 第一个 <p>），不会双重替换——footer_inner 是纯文本，不含 <p> 标签。
         seed_footer = _extract_footer_block(out)
         if not seed_footer:
             return None
@@ -534,6 +780,70 @@ def _repair_content_template_chrome(seed_html: str, filled_html: str) -> str | N
             count=1,
         )
         out = out.replace(seed_footer, repaired_footer, 1)
+
+    return out
+
+
+def _repair_structural_page_chrome(seed_html: str, filled_html: str) -> str | None:
+    """结构页 chrome 修复：从 seed 恢复 head，保留 filled 的 body 内容。
+
+    与 _repair_content_template_chrome 不同，结构页（cover/agenda/section/
+    ending）没有 <main>/<footer> 标签，不能用 main_inner 提取。
+    本函数从 filled 的 <body> 中提取 .ppt-slide 整块内容（含已填的
+    {{PAGE_TITLE}}/{{PAGE_CONTENT}}/{{PAGE_FOOTER}} 等槽位值），
+    替换 seed 的对应占位符，保留 seed 的 head chrome 不变。
+
+    返回 None 表示无法提取有效 body 内容。
+    """
+    if not (seed_html or "").strip() or not (filled_html or "").strip():
+        return None
+
+    # 从 filled 提取 <body> 内的 .ppt-slide 整块
+    body_match = re.search(
+        r"<body\b[^>]*>(.*?)</body>",
+        filled_html,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not body_match:
+        return None
+    body_inner = body_match.group(1).strip()
+    if not body_inner or "{{" in body_inner:
+        # body 仍有未填占位符，修复无意义
+        return None
+
+    # 从 filled 提取 <title> 文字（用于替换 seed 的 {{PAGE_TITLE}}）
+    title_match = re.search(
+        r"<title\b[^>]*>(.*?)</title>",
+        filled_html,
+        re.DOTALL | re.IGNORECASE,
+    )
+    title_text = title_match.group(1).strip() if title_match else ""
+
+    # 从 seed 的 body 中提取 .ppt-slide 整块（含占位符），
+    # 用 filled 的 body 内容替换
+    seed_body_match = re.search(
+        r"(<body\b[^>]*>)(.*?)(</body>)",
+        seed_html,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not seed_body_match:
+        return None
+
+    # 组装：seed head + seed body 开标签 + filled body 内容 + seed body 闭标签
+    # head 从 seed 取（chrome 不变），body 内容从 filled 取（已填槽）
+    head_end = seed_html.find("</head>")
+    if head_end < 0:
+        return None
+    head_end += len("</head>")
+
+    out = seed_html[:head_end]  # seed head（chrome 不变）
+    out += f"\n{seed_body_match.group(1)}\n"
+    out += body_inner
+    out += f"\n{seed_body_match.group(3)}\n"
+
+    # 如果 seed 中有 {{PAGE_TITLE}} 占位符且 filled 有 title 文字，替换
+    if title_text and "{{PAGE_TITLE}}" in out:
+        out = out.replace("{{PAGE_TITLE}}", title_text)
 
     return out
 
@@ -555,17 +865,17 @@ def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> 
     seed_head = _normalize_template_whitespace(_normalize_title_tag_text_only(_extract_head_block(seed_html)))
     filled_head = _normalize_template_whitespace(_normalize_title_tag_text_only(_extract_head_block(filled_html)))
     if not seed_head or seed_head != filled_head:
-        return False, "content_template_chrome_changed"
+        return False, "head_chrome_changed"
 
     seed_header = _normalize_template_whitespace(_normalize_h1_text_only(_extract_header_block(seed_html)))
     filled_header = _normalize_template_whitespace(_normalize_h1_text_only(_extract_header_block(filled_html)))
     if not seed_header or seed_header != filled_header:
-        return False, "content_template_chrome_changed"
+        return False, "header_chrome_changed"
 
     seed_footer = _normalize_template_whitespace(_normalize_footer_text_only(seed_html))
     filled_footer = _normalize_template_whitespace(_normalize_footer_text_only(filled_html))
     if not seed_footer or seed_footer != filled_footer:
-        return False, "content_template_chrome_changed"
+        return False, "footer_chrome_changed"
 
     main_inner_html = _extract_main_inner_html(filled_html)
     if not main_inner_html.strip():
@@ -584,6 +894,30 @@ def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> 
     if _has_placeholder_slop(footer_text):
         return False, "footer_invalid"
 
+    if not _validate_slide_dom(filled_html):
+        return False, "invalid_dom"
+    if not _validate_chart_height_chain(filled_html):
+        return False, "invalid_chart_height_chain"
+    return True, ""
+
+
+def _validate_custom_content_template_fill_output(
+    seed_html: str, filled_html: str
+) -> tuple[bool, str]:
+    """custom 内容页填槽轻量校验（对齐结构页；不做 head 全等 / chrome repair）。"""
+    if not _is_valid_html(filled_html):
+        return False, "invalid_html"
+    if _has_unfilled_placeholders(filled_html):
+        return False, "unfilled_placeholders"
+    seed_main_tag = _extract_main_open_tag(seed_html)
+    filled_main_tag = _extract_main_open_tag(filled_html)
+    if not seed_main_tag or seed_main_tag != filled_main_tag:
+        return False, "main_tag_changed"
+    main_inner_html = _extract_main_inner_html(filled_html)
+    if not main_inner_html.strip():
+        return False, "empty_page_content"
+    if "{{PAGE_CONTENT}}" in main_inner_html:
+        return False, "page_content_unfilled"
     if not _validate_slide_dom(filled_html):
         return False, "invalid_dom"
     if not _validate_chart_height_chain(filled_html):
@@ -622,7 +956,7 @@ def _build_content_template_fill_prompt(
     total_pages: int = 0,
     rewrite_hint: str = "",
 ) -> str:
-    """预设四风格内容页：content-template 预铺后仅填三处占位符。"""
+    """内容页 content-template 预铺填槽 prompt（四预设三槽；custom 含 THEME_*）。"""
     user_query_section = ""
     if user_query:
         user_query_section = (
@@ -630,12 +964,8 @@ def _build_content_template_fill_prompt(
             f"{user_query}\n"
             f"⚠️ 用户 query 中的页数/总量要求已由大纲规划完成，本步骤**仅填充第 {page_number} 页内容页模板**。\n\n"
         )
-    outline_full_section = ""
-    if outline_full.strip() and outline_full.strip() != outline_page.strip():
-        outline_full_section = (
-            "### 大纲全文（仅用于核对本页章节与上下文，不得混入其他页内容）\n"
-            f"{outline_full}\n\n"
-        )
+    # outline_full 故意不注入：本页 outline_page + research 已够；全文易胀 prompt、诱长推理。
+    _ = outline_full
     page_type = _detect_page_type(outline_page)
     page_number_rule = _build_visible_page_number_rule(
         user_query,
@@ -643,14 +973,19 @@ def _build_content_template_fill_prompt(
         total_pages or page_number,
     )
     designer_section = ""
-    if designer_md_text:
-        designer_md = _extract_designer_section(
-            designer_md_text,
-            include_charts=page_type in _CHART_CANDIDATE_TYPES,
-            for_content_template_fill=True,
+    designer_md = _extract_designer_section(
+        designer_md_text or "",
+        include_charts=page_type in _CHART_CANDIDATE_TYPES,
+        for_content_template_fill=True,
+    )
+    if style_id == "custom" and designer_md:
+        designer_md = designer_md.replace(
+            "- 只替换三处占位符；禁止先写 YAML 预算、开 subagent 或重写整页骨架。",
+            "- 替换模板中实际出现的占位符（含 THEME_* 与 PAGE_*）；"
+            "禁止先写 YAML 预算、开 subagent 或重写整页骨架。",
         )
-        if designer_md:
-            designer_section = f"\n## skill designer 约束（仅作用于 `{{PAGE_CONTENT}}`）\n{designer_md}\n"
+    if designer_md:
+        designer_section = f"\n## skill designer 约束（仅作用于 `{{PAGE_CONTENT}}`）\n{designer_md}\n"
     layout_template = _build_content_layout_template(page_type)
     rewrite_section = ""
     if rewrite_hint:
@@ -659,8 +994,6 @@ def _build_content_template_fill_prompt(
             f"{rewrite_hint}\n"
             "⚠️ 仅修复上述不通过项，不要改动其他正常部分。\n"
         )
-    # custom content-template：page-main 已是根容器，PAGE_CONTENT 须 ≥2 直接子块；
-    # 四预设仍用唯一首层根容器（与现行预设脚手架一致）。
     if style_id == "custom":
         page_content_rule = (
             "5. `{{PAGE_CONTENT}}` 必须作为 `<main class=\"page-main\">` 的至少两个直接子块"
@@ -668,43 +1001,85 @@ def _build_content_template_fill_prompt(
             "（如 `flex-shrink-0` / `flex-1 min-h-0`）；需要分栏时只在其中一个直接子块内部"
             "使用 grid/flex-row，禁止再用唯一根容器包住全部内容\n"
         )
+        task_line = (
+            f"## 任务：填充第 {page_number} 页 custom content-template 官方模板\n"
+        )
+        fill_rules = (
+            "## 填充规则（对齐 Stage 6 §3.6，严格遵守）\n"
+            "1. 已预铺 `custom/content-template.html` 脚手架：逐字保留 `.ppt-slide` 硬约束、"
+            "`.content-safe` / `.page-header` / `.page-main` / `.page-footer`、"
+            "`@layer utilities` 与 theme-contract 插槽结构\n"
+            "2. 仅替换实际出现的占位符：`{{THEME_CSS_VARIABLES}}`、`{{THEME_CSS_RULES}}`、"
+            "`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`；未提供的主题槽替换为空\n"
+            "3. `{{PAGE_TITLE}}` 只填写本页标题文字；不得改 `<h1>` / `.page-title` 的 class\n"
+            "4. `{{PAGE_FOOTER}}` 只填写来源/备注；不得追加运行页码\n"
+            f"{page_content_rule}"
+            "6. 不得修改预铺模板 `<main>` 的 class；所有布局变化仅在 `{{PAGE_CONTENT}}` 内完成\n"
+            "7. PAGE_* 占位符须填有意义内容；THEME 槽无内容时替换为空；"
+            "禁止用 `—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位` 敷衍 PAGE_*\n"
+            "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；"
+            "禁止额外手写第二套图表初始化框架\n"
+            "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
+        )
+        chrome_section = (
+            "## 框架约束\n"
+            "- 框架与 `@layer utilities`、theme-contract **插槽结构**逐字保留；"
+            "允许填入 `{{THEME_CSS_VARIABLES}}` / `{{THEME_CSS_RULES}}`\n"
+            "- 允许改动：主题槽、`<title>`/`<h1>` 文字、`<main>` 内部、footer 首个 `<p>` 文字\n"
+            "- 禁止增删/重排框架节点，禁止改框架 class，禁止把内容挪到 header/footer/`<head>`\n"
+            "- 不要“重新生成一版更美观的同款页面”\n\n"
+        )
+        seed_caption = (
+            "## 预铺模板 HTML（只填槽，勿重写框架；须填满模板中实际出现的 {{...}}）\n"
+        )
     else:
         page_content_rule = (
             "5. `{{PAGE_CONTENT}}` 必须替换为一个且仅一个首层根容器，"
             "根容器必须带 `w-full flex-1 min-h-0`\n"
         )
+        task_line = (
+            f"## 任务：填充第 {page_number} 页预设风格 content-template 官方模板\n"
+        )
+        fill_rules = (
+            "## 填充规则（对齐 Stage 6 §3.5，严格遵守）\n"
+            "1. **字面拷贝已完成**：下方 HTML 即官方 `content-template.html` 预铺结果；"
+            "禁止重写整页、禁止改标题栏/页脚/CSS/`@layer utilities`/装饰/SVG/Tailwind class 顺序\n"
+            "2. **只允许替换 3 类占位符**：`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`\n"
+            "3. `{{PAGE_TITLE}}` 只填写本页标题文字；不得改 `<h1>` 的 class、字号、字重、字体、装饰线、padding\n"
+            "4. `{{PAGE_FOOTER}}` 只填写来源/备注；不得追加运行页码\n"
+            f"{page_content_rule}"
+            "6. 不得修改预铺模板 `<main>` 的 class；所有布局变化仅在 `{{PAGE_CONTENT}}` 内完成\n"
+            "7. 每个占位符必须填有意义内容；禁止空串、`—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位`\n"
+            "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；禁止额外手写第二套图表初始化框架\n"
+            "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
+        )
+        chrome_section = (
+            "## Page Chrome 硬锁（违反将导致校验失败 `content_template_chrome_changed`）\n"
+            "- **Chrome = 除 `{{PAGE_CONTENT}}` 以外的一切**：`<head>`（含 script/link/style/`tailwind.config`）、"
+            "`.content-safe` 到 `<main>` 之前的 header 带、`<main>` 开标签、footer 骨架\n"
+            "- **允许改动的仅是占位符文本**：\n"
+            "  - `<title>` / `<h1>` 内文字 ← `{{PAGE_TITLE}}`\n"
+            "  - footer 内首个 `<p>` 文字 ← `{{PAGE_FOOTER}}`\n"
+            "  - `<main>` **内部** HTML ← `{{PAGE_CONTENT}}`\n"
+            "- **禁止**增删/重排 chrome 节点，禁止改 chrome 上的 class/style/属性/注释/空白结构，"
+            "禁止把图表、卡片、遮罩、装饰线挪到 header/footer/`<head>`\n"
+            "- **操作方式**：以预铺 HTML 为底稿，只做三处字符串级替换后原样输出；"
+            "不要“重新生成一版更美观的同款页面”\n"
+            "- **自检**：输出前对比预铺稿——若除上述三处文本/main 内部外仍有任何差异，必须撤回重填\n\n"
+        )
+        seed_caption = (
+            "## 预铺模板 HTML（只填槽，勿重写；Chrome 必须与下方稿逐字节一致，除三处占位符外）\n"
+        )
     return (
         f"{user_query_section}"
-        f"## 任务：填充第 {page_number} 页预设风格 content-template 官方模板\n"
+        f"{task_line}"
         f"style_id=`{style_id}`，模板=`content-template.html`。你是模板填充师，不是自由排版设计师。\n\n"
-        "## 填充规则（对齐 Stage 6 §3.5，严格遵守）\n"
-        "1. **字面拷贝已完成**：下方 HTML 即官方 `content-template.html` 预铺结果；"
-        "禁止重写整页、禁止改标题栏/页脚/CSS/`@layer utilities`/装饰/SVG/Tailwind class 顺序\n"
-        "2. **只允许替换 3 类占位符**：`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`\n"
-        "3. `{{PAGE_TITLE}}` 只填写本页标题文字；不得改 `<h1>` 的 class、字号、字重、字体、装饰线、padding\n"
-        "4. `{{PAGE_FOOTER}}` 只填写来源/备注；不得追加运行页码\n"
-        f"{page_content_rule}"
-        "6. 不得修改预铺模板 `<main>` 的 class；所有布局变化仅在 `{{PAGE_CONTENT}}` 内完成\n"
-        "7. 每个占位符必须填有意义内容；禁止空串、`—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位`\n"
-        "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；禁止额外手写第二套图表初始化框架\n"
-        "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
-        "## Page Chrome 硬锁（违反将导致校验失败 `content_template_chrome_changed`）\n"
-        "- **Chrome = 除 `{{PAGE_CONTENT}}` 以外的一切**：`<head>`（含 script/link/style/`tailwind.config`）、"
-        "`.content-safe` 到 `<main>` 之前的 header 带、`<main>` 开标签、footer 骨架\n"
-        "- **允许改动的仅是占位符文本**：\n"
-        "  - `<title>` / `<h1>` 内文字 ← `{{PAGE_TITLE}}`\n"
-        "  - footer 内首个 `<p>` 文字 ← `{{PAGE_FOOTER}}`\n"
-        "  - `<main>` **内部** HTML ← `{{PAGE_CONTENT}}`\n"
-        "- **禁止**增删/重排 chrome 节点，禁止改 chrome 上的 class/style/属性/注释/空白结构，"
-        "禁止把图表、卡片、遮罩、装饰线挪到 header/footer/`<head>`\n"
-        "- **操作方式**：以预铺 HTML 为底稿，只做三处字符串级替换后原样输出；"
-        "不要“重新生成一版更美观的同款页面”\n"
-        "- **自检**：输出前对比预铺稿——若除上述三处文本/main 内部外仍有任何差异，必须撤回重填\n\n"
+        f"{fill_rules}"
+        f"{chrome_section}"
         "## 风格文件（正文区配色/字体/组件权威；不得把风格元数据写成观众可见文字）\n"
         f"{style_text}\n\n"
         "## 大纲 — 本页规划\n"
         f"{outline_page}\n\n"
-        f"{outline_full_section}"
         "## 研究报告 — 本页素材\n"
         f"{research_page}\n"
         f"{_build_image_section(image_map_page)}\n"
@@ -713,7 +1088,7 @@ def _build_content_template_fill_prompt(
         f"{designer_section}"
         f"{layout_template}\n"
         f"{rewrite_section}"
-        "## 预铺模板 HTML（只填槽，勿重写；Chrome 必须与下方稿逐字节一致，除三处占位符外）\n"
+        f"{seed_caption}"
         f"{seed_html}\n"
     )
 
@@ -1381,11 +1756,51 @@ def _main_inside_ppt_slide(html: str) -> bool:
     return start <= main_match.start() < end
 
 
+def _validate_no_escaped_content(html: str) -> bool:
+    """快速静态检测：内容块是否逃逸到 .ppt-slide 容器之外。
+
+    Skill 原文等价物：pptx-craft check-layout 的 ``escaped`` 检测器
+   （check-layout-u9kFnFH0.js#L1094-L1129），原文通过 Playwright 渲染后
+    检查 ``[data-block]`` / ``.content-safe`` / flow anchors 是否跑到了
+    ``.ppt-slide`` 之外。本函数用纯文本正则做同等效力的静态检测，
+    避免渲染开销（<1ms vs 渲染 3s/页），适用于 skill turbo 快路径。
+
+    原理：``_ppt_slide_bounds`` 已算出 ``.ppt-slide`` div 的 [start, end)。
+    若 ``</main>``、``<section``、``<footer``、``<header`` 等内容块标签
+    出现在 end 之后、``</body>`` 之前，说明它们是 slide 提前闭合后的孤儿元素
+    （流式输出 token 损坏的典型表现：``</div></main></div></div>`` 提前闭合
+    所有外层容器，后续内容变成脱流孤儿）。
+    """
+    bounds = _ppt_slide_bounds(html)
+    if bounds is None:
+        return True  # 无法定位 slide 边界时不拦截，交给其他校验
+    _, slide_end = bounds
+    body_close = html.lower().rfind("</body>")
+    if body_close == -1:
+        return True  # 无 </body> 由其他校验拦截
+    # slide 闭合后到 </body> 之前的区域不应有内容块标签
+    tail = html[slide_end:body_close]
+    # 匹配内容块标签（开标签或闭合标签），排除注释内的
+    _escaped_content_tags_re = re.compile(
+        r"</?(?:main|section|footer|header|article|aside)\b",
+        re.IGNORECASE,
+    )
+    # 去除 HTML 注释内容后再检测，避免注释里的标签误报
+    tail_no_comments = re.sub(r"<!--.*?-->", "", tail, flags=re.DOTALL)
+    if _escaped_content_tags_re.search(tail_no_comments):
+        return False
+    return True
+
+
 def _validate_slide_dom(html: str) -> bool:
-    """P8.1 写盘前校验：拦截 LLM 畸形片段与 main 滑出 slide。"""
+    """P8.1 写盘前校验：拦截 LLM 畸形片段、main 滑出 slide 及内容逃逸到 slide 之外。"""
     if _MALFORMED_HTML_RE.search(html):
         return False
-    return _main_inside_ppt_slide(html)
+    if not _main_inside_ppt_slide(html):
+        return False
+    if not _validate_no_escaped_content(html):
+        return False
+    return True
 
 
 def _is_slide_exportable(html: str) -> bool:
@@ -1510,6 +1925,26 @@ def _fix_chart_height_chain(html: str) -> str:
         )
 
     return result
+
+
+# CHART_SCAFFOLD HTML 注释定界符模式（仅匹配带 <!-- / --> 的注释标记，
+# 不影响 JS 块注释内的同名文字）
+_CHART_SCAFFOLD_BEGIN_RE = re.compile(r"<!--\s*CHART_SCAFFOLD(_\d+)?_BEGIN\s*\n?")
+_CHART_SCAFFOLD_END_RE = re.compile(r"\n?\s*CHART_SCAFFOLD(_\d+)?_END\s*-->")
+
+
+def _fix_chart_scaffold_activation(html: str) -> str:
+    """写盘前修复：LLM 填了 option 但忘删 CHART_SCAFFOLD 注释定界符时自动激活。
+
+    仅匹配带 <!-- / --> 的 HTML 注释标记（不影响 JS 块注释内的同名文字）。
+    """
+    if "CHART_SCAFFOLD" not in html:
+        return html
+    fixed = _CHART_SCAFFOLD_BEGIN_RE.sub("", html)
+    fixed = _CHART_SCAFFOLD_END_RE.sub("", fixed)
+    if fixed != html:
+        logger.info("[P8.1] repaired=chart_scaffold_activation 激活图表骨架")
+    return fixed
 
 
 def _extract_backup_timestamp(path: str) -> str:
@@ -2747,6 +3182,9 @@ _REWRITE_ACTIONS = {
         "禁止改动模板 chrome（<head>、header 结构、footer 结构）；"
         "仅替换 PAGE_TITLE / PAGE_CONTENT / PAGE_FOOTER 三处占位内容"
     ),
+    "head_chrome_changed": "禁止改动 <head> 块（含 title 文字、script/style 引用）；仅填 body 内占位符",
+    "header_chrome_changed": "禁止改动 header 结构（content-safe 到 main 之间）；仅替换 PAGE_TITLE",
+    "footer_chrome_changed": "禁止改动 footer 结构（main 之后的 flex-shrink-0 div）；仅替换 PAGE_FOOTER",
     "empty_page_content": "在 main 内填入本页正文内容，禁止空的 PAGE_CONTENT",
     "page_content_unfilled": "将 {{PAGE_CONTENT}} 替换为本页实际 HTML 内容",
     "title_invalid": "将 PAGE_TITLE 替换为大纲中的真实标题，禁止占位敷衍文案",
@@ -3362,7 +3800,7 @@ class PrepareNode(PlanNode):
         }
 
 
-class PageWorkerNode(PlanNode):
+class PageWorkerNode(DisableThinkingMixin, PlanNode):
     """P8.1 — 按新版 pptx-craft 规则并发生成并校验每页 HTML。"""
 
     def __init__(self) -> None:
@@ -3464,6 +3902,7 @@ class PageWorkerNode(PlanNode):
                 raise result
 
         missing_pages: list[int] = []
+        vote_pages: list[dict[str, Any]] = []
         for p, r in zip(all_pages, results):
             if isinstance(r, BaseException):
                 logger.warning("[P8.1] 页面 %d 生成异常: %s", p, r)
@@ -3471,6 +3910,34 @@ class PageWorkerNode(PlanNode):
                 continue
             if r.get("missing"):
                 missing_pages.append(p)
+                continue
+            # 收集落盘页用于跨页 head 指纹投票
+            vote_pages.append({
+                "page_num": int(r.get("page_num") or p),
+                "html": str(r.get("html") or ""),
+            })
+
+        # 跨页 head 指纹投票：偏离多数派的页判定损坏，进 missing_pages 走补写通道
+        vote_deviant = _vote_head_fingerprints(vote_pages)
+        if vote_deviant:
+            missing_pages.extend(
+                p for p in vote_deviant if p not in missing_pages
+            )
+            logger.warning(
+                "[P8.1] head 指纹投票发现损坏页 pages=%s，转 missing 走补写",
+                sorted(vote_deviant),
+            )
+
+        # agenda 条目数校验：目录页条目数必须等于大纲内容章节数
+        agenda_deviant = _validate_agenda_item_count(outline_full, vote_pages)
+        if agenda_deviant:
+            missing_pages.extend(
+                p for p in agenda_deviant if p not in missing_pages
+            )
+            logger.warning(
+                "[P8.1] agenda 条目数与大纲内容章节数不匹配 pages=%s，转 missing 走补写",
+                sorted(agenda_deviant),
+            )
 
         successful_pages = [p for p in all_pages if p not in missing_pages]
         page_files = [f"page-{p}.pptx.html" for p in successful_pages]
@@ -3570,6 +4037,9 @@ class PageWorkerNode(PlanNode):
             "missing": False,
             "low_density": False,
             "report": {},
+            # 跨页 head 指纹投票用：落盘页的原始 HTML 与页码
+            "html": html,
+            "page_num": page_num,
         }
 
     async def _read_file(self, path: str) -> str:
@@ -3667,6 +4137,36 @@ class PageWorkerNode(PlanNode):
                 _UNFILLED_PLACEHOLDER_RE.findall(html)[:8],
             )
             return ""
+        if not _structural_chrome_matches_seed(seed_html, html):
+            logger.warning(
+                "[P8.1] 结构页 chrome 偏离 seed（违规修改或流式输出损坏）"
+                " page=%d type=%s seed_head_len=%d filled_head_len=%d"
+                " -> 尝试 chrome 自动修复",
+                ctx.page_num,
+                page_type,
+                len(_head_chrome_signature(seed_html)),
+                len(_head_chrome_signature(html)),
+            )
+            # 尝试从 seed 恢复 chrome，保留 LLM 填入的 body 内容。
+            # 结构页无 <main>/<footer>，不能用 _repair_content_template_chrome
+            #（它依赖 main_inner 提取），改用 _repair_structural_chrome：
+            # 从 filled 的 <body> 提取 slide 内容，替换 seed 的 {{PAGE_TITLE}}/
+            # {{PAGE_CONTENT}} 等占位符。
+            repaired = _repair_structural_page_chrome(seed_html, html)
+            if repaired and _structural_chrome_matches_seed(seed_html, repaired):
+                logger.info(
+                    "[P8.1] 结构页 chrome 自动修复成功 page=%d type=%s",
+                    ctx.page_num,
+                    page_type,
+                )
+                html = repaired
+            else:
+                logger.warning(
+                    "[P8.1] 结构页 chrome 自动修复失败 page=%d type=%s",
+                    ctx.page_num,
+                    page_type,
+                )
+                return ""
 
         html = _apply_visible_page_number_policy(
             html,
@@ -3690,14 +4190,10 @@ class PageWorkerNode(PlanNode):
         )
         return html
 
-    async def _generate_agenda_template_fill(self, ctx: PageGenContext) -> str:
-        """预设/custom agenda：官方模板预铺 + 仅填 {{}}。"""
-        return await self._generate_structural_template_fill(ctx, "agenda")
-
     async def _generate_content_template_fill(
         self, ctx: PageGenContext, *, rewrite_hint: str = ""
     ) -> tuple[str, str, str]:
-        """预设四风格内容页：官方 content-template 预铺 + 仅填三处占位符。
+        """四预设 ∪ custom 内容页：官方 content-template 预铺填槽。
 
         返回 (校验通过的 html 或空串, 最后一次产物 html 或空串, 失败 reason 或空串)。
         """
@@ -3737,11 +4233,21 @@ class PageWorkerNode(PlanNode):
                     rewrite_hint=rewrite_hint,
                 ),
                 system_prompt=(
-                    "你是 PPT 内容页模板填充师，不是设计师。"
-                    "唯一任务：在预铺 HTML 上替换 {{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}} 三处占位符。"
-                    "Page Chrome（head/header/`<main>` 开标签/footer 骨架/class/script/style）必须与预铺稿保持一致；"
-                    "改 chrome 会触发 content_template_chrome_changed 校验失败。"
-                    "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
+                    (
+                        "你是 PPT 内容页模板填充师，不是设计师。"
+                        "替换预铺 HTML 中实际出现的占位符（含 {{THEME_CSS_VARIABLES}}、"
+                        "{{THEME_CSS_RULES}}、{{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}}；"
+                        "未提供的主题槽填空）。保留框架 class/@layer/theme-contract 插槽结构；"
+                        "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
+                    )
+                    if ctx.style_id == "custom"
+                    else (
+                        "你是 PPT 内容页模板填充师，不是设计师。"
+                        "唯一任务：在预铺 HTML 上替换 {{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}} 三处占位符。"
+                        "Page Chrome（head/header/`<main>` 开标签/footer 骨架/class/script/style）必须与预铺稿保持一致；"
+                        "改 chrome 会触发 content_template_chrome_changed 校验失败。"
+                        "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
+                    )
                 ),
                 node_name=f"p8_1_content_fill_{ctx.page_num}",
                 concurrent=True,
@@ -3764,14 +4270,23 @@ class PageWorkerNode(PlanNode):
         html = _fix_echarts_svg_renderer(html)
         html = _strip_unsupported_fullpage_overlays(html)
         html = _strip_chart_header_unit(html)
+        html = _fix_chart_scaffold_activation(html)
         html = _fix_chart_height_chain(html)
-        ok, reason = _validate_content_template_fill_output(seed_html, html)
-        if not ok and reason in _REPAIRABLE_CONTENT_TEMPLATE_REASONS:
+        if ctx.style_id == "custom":
+            ok, reason = _validate_custom_content_template_fill_output(seed_html, html)
+        else:
+            ok, reason = _validate_content_template_fill_output(seed_html, html)
+        if (
+            ctx.style_id != "custom"
+            and not ok
+            and reason in _REPAIRABLE_CONTENT_TEMPLATE_REASONS
+        ):
             repaired = _repair_content_template_chrome(seed_html, html)
             if repaired:
                 repaired = _fix_echarts_svg_renderer(repaired)
                 repaired = _strip_unsupported_fullpage_overlays(repaired)
                 repaired = _strip_chart_header_unit(repaired)
+                repaired = _fix_chart_scaffold_activation(repaired)
                 repaired = _fix_chart_height_chain(repaired)
                 ok_repaired, reason_repaired = _validate_content_template_fill_output(
                     seed_html,
@@ -3867,6 +4382,7 @@ class PageWorkerNode(PlanNode):
         html = _fix_echarts_svg_renderer(html)
         html = _strip_unsupported_fullpage_overlays(html)
         html = _strip_chart_header_unit(html)
+        html = _fix_chart_scaffold_activation(html)
         html = _fix_chart_height_chain(html)
         if not _validate_slide_dom(html):
             logger.warning("[P8.1] 页面 %d DOM 结构校验失败", ctx.page_num)
@@ -4694,6 +5210,21 @@ class PPTPageGenNode(PlanNode):
                 logger.error("[P8-TP] fill.js check 异常: %s", e)
                 check_ok = False
                 break
+
+        # agenda 条目数校验：读取生成的 agenda 页 HTML，比对大纲内容章节数
+        agenda_page_num = _find_agenda_page_num(outline_text)
+        if agenda_page_num and agenda_page_num not in missing_pages:
+            agenda_path = f"{pages_dir}/page-{agenda_page_num}.pptx.html"
+            agenda_html = await self._read_file(agenda_path)
+            if agenda_html:
+                content_chapters = _count_outline_content_chapters(outline_text)
+                item_count = _count_agenda_items(agenda_html)
+                if content_chapters > 0 and item_count != content_chapters:
+                    logger.warning(
+                        "[P8-TP] agenda 条目数(%d) ≠ 大纲内容章节数(%d) page=%d，转 missing 走补写",
+                        item_count, content_chapters, agenda_page_num,
+                    )
+                    missing_pages.append(agenda_page_num)
 
         ppt_gen_status = "ok"
         if missing_pages:

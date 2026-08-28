@@ -2155,3 +2155,46 @@ select {
     --statusbar-right-space: var(--tool-panel-width);
   }
 }
+
+/* Enterprise-only entry surface. Personal mode never renders these classes. */
+.enterprise-entry { min-height: 100vh; display: grid; place-items: center; position: relative; overflow: hidden; padding: 24px; background: #0b1020; color: #eef4ff; }
+.enterprise-entry__glow { position: absolute; width: 620px; height: 620px; border-radius: 50%; background: radial-gradient(circle, #2563eb55, transparent 68%); transform: translate(25%, -25%); }
+.enterprise-entry__card { position: relative; width: min(100%, 460px); padding: 42px; border: 1px solid #ffffff1c; border-radius: 24px; background: #111a2fee; box-shadow: 0 28px 80px #0008; backdrop-filter: blur(14px); }
+.enterprise-entry__brand { margin-bottom: 42px; color: #93c5fd; font: 700 13px/1 var(--font-body); letter-spacing: .18em; }
+.enterprise-entry__brand span { color: #5eead4; }
+.enterprise-entry__eyebrow { color: #60a5fa; font-size: 11px; font-weight: 700; letter-spacing: .16em; }
+.enterprise-entry h1 { margin: 10px 0 10px; color: #fff; font-size: 32px; letter-spacing: -.04em; }
+.enterprise-entry p { margin: 0 0 24px; color: #9fb0cb; line-height: 1.7; }
+.enterprise-entry__input { box-sizing: border-box; width: 100%; margin-top: 12px; padding: 13px 14px; border: 1px solid #ffffff20; border-radius: 10px; background: #081126; color: #fff; outline: none; }
+.enterprise-entry__input:focus { border-color: #60a5fa; box-shadow: 0 0 0 3px #60a5fa22; }
+.enterprise-entry__button, .enterprise-entry__option { width: 100%; margin-top: 14px; padding: 13px 15px; border: 1px solid #ffffff1c; border-radius: 10px; background: #2563eb; color: #fff; cursor: pointer; text-align: left; }
+.enterprise-entry__button { text-align: center; font-weight: 700; }
+.enterprise-entry__option { display: flex; flex-direction: column; gap: 5px; background: #ffffff09; }
+.enterprise-entry__option:hover { border-color: #60a5fa; background: #60a5fa18; transform: translateY(-1px); }
+.enterprise-entry__option small { color: #90a4c3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.enterprise-entry__error { margin-top: 16px; color: #fca5a5; font-size: 13px; }
+
+/* 企业版上下文栏：沿用主页面的中性色和细边框，不影响个人版。 */
+.enterprise-user-shell { min-height: 100vh; background: var(--color-surface-page, #fff); }
+.enterprise-user-content { min-height: 100vh; }
+.enterprise-context-bar { position: fixed; z-index: 1200; top: 68px; left: 64px; bottom: 16px; width: 208px; box-sizing: border-box; padding: 12px; overflow-y: auto; border: 1px solid var(--color-border-default, #e5e7eb); border-radius: 12px; background: var(--color-sidebar-surface, #fafafa); box-shadow: var(--effect-shadow-sm, 0 2px 8px #0000000d); }
+.enterprise-context-item { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; padding: 10px; border-bottom: 1px solid var(--color-border-default, #e5e7eb); }
+.enterprise-context-item:last-child { border-bottom: 0; }
+.enterprise-context-item span { color: var(--color-text-secondary, #6b7280); font-size: 11px; }
+.enterprise-context-item strong { overflow: hidden; color: var(--color-text-primary, #111827); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.enterprise-context-item small { overflow: hidden; color: var(--color-text-secondary, #6b7280); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.enterprise-context-item select { width: 100%; min-width: 0; padding: 5px 4px; border: 1px solid var(--color-border-default, #e5e7eb); border-radius: 6px; background: var(--color-surface-card, #fff); color: var(--color-text-primary, #111827); font-size: 12px; }
+.enterprise-entry { min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; background: var(--color-surface-page, #fff); color: var(--color-text-primary, #111827); }
+.enterprise-entry__glow { display: none; }
+.enterprise-entry__card { width: min(100%, 380px); padding: 32px; border: 1px solid var(--color-border-default, #e5e7eb); border-radius: 12px; background: var(--color-surface-card, #fff); box-shadow: var(--effect-shadow-md, 0 8px 24px #00000012); }
+.enterprise-entry__brand { margin-bottom: 28px; color: var(--color-text-primary, #111827); font-size: 14px; font-weight: 600; letter-spacing: .08em; }
+.enterprise-entry__brand span { color: var(--color-text-secondary, #6b7280); }
+.enterprise-entry__eyebrow { margin-bottom: 8px; color: var(--color-text-secondary, #6b7280); font-size: 11px; letter-spacing: .08em; }
+.enterprise-entry h1 { margin: 0 0 8px; color: var(--color-text-primary, #111827); font-size: 24px; font-weight: 600; }
+.enterprise-entry p { margin: 0 0 20px; color: var(--color-text-secondary, #6b7280); font-size: 13px; line-height: 1.6; }
+.enterprise-entry__input { box-sizing: border-box; width: 100%; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--color-border-default, #e5e7eb); border-radius: 6px; background: var(--color-surface-card, #fff); color: var(--color-text-primary, #111827); }
+.enterprise-entry__button, .enterprise-entry__option { width: 100%; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--color-border-default, #e5e7eb); border-radius: 6px; background: var(--color-action-primary, #2563eb); color: #fff; cursor: pointer; text-align: left; }
+.enterprise-entry__button { text-align: center; }
+.enterprise-entry__option { display: flex; flex-direction: column; gap: 4px; background: var(--color-surface-card, #fff); color: var(--color-text-primary, #111827); }
+.enterprise-entry__option:hover { border-color: var(--color-action-primary, #2563eb); }
+@media (max-width: 760px) { .enterprise-context-bar { position: static; width: auto; margin: 12px; } .enterprise-user-shell { display: block; } }
