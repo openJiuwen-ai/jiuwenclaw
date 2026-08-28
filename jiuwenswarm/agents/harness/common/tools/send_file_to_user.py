@@ -395,7 +395,13 @@ class SendFileToolkit:
                 merged_meta["send_file_targets"] = list(target_channel_list)
             if merged_meta:
                 msg["metadata"] = merged_meta
-            await server.send_push(msg)
+            delivered = await server.send_push(msg)
+            if not delivered:
+                return (
+                    f"文件推送失败：无活跃连接接收推送"
+                    f"（PushRegistry 槽位可能被短连接清空），"
+                    f"本次未投递 {len(valid_files)} 个文件。"
+                )
             _mark_files_sent(route.session_id, valid_files)
             result_parts = [f"成功发送 {len(valid_files)} 个文件"]
             if skipped_files:

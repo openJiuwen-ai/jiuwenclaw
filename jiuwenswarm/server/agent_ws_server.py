@@ -1481,7 +1481,7 @@ class AgentWebSocketServer:
     def _tenant_pool() -> TenantAgentPool:
         return TenantAgentPool.get_instance()
 
-    async def send_push(self, msg) -> None:
+    async def send_push(self, msg) -> bool:
         """AgentServer 主动向 Gateway 推送消息。
 
         payload 格式与 AgentResponse.payload 一致，
@@ -1490,6 +1490,11 @@ class AgentWebSocketServer:
         扇出给 :class:`PushRegistry` 里的全部订阅者：Gateway WS 连接与经
         ``GET /api/v1/events/stream`` 订阅的 HTTP 客户端都在其中，推送只有这一条
         路径。有订阅者即送达，一个都没有则记 warning。
+
+        Returns:
+            True 表示至少有一个订阅者成功接收；False 表示无订阅者或
+            无人成功接收（如 PushRegistry 单槽被短连接清空、wire 构造失败等），
+            调用方可据此避免误报成功。
         """
         registry = get_push_registry()
         if registry.subscriber_count() == 0:
@@ -1497,13 +1502,13 @@ class AgentWebSocketServer:
             logger.warning(
                 "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接"
             )
-            return
+            return False
 
         try:
             wire = build_server_push_wire(msg)
         except Exception as e:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
-            return
+            return False
 
         delivered = await registry.push(wire)
 
@@ -1515,7 +1520,7 @@ class AgentWebSocketServer:
                 "（内容过大降级为错误帧，或订阅者过滤后无人匹配）: channel_id=%s",
                 msg.get("channel_id", ""),
             )
-            return
+            return False
 
         response_kind = str(msg.get("response_kind") or "").strip()
         if response_kind:
@@ -1532,6 +1537,7 @@ class AgentWebSocketServer:
                 msg.get("channel_id", ""),
                 delivered,
             )
+        return True
 
     def get_agent(self):
         """获取 default agent 实例（向后兼容）."""
