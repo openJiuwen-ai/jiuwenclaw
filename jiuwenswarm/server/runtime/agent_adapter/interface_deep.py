@@ -417,7 +417,11 @@ from jiuwenswarm.common.mcp_config import (
     is_asyncio_outer_cancellation,
     list_office_claw_mcp_tools,
     preflight_mcp_server_reachable,
+    publish_live_office_claw_allowlist,
+    register_live_office_claw_tool_instance,
+    revoke_live_office_claw_allowlist,
     set_agent_office_claw_tool_ids,
+    unregister_live_office_claw_tool_instance,
     validate_office_claw_mcp_config,
 )
 from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
@@ -3694,6 +3698,7 @@ class JiuWenSwarmDeepAdapter:
 
         tool_ids: list[str] = []
         tool_names: list[str] = []
+        registered_tools: list[RequestScopedOfficeClawMcpTool] = []
         try:
             params = validate_office_claw_mcp_config(raw_config)
             tool_defs = await list_office_claw_mcp_tools(params)
@@ -3714,6 +3719,7 @@ class JiuWenSwarmDeepAdapter:
                     input_params=tool_def.get("input_params") or {},
                 )
                 tool = RequestScopedOfficeClawMcpTool(card, params)
+                registered_tools.append(tool)
                 add_result = Runner.resource_mgr.add_tool(tool, tag="office-claw")
                 is_ok = getattr(add_result, "is_ok", None)
                 add_succeeded = True
@@ -3733,12 +3739,20 @@ class JiuWenSwarmDeepAdapter:
                 request_id=request.request_id,
                 tool_ids=tuple(tool_ids),
                 tool_names=tuple(tool_names),
+                tool_instances=tuple(registered_tools),
             )
             self._active_office_claw_mcp = registration
             # Store tool_ids on the agent's shared ability_manager so the
             # supervisor / round task (created before bind_active_office_claw_mcp_tools)
             # can re-bind the ContextVar before invoking OfficeClaw tools.
             set_agent_office_claw_tool_ids(self._instance, tool_ids)
+            publish_live_office_claw_allowlist(registration.tool_ids)
+            for registered_tool in registered_tools:
+                register_live_office_claw_tool_instance(
+                    registered_tool,
+                    registration.tool_ids,
+                )
+            self._sync_office_claw_allowlist_to_progressive_rail(registration.tool_ids)
             request_env = params.get("env") if isinstance(params.get("env"), dict) else {}
             invocation_id = str(request_env.get("OFFICE_CLAW_INVOCATION_ID") or "").strip()
             logger.info(
@@ -3757,6 +3771,7 @@ class JiuWenSwarmDeepAdapter:
                 request_id=request.request_id,
                 tool_ids=tuple(tool_ids),
                 tool_names=tuple(tool_names),
+                tool_instances=tuple(registered_tools),
             )
             await self.cleanup_request_scoped_office_claw_mcp(registration)
             raise
@@ -3765,6 +3780,7 @@ class JiuWenSwarmDeepAdapter:
                 request_id=request.request_id,
                 tool_ids=tuple(tool_ids),
                 tool_names=tuple(tool_names),
+                tool_instances=tuple(registered_tools),
             )
             await self.cleanup_request_scoped_office_claw_mcp(registration)
             logger.warning(
@@ -3862,6 +3878,8 @@ class JiuWenSwarmDeepAdapter:
 
         if registration is None:
             return
+        for registered_tool in registration.tool_instances:
+            unregister_live_office_claw_tool_instance(registered_tool)
         for tool_id in registration.tool_ids:
             try:
                 Runner.resource_mgr.remove_tool(tool_id)
@@ -3910,12 +3928,33 @@ class JiuWenSwarmDeepAdapter:
             and self._active_office_claw_mcp.request_id == registration.request_id
         ):
             self._active_office_claw_mcp = None
+            self._sync_office_claw_allowlist_to_progressive_rail(None)
         # Clear the shared ability_manager allowlist so stale ids are not reused.
         clear_agent_office_claw_tool_ids(self._instance)
+        revoke_live_office_claw_allowlist(registration.tool_ids)
         logger.info(
             "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP cleaned up: request_id=%s",
             registration.request_id,
         )
+
+    def _sync_office_claw_allowlist_to_progressive_rail(
+        self,
+        tool_ids: tuple[str, ...] | list[str] | frozenset[str] | None,
+    ) -> None:
+        """Keep ProgressiveToolRail's interaction-round allowlist in sync."""
+
+        rail = getattr(self, "_progressive_tool_rail", None)
+        setter = getattr(rail, "set_office_claw_active_tool_ids", None)
+        if not callable(setter):
+            return
+        try:
+            setter(tool_ids)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] failed to sync OfficeClaw allowlist to "
+                "ProgressiveToolRail: %s",
+                exc,
+            )
 
     async def _register_mcp_servers_from_config(
         self, config_base: dict[str, Any], *, tag: str = "agent.main"

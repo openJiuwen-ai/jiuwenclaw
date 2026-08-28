@@ -289,6 +289,100 @@ async def test_invoke_falls_back_to_active_office_claw_tool_id():
 
 
 @pytest.mark.asyncio
+async def test_invoke_prefers_owned_id_when_foreign_card_still_live():
+    """Concurrent request's card is still in resource_mgr; rail must use owned id."""
+
+    foreign_live = (
+        "office-claw-request-other.office-claw.office_claw_list_schedule_templates"
+    )
+    owned_live = (
+        "office-claw-request-mine.office-claw.office_claw_list_schedule_templates"
+    )
+    foreign_card = SimpleNamespace(
+        name="office_claw_list_schedule_templates",
+        id=foreign_live,
+        description="d",
+        input_params={},
+        properties={"resilience": {"timeout_s": None}},
+    )
+    foreign_tool = SimpleNamespace(invoke=AsyncMock(return_value={"foreign": True}))
+    owned_tool = SimpleNamespace(invoke=AsyncMock(return_value={"owned": True}))
+    rail = ProgressiveToolRail(eager_tools=["tools_search", "invoke_tool"])
+    rail.set_office_claw_active_tool_ids([owned_live])
+    rail._cached_deferred_tool_infos = [foreign_card]
+
+    async def _fake_refresh(_agent=None):
+        rail._cached_deferred_tool_infos = [foreign_card]
+
+    def _get_tool_side_effect(tool_id, session=None):
+        if tool_id == foreign_live:
+            return foreign_tool
+        if tool_id == owned_live:
+            return owned_tool
+        return None
+
+    with patch.object(
+        Runner.resource_mgr, "get_tool", side_effect=_get_tool_side_effect
+    ), patch.object(rail, "_refresh_deferred_tool_cache", new=_fake_refresh):
+        result = await rail._invoke_target_tool(
+            None,
+            InvokeToolInput(
+                tool_name="office_claw_list_schedule_templates",
+                arguments={},
+            ),
+        )
+
+    assert result == {
+        "success": True,
+        "tool_name": "office_claw_list_schedule_templates",
+        "result": {"owned": True},
+    }
+    owned_tool.invoke.assert_awaited_once()
+    foreign_tool.invoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invoke_rebinds_office_claw_allowlist_from_rail_attribute():
+    """Without facade ContextVar, rail-owned allowlist must still bind for invoke."""
+
+    from jiuwenswarm.common.mcp_config import get_active_office_claw_mcp_tool_ids
+
+    owned_live = (
+        "office-claw-request-mine.office-claw.office_claw_list_schedule_templates"
+    )
+    card = SimpleNamespace(
+        name="office_claw_list_schedule_templates",
+        id=owned_live,
+        description="d",
+        input_params={},
+        properties={"resilience": {"timeout_s": None}},
+    )
+    seen: dict[str, object] = {}
+
+    async def _invoke(arguments, session=None, **kwargs):
+        seen["allowed"] = get_active_office_claw_mcp_tool_ids()
+        return {"ok": True}
+
+    target = SimpleNamespace(invoke=AsyncMock(side_effect=_invoke))
+    rail = ProgressiveToolRail(eager_tools=["tools_search", "invoke_tool"])
+    rail.set_office_claw_active_tool_ids([owned_live])
+    rail._cached_deferred_tool_infos = [card]
+
+    with patch.object(Runner.resource_mgr, "get_tool", return_value=target):
+        result = await rail._invoke_target_tool(
+            None,
+            InvokeToolInput(
+                tool_name="office_claw_list_schedule_templates",
+                arguments={},
+            ),
+        )
+
+    assert result["success"] is True
+    assert seen["allowed"] == frozenset({owned_live})
+    assert get_active_office_claw_mcp_tool_ids() is None
+
+
+@pytest.mark.asyncio
 async def test_search_skips_dead_instance_without_active_fallback():
     """tools_search must not advertise a tool whose instance is gone and
     which has no active OfficeClaw binding for this request."""
