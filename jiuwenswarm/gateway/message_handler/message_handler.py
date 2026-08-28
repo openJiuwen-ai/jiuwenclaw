@@ -200,7 +200,12 @@ class MessageHandler(ABC):
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, agent_client: "AgentServerClient") -> None:
+    def __init__(
+        self,
+        agent_client: "AgentServerClient",
+        *,
+        session_sharing_registry: SessionSharingRegistry | None = None,
+    ) -> None:
         if getattr(self, "_singleton_initialized", False):
             return
         self._singleton_initialized = True
@@ -254,7 +259,7 @@ class MessageHandler(ABC):
         })
         self._channel_states: Dict[str, ChannelControlState] = {}
         self._session_map = SessionMap()
-        self._session_sharing = SessionSharingRegistry()
+        self._session_sharing = session_sharing_registry or SessionSharingRegistry()
         # 组合：/join /exit 团队成员管理逻辑（独立文件维护，通过 self._h 访问宿主能力）
         self._join_exit = JoinExitHandlers(self)
         self._cron_controller = None
