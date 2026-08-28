@@ -53,6 +53,10 @@ def _agent(agent_id: str = "agent-1") -> A2AOutboundAgent:
             "nested": {
                 "apiKey": "also-secret",
                 "clientSecret": "client-secret",
+                "secret_key": "secret-key",
+                "passwordField": "password",
+                "tokenValue": "token",
+                "credential_data": "credential",
                 "description": "safe",
             },
         },
@@ -122,6 +126,10 @@ async def test_agent_roundtrip_redacts_card_secrets_and_hides_credential_ref() -
     assert row["agent_card"]["nested"] == {
         "apiKey": "******",
         "clientSecret": "******",
+        "secret_key": "******",
+        "passwordField": "******",
+        "tokenValue": "******",
+        "credential_data": "******",
         "description": "safe",
     }
     assert created.public_dict()["has_credential"] is True

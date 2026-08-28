@@ -64,13 +64,24 @@ _SENSITIVE_KEYS = frozenset(
     }
 )
 _REDACTED = "******"
+_SENSITIVE_KEY_COMPACTS = (
+    "authorization",
+    "cookie",
+    "password",
+    "secret",
+    "token",
+    "apikey",
+    "credential",
+)
 
 
 def _is_sensitive_key(key: str) -> bool:
     normalized = key.strip().lower().replace("-", "_")
     compact = normalized.replace("_", "")
-    return normalized in _SENSITIVE_KEYS or compact.endswith(
-        ("authorization", "cookie", "password", "secret", "token", "apikey")
+    return (
+        normalized in _SENSITIVE_KEYS
+        or compact.startswith(_SENSITIVE_KEY_COMPACTS)
+        or compact.endswith(_SENSITIVE_KEY_COMPACTS)
     )
 
 
