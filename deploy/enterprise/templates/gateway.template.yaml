@@ -162,6 +162,7 @@ spec:
     - name: acp-ws
       port: <<GATEWAY_PORT>>
       targetPort: <<GATEWAY_PORT>>
+=======
     - name: http
       port: <<GATEWAY_HTTP_PORT>>
       targetPort: <<GATEWAY_HTTP_PORT>>
