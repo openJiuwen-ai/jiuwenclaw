@@ -926,44 +926,13 @@ def _migrate_legacy_workspace(
 
         logger.info(f"Migrated memory: {old_memory} -> {new_memory}")
 
-    # 5. Migrate cron_jobs.json from old_home to gateway
-    # This ensures cron jobs are not lost during migration
-    old_cron_jobs = old_home / "cron_jobs.json"
-    gateway_dir = workspace_dir / "gateway"
-    new_cron_jobs = gateway_dir / "cron_jobs.json"
-    if old_cron_jobs.exists():
-        gateway_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            # Read old cron jobs data
-            old_data = json.loads(old_cron_jobs.read_text(encoding="utf-8"))
-            # Add 'expired': false to each job if not present (schema migration)
-            if "jobs" in old_data and isinstance(old_data["jobs"], list):
-                for job in old_data["jobs"]:
-                    if isinstance(job, dict) and "expired" not in job:
-                        job["expired"] = False
-            if not new_cron_jobs.exists():
-                # Write migrated data to new location
-                new_cron_jobs.write_text(
-                    json.dumps(old_data, ensure_ascii=False, indent=2),
-                    encoding="utf-8"
-                )
-                logger.info(f"Migrated cron_jobs.json: {old_cron_jobs} -> {new_cron_jobs}")
-            else:
-                # Both exist - backup old, log warning
-                backup_cron = gateway_dir / f"cron_jobs.json.backup.{int(time.time())}"
-                shutil.copy2(old_cron_jobs, backup_cron)
-                logger.warning(
-                    f"Both old and new cron_jobs.json exist. "
-                    f"Kept new version, backed up old to {backup_cron}"
-                )
-        except (json.JSONDecodeError, IOError) as e:
-            logger.error(f"Failed to migrate cron_jobs.json: {e}")
-
+    # 5. Keep cron runtime files in agent/home (canonical location, see
+    # get_cron_jobs_path). They must NOT be migrated to gateway/ (dead path,
+    # no reader) nor deleted by the old-home cleanup below.
     # 6. Clean up old directories after successful migration
     try:
         if old_home.exists():
-            shutil.rmtree(old_home)
-            logger.info(f"Removed old home: {old_home}")
+            _clean_home_keep_cron(old_home, context="legacy migration")
         if old_skills.exists():
             shutil.rmtree(old_skills)
             logger.info(f"Removed old skills: {old_skills}")
@@ -975,6 +944,101 @@ def _migrate_legacy_workspace(
 
     logger.info(f"Migration completed: {new_workspace}")
 
+
+def _clean_home_keep_cron(home_dir: Path, *, context: str) -> None:
+    """Remove legacy files under agent/home but KEEP cron runtime files.
+
+    ``agent/home`` is the canonical cron runtime dir (see get_cron_jobs_path):
+    cron_jobs.json*, cron_desktop_*, cron_session_* must survive workspace
+    migrations/re-inits so upgraded users keep their scheduled tasks.
+    """
+    if not home_dir.exists():
+        return
+    preserved: list[Path] = []
+    for item in home_dir.iterdir():
+        if item.is_file() and (
+            item.name.startswith("cron_jobs.json")
+            or item.name.startswith("cron_desktop_")
+            or item.name.startswith("cron_session_")
+        ):
+            preserved.append(item)
+    if not preserved:
+        shutil.rmtree(home_dir)
+        logger.info(f"Removed old home ({context}): {home_dir}")
+        return
+    for f in preserved:
+        logger.info(f"Preserving cron runtime file ({context}): {f}")
+    for item in list(home_dir.iterdir()):
+        if item in preserved:
+            continue
+        if item.is_dir():
+            shutil.rmtree(item, ignore_errors=True)
+        else:
+            item.unlink(missing_ok=True)
+    logger.info(
+        f"Cleaned old home, kept {len(preserved)} cron runtime files "
+        f"({context}): {home_dir}"
+    )
+
+def _recover_gateway_cron_jobs(workspace_dir: Path) -> None:
+    """Recover cron_jobs.json mistakenly migrated to gateway/ (dead path).
+
+    Historical bug: _migrate_legacy_workspace copied cron_jobs.json to
+    ``{workspace}/gateway/cron_jobs.json`` where no code ever reads it, then
+    removed ``agent/home``. This recovery merges orphaned jobs back into the
+    canonical ``{workspace}/agent/home/cron_jobs.json`` (jobs are matched by
+    id; existing entries win) and renames the gateway copy to .migrated.
+    """
+    gateway_cron = workspace_dir / "gateway" / "cron_jobs.json"
+    canonical = get_cron_jobs_path()
+    if not gateway_cron.exists():
+        return
+    try:
+        gateway_data = json.loads(gateway_cron.read_text(encoding="utf-8"))
+        gateway_jobs = gateway_data.get("jobs")
+        if not isinstance(gateway_jobs, list):
+            gateway_jobs = []
+
+        canonical_jobs: list[dict] = []
+        canonical_data: dict = {}
+        if canonical.exists():
+            try:
+                canonical_data = json.loads(canonical.read_text(encoding="utf-8"))
+                if isinstance(canonical_data.get("jobs"), list):
+                    canonical_jobs = [
+                        j for j in canonical_data["jobs"] if isinstance(j, dict)
+                    ]
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning(f"Failed to parse canonical cron_jobs.json: {exc}")
+
+        existing_ids = {j.get("id") for j in canonical_jobs}
+        recovered = 0
+        for job in gateway_jobs:
+            if isinstance(job, dict) and job.get("id") not in existing_ids:
+                canonical_jobs.append(job)
+                recovered += 1
+
+        if recovered:
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            canonical_data["jobs"] = canonical_jobs
+            canonical.write_text(
+                json.dumps(canonical_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.info(
+                f"Recovered {recovered} orphaned cron job(s) from {gateway_cron} "
+                f"into {canonical}"
+            )
+        else:
+            logger.info(
+                f"No orphaned cron jobs to recover from {gateway_cron} "
+                f"(all ids already present in {canonical})"
+            )
+        migrated_name = gateway_cron.with_suffix(".json.migrated")
+        shutil.move(str(gateway_cron), str(migrated_name))
+        logger.info(f"Renamed gateway cron file: {gateway_cron} -> {migrated_name}")
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.error(f"Failed to recover cron_jobs.json from gateway/: {exc}")
 
 def cleanup_team_files(workspace_dir: Path) -> None:
     """清理 Team 旧版本遗留的文件和目录.
@@ -1091,9 +1155,15 @@ def prepare_workspace(
     old_memory = workspace_dir / "agent" / "memory"
 
     # Check for legacy directory migration (for start command, overwrite=False)
-    # Migration triggers when ANY legacy directory exists, not just old_workspace
+    # agent/home is the CANONICAL cron runtime dir (get_cron_jobs_path); it exists
+    # on every normal install and must NOT be treated as a legacy marker.
+    # Only treat old_home as legacy when it contains DeepAgent-pre legacy files.
+    _legacy_home_markers = ("PRINCIPLE.md", "TONE.md", "HEARTBEAT.md")
+    old_home_is_legacy = old_home.exists() and any(
+        (old_home / m).exists() for m in _legacy_home_markers
+    )
     legacy_dirs_exist = (
-        old_home.exists() or old_skills.exists() or old_memory.exists()
+        old_home_is_legacy or old_skills.exists() or old_memory.exists()
     )
 
     if legacy_dirs_exist and not overwrite:
@@ -1102,8 +1172,9 @@ def prepare_workspace(
     elif overwrite:
         try:
             if old_home.exists():
-                shutil.rmtree(old_home)
-                logger.info(f"Removed old home: {old_home}")
+                # init/overwrite rebuilds the workspace but must NOT drop the
+                # user's cron jobs — agent/home is their canonical location.
+                _clean_home_keep_cron(old_home, context="workspace init")
             if old_skills.exists():
                 shutil.rmtree(old_skills)
                 logger.info(f"Removed old skills: {old_skills}")
@@ -1112,6 +1183,10 @@ def prepare_workspace(
                 logger.info(f"Removed old memory: {old_memory}")
         except OSError as e:
             logger.warning(f"Failed to remove some old directories: {e}")
+
+    # Recover cron jobs mistakenly left in gateway/ (dead path) by an older
+    # buggy migration — merge them back into agent/home/cron_jobs.json.
+    _recover_gateway_cron_jobs(workspace_dir)
 
     # ----- config: copy config.yaml -----
     resources_dir = package_root / "resources"
