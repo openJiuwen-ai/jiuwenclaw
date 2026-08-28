@@ -97,10 +97,13 @@ async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
     saved_configs: list[dict] = []
     lifecycle_calls: list[tuple[str, object]] = []
 
+    async def fake_update_browser(config):
+        saved_configs.append(config)
+
     monkeypatch.setattr(
         app_web_handlers,
         "update_browser_in_config",
-        lambda config: saved_configs.append(config),
+        fake_update_browser,
     )
 
     async def fake_clear(client):
@@ -350,9 +353,12 @@ async def test_config_save_handlers_respond_before_agent_reload_finishes(monkeyp
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_channel_subsection_with_cleanup",
         _record_subsection,
     )
+    async def _record_heartbeat(payload):
+        persisted.append(("heartbeat", dict(payload)))
+
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_heartbeat_in_config",
-        lambda payload: persisted.append(("heartbeat", dict(payload))),
+        _record_heartbeat,
     )
 
     _register_web_handlers(

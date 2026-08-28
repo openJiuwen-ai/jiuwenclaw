@@ -7,7 +7,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from zoneinfo import ZoneInfo
 
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
@@ -28,6 +28,9 @@ from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE
+
+if TYPE_CHECKING:
+    from jiuwenswarm.gateway.storage.protocols.ephemeral import EphemeralStore
 from jiuwenswarm.server.runtime.session.session_history import append_history_record
 
 logger = logging.getLogger(__name__)
@@ -258,6 +261,7 @@ class CronSchedulerService:
         now_fn: Callable[[], float] = _now_utc_ts,
         service_id: str = "default",
         agent_id: str = "default",
+        run_ephemeral: "EphemeralStore | None" = None,
     ) -> None:
         self._store = store
         self._agent_client = agent_client
@@ -265,6 +269,7 @@ class CronSchedulerService:
         self._now_fn = now_fn
         self._service_id = str(service_id or "default").strip() or "default"
         self._agent_id = str(agent_id or "default").strip() or "default"
+        self._run_ephemeral = run_ephemeral
 
         self._running = False
         self._task: asyncio.Task | None = None
@@ -279,6 +284,80 @@ class CronSchedulerService:
         self._store_poll_interval: float = 5.0  # seconds
         # active-standby 下由 LeaderElection 控制：STANDBY 期间 loop 自旋但不消费事件
         self._active: bool = True
+
+    def _run_ephemeral_field(self, run_id: str) -> str:
+        from jiuwenswarm.gateway.storage.state.cron_run_codec import run_field_key
+
+        return run_field_key(self._service_id, self._agent_id, run_id)
+
+    async def _persist_run(self, state: CronRunState) -> None:
+        if self._run_ephemeral is None:
+            return
+        from jiuwenswarm.gateway.storage.state.cron_run_codec import (
+            RUNS_HASH,
+            cron_run_to_bytes,
+        )
+
+        await self._run_ephemeral.hset(
+            RUNS_HASH,
+            self._run_ephemeral_field(state.run_id),
+            cron_run_to_bytes(state),
+        )
+
+    async def _delete_run_ephemeral(self, run_id: str) -> None:
+        if self._run_ephemeral is None:
+            return
+        from jiuwenswarm.gateway.storage.state.cron_run_codec import RUNS_HASH
+
+        await self._run_ephemeral.hdel(RUNS_HASH, self._run_ephemeral_field(run_id))
+
+    async def _clear_run_ephemeral(self) -> None:
+        if self._run_ephemeral is None:
+            return
+        from jiuwenswarm.gateway.storage.state.cron_run_codec import (
+            RUNS_HASH,
+            run_field_key,
+        )
+
+        prefix = f"{self._service_id}:{self._agent_id}:"
+        rows = await self._run_ephemeral.hgetall(RUNS_HASH)
+        for field in rows:
+            if str(field).startswith(prefix):
+                await self._run_ephemeral.hdel(RUNS_HASH, field)
+
+    async def _assign_run(self, run_id: str, state: CronRunState) -> None:
+        self._runs[run_id] = state
+        await self._persist_run(state)
+
+    async def hydrate_runs_from_ephemeral(self) -> None:
+        """启动时恢复本 tenant 的 run 快照（无 store 时 no-op）。"""
+        if self._run_ephemeral is None:
+            return
+        from jiuwenswarm.gateway.storage.state.cron_run_codec import (
+            RUNS_HASH,
+            cron_run_from_bytes,
+        )
+
+        prefix = f"{self._service_id}:{self._agent_id}:"
+        rows = await self._run_ephemeral.hgetall(RUNS_HASH)
+        restored = 0
+        for field, raw in rows.items():
+            if not str(field).startswith(prefix):
+                continue
+            try:
+                state = cron_run_from_bytes(raw)
+            except Exception as exc:
+                logger.warning("[Cron] skip corrupt run snapshot: %s", exc)
+                continue
+            self._runs[state.run_id] = state
+            restored += 1
+        if restored:
+            logger.info(
+                "[Cron] hydrated %d run snapshot(s) from ephemeral service_id=%s agent_id=%s",
+                restored,
+                self._service_id,
+                self._agent_id,
+            )
 
     async def _get_store_revision(self) -> int:
         try:
@@ -332,6 +411,14 @@ class CronSchedulerService:
             self._run_tasks.clear()
             self._events.clear()
             self._runs.clear()
+            if self._run_ephemeral is not None:
+                try:
+                    asyncio.get_running_loop().create_task(
+                        self._clear_run_ephemeral(),
+                        name="cron-clear-run-ephemeral",
+                    )
+                except RuntimeError:
+                    pass
             self._seq = 0
             self._last_store_revision = 0
         # 无论激活/失活都唤醒一次 loop，让它立刻看到新状态
@@ -473,6 +560,7 @@ class CronSchedulerService:
                     self._cancel_agent_session(state),
                     name=f"cron-ghost-cancel-{state.job_id}",
                 )
+            await self._delete_run_ephemeral(rid)
             self._runs.pop(rid, None)
 
         now = self._now_fn()
@@ -566,7 +654,7 @@ class CronSchedulerService:
         wake_dt = now
         run_id = f"{job.id}:{int(push_dt.timestamp())}"
         channel_id, exec_session_id = self._make_execution_context(job)
-        self._runs[run_id] = CronRunState(
+        state = CronRunState(
             run_id=run_id,
             job_id=job.id,
             wake_at_iso=wake_dt.isoformat(),
@@ -579,6 +667,7 @@ class CronSchedulerService:
             exec_channel_id=channel_id,
             exec_session_id=exec_session_id,
         )
+        await self._assign_run(run_id, state)
         self._schedule_event(wake_dt, "wake", job.id, run_id)
         self._schedule_event(push_dt, "push", job.id, run_id)
         self._reload_event.set()
@@ -766,7 +855,7 @@ class CronSchedulerService:
                     chat_type=job.chat_type,
                     timezone=job.timezone,
                 )
-                self._runs[ev.run_id] = state
+                await self._assign_run(ev.run_id, state)
                 state.status = "running"
                 state.started_at = self._now_fn()
 
@@ -960,7 +1049,7 @@ class CronSchedulerService:
                 chat_type=job.chat_type,
                 timezone=job.timezone,
             )
-            self._runs[run_id] = state
+            await self._assign_run(run_id, state)
 
         # 幂等保护：reload 可能对同一 run_id 重复排入 wake 事件。
         # 如果该 run 已完成（succeeded/failed）或已有结果文本，不再重复执行 agent。
@@ -1385,7 +1474,7 @@ class CronSchedulerService:
                 chat_type=job.chat_type,
                 timezone=job.timezone,
             )
-            self._runs[run_id] = state
+            await self._assign_run(run_id, state)
 
         if state.pushed_final:
             return
