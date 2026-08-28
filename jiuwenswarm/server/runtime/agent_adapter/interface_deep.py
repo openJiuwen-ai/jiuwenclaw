@@ -6794,9 +6794,6 @@ class JiuWenSwarmDeepAdapter:
         """Build DeepAgent rails consistently for cold start and hot reload."""
         rail_infos = [
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
-            _RailBuildInfo(
-                "_eternal_conversation_rail", self._build_eternal_conversation_rail
-            ),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo(
                 "_multimodal_image_rail",
@@ -6838,6 +6835,9 @@ class JiuWenSwarmDeepAdapter:
                 "_context_processor_rail",
                 _build_context_processor_rail,
                 {"config": self._config_cache},
+            ),
+            _RailBuildInfo(
+                "_eternal_conversation_rail", self._build_eternal_conversation_rail
             ),
         ]
 

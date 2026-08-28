@@ -33,6 +33,7 @@ class GatewaySlashCommand(str, Enum):
     SECURITY_REVIEW = "/security-review"
     JOIN = "/join"
     EXIT = "/exit"
+    PERSIST = "/persist"
 
 
 class ModeSubcommand(str, Enum):
@@ -88,6 +89,7 @@ CONTROL_MESSAGE_TEXTS: frozenset[str] = frozenset(
         GatewaySlashCommand.REWIND.value,
         GatewaySlashCommand.JOIN.value,
         GatewaySlashCommand.EXIT.value,
+        GatewaySlashCommand.PERSIST.value,
     }
 )
 
@@ -119,6 +121,8 @@ class ParsedControlAction(str, Enum):
     JOIN_BAD = "join_bad"
     EXIT_OK = "exit_ok"
     EXIT_BAD = "exit_bad"
+    PERSIST_OK = "persist_ok"
+    PERSIST_BAD = "persist_bad"
 
 
 @dataclass(frozen=True)
@@ -144,6 +148,8 @@ class ParsedChannelControl:
     """join/exit 时的 session 引用。"""
     member_name: str | None = None
     """join 时的席位名。"""
+    persist_task: str | None = None
+    """persist_ok 时为去掉 /persist 前缀后的首条任务。"""
 
 
 _PR_ARG_MAX_LEN = 2048
@@ -179,6 +185,17 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
     """
     if not text:
         return ParsedChannelControl(ParsedControlAction.NONE)
+    # /persist 是“创建会话 + 首条任务”的混合命令，任务正文允许换行。
+    # 必须先于其它控制命令的单行限制解析。
+    persist_match = re.match(r"^/persist(?=$|\s)", text.strip(), flags=re.IGNORECASE)
+    if persist_match:
+        task = text.strip()[persist_match.end():].strip()
+        if not task:
+            return ParsedChannelControl(ParsedControlAction.PERSIST_BAD)
+        return ParsedChannelControl(
+            ParsedControlAction.PERSIST_OK,
+            persist_task=task,
+        )
     if "\n" in text:
         return ParsedChannelControl(ParsedControlAction.NONE)
     t = text.strip()
@@ -308,6 +325,9 @@ def is_control_like_for_im_batching(text: str) -> bool:
     """
     if not text:
         return False
+    # Persist 的任务正文可以换行，但整条消息仍必须绕过 IM 合并窗口。
+    if re.match(r"^/persist(?=$|\s)", text.strip(), flags=re.IGNORECASE):
+        return True
     if "\n" in text:
         return False
     t = text.strip()
@@ -502,6 +522,18 @@ BUILTIN_COMMANDS_META: tuple[dict[str, Any], ...] = (
         "mode": "agent.plan",
         "plan_entry_source": "slash_command",
         # 纯本地开关翻转，欢迎页（NEW_CONVERSATION_ID）也能用，开关随首次发送迁移
+        "requires_session": False,
+        "available_modes": None,
+    },
+    {
+        "name": "persist",
+        "description": "开启永续会话并开始任务（仅限新会话，创建后不可更改）",
+        "usage": "/persist <任务>",
+        "example": "/persist 帮我持续跟进这次产品发布",
+        "kind": "built-in",
+        "takesArgs": True,
+        "scope": "client",
+        "execution": "session.create",
         "requires_session": False,
         "available_modes": None,
     },
