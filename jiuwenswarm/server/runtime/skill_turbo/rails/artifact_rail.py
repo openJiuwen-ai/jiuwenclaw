@@ -11,6 +11,7 @@ session stream。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -24,6 +25,7 @@ from openjiuwen.core.single_agent.rail.base import (
 
 # 复用 jiuwenswarm TaskExecutionRail 的共享产物检测逻辑
 from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
+    _ARTIFACT_DETECT_TIMEOUT_S,
     ARTIFACT_DETECTION_TOOL_NAMES,
     detect_artifact_paths,
     filter_unhooked,
@@ -77,15 +79,32 @@ class SkillTurboArtifactRail:
         task_id = self._executor.current_task_id()
         detect_start = time.perf_counter()
 
-        detection = detect_artifact_paths(
-            ctx.inputs.tool_name,
-            getattr(ctx.inputs, "tool_args", None),
-            getattr(ctx.inputs, "tool_result", None),
-            tool_start_time=pop_tool_start_time(
-                self._tool_start_times, ctx
-            ),
-            workspace_base=resolve_workspace_base(),
-        )
+        # 将同步的 detect_artifact_paths 移到线程中执行，加超时保护，
+        # 避免 stat() 对不可达网络路径同步阻塞 event loop（对齐 TaskExecutionRail）
+        try:
+            detection = await asyncio.wait_for(
+                asyncio.to_thread(
+                    detect_artifact_paths,
+                    ctx.inputs.tool_name,
+                    getattr(ctx.inputs, "tool_args", None),
+                    getattr(ctx.inputs, "tool_result", None),
+                    tool_start_time=pop_tool_start_time(
+                        self._tool_start_times, ctx
+                    ),
+                    workspace_base=resolve_workspace_base(),
+                ),
+                timeout=_ARTIFACT_DETECT_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "%s artifact detection timed out (%.1fs), skipping "
+                "session_id=%s tool=%s",
+                _LOG_PREFIX,
+                _ARTIFACT_DETECT_TIMEOUT_S,
+                session_id,
+                ctx.inputs.tool_name,
+            )
+            return
 
         # 去重：跳过已 hook 过且内容未变化的文件
         # （存在性过滤已在 detect_artifact_paths 统一出口处理）

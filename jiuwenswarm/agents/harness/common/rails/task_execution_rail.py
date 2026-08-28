@@ -8,6 +8,7 @@ so downstream tool/artifact events can be attributed to the active task.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -101,6 +102,14 @@ ARTIFACT_DETECTION_TOOL_NAMES = frozenset(
 # mtime 校验容差（秒）：覆盖 FAT32 2 秒时间戳粒度等文件系统精度问题
 _MTIME_TOLERANCE_S = 2.0
 
+# 产物路径检测超时（秒）：防止 stat() 对不可达网络路径同步阻塞 event loop
+_ARTIFACT_DETECT_TIMEOUT_S = 2.0
+
+
+def _is_unc_path(path_str: str) -> bool:
+    """检查是否为 UNC 网络路径（\\\\host\\share），避免 stat() 同步阻塞。"""
+    return path_str.startswith("\\\\") or path_str.startswith("//")
+
 # 文件路径检测的正则表达式模式（仿 PR#1440；调用方按黑名单排除过滤）
 _FILE_PATH_PATTERNS = [
     # Windows绝对路径 (D:\path, D:/path)
@@ -122,13 +131,18 @@ _PYTHON_SCRIPT_EXTENSIONS = frozenset({".py", ".pyw"})
 # 且要求路径以扩展名结尾，避免匹配到无扩展名的目录名
 _ARTIFACT_PATH_PATTERNS = [
     # Windows绝对路径，允许空格（停在换行/引号/括号等边界）
+    # (?<![A-Za-z]) 排除 URL 协议：https:// 中的 s: 会被误认为盘符，
+    # 提取出 s:\example.com 后 stat() 可能对断连映射盘同步阻塞
     re.compile(
-        r'[A-Za-z]:[/\\][^\r\n\]\}\)\'\"`<>，。；、：]+'
+        r'(?<![A-Za-z])[A-Za-z]:[/\\][^\r\n\]\}\)\'\"`<>，。；、：]+'
         r'\.[a-zA-Z0-9]{1,10}'
     ),
     # Unix绝对路径，允许空格
+    # (?<![:/]) 排除 URL：避免 //host 被 normpath 转为 UNC 网络路径后
+    # stat() 同步阻塞 event loop（对齐问题201的22秒阻塞根因）
     re.compile(
-        r'/[^\r\n\]\}\)\'\"`<>，。；、：]+\.[a-zA-Z0-9]{1,10}'
+        r'(?<![:/])/[^\r\n\]\}\)\'\"`<>，。；、：]+'
+        r'\.[a-zA-Z0-9]{1,10}'
     ),
 ]
 
@@ -360,6 +374,9 @@ def _extract_artifact_paths_from_result(
                     raw_paths.append(cleaned)
     for raw_path in raw_paths:
         path = os.path.normpath(raw_path)
+        if _is_unc_path(path):
+            logger.debug("[artifact-detect] skip UNC path: %s", path)
+            continue
         file_path = Path(path)
         if _is_excluded_path(path):
             continue
@@ -457,8 +474,8 @@ def detect_artifact_paths(
             workspace_base=workspace_base,
         )
 
-    # 统一出口：仅保留实际存在的文件
-    paths = [p for p in paths if Path(p).exists()]
+    # 统一出口：仅保留实际存在的文件（跳过 UNC 网络路径避免同步阻塞）
+    paths = [p for p in paths if not _is_unc_path(p) and Path(p).exists()]
     return ArtifactDetection(tool_name, paths)
 
 
@@ -872,15 +889,31 @@ class TaskExecutionRail(DeepAgentRail):
             )
             return
 
-        detection = detect_artifact_paths(
-            ctx.inputs.tool_name,
-            getattr(ctx.inputs, "tool_args", None),
-            getattr(ctx.inputs, "tool_result", None),
-            tool_start_time=pop_tool_start_time(
-                self._tool_start_times, ctx
-            ),
-            workspace_base=resolve_workspace_base(),
-        )
+        # 将同步的 detect_artifact_paths 移到线程中执行，加超时保护，
+        # 避免 stat() 对不可达网络路径同步阻塞 event loop（对齐 clowder-ai）
+        try:
+            detection = await asyncio.wait_for(
+                asyncio.to_thread(
+                    detect_artifact_paths,
+                    ctx.inputs.tool_name,
+                    getattr(ctx.inputs, "tool_args", None),
+                    getattr(ctx.inputs, "tool_result", None),
+                    tool_start_time=pop_tool_start_time(
+                        self._tool_start_times, ctx
+                    ),
+                    workspace_base=resolve_workspace_base(),
+                ),
+                timeout=_ARTIFACT_DETECT_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[TaskExecutionRail] artifact detection timed out "
+                "(%.1fs), skipping session_id=%s tool=%s",
+                _ARTIFACT_DETECT_TIMEOUT_S,
+                session_id,
+                ctx.inputs.tool_name,
+            )
+            return
         task_id = _ACTIVE_TASK_ID.get()
 
         # 去重：跳过已 hook 过且内容未变化的文件
