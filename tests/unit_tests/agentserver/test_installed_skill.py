@@ -7,6 +7,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 
+import pytest
+
 from jiuwenclaw.agentserver.installed_skill import (
     DECISION_ALREADY_INSTALLED,
     DECISION_BLOCKED,
@@ -18,6 +20,7 @@ from jiuwenclaw.agentserver.installed_skill import (
     decide_user_reinstall,
     format_user_skill_source,
     resolve_final_tenant_ids,
+    resolve_final_tenant_ids_async,
     row_public_view,
     skill_versions_equal,
     verify_skill_download_hmac,
@@ -105,6 +108,48 @@ def test_resolve_final_tenant_ids_md5_logical() -> None:
     svc, ag = resolve_final_tenant_ids(service_id="my-svc", agent_id="my-agent")
     assert svc == hashlib.md5(b"my-svc").hexdigest()
     assert ag == hashlib.md5(b"my-agent").hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_resolve_final_tenant_ids_async_uses_enterprise_policy_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """列表查询须与 Runtime 安装路径使用同一 service_id/agent_id 源。"""
+
+    class _Loaded:
+        service_id = "g_demo_sales::bot_main"
+        agent_id = None
+
+    async def _fake_load(_request: object) -> _Loaded:
+        return _Loaded()
+
+    def _fake_coalesce(_request: object, loaded: object) -> tuple[str, str, str]:
+        assert getattr(loaded, "service_id") == "g_demo_sales::bot_main"
+        return "g_demo_sales::bot_main", "g_demo_salesbot_mainbob", "g_demo_sales::bot_main::bob"
+
+    monkeypatch.setattr(
+        "openjiuwen_runtime_management_extension.runtime_management_client.load_effective_service_config_for_request",
+        _fake_load,
+    )
+    monkeypatch.setattr(
+        "openjiuwen_runtime_management_extension.runtime_management_client._coalesce_loaded_invoke_ids",
+        _fake_coalesce,
+    )
+
+    svc, ag = await resolve_final_tenant_ids_async(
+        group_id="g_demo_sales",
+        bot_id="bot_main",
+        user_id="bob",
+    )
+    assert svc == hashlib.md5(b"g_demo_sales::bot_main").hexdigest()
+    assert ag == hashlib.md5(b"g_demo_salesbot_mainbob").hexdigest()
+
+    sync_svc, _sync_ag = resolve_final_tenant_ids(
+        group_id="g_demo_sales",
+        bot_id="bot_main",
+        user_id="bob",
+    )
+    assert sync_svc != svc
 
 
 def test_format_user_skill_source_and_row_public_view() -> None:
