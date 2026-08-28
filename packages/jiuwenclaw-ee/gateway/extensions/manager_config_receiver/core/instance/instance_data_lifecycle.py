@@ -29,6 +29,8 @@ INSTANCE_PURGE_TABLES: tuple[str, ...] = (
     "extension_config_template",
     "skill_whitelist_template",
     "service_config_template",
+    "agent_template",
+    "instance_agent_resource",
     "config_effective_global_policy",
     "config_effective_service_policy",
     "config_effective_agent_policy",
