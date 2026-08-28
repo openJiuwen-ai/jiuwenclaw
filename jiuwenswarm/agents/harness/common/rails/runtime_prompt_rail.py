@@ -7,6 +7,7 @@ every model call by reading runtime_state.yaml in Python, so the LLM always
 sees the current values without needing to call any tool.
 """
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import os
 import sys
@@ -157,7 +158,7 @@ class RuntimePromptRail(DeepAgentRail):
 
     def _resolve_agent_workspace_and_config(self) -> tuple[str, str]:
         """Resolve agent workspace / config dirs; enterprise uses workspace_key paths."""
-        if self._workspace_dir and os.getenv("AGENT_RUNTIME", "").strip():
+        if self._workspace_dir and is_enterprise():
             workspace_root = Path(self._workspace_dir)
             base_workspace = workspace_root.parent.parent
             return str(workspace_root), str(base_workspace / "config")

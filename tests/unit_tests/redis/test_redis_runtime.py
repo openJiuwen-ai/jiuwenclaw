@@ -54,7 +54,7 @@ async def test_active_standby_without_redis_package_degrades(
         init_gateway_redis_from_config,
     )
 
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     builtins.__import__ = _block_redis_import
 
     await init_gateway_redis_from_config({
@@ -88,7 +88,7 @@ async def test_active_standby_unreachable_server_degrades(
         async def close(self) -> None:
             pass
 
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setattr(
         "jiuwenswarm.extensions.redis.redis_runtime._load_gateway_redis_client_class",
         lambda: _UnreachableRedisClient,
@@ -111,7 +111,7 @@ async def test_active_standby_without_agent_runtime_skips_connect(
         init_gateway_redis_from_config,
     )
 
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     builtins.__import__ = _block_redis_import
     await init_gateway_redis_from_config({
         "gateway": {"deployment_mode": "active-standby"},

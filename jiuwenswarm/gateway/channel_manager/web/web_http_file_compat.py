@@ -3,6 +3,7 @@
 """Mount legacy ``/file-api/*`` and ``/share-api/*`` on Gateway Web HTTP."""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import logging
 import os
@@ -345,7 +346,7 @@ def register_file_compat_routes(app: FastAPI) -> None:
         summary="企业 MinIO 上传",
     )
     async def upload_obs(request: Request) -> JSONResponse:
-        if not os.getenv("AGENT_RUNTIME", "").strip():
+        if not is_enterprise():
             return _json(404, {"error": "not_available"})
         raw = await request.body()
         status, payload = process_obs_upload_body(raw)
@@ -362,7 +363,7 @@ def register_file_compat_routes(app: FastAPI) -> None:
         session_id: str = Form("default"),
         filename: str = Form(""),
     ) -> JSONResponse:
-        if not os.getenv("AGENT_RUNTIME", "").strip():
+        if not is_enterprise():
             return _json(404, {"error": "not_available"})
         try:
             raw = await file.read()

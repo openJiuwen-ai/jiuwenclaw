@@ -1,6 +1,7 @@
 """面向 agent 的 skill 管理工具封装。"""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import asyncio
 import logging

@@ -134,7 +134,7 @@ async def test_reload_log_masking_rule_skips_gdb_in_standalone(monkeypatch):
     import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
     from jiuwenswarm.infrastructure.config import Settings
 
-    monkeypatch.setenv("AGENT_RUNTIME", "")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "personal")
     monkeypatch.setattr(engine_mod, "settings", Settings())
 
     with (
@@ -157,7 +157,7 @@ async def test_reload_log_masking_rule_reads_gdb_in_enterprise(monkeypatch):
     import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
     from jiuwenswarm.infrastructure.config import Settings
 
-    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("JIUWENCLAW_ID", "sp-test")
     monkeypatch.setattr(engine_mod, "settings", Settings())
 
@@ -181,7 +181,7 @@ async def test_reload_log_masking_rule_db_authoritative_when_rows_present(monkey
     import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
     from jiuwenswarm.infrastructure.config import Settings
 
-    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("JIUWENCLAW_ID", "sp-test")
     monkeypatch.setattr(engine_mod, "settings", Settings())
     rows = [{"rule_id": "r1", "pattern": r"X", "replacement": "Y", "enabled": True}]
@@ -206,7 +206,7 @@ async def test_reload_log_masking_rule_skips_gdb_without_jiuwenclaw_id(monkeypat
     import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
     from jiuwenswarm.infrastructure.config import Settings
 
-    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.delenv("JIUWENCLAW_ID", raising=False)
     monkeypatch.delenv("JIUWENSWARM_ID", raising=False)
     monkeypatch.setattr(engine_mod, "settings", Settings())
@@ -229,7 +229,7 @@ async def test_reload_log_masking_rule_skips_gdb_without_jiuwenclaw_id(monkeypat
 
 @pytest.mark.asyncio
 async def test_reload_from_gateway_db_loads_rows(monkeypatch):
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("JIUWENCLAW_ID", "sp-1")
     import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
     from jiuwenswarm.infrastructure.config import Settings

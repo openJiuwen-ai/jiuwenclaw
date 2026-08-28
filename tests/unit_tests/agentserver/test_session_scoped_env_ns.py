@@ -34,7 +34,7 @@ def test_new_session_scoped_adapter_inherits_tenant_env_namespace() -> None:
 def test_session_children_inherit_distinct_tenant_artifact_workspaces(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     parents = [
         JiuWenSwarmDeepAdapter(
             workspace_dir=str(tmp_path / tenant),

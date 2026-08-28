@@ -23,12 +23,12 @@ def _document_to_dict(document) -> dict[str, Any]:
 
 
 def _apply_memory(body: dict[str, Any] | None, *, op: str) -> None:
+    from jiuwenswarm.common.local_env_config import is_enterprise
     from jiuwenswarm.agents.harness.common.memory.config import (
         apply_memory_config_payload,
-        is_enterprise_memory_config_enabled,
     )
 
-    if not is_enterprise_memory_config_enabled():
+    if not is_enterprise():
         logger.debug(
             "[ManagerConfigReceiver] skip memory_config hot-reload: not enterprise runtime"
         )

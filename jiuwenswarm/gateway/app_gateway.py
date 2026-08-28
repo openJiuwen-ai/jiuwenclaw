@@ -64,7 +64,7 @@ from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
-from jiuwenswarm.common.local_env_config import decrypt
+from jiuwenswarm.common.local_env_config import decrypt, is_enterprise
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
@@ -2825,7 +2825,7 @@ async def _run_with_telemetry(
     # Enterprise active-standby gates the default scheduler; tenant controllers
     # remain owned by CronTenantRegistry and inherit the same process role.
     leader_election = None
-    if os.getenv("AGENT_RUNTIME", "").strip():
+    if is_enterprise():
         deployment_mode = str(
             (get_config().get("gateway") or {}).get("deployment_mode", "standalone")
         ).strip().lower()

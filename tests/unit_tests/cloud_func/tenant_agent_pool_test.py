@@ -68,8 +68,8 @@ class TestTenantAgentPool(TestCase):
         DeepResearchTaskManagerPool.reset_for_tests()
 
     def test_community_singleton(self) -> None:
-        """未设置 AGENT_RUNTIME 时，同租户键复用同一 AgentManager."""
-        with patch.dict("os.environ", {"AGENT_RUNTIME": ""}, clear=False):
+        """非企业版时，同租户键复用同一 AgentManager."""
+        with patch.dict("os.environ", {"JIUWENSWARM_EDITION": "personal"}, clear=False):
             TenantAgentPool.reset_instance()
             pool = TenantAgentPool.get_instance()
             mock_mgr = MagicMock()
@@ -87,8 +87,8 @@ class TestTenantAgentPool(TestCase):
             asyncio.run(_run())
 
     def test_enterprise_pool(self) -> None:
-        """AGENT_RUNTIME 下按 (agent_id, service_id) 隔离多租户 LRU."""
-        with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
+        """企业版下按 (agent_id, service_id) 隔离多租户 LRU."""
+        with patch.dict("os.environ", {"JIUWENSWARM_EDITION": "enterprise"}, clear=False):
             TenantAgentPool.reset_instance()
             pool = TenantAgentPool.get_instance()
 
@@ -111,7 +111,7 @@ class TestTenantAgentPool(TestCase):
                     mgr3 = await pool.get_agent_manager("a2", "s2")
                 self.assertIs(mgr1, mgr2)
                 self.assertIsNot(mgr1, mgr3)
-                # AGENT_RUNTIME 下 manager.agent_id 使用 legacy "aid_sid" 形态
+                # 企业版下 manager.agent_id 使用 legacy "aid_sid" 形态
                 self.assertEqual(mgr1.agent_id, "a1_s1")
                 self.assertEqual(mgr1.service_id, "s1")
                 self.assertEqual(mgr1.env_agent_id, "a1")
@@ -132,7 +132,7 @@ class TestTenantAgentPool(TestCase):
 
     def test_process_message_dispatch(self) -> None:
         """process_message 分发到对应租户的 AgentManager."""
-        with patch.dict("os.environ", {"AGENT_RUNTIME": ""}, clear=False):
+        with patch.dict("os.environ", {"JIUWENSWARM_EDITION": "personal"}, clear=False):
             TenantAgentPool.reset_instance()
             pool = TenantAgentPool.get_instance()
             mock_resp = MagicMock()
@@ -235,7 +235,7 @@ class TestTenantAgentPool(TestCase):
 
     def test_get_lock_recreates_on_different_event_loop(self) -> None:
         """_get_lock 在事件循环变化时能正确重建锁."""
-        with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
+        with patch.dict("os.environ", {"JIUWENSWARM_EDITION": "enterprise"}, clear=False):
             TenantAgentPool.reset_instance()
 
             async def first_loop():
@@ -260,7 +260,7 @@ class TestTenantAgentPool(TestCase):
 
     def test_get_lock_returns_same_lock_in_same_loop(self) -> None:
         """同一事件循环中多次调用 _get_lock 返回同一个锁对象."""
-        with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
+        with patch.dict("os.environ", {"JIUWENSWARM_EDITION": "enterprise"}, clear=False):
             TenantAgentPool.reset_instance()
 
             async def _run():
@@ -273,7 +273,7 @@ class TestTenantAgentPool(TestCase):
 
     def test_get_lock_creates_new_for_different_keys(self) -> None:
         """不同 cache_key 会创建不同的锁对象."""
-        with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
+        with patch.dict("os.environ", {"JIUWENSWARM_EDITION": "enterprise"}, clear=False):
             TenantAgentPool.reset_instance()
 
             async def _run():
@@ -286,7 +286,7 @@ class TestTenantAgentPool(TestCase):
 
     def test_ensure_agent_manager_across_event_loops(self) -> None:
         """跨事件循环调用 _ensure_agent_manager 不会报错."""
-        with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
+        with patch.dict("os.environ", {"JIUWENSWARM_EDITION": "enterprise"}, clear=False):
             TenantAgentPool.reset_instance()
 
             async def first_request():
@@ -310,7 +310,7 @@ class TestTenantAgentPool(TestCase):
 
     def test_concurrent_requests_after_event_loop_change(self) -> None:
         """事件循环变化后，并发请求能正常工作."""
-        with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
+        with patch.dict("os.environ", {"JIUWENSWARM_EDITION": "enterprise"}, clear=False):
             TenantAgentPool.reset_instance()
 
             async def simulate_multiple_requests():
@@ -332,7 +332,7 @@ class TestTenantAgentPool(TestCase):
 
     def test_get_lock_detects_loop_change(self) -> None:
         """验证 _get_lock 能检测到事件循环变化并重建锁."""
-        with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
+        with patch.dict("os.environ", {"JIUWENSWARM_EDITION": "enterprise"}, clear=False):
             TenantAgentPool.reset_instance()
             pool = TenantAgentPool.get_instance()
             lock1_id = None
@@ -355,7 +355,7 @@ class TestTenantAgentPool(TestCase):
 
     def test_lock_with_waiters_across_event_loop(self) -> None:
         """锁在有占用时跨事件循环仍可重建后使用（不复用旧 loop 的锁）。"""
-        with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
+        with patch.dict("os.environ", {"JIUWENSWARM_EDITION": "enterprise"}, clear=False):
             TenantAgentPool.reset_instance()
             held_lock_id: int | None = None
 
@@ -384,7 +384,7 @@ class TestTenantAgentPool(TestCase):
 
     def test_concurrent_waiters_across_event_loop(self) -> None:
         """有并发争用后，事件循环变化仍可服务新请求."""
-        with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
+        with patch.dict("os.environ", {"JIUWENSWARM_EDITION": "enterprise"}, clear=False):
             TenantAgentPool.reset_instance()
 
             async def first_loop_with_concurrent_requests():

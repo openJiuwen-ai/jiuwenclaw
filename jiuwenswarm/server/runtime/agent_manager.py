@@ -17,6 +17,7 @@ from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config, get_default_models
 from jiuwenswarm.common.local_env_config import (
+    is_enterprise,
     apply_env_overrides_to_active,
     apply_env_removals,
     bind_task_env_overlay,
@@ -197,7 +198,7 @@ class AgentManager:
         from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
 
         self.warm_pool = AgentWarmPool(self)
-        if self._user_workspace_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+        if self._user_workspace_dir is not None and is_enterprise():
             logger.info(
                 "[AgentManager] enterprise init: agent_id=%s service_id=%s user_workspace=%s",
                 self.agent_id,
@@ -851,7 +852,7 @@ class AgentManager:
                     **_build_acp_agent_config()
                 }
             # 企业版：创建 agent 时附带完整 request，供 create_instance 加载企业配置
-            if request is not None and os.getenv("AGENT_RUNTIME", "").strip():
+            if request is not None and is_enterprise():
                 config = {**config, "request": request}
             agent = await self._create_agent(
                 channel_key,

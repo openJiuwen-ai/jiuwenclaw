@@ -3,6 +3,7 @@
 """Distributed Leader Election using Redis SETNX + TTL for PRIMARY/STANDBY failover."""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import asyncio
 import logging
@@ -244,9 +245,9 @@ class LeaderElection:
             logger.warning("[LeaderElection] Already running")
             return
 
-        # 企业版特性：仅 AGENT_RUNTIME + distributed Redis 时启用
-        if not os.getenv("AGENT_RUNTIME", "").strip():
-            logger.info("[LeaderElection] AGENT_RUNTIME unset; skip")
+        # 仅企业版 + distributed Redis 时启用
+        if not is_enterprise():
+            logger.info("[LeaderElection] not enterprise edition; skip")
             return
 
         from jiuwenswarm.extensions.redis.redis_runtime import (

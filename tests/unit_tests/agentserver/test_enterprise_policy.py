@@ -327,7 +327,7 @@ async def test_load_effective_config_fills_missing_slots_from_global(
     )
     from jiuwenswarm.common.schema.agent import AgentRequest
 
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("JIUWENCLAW_ID", "sp-demo")
 
     m2 = "22222222-2222-4222-8222-222222222222"
@@ -443,7 +443,7 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
     )
     from jiuwenswarm.common.schema.agent import AgentRequest
 
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("JIUWENCLAW_ID", "sp-current")
     e4 = "44444444-4444-4444-8444-444444444444"
     e3_old = "33333333-3333-4333-8333-333333333333"
@@ -610,7 +610,7 @@ async def test_load_effective_config_loads_embedding_template(
     )
     from jiuwenswarm.server.runtime.enterprise_config.schemas import TemplateRefSlot
 
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     jid = "embedding-demo"
     monkeypatch.setenv("JIUWENCLAW_ID", jid)
     embedding_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"

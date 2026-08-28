@@ -46,6 +46,8 @@ spec:
               value: "http://<<MANAGER_SERVER_NAME>>:<<MANAGER_REST_PORT>>"
             - name: FRONTEND_PORT
               value: "<<WEB_HTTP_PORT>>"
+            - name: VITE_WEB_TRANSPORT
+              value: "http"
             - name: ENTERPRISE_WEB_WS_HOST
               value: "0.0.0.0"
             - name: ENTERPRISE_WEB_WS_PORT
@@ -58,8 +60,6 @@ spec:
               value: "<<WS_ORIGIN_CHECK_ENABLED>>"
             - name: WS_ALLOWED_ORIGINS
               value: "<<WS_ALLOWED_ORIGINS>>"
-            - name: TZ
-              value: "<<TIMEZONE>>"
             - name: WEB_DB_TYPE
               value: "<<DB_TYPE>>"
             - name: WEB_DB_HOST
@@ -70,6 +70,10 @@ spec:
               value: "<<WEB_DB_USER>>"
             - name: WEB_DB_NAME
               value: "<<WEB_DB_NAME>>"
+            - name: JIUWENSWARM_EDITION
+              value: "enterprise"
+            - name: TZ
+              value: "<<TIMEZONE>>"
 
 ---
 # 集群内部访问： 提供稳定 DNS 域名
