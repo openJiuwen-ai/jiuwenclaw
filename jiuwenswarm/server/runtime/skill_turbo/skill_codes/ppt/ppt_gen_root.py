@@ -33,6 +33,25 @@ _P3_SKIP_FIELDS = {
 }
 
 
+def _document_parse_failed(inputs: dict[str, Any]) -> bool:
+    return bool(inputs.get("has_documents")) and inputs.get("doc_parse_ok") is not True
+
+
+def _document_parse_failure_result(
+    node: str,
+    inputs: dict[str, Any],
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    error = inputs.get("doc_parse_error") or "未知原因"
+    return {
+        "node": node,
+        "status": "error",
+        "message": f"文档解析失败，已停止生成 PPT：{error}",
+        "result": inputs,
+        "steps": results,
+    }
+
+
 _MERGE_SKIP_KEYS = frozenset(
     {
         "node",
@@ -147,6 +166,8 @@ class PPTGenRootNode(PlanNode):
             await self._run_subplan(self._p3, inputs, results)
         else:
             await self._skip_p3_subplan(inputs, results)
+        if _document_parse_failed(inputs):
+            return
         await self._run_subplan(self._p2, inputs, results)
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
@@ -156,6 +177,9 @@ class PPTGenRootNode(PlanNode):
         await self._run_subplan(self._p0, inputs, results)
         await self._run_subplan(self._p1, inputs, results)
         await self._run_p3_and_p2(inputs, results)
+
+        if _document_parse_failed(inputs):
+            return _document_parse_failure_result(self.plan_name, inputs, results)
 
         # P3.5 模板叙事上下文预处理（条件执行，节点内部判断 style_mode）
         await self._run_subplan(self._p3_5, inputs, results)
@@ -315,6 +339,9 @@ class PPTGenRootNode(PlanNode):
             ):
                 yield chunk
 
+        if _document_parse_failed(inputs):
+            return
+
         async for chunk in self._run_subplan_stream(
             self._p2, inputs, results, index=4, total_steps=total_steps
         ):
@@ -346,6 +373,10 @@ class PPTGenRootNode(PlanNode):
 
         async for chunk in self._run_p3_and_p2_stream(inputs, results, total_steps=total_steps):
             yield chunk
+
+        if _document_parse_failed(inputs):
+            yield _document_parse_failure_result(self.plan_name, inputs, results)
+            return
 
         # P3.5 模板叙事上下文预处理（条件执行，节点内部判断 style_mode）
         async for chunk in self._run_subplan_stream(

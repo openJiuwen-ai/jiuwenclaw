@@ -321,13 +321,19 @@ function resolveWebHttpPort(wsPort: number): number {
 
 const frontendPort = portFromEnv('FRONTEND_PORT', 5173)
 const webPort = portFromEnv('WEB_PORT', 19000)
-const webTarget = process.env.GATEWAY_URL?.replace(/\/$/, '') || `http://127.0.0.1:${webPort}`
+const webTarget =
+  process.env.GATEWAY_WEB_WS_URL?.replace(/\/$/, '') ||
+  process.env.GATEWAY_URL?.replace(/\/$/, '') ||
+  `http://127.0.0.1:${webPort}`
 const webHttpPort = resolveWebHttpPort(webPort)
 const webHttpTarget =
   process.env.GATEWAY_WEB_HTTP_URL?.replace(/\/$/, '') ||
   `http://127.0.0.1:${webHttpPort}`
 
 export default defineConfig({
+  // 产物会被 Manager Web 挂载在 /chat/ iframe 中；使用相对资源路径，
+  // 避免 iframe 的 JS/CSS 请求回到 Manager 根路径。
+  base: './',
   plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), react(), svgr()],
   optimizeDeps: {
     include: ['exceljs', 'jszip', 'saxes', 'ssf'],
@@ -341,6 +347,8 @@ export default defineConfig({
     port: frontendPort,
     strictPort: true,
     proxy: {
+      '/idp': { target: process.env.USER_WEB_IDP_TARGET || 'http://127.0.0.1:8770', changeOrigin: true, rewrite: (p) => p.replace(/^\/idp/, '') },
+      '/manager-api': { target: process.env.USER_WEB_MANAGER_TARGET || 'http://127.0.0.1:8765', changeOrigin: true, rewrite: (p) => p.replace(/^\/manager-api/, '/api') },
       '/file-api': {
         target: webHttpTarget,
         changeOrigin: true,

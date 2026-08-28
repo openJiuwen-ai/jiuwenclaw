@@ -76,8 +76,8 @@ spec:
           ports:
             - name: web-ws
               containerPort: <<WEB_PORT>>
-            - name: acp-ws
-              containerPort: <<GATEWAY_PORT>>
+            - name: http
+              containerPort: <<GATEWAY_HTTP_PORT>>
             - name: web-http
               containerPort: <<GATEWAY_WEB_HTTP_PORT>>
             - name: config-http
@@ -103,6 +103,8 @@ spec:
             - secretRef:
                 name: <<SECRET_CM_NAME>>
           env:
+            - name: USER_WEB_MODE
+              value: "<<USER_WEB_MODE>>"
             # downward API：注入当前 Pod 身份，供 RuntimeManagementAgentClient
             # 构建 agentserver pod 的 ownerReference（指向本 Pod），实现级联清理。
             - name: POD_NAME
@@ -155,9 +157,9 @@ spec:
     - name: web-ws
       port: <<WEB_PORT>>
       targetPort: <<WEB_PORT>>
-    - name: acp-ws
-      port: <<GATEWAY_PORT>>
-      targetPort: <<GATEWAY_PORT>>
+    - name: http
+      port: <<GATEWAY_HTTP_PORT>>
+      targetPort: <<GATEWAY_HTTP_PORT>>
     - name: web-http
       port: <<GATEWAY_WEB_HTTP_PORT>>
       targetPort: <<GATEWAY_WEB_HTTP_PORT>>

@@ -17,13 +17,14 @@ check_boolean_value() {
     fi
 }
 
-check_user_web_embedding_config() {
-    check_boolean_value "ENABLE_USER_WEB_EMBEDDING"
+check_user_web_mode_config() {
+    local mode="${DEPLOY_VARS["USER_WEB_MODE"]:-personal}"
+    if [[ "${mode}" != "personal" && "${mode}" != "enterprise" ]]; then
+        error "USER_WEB_MODE must be personal or enterprise, current value: ${mode}"
+    fi
     check_boolean_value "IS_UP_MANAGER_WEB"
-
-    if [[ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" \
-        && "${DEPLOY_VARS["IS_UP_MANAGER_WEB"]}" != "true" ]]; then
-        error "ENABLE_USER_WEB_EMBEDDING=true requires IS_UP_MANAGER_WEB=true"
+    if [[ "${mode}" == "enterprise" && "${DEPLOY_VARS["IS_UP_MANAGER_WEB"]}" != "true" ]]; then
+        error "USER_WEB_MODE=enterprise requires IS_UP_MANAGER_WEB=true"
     fi
 }
 
@@ -442,12 +443,12 @@ check_gateway_up_dependency(){
 }
 
 check_web_up_dependency(){
-    check_user_web_embedding_config
-    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ] \
+    check_user_web_mode_config
+    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ] \
         && ! module_is_selected "MANAGER"; then
         if ! check_k8s_resource_exists \
             "deployment" "${DEPLOY_VARS["MANAGER_WEB_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
-            error "Embedded User Web requires the Manager Web module to be deployed"
+            error "Enterprise User Web requires the Manager Web module to be deployed"
         fi
     fi
     check_if_db_up
@@ -459,12 +460,12 @@ check_web_up_dependency(){
 }
 
 check_manager_up_dependency(){
-    check_user_web_embedding_config
-    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ] \
+    check_user_web_mode_config
+    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ] \
         && ! module_is_selected "WEB"; then
         if ! check_k8s_resource_exists \
             "deployment" "${DEPLOY_VARS["WEB_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
-            error "Embedded User Web requires the Web module to be deployed"
+            error "Enterprise User Web requires the Web module to be deployed"
         fi
     fi
     #check_if_rabbitmq_up

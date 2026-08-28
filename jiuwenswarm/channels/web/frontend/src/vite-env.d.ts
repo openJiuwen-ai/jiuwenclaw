@@ -44,4 +44,7 @@ interface Window {
   };
   /** Durable ingest hook invoked by desktop_app.py run_js on native file drops. */
   __JIUWEN_INGEST_LOCAL_FILES__?: (detail: unknown) => void;
+  /** Set by the User Web server for enterprise embedding mode. */
+  __JIUWEN_USER_WEB_MODE__?: string;
+  __JIUWEN_USER_WEB_EMBEDDING__?: boolean;
 }

@@ -815,12 +815,18 @@ heartbeat:
     end: 22:00
 
 execution_guard:
-  # LLM 重试护栏：处理模型重复输出和流式帧超时，命中后重新发起模型请求
+  # LLM 重试护栏：处理模型重复输出、流式帧超时，以及非流式 invoke 的瞬时网络/超时错误
   llm_retry_rail:
     # 总开关。关闭后不注册 LLMRetryRail，也不会额外拦截重复输出/流式帧超时
     enabled: true
     # 单次 invoke 内同一类异常最多重试次数；超过后把异常继续抛给上层
     max_retries: 2
+    # 非流式 invoke 遇到 Connection error / Request timed out 等瞬时错误时是否自动重试
+    retry_transient_invoke_errors: true
+    # 重试进行中是否向前端推送可见提示（映射为 chat.delta）
+    notify_user_on_retry: true
+    # 重试用尽后是否向前端推送 chat.error，避免静默结束
+    notify_user_on_exhausted: true
     # 重复片段检测的最短长度，单位：字符；用于检测短句/短片段循环输出
     repeat_min_pattern_chars: 2
     # 重复片段检测的最长长度，单位：字符；过长片段不作为循环模式检测
@@ -1403,6 +1409,11 @@ modes:
     rails:
     tools:
   code:
+    artifact_post_process:
+      # 为生成的代码文件添加语言对应的 header 注释：
+      # "Co-authored by OfficeAce Coding Agent"。可通过 .env 开关控制，默认关闭。
+      coauthor_header: ${JIUWENSWARM_CODE_COAUTHOR_HEADER_ENABLED:-false}
+
     # 记忆开关 — 控制 CodingMemoryRail 和 ProjectMemoryRail 加载
     # 关闭后，coding_memory_read/write/edit 工具不可用，项目记忆文件不自动加载
     memory:
@@ -1412,7 +1423,8 @@ modes:
     # 固定 Rails（以下 Rails 已在代码中固定挂载，无需在此配置）：
     #   RuntimePromptRail, ResponsePromptRail, JiuSwarmStreamEventRail, SecurityRail,
     #   PermissionInterruptRail, SysOperationRail(FileSystemRail), LspRail,
-    #   AgentModeRail, StructuredAskUserRail, ConfirmInterruptRail, ContextProcessorRail
+    #   CodingArtifactPostProcessRail, AgentModeRail, StructuredAskUserRail,
+    #   ConfirmInterruptRail, ContextProcessorRail
     # 注意：ProjectMemoryRail, CodingMemoryRail 受 memory.enabled 开关控制，
     #       开关关闭时不加载，开关开启时固定挂载。
     rails:

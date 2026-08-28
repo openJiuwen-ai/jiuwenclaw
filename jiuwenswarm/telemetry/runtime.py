@@ -319,10 +319,22 @@ class TelemetryRuntime:
                 max_attributes=config.max_attributes,
                 backend="otlp",
             )
+            # Skill / team evolution rails subscribe to this processor; without
+            # registering it on the unified TracerProvider, after_invoke never
+            # receives LLM/tool spans and run_evolution is skipped silently.
+            from jiuwenswarm.agents.harness.observability_runtime import (
+                get_trajectory_span_processor,
+            )
+
+            trajectory_processor = get_trajectory_span_processor()
+            extra_processors = (
+                (trajectory_processor,) if trajectory_processor is not None else ()
+            )
             init_observability(
                 core_config,
                 tracer_provider_override=tracer_provider,
                 owns_provider=False,
+                additional_span_processors=extra_processors,
             )
         except Exception as error:
             self._set_status("agentcore", False, error)

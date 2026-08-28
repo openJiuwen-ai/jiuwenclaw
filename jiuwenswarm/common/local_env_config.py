@@ -79,6 +79,8 @@ SPAWN_ENV_KEYS: frozenset[str] = frozenset(
         # Unified tool switch (blacklist); config.yaml references ${DISABLED_TOOLS-...}.
         # Defaults to disabling search_skill / install_skill / uninstall_skill.
         "DISABLED_TOOLS",
+        # Code-mode generated-code co-author header switch; process shared.
+        "JIUWENSWARM_CODE_COAUTHOR_HEADER_ENABLED",
         # launchEnv / config.yaml ${EXTENSION_DIRS}; process-shared (relay RELAYCLAW_SHARED_ENV_KEYS TBD).
         "EXTENSION_DIRS",
     }

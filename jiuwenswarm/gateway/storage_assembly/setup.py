@@ -8,7 +8,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE, resolve_gateway_edition
+from jiuwenswarm.gateway.edition import (
+    EDITION_ENTERPRISE,
+    EDITION_PERSONAL,
+    resolve_gateway_edition,
+)
 from jiuwenswarm.gateway.storage.backends.db.persistent_store import DbPersistentBackend
 from jiuwenswarm.gateway.storage.backends.file_persistent import FilePersistentBackend
 from jiuwenswarm.gateway.storage.backends.memory_ephemeral import MemoryEphemeralBackend
@@ -165,6 +169,86 @@ def is_session_map_repository_enabled(cfg: dict[str, Any] | None = None) -> bool
     )
 
 
+def is_ephemeral_state_enabled(cfg: dict[str, Any] | None = None) -> bool:
+    """session_sharing / cron_scheduler 是否切到 EphemeralStore。"""
+    return _storage_flag(
+        cfg,
+        config_key="ephemeral",
+        env_key="GATEWAY_EPHEMERAL_STATE",
+        default=True,
+    )
+
+
+def ensure_gateway_storage_context_for_ephemeral(
+    cfg: dict[str, Any] | None = None,
+    *,
+    existing: StorageContext | None = None,
+) -> StorageContext | None:
+    """Ephemeral 需要 StorageContext；可与 Persistent 装配共用同一实例。"""
+    if existing is not None:
+        return existing
+    if not is_ephemeral_state_enabled(cfg):
+        return None
+    return create_gateway_storage_context(cfg)
+
+
+async def create_session_sharing_registry(
+    ctx: StorageContext,
+) -> Any:
+    """装配 SessionSharingRegistry 并从 Ephemeral 恢复订阅（若有）。"""
+    from jiuwenswarm.gateway.routing.session_sharing import SessionSharingRegistry
+
+    registry = SessionSharingRegistry(ephemeral=ctx.ephemeral("session_sharing"))
+    await registry.hydrate_from_ephemeral()
+    return registry
+
+
+def cron_run_ephemeral_store(ctx: StorageContext) -> Any:
+    """Cron run 快照使用的 Ephemeral namespace。"""
+    return ctx.ephemeral("cron_scheduler")
+
+
+def _wire_personal_yaml_section_repositories(
+    store: PersistentStore,
+    cfg: dict[str, Any] | None,
+) -> None:
+    """personal-only：heartbeat / browser / locale / a2ui YAML overlay。"""
+    from jiuwenswarm.gateway.config.a2ui.access import set_a2ui_config_repository
+    from jiuwenswarm.gateway.config.browser.access import set_browser_config_repository
+    from jiuwenswarm.gateway.config.heartbeat.access import (
+        set_heartbeat_config_repository,
+    )
+    from jiuwenswarm.gateway.config.locale.access import (
+        set_preferred_language_config_repository,
+    )
+
+    if resolve_gateway_edition(cfg) != EDITION_PERSONAL:
+        return
+
+    edition = EDITION_PERSONAL
+    instance_id = resolve_storage_instance_id(cfg)
+    set_heartbeat_config_repository(
+        create_heartbeat_config_repository(
+            store, edition, instance_id=instance_id
+        )
+    )
+    set_browser_config_repository(
+        create_browser_config_repository(
+            store, edition, instance_id=instance_id
+        )
+    )
+    set_preferred_language_config_repository(
+        create_preferred_language_config_repository(
+            store, edition, instance_id=instance_id
+        )
+    )
+    set_a2ui_config_repository(
+        create_a2ui_config_repository(
+            store, edition, instance_id=instance_id
+        )
+    )
+
+
 def _wire_config_and_cron_repositories(
     store: PersistentStore,
     cfg: dict[str, Any] | None,
@@ -203,12 +287,21 @@ def _wire_config_and_cron_repositories(
     )
     set_persistent_store(store)
     set_cron_persistent_store(store)
+    _wire_personal_yaml_section_repositories(store, cfg)
 
 
 def _clear_config_and_cron_repositories() -> None:
+    from jiuwenswarm.gateway.config.a2ui.access import clear_a2ui_config_repository
+    from jiuwenswarm.gateway.config.browser.access import clear_browser_config_repository
     from jiuwenswarm.gateway.config.channel.access import clear_channel_config_repository
     from jiuwenswarm.gateway.config.enterprise.access import (
         clear_enterprise_record_repositories,
+    )
+    from jiuwenswarm.gateway.config.heartbeat.access import (
+        clear_heartbeat_config_repository,
+    )
+    from jiuwenswarm.gateway.config.locale.access import (
+        clear_preferred_language_config_repository,
     )
     from jiuwenswarm.gateway.config.logging.access import clear_logging_config_repository
     from jiuwenswarm.gateway.config.memory.access import clear_memory_config_repository
@@ -222,6 +315,10 @@ def _clear_config_and_cron_repositories() -> None:
     clear_permissions_config_repository()
     clear_logging_config_repository()
     clear_memory_config_repository()
+    clear_heartbeat_config_repository()
+    clear_browser_config_repository()
+    clear_preferred_language_config_repository()
+    clear_a2ui_config_repository()
     clear_enterprise_record_repositories()
     clear_persistent_store()
     clear_cron_persistent_store()
@@ -233,7 +330,8 @@ async def setup_gateway_storage_repositories(
     """按开关装配 SessionMap + overlay/cron Repository，返回共享 ``StorageContext``。
 
     - ``session_map_repository``：SessionMap
-    - ``repositories``：channel / permissions / logging / memory / cron
+    - ``repositories``：channel / permissions / logging / memory / cron；
+      personal 另注入 heartbeat / browser / locale / a2ui
 
     任一开启则创建 Context；全关返回 ``None``。须在 MessageHandler / CronTenantRegistry
     创建 tenant store 之前调用。
@@ -630,7 +728,11 @@ __all__ = [
     "create_permissions_config_repository",
     "create_preferred_language_config_repository",
     "create_session_map_repository",
+    "create_session_sharing_registry",
+    "cron_run_ephemeral_store",
     "ensure_enterprise_storage_context",
+    "ensure_gateway_storage_context_for_ephemeral",
+    "is_ephemeral_state_enabled",
     "is_session_map_repository_enabled",
     "is_storage_repositories_enabled",
     "resolve_storage_instance_id",

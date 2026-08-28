@@ -92,6 +92,20 @@ process_restart() {
 # ==================== Main function ====================
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
+
+    # USER_WEB_MODE 是用户面产品形态的唯一开关；旧布尔变量仅作兼容输入。
+    if [[ -z "${DEPLOY_VARS["USER_WEB_MODE"]:-}" ]]; then
+        if [[ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]:-false}" == "true" ]]; then
+            DEPLOY_VARS["USER_WEB_MODE"]="enterprise"
+            warn "ENABLE_USER_WEB_EMBEDDING is deprecated; use USER_WEB_MODE=enterprise"
+        else
+            DEPLOY_VARS["USER_WEB_MODE"]="personal"
+        fi
+    fi
+    DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]=$(
+        [[ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]] && printf true || printf false
+    )
+
     parse_args "$@"
     detect_os
     check_dependency
