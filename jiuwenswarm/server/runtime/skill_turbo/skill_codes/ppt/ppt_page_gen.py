@@ -668,7 +668,8 @@ def _extract_footer_block(html: str) -> str:
     matches = list(_FOOTER_BLOCK_RE.finditer(html or ""))
     if not matches:
         return ""
-    return matches[-1].group(1)
+    # 模板结构保证 </main> 之后只有一个 footer div，取第一个匹配即可。
+    return matches[0].group(1)
 
 
 def _normalize_footer_text_only(html: str) -> str:
@@ -715,6 +716,9 @@ def _replace_main_inner_html(html: str, new_inner: str) -> str:
 
 _REPAIRABLE_CONTENT_TEMPLATE_REASONS = frozenset({
     "content_template_chrome_changed",
+    "head_chrome_changed",
+    "header_chrome_changed",
+    "footer_chrome_changed",
     "main_tag_changed",
 })
 
@@ -764,6 +768,9 @@ def _repair_content_template_chrome(seed_html: str, filled_html: str) -> str | N
     if "{{PAGE_FOOTER}}" in out:
         out = out.replace("{{PAGE_FOOTER}}", footer_inner)
     else:
+        # fallback：seed 模板无 {{PAGE_FOOTER}} 占位符时，直接在 footer div 的
+        # <p> 标签内替换文本。_P_INNER_TEXT_RE 只匹配 count=1（footer block 内
+        # 第一个 <p>），不会双重替换——footer_inner 是纯文本，不含 <p> 标签。
         seed_footer = _extract_footer_block(out)
         if not seed_footer:
             return None
@@ -858,17 +865,17 @@ def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> 
     seed_head = _normalize_template_whitespace(_normalize_title_tag_text_only(_extract_head_block(seed_html)))
     filled_head = _normalize_template_whitespace(_normalize_title_tag_text_only(_extract_head_block(filled_html)))
     if not seed_head or seed_head != filled_head:
-        return False, "content_template_chrome_changed"
+        return False, "head_chrome_changed"
 
     seed_header = _normalize_template_whitespace(_normalize_h1_text_only(_extract_header_block(seed_html)))
     filled_header = _normalize_template_whitespace(_normalize_h1_text_only(_extract_header_block(filled_html)))
     if not seed_header or seed_header != filled_header:
-        return False, "content_template_chrome_changed"
+        return False, "header_chrome_changed"
 
     seed_footer = _normalize_template_whitespace(_normalize_footer_text_only(seed_html))
     filled_footer = _normalize_template_whitespace(_normalize_footer_text_only(filled_html))
     if not seed_footer or seed_footer != filled_footer:
-        return False, "content_template_chrome_changed"
+        return False, "footer_chrome_changed"
 
     main_inner_html = _extract_main_inner_html(filled_html)
     if not main_inner_html.strip():
@@ -3175,6 +3182,9 @@ _REWRITE_ACTIONS = {
         "禁止改动模板 chrome（<head>、header 结构、footer 结构）；"
         "仅替换 PAGE_TITLE / PAGE_CONTENT / PAGE_FOOTER 三处占位内容"
     ),
+    "head_chrome_changed": "禁止改动 <head> 块（含 title 文字、script/style 引用）；仅填 body 内占位符",
+    "header_chrome_changed": "禁止改动 header 结构（content-safe 到 main 之间）；仅替换 PAGE_TITLE",
+    "footer_chrome_changed": "禁止改动 footer 结构（main 之后的 flex-shrink-0 div）；仅替换 PAGE_FOOTER",
     "empty_page_content": "在 main 内填入本页正文内容，禁止空的 PAGE_CONTENT",
     "page_content_unfilled": "将 {{PAGE_CONTENT}} 替换为本页实际 HTML 内容",
     "title_invalid": "将 PAGE_TITLE 替换为大纲中的真实标题，禁止占位敷衍文案",
