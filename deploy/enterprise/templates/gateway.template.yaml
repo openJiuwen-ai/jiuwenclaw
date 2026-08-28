@@ -105,6 +105,8 @@ spec:
           env:
             - name: USER_WEB_MODE
               value: "<<USER_WEB_MODE>>"
+            - name: GATEWAY_RUNTIME_MANAGER_URL
+              value: "<<GATEWAY_RUNTIME_MANAGER_URL>>"
             # downward API：注入当前 Pod 身份，供 RuntimeManagementAgentClient
             # 构建 agentserver pod 的 ownerReference（指向本 Pod），实现级联清理。
             - name: POD_NAME

@@ -25,6 +25,15 @@ import sys
 from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
 parse_dotenv_early("jiuwenswarm-agentserver")
 
+
+def is_enterprise() -> bool:
+    """判断当前 AgentServer 是否运行在企业版。
+
+    产品形态由 JIUWENSWARM_EDITION 统一标识；AGENT_RUNTIME 仅表示运行模式，
+    不再作为个人版/企业版的判定依据。
+    """
+    return os.getenv("JIUWENSWARM_EDITION", "").strip().lower() == "enterprise"
+
 from jiuwenswarm.common.utils import (
     get_env_file,
     get_logs_dir,

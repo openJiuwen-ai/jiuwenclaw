@@ -224,6 +224,7 @@ declare -A DEPLOY_VARS=(
     ["AGENT_RUNTIME_IMAGE"]=""
     ["AGENT_RUNTIME_REPLICAS"]="1"
     ["AGENT_RUNTIME_PORT"]="8091"
+    ["GATEWAY_RUNTIME_MANAGER_URL"]="http://jiuwenclaw-agent-runtime:8091"
     ["AGENT_RUNTIME_SYNC_TIMEOUT"]="10"
     ["AGENT_RUNTIME_DB_NAME"]="runtime"
     ["AGENT_RUNTIME_REDIS_DB"]="2"

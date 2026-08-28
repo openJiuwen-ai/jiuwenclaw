@@ -324,3 +324,29 @@
 .icon-rail-help-button + .icon-rail-nav-item {
   margin-bottom: 12px;
 }
+
+.enterprise-context-popover {
+  position: absolute;
+  z-index: 1500;
+  left: 72px;
+  bottom: 56px;
+  width: 240px;
+  padding: 14px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 12px;
+  background: var(--color-surface-popover);
+  box-shadow: var(--effect-shadow-lg);
+}
+.enterprise-context-popover__user { padding-bottom: 12px; margin-bottom: 10px; border-bottom: 1px solid var(--color-border-default); color: var(--color-text-primary); font-size: 13px; font-weight: 600; }
+.enterprise-context-popover__user small { display: block; margin-top: 4px; color: var(--color-text-secondary); font-size: 11px; font-weight: 400; }
+.enterprise-context-popover label { display: block; margin-top: 10px; color: var(--color-text-secondary); font-size: 11px; }
+.enterprise-context-popover select { display: block; box-sizing: border-box; width: 100%; margin-top: 5px; padding: 7px; border: 1px solid var(--color-border-default); border-radius: 6px; background: var(--color-surface-card); color: var(--color-text-primary); font-size: 12px; }
+
+
+/* 企业版用户面：与主侧栏统一的克制弹层样式。 */
+.enterprise-context-popover { padding: 12px; border-radius: 12px; background: var(--color-surface-popover); box-shadow: var(--effect-shadow-lg); }
+.enterprise-context-popover__user { margin: 0 2px 8px; padding: 4px 4px 10px; font-size: 13px; }
+.enterprise-context-popover label { margin-top: 8px; font-size: 11px; }
+.enterprise-context-popover select { height: 32px; margin-top: 4px; padding: 0 28px 0 9px; appearance: auto; border-radius: 7px; background: var(--color-surface-card); font-size: 12px; }
+.enterprise-context-popover__logout { width: 100%; margin-top: 12px; padding: 8px 10px; border: 1px solid var(--color-border-default); border-radius: 7px; background: transparent; color: var(--color-feedback-danger); cursor: pointer; font-size: 12px; text-align: center; }
+.enterprise-context-popover__logout:hover { background: color-mix(in srgb, var(--color-feedback-danger) 8%, transparent); border-color: var(--color-feedback-danger); }

@@ -20,6 +20,7 @@ import SkillDesignIcon from '../../assets/技能.svg?react';
 import AgentDesignIcon from '../../assets/智能体.svg?react';
 import MoreDesignIcon from '../../assets/更多.svg?react';
 import { webRequest } from '../../services/webClient';
+import { useEnterpriseContext } from '../../services/enterpriseContext';
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
 
@@ -32,7 +33,6 @@ interface SessionSidebarProps {
   showNewSession?: boolean;
   hiddenNavItems?: MainNavKey[];
   onMorePanelOpenChange?: (open: boolean) => void;
-  onSetupGuideRequest: () => void;
 }
 
 interface NavItem {
@@ -157,11 +157,12 @@ export function SessionSidebar({
   showNewSession = true,
   hiddenNavItems = [],
   onMorePanelOpenChange,
-  onSetupGuideRequest,
 }: SessionSidebarProps) {
   const { t } = useTranslation();
   const [advancedConfigOpen, setAdvancedConfigOpen] = useState(false);
   const settingsRef = useRef<HTMLButtonElement>(null);
+  const enterprise = useEnterpriseContext();
+  const [contextOpen, setContextOpen] = useState(false);
 
   const handleNewSession = useCallback(() => {
     onNavigate('chat');
@@ -269,26 +270,26 @@ export function SessionSidebar({
 
       <div className="icon-rail-spacer" />
 
-      <button
-        type="button"
-        className="icon-rail-nav-item icon-rail-help-button"
-        onClick={onSetupGuideRequest}
-        aria-label={t('modelSetupGuide.open')}
-        title={t('modelSetupGuide.open')}
-      >
-        <span className="icon-rail-nav-item__icon">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden>
-            <circle cx="12" cy="12" r="8.25" stroke="currentColor" strokeWidth="1.5" />
-            <path
-              d="M9.8 9.35a2.35 2.35 0 014.55.82c0 1.57-1.2 2.05-2.02 2.7-.48.38-.73.74-.73 1.38"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-            />
-            <circle cx="11.6" cy="17.15" r=".85" fill="currentColor" />
-          </svg>
-        </span>
-      </button>
+      {enterprise && (
+        <button type="button" className={`icon-rail-nav-item${contextOpen ? ' icon-rail-nav-item--active' : ''}`} onClick={() => setContextOpen((open) => !open)} aria-label="用户上下文" title="用户上下文">
+          <span className="icon-rail-nav-item__icon">{(enterprise.user.display_name || enterprise.user.user_id).slice(0, 1).toUpperCase()}</span>
+          <span className="icon-rail-nav-item__label">用户</span>
+        </button>
+      )}
+      {enterprise && contextOpen && (
+        <div className="enterprise-context-popover">
+          <div className="enterprise-context-popover__user">{enterprise.user.display_name || enterprise.user.user_id}<small>{enterprise.user.user_id}</small></div>
+          <label>租户<select value={enterprise.org.group_id} onChange={(event) => enterprise.onOrgChange(event.target.value)}>{enterprise.orgs.map((item) => <option key={item.group_id} value={item.group_id}>{item.name}</option>)}</select></label>
+          <label>组网<select value={enterprise.gateway.jiuwenclaw_id} onChange={(event) => enterprise.onGatewayChange(event.target.value)}>{enterprise.gateways.map((item) => <option key={item.jiuwenclaw_id} value={item.jiuwenclaw_id}>{item.jiuwenclaw_name}</option>)}</select></label>
+          <label>Bot<select value={enterprise.selectedBot} onChange={(event) => enterprise.onBotChange(event.target.value)}>{enterprise.agents.map((item) => <option key={item.resource_id || item.template_id} value={item.resource_id || item.template_id}>{item.template_name}</option>)}</select></label>
+          <button type="button" className="enterprise-context-popover__logout" onClick={() => {
+            localStorage.removeItem('openjiuwen_access_token');
+            localStorage.removeItem('openjiuwen_refresh_token');
+            localStorage.removeItem('jiuwenclaw:enterprise-context');
+            window.location.reload();
+          }}>注销登录</button>
+        </div>
+      )}
 
       <button
         ref={settingsRef}
