@@ -275,15 +275,6 @@ async def handle_sync_agents_configs(ctx: RequestContext) -> None:
 
     wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
     await ctx.sink.send_wire(wire)
-    if resp.ok:
-        from jiuwenswarm.server.agent_ws_server import (
-            schedule_skill_index_warmup_after_sync,
-        )
-
-        # sync 注入 JIUWENSWARM_SHARED_SKILLS_DIRS 后再预热。
-        # 不要 force=True：第二次 catalog sync 会取消正在扫的索引再扫一遍，
-        # 首聊窗口 filled=0 hits=N 仍占 2–5s GIL。
-        schedule_skill_index_warmup_after_sync(sync_params=params)
 
 
 async def handle_agent_prewarm_sync(ctx: RequestContext) -> None:
