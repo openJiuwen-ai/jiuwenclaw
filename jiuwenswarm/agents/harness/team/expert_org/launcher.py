@@ -5,14 +5,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-_SAFE_ID = re.compile(r"[^a-zA-Z0-9_-]+")
 
 
 @dataclass(frozen=True)
@@ -28,11 +26,6 @@ class LaunchedExpertTeam:
         data = asdict(self)
         data["capabilities"] = list(self.capabilities)
         return data
-
-
-def _safe_id_part(value: str, *, fallback: str = "x") -> str:
-    cleaned = _SAFE_ID.sub("-", str(value or "").strip()).strip("-_")
-    return cleaned or fallback
 
 
 def _leader_id_from_agent(agent: Any, team_id: str) -> str:
@@ -66,12 +59,76 @@ def _capabilities_from_agent(agent: Any) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _align_spec_storage(spec: Any, donor_db: Any) -> None:
+    """Point spec.storage at the donor DB so build uses the same TeamDatabase instance."""
+    config = getattr(donor_db, "config", None)
+    if config is None:
+        raise ValueError("donor TeamDatabase has no config")
+
+    from openjiuwen.agent_teams.schema.blueprint import StorageSpec
+
+    db_type = str(getattr(config, "db_type", "") or "sqlite").strip() or "sqlite"
+    params: dict[str, Any] = {
+        "connection_string": str(getattr(config, "connection_string", "") or ""),
+    }
+    for key in ("db_timeout", "db_enable_wal"):
+        if hasattr(config, key):
+            params[key] = getattr(config, key)
+
+    spec.storage = StorageSpec(type=db_type, params=params)
+
+
+def _read_agent_group_instruction(agent_group_name: str) -> str:
+    from jiuwenswarm.server.runtime.extension_package_manager import (
+        resolve_agent_group_dir,
+    )
+
+    package_dir = resolve_agent_group_dir(agent_group_name)
+    manifest_path = package_dir / "manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return ""
+    instruction = payload.get("instruction", "")
+    return instruction.strip() if isinstance(instruction, str) else ""
+
+
+def _read_agent_group_capabilities(agent_group_name: str) -> tuple[str, ...]:
+    from jiuwenswarm.agents.harness.team.expert_org.catalog import (
+        _capabilities_from_manifest,
+    )
+    from jiuwenswarm.server.runtime.extension_package_manager import (
+        resolve_agent_group_dir,
+    )
+
+    package_dir = resolve_agent_group_dir(agent_group_name)
+    manifest_path = package_dir / "manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return ()
+    return _capabilities_from_manifest(payload)
+
+
+def _team_build_labels(
+    *,
+    team_id: str,
+    agent_group_name: str,
+    display_name: str | None,
+    spec: Any,
+) -> tuple[str, str, str, str]:
+    team_display = str(display_name or "").strip() or agent_group_name or team_id
+    team_desc = _read_agent_group_instruction(agent_group_name) or team_display
+    leader = getattr(spec, "leader", None)
+    leader_display = str(getattr(leader, "display_name", "") or "").strip() or "leader"
+    leader_desc = str(getattr(leader, "desc", "") or "").strip()
+    return team_display, team_desc, leader_display, leader_desc
+
+
 class JiuwenExpertTeamLauncher:
     """Build an independent Team from an AgentGroup package and activate it.
 
     Flow:
-      validate package → allocate team_id → base Spec → enrich_team_spec_for_swarm
-      → TeamRuntimeManager.activate → best-effort pause → LaunchedExpertTeam
+      validate package → resolve donor DB → allocate team_id → enriched Spec
+      → activate → build_team on shared DB → verify DB refs → pause
 
     On failure after a team_id is allocated, ``stop`` is called for rollback.
     """
@@ -110,9 +167,35 @@ class JiuwenExpertTeamLauncher:
         async with self._seq_lock:
             seq = self._seq
             self._seq += 1
-        org = _safe_id_part(organization_id, fallback="org")
-        group = _safe_id_part(agent_group_name, fallback="group")
+        org = str(organization_id or "").strip() or "org"
+        group = str(agent_group_name or "").strip() or "group"
         return f"org-{org}-{group}-{seq}"
+
+    async def _resolve_donor_backend(
+        self,
+        *,
+        session_id: str,
+        team_id: str,
+        share_db_from_team_id: str | None,
+    ) -> Any | None:
+        runtime = self._get_runtime()
+        donor_id = str(share_db_from_team_id or "").strip()
+        donor_backend = None
+        if donor_id:
+            entry = await runtime.pool.get(donor_id)
+            if entry is not None:
+                donor_backend = getattr(entry.agent, "team_backend", None)
+        if donor_backend is None or getattr(donor_backend, "db", None) is None:
+            teams_for_session = getattr(runtime.pool, "teams_for_session", None)
+            if callable(teams_for_session):
+                for entry in await teams_for_session(session_id):
+                    if getattr(entry, "team_name", None) == team_id:
+                        continue
+                    candidate = getattr(entry.agent, "team_backend", None)
+                    if candidate is not None and getattr(candidate, "db", None) is not None:
+                        donor_backend = candidate
+                        break
+        return donor_backend
 
     async def _build_enriched_spec(
         self,
@@ -122,6 +205,7 @@ class JiuwenExpertTeamLauncher:
         agent_group_name: str,
         display_name: str | None,
         channel_id: str | None = None,
+        shared_db: Any | None = None,
     ) -> Any:
         """Base Team Spec from config, then AgentGroup overlay via assembly."""
         from jiuwenswarm.agents.harness.team.team_manager import TeamManager
@@ -132,6 +216,7 @@ class JiuwenExpertTeamLauncher:
         metadata = dict(getattr(spec, "metadata", None) or {})
         metadata["agent_group_name"] = agent_group_name
         metadata["expert_team"] = True
+        metadata["capabilities"] = list(_read_agent_group_capabilities(agent_group_name))
         if display_name:
             metadata["display_name"] = display_name
         updates["metadata"] = metadata
@@ -145,7 +230,66 @@ class JiuwenExpertTeamLauncher:
             request_metadata={"mode": "team", "agent_group_name": agent_group_name},
             agent_group_name=agent_group_name,
         )
+        if shared_db is not None:
+            _align_spec_storage(spec, shared_db)
         return spec
+
+    async def _materialize_expert_team_in_db(
+        self,
+        agent: Any,
+        *,
+        team_id: str,
+        agent_group_name: str,
+        display_name: str | None,
+        spec: Any,
+    ) -> None:
+        backend = getattr(agent, "team_backend", None)
+        if backend is None:
+            raise ValueError(f"activate returned no team_backend for team: {team_id}")
+
+        build_team = getattr(backend, "build_team", None)
+        if not callable(build_team):
+            raise ValueError(f"expert team backend has no build_team for team: {team_id}")
+
+        team_display, team_desc, leader_display, leader_desc = _team_build_labels(
+            team_id=team_id,
+            agent_group_name=agent_group_name,
+            display_name=display_name,
+            spec=spec,
+        )
+        await build_team(
+            display_name=team_display,
+            desc=team_desc,
+            leader_display_name=leader_display,
+            leader_desc=leader_desc,
+        )
+
+    @staticmethod
+    def _verify_shared_database(agent: Any, donor_backend: Any) -> None:
+        backend = getattr(agent, "team_backend", None)
+        if backend is None:
+            raise ValueError("expert team has no team_backend")
+
+        donor_db = getattr(donor_backend, "db", None)
+        if donor_db is None:
+            raise ValueError("donor team has no TeamDatabase")
+
+        if backend.db is not donor_db:
+            raise ValueError(
+                "expert team must use the owner's shared TeamDatabase instance"
+            )
+
+        task_manager = getattr(backend, "task_manager", None)
+        if task_manager is not None and getattr(task_manager, "db", None) is not donor_db:
+            raise ValueError(
+                "expert team task_manager must use the shared TeamDatabase instance"
+            )
+
+        message_manager = getattr(backend, "message_manager", None)
+        if message_manager is not None and getattr(message_manager, "db", None) is not donor_db:
+            raise ValueError(
+                "expert team message_manager must use the shared TeamDatabase instance"
+            )
 
     async def launch(
         self,
@@ -171,6 +315,13 @@ class JiuwenExpertTeamLauncher:
             agent_group_name=group_name,
         )
         runtime = self._get_runtime()
+        donor_backend = await self._resolve_donor_backend(
+            session_id=session_id,
+            team_id=team_id,
+            share_db_from_team_id=share_db_from_team_id,
+        )
+        shared_db = getattr(donor_backend, "db", None) if donor_backend is not None else None
+
         activated = False
         try:
             spec = await self._build_enriched_spec(
@@ -179,6 +330,7 @@ class JiuwenExpertTeamLauncher:
                 agent_group_name=group_name,
                 display_name=display_name,
                 channel_id=channel_id,
+                shared_db=shared_db,
             )
             activation = await runtime.activate(spec, session_id)
             activated = True
@@ -186,12 +338,15 @@ class JiuwenExpertTeamLauncher:
             if agent is None:
                 raise ValueError(f"activate returned no agent for team: {team_id}")
 
-            await self._share_team_database(
-                agent=agent,
-                session_id=session_id,
-                team_id=team_id,
-                share_db_from_team_id=share_db_from_team_id,
-            )
+            if donor_backend is not None:
+                await self._materialize_expert_team_in_db(
+                    agent,
+                    team_id=team_id,
+                    agent_group_name=group_name,
+                    display_name=display_name,
+                    spec=spec,
+                )
+                self._verify_shared_database(agent, donor_backend)
 
             # Design: expert Team should sit PAUSED without an idle LLM warm-up.
             pause = getattr(runtime, "pause", None)
@@ -215,50 +370,6 @@ class JiuwenExpertTeamLauncher:
             if activated or team_id:
                 await self.stop(team_id=team_id, session_id=session_id)
             raise
-
-    async def _share_team_database(
-        self,
-        *,
-        agent: Any,
-        session_id: str,
-        team_id: str,
-        share_db_from_team_id: str | None,
-    ) -> None:
-        """Reuse an existing session TeamDatabase so org invite can bind the team."""
-        backend = getattr(agent, "team_backend", None)
-        if backend is None:
-            return
-        runtime = self._get_runtime()
-        donor_id = str(share_db_from_team_id or "").strip()
-        donor_backend = None
-        if donor_id:
-            entry = await runtime.pool.get(donor_id)
-            if entry is not None:
-                donor_backend = getattr(entry.agent, "team_backend", None)
-        if donor_backend is None or getattr(donor_backend, "db", None) is None:
-            teams_for_session = getattr(runtime.pool, "teams_for_session", None)
-            if callable(teams_for_session):
-                for entry in await teams_for_session(session_id):
-                    if getattr(entry, "team_name", None) == team_id:
-                        continue
-                    candidate = getattr(entry.agent, "team_backend", None)
-                    if candidate is not None and getattr(candidate, "db", None) is not None:
-                        donor_backend = candidate
-                        donor_id = entry.team_name
-                        break
-        if donor_backend is None or getattr(donor_backend, "db", None) is None:
-            logger.warning(
-                "[ExpertTeamLauncher] no shared TeamDatabase found for team=%s session=%s",
-                team_id,
-                session_id,
-            )
-            return
-        backend.db = donor_backend.db
-        logger.info(
-            "[ExpertTeamLauncher] team %s adopted shared db from %s",
-            team_id,
-            donor_id or "session-peer",
-        )
 
     async def stop(self, *, team_id: str, session_id: str) -> None:
         name = str(team_id or "").strip()

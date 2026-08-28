@@ -60,11 +60,18 @@ def test_register_expert_adapter_installer_sets_lazy_installer(
         pass
 
     runner = _Runner()
-    import openjiuwen.agent_teams.runtime as runtime_mod
-    import openjiuwen.core.runner.runner as runner_mod
+    import sys
 
-    monkeypatch.setattr(runner_mod, "GLOBAL_RUNNER", runner)
-    monkeypatch.setattr(runtime_mod, "TeamRuntimeManager", lambda: _TeamRuntime())
+    monkeypatch.setitem(
+        sys.modules,
+        "openjiuwen.agent_teams.runtime",
+        SimpleNamespace(TeamRuntimeManager=lambda: _TeamRuntime()),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "openjiuwen.core.runner.runner",
+        SimpleNamespace(GLOBAL_RUNNER=runner),
+    )
 
     from jiuwenswarm.agents.harness.team.expert_org.wiring import (
         install_expert_org_adapters,
@@ -80,7 +87,17 @@ def test_register_expert_adapter_installer_sets_lazy_installer(
 async def test_launcher_shares_db_from_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     shared_db = object()
     owner_backend = SimpleNamespace(db=shared_db)
-    expert_backend = SimpleNamespace(db=object())
+    expert_backend = SimpleNamespace(
+        db=shared_db,
+        task_manager=SimpleNamespace(db=shared_db),
+        message_manager=SimpleNamespace(db=shared_db),
+        build_team_calls=[],
+    )
+
+    async def _build_team(**kwargs):
+        expert_backend.build_team_calls.append(kwargs)
+
+    expert_backend.build_team = _build_team
 
     class _Pool:
         async def get(self, team_name: str):
@@ -88,11 +105,6 @@ async def test_launcher_shares_db_from_owner(monkeypatch: pytest.MonkeyPatch) ->
                 return SimpleNamespace(
                     team_name="owner-team",
                     agent=SimpleNamespace(team_backend=owner_backend),
-                )
-            if team_name == "expert-team":
-                return SimpleNamespace(
-                    team_name="expert-team",
-                    agent=SimpleNamespace(team_backend=expert_backend),
                 )
             return None
 
@@ -108,7 +120,10 @@ async def test_launcher_shares_db_from_owner(monkeypatch: pytest.MonkeyPatch) ->
             agent = SimpleNamespace(
                 team_backend=expert_backend,
                 member_name="leader-expert",
-                spec=SimpleNamespace(metadata={"capabilities": ["frontend"]}),
+                spec=SimpleNamespace(
+                    metadata={"capabilities": ["frontend"]},
+                    leader=SimpleNamespace(display_name="Leader", desc="leader desc"),
+                ),
             )
             return SimpleNamespace(agent=agent)
 
@@ -122,9 +137,16 @@ async def test_launcher_shares_db_from_owner(monkeypatch: pytest.MonkeyPatch) ->
     runtime = _Runtime()
     launcher = JiuwenExpertTeamLauncher(runtime_manager=runtime, sequence_start=1)
     monkeypatch.setattr(launcher, "_validate_agent_group", lambda _name: None)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.expert_org.launcher._read_agent_group_instruction",
+        lambda _name: "group instruction",
+    )
 
     async def _fake_build(**kwargs):
-        return SimpleNamespace(team_name=kwargs["team_id"])
+        return SimpleNamespace(
+            team_name=kwargs["team_id"],
+            leader=SimpleNamespace(display_name="Leader", desc="leader desc"),
+        )
 
     monkeypatch.setattr(launcher, "_build_enriched_spec", _fake_build)
 
@@ -136,4 +158,7 @@ async def test_launcher_shares_db_from_owner(monkeypatch: pytest.MonkeyPatch) ->
     )
     assert launched.team_id == "org-org-1-sample-expert-group-1"
     assert expert_backend.db is shared_db
+    assert expert_backend.task_manager.db is shared_db
+    assert expert_backend.message_manager.db is shared_db
+    assert expert_backend.build_team_calls
     assert runtime.paused is True
