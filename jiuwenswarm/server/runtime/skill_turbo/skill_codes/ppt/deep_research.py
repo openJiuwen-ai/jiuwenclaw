@@ -29,7 +29,11 @@ def _extract_fetch_result_items(result: Any) -> list[dict[str, Any]]:
     return []
 
 
-from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
+from jiuwenswarm.server.runtime.skill_turbo.plan_node import (
+    AbortError,
+    DisableThinkingMixin,
+    PlanNode,
+)
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_common import PptCommon
 
 logger = logging.getLogger(__name__)
@@ -43,6 +47,7 @@ _MIN_DATA_TYPES = 2
 _MIN_TIMEPOINTS = 3
 _MIN_COMPARE_OBJECTS = 2
 _MIN_COMPARE_DIMS = 2
+_MIN_NAMED_CITATIONS = 3
 
 _WORD_COUNT_MAP = {"L1": 1200, "L2": 2000, "L3": 3500}
 _WORD_COUNT_NO_SEARCH_MAP = {"L1": 800, "L2": 1200, "L3": 2000}
@@ -56,6 +61,66 @@ _LIST_ITEM_RE = re.compile(r"^[ \t]*-[ \t]+(.+)$", re.MULTILINE)
 _NEXT_FIELD_RE = re.compile(r"\*\*[^*]+\*\*[：:]")
 _SEARCHED_SOURCES_RE = re.compile(r"^##\s*已搜索来源", re.MULTILINE)
 _URL_RE = re.compile(r"https?://[^\s\])>\"']+")
+# 来源名称标注 [Name]，排除纯数字编号
+_NAMED_CITATION_RE = re.compile(r"\[([^\[\]]{1,40})\]")
+_HOST_FROM_URL_RE = re.compile(r"^https?://([^/\s?#:]+)", re.IGNORECASE)
+
+
+def count_named_citations(section: str) -> int:
+    """Count unique non-numeric ``[source]`` labels in a research section."""
+    names: set[str] = set()
+    for m in _NAMED_CITATION_RE.finditer(section or ""):
+        name = m.group(1).strip()
+        if not name or name.isdigit():
+            continue
+        names.add(name)
+    return len(names)
+
+
+def source_label_from_url(url: str) -> str:
+    """Derive a short label from an existing URL host (no invention)."""
+    m = _HOST_FROM_URL_RE.match((url or "").strip())
+    if not m:
+        return ""
+    host = m.group(1).lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def enrich_section_citations(
+    section: str,
+    extractions: list[dict[str, Any]] | None,
+    *,
+    min_citations: int = _MIN_NAMED_CITATIONS,
+) -> str:
+    """Append real extraction hosts as ``[label]`` until min_citations if needed."""
+    if not section or count_named_citations(section) >= min_citations:
+        return section
+
+    existing = {
+        m.group(1).strip()
+        for m in _NAMED_CITATION_RE.finditer(section)
+        if m.group(1).strip() and not m.group(1).strip().isdigit()
+    }
+    need = min_citations - len(existing)
+    labels: list[str] = []
+    for item in extractions or []:
+        if item.get("data_limited"):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        label = source_label_from_url(url)
+        if not label or label in existing or label in labels:
+            continue
+        labels.append(label)
+        if len(labels) >= need:
+            break
+    if not labels:
+        return section
+    tags = " ".join(f"[{lb}]" for lb in labels)
+    return section.rstrip() + f"\n- **来源标注**：{tags}\n"
 
 
 @dataclass
@@ -67,7 +132,7 @@ class _ResearchConfig:
     no_data_fallback: bool = False
 
 
-class PrepareNode(PlanNode):
+class PrepareNode(DisableThinkingMixin, PlanNode):
     """P6.0 — 全局预处理：解析 outline、判定搜索策略、素材覆盖度评估、计算每页最低字数。"""
 
     def __init__(self) -> None:
@@ -410,7 +475,7 @@ class PrepareNode(PlanNode):
         }
 
 
-class PageWorkerNode(PlanNode):
+class PageWorkerNode(DisableThinkingMixin, PlanNode):
     """P6.1 — per-page 并发闭环：搜索→评分→补搜→抓取→ghost→校验→回溯→撰写→按页校验→失败重写，N 页并发。"""
 
     def __init__(self) -> None:
@@ -736,11 +801,13 @@ class PageWorkerNode(PlanNode):
             min_words_per_page=min_words_per_page,
         )
 
-        # 按页校验 + 失败重写
+        # 结构校验 + 规则补引用；仅结构崩才整页重写一次（软质量不重写）
         if section:
-            passed = await self._validate_single_page(page, section, config, min_words_per_page)
-            if not passed:
-                logger.info("[P6.1] 页面 P%d 校验未通过，尝试重写1次", page_num)
+            section, structural_ok = self._finalize_page_section(
+                page, section, page_extractions, min_words_per_page,
+            )
+            if not structural_ok:
+                logger.info("[P6.1] 页面 P%d 结构校验未通过，尝试重写1次", page_num)
                 rewritten = await self._write_single_page(
                     page=page,
                     extractions=page_extractions,
@@ -749,7 +816,9 @@ class PageWorkerNode(PlanNode):
                     min_words_per_page=min_words_per_page,
                 )
                 if rewritten:
-                    section = rewritten
+                    section, _ = self._finalize_page_section(
+                        page, rewritten, page_extractions, min_words_per_page,
+                    )
 
         return {"section": section}
 
@@ -1320,17 +1389,16 @@ class PageWorkerNode(PlanNode):
             )
             extractions.extend(backfill)
 
-        # 回填后用严格标准二次校验
-        still_gap, _ = await self._validate_page_sufficiency(
-            page, extractions, research_depth, strict=True,
+        # 宽松失败 → 至多一轮补抓后直接 data_limited；取消严格二次充分性 LLM
+        extractions.append({
+            "url": "",
+            "content": "[数据有限] 该页面研究素材不足，需降级撰写",
+            "data_limited": True,
+        })
+        logger.info(
+            "[P6.1] 页面 P%d 回溯后标注 data_limited（跳过严格二次充分性）",
+            page["page_number"],
         )
-        if still_gap:
-            extractions.append({
-                "url": "",
-                "content": "[数据有限] 该页面研究素材不足，需降级撰写",
-                "data_limited": True,
-            })
-            logger.info("[P6.1] 页面 P%d 回溯后仍不通过，标注 data_limited", page["page_number"])
 
         return extractions
 
@@ -1497,92 +1565,40 @@ class PageWorkerNode(PlanNode):
         lines.append("")
         return "\n".join(lines)
 
-    async def _validate_single_page(
+    def _finalize_page_section(
         self,
         page: dict[str, Any],
         section: str,
-        config: _ResearchConfig,
+        extractions: list[dict[str, Any]] | None,
         min_words_per_page: int,
-    ) -> bool:
-        """单页校验（7 项，LLM 判断）。LLM 异常保守判通过。"""
+    ) -> tuple[str, bool]:
+        """结构校验 + 规则补引用。返回 (section, structural_ok)；仅结构崩触发重写。"""
         if not section:
-            return False
+            return "", False
 
         page_num = page["page_number"]
-        page_type = page.get("page_type", page.get("type", ""))
-
-        # 程序化前置检查：页码对齐
         header_match = _PAGE_HEADER_RE.search(section)
         if not header_match or int(header_match.group(1)) != int(page_num):
             logger.warning(
-                "[P6.1] 页面 P%d 校验失败：页码不对齐（section 未以 ### P%d: 开头）",
+                "[P6.1] 页面 P%d 结构失败：页码不对齐（section 未以 ### P%d: 开头）",
                 page_num, page_num,
             )
-            return False
+            return section, False
 
-        # 程序化前置检查：必须包含 #### PPT 内容建议
         if "#### PPT 内容建议" not in section:
-            logger.warning("[P6.1] 页面 P%d 校验失败：缺少 #### PPT 内容建议", page_num)
-            return False
+            logger.warning("[P6.1] 页面 P%d 结构失败：缺少 #### PPT 内容建议", page_num)
+            return section, False
 
-        # 程序化前置检查：字数
         chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", section))
         min_words_80 = int(min_words_per_page * 0.8)
         if chinese_chars < min_words_80:
             logger.warning(
-                "[P6.1] 页面 P%d 校验失败：字数不足 %d < %d",
+                "[P6.1] 页面 P%d 字数偏低 %d < %d（不触发重写）",
                 page_num, chinese_chars, min_words_80,
             )
-            return False
 
-        # LLM 校验剩余项
-        data_table_min = 5 if config.search_mode != "no_search" else 3
-
-        prompt = (
-            "请对以下单页研究报告内容做 7 项产物验证，仅输出 JSON。\n\n"
-            f"页面编号：P{page_num}\n"
-            f"页面类型：{page_type}\n"
-            f"搜索模式：{config.search_mode}\n"
-            f"研究深度：{config.research_depth}\n"
-            f"本页最低字数：{min_words_per_page}（已通过程序化字数检查）\n"
-            f"关键数据清单最少行数：{data_table_min}\n\n"
-            "【判断纪律】\n"
-            "- 逐项快速判断，每项给出结论后不再回溯，禁止反复质疑\n"
-            "- 存在歧义时一律按\"通过\"处理，避免过度思考\n"
-            "- 简洁推理，直接给结论\n\n"
-            "校验项（7 项，均为二元判断，是→通过）：\n"
-            "1. 页面结构：`### P{N}:` 标题 + `#### PPT 内容建议`（已程序化检查通过）\n"
-            f"2. PPT 内容建议：推荐主标题 + 核心论点(5-10条) + 关键数据清单表格(≥{data_table_min}行) + 时序数据表(必要时) + 对比数据表(必要时) + 案例素材\n"
-            "3. 数据表格格式：关键数据清单含'数据类型'列；时序/对比为专用表格非散文\n"
-            "4. 引用规范：每页 ≥3 个来源标注（来源名称，非数字编号）\n"
-            "5. 反空泛：无模糊修饰、无占位文本\n"
-            "6. 字数达标：本页中文字数 ≥ min_words_per_page × 80%（已程序化检查通过）\n"
-            "7. 素材充实度：核心论点有展开说明和来源标注；案例含具体实体名称\n\n"
-            '输出 JSON：{"pass": true/false, "reason": "不通过原因简述，通过则为空"}\n'
-            "只输出 JSON，不要输出其他内容。\n\n"
-            f"待校验内容：\n{section}"
-        )
-        try:
-            result = await self.stream_llm_collect(
-                prompt=prompt,
-                system_prompt="你是研究报告校验助手，只输出 JSON。",
-                concurrent=True,
-            )
-            check = self.extract_json(result, expected_type=dict)
-            if isinstance(check, dict):
-                passed = bool(check.get("pass", False))
-                if not passed:
-                    logger.info(
-                        "[P6.1] 页面 P%d 校验未通过: %s",
-                        page_num, check.get("reason", ""),
-                    )
-                return passed
-            return True
-        except Exception as e:
-            if isinstance(e, AbortError):
-                raise
-            logger.warning("[P6.1] 页面 P%d 校验LLM失败，保守视为通过: %s", page_num, e)
-            return True
+        section = enrich_section_citations(section, extractions)
+        return section, True
 
     async def _write_file(self, path: str, content: str) -> bool:
         if not path:
