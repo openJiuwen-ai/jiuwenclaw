@@ -279,7 +279,7 @@ export function SessionSidebar({
           </div>
           <label>
             组织（group_id）
-            <select value={enterprise.org.group_id} onChange={event => enterprise.onOrgChange(event.target.value)}>
+            <select value={enterprise.org.group_id} disabled={enterprise.contextSwitching} onChange={event => enterprise.onOrgChange(event.target.value)}>
               {enterprise.orgs.map(item => (
                 <option key={item.group_id} value={item.group_id}>
                   {item.name} · {item.group_id}
@@ -289,7 +289,11 @@ export function SessionSidebar({
           </label>
           <label>
             组网（gateway_id）
-            <select value={enterprise.gateway.jiuwenclaw_id} onChange={event => enterprise.onGatewayChange(event.target.value)}>
+            <select
+              value={enterprise.gateway.jiuwenclaw_id}
+              disabled={enterprise.contextSwitching}
+              onChange={event => enterprise.onGatewayChange(event.target.value)}
+            >
               {enterprise.gateways.map(item => (
                 <option key={item.jiuwenclaw_id} value={item.jiuwenclaw_id}>
                   {item.jiuwenclaw_name} · {item.jiuwenclaw_id}
@@ -299,7 +303,7 @@ export function SessionSidebar({
           </label>
           <label>
             Agent（bot_id）
-            <select value={enterprise.selectedBot} onChange={event => enterprise.onBotChange(event.target.value)}>
+            <select value={enterprise.selectedBot} disabled={enterprise.contextSwitching} onChange={event => enterprise.onBotChange(event.target.value)}>
               {enterprise.agents.map(item => (
                 <option key={item.resource_id || item.template_id} value={item.resource_id || item.template_id}>
                   {item.template_name} · {item.resource_id || item.template_id}
@@ -307,6 +311,8 @@ export function SessionSidebar({
               ))}
             </select>
           </label>
+          {enterprise.contextSwitching && <div className="enterprise-context-popover__status">正在切换...</div>}
+          {enterprise.contextError && <div className="enterprise-context-popover__error">{enterprise.contextError}</div>}
           <button type="button" className="enterprise-context-popover__logout" onClick={enterprise.onLogout}>
             注销登录
           </button>
