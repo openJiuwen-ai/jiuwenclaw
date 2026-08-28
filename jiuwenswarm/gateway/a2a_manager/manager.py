@@ -22,9 +22,11 @@ _TERMINAL_REQUEST_STATUSES = frozenset({"completed", "failed", "canceled"})
 class _ManagedA2AChannel(Protocol):
     channel_id: str
 
-    async def start(self) -> None: ...
+    async def start(self) -> None:
+        ...
 
-    async def stop(self) -> None: ...
+    async def stop(self) -> None:
+        ...
 
 
 ChannelFactory = Callable[[Any, Any], _ManagedA2AChannel]
@@ -210,7 +212,12 @@ class A2AManager:
         self._starting_config = effective_config
         self._state = A2AIngressState.STARTING
         self._last_error = None
-        logger.info("a2a.ingress starting: rpc_url=http://%s:%s%s", effective_config.host, effective_config.port, effective_config.rpc_path)
+        logger.info(
+            "a2a.ingress starting: rpc_url=http://%s:%s%s",
+            effective_config.host,
+            effective_config.port,
+            effective_config.rpc_path,
+        )
         task = asyncio.create_task(channel.start(), name="a2a-channel")
         self._start_task = task
         task.add_done_callback(self._on_start_done)
@@ -220,8 +227,6 @@ class A2AManager:
     async def _await_start_locked(self, task: asyncio.Task[None]) -> None:
         try:
             await task
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # noqa: BLE001
             self._record_start_error(exc)
             raise self._as_operation_error(exc) from exc

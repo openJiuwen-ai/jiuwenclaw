@@ -1636,7 +1636,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _a2a_ingress_update(ws, req_id, params, session_id):
         payload = params.get("config", params)
         if not isinstance(payload, dict):
-            await channel.send_response(ws, req_id, ok=False, error="config must be an object", code="A2A_CONFIG_INVALID")
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="config must be an object",
+                code="A2A_CONFIG_INVALID",
+            )
             return
         patch = dict(payload)
         patch.pop("apply", None)

@@ -88,7 +88,11 @@ class A2AIngressConfigRepository:
         updates = self._to_env_updates(config.validate())
         temp_path: Path | None = None
         try:
-            lines = self._env_path.read_text(encoding="utf-8").splitlines(keepends=True) if self._env_path.is_file() else []
+            lines = (
+                self._env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+                if self._env_path.is_file()
+                else []
+            )
             pending = dict(updates)
             output: list[str] = []
             for line in lines:
