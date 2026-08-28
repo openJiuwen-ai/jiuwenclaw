@@ -116,7 +116,6 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_WEB_HTTP_PORT"]="19002"
     # Manager → Gateway 配置同步 HTTP（manager_config_receiver）
     ["GATEWAY_CONFIG_HTTP_PORT"]="8775"
-    ["GATEWAY_WEB_HTTP_PORT"]="19002"
     ["ENABLE_EXTERNAL_OBS"]="false"
     ["ENABLE_EXTERNAL_NFS"]="false"
     ["ENABLE_EXTERNAL_PVC"]="false"
