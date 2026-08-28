@@ -90,7 +90,7 @@ def resolve_playwright_mcp_cwd() -> str:
 
 def build_playwright_mcp_config() -> McpServerConfig:
     command = os.getenv("PLAYWRIGHT_MCP_COMMAND", "npx").strip() or "npx"
-    args = parse_args(os.getenv("PLAYWRIGHT_MCP_ARGS", "-y @playwright/mcp@latest"))
+    args = parse_args(os.getenv("PLAYWRIGHT_MCP_ARGS", "-y @playwright/mcp@0.0.78"))
     cwd = resolve_playwright_mcp_cwd()
     driver_mode = (os.getenv("BROWSER_DRIVER") or "").strip().lower()
     extension_mode = driver_mode == "extension" or _is_truthy_env(os.getenv("PLAYWRIGHT_MCP_EXTENSION") or "")
