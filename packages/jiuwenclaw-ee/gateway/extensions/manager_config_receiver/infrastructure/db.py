@@ -178,7 +178,16 @@ class Database:
 
 
 async def ensure_db_handler(*, log_prefix: str = "manager_config_receiver") -> DBHandler:
-    """获取 Gateway 本地库 ``DBHandler``（委托 ``GatewayDb`` 单例）。"""
+    """获取 Gateway 写库入口。
+
+    企业版在 Gateway 启动经 ``wire_manager_ws_table_store`` 注入后，优先走
+    ``PersistentStore`` 适配器；未注入时回退 ``GatewayDb`` 直连（兼容/单测）。
+    """
+    from .table_store_access import get_table_store_handler_if_wired
+
+    wired = await get_table_store_handler_if_wired()
+    if wired is not None:
+        return wired  # type: ignore[return-value]
     return await get_shared_gateway_database().ensure_ready(log_prefix=log_prefix)
 
 

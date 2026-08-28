@@ -210,6 +210,7 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
 )
 from jiuwenswarm.common.openjiuwen_rail_compat import install_evolution_rail_kwargs_compat
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
+from jiuwenswarm.agents.harness.common.rails.llm_retry_notify_rail import NotifyingLLMRetryRail
 from jiuwenswarm.agents.harness.common.rails import (
     DeepResearchExecutionRail,
     JiuSwarmStreamEventRail,
@@ -6787,7 +6788,7 @@ class JiuWenSwarmDeepAdapter:
             return None
 
     @staticmethod
-    def _build_llm_retry_rail(config_base: dict[str, Any] | None = None) -> LLMRetryRail | None:
+    def _build_llm_retry_rail(config_base: dict[str, Any] | None = None) -> NotifyingLLMRetryRail | None:
         try:
             config_base = config_base or get_config()
             guard_cfg = config_base.get("execution_guard", {}) if isinstance(config_base, dict) else {}
@@ -6795,7 +6796,7 @@ class JiuWenSwarmDeepAdapter:
             if retry_cfg.get("enabled", False) is not True:
                 logger.info("[JiuWenSwarmDeepAdapter] LLMRetryRail disabled by config")
                 return None
-            rail = LLMRetryRail(
+            rail = NotifyingLLMRetryRail(
                 max_retries=retry_cfg.get("max_retries", 2),
                 repeat_min_pattern_chars=retry_cfg.get("repeat_min_pattern_chars", 2),
                 repeat_max_pattern_chars=retry_cfg.get("repeat_max_pattern_chars", 64),
@@ -6803,8 +6804,11 @@ class JiuWenSwarmDeepAdapter:
                 repeat_min_total_chars=retry_cfg.get("repeat_min_total_chars", 160),
                 repeat_window_chars=retry_cfg.get("repeat_window_chars", 1024),
                 single_char_repeat_count=retry_cfg.get("single_char_repeat_count", 100),
+                retry_transient_invoke_errors=retry_cfg.get("retry_transient_invoke_errors", True),
+                notify_user_on_retry=retry_cfg.get("notify_user_on_retry", True),
+                notify_user_on_exhausted=retry_cfg.get("notify_user_on_exhausted", True),
             )
-            logger.info("[JiuWenSwarmDeepAdapter] LLMRetryRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] NotifyingLLMRetryRail create success")
             return rail
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] LLMRetryRail create failed: %s", exc)
@@ -7969,6 +7973,10 @@ class JiuWenSwarmDeepAdapter:
             should_enable_general_agent = should_add_general_agent and (
                 sub_mode == "plan" or (isinstance(mode, str) and mode.startswith("agent"))
             )
+            from jiuwenswarm.agents.harness.observability_runtime import (
+                get_trajectory_span_processor,
+            )
+
             common_kwargs = dict(
                 model=model,
                 card=agent_card,
@@ -7988,7 +7996,8 @@ class JiuWenSwarmDeepAdapter:
                 ),
                 sys_operation=sys_operation,
                 language=self._resolve_runtime_language(),
-                auto_create_workspace=False
+                auto_create_workspace=False,
+                trajectory_span_processor=get_trajectory_span_processor(),
             )
 
             # agent_ras YAML passthrough (Agent RAS owns loop detection / recovery).
@@ -15371,6 +15380,7 @@ class JiuWenSwarmDeepAdapter:
                     )
                 )
             run_failure: tuple[str, str] | None = None
+            emitted_chat_error = False
             # HITL 暂停标志：本轮有 ask_user 卡片发出时置位，收尾据此发
             # chat.invocation_paused 终结帧（而非普通完成帧），避免前端把"等待用户
             # 输入"误判为"任务完成"。镜像 vendor(clowder-ai) 的 _detect_hitl_pause。
@@ -15466,6 +15476,8 @@ class JiuWenSwarmDeepAdapter:
                             accumulated_reasoning = ""
                         if parsed.get("event_type") == "chat.final":
                             self._stream_content_run_kind = None
+                        if parsed.get("event_type") == "chat.error":
+                            emitted_chat_error = True
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
@@ -15606,6 +15618,8 @@ class JiuWenSwarmDeepAdapter:
                                 hitl_pending_stream = True
                             if parsed.get("event_type") == "chat.final":
                                 self._stream_content_run_kind = None
+                            if parsed.get("event_type") == "chat.error":
+                                emitted_chat_error = True
                             yield AgentResponseChunk(
                                 request_id=rid,
                                 channel_id=cid,
@@ -15625,6 +15639,8 @@ class JiuWenSwarmDeepAdapter:
                             hitl_pending_stream = True
                         if parsed.get("event_type") == "chat.final":
                             self._stream_content_run_kind = None
+                        if parsed.get("event_type") == "chat.error":
+                            emitted_chat_error = True
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
@@ -15661,6 +15677,8 @@ class JiuWenSwarmDeepAdapter:
                         hitl_pending_stream = True
                     if parsed.get("event_type") == "chat.final":
                         self._stream_content_run_kind = None
+                    if parsed.get("event_type") == "chat.error":
+                        emitted_chat_error = True
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -15670,6 +15688,20 @@ class JiuWenSwarmDeepAdapter:
                     if hitl_pending_stream:
                         suppress_stream_after_hitl = True
                         continue
+
+            if run_failure is not None and not emitted_chat_error:
+                error_type, error_message = run_failure
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=note_chat_payload({
+                        "event_type": "chat.error",
+                        "error": error_message,
+                        "error_type": error_type,
+                    }),
+                    is_complete=False,
+                )
+                emitted_chat_error = True
 
             if accumulated_text and not hitl_pending_stream:
                 # Same rule as _adapt_goal_intermediate_final: demote host
@@ -16208,6 +16240,18 @@ class JiuWenSwarmDeepAdapter:
                         else str(payload)
                     )
                     return {"event_type": "chat.error", "error": error_msg}
+
+                if chunk_type == "retry_notification":
+                    if isinstance(payload, dict):
+                        output = payload.get("output", {})
+                        content = output.get("output", "") if isinstance(output, dict) else str(output)
+                    else:
+                        content = str(payload)
+                    return {
+                        "event_type": "chat.delta",
+                        "content": content,
+                        "source_chunk_type": chunk_type,
+                    }
 
                 if chunk_type == "security.alert":
                     if isinstance(payload, dict):

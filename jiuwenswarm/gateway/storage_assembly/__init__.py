@@ -24,6 +24,7 @@ from jiuwenswarm.gateway.storage_assembly.setup import (
     create_permissions_config_repository,
     create_preferred_language_config_repository,
     create_session_map_repository,
+    ensure_enterprise_storage_context,
     is_session_map_repository_enabled,
     is_storage_repositories_enabled,
     resolve_storage_instance_id,
@@ -31,6 +32,8 @@ from jiuwenswarm.gateway.storage_assembly.setup import (
     setup_session_map_repository,
     teardown_gateway_storage_repositories,
     teardown_session_map_repository,
+    wire_enterprise_manager_ws_store,
+    wire_enterprise_manager_ws_store_async,
 )
 
 __all__ = [
@@ -51,6 +54,7 @@ __all__ = [
     "create_permissions_config_repository",
     "create_preferred_language_config_repository",
     "create_session_map_repository",
+    "ensure_enterprise_storage_context",
     "is_session_map_repository_enabled",
     "is_storage_repositories_enabled",
     "resolve_storage_instance_id",
@@ -58,5 +62,7 @@ __all__ = [
     "setup_session_map_repository",
     "teardown_gateway_storage_repositories",
     "teardown_session_map_repository",
+    "wire_enterprise_manager_ws_store",
+    "wire_enterprise_manager_ws_store_async",
     "wire_manager_ws_table_store",
 ]

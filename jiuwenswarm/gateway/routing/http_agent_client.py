@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT_SECONDS = 10.0
 _PUSH_RETRY_SECONDS = 3.0
+# 与 WebSocketAgentServerClient._delayed_cleanup_cancelled_request_id 对齐。
+_CANCELLED_RID_TTL_SECONDS = 2.0
 
 
 def http_unary_to_agent_response(
@@ -132,6 +134,9 @@ class HttpSseAgentServerClient(AgentServerClient):
         self._running = False
         self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self._push_task: asyncio.Task[None] | None = None
+        self._stream_lock = asyncio.Lock()
+        self._cancelled_request_ids: set[str] = set()
+        self._inflight_stream_ids: set[str] = set()
 
     def set_or_update_server_config(
         self,
@@ -219,6 +224,8 @@ class HttpSseAgentServerClient(AgentServerClient):
             self._http = None
         self._base_url = None
         self._api_root = None
+        self._cancelled_request_ids.clear()
+        self._inflight_stream_ids.clear()
         logger.info("[HttpSseAgentServerClient] 已断开")
 
     async def send_request(
@@ -251,6 +258,42 @@ class HttpSseAgentServerClient(AgentServerClient):
             payload, channel_id=channel_id, request_id=rid
         )
 
+    def _is_stream_cancelled(self, rid: str) -> bool:
+        return bool(rid) and rid in self._cancelled_request_ids
+
+    def _supersede_other_streams(self, rid: str) -> None:
+        """新流开始时标记其它 in-flight rid，旧 SSE 残余不再 yield。"""
+        for other in list(self._inflight_stream_ids):
+            if other and other != rid:
+                self._cancelled_request_ids.add(other)
+                asyncio.create_task(self._delayed_cleanup_cancelled_request_id(other))
+
+    async def _mark_stream_cancelled(self, rid: str) -> None:
+        if not rid:
+            return
+        async with self._stream_lock:
+            already = rid in self._cancelled_request_ids
+            self._cancelled_request_ids.add(rid)
+            self._inflight_stream_ids.discard(rid)
+        if not already:
+            asyncio.create_task(self._delayed_cleanup_cancelled_request_id(rid))
+
+    async def _delayed_cleanup_cancelled_request_id(self, rid: str) -> None:
+        try:
+            await asyncio.sleep(_CANCELLED_RID_TTL_SECONDS)
+            async with self._stream_lock:
+                self._cancelled_request_ids.discard(rid)
+        except Exception:
+            logger.exception(
+                "[HttpSseAgentServerClient] 清理已取消标记失败: request_id=%s",
+                rid,
+            )
+
+    def _should_drop_stream_chunk(self, *, envelope_rid: str, chunk_rid: str) -> bool:
+        if self._is_stream_cancelled(envelope_rid) or self._is_stream_cancelled(chunk_rid):
+            return True
+        return False
+
     async def send_request_stream(
         self, envelope: E2AEnvelope, *, base_url: str | None = None
     ) -> AsyncIterator[AgentResponseChunk]:
@@ -268,42 +311,63 @@ class HttpSseAgentServerClient(AgentServerClient):
             assembled.url,
             assembled.used_rpc_fallback,
         )
+        async with self._stream_lock:
+            self._supersede_other_streams(rid)
+            if rid:
+                self._inflight_stream_ids.add(rid)
         timeout = httpx.Timeout(None, connect=_CONNECT_TIMEOUT_SECONDS)
-        async with http.stream(
-            assembled.verb,
-            assembled.url,
-            headers=assembled.headers,
-            json=assembled.json_body,
-            params=assembled.query,
-            timeout=timeout,
-        ) as response:
-            _raise_for_pod_http_error(response, base_url=base_url)
-            if response.status_code >= 400:
-                body = await response.aread()
-                payload = _bytes_json(body, request_id=rid)
-                err = http_unary_to_agent_response(
-                    payload, channel_id=channel_id, request_id=rid
-                )
-                yield AgentResponseChunk(
-                    request_id=rid,
-                    channel_id=channel_id,
-                    payload=err.payload or {"error": "stream http error"},
-                    is_complete=True,
-                    metadata=err.metadata or {},
-                )
-                return
-            async for frame in iter_sse_data_frames(response):
-                try:
-                    chunk = parse_agent_server_wire_chunk(frame)
-                except Exception:
-                    logger.exception(
-                        "[HttpSseAgentServerClient] SSE 帧无法按 E2A chunk 解析 request_id=%s",
-                        rid,
+        try:
+            async with http.stream(
+                assembled.verb,
+                assembled.url,
+                headers=assembled.headers,
+                json=assembled.json_body,
+                params=assembled.query,
+                timeout=timeout,
+            ) as response:
+                _raise_for_pod_http_error(response, base_url=base_url)
+                if response.status_code >= 400:
+                    body = await response.aread()
+                    payload = _bytes_json(body, request_id=rid)
+                    err = http_unary_to_agent_response(
+                        payload, channel_id=channel_id, request_id=rid
                     )
-                    continue
-                if not chunk.channel_id:
-                    chunk.channel_id = channel_id
-                yield chunk
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=channel_id,
+                        payload=err.payload or {"error": "stream http error"},
+                        is_complete=True,
+                        metadata=err.metadata or {},
+                    )
+                    return
+                async for frame in iter_sse_data_frames(response):
+                    try:
+                        chunk = parse_agent_server_wire_chunk(frame)
+                    except Exception:
+                        logger.exception(
+                            "[HttpSseAgentServerClient] SSE 帧无法按 E2A chunk 解析 request_id=%s",
+                            rid,
+                        )
+                        continue
+                    if not chunk.channel_id:
+                        chunk.channel_id = channel_id
+                    chunk_rid = str(chunk.request_id or rid)
+                    if self._should_drop_stream_chunk(
+                        envelope_rid=rid, chunk_rid=chunk_rid
+                    ):
+                        logger.debug(
+                            "[HttpSseAgentServerClient] 丢弃已取消流的残余 chunk: "
+                            "request_id=%s chunk_request_id=%s",
+                            rid,
+                            chunk_rid,
+                        )
+                        continue
+                    yield chunk
+        except asyncio.CancelledError:
+            logger.info("[HttpSseAgentServerClient] 流式接收被取消: request_id=%s", rid)
+            raise
+        finally:
+            await self._mark_stream_cancelled(rid)
 
     async def _push_loop(self) -> None:
         while self._running and self._on_server_push is not None:
@@ -327,6 +391,14 @@ class HttpSseAgentServerClient(AgentServerClient):
                     async for frame in iter_sse_data_frames(response):
                         meta = frame.get("metadata")
                         if not (isinstance(meta, dict) and meta.get(E2A_WIRE_SERVER_PUSH_KEY)):
+                            continue
+                        frame_rid = str(frame.get("request_id") or "")
+                        if self._is_stream_cancelled(frame_rid):
+                            logger.debug(
+                                "[HttpSseAgentServerClient] 丢弃已取消 rid 的 server_push: "
+                                "request_id=%s",
+                                frame_rid,
+                            )
                             continue
                         handler = self._on_server_push
                         if handler is None:

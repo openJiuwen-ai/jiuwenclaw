@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.gateway.edition import resolve_gateway_edition
+from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE, resolve_gateway_edition
 from jiuwenswarm.gateway.storage.backends.db.persistent_store import DbPersistentBackend
 from jiuwenswarm.gateway.storage.backends.file_persistent import FilePersistentBackend
 from jiuwenswarm.gateway.storage.backends.memory_ephemeral import MemoryEphemeralBackend
@@ -177,6 +177,7 @@ def _wire_config_and_cron_repositories(
         set_permissions_config_repository,
     )
     from jiuwenswarm.gateway.cron.job_access import set_cron_persistent_store
+    from jiuwenswarm.gateway.storage.access import set_persistent_store
 
     edition = resolve_gateway_edition(cfg)
     instance_id = resolve_storage_instance_id(cfg)
@@ -200,22 +201,29 @@ def _wire_config_and_cron_repositories(
             store, edition, instance_id=instance_id
         )
     )
+    set_persistent_store(store)
     set_cron_persistent_store(store)
 
 
 def _clear_config_and_cron_repositories() -> None:
     from jiuwenswarm.gateway.config.channel.access import clear_channel_config_repository
+    from jiuwenswarm.gateway.config.enterprise.access import (
+        clear_enterprise_record_repositories,
+    )
     from jiuwenswarm.gateway.config.logging.access import clear_logging_config_repository
     from jiuwenswarm.gateway.config.memory.access import clear_memory_config_repository
     from jiuwenswarm.gateway.config.permissions.access import (
         clear_permissions_config_repository,
     )
     from jiuwenswarm.gateway.cron.job_access import clear_cron_persistent_store
+    from jiuwenswarm.gateway.storage.access import clear_persistent_store
 
     clear_channel_config_repository()
     clear_permissions_config_repository()
     clear_logging_config_repository()
     clear_memory_config_repository()
+    clear_enterprise_record_repositories()
+    clear_persistent_store()
     clear_cron_persistent_store()
 
 
@@ -252,6 +260,18 @@ async def setup_gateway_storage_repositories(
     if repos_on:
         _wire_config_and_cron_repositories(store, cfg)
 
+    if resolve_gateway_edition(cfg) == EDITION_ENTERPRISE:
+        from jiuwenswarm.gateway.config.enterprise.access import (
+            set_enterprise_record_repositories,
+        )
+
+        set_enterprise_record_repositories(
+            create_enterprise_record_repositories(
+                store,
+                instance_id=resolve_storage_instance_id(cfg),
+            )
+        )
+
     return ctx
 
 
@@ -260,7 +280,92 @@ async def teardown_gateway_storage_repositories(ctx: StorageContext) -> None:
 
     clear_session_map_repository()
     _clear_config_and_cron_repositories()
+    _clear_manager_ws_table_store()
     await ctx.shutdown()
+
+
+def _clear_manager_ws_table_store() -> None:
+    try:
+        from jiuwenswarm.gateway.storage_assembly.manager_ws_bridge import (
+            clear_manager_ws_table_store,
+        )
+
+        clear_manager_ws_table_store()
+    except Exception as exc:
+        logger.warning("clear manager ws table store failed: %s", exc)
+
+
+def ensure_enterprise_storage_context(
+    cfg: dict[str, Any] | None = None,
+    *,
+    existing: StorageContext | None = None,
+) -> StorageContext:
+    """企业版至少持有 ``StorageContext``（Manager WS 写路径经 ``PersistentStore``）。"""
+    if existing is not None:
+        return existing
+    if cfg is None:
+        from jiuwenswarm.common.config import get_config
+
+        cfg = get_config()
+    if resolve_gateway_edition(cfg) != EDITION_ENTERPRISE:
+        raise ValueError("ensure_enterprise_storage_context requires enterprise edition")
+    return create_gateway_storage_context(cfg)
+
+
+def wire_enterprise_manager_ws_store(
+    ctx: StorageContext,
+    cfg: dict[str, Any] | None = None,
+) -> None:
+    """同步包装：见 ``wire_enterprise_manager_ws_store_async``。"""
+    from jiuwenswarm.gateway.storage.async_bridge import run_awaitable
+
+    run_awaitable(wire_enterprise_manager_ws_store_async(ctx, cfg))
+
+
+async def wire_enterprise_manager_ws_store_async(
+    ctx: StorageContext,
+    cfg: dict[str, Any] | None = None,
+) -> None:
+    """企业版：注入 Manager WS PersistentStore 与各 Repository。"""
+    if cfg is None:
+        from jiuwenswarm.common.config import get_config
+
+        cfg = get_config()
+    if resolve_gateway_edition(cfg) != EDITION_ENTERPRISE:
+        return
+    from jiuwenswarm.gateway.storage_assembly.manager_ws_bridge import (
+        wire_manager_ws_table_store,
+    )
+
+    wire_manager_ws_table_store(ctx)
+    store = await ctx.persistent()
+    from jiuwenswarm.gateway.config.enterprise.access import (
+        set_enterprise_record_repositories,
+    )
+    from jiuwenswarm.gateway.cron.job_access import (
+        get_cron_persistent_store,
+        set_cron_persistent_store,
+    )
+    from jiuwenswarm.gateway.storage.access import (
+        get_persistent_store,
+        set_persistent_store,
+    )
+
+    set_enterprise_record_repositories(
+        create_enterprise_record_repositories(
+            store,
+            instance_id=resolve_storage_instance_id(cfg),
+        )
+    )
+    if get_persistent_store() is None:
+        set_persistent_store(store)
+    if get_cron_persistent_store() is None:
+        set_cron_persistent_store(store)
+
+    from jiuwenswarm.gateway.config.channel.access import get_channel_config_repository
+
+    if get_channel_config_repository() is None:
+        _wire_config_and_cron_repositories(store, cfg)
 
 
 async def setup_session_map_repository(
@@ -321,7 +426,6 @@ def create_channel_config_repository(
         DbRowChannelCodec,
         YamlMapChannelCodec,
     )
-    from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE
 
     if edition == EDITION_ENTERPRISE:
         codec = DbRowChannelCodec(instance_id=instance_id)
@@ -359,7 +463,6 @@ def create_permissions_config_repository(
         PermissionsConfigRepository,
         YamlSectionCodec,
     )
-    from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE
 
     codec = (
         DbBodySectionCodec()
@@ -382,7 +485,6 @@ def create_logging_config_repository(
         YamlSectionCodec,
         db_logging_codec,
     )
-    from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE
 
     codec = (
         db_logging_codec()
@@ -403,7 +505,6 @@ def create_memory_config_repository(
         MemoryConfigRepository,
         YamlSectionCodec,
     )
-    from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE
 
     codec = (
         DbBodySectionCodec()
@@ -415,8 +516,6 @@ def create_memory_config_repository(
 
 def _require_personal_config_store(edition: str, store_name: str) -> None:
     """heartbeat / browser / preferred_language / a2ui 无企业同构表。"""
-    from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE
-
     if edition == EDITION_ENTERPRISE:
         raise ValueError(
             f"{store_name} is personal-only (YAML overlay); "
@@ -544,6 +643,7 @@ __all__ = [
     "create_permissions_config_repository",
     "create_preferred_language_config_repository",
     "create_session_map_repository",
+    "ensure_enterprise_storage_context",
     "is_session_map_repository_enabled",
     "is_storage_repositories_enabled",
     "resolve_storage_instance_id",
@@ -551,4 +651,6 @@ __all__ = [
     "setup_session_map_repository",
     "teardown_gateway_storage_repositories",
     "teardown_session_map_repository",
+    "wire_enterprise_manager_ws_store",
+    "wire_enterprise_manager_ws_store_async",
 ]

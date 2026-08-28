@@ -100,12 +100,21 @@ async def _list_records_via_ee_handler(
 
 
 async def list_table_records(table: str, jiuwenclaw_id: str) -> list[dict[str, Any]]:
+    """拉取 poll 表行：优先 ``PersistentStore``，否则回退 EE handler / ``gateway_db``。"""
     if table not in _POLL_TABLES:
         logger.warning("[ConfigPoll] unsupported table: %s", table)
         return []
     jid = str(jiuwenclaw_id or "").strip()
     if table != "channel_config" and not jid:
         return []
+
+    from jiuwenswarm.gateway.storage.access import get_persistent_store
+
+    store = get_persistent_store()
+    if store is not None:
+        await store.ensure_ready()
+        rows = await store.list(table, filters=_poll_table_filters(table, jid))
+        return [dict(row) for row in rows or []]
 
     ee_rows = await _list_records_via_ee_handler(table, jid)
     if ee_rows is not None:

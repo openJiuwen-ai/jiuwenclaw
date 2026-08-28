@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -15,8 +13,6 @@ _DOC_RAW_NAME = "doc_raw.md"
 _MAX_PARSE_ATTEMPTS = 2
 _DOC_EXCERPT_MAX_CHARS = 8000
 _PDF_BATCH_SIZE = 10
-# Keep in sync with agent-core ReadFileTool.MAX_PDF_SIZE_BYTES_WITHOUT_PAGES (10 MB).
-_PDF_LARGE_FILE_BYTES = 10 * 1024 * 1024
 _PDF_MAX_AUTO_PARSE_PAGES = 200
 _PDF_TRUNCATION_MARKER = (
     "\n\n---\n"
@@ -53,6 +49,9 @@ def _normalize_tool_text(result: Any) -> str:
     if isinstance(result, str):
         return _strip_line_numbers(result)
     if isinstance(result, dict):
+        if result.get("success") is False:
+            error = result.get("error") or result.get("message") or "工具调用失败"
+            return f"[ERROR]: {error}"
         for key in ("content", "output", "result", "stdout", "text", "answer"):
             value = result.get(key)
             if isinstance(value, str) and value.strip():
@@ -63,10 +62,12 @@ def _normalize_tool_text(result: Any) -> str:
                 value = data.get(key)
                 if isinstance(value, str) and value.strip():
                     return _strip_line_numbers(value)
-        if result.get("success") is False:
-            error = result.get("error") or result.get("message")
-            if isinstance(error, str):
-                return f"[ERROR]: {error}"
+    if hasattr(result, "success") and result.success is False:
+        error = result.error if hasattr(result, "error") else None
+        if not error and hasattr(result, "message"):
+            error = result.message
+        error = error or "工具调用失败"
+        return f"[ERROR]: {error}"
     if hasattr(result, "data"):
         data_attr = result.data
         if isinstance(data_attr, dict):
@@ -77,6 +78,10 @@ def _normalize_tool_text(result: Any) -> str:
         if isinstance(data_attr, str) and data_attr.strip():
             return _strip_line_numbers(data_attr)
     return _strip_line_numbers(str(result))
+
+
+def _is_tool_error_text(text: str) -> bool:
+    return text.lstrip().startswith(("[ERROR]", "[READ_FILE_ERROR]", "[PDF_READ_ERROR]"))
 
 
 def _extract_vqa_ocr_section(text: str) -> str:
@@ -207,7 +212,7 @@ class DocumentParseNode(PlanNode):
             raise DocumentParseError("read_file 工具未注册")
         raw = await self.call_tool("read_file", file_path=str(path))
         text = _normalize_tool_text(raw).strip()
-        if text.startswith("[ERROR]"):
+        if _is_tool_error_text(text):
             raise DocumentParseError(text)
         if not text:
             raise DocumentParseError(f"read_file 返回空内容: {path}")
@@ -232,10 +237,13 @@ class DocumentParseNode(PlanNode):
                     return "\n\n".join(parts)
             raise DocumentParseError(text)
 
-        if "CODE=PDF_PAGE_RANGE_OUT_OF_BOUNDS" in text:
+        if (
+            "CODE=PDF_PAGE_RANGE_OUT_OF_BOUNDS" in text
+            or "Invalid or empty PDF page range" in text
+        ):
             return None
 
-        if text.startswith("[ERROR]") or text.startswith("[PDF_READ_ERROR]"):
+        if _is_tool_error_text(text):
             raise DocumentParseError(text)
         return text
 
@@ -294,7 +302,7 @@ class DocumentParseNode(PlanNode):
         try:
             if _is_image_path(path):
                 content = await self._read_image_file(path)
-            elif _is_pdf_path(path) and path.stat().st_size > _PDF_LARGE_FILE_BYTES:
+            elif _is_pdf_path(path):
                 content = await self._read_large_pdf_file(path)
             else:
                 content = await self._read_text_file(path)

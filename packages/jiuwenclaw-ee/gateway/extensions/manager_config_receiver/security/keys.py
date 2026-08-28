@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from openjiuwen_runtime.foundation.security import link_auth
-from openjiuwen_runtime.foundation.db.handler import DBHandler
 
+from ..infrastructure.repository_access import require_enterprise_repository
 from ..infrastructure.utils import utc_now
 from ..models.key_models import (
     GATEWAY_ENC_KEYPAIR_TABLE_DEF,
@@ -58,26 +58,10 @@ class ManagerSignPublicKey:
     fingerprint: str
 
 
-def _row_to_dict(row: Any) -> dict[str, Any] | None:
-    if row is None:
-        return None
-    if isinstance(row, dict):
-        return row
-    if hasattr(row, "to_dict"):
-        return row.to_dict()
-    return None
-
-
-async def _handler() -> DBHandler:
-    from ..core.enterprise_config.gateway_db import GatewayDb
-
-    return await GatewayDb.current().ensure_ready(log_prefix="security_keys")
-
-
 async def get_or_create_gateway_enc_keypair() -> GatewayEncKeypair:
     """加载 Gateway 加密密钥对；不存在则生成并持久化（单例，幂等）。"""
-    handler = await _handler()
-    row = _row_to_dict(await handler.get(_KEYPAIR_TABLE, {"id": _KEYPAIR_ID}))
+    repo = require_enterprise_repository(_KEYPAIR_TABLE)
+    row = await repo.get({"id": _KEYPAIR_ID})
     if row and row.get("private_key") and row.get("public_key"):
         priv = cp.b64d(row["private_key"])
         pub = cp.b64d(row["public_key"])
@@ -86,8 +70,7 @@ async def get_or_create_gateway_enc_keypair() -> GatewayEncKeypair:
     priv, pub = cp.x25519_generate()
     fp = cp.fingerprint(pub)
     now = utc_now()
-    await handler.create(
-        _KEYPAIR_TABLE,
+    await repo.create(
         {
             "id": _KEYPAIR_ID,
             "enc_alg": ENC_ALG,
@@ -107,8 +90,8 @@ async def get_or_create_gateway_sign_keypair() -> GatewaySignKeypair:
 
     直接存/读 link_auth 给的 base64 字符串，正好喂给 ``build_token``/``build_token_header``。
     """
-    handler = await _handler()
-    row = _row_to_dict(await handler.get(_SIGN_KEYPAIR_TABLE, {"id": _KEYPAIR_ID}))
+    repo = require_enterprise_repository(_SIGN_KEYPAIR_TABLE)
+    row = await repo.get({"id": _KEYPAIR_ID})
     if row and row.get("private_key") and row.get("public_key"):
         priv_b64 = str(row["private_key"])
         pub_b64 = str(row["public_key"])
@@ -118,8 +101,7 @@ async def get_or_create_gateway_sign_keypair() -> GatewaySignKeypair:
     priv_b64, pub_b64 = link_auth.generate_keypair()
     fp = link_auth.fingerprint(pub_b64)
     now = utc_now()
-    await handler.create(
-        _SIGN_KEYPAIR_TABLE,
+    await repo.create(
         {
             "id": _KEYPAIR_ID,
             "sign_alg": SIGN_ALG,
@@ -151,13 +133,17 @@ async def store_manager_sign_pubkey(
     sign_alg: str = "Ed25519",
     fingerprint: str | None = None,
 ) -> None:
-    """落库/更新 Manager 签名公钥（握手 register.ack 时调用，即“确认配对”）。"""
-    handler = await _handler()
+    """落库/更新 Manager 签名公钥（握手 register.ack 时调用，即“确认配对”）。
+
+    读写走装配层注入的 ``manager_sign_pubkey`` Repository（按启动时 ``instance_id`` 隔离）。
+    ``jiuwenclaw_id`` 仍写入行内，供对账；lookup 以 Repository scope 为准。
+    """
+    repo = require_enterprise_repository(_SIGN_PUBKEY_TABLE)
     pub = cp.b64d(public_key_b64)
     fp = fingerprint or cp.fingerprint(pub)
     now = utc_now()
-    existing = await handler.get(_SIGN_PUBKEY_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
-    data = {
+    existing = await repo.get()
+    data: dict[str, Any] = {
         "manager_id": manager_id,
         "sign_alg": sign_alg,
         "public_key": public_key_b64,
@@ -167,11 +153,14 @@ async def store_manager_sign_pubkey(
         "updated_at": now,
     }
     if existing is not None:
-        await handler.update(_SIGN_PUBKEY_TABLE, {"jiuwenclaw_id": jiuwenclaw_id}, data)
+        await repo.update({}, data)
     else:
-        await handler.create(
-            _SIGN_PUBKEY_TABLE,
-            {"jiuwenclaw_id": jiuwenclaw_id, "bound_at": now, **data},
+        await repo.create(
+            {
+                "jiuwenclaw_id": jiuwenclaw_id,
+                "bound_at": now,
+                **data,
+            },
         )
     logger.info(
         "[keys] bound manager sign pubkey jiuwenclaw_id=%s version=%s fp=%s",
@@ -185,9 +174,12 @@ async def load_manager_sign_pubkey(
     jiuwenclaw_id: str, key_version: str | None = None
 ) -> ManagerSignPublicKey | None:
     """读取 Manager 签名公钥；指定版本时需匹配，否则返回 None。"""
-    handler = await _handler()
-    row = _row_to_dict(await handler.get(_SIGN_PUBKEY_TABLE, {"jiuwenclaw_id": jiuwenclaw_id}))
+    repo = require_enterprise_repository(_SIGN_PUBKEY_TABLE)
+    row = await repo.get()
     if not row or not row.get("public_key") or str(row.get("status")) != "bound":
+        return None
+    stored_jid = str(row.get("jiuwenclaw_id") or "")
+    if jiuwenclaw_id and stored_jid and stored_jid != jiuwenclaw_id:
         return None
     stored_version = str(row.get("key_version") or "")
     if key_version and key_version != stored_version:
@@ -198,5 +190,11 @@ async def load_manager_sign_pubkey(
 
 async def delete_manager_sign_pubkey(jiuwenclaw_id: str) -> None:
     """解绑时清除该实例的 Manager 签名公钥。"""
-    handler = await _handler()
-    await handler.delete(_SIGN_PUBKEY_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
+    repo = require_enterprise_repository(_SIGN_PUBKEY_TABLE)
+    row = await repo.get()
+    if row is None:
+        return
+    stored_jid = str(row.get("jiuwenclaw_id") or "")
+    if jiuwenclaw_id and stored_jid and stored_jid != jiuwenclaw_id:
+        return
+    await repo.delete()

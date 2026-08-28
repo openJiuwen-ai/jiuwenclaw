@@ -321,7 +321,7 @@ function resolveWebHttpPort(wsPort: number): number {
 
 const frontendPort = portFromEnv('FRONTEND_PORT', 5173)
 const webPort = portFromEnv('WEB_PORT', 19000)
-const webTarget = `http://127.0.0.1:${webPort}`
+const webTarget = process.env.GATEWAY_URL?.replace(/\/$/, '') || `http://127.0.0.1:${webPort}`
 const webHttpPort = resolveWebHttpPort(webPort)
 const webHttpTarget =
   process.env.GATEWAY_WEB_HTTP_URL?.replace(/\/$/, '') ||

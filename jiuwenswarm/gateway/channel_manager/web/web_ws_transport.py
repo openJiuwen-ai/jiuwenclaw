@@ -49,6 +49,14 @@ _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
 
+# 带了 ws_id 但 peer 已不在时，这些事件不得按 session 兜底到其它连接，
+# 否则旧 HTTP SSE abort 后残余 chat.delta 会打进同会话新 outbound，前端粘泡。
+_REQUEST_SCOPED_STREAM_EVENTS = frozenset({
+    EventType.CHAT_DELTA.value,
+    EventType.CHAT_REASONING.value,
+    EventType.CHAT_FINAL.value,
+})
+
 _STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
 _STREAM_COALESCE_MAX_FRAMES = 32
 
@@ -801,6 +809,14 @@ class WebWsTransport(BaseWsChannel):
         # 调 channel.send(msg)，不会携带 RoutingTarget；但原始 Web 请求注入的
         # metadata.ws_id 会经 _chunk_to_message 保留下来。先用它收窄到发起请求的
         # 物理连接，避免同一个 session 桶里的陈旧 ws 一起收到迟到事件。
+        event_name = "chat.final"
+        if msg.event_type is not None:
+            event_name = msg.event_type.value
+        elif isinstance(msg.payload, dict):
+            payload_event_type = msg.payload.get("event_type")
+            if isinstance(payload_event_type, str) and payload_event_type.strip():
+                event_name = payload_event_type.strip()
+
         ws_set: set[Any] = set()
         metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
         request_ws_id = str(metadata.get("ws_id") or "").strip()
@@ -817,6 +833,16 @@ class WebWsTransport(BaseWsChannel):
             )
             return
         if not ws_set:
+            if request_ws_id and event_name in _REQUEST_SCOPED_STREAM_EVENTS:
+                logger.debug(
+                    "[WebChannel] drop stale stream event: event=%s ws_id=%s "
+                    "session_id=%s id=%s",
+                    event_name,
+                    request_ws_id,
+                    msg.session_id,
+                    getattr(msg, "id", ""),
+                )
+                return
             ws_set |= self.peers_for_session_ws(msg.session_id)
         if not ws_set:
             logger.debug(
@@ -825,15 +851,6 @@ class WebWsTransport(BaseWsChannel):
             )
             return
         all_clients = ws_set
-
-        # 确定事件名称
-        event_name = "chat.final"
-        if msg.event_type is not None:
-            event_name = msg.event_type.value
-        elif isinstance(msg.payload, dict):
-            payload_event_type = msg.payload.get("event_type")
-            if isinstance(payload_event_type, str) and payload_event_type.strip():
-                event_name = payload_event_type.strip()
 
         payload = self._build_event_payload(msg, event_name)
 

@@ -160,6 +160,7 @@ _INTERFACE_DEEP_MODULE = "jiuwenswarm.server.runtime.agent_adapter.interface_dee
 _skill_index_warmup_task: asyncio.Task[None] | None = None
 _skill_index_warmup_roots_cache: list[str] = []
 _skill_index_warmup_enabled_cache: str | None = None
+_startup_warmup_task: asyncio.Task[None] | None = None
 
 
 def _import_interface_deep_blocking() -> None:
@@ -201,6 +202,26 @@ async def _startup_warmup_chain() -> None:
         logger.warning(
             "[AgentWebSocketServer] checkpointer 预热失败 (首请求将兜底重试): %s", exc
         )
+
+
+async def ensure_interface_deep_and_checkpointer() -> None:
+    """Make interface_deep importable without a synchronous import on this task.
+
+    Chat/bootstrap used to ``from interface_deep import ...`` on the asyncio
+    thread. If listen-after ``to_thread(import)`` was still running, that
+    blocked the event loop on the import lock (WS recv + Creating starved).
+    Await the background chain first; only then import (cache hit).
+    """
+    task = _startup_warmup_task
+    if task is not None and not task.done():
+        await task
+    if _INTERFACE_DEEP_MODULE not in sys.modules:
+        await _warm_interface_deep_module()
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        ensure_persistent_checkpointer,
+    )
+
+    await ensure_persistent_checkpointer()
 
 
 def _parse_shared_skills_dirs_from_env_dict(env: dict) -> list[str]:
@@ -519,11 +540,10 @@ def schedule_skill_index_warmup_after_sync(
     global _skill_index_warmup_roots_cache, _skill_index_warmup_enabled_cache
 
     roots: list[str] = []
+    enabled: str | None = None
     if isinstance(sync_params, dict):
         roots = _shared_skills_dirs_from_sync_params(sync_params)
         enabled = _enabled_skills_from_sync_params(sync_params)
-        if enabled is not None:
-            _skill_index_warmup_enabled_cache = enabled
     if not roots:
         roots = _shared_skills_dirs_from_tip_namespaces()
     if not roots:
@@ -544,7 +564,32 @@ def schedule_skill_index_warmup_after_sync(
             "no shared skill roots"
         )
         return
+
+    prev_roots = list(_skill_index_warmup_roots_cache)
+    prev_enabled = _skill_index_warmup_enabled_cache
+    same_roots = prev_roots == list(roots)
+    same_enabled = enabled is None or enabled == prev_enabled
     _skill_index_warmup_roots_cache = roots
+    if enabled is not None:
+        _skill_index_warmup_enabled_cache = enabled
+
+    task = _skill_index_warmup_task
+    inflight = task is not None and not task.done()
+    if inflight:
+        logger.info(
+            "[AgentWebSocketServer] schedule_skill_index_warmup_after_sync skipped: "
+            "warmup already inflight roots=%s",
+            roots,
+        )
+        return
+    skip_unchanged = same_roots and same_enabled and not force
+    if task is not None and skip_unchanged:
+        logger.info(
+            "[AgentWebSocketServer] schedule_skill_index_warmup_after_sync skipped: "
+            "roots unchanged roots=%s",
+            roots,
+        )
+        return
     _start_skill_index_warmup(force=force)
 
 
@@ -666,7 +711,8 @@ class AgentWebSocketServer:
         self._server: Any = None
         # send_push的推送订阅者统一由PushRegistry持有，本类不持有当前连接；
         # WS侧以固定id：`WS_PUSH_SUBSCRIBER_ID`注册。
-        self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
+        # key是``_ws_capabilities_key``返回的str(id(ws))，与RequestContext.connection_id
+        self._acp_client_capabilities_by_ws: dict[str, dict[str, Any]] = {}
         # AgentManager 实例（企业多租户入口见 TenantAgentPool，按 AGENT_RUNTIME 使用）
         self._agent_manager = AgentManager()
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
@@ -810,12 +856,14 @@ class AgentWebSocketServer:
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
+        global _startup_warmup_task
         _start_skill_index_warmup()
         # 端口已 listen: interface_deep 在 thread pool import，再预热 checkpointer.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
         self._checkpointer_warmup_task = asyncio.create_task(
             _startup_warmup_chain(), name="startup-warmup"
         )
+        _startup_warmup_task = self._checkpointer_warmup_task
         # WS 监听已经开放, 现在按 config.yaml::sandbox 的 runtime.enabled +
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
@@ -905,8 +953,15 @@ class AgentWebSocketServer:
                 )
                 return
 
-            host, preferred_port = self._parse_sandbox_host_port(url)
-            port = self._allocate_internal_jiuwenbox_port(host, preferred_port)
+            from jiuwenswarm.server.handlers.sandbox import (
+                allocate_internal_jiuwenbox_port,
+                parse_sandbox_host_port,
+            )
+
+            host, preferred_port = parse_sandbox_host_port(url)
+            port = allocate_internal_jiuwenbox_port(
+                AgentServerServices(self), host, preferred_port
+            )
             if port != preferred_port:
                 url = f"http://{host}:{port}"
                 logger.info(
@@ -1359,9 +1414,7 @@ class AgentWebSocketServer:
     ) -> AgentResponse | None:
         """Return an error response when persistent checkpoint storage is unavailable."""
         try:
-            from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
-
-            await ensure_persistent_checkpointer()
+            await ensure_interface_deep_and_checkpointer()
             return None
         except Exception as exc:
             logger.exception(

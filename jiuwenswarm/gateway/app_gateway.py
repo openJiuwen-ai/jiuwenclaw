@@ -1692,6 +1692,26 @@ async def _run_with_telemetry(
         )
         gateway_storage_ctx = None
 
+    try:
+        from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE, resolve_gateway_edition
+        from jiuwenswarm.gateway.storage_assembly.setup import (
+            ensure_enterprise_storage_context,
+            wire_enterprise_manager_ws_store_async,
+        )
+
+        if resolve_gateway_edition(full_cfg) == EDITION_ENTERPRISE:
+            gateway_storage_ctx = ensure_enterprise_storage_context(
+                full_cfg,
+                existing=gateway_storage_ctx,
+            )
+            await wire_enterprise_manager_ws_store_async(gateway_storage_ctx, full_cfg)
+            logger.info("[App] Manager WS write path wired to PersistentStore")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] enterprise Manager WS storage wiring failed: %s",
+            exc,
+        )
+
     client, message_handler = await _connect_wrap_and_create_message_handler(
         client,
         agent_server_url=agent_server_url,

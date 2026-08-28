@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server import agent_http_routes as agent_http_routes_module
 from jiuwenswarm.server.agent_http_routes import ROUTES, RouteSpec
 from tests.transport.conftest import fill_path
 
@@ -447,3 +448,127 @@ def _capture_sink_warnings(fn) -> list[str]:
     finally:
         logger.removeHandler(handler)
     return seen
+
+
+def test_query_string_numeric_params_are_coerced_like_ws() -> None:
+    from jiuwenswarm.server.handlers.session import _coerce_int
+
+    for ws_value, http_value in [(1, "1"), (20, "20"), (500, "500"), (0, "0")]:
+        assert _coerce_int(ws_value, -999) == _coerce_int(http_value, -999), (
+            f"WS 传 {ws_value!r} 与 HTTP 传 {http_value!r} 归一化结果不一致 —— "
+            f"同一个方法两个传输会有不同行为。"
+        )
+
+
+def test_history_handlers_coerce_page_idx() -> None:
+    import ast
+    import inspect
+    from jiuwenswarm.server.handlers import session as session_mod
+
+    tree = ast.parse(inspect.getsource(session_mod))
+    targets = {"handle_history_get", "handle_history_get_stream"}
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.AsyncFunctionDef) and node.name in targets):
+            continue
+        found.add(node.name)
+        src = ast.unparse(node)
+        assert "_coerce_int(params.get('page_idx')" in src.replace('"', "'"), (
+            f"{node.name} 未对 page_idx 做归一化 —— HTTP query 传下来是字符串，"
+            f"get_conversation_history 的 isinstance(page_idx, int) 会判它非法。"
+        )
+    assert found == targets, f"未找到全部 handler：缺 {targets - found}"
+
+
+def test_schedule_logs_coerces_numeric_params() -> None:
+    import inspect
+    from jiuwenswarm.server.handlers import schedule as schedule_mod
+
+    src = inspect.getsource(schedule_mod)
+    for name, default in (("history_index", "-1"), ("offset", "0"), ("limit", "500")):
+        expected = f'_coerce_int(params.get("{name}"), {default})'
+        assert expected in src, f"schedule logs 未归一化 {name} —— 期望 `{expected}`"
+
+
+def test_gateway_rest_map_paths_all_exist_on_server() -> None:
+    from jiuwenswarm.gateway.routing.agent_rest_map import REST_ROUTES
+    registered = {(spec.verb, spec.path) for spec in ROUTES}
+    registered_paths = {spec.path for spec in ROUTES}
+    missing = []
+    for method, (verb, path) in sorted(REST_ROUTES.items()):
+        if (verb, path) in registered:
+            continue
+        why = "路径未注册 → 404" if path not in registered_paths else "路径在、动词不符 → 405"
+        missing.append(f"{verb:6s} {path}  ({method})  [{why}]")
+
+    assert not missing, (
+        "Gateway 南向会打这些路径，但 AgentServer 没注册。切 HTTP 后必挂，且不会降级：\n  "
+        + "\n  ".join(missing)
+    )
+
+
+def test_server_routes_all_reachable_from_gateway_map() -> None:
+    from jiuwenswarm.gateway.routing.agent_rest_map import REST_ROUTES
+
+    server_map = {spec.method: (spec.verb, spec.path) for spec in ROUTES}
+    drifted = [
+        f"{method}: server={server_map[method]}  gateway={REST_ROUTES[method]}"
+        for method in sorted(server_map.keys() & REST_ROUTES.keys())
+        if server_map[method] != REST_ROUTES[method]
+    ]
+    assert not drifted, "同一 method 两张表路径不一致：\n  " + "\n  ".join(drifted)
+
+_KNOWN_UNIMPLEMENTED_ON_SERVER = frozenset({
+    # --- Gateway 本地实现（app_web_handlers.register_method），Gateway 不转发 ---
+    "channel.dingtalk.get_conf", "channel.dingtalk.set_conf",
+    "channel.feishu.get_conf", "channel.feishu.set_conf",
+    "channel.slack.get_conf", "channel.slack.set_conf",
+    "channel.telegram.get_conf", "channel.telegram.set_conf",
+    "channel.wechat.get_conf", "channel.wechat.set_conf",
+    "channel.wechat.get_login_ui", "channel.wechat.unbind",
+    "channel.whatsapp.get_conf", "channel.whatsapp.set_conf",
+    "channel.xiaoyi.get_conf", "channel.xiaoyi.set_conf",
+    "heartbeat.get_conf", "heartbeat.set_conf",
+    "updater.check", "updater.download",
+    "updater.get_conf", "updater.set_conf", "updater.get_status",
+    # --- TUI 本地实现（tui_connect.register_local_handler）---
+    "history.list_turns",
+    "session.restore_files",
+})
+
+
+def _methods_with_server_landing_spot() -> set[str]:
+    import re
+    from pathlib import Path
+
+    from jiuwenswarm.server import dispatch as dispatch_mod
+
+    found = {m.value for m in dispatch_mod.HANDLERS}
+
+    server_dir = Path(agent_http_routes_module.__file__).parent
+    attr = re.compile(r"ReqMethod\.([A-Z0-9_]+)")
+    for path in server_dir.rglob("*.py"):
+        if "__pycache__" in path.parts or path.name == "agent_http_routes.py":
+            continue
+        for name in set(attr.findall(path.read_text(encoding="utf-8"))):
+            member = getattr(ReqMethod, name, None)
+            if member is not None:
+                found.add(member.value)
+    return found
+
+
+def test_every_route_has_a_server_landing_spot_or_is_registered_as_missing() -> None:
+    landing = _methods_with_server_landing_spot()
+    unhandled = {spec.method for spec in ROUTES} - landing
+
+    new = sorted(unhandled - _KNOWN_UNIMPLEMENTED_ON_SERVER)
+    assert not new, (
+        "这些路由声明了，但 AgentServer 上没有落点，调用方会拿到模型回的『收到』而不是错误：\n  "
+        + "\n  ".join(new)
+        + "\n补 handler，或写进 _KNOWN_UNIMPLEMENTED_ON_SERVER 并注明归属。"
+    )
+
+    stale = sorted(_KNOWN_UNIMPLEMENTED_ON_SERVER - unhandled)
+    assert not stale, (
+        "这些方法已经有落点了（或路由已删），清单该同步删掉：\n  " + "\n  ".join(stale)
+    )
