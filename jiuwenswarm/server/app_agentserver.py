@@ -29,6 +29,7 @@ from jiuwenswarm.common.utils import (
     get_env_file,
     get_logs_dir,
     get_user_workspace_dir,
+    is_enterprise,
     logger,
     prepare_workspace,
     reset_free_search_runtime_flags,
