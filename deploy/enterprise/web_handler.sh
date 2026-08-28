@@ -7,9 +7,12 @@ gen_web_file() {
     local enable_external_obs="${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}"
     local obs_url="${DEPLOY_VARS["MINIO_NAME"]}-headless.default:9000"
 
-    # 用户面自己展示认证页，不跳转到 Manager Web；端口和内部服务地址由模板注入。
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
 
+    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]; then
+        local nodeport_name="${DEPLOY_VARS["WEB_NAME"]}-nodeport"
+        yq eval 'select(.metadata.name != "'"${nodeport_name}"'")' -i "${file}"
+    fi
 
     if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}" == "true" ]; then
         obs_url="${DEPLOY_VARS["OBS_URL"]}"
@@ -54,7 +57,9 @@ gen_web_file() {
 
 render_web_files() {
     render_secret_configmap
-    ensure_available_port "WEB_NODE_PORT"
+    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" != "enterprise" ]; then
+        ensure_available_port "WEB_NODE_PORT"
+    fi
     gen_web_file
 }
 
@@ -67,7 +72,8 @@ deploy_web() {
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
     if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]; then
-        success "USER_WEB_LOGIN_ENTRY_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
+        delete_k8s_resource "service" "${name}-nodeport" "${namespace}"
+        success "User Web is available through Manager Web; standalone NodePort is disabled"
     else
         success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
     fi

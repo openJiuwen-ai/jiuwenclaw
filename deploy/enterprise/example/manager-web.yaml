@@ -32,10 +32,12 @@ spec:
               value: "http://jiuwenclaw-manager-server:8765"
             - name: MANAGER_WEB_IDP_TARGET
               value: "http://jiuwenclaw-identity:8770"
-            - name: MANAGER_WEB_GATEWAY_SSE
-              value: "http://jiuwenclaw-gateway:19001/web/invoke"
-            - name: MANAGER_WEB_USER_SERVER_TARGET
-              value: "http://jiuwenclaw-web:19000"
+            - name: MANAGER_WEB_USER_WEB_TARGET
+              value: "http://jiuwenclaw-web:5173"
+            - name: MANAGER_WEB_GATEWAY_HTTP_TARGET
+              value: "http://jiuwenclaw-gateway:19002"
+            - name: MANAGER_WEB_GATEWAY_WS_TARGET
+              value: "http://jiuwenclaw-gateway:19000"
             - name: TZ
               value: "Asia/Shanghai"
 

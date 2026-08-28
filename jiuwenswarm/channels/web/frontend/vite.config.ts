@@ -331,8 +331,7 @@ const webHttpTarget =
   `http://127.0.0.1:${webHttpPort}`
 
 export default defineConfig({
-  // 产物会被 Manager Web 挂载在 /chat/ iframe 中；使用相对资源路径，
-  // 避免 iframe 的 JS/CSS 请求回到 Manager 根路径。
+  // 相对资源路径同时支持独立根路径与 Manager Web 的 /chat/ 同源转发。
   base: './',
   plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), react(), svgr()],
   optimizeDeps: {
@@ -361,6 +360,11 @@ export default defineConfig({
       '/api/v1': {
         target: webHttpTarget,
         changeOrigin: true,
+      },
+      '/gateway-api': {
+        target: webHttpTarget,
+        changeOrigin: true,
+        rewrite: (requestPath) => requestPath.replace(/^\/gateway-api/, '/api'),
       },
       '/api/sessions': {
         target: webHttpTarget,

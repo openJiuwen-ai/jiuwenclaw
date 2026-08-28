@@ -86,6 +86,9 @@ spec:
   selector:
     app: <<WEB_NAME>>
   ports:
+    - name: http
+      port: <<WEB_HTTP_PORT>>
+      targetPort: <<WEB_HTTP_PORT>>
     - name: websocket
       port: <<WEB_WS_PORT>>         # Service 端口
       targetPort: <<WEB_WS_PORT>>   # 容器端口
