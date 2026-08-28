@@ -10,6 +10,7 @@ import './SessionSidebar.css';
 import ChannelIcon from '../../assets/sidebar/channel.svg?react';
 import PluginIcon from '../../assets/sidebar/plugin.svg?react';
 import ConfigIcon from '../../assets/sidebar/config.svg?react';
+import A2AIcon from '../../assets/sidebar/a2a.svg?react';
 import WebIcon from '../../assets/sidebar/web.svg?react';
 import PlusIcon from '../../assets/sidebar/plus.svg?react';
 import logoIcon from '/logo.svg';
@@ -21,7 +22,7 @@ import AgentDesignIcon from '../../assets/智能体.svg?react';
 import MoreDesignIcon from '../../assets/更多.svg?react';
 import { webRequest } from '../../services/webClient';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel' | 'a2aingress';
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
@@ -59,6 +60,7 @@ const moreNavItems: NavItem[] = [
   { key: 'configpanel', labelKey: 'nav.config', icon: <ConfigIcon aria-hidden /> },
   { key: 'extensions', labelKey: 'nav.extensions', icon: <PluginIcon aria-hidden /> },
   { key: 'browserpanel', labelKey: 'nav.browser', icon: <WebIcon aria-hidden /> },
+  { key: 'a2aingress', labelKey: 'nav.a2aIngress', icon: <A2AIcon aria-hidden /> },
   { key: 'updatepanel', labelKey: 'nav.update', icon: <UpdateIcon aria-hidden /> },
 ];
 

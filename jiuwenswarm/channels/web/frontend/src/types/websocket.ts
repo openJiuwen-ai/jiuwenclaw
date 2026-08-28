@@ -55,6 +55,7 @@ export interface WebError extends Error {
   code?: string;
   requestId?: string;
   retriable?: boolean;
+  payload?: unknown;
 }
 
 export interface ConnectionAckPayload {

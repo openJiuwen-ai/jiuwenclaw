@@ -48,6 +48,8 @@ if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.
 else:
     # 企业级多 Pod 共享 PVC：各 AgentServer 启动时 merge 写 config.yaml 会与并发读竞态。
     # 配置由部署侧/init 写入 PVC，运行时经 Gateway reload_config 热更新，不在此 merge。
+    from jiuwenswarm.common.local_env_config import is_enterprise
+
     if not is_enterprise():
         update_config()
 
