@@ -13,9 +13,16 @@ _CREDENTIAL_REF_RE = re.compile(r"^a2a/outbound/([^/\\\r\n]+)\.api_key$")
 
 
 class SecretStoreLike(Protocol):
-    def get(self, key: str) -> str: ...
-    def set(self, key: str, value: str, *, algorithm: str | None = None) -> None: ...
-    def delete(self, key: str) -> None: ...
+    def get(self, key: str) -> str:
+        raise NotImplementedError
+
+    def set(
+        self, key: str, value: str, *, algorithm: str | None = None
+    ) -> None:
+        raise NotImplementedError
+
+    def delete(self, key: str) -> None:
+        raise NotImplementedError
 
 
 class A2AOutboundCredentialStore:

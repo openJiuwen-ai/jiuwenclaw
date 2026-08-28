@@ -46,15 +46,28 @@ def _parse_timestamp(value: str | None) -> datetime | None:
 
 
 class A2AOutboundRecordCodec(Protocol):
-    def agent_identity(self, agent_id: str) -> dict[str, Any]: ...
-    def dispatch_identity(self, dispatch_id: str) -> dict[str, Any]: ...
-    def list_filters(self) -> dict[str, Any] | None: ...
-    def agent_to_record(self, agent: A2AOutboundAgent) -> dict[str, Any]: ...
-    def agent_from_record(self, record: Mapping[str, Any]) -> A2AOutboundAgent: ...
-    def dispatch_to_record(self, dispatch: A2AOutboundDispatch) -> dict[str, Any]: ...
+    def agent_identity(self, agent_id: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def dispatch_identity(self, dispatch_id: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def list_filters(self) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def agent_to_record(self, agent: A2AOutboundAgent) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def agent_from_record(self, record: Mapping[str, Any]) -> A2AOutboundAgent:
+        raise NotImplementedError
+
+    def dispatch_to_record(self, dispatch: A2AOutboundDispatch) -> dict[str, Any]:
+        raise NotImplementedError
+
     def dispatch_from_record(
         self, record: Mapping[str, Any]
-    ) -> A2AOutboundDispatch: ...
+    ) -> A2AOutboundDispatch:
+        raise NotImplementedError
 
 
 class JsonA2AOutboundRecordCodec:
@@ -255,8 +268,9 @@ class A2AOutboundRepository:
             stamp = updated_at or utc_now_text()
             if normalized_status in TERMINAL_DISPATCH_STATUSES:
                 changes.setdefault("finished_at", stamp)
-            if changes.get("error_code"):
-                changes["error_summary"] = safe_error_summary(changes["error_code"])
+            error_code = changes.get("error_code")
+            if error_code:
+                changes["error_summary"] = safe_error_summary(error_code)
             next_value = replace(
                 current,
                 status=normalized_status,
@@ -309,16 +323,14 @@ class A2AOutboundRepository:
                     or datetime.min.replace(tzinfo=timezone.utc)
                 ),
             )
-            expired_ids = {
-                item.dispatch_id
-                for item in ordered
-                if cutoff is not None
-                and (
-                    _parse_timestamp(item.created_at)
-                    or datetime.min.replace(tzinfo=timezone.utc)
-                )
-                < cutoff
-            }
+            expired_ids: set[str] = set()
+            if cutoff is not None:
+                for item in ordered:
+                    created_at = _parse_timestamp(item.created_at)
+                    if (
+                        created_at or datetime.min.replace(tzinfo=timezone.utc)
+                    ) < cutoff:
+                        expired_ids.add(item.dispatch_id)
             survivors = [
                 item for item in ordered if item.dispatch_id not in expired_ids
             ]
