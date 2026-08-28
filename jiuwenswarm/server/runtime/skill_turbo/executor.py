@@ -60,7 +60,11 @@ from jiuwenswarm.server.runtime.skill_turbo.fallback_handler import FallbackCont
 from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
     resolve_interactive_ask_from_inputs,
 )
-from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
+from jiuwenswarm.server.runtime.skill_turbo.plan_node import (
+    AbortError,
+    LLMOutputVisibility,
+    PlanNode,
+)
 from jiuwenswarm.server.runtime.skill_turbo.validator import (
     PlanCodeValidationError,
     PlanCodeValidator,
@@ -1735,6 +1739,7 @@ class SkillTurboExecutor:
         *,
         node_name: str = "unknown",
         concurrent: bool = False,
+        output_visibility: LLMOutputVisibility = "public",
     ) -> str:
         """
         调用 LLM（使用Rail机制）。
@@ -1746,6 +1751,8 @@ class SkillTurboExecutor:
             concurrent: 是否处于并发上下文中。True 时 Executor 自动生成
                 stream_source_id，并注入到本次产生的 llm_reasoning / llm_usage
                 事件，方便前端按调用分桶。
+            output_visibility: 模型文本的事件可见性。internal 时仍将结果返回给
+                调用节点，但不向会话流发送 llm_output / llm_reasoning。
 
         Returns:
             LLM 响应文本
@@ -1755,6 +1762,9 @@ class SkillTurboExecutor:
         """
         ctx = self._build_model_call_context()
         session = ctx.session
+        if output_visibility not in {"public", "internal"}:
+            raise ValueError("output_visibility 必须是 'public' 或 'internal'")
+        emit_llm_output = output_visibility == "public"
         # 获取模型客户端
         client = self._env.model_client
         if client is None:
@@ -1764,11 +1774,13 @@ class SkillTurboExecutor:
         source_id = self._gen_stream_source_id(node_name) if concurrent else None
 
         logger.debug(
-            "[SkillTurboExecutor] call_llm prompt_len=%s system_len=%s node=%s source_id=%s",
+            "[SkillTurboExecutor] call_llm prompt_len=%s system_len=%s node=%s "
+            "source_id=%s visibility=%s",
             len(prompt),
             len(system_prompt),
             node_name,
             source_id,
+            output_visibility,
         )
 
         # 记录节点执行
@@ -1804,7 +1816,7 @@ class SkillTurboExecutor:
 
             # 处理 reasoning_content（推理过程）并注入 source_id
             reasoning_content = getattr(response, "reasoning_content", None)
-            if reasoning_content and session:
+            if reasoning_content and session and emit_llm_output:
                 payload: dict[str, Any] = {
                     "content": str(reasoning_content),
                     "plan_name": self._display_name(node_name),
@@ -1825,7 +1837,7 @@ class SkillTurboExecutor:
             result = response.content
 
             # 处理正文内容并注入 source_id（与 reasoning 保持一致）
-            if result and session:
+            if result and session and emit_llm_output:
                 output_payload: dict[str, Any] = {
                     "content": str(result),
                     "plan_name": self._display_name(node_name),
@@ -1860,6 +1872,7 @@ class SkillTurboExecutor:
         system_prompt: str = "",
         node_name: str = "unknown",
         concurrent: bool = False,
+        output_visibility: LLMOutputVisibility = "public",
     ) -> AsyncIterator[str]:
         """
         流式调用 LLM（使用Rail机制）。
@@ -1873,6 +1886,8 @@ class SkillTurboExecutor:
             concurrent: 是否处于并发上下文中。True 时 Executor 自动生成
                 stream_source_id，并注入到本次产生的 llm_reasoning / llm_usage
                 事件，方便前端按调用分桶。
+            output_visibility: 模型文本的事件可见性。internal 时仍向调用节点
+                yield 文本，但不向会话流发送 llm_output / llm_reasoning。
 
         Yields:
             str: 流式文本片段（普通文本内容）
@@ -1883,6 +1898,9 @@ class SkillTurboExecutor:
         """
         ctx = self._build_model_call_context()
         session = ctx.session
+        if output_visibility not in {"public", "internal"}:
+            raise ValueError("output_visibility 必须是 'public' 或 'internal'")
+        emit_llm_output = output_visibility == "public"
         # 获取模型客户端
         client = self._env.model_client
         if client is None:
@@ -1892,11 +1910,13 @@ class SkillTurboExecutor:
         source_id = self._gen_stream_source_id(node_name) if concurrent else None
 
         logger.debug(
-            "[SkillTurboExecutor] stream_llm prompt_len=%s system_len=%s node=%s source_id=%s",
+            "[SkillTurboExecutor] stream_llm prompt_len=%s system_len=%s node=%s "
+            "source_id=%s visibility=%s",
             len(prompt),
             len(system_prompt),
             node_name,
             source_id,
+            output_visibility,
         )
 
         # 记录节点执行
@@ -1935,7 +1955,7 @@ class SkillTurboExecutor:
                     # 框架层面自动发送 reasoning 事件，业务代码无需关心
                     reasoning_content = getattr(chunk, "reasoning_content", None)
                     if reasoning_content:
-                        if session:
+                        if session and emit_llm_output:
                             reasoning_payload: dict[str, Any] = {
                                 "content": str(reasoning_content),
                                 "plan_name": self._display_name(node_name),
@@ -1963,7 +1983,7 @@ class SkillTurboExecutor:
                         accumulated_message += text_chunk
 
                         # 通过 session stream 发送正文 delta（与 reasoning 保持一致）
-                        if session:
+                        if session and emit_llm_output:
                             output_payload: dict[str, Any] = {
                                 "content": str(text_chunk),
                                 "plan_name": self._display_name(node_name),

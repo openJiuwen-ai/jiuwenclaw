@@ -4,7 +4,11 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
+from jiuwenswarm.server.runtime.skill_turbo.plan_node import (
+    AbortError,
+    LLMOutputVisibility,
+    PlanNode,
+)
 
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_common import NODE_DISPLAY_NAMES
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.pipeline_init import PipelineInitNode
@@ -94,6 +98,9 @@ def _append_subplan_step(
 
 
 class PPTGenRootNode(PlanNode):
+    # 该流程中的模型文本用于构造中间产物，由节点自行输出进度与交付信息。
+    llm_output_visibility: LLMOutputVisibility = "internal"
+
     # 节点显示名映射：供 Executor 读取，将内部 plan_name 转为前端展示的中文名。
     display_names: dict[str, str] = NODE_DISPLAY_NAMES
 
