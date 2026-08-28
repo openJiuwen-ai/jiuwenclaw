@@ -2087,6 +2087,10 @@ async def _consume_stream_with_query(
     # 否则同文双发（多气泡时间线下两个 final 各开一卡 → 重复展示、历史双写）；
     # 每次 task_completion 判定后复位，不影响后续无原生 final 的纯文本回合
     leader_final_emitted = False
+    # 本周期经 task_completion 合成的 chat.final 文本：部分模型（GLM 实证）的
+    # answer 原生帧晚于 task_completion 到达（顺序与上面守卫假设相反），
+    # chat.final 分支据此文丢弃同文迟到重复帧——否则同文双发开两卡、历史同 id 双写
+    leader_synth_text = ""
     # 纯文本回合的即时收尾标记：仅当本轮无任何团队活动（无团队事件/无工具调用/
     # 无成员产出）且 leader 以 task_completion 收尾时置位——下一轮循环开头 break
     # （运行时暂停，下次发送 resume_from_pause 热恢复）。leader 先答、成员后报的
@@ -2212,6 +2216,8 @@ async def _consume_stream_with_query(
                             "role": TeamRole.LEADER.value,
                         }
                         final_from_completion = True
+                        # 记录合成文本：迟到的同文原生 final 在下方 chat.final 分支丢弃
+                        leader_synth_text = str(parsed["content"] or "")
                         # 合成即重置：buffer 已完成本轮使命
                         leader_round_text = ""
             if parsed is not None:
@@ -2393,9 +2399,23 @@ async def _consume_stream_with_query(
                     # 客户端同 seq 覆盖（重试去重）、新 seq 封段开新卡；
                     # 随载荷进历史落盘 extra，刷新后按段恢复
                     if is_leader:
+                        # 迟到的原生 final 与本周期合成帧同文（answer chunk 晚于
+                        # task_completion 到达）→ 丢弃：不广播、不占泡序号、不落盘，
+                        # 防同文双发开两卡 + 历史同 id 双写。比对后即消费合成文本，
+                        # 避免误伤后续周期同文的新发言；不同文（真重新生成）正常放行。
+                        if (
+                            not final_from_completion
+                            and leader_synth_text
+                            and str(parsed.get("content") or "") == leader_synth_text
+                        ):
+                            leader_synth_text = ""
+                            continue
                         # 标记本周期已发 final（含合成），轮末 task_completion
                         # 据此跳过重复合成
                         leader_final_emitted = True
+                        if not final_from_completion:
+                            # 原生 final 落定：旧合成文本失效（防跨周期误伤同文新发言）
+                            leader_synth_text = ""
                         parsed["bubble_seq"] = leader_bubble_seq
                         leader_bubble_seq += 1
                         # 原生 final 同样意味着本轮落定：重置累积 buffer

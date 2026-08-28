@@ -4631,3 +4631,131 @@ async def test_native_final_suppresses_completion_synthesis(monkeypatch):
 
     finals = [e for e in manager.events if e.get("event_type") == "chat.final"]
     assert [e.get("content") for e in finals] == ["同文答案", "第二轮只有 completion"]
+
+
+def _llm_output_chunk(text: str):
+    """leader 正文流式 chunk（parse 转 chat.delta，不产生原生 final）。"""
+    return SimpleNamespace(type="llm_output", payload=text, role=None)
+
+
+def _answer_chunk(text: str):
+    """leader 答案的原生"正式帧"（parse 转原生 chat.final）。"""
+    return SimpleNamespace(type="answer", payload=text, role=None)
+
+
+@pytest.mark.asyncio
+async def test_late_native_final_same_text_dropped(monkeypatch):
+    """task_completion 先于 answer 原生帧到达——
+    合成兜底先行（bubble_seq=0），迟到的同文原生 final 必须丢弃
+    （不广播、不占泡序号），否则同文双发开两卡 + 历史同 id 双写。"""
+    manager = _RecordingTeamManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+
+    def _fake_parse(chunk):
+        ctype = getattr(chunk, "type", None)
+        if ctype == "team.member":
+            return {
+                "event_type": "team.member",
+                "event": {"type": "team.member.status_changed", "member_id": "m1"},
+            }
+        if ctype == "llm_output":
+            return {"event_type": "chat.delta", "content": chunk.payload}
+        if ctype == "answer":
+            return {"event_type": "chat.final", "content": chunk.payload}
+        return None  # task_completion 被 parse 丢弃（生产行为）
+
+    monkeypatch.setattr(team_helpers, "parse_stream_chunk", _fake_parse)
+
+    async def _fake_stream(**kwargs):
+        # 团队事件先行（防纯文本回合即时收尾提前断流，干扰断言）
+        yield SimpleNamespace(type="team.member", payload={}, role=TeamRole.LEADER)
+        # 实证顺序：正文 delta → task_completion → answer 原生帧
+        yield _llm_output_chunk("同文答案")
+        yield _completion_chunk("同文答案")
+        yield _answer_chunk("同文答案")
+
+    monkeypatch.setattr(team_helpers.Runner, "run_agent_team_streaming", _fake_stream)
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web", "sess-late-native", SimpleNamespace(team_name="spec-team"), "问",
+    )
+
+    finals = [e for e in manager.events if e.get("event_type") == "chat.final"]
+    assert len(finals) == 1
+    assert finals[0]["content"] == "同文答案"
+    assert finals[0]["bubble_seq"] == 0
+
+
+@pytest.mark.asyncio
+async def test_late_native_final_different_text_passes(monkeypatch):
+    """迟到原生帧与合成文本不同（轮末真重新生成）→ 正常放行开新卡。"""
+
+    manager = _RecordingTeamManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+
+    def _fake_parse(chunk):
+        ctype = getattr(chunk, "type", None)
+        if ctype == "team.member":
+            return {
+                "event_type": "team.member",
+                "event": {"type": "team.member.status_changed", "member_id": "m1"},
+            }
+        if ctype == "answer":
+            return {"event_type": "chat.final", "content": chunk.payload}
+        return None
+
+    monkeypatch.setattr(team_helpers, "parse_stream_chunk", _fake_parse)
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(type="team.member", payload={}, role=TeamRole.LEADER)
+        yield _completion_chunk("答案A")
+        yield _answer_chunk("答案B-重新生成")
+
+    monkeypatch.setattr(team_helpers.Runner, "run_agent_team_streaming", _fake_stream)
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web", "sess-regen", SimpleNamespace(team_name="spec-team"), "问",
+    )
+
+    finals = [e for e in manager.events if e.get("event_type") == "chat.final"]
+    assert [e.get("content") for e in finals] == ["答案A", "答案B-重新生成"]
+    assert [e.get("bubble_seq") for e in finals] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_multi_speech_double_completion_single_card_each(monkeypatch):
+    """每发言 = [task_completion ×2, answer 原生帧]——每次发言只留一张卡（合成帧），
+    同文迟到原生均丢弃，泡序号连续不跳号。"""
+
+    manager = _RecordingTeamManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+
+    def _fake_parse(chunk):
+        ctype = getattr(chunk, "type", None)
+        if ctype == "team.member":
+            return {
+                "event_type": "team.member",
+                "event": {"type": "team.member.status_changed", "member_id": "m1"},
+            }
+        if ctype == "answer":
+            return {"event_type": "chat.final", "content": chunk.payload}
+        return None
+
+    monkeypatch.setattr(team_helpers, "parse_stream_chunk", _fake_parse)
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(type="team.member", payload={}, role=TeamRole.LEADER)
+        for text in ("发言一", "发言二"):
+            yield _completion_chunk(text)
+            yield _completion_chunk(text)
+            yield _answer_chunk(text)
+
+    monkeypatch.setattr(team_helpers.Runner, "run_agent_team_streaming", _fake_stream)
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web", "sess-multi-speech", SimpleNamespace(team_name="spec-team"), "问",
+    )
+
+    finals = [e for e in manager.events if e.get("event_type") == "chat.final"]
+    assert [e.get("content") for e in finals] == ["发言一", "发言二"]
+    assert [e.get("bubble_seq") for e in finals] == [0, 1]
