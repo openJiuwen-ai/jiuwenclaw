@@ -40,7 +40,7 @@ def _capture():
 
 
 async def _call_dissolve(
-    request, *, resolved_name: str | None = "oc_team_x__sess_1"
+    request, *, resolved_name: str | None = "oc_team_x__sess_1", clear_raises=None
 ) -> dict:
     from jiuwenswarm.server import agent_ws_server as mod
     from jiuwenswarm.server.handlers import team as team_handlers
@@ -48,7 +48,7 @@ async def _call_dissolve(
     captured, fake_encode = _capture()
     fake_tm = MagicMock()
     fake_tm.stop_session_runtime = AsyncMock(return_value=True)
-    fake_tm.clear_session_initialized = MagicMock()
+    fake_tm.clear_session_initialized = MagicMock(side_effect=clear_raises)
 
     with patch(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
@@ -103,6 +103,19 @@ async def test_dissolve_calls_runner_reset_with_resolved_name():
     assert resp.payload["session_id"] == "sess_1"
     # 回显解析后的权威运行时名，而非请求参数里的 team_name。
     assert resp.payload["team_name"] == "oc_team_x__sess_1"
+
+
+@pytest.mark.asyncio
+async def test_dissolve_continues_when_clear_initialized_fails():
+    params = {"team_name": "oc_team_x", "session_id": "sess_1"}
+    captured = await _call_dissolve(
+        _make_request(params), clear_raises=RuntimeError("clear failed")
+    )
+
+    captured["runner_reset"].assert_awaited_once()
+    captured["fake_tm"].clear_session_initialized.assert_called_once_with("sess_1")
+    assert captured["resp"].ok is True
+    assert captured["resp"].payload["dissolved"] is True
 
 
 @pytest.mark.asyncio

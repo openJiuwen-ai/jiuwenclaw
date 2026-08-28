@@ -945,7 +945,15 @@ async def handle_team_runtime_dissolve(ctx: RequestContext) -> None:
                     session_id,
                     exc,
                 )
-            team_manager.clear_session_initialized(session_id)
+            try:
+                team_manager.clear_session_initialized(session_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] clear_session_initialized (dissolve) "
+                    "failed: session_id=%s error=%s",
+                    session_id,
+                    exc,
+                )
             # 1.5) 解析 keep-set：现跑 reconcile 对齐模板后取 leader + predefined
             #      成员名（时序陷阱：dissolve 先于下一轮 chat.send，此刻冻结快照
             #      仍含被删成员，故不读冻结原样，必经 reconcile）。None = 模板不可
