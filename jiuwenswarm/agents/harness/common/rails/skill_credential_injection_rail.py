@@ -21,6 +21,18 @@ logger = logging.getLogger(__name__)
 SHELL_PERMISSION_TOOLS = frozenset(
     {"bash", "shell", "mcp_exec_command", "create_terminal", "exec_command"}
 )
+_DEFAULT_SHELL_TYPES = frozenset({"auto", "cmd", "bash", "sh"})
+
+
+def _should_strip_powershell_amp_prefix(
+    tool_name: str, command: Any, shell_type: Any
+) -> bool:
+    """True when bash command uses PowerShell '&' prefix under a non-PowerShell shell."""
+    if tool_name != "bash":
+        return False
+    if not isinstance(command, str) or not command.lstrip().startswith("& "):
+        return False
+    return shell_type in _DEFAULT_SHELL_TYPES
 
 
 def coalesce_skill_envs(
@@ -100,8 +112,9 @@ class SkillCredentialInjectionRail(DeepAgentRail):
         if not credentials:
             return
 
-        # BashTool (agent-core) and mcp_exec_command both honor tool_args["env"].
-        self._inject_credentials(ctx.inputs, credentials)
+        # 注入凭据到 tool_args["env"]，BashTool 会转发给子进程。
+        # 同时处理 PowerShell '&' 语法（去前缀保持 auto shell）。
+        self._inject_credentials(ctx.inputs, credentials, tool_name)
         logger.debug(
             "[SkillCredentialInjectionRail] injected env keys=%s for skill=%s tool=%s",
             list(credentials.keys()),
@@ -112,7 +125,9 @@ class SkillCredentialInjectionRail(DeepAgentRail):
     def _resolve_session_id(self, ctx: AgentCallbackContext) -> str:
         return resolve_skill_session_id(ctx, self._preset_session_id)
 
-    def _inject_credentials(self, inputs: ToolCallInputs, credentials: dict[str, str]) -> None:
+    def _inject_credentials(
+        self, inputs: ToolCallInputs, credentials: dict[str, str], tool_name: str
+    ) -> None:
         tool_args: Any = inputs.tool_args
         if tool_args is None:
             return
@@ -128,6 +143,16 @@ class SkillCredentialInjectionRail(DeepAgentRail):
             inputs.tool_args = tool_args
 
         if isinstance(tool_args, dict):
+            command = tool_args.get("command", "")
+
+            # 当 bash 工具的命令以 PowerShell 调用操作符 '&' 开头时，
+            # 去掉 '&' 前缀让命令在默认 shell(auto=Git Bash/cmd)下直接执行，
+            # 避免 cmd 报 "& was unexpected" 及 Git Bash 的后台执行语义。
+            # 若 LLM 显式指定了 powershell 则保留原样（尊重其意图）。
+            shell_type = tool_args.get("shell_type", "auto")
+            if _should_strip_powershell_amp_prefix(tool_name, command, shell_type):
+                tool_args["command"] = command.lstrip()[2:].lstrip()
+
             env = tool_args.get("env")
             if not isinstance(env, dict):
                 env = {}

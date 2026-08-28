@@ -406,6 +406,18 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         )
         return {"event_type": "chat.error", "error": error_msg}
 
+    if chunk_type == "retry_notification":
+        if isinstance(payload, dict):
+            output = payload.get("output", {})
+            content = output.get("output", "") if isinstance(output, dict) else str(output)
+        else:
+            content = str(payload)
+        return {
+            "event_type": "chat.delta",
+            "content": content,
+            "source_chunk_type": chunk_type,
+        }
+
     if chunk_type in ("thinking", "llm_toolcall_progress"):
         # `thinking`: model 处理中（既有）。
         # `llm_toolcall_progress`: tool_call 长流式期间 react_agent 节流发的心跳

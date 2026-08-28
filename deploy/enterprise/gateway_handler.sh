@@ -149,8 +149,9 @@ deploy_gateway() {
     local is_external_pvc="${DEPLOY_VARS["ENABLE_EXTERNAL_PVC"]}"
 
     ensure_secret_configmap
-    exec_cmd kubectl create configmap -n ${namespace} ${envfile_name} --from-file=.env=${env_file}
-    exec_cmd kubectl create configmap -n ${namespace} ${conf_name} --from-file=config.yaml=${conf_file}
+    # 使用 apply 保证重复部署幂等：ConfigMap 已存在时更新内容，不因 create 冲突失败。
+    exec_cmd kubectl apply -f ${CONFIG_DIR}/gateway-envfile.configmap.yaml
+    exec_cmd kubectl apply -f ${CONFIG_DIR}/gateway-config.configmap.yaml
 
     if [[ "${mount_type}" == "pvc" && "${is_external_pvc}" == "false" ]]; then
         exec_cmd kubectl apply -f ${pvc_file}

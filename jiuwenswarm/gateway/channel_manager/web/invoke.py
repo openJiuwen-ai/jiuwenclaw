@@ -18,6 +18,29 @@ logger = logging.getLogger(__name__)
 # mapped routes already expose so WebSocket and HTTP have identical behavior.
 _LOCAL_ROUTING_IDENTITY_PREFIXES = ("cron.", "skills.enterprise.")
 
+_ENTERPRISE_BLOCKED_EXACT = frozenset({
+    "config.set", "config.save_all", "models.replace_all", "models.save",
+    "models.remove", "models.set_active", "path.set", "updater.download",
+    "updater.upgrade", "updater.reset_source", "updater.set_conf",
+})
+_ENTERPRISE_BLOCKED_PREFIXES = ("agents.", "teams.", "extensions.", "plugins.")
+_ENTERPRISE_SKILL_ALLOWED = frozenset({"skills.list", "skills.get", "skills.enterprise.list"})
+
+
+def is_enterprise_write_forbidden(method: str) -> bool:
+    """Central guard shared by WS and HTTP; Cron and locale remain user-writable."""
+    from jiuwenswarm.gateway.edition import is_gateway_enterprise
+
+    if not is_gateway_enterprise():
+        return False
+    if method in _ENTERPRISE_BLOCKED_EXACT or method.startswith(_ENTERPRISE_BLOCKED_PREFIXES):
+        return True
+    if method.startswith("channel.") and (method.endswith(".set_conf") or method.endswith(".unbind")):
+        return True
+    if method.startswith("skills.") and method not in _ENTERPRISE_SKILL_ALLOWED:
+        return True
+    return False
+
 
 async def dispatch_web_request(
     channel: Any,
@@ -39,6 +62,13 @@ async def dispatch_web_request(
         HANDLER_BEFORE_CALLBACK_METHODS as _HANDLER_BEFORE_CALLBACK_METHODS,
         MethodHandlerInvocation as _MethodHandlerInvocation,
     )
+
+    if is_enterprise_write_forbidden(method):
+        await channel.send_response(
+            outbound, request_id, ok=False,
+            error="企业版配置由管理面统一下发", code="FORBIDDEN",
+        )
+        return
 
     handler = channel.rpc.method_handlers.get(method)
     handler_params = params
