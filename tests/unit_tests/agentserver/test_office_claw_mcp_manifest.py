@@ -165,3 +165,59 @@ def test_load_manifest_returns_none_when_file_missing(
     monkeypatch.setenv("OFFICE_CLAW_MCP_MANIFEST_PATH", str(tmp_path / "nope.json"))
 
     assert _load_office_claw_mcp_manifest(_params(bundle)) is None
+
+
+@pytest.mark.asyncio
+async def test_manifest_switch_disabled_falls_back_to_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _write_bundle(tmp_path)
+    manifest = _write_manifest(tmp_path, _tools(), _bundle_fingerprint(bundle))
+    monkeypatch.setenv("OFFICE_CLAW_MCP_MANIFEST_PATH", str(manifest))
+    monkeypatch.setenv("JIUWENSWARM_MCP_MANIFEST", "0")
+    discovered = [{"name": "office_claw_post_message", "description": "live", "input_params": {}}]
+    monkeypatch.setattr(
+        mcp_config,
+        "_list_office_claw_mcp_tools_uncached",
+        AsyncMock(return_value=discovered),
+    )
+    monkeypatch.setenv("JIUWENSWARM_MCP_SCHEMA_CACHE", "0")
+
+    result = await list_office_claw_mcp_tools(_params(bundle))
+
+    assert result == discovered
+
+
+@pytest.mark.asyncio
+async def test_manifest_switch_off_values_all_disable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _write_bundle(tmp_path)
+    manifest = _write_manifest(tmp_path, _tools(), _bundle_fingerprint(bundle))
+    monkeypatch.setenv("OFFICE_CLAW_MCP_MANIFEST_PATH", str(manifest))
+
+    for off_val in ("0", "false", "no", "off", "FALSE", "Off"):
+        monkeypatch.setenv("JIUWENSWARM_MCP_MANIFEST", off_val)
+        assert _load_office_claw_mcp_manifest(_params(bundle)) is None, f"should be disabled for {off_val!r}"
+
+
+@pytest.mark.asyncio
+async def test_manifest_switch_truthy_values_keep_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _write_bundle(tmp_path)
+    manifest = _write_manifest(tmp_path, _tools(), _bundle_fingerprint(bundle))
+    monkeypatch.setenv("OFFICE_CLAW_MCP_MANIFEST_PATH", str(manifest))
+    monkeypatch.setattr(
+        mcp_config,
+        "_list_office_claw_mcp_tools_uncached",
+        AsyncMock(side_effect=AssertionError("spawn should be skipped")),
+    )
+
+    for on_val in ("1", "true", "yes", "on", ""):
+        monkeypatch.setenv("JIUWENSWARM_MCP_MANIFEST", on_val)
+        result = await list_office_claw_mcp_tools(_params(bundle))
+        assert result is not None and len(result) == 3, f"should be enabled for {on_val!r}"
