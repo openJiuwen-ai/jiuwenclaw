@@ -34,6 +34,7 @@ import {
 } from '../../features/workspace/projectDirectoryPicker';
 import { toDisplaySessionTitle } from '../../utils/documentMessage';
 import './ConversationSidebar.css';
+import { isEnterpriseMode } from '../../edition';
 import '../dialogs/dialogs.css';
 import AddProjectIcon from '../../assets/work-mode/add-project.svg?react';
 import ArrowRightIcon from '../../assets/work-mode/arrow-right.svg?react';
@@ -709,6 +710,7 @@ export function ConversationSidebar({
   isCronActive,
 }: ConversationSidebarProps) {
   const { t } = useTranslation();
+  const enterpriseMode = isEnterpriseMode();
   const runtimes = useChatStore((state) => state.runtimes);
   const [relativeTimeNow, setRelativeTimeNow] = useState(Date.now);
   const [unreadSessions, setUnreadSessions] = useState(loadUnreadSessions);
@@ -1272,7 +1274,7 @@ export function ConversationSidebar({
                   projectMenu: Boolean(project && !isDefaultProject(project)),
                 });
               })}
-              {pinnedProjects.map((project) => renderProject(project))}
+              {!enterpriseMode && pinnedProjects.map((project) => renderProject(project))}
             </div>
           </div>
         ) : null}
@@ -1288,6 +1290,7 @@ export function ConversationSidebar({
             </div>
           </div>
         ) : null}
+{!enterpriseMode ? (
         <div className="conversation-sidebar__group conversation-sidebar__project-add" ref={addMenuRef}>
           <div className="conversation-sidebar__section-heading">
             <span className="conversation-sidebar__label">{t('multiSession.project.projects')}</span>
@@ -1329,6 +1332,7 @@ export function ConversationSidebar({
             {regularProjects.map((project) => renderProject(project))}
           </div>
         </div>
+) : null}
         <div className="conversation-sidebar__group conversation-sidebar__group--conversations">
           <div className="conversation-sidebar__section-heading">
             <span className="conversation-sidebar__label">{t('multiSession.conversations')}</span>

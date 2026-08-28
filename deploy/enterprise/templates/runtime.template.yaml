@@ -53,6 +53,13 @@ spec:
       labels:
         app: <<AGENT_RUNTIME_NAME>>
     spec:
+      volumes:
+        - name: gateway-env-file
+          configMap:
+            name: <<GATEWAY_ENV_FILE_CM_NAME>>
+            items:
+              - key: .env
+                path: .env
       serviceAccountName: <<AGENT_RUNTIME_NAME>>-sa
       affinity:
         podAntiAffinity:
@@ -88,6 +95,11 @@ spec:
           envFrom:
             - secretRef:
                 name: <<SECRET_CM_NAME>>
+          volumeMounts:
+            - name: gateway-env-file
+              mountPath: /etc/jiuwenclaw/gateway.env
+              subPath: .env
+              readOnly: true
           env:
             - name: AGENT_RUNTIME_MODE
               value: "server"

@@ -340,6 +340,8 @@ def build_gateway_env(
             "GATEWAY_CONFIG_RECEIVER_ENABLED": "true" if enabled else "false",
         }
     )
+    if manager_http_url is not None:
+        env["GATEWAY_MANAGER_HTTP_URL"] = manager_http_url
     if manager_config_public_host is not None:
         env["GATEWAY_CONFIG_PUBLIC_HOST"] = manager_config_public_host
     ut_log(
@@ -350,6 +352,7 @@ def build_gateway_env(
         gateway_port=gateway_port,
         jiuwenclaw_id=jiuwenclaw_id,
         manager_config_receiver_enabled=env["GATEWAY_CONFIG_RECEIVER_ENABLED"],
+        manager_http_url=env.get("GATEWAY_MANAGER_HTTP_URL"),
         manager_config_public_host=env.get("GATEWAY_CONFIG_PUBLIC_HOST"),
         gateway_sqlite_path=env["GATEWAY_SQLITE_PATH"],
         log_root_path=env["LOG_ROOT_PATH"],

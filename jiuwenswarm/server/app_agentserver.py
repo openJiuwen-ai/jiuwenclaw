@@ -30,6 +30,7 @@ from jiuwenswarm.common.utils import (
     get_env_file,
     get_logs_dir,
     get_user_workspace_dir,
+    is_enterprise,
     logger,
     prepare_workspace,
     reset_free_search_runtime_flags,
@@ -38,6 +39,8 @@ from jiuwenswarm.common.utils import (
 )
 
 migrate_legacy_user_config_if_needed()
+
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
@@ -49,6 +52,8 @@ if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.
 else:
     # 企业级多 Pod 共享 PVC：各 AgentServer 启动时 merge 写 config.yaml 会与并发读竞态。
     # 配置由部署侧/init 写入 PVC，运行时经 Gateway reload_config 热更新，不在此 merge。
+    from jiuwenswarm.common.local_env_config import is_enterprise
+
     if not is_enterprise():
         update_config()
 

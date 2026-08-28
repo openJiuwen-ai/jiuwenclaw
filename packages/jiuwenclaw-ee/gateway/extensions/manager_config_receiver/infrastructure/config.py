@@ -68,6 +68,37 @@ class Settings(BaseSettings):
         default="",
         validation_alias="GATEWAY_CONFIG_PUBLIC_HOST",
     )
+    # Gateway 注册/心跳调用的 Manager REST Base（无尾斜杠）
+    gateway_manager_http_url: str = Field(
+        default="",
+        validation_alias="GATEWAY_MANAGER_HTTP_URL",
+    )
+    gateway_config_heartbeat_seconds: int = Field(
+        default=60,
+        validation_alias="GATEWAY_CONFIG_HEARTBEAT_SECONDS",
+        description="Interval for Gateway → Manager HTTP heartbeats after register succeeds (seconds)",
+    )
+    gateway_manager_max_reconnect_attempts: int = Field(
+        default=3,
+        validation_alias="GATEWAY_MANAGER_MAX_RECONNECT_ATTEMPTS",
+        description=(
+            "Fast-retry phase length before switching to probe mode; "
+            "0 = use exponential backoff only (no separate fast phase)"
+        ),
+    )
+    gateway_manager_reconnect_interval_seconds: float = Field(
+        default=3.0,
+        validation_alias="GATEWAY_MANAGER_RECONNECT_INTERVAL_SECONDS",
+        description="Delay between fast-phase Manager HTTP register/reconnect attempts (seconds)",
+    )
+    gateway_manager_probe_interval_seconds: float = Field(
+        default=120.0,
+        validation_alias="GATEWAY_MANAGER_PROBE_INTERVAL_SECONDS",
+        description=(
+            "Interval for probe-mode register when Manager is unavailable "
+            "(seconds); also caps exponential backoff when max attempts is 0"
+        ),
+    )
 
     # ========== 配置下发字段级解密（信封解密，私钥本机自持） ==========
     gateway_config_dec_enabled: bool = Field(
