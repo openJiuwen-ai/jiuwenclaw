@@ -376,10 +376,17 @@ class CloudPluginClient(AgentRuntimeClient):
         # 接收帧并返回结果
         frames = await self._receive_frames(ws_ctx, message, spec)
         rsp = self.final_response(frames, spec)
-        logger.info(
-            "[session=%s] [%s] [CloudPluginClient] pluginId=%s toolName=%s success=%s",
-            self.session_id, self.plugin_session_id, plugin_id, tool_name, rsp.get("success"),
-        )
+        if rsp.get("success"):
+            logger.info(
+                "[session=%s] [%s] [CloudPluginClient] pluginId=%s toolName=%s success=True",
+                self.session_id, self.plugin_session_id, plugin_id, tool_name,
+            )
+        else:
+            logger.warning(
+                "[session=%s] [%s] [CloudPluginClient] pluginId=%s toolName=%s success=False error=%s",
+                self.session_id, self.plugin_session_id, plugin_id, tool_name,
+                rsp.get("error") or "云插件调用失败",
+            )
         return rsp
 
     async def _receive_frames(
