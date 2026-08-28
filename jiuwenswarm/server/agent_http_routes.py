@@ -298,8 +298,6 @@ ROUTES: list[RouteSpec] = [
     # --- Harness 包 ---
     RouteSpec("GET", "/harness/packages", ReqMethod.HARNESS_PACKAGES_GET.value),
     RouteSpec("POST", "/harness/packages/scan", ReqMethod.HARNESS_PACKAGES_SCAN.value),
-    RouteSpec("POST", "/harness/packages/import", ReqMethod.HARNESS_PACKAGES_IMPORT.value),
-    RouteSpec("POST", "/harness/packages/export", ReqMethod.HARNESS_PACKAGES_EXPORT.value),
     RouteSpec(
         "POST",
         "/harness/packages/{name}/actions/activate",
@@ -343,6 +341,16 @@ ROUTES: list[RouteSpec] = [
         "/permissions/file-guard/workspace",
         ReqMethod.PERMISSIONS_WORKSPACE_ENABLE_SET.value,
     ),
+    RouteSpec(
+        "GET",
+        "/permissions/file-guard/workspace/access",
+        ReqMethod.PERMISSIONS_WORKSPACE_ACCESS_GET.value,
+    ),
+    RouteSpec(
+        "PUT",
+        "/permissions/file-guard/workspace/access",
+        ReqMethod.PERMISSIONS_WORKSPACE_ACCESS_SET.value,
+    ),
     # --- 配置与运维 ---
     RouteSpec("POST", "/config/actions/cache-clear", ReqMethod.CONFIG_CACHE_CLEAR.value),
     RouteSpec("POST", "/config/actions/agent-reload", ReqMethod.AGENT_RELOAD_CONFIG.value),
@@ -351,8 +359,6 @@ ROUTES: list[RouteSpec] = [
     RouteSpec("POST", "/runtime/browser/actions/restart", ReqMethod.BROWSER_RUNTIME_RESTART.value),
     RouteSpec("POST", "/proactive/actions/tick", ReqMethod.PROACTIVE_TICK.value),
     RouteSpec("POST", "/acp/tool-responses", ReqMethod.ACP_TOOL_RESPONSE.value),
-    RouteSpec("GET", "/files", ReqMethod.FILES_LIST.value),
-    RouteSpec("GET", "/files/content", ReqMethod.FILES_GET.value),
     # --- Symphony（乐谱式编排）---
     RouteSpec("POST", "/symphony/actions/plan", ReqMethod.SYMPHONY_PLAN.value),
     RouteSpec("POST", "/symphony/actions/build-score", ReqMethod.SYMPHONY_BUILD_SCORE.value),
