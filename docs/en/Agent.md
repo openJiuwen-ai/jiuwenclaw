@@ -208,10 +208,13 @@ C:\Users\<username>\.jiuwenswarm\
 │
 ├── config/                          # Configuration
 │   ├── config.yaml                  # Main config (models, channels, permissions)
-│   └── builtin_rules.yaml           # Built-in rules
+│   ├── builtin_rules.yaml           # Built-in rules
+│   ├── .env                         # Environment variables
+│   └── runtime_state/               # Runtime state directory (per-session / per-task files)
 │
 ├── agent/                           # Agent-related data
 │   ├── sessions/                    # Session history storage
+│   ├── home/                        # Agent home data
 │   └── workspace/                   # Agent workspace
 │       ├── AGENT_ZH.md              # Agent bootstrap config (Chinese)
 │       ├── AGENT_EN.md              # Agent bootstrap config (English)
@@ -224,12 +227,14 @@ C:\Users\<username>\.jiuwenswarm\
 │       ├── todo/                    # Agent todo items storage
 │       └── skills/                  # Skills
 │
-├── todo/                            # Global todo items storage
+├── .agent_teams/                    # Team-related data (bindings.json, team.db, trio-count/, etc.)
+├── .updates/                        # Version update cache
 ├── gateway/                         # Gateway data
 ├── logs/                            # Log files
 ├── memory/                          # Global memory store
 ├── received_files/                  # Incoming external files
-└── web/                             # Web channel assets
+├── web/                             # Web channel assets
+└── .trace/                          # Trace data (created on demand)
 ```
 
 **Key files:**
@@ -254,9 +259,13 @@ C:\Users\<username>\.jiuwenswarm\
 ```text
 C:\Users\Administrator\.jiuwenswarm\
 ├── config\config.yaml
+├── config\builtin_rules.yaml
+├── config\runtime_state\           # Runtime state directory (per-session / per-task files)
+├── .agent_teams\                    # Team-related data
 ├── todo\                            # Global todo items
 ├── agent\
 │   ├── sessions\                    # Session history
+│   ├── home\                       # Agent home data
 │   └── workspace\
 │       ├── AGENT_ZH.md
 │       ├── AGENT_EN.md
@@ -268,6 +277,9 @@ C:\Users\Administrator\.jiuwenswarm\
 │       ├── memory\
 │       ├── todo\                    # Agent todo items
 │       └── skills\
+├── .updates\                        # Version update cache
+├── logs\                            # Log files
+└── .trace\                          # Trace data (created on demand)
 ```
 
 > **Notes:**  
@@ -395,9 +407,11 @@ models:
 ```yaml
 channels:
   feishu:
-    enabled: true
+    apps:
+      - name: Feishu default app
+        enabled: true  # Enable the Feishu channel (enabled is inside the apps list element)
   telegram:
-    enabled: false
+    enabled: false  # Disable the Telegram channel (telegram has enabled at the top level)
 ```
 
 #### Troubleshooting
