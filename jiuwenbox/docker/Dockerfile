@@ -73,6 +73,9 @@ RUN pip install --break-system-packages --upgrade \
 
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
+RUN mkdir -p /opt/jiuwenbox-pip && \
+    chown app:app /opt/jiuwenbox-pip
+
 EXPOSE 8321
 EXPOSE 8322
 

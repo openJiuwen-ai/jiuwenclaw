@@ -122,6 +122,9 @@ from jiuwenclaw.agentserver.permissions.config_loader import (
     reset_permissions_session_scope,
     setup_permissions_session_scope,
 )
+from jiuwenclaw.agentserver.permissions.skill_authorization.subagent_approval_registry import (
+    SubagentApprovalKind,
+)
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import SkillManager
 from jiuwenclaw.agentserver.tools.multimodal_config import (
@@ -208,7 +211,6 @@ from jiuwenclaw.agentserver.skill_whitelist import (is_skill_whitelist_tenant, p
                                                      SkillWhitelistSynchronizer)
 from jiuwenclaw.utils import (
     get_agent_registered_skill_dirs,
-    get_agent_workspace_dir,
     get_checkpoint_dir,
     get_env_file,
     get_agent_root_dir,
@@ -249,6 +251,12 @@ _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
         "bash",
         "code",
     }
+)
+
+#: 子 Agent 委托审批卡的 source 集合，从审批类型枚举派生，新增类型自动同步。
+_SUBAGENT_APPROVAL_SOURCES = frozenset(
+    f"subagent_{kind.value}"
+    for kind in SubagentApprovalKind
 )
 
 
@@ -869,6 +877,7 @@ class JiuWenClawDeepAdapter:
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._subagent_rail: SubagentRail | None = None
+        self._subagent_executor: Any = None
         self._disabled_tools_rail: DisabledToolsRail | None = None
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
@@ -1790,6 +1799,7 @@ class JiuWenClawDeepAdapter:
         """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。
 
         不全量 ``create_instance``：不重建模型/工具卡，仅更新启用集与技能 Rail。
+        刷新前先做盘→库对账，避免「盘有库无」导致永久 Skill not found。
         """
         if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
             return
@@ -1798,6 +1808,23 @@ class JiuWenClawDeepAdapter:
                 "[JiuWenClawDeepAdapter] refresh_enabled_skills_from_db skipped: instance not ready"
             )
             return
+
+        try:
+            recon = await SkillWhitelistSynchronizer(
+                self._workspace_dir,
+                service_id=str(self._service_id or ""),
+                agent_id=str(self._agent_id or ""),
+            ).reconcile_disk_into_ledger()
+            if recon.errors:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] disk→ledger reconcile warnings: %s",
+                    recon.errors,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenClawDeepAdapter] disk→ledger reconcile failed: %s",
+                exc,
+            )
 
         from jiuwenclaw.agentserver.installed_skill import (
             SOURCE_PREBUILT,
@@ -3013,7 +3040,7 @@ class JiuWenClawDeepAdapter:
             from jiuwenclaw.agentserver.tools.subagent_tools import fork_agent, spawn_subagent
 
             # Initialize the subagent executor with parent agent and model
-            init_subagent_executor(
+            self._subagent_executor = init_subagent_executor(
                 self._instance,
                 model=self._model,  # Pass the model instance
                 default_role_prompts=None,  # Can be customized later
@@ -3535,8 +3562,12 @@ class JiuWenClawDeepAdapter:
         from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
             set_effective_request_workspace_dir,
         )
+        from jiuwenclaw.agentserver.tools.subagent_executor import (
+            set_fork_agent_executor,
+        )
 
         set_effective_request_workspace_dir(resolved_workspace_dir)
+        set_fork_agent_executor(self._subagent_executor)
 
         # Sync the tool CWD layer to the client-provided workspace dir so that
         # relative file paths in tool calls resolve against the correct base.
@@ -5264,7 +5295,11 @@ class JiuWenClawDeepAdapter:
 
     @staticmethod
     def _is_ask_user_payload(payload: Any) -> bool:
-        return isinstance(payload, dict) and payload.get("event_type") == "chat.ask_user_question"
+        if not isinstance(payload, dict) or payload.get("event_type") != "chat.ask_user_question":
+            return False
+        # 子 Agent委托审批在子协程内等待Future，不是主 Agent checkpoint。
+        # 反向排除这些委托source，保留所有主Agent类型和缺source旧协议的HITL语义。
+        return payload.get("source") not in _SUBAGENT_APPROVAL_SOURCES
 
     def _parse_stream_chunk(self, chunk, *, _has_streamed_content: bool = False) -> dict | None:
         """将 SDK OutputSchema 转为前端可消费的 payload dict.
@@ -5546,6 +5581,12 @@ class JiuWenClawDeepAdapter:
                 if chunk_type == "chat.ask_user_question":
                     return {
                         "event_type": "chat.ask_user_question",
+                        **(payload if isinstance(payload, dict) else {}),
+                    }
+
+                if chunk_type == "chat.ask_user_question_expired":
+                    return {
+                        "event_type": "chat.ask_user_question_expired",
                         **(payload if isinstance(payload, dict) else {}),
                     }
 

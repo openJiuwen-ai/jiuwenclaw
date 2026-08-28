@@ -370,7 +370,14 @@ export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
 	     
     return (
       <div className="flex justify-center my-4 animate-fade-in">
-        <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
+        <div
+          className={clsx(
+            'px-4 py-2 rounded-xl border text-sm max-w-[90%] whitespace-pre-wrap break-words',
+            message.isError
+              ? 'bg-danger/10 border-danger/30 text-danger'
+              : 'rounded-full bg-secondary border-border text-text-muted'
+          )}
+        >
           {content}
         </div>
       </div>

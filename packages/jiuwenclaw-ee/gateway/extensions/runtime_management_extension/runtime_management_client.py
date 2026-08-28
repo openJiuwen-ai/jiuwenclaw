@@ -125,6 +125,11 @@ async def load_effective_service_config_for_request(request: AgentRequest) -> An
         load_fn, service_config_slot, extension_config_slot = _ensure_enterprise_config_loader()
         loaded = await load_fn(request, [service_config_slot, extension_config_slot])
     except Exception as exc:
+        from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+
+        gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
+        if gateway_db_mod.is_db_query_timeout(exc):
+            raise
         logger.warning(
             "[RuntimeManagementAgentClient] load service_config failed: %s",
             exc,
@@ -605,6 +610,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("RUNTIME_DB_POOL_SIZE", os.getenv("RUNTIME_DB_POOL_SIZE")),
                 ("RUNTIME_DB_MAX_OVERFLOW", os.getenv("RUNTIME_DB_MAX_OVERFLOW")),
                 ("RUNTIME_DB_POOL_TIMEOUT", os.getenv("RUNTIME_DB_POOL_TIMEOUT")),
+                ("RUNTIME_DB_QUERY_TIMEOUT", os.getenv("RUNTIME_DB_QUERY_TIMEOUT")),
                 ("JIUWENCLAW_ID", os.getenv("JIUWENCLAW_ID")),
                 ("LLM_SSL_VERIFY", os.getenv("LLM_SSL_VERIFY")),
                 ("PYTHONPATH", os.getenv("PYTHONPATH")),
@@ -1317,57 +1323,58 @@ class RuntimeManagementAgentClient(AgentServerClient):
         rid = _wire_request_id_key(request.request_id)
         abort_ev = asyncio.Event()
         self._stream_abort_events[rid] = abort_ev
+        access_gen = None
 
-        # 加载服务配置
-        service_template = None
-        loaded = await load_effective_service_config_for_request(request)
-        if abort_ev.is_set():
-            self._stream_abort_events.pop(rid, None)
-            raise asyncio.CancelledError()
-        if loaded is not None:
-            entities = loaded.service_config or []
-            if entities:
-                service_template = entities[0]
-                logger.info(
-                    "[RuntimeManagementAgentClient] service_template keys: %s",
-                    list(service_template.keys()) if isinstance(service_template, dict) else None,
-                )
-
-            # 将扩展配置附加到 envelope.channel_context
-            ext_config = getattr(loaded, "extension_config", None)
-            if ext_config:
-                envelope.channel_context = envelope.channel_context or {}
-                envelope.channel_context["extension_config"] = ext_config
-                logger.info(
-                    "[RuntimeManagementAgentClient] extension_config attached: %s",
-                    ext_config,
-                )
-
-        service_id, agent_id, workspace_dir = _coalesce_loaded_invoke_ids(request, loaded)
-        logger.info(
-            "[RuntimeManagementAgentClient] resolved config: service_id=%s agent_id=%s workspace_dir=%s",
-            service_id,
-            agent_id,
-            workspace_dir,
-        )
-        if service_template is None:
-            service_template = {}
-        request.service_id = service_id
-        request.agent_id = agent_id
-        request.workspace_dir = workspace_dir
-        service_template["service_id"] = service_id
-        service_template["agent_id"] = agent_id
-        service_template["workspace_dir"] = workspace_dir
-
-        session_request = _SessionRequest(
-            request,
-            envelope,
-            service_template=service_template,
-        )
-
-        access_gen = self._access.send_message(session_request)
-        self._stream_access_gens[rid] = access_gen
         try:
+            # 加载服务配置
+            service_template = None
+            loaded = await load_effective_service_config_for_request(request)
+            if abort_ev.is_set():
+                raise asyncio.CancelledError()
+            if loaded is not None:
+                entities = loaded.service_config or []
+                if entities:
+                    service_template = entities[0]
+                    logger.info(
+                        "[RuntimeManagementAgentClient] service_template keys: %s",
+                        list(service_template.keys()) if isinstance(service_template, dict) else None,
+                    )
+
+                # 将扩展配置附加到 envelope.channel_context
+                ext_config = getattr(loaded, "extension_config", None)
+                if ext_config:
+                    envelope.channel_context = envelope.channel_context or {}
+                    envelope.channel_context["extension_config"] = ext_config
+                    logger.info(
+                        "[RuntimeManagementAgentClient] extension_config attached: %s",
+                        ext_config,
+                    )
+
+            service_id, agent_id, workspace_dir = _coalesce_loaded_invoke_ids(request, loaded)
+            logger.info(
+                "[RuntimeManagementAgentClient] resolved config: service_id=%s agent_id=%s workspace_dir=%s",
+                service_id,
+                agent_id,
+                workspace_dir,
+            )
+            if service_template is None:
+                service_template = {}
+            request.service_id = service_id
+            request.agent_id = agent_id
+            request.workspace_dir = workspace_dir
+            service_template["service_id"] = service_id
+            service_template["agent_id"] = agent_id
+            service_template["workspace_dir"] = workspace_dir
+
+            session_request = _SessionRequest(
+                request,
+                envelope,
+                service_template=service_template,
+            )
+
+            access_gen = self._access.send_message(session_request)
+            self._stream_access_gens[rid] = access_gen
+
             # 企业版空闲超时机制：跟踪最后一个真实业务 chunk 的时间
             last_real_chunk_time = asyncio.get_event_loop().time()
             chunk_count = 0
@@ -1376,17 +1383,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 if abort_ev.is_set():
                     raise asyncio.CancelledError()
                 chunk_count += 1
-                
+
                 # 检查是否是真实业务 chunk（排除 keepalive）
                 is_keepalive = (
-                    isinstance(chunk.payload, dict) 
+                    isinstance(chunk.payload, dict)
                     and chunk.payload.get("event_type") == "keepalive"
                 )
-                
+
                 if not is_keepalive:
                     # 更新最后真实业务 chunk 时间
                     last_real_chunk_time = asyncio.get_event_loop().time()
-                
+
                 # 检查是否超时（每次收到 chunk 时检查）
                 current_time = asyncio.get_event_loop().time()
                 idle_duration = current_time - last_real_chunk_time
@@ -1408,14 +1415,28 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 yield chunk
 
         except Exception as exc:
-            logger.exception("[RuntimeManagementAgentClient] send_request_stream failed: %s", exc)
+            from jiuwenclaw.infrastructure.module_importer import (
+                import_manager_ws_client_module,
+            )
+
+            gateway_db_mod = import_manager_ws_client_module(
+                "core.enterprise_config.gateway_db"
+            )
+            err_text = gateway_db_mod.format_db_exception(exc)
+            logger.exception(
+                "[RuntimeManagementAgentClient] send_request_stream failed: %s",
+                err_text,
+            )
             yield AgentResponseChunk(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
-                payload={"error": str(exc)},
+                payload={
+                    "event_type": "chat.error",
+                    "error": err_text,
+                },
                 is_complete=True,
             )
         finally:
             self._stream_abort_events.pop(rid, None)
-            if rid in self._stream_access_gens:
+            if access_gen is not None and rid in self._stream_access_gens:
                 await self._release_access_stream(rid, access_gen)

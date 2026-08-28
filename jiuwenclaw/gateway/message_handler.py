@@ -1856,7 +1856,8 @@ class MessageHandler(ABC):
             return False
         if payload.get("content") not in (None, ""):
             return False
-        if payload.get("error") not in (None, ""):
+        # 显式带 error 字段（即使为空）视为业务失败，不能当终止哨兵吞掉
+        if "error" in payload:
             return False
         # runtime 资源拒绝：error_code/message 必须下发，不能当哨兵吞掉
         if payload.get("error_code") not in (None, ""):
@@ -2047,6 +2048,31 @@ class MessageHandler(ABC):
                     logger.debug("[session_index] session.delete 已从索引移除: %s", sid)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[session_index] _maybe_sync_session_index_on_response 异常: %s", exc)
+
+    async def _process_local_session_create(self, msg: "Message") -> None:
+        """网关本地响应 session.create，不转发 AgentServer。"""
+        from jiuwenclaw.e2a.acp.protocol import build_acp_session_new_result
+        from jiuwenclaw.schema.agent import AgentResponse
+
+        session_id = str(msg.session_id or "").strip()
+        resp = AgentResponse(
+            request_id=msg.id,
+            channel_id=msg.channel_id,
+            ok=True,
+            payload=build_acp_session_new_result(session_id),
+            metadata=msg.metadata,
+        )
+        out = self._response_to_message(
+            resp, session_id=msg.session_id, request_metadata=msg.metadata
+        )
+        # remote 模式：session.create 成功后同步更新网关会话索引（与透传路径行为一致）
+        self._maybe_sync_session_index_on_response(msg, resp)
+        await self.publish_robot_messages(out)
+        logger.info(
+            "[MessageHandler] session.create 已网关本地响应（不转发 AgentServer）: id=%s session_id=%s",
+            msg.id,
+            session_id,
+        )
 
     async def _process_remote_session_list_request(self, msg: "Message") -> None:
         """remote 模式：在网关读会话索引并响应，不转发给 AgentServer。"""
@@ -2381,6 +2407,17 @@ class MessageHandler(ABC):
                     if is_remote_storage() and str(msg.channel_id or "").strip() == "web":
                         await self._process_remote_session_list_request(msg)
                         continue
+
+                # session.create 短路：AgentServer 端仅回显 session_id（AgentManager.create_session
+                # 无副作用，不建目录/不初始化 Agent），透传却把每请求一次的企业配置 DB 查询
+                # 串进 _forward_loop —— DB 时延波动时大量 session.create 排队造成队头阻塞
+                # （曾致 _user_messages 积压数小时）。网关本地构造回显响应，契约同
+                # build_acp_session_new_result；remote 模式会话索引 upsert 保留。
+                # 注意：session.delete 是真删除（rmtree+权限回收），必须继续透传；
+                # acp/vibeskill 内部 session ensure 直接调 send_request 不入队，不受影响。
+                if msg.req_method == ReqMethod.SESSION_CREATE:
+                    await self._process_local_session_create(msg)
+                    continue
 
                 # 检查是否是中断请求
                 # 用户回答 Agent 的审批/确认请求

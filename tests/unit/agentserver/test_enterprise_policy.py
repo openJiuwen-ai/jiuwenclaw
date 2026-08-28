@@ -46,10 +46,10 @@ def _patch_gateway_queries(
     db: GatewayDb,
     *,
     list_records: Any,
-    fetch_template_by_slot: Any,
+    fetch_templates_by_slot: Any,
 ) -> None:
     monkeypatch.setattr(db, "list_records", list_records)
-    monkeypatch.setattr(db, "fetch_template_by_slot", fetch_template_by_slot)
+    monkeypatch.setattr(db, "fetch_templates_by_slot", fetch_templates_by_slot)
 
 RoutingContext = schemas.RoutingContext
 normalize_template_ref = _utils.normalize_template_ref
@@ -566,14 +566,17 @@ async def test_load_effective_config_fills_missing_slots_from_global(
                 return [{"template_id": m5}]
         return []
 
-    async def _fetch_template_by_slot(slot: str, template_id: str) -> dict | None:
-        return {"template_id": template_id, "model_id": template_id, "slot": slot}
+    async def _fetch_templates_by_slot(slot: str, template_ids: list[str]) -> dict[str, dict]:
+        return {
+            template_id: {"template_id": template_id, "model_id": template_id, "slot": slot}
+            for template_id in template_ids
+        }
 
     _patch_gateway_queries(
         monkeypatch,
         db,
         list_records=_list_records,
-        fetch_template_by_slot=_fetch_template_by_slot,
+        fetch_templates_by_slot=_fetch_templates_by_slot,
     )
 
     request = AgentRequest(
@@ -637,19 +640,22 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
             return []
         return []
 
-    async def _fetch_template_by_slot(slot: str, template_id: str) -> dict | None:
+    async def _fetch_templates_by_slot(slot: str, template_ids: list[str]) -> dict[str, dict]:
         return {
-            "template_id": template_id,
-            "template_name": "Gateway 定时清理" if template_id == e4 else "Agent Server 错误恢复",
-            "component": "gateway" if template_id == e4 else "agent_server",
-            "slot": slot,
+            template_id: {
+                "template_id": template_id,
+                "template_name": "Gateway 定时清理" if template_id == e4 else "Agent Server 错误恢复",
+                "component": "gateway" if template_id == e4 else "agent_server",
+                "slot": slot,
+            }
+            for template_id in template_ids
         }
 
     _patch_gateway_queries(
         monkeypatch,
         db,
         list_records=_list_records,
-        fetch_template_by_slot=_fetch_template_by_slot,
+        fetch_templates_by_slot=_fetch_templates_by_slot,
     )
 
     request = AgentRequest(
@@ -725,19 +731,22 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
             return []
         return []
 
-    async def _fetch_template_by_slot(slot: str, template_id: str) -> dict | None:
+    async def _fetch_templates_by_slot(_slot: str, template_ids: list[str]) -> dict[str, dict]:
         return {
-            "template_id": template_id,
-            "template_name": "demo-pool",
-            "min_idle_services": 2,
-            "max_services": 10,
+            template_id: {
+                "template_id": template_id,
+                "template_name": "demo-pool",
+                "min_idle_services": 2,
+                "max_services": 10,
+            }
+            for template_id in template_ids
         }
 
     _patch_gateway_queries(
         monkeypatch,
         db,
         list_records=_list_records,
-        fetch_template_by_slot=_fetch_template_by_slot,
+        fetch_templates_by_slot=_fetch_templates_by_slot,
     )
 
     alice_request = AgentRequest(
@@ -824,7 +833,7 @@ async def test_load_service_config_returns_routing_ids_without_template_slots(
         monkeypatch,
         db,
         list_records=_list_records,
-        fetch_template_by_slot=pytest.fail,
+        fetch_templates_by_slot=pytest.fail,
     )
 
     request = AgentRequest(
@@ -894,7 +903,7 @@ async def test_load_returns_send_file_allowed_without_service_config_slot(
         monkeypatch,
         db,
         list_records=_list_records,
-        fetch_template_by_slot=pytest.fail,
+        fetch_templates_by_slot=pytest.fail,
     )
 
     request = AgentRequest(
@@ -964,14 +973,17 @@ async def test_load_effective_config_prefers_newer_rule_at_same_priority(
             return []
         return []
 
-    async def _fetch_template(_slot: str, template_id: str) -> dict | None:
-        return {"template_id": template_id, "model_id": template_id}
+    async def _fetch_templates_by_slot(_slot: str, template_ids: list[str]) -> dict[str, dict]:
+        return {
+            template_id: {"template_id": template_id, "model_id": template_id}
+            for template_id in template_ids
+        }
 
     _patch_gateway_queries(
         monkeypatch,
         db,
         list_records=_list_records,
-        fetch_template_by_slot=_fetch_template,
+        fetch_templates_by_slot=_fetch_templates_by_slot,
     )
 
     request = AgentRequest(

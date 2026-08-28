@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date, datetime
 from pathlib import Path
@@ -33,6 +34,53 @@ _INSTANCE_SCOPED_TABLES = frozenset({
 })
 
 _DEFAULT_RELATIVE_ROOT = Path(__file__).resolve().parents[2]
+
+_DB_QUERY_TIMEOUT_MARKERS = (
+    "max_execution_time",
+    "statement timeout",
+    "query execution was interrupted",
+    "maximum statement execution time exceeded",
+    "querycanceled",
+    "canceling statement",
+    "command timeout",
+    "read timeout",
+    "write timeout",
+    "lock wait timeout",
+)
+
+
+class DatabaseQueryTimeoutError(RuntimeError):
+    """DB 查询超过 ``RUNTIME_DB_QUERY_TIMEOUT`` 或服务端执行超时。"""
+
+
+def is_db_query_timeout(exc: BaseException) -> bool:
+    """识别 ``RUNTIME_DB_QUERY_TIMEOUT`` 等导致的查询超时异常。"""
+    if isinstance(exc, (DatabaseQueryTimeoutError, asyncio.TimeoutError)):
+        return True
+    message = str(exc).lower()
+    if type(exc).__name__.lower() in {"timeouterror", "querycancelederror"}:
+        return True
+    orig = getattr(exc, "orig", None)
+    if orig is not None and orig is not exc and is_db_query_timeout(orig):
+        return True
+    return any(marker in message for marker in _DB_QUERY_TIMEOUT_MARKERS)
+
+
+def format_db_exception(exc: BaseException) -> str:
+    """将 DB 异常转为非空、可下发给前端的文案。"""
+    if isinstance(exc, DatabaseQueryTimeoutError):
+        return str(exc).strip() or "database query timeout"
+    if is_db_query_timeout(exc):
+        return "database query timeout"
+    text = str(exc).strip()
+    if text:
+        return text
+    return type(exc).__name__ or "database error"
+
+
+def raise_db_query_timeout(exc: BaseException) -> None:
+    """向上抛出可安全重抛的超时异常（勿用 ``type(exc)(msg)`` 重建 SQLAlchemy 异常）。"""
+    raise DatabaseQueryTimeoutError(format_db_exception(exc)) from exc
 
 
 class GatewayDb(Database):
@@ -106,12 +154,12 @@ class GatewayDb(Database):
             query["jiuwenclaw_id"] = self._jiuwenclaw_id
         return query
 
-    async def fetch_template_by_slot(
+    async def fetch_templates_by_slot(
         self,
         slot: str,
-        template_id: str,
-    ) -> dict[str, Any] | None:
-        """按 ``template_ref`` 槽位与 ``template_id`` 从 Gateway 库加载一条启用中的模板行。"""
+        template_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """按槽位批量加载启用中的模板，返回 ``template_id -> row`` 映射。"""
         try:
             slot_key = TemplateRefSlot(slot)
         except ValueError as exc:
@@ -119,13 +167,23 @@ class GatewayDb(Database):
                 f"unknown template_ref slot {slot!r} "
                 f"(known: {[s.value for s in TemplateRefSlot]})"
             ) from exc
+
+        refs: list[str] = []
+        for raw in template_ids:
+            ref = str(raw or "").strip()
+            if ref and ref not in refs:
+                refs.append(ref)
+        if not refs:
+            return {}
+
         table = SLOT_ENTITY_TABLE[slot_key]
-        ref = str(template_id or "").strip()
-        if not ref:
-            return None
-        filters: dict[str, Any] = {"enabled": True, "template_id": ref}
+        filters: dict[str, Any] = {"enabled": True, "template_id": refs}
         rows = await self.list_records(table, filters=filters)
-        return rows[0] if rows else None
+        return {
+            str(row.get("template_id") or ""): row
+            for row in rows
+            if str(row.get("template_id") or "").strip()
+        }
 
     async def list_records(
         self,
@@ -151,7 +209,10 @@ class GatewayDb(Database):
             )
             return [_row_to_dict(r) for r in rows]
         except Exception as exc:
-            logger.warning("[enterprise_config] query %s failed: %s", table, exc)
+            err_text = format_db_exception(exc)
+            logger.warning("[enterprise_config] query %s failed: %s", table, err_text)
+            if is_db_query_timeout(exc):
+                raise_db_query_timeout(exc)
             return []
 
 
@@ -193,4 +254,10 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return out
 
 
-__all__ = ("GatewayDb",)
+__all__ = (
+    "DatabaseQueryTimeoutError",
+    "GatewayDb",
+    "format_db_exception",
+    "is_db_query_timeout",
+    "raise_db_query_timeout",
+)

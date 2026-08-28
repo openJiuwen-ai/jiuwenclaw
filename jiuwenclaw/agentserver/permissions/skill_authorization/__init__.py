@@ -51,6 +51,7 @@ from jiuwenclaw.agentserver.permissions.skill_authorization.subagent_approval_re
     SubagentApprovalKind,
     SubagentApprovalRegistry,
     SubagentApprovalRequest,
+    SubagentApprovalTimeout,
     get_subagent_approval_registry,
 )
 
@@ -85,6 +86,7 @@ __all__ = [
     "SubagentApprovalKind",
     "SubagentApprovalRegistry",
     "SubagentApprovalRequest",
+    "SubagentApprovalTimeout",
     "get_subagent_approval_registry",
     # Manifest
     "load_skill_manifest",

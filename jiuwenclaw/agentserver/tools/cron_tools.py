@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 from jiuwenclaw.gateway.cron.store import CronJobStore
@@ -35,6 +34,47 @@ from jiuwenclaw.agentserver.gateway_push import (
 from jiuwenclaw.utils import get_user_workspace_dir
 
 logger = logging.getLogger(__name__)
+
+
+def _format_query_timestamp(value: Any, timezone_name: str) -> Any:
+    """Convert a stored UTC timestamp to an offset-aware time in the job timezone."""
+    if value is None:
+        return None
+
+    try:
+        target_timezone = ZoneInfo(str(timezone_name or "").strip())
+    except (ValueError, ZoneInfoNotFoundError):
+        target_timezone = datetime_timezone.utc
+
+    try:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            source_time = datetime.fromtimestamp(float(value), tz=datetime_timezone.utc)
+        elif isinstance(value, datetime):
+            source_time = value
+        elif isinstance(value, str):
+            timestamp_text = value.strip()
+            if not timestamp_text:
+                return value
+            source_time = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+        else:
+            return value
+    except (OSError, OverflowError, TypeError, ValueError):
+        return value
+
+    if source_time.tzinfo is None:
+        source_time = source_time.replace(tzinfo=datetime_timezone.utc)
+    return source_time.astimezone(target_timezone).isoformat()
+
+
+def _format_query_job(job: dict[str, Any]) -> dict[str, Any]:
+    """Format timestamps exposed by cron_get_job and cron_list_jobs."""
+    result = dict(job)
+    timezone_name = str(result.get("timezone") or "UTC")
+    result["created_at"] = _format_query_timestamp(result.get("created_at"), timezone_name)
+    result["updated_at"] = _format_query_timestamp(result.get("updated_at"), timezone_name)
+    return result
 
 # 按 asyncio Task 隔离：多 session 并发时不能用单例字段存路由，否则后到的请求会覆盖先到的 session_id。
 _cron_route_ctx: contextvars.ContextVar[CronToolRoute | None] = contextvars.ContextVar(
@@ -421,16 +461,17 @@ class CronTools:
     async def list_jobs(self) -> Any:
         # 与 ensure_scheduler 对齐：仅企业就绪（jid 已绑定）走企业只读
         if self._enterprise_ready():
-            return await self._list_jobs_enterprise()
+            jobs = await self._list_jobs_enterprise()
+            return [_format_query_job(job) for job in jobs]
         jobs = await self._local_store.list_jobs()
         if jobs:
-            return [j.to_dict() for j in jobs]
+            return [_format_query_job(j.to_dict()) for j in jobs]
         shared = await self._shared_gateway_store()
         if shared is None:
             return []
         try:
             shared_jobs = await shared.list_jobs()
-            return [j.to_dict() for j in shared_jobs]
+            return [_format_query_job(j.to_dict()) for j in shared_jobs]
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] list jobs from shared store failed: %s", exc)
             return []
@@ -440,17 +481,17 @@ class CronTools:
             jobs = await self._list_jobs_enterprise()
             for item in jobs:
                 if str(item.get("id") or "") == str(job_id or "").strip():
-                    return item
+                    return _format_query_job(item)
             return None
         job = await self._local_store.get_job(job_id)
         if job is not None:
-            return job.to_dict()
+            return _format_query_job(job.to_dict())
         shared = await self._shared_gateway_store()
         if shared is None:
             return None
         try:
             shared_job = await shared.get_job(job_id)
-            return shared_job.to_dict() if shared_job else None
+            return _format_query_job(shared_job.to_dict()) if shared_job else None
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] get job from shared store failed: %s", exc)
             return None

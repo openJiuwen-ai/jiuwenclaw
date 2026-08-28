@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable
 from typing import Any, Callable
 
 from openjiuwen.core.runner import Runner
@@ -111,6 +112,39 @@ async def _emit_subagent_approval(
         "type": "chat.ask_user_question",
         "payload": event_payload,
     })
+
+
+async def _emit_subagent_approval_expired(
+    approval_session: Session,
+    request: Any,
+    reason: str,
+) -> None:
+    """撤下已结束等待的子 Agent 审批卡；不携带任何授权语义。"""
+    event_payload = {
+        "event_type": "chat.ask_user_question_expired",
+        "request_id": request.approval_id,
+        "source": f"subagent_{request.kind.value}",
+        "session_id": request.session_id,
+        "agent_scope_id": request.agent_scope_id,
+        "reason": reason,
+    }
+    await approval_session.write_stream({
+        "type": "chat.ask_user_question_expired",
+        "payload": event_payload,
+    })
+
+
+def _make_approval_expiry_sender(
+    approval_session: Session | None,
+) -> Callable[[Any, str], Awaitable[None]] | None:
+    """构造审批卡过期通知 sender；session 缺失时返回 None（不通知）。"""
+    if approval_session is None:
+        return None
+
+    async def send_expiry(request: Any, reason: str) -> None:
+        await _emit_subagent_approval_expired(approval_session, request, reason)
+
+    return send_expiry
 
 
 # Default excluded tools for spawn/fork agents
@@ -460,6 +494,7 @@ Approach each task methodically and deliver high-quality results.
                 agent_scope_id=agent_scope_id,
                 session_id=session_id,
                 approval_sender=send_approval if approval_session is not None else None,
+                approval_expiry_sender=_make_approval_expiry_sender(approval_session),
                 skill_resolver=build_skill_registry_resolver(
                     skill_use_rail.get_skills_meta,
                     skill_dirs_provider=lambda: skill_use_rail.skills_dir,
@@ -520,6 +555,7 @@ Approach each task methodically and deliver high-quality results.
                 session_id=session_id,
                 approval_registry=get_subagent_approval_registry(),
                 approval_sender=send_approval if approval_session is not None else None,
+                approval_expiry_sender=_make_approval_expiry_sender(approval_session),
             )
         except Exception as exc:
             logger.warning("[Subagent] SubagentPermissionRail create failed: %s", exc)

@@ -204,19 +204,30 @@ async def _fetch_slot_entities(
     slot: str,
     template_ids: list[str],
 ) -> list[dict[str, Any]]:
+    refs = [str(template_id or "").strip() for template_id in template_ids]
+    if not any(refs):
+        return []
+
+    by_id = await GatewayDb.current().fetch_templates_by_slot(slot, refs)
     entities: list[dict[str, Any]] = []
-    for template_id in template_ids:
-        entity = await GatewayDb.current().fetch_template_by_slot(slot, template_id)
+    missing_template_ids: list[str] = []
+    for template_id in refs:
+        if not template_id:
+            continue
+        entity = by_id.get(template_id)
         if entity is None:
-            logger.warning(
-                "[enterprise_config] template not found: slot=%r template_id=%r",
-                slot,
-                template_id,
-            )
+            missing_template_ids.append(template_id)
             continue
         if slot == TemplateRefSlot.SERVICE_CONFIG:
             entity = _normalize_service_config_row(entity)
         entities.append(entity)
+    if missing_template_ids:
+        logger.warning(
+            "[enterprise_config] templates not found: slot=%r count=%d template_ids=%s",
+            slot,
+            len(missing_template_ids),
+            missing_template_ids,
+        )
     return entities
 
 

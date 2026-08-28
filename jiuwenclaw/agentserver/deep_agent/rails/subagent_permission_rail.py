@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -13,7 +15,10 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 
 from jiuwenclaw.agentserver.deep_agent.skill_lifecycle_events import (
+    extract_skill_lifecycle_event,
     is_skill_authorization_gate_call,
+    is_root_skill_load,
+    is_skill_complete,
     parse_tool_call_arguments,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import TOOL_NAME_ALIASES
@@ -37,21 +42,31 @@ from jiuwenclaw.agentserver.permissions.skill_authorization.composer import (
     setup_skill_authorization_context,
 )
 from jiuwenclaw.agentserver.permissions.skill_authorization.subagent_approval_registry import (
+    ApprovalExpirySender,
     ApprovalSender,
     SubagentApprovalCancelled,
     SubagentApprovalCapacityError,
     SubagentApprovalKind,
     SubagentApprovalRegistry,
+    SubagentApprovalTimeout,
     get_subagent_approval_registry,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.subagent_skill_authorization_rail import (
     _resolve_subagent_scope,
+)
+from jiuwenclaw.agentserver.tools.subagent_executor.executor import (
+    EXCLUDED_TOOLS_SPAWN,
 )
 
 logger = logging.getLogger(__name__)
 
 
 _SEVERITY = {PermissionLevel.ALLOW: 0, PermissionLevel.ASK: 1, PermissionLevel.DENY: 2}
+
+#: 同一调用被拒绝/审批超时后的统一提示；before 拒绝与 after 强制收口共用。
+_REJECTED_RETRY_TOOL_RESULT = (
+    "[PERMISSION_DENIED] 相同的子 Agent 工具调用已被拒绝或审批超时"
+)
 
 
 def _tighten_permission_level(
@@ -80,6 +95,7 @@ class SubagentPermissionRail(ConfirmInterruptRail):
         grant_store: SkillGrantStore | None = None,
         approval_registry: SubagentApprovalRegistry | None = None,
         approval_sender: ApprovalSender | None = None,
+        approval_expiry_sender: ApprovalExpirySender | None = None,
         approval_timeout: float = 120.0,
         config_provider: Callable[[], dict[str, Any]] | None = None,
         session_id: str | None = None,
@@ -90,9 +106,11 @@ class SubagentPermissionRail(ConfirmInterruptRail):
         self._grant_store = grant_store or get_skill_grant_store()
         self._approval_registry = approval_registry or get_subagent_approval_registry()
         self._approval_sender = approval_sender
+        self._approval_expiry_sender = approval_expiry_sender
         self._approval_timeout = approval_timeout
         self._config_provider = config_provider or get_effective_permissions_config
         self._approval_session_id = (session_id or "").strip()
+        self._rejected_call_fingerprints: set[str] = set()
 
     def _resolve_scope(self, ctx: AgentCallbackContext) -> tuple[str, str] | None:
         return _resolve_subagent_scope(
@@ -124,7 +142,59 @@ class SubagentPermissionRail(ConfirmInterruptRail):
             for item in selected
         )
 
+    @staticmethod
+    def _explicitly_rejected(answer: Any) -> bool:
+        if isinstance(answer, list):
+            return any(SubagentPermissionRail._explicitly_rejected(item) for item in answer)
+        if not isinstance(answer, dict):
+            return False
+        selected = answer.get("selected_options")
+        return isinstance(selected, list) and any(
+            str(item).strip() == "拒绝" for item in selected
+        )
+
+    @staticmethod
+    def _call_fingerprint(
+        *,
+        skill_name: str,
+        tool_name: str,
+        tool_args: dict[str, Any],
+    ) -> str:
+        """Hash a stable call identity without retaining sensitive raw arguments."""
+        canonical = json.dumps(
+            {
+                "skill_name": skill_name,
+                "tool_name": TOOL_NAME_ALIASES.get(tool_name, tool_name),
+                "tool_args": tool_args,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        # 执行期兜底：EXCLUDED_TOOLS_SPAWN 中的工具在 spawn 时已从子 Agent 工具列表
+        # 剔除；若经其他路径混入子 Agent（如继承异常、直接注入），在此无条件拒绝。
+        # 与工具列表剔除保持一致，且不受动态授权开关影响。
+        excluded_tool_name = str(getattr(ctx.inputs, "tool_name", "") or "")
+        if excluded_tool_name in EXCLUDED_TOOLS_SPAWN:
+            tool_call = ctx.inputs.tool_call
+            logger.warning(
+                "[skill_authorization] subagent.permission.excluded_tool tool=%s scope=%s",
+                excluded_tool_name,
+                self._agent_scope_id,
+            )
+            decision = self.reject(
+                tool_result=(
+                    f"[PERMISSION_DENIED] {excluded_tool_name} 为主 Agent 专属工具，"
+                    "子 Agent 不允许执行"
+                ),
+            )
+            ctx.extra["_interrupt_decision"] = decision
+            self._apply_decision(ctx, tool_call, excluded_tool_name, decision)
+            return
         if not self._enabled():
             return
         try:
@@ -220,16 +290,28 @@ class SubagentPermissionRail(ConfirmInterruptRail):
                 tool_result=f"[PERMISSION_DENIED] {result.reason or 'Operation not allowed'}",
             )
         else:
-            decision = await self._resolve_ask(
-                session_id=session_id,
-                agent_scope_id=agent_scope_id,
-                tool_call=tool_call,
+            call_fingerprint = self._call_fingerprint(
+                skill_name=active_skill_name,
                 tool_name=tool_name,
                 tool_args=tool_args,
-                reason=result.reason,
-                risk=result.risk,
-                skill_name=active_skill_name,
             )
+            if call_fingerprint in self._rejected_call_fingerprints:
+                decision = self.reject(tool_result=_REJECTED_RETRY_TOOL_RESULT)
+                # 不能在 before hook 直接 request_force_finish：agent-core 会跳过
+                # railed 方法体并返回 None，破坏工具结果二元组。after hook 再终止。
+                ctx.extra["_subagent_force_finish"] = True
+            else:
+                decision = await self._resolve_ask(
+                    session_id=session_id,
+                    agent_scope_id=agent_scope_id,
+                    tool_call=tool_call,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    reason=result.reason,
+                    risk=result.risk,
+                    skill_name=active_skill_name,
+                    call_fingerprint=call_fingerprint,
+                )
         ctx.extra["_interrupt_decision"] = decision
         self._apply_decision(ctx, tool_call, tool_name, decision)
 
@@ -244,6 +326,7 @@ class SubagentPermissionRail(ConfirmInterruptRail):
         reason: str | None,
         risk: dict | None,
         skill_name: str,
+        call_fingerprint: str,
     ):
         from jiuwenclaw.agentserver.permissions.skill_authorization import (
             get_skill_authorization_generation,
@@ -269,9 +352,11 @@ class SubagentPermissionRail(ConfirmInterruptRail):
                     "risk": risk,
                 },
                 sender=self._approval_sender,
+                expiry_sender=self._approval_expiry_sender,
                 timeout=self._approval_timeout,
             )
-        except asyncio.TimeoutError:
+        except SubagentApprovalTimeout:
+            self._rejected_call_fingerprints.add(call_fingerprint)
             logger.warning(
                 "[skill_authorization] subagent.permission.ask_timeout session=%s scope=%s tool=%s",
                 session_id,
@@ -280,6 +365,17 @@ class SubagentPermissionRail(ConfirmInterruptRail):
             )
             return self.reject(
                 tool_result="[PERMISSION_DENIED] 子 Agent 权限审批超时",
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[skill_authorization] subagent.permission.ask_sender_timeout "
+                "session=%s scope=%s tool=%s",
+                session_id,
+                agent_scope_id,
+                tool_name,
+            )
+            return self.reject(
+                tool_result="[PERMISSION_DENIED] 子 Agent 权限审批通道超时",
             )
         except (SubagentApprovalCancelled, SubagentApprovalCapacityError):
             return self.reject(
@@ -313,4 +409,17 @@ class SubagentPermissionRail(ConfirmInterruptRail):
             )
         if self._approved(answer):
             return self.approve()
+        if self._explicitly_rejected(answer):
+            self._rejected_call_fingerprints.add(call_fingerprint)
         return self.reject(tool_result="[PERMISSION_DENIED] 用户未批准子 Agent 工具调用")
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        event = extract_skill_lifecycle_event(ctx)
+        if is_root_skill_load(event) or is_skill_complete(event):
+            self._rejected_call_fingerprints.clear()
+        if not ctx.extra.pop("_subagent_force_finish", False):
+            return
+        ctx.request_force_finish({
+            "output": _REJECTED_RETRY_TOOL_RESULT,
+            "result_type": "answer",
+        })
