@@ -16,6 +16,8 @@ export interface SearchJobPayload {
   latency_ms?: number;
   progress?: SearchProgressEntry;
   progress_history?: SearchProgressEntry[];
+  tool_call_id?: string;
+  tool_name?: string;
 }
 
 export interface SearchProgressEntry {
@@ -44,6 +46,8 @@ export interface SearchJobState {
   query: string;
   status: 'running' | 'queued' | 'failed';
   frameDataUrl?: string;
+  toolCallId?: string;
+  toolName?: string;
 }
 
 export interface AgentAction {
@@ -56,14 +60,19 @@ export interface AgentAction {
     query?: string;
     status?: string;
     search_session_id?: string;
+    tool_call_id?: string;
+    tool_name?: string;
   } | null;
 }
 
 export interface VideoSessionConfig {
-  provider?: 'realtime' | 'joyai';
+  provider?: 'realtime' | 'joyai' | 'qwen_omni';
+  dialect?: 'minicpm' | 'qwen_omni';
   url?: string;
   model: string;
   ref_audio_base64?: string;
+  voice?: string;
+  tools?: Array<Record<string, unknown>>;
 }
 
 export interface JoyAIFrameResult extends AgentAction {

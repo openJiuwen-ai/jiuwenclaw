@@ -51,6 +51,7 @@ _LOCAL_ONLY_METHODS = frozenset(
         "video.realtime.telemetry",
         "video.transcribe",
         "video.agent",
+        "video.qwen.tool",
         "video.search.status",
         "tts.synthesize",
         "tts.stream.start",

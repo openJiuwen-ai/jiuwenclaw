@@ -16,7 +16,9 @@ import {
   XCircle,
 } from 'lucide-react';
 import { webClient, webRequest } from '../../services/webClient';
+import { MINICPM_CURRENT_TASK_MONITORING_ENABLED } from '../../utils/minicpmRealtime';
 import { RealtimeVideoFrameScheduler } from '../../utils/realtimeVideoFrameScheduler';
+import { QwenOmniFunctionCall } from '../../utils/qwenOmniTools';
 import { fetchTtsAudio, playAudioBase64, sanitizeTtsText, stopGlobalAudio } from '../../utils/tts';
 import {
   evaluateVoiceTranscriptRoute,
@@ -29,7 +31,6 @@ import {
 } from '../../utils/realtimeVideoSourceReadiness';
 import { JoyAIProvider } from './joyaiProvider';
 import { createRealtimeProvider, RealtimeDuplexSession } from './realtimeProvider';
-import { MINICPM_CURRENT_TASK_MONITORING_ENABLED } from '../../utils/realtimeDuplex';
 import { searchAwareToolStatus } from '../../utils/searchPresentation';
 import {
   mergeSearchProgressJob,
@@ -104,6 +105,8 @@ export function VideoLivePanel() {
   const searchJobsRef = useRef<Map<string, SearchJobState>>(new Map());
   const pollingSearchJobsRef = useRef<Set<string>>(new Set());
   const acceptedSearchJobIdsRef = useRef<Set<string>>(new Set());
+  const qwenOmniActiveRef = useRef(false);
+  const qwenToolCallsRef = useRef<Map<string, QwenOmniFunctionCall>>(new Map());
   const lastVoiceTranscriptRouteRef = useRef<VoiceTranscriptRouteStamp | null>(null);
   const searchSpeechGenerationRef = useRef(0);
 
@@ -148,6 +151,8 @@ export function VideoLivePanel() {
     duplexRef.current?.stop();
     duplexRef.current = null;
     joyaiProviderRef.current?.stop();
+    qwenOmniActiveRef.current = false;
+    qwenToolCallsRef.current.clear();
   };
 
   const resetVisualContext = () => {
@@ -163,6 +168,7 @@ export function VideoLivePanel() {
     searchJobsRef.current.clear();
     pollingSearchJobsRef.current.clear();
     acceptedSearchJobIdsRef.current.clear();
+    qwenToolCallsRef.current.clear();
     lastVoiceTranscriptRouteRef.current = null;
     searchSpeechGenerationRef.current += 1;
     stopGlobalAudio();
@@ -189,21 +195,16 @@ export function VideoLivePanel() {
     setChatHistory(displayChatRef.current);
   };
 
-  const insertDisplayTranscript = (text: string, id: number) => {
+  const recordVoiceTranscript = (text: string, id: number) => {
     const normalized = text.trim();
     if (!isUsefulTranscript(normalized)) return;
-    const matching = displayChatRef.current.filter((item) => item.role === 'user'
-      && Math.abs(item.id - id) === 1
-      && (normalized.includes(item.text) || item.text.includes(normalized)));
-    const effectiveId = matching.reduce((earliest, item) => Math.min(earliest, item.id), id);
-    const longestText = matching.reduce(
-      (longest, item) => item.text.length > longest.length ? item.text : longest,
-      normalized,
-    );
-    const matchingIds = new Set(matching.map((item) => item.id));
-    const item: ChatContextItem = { id: effectiveId, role: 'user', text: longestText };
+    const item: ChatContextItem = { id, role: 'user', text: normalized };
+    recentChatRef.current = [
+      ...recentChatRef.current.filter((existing) => existing.id !== id),
+      item,
+    ].sort((left, right) => left.id - right.id).slice(-12);
     displayChatRef.current = [
-      ...displayChatRef.current.filter((existing) => !matchingIds.has(existing.id)),
+      ...displayChatRef.current.filter((existing) => existing.id !== id),
       item,
     ].sort((left, right) => left.id - right.id).slice(-12);
     setChatHistory(displayChatRef.current);
@@ -265,6 +266,8 @@ export function VideoLivePanel() {
       query: job?.query?.trim() || '',
       status: 'running',
       frameDataUrl: existing?.frameDataUrl || framesRef.current.at(-1)?.data_url,
+      toolCallId: job?.tool_call_id?.trim() || existing?.toolCallId,
+      toolName: job?.tool_name?.trim() || existing?.toolName,
     });
     setSearchStatus('');
   };
@@ -319,12 +322,21 @@ export function VideoLivePanel() {
     .map((item) => `${item.role === 'user' ? '用户' : item.role === 'assistant' ? 'Realtime助手' : '工具'}：${item.text}`)
     .join('\n');
 
-  const handleFinalRealtimeUserText = (text: string, realtimeAnswer = answerRef.current) => {
+  const handleFinalRealtimeUserText = (
+    text: string,
+    realtimeAnswer = answerRef.current,
+    displayOrder?: number,
+  ) => {
     const transcript = text.trim();
     if (!isUsefulTranscript(transcript)) return;
     const version = ++agentRequestVersionRef.current;
     latestMeaningfulAgentVersionRef.current = version;
-    appendChat('user', transcript);
+    if (displayOrder === undefined) appendChat('user', transcript);
+    else recordVoiceTranscript(transcript, displayOrder);
+    if (qwenOmniActiveRef.current) {
+      reportRealtimeEvent('qwen_native_tool_router_selected', { question: transcript });
+      return;
+    }
     void (async () => {
       try {
         const action = await webRequest<AgentAction>('video.agent', {
@@ -341,13 +353,22 @@ export function VideoLivePanel() {
           applyCurrentTask(action.current_task || '');
         }
         rememberSearchJob(action.search_job);
-      } catch {
-        setToolStatus('意图识别失败，Full-duplex 对话仍可继续');
+      } catch (routeError) {
+        const message = routeError instanceof Error ? routeError.message : '未知路由错误';
+        reportRealtimeEvent('video_agent_route_failed', {
+          source: 'voice',
+          message,
+        });
+        setToolStatus(`意图识别失败（${message}），Full-duplex 对话仍可继续`);
       }
     })();
   };
 
-  const routeFinalVoiceTranscript = (text: string, source: VoiceTranscriptSource) => {
+  const routeFinalVoiceTranscript = (
+    text: string,
+    source: VoiceTranscriptSource,
+    displayOrder?: number,
+  ) => {
     const decision = evaluateVoiceTranscriptRoute(
       lastVoiceTranscriptRouteRef.current,
       text,
@@ -361,7 +382,7 @@ export function VideoLivePanel() {
       });
       return;
     }
-    handleFinalRealtimeUserText(text);
+    handleFinalRealtimeUserText(text, answerRef.current, displayOrder);
   };
 
   const acceptCompletedSearch = (payload: SearchJobPayload) => {
@@ -394,11 +415,14 @@ export function VideoLivePanel() {
     // Claim the job before asynchronous delivery starts: WebSocket completion and
     // status polling may report the same completed job in the same event loop turn.
     acceptedSearchJobIdsRef.current.add(payload.job_id);
-    if (getJoyAIProvider().handleCompletedSearch(payload, existing)) return;
+    if (joyaiProviderRef.current?.handleCompletedSearch(payload, existing)) return;
+    const qwenCall = qwenToolCallsRef.current.get(payload.job_id);
+    const callId = payload.tool_call_id?.trim() || existing?.toolCallId || qwenCall?.callId;
     const queued = duplexRef.current?.enqueueToolResult({
       jobId: payload.job_id,
       question,
       result,
+      ...(callId ? { callId } : {}),
     }) || false;
     searchJobsRef.current.set(payload.job_id, {
       id: payload.job_id,
@@ -407,8 +431,11 @@ export function VideoLivePanel() {
       query: payload.query?.trim() || existing?.query || '',
       // A failed delivery stays recoverable and will be retried by status polling.
       status: queued ? 'queued' : 'running',
+      toolCallId: callId,
+      toolName: payload.tool_name?.trim() || existing?.toolName || qwenCall?.name,
     });
     if (queued) {
+      qwenToolCallsRef.current.delete(payload.job_id);
       appendChat('tool', result);
       setSearchStatus(`${payload.engine || '九问搜索 Agent'}完成，等待模型空闲后回答…`);
     } else {
@@ -423,14 +450,30 @@ export function VideoLivePanel() {
   const acceptFailedSearch = (payload: SearchJobPayload) => {
     if (!payload.job_id || payload.search_session_id !== searchSessionRef.current) return;
     const existing = searchJobsRef.current.get(payload.job_id);
+    const qwenCall = qwenToolCallsRef.current.get(payload.job_id);
+    const question = payload.question?.trim() || existing?.question || qwenCall?.query || '';
+    const callId = payload.tool_call_id?.trim() || existing?.toolCallId || qwenCall?.callId;
+    const error = payload.error?.trim() || 'Jiuwen Core Agent failed';
+    const returnedToQwen = Boolean(callId && duplexRef.current?.enqueueToolResult({
+      jobId: payload.job_id,
+      question,
+      result: `Jiuwen Core Agent could not complete the research: ${error}`,
+      callId,
+    }));
+    if (returnedToQwen) {
+      acceptedSearchJobIdsRef.current.add(payload.job_id);
+      qwenToolCallsRef.current.delete(payload.job_id);
+    }
     searchJobsRef.current.set(payload.job_id, {
       id: payload.job_id,
       searchSessionId: payload.search_session_id || existing?.searchSessionId || '',
-      question: payload.question?.trim() || existing?.question || '',
+      question,
       query: payload.query?.trim() || existing?.query || '',
       status: 'failed',
+      toolCallId: callId,
+      toolName: payload.tool_name?.trim() || existing?.toolName || qwenCall?.name,
     });
-    setSearchStatus(`${payload.engine || '九问搜索 Agent'}失败：${payload.error || '请重试'}`);
+    setSearchStatus(`${payload.engine || '九问搜索 Agent'}失败：${error}`);
   };
 
   useEffect(() => {
@@ -448,6 +491,8 @@ export function VideoLivePanel() {
         query: payload.query?.trim() || '',
         status: 'running',
         frameDataUrl: framesRef.current.at(-1)?.data_url,
+        toolCallId: payload.tool_call_id?.trim(),
+        toolName: payload.tool_name?.trim(),
       });
       setSearchStatus('');
     });
@@ -804,6 +849,12 @@ export function VideoLivePanel() {
       searchSessionRef.current = crypto.randomUUID();
       acceptedSearchJobIdsRef.current.clear();
       const config = await webRequest<VideoSessionConfig>('video.realtime.config', {});
+      qwenOmniActiveRef.current = config.dialect === 'qwen_omni' || config.provider === 'qwen_omni';
+      if (qwenOmniActiveRef.current) {
+        reportRealtimeEvent('qwen_local_asr_disabled', {
+          reason: 'using_qwen_native_input_audio_transcription',
+        });
+      }
       reportRealtimeEvent('realtime_config_received', {
         model: config.model,
         provider: config.provider || 'realtime',
@@ -839,7 +890,9 @@ export function VideoLivePanel() {
         onUserTurnStarted: (turnId) => {
           searchSpeechGenerationRef.current += 1;
           stopGlobalAudio();
-          displayTurnOrderRef.current.set(turnId, ++chatSequenceRef.current);
+          if (!qwenOmniActiveRef.current) {
+            displayTurnOrderRef.current.set(turnId, ++chatSequenceRef.current);
+          }
         },
         onUserTurnAudio: (audioDataUrl, turnId) => {
           const displayOrder = displayTurnOrderRef.current.get(turnId) || ++chatSequenceRef.current;
@@ -851,8 +904,7 @@ export function VideoLivePanel() {
               }, { timeoutMs: 45_000 });
               if (duplexRef.current !== session) return;
               const transcript = asr.transcript?.trim() || '';
-              routeFinalVoiceTranscript(transcript, 'local');
-              insertDisplayTranscript(transcript, displayOrder);
+              routeFinalVoiceTranscript(transcript, 'local', displayOrder);
             } catch {
               // The Realtime answer remains usable when display-only ASR fails.
             }
@@ -889,6 +941,41 @@ export function VideoLivePanel() {
             if (generation !== searchSpeechGenerationRef.current || !tts?.audio_base64) return;
             await playAudioBase64(tts.audio_base64, tts.audio_mime || 'audio/mpeg');
           })();
+        },
+        onFunctionCall: (call) => {
+          const questionForTool = call.query;
+          reportRealtimeEvent('qwen_tool_call_forwarding', {
+            name: call.name,
+            call_id: call.callId,
+            question: questionForTool,
+            query: call.query,
+          });
+          void webRequest<AgentAction & { call_id?: string }>('video.qwen.tool', {
+            name: call.name,
+            call_id: call.callId,
+            arguments: call.arguments,
+            question: questionForTool,
+            search_session_id: searchSessionRef.current,
+            frame_data_url: framesRef.current.at(-1)?.data_url || '',
+          }, { timeoutMs: 10_000 }).then((action) => {
+            const jobId = action.search_job?.id?.trim() || '';
+            if (!jobId) throw new Error('Jiuwen Core Agent did not create a search job');
+            const existing = searchJobsRef.current.get(jobId);
+            if (existing?.status === 'queued' || existing?.status === 'failed') return;
+            qwenToolCallsRef.current.set(jobId, call);
+            rememberSearchJob(action.search_job);
+          }).catch((toolError) => {
+            const message = toolError instanceof Error
+              ? toolError.message
+              : 'Jiuwen Core Agent request failed';
+            const queued = session.enqueueToolResult({
+              jobId: `qwen-tool-error-${call.callId}`,
+              question: questionForTool,
+              result: `Jiuwen Core Agent could not start the research: ${message}`,
+              callId: call.callId,
+            });
+            if (!queued) setError(message);
+          });
         },
         onDiagnostic: (event) => {
           void webRequest('video.realtime.telemetry', event, { timeoutMs: 5_000 }).catch(() => undefined);
@@ -951,6 +1038,10 @@ export function VideoLivePanel() {
         return;
       }
       const accepted = await duplexRef.current?.sendTextTurn(text);
+      if (qwenOmniActiveRef.current) {
+        if (!accepted) throw new Error('文字输入未进入千问 Realtime 会话');
+        return;
+      }
       const action = await webRequest<AgentAction>('video.agent', {
         question: text,
         realtime_answer: realtimeAnswerAtTurn,

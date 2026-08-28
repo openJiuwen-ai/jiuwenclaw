@@ -18,11 +18,17 @@ import {
   JoyAIFrameClock,
   JoyAIPromptLifecycle,
 } from './joyaiPromptLifecycle';
+import {
+  buildJoyAIToolContextBatch,
+  JoyAIToolContextEntry,
+  rememberJoyAIToolContext,
+  removeSentJoyAIToolContext,
+} from './joyaiToolContext';
 
 const MONITOR_INTERVAL_MS = 1_000;
 const RATE_LIMIT_BASE_COOLDOWN_MS = 60_000;
 const RATE_LIMIT_MAX_COOLDOWN_MS = 5 * 60_000;
-const MONITOR_CLIENT_BUILD = 'joyai-rate-limit-backoff-v10';
+const MONITOR_CLIENT_BUILD = 'joyai-tool-context-v11';
 
 function isJoyAIRateLimit(error: unknown): boolean {
   const candidate = error as { code?: string; message?: string } | null;
@@ -84,6 +90,7 @@ export class JoyAIProvider {
   private searchDeliveryQueue: Promise<void> = Promise.resolve();
   private rateLimitStrikes = 0;
   private monitorPausedUntil = 0;
+  private pendingToolContext: JoyAIToolContextEntry[] = [];
 
   constructor(callbacks: JoyAIProviderCallbacks) {
     this.callbacks = callbacks;
@@ -107,6 +114,7 @@ export class JoyAIProvider {
     this.frameClock.reset();
     this.rateLimitStrikes = 0;
     this.monitorPausedUntil = 0;
+    this.pendingToolContext = [];
     this.startMonitor();
 
     const voice = new JoyAIVoiceSession({
@@ -168,6 +176,7 @@ export class JoyAIProvider {
     this.frameClock.reset();
     this.rateLimitStrikes = 0;
     this.monitorPausedUntil = 0;
+    this.pendingToolContext = [];
     this.handledTurns.clear();
     if (this.monitorTimer !== null) {
       window.clearInterval(this.monitorTimer);
@@ -217,6 +226,17 @@ export class JoyAIProvider {
         if (!finalAnswer) {
           throw new Error('Core Agent 未返回有效最终答案');
         }
+        this.pendingToolContext = rememberJoyAIToolContext(this.pendingToolContext, {
+          jobId,
+          question,
+          query: payload.query?.trim() || existing?.query || '',
+          result: finalAnswer,
+          completedAt: new Date().toISOString(),
+        });
+        this.callbacks.report('joyai_tool_context_buffered', {
+          job_id: jobId,
+          context_job_count: this.pendingToolContext.length,
+        });
         this.callbacks.report('search_result_dispatched', {
           job_id: jobId,
           attempt: 1,
@@ -402,6 +422,9 @@ export class JoyAIProvider {
       }
       const requestKind = options.requestKind || (originalQuestion ? 'user' : 'monitor');
       const prompt = options.frameOnly ? '' : instruction.trim();
+      const toolContext = requestKind === 'user'
+        ? buildJoyAIToolContextBatch(this.pendingToolContext)
+        : { text: '', jobIds: [] };
       const frameTimeRange = this.frameClock.nextRange();
       let result: JoyAIFrameResult;
       try {
@@ -413,7 +436,19 @@ export class JoyAIProvider {
           joyai_session_id: sessionId,
           search_session_id: this.callbacks.getSearchSessionId(),
           frame_time_range: frameTimeRange,
+          ...(toolContext.text ? { tool_context: toolContext.text } : {}),
         }, { timeoutMs: 60_000 });
+        if (toolContext.jobIds.length > 0) {
+          this.pendingToolContext = removeSentJoyAIToolContext(
+            this.pendingToolContext,
+            toolContext.jobIds,
+          );
+          this.callbacks.report('joyai_tool_context_attached', {
+            job_id: toolContext.jobIds.join(','),
+            context_job_count: toolContext.jobIds.length,
+            context_chars: toolContext.text.length,
+          });
+        }
       } catch (error) {
         if (isJoyAIRateLimit(error)) {
           this.rateLimitStrikes += 1;

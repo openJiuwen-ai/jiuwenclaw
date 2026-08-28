@@ -902,6 +902,23 @@
       "memberNameConflictWithLeader": "Team '{{team}}' member name '{{name}}' conflicts with Leader member name"
     },
     "keys": {
+      "videoLiveProvider": "Video live runtime",
+      "videoRealtimePublicUrl": "Realtime WebSocket URL",
+      "videoRealtimeRefAudioPath": "Reference audio path",
+      "qwenOmniRealtimeUrl": "Qwen Realtime URL",
+      "qwenOmniApiKey": "Qwen API key",
+      "qwenOmniModel": "Qwen model",
+      "qwenOmniVoice": "Qwen voice",
+      "joyaiApiBase": "JoyAI API base",
+      "joyaiApiKey": "JoyAI API key",
+      "joyaiModel": "JoyAI model",
+      "voiceProtocol": "Voice protocol",
+      "voiceAsrEndpoint": "Full ASR endpoint",
+      "voiceTtsEndpoint": "Full TTS endpoint",
+      "voiceApiKey": "Voice API key",
+      "voiceAsrModel": "ASR model",
+      "voiceTtsModel": "TTS model",
+      "voiceTtsVoice": "TTS voice",
       "memoryForbiddenEnabled": "Enable",
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
@@ -964,6 +981,18 @@
       "teamLeaderPersona": "Genius project management expert, skilled at task decomposition and team coordination"
     },
     "keyHelp": {
+      "videoLiveProvider": "Select the runtime used by Video Live. Saving also switches the backend route.",
+      "videoRealtimePublicUrl": "MiniCPM Realtime WebSocket URL accessible from the browser.",
+      "videoRealtimeRefAudioPath": "Absolute MiniCPM reference-audio path on the gateway host.",
+      "qwenOmniRealtimeUrl": "Alibaba Cloud Model Studio Qwen Omni Realtime WebSocket URL.",
+      "joyaiApiBase": "JoyAI OpenAI-compatible API base URL, usually ending in /v1.",
+      "voiceProtocol": "Both protocols use the fields below. Select WebSocket for native JoyAI or OpenAI-compatible HTTP for services such as SiliconFlow.",
+      "voiceAsrEndpoint": "Enter the full WebSocket URL for JoyAI WS, or the full /audio/transcriptions or /chat/completions endpoint for OpenAI HTTP.",
+      "voiceTtsEndpoint": "Enter the full WebSocket URL for JoyAI WS, or the full /audio/speech endpoint for OpenAI HTTP.",
+      "voiceApiKey": "Shared ASR/TTS credential. Leave blank for an unauthenticated local JoyAI service.",
+      "voiceAsrModel": "ASR model used by compatible mode; optional for native JoyAI.",
+      "voiceTtsModel": "TTS model used by compatible mode; optional for native JoyAI.",
+      "voiceTtsVoice": "TTS voice used by compatible mode; native JoyAI keeps its fixed voice.",
       "apiBase": "Base URL of the model API. Must start with http:// or https://, e.g. https://api.openai.com/v1 (usually without a chat-specific path).",
       "apiKey": "Auth key for this model service. For local unauthenticated servers, any placeholder (e.g. sk-1234) is fine. Not needed after OpenAI account OAuth.",
       "model": "Provider model ID/name, e.g. gpt-4o or qwen-plus. Must be compatible with the selected provider.",
@@ -1129,11 +1158,11 @@
       "memberNameEnglishOnly": "Member name can only contain English letters",
       "memberNameFormatInvalid": "Member name must start with a lowercase letter, followed by lowercase letters, digits, or hyphens",
       "referencedByTeams": "Referenced by {{count}} Team(s)",
-       "duration": "duration"
+      "duration": "duration"
     },
     "groups": {
       "modelDefault": { "label": "Default Model (Main Chat)", "hint": "Primary chat model service and auth" },
-      "modelVideo": { "label": "Video Model", "hint": "Video understanding/generation model (optional)" },
+      "modelVideo": { "label": "Video Live Model", "hint": "Configure the Qwen Omni or JoyAI video-live and voice runtime" },
       "modelAudio": { "label": "Audio Model", "hint": "Speech recognition/synthesis model (optional)" },
       "modelVision": { "label": "Vision Model", "hint": "Image understanding model (optional)" },
       "model": { "label": "Model Configuration", "hint": "Model service and authentication settings" },
@@ -1170,6 +1199,14 @@
       "externalCliClaude": "Enable Claude",
       "externalCliCodex": "Enable Codex",
       "externalCliUseBuiltin": "Use built-in"
+    },
+    "videoProviders": {
+      "qwenOmni": "Qwen Omni Realtime",
+      "joyai": "JoyAI VL Interaction"
+    },
+    "voiceProtocols": {
+      "nativeWs": "JoyAI WS",
+      "openaiHttp": "OpenAI HTTP"
     },
     "externalCli": {
       "claude": "Claude",
@@ -2083,9 +2120,9 @@
       "titleRepoLinkText": "SkillNet on GitHub",
       "titleRepoAria": "SkillNet repository on GitHub",
       "search": "Search",
-    "collapse": "Collapse",
-    "maximize": "Maximize",
-    "restore": "Exit fullscreen",
+      "collapse": "Collapse",
+      "maximize": "Maximize",
+      "restore": "Exit fullscreen",
       "expand": "Expand",
       "searchPlaceholder": "Enter keywords (e.g. pdf)",
       "noResults": "No matching skills. Try different keywords.",

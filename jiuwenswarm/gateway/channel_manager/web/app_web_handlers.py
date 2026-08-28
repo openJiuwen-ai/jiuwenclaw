@@ -132,6 +132,36 @@ _MODEL_RELOAD_ENV_KEYS = {
     "VIDEO_MODEL_NAME",
     "VIDEO_API_BASE",
     "VIDEO_API_KEY",
+    "VIDEO_LIVE_MODE",
+    "VIDEO_REALTIME_PROVIDER",
+    "VIDEO_REALTIME_PUBLIC_URL",
+    "VIDEO_REALTIME_REF_AUDIO_PATH",
+    "QWEN_OMNI_REALTIME_URL",
+    "QWEN_OMNI_API_KEY",
+    "QWEN_OMNI_MODEL_NAME",
+    "QWEN_OMNI_VOICE",
+    "JOYAI_API_BASE",
+    "JOYAI_API_KEY",
+    "JOYAI_MODEL_NAME",
+    "VOICE_PROTOCOL",
+    "VOICE_ASR_ENDPOINT",
+    "VOICE_TTS_ENDPOINT",
+    "VOICE_API_KEY",
+    "VOICE_ASR_MODEL",
+    "VOICE_TTS_MODEL",
+    "VOICE_TTS_VOICE",
+    # Legacy voice keys remain reload-sensitive for .env compatibility.
+    "JOYAI_VOICE_PROVIDER",
+    "JOYAI_ASR_WS_URL",
+    "JOYAI_TTS_WS_URL",
+    "ASR_API_BASE",
+    "ASR_API_KEY",
+    "ASR_MODEL_NAME",
+    "ASR_API_MODE",
+    "TTS_API_BASE",
+    "TTS_API_KEY",
+    "TTS_MODEL_NAME",
+    "TTS_VOICE",
     "AUDIO_PROVIDER",
     "AUDIO_MODEL_NAME",
     "AUDIO_API_BASE",
@@ -840,6 +870,23 @@ _CONFIG_SET_ENV_MAP = {
     "video_api_key": "VIDEO_API_KEY",
     "video_model": "VIDEO_MODEL_NAME",
     "video_provider": "VIDEO_PROVIDER",
+    # video live runtimes (the selected runtime itself is translated below)
+    "video_realtime_public_url": "VIDEO_REALTIME_PUBLIC_URL",
+    "video_realtime_ref_audio_path": "VIDEO_REALTIME_REF_AUDIO_PATH",
+    "qwen_omni_realtime_url": "QWEN_OMNI_REALTIME_URL",
+    "qwen_omni_api_key": "QWEN_OMNI_API_KEY",
+    "qwen_omni_model": "QWEN_OMNI_MODEL_NAME",
+    "qwen_omni_voice": "QWEN_OMNI_VOICE",
+    "joyai_api_base": "JOYAI_API_BASE",
+    "joyai_api_key": "JOYAI_API_KEY",
+    "joyai_model": "JOYAI_MODEL_NAME",
+    "voice_protocol": "VOICE_PROTOCOL",
+    "voice_asr_endpoint": "VOICE_ASR_ENDPOINT",
+    "voice_tts_endpoint": "VOICE_TTS_ENDPOINT",
+    "voice_api_key": "VOICE_API_KEY",
+    "voice_asr_model": "VOICE_ASR_MODEL",
+    "voice_tts_model": "VOICE_TTS_MODEL",
+    "voice_tts_voice": "VOICE_TTS_VOICE",
     # audio 模型
     "audio_api_base": "AUDIO_API_BASE",
     "audio_api_key": "AUDIO_API_KEY",
@@ -885,7 +932,7 @@ _CONFIG_SET_ENV_MAP = {
     "prompt_hint": "PROMPT_HINT",
 }
 # 配置项键名列表，用于日志等说明
-CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP.keys())
+CONFIG_KEYS = ("video_live_provider", *_CONFIG_SET_ENV_MAP.keys())
 
 # 来自 config.yaml 的配置项（前端 param 名 -> config.yaml 路径）
 _CONFIG_YAML_KEYS = frozenset({
@@ -2522,6 +2569,80 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             param_key: (os.getenv(env_key) or "")
             for param_key, env_key in _CONFIG_SET_ENV_MAP.items()
         }
+        video_live_mode = (os.getenv("VIDEO_LIVE_MODE") or "realtime").strip().casefold()
+        video_realtime_provider = (
+            os.getenv("VIDEO_REALTIME_PROVIDER") or "minicpm"
+        ).strip().casefold()
+        payload["video_live_provider"] = (
+            "joyai"
+            if video_live_mode == "joyai"
+            else "qwen_omni"
+            if video_realtime_provider == "qwen_omni"
+            else "minicpm"
+        )
+        legacy_voice_provider = (
+            os.getenv("JOYAI_VOICE_PROVIDER") or "native"
+        ).strip().casefold()
+        voice_protocol = (payload.get("voice_protocol") or "").strip().casefold()
+        if not voice_protocol:
+            voice_protocol = (
+                "openai_http"
+                if legacy_voice_provider in {"openai", "openai_compatible", "siliconflow"}
+                else "native_ws"
+            )
+            payload["voice_protocol"] = voice_protocol
+
+        legacy_voice_values = (
+            {
+                "voice_asr_endpoint": os.getenv("JOYAI_ASR_WS_URL")
+                or "ws://127.0.0.1:8994/ws/asr",
+                "voice_tts_endpoint": os.getenv("JOYAI_TTS_WS_URL")
+                or "ws://127.0.0.1:8992/ws/tts",
+                "voice_api_key": "",
+                "voice_asr_model": "",
+                "voice_tts_model": "",
+                "voice_tts_voice": "vivian",
+            }
+            if voice_protocol == "native_ws"
+            else {
+                "voice_asr_endpoint": os.getenv("ASR_API_BASE") or "",
+                "voice_tts_endpoint": os.getenv("TTS_API_BASE") or "",
+                "voice_api_key": os.getenv("ASR_API_KEY") or os.getenv("TTS_API_KEY") or "",
+                "voice_asr_model": os.getenv("ASR_MODEL_NAME") or "",
+                "voice_tts_model": os.getenv("TTS_MODEL_NAME") or "",
+                "voice_tts_voice": os.getenv("TTS_VOICE") or "",
+            }
+        )
+        for key, legacy_value in legacy_voice_values.items():
+            if not payload.get(key):
+                payload[key] = legacy_value
+        if voice_protocol == "openai_http":
+            asr_endpoint = str(payload.get("voice_asr_endpoint") or "").rstrip("/")
+            asr_path = asr_endpoint.casefold()
+            if asr_endpoint and not asr_path.endswith(
+                ("/audio/transcriptions", "/chat/completions")
+            ):
+                legacy_mode = (
+                    os.getenv("VOICE_ASR_MODE") or os.getenv("ASR_API_MODE") or ""
+                ).strip().casefold()
+                asr_model = str(payload.get("voice_asr_model") or "").casefold()
+                use_transcription = legacy_mode in {
+                    "transcription", "transcriptions", "audio"
+                } or (
+                    legacy_mode not in {"chat", "chat_completion", "chat_completions"}
+                    and any(
+                        name in asr_model
+                        for name in ("sensevoice", "whisper", "telespeechasr")
+                    )
+                )
+                payload["voice_asr_endpoint"] = (
+                    f"{asr_endpoint}/audio/transcriptions"
+                    if use_transcription
+                    else f"{asr_endpoint}/chat/completions"
+                )
+            tts_endpoint = str(payload.get("voice_tts_endpoint") or "").rstrip("/")
+            if tts_endpoint and not tts_endpoint.casefold().endswith("/audio/speech"):
+                payload["voice_tts_endpoint"] = f"{tts_endpoint}/audio/speech"
         payload["app_version"] = __version__
         runtime_platform = (os.getenv("JIUWENSWARM_RUNTIME_PLATFORM") or "").strip().lower() or "default"
         payload["runtime_platform"] = runtime_platform
@@ -2763,11 +2884,35 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except ValueError as exc:
             raise _ConfigBadRequest(str(exc)) from exc
 
+        if "video_live_provider" in params:
+            video_live_provider = str(params.get("video_live_provider") or "").strip().casefold()
+            if video_live_provider == "joyai":
+                env_updates["VIDEO_LIVE_MODE"] = "joyai"
+                env_updates["VIDEO_REALTIME_PROVIDER"] = ""
+            elif video_live_provider in {"qwen_omni", "minicpm"}:
+                env_updates["VIDEO_LIVE_MODE"] = "realtime"
+                env_updates["VIDEO_REALTIME_PROVIDER"] = video_live_provider
+            else:
+                raise _ConfigBadRequest(
+                    "Video live provider must be one of: qwen_omni, joyai, minicpm"
+                )
+
+        if "voice_protocol" in params:
+            voice_protocol = str(params.get("voice_protocol") or "").strip().casefold()
+            if voice_protocol not in {"native_ws", "openai_http"}:
+                raise _ConfigBadRequest(
+                    "Voice protocol must be one of: native_ws, openai_http"
+                )
+
         for param_key, env_key in _CONFIG_SET_ENV_MAP.items():
             if param_key not in params:
                 continue
             val = params[param_key]
-            if param_key.endswith("_provider") and val and val not in available_model_providers:
+            if (
+                param_key.endswith("_provider")
+                and val
+                and val not in available_model_providers
+            ):
                 raise _ConfigBadRequest(f"Model provider must in: {available_model_providers} ")
             if val is None:
                 env_updates[env_key] = ""
@@ -3065,7 +3210,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[config.set] warm_zen_free_models failed: %s", exc)
 
-        updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated
+        updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates]
+        if "video_live_provider" in params:
+            updated_param_keys.insert(0, "video_live_provider")
+        updated_param_keys += yaml_updated
         payload = {"updated": updated_param_keys, "applied_without_restart": applied_without_restart}
         if apply_result.codex_dependency_install is not None:
             payload["codex_dependency_install"] = apply_result.codex_dependency_install
@@ -3444,7 +3592,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     logger.warning("[config.save_all] warm_zen_free_models failed: %s", exc)
 
             payload = {
-                "updated": [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated,
+                "updated": (
+                    (["video_live_provider"] if "video_live_provider" in config_params else [])
+                    + [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates]
+                    + yaml_updated
+                ),
                 "applied_without_restart": applied_without_restart,
                 "models_count": models_count,
             }

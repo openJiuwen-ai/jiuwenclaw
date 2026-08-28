@@ -82,7 +82,6 @@ test('native duplex uploads audio after websocket open and supports voice-only i
   try {
     const session = new RealtimeDuplexSession({
       url: 'ws://127.0.0.1:17862/v1/realtime',
-      model: 'openbmb/MiniCPM-o-4_5',
       refAudio: 'data:audio/wav;base64,',
     }, callbacks('jpeg'));
 
@@ -115,7 +114,6 @@ test('native duplex uploads audio after websocket open and supports voice-only i
 
     const voiceSession = new RealtimeDuplexSession({
       url: 'ws://127.0.0.1:17862/v1/realtime',
-      model: 'openbmb/MiniCPM-o-4_5',
       refAudio: 'data:audio/wav;base64,',
     }, callbacks(null));
     await voiceSession.start();
@@ -136,14 +134,16 @@ test('native duplex uploads audio after websocket open and supports voice-only i
   }
 });
 
-test('MiniCPM buffering follows target while hard barge-in remains JoyAI-only', async () => {
+test('MiniCPM keeps native interruption while Qwen and JoyAI own their barge-in protocols', async () => {
   const realtime = await readFile(new URL('../src/utils/realtimeDuplex.ts', import.meta.url), 'utf8');
+  const qwen = await readFile(new URL('../src/utils/qwenOmniRealtime.ts', import.meta.url), 'utf8');
   const playback = await readFile(new URL('../public/duplex-playback.js', import.meta.url), 'utf8');
   const joyai = await readFile(new URL('../src/components/VideoLivePanel/joyaiProvider.ts', import.meta.url), 'utf8');
 
   assert.match(realtime, /INITIAL_PLAYBACK_BUFFER_MS = 400/);
   assert.doesNotMatch(realtime, /force_listen/);
   assert.doesNotMatch(realtime, /interruptForUserInput|bargeInCandidate/);
+  assert.match(qwen, /type: 'response\.cancel'/);
   assert.match(playback, /initialBufferSamples = Math\.round\(sampleRate \* 0\.4\)/);
   assert.match(joyai, /onSpeechStart[^]+interruptTts\(\)/);
 });

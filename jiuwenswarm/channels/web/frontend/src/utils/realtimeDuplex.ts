@@ -1,13 +1,39 @@
+import {
+  createMiniCpmAudioAppendEvent,
+  createMiniCpmCloseSessionEvent,
+  createMiniCpmContextInstructions,
+  createMiniCpmPlaybackAckEvent,
+  createMiniCpmSessionUpdate,
+  createMiniCpmTaskControl,
+  createMiniCpmTaskReminder,
+  createMiniCpmTextAppendEvent,
+  MINICPM_BASE_INSTRUCTIONS,
+  MINICPM_CURRENT_TASK_MONITORING_ENABLED,
+} from './minicpmRealtime.js';
+import {
+  createQwenOmniCancelResponseEvent,
+  createQwenOmniFinishSessionEvent,
+  createQwenOmniSessionUpdate,
+  createQwenOmniTextTurnEvents,
+  createQwenOmniToolResultEvents,
+  parseQwenOmniFunctionCall,
+  QwenOmniFunctionCall,
+  QwenOmniMediaSequencer,
+} from './qwenOmniRealtime.js';
+
 export interface RealtimeDuplexConfig {
   url: string;
-  model: string;
-  refAudio: string;
+  dialect?: 'minicpm' | 'qwen_omni';
+  refAudio?: string;
+  voice?: string;
+  tools?: Array<Record<string, unknown>>;
 }
 
 export interface RealtimeToolResult {
   jobId: string;
   question: string;
   result: string;
+  callId?: string;
 }
 
 export interface RealtimeDuplexCallbacks {
@@ -21,6 +47,7 @@ export interface RealtimeDuplexCallbacks {
   onDiagnostic?: (event: Record<string, unknown>) => void;
   onToolResultDispatched?: (jobId: string) => void;
   onToolResultReady?: (toolResult: RealtimeToolResult) => void;
+  onFunctionCall?: (call: QwenOmniFunctionCall) => void;
 }
 
 const INPUT_RATE = 16_000;
@@ -29,34 +56,10 @@ const SEND_INTERVAL_MS = 200;
 const USER_TURN_SILENCE_MS = 1_200;
 const USER_TURN_PREROLL_MS = 1_000;
 const ACTIVE_TASK_REMINDER_INTERVAL_MS = 5_000;
-const REALTIME_CLIENT_BUILD = 'target-native-duplex-v1';
+const REALTIME_CLIENT_BUILD = 'qwen-media-bargein-v3';
 const LISTENING_SPEECH_MS = 240;
 const INITIAL_PLAYBACK_BUFFER_MS = 400;
-const OFFICIAL_OMNI_INSTRUCTIONS = 'Streaming Omni Conversation.';
 type PlaybackLane = 'normal' | 'urgent';
-
-// Keep the task implementation available while the target MiniCPM flow is evaluated.
-export const MINICPM_CURRENT_TASK_MONITORING_ENABLED = false;
-
-const CURRENT_TASK_INSTRUCTIONS = [
-  '当前任务是需要持续执行的视觉任务。任务不为“无”时，持续观察画面、维护进度，并仅在任务规定的时机主动说话；没有新进展时保持倾听。',
-  '所有当前任务提醒都按紧急事件处理：条件满足时只输出一句独立提醒，不要夹带正在处理的普通对话或搜索回答。',
-  '不要因为每帧画面而重复回答。持续出现的同一事件只介入一次；消失后再次出现视为新事件，可以再次介入。一个动作只在完整周期结束后计数。',
-  '用户可以随时询问进度、修改、暂停或取消当前任务。回答使用自然、简洁的中文。',
-  '用户提出新任务时只确认开始观察，不得把任务描述中的目标当成已经发生；只有目标在[当前任务]中且最新画面确认满足时才提醒。',
-];
-const BASE_INSTRUCTIONS = [
-  '你是九问实时视觉助手。',
-  '始终结合当前会话中的近期聊天、近期画面和最新画面回答；最新画面优先，不得把已经消失的物体当成仍在画面中。',
-  '只把当前可见画面、当前可辨语音、用户明确提供的信息和九问工具结果作为事实依据。画面模糊、文字不完整、对象无法确认时，明确说明无法确认或请用户调整画面，不得猜测品牌、文字、人物、数量或状态。',
-  '天气、新闻、价格、公司背景、人物资料、地点信息及其他需要外部知识或时效性的事实，当前画面和用户输入不是足够证据。在收到[异步工具结果]前，必须明确回答“我目前不知道，需要搜索确认”，不得给出任何实质结论，不得用模型记忆或常识补全答案。',
-  '例如用户询问“香港今天天气如何”时，未收到支持该地点和日期的[异步工具结果]前，不得说晴、阴、雨、温度、湿度或其他具体天气信息。',
-  '收到九问检索摘要后，只回答摘要正文能够直接支持的内容。摘要表示材料不足、存在冲突或无法确认时，必须保留该不确定性，不得自行补齐结论。',
-  ...(MINICPM_CURRENT_TASK_MONITORING_ENABLED ? CURRENT_TASK_INSTRUCTIONS : []),
-  '简单询问当前画面中清晰可见的物体或品牌是什么时可直接识别回答；用户询问公司介绍、背景资料、天气、新闻、价格或其他外部事实时，只说当前不知道并需要搜索确认，系统会接续九问搜索结果。',
-  '用户要求持续观察、搜索外部信息或停止当前任务时，使用自然语言明确说明你理解的操作和对象；不要输出JSON、工具标签或内部控制格式。',
-].join('\n');
-const SESSION_INSTRUCTIONS = `${OFFICIAL_OMNI_INSTRUCTIONS}\n${BASE_INSTRUCTIONS}`;
 
 function readableError(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -108,17 +111,17 @@ export class RealtimeDuplexSession {
   private pending: Int16Array[] = [];
   private pendingSamples = 0;
   private sendTimer: number | null = null;
-  private lastVoiceAt = 0;
   private hasActiveTask = false;
   private activeTask = '';
   private lastTaskReminderAt = 0;
-  private contextInstructions = `${BASE_INSTRUCTIONS}\n\n[当前任务]\n无`;
+  private contextInstructions = `${MINICPM_BASE_INSTRUCTIONS}\n\n[当前任务]\n无`;
   private lastSentContext = '';
   private sessionReady = false;
   private responseId: string | null = null;
   private pendingTaskControl: string | null = null;
   private pendingToolResults: RealtimeToolResult[] = [];
   private acceptedToolResultIds = new Set<string>();
+  private acceptedFunctionCallIds = new Set<string>();
   private activeToolJobId: string | null = null;
   private lastInteractiveInputAt = 0;
   private turnAudio: Int16Array[] = [];
@@ -139,6 +142,7 @@ export class RealtimeDuplexSession {
   private pendingResponseLane: PlaybackLane | null = null;
   private activeResponseLane: PlaybackLane = 'normal';
   private responseLanes = new Map<string, PlaybackLane>();
+  private qwenMedia = new QwenOmniMediaSequencer();
 
   constructor(
     private readonly config: RealtimeDuplexConfig,
@@ -151,37 +155,11 @@ export class RealtimeDuplexSession {
     const taskChanged = normalizedTask !== this.activeTask;
     if (MINICPM_CURRENT_TASK_MONITORING_ENABLED && taskChanged) {
       this.lastTaskReminderAt = 0;
-      this.pendingTaskControl = normalizedTask
-        ? [
-          '<|im_start|>system',
-          `[当前任务已更新]\n${normalizedTask}`,
-          '从现在开始持续执行该任务；不要把任务条件当成已经发生。此控制消息无需单独回答。',
-          '<|im_end|>\n',
-        ].join('\n')
-        : [
-          '<|im_start|>system',
-          '[当前任务已停止]\n立即停止之前的持续观察任务，仅继续普通实时对话。此控制消息无需单独回答。',
-          '<|im_end|>\n',
-        ].join('\n');
+      this.pendingTaskControl = createMiniCpmTaskControl(normalizedTask);
     }
     this.activeTask = normalizedTask;
     this.hasActiveTask = Boolean(normalizedTask);
-    const chat = recentChat
-      .slice(-8)
-      .map((item) => {
-        const speaker = item.role === 'assistant' ? '助手' : item.role === 'tool' ? '九问工具结果' : '用户';
-        return `${speaker}：${item.text.trim()}`;
-      })
-      .filter((line) => !line.endsWith('：'))
-      .join('\n');
-    this.contextInstructions = [
-      BASE_INSTRUCTIONS,
-      ...(MINICPM_CURRENT_TASK_MONITORING_ENABLED
-        ? [`[当前任务]\n${normalizedTask || '无'}`]
-        : []),
-      `[当前聊天]\n${chat || '无'}`,
-      '[近期画面与当前画面]\n由当前 Realtime 视频流持续提供；按时间理解动作和变化，以最新帧为准。',
-    ].join('\n\n');
+    this.contextInstructions = createMiniCpmContextInstructions(normalizedTask, recentChat);
     this.sendContextUpdate();
   }
 
@@ -195,29 +173,13 @@ export class RealtimeDuplexSession {
         this.playbackGeneration += 1;
         this.playbackOperation = Promise.resolve();
         this.queuedDrainResponseId = null;
-        if (data.responseId && data.playedMs) {
-          this.send({
-            type: 'playback.ack',
-            response_id: data.responseId,
-            item_id: `item_${data.responseId}`,
-            played_ms: data.playedMs,
-            committed_ms: data.playedMs,
-          });
-        }
+        this.acknowledgePlayback(data.responseId, data.playedMs);
         this.assistantPlaying = false;
         return;
       }
       if (data.type !== 'drained') return;
       if (this.queuedDrainResponseId === data.responseId) this.queuedDrainResponseId = null;
-      if (data.responseId && data.playedMs) {
-        this.send({
-          type: 'playback.ack',
-          response_id: data.responseId,
-          item_id: `item_${data.responseId}`,
-          played_ms: data.playedMs,
-          committed_ms: data.playedMs,
-        });
-      }
+      this.acknowledgePlayback(data.responseId, data.playedMs);
       this.assistantPlaying = false;
       this.sendContextUpdate();
       if (!this.responseActive) this.callbacks.onState('listening');
@@ -246,14 +208,14 @@ export class RealtimeDuplexSession {
       const frameMs = pcm.length * 1_000 / INPUT_RATE;
       const threshold = Math.max(350, this.noiseFloor * 2.5);
       if (level > threshold) {
-        this.lastVoiceAt = Date.now();
-        this.lastInteractiveInputAt = this.lastVoiceAt;
+        this.lastInteractiveInputAt = Date.now();
         this.userSpeechMs += frameMs;
         this.userSilenceMs = 0;
         if (!this.userActivityActive && this.userSpeechMs >= LISTENING_SPEECH_MS) {
           this.userActivityActive = true;
           this.turnHasUserActivity = true;
           this.activeUserTurnId = this.newTurnId('voice');
+          this.interruptQwenResponse(this.activeUserTurnId, this.userSpeechMs, level, threshold);
           this.callbacks.onUserTurnStarted(this.activeUserTurnId);
           this.emitDiagnostic('realtime_user_turn_started', {
             turn_id: this.activeUserTurnId,
@@ -281,7 +243,9 @@ export class RealtimeDuplexSession {
   stop(): void {
     if (this.sendTimer !== null) window.clearInterval(this.sendTimer);
     this.sendTimer = null;
-    this.send({ type: 'session.close' });
+    this.send(this.config.dialect === 'qwen_omni'
+      ? createQwenOmniFinishSessionEvent()
+      : createMiniCpmCloseSessionEvent());
     this.socket?.close(1000, 'client stop');
     this.socket = null;
     this.microphone?.getTracks().forEach((track) => track.stop());
@@ -295,6 +259,7 @@ export class RealtimeDuplexSession {
     this.pendingTaskControl = null;
     this.pendingToolResults = [];
     this.acceptedToolResultIds.clear();
+    this.acceptedFunctionCallIds.clear();
     this.activeToolJobId = null;
     this.lastInteractiveInputAt = 0;
     this.hasActiveTask = false;
@@ -310,6 +275,7 @@ export class RealtimeDuplexSession {
     this.userSpeechMs = 0;
     this.userSilenceMs = 0;
     this.userActivityActive = false;
+    this.qwenMedia.reset();
     this.playbackGeneration += 1;
     this.playbackOperation = Promise.resolve();
     this.queuedDrainResponseId = null;
@@ -320,6 +286,11 @@ export class RealtimeDuplexSession {
     const normalized = text.trim();
     if (!normalized || !isFresh()) return false;
     this.lastInteractiveInputAt = Date.now();
+    if (this.config.dialect === 'qwen_omni') {
+      createQwenOmniTextTurnEvents(normalized).forEach((event) => this.send(event));
+      this.emitDiagnostic('qwen_text_input_dispatched', { text: normalized });
+      return true;
+    }
     this.emitDiagnostic('native_text_input_router_only', { text: normalized });
     return false;
   }
@@ -328,9 +299,11 @@ export class RealtimeDuplexSession {
     const jobId = toolResult.jobId.trim();
     const question = toolResult.question.trim();
     const result = toolResult.result.trim();
+    const callId = toolResult.callId?.trim();
     if (!jobId || !question || !result || this.acceptedToolResultIds.has(jobId)) return false;
+    if (this.config.dialect === 'qwen_omni' && !callId) return false;
     this.acceptedToolResultIds.add(jobId);
-    this.pendingToolResults.push({ jobId, question, result });
+    this.pendingToolResults.push({ jobId, question, result, ...(callId ? { callId } : {}) });
     this.emitDiagnostic('search_result_queued', {
       job_id: jobId,
       question,
@@ -355,7 +328,7 @@ export class RealtimeDuplexSession {
   private openSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
       const url = new URL(this.config.url);
-      url.searchParams.set('duplex', '1');
+      if (this.config.dialect !== 'qwen_omni') url.searchParams.set('duplex', '1');
       const socket = new WebSocket(url);
       this.socket = socket;
       let initSent = false;
@@ -381,19 +354,16 @@ export class RealtimeDuplexSession {
       const sendInit = async () => {
         if (initSent) return;
         initSent = true;
-        this.send({
-          type: 'session.update',
-          session: {
-            modalities: ['audio', 'text'],
-            voice: 'default',
-            ref_audio: this.config.refAudio,
-            instructions: SESSION_INSTRUCTIONS,
-            extra_body: {
-              auto_response: true,
-              minicpmo45_native_duplex: true,
-            },
-          },
-        });
+        if (this.config.dialect === 'qwen_omni') {
+          this.send(createQwenOmniSessionUpdate({
+            voice: this.config.voice,
+            tools: this.config.tools,
+            inputRate: INPUT_RATE,
+            outputRate: OUTPUT_RATE,
+          }));
+        } else {
+          this.send(createMiniCpmSessionUpdate(this.config.refAudio));
+        }
       };
       socket.onopen = () => {
         this.emitDiagnostic('realtime_websocket_open', { url: url.toString() });
@@ -458,15 +428,20 @@ export class RealtimeDuplexSession {
     if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(event));
   }
 
-  private sendContextUpdate(): boolean {
+  private acknowledgePlayback(responseId: unknown, playedMs: unknown): void {
+    if (this.config.dialect === 'qwen_omni') return;
+    const event = createMiniCpmPlaybackAckEvent(responseId, playedMs);
+    if (event) this.send(event);
+  }
+
+  private sendContextUpdate(): void {
     if (!this.sessionReady || this.responseActive
-      || this.contextInstructions === this.lastSentContext) return false;
+      || this.contextInstructions === this.lastSentContext) return;
     // Native MiniCPM duplex owns the live listen/speak state. Mid-session
     // session.update messages are intentionally avoided; task checks and tool
     // results use normal input chunks below.
     this.lastSentContext = this.contextInstructions;
     this.emitDiagnostic('realtime_context_recorded', { has_active_task: this.hasActiveTask });
-    return false;
   }
 
   private flush(): void {
@@ -514,21 +489,26 @@ export class RealtimeDuplexSession {
   }
 
   private sendAudio(pcm: Int16Array, includeVideo: boolean): void {
-    const input: Record<string, unknown> = {
-      type: 'input_audio_buffer.append',
-      audio: bytesToBase64(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength)),
-      format: 'pcm16',
-      sample_rate_hz: INPUT_RATE,
-    };
-    if (includeVideo) {
-      const frame = this.callbacks.getVideoFrame();
-      if (frame) input.video_frames = [frame];
+    const audio = bytesToBase64(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength));
+    if (this.config.dialect === 'qwen_omni') {
+      const batch = this.qwenMedia.createBatch(
+        audio,
+        includeVideo,
+        includeVideo ? this.callbacks.getVideoFrame() : null,
+      );
+      batch.events.forEach((event) => this.send(event));
+      batch.diagnostics.forEach(({ event, details }) => this.emitDiagnostic(event, details));
+      return;
     }
-    this.send(input);
+    this.send(createMiniCpmAudioAppendEvent(
+      audio,
+      INPUT_RATE,
+      includeVideo ? this.callbacks.getVideoFrame() : null,
+    ));
   }
 
   private dispatchQueuedTextInput(): void {
-    const contextUpdated = this.sendContextUpdate();
+    this.sendContextUpdate();
     let text = '';
     if (MINICPM_CURRENT_TASK_MONITORING_ENABLED && this.pendingTaskControl) {
       text = this.pendingTaskControl;
@@ -537,16 +517,11 @@ export class RealtimeDuplexSession {
         has_active_task: this.hasActiveTask,
       });
     } else if (MINICPM_CURRENT_TASK_MONITORING_ENABLED
-      && !contextUpdated && this.activeTask && !this.responseActive
+      && this.activeTask && !this.responseActive
       && !this.userActivityActive
       && !this.turnHasUserActivity
       && Date.now() - this.lastTaskReminderAt >= ACTIVE_TASK_REMINDER_INTERVAL_MS) {
-      text = [
-        '<|im_start|>user',
-        `[紧急当前任务检查]\n${this.activeTask}`,
-        '立即检查本次输入的最新画面；条件满足或有新进展时，输出一句独立、简洁的任务提醒，否则保持倾听。不要回答其他对话，不要复述任务。',
-        '<|im_end|>\n',
-      ].join('\n');
+      text = createMiniCpmTaskReminder(this.activeTask);
       this.pendingResponseLane = 'urgent';
       this.lastTaskReminderAt = Date.now();
       this.emitDiagnostic('active_task_reminder_sent', {
@@ -560,18 +535,33 @@ export class RealtimeDuplexSession {
       && !this.assistantPlaying
       && !this.userActivityActive
       && !this.turnHasUserActivity
-      && Date.now() - this.lastInteractiveInputAt >= 2_500) {
+      && (this.config.dialect === 'qwen_omni'
+        || Date.now() - this.lastInteractiveInputAt >= 2_500)) {
       const toolResult = this.pendingToolResults.shift();
       if (toolResult) {
         this.emitDiagnostic('search_result_dispatched', {
           job_id: toolResult.jobId,
         });
         this.callbacks.onToolResultDispatched?.(toolResult.jobId);
-        this.callbacks.onToolResultReady?.(toolResult);
+        if (this.config.dialect === 'qwen_omni' && toolResult.callId) {
+          this.activeToolJobId = toolResult.jobId;
+          this.responseActive = true;
+          createQwenOmniToolResultEvents(
+            toolResult.callId,
+            toolResult.result,
+            toolResult.question,
+          ).forEach((event) => this.send(event));
+          this.emitDiagnostic('qwen_tool_result_returned', {
+            job_id: toolResult.jobId,
+            call_id: toolResult.callId,
+          });
+        } else {
+          this.callbacks.onToolResultReady?.(toolResult);
+        }
       }
     }
     if (!text) return;
-    this.send({ type: 'input.text.append', text });
+    this.send(createMiniCpmTextAppendEvent(text));
   }
 
   private activateResponseLane(responseId: string | null): PlaybackLane {
@@ -597,7 +587,28 @@ export class RealtimeDuplexSession {
     const type = String(event.type || '');
     const response = event.response as Record<string, unknown> | undefined;
     const eventResponseId = String(event.response_id || response?.id || '') || null;
-    if (type === 'session.created' || type === 'response.listen') {
+    const functionCall = parseQwenOmniFunctionCall(event);
+    if (functionCall) {
+      if (!this.acceptedFunctionCallIds.has(functionCall.callId)) {
+        this.acceptedFunctionCallIds.add(functionCall.callId);
+        if (this.acceptedFunctionCallIds.size > 32) {
+          const oldest = this.acceptedFunctionCallIds.values().next().value;
+          if (oldest) this.acceptedFunctionCallIds.delete(oldest);
+        }
+        this.emitDiagnostic('qwen_tool_call_received', {
+          name: functionCall.name,
+          call_id: functionCall.callId,
+          query: functionCall.query,
+        });
+        this.callbacks.onFunctionCall?.(functionCall);
+      }
+    } else if (type === 'response.function_call_arguments.done') {
+      this.emitDiagnostic('qwen_tool_call_invalid', {
+        name: String(event.name || ''),
+        call_id: String(event.call_id || ''),
+      });
+      this.callbacks.onError('千问返回了无效的工具调用');
+    } else if (type === 'session.created' || type === 'response.listen') {
       if (type === 'response.listen') {
         this.finishOfficialTurn();
       }
@@ -640,7 +651,20 @@ export class RealtimeDuplexSession {
         this.assistantTranscript = '';
       }
       this.callbacks.onState('speaking');
-    } else if (type === 'audio.cancelled' || type === 'response.audio.cancelled') {
+    } else if (type === 'response.text.delta') {
+      this.beginOfficialTurn(eventResponseId);
+      const delta = String(event.delta || '');
+      this.assistantTranscript += delta;
+      this.callbacks.onAssistantText(
+        this.assistantTranscript,
+        false,
+        this.activeToolJobId || undefined,
+      );
+    } else if (type === 'response.text.done') {
+      this.assistantTranscript = String(event.text || this.assistantTranscript);
+      this.finishAssistantText();
+    } else if (type === 'audio.cancelled' || type === 'response.audio.cancelled'
+      || type === 'response.cancelled') {
       if (!eventResponseId || eventResponseId === this.responseId) {
         this.responseActive = false;
         this.playbackNode?.port.postMessage({ type: 'clear', cancelResponse: false });
@@ -673,12 +697,63 @@ export class RealtimeDuplexSession {
       this.assistantTranscript = String(event.transcript || this.assistantTranscript);
       this.finishAssistantText();
     } else if (type === 'conversation.item.input_audio_transcription.delta') {
-      this.callbacks.onUserText(String(event.delta || ''), false);
+      this.callbacks.onUserText(
+        `${String(event.delta || event.text || '')}${String(event.stash || '')}`,
+        false,
+      );
     } else if (type === 'conversation.item.input_audio_transcription.completed') {
-      this.callbacks.onUserText(String(event.transcript || ''), true);
+      const transcript = String(event.transcript || '');
+      if (this.config.dialect === 'qwen_omni') {
+        this.emitDiagnostic('qwen_native_asr_completed', {
+          transcript,
+          has_transcript: Boolean(transcript.trim()),
+        });
+      }
+      this.callbacks.onUserText(transcript, true);
     } else if (type === 'error') {
+      if (this.config.dialect === 'qwen_omni') {
+        const media = this.qwenMedia.snapshot();
+        this.emitDiagnostic('qwen_realtime_error', {
+          raw_event: event,
+          audio_append_sequence: media.audioAppendSequence,
+          image_append_sequence: media.imageAppendSequence,
+          has_deferred_image: media.hasDeferredImage,
+        });
+      }
       this.callbacks.onError(readableError(event.error || event));
     }
+  }
+
+  private interruptQwenResponse(
+    turnId: string,
+    speechMs: number,
+    level: number,
+    threshold: number,
+  ): boolean {
+    if (this.config.dialect !== 'qwen_omni'
+      || (!this.responseActive && !this.assistantPlaying)) return false;
+    const interruptedResponseId = this.responseId;
+    const cancelEventSent = this.responseActive;
+    if (cancelEventSent) this.send(createQwenOmniCancelResponseEvent());
+    this.playbackGeneration += 1;
+    this.playbackOperation = Promise.resolve();
+    this.queuedDrainResponseId = null;
+    this.playbackNode?.port.postMessage({ type: 'clear', cancelResponse: false });
+    this.responseActive = false;
+    this.assistantPlaying = false;
+    this.pendingResponseLane = null;
+    this.activeResponseLane = 'normal';
+    if (this.assistantTranscript) this.finishAssistantText();
+    this.emitDiagnostic('qwen_response_interrupted_by_user', {
+      turn_id: turnId,
+      response_id: interruptedResponseId,
+      speech_ms: Math.round(speechMs),
+      audio_level: Math.round(level),
+      speech_threshold: Math.round(threshold),
+      cancel_event_sent: cancelEventSent,
+    });
+    this.callbacks.onState('listening');
+    return true;
   }
 
   private beginOfficialTurn(responseId: string | null): void {
@@ -808,6 +883,12 @@ export class RealtimeDuplexSession {
   private dispatchUserTurn(turnId: string): void {
     if (!this.turnHasUserActivity || this.turnSamples < INPUT_RATE / 2) return;
     this.turnHasUserActivity = false;
+    if (this.config.dialect === 'qwen_omni') {
+      this.turnAudio = [];
+      this.turnSamples = 0;
+      this.emitDiagnostic('qwen_local_asr_skipped', { turn_id: turnId });
+      return;
+    }
     this.callbacks.onUserTurnAudio(this.takeTurnAudio(), turnId);
   }
 

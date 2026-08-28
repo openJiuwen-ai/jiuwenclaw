@@ -75,6 +75,7 @@ def test_build_app_exposes_ws_routes_only() -> None:
     paths = _route_paths(app)
     assert "/ws" in paths
     assert "/ws/git" in paths
+    assert "/ws/video/qwen-omni" in paths
     assert "/container-file-api/upload" not in paths
     assert "/file-api/upload" not in paths
 

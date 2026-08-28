@@ -16,6 +16,10 @@ from jiuwenswarm.common.security.ws_origin import (
     is_origin_check_enabled,
 )
 from jiuwenswarm.gateway.channel_manager.web.ws_connection_adapter import StarletteWsAdapter
+from jiuwenswarm.gateway.channel_manager.web.qwen_omni_gateway import (
+    QWEN_OMNI_PROXY_PATH,
+    serve_qwen_omni_websocket,
+)
 
 if TYPE_CHECKING:
     from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel
@@ -61,8 +65,14 @@ def build_web_channel_app(channel: WebChannel) -> FastAPI:
     async def websocket_endpoint(websocket: WebSocket) -> None:
         await _serve_channel_websocket(channel, websocket)
 
+    async def qwen_omni_websocket_endpoint(websocket: WebSocket) -> None:
+        if await _reject_disallowed_origin(websocket):
+            return
+        await serve_qwen_omni_websocket(websocket)
+
     # Honor WEB_PATH / --web-path (same as legacy handle_connection path check).
     app.add_api_websocket_route(main_path, websocket_endpoint)
+    app.add_api_websocket_route(QWEN_OMNI_PROXY_PATH, qwen_omni_websocket_endpoint)
     if main_path != _GIT_WS_PATH:
         app.add_api_websocket_route(_GIT_WS_PATH, websocket_endpoint)
     else:
