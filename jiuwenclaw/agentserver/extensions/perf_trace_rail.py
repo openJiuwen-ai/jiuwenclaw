@@ -327,15 +327,6 @@ class PerfTraceRail(DeepAgentRail):
         if not _ENABLED:
             return
         tid = _resolve_trace_id(ctx)
-        # 诊断：同 ContextVar 上下文内若 before_invoke 第二次进入，打印调用栈，
-        # 用于定位"invoke 日志重复"的运行时重入来源。读栈仅在此异常路径发生。
-        prev_start = (_starts.get() or {}).get("invoke:start:")
-        if prev_start is not None:
-            import traceback
-            logger.warning(
-                "[perf] %s phase=invoke REENTRY detected (trace_id reuse) — call stack:\n%s",
-                _log_kv(), "".join(traceback.format_stack()),
-            )
         _trace_id.set(tid)
         _session_id.set(_resolve_session_id(ctx))
         _starts.set({})
