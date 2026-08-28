@@ -1701,12 +1701,51 @@ async def _run_with_telemetry(
             exc,
         )
 
+    session_sharing_registry = None
+    cron_run_ephemeral = None
+    try:
+        from jiuwenswarm.gateway.storage_assembly.setup import (
+            create_session_sharing_registry,
+            cron_run_ephemeral_store,
+            ensure_gateway_storage_context_for_ephemeral,
+            is_ephemeral_state_enabled,
+        )
+
+        if is_ephemeral_state_enabled(full_cfg):
+            gateway_storage_ctx = ensure_gateway_storage_context_for_ephemeral(
+                full_cfg,
+                existing=gateway_storage_ctx,
+            )
+            if gateway_storage_ctx is not None:
+                session_sharing_registry = await create_session_sharing_registry(
+                    gateway_storage_ctx
+                )
+                cron_run_ephemeral = cron_run_ephemeral_store(gateway_storage_ctx)
+                logger.info(
+                    "[App] Ephemeral state wired: session_sharing, cron_scheduler"
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] ephemeral state wiring failed, using in-memory only: %s",
+            exc,
+        )
+        session_sharing_registry = None
+        cron_run_ephemeral = None
+
+    def _message_handler_factory(client):
+        if session_sharing_registry is not None:
+            return MessageHandler(
+                client,
+                session_sharing_registry=session_sharing_registry,
+            )
+        return MessageHandler(client)
+
     client, message_handler = await _connect_wrap_and_create_message_handler(
         client,
         agent_server_url=agent_server_url,
         max_retries=max_retries,
         retry_interval=retry_interval,
-        message_handler_factory=MessageHandler,
+        message_handler_factory=_message_handler_factory,
     )
     await message_handler.start_forwarding()
 
@@ -1721,6 +1760,7 @@ async def _run_with_telemetry(
     cron_registry = CronTenantRegistry.get_instance(
         agent_client=client,
         message_handler=message_handler,
+        cron_run_ephemeral=cron_run_ephemeral,
     )
     message_handler.set_cron_registry(cron_registry)
     # Default-tenant controller for proactive sync / TUI compatibility.
