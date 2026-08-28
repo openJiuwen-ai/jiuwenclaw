@@ -449,6 +449,11 @@ def _build_show_card(
     avatar = manifest.get("avatar")
     version = manifest.get("version")
     tags = manifest.get("tags")
+    if package_type == "agent_template":
+        description = manifest.get("description")
+        details = description if isinstance(description, str) else ""
+    else:
+        details = _read_readme_details(pkg_dir)
     card: dict[str, Any] = {
         "id": pkg_dir.name,
         "displayName": manifest.get("display_name") or pkg_dir.name,
@@ -456,7 +461,7 @@ def _build_show_card(
         "source": resolved_source,
         "avatar": avatar if isinstance(avatar, str) else "",
         "version": version if isinstance(version, str) else "",
-        "details": manifest.get("description") if isinstance(manifest.get("description"), str) else "",
+        "details": details,
         "tags": tags if isinstance(tags, list) else [],
         "skills": _map_skills(pkg_dir, manifest),
         "tools": _map_class_entries(manifest, "tools"),

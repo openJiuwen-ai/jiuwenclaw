@@ -758,9 +758,6 @@
     "approvalInputPlaceholder": "填写修改意见后点击「下一步」；留空点击「跳过」"
   },
   "persistSession": {
-    "toolbarTag": "永续会话",
-    "closeTag": "取消永续会话",
-    "lockedHint": "永续会话已在创建时锁定，当前会话中不可更改",
     "textRequired": "请在 /persist 后输入任务内容"
   },
   "goal": {
