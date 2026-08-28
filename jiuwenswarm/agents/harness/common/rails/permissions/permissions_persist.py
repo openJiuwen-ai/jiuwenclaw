@@ -11,7 +11,7 @@ openjiuwen 的 PermissionInterruptRail 在「总是允许」时会通过 ToolPer
 （不写 config.yaml）。
 
 路径信任：
-- ``/add-dir`` → ``file_guard.paths``（read/write allow，exec ask）
+- ``/add-dir`` → ``file_guard.paths``（read/write/exec allow）
 - HITL「总是允许」外部路径 → 触达路径本身 + 按当时 action 轴（read 不放开 write）
 不再写入 ``external_directory`` 具名键，也不再写 path 类 ``approval_overrides``。
 shell 命令维 ``approval_overrides`` 仍可保留。
@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 _SESSION_OVERLAY_FILENAME = "session_permissions.yaml"
 _SESSION_ID_MAX_LEN = 128
+_RUNTIME_TRUSTED_DIR_MARKER = "_jiuwenswarm_runtime_trusted_dir"
 _session_overlay_lock = threading.Lock()
 _AXIS_RANK = {"deny": 0, "ask": 1, "allow": 2}
 
@@ -309,6 +310,8 @@ def extract_session_overlay_delta(
     base_paths = _file_guard_paths_by_key(base)
     delta_paths: list[dict[str, Any]] = []
     for key, entry in _file_guard_paths_by_key(new).items():
+        if entry.get(_RUNTIME_TRUSTED_DIR_MARKER):
+            continue
         old = base_paths.get(key)
         new_read = _normalize_axis(entry.get("read"))
         new_write = _normalize_axis(entry.get("write"))
@@ -640,7 +643,7 @@ def persist_external_directory_allow(
 def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
     """CLI ``command.add_dir``：全局信任目录子树。
 
-    写入 ``permissions.file_guard.paths``：``read/write: allow``，``exec: ask``。
+    写入 ``permissions.file_guard.paths``：``read/write/exec: allow``。
     """
     if not isinstance(raw_path, str) or not raw_path.strip():
         return {"ok": False, "error": "path is empty"}
@@ -657,11 +660,12 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
     data, yaml_path = _load_config_yaml_round_trip()
     permissions = _ensure_permissions_dict(data)
     _merge_file_guard_path_into_permissions(
-        permissions, dir_norm, read="allow", write="allow", exec_="ask",
+        permissions, dir_norm, read="allow", write="allow", exec_="allow",
     )
     _dump_config_yaml_round_trip(yaml_path, data)
     logger.info(
-        "[PermissionPersist] cli_add_dir.file_guard path=%s read=allow write=allow exec=ask",
+        "[PermissionPersist] cli_add_dir.file_guard path=%s "
+        "read=allow write=allow exec=allow",
         dir_norm,
     )
     return {
@@ -675,7 +679,7 @@ def persist_cli_trusted_directory_with_overrides(raw_path: str) -> dict[str, Any
     """CLI ``command.add_dir``：信任目录 + shell 命令维 approval_overrides。
 
     写入：
-    - ``permissions.file_guard.paths``：目录 read/write allow，exec ask
+    - ``permissions.file_guard.paths``：目录 read/write/exec allow
     - ``permissions.approval_overrides``：仅 shell ``match_type: command``（不再写 path 类）
     """
     if not isinstance(raw_path, str) or not raw_path.strip():
@@ -693,10 +697,15 @@ def persist_cli_trusted_directory_with_overrides(raw_path: str) -> dict[str, Any
     data, yaml_path = _load_config_yaml_round_trip()
     permissions = _ensure_permissions_dict(data)
     _merge_file_guard_path_into_permissions(
-        permissions, dir_norm, read="allow", write="allow", exec_="ask",
+        permissions, dir_norm, read="allow", write="allow", exec_="allow",
     )
 
-    shell_pattern = "re:" + rf".*{re.escape(dir_norm)}.*"
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+        _agent_core_shell_tools,
+        _runtime_script_command_pattern,
+    )
+
+    shell_pattern = _runtime_script_command_pattern(dir_norm)
     schema_key = str(permissions.get("schema") or permissions.get("version") or "").strip().lower()
     tiered = schema_key in {"tiered_policy", "v_cc", "v4.2", ""}
 
@@ -707,11 +716,10 @@ def persist_cli_trusted_directory_with_overrides(raw_path: str) -> dict[str, Any
         overrides = _ensure_approval_overrides_list(permissions)
         # 写回 list（_ensure 可能过滤）
         permissions["approval_overrides"] = overrides
-        shell_tools = sorted({"bash", "mcp_exec_command", "create_terminal"})
         _append_override_if_missing(
             overrides,
             oid=shell_override_id,
-            tools=shell_tools,
+            tools=_agent_core_shell_tools(),
             match_type="command",
             pattern=shell_pattern,
             action="allow",

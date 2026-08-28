@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from typing import Any, AsyncIterator, Callable
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,87 @@ def _get_ws_connect() -> Callable[..., Any]:
         import websockets
 
         return websockets.connect
+
+
+def _build_agent_run_payload(request: dict[str, Any] | None) -> dict[str, Any]:
+    """Map invoke agent_as_a_tool fields onto /agent/run body.
+
+    Device/uid follow the same runtime resolvers as PluginSkillExec extraInfo.
+    Application (vassistant) is the protocol client shell, not a fake handset.
+    """
+    from jiuwenswarm.agents.harness.common.tools.invoke_meta.useraccess_runtime import (
+        resolve_device_hostname,
+        resolve_device_sandbox_system,
+        resolve_runtime_device_id,
+        resolve_runtime_uid,
+    )
+
+    request = request or {}
+    agent_id = str(request.get("agentId") or "")
+    query = str(request.get("query") or "")
+    files_info = request.get("filesInfo") or []
+    hostname = resolve_device_hostname()
+    sandbox_system = resolve_device_sandbox_system()
+    device_id = resolve_runtime_device_id()
+    uid = resolve_runtime_uid()
+    return {
+        "contexts": [
+            {
+                "header": {"name": "Application", "namespace": "System"},
+                "payload": {
+                    "apps": [{
+                        "name": "智慧语音",
+                        "packageName": "com.huawei.hmos.vassistant",
+                        "version": "11.6.4.212",
+                    }],
+                },
+            },
+            {
+                "header": {"name": "ClientContext", "namespace": "System"},
+                "payload": {
+                    "agentId": agent_id,
+                    "agentInfo": {
+                        "agentId": agent_id,
+                        "agentName": agent_id,
+                    },
+                    "businessType": "NormalScreen",
+                    "isNeedAgentInfo": False,
+                    "odid": device_id,
+                    "serviceCenterData": [
+                        {"featureType": "CONTENT_CARD", "featureVersion": "999.999"},
+                        {"featureType": "CONTENT_CARD_SDK", "featureVersion": "999.999"},
+                    ],
+                    "currentAgentAttachment": files_info,
+                },
+            },
+            {
+                "header": {"name": "AsrRecognize", "namespace": "TextRecognizer"},
+                "payload": {"asrText": query, "isNeedAgentInfo": False},
+            },
+            {
+                "header": {"name": "Device", "namespace": "System"},
+                "payload": {
+                    "deviceName": hostname or "sandbox_pc",
+                    "deviceType": sandbox_system or "pc",
+                    "sysVersion": sandbox_system or "",
+                    "ohosApiVersion": 0,
+                },
+            },
+            {
+                "header": {"name": "DialogueHistory", "namespace": "DialogManager"},
+                "payload": {"dialogueHistory": []},
+            },
+        ],
+        "message": "",
+        "session": {
+            "deviceId": device_id,
+            "interactionId": 1,
+            "messageId": uuid.uuid4().hex,
+            "messageName": "textRecognize",
+            "sessionId": uuid.uuid4().hex,
+            "uid": uid,
+        },
+    }
 
 
 class AgentRuntimeClient:
@@ -72,8 +154,6 @@ class AgentRuntimeClient:
             headers.update(self._default_headers)
         if extra:
             headers.update(extra)
-        # Local/unit tests without session still need a uid placeholder.
-        headers.setdefault("x-uid", "u123456789")
         return headers
 
     def _parse_response(self, raw: str | bytes) -> dict[str, Any]:
@@ -186,7 +266,11 @@ class AgentRuntimeClient:
                     )
                     break
                 frame = self._parse_response(raw)
-                logger.info("Recived frame index[%s], frame content: %s", frame_index, frame)
+                logger.debug(
+                    "[AgentRuntimeClient] Received frame index[%s], frame content: %s",
+                    frame_index,
+                    frame,
+                )
                 yield frame
                 if self._is_final_frame(frame):
                     logger.debug(
@@ -197,102 +281,11 @@ class AgentRuntimeClient:
 
     async def run_agent(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
         """WS /agent/run — 执行智能体、工作流、组件接口（一次性返回最终结果）."""
-        # TODO: 请求体构造（将调用方字段映射为外部接口真实字段）
         payload = await self.generatePayload(request)
         return await self._request("/agent/run", payload)
 
     async def generatePayload(self, request):
-        import random
-        import string
-        agent_id = request.get("agentId", "") if request else ""
-        query = request.get("query", "") if request else ""
-        files_info = request.get("filesInfo", []) if request else []
-        session_id = "".join(random.choices(string.digits, k=10))
-        payload = {
-            "contexts": [
-                {
-                    "header": {
-                        "name": "Application",
-                        "namespace": "System"
-                    },
-                    "payload": {
-                        "apps": [{
-                            "name": "智慧语音",
-                            "packageName": "com.huawei.hmos.vassistant",
-                            "version": "11.6.4.212"
-                        }]
-                    }
-                },
-                {
-                    "header": {
-                        "name": "ClientContext",
-                        "namespace": "System"
-                    },
-                    "payload": {
-                        "agentId": agent_id,
-                        "agentInfo": {
-                            "agentId": agent_id,
-                            "agentName": "测试"
-                        },
-                        "businessType": "NormalScreen",
-                        "isNeedAgentInfo": False,
-                        "odid": "1a2b3c4d5e-6f7g8h",
-                        "serviceCenterData": [
-                            {
-                                "featureType": "CONTENT_CARD",
-                                "featureVersion": "999.999"
-                            },
-                            {
-                                "featureType": "CONTENT_CARD_SDK",
-                                "featureVersion": "999.999"
-                            }
-                        ],
-                        "currentAgentAttachment": files_info
-                    }
-                },
-                {
-                    "header": {
-                        "name": "AsrRecognize",
-                        "namespace": "TextRecognizer"
-                    },
-                    "payload": {
-                        "asrText": query,
-                        "isNeedAgentInfo": False
-                    }
-                },
-                {
-                    "header": {
-                        "name": "Device",
-                        "namespace": "System"
-                    },
-                    "payload": {
-                        "deviceName": "phone",
-                        "deviceType": "NOH-AN00",
-                        "sysVersion": "OpenHarmony-5.0.2.42(Canary1)",
-                        "ohosApiVersion": 23
-                    }
-                },
-                {
-                    "header": {
-                        "name": "DialogueHistory",
-                        "namespace": "DialogManager"
-                    },
-                    "payload": {
-                        "dialogueHistory": []
-                    }
-                }
-            ],
-            "message": "",
-            "session": {
-                "deviceId": "1a2b3c4d5e-6f7g8h",
-                "interactionId": 1,
-                "messageId": "123456",
-                "messageName": "textRecognize",
-                "sessionId": session_id,
-                "uid": "u123456789"
-            }
-        }
-        return payload
+        return _build_agent_run_payload(request)
 
     def run_agent_stream(
         self, request: dict[str, Any] | None = None
@@ -304,98 +297,7 @@ class AgentRuntimeClient:
             async for frame in client.run_agent_stream({...}):
                 ...
         """
-        # TODO: 请求体构造（将调用方字段映射为外部接口真实字段）
-        import random
-        import string
-        agent_id = request.get("agentId", "") if request else ""
-        query = request.get("query", "") if request else ""
-        files_info = request.get("filesInfo", []) if request else []
-        session_id = "".join(random.choices(string.digits, k=10))
-        payload = {
-            "contexts": [
-                {
-                    "header": {
-                        "name": "Application",
-                        "namespace": "System"
-                    },
-                    "payload": {
-                        "apps": [{
-                            "name": "智慧语音",
-                            "packageName": "com.huawei.hmos.vassistant",
-                            "version": "11.6.4.212"
-                        }]
-                    }
-                },
-                {
-                    "header": {
-                        "name": "ClientContext",
-                        "namespace": "System"
-                    },
-                    "payload": {
-                        "agentId": agent_id,
-                        "agentInfo": {
-                            "agentId": agent_id,
-                            "agentName": "测试"
-                        },
-                        "businessType": "NormalScreen",
-                        "isNeedAgentInfo": False,
-                        "odid": "1a2b3c4d5e-6f7g8h",
-                        "serviceCenterData": [
-                            {
-                                "featureType": "CONTENT_CARD",
-                                "featureVersion": "999.999"
-                            },
-                            {
-                                "featureType": "CONTENT_CARD_SDK",
-                                "featureVersion": "999.999"
-                            }
-                        ],
-                        "currentAgentAttachment": files_info
-                    }
-                },
-                {
-                    "header": {
-                        "name": "AsrRecognize",
-                        "namespace": "TextRecognizer"
-                    },
-                    "payload": {
-                        "asrText": query,
-                        "isNeedAgentInfo": False
-                    }
-                },
-                {
-                    "header": {
-                        "name": "Device",
-                        "namespace": "System"
-                    },
-                    "payload": {
-                        "deviceName": "phone",
-                        "deviceType": "NOH-AN00",
-                        "sysVersion": "OpenHarmony-5.0.2.42(Canary1)",
-                        "ohosApiVersion": 23
-                    }
-                },
-                {
-                    "header": {
-                        "name": "DialogueHistory",
-                        "namespace": "DialogManager"
-                    },
-                    "payload": {
-                        "dialogueHistory": []
-                    }
-                }
-            ],
-            "message": "",
-            "session": {
-                "deviceId": "1a2b3c4d5e-6f7g8h",
-                "interactionId": 1,
-                "messageId": "123456",
-                "messageName": "textRecognize",
-                "sessionId": session_id,
-                "uid": "u123456789"
-            }
-        }
-        return self._request_stream("/agent/run", payload)
+        return self._request_stream("/agent/run", _build_agent_run_payload(request))
 
 
 __all__ = ["AgentRuntimeClient"]

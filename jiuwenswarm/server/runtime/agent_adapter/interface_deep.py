@@ -133,6 +133,7 @@ from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntim
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     SKILL_EVOLUTION_APPROVAL_SCHEMA,
+    apply_permission_trusted_dirs,
     build_permission_rail,
     convert_interactions_to_ask_user_question,
 )
@@ -6577,16 +6578,20 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             self._response_prompt_rail.set_channel(resolved_channel)
         if isinstance(self._subagent_rail, BrowserTaskPromptRail):
             self._subagent_rail.set_channel(resolved_channel)
-        # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
-        # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
+        # PermissionInterruptRail: per-request trusted_dirs/project_dir 注入，
+        # 使这些子树的文件读写执行及目录内脚本直执行按 allow 处理。
         # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
         permission_rail = getattr(self, "_permission_rail", None)
         if permission_rail is not None and bind_request:
             try:
-                permission_rail.set_trusted_dirs(runtime_config.trusted_dirs)
+                apply_permission_trusted_dirs(
+                    permission_rail,
+                    runtime_config.trusted_dirs,
+                    runtime_config.project_dir or self._project_dir,
+                )
             except Exception:
                 logger.debug(
-                    "[JiuWenSwarmDeepAdapter] permission_rail.set_trusted_dirs failed",
+                    "[JiuWenSwarmDeepAdapter] permission_rail trusted_dirs update failed",
                     exc_info=True,
                 )
         circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
