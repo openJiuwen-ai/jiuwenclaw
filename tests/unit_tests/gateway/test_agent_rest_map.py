@@ -42,6 +42,7 @@ _RPC_ALLOWLIST = frozenset(
         "config.set",
         "channel.get",
         "team.session.reset",
+        "team.runtime.dissolve",
         "path.get",
         "path.set",
         "logging.set",

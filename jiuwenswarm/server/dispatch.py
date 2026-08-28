@@ -104,6 +104,7 @@ HANDLERS: dict[ReqMethod, HandlerSpec] = {
     ReqMethod.TEAM_SESSION_BIND: HandlerSpec(fn=team_handlers.handle_team_session_bind),
     ReqMethod.TEAM_DELETE: HandlerSpec(fn=team_handlers.handle_team_delete),
     ReqMethod.TEAM_SESSION_RESET: HandlerSpec(fn=team_handlers.handle_team_session_reset),
+    ReqMethod.TEAM_RUNTIME_DISSOLVE: HandlerSpec(fn=team_handlers.handle_team_runtime_dissolve),
     ReqMethod.TEAM_SNAPSHOT: HandlerSpec(fn=team_handlers.handle_team_snapshot),
     ReqMethod.TEAM_MQ_PUBLISH: HandlerSpec(fn=team_handlers.handle_team_mq_publish),
     ReqMethod.TEAM_HISTORY_GET: HandlerSpec(fn=team_handlers.handle_team_history_get),

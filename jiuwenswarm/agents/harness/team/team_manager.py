@@ -721,6 +721,23 @@ class TeamManager:
             if template_snapshot is None and entity is not None:
                 template_id = entity.template_id
                 template_snapshot = copy.deepcopy(entity.template_snapshot)
+        # 模板漂移自愈：live 模板 vs 冻结快照指纹比对，漂移则刷新两处冻结副本。
+        # fail-open：reconcile 任何异常都原样返回 frozen，不阻断 chat。
+        # runtime_config 已在上方 :701 解析（仅当 team_name 真值时定义，与下方
+        # 守卫同前置条件，故此处引用安全）。
+        if team_name and template_id and isinstance(template_snapshot, dict):
+            from jiuwenswarm.server.runtime.team_snapshot_refresh import (
+                reconcile_session_team_snapshot,
+            )
+
+            template_snapshot = reconcile_session_team_snapshot(
+                session_id=session_id,
+                team_name=team_name,
+                template_id=template_id,
+                frozen_snapshot=template_snapshot,
+                config_base=runtime_config,
+                sessions_root=sessions_root,
+            )
         return (
             team_name or None,
             runtime_team_name or None,
