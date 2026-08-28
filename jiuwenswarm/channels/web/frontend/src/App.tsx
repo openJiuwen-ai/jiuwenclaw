@@ -27,6 +27,7 @@ import {
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
+import { ENTERPRISE_HIDDEN_NAV_ITEMS, isEnterpriseMode } from './edition';
 import {
   beginHistoryRestore,
   fetchHistoryPage,
@@ -270,6 +271,8 @@ function AppContent() {
     return 'new';
   });
 
+  const enterpriseMode = isEnterpriseMode();
+  const enterpriseBlockedNav = new Set<MainNavKey>(ENTERPRISE_HIDDEN_NAV_ITEMS);
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
@@ -330,11 +333,11 @@ function AppContent() {
   useEffect(() => {
     const handler = (e: Event) => {
       const nav = (e as CustomEvent<MainNavKey>).detail;
-      if (nav) setActiveNav(nav);
+      if (nav && !(enterpriseMode && enterpriseBlockedNav.has(nav))) setActiveNav(nav);
     };
     window.addEventListener('jiuwen:nav', handler);
     return () => window.removeEventListener('jiuwen:nav', handler);
-  }, []);
+  }, [enterpriseMode]);
 
   const restartAutoCloseTimerRef = useRef<number | null>(null);
   const saveToastTimerRef = useRef<number | null>(null);
@@ -2072,13 +2075,14 @@ function AppContent() {
   }, [deleteTarget, enterNewConversation, request, t]);
 
   const handleNavigate = useCallback((nav: MainNavKey) => {
+    if (enterpriseMode && enterpriseBlockedNav.has(nav)) return;
     setActiveNav(nav);
     if (modelSetupGuideStep === 1 && nav === 'configpanel') {
       setModelSetupGuideStep(2);
     }
     if (nav === 'skills') setHasVisitedSkills(true);
     if (nav === 'channels') setHasVisitedChannels(true);
-  }, [modelSetupGuideStep]);
+  }, [enterpriseMode, modelSetupGuideStep]);
 
   const skipModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
@@ -2208,7 +2212,7 @@ function AppContent() {
         isConnected={isConnected}
         onNewSession={handleNewSession}
         showNewSession={false}
-        hiddenNavItems={['sessions']}
+        hiddenNavItems={enterpriseMode ? ['sessions', ...ENTERPRISE_HIDDEN_NAV_ITEMS] : ['sessions']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
         onSetupGuideRequest={openModelSetupGuide}
       />
