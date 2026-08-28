@@ -6,6 +6,7 @@ from jiuwenswarm.gateway.a2a_manager import (
     A2AIngressConfig,
     A2AIngressConfigRepository,
     A2AIngressError,
+    A2AIngressState,
     A2AManager,
     load_a2a_ingress_config,
     load_a2a_ingress_config_safely,
@@ -447,6 +448,59 @@ async def test_update_apply_true_with_disabled_config_stops_running_service():
     assert snapshot.effective_rpc_url is None
     assert channels[0].stop_calls == 1
     assert channel_manager.unregistered == ["a2a"]
+
+
+@pytest.mark.asyncio
+async def test_reload_disposes_running_channel_when_saved_config_is_disabled():
+    channel_manager = _ChannelManagerProbe()
+    channels = []
+
+    def factory(config, router):
+        channel = _ChannelProbe(config, router)
+        channels.append(channel)
+        return channel
+
+    manager = A2AManager(
+        channel_manager,
+        object(),
+        A2AIngressConfig(),
+        repository=_ConfigRepositoryProbe(),
+        channel_factory=factory,
+    )
+    await manager.enable()
+    await manager.update({"enabled": False}, apply=False)
+    snapshot = await manager.reload()
+
+    assert snapshot.enabled is False
+    assert snapshot.state.value == "disabled"
+    assert snapshot.effective_rpc_url is None
+    assert snapshot.started_at is None
+    assert channels[0].stop_calls == 1
+    assert channel_manager.unregistered == ["a2a"]
+
+
+@pytest.mark.asyncio
+async def test_on_start_done_keeps_callback_task_referenced():
+    manager = A2AManager(
+        _ChannelManagerProbe(),
+        object(),
+        A2AIngressConfig(),
+        repository=_ConfigRepositoryProbe(),
+        channel_factory=lambda config, router: _ChannelProbe(config, router),
+    )
+    start_task = asyncio.create_task(asyncio.sleep(0))
+    await start_task
+    manager._start_task = start_task
+    manager._state = A2AIngressState.STARTING
+    manager._starting_config = manager._config
+
+    manager._on_start_done(start_task)
+
+    assert manager._pending_callbacks
+    callback = next(iter(manager._pending_callbacks))
+    await callback
+    assert manager.snapshot().state.value == "running"
+    assert manager._pending_callbacks == set()
 
 
 @pytest.mark.asyncio

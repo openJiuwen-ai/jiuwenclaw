@@ -1651,13 +1651,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _a2a_ingress_enable(ws, req_id, params, session_id):
-        await _send_a2a_snapshot(ws, req_id, a2a_manager.enable)
+        await _send_a2a_snapshot(ws, req_id, lambda: a2a_manager.enable())
 
     async def _a2a_ingress_disable(ws, req_id, params, session_id):
-        await _send_a2a_snapshot(ws, req_id, a2a_manager.disable)
+        await _send_a2a_snapshot(ws, req_id, lambda: a2a_manager.disable())
 
     async def _a2a_ingress_reload(ws, req_id, params, session_id):
-        await _send_a2a_snapshot(ws, req_id, a2a_manager.reload)
+        await _send_a2a_snapshot(ws, req_id, lambda: a2a_manager.reload())
 
     channel.register_method("a2a.ingress.get", _a2a_ingress_get)
     channel.register_method("a2a.ingress.history", _a2a_ingress_history)

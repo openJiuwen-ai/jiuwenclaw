@@ -123,6 +123,19 @@ async def test_a2a_ingress_history_rejects_non_integer_limit():
     assert channel.responses[-1]["error"] == "limit must be an integer"
 
 
+@pytest.mark.asyncio
+async def test_a2a_ingress_lifecycle_handlers_tolerate_missing_manager():
+    channel = _WebChannelProbe()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, a2a_manager=None))
+
+    await channel.methods["a2a.ingress.enable"](object(), "enable", {}, "session")
+    await channel.methods["a2a.ingress.disable"](object(), "disable", {}, "session")
+    await channel.methods["a2a.ingress.reload"](object(), "reload", {}, "session")
+
+    assert [item["ok"] for item in channel.responses] == [False, False, False]
+    assert {item["code"] for item in channel.responses} == {"A2A_BIND_FAILED"}
+
+
 def test_a2a_ingress_http_routes_map_to_rpc_methods():
     routes = {(route.http_method, route.path): route.rpc_method for route in MAPPED_ROUTES}
 

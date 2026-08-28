@@ -505,6 +505,68 @@ async def test_executor_cancellation_records_terminal_history_and_reraises():
 
 
 @pytest.mark.asyncio
+async def test_executor_cancel_closes_event_queue_without_immediate():
+    pytest.importorskip("a2a.types")
+
+    class TrackingQueue:
+        def __init__(self) -> None:
+            self.events: list = []
+            self.close_immediate: bool | None = None
+
+        async def enqueue_event(self, event) -> None:
+            self.events.append(event)
+
+        async def close(self, immediate: bool = False) -> None:
+            self.close_immediate = immediate
+
+    channel = build_channel()
+    queue = TrackingQueue()
+    await _A2AAgentExecutor(channel).cancel(_FakeContext(), queue)
+
+    assert queue.close_immediate is False
+    assert queue.events
+
+
+@pytest.mark.asyncio
+async def test_executor_interrupt_survives_closed_event_queue():
+    pytest.importorskip("a2a.types")
+    channel = build_channel()
+    dispatched = asyncio.Event()
+    history_events = []
+
+    async def on_message(msg: Message):
+        dispatched.set()
+
+    channel.on_message(on_message)
+    channel.set_request_observer(history_events.append)
+
+    class ClosedQueue:
+        def __init__(self) -> None:
+            self.closed = False
+            self.close_immediate: bool | None = None
+
+        async def enqueue_event(self, event) -> None:
+            if self.closed:
+                raise RuntimeError("queue is closed")
+
+        async def close(self, immediate: bool = False) -> None:
+            self.closed = True
+            self.close_immediate = immediate
+
+    context = _FakeContext()
+    queue = ClosedQueue()
+    execute_task = asyncio.create_task(
+        _A2AAgentExecutor(channel).execute(context, queue)
+    )
+    await dispatched.wait()
+    await _A2AAgentExecutor(channel).cancel(context, queue)
+    await execute_task
+
+    assert queue.close_immediate is False
+    assert history_events[-1]["status"] == "canceled"
+
+
+@pytest.mark.asyncio
 async def test_executor_history_redacts_internal_exception_text():
     pytest.importorskip("a2a.types")
     channel = build_channel()

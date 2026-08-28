@@ -37,6 +37,17 @@ def _raise_missing_a2a_sdk(exc: ImportError) -> None:
     ) from exc
 
 
+async def _enqueue_event_safely(event_queue: Any, event: Any) -> None:
+    """Best-effort enqueue; cancel may already have closed the A2A queue."""
+    try:
+        await event_queue.enqueue_event(event)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "[A2AChannel] skipped event because the A2A event queue is unavailable",
+            exc_info=True,
+        )
+
+
 @dataclass
 class A2AChannelConfig:
     enabled: bool = False
@@ -252,12 +263,13 @@ class _A2AAgentExecutor(_AgentExecutorBase):
                         final_state = TaskState.TASK_STATE_COMPLETED
                         history_status = "completed"
                         history_error = None
-                    await event_queue.enqueue_event(
+                    await _enqueue_event_safely(
+                        event_queue,
                         TaskStatusUpdateEvent(
                             task_id=task_id,
                             context_id=context_id,
                             status=TaskStatus(state=final_state),
-                        )
+                        ),
                     )
                     self._channel.notify_request_observer(
                         request_id=request_id,
@@ -291,12 +303,13 @@ class _A2AAgentExecutor(_AgentExecutorBase):
                 finished_at=time.time(),
                 error="request execution failed",
             )
-            await event_queue.enqueue_event(
+            await _enqueue_event_safely(
+                event_queue,
                 TaskStatusUpdateEvent(
                     task_id=task_id,
                     context_id=context_id,
                     status=TaskStatus(state=TaskState.TASK_STATE_FAILED),
-                )
+                ),
             )
         finally:
             self._channel.clear_pending_request(request_id)
@@ -325,7 +338,7 @@ class _A2AAgentExecutor(_AgentExecutorBase):
                 status=TaskStatus(state=TaskState.TASK_STATE_CANCELED),
             )
         )
-        await event_queue.close(immediate=True)
+        await event_queue.close()
 
 
 class A2AChannel(BaseChannel):

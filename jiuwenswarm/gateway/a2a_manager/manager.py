@@ -60,6 +60,7 @@ class A2AManager:
         self._config_revision = 0
         self._request_history: deque[dict[str, Any]] = deque(maxlen=200)
         self._lock = asyncio.Lock()
+        self._pending_callbacks: set[asyncio.Task[None]] = set()
 
     @property
     def channel(self) -> _ManagedA2AChannel | None:
@@ -181,7 +182,7 @@ class A2AManager:
     async def reload(self) -> A2AIngressSnapshot:
         async with self._lock:
             if not self._config.enabled:
-                self._state = A2AIngressState.DISABLED
+                await self._disable_locked()
                 return self.snapshot()
             await self._reload_locked()
             return self.snapshot()
@@ -262,14 +263,24 @@ class A2AManager:
         if propagate_cancellation:
             raise asyncio.CancelledError
 
+    def _track_callback_task(self, task: asyncio.Task[None]) -> None:
+        self._pending_callbacks.add(task)
+        task.add_done_callback(self._pending_callbacks.discard)
+
     def _on_start_done(self, task: asyncio.Task[None]) -> None:
         if task.cancelled():
             return
         exc = task.exception()
         if exc is None:
-            asyncio.create_task(self._record_start_success(task), name="a2a-ingress-started")
+            callback = asyncio.create_task(
+                self._record_start_success(task), name="a2a-ingress-started"
+            )
         else:
-            asyncio.create_task(self._record_background_error(task, exc), name="a2a-ingress-start-failed")
+            callback = asyncio.create_task(
+                self._record_background_error(task, exc),
+                name="a2a-ingress-start-failed",
+            )
+        self._track_callback_task(callback)
 
     async def _record_start_success(self, task: asyncio.Task[None]) -> None:
         async with self._lock:
