@@ -186,8 +186,10 @@ _H1_INNER_TEXT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _CONTENT_SAFE_OPEN_RE = re.compile(r'<div class="content-safe"', re.IGNORECASE)
+# footer 块：必须位于 </main> 之后，避免误匹配内容区 flex-shrink-0 + <p> 的卡片。
+# 用捕获组(footer_div)只提取 footer div 本身，不含 </main> 与 main 内容之间的文本。
 _FOOTER_BLOCK_RE = re.compile(
-    r'<div class="[^"]*\bflex-shrink-0\b[^"]*"[^>]*>\s*<p\b[^>]*>.*?</p>\s*</div>',
+    r'</main>.*?(<div class="[^"]*\bflex-shrink-0\b[^"]*"[^>]*>\s*<p\b[^>]*>.*?</p>\s*</div>)',
     re.IGNORECASE | re.DOTALL,
 )
 _P_INNER_TEXT_RE = re.compile(r"(<p\b[^>]*>)(.*?)(</p>)", re.IGNORECASE | re.DOTALL)
@@ -666,7 +668,7 @@ def _extract_footer_block(html: str) -> str:
     matches = list(_FOOTER_BLOCK_RE.finditer(html or ""))
     if not matches:
         return ""
-    return matches[-1].group(0)
+    return matches[-1].group(1)
 
 
 def _normalize_footer_text_only(html: str) -> str:
