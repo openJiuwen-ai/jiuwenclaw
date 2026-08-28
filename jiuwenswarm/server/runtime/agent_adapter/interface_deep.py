@@ -263,7 +263,6 @@ from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context
 from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
     get_base_permissions_config,
     get_effective_permissions_config,
-    is_enterprise_runtime,
     reset_permissions_session_scope,
     setup_permissions_session_scope,
 )
@@ -312,6 +311,7 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
 from jiuwenswarm.server.runtime.agent_adapter import evolution_version as evolution_version_ctl
 from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
 from jiuwenswarm.common.local_env_config import (
+    is_enterprise,
     bind_agent_env_ns,
     bind_task_env_overlay,
     build_effective_env_overlay,
@@ -1553,12 +1553,12 @@ async def _build_mysql_async_engine():
 
     连接参数从 ``GATEWAY_DB_*`` 读取；池参数见 ``GATEWAY_DB_POOL_*``。
     进程内复用同一 engine，避免每个 agent 再建独立连接池。
-    未配置 ``GATEWAY_DB_HOST`` 或未开 ``AGENT_RUNTIME`` 时返回 None，由调用方决定是否回退 SQLite。
+    未配置 ``GATEWAY_DB_HOST`` 或非企业版时返回 None，由调用方决定是否回退 SQLite。
     配置了 ``GATEWAY_DB_HOST`` 但连接/初始化失败时抛出异常，避免静默回退到 SQLite。
     注意：SQLite 不扛并发，并发时会报：(sqlite3.OperationalError) disk I/O error
     """
     global _shared_mysql_checkpoint_engine
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    if not is_enterprise():
         return None
     if _shared_mysql_checkpoint_engine is not None:
         return _shared_mysql_checkpoint_engine
@@ -1656,12 +1656,12 @@ async def _build_postgresql_async_engine():
 
     连接参数从 ``GATEWAY_DB_*`` 读取；池参数见 ``GATEWAY_DB_POOL_*``。
     进程内复用同一 engine，避免每个 agent 再建独立连接池。
-    未配置 ``GATEWAY_DB_HOST`` 或未开 ``AGENT_RUNTIME`` 时返回 None，由调用方决定是否回退 SQLite。
+    未配置 ``GATEWAY_DB_HOST`` 或非企业版时返回 None，由调用方决定是否回退 SQLite。
     配置了 ``GATEWAY_DB_HOST`` 但连接/初始化失败时抛出异常，避免静默回退到 SQLite。
     注意：SQLite 不扛并发，并发时会报：(sqlite3.OperationalError) disk I/O error
     """
     global _shared_postgresql_checkpoint_engine
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    if not is_enterprise():
         return None
     if _shared_postgresql_checkpoint_engine is not None:
         return _shared_postgresql_checkpoint_engine
@@ -1804,7 +1804,7 @@ async def ensure_persistent_checkpointer() -> None:
 
             # 企业版：CHECKPOINT_DB_TYPE=mysql|postgresql 时改用对应库（复用 GATEWAY_DB_*）
             checkpoint_db_type = os.getenv("CHECKPOINT_DB_TYPE", "").strip().lower()
-            if os.getenv("AGENT_RUNTIME", "").strip():
+            if is_enterprise():
                 if checkpoint_db_type == "mysql":
                     mysql_engine = await _build_mysql_async_engine()
                     if mysql_engine is not None:
@@ -1974,8 +1974,8 @@ class JiuWenSwarmDeepAdapter:
         apply_mcp_call_timeout_patch()
         self._instance: DeepAgent | None = None
         self._project_dir: str | None = None
-        # 企业多租户：AGENT_RUNTIME 下可用外部传入的隔离 workspace / 租户 ID
-        enterprise = bool(os.getenv("AGENT_RUNTIME", "").strip())
+        # 企业多租户：企业版下可用外部传入的隔离 workspace / 租户 ID
+        enterprise = is_enterprise()
         if workspace_dir and enterprise:
             self._workspace_dir: str = str(
                 collapse_nested_agent_workspace_dir(workspace_dir)
@@ -4230,7 +4230,7 @@ class JiuWenSwarmDeepAdapter:
     async def _load_enterprise_config(self, request: AgentRequest) -> None:
         """按当前请求的 ``params`` 从 Gateway DB 加载生效企业策略到 ``self._enterprise_config``。"""
         self._enterprise_config = None
-        if not os.getenv("AGENT_RUNTIME", "").strip():
+        if not is_enterprise():
             return
         try:
             from jiuwenswarm.server.runtime.enterprise_config import (
@@ -4260,7 +4260,7 @@ class JiuWenSwarmDeepAdapter:
 
     def _inject_extension_config_into_inputs(self, inputs: dict[str, Any]) -> None:
         """将企业策略中的 extension_config 注入 inputs（替代 ee gateway channel_context 透传）。"""
-        if not os.getenv("AGENT_RUNTIME", "").strip():
+        if not is_enterprise():
             return
         if "extension_config" in inputs:
             return
@@ -4667,7 +4667,7 @@ class JiuWenSwarmDeepAdapter:
     def _tenant_disk_ids(self) -> tuple[str, str]:
         """Return ``(service_id, agent_id)`` for on-disk tenant paths.
 
-        Prefer request-side ``env_*`` ids so ``AGENT_RUNTIME`` rewrite of
+        Prefer request-side ``env_*`` ids so enterprise rewrite of
         ``self._agent_id`` (e.g. ``office_default``) does not divert checkpoint
         / prompt paths away from ``agent_office``.
         """
@@ -4707,7 +4707,7 @@ class JiuWenSwarmDeepAdapter:
                 }
 
                 checkpoint_db_type = os.getenv("CHECKPOINT_DB_TYPE", "").strip().lower()
-                if os.getenv("AGENT_RUNTIME", "").strip():
+                if is_enterprise():
                     if checkpoint_db_type == "mysql":
                         mysql_engine = await _build_mysql_async_engine()
                         if mysql_engine is not None:
@@ -5517,7 +5517,7 @@ class JiuWenSwarmDeepAdapter:
         """
         runtime = runtime or {}
         shared_dir: str | None = None
-        if os.getenv("AGENT_RUNTIME", "").strip() and self._workspace_dir:
+        if is_enterprise() and self._workspace_dir:
             # 企业多租户：挂载当前 workspace 根，修复下载路径权限
             shared_dir = str(Path(self._workspace_dir).resolve().parent.parent)
         return create_sandbox_sysop_card(
@@ -5845,7 +5845,7 @@ class JiuWenSwarmDeepAdapter:
         extra["excluded_commands"] = list(runtime.get("excluded_commands") or [])
         extra["fallback_on_failure"] = bool(runtime.get("fallback_on_failure", False))
         shared_dir: str | None = None
-        if os.getenv("AGENT_RUNTIME", "").strip() and self._workspace_dir:
+        if is_enterprise() and self._workspace_dir:
             shared_dir = str(Path(self._workspace_dir).resolve().parent.parent)
         new_policy, upload_list = build_filesystem_policy(
             runtime.get("files") or {},
@@ -6516,9 +6516,9 @@ class JiuWenSwarmDeepAdapter:
             AGENT_EXTRA_RAILS=path.to.module1;path.to.module2
 
         Each module must expose a ``register_rails()`` function that returns
-        a list of DeepAgentRail instances. Only honored when AGENT_RUNTIME is set.
+        a list of DeepAgentRail instances. Only honored under enterprise edition.
         """
-        if not os.getenv("AGENT_RUNTIME", "").strip():
+        if not is_enterprise():
             return []
         env_value = os.getenv("AGENT_EXTRA_RAILS", "").strip()
         if not env_value:
@@ -7292,7 +7292,7 @@ class JiuWenSwarmDeepAdapter:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
         permission_config = (
             get_base_permissions_config()
-            if is_enterprise_runtime()
+            if is_enterprise()
             else get_effective_permissions_config()
         )
         if self._permission_rail is not None:
@@ -7443,10 +7443,10 @@ class JiuWenSwarmDeepAdapter:
         """Return AgentCard / tool-owner base id for this adapter.
 
         Community keeps the stable ``_AGENT_CARD_ID`` so checkpointer keys stay
-        constant. Enterprise (``AGENT_RUNTIME``) scopes by service/agent to avoid
+        constant. Enterprise scopes by service/agent to avoid
         cross-tenant card/tool collisions.
         """
-        if not os.getenv("AGENT_RUNTIME", "").strip():
+        if not is_enterprise():
             return _AGENT_CARD_ID
         agent_id = str(self._agent_id or "").strip()
         service_id = str(self._service_id or "").strip()
@@ -7851,7 +7851,7 @@ class JiuWenSwarmDeepAdapter:
             )
             # 企业版：create_instance 时可带 request，按 params 加载企业配置并合并模型
             bootstrap_request = self._instance_overrides.pop("request", None)
-            if bootstrap_request is not None and os.getenv("AGENT_RUNTIME", "").strip():
+            if bootstrap_request is not None and is_enterprise():
                 await self._load_enterprise_config(bootstrap_request)
             config_base = merge_memory_config_into_config(config_base)
             config_base = self._merge_enterprise_models_into_config(config_base)
@@ -8354,7 +8354,7 @@ class JiuWenSwarmDeepAdapter:
         elif _force_apply:
             self._pending_reload = None
 
-        if os.getenv("AGENT_RUNTIME", "").strip():
+        if is_enterprise():
             try:
                 await reload_memory_config_from_gateway_db()
             except Exception as exc:  # noqa: BLE001
@@ -8992,7 +8992,7 @@ class JiuWenSwarmDeepAdapter:
         # web 默认 True；officeclaw 与 test 仓对齐默认允许；其它 channel 默认 False
         if send_file_enabled is None:
             send_file_enabled = channel in {"web", "officeclaw"}
-        agent_runtime_env = os.getenv("AGENT_RUNTIME", "").strip()
+        agent_runtime_env = is_enterprise()
         if agent_runtime_env:
             send_file_enabled = True
             if self._enterprise_config is not None:

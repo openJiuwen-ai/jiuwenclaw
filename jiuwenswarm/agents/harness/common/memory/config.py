@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from jiuwenswarm.common.local_env_config import (
+    is_enterprise,
     SPAWN_ENV_KEYS,
     get_local_config,
     ingest_bare_business_into_tip,
@@ -37,11 +38,6 @@ _memory_config_cache_source: str | None = None
 MEMORY_CONFIG_TABLE = "memory_config"
 MEMORY_CONFIG_SOURCE_DB = "gateway_db"
 MEMORY_CONFIG_SOURCE_YAML = "config.yaml"
-
-
-def is_enterprise_memory_config_enabled() -> bool:
-    """Manager 下发的 memory_config 仅在企业级部署（``AGENT_RUNTIME`` 非空）生效。"""
-    return bool(os.getenv("AGENT_RUNTIME", "").strip())
 
 
 def _resolve_env_vars(value: Any) -> Any:
@@ -95,7 +91,7 @@ def _deep_merge_dict(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
 
 def get_memory_config_overlay() -> Dict[str, Any] | None:
     """Return Manager 下发的 memory 段 overlay（非企业级或未下发时为 None）。"""
-    if not is_enterprise_memory_config_enabled():
+    if not is_enterprise():
         return None
     if _memory_config_db_cache is not None:
         return copy.deepcopy(_memory_config_db_cache)
@@ -105,12 +101,12 @@ def get_memory_config_overlay() -> Dict[str, Any] | None:
 def get_memory_section(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """读取 memory 段。
 
-    企业级（``AGENT_RUNTIME`` 非空）：Gateway DB overlay > config.yaml。
+    企业级：Gateway DB overlay > config.yaml。
     其他场景：仅 config.yaml。
     """
     base_cfg = config if config is not None else _load_config()
     yaml_mem = (base_cfg or {}).get("memory", {})
-    if not is_enterprise_memory_config_enabled():
+    if not is_enterprise():
         return copy.deepcopy(yaml_mem) if isinstance(yaml_mem, dict) else {}
 
     merged = copy.deepcopy(yaml_mem) if isinstance(yaml_mem, dict) else {}
@@ -122,7 +118,7 @@ def get_memory_section(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any
 
 def merge_memory_config_into_config(config_base: Dict[str, Any]) -> Dict[str, Any]:
     """深拷贝 config；企业级时将 memory 段与 DB overlay 合并。"""
-    if not is_enterprise_memory_config_enabled():
+    if not is_enterprise():
         return copy.deepcopy(config_base)
     merged = copy.deepcopy(config_base)
     merged["memory"] = get_memory_section(config_base)
@@ -133,7 +129,7 @@ def apply_memory_config_payload(payload: dict[str, Any] | None) -> dict[str, Any
     """应用 Manager/Gateway 下发的 memory_config（热更新入口，仅企业级生效）。"""
     global _memory_config_db_cache, _memory_config_cache_source
 
-    if not is_enterprise_memory_config_enabled():
+    if not is_enterprise():
         return {"ok": True, "source": MEMORY_CONFIG_SOURCE_YAML}
 
     clear_config_cache()
@@ -164,7 +160,7 @@ def apply_memory_config_payload(payload: dict[str, Any] | None) -> dict[str, Any
 
 async def reload_memory_config_from_gateway_db() -> dict[str, Any]:
     """从 Gateway 库加载 ``memory_config`` 更新缓存（冷启动/热重载，仅企业级）。"""
-    if not is_enterprise_memory_config_enabled():
+    if not is_enterprise():
         return {"ok": True, "source": MEMORY_CONFIG_SOURCE_YAML}
 
     global _memory_config_db_cache, _memory_config_cache_source
@@ -526,7 +522,7 @@ def get_memory_mode(config: Optional[Dict[str, Any]] = None) -> str:
 async def reload_embed_config_from_gateway_db() -> None:
     """从 Gateway 库加载 ``embed_config`` 并刷新 embedding 缓存（企业版）。"""
     global _embed_config_db_cache
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    if not is_enterprise():
         return
     try:
         from jiuwenswarm.server.runtime.enterprise_config import gateway_db
@@ -589,7 +585,7 @@ def get_task_memory_config() -> Dict[str, Any]:
 async def reload_task_memory_config_from_gateway_db() -> None:
     """从 Gateway 库加载 ``task_memory_config`` 并刷新缓存（企业版）。"""
     global _task_memory_config_db_cache
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    if not is_enterprise():
         return
     try:
         from jiuwenswarm.server.runtime.enterprise_config import gateway_db

@@ -667,7 +667,7 @@ class AgentWebSocketServer:
         # WS侧以固定id：`WS_PUSH_SUBSCRIBER_ID`注册。
         # key是``_ws_capabilities_key``返回的str(id(ws))，与RequestContext.connection_id
         self._acp_client_capabilities_by_ws: dict[str, dict[str, Any]] = {}
-        # AgentManager 实例（企业多租户入口见 TenantAgentPool，按 AGENT_RUNTIME 使用）
+        # AgentManager 实例（企业多租户入口见 TenantAgentPool，按企业版使用）
         self._agent_manager = AgentManager()
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
         # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。

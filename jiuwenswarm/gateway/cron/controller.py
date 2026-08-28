@@ -6,12 +6,12 @@ from zoneinfo import ZoneInfo
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
+from jiuwenswarm.common.local_env_config import is_enterprise
 from jiuwenswarm.gateway.cron.cron_expr import clamp_wake_offset_for_delay_seconds, normalize_cron_expr
 from jiuwenswarm.gateway.cron.enterprise_gate import (
     coerce_routing_id,
     enterprise_cron_enabled,
     extract_routing_triple,
-    is_enterprise_edition,
     job_matches_routing,
     routing_triple_complete,
     strip_sticky_identity_fields,
@@ -161,7 +161,7 @@ class CronController:
 
     @staticmethod
     def _require_enterprise_routing(params: dict[str, Any] | None) -> tuple[str, str, str]:
-        if is_enterprise_edition() and not enterprise_cron_enabled():
+        if is_enterprise() and not enterprise_cron_enabled():
             raise PermissionError(
                 "enterprise cron is not ready: jiuwenclaw_id not bound "
                 "(refuse write path; will not fall back to file store)"
@@ -305,7 +305,7 @@ class CronController:
         self._validate_schedule(cron_expr=cron_expr, timezone=timezone)
         description = self._normalize_description(description, name)
 
-        if is_enterprise_edition():
+        if is_enterprise():
             wake_offset_seconds = self._clamp_wake_offset_for_upcoming_run(
                 wake_offset_seconds,
                 cron_expr=cron_expr,
@@ -392,7 +392,7 @@ class CronController:
         bot_id: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
-        if is_enterprise_edition() and not enterprise_cron_enabled():
+        if is_enterprise() and not enterprise_cron_enabled():
             raise PermissionError(
                 "enterprise cron is not ready: jiuwenclaw_id not bound"
             )
@@ -451,7 +451,7 @@ class CronController:
         user_id: str | None = None,
         skip_ownership: bool = False,
     ) -> bool:
-        if is_enterprise_edition() and not enterprise_cron_enabled():
+        if is_enterprise() and not enterprise_cron_enabled():
             raise PermissionError(
                 "enterprise cron is not ready: jiuwenclaw_id not bound"
             )

@@ -4,11 +4,12 @@
 
 Enterprise list/preview of remote Agent workspace is **not** guaranteed (1-A):
 handlers read Gateway-local disks. Share uses disk history personally and
-``ChatHistoryStore`` under ``AGENT_RUNTIME`` (2-A). Push lands on Gateway disk
+``ChatHistoryStore`` under enterprise edition (2-A). Push lands on Gateway disk
 and signs a download token (3-A); no POST to Web Pod.
 """
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import json
 import logging
@@ -464,13 +465,13 @@ def build_share_snapshot(
 ) -> tuple[dict[str, Any], str]:
     """Build share payload.
 
-    Personal: disk session history. Enterprise (``AGENT_RUNTIME``): ChatHistoryStore (2-A).
+    Personal: disk session history. Enterprise: ChatHistoryStore (2-A).
     """
     exported_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     filename = f"jiuwenswarm-share-{timestamp}.png"
 
-    if os.getenv("AGENT_RUNTIME", "").strip():
+    if is_enterprise():
         from jiuwenswarm.channels.web.history_store import get_session_detail_sync
 
         detail = get_session_detail_sync(session_id, user=user)

@@ -71,8 +71,8 @@ async def test_create_job_enterprise_rejects_without_jid(
     controller: CronController,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
-    with patch("jiuwenswarm.gateway.cron.controller.is_enterprise_edition", return_value=True):
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    with patch("jiuwenswarm.gateway.cron.controller.is_enterprise", return_value=True):
         with patch("jiuwenswarm.gateway.cron.controller.enterprise_cron_enabled", return_value=False):
             with pytest.raises(PermissionError, match="not ready"):
                 await controller.create_job(
@@ -94,7 +94,7 @@ async def test_create_job_non_enterprise_does_not_pass_routing_triple(controller
     created = _job()
     controller._store.create_job = AsyncMock(return_value=created)
     with patch("jiuwenswarm.gateway.cron.controller.enterprise_cron_enabled", return_value=False):
-        with patch("jiuwenswarm.gateway.cron.controller.is_enterprise_edition", return_value=False):
+        with patch("jiuwenswarm.gateway.cron.controller.is_enterprise", return_value=False):
             result = await controller.create_job(
                 {
                     "name": "n",
@@ -119,7 +119,7 @@ async def test_create_job_enterprise_passes_routing_triple(controller: CronContr
     created = _job()
     controller._store.create_job = AsyncMock(return_value=created)
     with patch("jiuwenswarm.gateway.cron.controller.enterprise_cron_enabled", return_value=True):
-        with patch("jiuwenswarm.gateway.cron.controller.is_enterprise_edition", return_value=True):
+        with patch("jiuwenswarm.gateway.cron.controller.is_enterprise", return_value=True):
             result = await controller.create_job(
                 {
                     "name": "n",
@@ -151,7 +151,7 @@ async def test_create_job_enterprise_clamps_wake_offset_by_horizon(controller: C
     controller._store.create_job = AsyncMock(return_value=created)
 
     with patch("jiuwenswarm.gateway.cron.controller.enterprise_cron_enabled", return_value=True):
-        with patch("jiuwenswarm.gateway.cron.controller.is_enterprise_edition", return_value=True):
+        with patch("jiuwenswarm.gateway.cron.controller.is_enterprise", return_value=True):
             with patch(
                 "jiuwenswarm.gateway.cron.controller._cron_next_push_dt",
                 return_value=push_at,

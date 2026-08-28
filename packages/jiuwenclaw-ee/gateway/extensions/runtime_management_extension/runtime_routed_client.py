@@ -140,6 +140,13 @@ def identity_from_envelope(envelope: E2AEnvelope) -> tuple[str, str, str, str, s
         )
     if not bot_id:
         bot_id = _first_text(envelope.agent_id)
+    # 如果 envelope 没带 group_id/bot_id/user_id，用默认值 route 到 wildcard scope
+    if not user_id:
+        user_id = "default"
+    if not group_id:
+        group_id = "default"
+    if not bot_id:
+        bot_id = "default"
     session_id = _first_text(envelope.session_id, params.get("session_id"))
     if not session_id and group_id and bot_id:
         session_id = f"{group_id}:{bot_id}:{user_id or '_'}"

@@ -3,6 +3,7 @@
 """MessageHandler - 消息处理抽象与双队列实现（入队经 AgentServerClient 发往 AgentServer）."""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import logging
 import asyncio
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 # openjiuwen_runtime ServiceManager._fail 在资源打满时下发 legacy chunk：
 # payload={"error_code": 100001|100002, "message": "..."}，无 event_type / error。
 # 若不规范化，Channel 会按空 chat.final 下发，前端表现为「发消息后直接结束」。
-# 仅企业版 AGENT_RUNTIME 启用。
+# 仅企业版启用。
 _RUNTIME_CAPACITY_ERROR_CODES = frozenset({"100001", "100002"})
 _RUNTIME_CAPACITY_USER_MESSAGES = {
     "100001": "Request exceeds the maximum connection limit. Please try again later.",
@@ -630,7 +631,7 @@ class MessageHandler(ABC):
             sess = self._session_map.find_session(*identity_key)
             if sess is not None:
                 state.session_id = sess.session_id
-                if os.getenv("AGENT_RUNTIME", "").strip():
+                if is_enterprise():
                     state.service_id = sess.service_id
                     state.agent_id = sess.agent_id
         self._channel_states[key] = state
@@ -688,7 +689,7 @@ class MessageHandler(ABC):
         identity_key = self._extract_identity_tuple(msg)
         if identity_key and self._channel_id_matches_session_map_types(str(msg.channel_id or "")):
             self._session_map.set_session_id(*identity_key, sid)
-            if os.getenv("AGENT_RUNTIME", "").strip():
+            if is_enterprise():
                 sess = self._session_map.find_session(*identity_key)
                 if sess is not None:
                     state.service_id = sess.service_id
@@ -2143,7 +2144,7 @@ class MessageHandler(ABC):
             if sess is not None:
                 state.session_id = sess.session_id
                 msg.session_id = sess.session_id
-                if os.getenv("AGENT_RUNTIME", "").strip():
+                if is_enterprise():
                     state.service_id = sess.service_id
                     state.agent_id = sess.agent_id
                     if msg.params is None:
@@ -2771,7 +2772,7 @@ class MessageHandler(ABC):
                 channel_id=channel_id,
             )
             # 企业版：runtime 资源拒绝需规范化为 chat.error
-            if os.getenv("AGENT_RUNTIME", "").strip():
+            if is_enterprise():
                 normalized = MessageHandler._normalize_runtime_failure_payload(payload)
                 if normalized is not None:
                     payload = normalized
@@ -2904,7 +2905,7 @@ class MessageHandler(ABC):
         filename: str,
         session_id: str,
     ) -> dict[str, Any] | None:
-        """将文件推送到 Web Server 并获取下载 Token（企业版 AGENT_RUNTIME）。"""
+        """将文件推送到 Web Server 并获取下载 Token（企业版）。"""
         from jiuwenswarm.gateway.message_handler.web_file_push import (
             push_file_to_web_and_get_token,
         )
@@ -3071,7 +3072,7 @@ class MessageHandler(ABC):
                 dict(chunk.payload),
                 channel_id=chunk.channel_id,
             )
-            if os.getenv("AGENT_RUNTIME", "").strip():
+            if is_enterprise():
                 normalized = MessageHandler._normalize_runtime_failure_payload(payload)
                 if normalized is not None:
                     payload = normalized

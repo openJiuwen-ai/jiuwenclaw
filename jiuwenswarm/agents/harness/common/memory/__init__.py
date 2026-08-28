@@ -27,7 +27,6 @@ from .config import (
     reload_memory_config_from_gateway_db,
     get_memory_section,
     apply_memory_config_payload,
-    is_enterprise_memory_config_enabled,
     DEFAULT_WORKSPACE_DIR,
 )
 from .embeddings import EmbeddingProvider, create_embedding_provider
@@ -90,7 +89,6 @@ __all__ = [
     "reload_memory_config_from_gateway_db",
     "get_memory_section",
     "apply_memory_config_payload",
-    "is_enterprise_memory_config_enabled",
     "DEFAULT_WORKSPACE_DIR",
     "estimate_tokens",
     "get_external_memory_config",

@@ -7,6 +7,7 @@ Reads the same ``ChatHistoryStore`` written by Gateway ``WebChannel`` Listen
 """
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import asyncio
 import logging
@@ -84,8 +85,8 @@ def register_sessions_compat_routes(app: FastAPI) -> None:
     logger.info(
         "[WebHTTP] registered enterprise history compat routes "
         "GET /api/sessions , GET /api/sessions/{session_id} "
-        "(AGENT_RUNTIME=%s)",
-        bool(os.getenv("AGENT_RUNTIME", "").strip()),
+        "(enterprise=%s)",
+        is_enterprise(),
     )
 
 
