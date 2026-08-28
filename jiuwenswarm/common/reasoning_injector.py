@@ -143,6 +143,17 @@ def _build_model_request_kwargs(
     model_config_obj: Any,
 ) -> dict[str, Any]:
     request_kwargs = _model_config_to_dict(model_config_obj)
+    is_agentos = request_kwargs.get("_source") == "agentos"
+    # Backward compatibility: older AgentOS configs used ``max_tokens`` for
+    # the model context-window size.  In core, however, ``max_tokens`` means
+    # the maximum number of output tokens.  Migrate the legacy value before
+    # building ModelRequestConfig so it cannot accidentally cap model output.
+    # An explicitly configured new field always wins.  Both fields are
+    # optional; omitting them leaves context-window resolution to core.
+    if is_agentos:
+        legacy_context_window = request_kwargs.pop("max_tokens", None)
+        if "context_window" not in request_kwargs and legacy_context_window is not None:
+            request_kwargs["context_window"] = legacy_context_window
     request_kwargs.pop("model", None)
     request_kwargs.pop("model_name", None)
     request_kwargs.pop("reasoning_level", None)
