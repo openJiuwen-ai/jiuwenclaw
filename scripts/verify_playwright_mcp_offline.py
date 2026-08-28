@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import logging
 import os
 import shutil
 import socket
@@ -35,6 +36,8 @@ from jiuwenswarm.common.playwright_mcp_runtime import (
 )
 
 
+LOGGER = logging.getLogger(__name__)
+
 EXPECTED_TOOLS = frozenset(
     {
         "browser_navigate",
@@ -48,8 +51,8 @@ ALL_CAPABILITIES = "pdf,vision,devtools,config,network,storage,testing"
 
 
 class _QuietHandler(SimpleHTTPRequestHandler):
-    def log_message(self, format: str, *args: object) -> None:
-        del format, args
+    def log_message(self, message_format: str, *args: object) -> None:
+        del message_format, args
 
 
 def _resolve_chrome(explicit: str | None) -> Path:
@@ -223,9 +226,11 @@ def verify(*, node_path: str | None = None, chrome_path: str | None = None) -> i
             server.shutdown()
             server.server_close()
             server_thread.join(timeout=5)
-    print(
-        f"Offline Playwright MCP verification passed: version={manifest['version']}, "
-        f"tools={tool_count}, browser={chrome.name}"
+    LOGGER.info(
+        "Offline Playwright MCP verification passed: version=%s, tools=%s, browser=%s",
+        manifest["version"],
+        tool_count,
+        chrome.name,
     )
     return tool_count
 
@@ -240,4 +245,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     raise SystemExit(main())

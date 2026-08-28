@@ -209,8 +209,20 @@ def test_browser_runtime_bundle_remains_lazy_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = _TestableJiuWenSwarmDeepAdapter()
-    monkeypatch.delenv("PLAYWRIGHT_MCP_COMMAND", raising=False)
-    monkeypatch.delenv("PLAYWRIGHT_MCP_ARGS", raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_MCP_COMMAND", "C:\\Node Runtime\\node.exe")
+    monkeypatch.setenv("PLAYWRIGHT_MCP_ARGS", '["C:\\\\MCP Runtime\\\\cli.js"]')
+    monkeypatch.setenv(
+        "JIUWENSWARM_PLAYWRIGHT_MCP_LAUNCH_SOURCE",
+        "bundled",
+    )
+    monkeypatch.setenv(
+        "JIUWENSWARM_PLAYWRIGHT_MCP_MANAGED_COMMAND",
+        "C:\\Node Runtime\\node.exe",
+    )
+    monkeypatch.setenv(
+        "JIUWENSWARM_PLAYWRIGHT_MCP_MANAGED_ARGS",
+        '["C:\\\\MCP Runtime\\\\cli.js"]',
+    )
     monkeypatch.setattr(
         deep_interface_module,
         "resolve_playwright_mcp_launch",
@@ -224,6 +236,9 @@ def test_browser_runtime_bundle_remains_lazy_when_disabled(
 
     assert "PLAYWRIGHT_MCP_COMMAND" not in os.environ
     assert "PLAYWRIGHT_MCP_ARGS" not in os.environ
+    assert "JIUWENSWARM_PLAYWRIGHT_MCP_LAUNCH_SOURCE" not in os.environ
+    assert "JIUWENSWARM_PLAYWRIGHT_MCP_MANAGED_COMMAND" not in os.environ
+    assert "JIUWENSWARM_PLAYWRIGHT_MCP_MANAGED_ARGS" not in os.environ
 
 
 def test_deep_adapter_subagents_includes_browser_by_default_when_runtime_enabled(

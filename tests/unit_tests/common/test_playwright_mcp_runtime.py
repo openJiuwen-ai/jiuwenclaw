@@ -195,6 +195,49 @@ def test_managed_environment_is_not_reclassified_as_override() -> None:
     assert runtime._environment_has_override(environ) is True
 
 
+def test_clear_managed_launch_environment_preserves_administrator_overrides() -> None:
+    bundled = runtime.PlaywrightMcpLaunch(
+        source="bundled",
+        command="C:/Node Runtime/node.exe",
+        args=("C:/MCP Runtime/cli.js",),
+        version="0.0.78",
+    )
+    bundled_args = runtime.serialize_playwright_mcp_args(bundled.args)
+    managed: dict[str, str] = {
+        "PLAYWRIGHT_MCP_COMMAND": bundled.command,
+        "PLAYWRIGHT_MCP_ARGS": bundled_args,
+    }
+    runtime.record_managed_launch_environment(managed, bundled, bundled_args)
+
+    runtime.clear_managed_launch_environment(managed)
+
+    assert managed == {}
+
+    override = runtime.PlaywrightMcpLaunch(
+        source="override",
+        command="custom-node",
+        args=("custom-cli.js",),
+        version="administrator-override",
+    )
+    override_args = runtime.serialize_playwright_mcp_args(override.args)
+    administrator_environment = {
+        "PLAYWRIGHT_MCP_COMMAND": override.command,
+        "PLAYWRIGHT_MCP_ARGS": override_args,
+    }
+    runtime.record_managed_launch_environment(
+        administrator_environment,
+        override,
+        override_args,
+    )
+
+    runtime.clear_managed_launch_environment(administrator_environment)
+
+    assert administrator_environment == {
+        "PLAYWRIGHT_MCP_COMMAND": "custom-node",
+        "PLAYWRIGHT_MCP_ARGS": override_args,
+    }
+
+
 def test_committed_artifact_matches_manifest_and_contains_no_browser_binary() -> None:
     resources = (
         Path(runtime.__file__).resolve().parents[1]

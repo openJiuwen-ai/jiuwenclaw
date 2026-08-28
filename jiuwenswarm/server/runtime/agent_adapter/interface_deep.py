@@ -375,6 +375,7 @@ from jiuwenswarm.gateway.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.playwright_mcp_runtime import (
+    clear_managed_launch_environment,
     record_managed_launch_environment,
     resolve_playwright_mcp_launch,
     serialize_playwright_mcp_args,
@@ -3198,6 +3199,8 @@ class JiuWenSwarmDeepAdapter:
                 launch.version,
                 launch.runtime_display_path or "external",
             )
+        else:
+            clear_managed_launch_environment(os.environ)
 
         if headless:
             os.environ["BROWSER_MANAGED_ARGS"] = "--headless=new"

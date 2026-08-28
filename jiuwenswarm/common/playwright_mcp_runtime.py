@@ -371,3 +371,18 @@ def record_managed_launch_environment(
     else:
         environ.pop(INTERNAL_COMMAND_ENV, None)
         environ.pop(INTERNAL_ARGS_ENV, None)
+
+
+def clear_managed_launch_environment(environ: MutableMapping[str, str]) -> None:
+    """Clear generated launch values without deleting administrator overrides."""
+    source = environ.get(INTERNAL_SOURCE_ENV, "")
+    if source in _INTERNAL_LAUNCH_SOURCES:
+        if environ.get("PLAYWRIGHT_MCP_COMMAND", "") == environ.get(
+            INTERNAL_COMMAND_ENV, ""
+        ):
+            environ.pop("PLAYWRIGHT_MCP_COMMAND", None)
+        if environ.get("PLAYWRIGHT_MCP_ARGS", "") == environ.get(INTERNAL_ARGS_ENV, ""):
+            environ.pop("PLAYWRIGHT_MCP_ARGS", None)
+    environ.pop(INTERNAL_SOURCE_ENV, None)
+    environ.pop(INTERNAL_COMMAND_ENV, None)
+    environ.pop(INTERNAL_ARGS_ENV, None)

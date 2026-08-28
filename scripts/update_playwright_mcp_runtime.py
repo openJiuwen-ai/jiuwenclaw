@@ -11,15 +11,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import shutil
 import stat
 import subprocess
-import sys
 import zipfile
 from pathlib import Path
 from typing import Any
 
+
+LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIR = PROJECT_ROOT / "third_party" / "playwright-mcp"
@@ -235,8 +237,8 @@ def build(*, npm_executable: str | None = None, node_executable: str | None = No
         encoding="utf-8",
         newline="\n",
     )
-    print(f"Wrote {archive_path.relative_to(PROJECT_ROOT)} ({archive_hash})")
-    print(f"Wrote {manifest_path.relative_to(PROJECT_ROOT)}")
+    LOGGER.info("Wrote %s (%s)", archive_path.relative_to(PROJECT_ROOT), archive_hash)
+    LOGGER.info("Wrote %s", manifest_path.relative_to(PROJECT_ROOT))
 
 
 def main() -> int:
@@ -247,10 +249,11 @@ def main() -> int:
     try:
         build(npm_executable=args.npm, node_executable=args.node)
     except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        LOGGER.error("error: %s", exc)
         return 1
     return 0
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     raise SystemExit(main())
