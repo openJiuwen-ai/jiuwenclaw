@@ -1594,11 +1594,14 @@ class DesktopRuntime:
         try:
             if os.name == "nt":
                 # Windows: 弹窗询问是否打开文件夹
+                # download_file 由 pywebview JS bridge 在后台线程触发；无 owner 的消息框
+                # 不会被系统带到前台，可能完全被主窗口遮挡（issue #2601）。MB_SETFOREGROUND /
+                # MB_TOPMOST 让无主消息框也强制置顶，确保用户能感知下载结果。
                 result = ctypes.windll.user32.MessageBoxW(
                     0,
                     f"文件已下载到:\n{file_path}\n\n是否打开所在文件夹？",
                     "下载完成",
-                    0x44  # MB_YESNO + MB_ICONINFORMATION
+                    0x44 | 0x10000 | 0x40000  # MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST
                 )
                 if result == 6:  # IDYES
                     # 打开文件夹并选中文件
