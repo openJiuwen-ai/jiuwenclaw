@@ -2105,11 +2105,6 @@ function AppContent() {
       });
   }, [request]);
 
-  const openModelSetupGuide = useCallback(() => {
-    setActiveNav('chat');
-    setModelSetupGuideManual(true);
-    setModelSetupGuideStep(1);
-  }, []);
 
   const handleExportShare = useCallback(async () => {
     const currentSessionId = sessionIdRef.current;
@@ -2214,7 +2209,6 @@ function AppContent() {
         showNewSession={false}
         hiddenNavItems={enterpriseMode ? ['sessions', ...ENTERPRISE_HIDDEN_NAV_ITEMS] : ['sessions']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
-        onSetupGuideRequest={openModelSetupGuide}
       />
 
       {modelSetupGuideStep ? (
