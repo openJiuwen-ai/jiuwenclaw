@@ -1303,7 +1303,7 @@ modes:
 
       # Proactive reliability monitoring for team leaders and teammates.
       reliability:
-        enabled: false
+        enabled: true
         monitor_roles:
           - leader
           - teammate
