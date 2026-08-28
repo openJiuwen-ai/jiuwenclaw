@@ -985,7 +985,9 @@
 .agent-management-file-preview {
   display: grid;
   grid-template-columns: 296px minmax(0, 1fr);
-  min-height: 620px;
+  grid-template-rows: minmax(0, 1fr);
+  height: 650px;
+  min-height: 0;
   margin-top: 24px;
   overflow: hidden;
   border: 1px solid var(--color-border-default);
@@ -995,6 +997,8 @@
 
 .agent-management-file-tree {
   min-width: 0;
+  min-height: 0;
+  overflow: auto;
   border-right: 1px solid var(--color-border-default);
   padding: 14px 0 12px;
   --agent-management-file-indent: 24px;
@@ -1003,6 +1007,7 @@
 
 .agent-management-file-preview--unavailable {
   display: flex;
+  height: auto;
   min-height: 240px;
   align-items: center;
   justify-content: center;
@@ -1058,11 +1063,15 @@
 }
 
 .agent-management-file-content {
+  display: flex;
+  min-height: 0;
   min-width: 0;
+  flex-direction: column;
 }
 
 .agent-management-file-content__header {
   display: flex;
+  flex: 0 0 58px;
   min-height: 58px;
   align-items: center;
   justify-content: space-between;
@@ -1112,51 +1121,149 @@
 }
 
 .agent-management-file-content__body {
-  min-height: 560px;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
   padding: 15px;
 }
 
 .agent-management-markdown {
+  min-width: 0;
   color: var(--color-text-primary);
-  font-size: 16px;
+  font-size: 14px;
   line-height: 24px;
 }
 
-.agent-management-markdown h1,
-.agent-management-markdown h2,
-.agent-management-markdown h3 {
+.agent-management-markdown__frontmatter {
+  max-width: 100%;
+  margin: 0 0 20px;
+  overflow: auto;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-panel);
+  color: var(--color-text-secondary);
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-management-markdown__body {
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  line-height: 24px;
+}
+
+.agent-management-markdown__body > :first-child {
+  margin-top: 0;
+}
+
+.agent-management-markdown__body > :last-child {
+  margin-bottom: 0;
+}
+
+.agent-management-markdown__body :where(h1, h2, h3, h4, h5, h6) {
   color: var(--color-text-strong);
-}
-
-.agent-management-markdown h1 {
-  margin: 0 0 8px;
-  font-size: 16px;
-  line-height: 24px;
   font-weight: 600;
 }
 
-.agent-management-markdown h2 {
+.agent-management-markdown__body :where(h1) {
+  margin: 0 0 16px;
+  font-size: 20px;
+  line-height: 28px;
+}
+
+.agent-management-markdown__body :where(h2) {
   margin: 24px 0 8px;
-  font-size: 16px;
+  font-size: 18px;
   line-height: 24px;
-  font-weight: 600;
 }
 
-.agent-management-markdown p {
-  margin: 0 0 24px;
+.agent-management-markdown__body :where(h3) {
+  margin: 20px 0 8px;
   font-size: 16px;
   line-height: 24px;
-  white-space: pre-line;
+}
+
+.agent-management-markdown__body :where(p) {
+  margin: 0 0 12px;
+  font-size: 14px;
+  line-height: 24px;
+}
+
+.agent-management-markdown__body :where(ul, ol) {
+  margin: 0 0 16px;
+  padding-left: 22px;
+}
+
+.agent-management-markdown__body :where(li + li) {
+  margin-top: 4px;
+}
+
+.agent-management-markdown__body :where(blockquote) {
+  border-left-color: var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.agent-management-markdown__body :where(:not(pre) > code) {
+  border-radius: var(--radius-sm);
+  background: var(--color-action-secondary);
+  color: var(--color-text-strong);
+  padding: 2px 5px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  white-space: break-spaces;
+}
+
+.agent-management-markdown__body :where(pre) {
+  max-width: 100%;
+  margin: 16px 0;
+  overflow: auto;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-panel);
+  padding: 12px 14px;
+}
+
+.agent-management-markdown__body :where(pre code) {
+  background: transparent;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: pre;
 }
 
 .agent-management-code {
+  max-width: 100%;
+  min-height: 100%;
   margin: 0;
   overflow: auto;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-panel);
   color: var(--color-text-primary);
+  padding: 12px 14px;
   font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.7;
-  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: pre;
+}
+
+.agent-management-code-preview {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-panel);
+}
+
+.agent-management-code-preview .cm-editor {
+  height: 100%;
 }
 
 .agent-management-detail-content :where(code)::before,
@@ -1570,6 +1677,33 @@
   max-height: 258px;
   font-size: 14px;
   line-height: 22px;
+}
+
+.agent-management-persona-rendered .agent-management-markdown > h1,
+.agent-management-persona-rendered .agent-management-markdown > h2,
+.agent-management-persona-rendered .agent-management-markdown > h3 {
+  color: var(--color-text-strong);
+}
+
+.agent-management-persona-rendered .agent-management-markdown > h1 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.agent-management-persona-rendered .agent-management-markdown > h2 {
+  margin: 24px 0 8px;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.agent-management-persona-rendered .agent-management-markdown > p {
+  margin: 0 0 24px;
+  font-size: 16px;
+  line-height: 24px;
+  white-space: pre-line;
 }
 
 .agent-management-field-count {
@@ -2334,10 +2468,11 @@
 
   .agent-management-file-preview {
     grid-template-columns: 1fr;
+    grid-template-rows: 280px minmax(0, 1fr);
   }
 
   .agent-management-file-tree {
-    max-height: 280px;
+    max-height: none;
     border-right: 0;
     border-bottom: 1px solid var(--color-border-default);
   }

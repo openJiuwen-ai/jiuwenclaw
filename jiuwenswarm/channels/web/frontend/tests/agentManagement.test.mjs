@@ -109,6 +109,7 @@ test('preserves an explicitly disabled template for selection guards', () => {
 test('normalizes package file tree and keeps preview policy extension-based', () => {
   assert.equal(isPreviewableFile('README.md'), true);
   assert.equal(isPreviewableFile('manifest.JSON'), true);
+  assert.equal(isPreviewableFile('tools/runtime.py'), true);
   assert.equal(isPreviewableFile('runtime.bin'), false);
 
   const tree = normalizeAgentFileTree([
