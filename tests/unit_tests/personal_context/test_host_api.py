@@ -1224,6 +1224,7 @@ async def test_disable_failure_restores_enabled_yaml_memory_and_runtime(
     old_config = host._config
     old_stored = deepcopy(host._stored_config)
     core.calls.clear()
+    core.deactivate_changes_active_before_error = True
     core.deactivate_error = RuntimeError("collection stop failed")
 
     with pytest.raises(PersonalContext.Error):
@@ -1233,6 +1234,10 @@ async def test_disable_failure_restores_enabled_yaml_memory_and_runtime(
     assert host._stored_config == old_stored
     assert host._config_path.read_bytes() == old_yaml
     assert yaml.safe_load(old_yaml)["collection_enabled"] is True
+    assert core.calls == [
+        ("stop_collection", 30.0),
+        ("start_collection", None),
+    ]
     assert core.active is True
     assert list(host._home.glob(".*.tmp")) == []
 

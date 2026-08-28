@@ -603,13 +603,13 @@ class PersonalContextHostAPI:
                         )
                     ),
                     rollback=(
-                        lambda: (
-                            self._personal_context.stop_collection(
+                        (
+                            lambda: self._personal_context.stop_collection(
                                 timeout_seconds=_STOP_TIMEOUT_SECONDS
                             )
-                            if enabled
-                            else self._personal_context.start_collection
                         )
+                        if enabled
+                        else self._personal_context.start_collection
                     ),
                     publish_before_apply=not enabled,
                 )
