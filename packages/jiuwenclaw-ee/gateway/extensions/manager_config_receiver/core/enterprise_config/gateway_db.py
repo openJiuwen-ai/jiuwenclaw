@@ -11,26 +11,17 @@ from typing import Any, ClassVar
 
 from openjiuwen_runtime.foundation.log import get_logger
 
+from jiuwenswarm.gateway.config.enterprise.instance_scope import (
+    apply_instance_scope as _apply_instance_scope,
+    list_records_requires_bound_instance,
+)
+
 from ...infrastructure.config import Settings
 from ...infrastructure.db import Database
 from ...infrastructure.utils import format_ts
 from .schemas import SLOT_ENTITY_TABLE, TemplateRefSlot
 
 logger = get_logger(__name__)
-
-_INSTANCE_SCOPED_TABLES = frozenset({
-    "config_effective_service_policy",
-    "config_effective_agent_policy",
-    "config_effective_global_policy",
-    "config_default_template_mapping",
-    "log_masking_rule",
-    "model_template",
-    "embedding_template",
-    "extension_config_template",
-    "skill_whitelist_template",
-    "service_config_template",
-    "cron_job",
-})
 
 _DEFAULT_RELATIVE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -98,13 +89,12 @@ class GatewayDb(Database):
             cls._current.clear_jiuwenclaw_id()
 
     def apply_instance_scope(self, table: str, filters: dict[str, Any]) -> dict[str, Any]:
-        """为策略/映射表查询附加 ``jiuwenclaw_id`` 隔离条件。"""
-        query = dict(filters)
-        if table not in _INSTANCE_SCOPED_TABLES:
-            return query
-        if self._jiuwenclaw_id:
-            query["jiuwenclaw_id"] = self._jiuwenclaw_id
-        return query
+        """为 scoped 表查询附加 ``jiuwenclaw_id`` 隔离条件。"""
+        return _apply_instance_scope(
+            table,
+            filters,
+            instance_id=self._jiuwenclaw_id,
+        )
 
     async def fetch_template_by_slot(
         self,
@@ -135,7 +125,7 @@ class GatewayDb(Database):
         order_by: str | list[tuple[str, bool]] = "",
     ) -> list[dict[str, Any]]:
         """列表查询；策略/映射表自动按 ``jiuwenclaw_id`` 隔离。"""
-        if table in _INSTANCE_SCOPED_TABLES and not self._jiuwenclaw_id:
+        if list_records_requires_bound_instance(table, self._jiuwenclaw_id):
             logger.warning(
                 "[enterprise_config] list_records skipped: jiuwenclaw_id not bound for table=%s",
                 table,
