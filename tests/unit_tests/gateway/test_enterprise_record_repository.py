@@ -127,6 +127,26 @@ async def test_singleton_keypair_no_scope() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cron_job_repository_scope_and_key() -> None:
+    store = InMemoryPersistentBackend()
+    repo = create_enterprise_record_repository(
+        store, "cron_job", instance_id="inst-1"
+    )
+    created = await repo.create(
+        {
+            "job_id": "job-1",
+            "name": "daily",
+            "cron_expr": "0 9 * * *",
+            "timezone": "UTC",
+            "targets": "web",
+        }
+    )
+    assert created["jiuwenclaw_id"] == "inst-1"
+    assert created["job_id"] == "job-1"
+    assert await repo.get(job_id="job-1") is not None
+
+
+@pytest.mark.asyncio
 async def test_task_memory_single_document_sync() -> None:
     store = InMemoryPersistentBackend()
     repo = EnterpriseRecordRepository(
@@ -164,4 +184,6 @@ def test_layouts_register_all_enterprise_names() -> None:
         layout = registry.get(name)
         assert layout.db is not None
         assert layout.db.table == name
+        if name == "cron_job":
+            continue
         assert layout.file is None

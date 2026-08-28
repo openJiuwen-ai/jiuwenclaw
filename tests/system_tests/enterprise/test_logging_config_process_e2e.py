@@ -246,7 +246,7 @@ async def test_logging_config_process_hot_reload_gdb_and_cold_start(
     链路：
         Manager REST PUT /logging
             → Manager WS config.push
-            → Gateway manager_ws_client 热更新
+            → Gateway manager_config_receiver 热更新
             → Gateway DB（jiuwenswarm.db）持久化 logging_config
 
     验证阶段：

@@ -108,23 +108,13 @@ def _create_ephemeral_factory(edition: str):
 
 
 def resolve_storage_instance_id(cfg: dict[str, Any] | None = None) -> str:
-    """企业表 ``jiuwenclaw_id``：gateway.instance_id → 环境变量。"""
-    if cfg:
-        raw = (cfg.get("gateway") or {}).get("instance_id")
-        if raw and str(raw).strip():
-            return str(raw).strip()
-    try:
-        from jiuwenswarm.extensions.redis.redis_runtime import get_gateway_instance_id
-    except ImportError:
-        value = None
-    else:
-        value = get_gateway_instance_id()
-    if value:
-        return str(value).strip()
-    return (
-        os.getenv("GATEWAY_INSTANCE_ID", "").strip()
-        or os.getenv("JIUWENCLAW_ID", "").strip()
+    """企业表 ``jiuwenclaw_id``（与 AgentServer 读库共用 ``resolve_gateway_instance_id``）。"""
+    from jiuwenswarm.gateway.config.enterprise.instance_scope import (
+        resolve_gateway_instance_id,
     )
+
+    resolved = resolve_gateway_instance_id(cfg)
+    return resolved or ""
 
 
 def _storage_flag(
