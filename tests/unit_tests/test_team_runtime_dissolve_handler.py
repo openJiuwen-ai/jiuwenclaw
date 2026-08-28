@@ -215,6 +215,7 @@ async def _call_dissolve_prune(
     reset/prune pair mocked, so prune wiring can be asserted in isolation."""
     from jiuwenswarm.server import agent_ws_server as mod
     from jiuwenswarm.server.handlers import team as team_handlers
+    from openjiuwen.core.runner import Runner
 
     captured, fake_encode = _capture()
     fake_tm = MagicMock()
@@ -237,8 +238,8 @@ async def _call_dissolve_prune(
         "jiuwenswarm.agents.harness.team.get_team_manager", return_value=fake_tm,
     ), patch(
         "openjiuwen.core.runner.Runner.reset_agent_team_session", new=runner_reset,
-    ), patch(
-        "openjiuwen.core.runner.Runner.prune_agent_team_roster", new=runner_prune,
+    ), patch.object(
+        Runner, "prune_agent_team_roster", new=runner_prune, create=True,
     ), patch.object(
         team_handlers, "_sessions_dir_for_request", return_value="/tmp/sessions",
     ), patch.object(
