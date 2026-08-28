@@ -22,8 +22,8 @@ _MODULE_PATH = (
 )
 
 
-def _load_module():
-    if "web_fetch_tools_mod" in sys.modules:
+def _load_module(*, reload: bool = False):
+    if not reload and "web_fetch_tools_mod" in sys.modules:
         return sys.modules["web_fetch_tools_mod"]
 
     tools_pkg = sys.modules.get("jiuwenswarm.agents.harness.common.tools")
@@ -33,6 +33,8 @@ def _load_module():
         tools_pkg.__package__ = "jiuwenswarm.agents.harness.common.tools"
         sys.modules["jiuwenswarm.agents.harness.common.tools"] = tools_pkg
 
+    # Drop cached module so source edits are visible under pytest re-runs.
+    sys.modules.pop("web_fetch_tools_mod", None)
     spec = importlib.util.spec_from_file_location("web_fetch_tools_mod", str(_MODULE_PATH))
     mod = importlib.util.module_from_spec(spec)
     sys.modules["web_fetch_tools_mod"] = mod
@@ -40,7 +42,7 @@ def _load_module():
     return mod
 
 
-_mod = _load_module()
+_mod = _load_module(reload=True)
 
 
 def _response(status_code: int, *, url: str = "https://example.com") -> Mock:
@@ -112,3 +114,80 @@ def test_successful_direct_fetch_does_not_use_jina(monkeypatch):
     assert result["status_code"] == 200
     assert result["title"] == "Example"
     jina_fetch.assert_not_called()
+
+
+def test_fetch_rejects_doc_url_without_http():
+    doc_url = "https://www.stats.gov.cn/xw/tjxw/tzgg/202302/P020230227339331821024.doc"
+    with patch.object(_mod, "_http_get") as http_get, pytest.raises(ValueError, match="unsupported binary content"):
+        _mod._fetch_webpage_sync(doc_url, 8)
+    http_get.assert_not_called()
+
+
+def test_fetch_rejects_ole_body_even_with_html_url():
+    ole = bytes([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) + b"\x00" * 32
+    response = _response(200, url="https://example.com/article")
+    response.headers = {"Content-Type": "application/msword"}
+    response.content = ole
+    response.encoding = "ISO-8859-1"
+    response.apparent_encoding = "ISO-8859-1"
+
+    with (
+        patch.object(_mod, "_http_get", return_value=response),
+        pytest.raises(ValueError, match="unsupported binary content"),
+    ):
+        _mod._fetch_webpage_sync("https://example.com/article", 8)
+
+
+def test_fetch_rejects_pdf_magic_with_octet_stream():
+    response = _response(200, url="https://example.com/download")
+    response.headers = {"Content-Type": "application/octet-stream"}
+    response.content = b"%PDF-1.7 binary-junk"
+
+    with (
+        patch.object(_mod, "_http_get", return_value=response),
+        pytest.raises(ValueError, match="unsupported binary content"),
+    ):
+        _mod._fetch_webpage_sync("https://example.com/download", 8)
+
+
+def test_fetch_allows_octet_stream_html():
+    response = _response(200, url="https://example.com/page")
+    response.headers = {"Content-Type": "application/octet-stream"}
+    response.content = b"<!DOCTYPE html><html><title>Ok</title><body>hello</body></html>"
+    response.encoding = "utf-8"
+    response.apparent_encoding = "utf-8"
+
+    with patch.object(_mod, "_http_get", return_value=response):
+        result = _mod._fetch_webpage_sync("https://example.com/page", 8)
+
+    assert result["status_code"] == 200
+    assert "hello" in result["content"] or "Ok" in result["title"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_single_url_returns_error_for_doc_extension():
+    doc_url = "https://www.stats.gov.cn/file/report.doc"
+    result = await _mod._fetch_single_url(
+        doc_url,
+        max_chars=8000,
+        timeout_seconds=8,
+        use_cache=True,
+        cache=None,
+    )
+    assert result["error"]
+    assert "unsupported binary content" in result["error"]
+    assert result["content"] == ""
+
+
+def test_plain_text_json_still_allowed():
+    response = _response(200, url="https://example.com/data.json")
+    response.headers = {"Content-Type": "application/json; charset=utf-8"}
+    response.content = b'{"hello":"world"}'
+    response.encoding = "utf-8"
+    response.apparent_encoding = "utf-8"
+
+    with patch.object(_mod, "_http_get", return_value=response):
+        result = _mod._fetch_webpage_sync("https://example.com/data.json", 8)
+
+    assert result["status_code"] == 200
+    assert "hello" in result["content"]
