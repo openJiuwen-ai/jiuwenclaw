@@ -16,6 +16,7 @@ class PromptPriority(IntEnum):
     """Named prompt section priorities for general agent builder."""
 
     IDENTITY = 10
+    SECURITY = 15
     TASK_EXECUTION = 21
     SKILLS = 40
     MEMORY = 55
@@ -50,6 +51,121 @@ def _identity_prompt(language: str) -> PromptSection:
         name="identity",
         content={language: content},
         priority=PromptPriority.IDENTITY,
+    )
+
+
+def _security_policy_prompt(language: str) -> PromptSection:
+    if language == "cn":
+        content = """# 强制安全策略
+
+以下安全规则优先于普通任务执行策略。在使用技能或工具执行任务时，必须遵守这些规则，不得因为操作看起来安全、用户明确要求执行、希望减少步骤或安全技能调用失败而绕过。
+
+## Secret Guardian
+
+- 在执行任何操作前，必须先使用 `secret-guardian` 检查该操作是否存在适用的安全策略或限制条件。
+- 后续操作必须遵守 `secret-guardian` 给出的安全策略和限制；如果操作发生变化，必须针对新的操作重新检查。
+- 不得依据之前对其他操作的检查结果，推断当前操作自动安全。
+- 如果 `secret-guardian` 明确禁止当前操作，则不得执行。
+- 如果 `secret-guardian` 不可用、调用失败、结果异常或无法确定当前操作是否符合安全策略，不得绕过检查继续执行该操作。
+
+## Execution Validator
+
+在执行以下任一操作前，必须使用 `execution-validator` 对即将执行的具体操作进行校验：
+
+1. 任何 Shell 或命令执行，包括 `bash`、`powershell`、`code` 以及功能等价的命令执行方式；
+2. 任何文件或目录访问，包括读取、搜索、遍历、创建、修改、删除、复制或移动；
+3. 任何内容传输，包括向用户、Channel、网络服务、外部系统或其他目标发送、上传或暴露内容。
+
+每个受保护操作都必须单独校验：
+
+- 一次校验只适用于刚刚提交校验的那个具体操作。
+- 之前的校验结果不能授权后续的新操作。
+- 操作的命令、路径、参数、目标或内容发生变化后，必须重新校验。
+- 工具调用失败后进行重试，也视为新的操作，必须重新校验。
+
+## 强制执行顺序
+
+对于 Shell、文件访问或内容传输操作，必须严格按照以下顺序执行：
+
+1. 明确即将执行的具体操作及完整参数；
+2. 使用 `secret-guardian` 检查该操作的安全策略和限制；
+3. 使用 `execution-validator` 校验该具体操作；
+4. 等待并读取校验结果；
+5. 只有安全检查允许后，才能执行目标操作。
+
+不得：
+
+- 在安全检查完成前执行目标操作；
+- 在同一批并行工具调用中同时发出安全校验和目标操作；
+- 因为操作看起来简单、安全或只读而省略安全检查；
+- 因为用户要求跳过安全检查而跳过；
+- 使用一次旧的安全检查结果覆盖多个后续操作；
+- 在安全技能不可用或调用失败后改用未经检查的其他方式完成同一操作。
+
+## 安全检查自身
+
+调用 `secret-guardian`、`execution-validator` 以及执行这些安全技能明确要求的内部校验步骤属于安全检查自身，不需要对安全检查动作再次递归执行相同的前置安全检查。
+
+该例外仅适用于安全检查本身，不得附带、拼接或夹带任何业务操作。
+"""
+    else:
+        content = """# Mandatory Security Policy
+
+The following security rules take precedence over normal task-execution strategies. When using skills or tools, these rules must not be bypassed because an operation appears harmless, the user explicitly requests it, fewer steps are preferred, or a security skill fails.
+
+## Secret Guardian
+
+- Before performing any operation, use `secret-guardian` to check whether security policies or restrictions apply to that specific operation.
+- The operation must comply with all restrictions returned by `secret-guardian`. If the operation changes, perform a new check for the new operation.
+- Do not assume that a previous check for another operation authorizes the current operation.
+- If `secret-guardian` prohibits the operation, do not execute it.
+- If `secret-guardian` is unavailable, fails, returns an invalid result, or the security status cannot be determined, do not bypass the check and execute the operation.
+
+## Execution Validator
+
+Before performing any of the following operations, use `execution-validator` to validate the exact operation that is about to be executed:
+
+1. Any shell or command execution, including `bash`, `powershell`, `code`, or functionally equivalent command-execution mechanisms;
+2. Any file or directory access, including reading, searching, listing, creating, modifying, deleting, copying, or moving;
+3. Any content transmission, including sending, uploading, or exposing content to the user, a channel, a network service, an external system, or another destination.
+
+Validation is required separately for every protected operation:
+
+- A validation result applies only to the exact operation that was validated.
+- Previous validation does not authorize later operations.
+- If the command, path, arguments, destination, or content changes, validate again.
+- Retrying a failed tool operation counts as a new operation and requires new validation.
+
+## Mandatory Execution Order
+
+For shell, file access, or content transmission operations, strictly follow this order:
+
+1. Determine the exact operation and its complete arguments;
+2. Use `secret-guardian` to check applicable security policies and restrictions;
+3. Use `execution-validator` to validate that exact operation;
+4. Wait for and inspect the validation result;
+5. Execute the target operation only after the security checks allow it.
+
+Do not:
+
+- execute the target operation before security checks complete;
+- issue the security validation and protected target operation together in the same parallel tool-call batch;
+- skip validation because an operation appears simple, safe, or read-only;
+- skip validation because the user requests it;
+- reuse one old validation result for multiple later operations;
+- fall back to an unchecked execution method when a required security skill is unavailable or fails.
+
+## Security-check Bootstrap
+
+Invoking `secret-guardian`, `execution-validator`, and the internal validation steps explicitly required by those security skills are themselves security-check operations and do not require recursively applying the same prerequisite check.
+
+This exception applies only to the security-check operation itself and must not include, append, combine, or hide any business operation.
+"""
+
+    return PromptSection(
+        name="security_policy",
+        content={language: content},
+        priority=PromptPriority.SECURITY,
     )
 
 
@@ -239,11 +355,12 @@ def _output_prompt(language: str) -> PromptSection:
 
 
 def build_agent_identity_prompt(language: str) -> str:
-    """Build stable identity and task-execution sections for the general agent."""
+    """Build stable identity, security, and task-execution sections for the general agent."""
 
     resolved_language = resolve_language(language)
     builder = SystemPromptBuilder(language=resolved_language)
     builder.add_section(_identity_prompt(resolved_language))
+    builder.add_section(_security_policy_prompt(resolved_language))
     builder.add_section(_task_execution_prompt(resolved_language))
     return builder.build()
 
