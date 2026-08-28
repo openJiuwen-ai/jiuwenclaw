@@ -39,9 +39,8 @@ _CN_PROTOCOL = """## 技能执行规范（强制）
 随后按 SKILL 工作流执行；下列规范约束执行过程。
 
 1. **声明步骤**：默认情况下，每次行动前必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。若 SKILL.md 明确声明“阶段状态和阶段消息由工具事件唯一生成”，则以该声明为准，禁止自行输出 `[当前步骤: ...]` 或其他步骤声明。
-2. **必须使用 todo**：在执行 skill 步骤前，必须先创建 todo 列表。
-   - **与 SKILL.md 阶段对齐**：若 SKILL.md 含编号阶段标题（`## 阶段 N：…` / `## Stage N: …`），系统会在加载成功后按这些标题创建 todo，条数和文案随 SKILL.md 变化。此时**禁止**再 `todo_create` 覆盖或自行增减阶段（例如把交付拆成第 5 条）；只用 `todo_modify` 按系统给出的 id 标记 completed。
-   - **创建时搭便车**：没有编号阶段标题的技能，`todo_create` **必须**和第一个工作工具在同一轮发出，禁止 `todo_create` 独占一轮。若技能已加载却还没有 todo，系统会拦截工作工具并要求同一轮补上 `todo_create`；`skill_acceleration_exec` 不受此限。
+2. **必须使用 todo**：在执行 skill 步骤前，必须先创建 todo 列表。用 `todo_create` 规划任务，条数和文案由你按 SKILL.md 工作流决定。
+   - **创建时搭便车**：`todo_create` **必须**和第一个工作工具在同一轮发出，禁止 `todo_create` 独占一轮。若技能已加载却还没有 todo，系统会拦截工作工具并要求同一轮补上 `todo_create`；`skill_acceleration_exec` 不受此限。
    - **更新时搭便车（强制）**：`todo_modify` **必须**和下一个任务的工作工具在同一轮发出，禁止 `todo_modify` 独占一轮。系统会在工作工具被调用时自动将 pending 推进为 in_progress，你只需要用 `todo_modify` 标记 completed/cancelled。
    - ✅ 正确：`[write_file(...), todo_modify(action="update", todos=[{"id":"step1","status":"completed"}])]`
    - ❌ 禁止：`[todo_modify(action="update", todos=[{"id":"step1","status":"completed"}])]` ← 独占一轮，浪费 LLM 调用
@@ -79,9 +78,8 @@ The "Skills" section of this prompt (from SkillUseRail) lists available skills a
 Then execute the workflow; the rules below govern execution.
 
 1. **Declare step**: By default, before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step. If SKILL.md explicitly states that stage status and stage messages are emitted exclusively by tool events, follow that rule and you must not declare `[Current Step: ...]` or any other step message yourself.
-2. **Use todo (mandatory)**: For skills, you MUST create a todo list before executing the skill steps.
-   - **Align with SKILL.md stages**: If SKILL.md has numbered stage headings (`## 阶段 N：…` / `## Stage N: …`), the system creates the todo list from those headings after a successful load — count and labels follow the skill. **Do not** call `todo_create` to replace or add extra stages (e.g. a 5th "deliver" item). Use `todo_modify` with the system-provided ids to mark completed.
-   - **Piggyback on creation**: For skills without numbered stage headings, `todo_create` **MUST** be called in the same response as the first work tool — never in a standalone todo-only round. If the skill is loaded but no todo list exists yet, the system blocks work tools until you emit `todo_create` in the same round; `skill_acceleration_exec` is exempt.
+2. **Use todo (mandatory)**: For skills, you MUST create a todo list with `todo_create` before executing the skill steps. You decide the items from the SKILL.md workflow.
+   - **Piggyback on creation**: `todo_create` **MUST** be called in the same response as the first work tool — never in a standalone todo-only round. If the skill is loaded but no todo list exists yet, the system blocks work tools until you emit `todo_create` in the same round; `skill_acceleration_exec` is exempt.
    - **Piggyback on updates (MANDATORY)**: `todo_modify` **MUST** be called alongside the next task's work tool in the same response — never alone. The system auto-advances pending tasks to in_progress when work tools are called, so you only need `todo_modify` to mark tasks completed/cancelled.
    - ✅ CORRECT: `[write_file(...), todo_modify(action="update", todos=[{"id":"step1","status":"completed"}])]`
    - ❌ PROHIBITED: `[todo_modify(action="update", todos=[{"id":"step1","status":"completed"}])]` ← wastes an entire LLM round

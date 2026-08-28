@@ -28,15 +28,6 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
-from jiuwenswarm.agents.harness.common.rails.skill_stage_parse import (
-    build_todos_from_skill_stages,
-    extract_skill_markdown,
-    format_seeded_stage_notice,
-    is_owned_skill_stage_id,
-    is_top_level_skill_body,
-    parse_skill_stage_headings,
-    parse_skill_tool_args,
-)
 from jiuwenswarm.common.utils import logger
 
 _ACTIVE_TASK_ID: ContextVar[str | None] = ContextVar(
@@ -675,11 +666,6 @@ class TaskExecutionRail(DeepAgentRail):
         "请在同一轮发出 todo_create（与首个工作工具并行），然后重试刚才的工作工具。"
         "不要再单独发一轮只含工作工具的调用。"
     )
-    _SKILL_STAGES_LOCKED_MSG = (
-        "[SKILL_STAGES_LOCKED] 系统已按 SKILL.md 阶段标题创建 todo 列表，"
-        "禁止再用 todo_create 覆盖。请用 todo_modify 按已有 id 标记 completed，"
-        "并继续执行当前阶段。"
-    )
     # 触发产物后处理 hook 的工具（共享常量，见模块级定义）
     ARTIFACT_DETECTION_TOOLS = ARTIFACT_DETECTION_TOOL_NAMES
 
@@ -697,8 +683,6 @@ class TaskExecutionRail(DeepAgentRail):
         # Set after skill_tool loads a skill body in this invoke; cleared in
         # before_invoke. Gates work tools until a todo list exists.
         self._skill_todo_required: bool = False
-        # True when this invoke seeded todos from SKILL.md numbered headings.
-        self._skill_stages_owned: bool = False
 
     def get_current_task_id(self) -> str | None:
         return _ACTIVE_TASK_ID.get()
@@ -734,7 +718,6 @@ class TaskExecutionRail(DeepAgentRail):
         self._todo_started = set()
         self._tool_start_times = {}
         self._skill_todo_required = False
-        self._skill_stages_owned = False
         _ACTIVE_TASK_ID.set(None)
         if isinstance(ctx.inputs, InvokeInputs):
             await self._init_task_tracking(ctx.session)
@@ -779,10 +762,6 @@ class TaskExecutionRail(DeepAgentRail):
                 list(self._active_tasks.keys()),
             )
             self._todo_map_before_tool = dict(self._todo_map)
-            if tool_name == "todo_create" and self._skill_stages_owned:
-                self._skip_tool_with_message(
-                    ctx, self._SKILL_STAGES_LOCKED_MSG
-                )
             return
 
         if tool_name in self.SKILL_COMPLETE_TOOLS:
@@ -797,7 +776,6 @@ class TaskExecutionRail(DeepAgentRail):
         if tool_name == "skill_acceleration_exec":
             # Turbo emits its own Stage events; do not require an outer todo.
             self._skill_todo_required = False
-            await self._release_owned_skill_stages(ctx)
 
         if self._should_block_work_until_todo(ctx, tool_name):
             self._skip_tool_with_message(ctx, self._SKILL_TODO_REQUIRED_MSG)
@@ -824,9 +802,7 @@ class TaskExecutionRail(DeepAgentRail):
             return
 
         if tool_name == "skill_tool":
-            seeded = await self._seed_skill_stages_from_body(ctx)
-            if not seeded:
-                self._mark_skill_todo_required_if_loaded(ctx)
+            self._mark_skill_todo_required_if_loaded(ctx)
             return
 
         await self._auto_advance_pending_to_in_progress(ctx)
@@ -863,133 +839,6 @@ class TaskExecutionRail(DeepAgentRail):
         logger.info(
             "[TaskExecutionRail] skill todo gate armed after skill_tool"
         )
-
-    async def _seed_skill_stages_from_body(
-        self, ctx: AgentCallbackContext
-    ) -> bool:
-        """Create todos from numbered SKILL.md stage headings after load.
-
-        Does not emit task.start: the first work tool auto-advances pending
-        to in_progress. Replacing this list via todo_create is blocked while
-        ``_skill_stages_owned`` is set.
-        """
-        if ctx.extra.get("_skip_tool"):
-            return False
-        tool_msg = getattr(ctx.inputs, "tool_msg", None)
-        meta = getattr(tool_msg, "metadata", None) or {}
-        if meta.get("is_directory_listing"):
-            return False
-        _, relative_path = parse_skill_tool_args(
-            getattr(ctx.inputs, "tool_args", None)
-        )
-        if not is_top_level_skill_body(relative_path):
-            return False
-        markdown = extract_skill_markdown(
-            getattr(ctx.inputs, "tool_result", None),
-            tool_msg,
-        )
-        stages = parse_skill_stage_headings(markdown)
-        if not stages:
-            return False
-
-        session = ctx.session
-        if session is None:
-            return False
-        try:
-            session_id = session.get_session_id()
-        except Exception:
-            return False
-        if self._has_incomplete_todos(self._todo_map):
-            return False
-        try:
-            existing = self._load_todo_from_json(session_id)
-        except Exception:
-            existing = []
-        if self._has_incomplete_todos(
-            self._build_map_from_todo_items(existing)
-        ):
-            return False
-
-        todo_path = self._get_todo_workspace_path(session_id)
-        if todo_path is None:
-            return False
-        items = build_todos_from_skill_stages(stages)
-        try:
-            todo_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(todo_path, "w", encoding="utf-8") as handle:
-                json.dump(items, handle, ensure_ascii=False, indent=2)
-        except OSError:
-            logger.warning(
-                "[TaskExecutionRail] skill stage seed: failed to write "
-                "todo.json session_id=%s path=%s",
-                session_id,
-                todo_path,
-            )
-            return False
-
-        self._todo_map = self._build_map_from_todo_items(items)
-        self._skill_stages_owned = True
-        self._skill_todo_required = False
-        parent_request_id = self._extract_request_id(ctx)
-        await self._emit_task_update_event(session, parent_request_id)
-        self._append_tool_result_notice(ctx, format_seeded_stage_notice(items))
-        logger.info(
-            "[TaskExecutionRail] skill stage seed: wrote %d stages "
-            "from SKILL.md session_id=%s",
-            len(items),
-            session_id,
-        )
-        return True
-
-    async def _release_owned_skill_stages(
-        self, ctx: AgentCallbackContext
-    ) -> None:
-        """Drop SKILL.md-seeded todos so turbo can emit its own Stage events."""
-        if not self._skill_stages_owned:
-            return
-        if self._todo_map and not all(
-            is_owned_skill_stage_id(task_id) for task_id in self._todo_map
-        ):
-            self._skill_stages_owned = False
-            _ACTIVE_TASK_ID.set(None)
-            return
-        session = ctx.session
-        session_id = ""
-        if session is not None:
-            try:
-                session_id = str(session.get_session_id() or "")
-            except Exception:
-                session_id = ""
-        if session_id:
-            todo_path = self._get_todo_workspace_path(session_id)
-            if todo_path is not None and todo_path.exists():
-                try:
-                    todo_path.unlink()
-                except OSError:
-                    logger.debug(
-                        "[TaskExecutionRail] failed to remove seeded "
-                        "todo.json session_id=%s",
-                        session_id,
-                        exc_info=True,
-                    )
-        self._todo_map = {}
-        self._todo_map_before_tool = {}
-        self._active_tasks = {}
-        self._todo_started = set()
-        self._skill_stages_owned = False
-        _ACTIVE_TASK_ID.set(None)
-
-    @staticmethod
-    def _append_tool_result_notice(
-        ctx: AgentCallbackContext, notice: str
-    ) -> None:
-        current = getattr(ctx.inputs, "tool_result", None)
-        if isinstance(current, str):
-            ctx.inputs.tool_result = current + notice
-        tool_msg = getattr(ctx.inputs, "tool_msg", None)
-        content = getattr(tool_msg, "content", None) if tool_msg else None
-        if isinstance(content, str):
-            tool_msg.content = content + notice
 
     def _should_block_work_until_todo(
         self, ctx: AgentCallbackContext, tool_name: str
