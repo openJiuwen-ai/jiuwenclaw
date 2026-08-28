@@ -909,7 +909,7 @@ async def handle_team_runtime_dissolve(ctx: RequestContext) -> None:
         )
     else:
         sessions_root = _sessions_dir_for_request(request)
-        metadata = get_session_metadata(session_id, sessions_root=sessions_root)
+        metadata = get_session_metadata(session_id, cache_bust=True, sessions_root=sessions_root)
         runtime_team_name = resolve_session_runtime_team_name(metadata) or team_name
         if not runtime_team_name:
             # 会话未绑定运行时团队且请求未带 team_name：无可 dissolve 的
