@@ -33,7 +33,10 @@ export const agentModule: SettingsModuleDefinition = {
     {
       id: 'team',
       titleKey: 'settingsPanel.agent.team',
-      items: [{ id: 'swarmflow', component: 'switch', key: 'swarmflow_enabled' }],
+      items: [
+        { id: 'swarmflow', component: 'switch', key: 'swarmflow_enabled' },
+        { id: 'swarmflow-budget', component: 'input', key: 'swarmflow_budget' },
+      ],
     },
   ],
 };

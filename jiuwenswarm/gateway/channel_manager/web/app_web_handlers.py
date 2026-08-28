@@ -1057,6 +1057,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_max_recommend_per_day",
     "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
+    "swarmflow_budget",
     "external_cli_agent_claude_enabled",
     "external_cli_agent_claude_use_builtin",
     "external_cli_agent_claude_cli_path",

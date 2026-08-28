@@ -102,6 +102,7 @@ export const SETTINGS_CONFIG_FIELDS: readonly ConfigFieldContract[] = [
   envField('video_plan', 'agent', 'text', 'VIDEO_PLAN'),
   envField('video_enabled', 'agent', 'boolean', 'VIDEO_ENABLED'),
   yamlField('swarmflow_enabled', 'agent', 'boolean', 'modes.team.jiuwen_team.enable_swarmflow'),
+  yamlField('swarmflow_budget', 'agent', 'integer', 'modes.team.jiuwen_team.swarmflow_budget'),
 
   yamlField('permissions_enabled', 'security', 'boolean', 'permissions.enabled'),
 

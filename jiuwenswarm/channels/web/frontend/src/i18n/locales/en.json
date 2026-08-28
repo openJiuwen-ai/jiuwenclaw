@@ -304,7 +304,8 @@
       },
       "swarmflow_budget": {
         "title": "SwarmFlow Budget",
-        "description": "Team budget (token ceiling, blank = unlimited)"
+        "description": "Team budget (token ceiling, blank = unlimited)",
+        "placeholder": "blank = unlimited, positive integer"
       },
       "permissions_mode": {
         "title": "Global permission mode",
