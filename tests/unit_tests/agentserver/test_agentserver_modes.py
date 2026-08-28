@@ -1987,6 +1987,58 @@ def test_handle_stream_accepts_team_mode_without_sub_mode(monkeypatch):
     ]
 
 
+def test_format_permission_wire_diagnostic_contains_boundary_fields():
+    message = agent_ws_server_module.format_permission_wire_diagnostic(
+        request_id="req-approval-diagnostic",
+        sequence=3,
+        payload={
+            "event_type": "chat.ask_user_question",
+            "request_id": "interrupt-diagnostic",
+            "source": "permission_interrupt",
+            "approval_id": "approval-42",
+            "approval_kind": "permission",
+            "tool_call_id": "call-bash-42",
+            "tool_args": {"command": "contains-sensitive-command"},
+            "questions": [{"header": "权限审批: bash", "tool_name": "bash"}],
+        },
+        wire={
+            "response_kind": "e2a.chunk",
+            "is_final": False,
+            "body": {
+                "event_type": "chat.ask_user_question",
+                "delta": {
+                    "source": "permission_interrupt",
+                    "questions": [{"header": "权限审批: bash"}],
+                },
+            },
+        },
+    )
+
+    assert "[GUI_AGENT_DIAG] phase=AGENT_APPROVAL_WIRE_SEND" in message
+    assert "request_id=req-approval-diagnostic" in message
+    assert "sequence=3" in message
+    assert "source=permission_interrupt" in message
+    assert "question_count=1" in message
+    assert "wire_event_type=chat.ask_user_question" in message
+    assert "payload_approval_id=approval-42" in message
+    assert "payload_approval_kind=permission" in message
+    assert "payload_request_id=interrupt-diagnostic" in message
+    assert "payload_tool_call_id=call-bash-42" in message
+    assert "contains-sensitive-command" not in message
+
+    no_identifiers = agent_ws_server_module.format_permission_wire_diagnostic(
+        request_id="req-without-payload-identifiers",
+        sequence=4,
+        payload={"event_type": "chat.ask_user_question", "questions": []},
+        wire={"body": {"delta": {}}},
+    )
+
+    assert "payload_approval_id=" not in no_identifiers
+    assert "payload_approval_kind=" not in no_identifiers
+    assert "payload_request_id=" not in no_identifiers
+    assert "payload_tool_call_id=" not in no_identifiers
+
+
 def test_handle_stream_accepts_code_team_sub_mode(monkeypatch):
     class FakeAgent:
         def __init__(self):

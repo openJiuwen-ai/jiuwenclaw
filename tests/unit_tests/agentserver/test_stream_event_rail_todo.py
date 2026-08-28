@@ -274,6 +274,11 @@ async def test_permission_interrupt_for_read_file_emits_approval_question():
     assert output.payload["request_id"] == "tool-read-1"
     assert output.payload["source"] == "permission_interrupt"
     assert output.payload["questions"][0]["header"] == "权限审批: read_file"
+    assert output.payload["questions"][0]["tool_call_id"] == "tool-read-1"
+    assert output.payload["questions"][0]["tool_name"] == "read_file"
+    assert output.payload["questions"][0]["tool_args"] == {
+        "file_path": r"C:\Users\Administrator\Desktop\分析.md"
+    }
 
 
 @pytest.mark.asyncio
@@ -362,6 +367,51 @@ async def test_subagent_interrupt_result_is_not_emitted_as_tool_result():
     assert len(questions) == 1
     assert questions[0].payload["request_id"] == "inner-call"
     assert questions[0].payload["source"] == "permission_interrupt"
+
+
+@pytest.mark.asyncio
+async def test_subagent_interrupt_batch_emits_each_question_in_input_order():
+    session = _FakeSession()
+    result = {
+        "result_type": "interrupt",
+        "state": [
+            OutputSchema(
+                type="__interaction__",
+                index=0,
+                payload=InteractionOutput(
+                    id="inner-write",
+                    value=ToolCallInterruptRequest(
+                        message="**工具 `write_file` 需要授权才能执行**",
+                        tool_name="write_file",
+                    ),
+                ),
+            ),
+            OutputSchema(
+                type="__interaction__",
+                index=1,
+                payload=InteractionOutput(
+                    id="inner-bash",
+                    value=ToolCallInterruptRequest(
+                        message="**工具 `bash` 需要授权才能执行**",
+                        tool_name="bash",
+                    ),
+                ),
+            ),
+        ],
+    }
+
+    await _TestRail().emit_ask_user_question_if_interrupted(
+        session,
+        SimpleNamespace(id="task-tool", name="task_tool", arguments={}),
+        "task_tool",
+        result,
+    )
+
+    questions = [output for output in session.outputs if output.type == "chat.ask_user_question"]
+    assert [output.payload["request_id"] for output in questions] == [
+        "inner-write",
+        "inner-bash",
+    ]
 
 
 @pytest.mark.asyncio

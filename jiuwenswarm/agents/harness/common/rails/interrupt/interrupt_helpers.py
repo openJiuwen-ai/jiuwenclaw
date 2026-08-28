@@ -547,8 +547,8 @@ def _resolve_interrupt_source(tool_name: str, message: str) -> str:
     return "confirm_interrupt"
 
 
-def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | None:
-    """Convert __interaction__ list to frontend chat.ask_user_question format.
+def convert_interactions_to_ask_user_questions(state_outputs: list) -> list[dict]:
+    """Convert every valid ``__interaction__`` into frontend question events.
 
     AskUserRail 中断: value 有 questions 字段，或 ask_user 的 plain query
         → source="ask_user_interrupt"
@@ -558,52 +558,75 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
     state_outputs 中的元素可能是:
     - InteractionOutput 对象 (有 id, value 属性, value 是 ToolCallInterruptRequest)
     - dict (有 id, value 键)
+
+    The returned list retains source order.  Keep the singular compatibility
+    wrapper below for the existing one-interaction callers.
     """
     if not state_outputs:
-        return None
+        return []
 
     interactions = list(_iter_interactions(state_outputs))
     if not interactions:
-        return None
+        return []
 
-    # A controller output can contain both a permission interrupt shell and the
-    # real ask_user interrupt. Prefer the structured ask_user payload; otherwise
-    # the frontend may receive an empty permission prompt and have no request_id
-    # to resume the waiting tool call.
+    payloads: list[dict] = []
+    payload_indexes: dict[str, int] = {}
+    payload_priorities: dict[str, int] = {}
+
+    def append_payload(payload: dict, *, priority: int) -> None:
+        """Keep one card per interrupt id, preferring structured user input."""
+        request_id = str(payload.get("request_id") or "").strip()
+        existing_index = payload_indexes.get(request_id)
+        if existing_index is None:
+            payload_indexes[request_id] = len(payloads)
+            payload_priorities[request_id] = priority
+            payloads.append(payload)
+            return
+        if priority > payload_priorities[request_id]:
+            payloads[existing_index] = payload
+            payload_priorities[request_id] = priority
+
     for interaction in interactions:
         request_id, value_obj = _extract_interaction_parts(interaction)
         if not request_id:
             continue
 
         questions_raw = _extract_questions_from_value(value_obj)
-        if questions_raw is None:
-            continue
-
-        questions = _build_multi_questions(questions_raw)
-        return {
-            "event_type": "chat.ask_user_question",
-            "request_id": request_id,
-            "questions": questions,
-            "source": "ask_user_interrupt",
-        }
-
-    for interaction in interactions:
-        request_id, value_obj = _extract_interaction_parts(interaction)
-        if not request_id:
+        if questions_raw is not None:
+            questions = _build_multi_questions(questions_raw)
+            tool_name, _message, tool_args = _read_interrupt_fields(value_obj)
+            for question in questions:
+                # Structured permission payloads may carry the tool context on the
+                # interrupt rather than on each question item.  Keep it attached to
+                # the emitted item so consumers can correlate the approval with the
+                # exact tool call instead of a conversation-level "last tool".
+                question.setdefault("tool_call_id", request_id)
+                if tool_name:
+                    question.setdefault("tool_name", tool_name)
+                if tool_args is not None:
+                    question.setdefault("tool_args", tool_args)
+            append_payload(
+                {
+                    "event_type": "chat.ask_user_question",
+                    "request_id": request_id,
+                    "questions": questions,
+                    "source": "ask_user_interrupt",
+                },
+                priority=2,
+            )
             continue
 
         plain_question = _build_plain_ask_user_question(value_obj)
         if plain_question:
-            return {
-                "event_type": "chat.ask_user_question",
-                "request_id": request_id,
-                "questions": [plain_question],
-                "source": "ask_user_interrupt",
-            }
-
-    for interaction in interactions:
-        request_id, value_obj = _extract_interaction_parts(interaction)
-        if not request_id:
+            append_payload(
+                {
+                    "event_type": "chat.ask_user_question",
+                    "request_id": request_id,
+                    "questions": [plain_question],
+                    "source": "ask_user_interrupt",
+                },
+                priority=1,
+            )
             continue
 
         question_data = extract_question_from_interaction(interaction)
@@ -641,9 +664,15 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
         structured_approval = _classify_structured_approval(value_obj, question_data)
         if structured_approval:
             payload.update(structured_approval)
-        return payload
+        append_payload(payload, priority=0)
 
-    return None
+    return payloads
+
+
+def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | None:
+    """Return the first converted interaction for legacy singular callers."""
+    payloads = convert_interactions_to_ask_user_questions(state_outputs)
+    return payloads[0] if payloads else None
 
 
 def _iter_interactions(state_outputs: list) -> Any:
@@ -725,10 +754,26 @@ def _build_multi_questions(questions_data: list) -> list:
             options = []
         question_payload = {
             "question": q.get("question", ""),
-            "header": q.get("header", ""),
+            "header": q.get("header") or "Question",
             "options": options,
             "multi_select": q.get("multi_select", False),
         }
+        for key in (
+            "tool_call_id",
+            "toolCallId",
+            "tool_name",
+            "toolName",
+            "tool_args",
+            "toolArgs",
+            "call_goal",
+            "callGoal",
+            "display_name",
+            "displayName",
+            "skill_name",
+            "skillName",
+        ):
+            if key in q and q[key] is not None:
+                question_payload[key] = q[key]
         questions.append(question_payload)
     return questions
 
@@ -850,6 +895,7 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
     if payload is None:
         return None
 
+    request_id, _ = _extract_interaction_parts(payload)
     if hasattr(payload, "value"):
         value_obj = payload.value
     elif isinstance(payload, dict):
@@ -906,6 +952,7 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
     return {
         "question": question,
         "header": header,
+        "tool_call_id": request_id,
         "tool_name": tool_name,
         "tool_args": tool_args,
         "skill_name": skill_name,
