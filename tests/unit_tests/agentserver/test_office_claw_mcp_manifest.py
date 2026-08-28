@@ -31,8 +31,9 @@ def _write_bundle(tmp_path: Path, content: str = "bundle v1") -> Path:
 
 
 def _bundle_fingerprint(bundle: Path) -> list[dict[str, object]]:
-    stat = bundle.stat()
-    return [{"path": str(bundle), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}]
+    import hashlib
+    content = bundle.read_bytes()
+    return [{"path": str(bundle), "size": len(content), "sha256": hashlib.sha256(content).hexdigest()}]
 
 
 def _write_manifest(
@@ -97,7 +98,7 @@ async def test_manifest_fingerprint_mismatch_falls_back_to_discovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle = _write_bundle(tmp_path)
-    stale = [{"path": str(bundle), "size": 1, "mtime_ns": 1}]
+    stale = [{"path": str(bundle), "size": 1, "sha256": "0000deadbeef"}]
     manifest = _write_manifest(tmp_path, _tools(), stale)
     monkeypatch.setenv("OFFICE_CLAW_MCP_MANIFEST_PATH", str(manifest))
     discovered = [{"name": "office_claw_post_message", "description": "live", "input_params": {}}]

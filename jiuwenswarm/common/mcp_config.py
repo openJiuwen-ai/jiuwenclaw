@@ -1078,33 +1078,42 @@ def _office_claw_mcp_manifest_enabled() -> bool:
     )
 
 
-def _office_claw_mcp_manifest_fingerprint_matches(
+def _office_claw_mcp_manifest_content_hash_matches(
     manifest_files: Any,
     actual_files: list[dict[str, Any]],
 ) -> bool:
-    """Check that every manifest file is present in the actual fingerprint.
+    """Compare SHA-256 content hashes of manifest build files against actual files.
 
-    Uses a subset check (manifest ⊆ actual) keyed by (size, mtime_ns) rather
-    than set equality, because the actual fingerprint stats both the command
-    executable (node.exe) and the bundle (index.js), while the manifest records
-    only the bundle — the command is not part of the bundle and must not
-    affect the match. A rebuilt bundle changes size and/or mtime, so its
-    (size, mtime_ns) tuple will be absent from the actual set and the manifest
-    is treated as stale.
+    Unlike ``mtime_ns`` (which changes on copy/bundle/install), a content hash
+    is stable across build steps and filesystem operations — the same file
+    content always produces the same hash regardless of where or when it was
+    copied. This makes the fingerprint reliable across source builds, Windows
+    packaging, and installed releases.
     """
     if not isinstance(manifest_files, list) or not manifest_files:
         return False
-    actual: set[tuple[int, int]] = set()
+    actual_by_path: dict[str, dict[str, Any]] = {}
     for entry in actual_files:
         if isinstance(entry, dict):
-            actual.add((int(entry.get("size") or -1), int(entry.get("mtime_ns") or -1)))
+            actual_by_path[_normalized_path(str(entry.get("path") or ""))] = entry
     for entry in manifest_files:
         if not isinstance(entry, dict):
             return False
-        key = (int(entry.get("size") or -1), int(entry.get("mtime_ns") or -1))
-        if key not in actual:
+        expected_hash = str(entry.get("sha256") or "").strip()
+        if not expected_hash:
             return False
-    return bool(actual)
+        manifest_path = _normalized_path(str(entry.get("path") or ""))
+        actual = actual_by_path.get(manifest_path)
+        if actual is None:
+            return False
+        try:
+            content = Path(str(actual.get("path") or "")).read_bytes()
+            actual_hash = hashlib.sha256(content).hexdigest()
+        except OSError:
+            return False
+        if actual_hash != expected_hash:
+            return False
+    return True
 
 
 def _load_office_claw_mcp_manifest(
@@ -1139,7 +1148,7 @@ def _load_office_claw_mcp_manifest(
         return None
     manifest_files = raw.get("buildFiles")
     actual_files = _office_claw_mcp_build_fingerprint(params)
-    if not _office_claw_mcp_manifest_fingerprint_matches(manifest_files, actual_files):
+    if not _office_claw_mcp_manifest_content_hash_matches(manifest_files, actual_files):
         logger.warning(
             "OfficeClaw MCP manifest fingerprint mismatch — falling back to live discovery"
         )
