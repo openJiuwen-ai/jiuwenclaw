@@ -9009,6 +9009,8 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         error_text: str | None = None
         interaction_stream = None
         interaction_stream_abort = True
+        # 诊断：记录非流式聚合时见过的 chunk 类型分布（排查「执行完成但未返回结果内容」）
+        _chunk_type_counts: dict[str, int] = {}
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -9114,12 +9116,14 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 )
             async for chunk in interaction_stream:
                 if hasattr(chunk, "type") and hasattr(chunk, "payload"):
+                    _chunk_type_counts[str(chunk.type)] = (
+                        _chunk_type_counts.get(str(chunk.type), 0) + 1
+                    )
                     if chunk.type in ("llm_output", "answer"):
-                        text = (
-                            chunk.payload.get("content", "")
-                            if isinstance(chunk.payload, dict)
-                            else str(chunk.payload)
-                        )
+                        if isinstance(chunk.payload, dict):
+                            text = str(chunk.payload.get("content") or chunk.payload.get("text") or "")
+                        else:
+                            text = str(chunk.payload)
                         if text:
                             collected_content.append(text)
                     else:
@@ -9174,6 +9178,22 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             self._unmark_session_active(session_id)
 
         content = "".join(collected_content) if collected_content else ""
+
+        if not content and not error_text:
+            # 非流式聚合结果为空且无错误文本——上层（如 cron 调度器）只能拿到空 content，
+            # 最终显示「任务执行完成但未返回结果内容」。打出 chunk 分布定位根因。
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] non-stream run ended with EMPTY content: "
+                "request_id=%s session_id=%s channel=%s chunks_total=%d chunk_types=%s "
+                "collectable_chunks=%d error_text=%r",
+                request.request_id,
+                session_id,
+                request.channel_id,
+                sum(_chunk_type_counts.values()),
+                _chunk_type_counts,
+                len(collected_content),
+                error_text,
+            )
 
         if error_text:
             # 模型/round 级错误：即使已流出部分内容，也按失败返回并透传错误消息，
