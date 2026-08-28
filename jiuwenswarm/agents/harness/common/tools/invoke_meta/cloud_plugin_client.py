@@ -59,7 +59,7 @@ def _insecure_ssl():
 
 @dataclass
 class CloudPluginContext:
-    """端侧上下文信息（DM 传入）。"""
+    """设备/会话上下文（桌面 env 或 invocation；缺省 PC）。"""
 
     session_id: str = ""
     interaction_id: int = 0
@@ -333,12 +333,12 @@ class CloudPluginClient(AgentRuntimeClient):
             *,
             context: CloudPluginContext | None = None,
     ) -> dict[str, Any]:
-        """调用云插件（单次响应，等待 finish 事件）。
+        """调用云插件：收帧直到 finish 或失败，再合并为一次结果。
 
         Args:
             spec: ExternalToolSpec
             arguments: 调用参数
-            context: 端侧上下文信息（DM 传入）
+            context: 设备/会话上下文（桌面 env 或 invocation；缺省 PC）
 
         Returns:
             响应结果 dict，包含 success、content、errCode 等字段
@@ -458,7 +458,7 @@ class CloudPluginClient(AgentRuntimeClient):
     async def _recv_single_frame(self, ws: Any) -> str | None:
         """接收单个帧，超时返回 None。"""
         try:
-            # 单次接收消息时延 10 秒，服务方中间帧为 8s
+            # 单帧 recv 超时为 self._timeout（默认 AGENT_RUNTIME_WS_TIMEOUT=120s；成曲 MUSIC_WS_TIMEOUT=600s）
             raw = await asyncio.wait_for(ws.recv(), timeout=self._timeout)
             if isinstance(raw, bytes):
                 return raw.decode("utf-8")

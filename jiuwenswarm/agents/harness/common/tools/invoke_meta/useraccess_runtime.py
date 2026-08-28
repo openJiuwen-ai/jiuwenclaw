@@ -86,7 +86,7 @@ def resolve_device_sandbox_system() -> str:
 
 
 def build_product_mcp_headers(*, plugin_session_id: str = "", extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Handshake headers for mcp/run (aligned with conversation-report / billing)."""
+    """Handshake headers for mcp/run: businessCredential, trace, optional uid/device."""
     uid = resolve_runtime_uid()
     device_id = resolve_runtime_device_id()
     headers: dict[str, str] = {

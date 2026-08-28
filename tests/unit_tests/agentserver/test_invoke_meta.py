@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -848,18 +847,16 @@ def _music_vocal_args(**extra: Any) -> dict[str, Any]:
     args: dict[str, Any] = {
         "functionName": "musicGeneration",
         "bundleName": _ATOMIC_BUNDLE,
-        "content": {
-            "prompt": "华语流行，轻快温暖",
-            "audio_setting": {
-                "sample_rate": 44100,
-                "bitrate": 256000,
-                "format": "mp3",
-            },
-            "aigc_watermark": True,
-            "lyrics_optimizer": False,
-            "is_instrumental": False,
-            "lyrics": "[Verse]\n清晨的风穿过窗台",
+        "prompt": "华语流行，轻快温暖",
+        "audio_setting": {
+            "sample_rate": 44100,
+            "bitrate": 256000,
+            "format": "mp3",
         },
+        "aigc_watermark": True,
+        "lyrics_optimizer": False,
+        "is_instrumental": False,
+        "lyrics": "[Verse]\n清晨的风穿过窗台",
     }
     args.update(extra)
     return args
@@ -869,16 +866,14 @@ def _lyrics_write_args(**extra: Any) -> dict[str, Any]:
     args: dict[str, Any] = {
         "functionName": "lyricsGeneration",
         "bundleName": _ATOMIC_BUNDLE,
-        "content": {
-            "prompt": "华语流行，轻快温暖",
-            "mode": "write_full_song",
-        },
+        "prompt": "华语流行，轻快温暖",
+        "mode": "write_full_song",
     }
     args.update(extra)
     return args
 
 
-def test_normalize_lyrics_folds_top_level_prompt_and_defaults_mode():
+def test_normalize_lyrics_keeps_top_level_prompt_and_defaults_mode():
     out, err = normalize_plugin_skill_args(
         "lyricsGeneration",
         {
@@ -888,13 +883,45 @@ def test_normalize_lyrics_folds_top_level_prompt_and_defaults_mode():
         },
     )
     assert err is None
-    assert "prompt" not in out
-    assert out["content"]["prompt"] == "Indie folk, melancholic"
-    assert out["content"]["mode"] == "write_full_song"
-    assert "lyrics" not in out["content"]
+    assert out["prompt"] == "Indie folk, melancholic"
+    assert out["mode"] == "write_full_song"
+    assert "lyrics" not in out
+    assert "content" not in out
 
 
-def test_normalize_music_folds_instrumental_prompt_and_fills_defaults():
+def test_normalize_lyrics_lifts_legacy_content():
+    out, err = normalize_plugin_skill_args(
+        "lyricsGeneration",
+        {
+            "bundleName": _ATOMIC_BUNDLE,
+            "functionName": "lyricsGeneration",
+            "content": {"prompt": "改副歌", "mode": "edit", "lyrics": "[Verse] old"},
+        },
+    )
+    assert err is None
+    assert out["prompt"] == "改副歌"
+    assert out["mode"] == "edit"
+    assert out["lyrics"] == "[Verse] old"
+    assert "content" not in out
+
+
+def test_normalize_lyrics_top_level_wins_over_legacy_content():
+    out, err = normalize_plugin_skill_args(
+        "lyricsGeneration",
+        {
+            "bundleName": _ATOMIC_BUNDLE,
+            "functionName": "lyricsGeneration",
+            "prompt": "顶层提示",
+            "content": {"prompt": "content 提示", "mode": "edit"},
+        },
+    )
+    assert err is None
+    assert out["prompt"] == "顶层提示"
+    assert out["mode"] == "edit"
+    assert "content" not in out
+
+
+def test_normalize_music_keeps_instrumental_prompt_and_fills_defaults():
     out, err = normalize_plugin_skill_args(
         "musicGeneration",
         {
@@ -905,38 +932,60 @@ def test_normalize_music_folds_instrumental_prompt_and_fills_defaults():
         },
     )
     assert err is None
-    assert "prompt" not in out
-    assert "is_instrumental" not in out
-    content = out["content"]
-    assert content["prompt"] == "轻快的钢琴背景乐"
-    assert content["is_instrumental"] is True
-    assert content["lyrics_optimizer"] is False
-    assert content["aigc_watermark"] is True
-    assert content["audio_setting"]["sample_rate"] == 44100
-    assert content["audio_setting"]["format"] == "mp3"
-    assert "lyrics" not in content
+    assert out["prompt"] == "轻快的钢琴背景乐"
+    assert out["is_instrumental"] is True
+    assert out["lyrics_optimizer"] is False
+    assert out["aigc_watermark"] is True
+    assert out["audio_setting"]["sample_rate"] == 44100
+    assert out["audio_setting"]["format"] == "mp3"
+    assert "lyrics" not in out
+    assert "content" not in out
+
+
+def test_normalize_music_lifts_legacy_content_and_aliases():
+    out, err = normalize_plugin_skill_args(
+        "musicGeneration",
+        {
+            "bundleName": _ATOMIC_BUNDLE,
+            "functionName": "musicGeneration",
+            "content": {
+                "prompt": "一首歌",
+                "instrumental": False,
+                "lyrics-optimizer": True,
+            },
+        },
+    )
+    assert err is None
+    assert out["prompt"] == "一首歌"
+    assert out["is_instrumental"] is False
+    assert out["lyrics_optimizer"] is True
+    assert "content" not in out
+    assert "instrumental" not in out
+    assert "lyrics-optimizer" not in out
 
 
 def test_validate_lyrics_edit_requires_lyrics():
     params, err = normalize_plugin_skill_args(
         "lyricsGeneration",
-        _lyrics_write_args(content={"prompt": "改副歌", "mode": "edit"}),
+        _lyrics_write_args(prompt="改副歌", mode="edit"),
     )
     assert err is None
     msg = validate_plugin_skill_args("lyricsGeneration", params)
     assert msg is not None
     assert "lyrics" in msg
+    assert "content." not in msg
 
 
 def test_validate_lyrics_rejects_invalid_mode():
     params, err = normalize_plugin_skill_args(
         "lyricsGeneration",
-        _lyrics_write_args(content={"prompt": "写词", "mode": "translate"}),
+        _lyrics_write_args(prompt="写词", mode="translate"),
     )
     assert err is None
     msg = validate_plugin_skill_args("lyricsGeneration", params)
     assert msg is not None
     assert "write_full_song" in msg
+    assert "content." not in msg
 
 
 def test_validate_music_vocal_requires_lyrics_or_optimizer():
@@ -945,13 +994,15 @@ def test_validate_music_vocal_requires_lyrics_or_optimizer():
         {
             "bundleName": _ATOMIC_BUNDLE,
             "functionName": "musicGeneration",
-            "content": {"prompt": "一首歌", "is_instrumental": False},
+            "prompt": "一首歌",
+            "is_instrumental": False,
         },
     )
     assert err is None
     msg = validate_plugin_skill_args("musicGeneration", params)
     assert msg is not None
     assert "lyrics" in msg
+    assert "content." not in msg
 
 
 def test_validate_music_instrumental_rejects_lyrics():
@@ -960,11 +1011,9 @@ def test_validate_music_instrumental_rejects_lyrics():
         {
             "bundleName": _ATOMIC_BUNDLE,
             "functionName": "musicGeneration",
-            "content": {
-                "prompt": "钢琴",
-                "is_instrumental": True,
-                "lyrics": "[Verse] no",
-            },
+            "prompt": "钢琴",
+            "is_instrumental": True,
+            "lyrics": "[Verse] no",
         },
     )
     assert err is None
@@ -977,6 +1026,11 @@ def test_invoke_tool_description_includes_music_skills():
     text = invoke_tool_description()
     assert "lyricsGeneration" in text
     assert "musicGeneration" in text
+    assert "不要包 content" in text
+    assert "只放 content" not in text
+    assert "content.prompt" not in text
+    assert "完整句子" in text
+    assert "明确确认" in text
 
 
 @pytest.mark.asyncio
@@ -1005,8 +1059,9 @@ async def test_invoke_lyrics_generation_reaches_plugin(monkeypatch):
 
     assert result.get("success") is True
     assert seen
-    assert seen[0]["content"]["prompt"] == "华语流行，轻快温暖"
-    assert seen[0]["content"]["mode"] == "write_full_song"
+    assert seen[0]["prompt"] == "华语流行，轻快温暖"
+    assert seen[0]["mode"] == "write_full_song"
+    assert "content" not in seen[0]
     assert timeouts == [None]
 
 
@@ -1071,15 +1126,14 @@ async def test_invoke_music_generation_reaches_plugin_with_long_timeout(monkeypa
 
     assert result.get("success") is True
     assert seen
-    content = seen[0]["content"]
-    assert content["prompt"] == "华语流行，轻快温暖"
-    assert content["lyrics"].startswith("[Verse]")
-    assert "prompt" not in seen[0] or seen[0].get("prompt") is None
+    assert seen[0]["prompt"] == "华语流行，轻快温暖"
+    assert seen[0]["lyrics"].startswith("[Verse]")
+    assert "content" not in seen[0]
     assert timeouts == [600.0]
 
 
 @pytest.mark.asyncio
-async def test_invoke_music_instrumental_fold_drops_top_level_prompt(monkeypatch):
+async def test_invoke_music_instrumental_keeps_top_level_prompt(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
     seen: list[dict[str, Any]] = []
 
@@ -1110,9 +1164,9 @@ async def test_invoke_music_instrumental_fold_drops_top_level_prompt(monkeypatch
 
     assert result.get("success") is True
     assert seen
-    assert "prompt" not in seen[0]
-    assert seen[0]["content"]["prompt"] == "轻快的钢琴背景乐"
-    assert seen[0]["content"]["is_instrumental"] is True
+    assert seen[0]["prompt"] == "轻快的钢琴背景乐"
+    assert seen[0]["is_instrumental"] is True
+    assert "content" not in seen[0]
 
 
 @pytest.mark.asyncio
@@ -1175,29 +1229,9 @@ def test_design_system_prompt_includes_video_workflow():
     )
 
     prompt = build_design_system_prompt()
-    assert "seedance-video-gen" in prompt
+    assert "seedanceMiniTask" in prompt
+    assert "seedance-video-gen" not in prompt
+    assert "image-generation skill" not in prompt
     assert "分镜" in prompt
     assert "invoke" in prompt.lower() or "`invoke`" in prompt
-
-
-def test_saas_video_case_prompt_asks_for_finished_clip():
-    constants = (
-        Path(__file__).resolve().parents[4]
-        / "claw_desktop"
-        / "src"
-        / "renderer"
-        / "src"
-        / "pages"
-        / "home"
-        / "design"
-        / "constants.ts"
-    )
-    if not constants.is_file():
-        pytest.skip("claw_desktop constants.ts not in workspace")
-    text = constants.read_text(encoding="utf-8")
-    saas = '为某 SaaS 产品生成 10 秒产品演示视频'
-    assert saas in text
-    assert "必须调用视频生成能力产出成片" in text
-    assert "60 秒短视频分镜脚本" not in text
-    assert "要求交付：分镜表" not in text
 

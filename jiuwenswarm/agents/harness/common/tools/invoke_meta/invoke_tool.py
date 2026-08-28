@@ -320,7 +320,7 @@ async def _dispatch_invoke(
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
 
-    # Skill-documented cloud capabilities: coerce then validate (fail fast vs 120s timeout).
+    # PLUGIN_SKILL_CATALOG: coerce then validate (fail fast, skip waiting on WS).
     if via_plugin_skill or func_name in PLUGIN_SKILL_CATALOG:
         params, norm_err = normalize_plugin_skill_args(func_name, params)
         if norm_err is not None:
@@ -371,9 +371,15 @@ _INVOKE_TOOL_CARD = ToolCard(
                     "生视频：同原子服务 bundle，seedanceMiniTask 用 content"
                     "（默认自动轮询到 video_url；wait=false 则只返回 task_id），"
                     "seedanceMiniTaskQuery 用 id；"
-                    "生音乐：同原子服务 bundle，lyricsGeneration 用 content.prompt/mode，"
-                    "musicGeneration 用 content（人声 lyrics 或 lyrics_optimizer，"
-                    "器乐 is_instrumental）。勿臆造其它 bundleName。"
+                    "生音乐：同原子服务 bundle，业务字段与 bundleName 平铺，不要包 content。"
+                    "基础器乐只用 musicGeneration+is_instrumental=true；"
+                    "基础人声 lyrics_optimizer=true；"
+                    "高级人声先 lyricsGeneration（write_full_song，改词 edit+lyrics），"
+                    "确认歌词后再 musicGeneration 带 lyrics。"
+                    "成曲前向用户展示类型/语言/prompt/歌词并得到明确确认。"
+                    "中文输入用中文 prompt 与歌词，英文同理，其它语言先问用户。"
+                    "prompt 写成完整句子（情绪+流派+人声或乐器+叙事/场景），"
+                    "不要逗号关键词列表。勿臆造其它 bundleName。"
                 ),
             },
         },
