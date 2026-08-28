@@ -35,6 +35,8 @@ from jiuwenswarm.common.utils import (
     update_config,
     migrate_legacy_user_config_if_needed,
 )
+# Needed before workspace update_config gate (module top-level uses is_enterprise).
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 migrate_legacy_user_config_if_needed()
 
@@ -129,7 +131,7 @@ if not _loaded_logging_yaml:
 
 # Load env from user workspace config/.env
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
-from jiuwenswarm.common.local_env_config import ingest_bare_business_into_tip, is_enterprise
+from jiuwenswarm.common.local_env_config import ingest_bare_business_into_tip
 
 ingest_bare_business_into_tip()
 reset_free_search_runtime_flags()

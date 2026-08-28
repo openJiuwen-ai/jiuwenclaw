@@ -1283,7 +1283,15 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                         _skill_turbo_tic.tool_call.id if _skill_turbo_tic.tool_call else "?",
                         ctx.inputs.tool_call.id if isinstance(ctx.inputs, ToolCallInputs) else "?",
                     )
-                    return  # 跳过 _emit_tool_result，由 harness __interaction__ 取代
+                    # 主路径必须主动 emit：外层 tool_name 是 skill_acceleration_exec，
+                    # _emit_ask_user_question_if_interrupted 不会命中；也不能只依赖
+                    # harness __interaction__（同 tool_call_id 二次 HITL 时常哑火）。
+                    await self._emit_skill_turbo_ask_user_question(
+                        session,
+                        outer_tool_call=ctx.inputs.tool_call,
+                        skill_turbo_tic=_skill_turbo_tic,
+                    )
+                    return  # 跳过 _emit_tool_result；ask_user 已在上方强制发出
             except Exception:
                 logger.debug(
                     "[StreamEventRail] skill_turbo HITL rewrite failed",
@@ -1418,6 +1426,61 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("tool_result emit failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_skill_turbo_ask_user_question(
+        session: Session,
+        *,
+        outer_tool_call: Any,
+        skill_turbo_tic: Any,
+    ) -> None:
+        """Emit chat.ask_user_question for SkillTurbo nested ask_user HITL.
+
+        Questions come from the inner ask_user tool_call; request_id is the
+        outer skill_acceleration_exec tool_call.id so OfficeClaw resume keeps
+        matching harness interrupt keys (e.g. call_c2967...).
+        """
+        inner_tc = getattr(skill_turbo_tic, "tool_call", None)
+        payload = _ask_user_question_payload_from_interrupt(
+            inner_tc or outer_tool_call,
+            skill_turbo_tic,
+        )
+        if not payload:
+            logger.debug(
+                "[StreamEventRail] SkillTurbo HITL ask_user payload unavailable"
+            )
+            return
+        # OfficeClaw resume matches harness interrupt keys on the outer
+        # skill_acceleration_exec id. Emitting with the nested ask_user id is
+        # worse than skipping: the UI would show a question that cannot resume.
+        harness_id = str(getattr(outer_tool_call, "id", "") or "").strip()
+        if not harness_id:
+            logger.warning(
+                "[StreamEventRail] SkillTurbo HITL ask_user skipped: "
+                "outer skill_acceleration_exec tool_call.id unavailable "
+                "(would mismatch harness interrupt key); inner_request_id=%s",
+                payload.get("request_id"),
+            )
+            return
+        payload["request_id"] = harness_id
+        try:
+            await session.write_stream(
+                OutputSchema(
+                    type="chat.ask_user_question",
+                    index=0,
+                    payload=payload,
+                )
+            )
+            logger.info(
+                "[StreamEventRail] SkillTurbo HITL emitted chat.ask_user_question "
+                "request_id=%s",
+                payload.get("request_id"),
+            )
+        except Exception:
+            logger.debug(
+                "[StreamEventRail] SkillTurbo HITL ask_user emit failed",
+                exc_info=True,
+            )
 
     @staticmethod
     async def _emit_ask_user_question_if_interrupted(
