@@ -39,6 +39,8 @@ from .executor import (
 from .globals import (
     get_fork_agent_executor,
     init_subagent_executor,
+    reset_fork_agent_executor,
+    set_fork_agent_executor,
 )
 
 
@@ -61,4 +63,6 @@ __all__ = [
     # Global instance management
     "get_fork_agent_executor",
     "init_subagent_executor",
+    "reset_fork_agent_executor",
+    "set_fork_agent_executor",
 ]
