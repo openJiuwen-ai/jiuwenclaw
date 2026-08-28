@@ -52,6 +52,7 @@ _BUNDLE_NAME_KEY = "bundleName"
 _DEVICE_UNSUPPORTED_MSG = "当前不支持pluginType为Device的端插件调用，请到真机进行测试"
 _SEEDANCE_TASK = "seedanceMiniTask"
 _SEEDANCE_QUERY = "seedanceMiniTaskQuery"
+_MUSIC_FUNC = "musicGeneration"
 
 
 def _parse_invoke_inputs(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -88,7 +89,8 @@ def _normalize_plugin_skill_call(
     if not nested_name:
         raise ValueError(
             "functionName=PluginSkillExecTool 时，arguments.functionName 为必填"
-            "（如 seedreamLite4Skill / imageUnderStandStream / seedanceMiniTask）"
+            "（如 seedreamLite4Skill / imageUnderStandStream / seedanceMiniTask / "
+            "lyricsGeneration / musicGeneration）"
         )
     return nested_name, dict(params), True
 
@@ -191,7 +193,10 @@ async def _invoke_cloud_plugin(
             arguments[key] = params[key]
 
     context = build_cloud_plugin_context(session_id=session_id)
-    client = CloudPluginClient(base_url=base_url, session_id=session_id)
+    ws_timeout = _plugin_ws_timeout(spec.tool_name)
+    client = CloudPluginClient(
+        base_url=base_url, session_id=session_id, timeout=ws_timeout
+    )
     logger.info(
         "[InvokeTool] [session=%s] plugin via mcp/run pluginId=%s toolName=%s url=%s",
         session_id or "",
@@ -200,6 +205,13 @@ async def _invoke_cloud_plugin(
         base_url,
     )
     return await client.invoke(spec, arguments=arguments, context=context)
+
+
+def _plugin_ws_timeout(tool_name: str) -> float | None:
+    """musicGeneration waits up to 10 minutes; others keep CloudPluginClient default."""
+    if tool_name != _MUSIC_FUNC:
+        return None
+    return float(os.getenv("MUSIC_WS_TIMEOUT", "600") or "600")
 
 
 def _seedance_poll_settings() -> tuple[float, float]:
@@ -345,7 +357,8 @@ _INVOKE_TOOL_CARD = ToolCard(
                     "远程 Agent：agent_as_a_tool。"
                     "arguments.functionName 才是具体能力"
                     "（seedreamLite4Skill / SeedreamPro4Skill / "
-                    "imageUnderStandStream / seedanceMiniTask / seedanceMiniTaskQuery）。"
+                    "imageUnderStandStream / seedanceMiniTask / seedanceMiniTaskQuery / "
+                    "lyricsGeneration / musicGeneration）。"
                 ),
             },
             "arguments": {
@@ -357,7 +370,10 @@ _INVOKE_TOOL_CARD = ToolCard(
                     "图像理解：bundleName=xiaoyi，functionName=imageUnderStandStream，imageUrl=...；"
                     "生视频：同原子服务 bundle，seedanceMiniTask 用 content"
                     "（默认自动轮询到 video_url；wait=false 则只返回 task_id），"
-                    "seedanceMiniTaskQuery 用 id。勿臆造其它 bundleName。"
+                    "seedanceMiniTaskQuery 用 id；"
+                    "生音乐：同原子服务 bundle，lyricsGeneration 用 content.prompt/mode，"
+                    "musicGeneration 用 content（人声 lyrics 或 lyrics_optimizer，"
+                    "器乐 is_instrumental）。勿臆造其它 bundleName。"
                 ),
             },
         },

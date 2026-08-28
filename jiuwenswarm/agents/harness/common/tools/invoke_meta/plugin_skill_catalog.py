@@ -20,6 +20,9 @@ PLUGIN_SKILL_CATALOG: dict[str, str] = {
     # 生视频 Seedance
     "seedanceMiniTask": _ATOMIC_BUNDLE,
     "seedanceMiniTaskQuery": _ATOMIC_BUNDLE,
+    # 生音乐 MiniMax
+    "lyricsGeneration": _ATOMIC_BUNDLE,
+    "musicGeneration": _ATOMIC_BUNDLE,
     # 图像理解
     "imageUnderStandStream": _XIAOYI_BUNDLE,
 }
@@ -34,10 +37,35 @@ _CATALOG_HELP = (
     "seedanceMiniTaskQuery 直到成片，arguments.wait=false 则只返回 task_id）或 "
     "seedanceMiniTaskQuery（查询，必填 id），"
     f"bundleName={_ATOMIC_BUNDLE}。\n"
+    "生音乐：functionName=lyricsGeneration（写词/改词，content.prompt 必填；"
+    "mode=write_full_song|edit，edit 须带 content.lyrics）或 "
+    "musicGeneration（成曲，content.prompt 必填；人声须 lyrics 或 lyrics_optimizer=true，"
+    "器乐 is_instrumental=true 时不能带 lyrics/optimizer），"
+    f"bundleName={_ATOMIC_BUNDLE}，业务参数只放 content。\n"
     f"图像理解：functionName=imageUnderStandStream，bundleName={_XIAOYI_BUNDLE}，必填 imageUrl；可选 text。"
 )
 
 _SEEDREAM_FUNCS = ("seedreamLite4Skill", "SeedreamPro4Skill")
+_LYRICS_FUNC = "lyricsGeneration"
+_MUSIC_FUNC = "musicGeneration"
+_LYRICS_MODES = ("write_full_song", "edit")
+_MUSIC_FLAG_TRUE = {"1", "true", "yes", "on"}
+_MUSIC_TOP_LEVEL_KEYS = (
+    "prompt",
+    "lyrics",
+    "mode",
+    "lyrics_optimizer",
+    "lyrics-optimizer",
+    "is_instrumental",
+    "instrumental",
+    "audio_setting",
+    "aigc_watermark",
+)
+_DEFAULT_AUDIO_SETTING = {
+    "sample_rate": 44100,
+    "bitrate": 256000,
+    "format": "mp3",
+}
 _SEEDREAM_SIZE_MAP = {
     "1k": "1K",
     "1024": "1K",
@@ -65,16 +93,94 @@ def _canonical_seedream_size(raw: Any) -> str | None:
     return _SEEDREAM_SIZE_MAP.get(key)
 
 
+def _as_bool(val: Any) -> bool:
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in _MUSIC_FLAG_TRUE
+
+
+def _pop_top_level_music_keys(out: dict[str, Any]) -> None:
+    for key in _MUSIC_TOP_LEVEL_KEYS:
+        out.pop(key, None)
+
+
+def _normalize_lyrics_args(out: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Fold prompt/mode/lyrics into content for lyricsGeneration."""
+    content = out.get("content")
+    bag: dict[str, Any] = dict(content) if isinstance(content, dict) else {}
+    prompt = out.get("prompt")
+    if prompt is not None and str(prompt).strip():
+        bag["prompt"] = str(prompt).strip()
+    mode = out.get("mode")
+    if mode is not None and str(mode).strip():
+        bag["mode"] = str(mode).strip()
+    elif not str(bag.get("mode") or "").strip():
+        bag["mode"] = "write_full_song"
+    lyrics = out.get("lyrics")
+    if lyrics is not None and str(lyrics).strip():
+        bag["lyrics"] = str(lyrics).strip()
+    if not str(bag.get("lyrics") or "").strip():
+        bag.pop("lyrics", None)
+    _pop_top_level_music_keys(out)
+    out["content"] = bag
+    return out, None
+
+
+def _normalize_music_args(out: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Fold MiniMax music fields into content; fill audio_setting / watermark defaults."""
+    content = out.get("content")
+    bag: dict[str, Any] = dict(content) if isinstance(content, dict) else {}
+    prompt = out.get("prompt")
+    if prompt is not None and str(prompt).strip():
+        bag["prompt"] = str(prompt).strip()
+    lyrics = out.get("lyrics")
+    if lyrics is not None and str(lyrics).strip():
+        bag["lyrics"] = str(lyrics).strip()
+    if "lyrics-optimizer" in out:
+        bag["lyrics_optimizer"] = _as_bool(out.get("lyrics-optimizer"))
+    elif "lyrics_optimizer" in out:
+        bag["lyrics_optimizer"] = _as_bool(out.get("lyrics_optimizer"))
+    if "instrumental" in out:
+        bag["is_instrumental"] = _as_bool(out.get("instrumental"))
+    elif "is_instrumental" in out:
+        bag["is_instrumental"] = _as_bool(out.get("is_instrumental"))
+    audio_over = out.get("audio_setting")
+    if isinstance(audio_over, dict):
+        bag_audio = bag.get("audio_setting") if isinstance(bag.get("audio_setting"), dict) else {}
+        bag["audio_setting"] = {**bag_audio, **audio_over}
+    if "aigc_watermark" in out:
+        bag["aigc_watermark"] = _as_bool(out.get("aigc_watermark"))
+
+    audio_base = bag.get("audio_setting") if isinstance(bag.get("audio_setting"), dict) else {}
+    bag["audio_setting"] = {**_DEFAULT_AUDIO_SETTING, **audio_base}
+    if "aigc_watermark" not in bag or bag["aigc_watermark"] is None:
+        bag["aigc_watermark"] = True
+    else:
+        bag["aigc_watermark"] = _as_bool(bag.get("aigc_watermark"))
+    bag["is_instrumental"] = _as_bool(bag.get("is_instrumental", False))
+    bag["lyrics_optimizer"] = _as_bool(bag.get("lyrics_optimizer", False))
+    if not str(bag.get("lyrics") or "").strip():
+        bag.pop("lyrics", None)
+
+    _pop_top_level_music_keys(out)
+    out["content"] = bag
+    return out, None
+
+
 def normalize_plugin_skill_args(
     func_name: str, params: dict[str, Any]
 ) -> tuple[dict[str, Any], str | None]:
-    """Coerce seedream size / drop Pro max_images / wrap seedance text content."""
+    """Coerce seedream size / drop Pro max_images / wrap seedance text content / fold music content."""
     out = dict(params)
     if func_name == "seedanceMiniTask":
         content = out.get("content")
         if isinstance(content, str) and content.strip():
             out["content"] = [{"type": "text", "text": content.strip()}]
         return out, None
+    if func_name == _LYRICS_FUNC:
+        return _normalize_lyrics_args(out)
+    if func_name == _MUSIC_FUNC:
+        return _normalize_music_args(out)
     if func_name not in _SEEDREAM_FUNCS:
         return out, None
 
@@ -244,6 +350,39 @@ def validate_plugin_skill_args(func_name: str, params: dict[str, Any]) -> str | 
     elif func_name == "seedanceMiniTaskQuery":
         if not str(params.get("id") or "").strip():
             return "seedanceMiniTaskQuery 须提供 arguments.id（seedanceMiniTask 返回的 task_id）。"
+    elif func_name == _LYRICS_FUNC:
+        content = params.get("content")
+        if not isinstance(content, dict):
+            return "lyricsGeneration 须提供 arguments.content 对象（必填 prompt，见 music-generation）。"
+        if not str(content.get("prompt") or "").strip():
+            return "lyricsGeneration 须提供 content.prompt。"
+        mode = str(content.get("mode") or "write_full_song").strip()
+        if mode not in _LYRICS_MODES:
+            return (
+                f"lyricsGeneration content.mode={mode!r} 无效，"
+                "仅允许 write_full_song 或 edit。"
+            )
+        if mode == "edit" and not str(content.get("lyrics") or "").strip():
+            return "lyricsGeneration mode=edit 时须提供 content.lyrics。"
+    elif func_name == _MUSIC_FUNC:
+        content = params.get("content")
+        if not isinstance(content, dict):
+            return "musicGeneration 须提供 arguments.content 对象（必填 prompt，见 music-generation）。"
+        if not str(content.get("prompt") or "").strip():
+            return "musicGeneration 须提供 content.prompt。"
+        instrumental = _as_bool(content.get("is_instrumental", False))
+        optimizer = _as_bool(content.get("lyrics_optimizer", False))
+        has_lyrics = bool(str(content.get("lyrics") or "").strip())
+        if instrumental:
+            if has_lyrics:
+                return "musicGeneration is_instrumental=true 时不能传 lyrics（纯器乐无人声）。"
+            if optimizer:
+                return "musicGeneration is_instrumental=true 时 lyrics_optimizer 须为 false。"
+        elif not has_lyrics and not optimizer:
+            return (
+                "musicGeneration is_instrumental=false 时须提供 content.lyrics，"
+                "或设置 lyrics_optimizer=true。"
+            )
 
     return None
 
@@ -266,7 +405,10 @@ def invoke_tool_description() -> str:
         f"\"bundleName\":\"{_XIAOYI_BUNDLE}\","
         "\"imageUrl\":\"https://...\",\"text\":\"描述图片\"}}。\n"
         "示例生视频：seedanceMiniTask（content）默认会轮询到 video_url；"
-        "只要 task_id 时传 arguments.wait=false，再用 seedanceMiniTaskQuery（id）。"
+        "只要 task_id 时传 arguments.wait=false，再用 seedanceMiniTaskQuery（id）。\n"
+        "示例生音乐：先可选 lyricsGeneration（content.prompt + mode），"
+        "再 musicGeneration（content.prompt；人声带 lyrics 或 lyrics_optimizer，"
+        "器乐 is_instrumental=true）。"
     )
 
 

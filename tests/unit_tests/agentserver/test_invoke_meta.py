@@ -24,6 +24,7 @@ from jiuwenswarm.agents.harness.common.tools.invoke_meta.plugin_skill_catalog im
     extract_seedance_task_id,
     invoke_tool_description,
     normalize_plugin_skill_args,
+    validate_plugin_skill_args,
     want_seedance_wait,
 )
 from jiuwenswarm.agents.harness.common.tools.invoke_meta.workspace_context import (
@@ -838,6 +839,334 @@ async def test_invoke_seedance_string_content_reaches_plugin(monkeypatch):
     assert "须提供 arguments.content 数组" not in str(result.get("error") or "")
     assert seen
     assert seen[0]["content"] == [{"type": "text", "text": "一只在月光下奔跑的狐狸"}]
+
+
+_ATOMIC_BUNDLE = "com.atomicservice.5765880207845681341"
+
+
+def _music_vocal_args(**extra: Any) -> dict[str, Any]:
+    args: dict[str, Any] = {
+        "functionName": "musicGeneration",
+        "bundleName": _ATOMIC_BUNDLE,
+        "content": {
+            "prompt": "华语流行，轻快温暖",
+            "audio_setting": {
+                "sample_rate": 44100,
+                "bitrate": 256000,
+                "format": "mp3",
+            },
+            "aigc_watermark": True,
+            "lyrics_optimizer": False,
+            "is_instrumental": False,
+            "lyrics": "[Verse]\n清晨的风穿过窗台",
+        },
+    }
+    args.update(extra)
+    return args
+
+
+def _lyrics_write_args(**extra: Any) -> dict[str, Any]:
+    args: dict[str, Any] = {
+        "functionName": "lyricsGeneration",
+        "bundleName": _ATOMIC_BUNDLE,
+        "content": {
+            "prompt": "华语流行，轻快温暖",
+            "mode": "write_full_song",
+        },
+    }
+    args.update(extra)
+    return args
+
+
+def test_normalize_lyrics_folds_top_level_prompt_and_defaults_mode():
+    out, err = normalize_plugin_skill_args(
+        "lyricsGeneration",
+        {
+            "bundleName": _ATOMIC_BUNDLE,
+            "functionName": "lyricsGeneration",
+            "prompt": "Indie folk, melancholic",
+        },
+    )
+    assert err is None
+    assert "prompt" not in out
+    assert out["content"]["prompt"] == "Indie folk, melancholic"
+    assert out["content"]["mode"] == "write_full_song"
+    assert "lyrics" not in out["content"]
+
+
+def test_normalize_music_folds_instrumental_prompt_and_fills_defaults():
+    out, err = normalize_plugin_skill_args(
+        "musicGeneration",
+        {
+            "bundleName": _ATOMIC_BUNDLE,
+            "functionName": "musicGeneration",
+            "prompt": "轻快的钢琴背景乐",
+            "is_instrumental": True,
+        },
+    )
+    assert err is None
+    assert "prompt" not in out
+    assert "is_instrumental" not in out
+    content = out["content"]
+    assert content["prompt"] == "轻快的钢琴背景乐"
+    assert content["is_instrumental"] is True
+    assert content["lyrics_optimizer"] is False
+    assert content["aigc_watermark"] is True
+    assert content["audio_setting"]["sample_rate"] == 44100
+    assert content["audio_setting"]["format"] == "mp3"
+    assert "lyrics" not in content
+
+
+def test_validate_lyrics_edit_requires_lyrics():
+    params, err = normalize_plugin_skill_args(
+        "lyricsGeneration",
+        _lyrics_write_args(content={"prompt": "改副歌", "mode": "edit"}),
+    )
+    assert err is None
+    msg = validate_plugin_skill_args("lyricsGeneration", params)
+    assert msg is not None
+    assert "lyrics" in msg
+
+
+def test_validate_lyrics_rejects_invalid_mode():
+    params, err = normalize_plugin_skill_args(
+        "lyricsGeneration",
+        _lyrics_write_args(content={"prompt": "写词", "mode": "translate"}),
+    )
+    assert err is None
+    msg = validate_plugin_skill_args("lyricsGeneration", params)
+    assert msg is not None
+    assert "write_full_song" in msg
+
+
+def test_validate_music_vocal_requires_lyrics_or_optimizer():
+    params, err = normalize_plugin_skill_args(
+        "musicGeneration",
+        {
+            "bundleName": _ATOMIC_BUNDLE,
+            "functionName": "musicGeneration",
+            "content": {"prompt": "一首歌", "is_instrumental": False},
+        },
+    )
+    assert err is None
+    msg = validate_plugin_skill_args("musicGeneration", params)
+    assert msg is not None
+    assert "lyrics" in msg
+
+
+def test_validate_music_instrumental_rejects_lyrics():
+    params, err = normalize_plugin_skill_args(
+        "musicGeneration",
+        {
+            "bundleName": _ATOMIC_BUNDLE,
+            "functionName": "musicGeneration",
+            "content": {
+                "prompt": "钢琴",
+                "is_instrumental": True,
+                "lyrics": "[Verse] no",
+            },
+        },
+    )
+    assert err is None
+    msg = validate_plugin_skill_args("musicGeneration", params)
+    assert msg is not None
+    assert "不能传 lyrics" in msg
+
+
+def test_invoke_tool_description_includes_music_skills():
+    text = invoke_tool_description()
+    assert "lyricsGeneration" in text
+    assert "musicGeneration" in text
+
+
+@pytest.mark.asyncio
+async def test_invoke_lyrics_generation_reaches_plugin(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    seen: list[dict[str, Any]] = []
+    timeouts: list[Any] = []
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            timeouts.append(kwargs.get("timeout"))
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            seen.append(dict(arguments))
+            assert spec.tool_name == "lyricsGeneration"
+            return {"success": True, "content": '{"lyrics":"[Verse] hi"}'}
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {"functionName": "PluginSkillExecTool", "arguments": _lyrics_write_args()}
+        )
+
+    assert result.get("success") is True
+    assert seen
+    assert seen[0]["content"]["prompt"] == "华语流行，轻快温暖"
+    assert seen[0]["content"]["mode"] == "write_full_song"
+    assert timeouts == [None]
+
+
+@pytest.mark.asyncio
+async def test_invoke_lyrics_missing_prompt_skips_ws(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    called = False
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, *args: Any, **kwargs: Any):
+            nonlocal called
+            called = True
+            return {"success": True, "content": "ok"}
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": {
+                    "functionName": "lyricsGeneration",
+                    "bundleName": _ATOMIC_BUNDLE,
+                    "content": {"mode": "write_full_song"},
+                },
+            }
+        )
+
+    assert result.get("success") is False
+    assert "prompt" in result.get("error", "")
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_invoke_music_generation_reaches_plugin_with_long_timeout(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    seen: list[dict[str, Any]] = []
+    timeouts: list[Any] = []
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            timeouts.append(kwargs.get("timeout"))
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            seen.append(dict(arguments))
+            assert spec.tool_name == "musicGeneration"
+            return {"success": True, "content": '{"items":["https://cdn.example/a.mp3"]}'}
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {"functionName": "PluginSkillExecTool", "arguments": _music_vocal_args()}
+        )
+
+    assert result.get("success") is True
+    assert seen
+    content = seen[0]["content"]
+    assert content["prompt"] == "华语流行，轻快温暖"
+    assert content["lyrics"].startswith("[Verse]")
+    assert "prompt" not in seen[0] or seen[0].get("prompt") is None
+    assert timeouts == [600.0]
+
+
+@pytest.mark.asyncio
+async def test_invoke_music_instrumental_fold_drops_top_level_prompt(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    seen: list[dict[str, Any]] = []
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, spec: ExternalToolSpec, arguments: dict, **kwargs: Any):
+            seen.append(dict(arguments))
+            return {"success": True, "content": "ok"}
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": {
+                    "functionName": "musicGeneration",
+                    "bundleName": _ATOMIC_BUNDLE,
+                    "prompt": "轻快的钢琴背景乐",
+                    "is_instrumental": True,
+                },
+            }
+        )
+
+    assert result.get("success") is True
+    assert seen
+    assert "prompt" not in seen[0]
+    assert seen[0]["content"]["prompt"] == "轻快的钢琴背景乐"
+    assert seen[0]["content"]["is_instrumental"] is True
+
+
+@pytest.mark.asyncio
+async def test_invoke_music_missing_prompt_skips_ws(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    called = False
+
+    class _FakeCloudClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def invoke(self, *args: Any, **kwargs: Any):
+            nonlocal called
+            called = True
+            return {"success": True}
+
+    with patch(
+        "jiuwenswarm.agents.harness.common.tools.invoke_meta.cloud_plugin_client.CloudPluginClient",
+        _FakeCloudClient,
+    ):
+        tool = InvokeTool()
+        result = await tool.invoke(
+            {
+                "functionName": "PluginSkillExecTool",
+                "arguments": {
+                    "functionName": "musicGeneration",
+                    "bundleName": _ATOMIC_BUNDLE,
+                    "is_instrumental": True,
+                },
+            }
+        )
+
+    assert result.get("success") is False
+    assert "prompt" in result.get("error", "")
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_invoke_rejects_wrong_bundle_for_music(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_MCP_RUN", "wss://example.test/v1/mcp/run")
+    tool = InvokeTool()
+    result = await tool.invoke(
+        {
+            "functionName": "PluginSkillExecTool",
+            "arguments": {
+                "functionName": "musicGeneration",
+                "bundleName": "xiaoyi",
+                "prompt": "钢琴",
+                "is_instrumental": True,
+            },
+        }
+    )
+    assert result.get("success") is False
+    assert _ATOMIC_BUNDLE in result.get("error", "")
 
 
 def test_design_system_prompt_includes_video_workflow():
