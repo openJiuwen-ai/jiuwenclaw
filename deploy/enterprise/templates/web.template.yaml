@@ -34,6 +34,16 @@ spec:
               value: "0.0.0.0"
             - name: FRONTEND_HOST
               value: "0.0.0.0"
+            - name: USER_WEB_MODE
+              value: "<<USER_WEB_MODE>>"
+            - name: VITE_USER_WEB_MODE
+              value: "<<USER_WEB_MODE>>"
+            - name: VITE_ENABLE_USER_WEB_EMBEDDING
+              value: "<<ENABLE_USER_WEB_EMBEDDING>>"
+            - name: USER_WEB_IDP_TARGET
+              value: "http://<<IDENTITY_NAME>>:<<IDENTITY_REST_PORT>>"
+            - name: USER_WEB_MANAGER_TARGET
+              value: "http://<<MANAGER_SERVER_NAME>>:<<MANAGER_REST_PORT>>"
             - name: FRONTEND_PORT
               value: "<<WEB_HTTP_PORT>>"
             - name: ENTERPRISE_WEB_WS_HOST
