@@ -13,7 +13,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.paths import (
@@ -481,6 +481,7 @@ async def _deliver_followup_interact_across_boundary(
     initial_reason: str | None = None,
     timeout_sec: float = _FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC,
     poll_interval_sec: float = _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC,
+    interact: Callable[[str, Any], Awaitable[tuple[bool, str | None]]] | None = None,
 ) -> _FollowupInteractBoundaryResult:
     """Deliver a follow-up until interact succeeds or the session becomes first-run ready."""
     deadline = time.monotonic() + max(0.0, timeout_sec)
@@ -492,7 +493,8 @@ async def _deliver_followup_interact_across_boundary(
         await asyncio.sleep(sleep_sec)
         if not await _team_session_has_runtime(team_manager, session_id):
             return _FollowupInteractBoundaryResult(success=False, reason=last_reason, first_request_ready=True)
-        success, reason = await team_manager.interact(session_id, query)
+        deliver = interact or team_manager.interact
+        success, reason = await deliver(session_id, query)
         if success:
             return _FollowupInteractBoundaryResult(success=True, reason=None, first_request_ready=False)
         last_reason = reason
@@ -1228,13 +1230,24 @@ _TEAM_BUILDING_EVENT_TYPES = frozenset({
 
 
 async def _broadcast_event(
-    channel_id: str | None, session_id: str, event: dict[str, Any]
+    channel_id: str | None,
+    session_id: str,
+    event: dict[str, Any],
+    *,
+    stream_closing: bool = False,
 ) -> None:
     """Broadcast an event to all request queues waiting on the same session."""
     tm = get_team_manager(channel_id)
     if event and event.get("event_type") == 'team.error':
         event.update({"event_type": "chat.error"})
-    result = tm.broadcast_event(session_id, event)
+    if stream_closing:
+        result = tm.broadcast_event(
+            session_id,
+            event,
+            stream_closing=True,
+        )
+    else:
+        result = tm.broadcast_event(session_id, event)
     if inspect.isawaitable(result):
         await result
     # Track team-building events so chat.final can be gated correctly.
@@ -1919,6 +1932,7 @@ async def _start_team_stream_round(
             session_id,
             team_spec,
             query,
+            request_id=request_id,
             round_id=round_id,
             envs=stream_envs or None,
         )
@@ -1975,6 +1989,7 @@ async def process_team_message_stream(
     is_bounded_round = is_heartbeat_request or _is_cron_request_id(rid)
     admission = getattr(heartbeat_service, "admission", None)
     user_admitted = False
+    admission_handed_off = False
     round_submitted = False
     event_stream_cancelled = False
 
@@ -2011,11 +2026,57 @@ async def process_team_message_stream(
             await _release_user_admission()
             raise
 
+    async def _begin_interactive_followup_admission() -> None:
+        nonlocal user_admitted
+        if admission is None:
+            return
+        is_interactive_round_active = getattr(
+            team_manager,
+            "is_interactive_round_active",
+            None,
+        )
+        can_join_current_round = callable(
+            is_interactive_round_active
+        ) and is_interactive_round_active(session_id)
+        if can_join_current_round:
+            await admission.begin_user(session_id)
+        else:
+            begin_team_user = getattr(
+                admission,
+                "begin_team_user",
+                admission.begin_user,
+            )
+            await begin_team_user(session_id)
+        user_admitted = True
+
+    async def _submit_interactive_followup(
+        delivery_session_id: str,
+        payload: Any,
+    ) -> tuple[bool, str | None]:
+        nonlocal admission_handed_off, round_submitted
+        submit = getattr(team_manager, "submit_interactive_followup", None)
+        if not callable(submit):
+            return await team_manager.interact(delivery_session_id, payload)
+        success, reason = await submit(
+            delivery_session_id,
+            rid,
+            payload,
+            release_admission=(_release_user_admission if user_admitted else None),
+        )
+        if success:
+            admission_handed_off = user_admitted
+            round_submitted = True
+        return success, reason
+
     async def _finish_round_submission(*, accepted: bool) -> None:
-        nonlocal round_submitted
+        nonlocal admission_handed_off, round_submitted
         round_submitted = accepted
-        if not accepted:
+        if accepted:
+            admission_handed_off = user_admitted
+        else:
             await team_manager.release_round(session_id, rid)
+            if user_admitted and not admission_handed_off:
+                await _release_user_admission()
 
     hide_dm = False
     debug = False
@@ -2265,11 +2326,18 @@ async def process_team_message_stream(
                 # Follow-up rounds carry their own attachments and context, so
                 # they are rendered exactly like the first one.
                 followup_payload = _deliverable(turn, query)
-                await _begin_team_round()
-                success, reason = await team_manager.interact(
-                    session_id,
-                    followup_payload,
-                )
+                if is_bounded_round:
+                    await _begin_team_round()
+                    success, reason = await team_manager.interact(
+                        session_id,
+                        followup_payload,
+                    )
+                else:
+                    await _begin_interactive_followup_admission()
+                    success, reason = await _submit_interactive_followup(
+                        session_id,
+                        followup_payload,
+                    )
                 if not success:
                     logger.warning(
                         "[TeamHelpers] interact failed: channel_id=%s session_id=%s reason=%s query=%s",
@@ -2280,11 +2348,18 @@ async def process_team_message_stream(
                     )
                     first_request_ready = False
                     if _is_followup_delivery_boundary_reason(reason):
-                        boundary_result = await _deliver_followup_interact_across_boundary(
-                            team_manager,
-                            session_id,
-                            followup_payload,
-                            initial_reason=reason,
+                        boundary_result = (
+                            await _deliver_followup_interact_across_boundary(
+                                team_manager,
+                                session_id,
+                                followup_payload,
+                                initial_reason=reason,
+                                interact=(
+                                    None
+                                    if is_bounded_round
+                                    else _submit_interactive_followup
+                                ),
+                            )
                         )
                         success = boundary_result.success
                         reason = boundary_result.reason
@@ -2355,7 +2430,7 @@ async def process_team_message_stream(
                         # replacement round.
                         await _finish_round_submission(accepted=False)
 
-                if success:
+                if success and not round_submitted:
                     await _finish_round_submission(accepted=True)
 
             if not is_first_request:
@@ -2614,7 +2689,7 @@ async def process_team_message_stream(
             await asyncio.shield(abort_task)
         elif is_bounded_round or not round_submitted:
             await team_manager.release_round(session_id, rid)
-        if user_admitted and not team_manager.is_round_owner(session_id, rid):
+        if user_admitted and not admission_handed_off:
             await _release_user_admission()
 
 
@@ -2624,6 +2699,7 @@ async def _consume_stream_with_query(
     team_spec: Any,
     initial_query: Any,
     *,
+    request_id: str | None = None,
     round_id: int,
     envs: dict[str, Any] | None = None,
 ) -> None:
@@ -2861,6 +2937,7 @@ async def _consume_stream_with_query(
                             "member_count": parsed.get("member_count"),
                             "task_count": parsed.get("task_count"),
                         },
+                        stream_closing=True,
                     )
                     terminal_broadcasted = True
                     continue
@@ -3052,6 +3129,7 @@ async def _consume_stream_with_query(
                             "is_processing": False,
                             "is_complete": True,
                         },
+                        stream_closing=True,
                     )
                     logger.info(
                         "[TeamHelpers] team finally completed: channel_id=%s session_id=%s round_id=%s",
@@ -3069,16 +3147,40 @@ async def _consume_stream_with_query(
             # Registry release must run even if cancellation arrives while a
             # normal stream is delivering its final snapshot.
             team_manager = get_team_manager(channel_id)
-            release_current_round = getattr(
-                team_manager, "release_current_round", None
-            )
-            if callable(release_current_round):
-                await release_current_round(session_id)
-            team_manager.clear_pending_runtime(session_id)
-            clear_active_runtime = getattr(team_manager, "clear_active_runtime", None)
-            if callable(clear_active_runtime):
-                clear_active_runtime(session_id)
-            team_manager.pop_stream_task(session_id)
+            try:
+                try:
+                    team_manager.clear_pending_runtime(session_id)
+                finally:
+                    try:
+                        clear_active_runtime = getattr(
+                            team_manager,
+                            "clear_active_runtime",
+                            None,
+                        )
+                        if callable(clear_active_runtime):
+                            clear_active_runtime(session_id)
+                    finally:
+                        team_manager.pop_stream_task(session_id)
+            finally:
+                # Open admission only after the old core stream and all of its
+                # runtime registrations are gone. Cleanup is generation-scoped
+                # so an old stream can never release a successor round.
+                finish_stream_round = getattr(
+                    team_manager,
+                    "finish_stream_round",
+                    None,
+                )
+                if request_id is not None and callable(finish_stream_round):
+                    await finish_stream_round(session_id, request_id)
+                else:
+                    # Compatibility for test doubles and older manager adapters.
+                    release_current_round = getattr(
+                        team_manager,
+                        "release_current_round",
+                        None,
+                    )
+                    if callable(release_current_round):
+                        await release_current_round(session_id)
 
 
 async def _consume_monitor_events(
