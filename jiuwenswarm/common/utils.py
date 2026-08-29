@@ -1184,6 +1184,9 @@ def prepare_workspace(
     cumulative_diff = CopyDiffResult([], [], [])
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
+    # Create logs directory at workspace root (~/.jiuwenswarm/logs)
+    (workspace_dir / "logs").mkdir(parents=True, exist_ok=True)
+
     # Migrate from legacy jiuwenclaw_workspace directory name to workspace
     _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir)
 
