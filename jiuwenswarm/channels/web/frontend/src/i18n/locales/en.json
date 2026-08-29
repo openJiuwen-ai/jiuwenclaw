@@ -475,7 +475,8 @@
       "views": {
         "list": "List view",
         "structure": "Structure view",
-        "board": "Board view"
+        "board": "Board view",
+        "graph": "Graph view"
       },
       "metrics": {
         "progress": "Progress"
@@ -3176,6 +3177,7 @@
     "toggleLabel": "SwarmFlow",
     "budgetPanelTitle": "SwarmFlow Budget",
     "budgetPanelHint": "Set the token limit for this session (blank = unlimited). Team mode only.",
-    "budgetPlaceholder": "blank = unlimited"
+    "budgetPlaceholder": "blank = unlimited",
+    "workflowList": "Workflow List"
   }
 }

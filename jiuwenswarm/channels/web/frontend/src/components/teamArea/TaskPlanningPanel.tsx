@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { File, Maximize2, Puzzle } from 'lucide-react';
+import { File, GitBranch, Maximize2, Puzzle } from 'lucide-react';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { useChatStore, useSessionStore } from '../../stores';
 import type { TeamTask as SessionTeamTask } from '../../stores/sessionStore';
@@ -21,6 +21,7 @@ import { CompactTaskList } from './CompactTaskList';
 import { getTotalTaskVisualProgressPercent } from './taskProgress';
 import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { SwarmflowTreeView } from './SwarmflowTreeView';
+import { SwarmflowGraphView } from './SwarmflowGraphView';
 
 type TaskPlanningPanelProps = {
   variant: 'compact' | 'expanded';
@@ -214,9 +215,11 @@ export function ProgressSection({
 export function ViewSwitcher({
   view,
   onViewChange,
+  showGraph = false,
 }: {
-  view: 'board' | 'list';
-  onViewChange: (view: 'board' | 'list') => void;
+  view: 'board' | 'list' | 'graph';
+  onViewChange: (view: 'board' | 'list' | 'graph') => void;
+  showGraph?: boolean;
 }) {
   const { t } = useTranslation();
   const { tooltip, handlers: tooltipHandlers } = useAdaptiveTooltip();
@@ -252,6 +255,19 @@ export function ViewSwitcher({
         <BoardViewIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
       </button>
       {tooltip}
+      {showGraph && (
+        <button
+          type="button"
+          onClick={() => onViewChange('graph')}
+          data-testid="team-area-task-planning-view-graph-button"
+          className={`flex h-6 w-6 items-center justify-center rounded-[4px] transition-colors ${view === 'graph' ? 'bg-card text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
+          aria-label={t('team.planning.views.graph')}
+          title={t('team.planning.views.graph')}
+          aria-pressed={view === 'graph'}
+        >
+          <GitBranch className="h-4 w-4 shrink-0" aria-hidden="true" />
+        </button>
+      )}
     </div>
   );
 }
@@ -276,7 +292,7 @@ export function TaskPlanningPanel({
   emptyIllustration,
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
-  const [view, setView] = useState<'board' | 'list'>('list');
+  const [view, setView] = useState<'board' | 'list' | 'graph'>('list');
   // SwarmFlow: 激活时用树视图替换看板/列表
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const swarmflowActive = useSessionStore(
@@ -302,34 +318,45 @@ export function TaskPlanningPanel({
 
   const progressPercent = getTotalTaskVisualProgressPercent(progressTasks ?? tasks, now ?? Date.now());
 
-  // ── SwarmFlow 激活时：树视图替换看板/列表 ──
-  if (swarmflowActive && workflowRuns.length > 0 && activeSessionId) {
-    return (
-      <div className="flex flex-[2] flex-col overflow-hidden min-h-0">
-        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3">
-          <div className="flex items-center gap-2">
-            <img src={recentTasksIcon} width={16} height={16} aria-hidden="true" />
-            <span className="text-sm font-medium text-text">
-              {title ?? t('swarmflow.layoutIndented')}
-            </span>
-          </div>
-          {variant === 'compact' && !hideExpandButton && onExpand && (
-            <button
-              onClick={() => onExpand()}
-              className="rounded p-2 text-text-muted hover:bg-secondary hover:text-text"
-              title={t('team.expand')}
-            >
-              <Maximize2 size={12} aria-hidden="true" />
-            </button>
-          )}
-        </div>
-        <SwarmflowTreeView runs={workflowRuns} sessionId={activeSessionId} />
-      </div>
-    );
-  }
-
   if (variant === 'compact') {
     const allTasks = tasks;
+
+    if (swarmflowActive && workflowRuns.length > 0) {
+      return (
+        <div
+          className={`flex flex-[2] flex-col overflow-hidden min-h-0 ${hideBorder ? '' : ' border-b border-border'}`}
+          data-testid="team-area-task-planning-panel"
+          data-variant="compact"
+        >
+          {hideHeader ? null : (
+            <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3" data-testid="team-area-task-planning-header">
+              <div className="flex items-center gap-2">
+                <img src={recentTasksIcon} width={16} height={16} aria-hidden="true" />
+                <span className="text-sm font-medium text-text" data-testid="team-area-task-planning-title">{t('swarmflow.workflowList')}</span>
+              </div>
+              {hideExpandButton ? null : (
+                <button
+                  onClick={onExpand}
+                  data-testid="team-area-task-planning-expand-button"
+                  className="rounded p-2 text-text-muted hover:bg-secondary hover:text-text"
+                  title={t('team.expand')}
+                >
+                  <Maximize2 size={12} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          )}
+          <div className="flex-1 overflow-y-auto">
+            {workflowRuns.map((run) => (
+              <div key={run.id} className="border-b border-border px-4 py-2 text-sm text-text">
+                <span className="font-medium">{run.name ?? run.id}</span>
+                <span className="ml-2 text-text-muted">({run.status})</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
 
     return (
       <div
@@ -375,7 +402,7 @@ export function TaskPlanningPanel({
   }
 
   const viewSwitcher = (
-    <ViewSwitcher view={view} onViewChange={setView} />
+    <ViewSwitcher view={view} onViewChange={setView} showGraph={workflowRuns.length > 0} />
   );
 
   const header = (
@@ -390,18 +417,29 @@ export function TaskPlanningPanel({
       {view === 'list' ? (
         <div className="flex h-full flex-col px-6 pb-6" data-testid="team-area-task-planning-list-view">
           {header}
-          <ProgressSection
-            tasks={tasks}
-            progressTasks={progressTasks}
-            now={now}
-            groupedTasks={groupedTasks}
-            completedTasks={completedTasks}
-            totalTasks={totalTasks}
-            displayMode="percent"
-            members={members}
-            hideAssignee={hideAssignee}
-            emptyIllustration={emptyIllustration}
-          />
+          {swarmflowActive && workflowRuns.length > 0 && activeSessionId ? (
+            <SwarmflowTreeView runs={workflowRuns} sessionId={activeSessionId} />
+          ) : (
+            <ProgressSection
+              tasks={tasks}
+              progressTasks={progressTasks}
+              now={now}
+              groupedTasks={groupedTasks}
+              completedTasks={completedTasks}
+              totalTasks={totalTasks}
+              displayMode="percent"
+              members={members}
+              hideAssignee={hideAssignee}
+              emptyIllustration={emptyIllustration}
+            />
+          )}
+        </div>
+      ) : view === 'graph' ? (
+        <div className="flex h-full flex-col px-6 pb-6" data-testid="team-area-task-planning-graph-view">
+          {header}
+          {workflowRuns.length > 0 && activeSessionId ? (
+            <SwarmflowGraphView runs={workflowRuns} sessionId={activeSessionId} />
+          ) : null}
         </div>
       ) : (
         <div className="flex h-full flex-col px-6 pb-6">
