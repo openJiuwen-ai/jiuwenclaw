@@ -5,6 +5,8 @@ version: 1
 name: "server-default"
 
 # Environment variables injected into every process running inside the sandbox.
+# SANDBOX_IP is reserved: the process runtime injects the lifecycle
+# IPv4 snapshot and rejects user-configured values for this key.
 environment: {}
 
 # Filesystem access rules. Paths are sandbox-visible absolute paths.

@@ -44,6 +44,7 @@ SANDBOX_LAUNCHER_PATH = f"{SANDBOX_RESERVED_DIR}/landlock-launcher.py"
 # children with ``close_fds=True`` so the inherited fd is not exposed
 # either).
 LISTENER_FD_ENV = "JIUWENBOX_CONTROL_LISTENER_FD"
+SANDBOX_IP_ENV = "SANDBOX_IP"
 
 # Daemon argv vector. ``-S`` shaves the ``import site`` cost so the daemon
 # starts faster; the daemon is stdlib-only so ``site`` is unnecessary.
