@@ -775,6 +775,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const planPendingExplicitEntry = usePlanStore(
     (s) => s.runtimes[activeSessionId ?? '']?.pendingExplicitEntry ?? false,
   );
+  // Reactive selectors for swarmflow state. Using getState() inside render IIFEs
+  // does not subscribe the component to store changes, leaving the Switch/UI stale
+  // when swarmflow is toggled off.
+  const swarmflowActive = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.enableSwarmflow ?? false,
+  );
+  const swarmflowBudget = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.swarmflowBudget ?? null,
+  );
   // Plan 已经真正生效：开关打开且至少发出过一条 Plan 消息（pendingExplicitEntry 已被消费）。
   // 区别于"刚打开开关但还没发消息"的未提交态——后者和 Goal 的 armed 一样可以被对方随手顶替。
   const planCommitted = planActive && !planPendingExplicitEntry;
@@ -3084,6 +3093,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       // Plan 与 Swarmflow 互斥：开启 Plan 前先关掉 Swarmflow。
                       if (useSessionStore.getState().getRuntime(activeSessionId)?.enableSwarmflow) {
                         useSessionStore.getState().setSwarmflowActive(activeSessionId, false);
+                        setSwarmflowBudgetOpen(false);
                       }
                       // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
                       // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
@@ -3119,7 +3129,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   );
                 })()}
                 {isTeamMode && (() => {
-                  const swarmflowActive = useSessionStore.getState().getRuntime(activeSessionId)?.enableSwarmflow ?? false;
                   const toggleSwarmflow = (next: boolean) => {
                     if (!activeSessionId) return;
                     // Swarmflow 与 Plan 互斥：开启 Swarmflow 前先关掉 Plan。
@@ -3128,6 +3137,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     }
                     useSessionStore.getState().setSwarmflowActive(activeSessionId, next);
                     if (next) setSwarmflowBudgetOpen(true);
+                    else setSwarmflowBudgetOpen(false);
                   };
                   return (
                     <div
@@ -3666,8 +3676,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         </div>
       ) : null}
       {swarmflowBudgetOpen && activeSessionId && (() => {
-        const rt = useSessionStore.getState().getRuntime(activeSessionId);
-        const enableSwarmflow = rt?.enableSwarmflow ?? false;
         return (
           <div className="fixed inset-0 z-50 flex" onClick={() => setSwarmflowBudgetOpen(false)}>
             <div className="absolute inset-0 bg-black/30" />
@@ -3681,9 +3689,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               <p className="text-xs text-text-muted mb-4">{t('swarmflow.budgetPanelHint')}</p>
               <Input
                 type="number"
-                value={rt?.swarmflowBudget ?? ''}
+                value={swarmflowBudget ?? ''}
                 placeholder={t('swarmflow.budgetPlaceholder')}
-                disabled={!enableSwarmflow}
+                disabled={!swarmflowActive}
                 onChange={(v) => {
                   const trimmed = v.trim();
                   useSessionStore.getState().setSwarmflowActive(
