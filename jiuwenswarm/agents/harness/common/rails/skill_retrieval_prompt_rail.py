@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails import SkillUseRail
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -23,7 +24,7 @@ _LEGACY_LIST_SKILL_TOOL_NAMES = frozenset({"list_skill", "list_skills"})
 
 
 class SkillRetrievalPromptRail(DeepAgentRail):
-    """Inject lightweight skill-tree retrieval guidance into the system prompt."""
+    """Deliver lightweight skill-tree retrieval guidance as history state."""
 
     # openjiuwen's callback framework executes higher priorities first, and
     # SkillUseRail rebuilds the native skills section on every model call. This
@@ -34,6 +35,7 @@ class SkillRetrievalPromptRail(DeepAgentRail):
     priority = SkillUseRail.priority - 1
     SECTION_NAME = "skill_retrieval"
     SECTION_PRIORITY = 41
+    ATTACHMENT_SOURCE = "jiuwenswarm.skill_retrieval_prompt_rail"
 
     def __init__(
         self,
@@ -46,12 +48,14 @@ class SkillRetrievalPromptRail(DeepAgentRail):
         self._visible_skill_names = visible_skill_names
         self._agent = None
         self.system_prompt_builder = None
+        self.attachment_manager = None
         self._hidden_legacy_abilities: dict[str, Any] = {}
         self._hidden_skills_section: PromptSection | None = None
 
     def init(self, agent: Any) -> None:
         self._agent = agent
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
     def uninit(self, agent: Any) -> None:
         self._restore_legacy_list_skill(agent)
@@ -60,16 +64,28 @@ class SkillRetrievalPromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section(self.SECTION_NAME)
         self.system_prompt_builder = None
         self._agent = None
+        self.attachment_manager = None
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Stage the retrieval prompt before the first admitted user turn."""
+        await self._sync_prompt_attachment(ctx)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        await self._sync_prompt_attachment(ctx)
+
+    async def _sync_prompt_attachment(self, ctx: AgentCallbackContext) -> None:
+        """Keep retrieval guidance out of the cache-stable system prefix."""
         agent = getattr(ctx, "agent", None)
         if agent is not None:
             self._agent = agent
             if self.system_prompt_builder is None:
                 self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+            if self.attachment_manager is None:
+                self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
         if not is_agentic_retrieval_enabled():
-            self._disable_agentic_prompt(ctx)
+            await self._clear_prompt_attachment(ctx)
+            self._disable_agentic_prompt()
             return
 
         if self.system_prompt_builder is None:
@@ -90,21 +106,52 @@ class SkillRetrievalPromptRail(DeepAgentRail):
         if not content.strip():
             self.system_prompt_builder.remove_section(self.SECTION_NAME)
             self._restore_native_skills_section()
+            await self._clear_prompt_attachment(ctx)
             return
 
         self._hide_legacy_list_skill()
         self._filter_legacy_list_skill_from_model_inputs(ctx)
         self._hide_native_skills_section()
-        self.system_prompt_builder.add_section(
-            PromptSection(
-                name=self.SECTION_NAME,
-                content={language: content},
-                priority=self.SECTION_PRIORITY,
+        manager = self.attachment_manager
+        if manager is None:
+            self.system_prompt_builder.add_section(
+                PromptSection(
+                    name=self.SECTION_NAME,
+                    content={language: content},
+                    priority=self.SECTION_PRIORITY,
+                )
             )
-        )
+            return
+        try:
+            await manager.bind_context(ctx).add_section(
+                section=self.SECTION_NAME,
+                content=content,
+                kind=PromptAttachmentKind.SKILL,
+                source=self.ATTACHMENT_SOURCE,
+                priority=self.SECTION_PRIORITY,
+                content_kind="text/markdown",
+            )
+        except ValueError as exc:
+            logger.warning("[SkillRetrievalPromptRail] attachment write failed: %s", exc)
+            self.system_prompt_builder.add_section(
+                PromptSection(
+                    name=self.SECTION_NAME,
+                    content={language: content},
+                    priority=self.SECTION_PRIORITY,
+                )
+            )
 
-    def _disable_agentic_prompt(self, ctx: AgentCallbackContext) -> None:
-        self._restore_legacy_list_skill(getattr(ctx, "agent", None))
+    async def _clear_prompt_attachment(self, ctx: AgentCallbackContext) -> None:
+        manager = self.attachment_manager
+        if manager is None:
+            return
+        try:
+            await manager.bind_context(ctx).clear_section(self.SECTION_NAME)
+        except ValueError as exc:
+            logger.warning("[SkillRetrievalPromptRail] attachment clear failed: %s", exc)
+
+    def _disable_agentic_prompt(self) -> None:
+        self._restore_legacy_list_skill(self._agent)
         self._restore_native_skills_section()
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section(self.SECTION_NAME)
