@@ -349,6 +349,10 @@ class PerfTraceRail(DeepAgentRail):
         _session_id.set(_resolve_session_id(ctx))
         _starts.set({})
         _iter.set(0)
+        # 与 _starts / _iter 同处复位：防止上一轮请求因异常 / 取消导致
+        # after_task_iteration 未被调用、_iter_in_flight 残留为 True，在上下文被
+        # 复用时让本轮首个 before_task_iteration 被静默跳过（iter 不递增、start 缺失）。
+        _iter_in_flight.set(False)
         _mark("invoke")
         logger.info("[perf] %s phase=invoke start", _log_kv())
 
