@@ -66,6 +66,12 @@ _iter: ContextVar[int] = ContextVar("perf_iter", default=0)
 # 用深度计数让重入幂等：最外层才初始化状态 / 打 start，嵌套进入静默，避免
 # 重复 start 行 + elapsed_ms=-1.0 + iter 串号。
 _invoke_depth: ContextVar[int] = ContextVar("perf_invoke_depth", default=0)
+# iter 钩子"进行中"标记（before_task_iteration 置 True、after_task_iteration 置 False）。
+# cron 等执行路径会在 1ms 内并发触发多次 before_task_iteration（已实跑确认），
+# 若无保护 _iter 会被推高、多出来的 after 产生 elapsed_ms=-1.0。用 in_flight 标记让
+# 重入幂等：仅在上一轮已配对结束（in_flight=False）时才递增 _iter / 打 start，
+# after 也只在 in_flight=True 时打 end，orphan after 静默。
+_iter_in_flight: ContextVar[bool] = ContextVar("perf_iter_in_flight", default=False)
 
 _ENABLED = os.getenv("PERF_TRACE_ENABLED", "true").strip().lower() not in (
     "false", "0", "no", "off",
@@ -369,6 +375,12 @@ class PerfTraceRail(DeepAgentRail):
     async def before_task_iteration(self, ctx: Any) -> None:
         if not _ENABLED:
             return
+        # 重入保护：cron 等路径会在 1ms 内并发触发多次 before_task_iteration。
+        # 上一轮 after 尚未配对（in_flight=True）说明这是重入，静默返回，
+        # 不递增 _iter / 不覆盖 mark / 不打第二条 start，避免 iter 串号 + 多余 end。
+        if _iter_in_flight.get():
+            return
+        _iter_in_flight.set(True)
         n = _iter.get() + 1
         _iter.set(n)
         _mark("iter", str(n))
@@ -378,6 +390,10 @@ class PerfTraceRail(DeepAgentRail):
     async def after_task_iteration(self, ctx: Any) -> None:
         if not _ENABLED:
             return
+        # orphan after（无对应 before，in_flight=False）静默返回，不打 elapsed_ms=-1.0。
+        if not _iter_in_flight.get():
+            return
+        _iter_in_flight.set(False)
         n = _iter.get()
         logger.info(
             "[perf] %s phase=iter end iter=%d elapsed_ms=%.1f",
