@@ -42,8 +42,8 @@ async function loadCronJobMeta(ctx: CommandContext): Promise<CronJobMetaPayload>
   cachedCronMeta = {
     modes: Array.isArray(payload.modes) ? payload.modes : [],
     default_mode: payload.default_mode || "agent.fast",
-    default_timeout_seconds: payload.default_timeout_seconds ?? 600,
-    default_team_timeout_seconds: payload.default_team_timeout_seconds ?? 1200,
+    default_timeout_seconds: payload.default_timeout_seconds ?? 3600,
+    default_team_timeout_seconds: payload.default_team_timeout_seconds ?? 3600,
   };
   return cachedCronMeta;
 }
@@ -57,8 +57,8 @@ const TEAM_MODES = new Set(["team", "team.plan", "code.team"]);
 function resolveDefaultTimeoutSeconds(job: Pick<CronJobPayload, "mode">, cronMeta: CronJobMetaPayload): number {
   const mode = String(job.mode || cronMeta.default_mode || "agent.fast").trim().toLowerCase();
   return TEAM_MODES.has(mode)
-    ? (cronMeta.default_team_timeout_seconds ?? 1200)
-    : (cronMeta.default_timeout_seconds ?? 600);
+    ? (cronMeta.default_team_timeout_seconds ?? 3600)
+    : (cronMeta.default_timeout_seconds ?? 3600);
 }
 
 function formatTimeoutLabel(
