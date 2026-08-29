@@ -836,19 +836,34 @@ def _resolve_session_swarmflow_config(
     )
 
     if params and params.get("enable_swarmflow") is not None:
-        return {
+        result = {
             "enable_swarmflow": bool(params.get("enable_swarmflow")),
             "swarmflow_budget": _coerce_budget(params.get("swarmflow_budget")),
         }
+        logger.info(
+            "[TeamHelpers] swarmflow config (source=request params, session=%s): %s",
+            session_id, result,
+        )
+        return result
 
     persisted = restore_session_swarmflow_config(session_id)
     if persisted is not None:
-        return {
+        result = {
             "enable_swarmflow": bool(persisted.get("enable_swarmflow", False)),
             "swarmflow_budget": _coerce_budget(persisted.get("swarmflow_budget")),
         }
+        logger.info(
+            "[TeamHelpers] swarmflow config (source=metadata, session=%s): %s",
+            session_id, result,
+        )
+        return result
 
-    return {"enable_swarmflow": config_enabled, "swarmflow_budget": config_budget}
+    result = {"enable_swarmflow": config_enabled, "swarmflow_budget": config_budget}
+    logger.info(
+        "[TeamHelpers] swarmflow config (source=config.yaml, session=%s): %s",
+        session_id, result,
+    )
+    return result
 
 
 def _resolve_channel_id(channel_id: str | None) -> str:
