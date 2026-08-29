@@ -28,6 +28,7 @@ from jiuwenswarm.server.gateway_push import (
     WebSocketGatewayPushTransport,
 )
 from jiuwenswarm.common.utils import get_cron_jobs_path
+from jiuwenswarm.common.work_mode import SUPPORTED_WORK_MODES
 
 logger = logging.getLogger(__name__)
 
@@ -616,9 +617,9 @@ class CronTools:
                         },
                         "work_mode": {
                             "type": "string",
-                            "enum": ["code", "work"],
+                            "enum": sorted(SUPPORTED_WORK_MODES),
                             "description": (
-                                "Working mode of the target project (code/work). "
+                                "Working mode of the target project (code/work/design). "
                                 "Defaults to current channel default (tui->code, web->work). "
                                 "Only used when project_id is not provided; ignored if project_id "
                                 "is provided (work_mode inherited from the project)."
@@ -688,12 +689,13 @@ class CronTools:
                                         "Directly patch the project_id (takes priority over "
                                         "project_dir). work_mode is re-injected from the "
                                         "project record. Must reference an existing visible "
-                                        "project or a default project (default / default_code)."
+                                        "project or a default project "
+                                        "(default / default_code / default_design)."
                                     ),
                                 },
                                 "work_mode": {
                                     "type": "string",
-                                    "enum": ["code", "work"],
+                                    "enum": sorted(SUPPORTED_WORK_MODES),
                                     "description": (
                                         "Disambiguates target project when patching "
                                         "project_dir. Ignored if project_id is patched "

@@ -127,6 +127,14 @@ def coerce_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> s
     return _CRON_JOB_MODE_ALIASES.get(value, value)
 
 
+def is_cron_job_mode(raw: Any) -> bool:
+    """Whether ``raw`` is a known cron execution mode (including legacy aliases)."""
+    if raw is None:
+        return False
+    value = str(raw).strip().lower()
+    return bool(value) and value in CRON_JOB_MODES
+
+
 def cron_job_modes_for_tools() -> list[str]:
     return sorted(CRON_JOB_MODES)
 

@@ -6,11 +6,14 @@ import json
 import pytest
 
 from jiuwenswarm.common.work_mode import (
+    DEFAULT_PROJECT_ID_CODE,
+    DEFAULT_PROJECT_ID_DESIGN,
     DEFAULT_PROJECT_ID_WORK,
     DEFAULT_WEB_WORK_MODE,
     is_default_project_id,
     normalize_work_mode,
     resolve_default_project_id,
+    work_mode_from_default_project_id,
 )
 from jiuwenswarm.gateway.cron.models import CronJob
 from jiuwenswarm.server.runtime.session.project_store import Project
@@ -30,6 +33,12 @@ class TestPureHelpers:
         (is_default_project_id, "default", True),
         (is_default_project_id, "proj_abc", False),
         (resolve_default_project_id, "work", DEFAULT_PROJECT_ID_WORK),
+        (resolve_default_project_id, "design", DEFAULT_PROJECT_ID_DESIGN),
+        (work_mode_from_default_project_id, "default", DEFAULT_WEB_WORK_MODE),
+        (work_mode_from_default_project_id, "default_code", DEFAULT_TUI_WORK_MODE),
+        (work_mode_from_default_project_id, "default_design", "design"),
+        (work_mode_from_default_project_id, "", None),
+        (work_mode_from_default_project_id, "proj_abc", None),
         (default_work_mode_for_channel, "tui", DEFAULT_TUI_WORK_MODE),
     ])
     def test_pure_helpers(self, fn, arg, expected):
@@ -57,6 +66,8 @@ class TestRequestResolution:
     @pytest.mark.parametrize("params, channel_id, expected_pid, expected_mode", [
         ({}, "web", "default", "work"),
         ({"project_id": "default_code"}, "tui", "default_code", "code"),
+        ({"project_id": "default_design"}, "web", "default_design", "design"),
+        ({"work_mode": "design"}, "web", "default_design", "design"),
     ])
     def test_default_project_mapping(self, params, channel_id, expected_pid, expected_mode):
         result = resolve_session_work_mode_params(params, channel_id=channel_id)
@@ -74,6 +85,7 @@ class TestRequestResolution:
         (None, "default", "work"),
         ("default", "default", "work"),
         ("default_code", "default_code", "code"),
+        ("default_design", "default_design", "design"),
     ])
     def test_default_project_preserves_project_dir(self, project_id, expected_pid, expected_mode):
         # 纯参数归一化,不直接拒绝;project_dir 透传给 resolve_session_project_binding
@@ -85,6 +97,22 @@ class TestRequestResolution:
         assert result.project_dir == "/tmp/demo"
         assert result.work_mode == expected_mode
         assert result.error is None
+
+    @pytest.mark.parametrize("project_id, work_mode", [
+        (DEFAULT_PROJECT_ID_WORK, "code"),
+        (DEFAULT_PROJECT_ID_CODE, "work"),
+        (DEFAULT_PROJECT_ID_DESIGN, "work"),
+        (DEFAULT_PROJECT_ID_DESIGN, "code"),
+    ])
+    def test_default_project_conflicts_with_explicit_work_mode(self, project_id, work_mode):
+        result = resolve_session_work_mode_params(
+            {"project_id": project_id, "work_mode": work_mode},
+            channel_id="web",
+        )
+        assert result.code == "BAD_REQUEST"
+        assert result.project_id == ""
+        assert result.work_mode == ""
+        assert "conflicts with project_id" in (result.error or "")
 
 
 class TestModelRoundtrip:
@@ -117,6 +145,7 @@ class TestModelRoundtrip:
         ({}, "work"),
         ({"work_mode": "invalid"}, "work"),
         ({"work_mode": "code"}, "code"),
+        ({"work_mode": "design"}, "design"),
     ])
     def test_cronjob_from_dict(self, raw_overrides, expected_work_mode):
         base = {"id": "j1", "name": "n", "enabled": True, "cron_expr": "0 0 * * *",

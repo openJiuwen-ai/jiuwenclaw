@@ -27,12 +27,12 @@ from typing import Any, Callable, Iterator, TypeVar
 
 from jiuwenswarm.common.utils import get_agent_root_dir
 from jiuwenswarm.common.work_mode import (
-    DEFAULT_PROJECT_ID_CODE,
-    DEFAULT_PROJECT_ID_WORK,
     DEFAULT_TUI_WORK_MODE,
     DEFAULT_WEB_WORK_MODE,
     is_default_project_id,
+    is_supported_work_mode,
     normalize_work_mode,
+    work_mode_from_default_project_id,
 )
 from jiuwenswarm.server.runtime.session.work_mode import (
     infer_legacy_project_work_mode,
@@ -262,10 +262,7 @@ def _load_cache(cache_bust: bool = False) -> list[dict[str, Any]]:
         changed = False
         for p in raw:
             existing_wm = p.get("work_mode")
-            if (
-                isinstance(existing_wm, str)
-                and existing_wm.strip().lower() in {"code", "work"}
-            ):
+            if is_supported_work_mode(existing_wm):
                 continue
             # infer_legacy_project_work_mode 总是返回合法值(缺失/非法时回退 "work")
             p["work_mode"] = infer_legacy_project_work_mode(p)
@@ -536,14 +533,11 @@ def resolve_cron_project_binding(
     input_mode = str(work_mode or DEFAULT_WEB_WORK_MODE).strip() or DEFAULT_WEB_WORK_MODE
     match_mode = _normalize_work_mode_value(work_mode)
     raw_project_id = str(project_id or "").strip()
-    if raw_project_id in (DEFAULT_PROJECT_ID_WORK, DEFAULT_PROJECT_ID_CODE):
+    mapped_default_mode = work_mode_from_default_project_id(raw_project_id)
+    if mapped_default_mode is not None:
         return CronProjectBinding(
             project_id=raw_project_id,
-            work_mode=(
-                DEFAULT_TUI_WORK_MODE
-                if raw_project_id == DEFAULT_PROJECT_ID_CODE
-                else DEFAULT_WEB_WORK_MODE
-            ),
+            work_mode=mapped_default_mode,
         )
 
     if raw_project_id:
@@ -575,10 +569,10 @@ def resolve_cron_project_binding(
         proj = get_project_by_id(resolved_project_id, cache_bust=True)
         if proj is not None:
             resolved_work_mode = proj.work_mode or DEFAULT_WEB_WORK_MODE
-    elif resolved_project_id == DEFAULT_PROJECT_ID_CODE:
-        resolved_work_mode = DEFAULT_TUI_WORK_MODE
-    elif resolved_project_id == DEFAULT_PROJECT_ID_WORK:
-        resolved_work_mode = DEFAULT_WEB_WORK_MODE
+    else:
+        mapped_resolved = work_mode_from_default_project_id(resolved_project_id)
+        if mapped_resolved is not None:
+            resolved_work_mode = mapped_resolved
     return CronProjectBinding(
         project_id=resolved_project_id,
         work_mode=resolved_work_mode,

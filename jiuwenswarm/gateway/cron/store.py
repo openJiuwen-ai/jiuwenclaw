@@ -24,7 +24,9 @@ from jiuwenswarm.common.utils import get_cron_jobs_path
 from jiuwenswarm.common.work_mode import (
     DEFAULT_TUI_WORK_MODE,
     DEFAULT_WEB_WORK_MODE,
+    is_supported_work_mode,
     normalize_work_mode,
+    work_mode_from_default_project_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,11 +99,15 @@ def _resolve_cron_job_work_mode(
     """为缺 work_mode 的老 cron job 推断 work_mode。
 
     规则(与原 ``migrate_legacy_jobs_at_startup`` 一致):
-      1. project_id 命中真实 Project → 继承该 Project 的 work_mode;
-      2. 未命中(默认项目/不存在/list_projects 失败)→
+      1. 虚拟默认 project_id(default / default_code / default_design)→ 逆映射;
+      2. project_id 命中真实 Project → 继承该 Project 的 work_mode;
+      3. 未命中(空 ID / 不存在 / list_projects 失败)→
          按 targets.channel_id 推断(tui→code,其他→work)。
     """
     pid = str(item.get("project_id") or "").strip()
+    mapped_default = work_mode_from_default_project_id(pid)
+    if mapped_default is not None:
+        return mapped_default
     if pid and pid in id_to_work_mode:
         return id_to_work_mode[pid]
     return _infer_work_mode_from_targets(item)
@@ -170,10 +176,7 @@ class CronJobStore:
                 if not isinstance(item, dict):
                     continue
                 existing_wm = item.get("work_mode")
-                if not (
-                    isinstance(existing_wm, str)
-                    and existing_wm.strip() in {"code", "work"}
-                ):
+                if not is_supported_work_mode(existing_wm):
                     needs_migration = True
                     break
 
@@ -184,10 +187,7 @@ class CronJobStore:
                     if not isinstance(item, dict):
                         continue
                     existing_wm = item.get("work_mode")
-                    if (
-                        isinstance(existing_wm, str)
-                        and existing_wm.strip() in {"code", "work"}
-                    ):
+                    if is_supported_work_mode(existing_wm):
                         continue
                     item["work_mode"] = _resolve_cron_job_work_mode(
                         item, id_to_work_mode
