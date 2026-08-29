@@ -411,11 +411,13 @@ from jiuwenswarm.common.mcp_config import (
     RequestScopedOfficeClawMcpTool,
     bind_active_office_claw_mcp_tools,
     build_mcp_server_config,
+    clear_agent_office_claw_tool_ids,
     extract_enabled_mcp_server_entries,
     extract_office_claw_mcp,
     is_asyncio_outer_cancellation,
     list_office_claw_mcp_tools,
     preflight_mcp_server_reachable,
+    set_agent_office_claw_tool_ids,
     validate_office_claw_mcp_config,
 )
 from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
@@ -3729,6 +3731,10 @@ class JiuWenSwarmDeepAdapter:
                 tool_names=tuple(tool_names),
             )
             self._active_office_claw_mcp = registration
+            # Store tool_ids on the agent's shared ability_manager so the
+            # supervisor / round task (created before bind_active_office_claw_mcp_tools)
+            # can re-bind the ContextVar before invoking OfficeClaw tools.
+            set_agent_office_claw_tool_ids(self._instance, tool_ids)
             request_env = params.get("env") if isinstance(params.get("env"), dict) else {}
             invocation_id = str(request_env.get("OFFICE_CLAW_INVOCATION_ID") or "").strip()
             logger.info(
@@ -3900,6 +3906,8 @@ class JiuWenSwarmDeepAdapter:
             and self._active_office_claw_mcp.request_id == registration.request_id
         ):
             self._active_office_claw_mcp = None
+        # Clear the shared ability_manager allowlist so stale ids are not reused.
+        clear_agent_office_claw_tool_ids(self._instance)
         logger.info(
             "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP cleaned up: request_id=%s",
             registration.request_id,
