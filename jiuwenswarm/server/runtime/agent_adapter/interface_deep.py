@@ -10108,6 +10108,28 @@ class JiuWenSwarmDeepAdapter:
             is_complete=False,
         )
 
+    def _deep_agent_has_skill_turbo_interrupt(self) -> bool:
+        """True when DeepAgent still holds an outer skill_acceleration_exec HITL."""
+        loop_session = getattr(getattr(self, "_instance", None), "_loop_session", None)
+        if loop_session is None:
+            return False
+        try:
+            state = loop_session.get_state(INTERRUPTION_KEY)
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] inspect skill_turbo interrupt failed",
+                exc_info=True,
+            )
+            return True
+        interrupted = getattr(state, "interrupted_tools", None)
+        if not isinstance(interrupted, dict) or not interrupted:
+            return False
+        return any(
+            getattr(getattr(entry, "tool_call", None), "name", None)
+            == "skill_acceleration_exec"
+            for entry in interrupted.values()
+        )
+
     async def _try_skill_turbo_resume(
         self,
         request: AgentRequest,
@@ -10119,6 +10141,12 @@ class JiuWenSwarmDeepAdapter:
         if not answers:
             return None
         if self._instance is None:
+            return None
+        if self._deep_agent_has_skill_turbo_interrupt():
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillTurbo resume deferred to DeepAgent "
+                "(outer skill_acceleration_exec interrupt present)"
+            )
             return None
         from openjiuwen.core.session.agent import create_agent_session
 
@@ -10228,7 +10256,7 @@ class JiuWenSwarmDeepAdapter:
                 if summary_chunk is not None:
                     yield summary_chunk
 
-            try:
+            async def _clear_resume_ctx() -> None:
                 await _skill_turbo_clear_resume_ctx(session)
                 try:
                     await session.post_run()
@@ -10237,6 +10265,22 @@ class JiuWenSwarmDeepAdapter:
                         "[JiuWenSwarmDeepAdapter] skill_turbo resume_stream post_run failed",
                         exc_info=True,
                     )
+
+            def _finish_text(success: bool, detail: str = "") -> str:
+                # Fallback only (no DeepAgent interrupt): template text, not a new LLM call.
+                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                    _build_artifact_summary,
+                )
+                summary = _build_artifact_summary(
+                    getattr(skill_turbo, "artifact_holder", None) or {}
+                )
+                head = detail or ("任务已完成" if success else "任务未完成")
+                if summary:
+                    return f"{head}\n\n{summary}"
+                return head
+
+            finish_text = ""
+            try:
                 async for chunk in skill_turbo.resume_stream(
                     plan_code=resume_ctx["plan_code"],
                     inputs=resume_inputs,
@@ -10260,7 +10304,10 @@ class JiuWenSwarmDeepAdapter:
                     if getattr(chunk, "is_complete", False):
                         async for summary_chunk in _emit_usage_summary():
                             yield summary_chunk
+                        continue
                     yield chunk
+                await _clear_resume_ctx()
+                finish_text = _finish_text(True)
             except _SkillTurboAbortError as e:
                 async for summary_chunk in _emit_usage_summary():
                     yield summary_chunk
@@ -10269,13 +10316,13 @@ class JiuWenSwarmDeepAdapter:
                 ):
                     yield hitl_chunk
                 return
-            except SkillTurboNotHandled:
+            except SkillTurboNotHandled as exc:
                 logger.info(
-                    "[JiuWenSwarmDeepAdapter] SkillTurbo resume fallback to DeepAgent"
+                    "[JiuWenSwarmDeepAdapter] SkillTurbo resume not handled: %s",
+                    exc,
                 )
-                async for summary_chunk in _emit_usage_summary():
-                    yield summary_chunk
-                return
+                await _clear_resume_ctx()
+                finish_text = _finish_text(False, f"SkillAccelerationExec 未处理: {exc}")
             finally:
                 _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
                 _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
@@ -10284,6 +10331,19 @@ class JiuWenSwarmDeepAdapter:
 
             async for summary_chunk in _emit_usage_summary():
                 yield summary_chunk
+            if finish_text:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "chat.delta", "content": finish_text},
+                    is_complete=False,
+                )
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"event_type": "chat.final", "content": finish_text or ""},
+                is_complete=True,
+            )
 
         return _resume_impl()
 
