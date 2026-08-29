@@ -12079,6 +12079,14 @@ class JiuWenSwarmDeepAdapter:
                 str(skill_path),
                 skill_name=name,
             )
+            # Use relay/control-plane skill_path root only (same as rollback).
+            # Do not merge channel-local workspace skill dirs (often empty C: path).
+            if store_dirs is None:
+                skills_base = evolution_version_ctl.skills_root_from_skill_md_path(
+                    resolved_skill_md
+                )
+                if skills_base:
+                    store_dirs = [skills_base]
 
         logger.info(
             "[JiuWenSwarmDeepAdapter] skills.evolution.rebuild start: skill=%s "
