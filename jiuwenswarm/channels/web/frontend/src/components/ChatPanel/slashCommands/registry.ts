@@ -1,9 +1,10 @@
 import { webRequest } from '../../../services/webClient';
 import type { Message } from '../../../types/message';
 import { usePlanStore } from '../../../stores/planStore';
+import { NEW_CONVERSATION_ID } from '../../../multi-session/state/newConversationLifecycle';
 
 /**
- * 斜杠命令注册表（/btw、/compact、/plan，对齐 TUI）。
+ * 斜杠命令注册表（/btw、/compact、/plan、/persist，对齐 TUI）。
  * 后端与 TUI 共用 agent_ws_server；命令结果以 system 消息留痕，
  * 第一行回显命令行，MessageItem 按 isCommandOutput 渲染。
  */
@@ -153,4 +154,35 @@ const planCommand: SlashCommand = {
   },
 };
 
-export const SLASH_COMMANDS: SlashCommand[] = [btwCommand, compactCommand, planCommand];
+/** /persist —— 在欢迎页创建 Persist Session，具体创建仍复用 App.tsx 现有入口。 */
+const persistCommand: SlashCommand = {
+  name: 'persist',
+  requiresSession: false,
+  execute: async (ctx, args) => {
+    if (ctx.sessionId !== NEW_CONVERSATION_ID) {
+      ctx.addMessage(
+        ctx.sessionId,
+        commandResultMessage(
+          ctx.inputLine,
+          'Persist Session 只能在创建新会话时开启，并且创建后不可更改。请点击“新建任务”后再使用 /persist <任务>。',
+        ),
+      );
+      return;
+    }
+    if (!args.trim()) {
+      ctx.addMessage(
+        ctx.sessionId,
+        commandResultMessage(ctx.inputLine, '用法：/persist <任务>'),
+      );
+      return;
+    }
+    ctx.submitMessage?.(ctx.inputLine);
+  },
+};
+
+export const SLASH_COMMANDS: SlashCommand[] = [
+  btwCommand,
+  compactCommand,
+  planCommand,
+  persistCommand,
+];

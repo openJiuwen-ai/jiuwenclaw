@@ -818,6 +818,8 @@ class MessageHandler(ABC):
         self,
         msg: "Message",
         state: ChannelControlState,
+        *,
+        persist_session: bool = False,
     ) -> str:
         """Allocate and persist a real AgentServer-owned session for a channel."""
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -831,6 +833,8 @@ class MessageHandler(ABC):
             "mode": mode,
             "is_swarm": ChannelMode.is_team_mode(mode),
         }
+        if persist_session:
+            create_params["persist_session"] = True
         for name in ("project_id", "project_dir", "work_mode", "model_name"):
             if params.get(name) is not None:
                 create_params[name] = params[name]
@@ -1745,14 +1749,19 @@ class MessageHandler(ABC):
             try:
                 state.session_id = None
                 new_sid = await self._allocate_channel_session(msg, state)
-            except Exception as exc:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 state.session_id = old_sid
+                logger.exception(
+                    "[MessageHandler] 创建新会话失败 channel=%s message_id=%s",
+                    channel_type,
+                    msg.id,
+                )
                 asyncio.create_task(
                     self.send_channel_notice(
                         user_infos,
                         ch,
                         msg.session_id,
-                        {"error": f"创建新会话失败：{exc}"},
+                        {"error": "创建新会话失败，请稍后重试"},
                     )
                 )
                 return True
@@ -1771,6 +1780,69 @@ class MessageHandler(ABC):
                         old_sid=old_sid,
                     ),
                     msg,
+                )
+            )
+            return True
+        if parsed.action is ParsedControlAction.PERSIST_OK:
+            old_sid = state.session_id
+            try:
+                state.session_id = None
+                new_sid = await self._allocate_channel_session(
+                    msg,
+                    state,
+                    persist_session=True,
+                )
+            except Exception:  # noqa: BLE001
+                state.session_id = old_sid
+                logger.exception(
+                    "[MessageHandler] 创建永续会话失败 channel=%s message_id=%s",
+                    channel_type,
+                    msg.id,
+                )
+                asyncio.create_task(
+                    self.send_channel_notice(
+                        user_infos,
+                        ch,
+                        msg.session_id,
+                        {"error": "创建永续会话失败，请稍后重试"},
+                    )
+                )
+                return True
+
+            task = parsed.persist_task or ""
+            msg.session_id = new_sid
+            msg.params = dict(msg.params or {})
+            msg.params["query"] = task
+            if "content" in msg.params:
+                msg.params["content"] = task
+            msg.metadata = dict(msg.metadata or {})
+            msg.metadata["persist_session_first_task"] = True
+
+            if self._gateway_hook_handler:
+                asyncio.create_task(
+                    self._gateway_hook_handler.on_session_start(new_sid, source=channel_type)
+                )
+            asyncio.create_task(
+                self._new_session_cancel_and_notice(
+                    NewSessionCancelParams(
+                        user_infos=user_infos,
+                        channel_id=ch,
+                        reply_session_id=msg.session_id,
+                        new_sid=new_sid,
+                        old_sid=old_sid,
+                    ),
+                    msg,
+                )
+            )
+            # 与 /review 相同：控制动作已经完成，改写后的正文继续作为首条任务。
+            return False
+        if parsed.action is ParsedControlAction.PERSIST_BAD:
+            asyncio.create_task(
+                self.send_channel_notice(
+                    user_infos,
+                    ch,
+                    msg.session_id,
+                    "指令格式错误。正确格式：/persist <第一条任务>",
                 )
             )
             return True

@@ -1395,9 +1395,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # 固定 Rails — code 模式特有
         rail_infos = [
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
-            _RailBuildInfo(
-                "_eternal_conversation_rail", self._build_eternal_conversation_rail
-            ),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_skill_retrieval_prompt_rail", self._build_skill_retrieval_prompt_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
@@ -1431,6 +1428,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 {"tool_names": ["switch_mode"]},
             ),
             _RailBuildInfo("_context_processor_rail", self._build_context_processor_rail),
+            _RailBuildInfo(
+                "_eternal_conversation_rail", self._build_eternal_conversation_rail
+            ),
             _RailBuildInfo("_code_task_planning_rail", self._build_code_task_planning_rail),
             _RailBuildInfo("_code_agent_rail", self._build_code_agent_rail),
             _RailBuildInfo("_code_plan_approval_rail", self._build_plan_approval_rail),
