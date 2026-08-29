@@ -14,6 +14,7 @@ from jiuwenswarm.server.runtime.reload_result import (
     log_reload_config_changes,
 )
 from jiuwenswarm.common.local_env_config import (
+    is_enterprise,
     EnvNsIdError,
     apply_env_removals,
     apply_process_baseline_gaps,
@@ -31,6 +32,9 @@ from jiuwenswarm.server.runtime.sync_agents_configs import (
     validate_sync_payload,
 )
 from jiuwenswarm.server.runtime.tenant_catalog_registry import TenantCatalogRegistry
+from jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail import (
+    coalesce_config_skill_envs,
+)
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     infer_multimodal_env_removals,
     sync_multimodal_env_omission_state,
@@ -276,6 +280,8 @@ class TenantAgentPool:
             if isinstance(config, dict)
             else (existing.config if existing is not None else {})
         )
+        if existing is not None:
+            config_snapshot = coalesce_config_skill_envs(config_snapshot, existing.config)
         runtime_snapshot = existing.runtime if existing is not None else {}
         env_snapshot = effective_tip(service_id, agent_id)
         registry.upsert(
@@ -491,8 +497,8 @@ class TenantAgentPool:
                     )
 
                 import os
-                # AGENT_RUNTIME: stable string instance id (legacy "aid_sid" form).
-                agent_runtime = os.getenv("AGENT_RUNTIME", "").strip()
+                # 企业版：stable string instance id (legacy "aid_sid" form).
+                agent_runtime = is_enterprise()
                 manager_agent_id = (
                     f"{agent_id}_{service_id}" if agent_runtime else request_agent_id
                 )

@@ -646,6 +646,21 @@ Manager 为平台管理模块，提供策略下发和配置、业务实例监控
 IS_UP_MANAGER_WEB=false
 ```
 
+Identity Center 的企业联合认证 Demo 默认关闭。需要验证联合登录链路时，在
+`.env.custom` 中显式开启；该 Demo 只用于联调，不接收或验证真实 SAML 报文：
+
+```bash
+IDENTITY_FEDERATION_DEMO_ENABLED=true
+IDENTITY_FEDERATION_PUBLIC_PATH_PREFIX=/idp
+IDENTITY_FEDERATION_REQUEST_TTL=300
+IDENTITY_FEDERATION_CODE_TTL=60
+IDENTITY_FEDERATION_DEMO_ADMIN_GROUP=enterprise-admins
+```
+
+开启后应通过 Manager Web 的 `/idp` 同源代理访问 Identity Center，因此
+`IDENTITY_FEDERATION_PUBLIC_PATH_PREFIX` 保持 `/idp`。登录页会根据 Identity Center
+返回的可用连接动态显示企业登录入口，不需要额外的 Manager Web 开关。
+
 ### 4.3 部署 Web（可选部署）
 
 Web 为 JiuwenSwarm 企业版面向终端用户的对话可视化前端，用于用户直接和大模型机器人在线对话功能。该模块为可选组件，若业务仅通过飞书渠道与机器人交互、无需网页端对话入口，则可不部署。
@@ -657,35 +672,41 @@ Web 为 JiuwenSwarm 企业版面向终端用户的对话可视化前端，用于
 
 #### 4.3.1 用户面入口模式
 
-用户面支持独立入口和 Manager Web 统一登录入口两种部署方式。通过 `.env.custom` 配置：
+用户面通过 `USER_WEB_MODE` 选择产品形态：
 
 ```bash
-# false：保留 User Web 独立 NodePort 入口（默认，兼容原有部署）
-# true：用户登录 Manager Web 后从 /user 进入内嵌 User Web，不暴露 User Web NodePort
-ENABLE_USER_WEB_EMBEDDING=false
+# personal：通过 User Web NodePort 提供独立用户面
+# enterprise：通过 Manager Web 统一登录并内嵌用户面，不暴露 User Web NodePort
+USER_WEB_MODE=personal
 ```
 
-启用统一入口时，Manager Web 是用户面唯一的集群外入口，User Web 仍会部署并保留
-ClusterIP，供 Manager Web 转发文件请求等内部调用。配置必须同时满足：
+`personal` 模式下，用户通过 User Web NodePort 直接使用独立用户面。`enterprise`
+模式下，Manager Web 是唯一对外入口：用户先通过 Identity Center 登录，在 Manager Web
+中选择组网、组织和 Bot，再进入同源 `/chat/` 内嵌用户面。User Web 仍保留供 Manager Web
+访问的 ClusterIP 服务，但部署脚本不会创建其 NodePort；enterprise 模式必须部署 Manager Web：
 
 ```bash
-ENABLE_USER_WEB_EMBEDDING=true
+USER_WEB_MODE=enterprise
 IS_UP_MANAGER_WEB=true
 ```
 
-统一入口使用以下同源路由，不需要额外暴露 Identity、Manager Server、Gateway 或
-User Server：
+旧配置 `ENABLE_USER_WEB_EMBEDDING` 仅作兼容输入：`true` 等价于
+`USER_WEB_MODE=enterprise`，`false` 等价于 `USER_WEB_MODE=personal`。新部署不应继续使用。
+
+Manager Web 内嵌入口使用以下同源路由，不需要额外暴露 Identity、Manager Server 或
+Gateway：
 
 | 路径 | 目标服务 | 用途 |
 |---|---|---|
 | `/idp/*` | Identity Center | 登录、刷新令牌和用户信息 |
 | `/api/*` | Manager Server | 管理面与用户目录接口 |
-| `/chat/*` | Manager Web 内置 User Web | 用户面对话界面 |
-| `/web/invoke` | Gateway HTTP/SSE | 对话请求与流式响应 |
-| `/file-api/*` | User Server | 文件相关接口 |
+| `/chat/*` | User Web HTTP | 用户面对话界面 |
+| `/ws*` | Gateway WebSocket | 用户面默认消息通道 |
+| `/gateway-api/*` | Gateway Web HTTP/SSE | 用户面 REST/SSE 通道，与 Manager `/api/v1` 隔离 |
+| `/file-api/*`、`/share-api/*` | Gateway Web HTTP | 文件与分享接口 |
 
-从独立入口切换为统一入口时，部署脚本会删除同命名空间中已有的 User Web NodePort
-Service，避免用户绕过统一登录入口；切回独立入口并重新部署 Web 后会恢复 NodePort。
+Manager Web 与 `/chat/` 使用同一浏览器源，登录状态由 Manager Web 统一管理。User Web
+只消费 Manager Web 注入的用户、组织、Bot 和组网上下文，不提供另一套登录入口。
 
 #### 4.3.2 升级已有 MySQL 数据库
 

@@ -18,6 +18,7 @@ import { getSkillAvatar } from "../../utils/skillAvatar";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { Switch } from "../Switch";
+import { isEnterpriseMode } from "../../edition";
 
 /** 刷新会 git pull marketplace，略放宽；普通进页单次 RPC 一般很快。 */
 const SKILLS_FETCH_TIMEOUT_REFRESH_MS = 60_000;
@@ -586,6 +587,7 @@ function SkillIndexTreeView({
 
 export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: SkillPanelProps) {
   const { t, i18n } = useTranslation();
+  const readOnly = isEnterpriseMode();
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
   const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("all");
   const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
@@ -1578,7 +1580,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
             </p>
           </div>
           <div className="flex items-center">
-            <button
+            {!readOnly && <button
               onClick={() => setSourceModalOpen(true)}
               className="flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50 "
             >
@@ -1586,7 +1588,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                 <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
               </svg>
               {t('skills.actions.sourceManager')}
-            </button>
+            </button>}
             <button
               onClick={() => {
                 if (activeTab === "index") {
@@ -1616,7 +1618,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
               </svg>
               {activeTab === "graph" && graphReading ? "正在读取技能总谱" : t('common.refresh')}
             </button>
-            <button
+            {!readOnly && <button
               onClick={handleImportLocal}
               className={`flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm  ${
                 actionTarget === "import_local"
@@ -1630,7 +1632,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                 <path strokeLinecap="round" strokeLinejoin="round" d="M5 15v4a2 2 0 002 2h10a2 2 0 002-2v-4" />
               </svg>
               {t('skills.actions.importLocal')}
-            </button>
+            </button>}
           </div>
         </div>
 
@@ -1709,7 +1711,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
           ) : null}
         </div>
 
-        {activeTab === "index" ? (
+        {!readOnly && activeTab === "index" ? (
           <div className="mt-4 flex flex-col flex-1 min-h-0 gap-4 overflow-y-auto pr-2">
             <div className="rounded-lg border border-border bg-panel p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1933,13 +1935,13 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
           </div>
           ) : null}
 
-        {activeTab === "graph" ? (
+        {!readOnly && activeTab === "graph" ? (
           <div className="mt-4 flex-1 min-h-0">
             <SkillGraphPanel ref={skillGraphPanelRef} onReadingChange={updateGraphReading} />
           </div>
         ) : null}
 
-        {activeTab === "marketplace" ? (
+        {!readOnly && activeTab === "marketplace" ? (
           <>
             <div className="mt-4 flex items-center justify-between gap-4">
               <div className="flex items-center gap-2">
@@ -2061,7 +2063,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                   <Switch
                                     checked={!isDisabled}
                                     onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
-                                    disabled={isToggling}
+                                    disabled={readOnly || isToggling}
                                   />
                                 )}
                               </div>
@@ -2088,10 +2090,10 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                               </div>
                               <div className="flex items-center mt-auto pt-2 gap-2 flex-shrink-0" style={{ width: "100%" }}>
                                 <div className="flex gap-1.5 flex-1">
-                                  {renderEvolutionButton(skill)}
+                                  {!readOnly && renderEvolutionButton(skill)}
                                 </div>
                                 <div className="flex-shrink-0 ml-auto">
-                                  {renderActionButton(skill)}
+                                  {!readOnly && renderActionButton(skill)}
                                 </div>
                               </div>
                             </>
@@ -2334,12 +2336,12 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 </div>
                               </div>
                               <div className="flex flex-col items-end gap-2 flex-shrink-0">
-                                {renderEvolutionButton(skill)}
+                                {!readOnly && renderEvolutionButton(skill)}
                                 <div className="flex items-center gap-2">
                                   <Switch
                                     checked={!isDisabled}
                                     onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
-                                    disabled={isToggling}
+                                    disabled={readOnly || isToggling}
                                   />
                                 </div>
                               </div>
@@ -2369,13 +2371,13 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                               </div>
                               <div className="flex items-center mt-auto pt-2 gap-2 flex-shrink-0" style={{ width: "100%" }}>
                                 <div className="flex gap-1.5 flex-1">
-                                  {renderEvolutionButton(skill)}
+                                  {!readOnly && renderEvolutionButton(skill)}
                                 </div>
                                 <div className="flex items-center gap-2">
                                   <Switch
                                     checked={!isDisabled}
                                     onChange={() => toggleSkillDisabled(skill.name, skill.origin)}
-                                    disabled={isToggling}
+                                    disabled={readOnly || isToggling}
                                   />
                                 </div>
                               </div>

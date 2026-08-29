@@ -9,6 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
+from ..core.template.agent_template import AgentTemplateService
 from ..core.template.embedding_template import EmbeddingTemplateService
 from ..core.template.extension_config_template import ExtensionConfigTemplateService
 from ..core.template.model_template import ModelTemplateService
@@ -17,6 +18,8 @@ from ..core.template.skill_whitelist_template import SkillWhitelistTemplateServi
 from ..schemas.common_schemas import ResponseModel
 from ..schemas.sync_schemas import SyncEnvelopeOnlyBody, make_sync_body
 from ..schemas.template_schemas import (
+    AgentTemplateCreateRequest,
+    AgentTemplateUpdateRequest,
     EmbeddingTemplateCreateRequest,
     EmbeddingTemplateUpdateRequest,
     ExtensionConfigTemplateCreateRequest,
@@ -160,4 +163,11 @@ _add_template_crud(
     "service_config",
     ServiceConfigTemplateCreateRequest,
     ServiceConfigTemplateUpdateRequest,
+)
+_add_template_crud(
+    "/agent-templates",
+    lambda h: AgentTemplateService(h),
+    "agent",
+    AgentTemplateCreateRequest,
+    AgentTemplateUpdateRequest,
 )

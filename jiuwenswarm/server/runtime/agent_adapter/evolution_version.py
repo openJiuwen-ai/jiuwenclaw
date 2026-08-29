@@ -59,6 +59,24 @@ def skills_root_from_skill_md_path(skill_path: str | None) -> str | None:
     return str(resolved.parent.parent)
 
 
+def extra_trusted_dirs_for_skill_md(skill_md_path: str | None) -> list[str]:
+    """Skill-dir + ``…/skills`` root for rebuild ``trusted_dirs`` (workspace-outside)."""
+    extra: list[str] = []
+    root = skills_root_from_skill_md_path(skill_md_path)
+    if root:
+        extra.append(root)
+    if skill_md_path is None or not str(skill_md_path).strip():
+        return extra
+    try:
+        resolved = Path(str(skill_md_path).strip()).expanduser().resolve()
+    except OSError:
+        return extra
+    parent = str(resolved.parent)
+    if parent and parent not in extra:
+        extra.append(parent)
+    return extra
+
+
 def disk_only_evolution_skill_dirs(params: dict[str, Any] | None = None) -> list[str]:
     """Skill roots for disk-only evolution: shared env + explicit skill_path root."""
     params = params if isinstance(params, dict) else {}

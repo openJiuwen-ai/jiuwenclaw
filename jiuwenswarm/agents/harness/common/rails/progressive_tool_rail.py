@@ -31,6 +31,10 @@ from jiuwenswarm.agents.harness.common.tools.invoke_tool_tool import (
     InvokeToolInput,
     InvokeToolTool,
 )
+from jiuwenswarm.common.mcp_config import (
+    bind_office_claw_from_agent,
+    resolve_active_office_claw_tool_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -660,6 +664,21 @@ class ProgressiveToolRail(DeepAgentRail):
             if str(getattr(tool, "name", "") or "")
         }
 
+    @staticmethod
+    def _tool_id_set(tools: list[Any]) -> set[str]:
+        """Return registered tool ids from ability_manager entries.
+
+        Same-named cards can swap ids when a request-scoped MCP rebinds
+        (e.g. OfficeClaw MCP re-registers per request with a fresh hash).
+        Comparing ids in addition to names lets the staleness check catch
+        such rebinds that name-only comparison misses.
+        """
+        return {
+            str(getattr(tool, "id", "") or "")
+            for tool in tools
+            if str(getattr(tool, "id", "") or "")
+        }
+
     async def _refresh_deferred_tool_cache_if_stale(self) -> None:
         """Refresh cache when ability_manager has tools not in cache."""
         agent = self._resolve_runtime_agent()
@@ -668,6 +687,11 @@ class ProgressiveToolRail(DeepAgentRail):
             await self._refresh_deferred_tool_cache(agent)
             return
         if self._tool_name_set(live_tools) != self._tool_name_set(
+            self._cached_all_tool_infos
+        ):
+            await self._refresh_deferred_tool_cache(agent)
+            return
+        if self._tool_id_set(live_tools) != self._tool_id_set(
             self._cached_all_tool_infos
         ):
             await self._refresh_deferred_tool_cache(agent)
@@ -734,6 +758,15 @@ class ProgressiveToolRail(DeepAgentRail):
             name = str(getattr(tool, "name", "") or "")
             description = str(getattr(tool, "description", "") or "")
             input_params = getattr(tool, "input_params", {}) or {}
+            tool_id = str(getattr(tool, "id", "") or "")
+            if not self._tool_instance_available(name, tool_id):
+                logger.warning(
+                    "%s search skip dead instance: tool_name=%s tool_id=%s",
+                    _LOG_PREFIX,
+                    name,
+                    tool_id,
+                )
+                continue
 
             result_matches.append({
                 "name": name,
@@ -748,6 +781,17 @@ class ProgressiveToolRail(DeepAgentRail):
             len(result_matches),
         )
 
+        if matches and not result_matches:
+            return {
+                "success": False,
+                "matches": [],
+                "count": 0,
+                "message": (
+                    f"工具 '{tool_name}' 的 schema 可见但实例不可用"
+                    "（可能被并发请求清理），请稍后重试。"
+                ),
+            }
+
         return {
             "success": bool(result_matches),
             "matches": result_matches,
@@ -758,6 +802,89 @@ class ProgressiveToolRail(DeepAgentRail):
                 else f"未找到名为 '{tool_name}' 的按需可见工具，请检查名称是否与导航列表一致。"
             ),
         }
+
+    @staticmethod
+    def _lookup_tool_instance(tool_id: str) -> Any | None:
+        """Best-effort resource_mgr lookup; never raises to callers."""
+        normalized = str(tool_id or "").strip()
+        if not normalized:
+            return None
+        try:
+            return Runner.resource_mgr.get_tool(normalized)
+        except Exception as exc:
+            logger.warning(
+                "%s failed to get tool instance: tool_id=%s error=%s",
+                _LOG_PREFIX,
+                normalized,
+                exc,
+            )
+            return None
+
+    def _tool_instance_available(self, tool_name: str, tool_id: str) -> bool:
+        """True when cache id or this request's active OfficeClaw id still resolves."""
+        if self._lookup_tool_instance(tool_id) is not None:
+            return True
+        active_id = resolve_active_office_claw_tool_id(tool_name)
+        if not active_id:
+            return False
+        if active_id == tool_id:
+            return False
+        return self._lookup_tool_instance(active_id) is not None
+
+    async def _resolve_tool_instance_with_recovery(
+        self,
+        tool_name: str,
+        preferred_id: str,
+    ) -> tuple[Any | None, str, str]:
+        """Resolve a live tool instance, recovering from stale card ids.
+
+        Order:
+        1. preferred_id from deferred cache / AbilityManager card
+        2. refresh AbilityManager cache and retry if the live card id changed
+        3. this request's ``bind_active_office_claw_mcp_tools`` allowlist
+           (authoritative for OfficeClaw MCP even when short-name AM was
+           overwritten or cleaned by a concurrent request)
+
+        Returns ``(tool, resolved_id, refreshed_id_for_diagnostics)``.
+        """
+        target_tool = self._lookup_tool_instance(preferred_id)
+        if target_tool is not None:
+            return target_tool, preferred_id, ""
+
+        logger.info(
+            "%s stale tool_id retry: tool_name=%s old_id=%s",
+            _LOG_PREFIX,
+            tool_name,
+            preferred_id,
+        )
+        await self._refresh_deferred_tool_cache()
+        refreshed_card = None
+        for tool in self._cached_deferred_tool_infos:
+            if str(getattr(tool, "name", "") or "") == tool_name:
+                refreshed_card = tool
+                break
+        refreshed_id = (
+            str(getattr(refreshed_card, "id", "") or "") if refreshed_card is not None else ""
+        )
+        if refreshed_id and refreshed_id != preferred_id:
+            target_tool = self._lookup_tool_instance(refreshed_id)
+            if target_tool is not None:
+                return target_tool, refreshed_id, refreshed_id
+
+        active_id = resolve_active_office_claw_tool_id(tool_name)
+        if active_id:
+            if active_id not in {preferred_id, refreshed_id}:
+                logger.info(
+                    "%s active OfficeClaw tool_id fallback: tool_name=%s active_id=%s",
+                    _LOG_PREFIX,
+                    tool_name,
+                    active_id,
+                )
+            target_tool = self._lookup_tool_instance(active_id)
+            if target_tool is not None:
+                return target_tool, active_id, refreshed_id or active_id
+
+        return None, preferred_id, refreshed_id
 
     async def _invoke_target_tool(
         self,
@@ -783,100 +910,119 @@ class ProgressiveToolRail(DeepAgentRail):
                 "tool_name": tool_name,
             }
 
-        target_tool_card = None
-        for tool in self._cached_deferred_tool_infos:
-            if str(getattr(tool, "name", "") or "") == tool_name:
-                target_tool_card = tool
-                break
+        # Re-bind the OfficeClaw tool id allowlist from the shared ability_manager.
+        # The supervisor / round task (where this code runs) was created at
+        # session startup, before ``bind_active_office_claw_mcp_tools`` set
+        # the ContextVar in the caller's task.  ``bind_office_claw_from_agent``
+        # reads the ids stored on the shared ability_manager by
+        # ``register_request_scoped_office_claw_mcp`` and sets the ContextVar
+        # for this task so that both tool resolution
+        # (``resolve_active_office_claw_tool_id``) and tool invocation
+        # (``ensure_request_scoped_office_claw_tool_allowed``) pass.
+        runtime_agent = self._resolve_runtime_agent()
+        with bind_office_claw_from_agent(runtime_agent):
+            target_tool_card = None
+            for tool in self._cached_deferred_tool_infos:
+                if str(getattr(tool, "name", "") or "") == tool_name:
+                    target_tool_card = tool
+                    break
 
-        if target_tool_card is None:
-            agent = self._resolve_runtime_agent()
-            ability_manager = getattr(agent, "ability_manager", None)
-            lookup_timeout = getattr(AbilityManager, "_resolve_call_timeout")(None)
-            try:
-                with anyio.fail_after(lookup_timeout):
-                    if ability_manager is not None:
-                        try:
-                            await ability_manager.list_tool_info()
-                        except Exception as exc:
-                            logger.warning(
-                                "%s invoke fallback list_tool_info failed: %s",
-                                _LOG_PREFIX,
-                                exc,
-                            )
-                    await self._refresh_deferred_tool_cache()
-                    for tool in self._cached_deferred_tool_infos:
-                        if str(getattr(tool, "name", "") or "") == tool_name:
-                            target_tool_card = tool
-                            break
-            except TimeoutError:
+            if target_tool_card is None:
+                agent = self._resolve_runtime_agent()
+                ability_manager = getattr(agent, "ability_manager", None)
+                lookup_timeout = getattr(AbilityManager, "_resolve_call_timeout")(None)
+                try:
+                    with anyio.fail_after(lookup_timeout):
+                        if ability_manager is not None:
+                            try:
+                                await ability_manager.list_tool_info()
+                            except Exception as exc:
+                                logger.warning(
+                                    "%s invoke fallback list_tool_info failed: %s",
+                                    _LOG_PREFIX,
+                                    exc,
+                                )
+                        await self._refresh_deferred_tool_cache()
+                        for tool in self._cached_deferred_tool_infos:
+                            if str(getattr(tool, "name", "") or "") == tool_name:
+                                target_tool_card = tool
+                                break
+                except TimeoutError:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Tool lookup for '{tool_name}' timed out after "
+                            f"{lookup_timeout}s"
+                        ),
+                        "tool_name": tool_name,
+                    }
+
+            if target_tool_card is None:
                 return {
                     "success": False,
-                    "error": (
-                        f"Tool lookup for '{tool_name}' timed out after "
-                        f"{lookup_timeout}s"
-                    ),
+                    "error": f"工具 '{tool_name}' 未注册或不在按需可见工具列表中。",
                     "tool_name": tool_name,
                 }
 
-        if target_tool_card is None:
-            return {
-                "success": False,
-                "error": f"工具 '{tool_name}' 未注册或不在按需可见工具列表中。",
-                "tool_name": tool_name,
-            }
-
-        target_tool_id = str(getattr(target_tool_card, "id", "") or "")
-        target_tool = None
-        try:
-            target_tool = Runner.resource_mgr.get_tool(target_tool_id)
-        except Exception as e:
-            logger.warning("%s failed to get tool instance: tool_id=%s error=%s", _LOG_PREFIX, target_tool_id, e)
-
-        if target_tool is None:
-            return {
-                "success": False,
-                "error": f"无法获取工具 '{tool_name}' 的实例。",
-                "tool_name": tool_name,
-            }
-
-        try:
-            kwargs_without_session = {k: v for k, v in kwargs.items() if k != "session"}
-            call_timeout = getattr(AbilityManager, "_resolve_call_timeout")(
-                target_tool_card
-            )
-            with self._bind_deepresearch_context(tool_name):
-                try:
-                    with anyio.fail_after(call_timeout) as timeout_scope:
-                        result = await target_tool.invoke(
-                            arguments, session=session, **kwargs_without_session
-                        )
-                except TimeoutError as exc:
-                    if not timeout_scope.cancel_called:
-                        raise
-                    raise TimeoutError(
-                        f"Tool '{tool_name}' timed out after {call_timeout}s"
-                    ) from exc
-            logger.info(
-                "%s invoke tool=%s success=True result_type=%s",
-                _LOG_PREFIX,
+            preferred_id = str(getattr(target_tool_card, "id", "") or "")
+            target_tool, target_tool_id, refreshed_id = await self._resolve_tool_instance_with_recovery(
                 tool_name,
-                type(result).__name__,
+                preferred_id,
             )
-            return {
-                "success": True,
-                "tool_name": tool_name,
-                "result": _json_safe_value(result),
-            }
-        except Exception as exc:
-            logger.warning(
-                "%s invoke tool=%s failed: %s",
-                _LOG_PREFIX,
-                tool_name,
-                exc,
-            )
-            return {
-                "success": False,
-                "error": str(exc),
-                "tool_name": tool_name,
-            }
+
+            if target_tool is None:
+                logger.warning(
+                    "%s invoke tool=%s failed: instance not found, "
+                    "tool_id=%s, refresh_attempted=True, refreshed_id=%s, active_id=%s",
+                    _LOG_PREFIX,
+                    tool_name,
+                    target_tool_id,
+                    refreshed_id,
+                    resolve_active_office_claw_tool_id(tool_name) or "",
+                )
+                return {
+                    "success": False,
+                    "error": f"无法获取工具 '{tool_name}' 的实例。",
+                    "tool_name": tool_name,
+                }
+
+            try:
+                kwargs_without_session = {k: v for k, v in kwargs.items() if k != "session"}
+                call_timeout = getattr(AbilityManager, "_resolve_call_timeout")(
+                    target_tool_card
+                )
+                with self._bind_deepresearch_context(tool_name):
+                    try:
+                        with anyio.fail_after(call_timeout) as timeout_scope:
+                            result = await target_tool.invoke(
+                                arguments, session=session, **kwargs_without_session
+                            )
+                    except TimeoutError as exc:
+                        if not timeout_scope.cancel_called:
+                            raise
+                        raise TimeoutError(
+                            f"Tool '{tool_name}' timed out after {call_timeout}s"
+                        ) from exc
+                logger.info(
+                    "%s invoke tool=%s success=True result_type=%s",
+                    _LOG_PREFIX,
+                    tool_name,
+                    type(result).__name__,
+                )
+                return {
+                    "success": True,
+                    "tool_name": tool_name,
+                    "result": _json_safe_value(result),
+                }
+            except Exception as exc:
+                logger.warning(
+                    "%s invoke tool=%s failed: %s",
+                    _LOG_PREFIX,
+                    tool_name,
+                    exc,
+                )
+                return {
+                    "success": False,
+                    "error": str(exc),
+                    "tool_name": tool_name,
+                }

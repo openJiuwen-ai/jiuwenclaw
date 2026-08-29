@@ -3,6 +3,7 @@
 """MessageHandler - 消息处理抽象与双队列实现（入队经 AgentServerClient 发往 AgentServer）."""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import logging
 import asyncio
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 # openjiuwen_runtime ServiceManager._fail 在资源打满时下发 legacy chunk：
 # payload={"error_code": 100001|100002, "message": "..."}，无 event_type / error。
 # 若不规范化，Channel 会按空 chat.final 下发，前端表现为「发消息后直接结束」。
-# 仅企业版 AGENT_RUNTIME 启用。
+# 仅企业版启用。
 _RUNTIME_CAPACITY_ERROR_CODES = frozenset({"100001", "100002"})
 _RUNTIME_CAPACITY_USER_MESSAGES = {
     "100001": "Request exceeds the maximum connection limit. Please try again later.",
@@ -200,7 +201,12 @@ class MessageHandler(ABC):
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, agent_client: "AgentServerClient") -> None:
+    def __init__(
+        self,
+        agent_client: "AgentServerClient",
+        *,
+        session_sharing_registry: SessionSharingRegistry | None = None,
+    ) -> None:
         if getattr(self, "_singleton_initialized", False):
             return
         self._singleton_initialized = True
@@ -254,7 +260,7 @@ class MessageHandler(ABC):
         })
         self._channel_states: Dict[str, ChannelControlState] = {}
         self._session_map = SessionMap()
-        self._session_sharing = SessionSharingRegistry()
+        self._session_sharing = session_sharing_registry or SessionSharingRegistry()
         # 组合：/join /exit 团队成员管理逻辑（独立文件维护，通过 self._h 访问宿主能力）
         self._join_exit = JoinExitHandlers(self)
         self._cron_controller = None
@@ -630,7 +636,7 @@ class MessageHandler(ABC):
             sess = self._session_map.find_session(*identity_key)
             if sess is not None:
                 state.session_id = sess.session_id
-                if os.getenv("AGENT_RUNTIME", "").strip():
+                if is_enterprise():
                     state.service_id = sess.service_id
                     state.agent_id = sess.agent_id
         self._channel_states[key] = state
@@ -688,7 +694,7 @@ class MessageHandler(ABC):
         identity_key = self._extract_identity_tuple(msg)
         if identity_key and self._channel_id_matches_session_map_types(str(msg.channel_id or "")):
             self._session_map.set_session_id(*identity_key, sid)
-            if os.getenv("AGENT_RUNTIME", "").strip():
+            if is_enterprise():
                 sess = self._session_map.find_session(*identity_key)
                 if sess is not None:
                     state.service_id = sess.service_id
@@ -936,18 +942,11 @@ class MessageHandler(ABC):
             else:
                 unresolved_rids.append(rid)
 
-        # Stop gateway stream consumers first — never block on AgentServer RPC.
-        tasks_to_stop = [task for _rid, task, _sess, _mode in candidates]
-        for task in tasks_to_stop:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks_to_stop, return_exceptions=True)
-        # 走集中化 pop+broadcast：新消息顶替旧流式任务后，须让跨窗口配置保存锁
-        # 感知运行态变化（否则前端保存锁卡在最后一次广播值，仅靠重连自愈）。
-        await self._pop_stream_tracking_and_broadcast(
-            [rid for rid, _, _, _ in candidates],
-        )
-
+        # 南向 HTTP 不能先 abort Gateway 的 SSE 再 interrupt：Agent 会
+        # output_detached，而旧 LLM 还在喷 token；下一轮 attach_output 会把
+        # 尾巴打上新 request_id，前端看起来像气泡粘黏。先 interrupt（旧 lease
+        # 仍在），再取消 Gateway consumer。WS 南向同样安全：残余仍走旧 rid。
+        # ``cancel_gateway_tasks=False`` 会在 interrupt 返回后再取消 stream task。
         for old_sid, mode in sid_mode.items():
             cancel_msg = self._clone_message_for_session_cancel(msg, old_sid, mode=mode)
             await self._cancel_agent_work_for_session(
@@ -958,6 +957,19 @@ class MessageHandler(ABC):
                 cancel_gateway_tasks=False,
                 agent_notify="await",
             )
+
+        leftover_tasks = [
+            task for _rid, task, _sess, _mode in candidates if not task.done()
+        ]
+        if leftover_tasks:
+            for task in leftover_tasks:
+                task.cancel()
+            await asyncio.gather(*leftover_tasks, return_exceptions=True)
+        leftover_rids = [
+            rid for rid, _, _, _ in candidates if rid in self._stream_tasks
+        ]
+        if leftover_rids:
+            await self._pop_stream_tracking_and_broadcast(leftover_rids)
 
         if unresolved_rids:
             logger.warning(
@@ -2143,7 +2155,7 @@ class MessageHandler(ABC):
             if sess is not None:
                 state.session_id = sess.session_id
                 msg.session_id = sess.session_id
-                if os.getenv("AGENT_RUNTIME", "").strip():
+                if is_enterprise():
                     state.service_id = sess.service_id
                     state.agent_id = sess.agent_id
                     if msg.params is None:
@@ -2771,7 +2783,7 @@ class MessageHandler(ABC):
                 channel_id=channel_id,
             )
             # 企业版：runtime 资源拒绝需规范化为 chat.error
-            if os.getenv("AGENT_RUNTIME", "").strip():
+            if is_enterprise():
                 normalized = MessageHandler._normalize_runtime_failure_payload(payload)
                 if normalized is not None:
                     payload = normalized
@@ -2904,7 +2916,7 @@ class MessageHandler(ABC):
         filename: str,
         session_id: str,
     ) -> dict[str, Any] | None:
-        """将文件推送到 Web Server 并获取下载 Token（企业版 AGENT_RUNTIME）。"""
+        """将文件推送到 Web Server 并获取下载 Token（企业版）。"""
         from jiuwenswarm.gateway.message_handler.web_file_push import (
             push_file_to_web_and_get_token,
         )
@@ -3071,7 +3083,7 @@ class MessageHandler(ABC):
                 dict(chunk.payload),
                 channel_id=chunk.channel_id,
             )
-            if os.getenv("AGENT_RUNTIME", "").strip():
+            if is_enterprise():
                 normalized = MessageHandler._normalize_runtime_failure_payload(payload)
                 if normalized is not None:
                     payload = normalized

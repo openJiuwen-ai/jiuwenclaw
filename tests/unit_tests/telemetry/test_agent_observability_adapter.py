@@ -153,7 +153,7 @@ def test_unified_root_spans_are_rich_and_stale_close_is_isolated(
 def test_registry_fallback_resolves_each_supervisor_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import openjiuwen.agent_teams.observability.callback_handler as callback_handler
+    import openjiuwen.extensions.observability.callback_handler as callback_handler
     from openjiuwen.agent_teams.context import reset_session_id, set_session_id
     from openjiuwen.agent_teams.observability import span_context
     from jiuwenswarm.agents.harness import agent_observability as adapter
@@ -178,7 +178,7 @@ def test_registry_fallback_resolves_each_supervisor_session(
                 assert handle is not None
                 span_context.clear_team_span()
                 await gate.wait()
-                resolved = callback_handler.get_team_span()
+                resolved = callback_handler.get_root_span()
                 assert span_context.get_team_span() is resolved
                 adapter.close_agent_run_span(handle, session_id=session_id)
                 return handle, resolved

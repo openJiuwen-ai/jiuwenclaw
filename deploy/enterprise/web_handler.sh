@@ -9,7 +9,7 @@ gen_web_file() {
 
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
 
-    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ]; then
+    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]; then
         local nodeport_name="${DEPLOY_VARS["WEB_NAME"]}-nodeport"
         yq eval 'select(.metadata.name != "'"${nodeport_name}"'")' -i "${file}"
     fi
@@ -48,12 +48,16 @@ gen_web_file() {
 
     add_resource_if_set "WEB" "${file}"
 
+    # yq 追加资源配置时可能重复 env；Deployment strategic merge patch 不接受重复键，
+    # 这里按名称去重，保留最后一次生成的值。
+    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].env |= unique_by(.name)' -i "${file}"
+
     enable_dev_mode_if_needed ${file} web
 }
 
 render_web_files() {
     render_secret_configmap
-    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" != "true" ]; then
+    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" != "enterprise" ]; then
         ensure_available_port "WEB_NODE_PORT"
     fi
     gen_web_file
@@ -67,7 +71,7 @@ deploy_web() {
     ensure_secret_configmap
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
-    if [ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" == "true" ]; then
+    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]; then
         delete_k8s_resource "service" "${name}-nodeport" "${namespace}"
         success "User Web is available through Manager Web; standalone NodePort is disabled"
     else

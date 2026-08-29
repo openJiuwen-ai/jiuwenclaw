@@ -34,18 +34,32 @@ spec:
               value: "0.0.0.0"
             - name: FRONTEND_HOST
               value: "0.0.0.0"
+            - name: USER_WEB_MODE
+              value: "<<USER_WEB_MODE>>"
+            - name: VITE_USER_WEB_MODE
+              value: "<<USER_WEB_MODE>>"
+            - name: VITE_ENABLE_USER_WEB_EMBEDDING
+              value: "<<ENABLE_USER_WEB_EMBEDDING>>"
+            - name: USER_WEB_IDP_TARGET
+              value: "http://<<IDENTITY_NAME>>:<<IDENTITY_REST_PORT>>"
+            - name: USER_WEB_MANAGER_TARGET
+              value: "http://<<MANAGER_SERVER_NAME>>:<<MANAGER_REST_PORT>>"
             - name: FRONTEND_PORT
               value: "<<WEB_HTTP_PORT>>"
+            - name: VITE_WEB_TRANSPORT
+              value: "http"
             - name: ENTERPRISE_WEB_WS_HOST
               value: "0.0.0.0"
             - name: ENTERPRISE_WEB_WS_PORT
               value: "<<WEB_WS_PORT>>"
+            - name: GATEWAY_URL
+              value: "http://<<GATEWAY_NAME>>:<<WEB_PORT>>"
+            - name: GATEWAY_WEB_HTTP_URL
+              value: "http://<<GATEWAY_NAME>>:<<GATEWAY_WEB_HTTP_PORT>>"
             - name: WS_ORIGIN_CHECK_ENABLED
               value: "<<WS_ORIGIN_CHECK_ENABLED>>"
             - name: WS_ALLOWED_ORIGINS
               value: "<<WS_ALLOWED_ORIGINS>>"
-            - name: TZ
-              value: "<<TIMEZONE>>"
             - name: WEB_DB_TYPE
               value: "<<DB_TYPE>>"
             - name: WEB_DB_HOST
@@ -56,6 +70,10 @@ spec:
               value: "<<WEB_DB_USER>>"
             - name: WEB_DB_NAME
               value: "<<WEB_DB_NAME>>"
+            - name: JIUWENSWARM_EDITION
+              value: "enterprise"
+            - name: TZ
+              value: "<<TIMEZONE>>"
 
 ---
 # 集群内部访问： 提供稳定 DNS 域名
@@ -68,6 +86,9 @@ spec:
   selector:
     app: <<WEB_NAME>>
   ports:
+    - name: http
+      port: <<WEB_HTTP_PORT>>
+      targetPort: <<WEB_HTTP_PORT>>
     - name: websocket
       port: <<WEB_WS_PORT>>         # Service 端口
       targetPort: <<WEB_WS_PORT>>   # 容器端口

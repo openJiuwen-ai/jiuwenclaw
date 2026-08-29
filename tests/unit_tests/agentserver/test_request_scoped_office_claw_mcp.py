@@ -14,8 +14,11 @@ from jiuwenswarm.common.mcp_config import (
     OfficeClawMcpRegistration,
     RequestScopedOfficeClawMcpTool,
     bind_active_office_claw_mcp_tools,
+    bind_office_claw_from_agent,
+    clear_agent_office_claw_tool_ids,
     ensure_request_scoped_office_claw_tool_allowed,
     extract_office_claw_mcp,
+    set_agent_office_claw_tool_ids,
     validate_office_claw_mcp_config,
 )
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
@@ -300,6 +303,58 @@ async def test_foreign_short_name_conflict_fails_closed(
 
 
 @pytest.mark.asyncio
+async def test_legacy_ability_manager_post_add_mismatch_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy AbilityManager.add() returns None. If the short-name mapping
+    does not land on our card id afterwards, registration must fail closed
+    instead of treating ``None`` as success."""
+
+    class _StickyForeignAbilityManager(_AbilityManager):
+        def add(self, card: object) -> None:
+            # Pretend to accept the card (legacy return) but keep the foreign bind.
+            return None
+
+    for key, value in _startup_env().items():
+        monkeypatch.setenv(key, value)
+    resource_manager = _ResourceManager()
+    monkeypatch.setattr(interface_deep.Runner, "resource_mgr", resource_manager)
+    monkeypatch.setattr(
+        interface_deep,
+        "list_office_claw_mcp_tools",
+        AsyncMock(
+            return_value=[
+                {
+                    "name": "office_claw_preview_scheduled_task",
+                    "description": "preview",
+                    "input_params": {"type": "object"},
+                }
+            ]
+        ),
+    )
+    adapter = _bare_session_adapter()
+    sticky = _StickyForeignAbilityManager()
+    sticky.cards["office_claw_preview_scheduled_task"] = ToolCard(
+        id="office-claw-request-foreign.office-claw.office_claw_preview_scheduled_task",
+        name="office_claw_preview_scheduled_task",
+        description="foreign",
+        input_params={},
+    )
+    # Pre-check sees foreign id and fails before add — exercise post-add path
+    # by clearing the foreign card only for the pre-check window is hard;
+    # instead start empty and make add() a no-op so post-verify sees missing id.
+    sticky.cards.clear()
+    adapter._instance = SimpleNamespace(ability_manager=sticky)
+
+    registration = await adapter.register_request_scoped_office_claw_mcp(
+        _request(_valid_config())
+    )
+
+    assert registration is None
+    assert sticky.cards == {}
+
+
+@pytest.mark.asyncio
 async def test_registration_failure_is_non_blocking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -414,3 +469,46 @@ async def test_stream_request_binds_active_tool_allowlist() -> None:
     ]
 
     assert seen == {"allowed": True, "rejected_foreign": True}
+
+
+def test_carrier_stores_on_ability_manager_and_rebinds() -> None:
+    """The allowlist lives on the shared ability_manager, visible to either agent."""
+    tool_id = "office-claw-request-aaa.office-claw.office_claw_multi_mention"
+    ability = SimpleNamespace()
+    deep_agent = SimpleNamespace(ability_manager=ability)
+    # DeepAgent and its inner ReActAgent share the same ability_manager.
+    react_agent = SimpleNamespace(ability_manager=ability)
+
+    set_agent_office_claw_tool_ids(deep_agent, [tool_id])
+
+    # Stored on the shared carrier, not on the agent object itself.
+    assert not hasattr(deep_agent, "_active_office_claw_tool_ids")
+    assert hasattr(ability, "_active_office_claw_tool_ids")
+
+    # The rail may resolve to either agent object; both re-bind the allowlist.
+    for agent in (deep_agent, react_agent):
+        with bind_office_claw_from_agent(agent):
+            ensure_request_scoped_office_claw_tool_allowed(tool_id)
+            with pytest.raises(RuntimeError, match="bound to another request"):
+                ensure_request_scoped_office_claw_tool_allowed(
+                    "office-claw-request-bbb.office-claw.office_claw_multi_mention"
+                )
+
+
+def test_clear_agent_office_claw_tool_ids_unbinds() -> None:
+    """Clearing the allowlist makes subsequent invokes fail closed as unbound."""
+    tool_id = "office-claw-request-aaa.office-claw.office_claw_multi_mention"
+    ability = SimpleNamespace()
+    agent = SimpleNamespace(ability_manager=ability)
+
+    set_agent_office_claw_tool_ids(agent, [tool_id])
+    with bind_office_claw_from_agent(agent):
+        ensure_request_scoped_office_claw_tool_allowed(tool_id)
+
+    clear_agent_office_claw_tool_ids(agent)
+    assert not hasattr(ability, "_active_office_claw_tool_ids")
+
+    # After clear, bind is a no-op and the tool is refused as unbound.
+    with bind_office_claw_from_agent(agent):
+        with pytest.raises(RuntimeError, match="without an active request binding"):
+            ensure_request_scoped_office_claw_tool_allowed(tool_id)

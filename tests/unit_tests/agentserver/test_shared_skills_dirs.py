@@ -18,6 +18,7 @@ from jiuwenswarm.common.utils import (
     JIUWENSWARM_SHARED_SKILLS_DIRS_ENV,
     get_agent_skills_dir,
     get_shared_agent_skills_dirs,
+    merge_shared_skills_trusted_dirs,
     parse_shared_skills_dirs_raw,
     resolve_agent_registered_skill_dirs,
 )
@@ -86,6 +87,56 @@ def test_parse_shared_skills_dirs_raw_deduplicates(tmp_path):
     raw = f"{a}{os.pathsep}{a}"
     parsed = parse_shared_skills_dirs_raw(raw)
     assert parsed == [a.resolve()]
+
+
+def test_merge_shared_skills_trusted_dirs_unions_cli_and_shared(tmp_path):
+    shared = tmp_path / "office-claw-skills"
+    extra = tmp_path / "cli-trusted"
+    shared.mkdir()
+    extra.mkdir()
+    ENV_CONFIG_DICT[JIUWENSWARM_SHARED_SKILLS_DIRS_ENV] = str(shared)
+
+    merged = merge_shared_skills_trusted_dirs([str(extra)])
+    assert str(extra.resolve()) in merged
+    assert str(shared.resolve()) in merged
+
+
+def test_merge_shared_skills_trusted_dirs_pathsep_second_dir(tmp_path):
+    """Align GitCode !4622: pathsep-joined env must whitelist each root."""
+    dir_a = tmp_path / "skills_a"
+    dir_b = tmp_path / "skills_b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    ENV_CONFIG_DICT[JIUWENSWARM_SHARED_SKILLS_DIRS_ENV] = os.pathsep.join(
+        (str(dir_a), str(dir_b))
+    )
+    merged = merge_shared_skills_trusted_dirs()
+    assert str(dir_a.resolve()) in merged
+    assert str(dir_b.resolve()) in merged
+
+
+def test_merge_shared_skills_trusted_dirs_unions_tip_and_os_environ(tmp_path):
+    """Align GitCode !4622: tip/overlay ∪ os.environ, not winner-take-all."""
+    dir_tip = tmp_path / "skills_tip"
+    dir_os = tmp_path / "skills_os"
+    dir_tip.mkdir()
+    dir_os.mkdir()
+    ENV_CONFIG_DICT[JIUWENSWARM_SHARED_SKILLS_DIRS_ENV] = str(dir_tip)
+    os.environ[JIUWENSWARM_SHARED_SKILLS_DIRS_ENV] = str(dir_os)
+    merged = merge_shared_skills_trusted_dirs()
+    assert str(dir_tip.resolve()) in merged
+    assert str(dir_os.resolve()) in merged
+
+
+def test_merge_shared_skills_trusted_dirs_tip_only_when_os_missing(tmp_path):
+    """Align GitCode !4622: SHARED_SKILLS from tip/overlay alone still whitelists."""
+    shared = tmp_path / "skills_tip_only"
+    shared.mkdir()
+    ENV_CONFIG_DICT[JIUWENSWARM_SHARED_SKILLS_DIRS_ENV] = str(shared)
+    os.environ.pop(JIUWENSWARM_SHARED_SKILLS_DIRS_ENV, None)
+    os.environ.pop(JIUWENCLAW_SHARED_SKILLS_DIRS_ENV, None)
+    merged = merge_shared_skills_trusted_dirs()
+    assert str(shared.resolve()) in merged
 
 
 def test_enabled_skills_from_environ_reads_tip():

@@ -119,6 +119,9 @@ class TestLocalEnvConfig:
         assert key not in SPAWN_ENV_KEYS
         assert is_sensitive_env_name(key) is False
 
+    def test_code_coauthor_header_switch_is_spawn_shared(self):
+        assert "JIUWENSWARM_CODE_COAUTHOR_HEADER_ENABLED" in SPAWN_ENV_KEYS
+
     def test_export_spawn_environ_keeps_process_path_without_tenant_credentials(self):
         from jiuwenswarm.common.local_env_config import export_spawn_environ
 

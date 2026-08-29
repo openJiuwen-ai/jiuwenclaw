@@ -3,7 +3,10 @@
 """Gateway 侧企业配置三级策略只读加载。"""
 
 from ...infrastructure.utils import normalize_template_ref
-from .loader import load_effective_enterprise_config
+from .loader import (
+    load_effective_enterprise_config,
+    load_effective_enterprise_config_old,
+)
 from .schemas import (
     SERVICE_CONFIG_SLOT,
     SERVICE_CONFIG_TABLE,
@@ -20,4 +23,5 @@ __all__ = (
     "TemplateRefSlot",
     "normalize_template_ref",
     "load_effective_enterprise_config",
+    "load_effective_enterprise_config_old",
 )

@@ -84,13 +84,33 @@ def _generate_engine_mismatch_warning(
     requested_engine = _detect_requested_engine(query)
     if not requested_engine:
         return None
-    actual_engine = _PROVIDER_TO_ENGINE.get(actual_provider, actual_provider)
+    # actual_provider 形如 "paid:bocha" / "free:duckduckgo"，剥掉 "paid:"/"free:" 前缀
+    # 再查 _PROVIDER_TO_ENGINE，否则带前缀查不到 → 误判与 requested_engine 不匹配。
+    actual_base = actual_provider.split(":", 1)[-1] if ":" in actual_provider else actual_provider
+    actual_engine = _PROVIDER_TO_ENGINE.get(actual_base, actual_base)
     if requested_engine == actual_engine:
         return None
     return (
         f"⚠️ 用户请求使用 {requested_engine} 搜索，但该引擎不可用，"
         f"已自动切换至 {actual_provider}。"
     )
+
+
+def _resolve_engine_preferred_source(query: str) -> str | None:
+    """从 query 文本里识别用户指定的引擎名；当该引擎是可用付费源时返回它作为 preferred。
+
+    仅当识别到的引擎属于 KNOWN_PAID_PROVIDERS 且当前确实可用（API key 已配置）时，
+    才把它作为优先 provider；否则返回 None，回退到默认 paid_order 顺序。
+    免费引擎名（google/bing/baidu 等）不属于付费源，不在此注入。
+    """
+    requested_engine = _detect_requested_engine(query)
+    if not requested_engine:
+        return None
+    if requested_engine not in KNOWN_PAID_PROVIDERS:
+        return None
+    if not paid_provider_available(requested_engine):
+        return None
+    return requested_engine
 
 
 def _parse_search_source(value: str | None) -> str | None:
@@ -176,6 +196,10 @@ async def run_web_search(
     settings = resolve_web_search_settings(max_results)
     mode, extracted_source = normalize_search_mode(search_mode)
     preferred_source = extracted_source or _parse_search_source(search_source)
+    # 显式入参优先；缺失时若 query 里识别出可用付费引擎则注入为 preferred_source，
+    # 让 run_paid_chain 把该引擎提到 order 首位优先试（而非仅生成不匹配警告）。
+    if not preferred_source:
+        preferred_source = _resolve_engine_preferred_source(query)
     if mode != "free" and preferred_source and not paid_provider_available(preferred_source):
         reason = paid_provider_skip_reason(preferred_source)
         _log_failed(

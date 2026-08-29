@@ -11,26 +11,9 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenswarm.common.utils import apply_logging_config_payload
 
-from ...infrastructure.utils import format_ts, utc_now
-from ...models.application_config_models import LOGGING_CONFIG_TABLE_DEF
+from ...infrastructure.repository_access import require_logging_repository
 
-_TABLE = LOGGING_CONFIG_TABLE_DEF.table_name
 logger = logging.getLogger(__name__)
-
-
-def _row_to_dict(obj: Any) -> dict[str, Any]:
-    return {
-        "id": getattr(obj, "id"),
-        "jiuwenclaw_id": getattr(obj, "jiuwenclaw_id"),
-        "level": getattr(obj, "level", "INFO"),
-        "console_level": getattr(obj, "console_level", None),
-        "gateway": getattr(obj, "gateway", None),
-        "channel": getattr(obj, "channel", None),
-        "agent_server": getattr(obj, "agent_server", None),
-        "full": getattr(obj, "full", None),
-        "created_at": format_ts(getattr(obj, "created_at", None)),
-        "updated_at": format_ts(getattr(obj, "updated_at", None)),
-    }
 
 
 def _apply_log_levels(payload: dict[str, Any]) -> None:
@@ -63,56 +46,31 @@ class LoggingConfigService:
         full: str | None = None,
         **_extra: Any,
     ) -> dict[str, Any] | None:
-        existing = await self._handler.get(_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
-        now = utc_now()
-
-        if existing is not None:
-            update_data: dict[str, Any] = {"level": level, "updated_at": now}
-            if console_level is not None:
-                update_data["console_level"] = console_level
-            if gateway is not None:
-                update_data["gateway"] = gateway
-            if channel is not None:
-                update_data["channel"] = channel
-            if agent_server is not None:
-                update_data["agent_server"] = agent_server
-            if full is not None:
-                update_data["full"] = full
-            updated = await self._handler.update(
-                _TABLE,
-                {"jiuwenclaw_id": jiuwenclaw_id},
-                update_data,
-            )
-            result = _row_to_dict(updated) if updated else None
-        else:
-            row_data = {
-                "jiuwenclaw_id": jiuwenclaw_id,
-                "level": level,
-                "console_level": console_level,
-                "gateway": gateway,
-                "channel": channel,
-                "agent_server": agent_server,
-                "full": full,
-                "created_at": now,
-                "updated_at": now,
-            }
-            created = await self._handler.create(_TABLE, row_data)
-            result = _row_to_dict(created) if created else None
-
-        _apply_log_levels(
-            {
-                "level": level,
-                "console_level": console_level,
-                "gateway": gateway,
-                "channel": channel,
-                "agent_server": agent_server,
-                "full": full,
-            }
-        )
+        _ = jiuwenclaw_id
+        repo = require_logging_repository()
+        fields = {
+            "level": level,
+            "console_level": console_level,
+            "gateway": gateway,
+            "channel": channel,
+            "agent_server": agent_server,
+            "full": full,
+        }
+        updates: dict[str, Any] = {}
+        for key, value in fields.items():
+            if value is not None:
+                updates[key] = value
+        if "level" not in updates:
+            updates["level"] = level
+        saved = await repo.merge_levels(updates)
+        result = dict(saved.body)
+        _apply_log_levels(fields)
         return result
 
     async def delete(self, jiuwenclaw_id: str) -> None:
-        await self._handler.delete(_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
+        _ = jiuwenclaw_id
+        repo = require_logging_repository()
+        await repo.delete()
         apply_logging_config_payload({"op": "delete"})
         logger.info(
             "[ManagerConfigReceiver] logging_config deleted jiuwenclaw_id=%s",

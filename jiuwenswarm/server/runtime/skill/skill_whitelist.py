@@ -3,6 +3,7 @@
 """Skill 白名单：按租户同步预制技能到盘 + ``installed_skill``，启用只信 DB."""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import asyncio
 import logging
@@ -75,8 +76,8 @@ class SkillWhitelistSyncResult:
 
 
 def is_skill_whitelist_tenant(agent_id: str | None, service_id: str | None) -> bool:
-    """ACP/default 或 ID 缺失的租户不启用白名单逻辑；仅 AGENT_RUNTIME 下生效."""
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    """ACP/default 或 ID 缺失的租户不启用白名单逻辑；仅企业版下生效."""
+    if not is_enterprise():
         return False
     try:
         sid, aid = _require_tenant_ids(service_id, agent_id)

@@ -40,6 +40,7 @@ from jiuwenswarm.agents.harness.common.tools.deepresearch.path_safety import (
     private_mode_is_compatible,
 )
 from jiuwenswarm.agents.harness.common.tools.deepresearch.stream_router import (
+    ROUTER_LIMIT_ERROR,
     RouterState,
     _format_outline_card_markdown,
     advance_stage,
@@ -98,6 +99,7 @@ _REPORT_PUBLICATION_ATTEMPTS = 8
 
 _CHILD_ERROR_CODE_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
 _PROTOCOL_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,127}")
+_LOG_CORRELATION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _PROTOCOL_FIXED_KEYS = frozenset(
     {
         "__deepsearch_status__",
@@ -203,6 +205,14 @@ class _ReportPublicationCollision(FileExistsError):
 
 class _StreamProtocolInvalid(ValueError):
     """A child-controlled JSON structure cannot be forwarded safely."""
+
+
+def _safe_log_correlation_id(value: object) -> str:
+    """Return a bounded identifier for logs without echoing arbitrary input."""
+    candidate = str(value or "").strip()
+    if _LOG_CORRELATION_ID_PATTERN.fullmatch(candidate):
+        return candidate
+    return "-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -841,9 +851,22 @@ async def _stop_deepresearch_process(proc: Any, timeout: float = 10.0) -> None:
             await proc.wait()
 
 
-async def _iter_ndjson_lines(stream: Any, read_size: int = 64 * 1024):
+async def _iter_ndjson_lines(
+    stream: Any,
+    read_size: int = 64 * 1024,
+    *,
+    request_id: str = "",
+    session_id: str = "",
+    conversation_id: str = "",
+):
     if stream is None:
         return
+    correlation_ids = (
+        _safe_log_correlation_id(request_id),
+        _safe_log_correlation_id(session_id),
+        _safe_log_correlation_id(conversation_id),
+    )
+
     read = getattr(stream, "read", None)
     if not callable(read):
         async for line in stream:
@@ -856,6 +879,14 @@ async def _iter_ndjson_lines(stream: Any, read_size: int = 64 * 1024):
             break
         pending.extend(chunk)
         if len(pending) > DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES:
+            logger.error(
+                "[deepresearch_stream] stdout frame limit exceeded "
+                "pending_bytes=%s limit_bytes=%s request_id=%s session_id=%s "
+                "conversation_id=%s",
+                len(pending),
+                DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES,
+                *correlation_ids,
+            )
             raise ValueError("deepresearch_stdout_limit_exceeded")
         while True:
             newline = pending.find(b"\n")
@@ -1877,6 +1908,22 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
     except _StreamProtocolInvalid:
         outcome = _stream_protocol_error()
     except Exception as exc:  # pylint: disable=broad-exception-caught
+        safe_reason = "unclassified"
+        if isinstance(exc, ValueError) and str(exc) in {
+            "deepresearch_stdout_limit_exceeded",
+            ROUTER_LIMIT_ERROR,
+        }:
+            safe_reason = str(exc)
+        logger.error(
+            "[deepresearch_stream] stream consume failed type=%s reason=%s "
+            "request_id=%s session_id=%s conversation_id=%s",
+            type(exc).__name__,
+            safe_reason,
+            _safe_log_correlation_id(route.get("request_id")),
+            _safe_log_correlation_id(session_id),
+            _safe_log_correlation_id(conversation_id),
+            exc_info=safe_reason != "unclassified",
+        )
         outcome = {
             "status": "error",
             "error_code": "stream_failed",
@@ -2060,7 +2107,12 @@ async def _consume_stream(
             result["timing"] = timing
         return result
 
-    async for raw in _iter_ndjson_lines(proc.stdout):
+    async for raw in _iter_ndjson_lines(
+        proc.stdout,
+        request_id=str(route.get("request_id") or ""),
+        session_id=str(route.get("session_id") or ""),
+        conversation_id=conversation_id,
+    ):
         try:
             line = raw.decode("utf-8").strip()
         except UnicodeDecodeError:
@@ -2356,6 +2408,12 @@ def _write_report_markdown_once(
                     "version_base_stem": paths.version.base_stem,
                     "citations": bundle.citations,
                     "inference_manifest": bundle.inference_manifest,
+                    "inference_graph_path": bundle.inference_graph_path,
+                    "inference_graph_sha256": (
+                        hashlib.sha256(bundle.inference_graph_bytes).hexdigest()
+                        if bundle.inference_graph_bytes is not None
+                        else ""
+                    ),
                     "chart_manifest": bundle.chart_manifest,
                     "rewrite_history": [],
                 }

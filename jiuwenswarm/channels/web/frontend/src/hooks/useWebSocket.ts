@@ -45,6 +45,7 @@ import {
 } from '../stores';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
+import { getWebTransport } from '../utils/env';
 import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
 import {
   fetchTtsAudio,
@@ -1381,6 +1382,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       // 不再预先创建助手消息，而是在收到第一个 content_chunk 时创建
       // 这样工具调用会先显示，然后才是助手的回复
+      // HTTP 叠发时两条 SSE 无序，须先刷出已到前端的 delta 再封口，避免新 delta 写入旧泡。
+      // WS 是单连接有序，提前封口会让路上的旧 delta 再开一个助手泡，故仅 HTTP 执行。
+      if (getWebTransport() === 'http') {
+        flushPendingStreamDelta(sessionId);
+        useChatStore.getState().stopStreaming(sessionId);
+      }
 
       useChatStore.getState().setProcessing(sessionId, true);
       useChatStore.getState().setThinking(sessionId, true);
@@ -1481,6 +1488,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     },
     [
       closeActiveTeamLeaderMessages,
+      flushPendingStreamDelta,
       persistDocuments,
       persistMedia,
       request,
@@ -1497,6 +1505,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       userInputVersionRef.current += 1;
       stopAllTts();
 
+      if (getWebTransport() === 'http') {
+        flushPendingStreamDelta(sessionId);
+        useChatStore.getState().stopStreaming(sessionId);
+      }
       useChatStore.getState().setProcessing(sessionId, true);
       useChatStore.getState().setThinking(sessionId, true);
 
@@ -1533,7 +1545,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         });
       }
     },
-    [request, resetContextCompressionTurn, setConnectionStats, t]
+    [flushPendingStreamDelta, request, resetContextCompressionTurn, setConnectionStats, t]
   );
 
   // 存储sendMessage函数到ref

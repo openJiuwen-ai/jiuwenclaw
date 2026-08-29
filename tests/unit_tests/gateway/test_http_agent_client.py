@@ -63,6 +63,32 @@ def test_assemble_session_rename_fills_path_and_drops_used_keys():
     assert assembled.json_body == {"title": "new"}
 
 
+def test_assemble_session_create_strips_session_id_from_body():
+    """Agent rejects params.session_id on create; envelope sid must not leak into body."""
+    env = e2a_from_agent_fields(
+        request_id="r-create",
+        channel_id="web",
+        session_id="sess_temp_client_id",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={
+            "create_token": "tok-1",
+            "mode": "agent",
+            "session_id": "sess_temp_client_id",
+            "title": "new chat",
+        },
+        is_stream=False,
+    )
+    assembled = assemble_rest_request(env, base_url="http://127.0.0.1:8766")
+    assert assembled.verb == "POST"
+    assert assembled.url == "http://127.0.0.1:8766/api/v1/sessions"
+    assert assembled.json_body is not None
+    assert "session_id" not in assembled.json_body
+    assert assembled.json_body["create_token"] == "tok-1"
+    assert assembled.json_body["mode"] == "agent"
+    # 身份仍可上头，不进 params
+    assert assembled.headers.get("X-Session-Id") == "sess_temp_client_id"
+
+
 def test_assemble_history_stream_uses_stream_path_and_query():
     env = e2a_from_agent_fields(
         request_id="r3",
@@ -763,3 +789,186 @@ async def test_send_request_base_url_5xx_raises():
             await client.send_request(env, base_url="http://10.42.1.8:8080")
     finally:
         await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_rid_drops_envelope_and_chunk_ids():
+    client = HttpSseAgentServerClient()
+    await client._mark_stream_cancelled("old-rid")
+    assert client._should_drop_stream_chunk(envelope_rid="old-rid", chunk_rid="x")
+    assert client._should_drop_stream_chunk(envelope_rid="new", chunk_rid="old-rid")
+    assert not client._should_drop_stream_chunk(envelope_rid="new", chunk_rid="new")
+
+
+async def _start_trailing_sse_stub(*, first_rid: str = "chat-old"):
+    first_sent = asyncio.Event()
+    release_trailing = asyncio.Event()
+    paths: list[str] = []
+
+    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+            request_line = header.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
+            _method, path, *_rest = request_line.split(" ")
+            paths.append(path)
+            content_length = 0
+            for raw in header.split(b"\r\n"):
+                if raw.lower().startswith(b"content-length:"):
+                    content_length = int(raw.split(b":", 1)[1].strip() or 0)
+            body = b""
+            if content_length:
+                body = await reader.readexactly(content_length)
+
+            if path.endswith("/health"):
+                writer.write(
+                    _http_json({"ok": True, "data": {"status": "ready"}, "request_id": "h1"})
+                )
+            elif path.endswith("/chat/completions"):
+                req_rid = first_rid
+                try:
+                    parsed = json.loads(body.decode("utf-8") or "{}")
+                    query = str((parsed or {}).get("query") or "")
+                    if query == "new":
+                        req_rid = "chat-new"
+                except Exception:  # noqa: BLE001
+                    pass
+                first = encode_agent_chunk_for_wire(
+                    AgentResponseChunk(
+                        request_id=req_rid,
+                        channel_id="web",
+                        payload={"content": "first", "event_type": "chat.delta"},
+                        is_complete=False,
+                    ),
+                    response_id=req_rid,
+                    sequence=0,
+                )
+                trailing = encode_agent_chunk_for_wire(
+                    AgentResponseChunk(
+                        request_id=req_rid,
+                        channel_id="web",
+                        payload={"content": "STALE_TAIL", "event_type": "chat.delta"},
+                        is_complete=False,
+                    ),
+                    response_id=req_rid,
+                    sequence=1,
+                )
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                    b"Cache-Control: no-cache\r\nConnection: close\r\n\r\n"
+                )
+                writer.write(_sse_blob(first))
+                await writer.drain()
+                first_sent.set()
+                await asyncio.wait_for(release_trailing.wait(), timeout=5)
+                writer.write(_sse_blob(trailing))
+            else:
+                writer.write(_http_json({"ok": False, "error": {"code": "NOT_FOUND"}}))
+            await writer.drain()
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+
+    server = await asyncio.start_server(_handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    return server, port, first_sent, release_trailing
+
+
+@pytest.mark.asyncio
+async def test_send_request_stream_cancel_drops_trailing_chunks():
+    server, port, first_sent, release_trailing = await _start_trailing_sse_stub()
+    base = f"http://127.0.0.1:{port}"
+    client = HttpSseAgentServerClient()
+    yielded: list[str] = []
+    try:
+        await client.connect(base)
+        env = e2a_from_agent_fields(
+            request_id="chat-old",
+            channel_id="web",
+            session_id="s1",
+            req_method=ReqMethod.CHAT_SEND,
+            params={"query": "old"},
+            is_stream=True,
+        )
+
+        async def _consume() -> None:
+            async for chunk in client.send_request_stream(env):
+                payload = chunk.payload or {}
+                yielded.append(str(payload.get("content") or ""))
+
+        task = asyncio.create_task(_consume())
+        await asyncio.wait_for(first_sent.wait(), timeout=5)
+        for _ in range(100):
+            if yielded:
+                break
+            await asyncio.sleep(0.01)
+        assert "first" in yielded
+        await client._mark_stream_cancelled("chat-old")
+        release_trailing.set()
+        await asyncio.sleep(0.1)
+        assert "STALE_TAIL" not in yielded
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    finally:
+        release_trailing.set()
+        await client.disconnect()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_new_stream_supersedes_old_stream_trailing_chunks():
+    server, port, first_sent, release_trailing = await _start_trailing_sse_stub()
+    base = f"http://127.0.0.1:{port}"
+    client = HttpSseAgentServerClient()
+    old_yielded: list[str] = []
+    new_yielded: list[str] = []
+    try:
+        await client.connect(base)
+        old_env = e2a_from_agent_fields(
+            request_id="chat-old",
+            channel_id="web",
+            session_id="s1",
+            req_method=ReqMethod.CHAT_SEND,
+            params={"query": "old"},
+            is_stream=True,
+        )
+        new_env = e2a_from_agent_fields(
+            request_id="chat-new",
+            channel_id="web",
+            session_id="s1",
+            req_method=ReqMethod.CHAT_SEND,
+            params={"query": "new"},
+            is_stream=True,
+        )
+
+        async def _consume_old() -> None:
+            async for chunk in client.send_request_stream(old_env):
+                payload = chunk.payload or {}
+                old_yielded.append(str(payload.get("content") or ""))
+
+        old_task = asyncio.create_task(_consume_old())
+        await asyncio.wait_for(first_sent.wait(), timeout=5)
+        first_sent.clear()
+
+        async def _consume_new() -> None:
+            async for chunk in client.send_request_stream(new_env):
+                payload = chunk.payload or {}
+                new_yielded.append(str(payload.get("content") or ""))
+
+        new_task = asyncio.create_task(_consume_new())
+        await asyncio.wait_for(first_sent.wait(), timeout=5)
+        release_trailing.set()
+        await asyncio.sleep(0.15)
+        old_task.cancel()
+        new_task.cancel()
+        await asyncio.gather(old_task, new_task, return_exceptions=True)
+        assert "first" in old_yielded
+        assert "STALE_TAIL" not in old_yielded
+    finally:
+        release_trailing.set()
+        await client.disconnect()
+        server.close()
+        await server.wait_closed()

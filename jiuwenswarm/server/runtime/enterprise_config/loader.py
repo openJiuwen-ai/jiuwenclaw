@@ -1,6 +1,7 @@
 """从 Gateway DB 加载企业级生效配置（Service → Agent → Global 三级匹配）。"""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import os
 from collections.abc import Collection
@@ -199,8 +200,8 @@ async def load_effective_enterprise_config(
 
     ``slots`` 指定要解析并加载的 ``template_ref`` 槽位。
     """
-    # 企业版特性：仅 AGENT_RUNTIME 开启时生效
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    # 企业版特性：仅企业版开启时生效
+    if not is_enterprise():
         return None
 
     ctx = routing_context_from_request(request)

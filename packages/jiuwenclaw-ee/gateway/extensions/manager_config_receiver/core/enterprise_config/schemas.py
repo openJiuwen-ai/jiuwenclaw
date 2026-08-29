@@ -89,6 +89,10 @@ class EffectiveEnterpriseConfig:
     service_policy: dict[str, Any] | None = None
     agent_policy: dict[str, Any] | None = None
     global_policy: dict[str, Any] | None = None
+    resource_id: str | None = None
+    ref_template_id: str | None = None
+    agent_template: dict[str, Any] | None = None
+    instance_agent_resource: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +113,10 @@ class EffectiveEnterpriseConfig:
             "service_policy": self.service_policy,
             "agent_policy": self.agent_policy,
             "global_policy": self.global_policy,
+            "resource_id": self.resource_id,
+            "ref_template_id": self.ref_template_id,
+            "agent_template": self.agent_template,
+            "instance_agent_resource": self.instance_agent_resource,
         }
 
 

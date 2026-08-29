@@ -113,9 +113,9 @@ def _get_unified_runtime() -> TelemetryRuntime:
 def _install_team_span_registry_fallback() -> None:
     """Patch AgentCore consumers to resolve cross-task roots by session.
 
-    Each SDK consumer did ``from span_context import get_team_span``, so each has
-    its own binding that must be rebound separately:
-      * callback_handler — creates llm/tool spans (parent lookup).
+    Each SDK consumer imports a root lookup directly, so each has its own
+    binding that must be rebound separately:
+      * extension callback_handler — creates llm/tool spans (parent lookup).
       * rail (ObservabilityRail) — creates the agent.<type>.invoke spans; it
         *returns early* when get_team_span() is None, which is why the agent-tier
         spans (incl. sub-agent's agent.<type>.invoke) were missing.
@@ -128,10 +128,14 @@ def _install_team_span_registry_fallback() -> None:
     """
     import importlib
 
-    for mod_path in (
-        "openjiuwen.agent_teams.observability.callback_handler",
-        "openjiuwen.agent_teams.observability.rail",
-        "openjiuwen.agent_teams.observability.monitor_handler",
+    for mod_path, getter_name in (
+        # The current AgentCore runtime creates generic LLM/tool spans through
+        # this extension-level root accessor. The historical Team consumers
+        # below are kept for compatibility with older AgentCore revisions.
+        ("openjiuwen.extensions.observability.callback_handler", "get_root_span"),
+        ("openjiuwen.agent_teams.observability.callback_handler", "get_team_span"),
+        ("openjiuwen.agent_teams.observability.rail", "get_team_span"),
+        ("openjiuwen.agent_teams.observability.monitor_handler", "get_team_span"),
     ):
         try:
             mod = importlib.import_module(mod_path)
@@ -142,26 +146,30 @@ def _install_team_span_registry_fallback() -> None:
                 exc,
             )
             continue
-        orig = getattr(mod, "get_team_span", None)
+        orig = getattr(mod, getter_name, None)
         if orig is None or orig in _team_span_patched:
             continue
 
-        def _get_team_span_with_registry(team_name=None, _orig=orig):  # type: ignore[no-untyped-def]
-            span = _orig(team_name)
-            if span is not None:
-                return span
+        def _get_span_with_registry(*args: Any, _orig=orig, **kwargs: Any) -> Any:
             try:
                 from openjiuwen.agent_teams.context import get_session_id
 
                 session_id = str(get_session_id() or "")
                 if not session_id:
-                    return None
+                    return _orig(*args, **kwargs)
                 binding = _get_unified_runtime().trace_bindings.resolve_session(
                     session_id
                 )
                 if binding is None:
-                    return None
+                    return _orig(*args, **kwargs)
                 root_span = binding.root_span
+                # Do not accept AgentCore's single-live-root fallback when the
+                # long-lived supervisor task belongs to a different session.
+                # In the expected session, retaining the original result keeps
+                # ordinary Team mode untouched.
+                span = _orig(*args, **kwargs)
+                if span is root_span:
+                    return span
                 # The single-agent supervisor task is created before any
                 # request, so it cannot inherit the request ContextVar. Cache
                 # the registry fallback in this task after AGENT_*_INPUT; the
@@ -170,15 +178,21 @@ def _install_team_span_registry_fallback() -> None:
                 from openjiuwen.agent_teams.observability.span_context import (
                     set_team_span,
                 )
+                from openjiuwen.extensions.observability.span_context import (
+                    set_current_session_id,
+                    set_root_span,
+                )
 
                 set_team_span(root_span, team_name="single-agent")
+                set_root_span(root_span, session_id=session_id)
+                set_current_session_id(session_id)
                 return root_span
             except Exception as exc:
                 logger.debug("[AgentObservability] session root lookup failed: %s", exc)
-                return None
+                return _orig(*args, **kwargs)
 
-        _team_span_patched.add(_get_team_span_with_registry)
-        mod.get_team_span = _get_team_span_with_registry
+        _team_span_patched.add(_get_span_with_registry)
+        setattr(mod, getter_name, _get_span_with_registry)
 
 
 _install_team_span_registry_fallback()
@@ -230,6 +244,20 @@ def sync_agent_observability(*, force: bool = False) -> None:
         _agent_observability_active = True
         _agent_owns_provider = False
         _runtime_managed_agent_observability = True
+        # Unified telemetry owns the TracerProvider but historically omitted
+        # TrajectorySpanProcessor; attach it so SkillEvolutionRail can drain.
+        try:
+            from jiuwenswarm.agents.harness.observability_runtime import (
+                ensure_trajectory_span_processor_attached,
+            )
+
+            ensure_trajectory_span_processor_attached()
+        except Exception as exc:
+            logger.warning(
+                "[AgentObservability] failed to attach trajectory processor "
+                "on unified path: %s",
+                exc,
+            )
         return
     if force:
         _force_ever_enabled = True

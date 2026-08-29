@@ -42,6 +42,73 @@ _CHARSET_META_RE = re.compile(
     br"""<meta[^>]+charset=["']?\s*([A-Za-z0-9._-]+)""",
     flags=re.IGNORECASE,
 )
+# Non-webpage binaries that historically leaked as mojibake via text decode.
+_BINARY_URL_SUFFIXES = (
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".pdf",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".gz",
+    ".tar",
+    ".tgz",
+    ".exe",
+    ".dll",
+    ".msi",
+    ".dmg",
+    ".apk",
+    ".iso",
+    ".mp3",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".wav",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
+    ".eot",
+)
+_BINARY_CONTENT_TYPE_MARKERS = (
+    "application/msword",
+    "application/pdf",
+    "application/zip",
+    "application/x-zip",
+    "application/gzip",
+    "application/x-gzip",
+    "application/x-rar",
+    "application/x-7z-compressed",
+    "application/vnd.openxmlformats",
+    "application/vnd.ms-",
+    "application/vnd.oasis",
+    "image/",
+    "audio/",
+    "video/",
+    "font/",
+)
+_BINARY_MAGIC_PREFIXES = (
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "ole/cfbf"),
+    (b"%PDF", "pdf"),
+    (b"PK\x03\x04", "zip"),
+    (b"\x89PNG", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"GIF8", "gif"),
+    (b"Rar!\x1a\x07", "rar"),
+    (b"7z\xbc\xaf'\x1c", "7z"),
+)
 
 
 def _extract_declared_charset(response: requests.Response) -> str:
@@ -193,6 +260,95 @@ def _normalize_url(url: str) -> str:
     return f"https://{decoded}"
 
 
+def _binary_url_reason(url: str) -> str:
+    """Return a short reason when the URL path looks like a non-webpage binary."""
+    path = unquote(urlparse(url).path or "").lower()
+    for suffix in _BINARY_URL_SUFFIXES:
+        if path.endswith(suffix):
+            return f"url ends with {suffix}"
+    return ""
+
+
+def _binary_magic_reason(raw: bytes) -> str:
+    if not raw:
+        return ""
+    for magic, name in _BINARY_MAGIC_PREFIXES:
+        if raw.startswith(magic):
+            return f"magic:{name}"
+    return ""
+
+
+def _looks_like_textual_payload(raw: bytes) -> bool:
+    """Best-effort sniff for text/HTML when Content-Type is octet-stream."""
+    sample = (raw or b"")[:2048].lstrip(b"\xef\xbb\xbf \t\r\n")
+    if not sample:
+        return True
+    if sample.startswith(
+        (b"<!DOCTYPE", b"<!doctype", b"<html", b"<HTML", b"<?xml", b"{", b"[")
+    ):
+        return True
+    if sample.count(b"\x00") > 2:
+        return False
+    for enc in ("utf-8", "gb18030"):
+        try:
+            text = sample.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        if not text:
+            return True
+        printable = sum(1 for c in text if c.isprintable() or c in "\n\r\t")
+        return (printable / len(text)) >= 0.9
+    return False
+
+
+def _binary_content_type_reason(content_type: str, raw: bytes) -> str:
+    ct = (content_type or "").lower().split(";", 1)[0].strip()
+    if not ct:
+        return ""
+    if (
+        "html" in ct
+        or ct.startswith("text/")
+        or ct
+        in {
+            "application/json",
+            "application/xml",
+            "application/javascript",
+            "application/xhtml+xml",
+            "image/svg+xml",
+        }
+    ):
+        return ""
+    if ct == "application/octet-stream":
+        magic = _binary_magic_reason(raw)
+        if magic:
+            return f"content-type={ct}; {magic}"
+        if _looks_like_textual_payload(raw):
+            return ""
+        return f"content-type={ct}"
+    for marker in _BINARY_CONTENT_TYPE_MARKERS:
+        if marker in ct:
+            return f"content-type={ct}"
+    return ""
+
+
+def _unsupported_binary_reason(
+    *,
+    url: str,
+    content_type: str = "",
+    raw: bytes | None = None,
+) -> str:
+    """Detect non-text payloads that must not be decoded as webpage text."""
+    url_reason = _binary_url_reason(url)
+    if url_reason:
+        return url_reason
+    if raw is None:
+        return ""
+    magic = _binary_magic_reason(raw)
+    if magic:
+        return magic
+    return _binary_content_type_reason(content_type, raw)
+
+
 def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
     reader_url = f"https://r.jina.ai/{url}"
     response = _http_get(reader_url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
@@ -206,6 +362,10 @@ def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str
 
 
 def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
+    binary_reason = _binary_url_reason(url)
+    if binary_reason:
+        raise ValueError(f"unsupported binary content ({binary_reason})")
+
     response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
     if response.status_code in {401, 403, 429} and _env_bool(
         _JINA_FETCH_ENABLED_ENV,
@@ -214,8 +374,16 @@ def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
         return _fetch_via_jina_reader_sync(url, timeout_seconds)
     response.raise_for_status()
 
+    content_type = response.headers.get("Content-Type", "") or ""
+    raw = response.content or b""
+    binary_reason = _unsupported_binary_reason(url=url, content_type=content_type, raw=raw)
+    final_url = str(response.url or "")
+    if not binary_reason and final_url and final_url != url:
+        binary_reason = _binary_url_reason(final_url)
+    if binary_reason:
+        raise ValueError(f"unsupported binary content ({binary_reason})")
+
     text = _decode_response_text(response)
-    content_type = response.headers.get("Content-Type", "")
     title_match = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.IGNORECASE | re.DOTALL)
     title = _strip_tags(title_match.group(1)) if title_match else ""
 
@@ -258,6 +426,18 @@ async def _fetch_single_url(
             "provider": "",
             "from_cache": False,
             "error": "url cannot be empty.",
+        }
+
+    binary_reason = _binary_url_reason(url)
+    if binary_reason:
+        return {
+            "url": url,
+            "status_code": None,
+            "title": "",
+            "content": "",
+            "provider": "",
+            "from_cache": False,
+            "error": f"unsupported binary content ({binary_reason})",
         }
 
     # 模式 1：查缓存

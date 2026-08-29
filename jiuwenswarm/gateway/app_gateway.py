@@ -64,12 +64,22 @@ from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
-from jiuwenswarm.common.local_env_config import decrypt
+from jiuwenswarm.common.local_env_config import decrypt, is_enterprise
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
 logger = logging.getLogger("jiuwenswarm.gateway")
+
+
+def _uses_external_agent_config() -> bool:
+    """企业版或外置 Runtime 托管：配置经 Manager→ConfigReceiver→runtime_notify，不经 Gateway push。"""
+    from jiuwenswarm.gateway.edition import is_gateway_enterprise
+
+    if is_gateway_enterprise():
+        return True
+    return bool(os.getenv("GATEWAY_RUNTIME_MANAGER_URL", "").strip())
+
 
 # Keep gateway idle-finalize fallback aligned with ACP channel default.
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
@@ -1512,7 +1522,7 @@ async def _run_with_telemetry(
     web_path: str,
     telemetry_lifecycle,
 ) -> bool:
-    from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChannel, A2AChannelConfig
+    from jiuwenswarm.gateway.a2a_manager import A2AManager, load_a2a_ingress_config_safely
     from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect import DingTalkChannel, \
         DingTalkConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_connect import FeishuChannel, FeishuConfig
@@ -1671,12 +1681,71 @@ async def _run_with_telemetry(
         )
         gateway_storage_ctx = None
 
+    try:
+        from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE, resolve_gateway_edition
+        from jiuwenswarm.gateway.storage_assembly.setup import (
+            ensure_enterprise_storage_context,
+            wire_enterprise_manager_ws_store_async,
+        )
+
+        if resolve_gateway_edition(full_cfg) == EDITION_ENTERPRISE:
+            gateway_storage_ctx = ensure_enterprise_storage_context(
+                full_cfg,
+                existing=gateway_storage_ctx,
+            )
+            await wire_enterprise_manager_ws_store_async(gateway_storage_ctx, full_cfg)
+            logger.info("[App] Manager WS write path wired to PersistentStore")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] enterprise Manager WS storage wiring failed: %s",
+            exc,
+        )
+
+    session_sharing_registry = None
+    cron_run_ephemeral = None
+    try:
+        from jiuwenswarm.gateway.storage_assembly.setup import (
+            create_session_sharing_registry,
+            cron_run_ephemeral_store,
+            ensure_gateway_storage_context_for_ephemeral,
+            is_ephemeral_state_enabled,
+        )
+
+        if is_ephemeral_state_enabled(full_cfg):
+            gateway_storage_ctx = ensure_gateway_storage_context_for_ephemeral(
+                full_cfg,
+                existing=gateway_storage_ctx,
+            )
+            if gateway_storage_ctx is not None:
+                session_sharing_registry = await create_session_sharing_registry(
+                    gateway_storage_ctx
+                )
+                cron_run_ephemeral = cron_run_ephemeral_store(gateway_storage_ctx)
+                logger.info(
+                    "[App] Ephemeral state wired: session_sharing, cron_scheduler"
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] ephemeral state wiring failed, using in-memory only: %s",
+            exc,
+        )
+        session_sharing_registry = None
+        cron_run_ephemeral = None
+
+    def _message_handler_factory(client):
+        if session_sharing_registry is not None:
+            return MessageHandler(
+                client,
+                session_sharing_registry=session_sharing_registry,
+            )
+        return MessageHandler(client)
+
     client, message_handler = await _connect_wrap_and_create_message_handler(
         client,
         agent_server_url=agent_server_url,
         max_retries=max_retries,
         retry_interval=retry_interval,
-        message_handler_factory=MessageHandler,
+        message_handler_factory=_message_handler_factory,
     )
     await message_handler.start_forwarding()
 
@@ -1691,6 +1760,7 @@ async def _run_with_telemetry(
     cron_registry = CronTenantRegistry.get_instance(
         agent_client=client,
         message_handler=message_handler,
+        cron_run_ephemeral=cron_run_ephemeral,
     )
     message_handler.set_cron_registry(cron_registry)
     # Default-tenant controller for proactive sync / TUI compatibility.
@@ -1703,10 +1773,15 @@ async def _run_with_telemetry(
     for env_key in _CONFIG_SET_ENV_MAP.values():
         tip_val = get_local_config(env_key)
         env_dict[env_key] = tip_val if tip_val is not None else ""
-    client.set_or_update_server_config(
-        config=dict(full_cfg or {}),
-        env=env_dict,
-    )
+    if not _uses_external_agent_config():
+        client.set_or_update_server_config(
+            config=dict(full_cfg or {}),
+            env=env_dict,
+        )
+    else:
+        logger.info(
+            "[App] external agent config: skip set_or_update_server_config at startup"
+        )
 
     if isinstance(heartbeat_cfg, dict):
         cfg_every = heartbeat_cfg.get("every")
@@ -1821,53 +1896,59 @@ async def _run_with_telemetry(
             "VISION_API_BASE",
             "VISION_API_KEY",
         }
+        external_agent_config = _uses_external_agent_config()
         try:
-            # 发送给 AgentServer 前解密扩展敏感配置
-            decrypted_config = decrypt_extensions_sensitive_for_agent(config_payload or {})
-            client.set_or_update_server_config(
-                config=dict(decrypted_config),
-                env=dict(env_updates or {}),
-            )
-
-            reload_env = e2a_from_agent_fields(
-                request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
-                channel_id="",
-                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-                params={
-                    # config: full config snapshot after save; Agent should prefer this over local yaml.
-                    "config": dict(decrypted_config),
-                    # env: incremental environment updates; missing keys mean unchanged.
-                    "env": dict(env_updates or {}),
-                    **dict(reload_options or {}),
-                },
-            )
-            reload_resp = await client.send_request(reload_env)
-            if not getattr(reload_resp, "ok", False):
-                err_payload = getattr(reload_resp, "payload", None) or {}
-                err_msg = (
-                    err_payload.get("error")
-                    if isinstance(err_payload, dict)
-                    else err_payload
+            if not external_agent_config:
+                # 发送给 AgentServer 前解密扩展敏感配置
+                decrypted_config = decrypt_extensions_sensitive_for_agent(config_payload or {})
+                client.set_or_update_server_config(
+                    config=dict(decrypted_config),
+                    env=dict(env_updates or {}),
                 )
-                err_str = str(err_msg or "")
-                # ValidationError 是配置格式问题，不需要重启 gateway
-                if any(kw in err_str for kw in ("ValidationError", "validation error", "Field required")):
-                    logger.warning("[App] agent.reload_config validation error (non-fatal): %s", err_str)
-                    return False
-                raise RuntimeError(f"agent.reload_config rejected: {err_msg}")
 
-            _schedule_agent_prewarm_sync(
-                "agent-prewarm-sync-after-config",
-                delay_seconds=3.0,
-            )
-
-            if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
-                restart_env = e2a_from_agent_fields(
-                    request_id=f"browser-restart-{uuid_module.uuid4().hex[:8]}",
+                reload_env = e2a_from_agent_fields(
+                    request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
                     channel_id="",
-                    req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+                    req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                    params={
+                        # config: full config snapshot after save; Agent should prefer this over local yaml.
+                        "config": dict(decrypted_config),
+                        # env: incremental environment updates; missing keys mean unchanged.
+                        "env": dict(env_updates or {}),
+                        **dict(reload_options or {}),
+                    },
                 )
-                await client.send_request(restart_env)
+                reload_resp = await client.send_request(reload_env)
+                if not getattr(reload_resp, "ok", False):
+                    err_payload = getattr(reload_resp, "payload", None) or {}
+                    err_msg = (
+                        err_payload.get("error")
+                        if isinstance(err_payload, dict)
+                        else err_payload
+                    )
+                    err_str = str(err_msg or "")
+                    # ValidationError 是配置格式问题，不需要重启 gateway
+                    if any(kw in err_str for kw in ("ValidationError", "validation error", "Field required")):
+                        logger.warning("[App] agent.reload_config validation error (non-fatal): %s", err_str)
+                        return False
+                    raise RuntimeError(f"agent.reload_config rejected: {err_msg}")
+
+                _schedule_agent_prewarm_sync(
+                    "agent-prewarm-sync-after-config",
+                    delay_seconds=3.0,
+                )
+
+                if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
+                    restart_env = e2a_from_agent_fields(
+                        request_id=f"browser-restart-{uuid_module.uuid4().hex[:8]}",
+                        channel_id="",
+                        req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+                    )
+                    await client.send_request(restart_env)
+            else:
+                logger.debug(
+                    "[App] external agent config: skip agent.reload_config in _on_config_saved"
+                )
 
             # 主动推荐：enabled 变更时同步 proactive.tick job（创建/删除）
             proactive_keys = {
@@ -1885,13 +1966,22 @@ async def _run_with_telemetry(
             _schedule_gateway_restart(restart_request)
             return False
 
-    callback_result = _on_config_saved(
-        set(_CONFIG_SET_ENV_MAP.values()) | _CONFIG_YAML_KEYS,
-        env_updates=dict(env_dict),
-        config_payload=dict(full_cfg or {})
-    )
-    if inspect.isawaitable(callback_result):
-        await callback_result
+    sync_on_startup = os.getenv("SYNC_CONFIG_ON_STARTUP", "TRUE").strip().upper() not in {
+        "FALSE",
+        "0",
+        "NO",
+        "OFF",
+    }
+    if sync_on_startup:
+        callback_result = _on_config_saved(
+            set(_CONFIG_SET_ENV_MAP.values()) | _CONFIG_YAML_KEYS,
+            env_updates=dict(env_dict),
+            config_payload=dict(full_cfg or {}),
+        )
+        if inspect.isawaitable(callback_result):
+            await callback_result
+    else:
+        logger.info("[App] SYNC_CONFIG_ON_STARTUP=false, skip startup agent.reload_config")
 
     web_channel = None
     tui_channel = None
@@ -1913,6 +2003,16 @@ async def _run_with_telemetry(
     web_channel.git_watcher_registry = _git_watcher_registry
     _git_watcher_registry.set_channel(web_channel)
 
+    a2a_config, a2a_config_error = load_a2a_ingress_config_safely()
+    if a2a_config_error is not None:
+        logger.error("a2a.ingress configuration is invalid; ingress remains disabled: %s", a2a_config_error)
+    a2a_manager = A2AManager(
+        channel_manager,
+        _DummyBus(),
+        a2a_config,
+        initial_error=a2a_config_error,
+    )
+
     _register_web_handlers(
         WebHandlersBindParams(
             channel=web_channel,
@@ -1924,6 +2024,7 @@ async def _run_with_telemetry(
             cron_controller=cron_controller,
             cron_registry=cron_registry,
             updater_service=updater_service,
+            a2a_manager=a2a_manager,
         )
     )
 
@@ -2020,62 +2121,7 @@ async def _run_with_telemetry(
             binding.install(gateway_server)
     gateway_server.on_message(acp_inbound_server.handle_message)
 
-    a2a_server_enabled = str(os.getenv("A2A_SERVER_ENABLED", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    a2a_channel = A2AChannel(
-        A2AChannelConfig(
-            enabled=a2a_server_enabled,
-            host=str(os.getenv("A2A_SERVER_HOST", "127.0.0.1")).strip() or "127.0.0.1",
-            port=int(os.getenv("A2A_SERVER_PORT", "19100")),
-            rpc_path=str(os.getenv("A2A_SERVER_PATH", "/a2a")).strip() or "/a2a",
-            protocol_version=str(os.getenv("A2A_SERVER_PROTOCOL_VERSION", "1.0.0")).strip() or "1.0.0",
-            card_path=str(
-                os.getenv("A2A_SERVER_CARD_PATH", "/.well-known/agent-card.json")
-            ).strip()
-                      or "/.well-known/agent-card.json",
-            extended_card_path=str(
-                os.getenv("A2A_SERVER_EXTENDED_CARD_PATH", "/agent/authenticatedExtendedCard")
-            ).strip()
-                               or "/agent/authenticatedExtendedCard",
-            app_name=str(
-                os.getenv("A2A_SERVER_APP_NAME", "JiuwenSwarm Gateway A2A Server")
-            ).strip()
-                     or "JiuwenSwarm Gateway A2A Server",
-            app_description=str(
-                os.getenv("A2A_SERVER_APP_DESCRIPTION", "A2A ingress for JiuwenSwarm Gateway")
-            ).strip()
-                            or "A2A ingress for JiuwenSwarm Gateway",
-            app_version=str(
-                os.getenv("A2A_SERVER_APP_VERSION", "0.1.0")
-            ).strip()
-                        or "0.1.0",
-            expose_reasoning=str(os.getenv("A2A_SERVER_EXPOSE_REASONING", "true")).strip().lower()
-                             not in {"0", "false", "no", "off"},
-        ),
-        _DummyBus(),
-    )
-    channel_manager.register_channel(a2a_channel)
-    a2a_task = asyncio.create_task(a2a_channel.start(), name="a2a-channel")
-    if a2a_server_enabled:
-        # Keep gateway startup non-blocking; surface background A2A boot failures with actionable logs.
-        def _on_a2a_task_done(task: asyncio.Task) -> None:
-            try:
-                task.result()
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "[App] A2A server failed to start: %s. "
-                    "If A2A is enabled, install optional dependency with "
-                    "`uv sync --extra a2a` or `pip install \"jiuwenswarm[a2a]\"`.",
-                    exc,
-                )
-
-        a2a_task.add_done_callback(_on_a2a_task_done)
+    await a2a_manager.start_from_config()
 
     feishu_channel = None
     feishu_task = None
@@ -2735,7 +2781,7 @@ async def _run_with_telemetry(
     # Enterprise active-standby gates the default scheduler; tenant controllers
     # remain owned by CronTenantRegistry and inherit the same process role.
     leader_election = None
-    if os.getenv("AGENT_RUNTIME", "").strip():
+    if is_enterprise():
         deployment_mode = str(
             (get_config().get("gateway") or {}).get("deployment_mode", "standalone")
         ).strip().lower()
@@ -2821,14 +2867,7 @@ async def _run_with_telemetry(
             await prewarm_sync_task
         except asyncio.CancelledError:
             pass
-        if a2a_task is not None:
-            a2a_task.cancel()
-            try:
-                await a2a_task
-            except asyncio.CancelledError:
-                pass
-        await a2a_channel.stop()
-        channel_manager.unregister_channel(a2a_channel.channel_id)
+        await a2a_manager.stop()
         if gateway_server_task is not None:
             gateway_server_task.cancel()
             try:

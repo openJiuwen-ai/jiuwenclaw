@@ -3,6 +3,7 @@
 """Transport-agnostic Web RPC host: method registry, history capture, handler invoke."""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import inspect
 import ipaddress
@@ -127,7 +128,7 @@ class WebRpcHost:
         """Enterprise: capture frames on Listen for ``GET /api/sessions*``."""
         if self._history_runner is not None:
             return
-        if not os.getenv("AGENT_RUNTIME", "").strip():
+        if not is_enterprise():
             return
         try:
             from jiuwenswarm.channels.web.history_store import (
@@ -269,7 +270,7 @@ class WebRpcHost:
         if not files or not isinstance(files, list):
             return params
 
-        strip_path_for_url = bool(os.getenv("AGENT_RUNTIME", "").strip())
+        strip_path_for_url = is_enterprise()
         downloaded_files = []
         workspace = Path(get_agent_workspace_dir()).resolve()
 

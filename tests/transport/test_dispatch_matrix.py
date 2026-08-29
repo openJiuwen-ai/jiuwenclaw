@@ -63,7 +63,7 @@ _DISPATCH_TABLE_METHODS = frozenset({
     "SESSION_REWIND_COMPACT", "SESSION_REWIND_CONTEXT", "SESSION_SWITCH",
     "SYNC_AGENTS_CONFIGS", "TEAM_BINDINGS_LIST", "TEAM_BINDING_CREATE",
     "TEAM_BINDING_GENERATE", "TEAM_DELETE", "TEAM_HISTORY_GET", "TEAM_MEMBERS_GET",
-    "TEAM_MQ_PUBLISH", "TEAM_SESSION_BIND", "TEAM_SESSION_RESET", "TEAM_SNAPSHOT",
+    "TEAM_MQ_PUBLISH", "TEAM_RUNTIME_DISSOLVE", "TEAM_SESSION_BIND", "TEAM_SESSION_RESET", "TEAM_SNAPSHOT",
     "TEAM_TEMPLATES_LIST",
 })
 
@@ -411,7 +411,8 @@ def test_service_members_matches_actual_handler_usage() -> None:
     sources = [py for py in sorted(handlers_dir.glob("*.py")) if py.name != "__init__.py"]
     sources.append(handlers_dir.parent / "pipeline.py")
     def _is_ctx_services(node: ast.AST) -> bool:
-        """该节点是否就是 ``ctx.services``。"""
+        if isinstance(node, ast.Name) and node.id == "services":
+            return True
         return (
             isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Name)
@@ -460,3 +461,100 @@ def test_service_members_matches_actual_handler_usage() -> None:
         f"业务层直接访问了受保护成员：{['ctx.services.' + n for n in leaked]}"
         f" —— 改用 SERVICE_MEMBERS 登记的公有名，私有名只应出现在 context.py 的映射里。"
     )
+
+
+def test_server_has_no_dangling_self_attribute_calls() -> None:
+    import ast
+    import inspect
+
+    from jiuwenswarm.server import agent_ws_server as mod
+
+    tree = ast.parse(inspect.getsource(mod))
+    cls = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "AgentWebSocketServer"
+    )
+
+    defined: set[str] = {
+        m.name for m in cls.body
+        if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for node in ast.walk(cls):
+        # self.x = ...
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    defined.add(target.attr)
+        # self.x: T = ...
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Attribute)
+            and isinstance(node.target.value, ast.Name)
+            and node.target.value.id == "self"
+        ):
+            defined.add(node.target.attr)
+    # 类属性（含 ClassVar）
+    for m in cls.body:
+        if isinstance(m, ast.AnnAssign) and isinstance(m.target, ast.Name):
+            defined.add(m.target.id)
+        if isinstance(m, ast.Assign):
+            for target in m.targets:
+                if isinstance(target, ast.Name):
+                    defined.add(target.id)
+
+    used = {
+        node.attr: node.lineno
+        for node in ast.walk(cls)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+
+    dangling = sorted(
+        (lineno, name) for name, lineno in used.items() if name not in defined
+    )
+    assert not dangling, (
+        "以下 self.X 在类上找不到定义，运行到即 AttributeError（多半是 helper 搬走了、"
+        "调用方留在原地）：\n  "
+        + "\n  ".join(f"agent_ws_server.py:{ln}  self.{n}" for ln, n in dangling)
+    )
+
+
+def test_sandbox_bootstrap_helpers_callable_from_server() -> None:
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+    from jiuwenswarm.server.context import AgentServerServices
+    from jiuwenswarm.server.handlers.sandbox import (
+        allocate_internal_jiuwenbox_port,
+        parse_sandbox_host_port,
+    )
+
+    host, port = parse_sandbox_host_port("http://127.0.0.1:8321")
+    assert (host, port) == ("127.0.0.1", 8321)
+
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+
+    class _Runner:
+        def is_owned_listener(self, host: str, port: int) -> bool:
+            return True          # 已拥有该监听 → 应直接复用 preferred_port
+
+    server._jiuwenbox_runner = _Runner()  # type: ignore[attr-defined]
+
+    # 与 agent_ws_server._bootstrap_internal_jiuwenbox 里的调用形态完全一致
+    got = allocate_internal_jiuwenbox_port(AgentServerServices(server), host, port)
+    assert got == port, f"已拥有监听时应复用 preferred_port，实际 {got}"
+
+    # 端口被占 → 走 pick_free_tcp_port；这条同时验证门面对方法的解析
+    class _BusyRunner:
+        def is_owned_listener(self, host: str, port: int) -> bool:
+            return False
+
+    server._jiuwenbox_runner = _BusyRunner()  # type: ignore[attr-defined]
+    server._is_tcp_port_bindable = lambda h, p: False  # type: ignore[attr-defined]
+    server._pick_free_tcp_port = lambda h: 54321       # type: ignore[attr-defined]
+
+    got = allocate_internal_jiuwenbox_port(AgentServerServices(server), host, port)
+    assert got == 54321, f"端口被占时应改用内核分配的空闲端口，实际 {got}"

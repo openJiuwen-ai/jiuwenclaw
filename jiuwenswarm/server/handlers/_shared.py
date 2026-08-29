@@ -224,14 +224,38 @@ def _agent_workspace_dir_for_request(request: AgentRequest) -> Path:
 
 
 def _effective_config_for_request(request: AgentRequest) -> Any:
-    """Return the OfficeClaw tenant snapshot; native gateway keeps disk config."""
+    """Return the resolved OfficeClaw tenant snapshot; native gateway keeps disk config."""
+    from jiuwenswarm.common.config import resolve_env_vars
+    from jiuwenswarm.common.local_env_config import (
+        bind_agent_env_ns,
+        bind_task_env_overlay,
+        build_effective_env_overlay,
+        reset_agent_env_ns,
+        reset_task_env_overlay,
+    )
+    from jiuwenswarm.server.runtime.sync_agents_configs import materialize_sync_env
     from jiuwenswarm.server.runtime.tenant_catalog_registry import TenantCatalogRegistry
 
     if request.channel_id == "officeclaw":
         agent_id, service_id, _workspace_key = TenantAgentPool.extract_ids(request)
         spec = TenantCatalogRegistry.get_instance().get(service_id, agent_id)
         if spec is not None and isinstance(spec.config, dict):
-            return spec.config
+            env = materialize_sync_env(spec.env) if isinstance(spec.env, dict) else {}
+            ns_token = bind_agent_env_ns(service_id, agent_id)
+            try:
+                overlay_token = bind_task_env_overlay(
+                    build_effective_env_overlay(
+                        env,
+                        service_id=service_id,
+                        agent_id=agent_id,
+                    )
+                )
+                try:
+                    return resolve_env_vars(spec.config)
+                finally:
+                    reset_task_env_overlay(overlay_token)
+            finally:
+                reset_agent_env_ns(ns_token)
         return {}
     return get_config()
 
@@ -249,7 +273,7 @@ async def bootstrap_preconditions(request: AgentRequest):
     来源                                         内容
     ==========================================  ============================
     ``_handle_unary``                            ``bind_incoming_request``（身份 + W3C trace 上下文）
-    ``_handle_unary_impl``                       ``await ensure_persistent_checkpointer()``
+    ``_handle_unary_impl``                       ``await ensure_interface_deep_and_checkpointer()``
     ==========================================  ============================
 
     把它们并入主表时，这两件事会**静默消失**：checkpointer 未就绪会影响连接引导，
@@ -262,8 +286,8 @@ async def bootstrap_preconditions(request: AgentRequest):
 
     顺序与原链路一致：先绑定，再等 checkpointer。
     """
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-        ensure_persistent_checkpointer,
+    from jiuwenswarm.server.agent_ws_server import (
+        ensure_interface_deep_and_checkpointer,
     )
     from jiuwenswarm.telemetry.context_propagation import (
         bind_incoming_request,
@@ -272,9 +296,8 @@ async def bootstrap_preconditions(request: AgentRequest):
 
     binding = bind_incoming_request(request)
     try:
-        # 兜底确保 checkpointer 就绪：start() 里是后台预热，首条请求可能赶在预热完成前
-        # 到达。内部 lock+ready 幂等，预热完成时秒过。
-        await ensure_persistent_checkpointer()
+        # 后台预热未完成时 await 预热任务，不要在事件循环上同步 import。
+        await ensure_interface_deep_and_checkpointer()
         yield
     finally:
         reset_incoming_request(binding)

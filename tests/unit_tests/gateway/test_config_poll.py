@@ -18,13 +18,13 @@ from jiuwenswarm.gateway.config_poll.syncer import ConfigPollSyncer
 
 
 def test_config_poll_disabled_without_agent_runtime(monkeypatch) -> None:
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     monkeypatch.delenv("GATEWAY_CONFIG_POLL_ENABLED", raising=False)
     assert config_poll_enabled() is False
 
 
 def test_config_poll_enabled_with_agent_runtime(monkeypatch) -> None:
-    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.delenv("GATEWAY_CONFIG_POLL_ENABLED", raising=False)
     with patch(
         "jiuwenswarm.gateway.config_poll.scheduler.get_config",
@@ -35,7 +35,7 @@ def test_config_poll_enabled_with_agent_runtime(monkeypatch) -> None:
 
 
 def test_config_poll_respects_yaml_enabled_false(monkeypatch) -> None:
-    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.delenv("GATEWAY_CONFIG_POLL_ENABLED", raising=False)
     with patch(
         "jiuwenswarm.gateway.config_poll.scheduler.get_config",
@@ -58,7 +58,7 @@ async def test_syncer_applies_when_row_updated_at_changes() -> None:
         return [{"updated_at": ts.isoformat()}]
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.gateway_db.resolve_jiuwenclaw_id",
+        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
         return_value="jid-1",
     ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",
@@ -89,7 +89,7 @@ async def test_syncer_skips_when_snapshot_unchanged() -> None:
         return [{"updated_at": ts.isoformat()}]
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.gateway_db.resolve_jiuwenclaw_id",
+        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
         return_value="jid-1",
     ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",
@@ -118,7 +118,7 @@ async def test_syncer_applies_when_all_rows_deleted() -> None:
         return []
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.gateway_db.resolve_jiuwenclaw_id",
+        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
         return_value="jid-1",
     ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",
@@ -160,7 +160,7 @@ async def test_syncer_detects_deleted_channel_row() -> None:
         ]
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.gateway_db.resolve_jiuwenclaw_id",
+        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
         return_value="jid-1",
     ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",
@@ -189,7 +189,7 @@ async def test_syncer_keeps_snapshot_when_apply_fails() -> None:
         return [{"updated_at": ts.isoformat()}]
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.gateway_db.resolve_jiuwenclaw_id",
+        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
         return_value="jid-1",
     ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",
@@ -225,7 +225,7 @@ async def test_syncer_normalizes_updated_at_for_snapshot() -> None:
         return [{"updated_at": ts.isoformat()}]
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.gateway_db.resolve_jiuwenclaw_id",
+        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
         return_value="jid-1",
     ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",

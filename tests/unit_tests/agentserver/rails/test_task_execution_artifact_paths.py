@@ -10,6 +10,7 @@ warnings.filterwarnings(
 )
 
 from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
+    _extract_artifact_paths_from_result,
     _extract_file_paths_from_write_tool,
     _extract_image_paths_from_tool_result,
 )
@@ -43,7 +44,39 @@ def test_write_tool_fallback_ignores_non_python_paths() -> None:
 
 
 def test_image_path_extraction_keeps_image_whitelist() -> None:
+    # generate_image 真实输出格式：每行一个路径，可能含空格（effective_project_dir）
     paths = _extract_image_paths_from_tool_result(
-        "Generated /workspace/out/chart.png and /workspace/out/demo.py"
+        "Generated 1 image(s) successfully!\n"
+        "Local file paths (use for attachments or send_file):\n"
+        "- E:\\01 code\\proj\\generated_images\\chart.png\n"
+        "- /workspace/out/demo.py\n"
+        "Prompt: a chart"
     )
-    assert paths == ["/workspace/out/chart.png"]
+    assert paths == ["E:\\01 code\\proj\\generated_images\\chart.png"]
+
+
+def test_weak_key_candidate_falls_back_to_body_scan(tmp_path) -> None:
+    # P1-1 回归：结构化弱键（result: "ok"）校验失败后，不应屏蔽
+    # stdout 正文中的真实产物路径
+    base = tmp_path.resolve()
+    report = base / "report.xlsx"
+    report.write_bytes(b"x")
+    paths = _extract_artifact_paths_from_result(
+        {"stdout": f"Saved to {report}\nDone.", "result": "ok"},
+        workspace_base=base,
+    )
+    assert paths == [str(report)]
+
+
+def test_structured_hit_short_circuits_body_scan(tmp_path) -> None:
+    # 结构化候选校验通过即返回，不再扫描正文（对齐 clowder-ai 语义）
+    base = tmp_path.resolve()
+    report = base / "report.xlsx"
+    report.write_bytes(b"x")
+    junk = base / "junk.txt"
+    junk.write_bytes(b"x")
+    paths = _extract_artifact_paths_from_result(
+        {"output_path": str(report), "stdout": f"see {junk}"},
+        workspace_base=base,
+    )
+    assert paths == [str(report)]

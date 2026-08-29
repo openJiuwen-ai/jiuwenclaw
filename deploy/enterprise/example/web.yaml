@@ -79,6 +79,9 @@ spec:
   selector:
     app: jiuwenclaw-web
   ports:
+    - name: http
+      port: 5173
+      targetPort: 5173
     - name: websocket
       port: 19000 # Service 端口
       targetPort: 19000 # 容器端口

@@ -814,6 +814,15 @@ class OfficeClawMcpRegistration:
 
 OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX = "office-claw-request-"
 
+# Attribute name used to store the request-scoped OfficeClaw tool id allowlist.
+# The allowlist must cross the asyncio task boundary between the caller's task
+# (where ``bind_active_office_claw_mcp_tools`` sets a ContextVar) and the
+# DeepAgent's supervisor / round task (created at session startup, before the
+# ContextVar is set).  Storing the ids on the shared ability_manager gives the
+# round task a reliable source to re-bind the ContextVar before invoking an
+# OfficeClaw MCP tool.
+_OFFICE_CLAW_TOOL_IDS_ATTR = "_active_office_claw_tool_ids"
+
 # Task-local allowlist for request-scoped OfficeClaw tool ids. Set for the
 # duration of one Relay chat.send so a concurrent session cannot invoke this
 # request's MCP tools (or vice versa) via a polluted short-name AbilityManager.
@@ -821,6 +830,24 @@ _active_office_claw_tool_ids: ContextVar[frozenset[str] | None] = ContextVar(
     "active_office_claw_tool_ids",
     default=None,
 )
+
+
+def _office_claw_tool_ids_carrier(agent: Any) -> Any:
+    """Return the object that carries the request-scoped allowlist.
+
+    The DeepAgent and its inner ReActAgent share the same ``ability_manager``
+    (openjiuwen wires ``agent.ability_manager = deep_agent.ability_manager``),
+    so storing the allowlist on the ability_manager makes it visible to
+    whichever agent object runs the round (``ctx.agent`` may be either the
+    DeepAgent or the ReActAgent).
+    """
+
+    if agent is None:
+        return None
+    ability_manager = getattr(agent, "ability_manager", None)
+    if ability_manager is not None:
+        return ability_manager
+    return agent
 
 
 @contextmanager
@@ -831,6 +858,69 @@ def bind_active_office_claw_mcp_tools(
 
     allowed = frozenset(str(tool_id) for tool_id in (tool_ids or ()) if str(tool_id))
     token = _active_office_claw_tool_ids.set(allowed)
+    try:
+        yield
+    finally:
+        _active_office_claw_tool_ids.reset(token)
+
+
+def set_agent_office_claw_tool_ids(agent: Any, tool_ids: Iterable[str] | None) -> None:
+    """Store the request-scoped OfficeClaw tool id allowlist on the shared ability_manager.
+
+    The ContextVar ``_active_office_claw_tool_ids`` cannot propagate to the
+    DeepAgent's supervisor task because that task is created (via
+    ``asyncio.create_task``) at session startup — before the caller enters
+    ``bind_active_office_claw_mcp_tools``.  Storing the ids on the shared
+    ability_manager gives the round task a way to re-bind the ContextVar
+    before invoking an OfficeClaw MCP tool.
+    """
+
+    carrier = _office_claw_tool_ids_carrier(agent)
+    if carrier is None:
+        return
+    ids = frozenset(str(tid) for tid in (tool_ids or ()) if str(tid))
+    if ids:
+        setattr(carrier, _OFFICE_CLAW_TOOL_IDS_ATTR, ids)
+    else:
+        try:
+            delattr(carrier, _OFFICE_CLAW_TOOL_IDS_ATTR)
+        except AttributeError:
+            pass
+
+
+def clear_agent_office_claw_tool_ids(agent: Any) -> None:
+    """Remove the request-scoped allowlist from the shared ability_manager."""
+
+    carrier = _office_claw_tool_ids_carrier(agent)
+    if carrier is None:
+        return
+    try:
+        delattr(carrier, _OFFICE_CLAW_TOOL_IDS_ATTR)
+    except AttributeError:
+        pass
+
+
+@contextmanager
+def bind_office_claw_from_agent(agent: Any) -> Iterator[None]:
+    """Re-bind the ContextVar from the shared ability_manager for the current task.
+
+    Call this inside the round task (e.g. in ``ProgressiveToolRail``) right
+    before invoking an OfficeClaw MCP tool.  If the shared ability_manager
+    carries a stored allowlist, the ContextVar is set for the duration of the
+    call so that ``ensure_request_scoped_office_claw_tool_allowed`` passes.
+    """
+
+    carrier = _office_claw_tool_ids_carrier(agent)
+    ids = getattr(carrier, _OFFICE_CLAW_TOOL_IDS_ATTR, None) if carrier is not None else None
+    if not ids:
+        logger.debug(
+            "OfficeClaw request-scoped allowlist not found on carrier; "
+            "leaving ContextVar unbound for this invoke (agent_type=%s)",
+            type(agent).__name__ if agent is not None else None,
+        )
+        yield
+        return
+    token = _active_office_claw_tool_ids.set(ids)
     try:
         yield
     finally:
@@ -853,6 +943,47 @@ def ensure_request_scoped_office_claw_tool_allowed(tool_id: str) -> None:
         raise RuntimeError(
             "OfficeClaw MCP tool is bound to another request; refusing cross-request invoke"
         )
+
+
+def get_active_office_claw_mcp_tool_ids() -> frozenset[str] | None:
+    """Return the request-local OfficeClaw tool id allowlist, if bound."""
+
+    return _active_office_claw_tool_ids.get()
+
+
+def resolve_active_office_claw_tool_id(tool_name: str) -> str | None:
+    """Map a short tool name to this request's OfficeClaw tool id.
+
+    Request-scoped ids look like
+    ``office-claw-request-<hash>.office-claw.<tool_name>``. ProgressiveToolRail
+    may hold a stale AbilityManager card whose id points at another request's
+    (already cleaned-up) registration; the active allowlist is the authority
+    for *this* chat.send.
+    """
+
+    name = str(tool_name or "").strip()
+    if not name:
+        return None
+    allowed = _active_office_claw_tool_ids.get()
+    if not allowed:
+        return None
+    suffix = f".{name}"
+    matches = [
+        tool_id
+        for tool_id in allowed
+        if tool_id.endswith(suffix) or tool_id.rsplit(".", 1)[-1] == name
+    ]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    # Prefer the canonical request-scoped shape when multiple ids match.
+    preferred = [
+        tool_id
+        for tool_id in matches
+        if tool_id.startswith(OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX) and tool_id.endswith(suffix)
+    ]
+    return preferred[0] if preferred else matches[0]
 
 
 def extract_office_claw_mcp(params: Any) -> dict[str, Any] | None:
@@ -1124,15 +1255,20 @@ __all__ = [
     "OfficeClawMcpRegistration",
     "RequestScopedOfficeClawMcpTool",
     "bind_active_office_claw_mcp_tools",
+    "bind_office_claw_from_agent",
+    "clear_agent_office_claw_tool_ids",
+    "set_agent_office_claw_tool_ids",
     "build_enabled_mcp_server_configs",
     "build_mcp_server_config",
     "create_mcp_tool",
     "ensure_request_scoped_office_claw_tool_allowed",
     "extract_enabled_mcp_server_entries",
     "extract_office_claw_mcp",
+    "get_active_office_claw_mcp_tool_ids",
     "invalidate_office_claw_mcp_schema_cache",
     "list_office_claw_mcp_tools",
     "preflight_mcp_server_reachable",
+    "resolve_active_office_claw_tool_id",
     "validate_office_claw_mcp_config",
     "_check_dangerous_args",
     "_is_blocked_host",

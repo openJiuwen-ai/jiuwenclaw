@@ -17,6 +17,7 @@ from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config, get_default_models
 from jiuwenswarm.common.local_env_config import (
+    is_enterprise,
     apply_env_overrides_to_active,
     apply_env_removals,
     bind_task_env_overlay,
@@ -38,6 +39,9 @@ from jiuwenswarm.server.runtime.reload_result import (
     log_agent_config_hot_reload,
     log_agent_config_hot_reload_replay,
     log_reload_config_changes,
+)
+from jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail import (
+    coalesce_config_skill_envs,
 )
 
 if TYPE_CHECKING:
@@ -194,7 +198,7 @@ class AgentManager:
         from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
 
         self.warm_pool = AgentWarmPool(self)
-        if self._user_workspace_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+        if self._user_workspace_dir is not None and is_enterprise():
             logger.info(
                 "[AgentManager] enterprise init: agent_id=%s service_id=%s user_workspace=%s",
                 self.agent_id,
@@ -848,7 +852,7 @@ class AgentManager:
                     **_build_acp_agent_config()
                 }
             # 企业版：创建 agent 时附带完整 request，供 create_instance 加载企业配置
-            if request is not None and os.getenv("AGENT_RUNTIME", "").strip():
+            if request is not None and is_enterprise():
                 config = {**config, "request": request}
             agent = await self._create_agent(
                 channel_key,
@@ -1081,6 +1085,9 @@ class AgentManager:
                     effective_config = get_config()
                 except Exception:
                     effective_config = None
+            previous_config = self._latest_config_base
+            if isinstance(effective_config, dict):
+                effective_config = coalesce_config_skill_envs(effective_config, previous_config)
             fingerprint = self._reload_fingerprint(
                 effective_config,
                 self._latest_env_overrides,
@@ -1185,6 +1192,8 @@ class AgentManager:
         env: dict[str, Any],
     ) -> ReloadAggregateResult:
         """Apply sync_agents_configs write-through config/env to live adapters."""
+        previous_config = self._latest_config_base
+        config = coalesce_config_skill_envs(config, previous_config)
         self._latest_config_base = config
         self._latest_env_overrides = seal_env_mapping(env)
         replace_active_env(

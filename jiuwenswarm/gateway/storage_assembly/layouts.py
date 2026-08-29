@@ -217,6 +217,8 @@ def _build_layouts(
             layouts[name] = layout
 
     for table in ENTERPRISE_RECORD_STORE_NAMES:
+        if table == "cron_job":
+            continue
         layouts[table] = _db_table(table)
 
     return layouts

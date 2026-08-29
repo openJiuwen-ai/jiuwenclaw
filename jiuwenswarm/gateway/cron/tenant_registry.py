@@ -28,9 +28,11 @@ class CronTenantRegistry:
         *,
         agent_client: Any,
         message_handler: Any,
+        cron_run_ephemeral: Any | None = None,
     ) -> None:
         self._agent_client = agent_client
         self._message_handler = message_handler
+        self._cron_run_ephemeral = cron_run_ephemeral
         self._controllers: dict[tuple[str, str], CronController] = {}
         self._controller_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._meta_lock = asyncio.Lock()
@@ -42,6 +44,7 @@ class CronTenantRegistry:
         *,
         agent_client: Any | None = None,
         message_handler: Any | None = None,
+        cron_run_ephemeral: Any | None = None,
     ) -> CronTenantRegistry:
         if cls._instance is not None:
             return cls._instance
@@ -52,6 +55,7 @@ class CronTenantRegistry:
         cls._instance = cls(
             agent_client=agent_client,
             message_handler=message_handler,
+            cron_run_ephemeral=cron_run_ephemeral,
         )
         return cls._instance
 
@@ -115,7 +119,9 @@ class CronTenantRegistry:
                 message_handler=self._message_handler,
                 service_id=sid,
                 agent_id=aid,
+                run_ephemeral=self._cron_run_ephemeral,
             )
+            await scheduler.hydrate_runs_from_ephemeral()
             await scheduler.start()
             controller = CronController(
                 store=store,

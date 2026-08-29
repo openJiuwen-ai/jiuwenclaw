@@ -202,3 +202,29 @@ SERVICE_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
         IndexDefinition(["jiuwenclaw_id", "template_id"], unique=True),
     ],
 )
+
+AGENT_TEMPLATE_TABLE_DEF = TableDefinition(
+    table_name="agent_template",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
+        ColumnDefinition("template_id", "string", length=100, nullable=False),
+        ColumnDefinition("template_name", "string", length=128, nullable=False),
+        ColumnDefinition("description", "string", length=512, nullable=True),
+        ColumnDefinition("agent_tags", "json", nullable=True),
+        ColumnDefinition("template_ref", "json", nullable=True),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=True),
+        ColumnDefinition("data", "json", nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["jiuwenclaw_id", "template_id"], unique=True),
+    ],
+)

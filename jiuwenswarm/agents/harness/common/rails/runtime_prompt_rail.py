@@ -7,9 +7,11 @@ every model call by reading runtime_state.yaml in Python, so the LLM always
 sees the current values without needing to call any tool.
 """
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -156,7 +158,7 @@ class RuntimePromptRail(DeepAgentRail):
 
     def _resolve_agent_workspace_and_config(self) -> tuple[str, str]:
         """Resolve agent workspace / config dirs; enterprise uses workspace_key paths."""
-        if self._workspace_dir and os.getenv("AGENT_RUNTIME", "").strip():
+        if self._workspace_dir and is_enterprise():
             workspace_root = Path(self._workspace_dir)
             base_workspace = workspace_root.parent.parent
             return str(workspace_root), str(base_workspace / "config")
@@ -264,15 +266,29 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section(name)
 
         # ── time ──
+        # Inject real date values (day-level precision only, not HH:MM) to avoid
+        # repeated date derivations in reasoning.  Priority 130 places this after
+        # FINAL_VISIBLE_REPLY(120) so the dynamic suffix does not break prefix
+        # caching of the static sections above.
+        now = datetime.now(timezone.utc).astimezone()
+        weekday_cn = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][now.weekday()]
+        weekday_en = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'][now.weekday()]
+        week_start = now - timedelta(days=now.weekday())
+        week_end = now + timedelta(days=6 - now.weekday())
+
         if not self._force_english and self._language == "cn":
             time_content = (
                 "# 时间说明\n\n"
+                f"当前日期：{now.strftime('%Y-%m-%d')}（{weekday_cn}）\n"
+                f"本周日期范围：{week_start.strftime('%Y-%m-%d')} 至 {week_end.strftime('%Y-%m-%d')}\n"
                 "- 当用户询问“最新、当前、今年、本年、实时、近期”等信息并需要搜索时，"
                 "搜索 query 必须优先使用当前年份或日期"
             )
         else:
             time_content = (
                 "# Time Description\n\n"
+                f"Current date: {now.strftime('%Y-%m-%d')} ({weekday_en})\n"
+                f"This week: {week_start.strftime('%Y-%m-%d')} to {week_end.strftime('%Y-%m-%d')}\n"
                 "- When the user asks for latest/current/this-year/recent information and search is needed, "
                 "search queries must prefer the current year or date."
             )
@@ -280,7 +296,7 @@ class RuntimePromptRail(DeepAgentRail):
         self.system_prompt_builder.add_section(PromptSection(
             name="time",
             content={"cn": time_content, "en": time_content},
-            priority=92,
+            priority=130,
         ))
 
         # ── runtime ──

@@ -9,6 +9,9 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
+from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
+
+from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import (
     apply_template_ref_to_updates,
     normalize_template_ref,
@@ -38,45 +41,42 @@ logger = logging.getLogger(__name__)
 
 
 async def _validate_service_policy_ref(
-    handler: DBHandler,
+    service_repo: EnterpriseRecordRepository,
     *,
-    jiuwenclaw_id: str,
     service_policy_id: str,
 ) -> None:
     normalized_id = str(service_policy_id).strip()
     if not normalized_id:
         raise ValueError("service_policy_id is required")
-    rows = await handler.list_records(
-        _SERVICE_TABLE,
-        {"jiuwenclaw_id": jiuwenclaw_id, "policy_id": normalized_id},
+    rows = await service_repo.list(
+        filters={"policy_id": normalized_id},
         limit=1,
-        offset=0,
     )
     if not rows:
         raise ValueError(f"unknown service_policy_id={normalized_id!r}")
 
 
 async def _before_agent_policy_create(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     jiuwenclaw_id: str,
     policy: dict[str, Any],
 ) -> None:
     req = ConfigEffectiveAgentPolicyCreateRequest.model_validate(policy)
+    service_repo = require_enterprise_repository(_SERVICE_TABLE)
     await _validate_service_policy_ref(
-        handler,
-        jiuwenclaw_id=jiuwenclaw_id,
+        service_repo,
         service_policy_id=req.service_policy_id,
     )
 
 
 async def update_config_effective_agent_policy_record(
-    handler: DBHandler,
+    repo: EnterpriseRecordRepository,
     policy_id: int,
     updates: dict[str, Any],
     jiuwenclaw_id: str,
 ) -> dict[str, Any] | None:
     request = ConfigEffectiveAgentPolicyUpdateRequest.model_validate(updates)
-    existing = await get_row_for_instance(handler, _AGENT_TABLE, policy_id, jiuwenclaw_id)
+    existing = await get_row_for_instance(repo, policy_id)
     if existing is None:
         return None
 
@@ -101,13 +101,13 @@ async def update_config_effective_agent_policy_record(
         validate_match_expr(field_updates["match_expr"])
 
     next_service_policy_id = field_updates.get(
-        "service_policy_id", getattr(existing, "service_policy_id")
+        "service_policy_id", existing.get("service_policy_id")
     )
     if "service_policy_id" in field_updates:
+        service_repo = require_enterprise_repository(_SERVICE_TABLE)
         await _validate_service_policy_ref(
-            handler,
-            jiuwenclaw_id=jiuwenclaw_id,
-            service_policy_id=next_service_policy_id,
+            service_repo,
+            service_policy_id=str(next_service_policy_id),
         )
 
     if not field_updates:
@@ -115,10 +115,10 @@ async def update_config_effective_agent_policy_record(
 
     field_updates = apply_template_ref_to_updates(field_updates, existing_row=existing)
     field_updates["updated_at"] = utc_now()
-    updated = await handler.update(_AGENT_TABLE, {"id": policy_id}, field_updates)
+    updated = await repo.update_by_row_id(policy_id, field_updates)
     if updated is None:
         return None
-    return {"id": getattr(updated, "id")}
+    return {"id": updated.get("id")}
 
 
 def _build_row_from_sync_policy(
@@ -156,9 +156,9 @@ class ConfigEffectiveAgentPolicyService:
         jiuwenclaw_id: str,
         policy: dict[str, Any],
     ) -> dict[str, Any]:
+        repo = require_enterprise_repository(_AGENT_TABLE)
         result = await apply_create_from_row_builder(
-            self._handler,
-            _AGENT_TABLE,
+            repo,
             section=_SECTION,
             jiuwenclaw_id=jiuwenclaw_id,
             record=policy,
@@ -177,8 +177,9 @@ class ConfigEffectiveAgentPolicyService:
         row_id: Any,
         updates: dict[str, Any],
     ) -> None:
+        repo = require_enterprise_repository(_AGENT_TABLE)
         await apply_update_by_id(
-            self._handler,
+            repo,
             section=_SECTION,
             jiuwenclaw_id=jiuwenclaw_id,
             row_id=row_id,
@@ -192,11 +193,11 @@ class ConfigEffectiveAgentPolicyService:
         )
 
     async def delete(self, jiuwenclaw_id: str, row_id: Any) -> None:
+        _ = jiuwenclaw_id
+        repo = require_enterprise_repository(_AGENT_TABLE)
         await apply_delete_by_id(
-            self._handler,
+            repo,
             section=_SECTION,
-            table=_AGENT_TABLE,
-            jiuwenclaw_id=jiuwenclaw_id,
             row_id=row_id,
         )
         logger.info(

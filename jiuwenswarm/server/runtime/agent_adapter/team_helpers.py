@@ -11,7 +11,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.paths import (
@@ -1195,6 +1195,32 @@ async def _team_has_unread_messages(session_id: str, handler: Any) -> bool:
         reset_session_id(token)
 
 
+def _taskless_completion_enabled(session_id: str) -> bool:
+    """Read TeamSpec.enable_taskless_completion for the session's team.
+
+    Defaults True (the fixed taskless-completion behavior). False = an empty
+    task board never settles, which is the emergency rollback for the EDGE
+    path (``_team_round_settled``). Mirrors the POLL_TASK gate in agent-core
+    (``team_completion`` reads ``self._blueprint.team_spec``) so the toggle
+    rolls back BOTH trigger paths consistently when set False. Any accessor
+    miss returns True so the toggle is purely opt-in and never breaks the
+    fixed behavior on a missing/NotReady TeamAgent.
+    """
+    try:
+        tm = get_team_manager(None)
+        handler = tm.get_monitor_handler(session_id)
+        if handler is None:
+            return True
+        # handler._monitor._team_agent is the agent-core TeamAgent, which
+        # exposes ``team_spec`` (a @property -> Optional[TeamSpec]). The
+        # field is ``TeamSpec.enable_taskless_completion: bool = True``.
+        team_agent = getattr(getattr(handler, "_monitor", None), "_team_agent", None)
+        spec = getattr(team_agent, "team_spec", None)
+        return bool(getattr(spec, "enable_taskless_completion", True))
+    except Exception:
+        return True
+
+
 async def _team_round_settled(channel_id: str | None, session_id: str) -> bool:
     """Return whether the DB-backed team state is safe to finish this round."""
     try:
@@ -1228,6 +1254,14 @@ async def _team_round_settled(channel_id: str | None, session_id: str) -> bool:
             if status not in _TEAM_TASK_TERMINAL_STATUSES:
                 return False
 
+        # Empty task board: when the toggle is disabled (rollback mode), the
+        # team must NOT settle via the edge path — faithful to the pre-fix
+        # hang. Defaults True (via _taskless_completion_enabled) so the fixed
+        # behavior is preserved on any accessor miss. Non-empty boards are
+        # unaffected (their terminal check above already gates completion).
+        if not (snapshot.get("tasks") or []) and not _taskless_completion_enabled(session_id):
+            return False
+
         if await _team_has_unread_messages(session_id, handler):
             return False
 
@@ -1249,6 +1283,45 @@ async def _team_round_settled(channel_id: str | None, session_id: str) -> bool:
             exc_info=True,
         )
         return False
+
+
+async def _finish_round_if_settled(
+    channel_id: str | None,
+    session_id: str,
+    round_id: Any,
+    *,
+    reason: str,
+) -> bool:
+    """Re-evaluate _team_round_settled; on True, broadcast processing_status
+    (is_complete=True) with per-round idempotent dedup and return True so the
+    caller can break the stream loop. On False, return False (no broadcast).
+
+    The dedup (claim_round_complete) is shared with the team.completed poll
+    path so exactly one is_complete frame is emitted per round even when both
+    paths fire. claim_round_complete is sync (flag set before any await)."""
+    if not await _team_round_settled(channel_id, session_id):
+        return False
+    tm = get_team_manager(channel_id)
+    if not tm.claim_round_complete(session_id):
+        return True  # already broadcast this round; idempotent
+    _broadcast_event(
+        channel_id,
+        session_id,
+        {
+            "event_type": "chat.processing_status",
+            "session_id": session_id,
+            "rid": round_id,
+            "is_processing": False,
+            "is_complete": True,
+        },
+    )
+    logger.info(
+        "[TeamHelpers] settle-close round: channel_id=%s session_id=%s reason=%s",
+        _resolve_channel_id(channel_id),
+        session_id,
+        reason,
+    )
+    return True
 
 
 def _is_duplicate_ask_user_question(
@@ -1887,6 +1960,7 @@ async def process_team_message_stream(
             )
             if not reuse_active_waiter and not _is_cron_request_id(rid):
                 team_manager.reset_seen_team_events(session_id)
+                team_manager.reset_round_complete(session_id)
                 team_manager.reset_workflow_completed(session_id)
                 request_queue = asyncio.Queue()
                 team_manager.add_waiter(session_id, rid, request_queue)
@@ -2259,6 +2333,7 @@ async def _consume_stream_with_query(
     # can correctly determine whether the team is active.
     tm_ = get_team_manager(channel_id)
     tm_.reset_seen_team_events(session_id)
+    tm_.reset_round_complete(session_id)
     tm_.reset_workflow_completed(session_id)
     try:
         logger.info(
@@ -2466,20 +2541,25 @@ async def _consume_stream_with_query(
                     continue
                 elif parsed.get("event_type") == "team.completed":
                     # Team completed this round — broadcast a single
-                    # round-complete signal that also carries team stats.
-                    _broadcast_event(
-                        channel_id,
-                        session_id,
-                        {
-                            "event_type": "chat.processing_status",
-                            "session_id": session_id,
-                            "rid": round_id,
-                            "is_processing": False,
-                            "is_complete": True,
-                            "member_count": parsed.get("member_count"),
-                            "task_count": parsed.get("task_count"),
-                        },
-                    )
+                    # round-complete signal that also carries team stats,
+                    # deduped per round via claim_round_complete so this poll
+                    # path and the leader chat.final edge path together emit
+                    # exactly one is_complete frame per round.
+                    tm_ = get_team_manager(channel_id)
+                    if tm_.claim_round_complete(session_id):
+                        _broadcast_event(
+                            channel_id,
+                            session_id,
+                            {
+                                "event_type": "chat.processing_status",
+                                "session_id": session_id,
+                                "rid": round_id,
+                                "is_processing": False,
+                                "is_complete": True,
+                                "member_count": parsed.get("member_count"),
+                                "task_count": parsed.get("task_count"),
+                            },
+                        )
                     continue
                 elif parsed.get("event_type") == "chat.error":
                     _broadcast_event(channel_id, session_id, parsed)
@@ -2506,37 +2586,30 @@ async def _consume_stream_with_query(
                 # workflow_completed stays False so the original behavior
                 # is preserved.
                 if parsed.get("event_type") == "chat.final":
-                    tm_ = get_team_manager(channel_id)
-                    should_finish_round = (
-                        (not tm_.has_seen_team_events(session_id))
-                        or tm_.is_workflow_completed(session_id)
-                    )
                     # Deliver the final content before announcing that the
                     # round is complete. Clients may stop consuming the stream
                     # as soon as processing_status(False) arrives.
                     _broadcast_event(channel_id, session_id, parsed)
-                    if should_finish_round:
-                        _broadcast_event(
-                            channel_id,
-                            session_id,
-                            {
-                                "event_type": "chat.processing_status",
-                                "session_id": session_id,
-                                "rid": round_id,
-                                "is_processing": False,
-                                "is_complete": True,
-                            },
-                        )
-                    if is_leader and await _team_round_settled(channel_id, session_id):
-                        logger.info(
-                            "[TeamHelpers] leader final with settled team; finish round "
-                            "and close stream: channel_id=%s session_id=%s",
-                            _resolve_channel_id(channel_id),
-                            session_id,
-                        )
+                    if is_leader and await _finish_round_if_settled(
+                        channel_id, session_id, round_id, reason="leader chat.final"
+                    ):
                         break
                     continue
                 _broadcast_event(channel_id, session_id, parsed)
+                # member-settle edge (leader-only): when a member transitions to
+                # a settled status, re-evaluate settle and close the stream if
+                # the round is settled — without waiting for a second leader
+                # chat.final (the 10:41 incident case: leader final arrived
+                # while members were still busy, so the stream hung).
+                if is_leader:
+                    evt = parsed.get("event") or {}
+                    new_status = str(evt.get("new_status") or "")
+                    if new_status in _TEAM_MEMBER_SETTLED_STATUSES:
+                        if await _finish_round_if_settled(
+                            channel_id, session_id, round_id,
+                            reason=f"member {evt.get('member_id')} -> {new_status}",
+                        ):
+                            break
 
         # If stream ended without any chunks, broadcast an error event
         if received_chunks == 0:
