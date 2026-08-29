@@ -928,6 +928,11 @@
     "disable": "禁用",
     "enableSuccess": "已启用“{{name}}”",
     "disableSuccess": "已禁用“{{name}}”",
+    "xiaoyiEnableConfirmation": {
+      "title": "提示",
+      "continueEnable": "仍然启用",
+      "editConfiguration": "去编辑"
+    },
     "unbind": "解绑",
     "unbindConfigurationTitle": "解绑频道配置",
     "unbindConfigurationMessage": "确定解绑“{{name}}”的频道配置吗？解绑后将清除已保存的配置。",

@@ -6228,10 +6228,14 @@ class JiuWenSwarmDeepAdapter:
     ) -> SubagentRail | None:
         """Build SubagentRail for subagent delegation."""
         try:
-            subagent_rail = BrowserTaskPromptRail()
+            runtime_enabled = is_subagent_runtime_enabled(config_base)
+            subagent_rail = BrowserTaskPromptRail(
+                enable_subagent_runtime=runtime_enabled,
+            )
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SubagentRail create success "
-                "(load-aware browser policy)",
+                "(subagent_runtime=%s)",
+                runtime_enabled,
             )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)

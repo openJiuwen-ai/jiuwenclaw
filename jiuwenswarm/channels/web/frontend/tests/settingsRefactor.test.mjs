@@ -1687,6 +1687,21 @@ test('Settings channel implementation stays decomposed around shared form capabi
   assert.doesNotMatch(source(files.panel), /channel\.[a-z]+\.(?:get|set)_conf/);
 });
 
+test('Xiaoyi enable confirmation keeps continue, edit, and dismiss as distinct actions', () => {
+  const controller = source('src/features/settings/modules/channels/useSettingsChannelsController.ts');
+  const xiaoyiConfirmation = source(
+    'src/features/settings/modules/channels/components/XiaoyiEnableConfirmDialog.tsx',
+  );
+  const confirmDialog = source('src/features/settings/components/SettingsConfirmDialog.tsx');
+
+  assert.match(controller, /shouldConfirmXiaoyiEnable\(enabled, xiaoyi\.form\.getValues\(\)\.api_id\)/);
+  assert.match(controller, /confirmXiaoyiEnable[\s\S]*enabled: true[\s\S]*setPendingXiaoyiEnable\(null\)/);
+  assert.match(xiaoyiConfirmation, /onConfirm=\{\(\) => void controller\.confirmXiaoyiEnable\(\)\}/);
+  assert.match(xiaoyiConfirmation, /onCancel=\{controller\.editPendingXiaoyiConfiguration\}/);
+  assert.match(xiaoyiConfirmation, /onDismiss=\{controller\.cancelXiaoyiEnable\}/);
+  assert.match(confirmDialog, /<Dialog[\s\S]*onCancel=\{onDismiss\}/);
+});
+
 test('legacy channel and More surfaces are removed while Settings owns their replacements', () => {
   const sidebar = source('src/components/SessionSidebar/index.tsx');
   const app = source('src/App.tsx');
