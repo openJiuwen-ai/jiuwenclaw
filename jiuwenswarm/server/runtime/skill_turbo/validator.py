@@ -127,6 +127,7 @@ class CodeValidationPolicy:
                 "__future__",
                 "asyncio",
                 "collections.abc",
+                "contextlib",
                 "dataclasses",
                 "datetime",
                 "json",

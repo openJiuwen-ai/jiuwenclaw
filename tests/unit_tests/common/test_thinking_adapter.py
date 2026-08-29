@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import pytest
 
-from jiuwenswarm.common.thinking.adapter import adapt_thinking
+from jiuwenswarm.common.thinking.adapter import (
+    adapt_thinking,
+    thinking_disabled_invoke_kwargs,
+)
 from jiuwenswarm.common.thinking.types import normalize_thinking
 from jiuwenswarm.common.thinking.vendor_map import match_vendor_style, style_to_kwargs
 
@@ -93,3 +96,11 @@ class TestAdaptThinking:
         with pytest.raises(TypeError):
             profile.llm_call_kwargs["extra_body"]["thinking"]["type"] = "enabled"
         assert profile.llm_call_kwargs["extra_body"]["thinking"]["type"] == "disabled"
+
+
+class TestThinkingDisabledInvokeKwargs:
+    def test_shotgun_shape(self):
+        kwargs = thinking_disabled_invoke_kwargs()
+        assert kwargs["extra_body"]["thinking"]["type"] == "disabled"
+        assert kwargs["extra_body"]["enable_thinking"] is False
+        assert kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False

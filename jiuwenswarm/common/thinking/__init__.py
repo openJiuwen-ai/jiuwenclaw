@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
-from jiuwenswarm.common.thinking.adapter import adapt_thinking
+from jiuwenswarm.common.thinking.adapter import (
+    adapt_thinking,
+    thinking_disabled_invoke_kwargs,
+)
 from jiuwenswarm.common.thinking.rail import ThinkingInjectRail
 from jiuwenswarm.common.thinking.types import (
     THINKING_VALUES,
@@ -18,4 +21,5 @@ __all__ = [
     "ThinkingProfile",
     "adapt_thinking",
     "normalize_thinking",
+    "thinking_disabled_invoke_kwargs",
 ]

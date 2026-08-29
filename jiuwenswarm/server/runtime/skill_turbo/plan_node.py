@@ -193,7 +193,7 @@ class PlanNode(ABC):
             concurrent: 是否处于并发上下文中。True 时 Executor 自动生成
                 stream_source_id 并注入到本次产生的 llm_reasoning / llm_usage
                 事件，方便前端按调用分桶。
-            thinking: 可选语义 thinking（None=不注入，与改前请求体一致）
+            thinking: 语义思考档位（default|off|on），透传给 Executor。
         """
         if self._call_llm_callback is None:
             raise RuntimeError("PlanNode call_llm 回调未初始化")
@@ -223,7 +223,7 @@ class PlanNode(ABC):
             concurrent: 是否处于并发上下文中。True 时 Executor 自动生成
                 stream_source_id 并注入到本次产生的 llm_reasoning / llm_usage
                 事件，方便前端按调用分桶。
-            thinking: 可选语义 thinking（None=不注入，与改前请求体一致）
+            thinking: 语义思考档位（default|off|on），透传给 Executor。
         
         Yields:
             str: LLM 响应片段
@@ -568,9 +568,9 @@ class PlanNode(ABC):
 class DisableThinkingMixin:
     """窄 seam：挂载节点的 call_llm / stream_llm 强制 thinking=\"off\"。
 
-    仅 opt-in：业务节点显式多重继承本 Mixin 才会注入；默认 PlanNode 仍
-    thinking=None（零注入）。stream_llm_collect 经 stream_llm 透传，无需另覆盖。
-    不改 ThinkingInjectRail / config；注入失败由 Executor 跳过或裸重试。
+    仅 opt-in：业务节点显式多重继承本 Mixin 才会注入；默认 PlanNode 保持
+    thinking=None（零注入）。stream_llm_collect 经 stream_llm 透传，无需覆写。
+    注入失败由 Executor 跳过或裸重试，不中止 PPT。
     """
 
     async def call_llm(

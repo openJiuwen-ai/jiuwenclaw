@@ -29,6 +29,10 @@ _VALID_RESEARCH_DEPTHS = frozenset({"L1", "L2", "L3"})
 _VALID_STRUCTURAL_REQUESTS = frozenset(
     {"none", "agenda", "section", "chapter", "auto"}
 )
+_REFERENCE_URL_RE = re.compile(r"https?://[^\s\])>\"']+")
+_EXPLICIT_NO_SEARCH_RE = re.compile(
+    r"(不要搜索|不搜索|无需搜索|禁止搜索|不用搜索|无需联网|不要联网)"
+)
 
 _STYLE_LABEL_TO_ID: dict[str, str] = {
     "商务经典": "business-classic",
@@ -61,15 +65,20 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
 
 提取字段：
 - topic: 演示主题（字符串；未知则 ""）
-- page_count: 内容页数（整数；不含封面/结束页；总页数 = page_count + 2；未知则 null）。
-  判断规则：①用户说"生成N页PPT"/"做N页汇报"/"PPT共N页"/"总页数N页"/"总共N页"/"一共N页"/"N页"/"做N页PPT"/"N页以内"/"不超过N页"/"最多N页"/"不大于N页"等未特指内容页的表达 → N 表示总页数 → page_count = max(N - 2, 1)；
-  ②用户明确说"N个内容页"/"N页正文"，或正在回答"需要多少页内容页"时 → page_count = N。
-  示例："10页以内"→8, "总页数严格为8页"→6, "8页"→6, "做8页PPT"→6
+- page_count: 内容页数（整数；不含封面/结束页，也不含目录/章节等中间结构页；总页数 = page_count + 2 + 中间结构页数；未知则 null）。
+  判断规则：①用户说"生成N页PPT"/"做N页汇报"/"PPT共N页"/"总页数N页"/"总共N页"/"一共N页"/"N页"/"做N页PPT"/"N页以内"/"不超过N页"/"最多N页"/"不大于N页"等未特指内容页的表达 → N 表示总页数 → page_count = max(N - 2 - 结构页扣减, 1)；结构页扣减 = 用户明确要求的中间结构页数量（取本请求提取的 structural_page_request / structural_page_count）：structural_page_request != "none" 且用户指定数量时按 structural_page_count 扣减；未指定数量时按 1 页扣减（如目录页）；structural_page_request == "none" 时扣减 0；
+  ②用户明确说"N个内容页"/"N页正文"，或正在回答"需要多少页内容页"时 → page_count = N（中间结构页另行添加，不占此配额）。
+  示例："10页以内"→8, "总页数严格为8页"→6, "8页"→6, "做8页PPT"→6, "共7页"+要求目录页→4, "8页PPT"+3个章节页→3
+- page_count_user_specified: 用户原文是否明确给出页数（含总页数/内容页表达）；有则为 true，否则 false
 - audience: 目标受众（字符串；未知则 ""）
 - presentation_purpose: 汇报目的，如「工作汇报」「产品展示」「教学分享」「auto」；未知则 ""
 - style_id: 用户明确提及风格时填写：business-classic / tech-minimal / elegant-narrative / industrial-tech / custom；“自由发挥”统一填写 custom；未知则 ""
   “华为风格/华为/华为红/华为风/华为商务”统一填写 business-classic，不得填 custom
 - style_description: style_id 为 custom 时的描述；否则 ""
+- style_constraints: 用户对版式/视觉的显式约束（字号、字体、行高、配色、每页要点数、页码、logo、留白等），凝练成一段自然语言；用户没提则为 ""。只记录用户真实说过的约束，不得推断补写。
+- user_dimensions: 用户显式给出的分析维度列表（string[]）。按优先级：①编号列表 1/2/3… ②「X、Y、Z 方面/维度/角度」③以 / 或 、 分隔的 ≥2 名词短语；清洗为干净名词短语。无则 []。
+- user_structure: 用户原文中表达结构意图的片段，原样保留（叙事顺序/页级规格/带强调结构等）；无则 ""。
+- notes_requirements: 用户对演讲备注的结构/数量/内容约束；未要求备注或不含约束则为 ""。若上游已提供非空值，保持原样。
 - pack_dir: 用户提供的模板包目录绝对路径（字符串；未知则 ""）。
   当用户在消息中提到"用 XX 模板""用模板包""template pack"等，且给出了目录路径时提取该路径。
   路径可能是 Windows 格式（如 D:\\path\\to\\pack）或 Unix 格式（/path/to/pack）。
@@ -94,13 +103,17 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
 4. 不要输出 search_mode / source_type。
 5. topic 缺失时由下游 LLM 生成 4 个主题候选并 ask 用户选择，不要生成询问文案。
 6. pack_dir 存在时 style_id 填 "custom"（模板包优先于预设风格），need_ask_style 设 false。
-7. page_count 为内容页数（不含封面/结束页），系统会在此基础上自动加 2 页（封面+结束页）。
-   用户说"生成N页PPT"/"做N页汇报"/"PPT共N页"/"总页数N页"/"总共N页"/"一共N页"/"N页"/"做N页PPT"/"N页以内"/"不超过N页"/"最多N页"等未特指内容页的表达 → N 表示总页数，page_count = max(N - 2, 1)；
-   用户明确说"N个内容页"/"N页正文"或正在回答"需要多少页内容页"时，page_count = N。
+7. page_count 为内容页数（不含封面/结束页，也不含目录/章节等中间结构页），总页数 = page_count + 2 + 中间结构页数。
+   用户说"生成N页PPT"/"做N页汇报"/"PPT共N页"/"总页数N页"/"总共N页"/"一共N页"/"N页"/"做N页PPT"/"N页以内"/"不超过N页"/"最多N页"等未特指内容页的表达 → N 表示总页数，page_count = max(N - 2 - 结构页扣减, 1)；结构页扣减规则同提取字段说明；
+   用户明确说"N个内容页"/"N页正文"或正在回答"需要多少页内容页"时，page_count = N（中间结构页另行添加）。
+8. style_constraints / user_dimensions / user_structure 不进 outline.md，只供下游透传。
 
 必须只输出 JSON："""
-    + '{"topic":"","page_count":null,"audience":"","presentation_purpose":"",'
-    + '"style_id":"","style_description":"","pack_dir":"",'
+    + '{"topic":"","page_count":null,"page_count_user_specified":false,'
+    + '"audience":"","presentation_purpose":"",'
+    + '"style_id":"","style_description":"","style_constraints":"",'
+    + '"user_dimensions":[],"user_structure":"","notes_requirements":"",'
+    + '"pack_dir":"",'
     + '"structural_page_request":"none","structural_page_count":null,'
     + '"missing_fields":[],"need_ask_style":true}')
 
@@ -121,8 +134,18 @@ _P24_SYSTEM_PROMPT = """你是 PPT 流水线派生参数分析助手。根据已
 
 search_mode 规则（互斥，按优先级取第一个匹配）：
 1. 用户明确要求不搜索、仅按给定材料、局部改稿或样式微调 → no_search
+   - 「仅按给定材料」仅适用于已上传且可解析的本地文档；未抓取的 http(s) 参考链接不算已给定材料
 2. 用户要求最新数据、趋势、市场分析、竞品对比等 → force_search
 3. 其余情况（含宽泛主题、有/无文档、用户提供大纲等）→ auto
+
+search_mode 补充规则（强制，优先于规则 1 的宽泛解读）：
+- 用户提供了 http(s) 参考链接，并要求「根据链接/参考链接/上述网址/链接内容」制作，且 has_documents=false 或 doc_parse_ok=false → 不得 no_search，按规则 3 取 auto（链接需搜索/抓取，不等于已给定材料）
+- 用户同时提供参考链接与「不要搜索/无需搜索」等明确禁搜表述时，仍取 no_search
+
+search_mode 决策纪律（强制）：
+- 按 1→2→3 顺序检查，第一条命中即确定，禁止在 force_search 与 auto 之间反复比较或自我推翻。
+- 用户同时要求「图表/数据/smart 化」与宽泛主题时，只要未命中规则 1，优先 force_search，不要降级为 auto。
+- 这是分类任务，不是开放讨论；确定后立即输出 JSON，禁止输出推理过程、分析步骤或「再想想」类自我反驳。
 
 source_type 规则（核心判据：用户对每页内容的指导深度）：
 - 用户提供了结构化大纲文本（章节/页面结构），各条目以标题或简短主题为主，未对单页的内容细节（如数据维度、图表选型、视觉规范、解读逻辑等）做明确指导 → outline
@@ -138,7 +161,7 @@ research_depth 规则（与 search_mode、page_count 联动；L1/L2/L3 含义见
 
 need_imagegen 规则：用户 query 明确要求 AI 生图/生成配图 → true，否则 → false
 
-必须只输出 JSON，四个字段均必填且取值必须在枚举内：
+必须只输出单行 JSON，四个字段均必填且取值必须在枚举内；禁止 markdown 围栏、禁止前后附加说明：
 {"search_mode":"auto","source_type":"topic","research_depth":"L2","need_imagegen":false}"""
 
 
@@ -275,8 +298,42 @@ def _set_requirement_artifact(ctx: dict[str, Any]) -> None:
             "style_id": ctx.get("style_id", ""),
             "audience": ctx.get("audience", ""),
             "presentation_purpose": ctx.get("presentation_purpose", ""),
+            "style_constraints": ctx.get("style_constraints", ""),
+            "user_dimensions": ctx.get("user_dimensions") or [],
+            "user_structure": ctx.get("user_structure", ""),
+            "notes_requirements": ctx.get("notes_requirements", ""),
+            "page_count_user_specified": bool(ctx.get("page_count_user_specified")),
+            "content_branch": ctx.get("content_branch", ""),
         },
     }
+
+
+def _normalize_user_dimensions(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            result.append(item.strip())
+    return result
+
+
+def _apply_soft_page_count_floor(inputs: dict[str, Any]) -> None:
+    """用户未指定页数且 dims/structure 非空时：page_count = max(6, len(dims) or 6)。"""
+    if inputs.get("page_count_user_specified"):
+        return
+    dims = _normalize_user_dimensions(inputs.get("user_dimensions"))
+    structure = str(inputs.get("user_structure") or "").strip()
+    if not dims and not structure:
+        return
+    floor = max(6, len(dims) if dims else 6)
+    current = inputs.get("page_count")
+    try:
+        current_int = int(current) if current is not None else 0
+    except (TypeError, ValueError):
+        current_int = 0
+    if current_int < floor:
+        inputs["page_count"] = min(floor, _MAX_PAGE_COUNT)
 
 
 def _apply_slot_defaults(inputs: dict[str, Any]) -> None:
@@ -286,6 +343,11 @@ def _apply_slot_defaults(inputs: dict[str, Any]) -> None:
         inputs["presentation_purpose"] = _DEFAULT_PRESENTATION_PURPOSE
     if inputs.get("page_count") is None:
         inputs["page_count"] = _DEFAULT_PAGE_COUNT
+    _apply_soft_page_count_floor(inputs)
+
+
+def _page_count_user_confirmed(inputs: dict[str, Any]) -> bool:
+    return bool(inputs.get("page_count_user_specified"))
 
 
 def _batch_field_is_satisfied(inputs: dict[str, Any], field: str) -> bool:
@@ -298,6 +360,21 @@ def _batch_field_is_satisfied(inputs: dict[str, Any], field: str) -> bool:
         purpose = inputs.get("presentation_purpose")
         return isinstance(purpose, str) and bool(purpose.strip())
     return False
+
+
+def _batch_field_needs_user_ask(inputs: dict[str, Any], field: str) -> bool:
+    """P2.2 是否仍需 ask_user。页数以用户是否明确指定为准，不能因系统默认值跳过询问。"""
+    if field == "page_count":
+        return not _page_count_user_confirmed(inputs)
+    return not _batch_field_is_satisfied(inputs, field)
+
+
+def _unsatisfied_batch_fields_for_ask(inputs: dict[str, Any]) -> list[str]:
+    return [
+        field
+        for field in _ASK_BATCH_FIELDS
+        if _batch_field_needs_user_ask(inputs, field)
+    ]
 
 
 def _unsatisfied_batch_fields(inputs: dict[str, Any]) -> list[str]:
@@ -322,11 +399,39 @@ def _require_batch_fields_collected(inputs: dict[str, Any]) -> None:
 
 
 def _prune_satisfied_batch_missing_fields(inputs: dict[str, Any]) -> None:
-    inputs["missing_fields"] = [
-        field
-        for field in (inputs.get("missing_fields") or [])
-        if field not in _ASK_BATCH_FIELDS or not _batch_field_is_satisfied(inputs, field)
-    ]
+    _reconcile_missing_fields(inputs)
+
+
+def _reconcile_missing_fields(inputs: dict[str, Any]) -> None:
+    """按 inputs 实际值重算 missing_fields，避免 P2.1 LLM 与已收集状态不一致。"""
+    missing: list[str] = []
+    if not _has_nonempty_topic(inputs):
+        missing.append("topic")
+    for field in _ASK_BATCH_FIELDS:
+        if _batch_field_needs_user_ask(inputs, field):
+            missing.append(field)
+    if not _style_id_resolved(inputs) and bool(inputs.get("need_ask_style")):
+        missing.append("style_id")
+    inputs["missing_fields"] = missing
+
+
+def _p21_should_skip(inputs: dict[str, Any]) -> bool:
+    """HITL resume 重放：P2.1 已完成且 topic 已有时跳过 LLM 槽位重分析。"""
+    if str(inputs.get("requirement_collect_status") or "").strip() != "slots_analyzed":
+        return False
+    return _has_nonempty_topic(inputs)
+
+
+def _batch_fields_need_ask(inputs: dict[str, Any]) -> bool:
+    return bool(_unsatisfied_batch_fields_for_ask(inputs))
+
+
+def _ensure_batch_fields_ready(inputs: dict[str, Any]) -> None:
+    """P2.2 skip 路径：补齐 batch 默认值并校验。"""
+    if inputs.get("page_count") is None:
+        inputs["page_count"] = _DEFAULT_PAGE_COUNT
+    _apply_soft_page_count_floor(inputs)
+    _require_batch_fields_collected(inputs)
 
 
 def _merge_slot_payload(
@@ -335,30 +440,66 @@ def _merge_slot_payload(
     *,
     preserve_topic: bool = False,
 ) -> None:
+    page_count_confirmed = _page_count_user_confirmed(inputs)
+    style_resolved = bool(_style_id_resolved(inputs))
+
     if not preserve_topic:
         topic = payload.get("topic")
         if isinstance(topic, str) and topic.strip():
             inputs["topic"] = topic.strip()
 
     page_count = _normalize_page_count(payload.get("page_count"))
-    if page_count is not None:
+    if page_count is not None and not page_count_confirmed:
         inputs["page_count"] = page_count
+
+    if "page_count_user_specified" in payload and not page_count_confirmed:
+        inputs["page_count_user_specified"] = bool(payload.get("page_count_user_specified"))
 
     audience = payload.get("audience")
     if isinstance(audience, str) and audience.strip():
-        inputs["audience"] = audience.strip()
+        if not str(inputs.get("audience") or "").strip():
+            inputs["audience"] = audience.strip()
 
     purpose = payload.get("presentation_purpose")
     if isinstance(purpose, str) and purpose.strip():
-        inputs["presentation_purpose"] = purpose.strip()
+        if not str(inputs.get("presentation_purpose") or "").strip():
+            inputs["presentation_purpose"] = purpose.strip()
 
     style_id = _resolve_style_id(payload.get("style_id"), payload.get("style_description"))
-    if style_id:
+    if style_id and not style_resolved:
         inputs["style_id"] = style_id
 
     style_description = payload.get("style_description")
     if isinstance(style_description, str) and style_description.strip():
         inputs["style_description"] = style_description.strip()
+
+    style_constraints = payload.get("style_constraints")
+    if isinstance(style_constraints, str) and style_constraints.strip():
+        inputs["style_constraints"] = style_constraints.strip()
+    elif "style_constraints" not in inputs:
+        inputs["style_constraints"] = ""
+
+    dims = _normalize_user_dimensions(payload.get("user_dimensions"))
+    if dims:
+        inputs["user_dimensions"] = dims
+    elif not isinstance(inputs.get("user_dimensions"), list):
+        inputs["user_dimensions"] = []
+
+    user_structure = payload.get("user_structure")
+    if isinstance(user_structure, str) and user_structure.strip():
+        inputs["user_structure"] = user_structure.strip()
+    elif "user_structure" not in inputs:
+        inputs["user_structure"] = ""
+
+    notes_requirements = payload.get("notes_requirements")
+    existing_notes = str(inputs.get("notes_requirements") or "").strip()
+    if existing_notes:
+        # P1 已提取则保留
+        pass
+    elif isinstance(notes_requirements, str) and notes_requirements.strip():
+        inputs["notes_requirements"] = notes_requirements.strip()
+    else:
+        inputs.setdefault("notes_requirements", "")
 
     pack_dir = payload.get("pack_dir")
     if isinstance(pack_dir, str) and pack_dir.strip():
@@ -398,9 +539,14 @@ def _merge_slot_payload(
 
     need_ask_style = payload.get("need_ask_style")
     if isinstance(need_ask_style, bool) and not inputs.get("pack_dir"):
-        inputs["need_ask_style"] = need_ask_style
+        if style_resolved:
+            inputs["need_ask_style"] = False
+        else:
+            inputs["need_ask_style"] = need_ask_style
     elif "need_ask_style" not in inputs:
         inputs["need_ask_style"] = not bool(inputs.get("style_id"))
+
+    _reconcile_missing_fields(inputs)
 
 
 def _build_p21_slot_prompt(
@@ -416,13 +562,22 @@ def _build_p21_slot_prompt(
             f"已知主题（来自上游，勿修改）：{inputs.get('topic', '').strip()}\n"
             "missing_fields 不得包含 topic。\n"
         )
+    existing_notes = str(inputs.get("notes_requirements") or "").strip()
+    if existing_notes:
+        parts.append(
+            f"已知 notes_requirements（来自上游，勿清空）：{existing_notes}\n"
+        )
     if user_text:
         parts.append(f"用户消息：\n{user_text}\n")
     if doc_excerpt:
-        parts.append(f"文档摘要（doc_raw）：\n{doc_excerpt}\n")
+        parts.append(f"文档摘要（doc_summary）：\n{doc_excerpt}\n")
     if inputs.get("has_documents"):
         parts.append(f"has_documents: {bool(inputs.get('has_documents'))}\n")
-    parts.append("按 JSON 返回全部槽位、missing_fields、need_ask_style。")
+    parts.append(
+        "按 JSON 返回全部槽位（含 style_constraints / user_dimensions / "
+        "user_structure / notes_requirements / page_count_user_specified）、"
+        "missing_fields、need_ask_style。"
+    )
     return "\n".join(parts)
 
 
@@ -433,10 +588,15 @@ def _parse_slot_analysis_response(raw: str, *, preserve_topic: bool) -> dict[str
         return {
             "topic": "",
             "page_count": None,
+            "page_count_user_specified": False,
             "audience": "",
             "presentation_purpose": "",
             "style_id": "",
             "style_description": "",
+            "style_constraints": "",
+            "user_dimensions": [],
+            "user_structure": "",
+            "notes_requirements": "",
             "pack_dir": "",
             "structural_page_request": "none",
             "structural_page_count": None,
@@ -444,6 +604,29 @@ def _parse_slot_analysis_response(raw: str, *, preserve_topic: bool) -> dict[str
             "need_ask_style": True,
         }
     return payload
+
+
+async def _load_doc_excerpt_for_slots(node: PlanNode, inputs: dict[str, Any]) -> str:
+    """优先读 doc_summary；无则退回 doc_raw 截断（降级兼容）。"""
+    summary_inline = str(inputs.get("doc_summary") or "").strip()
+    if summary_inline:
+        return summary_inline[:_DOC_EXCERPT_MAX_CHARS]
+    summary_path = inputs.get("doc_summary_path")
+    if summary_path:
+        text = await PptCommon.read_file(
+            node,
+            summary_path,
+            max_chars=_DOC_EXCERPT_MAX_CHARS,
+            error_type=RequirementCollectError,
+        )
+        if text.strip():
+            return text
+    return await PptCommon.read_file(
+        node,
+        inputs.get("doc_raw_path"),
+        max_chars=_DOC_EXCERPT_MAX_CHARS,
+        error_type=RequirementCollectError,
+    )
 
 
 def _build_p24_prompt(inputs: dict[str, Any], user_text: str, doc_excerpt: str) -> str:
@@ -455,6 +638,7 @@ def _build_p24_prompt(inputs: dict[str, Any], user_text: str, doc_excerpt: str) 
         f"- audience: {inputs.get('audience', '')}\n"
         f"- presentation_purpose: {inputs.get('presentation_purpose', '')}\n"
         f"- style_id: {inputs.get('style_id', '')}\n"
+        f"- style_constraints: {inputs.get('style_constraints', '')}\n"
         f"- has_documents: {bool(inputs.get('has_documents'))}\n"
         f"- doc_parse_ok: {bool(inputs.get('doc_parse_ok'))}\n"
         f"- image_paths: {bool(inputs.get('image_paths'))}\n"
@@ -468,7 +652,7 @@ def _build_p24_prompt(inputs: dict[str, Any], user_text: str, doc_excerpt: str) 
 
 
 async def _ask_missing_batch_fields(node: PlanNode, inputs: dict[str, Any]) -> None:
-    missing_fields = _unsatisfied_batch_fields(inputs)
+    missing_fields = _unsatisfied_batch_fields_for_ask(inputs)
     if not missing_fields:
         return
 
@@ -504,7 +688,7 @@ async def _ask_missing_batch_fields(node: PlanNode, inputs: dict[str, Any]) -> N
     _prune_satisfied_batch_missing_fields(inputs)
 
     # 部分字段在回填中仍空（如用户选了"其他"但未填文本）——继续 LLM 兜底
-    still_missing = _unsatisfied_batch_fields(inputs)
+    still_missing = _unsatisfied_batch_fields_for_ask(inputs)
     if still_missing:
         logger.info(
             "[P2.2] 用户作答后仍存在缺失字段，LLM 兜底补默认值: %s", still_missing,
@@ -547,14 +731,53 @@ def _parse_derive_params_response(raw: str) -> dict[str, str]:
     }
 
 
+def _extract_reference_urls(text: str) -> list[str]:
+    if not text:
+        return []
+    seen: set[str] = set()
+    urls: list[str] = []
+    for match in _REFERENCE_URL_RE.finditer(text):
+        url = match.group(0).rstrip(".,;:)」\"'")
+        key = url.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        urls.append(url)
+    return urls
+
+
+def _user_explicitly_no_search(user_text: str) -> bool:
+    return bool(_EXPLICIT_NO_SEARCH_RE.search(user_text or ""))
+
+
+def _adjust_search_mode_for_reference_urls(
+    inputs: dict[str, Any],
+    user_text: str,
+    derived: dict[str, str],
+) -> dict[str, str]:
+    """参考链接未解析为本地文档时，禁止 no_search（与 pptx-craft 素材分支一致）。"""
+    if derived.get("search_mode") != "no_search":
+        return derived
+    if not _extract_reference_urls(user_text):
+        return derived
+    if _user_explicitly_no_search(user_text):
+        return derived
+
+    has_parsed_docs = bool(inputs.get("has_documents")) and bool(inputs.get("doc_parse_ok"))
+    if has_parsed_docs:
+        return derived
+
+    adjusted = dict(derived)
+    adjusted["search_mode"] = "auto"
+    logger.info(
+        "[P2.4] 检测到未解析的参考链接，search_mode 从 no_search 调整为 auto"
+    )
+    return adjusted
+
+
 async def _derive_params_via_llm(node: PlanNode, inputs: dict[str, Any]) -> dict[str, str]:
     user_text = _collect_user_text(inputs)
-    doc_excerpt = await PptCommon.read_file(
-        node,
-        inputs.get("doc_raw_path"),
-        max_chars=_DOC_EXCERPT_MAX_CHARS,
-        error_type=RequirementCollectError,
-    )
+    doc_excerpt = await _load_doc_excerpt_for_slots(node, inputs)
 
     response = await node.stream_llm_collect(
         _build_p24_prompt(inputs, user_text, doc_excerpt),
@@ -563,7 +786,8 @@ async def _derive_params_via_llm(node: PlanNode, inputs: dict[str, Any]) -> dict
     if not isinstance(response, str) or not response.strip():
         raise RequirementCollectError("派生参数推断失败：LLM 返回为空")
 
-    return _parse_derive_params_response(response)
+    derived = _parse_derive_params_response(response)
+    return _adjust_search_mode_for_reference_urls(inputs, user_text, derived)
 
 
 def _field_from_header(header: str) -> str | None:
@@ -614,6 +838,7 @@ def _apply_answer_item(
         count = _page_count_from_label(label, other_text)
         if count is not None:
             inputs["page_count"] = count
+            inputs["page_count_user_specified"] = True
     elif field == "audience":
         inputs["audience"] = _audience_from_label(label, other_text)
     elif field == "presentation_purpose":
@@ -635,6 +860,12 @@ def _apply_answer_item(
             inputs["style_description"] = description
             if style_id == "custom":
                 inputs["additional_notes"] = description
+            # Other/自定义描述并入 style_constraints（与 style_id 正交覆盖项）
+            existing = str(inputs.get("style_constraints") or "").strip()
+            if description and description not in existing:
+                inputs["style_constraints"] = (
+                    f"{existing}；{description}".strip("；") if existing else description
+                )
 
 
 def _apply_ask_answers(
@@ -752,6 +983,7 @@ async def _ask_missing_style(node: PlanNode, inputs: dict[str, Any]) -> None:
         logger.info("[P2.3] ask_user 自动应答（用户超时），style_id 兜底为 %s", fallback_style)
         inputs["style_id"] = fallback_style
         inputs["need_ask_style"] = False
+        _reconcile_missing_fields(inputs)
         return
 
     if status != "answered" or not answers:
@@ -771,6 +1003,8 @@ async def _ask_missing_style(node: PlanNode, inputs: dict[str, Any]) -> None:
         logger.info("[P2.3] 用户作答后仍缺 style_id，LLM 兜底为 %s", fallback_style)
         inputs["style_id"] = fallback_style
         inputs["need_ask_style"] = False
+
+    _reconcile_missing_fields(inputs)
 
 
 def _normalize_ask_result(result: Any) -> tuple[str, list[Any]]:
@@ -902,12 +1136,7 @@ async def _llm_default_batch_fields(
 ) -> None:
     """超时兜底：LLM 推断缺失 batch 字段；最终仍为空时落到模块级 default。"""
     user_text = _collect_user_text(inputs)
-    doc_excerpt = await PptCommon.read_file(
-        node,
-        inputs.get("doc_raw_path"),
-        max_chars=_DOC_EXCERPT_MAX_CHARS,
-        error_type=RequirementCollectError,
-    )
+    doc_excerpt = await _load_doc_excerpt_for_slots(node, inputs)
     payload: dict[str, Any] = {}
     try:
         response = await node.stream_llm_collect(
@@ -925,6 +1154,9 @@ async def _llm_default_batch_fields(
     if "page_count" in missing_fields:
         count = _normalize_page_count(payload.get("page_count"))
         inputs["page_count"] = count if count is not None else _DEFAULT_PAGE_COUNT
+        # 超时/空答兜底视为「页数收集已完成」，否则 HITL resume 会因
+        # page_count_user_specified=False 再次进入 P2.2，形成页数↔风格死循环。
+        inputs["page_count_user_specified"] = True
     if "audience" in missing_fields:
         audience = payload.get("audience")
         inputs["audience"] = (
@@ -946,12 +1178,7 @@ async def _llm_default_topic(
 ) -> str:
     """超时兜底：LLM 从候选中挑选最契合的主题；失败时取第一项。"""
     user_text = _collect_user_text(inputs)
-    doc_excerpt = await PptCommon.read_file(
-        node,
-        inputs.get("doc_raw_path"),
-        max_chars=_DOC_EXCERPT_MAX_CHARS,
-        error_type=RequirementCollectError,
-    )
+    doc_excerpt = await _load_doc_excerpt_for_slots(node, inputs)
     try:
         response = await node.stream_llm_collect(
             _build_topic_fallback_prompt(topic_options, user_text, doc_excerpt),
@@ -1099,12 +1326,7 @@ async def _resolve_topic_via_ask(node: PlanNode, inputs: dict[str, Any]) -> None
     if not node.has_tool("ask_user"):
         raise RequirementCollectError("缺少 ask_user 工具，无法收集演示主题")
 
-    doc_excerpt = await PptCommon.read_file(
-        node,
-        inputs.get("doc_raw_path"),
-        max_chars=_DOC_EXCERPT_MAX_CHARS,
-        error_type=RequirementCollectError,
-    )
+    doc_excerpt = await _load_doc_excerpt_for_slots(node, inputs)
     topic_options = await _generate_topic_suggestions(node, inputs, doc_excerpt)
     topic_question = _build_topic_ask_question(topic_options)
 
@@ -1180,13 +1402,9 @@ class P21SlotExtractNode(PlanNode):
         )
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        PptCommon.ensure_phase1_defaults(inputs)
         user_text = _collect_user_text(inputs)
-        doc_excerpt = await PptCommon.read_file(
-            self,
-            inputs.get("doc_raw_path"),
-            max_chars=_DOC_EXCERPT_MAX_CHARS,
-            error_type=RequirementCollectError,
-        )
+        doc_excerpt = await _load_doc_excerpt_for_slots(self, inputs)
         preserve_topic = _has_nonempty_topic(inputs)
 
         response = await self.stream_llm_collect(
@@ -1242,6 +1460,9 @@ class P22AskBatchNode(PlanNode):
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         await _ask_missing_batch_fields(self, inputs)
+        if inputs.get("page_count") is None:
+            inputs["page_count"] = _DEFAULT_PAGE_COUNT
+        _apply_soft_page_count_floor(inputs)
         _require_batch_fields_collected(inputs)
         return inputs
 
@@ -1512,6 +1733,7 @@ class RequirementCollectNode(PlanNode):
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         ctx = inputs
+        PptCommon.ensure_phase1_defaults(ctx)
 
         # 快捷路径：无附件且 P1 已从 query 预提取全部槽位
         pre_slots = ctx.get("slots_from_query", {})
@@ -1521,6 +1743,7 @@ class RequirementCollectNode(PlanNode):
                 v = pre_slots.get(slot)
                 if slot == "page_count" and v is not None:
                     ctx[slot] = v
+                    ctx["page_count_user_specified"] = True
                 elif slot == "style_id" and isinstance(v, str) and v.strip():
                     # 归一化 style_id（如"华为风格"->"business-classic"），支持 style_description 回退
                     normalized = _resolve_style_id(v, pre_slots.get("style_description"))
@@ -1541,7 +1764,9 @@ class RequirementCollectNode(PlanNode):
                 ctx["structural_page_count"] = _spc
             else:
                 ctx.setdefault("structural_page_count", None)
-            await self.skip_subplan(self.sub_plans[0], ctx, message="slots pre-filled from query")
+
+            # 快捷路径仍跑一次轻量 P2.1，补齐 constraints/dims/structure
+            await self.execute_subplan(self.sub_plans[0], ctx)
             await self.skip_subplan(self.sub_plans[1], ctx, message="slots pre-filled from query")
             await self.skip_subplan(self.sub_plans[2], ctx, message="slots pre-filled from query")
             await self.execute_subplan(self.sub_plans[3], ctx)  # P2.4 必跑
@@ -1551,6 +1776,7 @@ class RequirementCollectNode(PlanNode):
             self._set_style_mode(ctx)
             # 图片变量兜底（供 P6.5 Diana 消费）
             self._ensure_image_vars(ctx)
+            PptCommon.apply_content_branch(ctx)
             # 写入 __artifact__，供跨请求续跑复用需求上下文
             _set_requirement_artifact(ctx)
             return ctx
@@ -1560,6 +1786,7 @@ class RequirementCollectNode(PlanNode):
             for slot, value in pre_slots.items():
                 if slot == "page_count" and value is not None and ctx.get("page_count") is None:
                     ctx[slot] = value
+                    ctx["page_count_user_specified"] = True
                 elif isinstance(value, str) and value.strip() and not ctx.get(slot):
                     ctx[slot] = value
             # 结构页需求透传
@@ -1579,10 +1806,36 @@ class RequirementCollectNode(PlanNode):
                 else:
                     ctx.setdefault("structural_page_count", None)
 
-        await self.execute_subplan(self.sub_plans[0], ctx)
+        if _p21_should_skip(ctx):
+            _reconcile_missing_fields(ctx)
+            await self.skip_subplan(
+                self.sub_plans[0],
+                ctx,
+                message="slots already analyzed (resume skip P2.1)",
+            )
+        else:
+            await self.execute_subplan(self.sub_plans[0], ctx)
 
-        for subplan in self.sub_plans[1:]:
-            await self.execute_subplan(subplan, ctx)
+        if _batch_fields_need_ask(ctx):
+            await self.execute_subplan(self.sub_plans[1], ctx)
+        else:
+            _ensure_batch_fields_ready(ctx)
+            await self.skip_subplan(
+                self.sub_plans[1],
+                ctx,
+                message="batch fields already collected",
+            )
+
+        if _style_id_resolved(ctx):
+            await self.skip_subplan(
+                self.sub_plans[2],
+                ctx,
+                message="style_id already collected",
+            )
+        else:
+            await self.execute_subplan(self.sub_plans[2], ctx)
+
+        await self.execute_subplan(self.sub_plans[3], ctx)
 
         if not _has_nonempty_topic(ctx):
             raise RequirementCollectError("缺少演示主题 topic，无法继续 PPT 流水线")
@@ -1590,6 +1843,7 @@ class RequirementCollectNode(PlanNode):
         self._set_style_mode(ctx)
         # 图片变量兜底（供 P6.5 Diana 消费）
         self._ensure_image_vars(ctx)
+        PptCommon.apply_content_branch(ctx)
         # 写入 __artifact__，供跨请求续跑复用需求上下文
         _set_requirement_artifact(ctx)
         return ctx
