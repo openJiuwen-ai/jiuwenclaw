@@ -225,7 +225,10 @@ from jiuwenswarm.agents.harness.common.rails import (
 from jiuwenswarm.agents.harness.common.rails.disabled_tools_rail import (
     DisabledToolsRail,
 )
-from jiuwenswarm.agents.harness.common.rails.skill_active_state import SkillActiveStateRail
+from jiuwenswarm.agents.harness.common.rails.skill_active_state import (
+    SkillActiveStateRail,
+    clear_session_skill_state,
+)
 from jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail import (
     SkillCredentialInjectionRail,
     coalesce_config_skill_envs,
@@ -2345,6 +2348,7 @@ class JiuWenSwarmDeepAdapter:
         self._session_adapter_last_used.pop(session_id, None)
         self._session_adapter_versions.pop(session_id, None)
         self._session_adapter_reload_failures.pop(session_id, None)
+        clear_session_skill_state(session_id)
         if not remove_runtime_state:
             return
         try:
@@ -6104,11 +6108,30 @@ class JiuWenSwarmDeepAdapter:
             skill_rail = None
         return skill_rail
 
-    @staticmethod
-    def _build_skill_active_state_rail() -> SkillActiveStateRail | None:
+    def _skill_rail_session_id(self) -> str | None:
+        """Session id bound into skill rails for session-scoped adapters.
+
+        OfficeClaw runs one DeepAgent per session; tool callbacks often lack
+        ``conversation_id`` on ``ToolCallInputs``, so rails must carry the real
+        ``officeclaw_…`` id instead of falling back to ``default``.
+        Prefer ``_parent_session_id`` whenever set (not only when the scoped
+        flag is already True) so early rail builds cannot miss the id.
+        """
+        sid = str(self._parent_session_id or "").strip()
+        if sid:
+            return sid
+        if not self._is_session_scoped_adapter:
+            return None
+        return None
+
+    def _build_skill_active_state_rail(self) -> SkillActiveStateRail | None:
         try:
-            rail = SkillActiveStateRail()
-            logger.info("[JiuWenSwarmDeepAdapter] SkillActiveStateRail create success")
+            rail = SkillActiveStateRail(session_id=self._skill_rail_session_id())
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillActiveStateRail create success "
+                "(session_id=%s)",
+                self._skill_rail_session_id() or "-",
+            )
             return rail
         except Exception as exc:
             logger.warning(
@@ -6117,17 +6140,21 @@ class JiuWenSwarmDeepAdapter:
             )
             return None
 
-    @staticmethod
     def _build_skill_credential_injection_rail(
+        self,
         config: dict[str, Any],
     ) -> SkillCredentialInjectionRail | None:
         try:
             skill_envs = coalesce_skill_envs(config.get("skill_envs"), None)
-            rail = SkillCredentialInjectionRail(skill_envs=skill_envs)
+            rail = SkillCredentialInjectionRail(
+                skill_envs=skill_envs,
+                preset_session_id=self._skill_rail_session_id(),
+            )
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SkillCredentialInjectionRail create success "
-                "(skills=[%s])",
+                "(skills=[%s], session_id=%s)",
                 ", ".join(skill_envs.keys()) if skill_envs else "",
+                self._skill_rail_session_id() or "-",
             )
             return rail
         except Exception as exc:
@@ -10447,6 +10474,7 @@ class JiuWenSwarmDeepAdapter:
                     self._parent_session_id,
                     exc,
                 )
+            clear_session_skill_state(str(self._parent_session_id or "").strip())
         self._teardown_agent_owned_tools()
         self._release_sys_operations()
         # 取消未到期的延时重索引 task，避免 adapter cleanup 后仍有孤儿 task
