@@ -2152,6 +2152,7 @@ _CONTAINER_FILE_API_METHODS = (
     "upload_container_file",
     "download_container_file",
     "list_container_files",
+    "mkdir_container_dir",
 )
 
 

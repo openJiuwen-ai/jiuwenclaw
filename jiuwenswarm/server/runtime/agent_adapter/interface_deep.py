@@ -1367,6 +1367,11 @@ class JiuWenSwarmDeepAdapter:
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
         self._model_name_to_keys: dict[str, list[str]] = {}
+        # 全局列表下标 → cache_key。通道侧（Web）用全局 origin_index 拼请求 key，
+        # 与后端 per-name 的 cache_key 序号语义分叉；此映射在 _resolve_model_by_name
+        # 回退分支把通道传入的全局序号换算成真实 cache_key，避免同名条目
+        # （如 agentos 第 2+ 个同名模型）被静默解析到 defaults 的同名首条目。
+        self._global_index_to_cache_key: dict[int, str] = {}
         # Cache system prompt to avoid re-building on every btw/recap call.
         # The system prompt is derived from project context (CLAUDE.md, skills, etc.)
         # which doesn't change within a session, so caching is safe.
@@ -4796,11 +4801,17 @@ class JiuWenSwarmDeepAdapter:
         self,
         entry: dict[str, Any],
         name_counter: dict[str, int],
-    ) -> None:
-        """Register one model entry into the request-selectable model cache."""
+    ) -> str | None:
+        """Register one model entry into the request-selectable model cache.
+
+        Returns the cache_key (``{model_name}#{per_name_idx}``) on success, or
+        ``None`` when the entry is skipped (missing model_name or build failure).
+        The caller pairs this return value with the entry's global list index
+        to populate ``_global_index_to_cache_key``.
+        """
         mcc = entry.get("model_client_config") or {}
         if not mcc.get("model_name"):
-            return
+            return None
         model_name = mcc["model_name"]
         idx = name_counter.get(model_name, 0)
         name_counter[model_name] = idx + 1
@@ -4816,7 +4827,7 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] 跳过无效模型条目 %s: %s",
                 model_name, exc,
             )
-            return
+            return None
         if model_name not in self._model_name_to_keys:
             self._model_name_to_keys[model_name] = []
         self._model_name_to_keys[model_name].append(cache_key)
@@ -4829,17 +4840,24 @@ class JiuWenSwarmDeepAdapter:
         if alias and alias != model_name and alias not in self._model_cache:
             self._model_cache[alias] = self._model_cache[cache_key]
 
+        return cache_key
+
     def _build_model_cache_from_defaults(self, config: dict) -> None:
         """从 models.defaults 列表构建模型缓存。
 
         key 使用 {model_name}#{index} 格式以支持同名模型共存。
-        同时记录 _model_name_to_keys 映射以便按 model_name 查找。
+        同时记录 _model_name_to_keys 映射以便按 model_name 查找，
+        以及 _global_index_to_cache_key 映射以便在 _resolve_model_by_name
+        回退分支把通道侧的全局 origin_index 换算成真实 cache_key。
         """
         self._model_name_to_keys.clear()
+        self._global_index_to_cache_key.clear()
         name_counter: dict[str, int] = {}
 
-        for entry in get_default_models(config):
-            self._register_model_cache_entry(entry, name_counter)
+        for global_idx, entry in enumerate(get_default_models(config)):
+            cache_key = self._register_model_cache_entry(entry, name_counter)
+            if cache_key is not None:
+                self._global_index_to_cache_key[global_idx] = cache_key
 
     def _build_model_cache_legacy(self, config: dict) -> None:
         """回退到旧格式（models.default / react 段）构建单条目缓存。"""
@@ -4889,6 +4907,7 @@ class JiuWenSwarmDeepAdapter:
 
         self._model_cache.clear()
         self._model_name_to_keys.clear()
+        self._global_index_to_cache_key.clear()
         self._inject_attribution_to_config(config)
         self._build_model_cache_from_defaults(config)
         if not self._model_cache:
@@ -4988,24 +5007,71 @@ class JiuWenSwarmDeepAdapter:
         return stored.strip() if isinstance(stored, str) else ""
 
     def _resolve_model_by_name(self, requested_model_name: str = "") -> Model | None:
-        """Resolve the exact model object that will be used."""
+        """Resolve the exact model object that will be used.
+
+        Accepts three request formats from channels (web/TUI/etc.):
+
+        1. Pure ``model_name`` — returns the ``is_default=true`` entry registered
+           under the bare name, if any.
+        2. ``{model_name}#{index}`` whose ``#index`` is the channel-supplied
+           global list position (e.g. Web's ``origin_index`` from models.list).
+           It is converted to the real per-name cache_key via
+           ``_global_index_to_cache_key``; if no entry is registered at that
+           global position (out of range) or the mapped key has since been
+           evicted, a warning is logged and the default model is returned
+           rather than silently falling back to the first same-name entry
+           (which would mis-resolve an agentos same-name entry to the defaults
+           entry and send the wrong api_base/api_key).
+
+        Note: the ``#index`` is *always* treated as a global position. An
+        earlier version first tried ``requested in self._model_cache`` (whose
+        keys use the per-name ``name_counter`` scheme
+        ``{model_name}#{per_name_idx}``); when a channel-supplied global index
+        happened to collide with a per-name index of a *different* same-name
+        entry, that lookup silently returned the wrong entry. Routing every
+        ``#``-bearing request through the global map removes that collision
+        while keeping the pure-name path (format 1) intact.
+        """
         requested = (requested_model_name or "").strip()
         if not requested:
             # ask_user_interrupt 等中断恢复请求不带 model_name，
             # 回退到 session 上次应用的模型，而非 config.yaml 默认占位模型。
             return getattr(self, "_last_resolved_model", None) or self._model
-        # 精确匹配（#index 格式，或已注册纯 model_name key 的默认模型）
-        if requested in self._model_cache:
-            return self._model_cache[requested]
-        # 回退：非默认模型只以 {model_name}#{index} 注册在 _model_cache 里，没有纯
-        # model_name 的 key；这里按 _model_name_to_keys 里登记的真实 cache key 去查，
-        # 而不是重复判断上面已知为 False 的 `requested in self._model_cache`
-        # （旧代码在此处写重了，导致非默认模型永远查不到，静默 fallback 回默认模型）。
-        keys = self._model_name_to_keys.get(requested)
-        if keys:
-            resolved = self._model_cache.get(keys[0])
-            if resolved is not None:
-                return resolved
+        # 含 # 的请求一律走全局 origin_index 换算（见上文 Note），避免 per-name
+        # cache_key 与通道侧全局 index 碰撞时误命中另一同名条目。
+        if "#" not in requested:
+            # 纯 model_name 精确命中（仅 is_default=true 的条目注册了纯名 key）
+            if requested in self._model_cache:
+                return self._model_cache[requested]
+            # 纯 model_name 查找（_model_name_to_keys 的 key 是纯名）
+            keys = self._model_name_to_keys.get(requested)
+            if keys:
+                resolved = self._model_cache.get(keys[0])
+                if resolved is not None:
+                    return resolved
+        # 通道侧使用全局 origin_index；将其换算成后端 per-name cache key。
+        if "#" in requested:
+            bare_name, _, index_part = requested.rpartition("#")
+            if not bare_name:
+                return self._model
+            try:
+                global_idx = int(index_part)
+            except ValueError:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] model resolve: requested %r has "
+                    "non-integer index, falling back to default model", requested,
+                )
+                return self._model
+            cache_key = self._global_index_to_cache_key.get(global_idx)
+            if cache_key is None or cache_key not in self._model_cache:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] model resolve: global index %d "
+                    "for %r not in cache map (mapped_key=%s), falling back to "
+                    "default model", global_idx, requested, cache_key,
+                )
+                return self._model
+            return self._model_cache[cache_key]
+
         # Opencode Zen 免费模型（纯内存态，不入 config.yaml）：从进程内存缓存
         # 取完整 model_client_config / model_config_obj 构建并缓存，供本次及后续请求复用。
         # 不写回 config，开关关闭（get_zen_free_model_entries 返回空）则自然查不到。
@@ -6228,10 +6294,14 @@ class JiuWenSwarmDeepAdapter:
     ) -> SubagentRail | None:
         """Build SubagentRail for subagent delegation."""
         try:
-            subagent_rail = BrowserTaskPromptRail()
+            runtime_enabled = is_subagent_runtime_enabled(config_base)
+            subagent_rail = BrowserTaskPromptRail(
+                enable_subagent_runtime=runtime_enabled,
+            )
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SubagentRail create success "
-                "(load-aware browser policy)",
+                "(subagent_runtime=%s)",
+                runtime_enabled,
             )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
@@ -6576,8 +6646,8 @@ class JiuWenSwarmDeepAdapter:
         skills_dirs = self._skill_scan_dirs()
         # Keep hot-bound plugin/template skill roots. _skill_scan_dirs() only
         # knows workspace + session MCP; package dirs live on deep_config.skills
-        # after _bind_skill. Append them so MCP refresh does not drop them, and
-        # workspace still wins on duplicate names.
+        # after _bind_skill. Prepend them so MCP refresh does not drop them and
+        # package skills retain precedence over same-named workspace skills.
         instance = getattr(self, "_instance", None)
         bound = getattr(getattr(instance, "deep_config", None), "skills", None)
         if bound:
@@ -6592,7 +6662,7 @@ class JiuWenSwarmDeepAdapter:
                     continue
                 seen.add(resolved)
                 extra.append(text)
-            skills_dirs = [*skills_dirs, *extra]
+            skills_dirs = [*extra, *skills_dirs]
         if self._skill_rail is not None:
             # Update the rail's scan roots before reload so it picks up newly
             # connected (and drops disconnected) MCP skill dirs.

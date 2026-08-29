@@ -1320,6 +1320,9 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
 
     优先级：models.defaults（列表） > models.default（单对象） > 环境变量回退
     返回的 api_key 已解密。每个条目可能含顶层 alias 字段。
+
+    无论走哪个分支，最后都会追加 ``models.agentos`` 备份模型条目（若有）。
+    agentos 与 defaults 并列、同等可选可切换，但 ``is_default=False`` 不抢启动默认。
     """
     if config is None:
         config = get_config()

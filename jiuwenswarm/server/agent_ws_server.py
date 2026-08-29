@@ -1236,6 +1236,36 @@ class AgentWebSocketServer:
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
         await self._bootstrap_internal_jiuwenbox()
 
+    def schedule_image_modality_warmup(
+        self, *, reason: str, reset_cache: bool = False
+    ) -> None:
+        """把图像模态探针任务放进统一槽位调度。
+
+        启动预热与模型配置变更重探共用 ``_image_modality_refresh_task`` 这一个
+        任务槽位：新任务启动前取消上一轮未完成的任务，避免启动预热在配置变化
+        后继续跑完并写回过期结论（新配置先 reset 缓存、旧任务随后覆盖）。
+        任务由 ``_stop_main_services`` 在 shutdown 时统一 cancel 回收。
+
+        Args:
+            reason: 传给 warm/refresh 的日志标签（"startup" / "model config change"）。
+            reset_cache: True 时先清空旧结论再探（配置变更场景），False 仅补探。
+        """
+        from jiuwenswarm.server.runtime.image_modality_warmup import (
+            refresh_image_modality_cache,
+            warm_image_modality_cache,
+        )
+
+        previous_task = self._image_modality_refresh_task
+        if previous_task is not None and not previous_task.done():
+            previous_task.cancel()
+        if reset_cache:
+            coro = refresh_image_modality_cache(get_config(), reason=reason)
+        else:
+            coro = warm_image_modality_cache(get_config(), reason=reason)
+        self._image_modality_refresh_task = asyncio.create_task(
+            coro, name=f"image-modality-warmup-{reason}"
+        )
+
     async def _start_personal_context_best_effort(self) -> None:
         """Start optional PersonalContext without changing AgentServer readiness."""
         start_cancelled: asyncio.CancelledError | None = None
@@ -9352,19 +9382,11 @@ class AgentWebSocketServer:
             # 把 reload 响应拖在这里；这个 loop 活到进程结束，结论一定能落进缓存。
             should_refresh_image_modality = not reload_scopes or "model" in reload_scopes
             if should_refresh_image_modality:
-                from jiuwenswarm.server.runtime.image_modality_warmup import (
-                    refresh_image_modality_cache,
-                )
-
-                # 上一轮还没探完就又改了配置：旧结论已经作废，直接取消。
-                previous_task = self._image_modality_refresh_task
-                if previous_task is not None and not previous_task.done():
-                    previous_task.cancel()
-                self._image_modality_refresh_task = asyncio.create_task(
-                    refresh_image_modality_cache(
-                        get_config(),
-                        reason="model config change",
-                    )
+                # 上一轮还没探完就又改了配置：旧结论已经作废，由统一调度入口
+                # 取消旧任务（含启动预热轮）后再 reset 缓存并重探。
+                self.schedule_image_modality_warmup(
+                    reason="model config change",
+                    reset_cache=True,
                 )
             # 模型配置变更时同步刷新本进程（AgentServer）的 Zen 免费模型缓存
             # （与上方 image modality 刷新同一 model scope）。Gateway 进程在
@@ -10687,6 +10709,17 @@ class AgentWebSocketServer:
         if model_name and model_name in self._model_cache:
             return self._model_cache[model_name]
         return self._default_model
+
+    def reset_model_cache(self) -> None:
+        """清空模型缓存,下次 _resolve_model 触发懒重建。
+
+        供 Zen 免费模型就绪回调使用:预热异步化后首个请求可能早于 Zen 拉取
+        完成构建不含 Zen 条目的缓存(一次性、不自动重建),就绪后清空即可让
+        重建带上 Zen 免费模型及占位符默认模型的 Zen 兜底。
+        """
+        if self._model_cache:
+            self._model_cache.clear()
+        self._default_model = None
 
     def _build_model_cache(self) -> None:
         """Build model cache from jiuwenswarm config.yaml (reuse interface_deep logic)."""

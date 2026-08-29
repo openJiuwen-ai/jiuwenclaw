@@ -1684,7 +1684,7 @@ class JiuWenSwarm:
                 )
                 if payload.get("success"):
                     await self.create_instance()
-                    self._refresh_team_shared_skill_links(request.session_id)
+                    await self._reload_team_skill_rails(request.session_id)
         except Exception as exc:
             logger.error("[JiuWenSwarm] skills 请求处理失败: %s", exc)
             err_payload: dict = {"error": str(exc), "message": str(exc)}

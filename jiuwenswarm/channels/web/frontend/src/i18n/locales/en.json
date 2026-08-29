@@ -943,6 +943,11 @@
     "disable": "Disable",
     "enableSuccess": "Enabled “{{name}}”",
     "disableSuccess": "Disabled “{{name}}”",
+    "xiaoyiEnableConfirmation": {
+      "title": "Notice",
+      "continueEnable": "Enable anyway",
+      "editConfiguration": "Edit configuration"
+    },
     "unbind": "Unbind",
     "unbindConfigurationTitle": "Unbind channel configuration",
     "unbindConfigurationMessage": "Unbind the channel configuration for “{{name}}”? The saved configuration will be cleared.",

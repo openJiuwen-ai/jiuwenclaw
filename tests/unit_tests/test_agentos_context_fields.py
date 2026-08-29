@@ -166,6 +166,52 @@ class TestContextWindowPopAdaptsToCoreField:
         assert core_has_context_window_field() is expected
 
     @staticmethod
+    def test_legacy_agentos_max_tokens_migrates_to_context_window(monkeypatch):
+        monkeypatch.setattr(
+            "jiuwenswarm.common.reasoning_injector.core_has_context_window_field",
+            lambda: True,
+        )
+        kwargs = build_reasoning_model_request_kwargs(
+            model_client_config={"client_provider": "OpenAI", "api_base": "http://y"},
+            model_config_obj={"_source": "agentos", "max_tokens": 131072},
+            model_name="agentos-pro",
+        )
+        assert kwargs["context_window"] == 131072
+        assert "max_tokens" not in kwargs
+
+    @staticmethod
+    def test_new_agentos_context_window_wins_over_legacy_field(monkeypatch):
+        monkeypatch.setattr(
+            "jiuwenswarm.common.reasoning_injector.core_has_context_window_field",
+            lambda: True,
+        )
+        kwargs = build_reasoning_model_request_kwargs(
+            model_client_config={"client_provider": "OpenAI", "api_base": "http://y"},
+            model_config_obj={
+                "_source": "agentos",
+                "max_tokens": 65536,
+                "context_window": 131072,
+            },
+            model_name="agentos-pro",
+        )
+        assert kwargs["context_window"] == 131072
+        assert "max_tokens" not in kwargs
+
+    @staticmethod
+    def test_agentos_context_window_is_optional(monkeypatch):
+        monkeypatch.setattr(
+            "jiuwenswarm.common.reasoning_injector.core_has_context_window_field",
+            lambda: True,
+        )
+        kwargs = build_reasoning_model_request_kwargs(
+            model_client_config={"client_provider": "OpenAI", "api_base": "http://y"},
+            model_config_obj={"_source": "agentos", "temperature": 0.95},
+            model_name="agentos-pro",
+        )
+        assert "context_window" not in kwargs
+        assert "max_tokens" not in kwargs
+
+    @staticmethod
     def test_agentos_context_window_adapts_to_core_field():
         entries = get_default_models(_config(agentos=[_agentos_block()]))
         agentos = next(e for e in entries
