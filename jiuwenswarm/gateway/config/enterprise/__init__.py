@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """企业专属表（config_effective_* / *_template / 密钥等）→ PersistentStore。
 
-仅 DB；运行时切流前 access 不注入，EE 仍用 ``DBHandler``。
+仅 DB；企业版启动时由 storage_assembly 注入 ``EnterpriseRecordRepository``。
 """
 
 from jiuwenswarm.gateway.config.enterprise.access import (

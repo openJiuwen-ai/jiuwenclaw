@@ -7,8 +7,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from openjiuwen_runtime.foundation.db.handler import DBHandler
-
 from jiuwenswarm.common.utils import apply_logging_config_payload
 
 from ...infrastructure.repository_access import require_logging_repository
@@ -31,8 +29,6 @@ def _apply_log_levels(payload: dict[str, Any]) -> None:
 
 
 class LoggingConfigService:
-    def __init__(self, handler: DBHandler) -> None:
-        self._handler = handler
 
     async def upsert(
         self,

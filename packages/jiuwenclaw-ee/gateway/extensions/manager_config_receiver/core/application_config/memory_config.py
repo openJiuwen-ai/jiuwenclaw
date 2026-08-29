@@ -7,8 +7,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from openjiuwen_runtime.foundation.db.handler import DBHandler
-
 from ...infrastructure.repository_access import require_memory_repository
 
 logger = logging.getLogger(__name__)
@@ -41,8 +39,6 @@ def _apply_memory(body: dict[str, Any] | None, *, op: str) -> None:
 
 
 class MemoryConfigService:
-    def __init__(self, handler: DBHandler) -> None:
-        self._handler = handler
 
     async def upsert(
         self,

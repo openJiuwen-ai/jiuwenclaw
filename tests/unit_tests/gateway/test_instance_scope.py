@@ -192,7 +192,7 @@ async def test_list_records_remote_does_not_fallback_to_sqlite(
 async def test_get_remote_engine_disposes_old_on_config_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+    from jiuwenswarm.gateway.storage.backends.db import reader as db_reader
 
     class _FakeEngine:
         def __init__(self, label: str) -> None:
@@ -221,20 +221,20 @@ async def test_get_remote_engine_disposes_old_on_config_change(
         _fake_create_async_engine,
     )
 
-    gateway_db._remote_engine = None
-    gateway_db._remote_engine_key = None
+    db_reader._remote_engine = None
+    db_reader._remote_engine_key = None
 
-    first = await gateway_db._get_remote_engine()
+    first = await db_reader.get_remote_engine()
     assert first is created[0]
     assert first.disposed is False
 
     monkeypatch.setenv("GATEWAY_DB_HOST", "host-b")
-    second = await gateway_db._get_remote_engine()
+    second = await db_reader.get_remote_engine()
     assert first.disposed is True
     assert second is created[1]
     assert second is not first
     assert second.disposed is False
 
-    await gateway_db._dispose_remote_engine()
+    await db_reader.dispose_remote_engine()
     assert second.disposed is True
-    assert gateway_db._remote_engine is None
+    assert db_reader._remote_engine is None

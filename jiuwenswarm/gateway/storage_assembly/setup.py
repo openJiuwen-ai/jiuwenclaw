@@ -673,7 +673,7 @@ def create_enterprise_record_repository(
     *,
     instance_id: str = "",
 ):
-    """企业专属表通用 Repository（仅 DB；不注入则 EE 仍走 DBHandler）。"""
+    """企业专属表通用 Repository（仅 DB）。"""
     from jiuwenswarm.gateway.config.enterprise import EnterpriseRecordRepository
 
     return EnterpriseRecordRepository(
@@ -690,8 +690,8 @@ def create_enterprise_record_repositories(
 ) -> dict[str, Any]:
     """为全部企业专属 store name 创建 ``EnterpriseRecordRepository``。
 
-    返回 ``{store_name: repo}``；迁移期不调用 ``set_enterprise_record_repositories``，
-    业务仍走 EE ``DBHandler``。
+    返回 ``{store_name: repo}``；企业启动时由
+    ``set_enterprise_record_repositories`` / ``wire_enterprise_manager_ws_store_async`` 注入。
     """
     from jiuwenswarm.gateway.config.enterprise.catalog import (
         ENTERPRISE_RECORD_STORE_NAMES,

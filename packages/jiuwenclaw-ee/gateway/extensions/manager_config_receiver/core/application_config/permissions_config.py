@@ -7,8 +7,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from openjiuwen_runtime.foundation.db.handler import DBHandler
-
 from ...infrastructure.repository_access import require_permissions_repository
 
 logger = logging.getLogger(__name__)
@@ -35,8 +33,6 @@ def _apply_permissions(body: dict[str, Any] | None, *, op: str) -> None:
 
 
 class PermissionsConfigService:
-    def __init__(self, handler: DBHandler) -> None:
-        self._handler = handler
 
     async def upsert(
         self,

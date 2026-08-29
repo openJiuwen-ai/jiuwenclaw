@@ -8,8 +8,6 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from openjiuwen_runtime.foundation.db.handler import DBHandler
-
 from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
 
 from ...infrastructure.repository_access import require_enterprise_repository
@@ -263,8 +261,6 @@ async def _sync_service_config_templates_records(
 
 
 class ServiceConfigTemplateService:
-    def __init__(self, handler: DBHandler) -> None:
-        self._handler = handler
 
     async def create(
         self,
