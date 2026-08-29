@@ -8,7 +8,6 @@ import { create } from 'zustand';
 import {
   Session,
   AgentMode,
-  WebConnectionState,
   ModelEntry,
   Message,
   ContextCompressionRuntime,
@@ -21,10 +20,82 @@ import {
   registerConfirmedTaskCreation,
   type TaskProgressBaseline,
 } from '../features/teamTaskProgressBaseline';
+import type { AgentSelectionIntent } from '../features/agentManagement/types';
 import { isTeamAgentMode, stripPlanSuffix } from '../features/planMode/wireMode';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
+const AGENT_SELECTION_STORAGE_KEY = 'jiuwenclaw_agent_selection';
+const TRANSIENT_NEW_CONVERSATION_ID = 'new';
+
+function clearStoredAgentSelection(sessionId: string): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const stored = localStorage.getItem(AGENT_SELECTION_STORAGE_KEY);
+    if (!stored) return;
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    const selections = { ...(parsed as Record<string, unknown>) };
+    if (!Object.prototype.hasOwnProperty.call(selections, sessionId)) return;
+    delete selections[sessionId];
+    if (Object.keys(selections).length === 0) {
+      localStorage.removeItem(AGENT_SELECTION_STORAGE_KEY);
+    } else {
+      localStorage.setItem(AGENT_SELECTION_STORAGE_KEY, JSON.stringify(selections));
+    }
+  } catch {
+    // Browser storage can be unavailable in private/restricted contexts.
+  }
+}
+
+function loadAgentSelectionIntent(sessionId: string): AgentSelectionIntent {
+  if (typeof localStorage === 'undefined') return { kind: 'keep' };
+  if (sessionId === TRANSIENT_NEW_CONVERSATION_ID) {
+    // The draft session lives only in memory. Clear keys written by older builds
+    // so a previous Agent cannot leak into the next new conversation.
+    clearStoredAgentSelection(sessionId);
+    return { kind: 'keep' };
+  }
+  try {
+    const stored = localStorage.getItem(AGENT_SELECTION_STORAGE_KEY);
+    if (!stored) return { kind: 'keep' };
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { kind: 'keep' };
+    const selectedId = (parsed as Record<string, unknown>)[sessionId];
+    return typeof selectedId === 'string' && selectedId.trim()
+      ? { kind: 'select', id: selectedId }
+      : { kind: 'keep' };
+  } catch {
+    return { kind: 'keep' };
+  }
+}
+
+function saveAgentSelectionIntent(sessionId: string, intent: AgentSelectionIntent) {
+  if (typeof localStorage === 'undefined') return;
+  if (sessionId === TRANSIENT_NEW_CONVERSATION_ID) {
+    clearStoredAgentSelection(sessionId);
+    return;
+  }
+  try {
+    const stored = localStorage.getItem(AGENT_SELECTION_STORAGE_KEY);
+    const parsed: unknown = stored ? JSON.parse(stored) : {};
+    const selections = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? { ...(parsed as Record<string, unknown>) }
+      : {};
+    if (intent.kind === 'select' && intent.id.trim()) {
+      selections[sessionId] = intent.id;
+    } else {
+      delete selections[sessionId];
+    }
+    if (Object.keys(selections).length === 0) {
+      localStorage.removeItem(AGENT_SELECTION_STORAGE_KEY);
+    } else {
+      localStorage.setItem(AGENT_SELECTION_STORAGE_KEY, JSON.stringify(selections));
+    }
+  } catch {
+    // Browser storage can be unavailable in private/restricted contexts.
+  }
+}
 
 function loadModeFromStorage(): AgentMode {
   if (typeof localStorage === 'undefined') return DEFAULT_MODE;
@@ -176,12 +247,6 @@ function dedupeTeamMemberExecutionEvents(
     deduped.push(event);
   }
   return deduped;
-}
-
-interface ConnectionStats {
-  state: WebConnectionState;
-  inflight: number;
-  lastError: string | null;
 }
 
 interface MemoryUsage {
@@ -337,13 +402,23 @@ export interface SessionRuntime {
   teamMemberExecutionEvents: TeamMemberExecutionEvent[];
   teamMemberContextCompression: Record<string, TeamMemberContextCompressionState>;
   teamHistoryMessages: Message[];
-  /** 当前会话输入栏已选中的技能名（用于随消息发送） */
+  /** 当前会话输入栏已选中的技能名（用于随消息发送，发送后清空——一次性语义） */
   selectedSkills: string[];
   /** skill-creator 统一入口等场景的会话级元数据，随 chat.send 发送后清除 */
   metadata?: Record<string, unknown>;
+  /** 当前会话的智能体挂载草稿；keep 表示不修改后端当前挂载 */
+  agentSelectionIntent: AgentSelectionIntent;
+  /**
+   * 本会话期间持续启用的插件id/MCP名，由输入框"+"菜单"扩展"面板的开关控制。与
+   * selectedSkills 不同：这两个字段发 chat.send 后不清空，会一直带在每条消息里，直到用户在
+   * 面板里手动关闭开关。插件字段名 plugin_names 后端尚未定义（backend-requests.md 需求11，
+   * 前端乐观发送，后端目前忽略）；mcp 字段名是 MCP 接口文档 v2 §6.2 的权威定义。
+   */
+  enabledPlugins: string[];
+  enabledMcps: string[];
 }
 
-function createEmptyRuntime(): SessionRuntime {
+function createEmptyRuntime(sessionId?: string): SessionRuntime {
   return {
     mode: loadModeFromStorage(),
     selectedModelName: (() => {
@@ -366,6 +441,9 @@ function createEmptyRuntime(): SessionRuntime {
     teamHistoryMessages: [],
     selectedSkills: [],
     metadata: undefined,
+    agentSelectionIntent: sessionId ? loadAgentSelectionIntent(sessionId) : { kind: 'keep' },
+    enabledPlugins: [],
+    enabledMcps: [],
   };
 }
 
@@ -375,7 +453,6 @@ interface SessionState {
   sessions: Session[];
   isConnected: boolean;
   availableTools: string[];
-  connectionStats: ConnectionStats;
   memoryUsage: MemoryUsage;
   availableModels: ModelEntry[];
   /** 过滤 is_default=true 的模型，供聊天窗口 ModelSelector 使用 */
@@ -400,7 +477,6 @@ interface SessionState {
   removeSession: (sessionId: string) => void;
   setConnected: (connected: boolean) => void;
   setAvailableTools: (tools: string[]) => void;
-  setConnectionStats: (stats: Partial<ConnectionStats>) => void;
   setContextCompressionStats: (sessionId: string, stats: Partial<ContextCompressionStats> | null) => void;
   setMemoryUsage: (memoryUsage: Partial<MemoryUsage> | null) => void;
   setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
@@ -428,6 +504,21 @@ interface SessionState {
   clearSelectedSkills: (sessionId: string) => void;
   /** 设置/清除会话级元数据（skill-creator 统一入口等场景） */
   setSessionMetadata: (sessionId: string, metadata: Record<string, unknown> | null) => void;
+  /** 输入栏智能体选择：选择、清空或恢复为不修改 */
+  setAgentSelectionIntent: (sessionId: string, intent: AgentSelectionIntent) => void;
+  clearAgentSelectionIntent: (sessionId: string) => void;
+  /** 本会话启用插件：追加（去重） */
+  addEnabledPlugin: (sessionId: string, pluginId: string) => void;
+  /** 本会话启用插件：移除指定项 */
+  removeEnabledPlugin: (sessionId: string, pluginId: string) => void;
+  /** 本会话启用插件：清空 */
+  clearEnabledPlugins: (sessionId: string) => void;
+  /** 本会话启用MCP：追加（去重） */
+  addEnabledMcp: (sessionId: string, mcpName: string) => void;
+  /** 本会话启用MCP：移除指定项 */
+  removeEnabledMcp: (sessionId: string, mcpName: string) => void;
+  /** 本会话启用MCP：清空 */
+  clearEnabledMcps: (sessionId: string) => void;
   addTeamMember: (sessionId: string, member: TeamMember) => void;
   updateTeamMemberStatus: (sessionId: string, memberId: string, newStatus: string, timestamp?: number) => void;
   setTeamHumanShareCommands: (sessionId: string, commands: HumanShareCommand[]) => void;
@@ -456,11 +547,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
   isConnected: false,
   availableTools: [],
-  connectionStats: {
-    state: 'idle',
-    inflight: 0,
-    lastError: null,
-  },
   memoryUsage: {
     rssMb: null,
     usedPercent: null,
@@ -473,7 +559,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   ensureRuntime: (sessionId) => {
     const existing = get().runtimes[sessionId];
     if (existing) return existing;
-    const runtime = createEmptyRuntime();
+    const runtime = createEmptyRuntime(sessionId);
     set((state) => ({
       runtimes: { ...state.runtimes, [sessionId]: runtime },
     }));
@@ -523,7 +609,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
       const sessionId = normalizedSession.session_id;
       const existingRuntime = state.runtimes[sessionId];
-      const baseRuntime = existingRuntime || createEmptyRuntime();
+      const baseRuntime = existingRuntime || createEmptyRuntime(sessionId);
       const nextRuntime: SessionRuntime = {
         ...baseRuntime,
         mode: normalizedSession.mode || baseRuntime.mode,
@@ -576,13 +662,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setMode: (sessionId, mode) => {
     const normalizedMode = normalizeAgentMode(mode);
     saveModeToStorage(normalizedMode);
+    if (normalizedMode !== 'agent') {
+      saveAgentSelectionIntent(sessionId, { kind: 'clear' });
+    }
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      const agentSelectionIntent = normalizedMode === 'agent'
+        ? runtime.agentSelectionIntent
+        : { kind: 'clear' as const };
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, mode: normalizedMode },
+          [sessionId]: { ...runtime, mode: normalizedMode, agentSelectionIntent },
         },
       };
     });
@@ -620,15 +712,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setAvailableTools: (tools) => {
     set({ availableTools: tools });
-  },
-
-  setConnectionStats: (stats) => {
-    set((state) => ({
-      connectionStats: {
-        ...state.connectionStats,
-        ...stats,
-      },
-    }));
   },
 
   setContextCompressionStats: (sessionId, stats) => {
@@ -988,6 +1071,126 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, metadata: metadata ?? undefined },
+        },
+      };
+    });
+  },
+
+  setAgentSelectionIntent: (sessionId, intent) => {
+    saveAgentSelectionIntent(sessionId, intent);
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime(sessionId);
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, agentSelectionIntent: intent },
+        },
+      };
+    });
+  },
+
+  clearAgentSelectionIntent: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || runtime.agentSelectionIntent.kind === 'keep') return state;
+      // A selected Agent is a session-level attachment, not a one-shot input hint.
+      // Keep the visible selection after a successful send; only a clear intent is
+      // consumed after the server has applied the detach request.
+      if (runtime.agentSelectionIntent.kind === 'select') return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, agentSelectionIntent: { kind: 'keep' } },
+        },
+      };
+    });
+  },
+
+  addEnabledPlugin: (sessionId, pluginId) => {
+    const normalized = pluginId.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      if (runtime.enabledPlugins.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledPlugins: [...runtime.enabledPlugins, normalized] },
+        },
+      };
+    });
+  },
+
+  removeEnabledPlugin: (sessionId, pluginId) => {
+    const normalized = pluginId.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (!runtime.enabledPlugins.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledPlugins: runtime.enabledPlugins.filter((s) => s !== normalized) },
+        },
+      };
+    });
+  },
+
+  clearEnabledPlugins: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.enabledPlugins.length === 0) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledPlugins: [] },
+        },
+      };
+    });
+  },
+
+  addEnabledMcp: (sessionId, mcpName) => {
+    const normalized = mcpName.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      if (runtime.enabledMcps.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledMcps: [...runtime.enabledMcps, normalized] },
+        },
+      };
+    });
+  },
+
+  removeEnabledMcp: (sessionId, mcpName) => {
+    const normalized = mcpName.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (!runtime.enabledMcps.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledMcps: runtime.enabledMcps.filter((s) => s !== normalized) },
+        },
+      };
+    });
+  },
+
+  clearEnabledMcps: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.enabledMcps.length === 0) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledMcps: [] },
         },
       };
     });

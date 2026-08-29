@@ -16,7 +16,8 @@ body {
 }
 
 html {
-  min-width: 1200px;
+  min-width: 584px;
+  overflow-y: hidden;
 }
 
 body {
@@ -260,15 +261,14 @@ body.workspace-resize-active iframe {
 
   /* Shell icon rail */
   .shell--icon-rail {
-    grid-template-columns: 64px minmax(0, 1fr);
+    grid-template-columns: 72px minmax(0, 1fr);
     grid-template-areas: 'nav content';
     --tool-panel-width: 300px;
   }
 
-  .shell--icon-rail.shell--more-panel-open {
-    grid-template-columns: 304px minmax(0, 1fr);
+  .shell--icon-rail.shell--agent-management {
+    grid-template-columns: 72px minmax(0, 1fr);
   }
-
   /* Topbar */
   .topbar {
     grid-area: topbar;
@@ -597,6 +597,10 @@ body.workspace-resize-active iframe {
     align-items: flex-start;
   }
 
+  .assistant-row.assistant-row--no-avatar {
+    gap: 0;
+  }
+
   .assistant-row__avatar {
     flex: 0 0 auto;
     width: 32px;
@@ -609,8 +613,10 @@ body.workspace-resize-active iframe {
 
   /* AI disclaimer — footer note pinned below the composer */
   .chat-ai-disclaimer {
+    width: 816px;
+    max-width: calc(100% - 48px);
+    margin-inline: auto;
     flex: 0 0 auto;
-    margin: 0 auto;
     padding: 8px 12px;
     color: var(--color-text-secondary);
     font-size: 11px;
@@ -968,7 +974,8 @@ body.workspace-resize-active iframe {
 
   /* Chat compose wrapper */
   .chat-compose {
-    width: min(var(--chat-page-max-width), calc(100% - 16px));
+    width: 816px;
+    max-width: calc(100% - 48px);
     margin-inline: auto;
     padding-top: 4px;
     position: relative;
@@ -979,6 +986,7 @@ body.workspace-resize-active iframe {
     --chat-page-max-width: 920px;
     --chat-page-gutter: clamp(12px, 3vw, 40px);
     --chat-content-width: min(var(--chat-page-max-width), calc(100% - (var(--chat-page-gutter) * 2)));
+    --chat-floating-panel-offset: 0px;
     position: relative;
   }
 
@@ -987,7 +995,8 @@ body.workspace-resize-active iframe {
   }
 
   .chat-content {
-    width: var(--chat-content-width);
+    width: 816px;
+    max-width: calc(100% - 48px);
     margin-inline: auto;
   }
 
@@ -996,6 +1005,22 @@ body.workspace-resize-active iframe {
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+
+  @media (min-width: 1600px) {
+    .chat-panel-shell--team-floating .chat-scroll:not(:has(.chat-content--welcome)) {
+      padding-right: 364px;
+    }
+
+    .chat-panel-shell--team-floating .chat-compose {
+      width: calc(816px + 364px);
+      padding-right: 364px;
+    }
+
+    .chat-panel-shell--team-floating .chat-ai-disclaimer {
+      width: calc(816px + 364px);
+      padding-right: 364px;
+    }
   }
 
   /* Tool cards (legacy single) */
@@ -1347,6 +1372,10 @@ body.workspace-resize-active iframe {
     align-items: flex-start;
   }
 
+  .tool-group-frame:not(.tool-group-frame--team).tool-group-frame--no-avatar {
+    gap: 0;
+  }
+
   .tool-group-frame:not(.tool-group-frame--team) > .tool-group-frame__avatar {
     flex: 0 0 32px;
     width: 32px;
@@ -1364,6 +1393,11 @@ body.workspace-resize-active iframe {
     grid-template-columns: 36px minmax(0, 1fr);
     gap: 12px;
     align-items: start;
+  }
+
+  .tool-group-frame--team.tool-group-frame--no-avatar {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
   }
 
   .tool-tree {
@@ -1508,6 +1542,10 @@ body.workspace-resize-active iframe {
     margin: 2px 0;
   }
 
+  .completed-work-row.completed-work-row--no-avatar {
+    gap: 0;
+  }
+
   .completed-work-row__avatar {
     flex: 0 0 32px;
     width: 32px;
@@ -1521,6 +1559,11 @@ body.workspace-resize-active iframe {
     grid-template-columns: 36px minmax(0, 1fr);
     gap: 12px;
     align-items: start;
+  }
+
+  .completed-work-row--team.completed-work-row--team-no-avatar {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
   }
 
   .completed-work-row--nested {
@@ -1610,6 +1653,10 @@ body.workspace-resize-active iframe {
     align-items: flex-start;
   }
 
+  .reasoning-row:not(.reasoning-row--team).reasoning-row--no-avatar {
+    gap: 0;
+  }
+
   .reasoning-row:not(.reasoning-row--team) > .reasoning-row__avatar {
     flex: 0 0 32px;
     width: 32px;
@@ -1623,6 +1670,11 @@ body.workspace-resize-active iframe {
     grid-template-columns: 36px minmax(0, 1fr);
     gap: 12px;
     align-items: start;
+  }
+
+  .reasoning-row--team.reasoning-row--team-no-avatar {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
   }
 
   .reasoning-panel {
@@ -2156,6 +2208,13 @@ body.workspace-resize-active iframe {
 /* ===========================================
    Responsive - Large screens
    =========================================== */
+
+@media (min-width: 1441px) {
+  .conversation-sidebar {
+    width: 296px;
+    min-width: 296px;
+  }
+}
 
 @media (min-width: 1440px) {
   :root {

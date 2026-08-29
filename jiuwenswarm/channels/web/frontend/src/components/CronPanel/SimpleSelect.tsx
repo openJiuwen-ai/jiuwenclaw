@@ -1,10 +1,12 @@
 import { useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { ChevronDown, Check } from 'lucide-react';
 import { useClickOutside } from './useClickOutside';
 
 interface SimpleSelectOption {
   value: string;
-  label: string;
+  /** 一般是纯文本；也接受 ReactNode（如带状态图标的选项），string 本身就是合法 ReactNode，不影响现有调用方 */
+  label: ReactNode;
   disabled?: boolean;
 }
 
@@ -41,6 +43,7 @@ export default function SimpleSelect({ value, onChange, options, placeholder = '
         type="button"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
+        data-testid="cron-simple-select-trigger"
         className="flex w-full items-center justify-between rounded-md border border-border bg-card px-3 py-1.5 text-sm outline-none hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-border"
       >
         <span className={selected && !isEmptySelection ? 'text-text' : 'text-text-muted'}>{selected ? selected.label : placeholder}</span>
@@ -64,6 +67,8 @@ export default function SimpleSelect({ value, onChange, options, placeholder = '
                   onChange(opt.value);
                   setOpen(false);
                 }}
+                data-testid="cron-simple-select-option"
+                data-variant={opt.value}
                 className={`flex w-full items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-sm transition-colors ${
                   opt.disabled
                     ? 'cursor-not-allowed text-text-muted'

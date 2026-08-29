@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from jiuwenswarm.agents.harness.common.tools import send_file_to_user as sfu
+from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +28,17 @@ def test_partition_and_mark_sent_files():
     new_paths, skipped = sfu._partition_sent_files("s1", [r"C:\tmp\a.md"])
     assert new_paths == [r"C:\tmp\a.md"]
     assert skipped == []
+
+
+def test_download_info_includes_agentos_user_id_in_url(tmp_path):
+    file_path = tmp_path / "report.txt"
+    file_path.write_text("hello", encoding="utf-8")
+
+    info = build_file_download_info(
+        str(file_path), "report.txt", "session-1", user_id="user-1"
+    )
+
+    assert "user_id=user-1" in info["download_url"]
 
 
 def test_send_file_skips_duplicate_after_success(tmp_path):

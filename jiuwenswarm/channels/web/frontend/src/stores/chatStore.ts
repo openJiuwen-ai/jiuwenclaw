@@ -14,14 +14,12 @@ import {
   ToolExecution,
   ToolExecutionStatus,
   InterruptResultPayload,
-  SubtaskUpdatePayload,
   AskUserQuestionPayload,
   EvolutionStatusPayload,
   UsageSummary,
   FileDownloadItem,
   ContextCompressionRuntime,
   ContextCompressionSummary,
-  TodoItem,
   MediaItem,
 } from '../types';
 import { useTodoStore } from './todoStore';
@@ -50,25 +48,13 @@ function computeTimeoutAt(baseIso: string): string {
 }
 
 function resolveExecutionStatus(result: ToolResult): ToolExecutionStatus {
+  if (result.pending) {
+    return 'pending';
+  }
   if (result.timedOut) {
     return 'timeout';
   }
   return result.success ? 'completed' : 'error';
-}
-
-/**
- * 子任务状态
- */
-export interface SubtaskState {
-  task_id: string;
-  description: string;
-  status: string;
-  index: number;
-  total: number;
-  tool_name?: string;
-  tool_count: number;
-  message?: string;
-  is_parallel: boolean;
 }
 
 interface TaskItem {
@@ -123,7 +109,6 @@ export interface ChatRuntime {
   /** 最近一次 chat.error 的错误信息，用于会话列表展示异常标记 */
   error: string | null;
   streamBuffers: Map<string, string>;
-  activeSubtasks: Map<string, SubtaskState>;
   toolExecutions: Map<string, ToolExecution>;
   toolExecutionOrder: string[];
   orphanResults: Map<string, ToolResult>;
@@ -170,7 +155,6 @@ function createEmptyRuntime(): ChatRuntime {
     messageRenderKeySeq: 0,
     error: null,
     streamBuffers: new Map(),
-    activeSubtasks: new Map(),
     toolExecutions: new Map(),
     toolExecutionOrder: [],
     orphanResults: new Map(),
@@ -256,8 +240,6 @@ interface ChatState {
   markTimedOutExecutions: (sessionId: string) => void;
   /** 历史回放常只有 tool_call、无 tool_result：把仍 pending 的工具按 startedAt 结算，避免超时巡检用 now 污染耗时 */
   settleHistoricalToolExecutions: (sessionId: string) => void;
-  updateSubtask: (sessionId: string, payload: SubtaskUpdatePayload) => void;
-  clearSubtasks: (sessionId: string) => void;
   clearMessages: (sessionId: string) => void;
   clearCurrentTurnData: (sessionId: string, requestId?: string) => void;
   prependMessages: (sessionId: string, olderFirst: Message[]) => void;
@@ -373,7 +355,6 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             pausedTask: null,
             interruptResult: null,
             switchingMode: false,
-            activeSubtasks: new Map(),
             toolExecutions: new Map(),
             toolExecutionOrder: [],
             orphanResults: new Map(),
@@ -1274,82 +1255,6 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
-  updateSubtask: (sessionId, payload) => {
-    set((state) => {
-      const runtime = state.runtimes[sessionId];
-      if (!runtime) return state;
-      const newSubtasks = new Map(runtime.activeSubtasks);
-
-      if (payload.status === 'completed' || payload.status === 'error') {
-        newSubtasks.delete(payload.task_id);
-      } else {
-        newSubtasks.set(payload.task_id, {
-          task_id: payload.task_id,
-          description: payload.description,
-          status: payload.status,
-          index: payload.index,
-          total: payload.total,
-          tool_name: payload.tool_name,
-          tool_count: payload.tool_count || 0,
-          message: payload.message,
-          is_parallel: payload.is_parallel || false,
-        });
-      }
-
-      return {
-        runtimes: {
-          ...state.runtimes,
-          [sessionId]: { ...runtime, activeSubtasks: newSubtasks },
-        },
-      };
-    });
-
-    const todoState = useTodoStore.getState();
-    const todoRuntime = todoState.getRuntime(sessionId);
-    const todos = todoRuntime?.todos ?? [];
-    const setTodos = todoState.setTodos;
-
-    const matchingTodo = todos.find(
-      (todo: TodoItem) =>
-        todo.status === 'in_progress' &&
-        (todo.content.includes(payload.description) ||
-         payload.description.includes(todo.content.slice(0, 20)))
-    );
-
-    if (matchingTodo) {
-      let activeForm = '';
-      if (payload.status === 'starting') {
-        activeForm = `正在${payload.description}...`;
-      } else if (payload.status === 'tool_call') {
-        activeForm = `正在调用 ${payload.tool_name}...`;
-      } else if (payload.status === 'completed') {
-        activeForm = '';
-      }
-
-      if (activeForm || payload.status === 'completed') {
-        const updatedTodos = todos.map((todo: TodoItem) =>
-          todo.id === matchingTodo.id
-            ? { ...todo, activeForm }
-            : todo
-        );
-        setTodos(sessionId, updatedTodos);
-      }
-    }
-  },
-
-  clearSubtasks: (sessionId) => {
-    set((state) => {
-      const runtime = state.runtimes[sessionId];
-      if (!runtime) return state;
-      return {
-        runtimes: {
-          ...state.runtimes,
-          [sessionId]: { ...runtime, activeSubtasks: new Map() },
-        },
-      };
-    });
-  },
-
   clearCurrentTurnData: (sessionId, requestId) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -1373,7 +1278,6 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
               toolExecutions: nextExecutions,
               toolExecutionOrder: nextOrder,
               orphanResults: new Map(),
-              activeSubtasks: new Map(),
               interruptResult: null,
               pendingQuestion: null,
               toolMetrics: {
@@ -1392,7 +1296,6 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             toolExecutions: new Map(),
             toolExecutionOrder: [],
             orphanResults: new Map(),
-            activeSubtasks: new Map(),
             interruptResult: null,
             pendingQuestion: null,
             toolMetrics: {
@@ -1447,7 +1350,6 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             pausedTask: null,
             interruptResult: null,
             switchingMode: false,
-            activeSubtasks: new Map(),
             toolExecutions: new Map(),
             toolExecutionOrder: [],
             orphanResults: new Map(),

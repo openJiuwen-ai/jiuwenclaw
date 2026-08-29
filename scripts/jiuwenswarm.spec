@@ -187,6 +187,13 @@ datas += collect_data_files(
     include_py_files=False,
     includes=DATA_FILE_PATTERNS,
 )
+# DesignRail 的 config.yaml + skills/ 树（SKILL.md / workflows / references / scripts）
+# 含 .mjs 脚本和 _templates/ 模板（脚本运行时读取），需额外 pattern
+datas += collect_data_files(
+    "jiuwenswarm.agents.harness.code.rails.sdd.design_rail",
+    include_py_files=False,
+    includes=["**/*.yaml", "**/*.yml", "**/*.json", "**/*.md", "**/*.mjs"],
+)
 for package_root in DISPATCH_PACKAGE_ROOTS:
     datas += collect_tree_data_files(
         os.path.join(symphony_root, package_root),
@@ -456,6 +463,7 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": build_config.display_name,
             "CFBundleDisplayName": build_config.display_name,
+            "CFBundleExecutable": build_config.executable_name,
             "CFBundleShortVersionString": build_config.version,
             "CFBundleVersion": build_config.version,
             "NSHighResolutionCapable": "True",

@@ -138,6 +138,11 @@ class _TestableScheduler(CronSchedulerService):
             envelope=envelope, timeout_seconds=timeout_seconds, state=state
         )
 
+    async def run_stream_cron_job(self, *, envelope, timeout_seconds, state):
+        return await self._run_stream_cron_job(
+            envelope=envelope, timeout_seconds=timeout_seconds, state=state
+        )
+
     @property
     def events(self):
         """Expose _events for test assertions (G.CLS.11: access via subclass property)."""
@@ -232,6 +237,14 @@ class FailingAgentClient(FakeAgentClient):
         if envelope.method == "session.create":
             return await super().send_request(envelope, *a, **kw)
         self.unary_requests.append(envelope)
+        raise RuntimeError("agent unavailable")
+
+    async def send_request_stream(self, envelope):
+        self.stream_requests.append(envelope)
+        if envelope.method == "session.create":
+            async for chunk in super().send_request_stream(envelope):  # pragma: no cover
+                yield chunk
+            return
         raise RuntimeError("agent unavailable")
 
 
@@ -563,6 +576,7 @@ class TestHandleEventStoreValidation:
         cron = msg.payload["cron"]
         assert msg.channel_id == "web"
         assert msg.session_id is None
+        assert msg.payload["user_id"] == ""
         assert cron["exec_channel_id"] == "__cron__"
         assert cron["exec_session_id"] == run_info["session_id"]
 
@@ -1020,18 +1034,19 @@ class TestTeamModeWake:
         assert task is not None
         await task
 
-        assert len(agent.unary_requests) == 2
-        assert len(agent.stream_requests) == 0
-        create_env, env = agent.unary_requests
+        assert len(agent.unary_requests) == 1
+        assert len(agent.stream_requests) == 1
+        create_env = agent.unary_requests[0]
         assert create_env.method == "session.create"
         assert "session_id" not in create_env.params
-        assert env.is_stream is False
+        env = agent.stream_requests[0]
+        assert env.is_stream is True
         assert env.channel == "__cron__"
         assert env.session_id == "cron_agentserver_allocated"
 
         state = svc.runs[run_id]
         assert state.status == "succeeded"
-        assert state.result_text == "done"
+        assert state.result_text == "team result"
 
     @pytest.mark.asyncio
     async def test_agent_wake_passes_model_as_model_name(self, tmp_path):
@@ -1048,9 +1063,38 @@ class TestTeamModeWake:
         assert task is not None
         await task
 
-        env = agent.unary_requests[1]
+        env = agent.stream_requests[0]
         assert env.params["model_name"] == "fast-model"
         assert "model" not in env.params
+
+    @pytest.mark.asyncio
+    async def test_agent_wake_does_not_resolve_project_dir_in_gateway(self, tmp_path):
+        """Phase 4：scheduler 触发时不再本地反查 project_id → project_dir。
+
+        SESSION_CREATE / CHAT_SEND 只传 project_id，归属解析由目标 AgentServer
+        在其注入目录内完成（resolve_session_project_binding 规则2 自动补齐）。
+        """
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(description="reminder", targets="tui", project_id="proj-1")
+
+        agent = FakeAgentClient()
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler, agent_client=agent)
+
+        run_id = f"{job.id}:1234"
+        await svc.on_wake(job, run_id)
+        task = svc.run_tasks.get(run_id)
+        assert task is not None
+        await task
+
+        create_env = agent.unary_requests[0]
+        assert create_env.method == "session.create"
+        # 不再本地反查 project_dir（Gateway 不访问用户目录项目表）
+        assert "project_dir" not in create_env.params
+        assert create_env.params["project_id"] == "proj-1"
+        chat_env = agent.stream_requests[0]
+        assert "project_dir" not in chat_env.params
+        assert chat_env.params["project_id"] == "proj-1"
 
     @pytest.mark.asyncio
     async def test_team_wake_stream_timeout(self, tmp_path):
@@ -1635,6 +1679,49 @@ class TestUnaryCronJobTimeoutOverride:
         assert text == "done"
 
 
+class TestSingleAgentCronStream:
+    @pytest.mark.asyncio
+    async def test_waits_for_chat_final_instead_of_empty_unary_ack(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await _create_one_job(store, targets="web")
+
+        class StreamingAgentClient:
+            async def send_request_stream(self, envelope):
+                yield AgentResponseChunk(
+                    request_id=envelope.request_id,
+                    channel_id=envelope.channel,
+                    payload={"event_type": "chat.reasoning", "content": ""},
+                    is_complete=False,
+                )
+                yield AgentResponseChunk(
+                    request_id=envelope.request_id,
+                    channel_id=envelope.channel,
+                    payload={"event_type": "chat.final", "content": "请记得开会。"},
+                    is_complete=True,
+                )
+
+        svc = _TestableScheduler(
+            store=store,
+            agent_client=StreamingAgentClient(),
+            message_handler=FakeMessageHandler(),
+        )
+        envelope = SimpleNamespace(request_id="cron-job-stream:1", channel="__cron__")
+        state = CronRunState(
+            run_id="job-stream:1", job_id=job.id,
+            wake_at_iso="2026-08-22T15:00:00+08:00",
+            push_at_iso="2026-08-22T15:00:00+08:00",
+            job_name=job.name, targets=job.targets, session_id=None,
+            chat_type=None, timezone=job.timezone,
+        )
+
+        text, ok = await svc.run_stream_cron_job(
+            envelope=envelope, timeout_seconds=30.0, state=state
+        )
+
+        assert ok is True
+        assert text == "请记得开会。"
+
+
 class TestCronJobStoreFileLock:
     """验证 portalocker 伴生锁包住 read-modify-write，避免多实例 lost update。"""
 
@@ -1820,9 +1907,9 @@ class TestExtractTextFromAgentPayload:
         result = self._call({"error": original_error, "content": "stale output"})
         assert result == original_error
 
-    def test_heartbeat_fallback(self):
+    def test_legacy_heartbeat_payload_is_ignored(self):
         result = self._call({"heartbeat": "ping"})
-        assert result == "ping"
+        assert result == ""
 
     def test_text_fallback(self):
         result = self._call({"text": "raw text"})
@@ -1835,6 +1922,19 @@ class TestExtractTextFromAgentPayload:
     def test_error_int_value_returns_empty_string(self):
         result = self._call({"error": 42})
         assert result == ""
+
+
+class _Clock:
+    """可控时钟，供 now_fn 注入测试，避免依赖真实秒数导致边界抖动。"""
+
+    def __init__(self, t: float) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
 
 
 class TestCrashRecoveryGraceWindow:
@@ -1979,3 +2079,64 @@ class TestCrashRecoveryGraceWindow:
         stored = await store.get_job(job.id)
         assert stored is not None
         assert stored.last_session_id == "cron_agentserver_allocated"
+
+    @pytest.mark.asyncio
+    async def test_start_resets_boot_time(self, tmp_path):
+        """start() 应将 boot_time 重置为启动时刻，覆盖构造到启动之间的延迟。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        clock = _Clock(1000.0)
+        svc = _TestableScheduler(
+            store=store,
+            agent_client=FakeAgentClient(),
+            message_handler=FakeMessageHandler(),
+            now_fn=clock,
+        )
+        assert svc.boot_time == 1000.0
+        clock.advance(500)
+        await svc.start()
+        assert svc.boot_time == 1500.0
+        await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_e2e_store_change_reload_keeps_pending_wake(self, tmp_path):
+        """端到端：未来 wake 排入后，其他任务写 store 触发 _check_store_changed
+        二次 reload，原事件被清空重排时运行期不应误丢（可控 now_fn）。"""
+        store_file = tmp_path / "cron_jobs.json"
+        store = CronJobStore(path=store_file)
+        clock = _Clock(time.time())
+        tz = ZoneInfo("Asia/Shanghai")
+        run_dt = datetime.fromtimestamp(clock.t, tz=tz) + timedelta(seconds=65)
+        expr = (
+            f"{run_dt.second} {run_dt.minute} {run_dt.hour} "
+            f"{run_dt.day} {run_dt.month} ? {run_dt.year}"
+        )
+        job_a = await store.create_job(
+            name="A", cron_expr=expr, timezone="Asia/Shanghai",
+            description="r", targets="tui", wake_offset_seconds=0,
+        )
+        svc = _TestableScheduler(
+            store=store,
+            agent_client=FakeAgentClient(),
+            message_handler=FakeMessageHandler(),
+            now_fn=clock,
+        )
+        svc.boot_time = clock.t
+        await svc.reload()
+        wake_before = [ev for _, _, ev in svc.events if ev.kind == "wake"]
+        assert len(wake_before) == 1
+
+        clock.advance(66)
+
+        store2 = CronJobStore(path=store_file)
+        await store2.create_job(
+            name="B", cron_expr="0 0 9 * * ? *", timezone="Asia/Shanghai",
+            description="r", targets="tui",
+        )
+        changed = await svc.check_store_changed()
+        assert changed is True
+
+        wake_a_after = [
+            ev for _, _, ev in svc.events
+            if ev.kind == "wake" and ev.job_id == job_a.id
+        ]
+        assert len(wake_a_after) == 1

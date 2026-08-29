@@ -690,6 +690,56 @@ async def test_container_file_http_raw_file_returns_binary_and_json() -> None:
 
 
 @pytest.mark.asyncio
+async def test_container_file_http_downloads_sent_file_from_token() -> None:
+    import httpx
+
+    from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
+    from jiuwenswarm.gateway.channel_manager.web.web_channel_app import build_web_channel_app
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannelConfig
+
+    router = _make_router_with_runtime()
+    router.download_container_file = AsyncMock(  # type: ignore[method-assign]
+        return_value=AgentFileDownloadChunk(
+            data=b"report",
+            path="/home/agentos/reports/result.txt",
+            offset=0,
+            chunk_size=6,
+            size=6,
+            content_type="text/plain",
+            eof=True,
+        )
+    )
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"path": "/home/agentos/reports/result.txt", "sid": "session-1"}).encode()
+    ).decode().rstrip("=")
+    channel = WebChannel(WebChannelConfig(enabled=True, dual_protocol=True), RobotMessageRouter())
+    channel.container_file_client = router
+    app = build_web_channel_app(channel)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        head = await client.head(
+            f"/file-api/download?token={payload}.signature&user_id=user-1",
+            headers={"Authorization": "Bearer tok-1"},
+        )
+        content = await client.get(
+            f"/file-api/download?token={payload}.signature&user_id=user-1",
+            headers={"Authorization": "Bearer tok-1"},
+        )
+
+    assert head.status_code == 200
+    assert head.headers["content-length"] == "6"
+    assert content.status_code == 200
+    assert content.content == b"report"
+    assert content.headers["content-disposition"].startswith("attachment;")
+    kwargs = router.download_container_file.await_args.kwargs
+    assert kwargs["user_id"] == "user-1"
+    assert kwargs["session_id"] == "session-1"
+    assert kwargs["path"] == "/home/agentos/reports/result.txt"
+    assert kwargs["auth_headers"].get("Authorization") == "Bearer tok-1"
+
+
+@pytest.mark.asyncio
 async def test_container_file_http_upload_multipart() -> None:
     import httpx
 

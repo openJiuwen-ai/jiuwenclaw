@@ -26,6 +26,7 @@ VALID_MODE_LINES = _MOD.VALID_MODE_LINES
 VALID_SWITCH_LINES = _MOD.VALID_SWITCH_LINES
 format_skills_list_for_notice = _MOD.format_skills_list_for_notice
 is_control_like_for_im_batching = _MOD.is_control_like_for_im_batching
+list_builtin_commands = _MOD.list_builtin_commands
 parse_channel_control_text = _MOD.parse_channel_control_text
 
 
@@ -148,6 +149,31 @@ def test_parse_channel_control_text_security_review_rejects_unsafe_args() -> Non
     assert p.action is ParsedControlAction.SECURITY_REVIEW_BAD
 
 
+@pytest.mark.parametrize(
+    ("text", "action", "task"),
+    [
+        ("/persist", ParsedControlAction.PERSIST_BAD, None),
+        ("/persist   ", ParsedControlAction.PERSIST_BAD, None),
+        ("/persist 跟进本周发布", ParsedControlAction.PERSIST_OK, "跟进本周发布"),
+        (
+            "/persist 跟进本周发布\n重点关注回滚方案",
+            ParsedControlAction.PERSIST_OK,
+            "跟进本周发布\n重点关注回滚方案",
+        ),
+        ("/PERSIST prepare the launch", ParsedControlAction.PERSIST_OK, "prepare the launch"),
+        ("/persistent task", ParsedControlAction.NONE, None),
+    ],
+)
+def test_parse_persist_with_first_task(
+    text: str,
+    action: ParsedControlAction,
+    task: str | None,
+) -> None:
+    parsed = parse_channel_control_text(text)
+    assert parsed.action is action
+    assert parsed.persist_task == task
+
+
 def test_control_message_texts_contains_mode_variants_and_skills() -> None:
     assert "/new_session" in CONTROL_MESSAGE_TEXTS
     assert "/skills list" in CONTROL_MESSAGE_TEXTS
@@ -165,6 +191,7 @@ def test_control_message_texts_contains_mode_variants_and_skills() -> None:
     assert "/switch team" in CONTROL_MESSAGE_TEXTS
     assert "/branch" in CONTROL_MESSAGE_TEXTS
     assert "/rewind" in CONTROL_MESSAGE_TEXTS
+    assert "/persist" in CONTROL_MESSAGE_TEXTS
 
 
 def test_is_control_like_for_im_batching() -> None:
@@ -186,6 +213,9 @@ def test_is_control_like_for_im_batching() -> None:
     assert is_control_like_for_im_batching("/review bad-arg")
     assert is_control_like_for_im_batching("/security-review")
     assert is_control_like_for_im_batching("/security-review focus on auth")
+    assert is_control_like_for_im_batching("/persist 跟进发布")
+    assert is_control_like_for_im_batching("/persist 第一行\n第二行")
+    assert not is_control_like_for_im_batching("/persistent task")
     assert not is_control_like_for_im_batching("/skills")
     assert not is_control_like_for_im_batching("/skills extra")
     assert not is_control_like_for_im_batching("")
@@ -343,6 +373,21 @@ def test_first_batch_registry_ids() -> None:
         "goal",
     }
     assert ids == expected
+
+
+def test_web_slash_picker_command_contract() -> None:
+    commands = list_builtin_commands({"work_mode": "code.normal"})["commands"]
+    assert [command["name"] for command in commands] == ["btw", "compact", "plan", "persist"]
+    assert commands[0]["req_method"] == "command.btw"
+    assert commands[1]["req_method"] == "command.compact"
+    assert commands[2]["execution"] == "chat.send_with_mode"
+    assert commands[2]["takesArgs"] is False
+    assert commands[2]["usage"] == "/plan"
+    assert commands[2]["example"] is None
+    assert commands[2]["plan_entry_source"] == "slash_command"
+    assert commands[3]["usage"] == "/persist <任务>"
+    assert commands[3]["execution"] == "session.create"
+    assert commands[3]["requires_session"] is False
 
 
 def test_exit_parse_rejects_short_form_requires_full_team_session_ref() -> None:

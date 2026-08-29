@@ -27,8 +27,8 @@ HOST_API_PATH = (
 
 UNCONFIGURED_PROJECTION = {
     "configured": False,
-    "enabled": False,
-    "fetching_enabled": False,
+    "collection_enabled": False,
+    "agent_use_enabled": False,
     "strategy_profile": "rules",
     "model_index": None,
     "fetch_services": [],
@@ -44,8 +44,8 @@ def _config(
 ) -> dict[str, object]:
     root = root_dir or Path.cwd()
     return {
-        "enabled": enabled,
-        "fetching_enabled": fetching_enabled,
+        "collection_enabled": enabled,
+        "agent_use_enabled": fetching_enabled,
         "strategy_profile": "rules",
         "fetch_services": [
             {
@@ -53,6 +53,7 @@ def _config(
                 "provider": "local_files",
                 "enabled": True,
                 "interval_seconds": interval,
+                "time_range": {"mode": "all"},
                 "source": {"root_dir": str(root)},
                 "credentials": {},
             }
@@ -67,6 +68,7 @@ def _local_service(service_id: str, root_dir: Path) -> dict[str, object]:
         "enabled": True,
         "interval_seconds": 60.0,
         "max_items_per_run": None,
+        "time_range": {"mode": "all"},
         "source": {"root_dir": str(root_dir)},
         "credentials": {},
     }
@@ -79,6 +81,7 @@ def _bookmark_service(service_id: str) -> dict[str, object]:
         "enabled": True,
         "interval_seconds": 60.0,
         "max_items_per_run": None,
+        "time_range": {"mode": "all"},
         "source": {},
         "credentials": {},
     }
@@ -88,8 +91,8 @@ def _config_with_services(
     services: list[dict[str, object]],
 ) -> dict[str, object]:
     return {
-        "enabled": False,
-        "fetching_enabled": False,
+        "collection_enabled": False,
+        "agent_use_enabled": False,
         "strategy_profile": "rules",
         "fetch_services": services,
     }
@@ -168,6 +171,45 @@ class FakeCore:
             raise error
         self.active = False
 
+    async def start_collection(self) -> None:
+        self.calls.append(("start_collection", None))
+        if self.activate_started is not None:
+            self.activate_started.set()
+        if self.activate_release is not None:
+            await self.activate_release.wait()
+        if self.activate_error is not None:
+            error = self.activate_error
+            self.activate_error = None
+            raise error
+        self.active = True
+
+    async def stop_collection(self, *, timeout_seconds: float = 30.0) -> None:
+        self.calls.append(("stop_collection", timeout_seconds))
+        if self.deactivate_started is not None:
+            self.deactivate_started.set()
+        if self.deactivate_release is not None:
+            await self.deactivate_release.wait()
+        if self.deactivate_error is not None:
+            error = self.deactivate_error
+            self.deactivate_error = None
+            if self.deactivate_changes_active_before_error:
+                self.active = False
+            raise error
+        self.active = False
+
+    async def start_agent_use(self) -> None:
+        self.calls.append(("start_agent_use", None))
+
+    async def stop_agent_use(self) -> None:
+        self.calls.append(("stop_agent_use", None))
+
+    async def set_fetch_service_enabled(
+        self,
+        service_id: str,
+        enabled: bool,
+    ) -> None:
+        self.calls.append(("set_fetch_service_enabled", (service_id, enabled)))
+
     async def snapshot(self) -> object:
         self.calls.append(("snapshot", None))
         if self.snapshot_error is not None:
@@ -232,8 +274,22 @@ class FakeCore:
         else:
             self.cursor_payloads[service_id] = payload
 
-    async def get_graph(self) -> dict[str, object]:
-        self.calls.append(("get_graph", None))
+    async def get_graph(
+        self,
+        *,
+        root_id: str | None = None,
+        depth: int = 3,
+    ) -> dict[str, object]:
+        self.calls.append(("get_graph", (root_id, depth)))
+        return {"context_ready": True, "nodes": [], "edges": []}
+
+    async def get_tree(
+        self,
+        *,
+        root_id: str | None = None,
+        depth: int = 3,
+    ) -> dict[str, object]:
+        self.calls.append(("get_tree", (root_id, depth)))
         return {"context_ready": True, "nodes": [], "edges": []}
 
     async def search_graph(self, query: str) -> dict[str, object]:
@@ -257,6 +313,10 @@ class FakeCore:
             "path": "topics/personal_context.md",
             "markdown": "# 主动上下文\n",
         }
+
+    async def get_source(self, source_id: str) -> dict[str, object]:
+        self.calls.append(("get_source", source_id))
+        return {"source_id": source_id, "title": "来源"}
 
 
 @pytest.fixture
@@ -284,7 +344,7 @@ def test_host_module_imports_personal_context_from_harness() -> None:
 def test_boolean_switches_use_isinstance_guards() -> None:
     source = HOST_API_PATH.read_text(encoding="utf-8")
 
-    assert source.count("if not isinstance(enabled, bool):") == 2
+    assert source.count("if not isinstance(enabled, bool):") == 3
     assert "type(enabled) is not bool" not in source
 
 
@@ -330,19 +390,42 @@ async def test_start_without_yaml_keeps_host_unconfigured(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("enabled", [False, True])
-async def test_runtime_enabled_projection_reads_loaded_configuration(
+@pytest.mark.parametrize("legacy_field", ["enabled", "fetching_enabled"])
+async def test_start_rejects_yaml_with_legacy_global_switch(
+    tmp_path: Path,
+    legacy_field: str,
+) -> None:
+    home = tmp_path / "personal_context"
+    home.mkdir()
+    raw = _config(enabled=False, root_dir=tmp_path)
+    raw[legacy_field] = False
+    (home / "personal_context.yaml").write_text(
+        yaml.safe_dump(raw, sort_keys=False),
+        encoding="utf-8",
+    )
+    host = PersonalContextHostAPI(home=home)
+
+    with pytest.raises(PersonalContext.Error):
+        await host.start()
+
+    assert host._config is None
+    assert host._stored_config is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_use_enabled", [False, True])
+async def test_agent_use_projection_reads_loaded_configuration(
     fake_host: tuple[PersonalContextHostAPI, FakeCore],
     tmp_path: Path,
-    enabled: bool,
+    agent_use_enabled: bool,
 ) -> None:
     host, _core = fake_host
 
     assert await host.is_runtime_enabled() is False
 
-    await host.configure(_config(enabled=enabled, root_dir=tmp_path))
+    await host.configure(_config(fetching_enabled=agent_use_enabled, root_dir=tmp_path))
 
-    assert await host.is_runtime_enabled() is enabled
+    assert await host.is_runtime_enabled() is agent_use_enabled
 
 
 @pytest.mark.asyncio
@@ -352,14 +435,14 @@ async def test_unconfigured_projection_and_stop_are_read_only_until_first_start(
     host, core = fake_host
 
     assert await host.get_runtime_config() == UNCONFIGURED_PROJECTION
-    assert await host.set_runtime_enabled(False) == UNCONFIGURED_PROJECTION
+    assert await host.set_collection_enabled(False) == UNCONFIGURED_PROJECTION
     assert not host._home.exists()
     assert core.calls == []
 
-    started = await host.set_runtime_enabled(True)
+    started = await host.set_collection_enabled(True)
 
-    assert started["enabled"] is True
-    assert started["fetching_enabled"] is False
+    assert started["collection_enabled"] is True
+    assert started["agent_use_enabled"] is False
     assert started["strategy_profile"] == "rules"
     assert started["model_index"] is None
     assert started["fetch_services"] == []
@@ -381,7 +464,7 @@ async def test_first_start_core_failure_rolls_back_to_unconfigured(
     setattr(core, failure_attribute, RuntimeError("first start failed"))
 
     with pytest.raises(PersonalContext.Error):
-        await host.set_runtime_enabled(True)
+        await host.set_collection_enabled(True)
 
     expected_calls = ["set_configuration", "deactivate_runtime"]
     if failure_attribute == "activate_error":
@@ -406,7 +489,7 @@ async def test_first_start_cancellation_rolls_back_to_unconfigured(
     core.activate_started = asyncio.Event()
     core.activate_release = asyncio.Event()
 
-    task = asyncio.create_task(host.set_runtime_enabled(True))
+    task = asyncio.create_task(host.set_collection_enabled(True))
     await asyncio.sleep(0)
     if task.done():
         await task
@@ -439,7 +522,7 @@ async def test_first_start_replace_failure_stops_core_and_removes_temporary_file
     monkeypatch.setattr(host_module, "_replace_yaml", fail_replace)
 
     with pytest.raises(PersonalContext.Error):
-        await host.set_runtime_enabled(True)
+        await host.set_collection_enabled(True)
 
     assert [name for name, _value in core.calls] == [
         "set_configuration",
@@ -467,7 +550,7 @@ async def test_first_start_replace_and_rollback_stop_failure_keeps_core_referenc
     monkeypatch.setattr(host_module, "_replace_yaml", fail_replace)
 
     with pytest.raises(PersonalContext.Error) as caught:
-        await host.set_runtime_enabled(True)
+        await host.set_collection_enabled(True)
 
     assert caught.value.status.name == "CONTEXT_PROACTIVE_STATE_INVALID"
     assert "previous configuration could not be restored" in str(caught.value)
@@ -495,7 +578,7 @@ async def test_configure_writes_yaml_and_starts_enabled_core(
     saved = yaml.safe_load(
         (host._home / "personal_context.yaml").read_text(encoding="utf-8")
     )
-    assert saved["enabled"] is True
+    assert saved["collection_enabled"] is True
     assert [name for name, _ in core.calls] == ["set_configuration", "activate_runtime"]
 
 
@@ -610,10 +693,22 @@ async def test_get_graph_delegates_to_core(
 ) -> None:
     host, core = fake_host
 
-    result = await host.get_graph()
+    result = await host.get_graph(root_id="page:topics/description.md", depth=1)
 
     assert result == {"context_ready": True, "nodes": [], "edges": []}
-    assert core.calls == [("get_graph", None)]
+    assert core.calls == [("get_graph", ("page:topics/description.md", 1))]
+
+
+@pytest.mark.asyncio
+async def test_get_tree_delegates_to_core(
+    fake_host: tuple[PersonalContextHostAPI, FakeCore],
+) -> None:
+    host, core = fake_host
+
+    result = await host.get_tree(root_id=None, depth=3)
+
+    assert result == {"context_ready": True, "nodes": [], "edges": []}
+    assert core.calls == [("get_tree", (None, 3))]
 
 
 @pytest.mark.asyncio
@@ -638,6 +733,18 @@ async def test_get_graph_page_delegates_to_core(
 
     assert result["markdown"] == "# 主动上下文\n"
     assert core.calls == [("get_graph_page", "page:topics/personal_context.md")]
+
+
+@pytest.mark.asyncio
+async def test_get_source_delegates_to_core(
+    fake_host: tuple[PersonalContextHostAPI, FakeCore],
+) -> None:
+    host, core = fake_host
+
+    result = await host.get_source("src_abc")
+
+    assert result["source_id"] == "src_abc"
+    assert core.calls == [("get_source", "src_abc")]
 
 
 @pytest.mark.asyncio
@@ -775,6 +882,29 @@ async def test_patch_runtime_configuration_changes_only_strategy_profile(
 
 
 @pytest.mark.asyncio
+async def test_patch_runtime_configuration_persists_both_global_switches(
+    fake_host: tuple[PersonalContextHostAPI, FakeCore],
+    tmp_path: Path,
+) -> None:
+    host, _core = fake_host
+    await host.configure(
+        _config(enabled=False, fetching_enabled=False, root_dir=tmp_path)
+    )
+
+    after = await host.patch_runtime_config(
+        {"collection_enabled": True, "agent_use_enabled": True}
+    )
+
+    saved = yaml.safe_load(host._config_path.read_text(encoding="utf-8"))
+    assert after["collection_enabled"] is True
+    assert after["agent_use_enabled"] is True
+    assert saved["collection_enabled"] is True
+    assert saved["agent_use_enabled"] is True
+    assert "fetching_enabled" not in saved
+    assert set(saved).isdisjoint({"enabled", "fetching_enabled"})
+
+
+@pytest.mark.asyncio
 async def test_patch_runtime_configuration_rejects_unknown_field_without_writing(
     fake_host: tuple[PersonalContextHostAPI, FakeCore],
     tmp_path: Path,
@@ -787,6 +917,29 @@ async def test_patch_runtime_configuration_rejects_unknown_field_without_writing
         await host.patch_runtime_config({"enabled": True})
 
     assert host._config_path.read_bytes() == before
+
+
+def test_resolve_model_reference_forces_personal_context_transport_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_entry = {
+        "model_client_config": {
+            "client_provider": "OpenAI",
+            "api_key": "key",
+            "api_base": "https://example.invalid/v1",
+            "model_name": "model-a",
+            "max_retries": 0,
+        },
+        "model_config_obj": {"temperature": 0.2},
+    }
+    monkeypatch.setattr(host_module, "get_default_models", lambda: [model_entry])
+
+    client, request = host_module._resolve_model_reference(0)
+
+    assert client["max_retries"] == 2
+    assert request["model"] == "model-a"
+    assert model_entry["model_client_config"]["max_retries"] == 0
+    assert model_entry["model_client_config"]["model_name"] == "model-a"
 
 
 @pytest.mark.asyncio
@@ -826,6 +979,8 @@ async def test_select_model_persists_only_model_index(
     assert "model_client" not in saved
     assert "model_request" not in saved
     assert applied.model_request.model_name == "model-a"
+    assert applied.model_client.max_retries == 2
+    assert "max_retries" not in saved
 
 
 @pytest.mark.asyncio
@@ -916,7 +1071,7 @@ async def test_start_rejects_saved_model_index_when_model_was_removed(
 
 
 @pytest.mark.asyncio
-async def test_set_runtime_enabled_persists_and_applies_switch(
+async def test_set_collection_enabled_persists_and_applies_switch(
     fake_host: tuple[PersonalContextHostAPI, FakeCore],
     tmp_path: Path,
 ) -> None:
@@ -925,14 +1080,17 @@ async def test_set_runtime_enabled_persists_and_applies_switch(
     await host.configure(_config(enabled=False, root_dir=tmp_path))
     core.calls.clear()
 
-    started = await host.set_runtime_enabled(True)
-    stopped = await host.set_runtime_enabled(False)
+    started = await host.set_collection_enabled(True)
+    stopped = await host.set_collection_enabled(False)
 
-    assert started["enabled"] is True
-    assert stopped["enabled"] is False
+    assert started["collection_enabled"] is True
+    assert stopped["collection_enabled"] is False
     saved = yaml.safe_load(host._config_path.read_text(encoding="utf-8"))
-    assert saved["enabled"] is False
-    assert [name for name, _ in core.calls].count("activate_runtime") == 1
+    assert saved["collection_enabled"] is False
+    assert core.calls == [
+        ("start_collection", None),
+        ("stop_collection", 30.0),
+    ]
 
 
 @pytest.mark.asyncio
@@ -955,17 +1113,12 @@ async def test_same_enabled_candidate_restarts_stopped_runtime_before_yaml_publi
 
     monkeypatch.setattr(host_module, "_replace_yaml", record_replace)
 
-    result = await host.set_runtime_enabled(True)
+    result = await host.set_collection_enabled(True)
 
-    assert result["enabled"] is True
+    assert result["collection_enabled"] is True
     assert core.active is True
     assert active_at_replace == [True]
-    assert [name for name, _ in core.calls] == [
-        "snapshot",
-        "deactivate_runtime",
-        "set_configuration",
-        "activate_runtime",
-    ]
+    assert core.calls == [("start_collection", None)]
 
 
 @pytest.mark.asyncio
@@ -988,29 +1141,22 @@ async def test_same_disabled_candidate_stops_unexpected_active_runtime_before_pu
 
     monkeypatch.setattr(host_module, "_replace_yaml", record_replace)
 
-    result = await host.set_runtime_enabled(False)
+    result = await host.set_collection_enabled(False)
 
-    assert result["enabled"] is False
+    assert result["collection_enabled"] is False
     assert core.active is False
-    assert active_at_replace == [False]
-    assert [name for name, _ in core.calls] == [
-        "snapshot",
-        "deactivate_runtime",
-        "set_configuration",
-    ]
+    assert active_at_replace == [True]
+    assert core.calls == [("stop_collection", 30.0)]
 
 
 @pytest.mark.asyncio
-async def test_snapshot_failure_aborts_before_staging_or_runtime_changes(
+async def test_collection_hot_switch_does_not_depend_on_snapshot(
     fake_host: tuple[PersonalContextHostAPI, FakeCore],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     host, core = fake_host
     await host.configure(_config(enabled=True, root_dir=tmp_path))
-    old_yaml = host._config_path.read_bytes()
-    old_config = host._config
-    old_stored = host._stored_config
     core.calls.clear()
     core.snapshot_error = RuntimeError("sensitive snapshot detail")
     stage_calls: list[tuple[Path, bytes]] = []
@@ -1022,17 +1168,14 @@ async def test_snapshot_failure_aborts_before_staging_or_runtime_changes(
 
     monkeypatch.setattr(host_module, "_stage_yaml", record_stage)
 
-    with pytest.raises(PersonalContext.Error) as caught:
-        await host.set_runtime_enabled(False)
+    result = await host.set_collection_enabled(False)
 
-    assert caught.value.status.name == "CONTEXT_PROACTIVE_STATE_INVALID"
-    assert "sensitive snapshot detail" not in str(caught.value)
-    assert core.calls == [("snapshot", None)]
-    assert core.active is True
-    assert stage_calls == []
-    assert host._config is old_config
-    assert host._stored_config is old_stored
-    assert host._config_path.read_bytes() == old_yaml
+    assert result["collection_enabled"] is False
+    assert core.calls == [("stop_collection", 30.0)]
+    assert core.active is False
+    assert len(stage_calls) == 1
+    assert host._config is not None
+    assert host._config.collection_enabled is False
     assert list(host._home.glob(".*.tmp")) == []
 
 
@@ -1047,15 +1190,15 @@ async def test_disable_publishes_false_before_waiting_for_core_stop(
     core.deactivate_started = asyncio.Event()
     core.deactivate_release = asyncio.Event()
 
-    task = asyncio.create_task(host.set_runtime_enabled(False))
+    task = asyncio.create_task(host.set_collection_enabled(False))
     try:
         await asyncio.wait_for(core.deactivate_started.wait(), timeout=1.0)
         saved_while_waiting = yaml.safe_load(
             host._config_path.read_text(encoding="utf-8")
         )
-        assert saved_while_waiting["enabled"] is False
+        assert saved_while_waiting["collection_enabled"] is False
         assert host._stored_config is not None
-        assert host._stored_config["enabled"] is True
+        assert host._stored_config["collection_enabled"] is True
 
         core.deactivate_release.set()
         stopped = await task
@@ -1065,7 +1208,7 @@ async def test_disable_publishes_false_before_waiting_for_core_stop(
             task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-    assert stopped["enabled"] is False
+    assert stopped["collection_enabled"] is False
     assert core.active is False
 
 
@@ -1081,15 +1224,20 @@ async def test_disable_failure_restores_enabled_yaml_memory_and_runtime(
     old_config = host._config
     old_stored = deepcopy(host._stored_config)
     core.calls.clear()
-    core.set_error = RuntimeError("disabled configuration failed")
+    core.deactivate_changes_active_before_error = True
+    core.deactivate_error = RuntimeError("collection stop failed")
 
     with pytest.raises(PersonalContext.Error):
-        await host.set_runtime_enabled(False)
+        await host.set_collection_enabled(False)
 
     assert host._config == old_config
     assert host._stored_config == old_stored
     assert host._config_path.read_bytes() == old_yaml
-    assert yaml.safe_load(old_yaml)["enabled"] is True
+    assert yaml.safe_load(old_yaml)["collection_enabled"] is True
+    assert core.calls == [
+        ("stop_collection", 30.0),
+        ("start_collection", None),
+    ]
     assert core.active is True
     assert list(host._home.glob(".*.tmp")) == []
 
@@ -1109,11 +1257,13 @@ async def test_disable_cancellation_restores_enabled_yaml_memory_and_runtime(
     core.deactivate_started = asyncio.Event()
     core.deactivate_release = asyncio.Event()
 
-    task = asyncio.create_task(host.set_runtime_enabled(False))
+    task = asyncio.create_task(host.set_collection_enabled(False))
     try:
         await asyncio.wait_for(core.deactivate_started.wait(), timeout=1.0)
         assert (
-            yaml.safe_load(host._config_path.read_text(encoding="utf-8"))["enabled"]
+            yaml.safe_load(host._config_path.read_text(encoding="utf-8"))[
+                "collection_enabled"
+            ]
             is False
         )
         task.cancel()
@@ -1149,7 +1299,7 @@ async def test_runtime_start_failure_rolls_back_file_and_memory(
     core.activate_error = RuntimeError("start failed")
 
     with pytest.raises(PersonalContext.Error):
-        await host.set_runtime_enabled(True)
+        await host.set_collection_enabled(True)
 
     assert host._config == old_config
     assert host._stored_config == old_stored
@@ -1169,7 +1319,7 @@ async def test_runtime_operations_reject_unconfigured_host(
 
 
 @pytest.mark.asyncio
-async def test_list_fetch_services_combines_config_state_and_error(
+async def test_list_fetch_services_returns_configuration_without_runtime_state(
     fake_host: tuple[PersonalContextHostAPI, FakeCore],
     tmp_path: Path,
 ) -> None:
@@ -1189,12 +1339,12 @@ async def test_list_fetch_services_combines_config_state_and_error(
             "enabled": True,
             "interval_seconds": 60.0,
             "max_items_per_run": None,
+            "time_range": {"mode": "all"},
             "source": {"root_dir": str(tmp_path)},
             "credentials": {},
-            "state": "RUNNING",
-            "last_error": "last failure",
         }
     ]
+    assert core.calls[-1] != ("snapshot", None)
 
 
 @pytest.mark.asyncio
@@ -1214,11 +1364,49 @@ async def test_create_fetch_service_normalizes_and_publishes_yaml_immediately(
 
     assert created["service_id"] == "local-created"
     assert created["provider"] == "local_files"
+    assert created["time_range"] == {"mode": "all"}
     saved = yaml.safe_load(host._config_path.read_text(encoding="utf-8"))
     assert [service["service_id"] for service in saved["fetch_services"]] == [
         "local-created",
         "local-notes",
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_and_patch_fetch_service_persist_normalized_time_range(
+    fake_host: tuple[PersonalContextHostAPI, FakeCore],
+    tmp_path: Path,
+) -> None:
+    host, _core = fake_host
+    await host.configure(_config(enabled=False, root_dir=tmp_path))
+    service = _bookmark_service("recent-bookmarks")
+    service["time_range"] = {"mode": "recent", "recent_days": 3}
+
+    created = await host.create_fetch_service(service)
+    patched = await host.patch_fetch_service(
+        "recent-bookmarks",
+        {
+            "time_range": {
+                "mode": "fixed",
+                "start_at": "2026-08-01T00:00:00+08:00",
+                "end_at": "2026-08-11T00:00:00+08:00",
+            }
+        },
+    )
+
+    assert created["time_range"] == {"mode": "recent", "recent_days": 3}
+    assert patched["time_range"] == {
+        "mode": "fixed",
+        "start_at": "2026-07-31T16:00:00Z",
+        "end_at": "2026-08-10T16:00:00Z",
+    }
+    saved = yaml.safe_load(host._config_path.read_text(encoding="utf-8"))
+    saved_service = next(
+        item
+        for item in saved["fetch_services"]
+        if item["service_id"] == "recent-bookmarks"
+    )
+    assert saved_service["time_range"] == patched["time_range"]
 
 
 @pytest.mark.asyncio
@@ -1641,8 +1829,16 @@ async def test_get_fetch_run_status_returns_all_or_one_service(
     host, core = fake_host
     await host.configure(_config(enabled=False, root_dir=tmp_path))
     core.snapshot_result = SimpleNamespace(
-        fetch_service_states={"local-notes": "RUNNING"},
-        fetch_service_errors={},
+        fetch_run_progress={
+            "local-notes": {
+                "service_id": "local-notes",
+                "run_state": "running",
+                "progress_percent": 15,
+                "total_items": 20,
+                "completed_items": 3,
+                "last_error": None,
+            }
+        },
     )
 
     all_status = await host.get_fetch_run_status()
@@ -1652,20 +1848,26 @@ async def test_get_fetch_run_status_returns_all_or_one_service(
         "services": [
             {
                 "service_id": "local-notes",
-                "state": "RUNNING",
+                "run_state": "running",
+                "progress_percent": 15,
+                "total_items": 20,
+                "completed_items": 3,
                 "last_error": None,
             }
         ]
     }
     assert one_status == {
         "service_id": "local-notes",
-        "state": "RUNNING",
+        "run_state": "running",
+        "progress_percent": 15,
+        "total_items": 20,
+        "completed_items": 3,
         "last_error": None,
     }
 
 
 @pytest.mark.asyncio
-async def test_set_fetching_updates_global_switch_through_full_restart(
+async def test_set_agent_use_enabled_updates_only_agent_use_switch(
     fake_host: tuple[PersonalContextHostAPI, FakeCore],
     tmp_path: Path,
 ) -> None:
@@ -1674,23 +1876,18 @@ async def test_set_fetching_updates_global_switch_through_full_restart(
     await host.configure(_config(root_dir=tmp_path))
     core.calls.clear()
 
-    await host.set_fetching(enabled=False)
+    await host.set_agent_use_enabled(False)
 
-    assert host._config.fetching_enabled is False
+    assert host._config.agent_use_enabled is False
     saved = yaml.safe_load(
         (host._home / "personal_context.yaml").read_text(encoding="utf-8")
     )
-    assert saved["fetching_enabled"] is False
-    assert [name for name, _ in core.calls] == [
-        "snapshot",
-        "deactivate_runtime",
-        "set_configuration",
-        "activate_runtime",
-    ]
+    assert saved["agent_use_enabled"] is False
+    assert core.calls == [("stop_agent_use", None)]
 
 
 @pytest.mark.asyncio
-async def test_set_fetching_updates_only_named_service(
+async def test_set_fetch_service_enabled_updates_only_named_service(
     fake_host: tuple[PersonalContextHostAPI, FakeCore],
     tmp_path: Path,
 ) -> None:
@@ -1698,21 +1895,26 @@ async def test_set_fetching_updates_only_named_service(
     core.snapshot_result = _FakeStatus()
     await host.configure(_config(root_dir=tmp_path))
 
-    await host.set_fetching(enabled=False, service_id="local-notes")
+    await host.set_fetch_service_enabled("local-notes", False)
 
-    assert host._config.fetching_enabled is True
+    assert host._config.collection_enabled is True
+    assert host._config.agent_use_enabled is True
     assert host._config.fetch_services[0].enabled is False
+    assert core.calls[-1] == (
+        "set_fetch_service_enabled",
+        ("local-notes", False),
+    )
 
 
 @pytest.mark.asyncio
-async def test_set_fetching_rejects_unconfigured_or_unknown_service(
+async def test_set_fetch_service_enabled_rejects_unconfigured_or_unknown_service(
     fake_host: tuple[PersonalContextHostAPI, FakeCore],
 ) -> None:
     host, _core = fake_host
     with pytest.raises(PersonalContext.Error):
-        await host.set_fetching(enabled=False)
+        await host.set_fetch_service_enabled("local-notes", False)
     with pytest.raises(PersonalContext.Error):
-        await host.set_fetching(enabled=False, service_id="missing")
+        await host.set_fetch_service_enabled("missing", False)
 
 
 @pytest.mark.asyncio
@@ -1773,7 +1975,7 @@ async def test_stop_calls_core_and_preserves_configuration(
     assert core.calls == [("deactivate_runtime", 1.5)]
     assert host._config is not None
     assert host._config_path.read_bytes() == saved
-    assert yaml.safe_load(saved)["enabled"] is True
+    assert yaml.safe_load(saved)["collection_enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -1894,7 +2096,7 @@ async def test_missing_staged_yaml_is_reported_as_host_error(
     monkeypatch.setattr(host_module, "_stage_yaml", lambda *_args: None)
 
     with pytest.raises(PersonalContext.Error) as caught:
-        await host.set_runtime_enabled(True)
+        await host.set_collection_enabled(True)
 
     assert "staging" in str(caught.value).lower()
     assert core.active is False

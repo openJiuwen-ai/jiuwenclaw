@@ -9,6 +9,12 @@ import { useTranslation } from 'react-i18next';
 import { ToolCall, ToolResult } from '../../types';
 import { formatToolArguments, formatToolResult } from '../../utils';
 import clsx from 'clsx';
+import {
+  countResultWords,
+  getSymphonyCommandLabel,
+  isSymphonyCommandTool,
+  parseSymphonyCommandAction,
+} from '../../utils/symphonyCommandDisplay';
 
 interface ToolCallDisplayProps {
   toolCall?: ToolCall;
@@ -20,11 +26,25 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
   const [isExpanded, setIsExpanded] = useState(false);
 
   if (toolCall) {
-    // session 类型：仅显示 会话任务：【description】，不显示 "session" 名称
+    // 后端 display_name 始终优先；未下发时，session 不显示原始工具名。
     const isSession = toolCall.name === 'session';
-    const displayTitle = isSession
-      ? (toolCall.formatted_args || '会话任务已完成')
-      : (toolCall.description ? `${toolCall.name}: ${toolCall.description}` : toolCall.name);
+    const displayName = toolCall.display_name?.trim();
+    const isSymphonyCommand = isSymphonyCommandTool(toolCall.name);
+    const symphonyAction = isSymphonyCommand
+      ? parseSymphonyCommandAction(toolCall.arguments)
+      : null;
+    const symphonyTitle = symphonyAction
+      ? (() => {
+          const label = getSymphonyCommandLabel(symphonyAction);
+          return t(label.key, label.values);
+        })()
+      : t('chatUi.toolGroup.symphony.command');
+    const displayTitle = displayName
+      || (isSession
+        ? (toolCall.formatted_args || '会话任务已完成')
+        : isSymphonyCommand
+          ? symphonyTitle
+          : (toolCall.description ? `${toolCall.name}: ${toolCall.description}` : toolCall.name));
 
     // 使用格式化的参数摘要（session 类型时 subtitle 已融入 title，不再重复显示）
     const displaySubtitle = isSession ? '' : (toolCall.formatted_args || '');
@@ -65,12 +85,20 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
   }
 
   if (toolResult) {
+    const isSymphonyCommand = isSymphonyCommandTool(toolResult.toolName);
     // 使用格式化的摘要或默认显示（session 类型优先用 summary，避免出现 "session 完成"）
     const displaySummary = toolResult.summary
       ? toolResult.summary
       : (toolResult.toolName === 'session'
         ? (toolResult.success ? t('chatUi.toolGroup.sessionCompleted') : t('chatUi.toolGroup.sessionFailed'))
-        : `${toolResult.toolName} ${toolResult.success ? t('chatUi.toolResult.success') : t('chatUi.toolResult.failed')}`);
+        : isSymphonyCommand
+          ? (toolResult.success
+            ? t('chatUi.toolGroup.symphony.completed')
+            : t('chatUi.toolGroup.symphony.failed'))
+          : `${toolResult.toolName} ${toolResult.success ? t('chatUi.toolResult.success') : t('chatUi.toolResult.failed')}`);
+    const resultWordCount = isSymphonyCommand
+      ? countResultWords(toolResult.result)
+      : null;
 
     return (
       <div className="chat-tool-card animate-rise" data-testid="chat-panel-tool-call-card" data-variant="result">
@@ -82,11 +110,15 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
           <div className="flex items-center gap-2">
             <span className={clsx(
               'w-5 h-5 rounded flex items-center justify-center text-sm',
-              toolResult.success
-                ? 'bg-ok-subtle text-ok'
-                : 'bg-danger-subtle text-danger'
+              toolResult.pending
+                ? 'bg-card text-text-muted'
+                : toolResult.success
+                  ? 'bg-ok-subtle text-ok'
+                  : 'bg-danger-subtle text-danger'
             )} data-testid="chat-panel-tool-call-card-status-icon" data-variant={toolResult.success ? 'success' : 'failed'}>
-              {toolResult.success ? (
+              {toolResult.pending ? (
+                <span className="text-xs" aria-hidden="true">●</span>
+              ) : toolResult.success ? (
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                 </svg>
@@ -98,7 +130,9 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
             </span>
             <span className={clsx(
               'font-mono text-sm',
-              toolResult.success ? 'text-text-muted' : 'text-danger'
+              toolResult.pending
+                ? 'text-text-muted'
+                : toolResult.success ? 'text-text-muted' : 'text-danger'
             )} data-testid="chat-panel-tool-call-card-summary">
               {displaySummary}
             </span>
@@ -109,6 +143,15 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
         </div>
         {isExpanded && (
           <div className="mt-2 p-2 rounded-md bg-card border border-border" data-testid="chat-panel-tool-call-card-result">
+            {resultWordCount !== null && (
+              <div className="mb-2 flex justify-end">
+                <span className="px-2 py-0.5 rounded-full border border-border text-xs text-text-muted">
+                  {t('chatUi.toolGroup.symphony.resultWords', {
+                    count: resultWordCount,
+                  })}
+                </span>
+              </div>
+            )}
             <pre className="font-mono text-sm text-text overflow-x-auto whitespace-pre-wrap max-h-60">
               {formatToolResult(toolResult.result)}
             </pre>

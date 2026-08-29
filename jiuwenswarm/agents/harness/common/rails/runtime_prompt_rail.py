@@ -1,10 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""RuntimePromptRail — Inject dynamic time/runtime info per model call.
+"""RuntimePromptRail — Assemble stable and dynamic runtime prompt state.
 
-Time and runtime state (model, mode, language, etc.) are injected fresh on
-every model call by reading runtime_state.yaml in Python, so the LLM always
-sees the current values without needing to call any tool.
+Stable environment rules and the conversation-start git snapshot stay in the
+system prompt. Dynamic runtime state is managed as a prompt attachment.
+Request date/time remains in the real user message's JSON envelope.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from jiuwenswarm.common.utils import (
 
 
 class RuntimePromptRail(DeepAgentRail):
-    """在 before_model_call 中注入时间及运行时状态文件路径。"""
+    """Keep stable system context separate from dynamic prompt attachments."""
 
     priority = 5  # 高优先级，确保早于其他 rail 执行
 
@@ -73,6 +73,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("directory_boundaries")
             self.system_prompt_builder.remove_section("tui_current_project_policy")
             self.system_prompt_builder.remove_section("trusted_dirs_policy")
+            self.system_prompt_builder.remove_section("git_status")
         self._agent = None
         self.system_prompt_builder = None
         self.attachment_manager = None
@@ -222,7 +223,13 @@ class RuntimePromptRail(DeepAgentRail):
             return "code.normal"
         return configured_mode
 
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Prepare conversation-start context before the first model call."""
+        runtime_state = await self._refresh_dynamic_attachments(ctx)
+        await self._sync_git_system_context(ctx, runtime_state)
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        runtime_state = await self._refresh_dynamic_attachments(ctx)
         if not self.system_prompt_builder:
             return
 
@@ -235,73 +242,7 @@ class RuntimePromptRail(DeepAgentRail):
             "trusted_dirs_policy"):
             self.system_prompt_builder.remove_section(name)
 
-        # ── runtime ──
-        runtime_state: dict[str, Any] = {}
-        state_path = get_runtime_state_path(self._session_id)
-        try:
-            with open(state_path, encoding="utf-8") as f:
-                runtime_state = yaml.safe_load(f) or {}
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            logger.warning("Failed to read runtime state file %s: %s", state_path, e)
-
-        configured_models: list[str] = []
-        raw_available_models = runtime_state.get("available_models") or []
-        available_models: list[str] = [
-            str(item).strip()
-            for item in raw_available_models
-            if str(item).strip()
-        ] if isinstance(raw_available_models, list) else []
-        if not available_models or not runtime_state.get("model"):
-            configured_models = self._configured_model_names()
-        if not available_models:
-            available_models = configured_models
-        fallback_model = configured_models[0] if configured_models else ""
-        model = str(
-            runtime_state.get("model")
-            or self._model_name
-            or fallback_model
-            or "unknown"
-        ).strip()
-        available_models_str = ", ".join(available_models) if available_models else model
-        configured_mode = str(
-            runtime_state.get("mode") or self._mode or "unknown"
-        ).strip()
-        mode = self._resolve_current_mode(ctx, configured_mode)
-        language_val = (
-            self._language
-            or runtime_state.get("language")
-            or "unknown"
-        ).strip()
         channel = (runtime_state.get("channel") or self._channel or "unknown").strip()
-
-        if not self._force_english and self._language == "cn":
-            runtime_content = (
-                "# 运行时状态\n\n"
-                f"- 当前模型：{model}\n"
-                f"- 可用模型：{available_models_str}\n"
-                f"- 当前模式：{mode}\n"
-                f"- 当前语言：{language_val}\n"
-                f"- 当前渠道：{channel}"
-            )
-        else:
-            runtime_content = (
-                "# Runtime State\n\n"
-                f"- Current model: {model}\n"
-                f"- Available models: {available_models_str}\n"
-                f"- Current mode: {mode}\n"
-                f"- Current language: {language_val}\n"
-                f"- Current channel: {channel}"
-            )
-        await self._clear_prompt_attachment(ctx, section="runtime.setting")
-        await self._upsert_prompt_attachment(
-            ctx,
-            section="runtime.setting",
-            content=runtime_content,
-            kind=PromptAttachmentKind.RUNTIME,
-            priority=95,
-        )
 
         # ── Platform, shell, encoding, time-query and channel rules ──
         os_type = sys.platform
@@ -359,45 +300,6 @@ class RuntimePromptRail(DeepAgentRail):
             content={"cn": env_content, "en": env_content},
             priority=89,
         ))
-
-        # ── Git status section ──
-        git_branch = str(runtime_state.get("git_branch") or "").strip()
-        if git_branch and git_branch != "N/A":
-            git_main_branch = str(runtime_state.get("git_main_branch") or "").strip()
-            git_status_text = str(runtime_state.get("git_status") or "").strip()
-            git_recent_commits = str(runtime_state.get("git_recent_commits") or "").strip()
-            git_user = str(runtime_state.get("git_user") or "").strip()
-
-            git_lines = [
-                "This is the git status at the start of the conversation. "
-                "Note that this status is a snapshot in time, and will not update during the conversation. "
-                "Run git yourself when you need the current state — for example before staging or "
-                "committing, or after anything may have changed the working tree.",
-                f"Current branch: {git_branch}",
-            ]
-            if git_main_branch:
-                git_lines.append(
-                    f"Main branch (you will usually use this for PRs): {git_main_branch}"
-                )
-            if git_user:
-                git_lines.append(f"Git user: {git_user}")
-            git_lines.append(f"Status:\n{git_status_text or '(clean)'}")
-            git_lines.append(f"Recent commits:\n{git_recent_commits or '(none)'}")
-
-            git_content = "\n\n".join(git_lines)
-
-            await self._upsert_prompt_attachment(
-                ctx,
-                section="git_status",
-                content=git_content,
-                kind=PromptAttachmentKind.WORKSPACE_DELTA,
-                priority=87,
-            )
-        else:
-            await self._clear_prompt_attachment(
-                ctx,
-                section="git_status",
-            )
 
         # ── Channel: directory and file-operation boundaries ──
         # Remove both the consolidated section and legacy sections first so
@@ -494,6 +396,121 @@ class RuntimePromptRail(DeepAgentRail):
                 name="directory_boundaries",
                 content={"cn": directory_content, "en": directory_content},
                 priority=89,
+            ))
+
+    async def _refresh_dynamic_attachments(
+        self,
+        ctx: AgentCallbackContext,
+    ) -> dict[str, Any]:
+        """Refresh runtime and git sections without touching the system prefix."""
+        runtime_state: dict[str, Any] = {}
+        state_path = get_runtime_state_path(self._session_id)
+        try:
+            with open(state_path, encoding="utf-8") as f:
+                loaded_state = yaml.safe_load(f) or {}
+                if isinstance(loaded_state, dict):
+                    runtime_state = loaded_state
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logger.warning("Failed to read runtime state file %s: %s", state_path, exc)
+
+        configured_models: list[str] = []
+        raw_available_models = runtime_state.get("available_models") or []
+        available_models: list[str] = [
+            str(item).strip()
+            for item in raw_available_models
+            if str(item).strip()
+        ] if isinstance(raw_available_models, list) else []
+        if not available_models or not runtime_state.get("model"):
+            configured_models = self._configured_model_names()
+        if not available_models:
+            available_models = configured_models
+        fallback_model = configured_models[0] if configured_models else ""
+        model = str(
+            runtime_state.get("model")
+            or self._model_name
+            or fallback_model
+            or "unknown"
+        ).strip()
+        available_models_str = ", ".join(available_models) if available_models else model
+        configured_mode = str(
+            runtime_state.get("mode") or self._mode or "unknown"
+        ).strip()
+        mode = self._resolve_current_mode(ctx, configured_mode)
+        language_val = (
+            self._language
+            or runtime_state.get("language")
+            or "unknown"
+        ).strip()
+        channel = (runtime_state.get("channel") or self._channel or "unknown").strip()
+
+        if not self._force_english and self._language == "cn":
+            runtime_content = (
+                "# 运行时状态\n\n"
+                f"- 当前模型：{model}\n"
+                f"- 可用模型：{available_models_str}\n"
+                f"- 当前模式：{mode}\n"
+                f"- 当前语言：{language_val}\n"
+                f"- 当前渠道：{channel}"
+            )
+        else:
+            runtime_content = (
+                "# Runtime State\n\n"
+                f"- Current model: {model}\n"
+                f"- Available models: {available_models_str}\n"
+                f"- Current mode: {mode}\n"
+                f"- Current language: {language_val}\n"
+                f"- Current channel: {channel}"
+            )
+        await self._upsert_prompt_attachment(
+            ctx,
+            section="runtime.setting",
+            content=runtime_content,
+            kind=PromptAttachmentKind.RUNTIME,
+            priority=95,
+        )
+
+        return runtime_state
+
+    async def _sync_git_system_context(
+        self,
+        ctx: AgentCallbackContext,
+        runtime_state: dict[str, Any],
+    ) -> None:
+        """Install the conversation git snapshot in the cacheable system prefix."""
+        # Clear the legacy per-model-call attachment when upgrading a live agent.
+        await self._clear_prompt_attachment(ctx, section="git_status")
+        if self.system_prompt_builder is None:
+            return
+
+        self.system_prompt_builder.remove_section("git_status")
+        git_branch = str(runtime_state.get("git_branch") or "").strip()
+        if git_branch and git_branch != "N/A":
+            git_main_branch = str(runtime_state.get("git_main_branch") or "").strip()
+            git_status_text = str(runtime_state.get("git_status") or "").strip()
+            git_recent_commits = str(runtime_state.get("git_recent_commits") or "").strip()
+            git_user = str(runtime_state.get("git_user") or "").strip()
+            git_lines = [
+                "This is the git status at the start of the conversation. "
+                "Note that this status is a snapshot in time, and will not update during the conversation. "
+                "Run git yourself when you need the current state — for example before staging or "
+                "committing, or after anything may have changed the working tree.",
+                f"Current branch: {git_branch}",
+            ]
+            if git_main_branch:
+                git_lines.append(
+                    f"Main branch (you will usually use this for PRs): {git_main_branch}"
+                )
+            if git_user:
+                git_lines.append(f"Git user: {git_user}")
+            git_lines.append(f"Status:\n{git_status_text or '(clean)'}")
+            git_lines.append(f"Recent commits:\n{git_recent_commits or '(none)'}")
+            git_content = "\n\n".join(git_lines)
+            self.system_prompt_builder.add_section(PromptSection(
+                name="git_status",
+                content={"cn": git_content, "en": git_content},
+                priority=90,
             ))
 
     async def _upsert_prompt_attachment(

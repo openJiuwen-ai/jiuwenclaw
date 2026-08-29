@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronUp, FileCode2, LoaderCircle, RefreshCw } from 'lucide-react';
+import { ChevronDown, ChevronUp, LoaderCircle, RefreshCw } from 'lucide-react';
+import { FileIcon, resolveFileIconType } from '../../components/FileIcon';
 import type { CodeReviewTarget, GitTurnChangeAction, GitTurnDiff } from './types';
 
 interface CodeChangesCardProps {
@@ -42,11 +43,13 @@ export function CodeChangesCard({
 
   if (files.length === 0) return null;
 
+  const primaryFileType = resolveFileIconType(files[0].file_path);
+
   return (
     <section className={`code-changes-card${discarded ? ' is-discarded' : ''}`} aria-label="已编辑文件" data-testid="code-mode-changes-card" data-variant={discarded ? 'discarded' : 'active'}>
       <div className="code-changes-card__header" data-testid="code-mode-changes-card-header">
-        <span className="code-changes-card__icon">
-          <FileCode2 size={20} />
+        <span className="code-changes-card__icon" data-variant={primaryFileType}>
+          <FileIcon iconType={primaryFileType} size={20} />
         </span>
         <div className="code-changes-card__heading" data-testid="code-mode-changes-card-heading">
           <strong data-testid="code-mode-changes-card-title">已编辑文件</strong>

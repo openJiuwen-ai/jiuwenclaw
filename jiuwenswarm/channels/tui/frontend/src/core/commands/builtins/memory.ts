@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, parse, relative } from "node:path";
 import { addError, addInfo, makeItem } from "../helpers.js";
@@ -132,6 +132,21 @@ function normalizePathKey(p: string): string {
     return process.platform === "win32" ? p.toLowerCase() : p;
   } catch {
     return p;
+  }
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+function createEmptyMemoryFile(filePath: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  try {
+    writeFileSync(filePath, "", { encoding: "utf-8", flag: "wx" });
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST" || !existsSync(filePath)) throw error;
   }
 }
 
@@ -435,6 +450,7 @@ async function editMemoryByPath(
   try {
     const trustedDirs = ctx.getTrustedDirs();
     const projectDir = ctx.getCurrentProjectDir();
+    const gitRoot = findGitRoot(projectDir);
 
     // 把 display path（相对路径或 ~ 缩写）解析为绝对路径
     // getDisplayPath 可能返回相对于 gitRoot/projectDir 的路径或 ~ 缩写
@@ -442,18 +458,16 @@ async function editMemoryByPath(
     if (path.startsWith("~/") || path === "~") {
       resolvedPath = join(homedir(), path.slice(1));
     } else if (!path.match(/^[A-Za-z]:[/\\]/) && !path.startsWith("/")) {
-      // 相对路径：尝试 join(projectDir, path)，如果文件存在就用
+      // 已存在文件优先按 projectDir 解析；否则使用 git root（如有）
+      // 或 projectDir 作为创建位置。
       const fromProject = join(projectDir, path);
       if (existsSync(fromProject)) {
         resolvedPath = fromProject;
       } else {
-        // 尝试从 gitRoot 解析
-        const gitRoot = findGitRoot(projectDir);
         if (gitRoot) {
-          const fromGit = join(gitRoot, path);
-          if (existsSync(fromGit)) {
-            resolvedPath = fromGit;
-          }
+          resolvedPath = join(gitRoot, path);
+        } else {
+          resolvedPath = fromProject;
         }
       }
     }
@@ -475,8 +489,25 @@ async function editMemoryByPath(
     if (isAncestorMemFile) {
       const displayPath = getDisplayPath(path, projectDir);
       if (!existsSync(path)) {
-        ctx.addItem(addError(ctx.sessionId, `Cannot edit: ${path} — memory file does not exist.`));
-        return;
+        const isGitRootMemoryFile =
+          !!gitRoot
+          && isAncestorOrSelfDir(fileParent, gitRoot)
+          && isAncestorOrSelfDir(gitRoot, fileParent);
+        if (!isGitRootMemoryFile) {
+          ctx.addItem(addError(ctx.sessionId, `Cannot edit: ${path} — memory file does not exist.`));
+          return;
+        }
+        try {
+          createEmptyMemoryFile(path);
+        } catch (error) {
+          ctx.addItem(
+            addError(
+              ctx.sessionId,
+              `Cannot create memory file: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+          return;
+        }
       }
       if (ctx.openInEditor) {
         const editorEnvironmentHint = getEditorEnvironmentHint();
@@ -517,6 +548,20 @@ async function editMemoryByPath(
       const reason = payload.reason ?? "path not in allowed memory directories";
       ctx.addItem(addError(ctx.sessionId, `Cannot edit: ${path} — ${reason}.`));
       return;
+    }
+
+    if (!payload.exists && !existsSync(payload.path)) {
+      try {
+        createEmptyMemoryFile(payload.path);
+      } catch (error) {
+        ctx.addItem(
+          addError(
+            ctx.sessionId,
+            `Cannot create memory file: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+        return;
+      }
     }
 
     if (ctx.openInEditor) {

@@ -48,6 +48,7 @@ from jiuwenswarm.common.security.ws_origin import get_header_value
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
+    ensure_config_migrated_from_template,
     ensure_default_builtin_skills,
     get_cron_jobs_path,
     get_env_file,
@@ -77,6 +78,9 @@ mcp_builtins_missing = not _mcp_builtins_dir.is_dir()
 if config_missing or workspace_migration_needed or mcp_builtins_missing:
     prepare_workspace(overwrite=False)
 
+# 每次启动合并模板新增配置项（保留用户已有值）
+ensure_config_migrated_from_template()
+
 # 幂等地补齐默认内置技能（对已有工作区也生效，新增默认技能时自动安装）
 ensure_default_builtin_skills()
 
@@ -104,6 +108,89 @@ _FEISHU_DEFAULT_API_BASE = "https://open.feishu.cn"
 _DINGTALK_DEFAULT_API_BASE = "https://api.dingtalk.com"    # 新版 v1.0 接口域名
 _DINGTALK_DEFAULT_OAPI_BASE = "https://oapi.dingtalk.com"  # 旧版 media 接口域名
 _XIAOYI_DEFAULT_PUSH_URL = "https://hag.cloud.huawei.com/open-ability-agent/v1/agent-webhook"
+
+
+def _resolve_health_check_config(full_cfg: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Prefer health_check and read legacy heartbeat probe keys during migration."""
+    if not isinstance(full_cfg, dict):
+        return None
+    current = full_cfg.get("health_check")
+    if isinstance(current, dict):
+        return current
+    legacy = full_cfg.get("heartbeat")
+    if not isinstance(legacy, dict):
+        return None
+    migrated = {
+        key: legacy[key]
+        for key in ("every", "target", "active_hours")
+        if key in legacy
+    }
+    return migrated or None
+
+
+def _load_gateway_runtime_config(
+    message_handler: Any,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+    """Load Gateway config without coupling optional migrations to channels.
+
+    A failed legacy HealthCheck migration must not discard otherwise readable
+    channel configuration. Evolution config propagation is optional for the
+    same reason: it may fail independently without changing the loaded config.
+    """
+    import jiuwenswarm.common.config as config_module
+
+    try:
+        if config_module.migrate_legacy_heartbeat_probe_config():
+            logger.info(
+                "[App] migrated legacy heartbeat probe config to health_check"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] failed to migrate legacy heartbeat probe config; "
+            "continuing with the existing config: %s",
+            exc,
+        )
+
+    try:
+        full_cfg = config_module.get_config()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] failed to read config.yaml, using defaults: %s",
+            exc,
+        )
+        return {}, None, None
+
+    if not isinstance(full_cfg, dict):
+        logger.warning(
+            "[App] config.yaml root must be an object, using defaults"
+        )
+        return {}, None, None
+
+    try:
+        message_handler.update_evolution_auto_save(full_cfg)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] failed to apply evolution auto-save config; "
+            "continuing with channel config: %s",
+            exc,
+        )
+
+    health_check_cfg = _resolve_health_check_config(full_cfg)
+    if (
+        isinstance(health_check_cfg, dict)
+        and not isinstance(full_cfg.get("health_check"), dict)
+    ):
+        logger.warning(
+            "[App] legacy heartbeat probe config detected; "
+            "migrate it to health_check"
+        )
+    channels_cfg = full_cfg.get("channels")
+    return (
+        full_cfg,
+        health_check_cfg,
+        channels_cfg if isinstance(channels_cfg, dict) else None,
+    )
+
 
 
 def _build_event_frame(msg) -> dict[str, Any]:
@@ -208,7 +295,8 @@ def _inject_session_work_mode(msg: Message) -> None:
     resolved_work_mode = binding.work_mode
 
     # 注意:TUI 通道的 session.create 不走 forward 路径(不在 CLI_FORWARD_REQ_METHODS),
-    # TUI 预解析在 tui_connect.py 的 _session_create 中通过 find_or_create_code_project_for_tui_params 完成。
+    # TUI 的 cwd→code project 绑定由 AgentServer 侧在 SESSION_CREATE 处理时通过
+    # find_or_create_code_project_for_tui_params 完成（经 E2A 转发后解析）。
     # 此处仅处理 WEB/ACP 通道的 work_mode 绑定注入。
 
     params["project_id"] = resolved_project_id
@@ -1066,12 +1154,19 @@ class GatewayServer(BaseWebChannel):
         setattr(ws, "_gateway_user_id", ws_user_id)
         setattr(ws, "_gateway_agent_type", "jiuwenswarm")
         uid_marker = "" if ws_user_id else " uid_empty=yes"
+        handshake_sid = ""
+        try:
+            handshake_sid = str((parse_qs(parsed.query).get("session_id") or [""])[0] or "")
+        except Exception:
+            handshake_sid = ""
         logger.info(
-            "[Gateway] WS handshake X-User-Id: user_id=%r%s channel=%s path=%s",
+            "[Gateway] WS handshake X-User-Id: user_id=%r%s channel=%s path=%s session_id=%s",
             ws_user_id,
             uid_marker,
             route.channel_id,
             matched_path,
+            handshake_sid,
+            extra={"session_id": handshake_sid} if handshake_sid else {},
         )
 
         # 触发连接钩子（GatewayServer 自身 + 外部 ws_channel，如 TuiChannel 鉴权）
@@ -1546,7 +1641,11 @@ async def _run(
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
     from jiuwenswarm.gateway.cron import CronController, CronJobStore, CronSchedulerService
-    from jiuwenswarm.gateway.heartbeat.heartbeat import GatewayHeartbeatService, HeartbeatConfig
+    from jiuwenswarm.gateway.health_check import (
+        GatewayHealthCheckService,
+        HealthCheckConfig,
+    )
+    from jiuwenswarm.gateway.heartbeat import HeartbeatControllerProxy
     from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
     from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
         WebHandlersBindParams,
@@ -1635,49 +1734,52 @@ async def _run(
     cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
     message_handler.set_cron_controller(cron_controller)
 
-    full_cfg: dict[str, Any] = {}
-    heartbeat_cfg: dict | None = None
-    channels_cfg: dict | None = None
-    try:
-        full_cfg = get_config()
-        message_handler.update_evolution_auto_save(full_cfg)
-        heartbeat_cfg = full_cfg.get("heartbeat") if isinstance(full_cfg, dict) else None
-        channels_cfg = full_cfg.get("channels") if isinstance(full_cfg, dict) else None
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[App] failed to read heartbeat config from config.yaml, using defaults: %s", e)
-        heartbeat_cfg = None
-        channels_cfg = None
+    # Heartbeat Store/Controller/Scheduler/Execution live in AgentServer.
+    # Gateway keeps only the stable public-interface proxy wired to Web/TUI.
+    heartbeat_controller = HeartbeatControllerProxy(client)
+
+    full_cfg, health_check_cfg, channels_cfg = _load_gateway_runtime_config(
+        message_handler
+    )
 
     client.set_or_update_server_config(
         config=dict(full_cfg or {}),
         env={env_key: (os.getenv(env_key) or "") for env_key in _CONFIG_SET_ENV_MAP.values()},
     )
 
-    if isinstance(heartbeat_cfg, dict):
-        cfg_every = heartbeat_cfg.get("every")
-        cfg_target = heartbeat_cfg.get("target")
-        cfg_active_hours = heartbeat_cfg.get("active_hours")
+    if isinstance(health_check_cfg, dict):
+        cfg_every = health_check_cfg.get("every")
+        cfg_target = health_check_cfg.get("target")
+        cfg_active_hours = health_check_cfg.get("active_hours")
     else:
         cfg_every = None
         cfg_target = None
         cfg_active_hours = None
 
     heartbeat_interval = float(
-        os.getenv("HEARTBEAT_INTERVAL")
+        os.getenv("HEALTH_CHECK_INTERVAL")
+        or os.getenv("HEARTBEAT_INTERVAL")
         or (str(cfg_every) if cfg_every is not None else "60")
     )
-    heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT", "30")) if os.getenv("HEARTBEAT_TIMEOUT") else None
-    heartbeat_relay_channel = os.getenv("HEARTBEAT_RELAY_CHANNEL_ID") or (
-        str(cfg_target) if cfg_target is not None else "web"
+    health_check_timeout_raw = os.getenv("HEALTH_CHECK_TIMEOUT") or os.getenv(
+        "HEARTBEAT_TIMEOUT"
+    )
+    heartbeat_timeout = (
+        float(health_check_timeout_raw) if health_check_timeout_raw else None
+    )
+    heartbeat_relay_channel = (
+        os.getenv("HEALTH_CHECK_RELAY_CHANNEL_ID")
+        or os.getenv("HEARTBEAT_RELAY_CHANNEL_ID")
+        or (str(cfg_target) if cfg_target is not None else "web")
     )
 
-    heartbeat_config = HeartbeatConfig(
+    heartbeat_config = HealthCheckConfig(
         interval_seconds=heartbeat_interval,
         timeout_seconds=heartbeat_timeout,
         relay_channel_id=heartbeat_relay_channel,
         active_hours=cfg_active_hours if isinstance(cfg_active_hours, dict) else None,
     )
-    heartbeat_service = GatewayHeartbeatService(
+    heartbeat_service = GatewayHealthCheckService(
         client,
         heartbeat_config,
         message_handler=message_handler,
@@ -1881,7 +1983,7 @@ async def _run(
         path=web_path,
         dual_protocol=web_dual_protocol,
     )
-    web_channel = WebChannel(web_config, _DummyBus())
+    web_channel = WebChannel(web_config, _DummyBus(), agent_client=client)
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
     # 1. 让 ``_mark_git_watcher_dirty`` 能通过 ``channel.git_watcher_registry`` 唤醒轮询
@@ -1893,6 +1995,25 @@ async def _run(
     web_channel.git_watcher_registry = _git_watcher_registry
     _git_watcher_registry.set_channel(web_channel)
 
+    # Git watch 状态计算委托：diff 状态、项目解析与工作目录访问都在目标
+    # AgentServer 注入目录完成，Gateway 只做指纹比对与事件推送（方案 §10.6 C）。
+    async def _git_diff_status_fetcher(request: dict):
+        from jiuwenswarm.gateway.routing.e2a_proxy import fetch_git_diff_status
+
+        hunk_paths = request.get("hunk_paths")
+        return await fetch_git_diff_status(
+            agent_client=client,
+            project_id=request.get("project_id"),
+            session_id=request.get("session_id") or None,
+            include_files=request.get("include_files"),
+            include_hunks=request.get("include_hunks"),
+            hunk_paths=list(hunk_paths) if hunk_paths else None,
+            user_id=request.get("user_id"),
+            channel_id="web",
+        )
+
+    _git_watcher_registry.set_diff_status_fetcher(_git_diff_status_fetcher)
+
     _register_web_handlers(
         WebHandlersBindParams(
             channel=web_channel,
@@ -1902,6 +2023,7 @@ async def _run(
             on_config_saved=_on_config_saved,
             heartbeat_service=heartbeat_service,
             cron_controller=cron_controller,
+            heartbeat_controller=heartbeat_controller,
             updater_service=updater_service,
         )
     )
@@ -1979,6 +2101,7 @@ async def _run(
                 path="/tui",
                 channel_id="tui",
                 cron_controller=cron_controller,
+                heartbeat_controller=heartbeat_controller,
                 ws_channel=tui_channel,
             )
         ),
@@ -3019,15 +3142,32 @@ def main() -> None:
     web_dual_protocol = _dual_raw not in {"0", "false", "no", "off"}
 
     install_async_dump_handler("gateway")
-    asyncio.run(
-        _run(
-            agent_server_url=agent_server_url,
-            web_host=web_host,
-            web_port=web_port,
-            web_path=web_path,
-            web_dual_protocol=web_dual_protocol,
+
+    # Per-workspace singleton lock: prevents a second Gateway process from
+    # serving the same workspace (two CronSchedulerService instances over one
+    # cron_jobs.json => duplicate cron executions).
+    from jiuwenswarm.instance_manager.lock import GatewayLock
+
+    gateway_lock = GatewayLock(get_user_workspace_dir())
+    if not gateway_lock.acquire():
+        logger.error(
+            "[App] Another Gateway is already serving this workspace; "
+            "refusing duplicate instance (lock: %s)",
+            gateway_lock.lock_path,
         )
-    )
+        raise SystemExit(1)
+    try:
+        asyncio.run(
+            _run(
+                agent_server_url=agent_server_url,
+                web_host=web_host,
+                web_port=web_port,
+                web_path=web_path,
+                web_dual_protocol=web_dual_protocol,
+            )
+        )
+    finally:
+        gateway_lock.release()
 
 
 if __name__ == "__main__":

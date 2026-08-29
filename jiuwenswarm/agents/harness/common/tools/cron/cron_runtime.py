@@ -31,6 +31,36 @@ class _CronToolsCronBackend(CronToolBackend):
     def __init__(self, cron_tools: CronTools, message_handler: MessageHandler | None = None) -> None:
         self._cron_tools = cron_tools
         self._message_handler = message_handler
+        # build_tools() 注入的稳定请求上下文。openjiuwen wrapper 只给
+        # create/update 传 context，其余 cron 操作（list/get/delete/toggle/
+        # preview/run_now）拿不到调用级 context，统一回退到该稳定上下文，
+        # 保证 AgentOS 下仍携带 user_id / session_id / request_id 路由键，
+        # 命中按用户保存的 Gateway 快照并把结果送回原对话。
+        self._bound_context: CronToolContext | None = None
+
+    def bind_context(self, context: CronToolContext | None) -> None:
+        self._bound_context = context
+
+    def _resolve_context(self, context: CronToolContext | None) -> CronToolContext | None:
+        return context if context is not None else self._bound_context
+
+    async def _with_route(
+        self,
+        context: CronToolContext | None,
+        coro: Any,
+    ) -> Any:
+        """在 cron 操作前后统一 push/reset CronToolRoute。
+
+        操作自己的 context 优先；缺省用 build_tools() 绑定的稳定上下文。
+        单用户 legacy（无 context、无 user_id）时 route 为空，行为不变。
+        """
+        token = self._cron_tools.push_cron_route(
+            self._route_from_context(self._resolve_context(context))
+        )
+        try:
+            return await coro
+        finally:
+            self._cron_tools.reset_cron_route(token)
 
     @staticmethod
     def _route_from_context(context: CronToolContext | None) -> CronToolRoute:
@@ -46,7 +76,7 @@ class _CronToolsCronBackend(CronToolBackend):
         )
         chat_type = str(metadata.get("chat_type") or "").strip() or None
         # 钉钉入站用 conversation_type(1/2)，需映射到 cron 的 group/p2p，供推送路由使用。
-        # create_job 以 route.session_id 落盘，这里必须写入 delivery binding，
+        # create_job 把 route.session_id 随转发 payload 传给 Gateway 落库，这里必须写入 delivery binding，
         # 不能把 Gateway 内部 dingtalk_… 会话 ID 当成钉钉 staffId。
         if channel_id == "dingtalk" or channel_id.startswith("dingtalk:"):
             if not chat_type:
@@ -60,7 +90,11 @@ class _CronToolsCronBackend(CronToolBackend):
         project_dir = str(metadata.get("project_dir") or "").strip()
         project_id = str(metadata.get("project_id") or "").strip()
         work_mode = str(metadata.get("work_mode") or "").strip()
+        model_name = str(metadata.get("model_name") or metadata.get("model") or "").strip()
         app_id = str(metadata.get("app_id") or "").strip()
+        # 发起会话的用户路由键：AgentOS 下由 CronToolContext.user_id 透传
+        # （deep adapter 从 E2A 请求 user_id 注入），供 job 归属创建者。
+        user_id = str(getattr(context, "user_id", "") or "").strip()
         return CronToolRoute(
             request_id=request_id,
             channel_id=channel_id,
@@ -69,7 +103,9 @@ class _CronToolsCronBackend(CronToolBackend):
             project_dir=project_dir,
             project_id=project_id,
             work_mode=work_mode,
+            model_name=model_name,
             app_id=app_id,
+            user_id=user_id,
         )
 
     @staticmethod
@@ -123,14 +159,14 @@ class _CronToolsCronBackend(CronToolBackend):
         return payload
 
     async def list_jobs(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
-        jobs = await self._cron_tools.list_jobs()
+        jobs = await self._with_route(None, self._cron_tools.list_jobs())
         rows = [self._to_backend_job(job) for job in jobs]
         if include_disabled:
             return rows
         return [job for job in rows if job.get("enabled", True)]
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
-        job = await self._cron_tools.get_job(job_id)
+        job = await self._with_route(None, self._cron_tools.get_job(job_id))
         if job is None:
             return None
         return self._to_backend_job(job)
@@ -165,11 +201,7 @@ class _CronToolsCronBackend(CronToolBackend):
             payload.get("id"),
             payload.get("name"),
         )
-        token = self._cron_tools.push_cron_route(self._route_from_context(context))
-        try:
-            job = await self._cron_tools.create_job(payload)
-        finally:
-            self._cron_tools.reset_cron_route(token)
+        job = await self._with_route(context, self._cron_tools.create_job(payload))
         return self._to_backend_job(job)
 
     async def update_job(
@@ -180,38 +212,30 @@ class _CronToolsCronBackend(CronToolBackend):
         context: CronToolContext | None = None,
     ) -> dict[str, Any]:
         payload = _extract_legacy_params(dict(patch or {}), context=context, require_schedule=False)
-        # update 不继承 chat-session 的模型配置：通过对话修改 cron 的配置（时间/名称等）
-        # 不应改动 cron 已落库的模型；只有 create 时才会继承会话模型（见 create_job）。
-        token = self._cron_tools.push_cron_route(self._route_from_context(context))
-        try:
-            job = await self._cron_tools.update_job(job_id, payload)
-        finally:
-            self._cron_tools.reset_cron_route(token)
+        job = await self._with_route(context, self._cron_tools.update_job(job_id, payload))
         return self._to_backend_job(job)
 
     async def delete_job(self, job_id: str) -> bool:
-        return bool(await self._cron_tools.delete_job(job_id))
+        # AgentServer→Gateway mutation is asynchronous; True means the delete
+        # request has been submitted to Gateway (single source of truth).
+        return bool(await self._with_route(None, self._cron_tools.delete_job(job_id)))
 
     async def toggle_job(self, job_id: str, enabled: bool) -> dict[str, Any]:
-        job = await self._cron_tools.toggle_job(job_id, enabled)
+        job = await self._with_route(None, self._cron_tools.toggle_job(job_id, enabled))
         return self._to_backend_job(job)
 
     async def preview_job(self, job_id: str, count: int = 5) -> list[dict[str, Any]]:
-        rows = await self._cron_tools.preview_job(job_id, count)
+        rows = await self._with_route(None, self._cron_tools.preview_job(job_id, count))
         return list(rows or [])
 
     async def run_now(self, job_id: str) -> str:
-        token = self._cron_tools.push_cron_route(CronToolRoute())
-        try:
-            run_result = await self._cron_tools.run_now(job_id)
-        finally:
-            self._cron_tools.reset_cron_route(token)
+        run_result = await self._with_route(None, self._cron_tools.run_now(job_id))
         if isinstance(run_result, dict):
             return str(run_result.get("run_id") or "")
         return str(run_result or "")
 
     async def status(self) -> dict[str, Any]:
-        jobs = await self._cron_tools.list_jobs()
+        jobs = await self._with_route(None, self._cron_tools.list_jobs())
         return {
             "running": False,
             "job_count": len(jobs),
@@ -255,7 +279,7 @@ class _CronToolsCronBackend(CronToolBackend):
         return {"queued": True}
 
     async def ensure_scheduler_started(self) -> None:
-        """确保scheduler已启动，如果未启动则异步启动"""
+        """兼容性 no-op：AgentServer 不再启动调度器（Phase 4 单源收敛）。"""
         await self._cron_tools.ensure_scheduler()
 
     @staticmethod
@@ -419,7 +443,7 @@ def _extract_legacy_params(
         if "deleteAfterRun" in data:
             out["delete_after_run"] = bool(data.get("deleteAfterRun"))
         # model_name：透传（新版格式可挂在顶层，也可能随 payload 传入），
-        # 供 CronTools.create_job 落盘；未显式传时由调用方继承会话模型。
+        # 供 CronTools.create_job 随 payload 转发 Gateway 落库；未显式传时由调用方继承会话模型。
         model_name_raw = data.get("model_name") or payload_block.get("model_name")
         if model_name_raw is not None and str(model_name_raw).strip():
             out["model_name"] = str(model_name_raw).strip()
@@ -585,12 +609,7 @@ _QUARTZ_DOW_DECLARATION_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 def _patch_cron_tool_cards(tools: list[Any]) -> list[Any]:
-    """修正 cron 工具 ToolCard 的 description/input_params 中的 dow 语义，返回修正后的 tools。
-
-    注意：不在工具描述中注入 model_name 字段——cron 的模型由创建它的 chat-session
-    直接复用（见 ``_CronToolsCronBackend._inherit_session_model``），不需要 LLM 参与
-    模型选择，避免 LLM 传入与创建会话不一致的模型。
-    """
+    """修正 cron 工具 ToolCard 的 description/input_params 中的 dow 语义，返回修正后的 tools。"""
     for tool in tools:
         card = getattr(tool, "card", None)
         if card is None:
@@ -647,7 +666,7 @@ class CronRuntimeBridge:
         return backend
 
     def ensure_scheduler_started(self) -> None:
-        """确保scheduler已启动，如果未启动则异步启动"""
+        """兼容性 no-op：AgentServer 不再启动调度器（Phase 4 单源收敛）。"""
         backend = self.get_backend()
         if backend is None:
             return
@@ -670,7 +689,15 @@ class CronRuntimeBridge:
         if backend is None:
             logger.warning("[CronRuntimeBridge] cron backend is not ready, skip builtin cron tools")
             return []
-        
+
+        # openjiuwen wrapper 只给 create/update 传 context；其余 cron 操作
+        # （list/get/delete/toggle/preview/run_now）拿不到调用级 context，
+        # 把 build_tools() 的稳定请求上下文绑到 backend，让这些操作也能带上
+        # user_id / session_id / request_id 路由键（AgentOS 命中用户快照并把
+        # 操作结果送回原对话）。
+        if isinstance(backend, _CronToolsCronBackend):
+            backend.bind_context(context)
+
         logger.info("[CronRuntimeBridge] Building cron tools for context: %s", 
                     getattr(context, 'tool_scope', 'unknown'))
         tools = create_cron_tools(

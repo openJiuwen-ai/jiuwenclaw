@@ -1002,6 +1002,64 @@ async def test_handle_tui_session_create_accepts_explicit_id_without_prewarm(
 
 
 @pytest.mark.asyncio
+async def test_handle_tui_non_explicit_create_resolves_project_in_agentserver(
+    monkeypatch, tmp_path
+):
+    """Non-``--session`` TUI creates resolve the code project in AgentServer."""
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="tui_non_explicit")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+    project_dir = str(tmp_path / "tui-code-project")
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
+        lambda _params: types.SimpleNamespace(
+            project_id="proj_tui_code",
+            project_dir=project_dir,
+            work_mode="code",
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.resolve_session_project_binding",
+        lambda project_id, resolved_dir: (project_id, resolved_dir, None, None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.get_project_by_id",
+        lambda project_id, cache_bust=True: types.SimpleNamespace(work_mode="code"),
+    )
+
+    request = AgentRequest(
+        request_id="req-tui-non-explicit",
+        channel_id="tui",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={
+            "create_token": "legacy-tui-create-001",
+            "mode": "code.normal",
+            "cwd": project_dir,
+            "project_dir": project_dir,
+        },
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert len(fake_manager.claim_session_calls) == 1
+    assert fake_manager.claim_session_calls[0]["project_id"] == "proj_tui_code"
+    metadata = json.loads(
+        (sessions_root / "tui_non_explicit" / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["project_id"] == "proj_tui_code"
+    assert metadata["project_dir"] == project_dir
+    assert fake_ws.sent[0]["ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_handle_tui_explicit_session_create_is_idempotent_and_bypasses_prewarm(
     monkeypatch, tmp_path
 ):
@@ -2831,6 +2889,24 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
     ensure_calls = []
     release_calls = []
     cleared_metadata_cache = []
+    heartbeat_deleted = []
+    heartbeat_delete_prepared = []
+
+    class HeartbeatRuntime:
+        is_available = True
+
+        async def begin_session_delete(self, session_id: str) -> None:
+            heartbeat_delete_prepared.append(session_id)
+
+        async def abort_session_delete(
+            self, session_id: str, *, channel_id: str = ""
+        ) -> None:
+            raise AssertionError("successful deletion must not be aborted")
+
+        async def commit_session_delete(self, session_id: str) -> None:
+            heartbeat_deleted.append(session_id)
+
+    server._heartbeat_runtime = HeartbeatRuntime()
 
     async def fake_ensure_persistent_checkpointer():
         ensure_calls.append("called")
@@ -2879,6 +2955,8 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
     assert ensure_calls == ["called"]
     assert release_calls == ["sess-agent-1"]
     assert cleared_metadata_cache == ["sess-agent-1"]
+    assert heartbeat_delete_prepared == ["sess-agent-1"]
+    assert heartbeat_deleted == ["sess-agent-1"]
     assert not session_dir.exists()
     assert fake_ws.sent == [
         {
@@ -2902,6 +2980,9 @@ async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cl
     events = []
 
     class RuntimeManager:
+        def get_agent_nowait(self, *args, **kwargs):
+            return None
+
         async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
             events.append(("runtime", channel_id, session_id))
             return True

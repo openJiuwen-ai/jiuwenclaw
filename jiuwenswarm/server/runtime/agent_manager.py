@@ -10,7 +10,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, TYPE_CHECKING
+from typing import Any, NamedTuple, TYPE_CHECKING
 from weakref import WeakValueDictionary
 
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
@@ -134,6 +134,7 @@ class AgentManager:
         # disconnect cleanup cannot tear it down in that gap.
         self._agent_borrowers: dict[int, set[asyncio.Task]] = {}
         self._agent_pins: dict[int, int] = {}
+        self._heartbeat_service: Any | None = None
         self._pending_tui_retirements: set[int] = set()
         self._retirement_tasks: dict[int, asyncio.Task] = {}
         self._agent_create_locks: WeakValueDictionary[
@@ -147,6 +148,16 @@ class AgentManager:
         from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
 
         self.warm_pool = AgentWarmPool(self)
+
+    def set_heartbeat_service(self, service: Any | None) -> None:
+        """Inject the process-owned Heartbeat service into single and Team agents."""
+        self._heartbeat_service = service
+        from jiuwenswarm.agents.swarm.context import set_heartbeat_job_service
+
+        set_heartbeat_job_service(service)
+        for agents in self.agents.values():
+            for agent in agents.values():
+                agent.set_heartbeat_service(service)
 
     def _get_agent_create_lock(
         self,
@@ -455,6 +466,7 @@ class AgentManager:
             project_dir or None,
         )
         agent = JiuWenSwarm()
+        agent.set_heartbeat_service(self._heartbeat_service)
         setter = getattr(agent, "set_personal_context_runtime_enabled", None)
         if callable(setter):
             setter(self._personal_context_runtime_enabled)
@@ -545,12 +557,20 @@ class AgentManager:
             return ACP_DEFAULT_CAPABILITIES.copy()
         return None
 
-    async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
+    async def cancel_all_inflight_work(
+        self,
+        reason: str = "[gateway ws disconnect] ",
+        *,
+        exclude_session_ids: set[str] | None = None,
+    ) -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时：取消所有已创建 Agent 实例上的在途任务。"""
         for modes in list(self.agents.values()):
             for agent in list(modes.values()):
                 try:
-                    await agent.cancel_inflight_work(reason)
+                    await agent.cancel_inflight_work(
+                        reason,
+                        exclude_session_ids=exclude_session_ids,
+                    )
                 except Exception:
                     logger.exception("[AgentManager] cancel_inflight_work failed")
 
@@ -1286,8 +1306,31 @@ class AgentManager:
             logger.warning("[AgentManager] LLM client evict skipped (import failed): %s", exc)
             return
 
-        def _diff_key(cfg: Any) -> tuple:
-            return (str(cfg.client_provider), cfg.api_key, cfg.api_base, cfg.verify_ssl, cfg.ssl_cert)
+        class _ConnDiffKey(NamedTuple):
+            # 新声明下同一 api_base 可能对应不同 endpoint_profile / auth_mode / api_mode，
+            # 这些会影响连接身份(如 affinity 走 custom_headers 不带 Authorization)。
+            # 纳入 diff key 避免误关/漏关连接池。core 侧 connection_key 已按归一 api_base
+            # + 鉴权分桶，此处 diff 至少不比 Client 更粗。
+            client_provider: str
+            endpoint_profile: Any
+            auth_mode: Any
+            api_mode: Any
+            api_key: str
+            api_base: str
+            verify_ssl: bool
+            ssl_cert: Any
+
+        def _diff_key(cfg: Any) -> _ConnDiffKey:
+            return _ConnDiffKey(
+                client_provider=str(cfg.client_provider),
+                endpoint_profile=getattr(cfg, "endpoint_profile", None),
+                auth_mode=getattr(cfg, "auth_mode", None),
+                api_mode=getattr(cfg, "api_mode", None),
+                api_key=cfg.api_key,
+                api_base=cfg.api_base,
+                verify_ssl=cfg.verify_ssl,
+                ssl_cert=cfg.ssl_cert,
+            )
 
         new_configs: dict[tuple, Any] = {}
         try:

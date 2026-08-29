@@ -1039,6 +1039,12 @@ async def test_finalize_runtime_cleanup_releases_session_markers(
     manager.mark_workflow_completed(session_id)
     manager.setdefault_cron_completion(session_id, {"round_id": 1})
     getattr(manager, "_pending_team_evolution_watcher_sessions").add(session_id)
+    release_admission = AsyncMock()
+    manager.begin_round(
+        session_id,
+        "req-terminal-cleanup",
+        release_admission=release_admission,
+    )
 
     async def fake_cleanup(
         _session_id: str,
@@ -1057,6 +1063,8 @@ async def test_finalize_runtime_cleanup_releases_session_markers(
     assert manager.has_seen_team_events(session_id) is False
     assert manager.is_workflow_completed(session_id) is False
     assert manager.get_cron_completion(session_id) is None
+    assert manager.is_round_active(session_id) is False
+    release_admission.assert_awaited_once()
     assert session_id not in getattr(
         manager,
         "_pending_team_evolution_watcher_sessions",
@@ -1101,6 +1109,44 @@ async def test_cancel_all_stream_tasks_uses_per_session_lifecycle_locks(
     assert first_cancelled.is_set() is True
     assert manager.has_stream_task("sess-1") is False
     assert manager.has_stream_task("sess-2") is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_stream_tasks_preserves_heartbeat_owned_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
+        lambda: {"team": {"runtime": {"mode": "local"}}},
+    )
+    manager = _TeamManagerHarness()
+    protected_cancelled = asyncio.Event()
+    ordinary_cancelled = asyncio.Event()
+
+    async def wait_until_cancelled(cancelled: asyncio.Event) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    protected_task = asyncio.create_task(wait_until_cancelled(protected_cancelled))
+    ordinary_task = asyncio.create_task(wait_until_cancelled(ordinary_cancelled))
+    await asyncio.sleep(0)
+    manager.register_stream_task("heartbeat-session", protected_task)
+    manager.register_stream_task("user-session", ordinary_task)
+
+    await manager.cancel_all_stream_tasks(
+        exclude_session_ids={"heartbeat-session"},
+    )
+
+    assert ordinary_cancelled.is_set() is True
+    assert protected_cancelled.is_set() is False
+    assert manager.has_stream_task("heartbeat-session") is True
+    assert manager.has_stream_task("user-session") is False
+
+    protected_task.cancel()
+    await asyncio.gather(protected_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
