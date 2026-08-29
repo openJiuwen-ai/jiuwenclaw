@@ -45,9 +45,6 @@ from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
 from jiuwenswarm.gateway.routing.agent_request_timeout import (
-    AGENT_SERVER_TIMEOUT_CODE,
-    AGENT_SERVER_TIMEOUT_ERROR,
-    AgentRequestTimeoutError,
     resolve_agent_request_timeout_seconds,
     send_agent_request_with_timeout,
 )

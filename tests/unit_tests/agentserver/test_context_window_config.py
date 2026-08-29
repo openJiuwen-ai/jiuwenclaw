@@ -210,7 +210,25 @@ async def test_code_adapter_forwards_model_tokenizer_spec_to_context(tmp_path, m
     monkeypatch.setattr(interface_code, "get_agent_workspace_dir", lambda: tmp_path)
 
     created_instance = MagicMock(ensure_initialized=AsyncMock())
+    created_instance.deep_config = SimpleNamespace(tool_owner_id=None)
+    created_instance.configured_rails.return_value = []
+    spec = MagicMock()
+    spec.build.return_value = created_instance
+    captured: dict = {}
+
+    def build_spec(**kwargs):
+        captured.update(kwargs)
+        context = SimpleNamespace(
+            tool_owner_id="code-tokenizer-test",
+            artifacts=SimpleNamespace(tools=[]),
+        )
+        return spec, context
+
     adapter = JiuwenSwarmCodeAdapter()
+
+    def create_sys_operation():
+        adapter._sys_operation_card = MagicMock()
+        return MagicMock()
 
     with (
         patch.object(adapter, "set_checkpoint", AsyncMock()),
@@ -219,16 +237,23 @@ async def test_code_adapter_forwards_model_tokenizer_spec_to_context(tmp_path, m
         patch.object(adapter, "_create_model", return_value=object()),
         patch.object(adapter, "_get_tool_cards", AsyncMock(return_value=[])),
         patch.object(adapter, "_build_agent_rails", return_value=[]),
-        patch.object(adapter, "_create_sys_operation", return_value=MagicMock()),
+        patch.object(
+            adapter, "_create_sys_operation", side_effect=create_sys_operation
+        ),
         patch.object(adapter, "_build_configured_subagents", return_value=(None, False)),
         patch.object(adapter, "_seed_runtime_cwd"),
         patch.object(adapter, "_register_mcp_servers_from_config", AsyncMock()),
         patch.object(adapter, "load_user_rails", AsyncMock()),
-        patch.object(interface_code, "create_deep_agent", return_value=created_instance) as create_agent,
+        patch.object(adapter, "_load_active_packages", AsyncMock()),
+        patch.object(
+            interface_code.code_agent_spec,
+            "convert_code_config_to_deep_agent_spec",
+            side_effect=build_spec,
+        ),
     ):
         await adapter.create_instance()
 
-    context_config = create_agent.call_args.kwargs["context_engine_config"]
+    context_config = captured["context_engine_config"]
     assert context_config.tokenizer_registry[0].model == "deepseek-chat"
     assert context_config.tokenizer_registry[0].tokenizer_id == str(tmp_path / "tokenizer.json")
     assert context_config.enable_tokenizer_download is False
