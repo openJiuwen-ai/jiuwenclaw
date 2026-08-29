@@ -4,6 +4,7 @@ import logging
 import os
 from typing import Any
 
+from jiuwenswarm.common.local_env_config import is_enterprise
 from jiuwenswarm.common.utils import get_cron_jobs_path
 from jiuwenswarm.extensions.redis import (
     get_declared_deployment_mode,
@@ -11,7 +12,6 @@ from jiuwenswarm.extensions.redis import (
     get_gateway_instance_id,
     get_gateway_redis_client,
 )
-from jiuwenswarm.gateway.cron.enterprise_gate import is_enterprise_edition
 from jiuwenswarm.gateway.cron.redis_store import RedisCronJobStore
 from jiuwenswarm.gateway.cron.store import FileCronJobStore
 from jiuwenswarm.gateway.cron.store_base import CronJobStoreBackend
@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 async def _create_base_cron_store() -> CronJobStoreBackend:
-    """Create cron store: file by default; Redis only under AGENT_RUNTIME + active-standby."""
-    # 企业版特性：无 AGENT_RUNTIME 时始终使用本地文件 store
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    """Create cron store: file by default; Redis only under enterprise edition + active-standby."""
+    # 企业版特性：非企业版时始终使用本地文件 store
+    if not is_enterprise():
         return FileCronJobStore(path=get_cron_jobs_path())
 
     mode = get_declared_deployment_mode()
@@ -48,11 +48,11 @@ async def _create_base_cron_store() -> CronJobStoreBackend:
 async def create_gateway_cron_store() -> CronJobStoreBackend | Any:
     """Create Gateway cron store.
 
-    - Non-enterprise: file store (or Redis under AGENT_RUNTIME + active-standby).
-    - Enterprise (``AGENT_RUNTIME`` set): wrap base store; use Gateway DB after bind.
+    - Non-enterprise: file store (or Redis under enterprise edition + active-standby).
+    - Enterprise: wrap base store; use Gateway DB after bind.
     """
     base = await _create_base_cron_store()
-    if not is_enterprise_edition():
+    if not is_enterprise():
         logger.info("[Cron] gateway cron store ready (non-enterprise)")
         return base
 

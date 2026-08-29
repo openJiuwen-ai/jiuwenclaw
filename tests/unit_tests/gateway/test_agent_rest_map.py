@@ -42,6 +42,7 @@ _RPC_ALLOWLIST = frozenset(
         "config.set",
         "channel.get",
         "team.session.reset",
+        "team.runtime.dissolve",
         "path.get",
         "path.set",
         "logging.set",
@@ -50,6 +51,11 @@ _RPC_ALLOWLIST = frozenset(
         "3rdagent.switch",
         "3rdagent.list",
         "skills.enterprise.list",
+        # 下面全仓无任何实现（只有ReqMethod枚举），与logging.set同类遗留
+        "files.list",
+        "files.get",
+        "harness.packages.import",
+        "harness.packages.export",
     }
 )
 

@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import asyncio
 import logging
@@ -32,7 +33,7 @@ def _parse_bool(raw: object, *, default: bool) -> bool:
 
 
 def config_poll_enabled() -> bool:
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    if not is_enterprise():
         return False
     env = os.getenv("GATEWAY_CONFIG_POLL_ENABLED")
     if env is not None and str(env).strip():

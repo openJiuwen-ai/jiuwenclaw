@@ -377,6 +377,24 @@ def _write_session_team_template_snapshot(
             raise
 
 
+def write_session_team_template_snapshot(
+    session_id: str,
+    snapshot: dict[str, Any],
+    *,
+    sessions_root: str | Path | None = None,
+) -> None:
+    """Persist a session's team template snapshot atomically (public wrapper).
+
+    Delegates to the existing atomic tmp+replace writer under ``_FILE_LOCK``.
+    Use this from refresh paths that must write synchronously without the
+    ``update_session_metadata`` side effects (async queueing,
+    ``touch_last_message_at``).
+    """
+    _write_session_team_template_snapshot(
+        session_id, snapshot, sessions_root=sessions_root
+    )
+
+
 def capture_session_team_binding_artifacts(
     session_id: str,
     *,

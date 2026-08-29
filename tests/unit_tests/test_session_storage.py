@@ -187,7 +187,7 @@ class TestSessionMapWithStorage:
             return session_storage_mod.LocalSessionStorage(store_path=store_path)
 
         monkeypatch.setattr(SessionMap, "_resolve_storage", staticmethod(_resolve_storage))
-        monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+        monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
 
         sm = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
         sm.set_session_id("provider1", "chat1", "bot1", "user1", "provider1::chat1::bot1::ts1::suffix1")

@@ -317,3 +317,28 @@ class ServiceConfigTemplateUpdateRequest(SafeTextMixin):
 class ServiceConfigTemplateCreateRequest(ServiceConfigTemplateUpdateRequest):
     template_id: str = Field(..., min_length=1, max_length=100)
     template_name: str = Field(..., min_length=1, max_length=128)
+
+
+class AgentTemplateUpdateRequest(SafeTextMixin):
+    template_name: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    agent_tags: list[str] | None = None
+    template_ref: dict[str, list[str]] | None = None
+    enabled: bool | None = None
+    data: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_template_ref_field(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("template_ref") is not None:
+            from ..infrastructure.utils import normalize_template_ref
+
+            data = dict(data)
+            data["template_ref"] = normalize_template_ref(data["template_ref"])
+        return data
+
+
+class AgentTemplateCreateRequest(AgentTemplateUpdateRequest):
+    template_id: str = Field(..., min_length=1, max_length=100)
+    template_name: str = Field(..., min_length=1, max_length=128)
+    template_ref: dict[str, list[str]] = Field(default_factory=dict)

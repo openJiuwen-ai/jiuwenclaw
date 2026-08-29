@@ -64,7 +64,7 @@ from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
-from jiuwenswarm.common.local_env_config import decrypt
+from jiuwenswarm.common.local_env_config import decrypt, is_enterprise
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
@@ -1522,7 +1522,7 @@ async def _run_with_telemetry(
     web_path: str,
     telemetry_lifecycle,
 ) -> bool:
-    from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChannel, A2AChannelConfig
+    from jiuwenswarm.gateway.a2a_manager import A2AManager, load_a2a_ingress_config_safely
     from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect import DingTalkChannel, \
         DingTalkConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_connect import FeishuChannel, FeishuConfig
@@ -1701,12 +1701,51 @@ async def _run_with_telemetry(
             exc,
         )
 
+    session_sharing_registry = None
+    cron_run_ephemeral = None
+    try:
+        from jiuwenswarm.gateway.storage_assembly.setup import (
+            create_session_sharing_registry,
+            cron_run_ephemeral_store,
+            ensure_gateway_storage_context_for_ephemeral,
+            is_ephemeral_state_enabled,
+        )
+
+        if is_ephemeral_state_enabled(full_cfg):
+            gateway_storage_ctx = ensure_gateway_storage_context_for_ephemeral(
+                full_cfg,
+                existing=gateway_storage_ctx,
+            )
+            if gateway_storage_ctx is not None:
+                session_sharing_registry = await create_session_sharing_registry(
+                    gateway_storage_ctx
+                )
+                cron_run_ephemeral = cron_run_ephemeral_store(gateway_storage_ctx)
+                logger.info(
+                    "[App] Ephemeral state wired: session_sharing, cron_scheduler"
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] ephemeral state wiring failed, using in-memory only: %s",
+            exc,
+        )
+        session_sharing_registry = None
+        cron_run_ephemeral = None
+
+    def _message_handler_factory(client):
+        if session_sharing_registry is not None:
+            return MessageHandler(
+                client,
+                session_sharing_registry=session_sharing_registry,
+            )
+        return MessageHandler(client)
+
     client, message_handler = await _connect_wrap_and_create_message_handler(
         client,
         agent_server_url=agent_server_url,
         max_retries=max_retries,
         retry_interval=retry_interval,
-        message_handler_factory=MessageHandler,
+        message_handler_factory=_message_handler_factory,
     )
     await message_handler.start_forwarding()
 
@@ -1721,6 +1760,7 @@ async def _run_with_telemetry(
     cron_registry = CronTenantRegistry.get_instance(
         agent_client=client,
         message_handler=message_handler,
+        cron_run_ephemeral=cron_run_ephemeral,
     )
     message_handler.set_cron_registry(cron_registry)
     # Default-tenant controller for proactive sync / TUI compatibility.
@@ -1963,6 +2003,16 @@ async def _run_with_telemetry(
     web_channel.git_watcher_registry = _git_watcher_registry
     _git_watcher_registry.set_channel(web_channel)
 
+    a2a_config, a2a_config_error = load_a2a_ingress_config_safely()
+    if a2a_config_error is not None:
+        logger.error("a2a.ingress configuration is invalid; ingress remains disabled: %s", a2a_config_error)
+    a2a_manager = A2AManager(
+        channel_manager,
+        _DummyBus(),
+        a2a_config,
+        initial_error=a2a_config_error,
+    )
+
     _register_web_handlers(
         WebHandlersBindParams(
             channel=web_channel,
@@ -1974,6 +2024,7 @@ async def _run_with_telemetry(
             cron_controller=cron_controller,
             cron_registry=cron_registry,
             updater_service=updater_service,
+            a2a_manager=a2a_manager,
         )
     )
 
@@ -2070,62 +2121,7 @@ async def _run_with_telemetry(
             binding.install(gateway_server)
     gateway_server.on_message(acp_inbound_server.handle_message)
 
-    a2a_server_enabled = str(os.getenv("A2A_SERVER_ENABLED", "")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    a2a_channel = A2AChannel(
-        A2AChannelConfig(
-            enabled=a2a_server_enabled,
-            host=str(os.getenv("A2A_SERVER_HOST", "127.0.0.1")).strip() or "127.0.0.1",
-            port=int(os.getenv("A2A_SERVER_PORT", "19100")),
-            rpc_path=str(os.getenv("A2A_SERVER_PATH", "/a2a")).strip() or "/a2a",
-            protocol_version=str(os.getenv("A2A_SERVER_PROTOCOL_VERSION", "1.0.0")).strip() or "1.0.0",
-            card_path=str(
-                os.getenv("A2A_SERVER_CARD_PATH", "/.well-known/agent-card.json")
-            ).strip()
-                      or "/.well-known/agent-card.json",
-            extended_card_path=str(
-                os.getenv("A2A_SERVER_EXTENDED_CARD_PATH", "/agent/authenticatedExtendedCard")
-            ).strip()
-                               or "/agent/authenticatedExtendedCard",
-            app_name=str(
-                os.getenv("A2A_SERVER_APP_NAME", "JiuwenSwarm Gateway A2A Server")
-            ).strip()
-                     or "JiuwenSwarm Gateway A2A Server",
-            app_description=str(
-                os.getenv("A2A_SERVER_APP_DESCRIPTION", "A2A ingress for JiuwenSwarm Gateway")
-            ).strip()
-                            or "A2A ingress for JiuwenSwarm Gateway",
-            app_version=str(
-                os.getenv("A2A_SERVER_APP_VERSION", "0.1.0")
-            ).strip()
-                        or "0.1.0",
-            expose_reasoning=str(os.getenv("A2A_SERVER_EXPOSE_REASONING", "true")).strip().lower()
-                             not in {"0", "false", "no", "off"},
-        ),
-        _DummyBus(),
-    )
-    channel_manager.register_channel(a2a_channel)
-    a2a_task = asyncio.create_task(a2a_channel.start(), name="a2a-channel")
-    if a2a_server_enabled:
-        # Keep gateway startup non-blocking; surface background A2A boot failures with actionable logs.
-        def _on_a2a_task_done(task: asyncio.Task) -> None:
-            try:
-                task.result()
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "[App] A2A server failed to start: %s. "
-                    "If A2A is enabled, install optional dependency with "
-                    "`uv sync --extra a2a` or `pip install \"jiuwenswarm[a2a]\"`.",
-                    exc,
-                )
-
-        a2a_task.add_done_callback(_on_a2a_task_done)
+    await a2a_manager.start_from_config()
 
     feishu_channel = None
     feishu_task = None
@@ -2785,7 +2781,7 @@ async def _run_with_telemetry(
     # Enterprise active-standby gates the default scheduler; tenant controllers
     # remain owned by CronTenantRegistry and inherit the same process role.
     leader_election = None
-    if os.getenv("AGENT_RUNTIME", "").strip():
+    if is_enterprise():
         deployment_mode = str(
             (get_config().get("gateway") or {}).get("deployment_mode", "standalone")
         ).strip().lower()
@@ -2871,14 +2867,7 @@ async def _run_with_telemetry(
             await prewarm_sync_task
         except asyncio.CancelledError:
             pass
-        if a2a_task is not None:
-            a2a_task.cancel()
-            try:
-                await a2a_task
-            except asyncio.CancelledError:
-                pass
-        await a2a_channel.stop()
-        channel_manager.unregister_channel(a2a_channel.channel_id)
+        await a2a_manager.stop()
         if gateway_server_task is not None:
             gateway_server_task.cancel()
             try:

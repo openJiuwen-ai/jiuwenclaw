@@ -6,6 +6,7 @@ Provides utilities for converting interrupt payloads to frontend format
 and building permission rails.
 """
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import copy
 import json
@@ -37,6 +38,20 @@ SKILL_EVOLUTION_APPROVAL_TOOL_KINDS = {
     "evolve_skill_experiences": "evolve",
     "simplify_skill_experiences": "simplify",
 }
+
+
+def is_interrupt_resume_source(source: Any) -> bool:
+    """True for permission / confirm / ask_user HITL resume sources.
+
+    Used to keep the active skill (and thus skill_envs injection) across
+    security-guard HITL. Intentionally excludes skill-evolution sources.
+    """
+    text = str(source or "").strip()
+    return text in {
+        "permission_interrupt",
+        "confirm_interrupt",
+        "ask_user_interrupt",
+    }
 
 
 def has_interrupt_resume_payload(params: Any) -> bool:
@@ -160,7 +175,7 @@ def build_permission_rail(
             try:
                 from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
                     get_base_permissions_config,
-                    is_enterprise_runtime,
+                    is_enterprise,
                     persist_permissions_mutate,
                 )
                 from jiuwenswarm.common.config import _load_yaml_round_trip
@@ -172,7 +187,7 @@ def build_permission_rail(
 
                 on_disk_perms = data.get("permissions")
                 if not isinstance(on_disk_perms, dict):
-                    on_disk_perms = get_base_permissions_config() if is_enterprise_runtime() else {}
+                    on_disk_perms = get_base_permissions_config() if is_enterprise() else {}
 
                 merged = dict(on_disk_perms)
                 overrides_new = permissions.get("approval_overrides")

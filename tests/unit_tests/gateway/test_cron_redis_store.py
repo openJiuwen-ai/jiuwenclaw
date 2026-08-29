@@ -99,7 +99,7 @@ async def test_factory_standalone_returns_file_store(tmp_path, monkeypatch) -> N
     from jiuwenswarm.gateway.cron.factory import create_gateway_cron_store
     from jiuwenswarm.gateway.cron.store import FileCronJobStore
 
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     await init_gateway_redis_from_config({"gateway": {"deployment_mode": "standalone"}})
     try:
         monkeypatch.setattr(
@@ -117,7 +117,7 @@ async def test_factory_standalone_returns_file_store(tmp_path, monkeypatch) -> N
 async def test_factory_active_standby_without_redis_raises(monkeypatch) -> None:
     from jiuwenswarm.gateway.cron.factory import create_gateway_cron_store
 
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setattr(
         "jiuwenswarm.gateway.cron.factory.get_declared_deployment_mode",
         lambda: "active-standby",
@@ -134,7 +134,7 @@ async def test_factory_active_standby_without_redis_raises(monkeypatch) -> None:
 async def test_factory_active_standby_requires_instance_id(monkeypatch) -> None:
     from jiuwenswarm.gateway.cron.factory import create_gateway_cron_store
 
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setattr(
         "jiuwenswarm.gateway.cron.factory.get_declared_deployment_mode",
         lambda: "active-standby",
@@ -160,7 +160,7 @@ async def test_factory_without_agent_runtime_uses_file(tmp_path, monkeypatch) ->
     from jiuwenswarm.gateway.cron.factory import create_gateway_cron_store
     from jiuwenswarm.gateway.cron.store import FileCronJobStore
 
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     monkeypatch.setattr(
         "jiuwenswarm.gateway.cron.factory.get_declared_deployment_mode",
         lambda: "active-standby",

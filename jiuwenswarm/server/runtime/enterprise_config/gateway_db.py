@@ -1,184 +1,66 @@
-"""Gateway 本地库：企业配置读库（``GATEWAY_*`` / aiosqlite，不依赖 jiuwenclaw-ee）。"""
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Gateway 本地库：企业配置读库 facade（``GATEWAY_*``，不依赖 jiuwenclaw-ee）。
+
+IO 实现见 ``gateway/storage/backends/db/reader``（与 Gateway 写库同环境变量）。
+本模块负责实例隔离（``jiuwenclaw_id``）与模板槽位等业务封装。
+"""
 
 from __future__ import annotations
 
-import json
-import os
-import re
-from pathlib import Path
 from typing import Any
 
-import aiosqlite
-
-from jiuwenswarm.common.utils import get_user_workspace_dir, logger
+from jiuwenswarm.common.utils import logger
+from jiuwenswarm.gateway.config.enterprise.instance_scope import (
+    apply_instance_scope as _apply_instance_scope,
+    instance_scoped_store_names,
+    list_records_requires_bound_instance,
+    resolve_gateway_instance_id,
+)
+from jiuwenswarm.gateway.storage.backends.db import reader as _db_reader
 
 from .schemas import SLOT_ENTITY_TABLE, TemplateRefSlot
 
-_DB_PATH: str | None = None
-_SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_INSTANCE_SCOPED_TABLES = frozenset(
-    {
-        "config_effective_service_policy",
-        "config_effective_agent_policy",
-        "config_effective_global_policy",
-        "config_default_template_mapping",
-        "model_template",
-        "embedding_template",
-        "log_masking_rule",
-    }
-)
+# 与 catalog + cron_job 对齐；供测试与文档引用
+INSTANCE_SCOPED_TABLES = instance_scoped_store_names()
+PERMISSIONS_CONFIG_TABLE = _db_reader.PERMISSIONS_CONFIG_TABLE
 
+resolve_gateway_db_path = _db_reader.resolve_gateway_db_path
+use_remote_gateway_db = _db_reader.use_remote_gateway_db
+is_gateway_db_available = _db_reader.is_gateway_db_available
 
-def resolve_gateway_db_path() -> str | None:
-    """解析 Gateway SQLite 路径；未配置或不存在时返回 None。"""
-    global _DB_PATH
-    if _DB_PATH is not None:
-        return _DB_PATH
-
-    explicit = (
-        os.getenv("GATEWAY_SQLITE_PATH", "").strip()
-        or os.getenv("JIUWENSWARM_GATEWAY_DB_PATH", "").strip()
-        or os.getenv("JIUWENCLAW_GATEWAY_DB_PATH", "").strip()
-        or os.getenv("MANAGER_WS_CLIENT_SQLITE_PATH", "").strip()
-    )
-    if explicit:
-        path = Path(explicit).expanduser()
-        if not path.is_absolute():
-            data_dir = (
-                os.getenv("JIUWENSWARM_DATA_DIR", "").strip()
-                or os.getenv("JIUWENCLAW_DATA_DIR", "").strip()
-            )
-            path = (Path(data_dir) / path) if data_dir else path
-        path = path.resolve()
-        if path.is_file():
-            _DB_PATH = str(path)
-            return _DB_PATH
-        logger.warning("[enterprise_config] GATEWAY_SQLITE_PATH not found: %s", path)
-        return None
-
-    data_dir = (
-        os.getenv("JIUWENSWARM_DATA_DIR", "").strip()
-        or os.getenv("JIUWENCLAW_DATA_DIR", "").strip()
-    )
-    if data_dir:
-        root = Path(data_dir).expanduser().resolve()
-        for candidate in (
-            root / "gateway.db",
-            root / "agent_client.db",
-            root / "gateway" / "agent_client.db",
-        ):
-            if candidate.is_file():
-                _DB_PATH = str(candidate)
-                return _DB_PATH
-
-    try:
-        from jiuwenswarm.common.config import get_config
-
-        sqlite_path = (
-            (get_config().get("extensions") or {})
-            .get("agent_client_rest", {})
-            .get("database", {})
-            .get("sqlite_path")
-        )
-        if isinstance(sqlite_path, str) and sqlite_path.strip():
-            configured = Path(sqlite_path.strip()).expanduser()
-            if configured.is_file():
-                _DB_PATH = str(configured.resolve())
-                return _DB_PATH
-    except Exception as exc:
-        logger.debug("[enterprise_config] read sqlite_path from config failed: %s", exc)
-
-    fallback = get_user_workspace_dir() / "gateway" / "agent_client.db"
-    if fallback.is_file():
-        _DB_PATH = str(fallback.resolve())
-        return _DB_PATH
-    return None
+# 别名：单测可 monkeypatch 本模块上的 ``_list_records_*``
+_list_records_remote = _db_reader.list_records_remote
+_list_records_sqlite = _db_reader.list_records_sqlite
 
 
 def resolve_jiuwenclaw_id() -> str | None:
-    """从环境变量读取当前实例 id；未设置时返回 ``None``。
-
-    优先 ``JIUWENCLAW_ID`` / ``JIUWENSWARM_ID``（Manager WS register.ack 写入）；
-    兼容旧的 ``*_PROVISIONED_INSTANCE_ID`` / ``GATEWAY_INSTANCE_ID``。
-    """
-    instance_id = (
-        os.getenv("JIUWENCLAW_ID", "").strip()
-        or os.getenv("JIUWENSWARM_ID", "").strip()
-        or os.getenv("JIUWENSWARM_PROVISIONED_INSTANCE_ID", "").strip()
-        or os.getenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "").strip()
-        or os.getenv("GATEWAY_INSTANCE_ID", "").strip()
-    )
-    return instance_id or None
+    """当前实例 id（``resolve_gateway_instance_id`` 别名，供 AgentServer 调用方）。"""
+    return resolve_gateway_instance_id()
 
 
 def apply_instance_scope(table: str, filters: dict[str, Any]) -> dict[str, Any]:
-    """为策略/映射/模型表查询附加 ``jiuwenclaw_id`` 隔离条件（供读库与测试复用）。"""
-    query = dict(filters)
-    if table not in _INSTANCE_SCOPED_TABLES:
-        return query
-    jiuwenclaw_id = resolve_jiuwenclaw_id()
-    if jiuwenclaw_id:
-        query["jiuwenclaw_id"] = jiuwenclaw_id
-    return query
+    """为 scoped 表查询附加 ``jiuwenclaw_id``（供读库与测试复用）。"""
+    return _apply_instance_scope(
+        table,
+        filters,
+        instance_id=resolve_gateway_instance_id(),
+    )
 
 
-def _parse_json_string(value: str) -> Any:
-    text = value.strip()
-    if not text or text[0] not in "{[":
-        return value
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return value
-
-
-def _row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key in row.keys():
-        value = row[key]
-        if isinstance(value, str):
-            parsed = _parse_json_string(value)
-            out[key] = parsed
-        else:
-            out[key] = value
-    return out
-
-
-def _sort_by_order(rows: list[dict[str, Any]], order_by: str) -> list[dict[str, Any]]:
-    text = order_by.strip()
-    if not text:
-        return rows
-
-    parts = text.split(None, 1)
-    field = parts[0].strip()
-    reverse = False
-    if len(parts) > 1:
-        reverse = parts[1].strip().upper() == "DESC"
-    elif field.startswith("-"):
-        reverse = True
-        field = field[1:].strip()
-    if not field:
-        return rows
-
-    def _key(row: dict[str, Any]) -> Any:
-        value = row.get(field)
-        if value is None:
-            return 0
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return value
-
-    return sorted(rows, key=_key, reverse=reverse)
-
-
-__all__ = (
-    "apply_instance_scope",
-    "fetch_template_by_slot",
-    "list_records",
-    "resolve_gateway_db_path",
-    "resolve_jiuwenclaw_id",
-)
+async def upsert_permissions_config(
+    body: dict[str, Any],
+    *,
+    source: str = "runtime_persist",
+) -> None:
+    """按 ``jiuwenclaw_id`` upsert ``permissions_config``（远程或本地 sqlite）。"""
+    jid = resolve_jiuwenclaw_id()
+    if not jid:
+        raise ValueError("JIUWENCLAW_ID is required for enterprise permissions persist")
+    await _db_reader.upsert_permissions_config(
+        body,
+        jiuwenclaw_id=jid,
+        source=source,
+    )
 
 
 async def fetch_template_by_slot(
@@ -198,10 +80,6 @@ async def fetch_template_by_slot(
     if not ref:
         return None
     filters: dict[str, Any] = {"enabled": True, "template_id": ref}
-    if table == "model_template":
-        jiuwenclaw_id = resolve_jiuwenclaw_id()
-        if jiuwenclaw_id:
-            filters["jiuwenclaw_id"] = jiuwenclaw_id
     rows = await list_records(table, filters=filters)
     return rows[0] if rows else None
 
@@ -212,38 +90,37 @@ async def list_records(
     filters: dict[str, Any] | None = None,
     order_by: str = "",
 ) -> list[dict[str, Any]]:
-    """列表查询；``filters`` 含 ``enabled`` 等条件。策略/映射/模型表自动按 ``jiuwenclaw_id`` 隔离。"""
-    if not _SAFE_IDENT.fullmatch(table or ""):
+    """列表查询；scoped 表自动按 ``jiuwenclaw_id`` 隔离。
+
+    ``is_enterprise()`` + ``GATEWAY_DB_HOST`` 时走远程 MySQL/PG；否则走本地 sqlite。
+    """
+    if not _db_reader.is_safe_ident(table or ""):
         logger.warning("[enterprise_config] invalid table name: %r", table)
         return []
 
-    db_path = resolve_gateway_db_path()
-    if not db_path:
+    instance_id = resolve_gateway_instance_id()
+    if list_records_requires_bound_instance(table, instance_id):
+        logger.warning(
+            "[enterprise_config] list_records skipped: jiuwenclaw_id not bound for table=%s",
+            table,
+        )
         return []
 
     query = apply_instance_scope(table, dict(filters or {}))
-    where_parts: list[str] = []
-    params: list[Any] = []
-    for key, value in query.items():
-        if not _SAFE_IDENT.fullmatch(str(key)):
-            continue
-        where_parts.append(f"{key} = ?")
-        if isinstance(value, bool):
-            params.append(1 if value else 0)
-        else:
-            params.append(value)
+    if use_remote_gateway_db():
+        return await _list_records_remote(table, query, order_by)
+    return await _list_records_sqlite(table, query, order_by)
 
-    sql = f"SELECT * FROM {table}"
-    if where_parts:
-        sql = f"{sql} WHERE {' AND '.join(where_parts)}"
 
-    try:
-        async with aiosqlite.connect(db_path) as conn:
-            conn.row_factory = aiosqlite.Row
-            async with conn.execute(sql, params) as cursor:
-                rows = await cursor.fetchall()
-        result = [_row_to_dict(r) for r in rows]
-        return _sort_by_order(result, order_by) if order_by else result
-    except Exception as exc:
-        logger.warning("[enterprise_config] query %s failed: %s", table, exc)
-        return []
+__all__ = (
+    "INSTANCE_SCOPED_TABLES",
+    "PERMISSIONS_CONFIG_TABLE",
+    "apply_instance_scope",
+    "fetch_template_by_slot",
+    "is_gateway_db_available",
+    "list_records",
+    "resolve_gateway_db_path",
+    "resolve_jiuwenclaw_id",
+    "upsert_permissions_config",
+    "use_remote_gateway_db",
+)

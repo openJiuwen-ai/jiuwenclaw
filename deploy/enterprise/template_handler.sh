@@ -115,32 +115,27 @@ mount_core_pkg() {
         "${DEPLOY_VARS["CORE_POD_PKG_PATH"]}"
 }
 
-# Override the container command to run the frontend vite dev server (HMR) in
-# <workdir> on <port>, bound to 0.0.0.0 so the Service/NodePort can reach it.
-# Usage: run_frontend_dev <file> <workdir> <port>
-run_frontend_dev() {
-    local file="$1" comp="$2"
-    local workdir="" port=""
-
-    case "${comp}" in
-        web)
-            [ -z "${DEPLOY_VARS["CLAW_POD_CODE_PATH"]:-}" ] && return
-            workdir="${DEPLOY_VARS["CLAW_POD_CODE_PATH"]}/jiuwenswarm/channels/web/frontend"
-            port="${DEPLOY_VARS["WEB_HTTP_PORT"]}"
-            ;;
-        manager-web)
-            [ -z "${DEPLOY_VARS["RUNTIME_CODE_PATH"]:-}" ] && return
-            workdir="${DEPLOY_VARS["RUNTIME_POD_CODE_PATH"]}/applications/manager/manager_web"
-            port="${DEPLOY_VARS["MANAGER_WEB_PORT"]}"
-            ;;
-        *)
-            warning "run_frontend_dev: unknown component '${comp}', skipping"
-            return
-            ;;
-    esac
+# User Web 挂载代码时先构建静态资源，再走与产品镜像相同的入口。
+# Vite dev HTML 使用根路径资源，不能完整经由 Manager Web 的 /chat 子路径代理。
+run_web_mounted() {
+    local file="$1"
+    [ -z "${DEPLOY_VARS["CLAW_POD_CODE_PATH"]:-}" ] && return
+    local root="${DEPLOY_VARS["CLAW_POD_CODE_PATH"]}"
+    local workdir="${root}/jiuwenswarm/channels/web/frontend"
 
     yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].command = ["/bin/sh", "-c"]' -i "${file}"
-    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].args = ["cd '"${workdir}"' && npm run dev -- --host 0.0.0.0 --port '"${port}"'"]' -i "${file}"
+    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].args = ["cd '"${workdir}"' && npm run build && cd '"${root}"' && exec jiuwenswarm-start web"]' -i "${file}"
+}
+
+# Manager Web 的挂载验证走与产品镜像相同的 Python 统一入口，
+# 以覆盖鉴权、HTTP/SSE 和 WebSocket 反向代理。
+run_manager_web_mounted() {
+    local file="$1"
+    [ -z "${DEPLOY_VARS["RUNTIME_POD_CODE_PATH"]:-}" ] && return
+    local workdir="${DEPLOY_VARS["RUNTIME_POD_CODE_PATH"]}/applications/manager/manager_web"
+
+    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].command = ["/bin/sh", "-c"]' -i "${file}"
+    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].args = ["cd '"${workdir}"' && npm run build && exec manager-web"]' -i "${file}"
 }
 
 enable_dev_mode_if_needed() {
@@ -158,7 +153,7 @@ enable_dev_mode_if_needed() {
             mount_claw_code "${file}"
             mount_runtime_pkg "${file}"
             mount_core_pkg "${file}"
-            run_frontend_dev "${file}" "${comp}"
+            run_web_mounted "${file}"
             ;;
         manager-server)
             mount_runtime_code "${file}"
@@ -172,7 +167,7 @@ enable_dev_mode_if_needed() {
         manager-web)
             [ "${DEPLOY_VARS["IS_MOUNT_MANAGER_WEB_CODE"]}" != "true" ] && return
             mount_runtime_code "${file}"
-            run_frontend_dev "${file}" "${comp}"
+            run_manager_web_mounted "${file}"
             ;;
         *)
             warning "enable_dev_mode_if_needed: unknown component '${comp}', skipping"

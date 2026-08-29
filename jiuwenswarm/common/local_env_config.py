@@ -75,10 +75,12 @@ SPAWN_ENV_KEYS: frozenset[str] = frozenset(
         "OTEL_SERVICE_NAME",
         "OTEL_LOG_MESSAGES",
         "PATH",
-        "AGENT_RUNTIME",
+        "JIUWENSWARM_EDITION",
         # Unified tool switch (blacklist); config.yaml references ${DISABLED_TOOLS-...}.
         # Defaults to disabling search_skill / install_skill / uninstall_skill.
         "DISABLED_TOOLS",
+        # Code-mode generated-code co-author header switch; process shared.
+        "JIUWENSWARM_CODE_COAUTHOR_HEADER_ENABLED",
         # launchEnv / config.yaml ${EXTENSION_DIRS}; process-shared (relay RELAYCLAW_SHARED_ENV_KEYS TBD).
         "EXTENSION_DIRS",
     }
@@ -927,9 +929,14 @@ def hydrate_default_tip_from_baseline() -> None:
     )
 
 
+def is_enterprise() -> bool:
+    """True if JIUWENSWARM_EDITION is 'enterprise' (企业版)."""
+    return os.getenv("JIUWENSWARM_EDITION", "").strip().lower() == "enterprise"
+
+
 def should_hydrate_default_tip() -> bool:
-    """True for local processes; False when relay sets ``AGENT_RUNTIME``."""
-    return not str(os.environ.get("AGENT_RUNTIME", "") or "").strip()
+    """True for local processes; False when enterprise edition."""
+    return not is_enterprise()
 
 
 _LEGACY_OFFICE_CLAW_DISABLE_TOOL_CALLING = "OFFICE_CLAW_DISABLE_TOOL_CALLING"

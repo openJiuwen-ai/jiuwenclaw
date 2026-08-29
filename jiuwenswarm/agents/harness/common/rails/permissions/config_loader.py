@@ -3,17 +3,14 @@
 """Permissions 配置加载：企业版 Gateway DB 优先，否则回落 config.yaml。"""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import asyncio
 import contextvars
 import copy
-import json
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Any, Callable, Literal
-
-import aiosqlite
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +27,6 @@ PERMISSIONS_SESSION_ID: contextvars.ContextVar[str | None] = contextvars.Context
     default=None,
 )
 
-
-def is_enterprise_runtime() -> bool:
-    return bool(os.getenv("AGENT_RUNTIME", "").strip())
 
 
 def setup_permissions_session_scope(session_id: str | None) -> contextvars.Token:
@@ -237,7 +231,7 @@ def merge_session_permissions_overlay(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """将 base 配置与会话 overlay 合并（供 PermissionInterruptRail 判定）。"""
-    if not is_enterprise_runtime():
+    if not is_enterprise():
         return copy.deepcopy(base_config)
     sid = _resolve_session_id(session_id)
     if not sid:
@@ -255,7 +249,7 @@ def get_base_permissions_config(*, force_reload: bool = False) -> dict[str, Any]
     if not force_reload and _cached_permissions is not None:
         return copy.deepcopy(_cached_permissions)
 
-    if not is_enterprise_runtime():
+    if not is_enterprise():
         cfg = _load_permissions_from_yaml()
         _cached_permissions = cfg
         _cache_source = "yaml"
@@ -288,7 +282,7 @@ def get_effective_permissions_config(
 ) -> dict[str, Any]:
     """返回生效的 ``permissions`` 段（企业版：base + 会话 overlay；其他：YAML/base）。"""
     base = get_base_permissions_config(force_reload=force_reload)
-    if not is_enterprise_runtime():
+    if not is_enterprise():
         return base
     return merge_session_permissions_overlay(base, session_id=session_id)
 
@@ -315,7 +309,7 @@ def apply_permissions_config_payload(payload: dict[str, Any] | None) -> dict[str
 
 async def reload_permissions_from_gateway_db() -> dict[str, Any]:
     """冷启动：从 Gateway 库加载 ``permissions_config`` 并刷新缓存。"""
-    if not is_enterprise_runtime():
+    if not is_enterprise():
         return apply_permissions_config_payload({"op": "delete"})
     try:
         body = await _load_permissions_body_from_db()
@@ -344,7 +338,7 @@ def persist_permissions_mutate(
     - 企业版 + ``persist_scope='session'``：仅更新指定会话的内存 overlay。
     - 企业版 + ``persist_scope='base'``：更新 base 缓存并写 Gateway DB（Web UI / CLI）。
     """
-    if is_enterprise_runtime() and persist_scope == "session":
+    if is_enterprise() and persist_scope == "session":
         sid = _resolve_session_id(session_id)
         if not sid:
             logger.warning(
@@ -371,7 +365,7 @@ def persist_permissions_mutate(
 
     mutate_fn(permissions)
 
-    if is_enterprise_runtime() and _gateway_db_available():
+    if is_enterprise() and _gateway_db_available():
         if _event_loop_is_running():
             loop = asyncio.get_running_loop()
             task = loop.create_task(
@@ -415,7 +409,7 @@ def _gateway_db_available() -> bool:
     try:
         from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 
-        return bool(gateway_db.resolve_gateway_db_path())
+        return gateway_db.is_gateway_db_available()
     except Exception:  # noqa: BLE001
         return False
 
@@ -447,47 +441,7 @@ async def _upsert_permissions_config_to_db(
 ) -> None:
     from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 
-    jid = gateway_db.resolve_jiuwenclaw_id()
-    if not jid:
-        raise ValueError("JIUWENCLAW_ID is required for enterprise permissions persist")
-
-    db_path = gateway_db.resolve_gateway_db_path()
-    if not db_path:
-        raise RuntimeError("gateway db not available")
-
-    now = _utc_now().isoformat()
-    body_json = json.dumps(body, ensure_ascii=False)
-
-    async with aiosqlite.connect(db_path) as conn:
-        async with conn.execute(
-            f"SELECT id, revision FROM {PERMISSIONS_CONFIG_TABLE} WHERE jiuwenclaw_id = ?",
-            (jid,),
-        ) as cursor:
-            existing = await cursor.fetchone()
-        if existing is not None:
-            revision = int(existing[1] or 1) + 1
-            await conn.execute(
-                f"""
-                UPDATE {PERMISSIONS_CONFIG_TABLE}
-                SET body = ?, source = ?, revision = ?, updated_at = ?
-                WHERE jiuwenclaw_id = ?
-                """,
-                (body_json, source, revision, now, jid),
-            )
-        else:
-            await conn.execute(
-                f"""
-                INSERT INTO {PERMISSIONS_CONFIG_TABLE}
-                (jiuwenclaw_id, body, source, revision, created_at, updated_at)
-                VALUES (?, ?, ?, 1, ?, ?)
-                """,
-                (jid, body_json, source, now, now),
-            )
-        await conn.commit()
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    await gateway_db.upsert_permissions_config(body, source=source)
 
 
 def _event_loop_is_running() -> bool:

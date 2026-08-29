@@ -387,6 +387,105 @@ async def test_handle_skills_evolution_rollback_accepts_office_claw_skill_path(
 
 
 @pytest.mark.anyio
+async def test_generate_evolution_merge_version_accepts_office_claw_skill_path(
+    tmp_path, monkeypatch,
+):
+    """Rebuild with skill_path must find skill even when adapter dirs are empty."""
+    workspace_skills = tmp_path / "workspace" / "skills"
+    workspace_skills.mkdir(parents=True)
+
+    skills_dir = tmp_path / ".office-claw" / "skills"
+    skill_dir = skills_dir / "image-reader"
+    skill_dir.mkdir(parents=True)
+    skill_md = skill_dir / "SKILL.md"
+    skill_md.write_text(
+        "---\nname: image-reader\nversion: 1.0.0\n---\n# image-reader\n",
+        encoding="utf-8",
+    )
+    skill_dir.joinpath("evolutions.json").write_text(
+        json.dumps(
+            {
+                "skill_id": "image-reader",
+                "version": "v1.0.0",
+                "updated_at": "live",
+                "entries": [
+                    {
+                        "id": "ev_1",
+                        "score": 0.9,
+                        "summary": "fix path handling",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = object()  # pylint: disable=protected-access
+    adapter._model = object()  # pylint: disable=protected-access
+    monkeypatch.setattr(adapter, "_resolve_skill_dirs", lambda: [str(workspace_skills)])
+    monkeypatch.setattr(adapter, "_bind_request_env_overlay", lambda: (None, None))
+    monkeypatch.setattr(adapter, "_reset_request_env_bindings", lambda *_a, **_k: None)
+    monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "cn")
+    monkeypatch.setattr(adapter, "_resolve_model_name", lambda: "test-model")
+    monkeypatch.setattr(adapter, "ensure_instance", AsyncMock())
+    monkeypatch.setattr(adapter, "_apply_rebuild_permission_trusted_dirs", lambda *_a, **_k: None)
+
+    captured_store_dirs: list[list[str]] = []
+    real_get_store = evolution_version_ctl.get_disk_evolution_store
+
+    def _capture_store(skills_dirs=None):
+        dirs = [str(p) for p in (skills_dirs or [])]
+        captured_store_dirs.append(dirs)
+        return real_get_store(dirs)
+
+    monkeypatch.setattr(
+        evolution_version_ctl,
+        "get_disk_evolution_store",
+        _capture_store,
+    )
+    monkeypatch.setattr(
+        evolution_version_ctl,
+        "prepare_rebuild_followup",
+        AsyncMock(
+            return_value={
+                "ok": True,
+                "followup_prompt": "rebuild",
+                "rebuild_context": {
+                    "skill_md_path": str(skill_md),
+                    "archive_pair": True,
+                },
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        evolution_version_ctl,
+        "finalize_rebuild_followup",
+        AsyncMock(return_value={"ok": True, "new_version": "1.0.1", "cleared": True}),
+    )
+
+    async def _rewrite(_prompt: str, **_kwargs: Any) -> bool:
+        skill_md.write_text("# rebuilt\n", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(adapter, "_execute_merge_version_rewrite", _rewrite)
+
+    result = await adapter.generate_evolution_merge_version(
+        {
+            "name": "image-reader",
+            "skill_path": str(skill_md),
+            "record_ids": ["ev_1"],
+        }
+    )
+    assert result["success"] is True
+    assert captured_store_dirs
+    resolved_store = {str(Path(p).resolve()) for p in captured_store_dirs[0]}
+    assert resolved_store == {str(skills_dir.resolve())}
+    assert str(workspace_skills.resolve()) not in resolved_store
+
+
+@pytest.mark.anyio
 async def test_handle_skills_evolution_rollback_rejects_mismatched_skill_dir_name(
     tmp_path, monkeypatch,
 ):

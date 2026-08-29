@@ -8,15 +8,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from ..infrastructure.ha import gateway_deployment_mode, is_gateway_primary
 from ..routers.application_config_routers import application_config_router
 from ..routers.config_effective_policy_routers import config_effective_policy_routers
+from ..routers.instance_resource_routers import instance_resource_router
 from ..routers.instance_routers import instance_router
 from ..routers.register_router import register_router
 from ..routers.template_routers import templates_router
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-# 注册/探活始终放行（STANDBY 也需可被 Manager 探测本地状态）
+# 探活路径始终放行（STANDBY 也需可被 Manager 探测）
 _WRITE_ALLOW_PATH_SUFFIXES = (
-    "/api/v1/register",
-    "/api/v1/register-payload",
     "/api/v1/health",
     "/api/v1/ready",
     "/api/health",
@@ -26,7 +25,7 @@ _WRITE_ALLOW_PATH_SUFFIXES = (
 
 
 class PrimaryWriteGateMiddleware(BaseHTTPMiddleware):
-    """active-standby 下 STANDBY 拒绝写请求（503），读与注册相关路径放行。"""
+    """active-standby 下 STANDBY 拒绝写请求（503），读与探活路径放行。"""
 
     async def dispatch(self, request: Request, call_next):
         if request.method.upper() in _WRITE_METHODS:
@@ -42,7 +41,7 @@ class PrimaryWriteGateMiddleware(BaseHTTPMiddleware):
 
 
 def create_app() -> FastAPI:
-    """Gateway 本机接口：无 ``/instances/{jiuwenclaw_id}``；实例 id 取自 ``JIUWENCLAW_ID``。"""
+    """Gateway 本机接口：无 ``/instances/{jiuwenclaw_id}``；实例 id 取自 ``JIUWENCLAW_ID``（未设则自动生成）。"""
     app = FastAPI(title="Gateway Manager Config Receiver", docs_url="/docs", redoc_url=None)
     app.add_middleware(PrimaryWriteGateMiddleware)
 
@@ -63,6 +62,7 @@ def create_app() -> FastAPI:
     v1.include_router(templates_router, tags=["Templates"])
     v1.include_router(register_router, tags=["Instances"])
     v1.include_router(instance_router, tags=["Instances"])
+    v1.include_router(instance_resource_router, tags=["Instance Resources"])
     v1.include_router(application_config_router, tags=["Application Config"])
     for policy_router in config_effective_policy_routers:
         v1.include_router(policy_router, tags=["Config Effective Policy"])

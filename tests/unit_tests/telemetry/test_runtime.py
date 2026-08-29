@@ -314,6 +314,11 @@ async def test_agentserver_injects_provider_and_registers_callbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     env = _install_runtime_fakes(monkeypatch)
+    trajectory_processor = Mock(name="trajectory_span_processor")
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.observability_runtime.get_trajectory_span_processor",
+        Mock(return_value=trajectory_processor),
+    )
     runtime = TelemetryRuntime()
 
     state = await runtime.start(
@@ -328,6 +333,7 @@ async def test_agentserver_injects_provider_and_registers_callbacks(
     assert kwargs == {
         "tracer_provider_override": env.tracer,
         "owns_provider": False,
+        "additional_span_processors": (trajectory_processor,),
     }
     assert env.callbacks.register_calls == 1
     assert runtime.component_status()["agentcore"].active is True

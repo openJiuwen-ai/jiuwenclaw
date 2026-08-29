@@ -1080,6 +1080,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "这次调用要达成的目标（如「调研 openJiuwen 官网信息」「创建三子棋对战团队」），"
                 "不要只写工具名或裸 URL。"
                 "该字段仅用于界面展示，不影响工具实际执行。\n"
+                "若工具参数里已有 `description`：`call_goal` 必须与 `description` 使用同一句，"
+                "禁止再写一句近义复述（避免同一信息输出两遍）。\n"
                 "团队工具也必须填 `call_goal`，且不能用其它字段代替：\n"
                 "- `spawn_member` / `spawn_teammate`：`call_goal` 写「为何创建该成员」；"
                 "`display_name` 仍是成员展示名，两者都要填。\n"
@@ -1092,6 +1094,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "When calling any tool, set `call_goal`: one short phrase for the goal of this call "
                 "(e.g. \"Research openJiuwen official site\", \"Create tic-tac-toe team\"). "
                 "Do not just repeat the tool name or raw URL. UI only; does not affect execution.\n"
+                "If the tool already has a `description` parameter: set `call_goal` to the exact same "
+                "string — do not invent a second near-duplicate phrase.\n"
                 "Team tools must also set `call_goal`; do not substitute other fields:\n"
                 "- `spawn_member` / `spawn_teammate`: `call_goal` = why spawn this member; "
                 "`display_name` remains the member label — fill both.\n"
@@ -1279,7 +1283,15 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                         _skill_turbo_tic.tool_call.id if _skill_turbo_tic.tool_call else "?",
                         ctx.inputs.tool_call.id if isinstance(ctx.inputs, ToolCallInputs) else "?",
                     )
-                    return  # 跳过 _emit_tool_result，由 harness __interaction__ 取代
+                    # 主路径必须主动 emit：外层 tool_name 是 skill_acceleration_exec，
+                    # _emit_ask_user_question_if_interrupted 不会命中；也不能只依赖
+                    # harness __interaction__（同 tool_call_id 二次 HITL 时常哑火）。
+                    await self._emit_skill_turbo_ask_user_question(
+                        session,
+                        outer_tool_call=ctx.inputs.tool_call,
+                        skill_turbo_tic=_skill_turbo_tic,
+                    )
+                    return  # 跳过 _emit_tool_result；ask_user 已在上方强制发出
             except Exception:
                 logger.debug(
                     "[StreamEventRail] skill_turbo HITL rewrite failed",
@@ -1414,6 +1426,61 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("tool_result emit failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_skill_turbo_ask_user_question(
+        session: Session,
+        *,
+        outer_tool_call: Any,
+        skill_turbo_tic: Any,
+    ) -> None:
+        """Emit chat.ask_user_question for SkillTurbo nested ask_user HITL.
+
+        Questions come from the inner ask_user tool_call; request_id is the
+        outer skill_acceleration_exec tool_call.id so OfficeClaw resume keeps
+        matching harness interrupt keys (e.g. call_c2967...).
+        """
+        inner_tc = getattr(skill_turbo_tic, "tool_call", None)
+        payload = _ask_user_question_payload_from_interrupt(
+            inner_tc or outer_tool_call,
+            skill_turbo_tic,
+        )
+        if not payload:
+            logger.debug(
+                "[StreamEventRail] SkillTurbo HITL ask_user payload unavailable"
+            )
+            return
+        # OfficeClaw resume matches harness interrupt keys on the outer
+        # skill_acceleration_exec id. Emitting with the nested ask_user id is
+        # worse than skipping: the UI would show a question that cannot resume.
+        harness_id = str(getattr(outer_tool_call, "id", "") or "").strip()
+        if not harness_id:
+            logger.warning(
+                "[StreamEventRail] SkillTurbo HITL ask_user skipped: "
+                "outer skill_acceleration_exec tool_call.id unavailable "
+                "(would mismatch harness interrupt key); inner_request_id=%s",
+                payload.get("request_id"),
+            )
+            return
+        payload["request_id"] = harness_id
+        try:
+            await session.write_stream(
+                OutputSchema(
+                    type="chat.ask_user_question",
+                    index=0,
+                    payload=payload,
+                )
+            )
+            logger.info(
+                "[StreamEventRail] SkillTurbo HITL emitted chat.ask_user_question "
+                "request_id=%s",
+                payload.get("request_id"),
+            )
+        except Exception:
+            logger.debug(
+                "[StreamEventRail] SkillTurbo HITL ask_user emit failed",
+                exc_info=True,
+            )
 
     @staticmethod
     async def _emit_ask_user_question_if_interrupted(

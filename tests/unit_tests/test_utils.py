@@ -515,7 +515,7 @@ class TestAdditionalHardcodedPaths:
         )
         expected_path = workspace / "agent" / "workspace" / "extensions"
         import os
-        os.environ["AGENT_RUNTIME"] = "1"
+        os.environ["JIUWENSWARM_EDITION"] = "enterprise"
         try:
             rail_manager = get_rail_manager(scope)
 
@@ -523,7 +523,7 @@ class TestAdditionalHardcodedPaths:
             assert str(extensions_dir.resolve()) == str(expected_path.resolve()), \
                 f"Expected: {expected_path.resolve()}, Got: {extensions_dir.resolve()}"
         finally:
-            os.environ.pop("AGENT_RUNTIME", None)
+            os.environ.pop("JIUWENSWARM_EDITION", None)
 
     @staticmethod
     def test_config_module_dir_structure(tmp_path):

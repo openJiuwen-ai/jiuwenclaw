@@ -321,13 +321,18 @@ function resolveWebHttpPort(wsPort: number): number {
 
 const frontendPort = portFromEnv('FRONTEND_PORT', 5173)
 const webPort = portFromEnv('WEB_PORT', 19000)
-const webTarget = process.env.GATEWAY_URL?.replace(/\/$/, '') || `http://127.0.0.1:${webPort}`
+const webTarget =
+  process.env.GATEWAY_WEB_WS_URL?.replace(/\/$/, '') ||
+  process.env.GATEWAY_URL?.replace(/\/$/, '') ||
+  `http://127.0.0.1:${webPort}`
 const webHttpPort = resolveWebHttpPort(webPort)
 const webHttpTarget =
   process.env.GATEWAY_WEB_HTTP_URL?.replace(/\/$/, '') ||
   `http://127.0.0.1:${webHttpPort}`
 
 export default defineConfig({
+  // 相对资源路径同时支持独立根路径与 Manager Web 的 /chat/ 同源转发。
+  base: './',
   plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), react(), svgr()],
   optimizeDeps: {
     include: ['exceljs', 'jszip', 'saxes', 'ssf'],
@@ -341,6 +346,8 @@ export default defineConfig({
     port: frontendPort,
     strictPort: true,
     proxy: {
+      '/idp': { target: process.env.USER_WEB_IDP_TARGET || 'http://127.0.0.1:8770', changeOrigin: true, rewrite: (p) => p.replace(/^\/idp/, '') },
+      '/manager-api': { target: process.env.USER_WEB_MANAGER_TARGET || 'http://127.0.0.1:8765', changeOrigin: true, rewrite: (p) => p.replace(/^\/manager-api/, '/api') },
       '/file-api': {
         target: webHttpTarget,
         changeOrigin: true,
@@ -353,6 +360,11 @@ export default defineConfig({
       '/api/v1': {
         target: webHttpTarget,
         changeOrigin: true,
+      },
+      '/gateway-api': {
+        target: webHttpTarget,
+        changeOrigin: true,
+        rewrite: (requestPath) => requestPath.replace(/^\/gateway-api/, '/api'),
       },
       '/api/sessions': {
         target: webHttpTarget,

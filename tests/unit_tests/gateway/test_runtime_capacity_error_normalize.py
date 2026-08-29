@@ -13,7 +13,7 @@ from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 
 @pytest.fixture(autouse=True)
 def _enable_agent_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
 
 
 def test_normalize_capacity_100001_to_chat_error():
@@ -104,7 +104,7 @@ def test_pure_is_complete_sentinel_still_terminal():
 
 
 def test_normalize_skipped_without_agent_runtime(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
     chunk = AgentResponseChunk(
         request_id="chat-1",
         channel_id="web",

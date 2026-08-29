@@ -1,12 +1,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Gateway 进程内 Redis 生命周期：配置解析、连接、健康检查（§3.3.4）。
+"""Gateway 进程内 Redis 生命周期：配置解析、连接、健康检查。
 
-``deployment_mode=standalone`` 或未成功连上 Redis 时，不创建客户端；业务模块可通过
-``get_gateway_redis_client()`` 判空后回退本地实现。
+企业版（``gateway.edition=enterprise``）启动时连接 Redis，供 Ephemeral 存储使用；
+个人版跳过。连接失败时降级为无 Redis，业务模块通过 ``get_gateway_redis_client()`` 判空。
 """
 
 from __future__ import annotations
-
 import asyncio
 import importlib
 import logging
@@ -72,7 +71,7 @@ def get_declared_deployment_mode() -> str:
 
 
 def get_effective_distributed_redis_active() -> bool:
-    """声明为 active-standby 且 Redis 已连接、未因健康检查标记为 degraded。"""
+    """企业版 Redis 已连接且未因健康检查标记为 degraded。"""
     return _effective_distributed_redis and not _redis_degraded and _redis_client is not None
 
 
@@ -153,15 +152,10 @@ async def init_gateway_redis_from_config(full_cfg: dict[str, Any] | None) -> Non
     else:
         _gateway_instance_id = iid if iid else None
 
-    if _declared_deployment_mode != "active-standby":
-        logger.debug("[GatewayRedis] deployment_mode=standalone; skip Redis init (§3.3.4)")
-        return
+    from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE, resolve_gateway_edition
 
-    # 企业版特性：仅 AGENT_RUNTIME 开启时启用主备 Redis
-    if not os.getenv("AGENT_RUNTIME", "").strip():
-        logger.debug(
-            "[GatewayRedis] deployment_mode=active-standby but AGENT_RUNTIME unset; skip Redis init"
-        )
+    if resolve_gateway_edition(cfg_in) != EDITION_ENTERPRISE:
+        logger.debug("[GatewayRedis] personal edition; skip Redis init")
         return
 
     r_cfg = RedisConfig.from_mapping(cfg_in.get("redis") if isinstance(cfg_in.get("redis"), dict) else {})

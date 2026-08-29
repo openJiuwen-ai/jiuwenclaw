@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11, <3.14"
 resolution-markers = [
     "python_full_version >= '3.13' and sys_platform == 'win32'",
@@ -3298,7 +3298,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.16"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=dev-stable#a0d574c155fbba7ec392ada5c64cca1bf21e8a05" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=dev-stable#c74877d4c861a4228c6fc55c1a5b7a5eb6ca65f6" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },

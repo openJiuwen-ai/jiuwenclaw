@@ -33,26 +33,14 @@ def require_enterprise_repository(store_name: str) -> EnterpriseRecordRepository
 
 
 def require_cron_job_enterprise_repository() -> EnterpriseRecordRepository:
-    """``cron_job`` 未单独注入时，从已装配的企业 Repository 派生。"""
+    """``cron_job`` 企业 Repository（catalog 登记，启动时随 enterprise repos 注入）。"""
     from jiuwenswarm.gateway.config.enterprise.access import (
         get_enterprise_record_repository,
-    )
-    from jiuwenswarm.gateway.config.enterprise.catalog import (
-        ENTERPRISE_RECORD_STORE_NAMES,
-        EnterpriseRecordSpec,
     )
 
     repo = get_enterprise_record_repository("cron_job")
     if repo is not None:
         return repo
-
-    for store_name in ENTERPRISE_RECORD_STORE_NAMES:
-        base = get_enterprise_record_repository(store_name)
-        if base is not None:
-            return base.for_table(
-                "cron_job",
-                spec=EnterpriseRecordSpec(key_fields=("job_id",)),
-            )
     raise RuntimeError(
         "Enterprise cron_job repository is not wired; "
         "ensure wire_enterprise_manager_ws_store_async ran at Gateway startup"

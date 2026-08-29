@@ -1,3 +1,4 @@
+from jiuwenswarm.common.local_env_config import is_enterprise
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 """Path management for JiuWenSwarm.
@@ -2451,7 +2452,7 @@ def _sanitize_log_text(text: str) -> str:
         return text
 
     # 企业版：若已从 Gateway DB 下发脱敏规则，优先走 LogMaskingEngine。
-    if os.getenv("AGENT_RUNTIME", "").strip():
+    if is_enterprise():
         try:
             from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 
@@ -3312,7 +3313,7 @@ async def reload_logging_levels() -> None:
             exc_info=True,
         )
 
-    if not os.getenv("AGENT_RUNTIME", "").strip():
+    if not is_enterprise():
         update_log_levels()
         return
     try:

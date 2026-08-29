@@ -1,6 +1,6 @@
 # Permissions 配置架构
 
-本文档描述 JiuWenClaw **工具权限（permissions）配置**的整体架构，涵盖标准版与企业版（`AGENT_RUNTIME`）两种部署模式、**生效粒度**、配置读写链路、运行时判定框架，以及各模块职责对照。
+本文档描述 JiuWenClaw **工具权限（permissions）配置**的整体架构，涵盖标准版与企业版两种部署模式、**生效粒度**、配置读写链路、运行时判定框架，以及各模块职责对照。
 
 > 相关文档：[工具权限与安全防护](./工具权限与安全防护.md)  
 > 企业版 E2E 用例说明：[test_permissions_config.md](../../tests/system_tests/enterprise/test_permissions_config.md)
@@ -17,7 +17,7 @@ flowchart TB
         GDB[("gateway.db / jiuwenswarm.db<br/>permissions_config")]
     end
 
-    subgraph enterprise [企业版 AGENT_RUNTIME 非空]
+    subgraph enterprise [企业版]
         MREST["Claw Manager REST<br/>GET/PUT/DELETE /instances/{id}/permissions"]
         MWS["Manager WS<br/>config.push permissions_config"]
         MREST --> MDB
@@ -97,8 +97,8 @@ flowchart TB
 
 | 模式      | 判定条件               | 读取来源                                                | 写入目标                                                                     |
 | ------- | ------------------ | --------------------------------------------------- | ------------------------------------------------------------------------ |
-| **标准版** | `AGENT_RUNTIME` 为空 | 仅 `config.yaml::permissions`                        | 写回 `config.yaml`                                                         |
-| **企业版** | `AGENT_RUNTIME` 非空 | `gateway.db` 有行 → 用 DB 整段 `body`；无行 → fallback YAML | Manager REST → `manager.db` → WS → `gateway.db`；运行时审批持久化直接写 `gateway.db` |
+| **标准版** | `JIUWENSWARM_EDITION` 非 `enterprise` | 仅 `config.yaml::permissions`                        | 写回 `config.yaml`                                                         |
+| **企业版** | `JIUWENSWARM_EDITION=enterprise` | `gateway.db` 有行 → 用 DB 整段 `body`；无行 → fallback YAML | Manager REST → `manager.db` → WS → `gateway.db`；运行时审批持久化直接写 `gateway.db` |
 
 
 **核心入口**：`jiuwenclaw/agentserver/permissions/config_loader.py`
@@ -106,7 +106,7 @@ flowchart TB
 
 | 函数                                     | 职责                                                                                       |
 | -------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `is_enterprise_runtime()`              | 判断 `AGENT_RUNTIME` 是否非空                                                                  |
+| `is_enterprise()`                      | 判断 `JIUWENSWARM_EDITION` 是否为 `enterprise`                                                |
 | `get_effective_permissions_config()`   | 返回当前生效的 permissions 段（带进程内缓存）；async 上下文且 `force_reload` 时不跨 loop 读 GDB，有缓存用缓存、无缓存回落 YAML |
 | `reload_permissions_from_gateway_db()` | **仅冷启动**：async 读 GDB → `apply_permissions_config_payload()`                              |
 | `apply_permissions_config_payload()`   | **热 apply**（同 `logging_config`）：直接用 payload / YAML fallback 更新缓存与引擎，**不在此路径二次读 GDB**     |
@@ -552,7 +552,7 @@ FileOperation(
 | **RPC 入口**     | `jiuwenclaw/agentserver/permissions/config_rpc.py`              | Web/Agent `permissions.`* 方法                                                                |
 | **Manager 服务** | `packages/jiuwenclaw-ee/claw_manager/.../permissions_config.py` | REST 写 manager.db + WS 推送                                                                   |
 | **Gateway 同步** | `packages/jiuwenclaw-ee/gateway/.../permissions_config.py`      | WS 收包：先写 GDB，再 `_apply_permissions()` → `apply_permissions_config_payload()`（不 `reload` 读库） |
-| **冷启动**        | `jiuwenclaw/app_gateway.py` / `app_agentserver.py`              | `AGENT_RUNTIME` 时 `await reload_permissions_from_gateway_db()`                              |
+| **冷启动**        | `jiuwenclaw/app_gateway.py` / `app_agentserver.py`              | 企业版时 `await reload_permissions_from_gateway_db()`                                    |
 | **权限校验进程**     | —                                                               | 仅 AgentServer：`PermissionInterruptRail` → `PermissionEngine`                                |
 
 

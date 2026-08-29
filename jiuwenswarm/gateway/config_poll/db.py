@@ -58,20 +58,6 @@ def row_snapshot(table: str, rows: list[dict[str, Any]]) -> dict[str, str]:
     return snapshot
 
 
-def _row_to_dict(row: Any) -> dict[str, Any]:
-    if isinstance(row, dict):
-        return dict(row)
-    out: dict[str, Any] = {}
-    for key in ("id", "jiuwenclaw_id", "updated_at", "created_at", "status"):
-        if hasattr(row, key):
-            out[key] = getattr(row, key)
-    if hasattr(row, "__dict__"):
-        for key, value in vars(row).items():
-            if not key.startswith("_"):
-                out.setdefault(key, value)
-    return out
-
-
 def _poll_table_filters(table: str, jiuwenclaw_id: str) -> dict[str, Any]:
     """channel_config 为全局表（当前 MySQL 无 jiuwenclaw_id 列），不按实例过滤。"""
     if table == "channel_config":
@@ -80,27 +66,8 @@ def _poll_table_filters(table: str, jiuwenclaw_id: str) -> dict[str, Any]:
     return {"jiuwenclaw_id": jid} if jid else {}
 
 
-async def _list_records_via_ee_handler(
-    table: str,
-    jiuwenclaw_id: str,
-) -> list[dict[str, Any]] | None:
-    try:
-        from jiuwenswarm.infrastructure.module_importer import import_manager_config_receiver_module
-
-        db_mod = import_manager_config_receiver_module("infrastructure.db")
-        ensure_db_handler = getattr(db_mod, "ensure_db_handler", None)
-        if ensure_db_handler is None:
-            return None
-        handler = await ensure_db_handler()
-        rows = await handler.list_records(table, _poll_table_filters(table, jiuwenclaw_id))
-        return [_row_to_dict(row) for row in rows]
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[ConfigPoll] EE DB handler unavailable for %s: %s", table, exc)
-        return None
-
-
 async def list_table_records(table: str, jiuwenclaw_id: str) -> list[dict[str, Any]]:
-    """拉取 poll 表行：优先 ``PersistentStore``，否则回退 EE handler / ``gateway_db``。"""
+    """拉取 poll 表行：优先 ``PersistentStore``，否则 ``gateway_db`` reader。"""
     if table not in _POLL_TABLES:
         logger.warning("[ConfigPoll] unsupported table: %s", table)
         return []
@@ -115,10 +82,6 @@ async def list_table_records(table: str, jiuwenclaw_id: str) -> list[dict[str, A
         await store.ensure_ready()
         rows = await store.list(table, filters=_poll_table_filters(table, jid))
         return [dict(row) for row in rows or []]
-
-    ee_rows = await _list_records_via_ee_handler(table, jid)
-    if ee_rows is not None:
-        return ee_rows
 
     from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 

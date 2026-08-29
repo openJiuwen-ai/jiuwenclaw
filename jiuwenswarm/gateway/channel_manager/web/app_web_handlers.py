@@ -49,9 +49,6 @@ from jiuwenswarm.common.config import (
     resolve_legacy_team_model_ref,
     replace_teams_in_config,
     update_default_models_in_config,
-    update_heartbeat_in_config,
-    update_browser_in_config,
-    update_preferred_language_in_config,
     update_evolution_enabled_in_config,
     update_context_engine_enabled_in_config,
     update_default_model_provider_in_config,
@@ -62,9 +59,18 @@ from jiuwenswarm.common.config import (
     update_symphony_in_config,
     update_setup_guide_enabled_in_config,
     update_swarmflow_enabled_in_config,
-    update_a2ui_in_config,
     update_updater_in_config,
     update_proactive_recommendation_in_config,
+)
+from jiuwenswarm.gateway.config.a2ui.access import update_a2ui_in_config
+from jiuwenswarm.gateway.config.browser.access import (
+    get_browser_body_in_config,
+    update_browser_in_config,
+)
+from jiuwenswarm.gateway.config.heartbeat.access import update_heartbeat_in_config
+from jiuwenswarm.gateway.config.locale.access import (
+    get_preferred_language_in_config,
+    update_preferred_language_in_config,
 )
 from jiuwenswarm.gateway.config.channel.access import (
     replace_channel_subsection_with_cleanup,
@@ -1419,6 +1425,7 @@ class WebHandlersBindParams:
     cron_controller: Any = None
     cron_registry: Any = None
     updater_service: UpdaterService | None = None
+    a2a_manager: Any = None
 
 
 def _attribute_session_project(
@@ -1588,6 +1595,76 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     cron_controller = bind.cron_controller
     cron_registry = bind.cron_registry or bind.cron_controller
     updater_service = bind.updater_service
+    a2a_manager = bind.a2a_manager
+
+    async def _send_a2a_snapshot(ws, req_id, operation) -> None:
+        if a2a_manager is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="A2A ingress manager is unavailable", code="A2A_BIND_FAILED"
+            )
+            return
+        try:
+            snapshot = await operation()
+        except Exception as exc:  # noqa: BLE001
+            code = str(getattr(exc, "code", "A2A_BIND_FAILED"))
+            payload = a2a_manager.snapshot().to_dict()
+            await channel.send_response(ws, req_id, ok=False, payload=payload, error=str(exc), code=code)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=snapshot.to_dict())
+
+    async def _a2a_snapshot_async(manager):
+        return manager.snapshot()
+
+    async def _a2a_ingress_get(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, lambda: _a2a_snapshot_async(a2a_manager))
+
+    async def _a2a_ingress_history(ws, req_id, params, session_id):
+        if a2a_manager is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="A2A ingress manager is unavailable", code="A2A_BIND_FAILED"
+            )
+            return
+        try:
+            limit = int(params.get("limit", 100))
+        except (TypeError, ValueError):
+            await channel.send_response(
+                ws, req_id, ok=False, error="limit must be an integer", code="A2A_CONFIG_INVALID"
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=a2a_manager.history(limit))
+
+    async def _a2a_ingress_update(ws, req_id, params, session_id):
+        payload = params.get("config", params)
+        if not isinstance(payload, dict):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="config must be an object",
+                code="A2A_CONFIG_INVALID",
+            )
+            return
+        patch = dict(payload)
+        patch.pop("apply", None)
+        await _send_a2a_snapshot(
+            ws, req_id, lambda: a2a_manager.update(patch, apply=bool(params.get("apply", False)))
+        )
+
+    async def _a2a_ingress_enable(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, lambda: a2a_manager.enable())
+
+    async def _a2a_ingress_disable(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, lambda: a2a_manager.disable())
+
+    async def _a2a_ingress_reload(ws, req_id, params, session_id):
+        await _send_a2a_snapshot(ws, req_id, lambda: a2a_manager.reload())
+
+    channel.register_method("a2a.ingress.get", _a2a_ingress_get)
+    channel.register_method("a2a.ingress.history", _a2a_ingress_history)
+    channel.register_method("a2a.ingress.update", _a2a_ingress_update)
+    channel.register_method("a2a.ingress.enable", _a2a_ingress_enable)
+    channel.register_method("a2a.ingress.disable", _a2a_ingress_disable)
+    channel.register_method("a2a.ingress.reload", _a2a_ingress_reload)
 
     from jiuwenswarm.common.schema.message import Message, EventType
 
@@ -1967,7 +2044,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     ok, update, error = validate_a2ui_config_update(param_key, val)
                     if not ok:
                         raise _ConfigBadRequest(error or "invalid A2UI config")
-                    update_a2ui_in_config(update)
+                    await update_a2ui_in_config(update)
                 elif param_key == "proactive_recommendation_enabled":
                     update_proactive_recommendation_in_config({"enabled": parsed})
                 elif param_key == "proactive_recommendation_max_recommend_per_day":
@@ -4901,7 +4978,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _path_get(ws, req_id, params, session_id):
         """读 browser.chrome_path 并返回给前端（会解析环境变量）。"""
         try:
-            config_base = get_config()
+            browser_cfg = await get_browser_body_in_config()
         except FileNotFoundError:
             await channel.send_response(
                 ws,
@@ -4911,18 +4988,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
 
-        if not isinstance(config_base, dict):
-            config_base = {}
+        if not isinstance(browser_cfg, dict):
+            browser_cfg = {}
 
-        config = _resolve_env_vars(config_base)
-        browser_cfg = config.get("browser", {}) if isinstance(config, dict) else {}
+        resolved = _resolve_env_vars({"browser": browser_cfg})
+        browser_resolved = resolved.get("browser", {}) if isinstance(resolved, dict) else {}
         chrome_path = ""
         headless = True
-        if isinstance(browser_cfg, dict):
-            value = browser_cfg.get("chrome_path", "")
+        if isinstance(browser_resolved, dict):
+            value = browser_resolved.get("chrome_path", "")
             if isinstance(value, str):
                 chrome_path = value
-            raw_headless = browser_cfg.get("headless", True)
+            raw_headless = browser_resolved.get("headless", True)
             headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
 
         await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
@@ -4943,7 +5020,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
 
         try:
-            update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
+            await update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
             resolved_agent_client = _resolve(agent_client)
             await _clear_agent_config_cache(resolved_agent_client)
         except Exception as e:  # noqa: BLE001
@@ -5158,10 +5235,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _locale_get_conf(ws, req_id, params, session_id):
         """返回当前 preferred_language 配置（zh / en）。"""
         try:
-            cfg = get_config()
-            lang = str(cfg.get("preferred_language") or "zh").strip().lower()
-            if lang not in ("zh", "en"):
-                lang = "zh"
+            lang = await get_preferred_language_in_config()
             await channel.send_response(
                 ws,
                 req_id,
@@ -5194,7 +5268,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            update_preferred_language_in_config(lang)
+            await update_preferred_language_in_config(lang)
             await channel.send_response(ws, req_id, ok=True, payload={"preferred_language": lang})
         except Exception as e:
             logger.warning("[locale.set_conf] 写回 config.yaml 失败: %s", e)
@@ -5282,7 +5356,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload = dict(hb.get_heartbeat_conf())
             should_clear_agent_config_cache = False
             try:
-                update_heartbeat_in_config(payload)
+                await update_heartbeat_in_config(payload)
                 should_clear_agent_config_cache = True
             except Exception as e:  # noqa: BLE001
                 logger.warning("[heartbeat.set_conf] 写回 config.yaml 失败: %s", e)

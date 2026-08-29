@@ -36,11 +36,11 @@ export function getWebTransport(): WebTransport {
   return "websocket";
 }
 
-/** Gateway A2 前缀，默认同源 `/api/v1`。不要和 H1 `/api/sessions` 混用。 */
+/** Gateway A2 前缀，默认同源 `/gateway-api/v1`，避免与 Manager `/api/v1` 冲突。 */
 export function getGatewayHttpBase(): string {
   const raw = import.meta.env.VITE_GATEWAY_HTTP_BASE ?? import.meta.env.VITE_WEB_HTTP_BASE;
   if (!raw) {
-    return "/api/v1";
+    return "/gateway-api/v1";
   }
   const normalized = normalizeBase(raw);
   if (normalized.endsWith("/api/v1")) {

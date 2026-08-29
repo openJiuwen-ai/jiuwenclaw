@@ -715,6 +715,7 @@ def load_team_spec_dict(
 
     spec_dict["team_name"] = str(team_raw.get("team_name") or resolved_template_id or "team").strip() or "team"
     spec_dict["lifecycle"] = team_raw.get("lifecycle", "persistent")
+    spec_dict.setdefault("enable_taskless_completion", True)
     spec_dict["teammate_mode"] = team_raw.get("teammate_mode", "build_mode")
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)

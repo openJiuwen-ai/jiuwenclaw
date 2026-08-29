@@ -21,7 +21,8 @@ class EnterpriseRecordSpec:
     scope_field: str | None = "jiuwenclaw_id"
 
 
-# store name == DB 表名；与 layouts._ENTERPRISE_ONLY / EE TableDefinition 对齐
+# store name == DB 表名；与 layouts / EE TableDefinition 对齐。
+# ``cron_job`` 另有 personal JSON 布局（见 ``layouts._legacy_gateway_cron_job_layout``）。
 ENTERPRISE_RECORD_SPECS: dict[str, EnterpriseRecordSpec] = {
     "config_effective_global_policy": EnterpriseRecordSpec(key_fields=("policy_id",)),
     "config_effective_service_policy": EnterpriseRecordSpec(key_fields=("policy_id",)),
@@ -32,7 +33,10 @@ ENTERPRISE_RECORD_SPECS: dict[str, EnterpriseRecordSpec] = {
     "extension_config_template": EnterpriseRecordSpec(key_fields=("template_id",)),
     "skill_whitelist_template": EnterpriseRecordSpec(key_fields=("template_id",)),
     "service_config_template": EnterpriseRecordSpec(key_fields=("template_id",)),
+    "agent_template": EnterpriseRecordSpec(key_fields=("template_id",)),
+    "instance_agent_resource": EnterpriseRecordSpec(key_fields=("resource_id",)),
     "log_masking_rule": EnterpriseRecordSpec(key_fields=("rule_id",)),
+    "cron_job": EnterpriseRecordSpec(key_fields=("job_id",)),
     "task_memory_config": EnterpriseRecordSpec(key_fields=()),
     "manager_sign_pubkey": EnterpriseRecordSpec(key_fields=()),
     "gateway_enc_keypair": EnterpriseRecordSpec(

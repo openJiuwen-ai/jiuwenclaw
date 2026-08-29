@@ -50,6 +50,16 @@ def _trust_client_tenant_headers(client_host: str | None) -> bool:
         return True
     if explicit in {"0", "false", "no"}:
         return False
+    # 企业用户面通过 NodePort/Web Pod 访问时，客户端地址不是回环地址。
+    # 企业版的身份边界由上游认证和 Gateway edition 控制，必须把选中的
+    # user/group/bot 透传给 Runtime 路由；个人版继续只信任本机请求。
+    try:
+        from jiuwenswarm.gateway.edition import is_gateway_enterprise
+
+        if is_gateway_enterprise():
+            return True
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to resolve gateway edition", exc_info=True)
     host = str(client_host or "").strip().lower()
     return host in {"127.0.0.1", "::1", "localhost"}
 

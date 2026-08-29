@@ -26,8 +26,10 @@ def load_env() -> None:
     except ImportError:
         return
 
+    # override=False：进程环境变量优先（例如 AgentServer 启动前设
+    # GATEWAY_CONFIG_RECEIVER_ENABLED=false），避免被仓库 .env 盖掉。
     for env_path in _resolve_env_files():
-        load_dotenv(env_path, override=True)
+        load_dotenv(env_path, override=False)
 
 
 class Settings(BaseSettings):
@@ -67,6 +69,11 @@ class Settings(BaseSettings):
     gateway_config_public_host: str = Field(
         default="",
         validation_alias="GATEWAY_CONFIG_PUBLIC_HOST",
+    )
+    # Gateway 管理面 REST Base（可选；身份绑定后一般不再主动调用 Manager）
+    gateway_manager_http_url: str = Field(
+        default="",
+        validation_alias="GATEWAY_MANAGER_HTTP_URL",
     )
 
     # ========== 配置下发字段级解密（信封解密，私钥本机自持） ==========

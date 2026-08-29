@@ -28,14 +28,21 @@ spec:
               value: "0.0.0.0"
             - name: MANAGER_WEB_PORT
               value: "<<MANAGER_WEB_PORT>>"
+            # 浏览器只能访问 Manager Web 同源路径，不能暴露 Kubernetes 内部 DNS。
+            - name: VITE_API_BASE
+              value: "/api"
+            - name: VITE_IDP_BASE
+              value: "/idp"
             - name: MANAGER_WEB_PROXY_TARGET
               value: "http://<<MANAGER_SERVER_NAME>>:<<MANAGER_REST_PORT>>"
             - name: MANAGER_WEB_IDP_TARGET
               value: "http://<<IDENTITY_NAME>>:<<IDENTITY_REST_PORT>>"
-            - name: MANAGER_WEB_GATEWAY_SSE
-              value: "http://<<GATEWAY_NAME>>:<<GATEWAY_PORT>>/web/invoke"
-            - name: MANAGER_WEB_USER_SERVER_TARGET
-              value: "http://<<WEB_NAME>>:<<WEB_WS_PORT>>"
+            - name: MANAGER_WEB_USER_WEB_TARGET
+              value: "http://<<WEB_NAME>>:<<WEB_HTTP_PORT>>"
+            - name: MANAGER_WEB_GATEWAY_HTTP_TARGET
+              value: "http://<<GATEWAY_NAME>>:<<GATEWAY_WEB_HTTP_PORT>>"
+            - name: MANAGER_WEB_GATEWAY_WS_TARGET
+              value: "http://<<GATEWAY_NAME>>:<<WEB_PORT>>"
             - name: TZ
               value: "<<TIMEZONE>>"
 
