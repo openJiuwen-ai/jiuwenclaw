@@ -85,7 +85,7 @@ class TestCredentialInjection(unittest.TestCase):
         return ctx
 
     @patch(
-        "jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail.get_session_active_skill"
+        "jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail.adopt_default_active_skill"
     )
     def test_injects_credentials_into_tool_args(self, mock_get_skill):
         mock_get_skill.return_value = "hwocr"
@@ -99,7 +99,7 @@ class TestCredentialInjection(unittest.TestCase):
         assert env["HWOCR_SK"] == "sk"
 
     @patch(
-        "jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail.get_session_active_skill"
+        "jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail.adopt_default_active_skill"
     )
     def test_does_not_overwrite_existing_env_keys(self, mock_get_skill):
         mock_get_skill.return_value = "hwocr"
@@ -115,7 +115,7 @@ class TestCredentialInjection(unittest.TestCase):
         assert env["HWOCR_SK"] == "from_rail"
 
     @patch(
-        "jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail.get_session_active_skill"
+        "jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail.adopt_default_active_skill"
     )
     def test_injects_from_json_string_tool_args(self, mock_get_skill):
         mock_get_skill.return_value = "hwocr"
@@ -126,7 +126,7 @@ class TestCredentialInjection(unittest.TestCase):
         assert ctx.inputs.tool_args["env"]["HWOCR_AK"] == "ak"
 
     @patch(
-        "jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail.get_session_active_skill"
+        "jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail.adopt_default_active_skill"
     )
     def test_bash_injects_env_into_tool_args(self, mock_get_skill):
         mock_get_skill.return_value = "hwocr"
@@ -140,7 +140,7 @@ class TestCredentialInjection(unittest.TestCase):
         assert env["HWOCR_SK"] == "sk"
 
     @patch(
-        "jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail.get_session_active_skill"
+        "jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail.adopt_default_active_skill"
     )
     def test_skips_when_no_active_skill(self, mock_get_skill):
         mock_get_skill.return_value = None

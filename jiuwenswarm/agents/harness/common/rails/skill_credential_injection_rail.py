@@ -12,11 +12,19 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCal
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenswarm.agents.harness.common.rails.skill_active_state import (
-    get_session_active_skill,
+    adopt_default_active_skill,
     resolve_skill_session_id,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _nonempty_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
 
 SHELL_PERMISSION_TOOLS = frozenset(
     {"bash", "shell", "mcp_exec_command", "create_terminal", "exec_command"}
@@ -83,7 +91,7 @@ class SkillCredentialInjectionRail(DeepAgentRail):
     ) -> None:
         super().__init__()
         self._skill_envs: dict[str, dict[str, str]] = skill_envs or {}
-        self._preset_session_id = preset_session_id
+        self._preset_session_id = _nonempty_str(preset_session_id)
 
     def update_skill_envs(self, new_skill_envs: dict[str, dict[str, str]]) -> None:
         self._skill_envs = new_skill_envs or {}
@@ -104,7 +112,8 @@ class SkillCredentialInjectionRail(DeepAgentRail):
             return
 
         session_id = self._resolve_session_id(ctx)
-        active_skill = get_session_active_skill(session_id)
+        # Prefer this session's active skill; adopt orphan under "default" if any.
+        active_skill = adopt_default_active_skill(session_id)
         if not active_skill:
             return
 

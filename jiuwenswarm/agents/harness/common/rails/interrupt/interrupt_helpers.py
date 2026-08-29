@@ -40,6 +40,20 @@ SKILL_EVOLUTION_APPROVAL_TOOL_KINDS = {
 }
 
 
+def is_interrupt_resume_source(source: Any) -> bool:
+    """True for permission / confirm / ask_user HITL resume sources.
+
+    Used to keep the active skill (and thus skill_envs injection) across
+    security-guard HITL. Intentionally excludes skill-evolution sources.
+    """
+    text = str(source or "").strip()
+    return text in {
+        "permission_interrupt",
+        "confirm_interrupt",
+        "ask_user_interrupt",
+    }
+
+
 def has_interrupt_resume_payload(params: Any) -> bool:
     if not isinstance(params, dict):
         return False

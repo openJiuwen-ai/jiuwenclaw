@@ -1551,6 +1551,49 @@ class JiuWenSwarm:
                 context,
             )
 
+        # HITL resume metadata for SkillActiveStateRail: keep active skill across
+        # permission/confirm/ask_user interrupt continuations.
+        try:
+            from jiuwenswarm.agents.harness.common.rails.skill_active_state import (
+                _CHAT_SEND_SOURCE_EXTRA_KEY,
+                _PRESERVE_SKILL_ACTIVE_EXTRA_KEY,
+                is_interrupt_resume_source,
+                should_preserve_skill_active_from_params,
+            )
+
+            chat_send_source = (
+                params.get("source").strip()
+                if isinstance(params.get("source"), str) and params.get("source").strip()
+                else ""
+            )
+            # HITL source alone must preserve; never write preserve=False for
+            # permission/confirm/ask_user (that cleared hwocr credentials).
+            preserve_skill = should_preserve_skill_active_from_params(params) or (
+                is_interrupt_resume_source(chat_send_source)
+            )
+            if preserve_skill or chat_send_source:
+                run_payload = inputs.get("run")
+                if not isinstance(run_payload, dict):
+                    run_payload = {}
+                    inputs["run"] = run_payload
+                context = run_payload.get("context")
+                if not isinstance(context, dict):
+                    context = {}
+                    run_payload["context"] = context
+                extra = context.get("extra")
+                if not isinstance(extra, dict):
+                    extra = {}
+                    context["extra"] = extra
+                if chat_send_source:
+                    extra[_CHAT_SEND_SOURCE_EXTRA_KEY] = chat_send_source
+                    extra["chat_send_source"] = chat_send_source
+                extra[_PRESERVE_SKILL_ACTIVE_EXTRA_KEY] = bool(preserve_skill)
+        except Exception:
+            logger.debug(
+                "[_build_inputs] failed to attach skill-active preserve flags",
+                exc_info=True,
+            )
+
         # Per-request workspace_dir scopes one prompt's cwd to the given
         # directory; threaded into inputs["cwd"] which downstream init_cwd
         # installs onto openjiuwen's CwdState ContextVar. See E2A-protocol.md
