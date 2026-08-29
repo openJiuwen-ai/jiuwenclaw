@@ -48,7 +48,10 @@ from jiuwenswarm.common.config import get_config, get_permissions_file_guard_wor
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.ask_user import normalize_ask_user_response
-from jiuwenswarm.common.chat_final import ensure_final_mode_inplace
+from jiuwenswarm.common.chat_final import (
+    ensure_final_mode_inplace,
+    fill_reasoning_only_empty_final_content,
+)
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
@@ -357,6 +360,20 @@ def _should_defer_a2ui_processing_status(
         and event_type == "chat.processing_status"
         and payload.get("is_processing") is False
     )
+
+
+def _is_duplicate_full_body_delta(pending_chunks: list[str], content: str) -> bool:
+    """True when ``content`` is an exact replay of the already-buffered answer body.
+
+    Requires a minimum length so incremental stream tokens are never dropped.
+    """
+    stripped = str(content or "").strip()
+    pending = "".join(pending_chunks).strip()
+    if not stripped or not pending:
+        return False
+    if len(stripped) < 8:
+        return False
+    return stripped == pending
 
 
 def _normalize_nested_stream_chunk(
@@ -3031,6 +3048,19 @@ class JiuWenSwarm:
                                         yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
                                         a2ui_pending_render_sent = True
                                     continue
+                                # Drop full-body replay of an already-buffered
+                                # answer (llm_output stream + answer-drain).
+                                if _is_duplicate_full_body_delta(
+                                    durable_pending_final_chunks, payload_content
+                                ):
+                                    logger.info(
+                                        "[JiuWenSwarm] skipped duplicate chat.delta: "
+                                        "request_id=%s len=%s",
+                                        rid,
+                                        len(str(payload_content or "").strip()),
+                                    )
+                                    should_record = False
+                                    continue
                                 durable_pending_final_chunks.append(payload_content)
                                 should_record = False
                             elif et == "chat.reasoning":
@@ -3038,6 +3068,10 @@ class JiuWenSwarm:
                                 should_record = False
                             elif et == "chat.tool_call":
                                 _persist_pending_final_text()
+                                # Post-tool LLM rounds must not inherit pre-tool
+                                # delta visibility; otherwise reasoning-only
+                                # follow-ups skip the empty-final rescue.
+                                final_answer_chunks = []
                             elif et == "chat.final":
                                 if isinstance(data.payload, dict):
                                     ensure_final_mode_inplace(data.payload)
@@ -3056,6 +3090,69 @@ class JiuWenSwarm:
                                     final_answer_content = payload_content
                                     durable_pending_final_chunks = []
                                     continue
+                                # Facade-level rescue: reasoning-only models may emit an
+                                # empty chat.final after chat.reasoning. Fill a short
+                                # visible reply before history/wire so non-team hosts
+                                # (which skip empty finals for bubble text) still show
+                                # something. Do this before clearing pending buffers.
+                                # Merge already-streamed deltas into an empty final so
+                                # history keeps the real answer. Wire must stay empty
+                                # when the body already rode chat.delta — otherwise
+                                # RelayClaw computeFinalTextDelta appends another copy
+                                # (esp. after post-tool \n\n round-break).
+                                merged_from_deltas = False
+                                if (
+                                    not str(payload_content or "").strip()
+                                    and durable_pending_final_chunks
+                                    and isinstance(data.payload, dict)
+                                ):
+                                    merged = "".join(durable_pending_final_chunks)
+                                    if merged.strip():
+                                        data.payload["content"] = merged
+                                        payload_content = merged
+                                        merged_from_deltas = True
+                                # Segment-local visibility only: durable_final_content
+                                # is prior-tool text and must not suppress post-tool
+                                # reasoning-only rescue.
+                                has_visible_streamed_text = bool(
+                                    "".join(final_answer_chunks).strip()
+                                    or "".join(durable_pending_final_chunks).strip()
+                                    or str(payload_content or "").strip()
+                                )
+                                has_reasoning = bool(
+                                    "".join(durable_pending_reasoning_chunks).strip()
+                                    or str(
+                                        (data.payload or {}).get("reasoning_content") or ""
+                                    ).strip()
+                                )
+                                if isinstance(data.payload, dict):
+                                    filled = fill_reasoning_only_empty_final_content(
+                                        content=payload_content,
+                                        has_visible_streamed_text=has_visible_streamed_text,
+                                        has_reasoning=has_reasoning,
+                                        lang=str(
+                                            get_config().get("preferred_language", "zh")
+                                        ),
+                                    )
+                                    if filled != payload_content:
+                                        data.payload["content"] = filled
+                                        payload_content = filled
+                                        logger.info(
+                                            "[JiuWenSwarm] filled reasoning-only empty "
+                                            "chat.final: request_id=%s "
+                                            "had_visible_streamed_text=%s",
+                                            rid,
+                                            has_visible_streamed_text,
+                                        )
+                                    elif not str(payload_content or "").strip():
+                                        logger.info(
+                                            "[JiuWenSwarm] skipped reasoning-only empty "
+                                            "chat.final fill: request_id=%s "
+                                            "has_reasoning=%s had_visible_streamed_text=%s",
+                                            rid,
+                                            has_reasoning,
+                                            has_visible_streamed_text,
+                                        )
                                 durable_pending_final_chunks = []
 
                             if should_record:
@@ -3090,11 +3187,17 @@ class JiuWenSwarm:
                                     durable_final_content = str(data.payload.get("content", ""))
                             if et == "chat.final":
                                 final_answer_content = str(data.payload.get("content", ""))
+                                # History kept the merged body; strip wire so hosts
+                                # that already rendered chat.delta do not append again.
+                                if merged_from_deltas and isinstance(data.payload, dict):
+                                    data.payload["content"] = ""
+                                    final_answer_content = ""
                         if data.is_complete:
                             facade_emitted_terminal_chunk = True
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
+                        merged_from_deltas = False
                         should_record = et.startswith("chat.") or et.startswith("task.")
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
@@ -3149,6 +3252,17 @@ class JiuWenSwarm:
                                     yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
                                     a2ui_pending_render_sent = True
                                 continue
+                            if _is_duplicate_full_body_delta(
+                                durable_pending_final_chunks, payload_content
+                            ):
+                                logger.info(
+                                    "[JiuWenSwarm] skipped duplicate chat.delta: "
+                                    "request_id=%s len=%s",
+                                    rid,
+                                    len(str(payload_content or "").strip()),
+                                )
+                                should_record = False
+                                continue
                             durable_pending_final_chunks.append(payload_content)
                             should_record = False
                         elif et == "chat.reasoning":
@@ -3156,6 +3270,7 @@ class JiuWenSwarm:
                             should_record = False
                         elif et == "chat.tool_call":
                             _persist_pending_final_text()
+                            final_answer_chunks = []
                         elif et == "chat.final":
                             if suppress_a2ui_stream or a2ui_split is not None:
                                 first_a2ui_suppression = not suppress_a2ui_stream
@@ -3172,6 +3287,51 @@ class JiuWenSwarm:
                                 final_answer_content = payload_content
                                 durable_pending_final_chunks = []
                                 continue
+                            has_visible_streamed_text = bool(
+                                "".join(final_answer_chunks).strip()
+                                or "".join(durable_pending_final_chunks).strip()
+                                or str(payload_content or "").strip()
+                            )
+                            has_reasoning = bool(
+                                "".join(durable_pending_reasoning_chunks).strip()
+                                or str(data.get("reasoning_content") or "").strip()
+                            )
+                            merged_from_deltas = False
+                            if (
+                                not str(payload_content or "").strip()
+                                and durable_pending_final_chunks
+                            ):
+                                merged = "".join(durable_pending_final_chunks)
+                                if merged.strip():
+                                    data["content"] = merged
+                                    payload_content = merged
+                                    has_visible_streamed_text = True
+                                    merged_from_deltas = True
+                            filled = fill_reasoning_only_empty_final_content(
+                                content=payload_content,
+                                has_visible_streamed_text=has_visible_streamed_text,
+                                has_reasoning=has_reasoning,
+                                lang=str(get_config().get("preferred_language", "zh")),
+                            )
+                            if filled != payload_content:
+                                data["content"] = filled
+                                payload_content = filled
+                                logger.info(
+                                    "[JiuWenSwarm] filled reasoning-only empty "
+                                    "chat.final: request_id=%s "
+                                    "had_visible_streamed_text=%s",
+                                    rid,
+                                    has_visible_streamed_text,
+                                )
+                            elif not str(payload_content or "").strip():
+                                logger.info(
+                                    "[JiuWenSwarm] skipped reasoning-only empty "
+                                    "chat.final fill: request_id=%s "
+                                    "has_reasoning=%s had_visible_streamed_text=%s",
+                                    rid,
+                                    has_reasoning,
+                                    has_visible_streamed_text,
+                                )
                             durable_pending_final_chunks = []
 
                         if should_record:
@@ -3208,6 +3368,9 @@ class JiuWenSwarm:
                                 durable_final_content = str(data.get("content", ""))
                         if et == "chat.final":
                             final_answer_content = str(data.get("content", ""))
+                            if merged_from_deltas:
+                                data["content"] = ""
+                                final_answer_content = ""
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
