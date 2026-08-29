@@ -94,7 +94,11 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     get_default_a2ui_config_payload,
     validate_a2ui_config_update,
 )
-from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.reasoning_injector import (
+    build_reasoning_model_request_kwargs,
+    core_has_context_window_field,
+)
+from jiuwenswarm.common.context_window import resolve_context_window_tokens
 from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
 from jiuwenswarm.common.utils import (
     get_agent_sessions_dir,
@@ -2157,15 +2161,22 @@ def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, An
                 obj = entry.get("model_config_obj")
                 if isinstance(obj, dict):
                     model_config_obj = dict(obj)
-                # AgentOS 备份模型的 mco 含 _source=="agentos" 标记（由
-                # get_default_models 注入）。其 max_tokens 是输入侧上下文窗口
-                # 别名（-> ContextEngineConfig.context_window_tokens，压缩阈值，
-                # 不发厂商），不得进入输出侧的 ModelRequestConfig.max_tokens
-                # （否则会被当输出上限发给厂商）。_source 标记本身由
-                # reasoning_injector._build_model_request_kwargs 统一 pop，
-                # 这里只需清 max_tokens。
-                if model_config_obj.get("_source") == "agentos":
-                    model_config_obj.pop("max_tokens", None)
+                # context_window（模型支持的上下文总长度）可配在任意模型条目的
+                # model_config_obj 里（defaults / agentos / video / audio / vision /
+                # image_gen 均可），供 core 从 ModelRequestConfig 取值。是否在出口
+                # 清掉取决于 core 是否已把 context_window 加为 ModelRequestConfig
+                # 正式字段（见 reasoning_injector.core_has_context_window_field）：
+                # - core 未加字段（过渡期）：context_window 进 extra 会被
+                #   base_model_client 经 model_dump 透传给厂商 SDK 报 unexpected
+                #   keyword argument -> 需清。
+                # - core 已加字段：context_window 作正式字段，core 自行 exclude
+                #   不发厂商、可读 -> 不清（否则切掉 core 想读的值）。
+                # 不再守 _source=="agentos"：所有条目一视同仁，defaults 配了
+                # context_window 同样需要过渡期清防发厂商。_source 标记本身由
+                # reasoning_injector._build_model_request_kwargs 统一 pop；此处与
+                # 公共出口同口径，覆盖绕过 build_model_from_entry 的 validate 路径。
+                if not core_has_context_window_field():
+                    model_config_obj.pop("context_window", None)
                 logger.info(
                     "[config.validate_model] loaded model_config_obj for '%s' "
                     "(matched_by=%s): %s",
@@ -3041,25 +3052,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             models = get_default_models(config)
             result = []
             active_model = ""
-            # 显式配置的上下文窗口上限（react.context_engine_config.context_window_tokens）
-            # 优先级高于按模型名解析，与 AgentServer 侧 ContextEngine 行为保持一致
-            cec = (config.get("react", {}) or {}).get("context_engine_config", {}) or {}
-            cw_override = cec.get("context_window_tokens")
-            if not (isinstance(cw_override, int) and cw_override > 0):
-                cw_override = None
             for idx, entry in enumerate(models):
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
                 is_default = entry.get("is_default", False)
                 model_name = mcc.get("model_name", "")
-                context_window_tokens = 0
                 try:
-                    from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-                    context_window_tokens = ContextUtils.resolve_context_max(
+                    context_window_tokens = resolve_context_window_tokens(
                         model_name=model_name,
-                        fallback_context_window_tokens=cw_override,
+                        context_engine_config=(config.get("react", {}) or {}),
+                        model_config_obj=mco,
                     )
                 except Exception:
+                    context_window_tokens = 0
                     logger.debug(
                         "Failed to resolve context_window_tokens for model %s",
                         model_name,
