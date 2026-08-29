@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
-from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_common import PptCommon
+from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_common import (
+    DELIVERY_STATUS_FAILED,
+    DELIVERY_STATUS_SENT,
+    DELIVERY_STATUS_UNAVAILABLE,
+    PptCommon,
+)
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.utils.bash_utils import (
     normalize_tool_text,
 )
@@ -29,7 +34,7 @@ def _looks_like_path(value: str) -> bool:
 
 
 class DeliveryNode(PlanNode):
-    """P10 — 交付与验收（对应 SKILL Stage 9）。"""
+    """P10 — 交付与验收（Phase 4 交付 / delivery-summary）。"""
 
     def __init__(self) -> None:
         super().__init__(
@@ -49,23 +54,24 @@ class DeliveryNode(PlanNode):
                 "- `page_count`（可选）: 预期页数\n"
                 "\n"
                 "### 输出\n"
-                "- `delivery_status`: ok / partial / failed\n"
+                "- `delivery_status`: sent / unavailable / failed\n"
                 "- `artifact_tag`: artifact 标记文本（供前端解析渲染预览）\n"
-                "- `send_file_status`: sent / skipped / failed\n"
+                "- `send_file_status`: sent / skipped / failed / unavailable\n"
                 "- `summary`: 完成状态摘要\n"
+                "- `pages_complete`: HTML 页是否齐全（明细，不再用 partial 作主枚举）\n"
                 "\n"
                 "### 执行流程\n"
                 "1. 验证 PPTX 产物：pptx_path 存在且 export_status != failed\n"
                 "2. 验证 HTML 页面：pages_dir 下文件数量与 page_count 一致\n"
                 "3. 发送文件：优先调用 send_file_to_user 发送 PPTX\n"
                 "4. 生成 artifact 标记（send_file_to_user 不可用时的 fallback）\n"
-                "5. 汇总交付状态\n"
+                "5. 汇总交付状态（sent / unavailable / failed）\n"
                 "\n"
                 "### 失败兜底\n"
                 "- PPTX 不存在或 export_status=failed：delivery_status = failed\n"
-                "- HTML 页面不完整：delivery_status = partial\n"
-                "- pages_dir 为空：delivery_status = failed\n"
-                "- send_file_to_user 不可用或失败：fallback 到 artifact_tag\n"
+                "- send_file_to_user 不可用：delivery_status = unavailable\n"
+                "- 发送失败：delivery_status = failed\n"
+                "- HTML 页不齐：记入 pages_complete=false / summary，不单独占用主枚举\n"
             ),
         )
 
@@ -85,9 +91,10 @@ class DeliveryNode(PlanNode):
         if not pages_dir:
             logger.error("[P10] pages_dir 为空")
             return {
-                "delivery_status": "failed",
+                "delivery_status": DELIVERY_STATUS_FAILED,
                 "artifact_tag": "",
                 "send_file_status": "skipped",
+                "pages_complete": False,
                 "summary": "交付失败：pages_dir 为空",
             }
 
@@ -105,30 +112,44 @@ class DeliveryNode(PlanNode):
         send_file_status = "skipped"
         if pptx_ok and pptx_path:
             send_file_status = await self._send_file(pptx_path)
+        if send_file_status == "skipped":
+            send_file_status = "unavailable"
 
-        if not pptx_ok or send_file_status == "failed":
-            delivery_status = "failed"
-        elif not pages_ok:
-            delivery_status = "partial"
-        else:
-            delivery_status = "ok"
+        delivery_status = PptCommon.normalize_delivery_status(
+            pptx_ok=pptx_ok,
+            send_file_status=send_file_status,
+        )
 
         # 仅当文件真实存在且工具确认发送成功时，才标记 task_completed。
-        # send_file_to_user 在文件缺失时返回错误字符串但不抛异常，旧逻辑会误标 sent。
         task_completed = send_file_status == "sent" and pptx_ok
 
         need_artifact = send_file_status != "sent"
         artifact_tag = f"<!-- artifact:pptx {pages_dir} -->" if need_artifact and pages_dir else ""
 
+        style_id = str(inputs.get("style_id") or "").strip()
+        style_constraints = str(inputs.get("style_constraints") or "").strip()
+        validate_pptx_status = str(inputs.get("validate_pptx_status") or "").strip()
+        speaker_notes_status = str(inputs.get("speaker_notes_status") or "skipped")
+
         summary = self._build_summary(
-            delivery_status, pptx_filename, page_count, pages_dir, send_file_status
+            delivery_status,
+            pptx_filename,
+            page_count,
+            pages_dir,
+            send_file_status,
+            pages_ok=pages_ok,
+            style_id=style_id,
+            style_constraints=style_constraints,
+            validate_pptx_status=validate_pptx_status,
+            speaker_notes_status=speaker_notes_status,
         )
 
         logger.info(
-            "[P10] 交付完成 status=%s send=%s pptx=%s task_completed=%s",
+            "[P10] 交付完成 status=%s send=%s pptx=%s pages_ok=%s task_completed=%s",
             delivery_status,
             send_file_status,
             pptx_filename,
+            pages_ok,
             task_completed,
         )
 
@@ -136,19 +157,19 @@ class DeliveryNode(PlanNode):
             "delivery_status": delivery_status,
             "artifact_tag": artifact_tag,
             "send_file_status": send_file_status,
+            "pages_complete": pages_ok,
             "summary": summary,
-            # __artifact__ 字段供 SkillTurboExecutor._collect_node_artifact 提取，
-            # 记录到 _node_artifacts_holder，最终由 _build_artifact_summary 构建产物摘要，
-            # 追加到 skill_acceleration_exec 返回给 DeepAgent 主链路的 tool_result 中。
-            # 没有 __artifact__ 时产物摘要为空，LLM 偶发性因看不到产物证据而误调 skill_tool 重跑。
             "__artifact__": {
                 "info": {
                     "delivery_status": delivery_status,
                     "send_file_status": send_file_status,
                     "pptx_filename": pptx_filename,
                     "task_completed": task_completed,
-                    # prod 新增：演讲备注状态（best-effort，可能 skipped/partial/ok）
-                    "speaker_notes_status": str(inputs.get("speaker_notes_status") or "skipped"),
+                    "pages_complete": pages_ok,
+                    "style_id": style_id,
+                    "style_constraints": style_constraints,
+                    "validate_pptx_status": validate_pptx_status,
+                    "speaker_notes_status": speaker_notes_status,
                 },
                 "files": [{"path": pptx_path}] if pptx_path else [],
             },
@@ -157,7 +178,7 @@ class DeliveryNode(PlanNode):
     async def _send_file(self, pptx_path: str) -> str:
         if not self.has_tool("send_file_to_user"):
             logger.info("[P10] send_file_to_user 工具不可用，跳过文件发送")
-            return "skipped"
+            return "unavailable"
 
         if not Path(pptx_path).is_file():
             logger.error("[P10] send_file 前文件不存在: %s", pptx_path)
@@ -296,23 +317,56 @@ class DeliveryNode(PlanNode):
         page_count: int,
         pages_dir: str,
         send_file_status: str,
+        *,
+        pages_ok: bool = True,
+        style_id: str = "",
+        style_constraints: str = "",
+        validate_pptx_status: str = "",
+        speaker_notes_status: str = "",
     ) -> str:
-        if status == "failed":
-            return f"PPT 生成失败，HTML 页面目录：{pages_dir}"
-        # PPT 已发送给用户时，无论 pages_ok 是否通过，都明确说明"已发送"，
-        # 避免 delivery_status=partial 时的"部分完成"措辞让 LLM 误判任务未完成。
-        if send_file_status == "sent":
-            return f"PPT 已生成并发送给用户，页数：{page_count}，文件：{pptx_filename or '未生成'}"
-        if status == "partial":
-            return f"PPT 部分完成，页数：{page_count}，文件：{pptx_filename or '未生成'}"
-        send_info = ""
-        if send_file_status == "failed":
-            send_info = "，文件发送失败"
-        return f"PPT 生成完成，页数：{page_count}，文件：{pptx_filename}{send_info}"
+        design = style_id or "（未指定风格）"
+        if style_constraints:
+            design = f"{design}；约束：{style_constraints[:80]}"
+        gates = validate_pptx_status or "n/a"
+        notes = speaker_notes_status or "skipped"
+        pages_hint = "" if pages_ok else "；HTML 页数告警"
+
+        if status == DELIVERY_STATUS_FAILED:
+            if send_file_status == "failed":
+                return (
+                    f"PPT 交付失败（发送失败），页数：{page_count}，文件：{pptx_filename or '未生成'}，"
+                    f"设计口径：{design}，validate：{gates}，备注：{notes}{pages_hint}"
+                )
+            return (
+                f"PPT 生成失败，HTML 页面目录：{pages_dir}，"
+                f"设计口径：{design}，validate：{gates}，备注：{notes}"
+            )
+        if send_file_status == "sent" or status == DELIVERY_STATUS_SENT:
+            return (
+                f"PPT 已生成并发送给用户，页数：{page_count}，文件：{pptx_filename or '未生成'}，"
+                f"设计口径：{design}，validate：{gates}，备注：{notes}{pages_hint}"
+            )
+        if status == DELIVERY_STATUS_UNAVAILABLE:
+            return (
+                f"PPT 已生成但发送通道不可用，页数：{page_count}，文件：{pptx_filename or '未生成'}，"
+                f"设计口径：{design}，validate：{gates}，备注：{notes}{pages_hint}"
+            )
+        return (
+            f"PPT 生成完成，页数：{page_count}，文件：{pptx_filename}，"
+            f"设计口径：{design}，validate：{gates}，备注：{notes}{pages_hint}"
+        )
 
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)
-        status_map = {"ok": "ok", "partial": "warning", "failed": "error"}
+        status_map = {
+            DELIVERY_STATUS_SENT: "ok",
+            DELIVERY_STATUS_UNAVAILABLE: "warning",
+            DELIVERY_STATUS_FAILED: "error",
+            # 兼容旧枚举（若上游仍写入）
+            "ok": "ok",
+            "partial": "warning",
+            "failed": "error",
+        }
         yield {
             **result,
             "node": self.plan_name,

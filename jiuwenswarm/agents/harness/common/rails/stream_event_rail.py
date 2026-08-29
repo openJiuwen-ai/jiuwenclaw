@@ -1283,15 +1283,19 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                         _skill_turbo_tic.tool_call.id if _skill_turbo_tic.tool_call else "?",
                         ctx.inputs.tool_call.id if isinstance(ctx.inputs, ToolCallInputs) else "?",
                     )
-                    # 主路径必须主动 emit：外层 tool_name 是 skill_acceleration_exec，
-                    # _emit_ask_user_question_if_interrupted 不会命中；也不能只依赖
-                    # harness __interaction__（同 tool_call_id 二次 HITL 时常哑火）。
-                    await self._emit_skill_turbo_ask_user_question(
-                        session,
-                        outer_tool_call=ctx.inputs.tool_call,
-                        skill_turbo_tic=_skill_turbo_tic,
-                    )
-                    return  # 跳过 _emit_tool_result；ask_user 已在上方强制发出
+                    # 前端 ask_user_question 卡必须用内层 ask_user 的 tool_call/questions。
+                    # 若此处直接 return，会跳过下方 emit；外层 skill_acceleration_exec 的
+                    # harness 中断又常发不出结构化选题卡 → 用户只看到后续风格卡。
+                    inner_tc = getattr(_skill_turbo_tic, "tool_call", None)
+                    if inner_tc is not None:
+                        await self._emit_ask_user_question_if_interrupted(
+                            session,
+                            inner_tc,
+                            str(getattr(inner_tc, "name", "") or "ask_user"),
+                            _skill_turbo_tic,
+                            None,
+                        )
+                    return  # 跳过 _emit_tool_result，由 harness __interaction__ 取代
             except Exception:
                 logger.debug(
                     "[StreamEventRail] skill_turbo HITL rewrite failed",

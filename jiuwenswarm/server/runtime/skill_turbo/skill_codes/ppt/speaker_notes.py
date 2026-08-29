@@ -1,10 +1,10 @@
-"""Stage 8 — 演讲备注生成与注入（仅 need_speaker_notes=True 时执行）。
+"""Phase 4.4 — 演讲备注生成与注入（仅 need_speaker_notes=True 时执行）。
 
 prod 契约：
 1. 取语调规则（优先 tone-style skill，降级为内置默认）
 2. cli notes extract-text 抽取每页可见纯文本
 3. 按页并发 LLM 生成备注分片 speaker-notes-page-{N}.txt
-4. 分片校验（缺失/空页重跑一次）
+4. 分片校验（缺失/空页重跑一次；接近 dispatch.md「首轮后按文件重试」）
 5. 单进程 cli notes inject 写回 .pptx
 
 best-effort：任何失败都不阻塞 PPTX 交付。
@@ -42,17 +42,19 @@ class _SpeakerNotesContext:
     audience: str
     presentation_purpose: str
     tone_rules: str
+    notes_requirements: str
 
 
 class SpeakerNotesNode(PlanNode):
-    """Stage 8 — 演讲备注生成与注入。"""
+    """Phase 4.4 — 演讲备注生成与注入。"""
 
     def __init__(self) -> None:
         super().__init__(
             plan_name="p11_speaker_notes",
             instruction=(
-                "## Stage 8 演讲备注生成与注入\n"
+                "## Phase 4.4 演讲备注生成与注入\n"
                 "仅 need_speaker_notes=True 时执行，否则跳过。\n"
+                "prompt 注入 notes_requirements（与 tone_rules 正交）。\n"
                 "best-effort：任何失败都不阻塞 PPTX 交付。\n"
             ),
         )
@@ -71,6 +73,7 @@ class SpeakerNotesNode(PlanNode):
         topic = str(inputs.get("topic") or "").strip()
         audience = str(inputs.get("audience") or "").strip()
         presentation_purpose = str(inputs.get("presentation_purpose") or "").strip()
+        notes_requirements = str(inputs.get("notes_requirements") or "").strip()
 
         if not pptx_path or not pages_dir or not pptx_root:
             logger.warning("[P11] 缺少必要路径，跳过演讲备注: pptx=%s pages=%s root=%s",
@@ -94,6 +97,7 @@ class SpeakerNotesNode(PlanNode):
             audience=audience,
             presentation_purpose=presentation_purpose,
             tone_rules=tone_rules,
+            notes_requirements=notes_requirements,
         )
 
         # 3. 按页并发生成备注分片
@@ -107,11 +111,32 @@ class SpeakerNotesNode(PlanNode):
 
         status = "ok" if inject_ok else "partial"
         msg = "演讲备注已注入" if inject_ok else "演讲备注注入失败（不阻塞交付）"
-        logger.info("[P11] 演讲备注完成 status=%s", status)
+        logger.info("[P11] 演讲备注完成 status=%s notes_requirements=%s", status, bool(notes_requirements))
         return {
             "speaker_notes_status": status,
             "speaker_notes_message": msg,
         }
+
+    def _build_notes_prompt(self, context: _SpeakerNotesContext, page_num: int, page_type: str) -> str:
+        page_text = context.page_texts.get(page_num, "")
+        notes_req_line = ""
+        if context.notes_requirements:
+            notes_req_line = (
+                f"用户备注规格要求（必须满足，与语调规则正交）："
+                f"{context.notes_requirements}\n"
+            )
+        return (
+            f"你是演讲备注撰写者。请为第 {page_num}/{context.total_pages} 页幻灯片生成口播备注。\n"
+            f"页类型：{page_type}\n"
+            f"页可见文本：{page_text[:2000]}\n"
+            f"主题：{context.topic}\n"
+            f"受众：{context.audience}\n"
+            f"演讲目的：{context.presentation_purpose}\n"
+            f"语调规则：{context.tone_rules}\n"
+            f"{notes_req_line}"
+            f"要求：生成纯文本口播备注，50-200字（若用户规格另有字数/结构要求以用户为准），"
+            f"直接输出备注正文，不要解释。\n"
+        )
 
     async def _get_tone_rules(self, inputs: dict[str, Any]) -> str:
         """取语调规则：优先 tone-style skill，降级为默认。"""
@@ -173,8 +198,6 @@ class SpeakerNotesNode(PlanNode):
     ) -> None:
         """按页并发生成备注分片。"""
         async def _gen_one(page_num: int) -> None:
-            page_text = context.page_texts.get(page_num, "")
-            # 判断页类型
             if page_num == 1:
                 page_type = "cover"
             elif page_num >= context.total_pages:
@@ -182,16 +205,7 @@ class SpeakerNotesNode(PlanNode):
             else:
                 page_type = "content"
 
-            prompt = (
-                f"你是演讲备注撰写者。请为第 {page_num}/{context.total_pages} 页幻灯片生成口播备注。\n"
-                f"页类型：{page_type}\n"
-                f"页可见文本：{page_text[:2000]}\n"
-                f"主题：{context.topic}\n"
-                f"受众：{context.audience}\n"
-                f"演讲目的：{context.presentation_purpose}\n"
-                f"语调规则：{context.tone_rules}\n"
-                f"要求：生成纯文本口播备注，50-200字，直接输出备注正文，不要解释。\n"
-            )
+            prompt = self._build_notes_prompt(context, page_num, page_type)
             try:
                 notes = await self.stream_llm_collect(
                     prompt=prompt,
@@ -219,25 +233,14 @@ class SpeakerNotesNode(PlanNode):
             content = await PptCommon.read_file(self, str(out_path), label=f"notes-page-{page_num}")
             if content and content.strip():
                 continue
-            # 缺失，重跑一次
             logger.warning("[P11] 备注分片缺失 page=%d，重跑", page_num)
-            page_text = context.page_texts.get(page_num, "")
             if page_num == 1:
                 page_type = "cover"
             elif page_num >= context.total_pages:
                 page_type = "ending"
             else:
                 page_type = "content"
-            prompt = (
-                f"你是演讲备注撰写者。请为第 {page_num}/{context.total_pages} 页幻灯片生成口播备注。\n"
-                f"页类型：{page_type}\n"
-                f"页可见文本：{page_text[:2000]}\n"
-                f"主题：{context.topic}\n"
-                f"受众：{context.audience}\n"
-                f"演讲目的：{context.presentation_purpose}\n"
-                f"语调规则：{context.tone_rules}\n"
-                f"要求：生成纯文本口播备注，50-200字，直接输出备注正文，不要解释。\n"
-            )
+            prompt = self._build_notes_prompt(context, page_num, page_type)
             try:
                 notes = await self.stream_llm_collect(
                     prompt=prompt,

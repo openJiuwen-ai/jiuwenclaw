@@ -1,16 +1,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Resume replay: 当 ask_user 等工具因非确定性参数导致 tool_call_id 变化时，
-仍能按 (tool_name, idx 段) 对齐注入 user_input，避免循环中断。
+"""Resume replay: 当工具因非确定性参数导致 tool_call_id 的 args_hash 变化时，
+仍能按 (tool_name, global_seq) 对齐注入 user_input，避免循环中断。
 
-复现 officeclaw_a873fc300d433068be0b0741 的根因：pptx-craft 的 ask_user 节点
-在 resume 重放时 LLM 重新生成主题候选 → questions args 变 → args_hash 变 →
-tool_call_id 与中断时不一致 → _consume_pending_resume_input 返回 None →
-ask_user_rail user_input=None → 再次 interrupt → 死循环。
+tool_call_id 末段 idx 为本次 plan 执行内的全局工具调用序（跨 tool_name 递增），
+因此同一执行内多次 ask_user（不同 questions）不会共享 idx=0，resume 不会误注入。
 
-回退匹配按 (tool_name, tool_call_id 末段 idx) 对齐：idx 是同
-``(tool_name, args_hash)`` 组合的调用次序，避免同一 stage 内多个同名同参
-调用时把 user_input 误注入到非中断点的同名调用。
+回退匹配：tool_name 一致且 global seq 一致时，用 expected_tool_call_id 对齐。
 """
 
 from __future__ import annotations
@@ -19,6 +15,7 @@ from unittest.mock import MagicMock
 
 from jiuwenswarm.server.runtime.skill_turbo.executor import (
     SkillTurboExecutor,
+    _parse_args_hash_from_call_id,
     _parse_call_idx_from_call_id,
     _parse_tool_name_from_call_id,
 )
@@ -174,11 +171,7 @@ class TestParseCallIdxFromCallId:
 
 
 class TestConsumePendingResumeIdxComparison:
-    """回退匹配额外比较 tool_call_id 末段 idx，避免多同名同参调用误注入。
-
-    idx 是同 ``(tool_name, args_hash)`` 组合的调用次序（0-based）。多同名调用
-    场景下，回退命中要求 current 与 expected 的 idx 一致。
-    """
+    """回退匹配比较 tool_call_id 末段 global seq，避免误注入到其他次序的同名调用。"""
 
     def test_idx_match_aligns_to_expected(self):
         """同名 + idx 一致（中断在第 2 次同参调用）：回退命中。"""
@@ -231,3 +224,66 @@ class TestConsumePendingResumeIdxComparison:
             "skill_turbo-tc-ask_user-cccccccc-1", "ask_user"
         )
         assert r1 == ("answer_for_second", expected_tcid)
+
+
+class TestGlobalToolCallSequence:
+    def test_sequential_ask_user_gets_distinct_global_idx(self):
+        ex = _make_executor()
+        first_questions = {"questions": [{"header": "A", "question": "q1"}]}
+        second_questions = {"questions": [{"header": "B", "question": "q2"}]}
+        first_id = ex._next_tool_call_id("ask_user", first_questions)
+        second_id = ex._next_tool_call_id("ask_user", second_questions)
+        assert _parse_call_idx_from_call_id(first_id) == 0
+        assert _parse_call_idx_from_call_id(second_id) == 1
+        assert _parse_args_hash_from_call_id(first_id) != _parse_args_hash_from_call_id(second_id)
+
+    def test_later_ask_user_pending_not_consumed_by_earlier_ask_on_replay(self):
+        ex = _make_executor()
+        first_tcid = ex._next_tool_call_id(
+            "ask_user",
+            {"questions": [{"header": "A", "question": "q"}]},
+        )
+        second_tcid = ex._next_tool_call_id(
+            "ask_user",
+            {"questions": [{"header": "B", "question": "q"}]},
+        )
+        ex.set_pending_resume(
+            expected_tool_call_id=second_tcid,
+            user_input=[{"question": "q", "selected_options": ["option-B"]}],
+        )
+        user_input, effective_id = ex._consume_pending_resume_input(first_tcid, "ask_user")
+        assert user_input is None
+        assert effective_id == first_tcid
+        assert ex._pending_resume is not None
+        user_input2, effective_id2 = ex._consume_pending_resume_input(second_tcid, "ask_user")
+        assert user_input2 == [{"question": "q", "selected_options": ["option-B"]}]
+        assert effective_id2 == second_tcid
+        assert ex._pending_resume is None
+
+    def test_other_tools_advance_global_seq(self):
+        ex = _make_executor()
+        bash_id = ex._next_tool_call_id("bash", {"command": "echo hi"})
+        ask_id = ex._next_tool_call_id("ask_user", {"questions": [{"header": "A"}]})
+        assert _parse_call_idx_from_call_id(bash_id) == 0
+        assert _parse_call_idx_from_call_id(ask_id) == 1
+
+    def test_resume_seeds_global_seq_from_pending_idx(self):
+        """跳过 completed stage 后首个 use_tool 应与中断时同一 global idx。"""
+        ex = _make_executor()
+        expected_tcid = "skill_turbo-tc-ask_user-18cefd55-3"
+        ex.set_pending_resume(
+            expected_tool_call_id=expected_tcid,
+            user_input=[{"question": "风格", "selected_options": ["典雅叙事"]}],
+        )
+        ex._setup_execution_context("plan", {}, 0.0)
+        replay_tcid = ex._next_tool_call_id(
+            "ask_user",
+            {"questions": [{"header": "风格", "question": "请选择演示文稿的视觉风格"}]},
+        )
+        assert _parse_call_idx_from_call_id(replay_tcid) == 3
+        user_input, effective_id = ex._consume_pending_resume_input(
+            replay_tcid, "ask_user"
+        )
+        assert user_input == [{"question": "风格", "selected_options": ["典雅叙事"]}]
+        assert effective_id == expected_tcid
+        assert ex._pending_resume is None

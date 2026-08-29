@@ -61,6 +61,10 @@ from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
     resolve_interactive_ask_from_inputs,
 )
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
+from jiuwenswarm.server.runtime.skill_turbo.thinking_seam import (
+    is_skill_turbo_thinking_param_error,
+    resolve_skill_turbo_thinking_kwargs,
+)
 from jiuwenswarm.server.runtime.skill_turbo.validator import (
     PlanCodeValidationError,
     PlanCodeValidator,
@@ -122,61 +126,6 @@ logger = logging.getLogger(__name__)
 
 # LLM 最大输出 token 数；可通过 LLM_MAX_TOKENS 环境变量覆盖，默认 65536
 _DEFAULT_LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "65536"))
-
-
-def resolve_skill_turbo_thinking_kwargs(
-    thinking: str | None,
-    model_client: Any,
-) -> dict[str, Any]:
-    """Optional thinking inject for SkillTurbo LLM calls.
-
-    ``thinking is None`` → empty dict (no adapt, identical to legacy invoke/stream).
-    Unsupported / degraded → empty dict (never abort).
-    """
-    if thinking is None:
-        return {}
-    from jiuwenswarm.common.thinking.adapter import adapt_thinking
-    from jiuwenswarm.common.thinking.types import kwargs_digest, thaw_llm_call_kwargs
-
-    profile = adapt_thinking(thinking, model_client)
-    if not profile.injected or not profile.llm_call_kwargs:
-        if profile.degraded:
-            logger.info(
-                "[SkillTurboExecutor] thinking not injected thinking=%s model=%r reason=%s",
-                profile.thinking,
-                profile.model_name,
-                profile.reason,
-            )
-        return {}
-    kwargs = thaw_llm_call_kwargs(profile.llm_call_kwargs)
-    logger.info(
-        "[SkillTurboExecutor] thinking inject thinking=%s model=%r digest=%s",
-        profile.thinking,
-        profile.model_name,
-        kwargs_digest(kwargs),
-    )
-    return kwargs
-
-
-def is_skill_turbo_thinking_param_error(exc: BaseException) -> bool:
-    """Heuristic: API/client rejected thinking-related call kwargs."""
-    if isinstance(exc, TypeError):
-        return True
-    msg = str(exc).lower()
-    needles = (
-        "extra_body",
-        "thinking",
-        "enable_thinking",
-        "reasoning_effort",
-        "unexpected keyword",
-        "invalid_request",
-        "bad request",
-        "validation error",
-        "unrecognized",
-    )
-    return any(n in msg for n in needles)
-
-
 # ──────────────────────── 全局上下文变量 ────────────────────────
 # Session管理（用于发送事件）
 _session_var: ContextVar[Session | None] = ContextVar("skill_turbo_session", default=None)
@@ -415,10 +364,28 @@ def _parse_tool_name_from_call_id(tool_call_id: str) -> str | None:
     return name or None
 
 
+def _parse_args_hash_from_call_id(tool_call_id: Any) -> str | None:
+    """从 ``skill_turbo-tc-{tool_name}-{args_hash}-{idx}`` 解析 args_hash 段。"""
+    if not isinstance(tool_call_id, str) or not tool_call_id.startswith(
+        _SKILL_TURBO_TC_PREFIX
+    ):
+        return None
+    body = tool_call_id[len(_SKILL_TURBO_TC_PREFIX):]
+    last_dash = body.rfind("-")
+    if last_dash <= 0:
+        return None
+    body = body[:last_dash]
+    last_dash = body.rfind("-")
+    if last_dash <= 0 or last_dash == len(body) - 1:
+        return None
+    args_hash = body[last_dash + 1:]
+    return args_hash or None
+
+
 def _parse_call_idx_from_call_id(tool_call_id: Any) -> int | None:
     """从 ``skill_turbo-tc-{tool_name}-{args_hash}-{idx}`` 解析末段 idx。
 
-    idx 是同一 ``(tool_name, args_hash)`` 组合的第几次调用（0-based）。
+    idx 是本次 plan 执行内的全局工具调用序（0-based，跨 tool_name 递增）。
     解析失败返回 ``None``。
     """
     if not isinstance(tool_call_id, str):
@@ -490,9 +457,9 @@ class SkillTurboExecutor:
         self._fallback_count = 0
         self._execution_inputs: dict[str, Any] = {}
         self._current_plan_code: str = ""
-        # use_tool 计数器：(tool_name, canonical_args) → call_index，用于生成
-        # 重放确定性 tool_call_id（Step 8 中真正落实算法，这里先准备容器）。
-        self._tool_call_counter: dict[str, int] = {}
+        # use_tool 计数器：本次执行内全局工具调用序（0-based），用于生成
+        # 重放确定性 tool_call_id；idx 为整次 plan 执行中的第几次 use_tool。
+        self._global_tool_call_seq: int = 0
         # resume 模式下，adapter 在 run_stream 入口注入；executor 在 use_tool
         # 命中目标 tool_call_id 时一次性消费。
         self._pending_resume: dict[str, Any] | None = None
@@ -1095,9 +1062,16 @@ class SkillTurboExecutor:
         )
         self._fallback_count = 0
         self._current_plan_code = plan_code
-        # 每次执行重置计数器：保证「重放同一 plan_code 时，相同顺序的 (name,args)
-        # 调用得到相同 call_index → 相同 tool_call_id」的不变量。
-        self._tool_call_counter = {}
+        # 每次执行重置计数器：保证「重放同一 plan_code 时，相同顺序的工具
+        # 调用得到相同 global seq → 相同 tool_call_id」的不变量。
+        # HITL resume 时 completed stage 会跳过其 bash 等工具，若仍从 0 起算则
+        # 中断点的 idx 与 pending 不一致，user_input 无法注入 → 再次 ask。
+        if self._resume_replay and self._pending_resume:
+            expected_id = self._pending_resume.get("expected_tool_call_id")
+            resume_idx = _parse_call_idx_from_call_id(expected_id)
+            self._global_tool_call_seq = resume_idx if resume_idx is not None else 0
+        else:
+            self._global_tool_call_seq = 0
         return tokens
 
     @staticmethod
@@ -1437,9 +1411,8 @@ class SkillTurboExecutor:
           注入到与中断点对齐的 ``ctx.extra[RESUME_USER_INPUT_KEY]``，避免
           再次中断形成死循环。
 
-          idx 段比较用于区分"同一 stage 内多个同名工具调用"：idx 是同
-          ``(tool_name, args_hash)`` 组合的调用次序，中断点与重放点的 idx
-          一致才回退命中，避免把 user_input 误注入到非中断点的同名调用。
+          idx 段比较用于区分「本次执行中的第几次工具调用」：中断点与重放点的
+          global seq 一致才回退命中，避免把 user_input 误注入到其他次序的同名调用。
         - 未命中：返回 ``(None, current_tool_call_id)``，pending 保留待后续匹配。
 
         ``current_tool_name`` 由调用方 ``use_tool`` 传入，避免在本方法里再解析
@@ -1482,12 +1455,12 @@ class SkillTurboExecutor:
         return None, current_tool_call_id
 
     def _next_tool_call_id(self, tool_name: str, kwargs: dict[str, Any]) -> str:
-        """生成确定性 tool_call_id：基于 (tool_name, canonical_args, call_index) 哈希。
+        """生成确定性 tool_call_id：基于 (tool_name, canonical_args, global_seq) 哈希。
 
         - canonical_args：``json.dumps(sort_keys, default=str)`` 后取 sha1[:8]
-        - call_index：本次执行内同 (name, args) 的第几次调用（从 0 起算）
+        - global_seq：本次 plan 执行内第几次 ``use_tool``（从 0 起算，跨工具类型递增）
 
-        重放时只要 plan_code+inputs 一致，相同顺序的同名同参调用必然得到同样的 id；
+        重放时只要 plan_code+inputs 一致，相同顺序的工具调用必然得到同样的 id；
         与 ``PermissionInterruptRail`` 的 ``user_inputs[tool_call_id]`` 对应即可命中。
         """
         try:
@@ -1495,9 +1468,8 @@ class SkillTurboExecutor:
         except (TypeError, ValueError):
             args_canonical = repr(sorted(kwargs.items()))
         args_hash = hashlib.sha1(args_canonical.encode("utf-8")).hexdigest()[:8]
-        key = f"{tool_name}|{args_hash}"
-        idx = self._tool_call_counter.get(key, 0)
-        self._tool_call_counter[key] = idx + 1
+        idx = self._global_tool_call_seq
+        self._global_tool_call_seq += 1
         return f"skill_turbo-tc-{tool_name}-{args_hash}-{idx}"
 
     async def use_tool(self, tool_name: str, **kwargs: Any) -> Any:
@@ -1801,7 +1773,7 @@ class SkillTurboExecutor:
             concurrent: 是否处于并发上下文中。True 时 Executor 自动生成
                 stream_source_id，并注入到本次产生的 llm_reasoning / llm_usage
                 事件，方便前端按调用分桶。
-            thinking: 可选语义 thinking；None 时不调用 adapt、请求体与改前一致。
+            thinking: 语义思考档位（default|off|on），对齐 skill 子代理 thinking 参数。
 
         Returns:
             LLM 响应文本
@@ -1820,11 +1792,12 @@ class SkillTurboExecutor:
         source_id = self._gen_stream_source_id(node_name) if concurrent else None
 
         logger.debug(
-            "[SkillTurboExecutor] call_llm prompt_len=%s system_len=%s node=%s source_id=%s",
+            "[SkillTurboExecutor] call_llm prompt_len=%s system_len=%s node=%s source_id=%s thinking=%s",
             len(prompt),
             len(system_prompt),
             node_name,
             source_id,
+            thinking,
         )
 
         # 记录节点执行
@@ -1949,7 +1922,7 @@ class SkillTurboExecutor:
             concurrent: 是否处于并发上下文中。True 时 Executor 自动生成
                 stream_source_id，并注入到本次产生的 llm_reasoning / llm_usage
                 事件，方便前端按调用分桶。
-            thinking: 可选语义 thinking；None 时不调用 adapt、请求体与改前一致。
+            thinking: 语义思考档位（default|off|on），对齐 skill 子代理 thinking 参数。
 
         Yields:
             str: 流式文本片段（普通文本内容）
@@ -1969,11 +1942,12 @@ class SkillTurboExecutor:
         source_id = self._gen_stream_source_id(node_name) if concurrent else None
 
         logger.debug(
-            "[SkillTurboExecutor] stream_llm prompt_len=%s system_len=%s node=%s source_id=%s",
+            "[SkillTurboExecutor] stream_llm prompt_len=%s system_len=%s node=%s source_id=%s thinking=%s",
             len(prompt),
             len(system_prompt),
             node_name,
             source_id,
+            thinking,
         )
 
         # 记录节点执行

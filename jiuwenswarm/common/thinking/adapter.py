@@ -15,6 +15,17 @@ from jiuwenswarm.common.thinking.vendor_map import match_vendor_style, style_to_
 from jiuwenswarm.common.utils import logger
 
 
+def thinking_disabled_invoke_kwargs() -> dict[str, Any]:
+    """Broad provider-compatible controls that disable thinking (turbo fallback)."""
+    return {
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    }
+
+
 def _resolve_model_name(model: Any) -> str:
     """Best-effort model name from openjiuwen Model / config objects."""
     if model is None:

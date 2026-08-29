@@ -67,13 +67,61 @@ async def test_no_tool_result_emitted_while_waiting_for_approval() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_result_emitted_for_executed_tool_call() -> None:
+async def test_skill_turbo_hitl_emits_ask_user_question_from_inner_tool_call() -> None:
+    """Nested ask_user inside skill_acceleration_exec must still emit the question card."""
+    from jiuwenswarm.server.runtime.skill_turbo import skill_turbo_tools as st_tools
+
     session = _FakeSession()
-    ctx = _ctx(session)
+    outer_tc = SimpleNamespace(
+        id="skill_turbo-outer",
+        name="skill_acceleration_exec",
+        arguments={"query": "做PPT"},
+    )
+    inner_tc = SimpleNamespace(
+        id="skill_turbo-tc-ask_user-page",
+        name="ask_user",
+        arguments={
+            "questions": [
+                {
+                    "header": "页数",
+                    "question": "需要多少页内容页？（不含封面、结束页）",
+                    "options": [{"label": "3-6 页（推荐）"}],
+                }
+            ]
+        },
+    )
+    inner_tic = ToolInterruptException(
+        request=InterruptRequest(message="ask_user"),
+        tool_call=inner_tc,
+    )
+    token = st_tools.set_skill_turbo_hitl_tic(inner_tic)
+    rail = JiuSwarmStreamEventRail()
+    rail.set_skill_turbo_adapter(object())
+    ctx = SimpleNamespace(
+        session=session,
+        agent=None,
+        context=None,
+        extra={},
+        exception=None,
+        inputs=ToolCallInputs(
+            tool_call=outer_tc,
+            tool_name="skill_acceleration_exec",
+            tool_args={"query": "做PPT"},
+            tool_result={"success": False, "error": "任务已暂停等待审批"},
+        ),
+    )
+    try:
+        await rail.after_tool_call(ctx)
+    finally:
+        st_tools._skill_turbo_hitl_tic.reset(token)
 
-    await JiuSwarmStreamEventRail().after_tool_call(ctx)
-
-    assert [output.type for output in session.outputs] == ["tool_result"]
+    assert any(getattr(o, "type", None) == "chat.ask_user_question" for o in session.outputs)
+    assert not any(getattr(o, "type", None) == "tool_result" for o in session.outputs)
+    assert extract_tool_interrupt(ctx.inputs.tool_result) is not None
+    ask_out = next(o for o in session.outputs if o.type == "chat.ask_user_question")
+    payload = ask_out.payload if isinstance(ask_out.payload, dict) else {}
+    questions = payload.get("questions") or []
+    assert questions and questions[0].get("header") == "页数"
 
 
 def test_shared_interrupt_unwrap_handles_deep_and_cyclic_chains() -> None:

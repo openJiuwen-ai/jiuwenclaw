@@ -6,7 +6,10 @@ from typing import Any
 
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
 
-from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_common import NODE_DISPLAY_NAMES
+from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_common import (
+    NODE_DISPLAY_NAMES,
+    PptCommon,
+)
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.pipeline_init import PipelineInitNode
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.intent_classify import IntentClassifyNode
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.requirement_collect import RequirementCollectNode
@@ -30,6 +33,14 @@ _P3_SKIP_FIELDS = {
     "doc_parse_error": None,
     "topic": "",
     "topic_inferred": False,
+    "doc_summary": "",
+    "doc_summary_path": "",
+    "doc_manifest_path": "",
+    "material_map_path": "",
+    "source_assets_dir": "",
+    "vision_verified": False,
+    "images_extracted": False,
+    "parse_degraded": False,
 }
 
 
@@ -113,13 +124,13 @@ class PPTGenRootNode(PlanNode):
             ImagePrepareNode(),
             PPTPageGenNode(),
             PPTExportNode(),
-            # Stage 8: 演讲备注（仅 need_speaker_notes=True 时执行，best-effort 不阻塞交付）
+            # Phase 4.4: 演讲备注（仅 need_speaker_notes=True 时执行，best-effort）
             self._speaker_notes,
             self._delivery,
         ]
         super().__init__(
             plan_name="ppt_gen_root",
-            instruction="PPT生成任务流根节点，串联P0-P10全流程（含Stage 8演讲备注）",
+            instruction="PPT生成任务流根节点，串联 Phase1–4 全流程（含可选演讲备注）",
             # P3 固定保留在任务列表；无附件时运行时 skip 并标记 completed。
             sub_plans=[
                 self._p0,
@@ -173,6 +184,7 @@ class PPTGenRootNode(PlanNode):
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """非流式执行 PPT 生成全流程，并把共享上下文透传给所有子节点。"""
         results: list[dict[str, Any]] = []
+        PptCommon.ensure_phase1_defaults(inputs)
 
         await self._run_subplan(self._p0, inputs, results)
         await self._run_subplan(self._p1, inputs, results)
@@ -351,9 +363,10 @@ class PPTGenRootNode(PlanNode):
         """流式执行 PPT 生成全流程，逐个透传子节点进度与结果。"""
         results: list[dict[str, Any]] = []
         total_steps = len(self.sub_plans)
+        PptCommon.ensure_phase1_defaults(inputs)
 
         # HITL resume 重放时首段 stage 往往已是 completed；不再广播「全流程开始」，
-        # 避免对话框重复刷 Stage 1–N 的假进度。
+        # 避免对话框重复刷 Phase 1–N 的假进度。
         if not await self.should_skip_subplan(self._p0, inputs):
             yield {
                 "node": self.plan_name,
