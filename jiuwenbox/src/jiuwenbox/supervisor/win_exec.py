@@ -516,14 +516,22 @@ def two_hop_spawn(
         None, ctypes.byref(startup), ctypes.byref(pi),
     )
     if not ok:
-        err = ctypes.WinError(ctypes.get_last_error())
+        last_err = ctypes.get_last_error()
+        err = ctypes.WinError(last_err)
         # 失败时关 pipe 句柄防泄漏.
         if token_write_handle:
             kernel32.CloseHandle(wintypes.HANDLE(token_write_handle))
         if token_read_handle.value:
             kernel32.CloseHandle(token_read_handle)
+        hint = ""
+        if last_err == const.ERROR_LOGON_TYPE_NOT_GRANTED:
+            hint = (
+                "; 账户缺少 SeInteractiveLogonRight (允许本地登录). "
+                "请重跑安装, 或由域管把 jbx-sandbox / jbx-sandbox-users "
+                "加入「允许本地登录」GPO"
+            )
         raise RuntimeError(
-            f"两跳第一跳 CreateProcessWithLogonW 失败 (sandbox_id={sandbox_id}): {err}"
+            f"两跳第一跳 CreateProcessWithLogonW 失败 (sandbox_id={sandbox_id}): {err}{hint}"
         )
 
     # CreateProcessWithLogonW 后 runner 已继承 pipe 读端, box-server 持有的读端副本可关.
