@@ -3279,7 +3279,9 @@ def _html_requires_activate_template_chart(html: str) -> bool:
                 continue
             if re.search(r"\bconst\s+option\s*=", body):
                 return True
-        return False
+        # 注释块均为 dormant：去掉注释 scaffold 后再查页内已暴露的 canonical
+        html_outside_comments = _COMMENTED_CHART_SCAFFOLD_BLOCK_RE.sub("", html)
+        return _CANONICAL_ACTIVE_CHART_SCAFFOLD_RE.search(html_outside_comments) is not None
     return _CANONICAL_ACTIVE_CHART_SCAFFOLD_RE.search(html) is not None
 
 
@@ -4407,6 +4409,26 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                 original_html=previous_html,
             )
             if html and await self._write_file(path, html):
+                # 与首写对齐：按需 chart CLI；失败回退旧 HTML（layout 路径不进 missing）
+                page_type = _detect_page_type(outline_page)
+                if _page_qualifies_for_chart_gate(page_type) and pptx_root:
+                    if _html_requires_activate_template_chart(html):
+                        passed, detail, skipped = await _run_activate_template_chart_page(
+                            self,
+                            pages_dir=pages_dir,
+                            pptx_root=pptx_root,
+                            page_num=page_num,
+                        )
+                        if not skipped and not passed:
+                            logger.warning(
+                                "[P8.1] check-layout 再填后 chart gate 未通过 "
+                                "page=%d detail=%s，回退上一版 HTML",
+                                page_num,
+                                detail,
+                            )
+                            if previous_html:
+                                await self._write_file(path, previous_html)
+                            return page_num, False
                 return page_num, True
 
             logger.warning(
