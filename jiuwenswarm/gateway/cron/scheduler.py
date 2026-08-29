@@ -138,7 +138,7 @@ def _extract_text_from_stream_payload(payload: dict | None) -> str | None:
     return None
 
 
-from jiuwenswarm.common.cron_team_completion import (  # noqa: E402
+from jiuwenswarm.common.cron_team_completion import (
     apply_cron_team_round_event,
     cron_team_round_should_end,
     is_cron_leader_placeholder_text as _is_cron_leader_placeholder_text,
