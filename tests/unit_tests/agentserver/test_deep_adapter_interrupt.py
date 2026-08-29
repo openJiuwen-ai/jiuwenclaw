@@ -975,3 +975,260 @@ async def test_stream_consumer_cancellation_survives_permission_cleanup_error_an
 
     route_reset.assert_called_once()
     full_reset.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_skill_turbo_resume_finalize_clears_tie_and_commits() -> None:
+    """resume 跑完必须清掉 INTERRUPTION_KEY、替换 TIE tool_result、补 commit。
+
+    回归 bug：HITL 中断恢复完成后未补 checkpoint，导致下一轮 query 把
+    skill_acceleration_exec 当未完成重新发起，所有后续 query 都重跑
+    第一个任务。
+    """
+    from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+
+    pending_tcid = "call_73bda756260e47708332d92e"
+
+    # context 里最后一条是 TIE 工具结果（tool_call_id == pending_tcid）
+    tie_msg = ToolMessage(tool_call_id=pending_tcid, content="任务已暂停等待审批")
+    other_msg = ToolMessage(tool_call_id="other-tc", content="other")
+    context = MagicMock()
+    context.get_messages.return_value = [other_msg, tie_msg]
+    context.set_messages = MagicMock()
+
+    context_engine = MagicMock()
+    context_engine.get_context.return_value = context
+    context_engine.save_contexts = AsyncMock()
+
+    loop_session = MagicMock()
+    loop_session.get_session_id.return_value = "officeclaw_sess_1"
+
+    instance = MagicMock()
+    instance._loop_session = loop_session
+    instance.react_agent = SimpleNamespace(context_engine=context_engine)
+
+    adapter = _make_adapter(_instance=instance)
+    adapter._persist_session_checkpoint = AsyncMock()
+
+    request = AgentRequest(
+        request_id="req-resume",
+        channel_id="officeclaw",
+        session_id="officeclaw_sess_1",
+        params={"mode": "agent.plan"},
+        is_stream=True,
+    )
+    resume_ctx = {
+        "pending_tool_call_id": pending_tcid,
+        "plan_code": "print('hi')",
+        "inputs": {},
+        "task_states": [],
+    }
+
+    await adapter._finalize_skill_turbo_resume_completion(
+        request=request, resume_ctx=resume_ctx
+    )
+
+    # 1) 中断态被清
+    loop_session.update_state.assert_called_once_with({INTERRUPTION_KEY: None})
+    # 2) TIE 工具结果被替换为成功结果
+    context.set_messages.assert_called_once()
+    set_args = context.set_messages.call_args.args[0]
+    assert any(
+        getattr(m, "tool_call_id", None) == pending_tcid and m.content == "任务已完成"
+        for m in set_args
+    )
+    context_engine.save_contexts.assert_awaited_once_with(loop_session)
+    # 3) checkpoint 被补 commit
+    adapter._persist_session_checkpoint.assert_awaited_once_with(
+        "officeclaw_sess_1", "req-resume"
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_turbo_resume_finalize_tolerates_missing_loop_session() -> None:
+    """无 _loop_session 时不应抛错，仅跳过中断态清理。"""
+    instance = MagicMock()
+    instance._loop_session = None
+    instance.react_agent = None
+
+    adapter = _make_adapter(_instance=instance)
+    adapter._persist_session_checkpoint = AsyncMock()
+
+    request = AgentRequest(
+        request_id="req-resume",
+        channel_id="officeclaw",
+        session_id="officeclaw_sess_1",
+        params={"mode": "agent.plan"},
+        is_stream=True,
+    )
+    # 不应抛异常
+    await adapter._finalize_skill_turbo_resume_completion(
+        request=request, resume_ctx={"pending_tool_call_id": "tc-1"}
+    )
+    adapter._persist_session_checkpoint.assert_awaited_once_with(
+        "officeclaw_sess_1", "req-resume"
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_turbo_resume_finalize_skips_commit_when_clear_interrupt_fails() -> None:
+    """step1 清 INTERRUPTION_KEY 抛错时必须跳过 checkpoint commit。
+
+    回归检视意见：清中断态失败仍 commit 会把中断态落盘固化，
+    正是本 PR 要修的 bug 静默复发路径。
+    """
+    loop_session = MagicMock()
+    loop_session.get_session_id.return_value = "officeclaw_sess_1"
+    loop_session.update_state.side_effect = RuntimeError("update_state boom")
+
+    instance = MagicMock()
+    instance._loop_session = loop_session
+    instance.react_agent = SimpleNamespace(context_engine=MagicMock())
+
+    adapter = _make_adapter(_instance=instance)
+    adapter._persist_session_checkpoint = AsyncMock()
+
+    request = AgentRequest(
+        request_id="req-resume",
+        channel_id="officeclaw",
+        session_id="officeclaw_sess_1",
+        params={"mode": "agent.plan"},
+        is_stream=True,
+    )
+    # 不应抛异常；且不得 commit（避免落盘中断态）
+    await adapter._finalize_skill_turbo_resume_completion(
+        request=request, resume_ctx={"pending_tool_call_id": "tc-1"}
+    )
+    adapter._persist_session_checkpoint.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_skill_turbo_resume_finalize_skips_commit_when_replace_tie_fails() -> None:
+    """step2 替换 TIE tool_result 抛错时必须跳过 checkpoint commit。
+
+    回归检视意见：替换失败仍 commit 会把残留的 TIE 工具结果落盘，
+    下一轮 LLM 看到"工具被中断未完成"重新发起同一调用。
+    """
+    from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+
+    pending_tcid = "call_73bda756260e47708332d92e"
+    tie_msg = ToolMessage(tool_call_id=pending_tcid, content="任务已暂停等待审批")
+
+    context = MagicMock()
+    context.get_messages.return_value = [tie_msg]
+    # set_messages 抛错模拟 context 写入失败
+    context.set_messages.side_effect = RuntimeError("set_messages boom")
+
+    context_engine = MagicMock()
+    context_engine.get_context.return_value = context
+    context_engine.save_contexts = AsyncMock()
+
+    loop_session = MagicMock()
+    loop_session.get_session_id.return_value = "officeclaw_sess_1"
+
+    instance = MagicMock()
+    instance._loop_session = loop_session
+    instance.react_agent = SimpleNamespace(context_engine=context_engine)
+
+    adapter = _make_adapter(_instance=instance)
+    adapter._persist_session_checkpoint = AsyncMock()
+
+    request = AgentRequest(
+        request_id="req-resume",
+        channel_id="officeclaw",
+        session_id="officeclaw_sess_1",
+        params={"mode": "agent.plan"},
+        is_stream=True,
+    )
+    # 不应抛异常；且不得 commit（避免落盘残留 TIE）
+    await adapter._finalize_skill_turbo_resume_completion(
+        request=request,
+        resume_ctx={"pending_tool_call_id": pending_tcid},
+    )
+    # step1 清中断态仍应执行成功
+    loop_session.update_state.assert_called_once_with({INTERRUPTION_KEY: None})
+    # 但 step2 失败 → step3 不得 commit
+    adapter._persist_session_checkpoint.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_skill_turbo_resume_final_chunk_carries_terminal_chat_final() -> None:
+    """resume 跑完的终止性 chat.final 必须在 is_complete 帧前补发，且携带产物摘要 + 停止提示。
+
+    回归 bug：HITL 中断恢复跑完整条流水线后只发 WS is_complete 帧关流，没有补
+    chat.final，前端该轮 request 永远收不到终止帧，界面卡在"执行中"。
+    """
+    # executor 收集的节点产物（与 delivery.py 的 __artifact__ 结构对齐）
+    artifact_holder = {
+        "p10_delivery": {
+            "info": {
+                "delivery_status": "ok",
+                "send_file_status": "sent",
+                "pptx_filename": "ChatGPT发展历程.pptx",
+            },
+            "files": [
+                {"path": "D:/codes/relay-claw/.../ChatGPT发展历程.pptx"}
+            ],
+        }
+    }
+    skill_turbo = SimpleNamespace(artifact_holder=artifact_holder)
+    adapter = _make_adapter()
+    request = AgentRequest(
+        request_id="req-resume",
+        channel_id="officeclaw",
+        session_id="officeclaw_ac17fa1a27498d314c089d06",
+        params={"mode": "agent", "source": "ask_user_interrupt"},
+        is_stream=True,
+    )
+
+    chunks = [
+        c
+        async for c in adapter._emit_skill_turbo_resume_final_chunk(
+            request=request, skill_turbo=skill_turbo
+        )
+    ]
+
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk.request_id == "req-resume"
+    assert chunk.channel_id == "officeclaw"
+    # 终止性 chat.final 帧本身不能 is_complete，否则会提前关 request queue
+    assert chunk.is_complete is False
+    payload = chunk.payload
+    assert payload["event_type"] == "chat.final"
+    # 与正常路径 _wrap_skill_turbo_result 语义对齐：任务已完成 + 产物摘要 + 停止提示
+    assert "任务已完成" in payload["content"]
+    assert "ChatGPT发展历程.pptx" in payload["content"]
+    assert "skill_acceleration_exec task is complete" in payload["content"]
+    # final_mode 必须标注，避免前端按启发式折叠整轮
+    assert payload["final_mode"] == "patch_segment"
+
+
+@pytest.mark.asyncio
+async def test_skill_turbo_resume_final_chunk_fallbacks_when_artifact_missing() -> None:
+    """artifact_holder 缺失 / 空时仍应发终止性 chat.final（content 兜底为空）。"""
+    adapter = _make_adapter()
+    request = AgentRequest(
+        request_id="req-resume-2",
+        channel_id="officeclaw",
+        session_id="officeclaw_sess_2",
+        params={"mode": "agent"},
+        is_stream=True,
+    )
+
+    # skill_turbo 没有 artifact_holder 属性
+    chunks = [
+        c
+        async for c in adapter._emit_skill_turbo_resume_final_chunk(
+            request=request, skill_turbo=SimpleNamespace()
+        )
+    ]
+
+    assert len(chunks) == 1
+    payload = chunks[0].payload
+    assert payload["event_type"] == "chat.final"
+    # 兜底文本仍含任务完成信号与停止提示
+    assert "任务已完成" in payload["content"]
+    assert "skill_acceleration_exec task is complete" in payload["content"]
+    assert payload["final_mode"] == "patch_segment"
+    assert chunks[0].is_complete is False

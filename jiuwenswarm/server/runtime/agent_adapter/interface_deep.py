@@ -10270,9 +10270,27 @@ class JiuWenSwarmDeepAdapter:
                         yield rewritten
                         continue
                     if getattr(chunk, "is_complete", False):
+                        # is_complete 帧会关闭 relay-claw 侧 request queue（WS is_final
+                        # 关流），此后再发的帧不会被消费。resume 路径绕过了顶层 agent
+                        # 的 tool_result→LLM→chat.final 回路，若不在 is_complete 前补一个
+                        # 终止性 chat.final，前端该轮 request 永远收不到终止帧，界面会
+                        # 一直停在"执行中"。这里用 executor 已收集的 node artifacts 摘要
+                        # 作为 final 文本，与正常路径 _wrap_skill_turbo_result 的产物对齐。
+                        async for final_chunk in self._emit_skill_turbo_resume_final_chunk(
+                            request=request,
+                            skill_turbo=skill_turbo,
+                        ):
+                            yield final_chunk
                         async for summary_chunk in _emit_usage_summary():
                             yield summary_chunk
                     yield chunk
+                # resume 成功跑完：把 harness 侧残留的 HITL 中断态（TIE）
+                # 落盘覆盖掉，避免 checkpoint 仍停在 16:53 中断点、下一轮
+                # query 把 skill_acceleration_exec 当未完成重新发起。
+                await self._finalize_skill_turbo_resume_completion(
+                    request=request,
+                    resume_ctx=resume_ctx,
+                )
             except _SkillTurboAbortError as e:
                 async for summary_chunk in _emit_usage_summary():
                     yield summary_chunk
@@ -10298,6 +10316,165 @@ class JiuWenSwarmDeepAdapter:
                 yield summary_chunk
 
         return _resume_impl()
+
+    async def _finalize_skill_turbo_resume_completion(
+        self,
+        *,
+        request: AgentRequest,
+        resume_ctx: dict[str, Any],
+    ) -> None:
+        """resume 跑完后的收尾：覆盖 harness 侧 HITL 中断态并补 commit。
+
+        SkillTurbo resume 路径在 ``process_message_stream_impl`` 入口直接 return，
+        绕过了主路径 ``finally`` 里的 ``_persist_session_checkpoint``；而中断时
+        的 TIE（Tool Interrupt Event）已经落盘到 checkpoint。若不在此处补
+        commit，下一轮 query restore 出来的仍是中断态，main agent 会把
+        skill_acceleration_exec 当未完成重新发起 → 所有后续 query 都重跑
+        第一个任务。
+
+        处理：清掉 ``_loop_session`` 的 ``INTERRUPTION_KEY``、把 context 里
+        TIE 工具结果换成成功结果、再走一次 ``_persist_session_checkpoint``。
+        """
+        try:
+            instance = getattr(self, "_instance", None)
+            if instance is None:
+                return
+            session_id = request.session_id or "default"
+            # 任一前置清理失败即跳过 checkpoint commit：避免把仍带中断态 /
+            # TIE 的状态落盘覆盖，反而固化本 PR 要修的 bug。
+            state_cleared = True
+            # 1) 清中断态：resume 跑通即视为工具成功，不再需要 HITL 续跑。
+            loop_session = getattr(instance, "_loop_session", None)
+            if loop_session is not None:
+                try:
+                    loop_session.update_state({INTERRUPTION_KEY: None})
+                except Exception:  # noqa: BLE001
+                    state_cleared = False
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] skill_turbo resume finalize: "
+                        "clear INTERRUPTION_KEY failed session=%s; "
+                        "skip checkpoint commit to avoid persisting interrupt state",
+                        session_id,
+                        exc_info=True,
+                    )
+            # 2) 把 context 里残留的 TIE 工具结果替换成成功结果，避免下一轮
+            # LLM 看到"工具被中断未完成"而重新发起同一调用。
+            react_agent = getattr(instance, "react_agent", None)
+            context_engine = getattr(react_agent, "context_engine", None)
+            if context_engine is not None and loop_session is not None:
+                target_sid = self._resolve_interrupt_session_id(session_id)
+                try:
+                    context = context_engine.get_context(session_id=target_sid)
+                    pending_tcid = resume_ctx.get("pending_tool_call_id")
+                    messages = list(context.get_messages() or []) if context is not None else []
+                    if context is not None and messages:
+                        from openjiuwen.core.foundation.llm.schema.message import (
+                            ToolMessage,
+                        )
+
+                        replaced = False
+                        for idx in range(len(messages) - 1, -1, -1):
+                            msg = messages[idx]
+                            if (
+                                getattr(msg, "tool_call_id", None) == pending_tcid
+                                and isinstance(msg, ToolMessage)
+                            ):
+                                messages[idx] = ToolMessage(
+                                    tool_call_id=pending_tcid or "",
+                                    content="任务已完成",
+                                )
+                                replaced = True
+                                break
+                        if replaced:
+                            context.set_messages(messages, with_history=True)
+                            await context_engine.save_contexts(loop_session)
+                except Exception:  # noqa: BLE001
+                    state_cleared = False
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] skill_turbo resume finalize: "
+                        "replace TIE tool_result failed session=%s; "
+                        "skip checkpoint commit to avoid persisting TIE state",
+                        session_id,
+                        exc_info=True,
+                    )
+            # 3) 补一次 checkpoint commit，把清理后的状态落盘，覆盖中断时的 TIE。
+            # 前置清理失败时跳过：落盘反而固化中断态 / TIE，正是本 PR 要修的 bug。
+            if not state_cleared:
+                return
+            try:
+                await self._persist_session_checkpoint(session_id, request.request_id or "")
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] skill_turbo resume finalize: "
+                    "checkpoint commit failed session=%s request_id=%s",
+                    session_id,
+                    request.request_id,
+                    exc_info=True,
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] skill_turbo resume finalize failed "
+                "session=%s request_id=%s",
+                request.session_id,
+                request.request_id,
+                exc_info=True,
+            )
+
+    async def _emit_skill_turbo_resume_final_chunk(
+        self,
+        *,
+        request: AgentRequest,
+        skill_turbo: Any,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """resume 跑完补发终止性 chat.final，避免前端卡在"执行中"。
+
+        正常路径下 skill_acceleration_exec 的 tool_result（含 delivery summary + 产物
+        摘要 + 停止提示）回到顶层 agent，由 LLM 生成最终回复并经 stream_utils 转成
+        chat.final。resume 路径绕过这条回路，由本方法用 executor 已收集的 node
+        artifacts 摘要 + "任务已完成" + 停止提示拼装 final 文本，与
+        ``_wrap_skill_turbo_result``（skill_turbo_tools.py）保持等价语义。
+        """
+        rid = request.request_id
+        cid = request.channel_id
+        try:
+            from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                _SKILL_TURBO_STOP_HINT,
+                _build_artifact_summary,
+            )
+            artifact_holder = getattr(skill_turbo, "artifact_holder", None)
+            artifact_text = _build_artifact_summary(artifact_holder or {})
+            parts = ["任务已完成"]
+            if artifact_text:
+                parts.append(artifact_text)
+            parts.append(_SKILL_TURBO_STOP_HINT)
+            content = "\n\n".join(p for p in parts if p)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] skill_turbo resume final text build failed "
+                "request_id=%s; fallback to empty chat.final",
+                rid,
+                exc_info=True,
+            )
+            content = ""
+        payload: dict[str, Any] = {
+            "event_type": "chat.final",
+            "content": content,
+            "source": "ask_user_interrupt",
+        }
+        try:
+            from jiuwenswarm.common.chat_final import (
+                FINAL_MODE_PATCH_SEGMENT,
+                ensure_final_mode_inplace,
+            )
+            ensure_final_mode_inplace(payload, final_mode=FINAL_MODE_PATCH_SEGMENT)
+        except Exception:  # noqa: BLE001
+            payload.setdefault("final_mode", "patch_segment")
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload=payload,
+            is_complete=False,
+        )
 
     @staticmethod
     def _skill_turbo_answers_to_confirm_payload(
