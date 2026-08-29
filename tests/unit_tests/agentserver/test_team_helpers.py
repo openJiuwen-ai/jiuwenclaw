@@ -6005,3 +6005,43 @@ def test_restore_session_budget_absent_returns_none(monkeypatch: pytest.MonkeyPa
         lambda session_id, cache_bust=True: {"session_id": "sess-budget"},
     )
     assert team_helpers.restore_session_budget("sess-budget") is None
+
+
+def test_persist_and_restore_session_swarmflow_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """persist/restore session-level swarmflow config round-trips through metadata."""
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    store: dict[str, Any] = {"session_id": "sess-swarmflow-cfg", "title": "t"}
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: dict(store),
+    )
+    written: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        session_metadata,
+        "_enqueue_write",
+        lambda session_id, metadata: written.append((session_id, dict(metadata))),
+    )
+
+    config = {"enable_swarmflow": True, "swarmflow_budget": 50000}
+    team_helpers.persist_session_swarmflow_config("sess-swarmflow-cfg", config)
+
+    assert written == [("sess-swarmflow-cfg", {**store, "session_swarmflow_config": config})]
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: {**store, "session_swarmflow_config": config},
+    )
+    assert team_helpers.restore_session_swarmflow_config("sess-swarmflow-cfg") == config
+
+
+def test_restore_session_swarmflow_config_absent_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: {"session_id": "sess-swarmflow-cfg"},
+    )
+    assert team_helpers.restore_session_swarmflow_config("sess-swarmflow-cfg") is None

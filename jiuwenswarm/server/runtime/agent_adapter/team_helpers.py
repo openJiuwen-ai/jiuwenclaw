@@ -100,6 +100,7 @@ logger = logging.getLogger(__name__)
 # get_team_manager(channel_id) or the team_manager handle passed in.
 _WORKFLOW_RUNS_STATE_KEY = "workflow_runs"
 _SESSION_BUDGET_STATE_KEY = "session_budget"
+_SESSION_SWARMFLOW_CONFIG_KEY = "session_swarmflow_config"
 
 _TEAM_CREATE_KINDS = {
     RunActionKind.CREATE.value,
@@ -775,6 +776,33 @@ def restore_session_budget(session_id: str) -> dict | None:
     metadata = _read_metadata(session_id, cache_bust=True)
     snapshot = metadata.get(_SESSION_BUDGET_STATE_KEY)
     return snapshot if isinstance(snapshot, dict) else None
+
+
+def persist_session_swarmflow_config(session_id: str, config: dict) -> None:
+    """Persist session-level swarmflow config to session metadata.
+
+    ``config`` is ``{enable_swarmflow: bool, swarmflow_budget: int | None}``.
+    Mirrors persist_session_budget (read-modify-write, no-op on read failure).
+    """
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata, _enqueue_write
+    metadata = _read_metadata(session_id, cache_bust=True)
+    if not metadata.get("session_id"):
+        logger.warning(
+            "[TeamHelpers] skipping session_swarmflow_config persist: "
+            "failed to read session metadata (session_id=%s)",
+            session_id,
+        )
+        return
+    metadata[_SESSION_SWARMFLOW_CONFIG_KEY] = config
+    _enqueue_write(session_id, metadata)
+
+
+def restore_session_swarmflow_config(session_id: str) -> dict | None:
+    """Restore session-level swarmflow config from session metadata, or None."""
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata
+    metadata = _read_metadata(session_id, cache_bust=True)
+    config = metadata.get(_SESSION_SWARMFLOW_CONFIG_KEY)
+    return config if isinstance(config, dict) else None
 
 
 def _resolve_channel_id(channel_id: str | None) -> str:
