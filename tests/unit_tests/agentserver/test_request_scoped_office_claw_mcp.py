@@ -14,8 +14,11 @@ from jiuwenswarm.common.mcp_config import (
     OfficeClawMcpRegistration,
     RequestScopedOfficeClawMcpTool,
     bind_active_office_claw_mcp_tools,
+    bind_office_claw_from_agent,
+    clear_agent_office_claw_tool_ids,
     ensure_request_scoped_office_claw_tool_allowed,
     extract_office_claw_mcp,
+    set_agent_office_claw_tool_ids,
     validate_office_claw_mcp_config,
 )
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
@@ -466,3 +469,46 @@ async def test_stream_request_binds_active_tool_allowlist() -> None:
     ]
 
     assert seen == {"allowed": True, "rejected_foreign": True}
+
+
+def test_carrier_stores_on_ability_manager_and_rebinds() -> None:
+    """The allowlist lives on the shared ability_manager, visible to either agent."""
+    tool_id = "office-claw-request-aaa.office-claw.office_claw_multi_mention"
+    ability = SimpleNamespace()
+    deep_agent = SimpleNamespace(ability_manager=ability)
+    # DeepAgent and its inner ReActAgent share the same ability_manager.
+    react_agent = SimpleNamespace(ability_manager=ability)
+
+    set_agent_office_claw_tool_ids(deep_agent, [tool_id])
+
+    # Stored on the shared carrier, not on the agent object itself.
+    assert not hasattr(deep_agent, "_active_office_claw_tool_ids")
+    assert hasattr(ability, "_active_office_claw_tool_ids")
+
+    # The rail may resolve to either agent object; both re-bind the allowlist.
+    for agent in (deep_agent, react_agent):
+        with bind_office_claw_from_agent(agent):
+            ensure_request_scoped_office_claw_tool_allowed(tool_id)
+            with pytest.raises(RuntimeError, match="bound to another request"):
+                ensure_request_scoped_office_claw_tool_allowed(
+                    "office-claw-request-bbb.office-claw.office_claw_multi_mention"
+                )
+
+
+def test_clear_agent_office_claw_tool_ids_unbinds() -> None:
+    """Clearing the allowlist makes subsequent invokes fail closed as unbound."""
+    tool_id = "office-claw-request-aaa.office-claw.office_claw_multi_mention"
+    ability = SimpleNamespace()
+    agent = SimpleNamespace(ability_manager=ability)
+
+    set_agent_office_claw_tool_ids(agent, [tool_id])
+    with bind_office_claw_from_agent(agent):
+        ensure_request_scoped_office_claw_tool_allowed(tool_id)
+
+    clear_agent_office_claw_tool_ids(agent)
+    assert not hasattr(ability, "_active_office_claw_tool_ids")
+
+    # After clear, bind is a no-op and the tool is refused as unbound.
+    with bind_office_claw_from_agent(agent):
+        with pytest.raises(RuntimeError, match="without an active request binding"):
+            ensure_request_scoped_office_claw_tool_allowed(tool_id)
