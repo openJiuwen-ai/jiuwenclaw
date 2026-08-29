@@ -4,6 +4,8 @@ r"""Windows 沙箱一次性环境准备.
 对齐 docs/window沙箱.md 6.4:
   - 创建 jbx-sandbox 本地用户 + jbx-sandbox-users 组 (随机密码, 标记
     PASSWD_CANT_CHANGE|DONT_EXPIRE_PASSWD, 从登录界面隐藏).
+  - LsaAddAccountRights 授 SeInteractiveLogonRight (允许本地登录), 域控机
+    上 CreateProcessWithLogonW 缺此权利会 WinError 1385.
   - LookupAccountName 取用户 SID, 写注册表供后续模块复用.
   - 安装 WFP filter set (win_wfp.install_wfp_filters).
   - 异步预装常用目录读 ACL (%USERPROFILE% / %SystemRoot% / Program Files /
@@ -217,6 +219,10 @@ def _get_advapi32() -> ctypes.WinDLL:
             ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR),
         ]
         _advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+        _advapi32.ConvertStringSidToSidW.argtypes = [
+            wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p),
+        ]
+        _advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
         _advapi32.RegCreateKeyExW.argtypes = [
             wintypes.HKEY, wintypes.LPCWSTR, wintypes.DWORD,
             wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
@@ -263,6 +269,17 @@ def get_kernel32() -> ctypes.WinDLL:
         # SetEvent: install 子进程跑完所有步骤后 set, 通知主进程可以继续.
         _kernel32.SetEvent.argtypes = [wintypes.HANDLE]
         _kernel32.SetEvent.restype = wintypes.BOOL
+        _kernel32.GetComputerNameW.argtypes = [
+            wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+        ]
+        _kernel32.GetComputerNameW.restype = wintypes.BOOL
+        # GetComputerNameExW: 对象选取器「查找位置」常用 DNS 主机名, 可比 NetBIOS 长.
+        _kernel32.GetComputerNameExW.argtypes = [
+            wintypes.INT, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+        ]
+        _kernel32.GetComputerNameExW.restype = wintypes.BOOL
+        _kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        _kernel32.LocalFree.restype = ctypes.c_void_p
     return _kernel32
 
 
@@ -609,13 +626,136 @@ def _set_user_password(user_name: str, password: str) -> None:
         )
 
 
+# GetComputerNameExW NameType (sysinfoapi.h COMPUTER_NAME_FORMAT).
+_COMPUTER_NAME_NETBIOS = 0
+_COMPUTER_NAME_DNS_HOSTNAME = 1
+_COMPUTER_NAME_PHYSICAL_DNS_HOSTNAME = 5
+_ADD_LOCALGROUP_MEMBER_OK = (
+    0, const.ERROR_MEMBER_IN_ALIAS, const.ERROR_MEMBER_NOT_IN_ALIAS,
+)
+
+
+def _computer_name_ex(name_format: int) -> str | None:
+    """GetComputerNameExW; 失败返回 None."""
+    kernel32 = get_kernel32()
+    size = wintypes.DWORD(0)
+    kernel32.GetComputerNameExW(name_format, None, ctypes.byref(size))
+    cap = size.value if size.value > 1 else 256
+    buf = ctypes.create_unicode_buffer(cap)
+    nsize = wintypes.DWORD(cap)
+    if not kernel32.GetComputerNameExW(name_format, buf, ctypes.byref(nsize)):
+        return None
+    name = buf.value or ""
+    return name.strip() or None
+
+
+def _local_computer_names() -> list[str]:
+    """本机 NetBIOS / DNS 主机名 (去重保序).
+
+    域加入机器上对象选取器「查找位置」用的是本机名 (如 D00624812-PD7AX),
+    不一定等于 GetComputerNameW 的 15 字符 NetBIOS 名.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str | None) -> None:
+        text = (name or "").strip()
+        if not text:
+            return
+        key = text.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        names.append(text)
+
+    try:
+        kernel32 = get_kernel32()
+        size = wintypes.DWORD(256)
+        buf = ctypes.create_unicode_buffer(256)
+        if kernel32.GetComputerNameW(buf, ctypes.byref(size)):
+            _add(buf.value)
+    except Exception:  # noqa: BLE001
+        logger.debug("GetComputerNameW 失败", exc_info=True)
+    for fmt in (
+        _COMPUTER_NAME_DNS_HOSTNAME,
+        _COMPUTER_NAME_PHYSICAL_DNS_HOSTNAME,
+        _COMPUTER_NAME_NETBIOS,
+    ):
+        try:
+            _add(_computer_name_ex(fmt))
+        except Exception:  # noqa: BLE001
+            logger.debug("GetComputerNameExW(%d) 失败", fmt, exc_info=True)
+    return names
+
+
+def _sandbox_group_member_names() -> list[str]:
+    """本机沙箱账户的加组名字候选, 对齐手动「查找位置=本机」.
+
+    域机上裸名 ``jbx-sandbox`` 会先查域, NetLocalGroupAddMembers 返回 1387.
+    必须用 ``计算机名\\jbx-sandbox`` 或 ``.\\jbx-sandbox``.
+    """
+    user = const.SANDBOX_USER_NAME
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        key = name.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        names.append(name)
+
+    for host in _local_computer_names():
+        _add(f"{host}\\{user}")
+    _add(f".\\{user}")
+    _add(user)
+    return names
+
+
+def _net_local_group_add_member_name(
+    netapi32: ctypes.WinDLL, group: str, member_name: str,
+) -> int:
+    """NetLocalGroupAddMembers level 3 (名字). 返回 netapi 错误码."""
+
+    class LocalGroupMembersInfo3(ctypes.Structure):
+        _fields_ = [("lgrpi3_domainandname", wintypes.LPWSTR)]
+
+    name_buf = ctypes.create_unicode_buffer(member_name)
+    member = LocalGroupMembersInfo3()
+    member.lgrpi3_domainandname = name_buf
+    return netapi32.NetLocalGroupAddMembers(
+        None, group, const.LOCALGROUP_MEMBERS_INFO_3,
+        ctypes.byref(member), 1,
+    )
+
+
+def _net_local_group_add_member_sid(
+    netapi32: ctypes.WinDLL, group: str, sid_str: str,
+) -> int:
+    """NetLocalGroupAddMembers level 0 (SID), 避开名字解析."""
+    advapi32 = _get_advapi32()
+    psid = ctypes.c_void_p()
+    if not advapi32.ConvertStringSidToSidW(sid_str, ctypes.byref(psid)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        class LocalGroupMembersInfo0(ctypes.Structure):
+            _fields_ = [("lgrmi0_sid", ctypes.c_void_p)]
+
+        member = LocalGroupMembersInfo0()
+        member.lgrmi0_sid = psid
+        return netapi32.NetLocalGroupAddMembers(
+            None, group, const.LOCALGROUP_MEMBERS_INFO_0,
+            ctypes.byref(member), 1,
+        )
+    finally:
+        get_kernel32().LocalFree(psid)
+
+
 def _add_user_to_group() -> None:
     """把 jbx-sandbox 加入 jbx-sandbox-users 组 (幂等, 失败 raise).
 
-    S8: 旧版用 level 0 (LOCALGROUP_MEMBERS_INFO_0, 字段是 PSID) 却塞用户名字符串
-    -> netapi 解析 PSID 失败返回 1337 (ERROR_INVALID_PASSWORD), 用户没进组。
-    改用 level 3 (LOCALGROUP_MEMBERS_INFO_3, lgrpi3_domainandname 接受
-    "DOMAIN\\user" 名字串), 与 LookupAccountName 拿到的域\\用户格式一致。
+    域加入机器必须用本机限定名 ``计算机名\\jbx-sandbox`` (与对象选取器
+    「查找位置=本机」一致); 裸名会解析到域, 返回 1387.
     """
     netapi32 = _get_netapi32()
     # 先尝试建组 (已存在则忽略, 错误码 2237 = NERR_GroupExists).
@@ -624,7 +764,8 @@ def _add_user_to_group() -> None:
         _fields_ = [("lgrpi0_name", wintypes.LPWSTR)]
 
     grp_info = LocalGroupInfo0()
-    grp_info.lgrpi0_name = const.SANDBOX_USER_GROUP  # LPWSTR 直接赋 str (见 _create_sandbox_user 注释)
+    grp_name_buf = ctypes.create_unicode_buffer(const.SANDBOX_USER_GROUP)
+    grp_info.lgrpi0_name = grp_name_buf
     ret = netapi32.NetLocalGroupAdd(
         None, 0, ctypes.byref(grp_info), None,
     )
@@ -636,58 +777,217 @@ def _add_user_to_group() -> None:
         # 组创建失败是致命 (S12): 没组就没法加成员, 后续组级 ACL 全废。
         raise RuntimeError(f"NetLocalGroupAdd 失败 ret={ret}")
 
-    # 加成员用 level 3 (LOCALGROUP_MEMBERS_INFO_3 { lgrpi3_domainandname: LPWSTR }).
-    # level 0 字段是 PSID, 传名字串会返回 1337. level 3 接受 "DOMAIN\\user" 或裸名, 本地账户用裸名.
-    class LocalGroupMembersInfo3(ctypes.Structure):  # noqa: E306 - Win32 结构体
-        _fields_ = [("lgrpi3_domainandname", wintypes.LPWSTR)]
-
-    member = LocalGroupMembersInfo3()
-    member.lgrpi3_domainandname = const.SANDBOX_USER_NAME  # LPWSTR 直接赋 str
-    ret = netapi32.NetLocalGroupAddMembers(
-        None, const.SANDBOX_USER_GROUP, 3,
-        ctypes.byref(member), 1,
-    )
-    # 0 = 成功; 1377 = ERROR_MEMBER_IN_ALIAS (已在组中, 幂等).
-    # 1378 = ERROR_MEMBER_NOT_IN_ALIAS / NERR_GroupNotMember (某些 Windows 版本返回此码表示已在组中).
-    if ret not in (0, 1377, 1378):
-        # S12: 成员加入失败是致命, 组级 ACL 对 jbx-sandbox 不生效。
-        raise RuntimeError(
-            f"NetLocalGroupAddMembers 失败 ret={ret} (user={const.SANDBOX_USER_NAME} "
-            f"group={const.SANDBOX_USER_GROUP})"
+    last_ret = -1
+    tried: list[str] = []
+    # SID 加组不走名字解析, 域机最稳; LookupAccountName 失败再退回限定名.
+    try:
+        sid = _lookup_user_sid(const.SANDBOX_USER_NAME)
+        last_ret = _net_local_group_add_member_sid(
+            netapi32, const.SANDBOX_USER_GROUP, sid,
         )
-    logger.info("用户 %s 已加入组 %s", const.SANDBOX_USER_NAME, const.SANDBOX_USER_GROUP)
+        tried.append(f"SID:{sid}")
+        if last_ret in _ADD_LOCALGROUP_MEMBER_OK:
+            logger.info(
+                "用户 %s 已加入组 %s (via SID)",
+                const.SANDBOX_USER_NAME, const.SANDBOX_USER_GROUP,
+            )
+            return
+        logger.warning("SID 加组失败 ret=%d, 回退计算机名限定名", last_ret)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("SID 加组失败, 回退计算机名限定名: %s", exc)
+
+    for member_name in _sandbox_group_member_names():
+        tried.append(member_name)
+        last_ret = _net_local_group_add_member_name(
+            netapi32, const.SANDBOX_USER_GROUP, member_name,
+        )
+        if last_ret in _ADD_LOCALGROUP_MEMBER_OK:
+            logger.info(
+                "用户 %s 已加入组 %s (member=%s)",
+                const.SANDBOX_USER_NAME, const.SANDBOX_USER_GROUP, member_name,
+            )
+            return
+        logger.warning(
+            "NetLocalGroupAddMembers ret=%d member=%s", last_ret, member_name,
+        )
+
+    raise RuntimeError(
+        f"NetLocalGroupAddMembers 失败 ret={last_ret} "
+        f"(user={const.SANDBOX_USER_NAME} group={const.SANDBOX_USER_GROUP} "
+        f"tried={tried})"
+    )
 
 
-def _lookup_user_sid(user_name: str) -> str:
-    """LookupAccountName 取用户 SID 字符串."""
+def _lsa_account_rights(win32security: object, policy: object, sid: object) -> list[str]:
+    """枚举 SID 已有的 LSA 用户权利; 账户尚无 LSA 对象时返回空列表."""
+    try:
+        rights = win32security.LsaEnumerateAccountRights(policy, sid)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return []
+    if not rights:
+        return []
+    return [str(r) for r in rights]
+
+
+def _grant_interactive_logon_right(sid_str: str) -> None:
+    """给 SID 授 SeInteractiveLogonRight (允许本地登录), 幂等.
+
+    对齐 secpol.msc → 本地策略 → 用户权限分配 → 允许本地登录.
+    域加入机器上第一跳 CreateProcessWithLogonW(LOGON_WITH_PROFILE) 必须有此权利,
+    否则 WinError 1385. 若域 GPO 同样配置了该权利, 下次 gpupdate 可能覆盖本机设置.
+    """
+    try:
+        import win32security  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "授 SeInteractiveLogonRight 需要 pywin32 (win32security)"
+        ) from exc
+    if not sid_str:
+        raise RuntimeError("授 SeInteractiveLogonRight 缺少用户 SID")
+    sid = win32security.ConvertStringSidToSid(sid_str)
+    policy = win32security.LsaOpenPolicy(None, const.POLICY_GRANT_LOGON_RIGHTS_ACCESS)
+    try:
+        existing = _lsa_account_rights(win32security, policy, sid)
+        if const.SE_DENY_INTERACTIVE_LOGON_NAME in existing:
+            logger.warning(
+                "账户已有 %s (拒绝本地登录), 优先于允许权利; "
+                "CreateProcessWithLogonW 仍会失败. 请从域 GPO / 本地策略中移除拒绝项",
+                const.SE_DENY_INTERACTIVE_LOGON_NAME,
+            )
+        if const.SE_INTERACTIVE_LOGON_NAME in existing:
+            logger.info(
+                "用户 %s 已有 %s, 跳过",
+                const.SANDBOX_USER_NAME, const.SE_INTERACTIVE_LOGON_NAME,
+            )
+            return
+        try:
+            win32security.LsaAddAccountRights(
+                policy, sid, [const.SE_INTERACTIVE_LOGON_NAME],
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"LsaAddAccountRights({const.SE_INTERACTIVE_LOGON_NAME}) 失败: {exc}. "
+                "域控机上 jbx-sandbox 需要「允许本地登录」才能 CreateProcessWithLogonW"
+            ) from exc
+        logger.info(
+            "已授 %s 给 %s (允许本地登录). "
+            "若本机加入域且 GPO 配置了同一用户权利, 下次 gpupdate 可能覆盖",
+            const.SE_INTERACTIVE_LOGON_NAME, const.SANDBOX_USER_NAME,
+        )
+        verified = _lsa_account_rights(win32security, policy, sid)
+        if const.SE_INTERACTIVE_LOGON_NAME not in verified:
+            logger.warning(
+                "LsaAddAccountRights 后枚举仍无 %s, 可能被域 GPO 立即覆盖. "
+                "请让域管把组 %s 加入「允许本地登录」, 或把 %s 加入 GPO 已放行的组",
+                const.SE_INTERACTIVE_LOGON_NAME,
+                const.SANDBOX_USER_GROUP,
+                const.SANDBOX_USER_NAME,
+            )
+    finally:
+        try:
+            win32security.LsaClose(policy)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _ensure_interactive_logon_right(sid_str: str, *, fatal: bool = True) -> None:
+    """install 主路径失败则 raise; 已装补授路径失败只记日志."""
+    try:
+        _grant_interactive_logon_right(sid_str)
+    except Exception as exc:
+        if fatal:
+            raise
+        logger.warning("补授 SeInteractiveLogonRight 失败 (非致命): %s", exc)
+
+
+def _revoke_interactive_logon_right(sid_str: str) -> None:
+    """卸载 / 回滚时收回 SeInteractiveLogonRight, best-effort."""
+    if not sid_str:
+        return
+    try:
+        import win32security  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    try:
+        sid = win32security.ConvertStringSidToSid(sid_str)
+        policy = win32security.LsaOpenPolicy(
+            None, const.POLICY_GRANT_LOGON_RIGHTS_ACCESS,
+        )
+        try:
+            win32security.LsaRemoveAccountRights(
+                policy, sid, False, [const.SE_INTERACTIVE_LOGON_NAME],
+            )
+        finally:
+            try:
+                win32security.LsaClose(policy)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        logger.warning("收回 SeInteractiveLogonRight 失败 (非致命)", exc_info=True)
+
+
+def _lookup_account_sid(system_name: str | None, account_name: str) -> str:
+    """LookupAccountName 取 SID 字符串; 找不到 raise WinError."""
     advapi32 = _get_advapi32()
-    # 先查长度.
     sid_buf = (ctypes.c_byte * 256)()
     sid_size = wintypes.DWORD(256)
     domain_buf = ctypes.create_unicode_buffer(256)
     domain_size = wintypes.DWORD(256)
     use = wintypes.DWORD(0)
     ok = advapi32.LookupAccountNameW(
-        None, user_name, sid_buf, ctypes.byref(sid_size),
+        system_name, account_name, sid_buf, ctypes.byref(sid_size),
         domain_buf, ctypes.byref(domain_size), ctypes.byref(use),
     )
     if not ok:
-        # 长度不够时重试.
-        sid_buf = (ctypes.c_byte * sid_size.value)()
-        domain_buf = ctypes.create_unicode_buffer(domain_size.value)
+        sid_buf = (ctypes.c_byte * max(sid_size.value, 1))()
+        domain_buf = ctypes.create_unicode_buffer(max(domain_size.value, 1))
         ok = advapi32.LookupAccountNameW(
-            None, user_name, sid_buf, ctypes.byref(sid_size),
+            system_name, account_name, sid_buf, ctypes.byref(sid_size),
             domain_buf, ctypes.byref(domain_size), ctypes.byref(use),
         )
         if not ok:
             raise ctypes.WinError(ctypes.get_last_error())
-    # 转 SID 字符串.
     sid_str = wintypes.LPWSTR()
     if not advapi32.ConvertSidToStringSidW(sid_buf, ctypes.byref(sid_str)):
         raise ctypes.WinError(ctypes.get_last_error())
     result = sid_str.value
     _free_sid_str(sid_str)
     return result
+
+
+def _lookup_user_sid(user_name: str) -> str:
+    """LookupAccountName 取用户 SID 字符串.
+
+    本机沙箱账户先按「查找位置=本机」解析 (计算机名\\jbx-sandbox),
+    避免域加入机器把裸名解析到域.
+    """
+    attempts: list[tuple[str | None, str]] = []
+    if "\\" in user_name:
+        attempts.append((None, user_name))
+    elif user_name.casefold() == const.SANDBOX_USER_NAME.casefold():
+        for host in _local_computer_names():
+            attempts.append((host, user_name))
+            attempts.append((None, f"{host}\\{user_name}"))
+        attempts.append((None, f".\\{user_name}"))
+        attempts.append((None, user_name))
+    else:
+        attempts.append((None, user_name))
+
+    last_exc: BaseException | None = None
+    seen: set[tuple[str | None, str]] = set()
+    for system, account in attempts:
+        key = (system.casefold() if system else None, account.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            return _lookup_account_sid(system, account)
+        except OSError as exc:
+            last_exc = exc
+            continue
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"LookupAccountName 失败: {user_name}")
 
 
 def _lookup_current_user_sid() -> str | None:
@@ -1335,13 +1635,22 @@ def install(
     # 幂等检查.
     if not force and reg_get_str(const.REG_VALUE_INSTALLED) == "1":
         logger.info("Windows 沙箱已安装, 跳过 (force=True 可重装)")
+        # 域控机可能缺「允许本地登录」; 已装也补授一次, 免强制 recreate-user.
+        try:
+            sid = get_sandbox_user_sid()
+            if not sid:
+                sid = _lookup_user_sid(const.SANDBOX_USER_NAME)
+            _ensure_interactive_logon_right(sid, fatal=False)
+        except Exception:  # noqa: BLE001
+            logger.warning("已安装路径补授允许本地登录失败 (非致命)", exc_info=True)
         return
 
     logger.info("开始 Windows 沙箱安装...")
 
     # install 主体 try/except, 致命步骤失败时调 _install_rollback 局部回滚并 raise,
     # 不写 installed=1 (旧版 best-effort 假成功).
-    # 致命: 用户+组创建、网络隔离至少一条路成功 (WFP 或降级). 非致命: 隐藏用户、DPAPI、合成 SID 缓存、读 ACL 预装.
+    # 致命: 用户+组创建、SeInteractiveLogonRight、网络隔离至少一条路成功 (WFP 或降级).
+    # 非致命: 隐藏用户、DPAPI、合成 SID 缓存、读 ACL 预装.
     # review #4: 失败回滚只清本次已成功步骤新增的资源 (用户/组/WFP filter), 不调
     # uninstall() 全量清理 (会删 jbx-sandbox 用户/profile, 影响并发运行的其他沙箱).
     steps_done: set[str] = set()
@@ -1428,10 +1737,11 @@ def install(
         except Exception:  # noqa: BLE001
             logger.warning("隐藏登录界面用户失败, 不影响功能", exc_info=True)
 
-        # 2. 查 SID 并存注册表.
+        # 2. 查 SID 并存注册表; 授允许本地登录 (致命: 域控机缺此权利第一跳 1385).
         sid = _lookup_user_sid(const.SANDBOX_USER_NAME)
         _reg_set_str(const.REG_VALUE_SANDBOX_USER_SID, sid)
         _save_sandbox_user_password(password)
+        _grant_interactive_logon_right(sid)
 
         # 合成 SID 缓存.
         from jiuwenbox.supervisor import win_acl
@@ -2030,6 +2340,9 @@ def _install_rollback(steps_done: "set[str]") -> None:
             const.SANDBOX_USER_NAME,
         )
     elif "user_created" in steps_done:
+        sid_str = get_sandbox_user_sid()
+        if sid_str:
+            _revoke_interactive_logon_right(sid_str)
         netapi32 = _get_netapi32()
         ret = netapi32.NetUserDel(None, const.SANDBOX_USER_NAME)
         if ret not in (0, 2221):  # 2221 = NERR_UserNotFound (幂等)
@@ -2218,6 +2531,7 @@ def _remove_sandbox_user_and_profile() -> None:
             sid_str = None
     if sid_str:
         logger.info("DeleteProfileW sid=%s", sid_str)
+        _revoke_interactive_logon_right(sid_str)
         try:
             _delete_profile_by_sid(sid_str)
         except Exception:  # noqa: BLE001

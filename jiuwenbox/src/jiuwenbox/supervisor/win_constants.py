@@ -92,6 +92,20 @@ WIN_WORLD_SID = 1  # WinWorldSid -> Everyone
 # ---------------------------------------------------------------------------
 LOGON32_LOGON_INTERACTIVE = 2
 LOGON32_PROVIDER_DEFAULT = 0
+# CreateProcessWithLogonW / LogonUser(INTERACTIVE) 未授「允许本地登录」时的 Win32 码.
+ERROR_LOGON_TYPE_NOT_GRANTED = 1385
+
+# LSA 用户权利 (ntsecapi.h). 第一跳 LOGON_WITH_PROFILE 需要交互式登录权利.
+# 对齐 secpol.msc → 本地策略 → 用户权限分配 → 允许本地登录.
+SE_INTERACTIVE_LOGON_NAME = "SeInteractiveLogonRight"
+SE_DENY_INTERACTIVE_LOGON_NAME = "SeDenyInteractiveLogonRight"
+# LsaOpenPolicy DesiredAccess (ntsecapi.h POLICY_*).
+POLICY_VIEW_LOCAL_INFORMATION = 0x00000001
+POLICY_CREATE_ACCOUNT = 0x00000010
+POLICY_LOOKUP_NAMES = 0x00000800
+POLICY_GRANT_LOGON_RIGHTS_ACCESS = (
+    POLICY_VIEW_LOCAL_INFORMATION | POLICY_CREATE_ACCOUNT | POLICY_LOOKUP_NAMES
+)
 
 # CreateProcessW / CreateProcessAsUserW dwCreationFlags.
 CREATE_SUSPENDED = 0x00000004
@@ -148,6 +162,13 @@ SANDBOX_USER_FLAGS = (
 
 # NetLocalGroupAddMembers 预定义级别.
 LOCALGROUP_MEMBERS_INFO_0 = 0
+LOCALGROUP_MEMBERS_INFO_3 = 3
+# 加组成员: 已在组中 (幂等).
+ERROR_MEMBER_IN_ALIAS = 1377
+ERROR_MEMBER_NOT_IN_ALIAS = 1378
+# 域机上裸名 jbx-sandbox 会被解析到域, 本机 SAM 账户加组失败.
+ERROR_NO_SUCH_MEMBER = 1387
+ERROR_INVALID_MEMBER = 1388
 
 # NetUserAdd 信息级别.
 USER_INFO_1_LEVEL = 1
