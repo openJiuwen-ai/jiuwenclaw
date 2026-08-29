@@ -420,6 +420,10 @@ export interface SessionRuntime {
   enabledMcps: string[];
   /** SwarmFlow 是否激活（曾收到过 swarmflow 事件即置真，粘性） */
   swarmflowActive: boolean;
+  /** 本会话是否启用 swarmflow（会话级，随 chat.send 下发） */
+  enableSwarmflow: boolean;
+  /** 本会话 swarmflow token 上限（留空=不限） */
+  swarmflowBudget: number | null;
   /** SwarmFlow 工作流运行列表（树视图渲染） */
   workflowRuns: WorkflowRun[];
 }
@@ -449,6 +453,8 @@ function createEmptyRuntime(sessionId?: string): SessionRuntime {
     enabledPlugins: [],
     enabledMcps: [],
     swarmflowActive: false,
+    enableSwarmflow: false,
+    swarmflowBudget: null,
     workflowRuns: [],
   };
 }
@@ -551,7 +557,7 @@ interface SessionState {
   /** 增量合并一条 workflow 更新到 workflowRuns */
   applyWorkflowUpdate: (sessionId: string, workflow: WorkflowRun) => void;
   /** 切换 swarmflowActive（粘性：置真后不再回 false） */
-  setSwarmflowActive: (sessionId: string, active: boolean) => void;
+  setSwarmflowActive: (sessionId: string, active: boolean, budget?: number | null) => void;
   /** 懒加载 phase 完整 agents（command.workflows get_phase） */
   loadPhaseAgents: (
     sessionId: string,
@@ -697,10 +703,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const agentSelectionIntent = normalizedMode === 'agent'
         ? runtime.agentSelectionIntent
         : { kind: 'clear' as const };
+      // 切离 team 模式时自动关闭 swarmflow
+      const closingSwarmflow =
+        runtime.mode === 'team' && normalizedMode !== 'team' && runtime.enableSwarmflow;
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, mode: normalizedMode, agentSelectionIntent },
+          [sessionId]: {
+            ...runtime,
+            mode: normalizedMode,
+            agentSelectionIntent,
+            ...(closingSwarmflow
+              ? { enableSwarmflow: false, swarmflowBudget: null }
+              : {}),
+          },
         },
       };
     });
@@ -1537,17 +1553,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     get().applyWorkflowUpdate(sessionId, { ...existing, phases: updatedPhases });
   },
 
-  setSwarmflowActive: (sessionId, active) => {
-    set((state) => {
-      const runtime = state.runtimes[sessionId];
-      if (!runtime) return state;
-      return {
-        runtimes: {
-          ...state.runtimes,
-          [sessionId]: { ...runtime, swarmflowActive: active },
+  setSwarmflowActive: (sessionId, active, budget) => {
+    const rt = get().runtimes[sessionId];
+    if (!rt) return;
+    set((state) => ({
+      runtimes: {
+        ...state.runtimes,
+        [sessionId]: {
+          ...rt,
+          enableSwarmflow: active,
+          swarmflowBudget: active ? (budget ?? rt.swarmflowBudget ?? null) : null,
         },
-      };
-    });
+      },
+    }));
   },
 
   setAvailableModels: (models, activeModel) => {
