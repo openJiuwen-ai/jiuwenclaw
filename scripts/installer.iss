@@ -1,3 +1,4 @@
+; Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 ; Inno Setup installer script
 ; 仅由 scripts\build-exe.ps1 调用；wrapper 从 pyproject.toml 读取并传入构建配置。
 
@@ -57,6 +58,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "..\dist\{#BuildDistDirName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[UninstallRun]
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--desktop-reset-external-cli-config"; Flags: runhidden waituntilterminated; RunOnceId: "ResetExternalCliConfig"
+
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
@@ -64,7 +68,8 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [UninstallDelete]
 ; Remove only application-owned paths that may gain runtime-generated files.
-; User data lives outside {app}, under ~/.jiuwenswarm, and is intentionally kept.
+; User configuration lives outside {app}; optional Windows runtimes live under {app}\runtime.
+; The uninstall command resets external CLI switches before this directory is removed.
 Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{app}\runtime"
 Type: files; Name: "{app}\{#MyAppExeName}"

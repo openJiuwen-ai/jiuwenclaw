@@ -1,3 +1,5 @@
+// Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+
 /**
  * App 主组件
  *
@@ -15,6 +17,7 @@ import CronPanel from './components/CronPanel';
 import HeartbeatPanel from './components/HeartbeatPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { UpdatePanel } from './components/UpdatePanel';
+import { ExternalCliInstallDialog, type ExternalCliInstallStatuses } from './components/ExternalCliInstallDialog';
 import { SettingsPage } from './features/settings/SettingsPage';
 import type { SettingsPageDefinition } from './features/settings/registry/types';
 import type { SettingsRequest } from './features/settings/services/settingsContract';
@@ -60,8 +63,8 @@ import { useTeamPanelState } from './features/teamPanelState';
 import { useSingleAgentPanelState } from './features/singleAgentPanelState';
 import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
 import type {
-  CodexDependencyInstallStatus,
   ExternalCliAgentKind,
+  ExternalCliDependencyInstallStatus,
 } from './components/ExternalCliAgentsSection';
 import {
   ensureSessionRuntimes,
@@ -294,6 +297,8 @@ function AppContent({
   const [proactiveToastMessage, setProactiveToastMessage] = useState('');
   const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
   const [securityAlertContent, setSecurityAlertContent] = useState('');
+  const [externalCliInstallDialogOpen, setExternalCliInstallDialogOpen] = useState(false);
+  const [externalCliInstallStatuses, setExternalCliInstallStatuses] = useState<ExternalCliInstallStatuses>({});
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [requestedSettingsModuleId, setRequestedSettingsModuleId] =
     useState<SettingsModuleTarget | null>(null);
@@ -1527,8 +1532,8 @@ function AppContent({
   }, [request, t]);
 
   const getExternalCliDependencyInstallStatus = useCallback(
-    async (cliAgent: ExternalCliAgentKind): Promise<CodexDependencyInstallStatus> => {
-      return request<CodexDependencyInstallStatus>(
+    async (cliAgent: ExternalCliAgentKind): Promise<ExternalCliDependencyInstallStatus> => {
+      return request<ExternalCliDependencyInstallStatus>(
         "external_cli.install_status",
         { cli_agent: cliAgent },
         { timeoutMs: 10 * 1000 },
@@ -1537,9 +1542,19 @@ function AppContent({
     [request],
   );
 
-  const getCodexDependencyInstallStatus = useCallback(
-    () => getExternalCliDependencyInstallStatus('codex'),
-    [getExternalCliDependencyInstallStatus],
+  const trackExternalCliDependencyInstalls = useCallback(
+    (statuses: ExternalCliInstallStatuses) => {
+      setExternalCliInstallStatuses(statuses);
+      setExternalCliInstallDialogOpen(true);
+    },
+    [],
+  );
+
+  const updateExternalCliInstallStatus = useCallback(
+    (cliAgent: ExternalCliAgentKind, status: ExternalCliDependencyInstallStatus) => {
+      setExternalCliInstallStatuses((current) => ({ ...current, [cliAgent]: status }));
+    },
+    [],
   );
 
   const savePermissionSilent = useCallback(async (updates: Record<string, string>) => {
@@ -3051,7 +3066,12 @@ function AppContent({
               onHasChangesChange={handleSettingsHasChangesChange}
               onDetectExternalCli={detectExternalCli}
               onSelectExternalCliPath={selectExternalCliPath}
-              onGetCodexDependencyInstallStatus={getCodexDependencyInstallStatus}
+              onTrackExternalCliDependencyInstalls={trackExternalCliDependencyInstalls}
+              externalCliInstallStatuses={externalCliInstallStatuses}
+              externalCliInstallBusy={Object.values(externalCliInstallStatuses).some(
+                (status) => status?.status === 'running',
+              )}
+              onOpenExternalCliInstallDialog={() => setExternalCliInstallDialogOpen(true)}
               initialModuleId={requestedSettingsModuleId ?? undefined}
             />
           </div>
@@ -3212,6 +3232,14 @@ function AppContent({
           </div>
         </div>
       )}
+
+      <ExternalCliInstallDialog
+        open={externalCliInstallDialogOpen}
+        statuses={externalCliInstallStatuses}
+        onClose={() => setExternalCliInstallDialogOpen(false)}
+        onGetStatus={getExternalCliDependencyInstallStatus}
+        onStatusChange={updateExternalCliInstallStatus}
+      />
 
       <div className="share-image-stage" aria-hidden="true" data-testid="app-share-image-stage">
         <ShareImageDocument ref={shareExportRef} snapshot={shareExportSnapshot} />

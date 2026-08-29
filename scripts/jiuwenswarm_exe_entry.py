@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """PyInstaller 打包入口：根据参数分发到主应用或子命令。"""
 
 from __future__ import annotations
@@ -108,15 +108,28 @@ if getattr(sys, "frozen", False):
 
         subprocess.Popen.__init__ = _patched_popen_init
 
+    from jiuwenswarm.common.external_cli_runtime import activate_external_cli_runtime_paths
+
+    activate_external_cli_runtime_paths()
+
 _DESKTOP_RUN_AGENT = "--desktop-run-agent"
 _DESKTOP_RUN_GATEWAY = "--desktop-run-gateway"
+_DESKTOP_INSTALL_EXTERNAL_CLI = "--desktop-install-external-cli"
+_DESKTOP_RESET_EXTERNAL_CLI_CONFIG = "--desktop-reset-external-cli-config"
 
 # 子进程 flag 集合，这些模式下需要将错误写入日志文件，
 # 因为 console=False 的 PyInstaller exe 在 Windows 上无法通过 stderr 捕获错误。
 _DESKTOP_INSTALL_UPDATE = "--desktop-install-update"
 
-_CHILD_FLAGS = {"--desktop-run-app", "--desktop-run-web",
-        _DESKTOP_RUN_AGENT, _DESKTOP_RUN_GATEWAY, _DESKTOP_INSTALL_UPDATE}
+_CHILD_FLAGS = {
+    "--desktop-run-app",
+    "--desktop-run-web",
+    _DESKTOP_RUN_AGENT,
+    _DESKTOP_RUN_GATEWAY,
+    _DESKTOP_INSTALL_EXTERNAL_CLI,
+    _DESKTOP_RESET_EXTERNAL_CLI_CONFIG,
+    _DESKTOP_INSTALL_UPDATE,
+}
 
 # Inno Setup checks these named mutexes before install/uninstall. The legacy
 # names are a stable upgrade protocol: installers using the existing AppId must
@@ -141,6 +154,8 @@ def _should_hold_windows_app_mutex() -> bool:
         os.name == "nt"
         and getattr(sys, "frozen", False)
         and _DESKTOP_INSTALL_UPDATE not in sys.argv
+        and _DESKTOP_INSTALL_EXTERNAL_CLI not in sys.argv
+        and _DESKTOP_RESET_EXTERNAL_CLI_CONFIG not in sys.argv
     )
 
 
@@ -449,6 +464,22 @@ def _dispatch() -> None:
     # frozen exe (console=False) 主进程的 sys.stdout/stderr 可能为 None
     if getattr(sys, "frozen", False):
         _ensure_stdio()
+    if _pop_flag(_DESKTOP_INSTALL_EXTERNAL_CLI):
+        if len(sys.argv) != 3:
+            raise ValueError("external CLI installation requires an agent name and artifact directory")
+        cli_agent = sys.argv[1].strip().lower()
+        artifact_directory = Path(sys.argv[2]).resolve()
+        from jiuwenswarm.common.external_cli_runtime import install_external_cli_runtime_from_artifacts
+
+        install_external_cli_runtime_from_artifacts(cli_agent, artifact_directory)
+        raise SystemExit(0)
+    if _pop_flag(_DESKTOP_RESET_EXTERNAL_CLI_CONFIG):
+        if len(sys.argv) != 1:
+            raise ValueError("external CLI configuration reset does not accept arguments")
+        from jiuwenswarm.common.config import reset_external_cli_agents_in_config
+
+        reset_external_cli_agents_in_config()
+        raise SystemExit(0)
     # 已知子命令分发（不检查单实例锁）
     if len(sys.argv) >= 2 and sys.argv[1].lower() == "init":
         sys.argv.pop(1)

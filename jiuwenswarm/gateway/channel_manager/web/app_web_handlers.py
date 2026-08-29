@@ -205,13 +205,30 @@ _CODEX_DEPENDENCY_INSTALL_STATUS: dict[str, Any] = {
     "started_at": 0.0,
     "finished_at": 0.0,
     "updated_at": 0.0,
+    "downloaded_bytes": 0,
+    "total_bytes": 0,
+    "bytes_per_second": 0.0,
+    "eta_seconds": 0.0,
+    "artifact_index": 0,
+    "artifact_count": 0,
+    "current_package": "",
+    "current_version": "",
+    "download_attempt": 0,
+    "download_max_attempts": 0,
+    "switching_source": False,
 }
 _CODEX_DEPENDENCY_INSTALL_LOG_TAIL_LIMIT = 8
-_CODEX_DESKTOP_MISSING_DEPENDENCY_ERROR = (
-    "this desktop package does not include Codex support; rebuild it after running `uv sync --extra codex`"
-)
+_OPTIONAL_DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 60 * 60
 _CLAUDE_DEPENDENCY_INSTALL_LOCK = threading.Lock()
 _CLAUDE_DEPENDENCY_INSTALL_STATUS: dict[str, Any] = dict(_CODEX_DEPENDENCY_INSTALL_STATUS)
+_EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS = {
+    "claude": _CLAUDE_DEPENDENCY_INSTALL_LOCK,
+    "codex": _CODEX_DEPENDENCY_INSTALL_LOCK,
+}
+_EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUSES = {
+    "claude": _CLAUDE_DEPENDENCY_INSTALL_STATUS,
+    "codex": _CODEX_DEPENDENCY_INSTALL_STATUS,
+}
 
 
 _PROJECT_ROOT = get_root_dir()
@@ -1581,12 +1598,42 @@ def _build_external_cli_publish_url() -> str:
     return f"ws://{host}:{port}{_EXTERNAL_CLI_PUBLISH_PATH}"
 
 
-def _snapshot_claude_dependency_install_status() -> dict[str, Any]:
-    with _CLAUDE_DEPENDENCY_INSTALL_LOCK:
-        result = dict(_CLAUDE_DEPENDENCY_INSTALL_STATUS)
-        result["cli_agent"] = "claude"
+def _snapshot_external_cli_dependency_install_status(cli_agent: str) -> dict[str, Any]:
+    lock = _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]
+    status = _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUSES[cli_agent]
+    with lock:
+        result = dict(status)
+        result["cli_agent"] = cli_agent
         result["log_tail"] = list(result.get("log_tail") or [])
         return result
+
+
+def _update_external_cli_dependency_install_status(cli_agent: str, updates: dict[str, Any]) -> None:
+    lock = _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]
+    status = _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUSES[cli_agent]
+    with lock:
+        status.update(updates)
+        status["updated_at"] = time.time()
+
+
+def _append_external_cli_dependency_install_log(cli_agent: str, line: str) -> None:
+    stripped = line.strip()
+    if not stripped:
+        return
+    lock = _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]
+    status = _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUSES[cli_agent]
+    with lock:
+        log_tail = list(status.get("log_tail") or [])
+        log_tail.append(stripped)
+        status.update({
+            "last_log": stripped,
+            "log_tail": log_tail[-_CODEX_DEPENDENCY_INSTALL_LOG_TAIL_LIMIT:],
+            "updated_at": time.time(),
+        })
+
+
+def _snapshot_claude_dependency_install_status() -> dict[str, Any]:
+    return _snapshot_external_cli_dependency_install_status("claude")
 
 
 def _ensure_claude_dependency_available_or_start_install() -> dict[str, Any] | None:
@@ -1603,20 +1650,7 @@ def _ensure_claude_dependency_available_or_start_install() -> dict[str, Any] | N
             )
         return None
     if _is_frozen_runtime():
-        with _CLAUDE_DEPENDENCY_INSTALL_LOCK:
-            _CLAUDE_DEPENDENCY_INSTALL_STATUS.update(
-                {
-                    "status": "failed",
-                    "phase": "failed",
-                    "error": (
-                        "this desktop package does not include Claude support; rebuild it "
-                        "after running `uv sync --extra claude`"
-                    ),
-                    "finished_at": time.time(),
-                    "updated_at": time.time(),
-                }
-            )
-        return _snapshot_claude_dependency_install_status()
+        return _ensure_managed_external_cli_runtime_or_start_install("claude")
     with _CLAUDE_DEPENDENCY_INSTALL_LOCK:
         if _CLAUDE_DEPENDENCY_INSTALL_STATUS.get("status") == "running":
             return _snapshot_claude_dependency_install_status()
@@ -1630,6 +1664,17 @@ def _ensure_claude_dependency_available_or_start_install() -> dict[str, Any] | N
                 "started_at": time.time(),
                 "finished_at": 0.0,
                 "updated_at": time.time(),
+                "downloaded_bytes": 0,
+                "total_bytes": 0,
+                "bytes_per_second": 0.0,
+                "eta_seconds": 0.0,
+                "artifact_index": 0,
+                "artifact_count": 0,
+                "current_package": "",
+                "current_version": "",
+                "download_attempt": 0,
+                "download_max_attempts": 0,
+                "switching_source": False,
             }
         )
     threading.Thread(
@@ -1641,70 +1686,124 @@ def _ensure_claude_dependency_available_or_start_install() -> dict[str, Any] | N
 def _install_claude_dependency_background() -> None:
     try:
         package = _resolve_openjiuwen_extra_package("claude")
-        completed = subprocess.run(
-            _build_optional_dependency_install_args(package),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=600,
-            check=False,
-        )
-        output = (completed.stdout or completed.stderr or "").strip()
-        if completed.returncode or importlib.util.find_spec("claude_agent_sdk") is None:
-            raise RuntimeError(output or "claude_agent_sdk is still unavailable")
+        _install_optional_dependency("claude", package, "claude_agent_sdk")
         updates = {"status": "succeeded", "phase": "succeeded", "error": "", "finished_at": time.time()}
     except Exception as exc:  # noqa: BLE001
+        logger.warning("[config.set] Claude dependency installation failed: %s", exc)
+        _append_external_cli_dependency_install_log("claude", str(exc))
         updates = {
             "status": "failed",
             "phase": "failed",
             "error": str(exc),
-            "last_log": str(exc),
-            "log_tail": [str(exc)],
             "finished_at": time.time(),
         }
-    with _CLAUDE_DEPENDENCY_INSTALL_LOCK:
-        _CLAUDE_DEPENDENCY_INSTALL_STATUS.update(updates)
-        _CLAUDE_DEPENDENCY_INSTALL_STATUS["updated_at"] = time.time()
-
-
-def _ensure_codex_dependency_available() -> None:
-    if importlib.util.find_spec("openai_codex") is not None:
-        return
-    if _is_frozen_runtime():
-        raise RuntimeError(_CODEX_DESKTOP_MISSING_DEPENDENCY_ERROR)
-    _install_codex_dependency()
+    _update_external_cli_dependency_install_status("claude", updates)
 
 
 def _is_frozen_runtime() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def _snapshot_external_cli_dependency_install_status_unlocked(cli_agent: str) -> dict[str, Any]:
+    status = _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUSES[cli_agent]
+    result = dict(status)
+    result["cli_agent"] = cli_agent
+    result["log_tail"] = list(result.get("log_tail") or [])
+    return result
+
+
+def _ensure_managed_external_cli_runtime_or_start_install(cli_agent: str) -> dict[str, Any]:
+    lock = _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]
+    status = _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUSES[cli_agent]
+    with lock:
+        if status.get("status") == "running":
+            return _snapshot_external_cli_dependency_install_status_unlocked(cli_agent)
+        status.update({
+            "status": "running",
+            "phase": "preparing",
+            "error": "",
+            "last_log": "",
+            "log_tail": [],
+            "started_at": time.time(),
+            "finished_at": 0.0,
+            "updated_at": time.time(),
+            "downloaded_bytes": 0,
+            "total_bytes": 0,
+            "bytes_per_second": 0.0,
+            "eta_seconds": 0.0,
+            "artifact_index": 0,
+            "artifact_count": 0,
+            "current_package": "",
+            "current_version": "",
+            "download_attempt": 0,
+            "download_max_attempts": 0,
+            "switching_source": False,
+        })
+    threading.Thread(
+        target=_run_managed_external_cli_runtime_install,
+        args=(cli_agent,),
+        name=f"{cli_agent}-managed-runtime-install",
+        daemon=True,
+    ).start()
+    return _snapshot_external_cli_dependency_install_status(cli_agent)
+
+
+def _run_managed_external_cli_runtime_install(cli_agent: str) -> None:
+    try:
+        from jiuwenswarm.common.external_cli_runtime import (
+            activate_external_cli_runtime_paths,
+            install_external_cli_runtime,
+        )
+
+        install_external_cli_runtime(
+            cli_agent,
+            log_callback=lambda line: _append_external_cli_dependency_install_log(cli_agent, line),
+            progress_callback=lambda progress: _update_external_cli_dependency_install_status(cli_agent, progress),
+        )
+        activate_external_cli_runtime_paths()
+        importlib.invalidate_caches()
+        required_module = "claude_agent_sdk" if cli_agent == "claude" else "openai_codex"
+        if importlib.util.find_spec(required_module) is None:
+            raise RuntimeError(f"{required_module} is still unavailable after installation")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[config.set] %s managed runtime installation failed: %s", cli_agent, exc)
+        _append_external_cli_dependency_install_log(cli_agent, str(exc))
+        _update_external_cli_dependency_install_status(
+            cli_agent,
+            {
+                "status": "failed",
+                "phase": "failed",
+                "error": str(exc),
+                "finished_at": time.time(),
+                "bytes_per_second": 0.0,
+                "eta_seconds": 0.0,
+            },
+        )
+        return
+
+    _update_external_cli_dependency_install_status(
+        cli_agent,
+        {
+            "status": "succeeded",
+            "phase": "succeeded",
+            "error": "",
+            "finished_at": time.time(),
+            "bytes_per_second": 0.0,
+            "eta_seconds": 0.0,
+        },
+    )
+
+
 def _snapshot_codex_dependency_install_status() -> dict[str, Any]:
-    with _CODEX_DEPENDENCY_INSTALL_LOCK:
-        snapshot = dict(_CODEX_DEPENDENCY_INSTALL_STATUS)
-        snapshot["log_tail"] = list(_CODEX_DEPENDENCY_INSTALL_STATUS.get("log_tail") or [])
-        return snapshot
+    return _snapshot_external_cli_dependency_install_status("codex")
 
 
 def _update_codex_dependency_install_status(updates: dict[str, Any]) -> None:
-    with _CODEX_DEPENDENCY_INSTALL_LOCK:
-        _CODEX_DEPENDENCY_INSTALL_STATUS.update(updates)
-        _CODEX_DEPENDENCY_INSTALL_STATUS["updated_at"] = time.time()
+    _update_external_cli_dependency_install_status("codex", updates)
 
 
 def _append_codex_dependency_install_log(line: str) -> None:
-    stripped = line.strip()
-    if not stripped:
-        return
-    with _CODEX_DEPENDENCY_INSTALL_LOCK:
-        log_tail = list(_CODEX_DEPENDENCY_INSTALL_STATUS.get("log_tail") or [])
-        log_tail.append(stripped)
-        _CODEX_DEPENDENCY_INSTALL_STATUS.update({
-            "last_log": stripped,
-            "log_tail": log_tail[-_CODEX_DEPENDENCY_INSTALL_LOG_TAIL_LIMIT:],
-            "updated_at": time.time(),
-        })
+    _append_external_cli_dependency_install_log("codex", line)
 
 
 def _ensure_codex_dependency_available_or_start_install() -> dict[str, Any] | None:
@@ -1718,16 +1817,7 @@ def _ensure_codex_dependency_available_or_start_install() -> dict[str, Any] | No
         return None
 
     if _is_frozen_runtime():
-        _update_codex_dependency_install_status({
-            "status": "failed",
-            "phase": "failed",
-            "error": _CODEX_DESKTOP_MISSING_DEPENDENCY_ERROR,
-            "last_log": "",
-            "log_tail": [],
-            "started_at": 0.0,
-            "finished_at": time.time(),
-        })
-        return _snapshot_codex_dependency_install_status()
+        return _ensure_managed_external_cli_runtime_or_start_install("codex")
 
     with _CODEX_DEPENDENCY_INSTALL_LOCK:
         if _CODEX_DEPENDENCY_INSTALL_STATUS.get("status") == "running":
@@ -1743,6 +1833,17 @@ def _ensure_codex_dependency_available_or_start_install() -> dict[str, Any] | No
                 "started_at": time.time(),
                 "finished_at": 0.0,
                 "updated_at": time.time(),
+                "downloaded_bytes": 0,
+                "total_bytes": 0,
+                "bytes_per_second": 0.0,
+                "eta_seconds": 0.0,
+                "artifact_index": 0,
+                "artifact_count": 0,
+                "current_package": "",
+                "current_version": "",
+                "download_attempt": 0,
+                "download_max_attempts": 0,
+                "switching_source": False,
             })
     if already_running:
         return _snapshot_codex_dependency_install_status()
@@ -1780,13 +1881,26 @@ def _run_codex_dependency_install_background() -> None:
 
 def _install_codex_dependency() -> None:
     if _is_frozen_runtime():
-        raise RuntimeError(_CODEX_DESKTOP_MISSING_DEPENDENCY_ERROR)
+        raise RuntimeError("frozen applications must use the managed Codex runtime installer")
     package = _resolve_openjiuwen_codex_package()
+    _install_optional_dependency("codex", package, "openai_codex")
+
+
+def _install_optional_dependency(
+    cli_agent: str,
+    package: str,
+    required_module: str,
+) -> None:
+    if _is_frozen_runtime():
+        raise RuntimeError(f"frozen applications must use the managed {cli_agent} runtime installer")
     args = _build_optional_dependency_install_args(package)
     output_lines: list[str] = []
-    _update_codex_dependency_install_status({
-        "phase": "installing",
-    })
+    _update_external_cli_dependency_install_status(
+        cli_agent,
+        {
+            "phase": "installing",
+        },
+    )
     try:
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
@@ -1800,7 +1914,7 @@ def _install_codex_dependency() -> None:
             env=env,
         )
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"failed to install codex dependency: {exc}") from exc
+        raise RuntimeError(f"failed to install {cli_agent} dependency: {exc}") from exc
 
     output_queue: queue.Queue[str | None] = queue.Queue()
 
@@ -1814,9 +1928,9 @@ def _install_codex_dependency() -> None:
         finally:
             output_queue.put(None)
 
-    reader = threading.Thread(target=read_output, name="codex-dependency-install-output", daemon=True)
+    reader = threading.Thread(target=read_output, name=f"{cli_agent}-dependency-install-output", daemon=True)
     reader.start()
-    deadline = time.monotonic() + 600
+    deadline = time.monotonic() + _OPTIONAL_DEPENDENCY_INSTALL_TIMEOUT_SECONDS
     reader_done = False
     while True:
         try:
@@ -1830,24 +1944,30 @@ def _install_codex_dependency() -> None:
                 line = item.rstrip()
                 if line:
                     output_lines.append(line)
-                    _append_codex_dependency_install_log(line)
+                    _append_external_cli_dependency_install_log(cli_agent, line)
 
         if process.poll() is not None and reader_done:
             break
-        if time.monotonic() > deadline:
+        if time.monotonic() >= deadline:
             process.kill()
-            raise RuntimeError("failed to install codex dependency: timed out")
+            process.wait()
+            reader.join(timeout=1)
+            raise RuntimeError(f"failed to install {cli_agent} dependency: timed out")
 
     reader.join(timeout=1)
     returncode = process.wait()
     if returncode != 0:
         output = "\n".join(output_lines[-20:])
-        raise RuntimeError(f"failed to install codex dependency: {output}")
-    _update_codex_dependency_install_status({
-        "phase": "verifying",
-    })
-    if importlib.util.find_spec("openai_codex") is None:
-        raise RuntimeError("failed to install codex dependency: openai_codex is still unavailable")
+        raise RuntimeError(f"failed to install {cli_agent} dependency: {output}")
+    _update_external_cli_dependency_install_status(
+        cli_agent,
+        {
+            "phase": "verifying",
+        },
+    )
+    importlib.invalidate_caches()
+    if importlib.util.find_spec(required_module) is None:
+        raise RuntimeError(f"failed to install {cli_agent} dependency: {required_module} is still unavailable")
 
 
 def _resolve_openjiuwen_codex_package() -> str:
