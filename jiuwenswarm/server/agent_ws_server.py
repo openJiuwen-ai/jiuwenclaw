@@ -455,29 +455,46 @@ class AgentWebSocketServer:
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
-        # 统一启动预热：interface_deep import → checkpointer → 临时 DeepAgent → query。
-        # 取代旧的双链（_checkpointer_warmup_task + _start_skill_index_warmup）。
-        # _startup_warmup_task 供 shutdown 时 cancel，且被 ensure_interface_deep_and_checkpointer
-        # 兜底 await —— 新链阶段1/2 即原 import+checkpointer，兜底语义不变。
+        # 启动端到端预热：interface_deep import → checkpointer → 临时 DeepAgent → query。
+        # 拆成两个 task：
+        #   - _startup_warmup_task 承载阶段1/2（import+checkpointer），快速有界，
+        #     供 ensure_interface_deep_and_checkpointer 兜底 await。
+        #   - 阶段3（临时 DeepAgent+query）独立 fire-and-forget，慢速，不兜底 await，
+        #     避免首请求被预热 query（mock ~2-3s / 真实 LLM 最长 120s）阻塞。
         global _startup_warmup_task
 
-        async def _warmup_or_skip() -> None:
-            from jiuwenswarm.server.runtime.prewarm import run_startup_warmup
+        wm = (get_config().get("startup") or {}).get("warmup") or {}
+        if not wm.get("enabled", True):  # 默认开启；关闭时跳过预热
+            _startup_warmup_task = None
+        else:
+            async def _warmup_phase12() -> None:
+                from jiuwenswarm.server.runtime.prewarm import warmup_import_and_checkpointer
 
-            wm = (get_config().get("startup") or {}).get("warmup") or {}
-            if not wm.get("enabled", True):  # 默认开启
-                return
-            await run_startup_warmup(
-                query=wm.get("query", "hello"),
-                channel_id=wm.get("channel_id", "__prewarm__"),
-                mode=wm.get("mode", "agent"),
-                timeout_s=wm.get("timeout_s", 120),
-                mock_model=wm.get("mock_model", True),  # 默认 mock，不消耗 token
+                await warmup_import_and_checkpointer()
+
+            async def _warmup_phase3() -> None:
+                from jiuwenswarm.server.runtime.prewarm import warmup_deep_agent_query
+
+                await warmup_deep_agent_query(
+                    query=wm.get("query", "hello"),
+                    channel_id=wm.get("channel_id", "__prewarm__"),
+                    mode=wm.get("mode", "agent"),
+                    timeout_s=wm.get("timeout_s", 120),
+                    mock_model=wm.get("mock_model", True),  # 默认 mock，不消耗 token
+                )
+
+            _startup_warmup_task = asyncio.create_task(
+                _warmup_phase12(), name="startup-warmup"
             )
 
-        _startup_warmup_task = asyncio.create_task(
-            _warmup_or_skip(), name="startup-warmup"
-        )
+            # 阶段3 在阶段1/2 完成后启动（独立 task，不阻塞 listen，不被兜底 await）。
+            async def _phase3_after_phase12() -> None:
+                task12 = _startup_warmup_task
+                if task12 is not None:
+                    await task12  # 等阶段1/2 完成再起阶段3（checkpointer 是 DeepAgent 前置）
+                await _warmup_phase3()
+
+            asyncio.create_task(_phase3_after_phase12(), name="startup-warmup-query")
         # WS 监听已经开放, 现在按 config.yaml::sandbox 的 runtime.enabled +
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。

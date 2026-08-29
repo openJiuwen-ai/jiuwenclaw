@@ -74,10 +74,9 @@ def _build_warmup_config_base() -> dict[str, Any]:
     """
     cfg = deepcopy(get_config())
     models = cfg.setdefault("models", {})
-    # defaults 列表（新格式）
+    # defaults 列表（新格式）。setdefault 确保缺失时回写，避免 mock 不生效。
     for entry in models.get("defaults", []) or []:
-        mcc = entry.get("model_client_config") or {}
-        mcc["client_provider"] = "warmup"
+        entry.setdefault("model_client_config", {})["client_provider"] = "warmup"
     # legacy 单条目
     default_mc = models.get("default", {})
     if isinstance(default_mc.get("model_client_config"), dict):
@@ -93,7 +92,10 @@ async def _cleanup_prewarm_agent(agent: Any) -> None:
     """释放预热 agent 持有的 sys_operation / tool / rails 引用。
 
     预热 agent 独立构造，不进 AgentManager 缓存，用完即清理，避免与生产会话纠缠。
+    ``agent`` 可能为 None（构造失败时），此时直接返回。
     """
+    if agent is None:
+        return
     try:
         adapter = getattr(agent, "_adapter", None)
         if adapter is None:
@@ -106,30 +108,20 @@ async def _cleanup_prewarm_agent(agent: Any) -> None:
         logger.warning("[Prewarm] cleanup prewarm agent failed", exc_info=True)
 
 
-async def run_startup_warmup(
-    *,
-    query: str = "hello",
-    channel_id: str = "__prewarm__",
-    mode: str = "agent",
-    timeout_s: float = 120.0,
-    mock_model: bool = True,
-) -> None:
-    """统一启动预热：interface_deep import → checkpointer → 临时 DeepAgent → query。
+async def warmup_import_and_checkpointer() -> None:
+    """阶段1/2：interface_deep import + checkpointer。
 
-    三阶段全部 try/except，失败仅告警不抛。预热 agent 独立构造，不进 AgentManager
-    缓存，与生产隔离。``ensure_interface_deep_and_checkpointer`` 的兜底语义由
-    ``_startup_warmup_task`` 句柄承接（本函数的调用方负责把它挂到该句柄）。
+    快速、有界、不抛异常（失败仅告警）。本函数由 ``_startup_warmup_task`` 承载，
+    ``ensure_interface_deep_and_checkpointer`` 兜底 await 本 task 时只会等待
+    阶段1/2 完成，不会被阶段3 的慢速 query 拖住。
     """
     # 延迟 import：避免模块加载时拉起 interface_deep（破坏 fire-and-forget 语义）。
     from jiuwenswarm.server.agent_ws_server import (
         _warm_interface_deep_module,
     )
-    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
         ensure_persistent_checkpointer,
     )
-
-    t_listen = time.perf_counter()
 
     # 阶段1：interface_deep import（原 _warm_interface_deep_module 职责）。
     # 其内部已有 ``interface_deep_warmup cache=miss ok elapsed_ms=`` 埋点。
@@ -154,11 +146,35 @@ async def run_startup_warmup(
         (time.perf_counter() - t0) * 1000,
     )
 
+
+async def warmup_deep_agent_query(
+    *,
+    query: str = "hello",
+    channel_id: str = "__prewarm__",
+    mode: str = "agent",
+    timeout_s: float = 120.0,
+    mock_model: bool = True,
+) -> None:
+    """阶段3：创建临时 DeepAgent 并执行一次 query（端到端预热）。
+
+    慢速、独立 fire-and-forget task，**不**由 ``_startup_warmup_task`` 承载——
+    这样 ``ensure_interface_deep_and_checkpointer`` 兜底 await 阶段1/2 时不会被
+    本阶段的慢速 query（mock ~2-3s / 真实 LLM 最长 timeout_s=120s）阻塞。
+
+    三阶段全部 try/except，失败仅告警不抛。预热 agent 独立构造，不进 AgentManager
+    缓存，与生产隔离。本函数应在 ``warmup_import_and_checkpointer`` 之后单独
+    ``create_task`` 调用。
+    """
+    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+
+    t_listen = time.perf_counter()
+
     # 阶段3a：创建临时 DeepAgent（独立临时实例，不经 AgentManager）。
     config_base = _build_warmup_config_base() if mock_model else get_config()
-    agent = JiuWenSwarm()
+    agent: Any = None
     t0 = time.perf_counter()
     try:
+        agent = JiuWenSwarm()
         await agent.create_instance({}, mode=mode, config_base=config_base)
     except Exception:  # noqa: BLE001
         logger.warning("[Prewarm] stage=3a create_instance failed", exc_info=True)
@@ -200,10 +216,34 @@ async def run_startup_warmup(
     finally:
         await _cleanup_prewarm_agent(agent)
 
-    # 总耗时（从预热起点起）。listen 日志时间戳早于本行 = 未阻塞 listen。
+    # 总耗时（从阶段3起点起）。
     logger.info(
         "[Prewarm] done mock_model=%s total_ms=%.1f listen_to_ready_ms=%.1f",
         mock_model,
         (time.perf_counter() - t_listen) * 1000,
         (time.perf_counter() - t_listen) * 1000,
+    )
+
+
+async def run_startup_warmup(
+    *,
+    query: str = "hello",
+    channel_id: str = "__prewarm__",
+    mode: str = "agent",
+    timeout_s: float = 120.0,
+    mock_model: bool = True,
+) -> None:
+    """端到端预热：阶段1/2（import+checkpointer）→ 阶段3（临时 DeepAgent+query）。
+
+    保留向后兼容。新代码应直接调用 ``warmup_import_and_checkpointer`` +
+    ``warmup_deep_agent_query`` 并分别 create_task，使 ``_startup_warmup_task``
+    只承载阶段1/2（供 ensure_interface_deep_and_checkpointer 兜底 await）。
+    """
+    await warmup_import_and_checkpointer()
+    await warmup_deep_agent_query(
+        query=query,
+        channel_id=channel_id,
+        mode=mode,
+        timeout_s=timeout_s,
+        mock_model=mock_model,
     )
