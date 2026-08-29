@@ -210,11 +210,7 @@ class _ActiveTeamRound:
     """Process-local ownership for one submitted Team interaction round."""
 
     request_id: str
-    stream_task: asyncio.Task | None = None
-    release_admissions: list[Callable[[], Awaitable[None]]] = field(
-        default_factory=list
-    )
-    generation: int = 0
+    release_admission: Callable[[], Awaitable[None]] | None = None
     defer_terminal_release: bool = False
     terminal_armed: bool = False
     completion_state: dict[str, Any] = field(
@@ -307,9 +303,6 @@ class TeamManager:
         self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
-        self._round_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
-            weakref.WeakValueDictionary()
-        )
         # 当 cancel 请求到达时设置，通知正在执行的 pause 操作中止自身并让 cancel 执行
         self._cancel_requested: dict[str, bool] = {}
         # 追踪当前正在执行的 pause 任务，供 cancel 抢占取消
@@ -326,7 +319,6 @@ class TeamManager:
         # describes the single actual round admitted for a Session and owns
         # its admission release until terminal/cancel cleanup.
         self._active_rounds: dict[str, _ActiveTeamRound] = {}
-        self._closing_rounds: dict[str, list[_ActiveTeamRound]] = {}
         # session_id → cron team round completion state. Lifetime-coupled to
         # _pending_waiters: set by _try_finish_cron_team_stream, popped by the
         # finisher coroutines once the cron stream ends.
@@ -419,13 +411,7 @@ class TeamManager:
         else:
             self._pending_waiters.pop(session_id, None)
 
-    async def broadcast_event(
-        self,
-        session_id: str,
-        event: dict[str, Any],
-        *,
-        stream_closing: bool = False,
-    ) -> None:
+    async def broadcast_event(self, session_id: str, event: dict[str, Any]) -> None:
         """Broadcast an event with backpressure to every active waiter.
 
         The short timed wait is only used while a queue is full.  It lets a
@@ -438,9 +424,23 @@ class TeamManager:
             and event.get("is_processing") is False
             and event.get("is_complete") is True
         )
-        # Route this event only to consumers that existed when it arrived.
-        # Follow-up waiters may be installed while an old terminal is being
-        # delivered, but they must not inherit that previous generation.
+        current_round = self._active_rounds.get(session_id)
+        if terminal and current_round is not None and not current_round.terminal_armed:
+            # A persistent Runner stream can emit duplicate terminal frames
+            # after the previous round has released.  A follow-up round is not
+            # allowed to accept a terminal until that stream has produced at
+            # least one event for the newly submitted interaction.  Dropping
+            # the stale control frame also keeps it out of the new exclusive
+            # waiter.
+            logger.debug(
+                "[TeamManager] ignored unarmed terminal: session_id=%s request_id=%s",
+                session_id,
+                current_round.request_id,
+            )
+            return
+        if not terminal and current_round is not None:
+            current_round.terminal_armed = True
+
         waiters = list(self._pending_waiters.get(session_id, ()))
         exclusive_request_id = self._exclusive_waiters.get(session_id)
         if exclusive_request_id is not None:
@@ -449,69 +449,8 @@ class TeamManager:
                 for request_id, queue in waiters
                 if request_id == exclusive_request_id
             ]
-        current_round = self._active_rounds.get(session_id)
-        round_generation = (
-            current_round.generation if current_round is not None else None
-        )
-        round_to_release: _ActiveTeamRound | None = None
-        if terminal:
-            async with self._get_round_lock(session_id):
-                latest_round = self._active_rounds.get(session_id)
-                round_changed = latest_round is not current_round or (
-                    latest_round is not None
-                    and latest_round.generation != round_generation
-                )
-                if round_changed:
-                    logger.debug(
-                        "[TeamManager] ignored stale terminal generation: "
-                        "session_id=%s",
-                        session_id,
-                    )
-                    return
-                if latest_round is not None and not latest_round.terminal_armed:
-                    # A persistent Runner stream can emit duplicate terminal
-                    # frames after the previous generation has released.  A
-                    # follow-up is not allowed to accept a terminal until its
-                    # generation has produced a new runtime event.
-                    logger.debug(
-                        "[TeamManager] ignored unarmed terminal: "
-                        "session_id=%s request_id=%s",
-                        session_id,
-                        latest_round.request_id,
-                    )
-                    return
-                if latest_round is not None and not latest_round.defer_terminal_release:
-                    round_to_release = self._pop_round_unlocked(
-                        session_id,
-                        latest_round.request_id,
-                    )
-                    if round_to_release is not None:
-                        self._closing_rounds.setdefault(session_id, []).append(
-                            round_to_release
-                        )
-        elif current_round is not None:
-            async with self._get_round_lock(session_id):
-                latest_round = self._active_rounds.get(session_id)
-                if (
-                    latest_round is current_round
-                    and latest_round.generation == round_generation
-                ):
-                    latest_round.terminal_armed = True
 
-        blocked_waiters: list[tuple[str, asyncio.Queue]] = []
-        for request_id, queue in waiters:
-            still_registered = any(
-                rid == request_id and registered_queue is queue
-                for rid, registered_queue in self._pending_waiters.get(session_id, ())
-            )
-            if not still_registered:
-                continue
-            try:
-                queue.put_nowait(dict(event))
-            except asyncio.QueueFull:
-                blocked_waiters.append((request_id, queue))
-
-        async def _put_to_blocked_waiter(
+        async def _put_to_waiter(
             request_id: str,
             queue: asyncio.Queue,
         ) -> None:
@@ -537,41 +476,22 @@ class TeamManager:
                     )
                     break
 
-        try:
-            await asyncio.gather(*(
-                _put_to_blocked_waiter(request_id, queue)
-                for request_id, queue in blocked_waiters
-            ))
-        finally:
-            retain_for_stream_close = (
-                stream_closing and session_id in self._stream_tasks
-            )
-            if round_to_release is not None and not retain_for_stream_close:
-                # Direct/non-stream broadcasts have no later stream finalizer.
-                # Shield their exact detached generation so cancellation while
-                # delivering to a full waiter cannot strand admission forever.
-                await self._finalize_detached_round(
-                    session_id,
-                    round_to_release,
-                )
+        await asyncio.gather(*(
+            _put_to_waiter(request_id, queue)
+            for request_id, queue in waiters
+        ))
 
-        # A known stream-closing terminal retains its detached generation
-        # through Runner teardown. Iteration-only terminals (for example
-        # team.idle or a final-only grace completion) release immediately so
-        # the persistent stream can accept the next follow-up iteration.
-        if not terminal and current_round is not None:
-            async with self._get_round_lock(session_id):
-                latest_round = self._active_rounds.get(session_id)
-                if (
-                    latest_round is current_round
-                    and latest_round.generation == round_generation
-                    and not latest_round.defer_terminal_release
-                ):
-                    self._observe_interactive_round_event(
-                        session_id,
-                        latest_round,
-                        event,
-                    )
+        # Deliver the terminal frame before releasing admission.  This keeps a
+        # new user/Heartbeat round from installing a waiter in the middle of
+        # the previous round's final broadcast.
+        if terminal:
+            await self.finish_round(session_id)
+        elif current_round is not None and not current_round.defer_terminal_release:
+            self._observe_interactive_round_event(
+                session_id,
+                current_round,
+                event,
+            )
 
     def _observe_interactive_round_event(
         self,
@@ -650,60 +570,10 @@ class TeamManager:
             )
         self._active_rounds[session_id] = _ActiveTeamRound(
             request_id=request_id,
-            stream_task=self._stream_tasks.get(session_id),
-            release_admissions=(
-                [release_admission] if release_admission is not None else []
-            ),
+            release_admission=release_admission,
             defer_terminal_release=defer_terminal_release,
             terminal_armed=terminal_armed,
         )
-
-    async def submit_interactive_steer(
-        self,
-        session_id: str,
-        request_id: str,
-        user_input: Any,
-        *,
-        release_admission: Callable[[], Awaitable[None]] | None = None,
-    ) -> tuple[bool, str | None, bool]:
-        """Steer the leader atomically and report whether admission was retained."""
-        created_round = False
-        async with self._get_round_lock(session_id):
-            if self._closing_rounds.get(session_id):
-                return False, "gate_closed", False
-            current = self._active_rounds.get(session_id)
-            if current is not None and current.defer_terminal_release:
-                return False, "round_busy", False
-            if current is None:
-                current = _ActiveTeamRound(
-                    request_id=request_id,
-                    stream_task=self._stream_tasks.get(session_id),
-                )
-                self._active_rounds[session_id] = current
-                created_round = True
-            try:
-                success, reason = await self.interact(session_id, user_input)
-            except BaseException:
-                if created_round:
-                    self._pop_round_unlocked(session_id, request_id)
-                raise
-            if not success:
-                if created_round:
-                    self._pop_round_unlocked(session_id, request_id)
-                return False, reason, False
-
-            admission_retained = created_round and release_admission is not None
-            if admission_retained:
-                current.release_admissions.append(release_admission)
-            if not created_round:
-                completion_task = current.completion_task
-                if completion_task is not None and not completion_task.done():
-                    completion_task.cancel()
-                current.completion_task = None
-                current.completion_state = new_cron_team_round_state()
-                current.generation += 1
-            current.terminal_armed = False
-            return True, None, admission_retained
 
     async def finish_round(self, session_id: str) -> None:
         """Finish the current round on a runtime terminal event."""
@@ -714,22 +584,9 @@ class TeamManager:
 
     async def release_round(self, session_id: str, request_id: str) -> bool:
         """Idempotently release one round and its admission lease."""
-        async with self._get_round_lock(session_id):
-            current = self._pop_round_unlocked(session_id, request_id)
-        if current is None:
-            return False
-        await self._release_round_admissions(current)
-        return True
-
-    def _pop_round_unlocked(
-        self,
-        session_id: str,
-        request_id: str,
-    ) -> _ActiveTeamRound | None:
-        """Detach a round while the caller owns the session round lock."""
         current = self._active_rounds.get(session_id)
         if current is None or current.request_id != request_id:
-            return None
+            return False
         self._active_rounds.pop(session_id, None)
         completion_task = current.completion_task
         if (
@@ -738,118 +595,8 @@ class TeamManager:
             and not completion_task.done()
         ):
             completion_task.cancel()
-        return current
-
-    @staticmethod
-    async def _release_round_admissions(current: _ActiveTeamRound) -> None:
-        """Release every user lease retained by one interaction generation."""
-        releases = current.release_admissions
-        current.release_admissions = []
-        results = await asyncio.gather(
-            *(release_admission() for release_admission in releases),
-            return_exceptions=True,
-        )
-        first_error: BaseException | None = None
-        for result in results:
-            if isinstance(result, BaseException):
-                logger.warning(
-                    "[TeamManager] round admission release failed: request_id=%s error=%s",
-                    current.request_id,
-                    result,
-                )
-                if first_error is None:
-                    first_error = result
-        if first_error is not None:
-            raise first_error
-
-    async def _finalize_detached_round(
-        self,
-        session_id: str,
-        current: _ActiveTeamRound,
-    ) -> None:
-        """Cancellation-safely release and forget one detached generation."""
-
-        async def _finalize() -> None:
-            try:
-                await self._release_round_admissions(current)
-            finally:
-                self._remove_closing_round(session_id, current)
-
-        cleanup_task = asyncio.create_task(
-            _finalize(),
-            name=f"team-round-release-{session_id}",
-        )
-        try:
-            await asyncio.shield(cleanup_task)
-        except asyncio.CancelledError:
-            await cleanup_task
-            raise
-
-    async def finish_stream_round(
-        self,
-        session_id: str,
-        request_id: str,
-        *,
-        stream_task: asyncio.Task | None = None,
-    ) -> bool:
-        """Release only generations owned by the stream that just terminated."""
-        async with self._get_round_lock(session_id):
-            rounds_to_release: list[_ActiveTeamRound] = []
-            current = self._active_rounds.get(session_id)
-            owns_current = current is not None and (
-                current.stream_task is stream_task
-                if stream_task is not None
-                else current.request_id == request_id
-            )
-            if owns_current and current is not None:
-                popped = self._pop_round_unlocked(session_id, current.request_id)
-                if popped is not None:
-                    rounds_to_release.append(popped)
-            closing = self._closing_rounds.get(session_id, [])
-            owned_closing = [
-                round_state
-                for round_state in closing
-                if (
-                    round_state.stream_task is stream_task
-                    if stream_task is not None
-                    else round_state.request_id == request_id
-                )
-            ]
-            if owned_closing:
-                rounds_to_release.extend(owned_closing)
-                remaining = [
-                    round_state
-                    for round_state in closing
-                    if not any(
-                        round_state is owned_round
-                        for owned_round in owned_closing
-                    )
-                ]
-                if remaining:
-                    self._closing_rounds[session_id] = remaining
-                else:
-                    self._closing_rounds.pop(session_id, None)
-        if not rounds_to_release:
-            return False
-
-        async def _release_owned() -> None:
-            results = await asyncio.gather(
-                *(self._release_round_admissions(round_state) for round_state in rounds_to_release),
-                return_exceptions=True,
-            )
-            for result in results:
-                if isinstance(result, BaseException):
-                    raise result
-
-        cleanup_task = asyncio.create_task(
-            _release_owned(),
-            name=f"team-stream-round-release-{session_id}",
-        )
-        try:
-            await asyncio.shield(cleanup_task)
-        except asyncio.CancelledError:
-            await cleanup_task
-            raise
+        if current.release_admission is not None:
+            await current.release_admission()
         return True
 
     async def release_current_round(self, session_id: str) -> bool:
@@ -861,31 +608,7 @@ class TeamManager:
 
     def is_round_active(self, session_id: str) -> bool:
         """Return whether a Team round, rather than its transport, is active."""
-        return session_id in self._active_rounds or bool(
-            self._closing_rounds.get(session_id)
-        )
-
-    def is_interactive_steer_round_active(self, session_id: str) -> bool:
-        """Return whether ordinary user text may steer the active Team round."""
-        current = self._active_rounds.get(session_id)
-        return current is not None and not current.defer_terminal_release
-
-    def _remove_closing_round(
-        self,
-        session_id: str,
-        closing_round: _ActiveTeamRound,
-    ) -> None:
-        """Forget one terminal generation after all of its leases release."""
-        rounds = self._closing_rounds.get(session_id)
-        if rounds is None:
-            return
-        remaining = [
-            round_state for round_state in rounds if round_state is not closing_round
-        ]
-        if remaining:
-            self._closing_rounds[session_id] = remaining
-        else:
-            self._closing_rounds.pop(session_id, None)
+        return session_id in self._active_rounds
 
     def is_round_owner(self, session_id: str, request_id: str) -> bool:
         current = self._active_rounds.get(session_id)
@@ -1012,14 +735,6 @@ class TeamManager:
         if lock is None:
             lock = asyncio.Lock()
             self._session_locks[session_id] = lock
-        return lock
-
-    def _get_round_lock(self, session_id: str) -> asyncio.Lock:
-        """Return the lock serializing Team submission and terminal ownership."""
-        lock = self._round_locks.get(session_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._round_locks[session_id] = lock
         return lock
 
     def get_monitor(self, session_id: str) -> TeamMonitorHandler | None:
@@ -2225,9 +1940,6 @@ class TeamManager:
 
     def register_stream_task(self, session_id: str, task: asyncio.Task) -> None:
         self._stream_tasks[session_id] = task
-        current = self._active_rounds.get(session_id)
-        if current is not None and current.stream_task is None:
-            current.stream_task = task
 
     def _has_local_team_runtime(self, session_id: str) -> bool:
         """Return whether the session should use the legacy in-memory TeamAgent path."""

@@ -19,12 +19,7 @@ from jiuwenswarm.server.runtime.agent_adapter import team_helpers
 
 
 def _broadcast_recorder(events: list[dict], manager=None):
-    async def _record(
-        _channel_id,
-        session_id: str,
-        event: dict,
-        **_kwargs,
-    ) -> None:
+    async def _record(_channel_id, session_id: str, event: dict) -> None:
         events.append(event)
         if (
             manager is not None
@@ -2017,7 +2012,7 @@ async def test_heartbeat_team_followup_waits_for_real_round_and_routes_once(monk
 
 
 @pytest.mark.anyio
-async def test_interactive_steer_attaches_after_headless_heartbeat(monkeypatch):
+async def test_interactive_followup_attaches_after_headless_heartbeat(monkeypatch):
     """A user can consume a stream whose only previous waiter was Heartbeat."""
     from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
         SessionRunAdmission,
@@ -2032,22 +2027,6 @@ async def test_interactive_steer_attaches_after_headless_heartbeat(monkeypatch):
             return SimpleNamespace(team_name="unit-team")
 
         async def interact(self, session_id: str, query: str):
-            async def _complete_round() -> None:
-                await asyncio.sleep(0)
-                await self.broadcast_event(
-                    session_id,
-                    {"event_type": "chat.final", "content": "visible"},
-                )
-                await self.broadcast_event(
-                    session_id,
-                    {
-                        "event_type": "chat.processing_status",
-                        "is_processing": False,
-                        "is_complete": True,
-                    },
-                )
-
-            asyncio.create_task(_complete_round())
             return True, None
 
     manager = _FakeManager()
@@ -2072,13 +2051,29 @@ async def test_interactive_steer_attaches_after_headless_heartbeat(monkeypatch):
             {"query": "continue visibly"},
             object(),
         )
-        first = await asyncio.wait_for(anext(response_stream), timeout=1.0)
+        first_event = asyncio.create_task(anext(response_stream))
+        for _ in range(100):
+            waiters = manager.get_waiters("sess-headless-first")
+            if waiters:
+                break
+            await asyncio.sleep(0.01)
+        assert manager.has_interactive_waiter("sess-headless-first") is True
+        request_queue = waiters[0][1]
+        await request_queue.put({"event_type": "chat.final", "content": "visible"})
+        await request_queue.put(
+            {
+                "event_type": "chat.processing_status",
+                "is_processing": False,
+                "is_complete": True,
+            }
+        )
+        await admission.end_team_user("sess-headless-first")
+        first = await asyncio.wait_for(first_event, timeout=1.0)
         second = await asyncio.wait_for(anext(response_stream), timeout=1.0)
 
         assert first.payload == {"event_type": "chat.final", "content": "visible"}
         assert second.payload["event_type"] == "chat.processing_status"
         assert second.payload["is_complete"] is True
-        assert manager.has_interactive_waiter("sess-headless-first") is True
         assert admission.is_user_active("sess-headless-first") is False
 
         await response_stream.aclose()
@@ -2148,9 +2143,7 @@ async def test_cancelled_heartbeat_followup_aborts_submitted_team_round(monkeypa
 
 
 @pytest.mark.anyio
-async def test_interactive_team_steer_starts_new_iteration_with_retained_lease(
-    monkeypatch,
-):
+async def test_interactive_team_followup_uses_round_only_for_lifecycle(monkeypatch):
     from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
         SessionRunAdmission,
     )
@@ -2196,31 +2189,116 @@ async def test_interactive_team_steer_starts_new_iteration_with_retained_lease(
         team_helpers.reset_team_heartbeat_service(heartbeat_token)
 
     assert chunks[0].payload["event_type"] == "chat.processing_status_deferred"
-    # With no active iteration, the steer creates the next iteration and its
-    # admission is retained until that Team round terminates.
+    # The user admission is retained until the actual Team round terminates,
+    # even though the short follow-up transport has already returned.
     assert admission.is_user_active("sess-team-user") is True
     assert manager.is_round_active("sess-team-user") is True
 
+    terminal_token = team_helpers.bind_team_heartbeat_service(
+        SimpleNamespace(admission=admission)
+    )
+    try:
+        await team_helpers._broadcast_event(
+            "web",
+            "sess-team-user",
+            {"event_type": "chat.final", "content": "continued"},
+        )
+        await team_helpers._broadcast_event(
+            "web",
+            "sess-team-user",
+            {
+                "event_type": "chat.processing_status",
+                "is_processing": False,
+                "is_complete": True,
+            },
+        )
+    finally:
+        team_helpers.reset_team_heartbeat_service(terminal_token)
+    assert manager.is_round_active("sess-team-user") is False
+    assert admission.is_user_active("sess-team-user") is False
+
+
+@pytest.mark.anyio
+async def test_concurrent_team_steers_reach_interact_without_round_wait(monkeypatch):
+    from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
+        SessionRunAdmission,
+    )
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    class _FakeManager(TeamManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.interact_calls: list[str] = []
+
+        def has_stream_task(self, session_id: str) -> bool:
+            return True
+
+        async def get_swarm_enriched_team_spec(self, **kwargs):
+            return SimpleNamespace(team_name="unit-team")
+
+        async def interact(self, session_id: str, query: str):
+            self.interact_calls.append(query)
+            return True, None
+
+    manager = _FakeManager()
+    manager.add_waiter("sess-concurrent-steer", "req-browser", asyncio.Queue())
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda _channel_id: manager)
+    monkeypatch.setattr(team_helpers, "_persist_team_file_monitor_roots", lambda *args: None)
+    admission = SessionRunAdmission()
+
+    async def _submit(request_id: str, query: str) -> list[Any]:
+        request = SimpleNamespace(
+            session_id="sess-concurrent-steer",
+            request_id=request_id,
+            channel_id="web",
+            metadata={},
+            params={"mode": "team"},
+            user_id="owner",
+        )
+        return [
+            chunk
+            async for chunk in team_helpers.process_team_message_stream(
+                request,
+                {"query": query},
+                object(),
+            )
+        ]
+
+    token = team_helpers.bind_team_heartbeat_service(
+        SimpleNamespace(admission=admission)
+    )
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                _submit("req-steer-a", "Hangzhou weather"),
+                _submit("req-steer-b", "Shanghai weather"),
+            ),
+            timeout=1.0,
+        )
+    finally:
+        team_helpers.reset_team_heartbeat_service(token)
+
+    assert len(results) == 2
+    assert len(manager.interact_calls) == 2
+    assert manager.is_round_active("sess-concurrent-steer") is True
+    assert admission.is_user_active("sess-concurrent-steer") is True
     await manager.broadcast_event(
-        "sess-team-user",
-        {"event_type": "chat.final", "content": "continued"},
+        "sess-concurrent-steer",
+        {"event_type": "chat.reasoning", "content": "working"},
     )
     await manager.broadcast_event(
-        "sess-team-user",
+        "sess-concurrent-steer",
         {
             "event_type": "chat.processing_status",
             "is_processing": False,
             "is_complete": True,
         },
     )
-    assert manager.is_round_active("sess-team-user") is False
-    assert admission.is_user_active("sess-team-user") is False
+    assert admission.is_user_active("sess-concurrent-steer") is False
 
 
 @pytest.mark.anyio
-async def test_interactive_team_steer_joins_active_round_without_retained_lease(
-    monkeypatch,
-):
+async def test_cron_team_followup_retains_bounded_round_ownership(monkeypatch):
     from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
         SessionRunAdmission,
     )
@@ -2240,179 +2318,48 @@ async def test_interactive_team_steer_joins_active_round_without_retained_lease(
             return True, None
 
     manager = _FakeManager()
-    session_id = "sess-team-overlapping-followup"
-    admission = SessionRunAdmission()
-    await admission.begin_team_user(session_id)
-
-    async def _release_first_round() -> None:
-        await admission.end_user(session_id)
-
-    manager.add_waiter(session_id, "req-browser", asyncio.Queue())
-    manager.begin_round(
-        session_id,
-        "req-first",
-        release_admission=_release_first_round,
-        terminal_armed=True,
-    )
+    manager.add_waiter("sess-cron-bounded", "req-browser", asyncio.Queue())
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda _channel_id: manager)
-    monkeypatch.setattr(
-        team_helpers, "_persist_team_file_monitor_roots", lambda *args: None
-    )
+    monkeypatch.setattr(team_helpers, "_persist_team_file_monitor_roots", lambda *args: None)
+    admission = SessionRunAdmission()
     request = SimpleNamespace(
-        session_id=session_id,
-        request_id="req-followup",
+        session_id="sess-cron-bounded",
+        request_id="cron-job:run-1",
         channel_id="web",
         metadata={},
         params={"mode": "team"},
         user_id="owner",
     )
 
-    heartbeat_token = team_helpers.bind_team_heartbeat_service(
+    token = team_helpers.bind_team_heartbeat_service(
         SimpleNamespace(admission=admission)
     )
-    try:
-        response_stream = team_helpers.process_team_message_stream(
+
+    async def _consume() -> None:
+        async for _chunk in team_helpers.process_team_message_stream(
             request,
-            {"query": "查询上海天气"},
+            {"query": "scheduled work"},
             object(),
-        )
-        first_chunk = await asyncio.wait_for(anext(response_stream), timeout=0.2)
+        ):
+            pass
 
-        assert interacted.is_set()
-        assert first_chunk.payload["event_type"] == "chat.processing_status_deferred"
-        # Ordinary Team text is a steer into the leader's active iteration.
-        # Its short admission protects the atomic handoff only; the original
-        # iteration remains the sole round-long user lease.
-        assert admission._states[session_id].active_users == 1
-        assert (
-            await admission.try_begin_heartbeat(session_id, "hb-during-user") is False
-        )
-
-        await response_stream.aclose()
-        await manager.broadcast_event(
-            session_id,
-            {"event_type": "chat.final", "content": "continued"},
-        )
-        await manager.broadcast_event(
-            session_id,
-            {
-                "event_type": "chat.processing_status",
-                "is_processing": False,
-                "is_complete": True,
-            },
-        )
-        assert manager.is_round_active(session_id) is False
-        assert admission.is_user_active(session_id) is False
-        assert await admission.try_begin_heartbeat(session_id, "hb-after-user") is True
-        await admission.end_heartbeat(session_id, "hb-after-user")
-    finally:
-        team_helpers.reset_team_heartbeat_service(heartbeat_token)
-
-
-@pytest.mark.anyio
-async def test_concurrent_first_steers_do_not_wait_for_first_iteration_terminal(
-    monkeypatch,
-):
-    from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
-        SessionRunAdmission,
-    )
-    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
-
-    class _ExclusiveBarrierAdmission(SessionRunAdmission):
-        """Expose the old lock-free snapshot race if exclusive admission is used."""
-
-        def __init__(self):
-            super().__init__()
-            self.exclusive_entries = 0
-            self.both_exclusive = asyncio.Event()
-
-        async def begin_team_user(self, session_id: str) -> None:
-            self.exclusive_entries += 1
-            if self.exclusive_entries == 2:
-                self.both_exclusive.set()
-            await self.both_exclusive.wait()
-            await super().begin_team_user(session_id)
-
-    interactions: list[str] = []
-
-    class _FakeManager(TeamManager):
-        def has_stream_task(self, session_id: str) -> bool:
-            return True
-
-        async def get_swarm_enriched_team_spec(self, **kwargs):
-            return SimpleNamespace(team_name="unit-team")
-
-        async def interact(self, session_id: str, query: str):
-            interactions.append(query)
-            return True, None
-
-    manager = _FakeManager()
-    session_id = "sess-concurrent-first-steers"
-    manager.add_waiter(session_id, "req-browser", asyncio.Queue())
-    monkeypatch.setattr(team_helpers, "get_team_manager", lambda _channel_id: manager)
-    monkeypatch.setattr(
-        team_helpers, "_persist_team_file_monitor_roots", lambda *args: None
-    )
-    admission = _ExclusiveBarrierAdmission()
-
-    def _request(request_id: str) -> SimpleNamespace:
-        return SimpleNamespace(
-            session_id=session_id,
-            request_id=request_id,
-            channel_id="web",
-            metadata={},
-            params={"mode": "team"},
-            user_id="owner",
-        )
-
-    heartbeat_token = team_helpers.bind_team_heartbeat_service(
-        SimpleNamespace(admission=admission)
-    )
-    streams = [
-        team_helpers.process_team_message_stream(
-            _request("req-steer-a"),
-            {"query": "查询杭州天气"},
-            object(),
-        ),
-        team_helpers.process_team_message_stream(
-            _request("req-steer-b"),
-            {"query": "查询上海天气"},
-            object(),
-        ),
-    ]
+    task = asyncio.create_task(_consume())
     try:
-        chunks = await asyncio.wait_for(
-            asyncio.gather(*(anext(stream) for stream in streams)),
-            timeout=0.2,
+        await asyncio.wait_for(interacted.wait(), timeout=1.0)
+        assert manager.is_round_owner("sess-cron-bounded", "cron-job:run-1") is True
+        assert admission.is_user_active("sess-cron-bounded") is True
+        assert (
+            await admission.try_begin_heartbeat("sess-cron-bounded", "hb-overlap")
+            is False
         )
-        assert len(interactions) == 2
-        assert all(
-            chunk.payload["event_type"] == "chat.processing_status_deferred"
-            for chunk in chunks
-        )
-        assert admission._states[session_id].active_users == 1
-        assert admission.exclusive_entries == 0
-        assert await admission.try_begin_heartbeat(session_id, "hb-blocked") is False
-
-        for stream in streams:
-            await stream.aclose()
-        await manager.broadcast_event(
-            session_id,
-            {"event_type": "chat.final", "content": "done"},
-        )
-        await manager.broadcast_event(
-            session_id,
-            {
-                "event_type": "chat.processing_status",
-                "is_processing": False,
-                "is_complete": True,
-            },
-        )
-        assert admission.is_user_active(session_id) is False
     finally:
-        for stream in streams:
-            await stream.aclose()
-        team_helpers.reset_team_heartbeat_service(heartbeat_token)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        team_helpers.reset_team_heartbeat_service(token)
+
+    assert manager.is_round_active("sess-cron-bounded") is False
+    assert admission.is_user_active("sess-cron-bounded") is False
 
 
 @pytest.mark.anyio
@@ -2687,7 +2634,6 @@ async def test_process_team_message_stream_retries_followup_while_native_starts(
         query: str,
         *,
         initial_reason: str | None = None,
-        interact=None,
     ):
         assert team_manager is not None
         assert initial_reason == (
@@ -2771,7 +2717,6 @@ async def test_process_team_message_stream_restarts_round_after_shutdown_race(mo
         query: str,
         *,
         initial_reason: str | None = None,
-        interact=None,
     ):
         assert team_manager is not None
         assert session_id == "sess-team-followup-stopped"
@@ -2793,11 +2738,10 @@ async def test_process_team_message_stream_restarts_round_after_shutdown_race(mo
         spec: object,
         query: str,
         *,
-        request_id: str | None = None,
         round_id: int,
         envs: dict | None = None,
     ) -> None:
-        _ = channel_id, request_id, spec, envs
+        _ = channel_id, spec, envs
         captured["consumed"] = (session_id, query, round_id)
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
@@ -2877,7 +2821,6 @@ async def test_process_team_message_stream_fallback_reuses_first_request_directi
         query: str,
         *,
         initial_reason: str | None = None,
-        interact=None,
     ):
         assert team_manager is not None
         assert session_id == "sess-team-followup-directives"
@@ -2896,11 +2839,10 @@ async def test_process_team_message_stream_fallback_reuses_first_request_directi
         spec: object,
         query: str,
         *,
-        request_id: str | None = None,
         round_id: int,
         envs: dict | None = None,
     ) -> None:
-        _ = channel_id, request_id, spec
+        _ = channel_id, spec
         captured["consumed"] = (session_id, query, round_id, envs)
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
@@ -2970,7 +2912,6 @@ async def test_process_team_message_stream_silences_gate_closed_when_shutdown_ra
         query: str,
         *,
         initial_reason: str | None = None,
-        interact=None,
     ):
         assert team_manager is not None
         assert session_id == "sess-team-followup-timeout"
@@ -3491,11 +3432,10 @@ async def test_process_team_message_stream_treats_plain_query_as_first_request_a
         spec: object,
         query: str,
         *,
-        request_id: str | None = None,
         round_id: int,
         envs: dict | None = None,
     ) -> None:
-        _ = channel_id, request_id, spec, envs
+        _ = channel_id, spec, envs
         captured["consumed"] = (session_id, query, round_id)
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
@@ -3633,11 +3573,9 @@ async def test_process_team_message_stream_defers_first_evolve_until_team_runtim
         spec: object,
         query: str,
         *,
-        request_id: str | None = None,
         round_id: int,
         envs: dict | None = None,
     ) -> None:
-        _ = request_id
         captured_queries.append(query)
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
@@ -3703,11 +3641,9 @@ async def test_process_team_message_stream_runs_evolve_followup_without_rail(mon
         spec: object,
         query: str,
         *,
-        request_id: str | None = None,
         round_id: int,
         envs: dict | None = None,
     ) -> None:
-        _ = request_id
         captured_queries.append(query)
 
     monkeypatch.setattr(team_helpers, "_consume_stream_with_query", _fake_consume_stream_with_query)
@@ -4079,7 +4015,7 @@ async def test_team_manager_exclusive_waiter_routes_heartbeat_round_once():
 
 
 @pytest.mark.anyio
-async def test_iteration_terminal_releases_round_not_persistent_stream():
+async def test_team_manager_busy_tracks_round_not_persistent_stream():
     from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 
     manager = TeamManager()
@@ -4136,8 +4072,6 @@ async def test_final_only_interactive_round_emits_terminal_and_releases(monkeypa
     )
     manager = TeamManager()
     session_id = "sess-final-only-round"
-    persistent_task = asyncio.create_task(asyncio.Event().wait())
-    manager.register_stream_task(session_id, persistent_task)
     queue: asyncio.Queue = asyncio.Queue()
     released = AsyncMock()
     manager.add_waiter(session_id, "req-final-only", queue)
@@ -4162,11 +4096,7 @@ async def test_final_only_interactive_round_emits_terminal_and_releases(monkeypa
             break
         await asyncio.sleep(0)
     assert manager.is_round_active(session_id) is False
-    assert manager.has_stream_task(session_id) is True
     released.assert_awaited_once()
-    manager.pop_stream_task(session_id)
-    persistent_task.cancel()
-    await asyncio.gather(persistent_task, return_exceptions=True)
 
 
 @pytest.mark.anyio
@@ -4240,9 +4170,10 @@ async def test_bounded_team_round_keeps_admission_through_late_event_grace():
     old_queue: asyncio.Queue = asyncio.Queue()
 
     await admission.begin_team_user(session_id)
+    await admission.complete_team_user_submission(session_id, accepted=True)
 
     async def _release() -> None:
-        await admission.end_user(session_id)
+        await admission.end_team_user(session_id)
 
     manager.add_waiter(session_id, "cron-old", old_queue, exclusive=True)
     manager.begin_round(
@@ -4328,397 +4259,6 @@ async def test_duplicate_terminal_cannot_release_next_team_round():
     assert (await queue_b.get())["event_type"] == "chat.processing_status"
     assert manager.is_round_active(session_id) is False
     released_b.assert_awaited_once()
-
-
-@pytest.mark.anyio
-async def test_terminal_racing_steer_cannot_release_new_generation():
-    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
-
-    interact_started = asyncio.Event()
-    allow_interact = asyncio.Event()
-
-    class _FakeManager(TeamManager):
-        async def interact(self, session_id: str, query: str):
-            interact_started.set()
-            await allow_interact.wait()
-            return True, None
-
-    manager = _FakeManager()
-    session_id = "sess-terminal-followup-race"
-    released_first = AsyncMock()
-    released_steer = AsyncMock()
-    manager.begin_round(
-        session_id,
-        "round-first",
-        release_admission=released_first,
-        terminal_armed=True,
-    )
-
-    submit_task = asyncio.create_task(
-        manager.submit_interactive_steer(
-            session_id,
-            "steer-request",
-            "continue",
-            release_admission=released_steer,
-        )
-    )
-    await asyncio.wait_for(interact_started.wait(), timeout=1.0)
-    stale_terminal_task = asyncio.create_task(
-        manager.broadcast_event(
-            session_id,
-            {
-                "event_type": "chat.processing_status",
-                "is_processing": False,
-                "is_complete": True,
-            },
-        )
-    )
-    await asyncio.sleep(0)
-    assert stale_terminal_task.done() is False
-
-    allow_interact.set()
-    assert await submit_task == (True, None, False)
-    await stale_terminal_task
-
-    assert manager.is_round_active(session_id) is True
-    released_first.assert_not_awaited()
-    released_steer.assert_not_awaited()
-
-    await manager.broadcast_event(
-        session_id,
-        {"event_type": "team.task", "event": {"type": "team.task.created"}},
-    )
-    await manager.broadcast_event(
-        session_id,
-        {
-            "event_type": "chat.processing_status",
-            "is_processing": False,
-            "is_complete": True,
-        },
-    )
-    assert manager.is_round_active(session_id) is False
-    released_first.assert_awaited_once()
-    released_steer.assert_not_awaited()
-
-
-@pytest.mark.anyio
-async def test_steer_during_terminal_broadcast_retries_after_old_round_closes():
-    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
-
-    class _FakeManager(TeamManager):
-        async def interact(self, session_id: str, query: str):
-            return True, None
-
-    manager = _FakeManager()
-    session_id = "sess-followup-during-terminal"
-    released_first = AsyncMock()
-    released_followup = AsyncMock()
-    full_waiter: asyncio.Queue = asyncio.Queue(maxsize=1)
-    full_waiter.put_nowait({"event_type": "already.queued"})
-    manager.add_waiter(session_id, "browser", full_waiter)
-    manager.begin_round(
-        session_id,
-        "round-first",
-        release_admission=released_first,
-        terminal_armed=True,
-    )
-
-    terminal_task = asyncio.create_task(
-        manager.broadcast_event(
-            session_id,
-            {
-                "event_type": "chat.processing_status",
-                "is_processing": False,
-                "is_complete": True,
-            },
-        )
-    )
-    for _ in range(20):
-        if not manager.is_interactive_steer_round_active(session_id):
-            break
-        await asyncio.sleep(0)
-    assert manager.is_interactive_steer_round_active(session_id) is False
-    assert manager.is_round_active(session_id) is True
-    released_first.assert_not_awaited()
-
-    followup_waiter: asyncio.Queue = asyncio.Queue()
-    manager.add_waiter(session_id, "followup-browser", followup_waiter)
-    assert await manager.submit_interactive_steer(
-        session_id,
-        "round-followup",
-        "continue",
-        release_admission=released_followup,
-    ) == (False, "gate_closed", False)
-    assert manager.is_round_owner(session_id, "round-followup") is False
-
-    manager.remove_waiter(session_id, "browser")
-    await asyncio.wait_for(terminal_task, timeout=1.0)
-    released_first.assert_awaited_once()
-    released_followup.assert_not_awaited()
-    assert followup_waiter.empty()
-
-    assert await manager.submit_interactive_steer(
-        session_id,
-        "round-followup",
-        "continue",
-        release_admission=released_followup,
-    ) == (True, None, True)
-    assert manager.is_round_owner(session_id, "round-followup") is True
-
-    await manager.broadcast_event(
-        session_id,
-        {"event_type": "team.task", "event": {"type": "team.task.created"}},
-    )
-    await manager.broadcast_event(
-        session_id,
-        {
-            "event_type": "chat.processing_status",
-            "is_processing": False,
-            "is_complete": True,
-        },
-    )
-    released_followup.assert_awaited_once()
-
-
-@pytest.mark.anyio
-async def test_cancelled_terminal_broadcast_releases_detached_round_once():
-    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
-
-    class _FakeManager(TeamManager):
-        async def interact(self, session_id: str, query: str):
-            return True, None
-
-    manager = _FakeManager()
-    session_id = "sess-cancelled-terminal-broadcast"
-    released_first = AsyncMock()
-    released_followup = AsyncMock()
-    manager.begin_round(
-        session_id,
-        "round-first",
-        release_admission=released_first,
-        terminal_armed=True,
-    )
-    assert await manager.submit_interactive_steer(
-        session_id,
-        "round-followup",
-        "continue",
-        release_admission=released_followup,
-    ) == (True, None, False)
-    await manager.broadcast_event(
-        session_id,
-        {"event_type": "team.task", "event": {"type": "team.task.created"}},
-    )
-    full_waiter: asyncio.Queue = asyncio.Queue(maxsize=1)
-    full_waiter.put_nowait({"event_type": "already.queued"})
-    manager.add_waiter(session_id, "browser", full_waiter)
-
-    terminal_task = asyncio.create_task(
-        manager.broadcast_event(
-            session_id,
-            {
-                "event_type": "chat.processing_status",
-                "is_processing": False,
-                "is_complete": True,
-            },
-        )
-    )
-    for _ in range(20):
-        if not manager.is_interactive_steer_round_active(session_id):
-            break
-        await asyncio.sleep(0)
-    assert manager.is_round_active(session_id) is True
-
-    terminal_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await terminal_task
-
-    released_first.assert_awaited_once()
-    released_followup.assert_not_awaited()
-    assert manager.is_round_active(session_id) is False
-
-
-@pytest.mark.anyio
-async def test_stream_finalizer_blocks_successor_until_owned_round_is_released(
-    monkeypatch,
-):
-    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
-
-    finalizer_started = asyncio.Event()
-    allow_finalizer = asyncio.Event()
-
-    class _FakeManager(TeamManager):
-        async def interact(self, session_id: str, query: str):
-            return True, None
-
-        async def finish_stream_round(
-            self,
-            session_id: str,
-            request_id: str,
-            *,
-            stream_task: asyncio.Task | None = None,
-        ) -> bool:
-            finalizer_started.set()
-            await allow_finalizer.wait()
-            return await super().finish_stream_round(
-                session_id,
-                request_id,
-                stream_task=stream_task,
-            )
-
-    async def _fake_stream(**kwargs):
-        yield SimpleNamespace(
-            type="team.completed",
-            payload={"event_type": "team.completed"},
-            role=TeamRole.LEADER,
-        )
-
-    class _FakeRunner:
-        run_agent_team_streaming = staticmethod(_fake_stream)
-
-    manager = _FakeManager()
-    session_id = "sess-owned-stream-finalizer"
-    released_first = AsyncMock()
-    released_followup = AsyncMock()
-    manager.begin_round(
-        session_id,
-        "round-first",
-        release_admission=released_first,
-        terminal_armed=True,
-    )
-    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
-    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
-    monkeypatch.setattr(
-        team_helpers,
-        "ensure_team_evolution_watcher",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(team_helpers, "get_session_metadata", lambda session_id: {})
-    monkeypatch.setattr(team_helpers, "update_session_metadata", lambda **kwargs: None)
-
-    stream_task = asyncio.create_task(
-        _TeamHelpersTestApi.consume_stream_with_query(
-            "web",
-            session_id,
-            SimpleNamespace(team_name="demo-team"),
-            "hello",
-            request_id="round-first",
-        )
-    )
-    manager.register_stream_task(session_id, stream_task)
-    await asyncio.wait_for(finalizer_started.wait(), timeout=1.0)
-
-    assert manager.is_round_active(session_id) is True
-    assert await manager.submit_interactive_steer(
-        session_id,
-        "round-followup",
-        "continue",
-        release_admission=released_followup,
-    ) == (False, "gate_closed", False)
-    released_first.assert_not_awaited()
-
-    allow_finalizer.set()
-    await asyncio.wait_for(stream_task, timeout=1.0)
-    released_first.assert_awaited_once()
-    assert manager.is_round_active(session_id) is False
-
-    assert await manager.submit_interactive_steer(
-        session_id,
-        "round-followup",
-        "continue",
-        release_admission=released_followup,
-    ) == (True, None, True)
-    released_followup.assert_not_awaited()
-    assert await manager.release_round(session_id, "round-followup") is True
-    released_followup.assert_awaited_once()
-
-
-@pytest.mark.anyio
-async def test_stream_finalizer_releases_later_iteration_with_different_request_id():
-    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
-
-    class _FakeManager(TeamManager):
-        async def interact(self, session_id: str, query: str):
-            return True, None
-
-    manager = _FakeManager()
-    session_id = "sess-stream-owner-token"
-    released_first = AsyncMock()
-    released_later = AsyncMock()
-    stream_task = asyncio.create_task(asyncio.Event().wait())
-    manager.begin_round(
-        session_id,
-        "request-first",
-        release_admission=released_first,
-        terminal_armed=True,
-    )
-    manager.register_stream_task(session_id, stream_task)
-
-    await manager.broadcast_event(
-        session_id,
-        {
-            "event_type": "chat.processing_status",
-            "is_processing": False,
-            "is_complete": True,
-        },
-    )
-    released_first.assert_awaited_once()
-    assert manager.is_round_active(session_id) is False
-
-    assert await manager.submit_interactive_steer(
-        session_id,
-        "request-later",
-        "continue",
-        release_admission=released_later,
-    ) == (True, None, True)
-    await manager.broadcast_event(
-        session_id,
-        {"event_type": "team.task", "event": {"type": "team.task.created"}},
-    )
-    await manager.broadcast_event(
-        session_id,
-        {
-            "event_type": "chat.processing_status",
-            "is_processing": False,
-            "is_complete": True,
-        },
-        stream_closing=True,
-    )
-    assert manager.is_round_active(session_id) is True
-    released_later.assert_not_awaited()
-
-    manager.pop_stream_task(session_id)
-    assert await manager.finish_stream_round(
-        session_id,
-        "request-first",
-        stream_task=stream_task,
-    ) is True
-    released_later.assert_awaited_once()
-    assert manager.is_round_active(session_id) is False
-
-    stream_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await stream_task
-
-
-@pytest.mark.anyio
-async def test_failed_interactive_steer_removes_empty_round():
-    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
-
-    class _FakeManager(TeamManager):
-        async def interact(self, session_id: str, query: str):
-            return False, "runner_failed"
-
-    manager = _FakeManager()
-    released = AsyncMock()
-
-    assert await manager.submit_interactive_steer(
-        "sess-followup-failed",
-        "round-followup",
-        "continue",
-        release_admission=released,
-    ) == (False, "runner_failed", False)
-    assert manager.is_round_active("sess-followup-failed") is False
-    released.assert_not_awaited()
 
 
 @pytest.mark.anyio
