@@ -27,6 +27,18 @@ def test_deep_agent_context_engine_config_ignores_invalid_context_window_tokens(
     assert config.context_window_tokens is None
 
 
+def test_deep_agent_context_engine_config_normalizes_empty_context_debug_dir():
+    config = _deep_agent_context_engine_config(
+        {"context_engine_config": {"context_debug_dir": ""}}
+    )
+    explicit_config = _deep_agent_context_engine_config(
+        {"context_engine_config": {"context_debug_dir": "/tmp/context-debug"}}
+    )
+
+    assert config.context_debug_dir is None
+    assert explicit_config.context_debug_dir == "/tmp/context-debug"
+
+
 @pytest.mark.asyncio
 async def test_code_adapter_forwards_context_window_tokens(tmp_path, monkeypatch):
     config_base = {

@@ -873,6 +873,8 @@ def _deep_agent_context_engine_config(
         for key, value in cec.items()
         if key in ContextEngineConfig.model_fields
     }
+    if "context_debug_dir" in supported and not supported["context_debug_dir"]:
+        supported["context_debug_dir"] = None
     # 显式设置的上下文窗口上限；非法值回退 None（由 agent-core 按模型解析）。
     supported["context_window_tokens"] = cw_tokens
     if "model_context_window_tokens" in ContextEngineConfig.model_fields:
