@@ -3677,33 +3677,52 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       ) : null}
       {swarmflowBudgetOpen && activeSessionId && (() => {
         return (
-          <div className="fixed inset-0 z-50 flex" onClick={() => setSwarmflowBudgetOpen(false)}>
+          <div
+            className="fixed inset-0 z-50 flex justify-end"
+            data-testid="swarmflow-budget-drawer-root"
+            onClick={() => setSwarmflowBudgetOpen(false)}
+          >
             <div className="absolute inset-0 bg-black/30" />
             <div
-              className="relative ml-auto h-full w-80 bg-card p-6 shadow-xl"
+              className="relative w-[380px] max-w-full h-full bg-bg shadow-xl flex flex-col animate-slide-in-right"
+              data-testid="swarmflow-budget-drawer-panel"
               onClick={(e) => e.stopPropagation()}
             >
-              <h3 className="text-sm font-semibold text-text-strong mb-4">
-                {t('swarmflow.budgetPanelTitle')}
-              </h3>
-              <p className="text-xs text-text-muted mb-4">{t('swarmflow.budgetPanelHint')}</p>
-              <Input
-                type="number"
-                value={swarmflowBudget ?? ''}
-                placeholder={t('swarmflow.budgetPlaceholder')}
-                disabled={!swarmflowActive}
-                onChange={(v) => {
-                  const trimmed = v.trim();
-                  useSessionStore.getState().setSwarmflowActive(
-                    activeSessionId,
-                    true,
-                    trimmed ? Number(trimmed) : null,
-                  );
-                }}
-              />
-              <Button className="mt-4" onClick={() => setSwarmflowBudgetOpen(false)}>
-                {t('common.confirm')}
-              </Button>
+              <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-card">
+                <h3 className="text-sm font-semibold text-text-strong">
+                  {t('swarmflow.budgetPanelTitle')}
+                </h3>
+                <button
+                  onClick={() => setSwarmflowBudgetOpen(false)}
+                  className="rounded p-1.5 text-text-muted hover:bg-secondary hover:text-text"
+                  aria-label={t('common.close')}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+                <p className="text-xs text-text-muted">{t('swarmflow.budgetPanelHint')}</p>
+                <Input
+                  type="number"
+                  value={swarmflowBudget ?? ''}
+                  placeholder={t('swarmflow.budgetPlaceholder')}
+                  disabled={!swarmflowActive}
+                  onChange={(v) => {
+                    const trimmed = v.trim();
+                    useSessionStore.getState().setSwarmflowActive(
+                      activeSessionId,
+                      true,
+                      trimmed ? Number(trimmed) : null,
+                    );
+                  }}
+                />
+                <Button
+                  className="w-full"
+                  onClick={() => setSwarmflowBudgetOpen(false)}
+                >
+                  {t('common.confirm')}
+                </Button>
+              </div>
             </div>
           </div>
         );
