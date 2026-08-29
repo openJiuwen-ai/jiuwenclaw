@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from jiuwenswarm.common.work_mode import (
+    DEFAULT_DESIGN_WORK_MODE,
     DEFAULT_PROJECT_ID_CODE,
+    DEFAULT_PROJECT_ID_DESIGN,
     DEFAULT_PROJECT_ID_WORK,
     DEFAULT_PROJECT_IDS,
     DEFAULT_TUI_WORK_MODE,
@@ -22,19 +24,23 @@ from jiuwenswarm.common.work_mode import (
     is_default_project_id,
     normalize_work_mode,
     resolve_default_project_id,
+    work_mode_from_default_project_id,
 )
 
 # 重导出底层常量与函数,供外部调用方保持单一 import 来源
 __all__ = [
     "DEFAULT_WEB_WORK_MODE",
     "DEFAULT_TUI_WORK_MODE",
+    "DEFAULT_DESIGN_WORK_MODE",
     "DEFAULT_PROJECT_ID_WORK",
     "DEFAULT_PROJECT_ID_CODE",
+    "DEFAULT_PROJECT_ID_DESIGN",
     "DEFAULT_PROJECT_IDS",
     "SUPPORTED_WORK_MODES",
     "normalize_work_mode",
     "is_default_project_id",
     "resolve_default_project_id",
+    "work_mode_from_default_project_id",
     "default_work_mode_for_channel",
     "resolve_request_work_mode",
     "infer_legacy_project_work_mode",
@@ -88,7 +94,7 @@ class SessionWorkModeParams:
 
     真实 ``project_id`` 仅透传请求/通道推断的 ``work_mode``,最终值以
     ProjectStore 查到的 Project 为准;默认项目按 channel_id 推断并映射到
-    ``default`` / ``default_code``。失败时调用方必须优先检查 ``error``/``code``。
+    ``default`` / ``default_code`` / ``default_design``。失败时调用方必须优先检查 ``error``/``code``。
 
     ``has_explicit_work_mode`` 标识请求是否显式传入 ``work_mode``:True 时
     调用方需在命中真实 Project 后做一致性校验(不一致 → BAD_REQUEST)。
@@ -111,7 +117,7 @@ def resolve_session_work_mode_params(
 
     纯参数归一化,不反查 ProjectStore:
     - 真实 ``project_id``:透传三元组,由调用方做存在性与一致性校验。
-    - 默认项目:按 channel_id 推断 ``work_mode`` 并映射到 ``default``/``default_code``。
+    - 默认项目:按 channel_id 推断 ``work_mode`` 并映射到 ``default``/``default_code``/``default_design``。
 
     始终以服务端传入的 channel_id 为准,不再信任 ``params.channel_id``
     (防 Web 客户端伪装 TUI 通道获得 code 模式会话,属功能面越权)。
@@ -162,6 +168,17 @@ def resolve_session_work_mode_params(
                 )
             work_mode = DEFAULT_TUI_WORK_MODE
             normalized_default_id = DEFAULT_PROJECT_ID_CODE
+        elif project_id == DEFAULT_PROJECT_ID_DESIGN:
+            if has_explicit_work_mode and work_mode != DEFAULT_DESIGN_WORK_MODE:
+                return SessionWorkModeParams(
+                    project_id="",
+                    project_dir="",
+                    work_mode="",
+                    error=f"work_mode={work_mode!r} conflicts with project_id={project_id!r} (expected 'design')",
+                    code="BAD_REQUEST",
+                )
+            work_mode = DEFAULT_DESIGN_WORK_MODE
+            normalized_default_id = DEFAULT_PROJECT_ID_DESIGN
         # 保留 project_dir:默认项目无 project_dir,但调用方传入的 project_dir 需透传给
         # resolve_session_project_binding,由其拒绝"仅传 project_dir 无真实 project_id"的请求
         return SessionWorkModeParams(

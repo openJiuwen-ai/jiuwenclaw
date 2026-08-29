@@ -227,16 +227,31 @@ def test_runtime_cron_schemas_keep_device_intents_internal() -> None:
     )
 
 
-def test_extract_legacy_params_passthrough_unknown_mode() -> None:
-    context = SimpleNamespace(channel_id="web", session_id="sess-1", mode="future.mode")
-    payload = {
+@pytest.mark.parametrize(
+    "context_mode, payload_mode, expected",
+    [
+        ("design", None, "agent"),
+        ("code.normal", None, "agent"),
+        ("future.mode", None, "agent"),
+        ("design", "team", "team"),
+        ("code.normal", "agent", "agent"),
+        ("team", None, "team"),
+    ],
+)
+def test_extract_legacy_params_profile_modes_fall_back_to_agent(
+    context_mode: str, payload_mode: str | None, expected: str
+) -> None:
+    context = SimpleNamespace(channel_id="web", session_id="sess-1", mode=context_mode)
+    payload: dict = {
         "schedule": {"kind": "cron", "expr": "0 9 * * *"},
         "payload": {"kind": "agentTurn", "message": "daily report"},
     }
+    if payload_mode is not None:
+        payload["mode"] = payload_mode
 
     out = _extract_legacy_params(payload, context=context, require_schedule=True)
 
-    assert out["mode"] == "future.mode"
+    assert out["mode"] == expected
 
 
 @pytest.mark.asyncio
@@ -470,6 +485,7 @@ _BASE_JOB = {
     pytest.param("web_default", "work", None, id="web_default_work"),
     pytest.param("explicit_project_id", "code", "code_proj", id="project_id_injects_code"),
     pytest.param("default_code", "code", "default_code", id="default_code_project"),
+    pytest.param("default_design", "design", "default_design", id="default_design_project"),
     pytest.param("invalid", None, None, id="rejects_invalid_work_mode"),
 ])
 async def test_cron_tools_create_job_work_mode(tmp_path, monkeypatch, scenario, expected_wm, expected_pid):
@@ -484,6 +500,8 @@ async def test_cron_tools_create_job_work_mode(tmp_path, monkeypatch, scenario, 
         base["project_id"] = code_project.project_id
     elif scenario == "default_code":
         base["project_id"] = "default_code"
+    elif scenario == "default_design":
+        base["project_id"] = "default_design"
     elif scenario == "invalid":
         base["work_mode"] = "invalid_mode"
 
@@ -558,6 +576,7 @@ async def test_cron_tools_update_job_rejects_invalid_patch(tmp_path, monkeypatch
     [
         pytest.param("default", "default", id="session_default_work"),
         pytest.param("default_code", "default_code", id="session_default_code"),
+        pytest.param("default_design", "default_design", id="session_default_design"),
         pytest.param("", "", id="session_empty_like_manual"),
     ],
 )

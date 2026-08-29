@@ -15,6 +15,7 @@ from jiuwenswarm.gateway.cron.dingtalk_routing import (
 from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DEFAULT_MODE,
     coerce_cron_job_mode,
+    is_cron_job_mode,
     is_valid_target_channel_id,
     normalize_target_channel_id,
 )
@@ -430,7 +431,15 @@ def _extract_legacy_params(
             out["app_id"] = context_app_id
 
         context_mode = getattr(context, "mode", None)
-        mode_resolved = context_mode or data.get("mode") or CRON_JOB_DEFAULT_MODE
+        payload_mode = data.get("mode")
+        if is_cron_job_mode(context_mode):
+            mode_resolved = context_mode
+        elif is_cron_job_mode(payload_mode):
+            mode_resolved = payload_mode
+        else:
+            # profile modes (design / code.normal) and unknown values are not
+            # cron execution modes; persist the default agent runner.
+            mode_resolved = CRON_JOB_DEFAULT_MODE
         out["mode"] = coerce_cron_job_mode(mode_resolved, default=CRON_JOB_DEFAULT_MODE)
         return _attach_xiaoyi_device_route(out, context=context)
 

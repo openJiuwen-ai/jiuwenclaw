@@ -655,6 +655,35 @@ class TestProjectLazyMigration:
         assert projects_file.stat().st_mtime == original_mtime
 
     @staticmethod
+    def test_design_work_mode_not_overwritten(project_store_dir):
+        """已有 design work_mode 的项目不被迁移覆盖或反复写盘。"""
+        from jiuwenswarm.server.runtime.session.project_store import (
+            list_projects, invalidate_cache,
+        )
+
+        projects_file = project_store_dir / "projects.json"
+        projects_file.write_text(
+            json.dumps({"projects": [
+                {
+                    "project_id": "p1",
+                    "name": "DesignApp",
+                    "project_dir": "E:\\design",
+                    "created_at": 1000.0,
+                    "updated_at": 1000.0,
+                    "work_mode": "design",
+                }
+            ]}),
+            encoding="utf-8",
+        )
+        invalidate_cache()
+
+        original_mtime = projects_file.stat().st_mtime
+        projects = list_projects(cache_bust=True)
+        assert projects[0].work_mode == "design"
+        assert projects_file.stat().st_mtime == original_mtime
+        assert _read_projects(project_store_dir)[0]["work_mode"] == "design"
+
+    @staticmethod
     def test_mixed_legacy_and_valid_projects(project_store_dir):
         """混合场景:老项目迁移、新项目不动,只写回有变更的部分。"""
         from jiuwenswarm.server.runtime.session.project_store import (
@@ -758,6 +787,7 @@ class TestResolveCronProjectBinding:
         [
             ("default", "work"),
             ("default_code", "code"),
+            ("default_design", "design"),
         ],
     )
     def test_explicit_default_ids_are_preserved(project_store_dir, raw_pid, expected_wm):
@@ -794,3 +824,14 @@ class TestResolveCronProjectBinding:
         binding = resolve_cron_project_binding("proj_missing", "", "work")
         assert binding.error is not None
         assert "project not found" in binding.error
+
+    @staticmethod
+    def test_empty_project_id_keeps_design_work_mode(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            resolve_cron_project_binding,
+        )
+
+        binding = resolve_cron_project_binding("", "", "design")
+        assert binding.error is None
+        assert binding.project_id == ""
+        assert binding.work_mode == "design"

@@ -65,3 +65,28 @@ def resolve_default_project_id(work_mode: str) -> str:
     if value == DEFAULT_DESIGN_WORK_MODE:
         return DEFAULT_PROJECT_ID_DESIGN
     return DEFAULT_PROJECT_ID_WORK
+
+
+def work_mode_from_default_project_id(project_id: str | None) -> str | None:
+    """虚拟默认项目 ID → ``work_mode``；非虚拟 ID（含空串）返回 ``None``。
+
+    - ``default`` → ``work``
+    - ``default_code`` → ``code``
+    - ``default_design`` → ``design``
+    - 空 / 未知 → ``None``（调用方保留入参 ``work_mode`` 或走其他推断）
+    """
+    if not isinstance(project_id, str):
+        return None
+    pid = project_id.strip()
+    if pid == DEFAULT_PROJECT_ID_CODE:
+        return DEFAULT_TUI_WORK_MODE
+    if pid == DEFAULT_PROJECT_ID_DESIGN:
+        return DEFAULT_DESIGN_WORK_MODE
+    if pid == DEFAULT_PROJECT_ID_WORK:
+        return DEFAULT_WEB_WORK_MODE
+    return None
+
+
+def is_supported_work_mode(raw: Any) -> bool:
+    """是否为已规范化（或仅大小写不同）的合法 ``work_mode``。"""
+    return isinstance(raw, str) and raw.strip().lower() in SUPPORTED_WORK_MODES
