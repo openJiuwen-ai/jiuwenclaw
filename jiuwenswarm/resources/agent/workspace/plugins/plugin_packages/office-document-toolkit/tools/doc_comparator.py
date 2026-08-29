@@ -205,7 +205,7 @@ class DocComparator(Tool):
     def _compare_pdf(path1: str, path2: str) -> dict:
         import difflib
 
-        from pypdf import PdfReader
+        from PyPDF2 import PdfReader
 
         reader1 = PdfReader(path1)
         reader2 = PdfReader(path2)

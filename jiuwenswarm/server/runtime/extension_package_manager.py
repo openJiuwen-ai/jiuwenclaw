@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -31,6 +32,13 @@ _CATALOG_PREVIEWABLE_DIRS: frozenset[str] = frozenset(
 )
 _CATALOG_PREVIEWABLE_EXTS: frozenset[str] = frozenset({".md", ".py"})
 _MAX_PREVIEW_FILE_BYTES = 1 * 1024 * 1024
+_AVATAR_MIME = {
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 _AGENT_TEMPLATE_KIND = "agent_templates"
 _AGENT_GROUP_KIND = "agent_groups"
 _PLUGIN_PACKAGE_KIND = "plugin_packages"
@@ -401,6 +409,32 @@ def _package_connection_state(manifest: dict, *, installed: bool) -> str:
     return "disconnected"
 
 
+def _resolve_package_avatar(pkg_dir: Path, manifest: dict) -> str:
+    """Inline manifest avatar as a data URL so the frontend can render <img src>."""
+    raw = manifest.get("avatar")
+    if not isinstance(raw, str):
+        return ""
+    rel = raw.strip().replace("\\", "/")
+    if not rel or rel.startswith("/") or ".." in PurePosixPath(rel).parts:
+        return ""
+    mime = _AVATAR_MIME.get(Path(rel).suffix.lower())
+    if mime is None:
+        return ""
+    root = pkg_dir.resolve()
+    full = (pkg_dir / rel).resolve()
+    try:
+        full.relative_to(root)
+    except ValueError:
+        return ""
+    if not full.is_file():
+        return ""
+    try:
+        data = full.read_bytes()
+    except OSError:
+        return ""
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
 def _build_list_card(
     pkg_dir: Path,
     *,
@@ -420,6 +454,7 @@ def _build_list_card(
         "displayDescription": manifest.get("display_description") or {},
         "category": category if isinstance(category, str) else "",
         "source": source,
+        "avatar": _resolve_package_avatar(pkg_dir, manifest),
     }
     if installed is not None:
         card["installed"] = installed
@@ -446,7 +481,6 @@ def _build_show_card(
     if manifest is None or manifest.get("package_type") != package_type:
         return None
     resolved_source = source if source is not None else _source_from_pkg_dir(pkg_dir)
-    avatar = manifest.get("avatar")
     version = manifest.get("version")
     tags = manifest.get("tags")
     card: dict[str, Any] = {
@@ -454,7 +488,7 @@ def _build_show_card(
         "displayName": manifest.get("display_name") or pkg_dir.name,
         "displayDescription": manifest.get("display_description") or {},
         "source": resolved_source,
-        "avatar": avatar if isinstance(avatar, str) else "",
+        "avatar": _resolve_package_avatar(pkg_dir, manifest),
         "version": version if isinstance(version, str) else "",
         "details": manifest.get("description") if isinstance(manifest.get("description"), str) else "",
         "tags": tags if isinstance(tags, list) else [],

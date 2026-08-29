@@ -37,7 +37,7 @@
     "zh": "精通后端系统架构设计与演进规划，梳理模块依赖关系，开展方案评审与风险识别，输出可落地技术改造思路。"
   },
   "category": "Engineering",
-  "avatar": "",
+  "avatar": "avatars/avatar.png",
   "source": "builtin",
   "default_init_input": {
     "zh": "帮我分析当前系统架构，梳理模块依赖关系，识别潜在风险并给出可落地的改造方案",

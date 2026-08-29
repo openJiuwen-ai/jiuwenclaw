@@ -6576,8 +6576,8 @@ class JiuWenSwarmDeepAdapter:
         skills_dirs = self._skill_scan_dirs()
         # Keep hot-bound plugin/template skill roots. _skill_scan_dirs() only
         # knows workspace + session MCP; package dirs live on deep_config.skills
-        # after _bind_skill. Append them so MCP refresh does not drop them, and
-        # workspace still wins on duplicate names.
+        # after _bind_skill. Prepend them so MCP refresh does not drop them and
+        # package skills retain precedence over same-named workspace skills.
         instance = getattr(self, "_instance", None)
         bound = getattr(getattr(instance, "deep_config", None), "skills", None)
         if bound:
@@ -6592,7 +6592,7 @@ class JiuWenSwarmDeepAdapter:
                     continue
                 seen.add(resolved)
                 extra.append(text)
-            skills_dirs = [*skills_dirs, *extra]
+            skills_dirs = [*extra, *skills_dirs]
         if self._skill_rail is not None:
             # Update the rail's scan roots before reload so it picks up newly
             # connected (and drops disconnected) MCP skill dirs.
