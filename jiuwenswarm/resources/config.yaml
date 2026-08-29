@@ -92,6 +92,19 @@ http_server:
   host:
   port: 8766
 
+# AgentServer 启动端到端预热：创建临时 DeepAgent 执行一次 query，
+# 触发模块 import / checkpointer / 模型 client / DeepAgent 工厂全链路首次初始化，
+# 降低首请求时延。后台执行，不阻塞启动完成。
+# 模型调用通过 mock 短路（不发真实 HTTP、不消耗 token），仅预热构建链路。
+startup:
+  warmup:
+    enabled: true               # 总开关，默认开启
+    query: "hello"              # 预热 query
+    channel_id: "__prewarm__"   # 专用 channel，与生产会话隔离
+    mode: "agent"               # 预热 agent 模式
+    timeout_s: 120              # 预热超时（秒），超时取消不阻塞启动
+    mock_model: true            # 是否 mock 模型调用（避免消耗 token），默认 true
+
 # 日志目录：~/.jiuwenswarm/agent/.logs/
 # gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总。
 # level：未单独指定时的默认级别。console_level：控制台；可省略则用 level。

@@ -1775,6 +1775,7 @@ async def ensure_persistent_checkpointer() -> None:
             CheckpointerFactory.set_default_checkpointer(_shared_checkpoint_checkpointer)
         return
 
+    t_cp_start = time.perf_counter()
     lock = await _get_persistent_checkpointer_lock()
     acquired = False
     try:
@@ -1828,13 +1829,16 @@ async def ensure_persistent_checkpointer() -> None:
             CheckpointerFactory.set_default_checkpointer(checkpointer)
             _PERSISTENT_CHECKPOINTER_READY = True
             logger.info(
-                "[JiuWenSwarmDeepAdapter] persistent checkpointer ready: %s",
+                "[JiuWenSwarmDeepAdapter] persistent checkpointer ready: %s elapsed_ms=%.1f",
                 checkpoint_path / "checkpoint",
+                (time.perf_counter() - t_cp_start) * 1000,
             )
         except Exception as exc:
             logger.error(
-                "[JiuWenSwarmDeepAdapter] fail to setup checkpoint due to: %s",
+                "[JiuWenSwarmDeepAdapter] fail to setup checkpoint due to: %s "
+                "elapsed_ms=%.1f",
                 exc,
+                (time.perf_counter() - t_cp_start) * 1000,
             )
             raise RuntimeError("persistent checkpointer initialization failed") from exc
     finally:
