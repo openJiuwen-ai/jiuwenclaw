@@ -212,7 +212,11 @@
       "vision": "Image processing",
       "audio": "Audio processing",
       "video": "Video understanding",
-      "team": "Agent team"
+      "videoDescription": "Enable video understanding; disabling it keeps the saved model configuration.",
+      "videoConfigTitle": "Configure video understanding model",
+      "toggleCapability": "Toggle {{name}} capability",
+      "saveAndEnable": "Save and enable",
+      "savedRestartRequired": "Saved; takes effect after restart."
     },
     "browser": {
       "runtime": "Browser runtime",
@@ -298,15 +302,6 @@
       "video_api_key": { "title": "API key" },
       "video_model": { "title": "Model name" },
       "video_provider": { "title": "Model provider" },
-      "swarmflow_enabled": {
-        "title": "Dynamic workflow",
-        "description": "Control whether the agent team enables dynamic workflow capabilities."
-      },
-      "swarmflow_budget": {
-        "title": "SwarmFlow Budget",
-        "description": "Team budget (token ceiling, blank = unlimited)",
-        "placeholder": "blank = unlimited, positive integer"
-      },
       "permissions_mode": {
         "title": "Global permission mode",
         "description": "Choose the shared guardrail mode for ordinary Agents and Teams."

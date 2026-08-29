@@ -212,7 +212,11 @@
       "vision": "图片处理",
       "audio": "音频处理",
       "video": "视频理解",
-      "team": "智能体团队"
+      "videoDescription": "启用后可理解视频内容；关闭后保留已有模型配置。",
+      "videoConfigTitle": "配置视频理解模型",
+      "toggleCapability": "切换{{name}}能力",
+      "saveAndEnable": "保存并启用",
+      "savedRestartRequired": "配置已保存，重启后生效。"
     },
     "browser": {
       "runtime": "浏览器运行配置",
@@ -289,8 +293,6 @@
       "video_api_key": { "title": "API 密钥" },
       "video_model": { "title": "模型名称" },
       "video_provider": { "title": "模型提供商" },
-      "swarmflow_enabled": { "title": "动态工作流", "description": "控制智能体团队是否启用动态工作流能力" },
-      "swarmflow_budget": { "title": "动态工作流会话级别token上限", "description": "Team budget（token 上限，留空=不限）", "placeholder": "留空=不限，填正整数" },
       "permissions_mode": { "title": "全局权限模式", "description": "为普通 Agent 与 Team 选择统一的安全护栏模式。" },
       "a2ui_enabled": { "title": "启用 A2UI", "description": "允许将支持的结果渲染成交互式界面。" },
       "external_cli_agent_claude_enabled": {
