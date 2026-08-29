@@ -2017,7 +2017,7 @@ async def process_team_message_stream(
                 # previous Cron round entering a new Heartbeat waiter.
                 defer_terminal_release=is_bounded_round,
                 # A fresh stream emits its own processing-start frame.  A
-                # follow-up on a persistent stream must instead wait for the
+                # steer on a persistent stream must instead wait for the
                 # first new runtime event so duplicate terminal frames from
                 # the previous generation cannot release this round.
                 terminal_armed=is_first_request,
@@ -2026,19 +2026,22 @@ async def process_team_message_stream(
             await _release_user_admission()
             raise
 
-    async def _begin_interactive_followup_admission() -> None:
+    async def _begin_interactive_steer_admission() -> None:
         nonlocal user_admitted
         if admission is None:
             return
-        is_interactive_round_active = getattr(
+        is_interactive_steer_round_active = getattr(
             team_manager,
-            "is_interactive_round_active",
+            "is_interactive_steer_round_active",
             None,
         )
         can_join_current_round = callable(
-            is_interactive_round_active
-        ) and is_interactive_round_active(session_id)
+            is_interactive_steer_round_active
+        ) and is_interactive_steer_round_active(session_id)
         if can_join_current_round:
+            # Ordinary Team text steers the current leader iteration. This
+            # short lease only protects the atomic submit/terminal handoff;
+            # the existing iteration keeps its original round-long lease.
             await admission.begin_user(session_id)
         else:
             begin_team_user = getattr(
@@ -2049,23 +2052,29 @@ async def process_team_message_stream(
             await begin_team_user(session_id)
         user_admitted = True
 
-    async def _submit_interactive_followup(
+    async def _submit_interactive_steer(
         delivery_session_id: str,
         payload: Any,
     ) -> tuple[bool, str | None]:
         nonlocal admission_handed_off, round_submitted
-        submit = getattr(team_manager, "submit_interactive_followup", None)
+        submit = getattr(team_manager, "submit_interactive_steer", None)
         if not callable(submit):
-            return await team_manager.interact(delivery_session_id, payload)
-        success, reason = await submit(
-            delivery_session_id,
-            rid,
-            payload,
-            release_admission=(_release_user_admission if user_admitted else None),
-        )
+            success, reason = await team_manager.interact(delivery_session_id, payload)
+            retained = False
+        else:
+            success, reason, retained = await submit(
+                delivery_session_id,
+                rid,
+                payload,
+                release_admission=(
+                    _release_user_admission if user_admitted else None
+                ),
+            )
         if success:
-            admission_handed_off = user_admitted
+            admission_handed_off = retained
             round_submitted = True
+            if user_admitted and not retained:
+                await _release_user_admission()
         return success, reason
 
     async def _finish_round_submission(*, accepted: bool) -> None:
@@ -2292,11 +2301,11 @@ async def process_team_message_stream(
         first_request_source = "first"
         if not is_first_request:
             logger.info(
-                "[TeamHelpers] follow-up team request: channel_id=%s session_id=%s",
+                "[TeamHelpers] subsequent team request: channel_id=%s session_id=%s",
                 _resolve_channel_id(channel_id),
                 session_id,
             )
-            # Interactive follow-ups normally keep using the original
+            # Interactive steers normally keep using the original
             # persistent waiter.  A headless Heartbeat can be the request that
             # first creates the persistent Team stream, however, and removes
             # its exclusive waiter when the bounded run ends.  In that case
@@ -2323,8 +2332,10 @@ async def process_team_message_stream(
                 else:
                     team_manager.add_waiter(session_id, rid, request_queue)
             if query:
-                # Follow-up rounds carry their own attachments and context, so
-                # they are rendered exactly like the first one.
+                # Subsequent interactive text keeps its own attachments and
+                # context. Plain Team text is delivered to the leader as an
+                # immediate steer by agent-core; bounded automation remains a
+                # separately admitted round.
                 followup_payload = _deliverable(turn, query)
                 if is_bounded_round:
                     await _begin_team_round()
@@ -2333,8 +2344,8 @@ async def process_team_message_stream(
                         followup_payload,
                     )
                 else:
-                    await _begin_interactive_followup_admission()
-                    success, reason = await _submit_interactive_followup(
+                    await _begin_interactive_steer_admission()
+                    success, reason = await _submit_interactive_steer(
                         session_id,
                         followup_payload,
                     )
@@ -2357,7 +2368,7 @@ async def process_team_message_stream(
                                 interact=(
                                     None
                                     if is_bounded_round
-                                    else _submit_interactive_followup
+                                    else _submit_interactive_steer
                                 ),
                             )
                         )
@@ -2378,12 +2389,12 @@ async def process_team_message_stream(
                             return
                         is_first_request = not preparation.recovered_runtime
                         if is_first_request:
-                            first_request_source = "follow-up fallback"
+                            first_request_source = "steer fallback"
                             query = preparation.query
                             hide_dm = preparation.hide_dm
                             debug = preparation.debug
                             logger.info(
-                                "[TeamHelpers] follow-up interact reclassified by first-request condition: "
+                                "[TeamHelpers] steer interact reclassified by first-request condition: "
                                 "channel_id=%s session_id=%s reason=%s",
                                 _resolve_channel_id(channel_id),
                                 session_id,
@@ -2425,7 +2436,7 @@ async def process_team_message_stream(
                         return
 
                     if not success and is_first_request:
-                        # The failed follow-up is about to be retried as a new
+                        # The failed steer is about to be retried as a new
                         # stream. Release its handoff before admitting the
                         # replacement round.
                         await _finish_round_submission(accepted=False)
@@ -2472,7 +2483,7 @@ async def process_team_message_stream(
 
                 if request_queue is not None:
                     logger.info(
-                        "[TeamHelpers] follow-up request attached persistent waiter: "
+                        "[TeamHelpers] steer request attached persistent waiter: "
                         "channel_id=%s session_id=%s request_id=%s",
                         _resolve_channel_id(channel_id),
                         session_id,
@@ -2480,14 +2491,14 @@ async def process_team_message_stream(
                     )
                 else:
                     logger.info(
-                        "[TeamHelpers] follow-up request submitted without waiter: "
+                        "[TeamHelpers] steer request submitted without waiter: "
                         "channel_id=%s session_id=%s request_id=%s",
                         _resolve_channel_id(channel_id),
                         session_id,
                         rid,
                     )
                 # NOTE: do NOT emit is_processing=False here.
-                # A follow-up request only enqueues the query into the running
+                # A steer request submits the query into the running
                 # team stream; the actual LLM work still happens inside
                 # _consume_stream_with_query. The real "round complete" signal
                 # will be broadcast by that background stream once team.completed

@@ -656,22 +656,22 @@ class TeamManager:
             terminal_armed=terminal_armed,
         )
 
-    async def submit_interactive_followup(
+    async def submit_interactive_steer(
         self,
         session_id: str,
         request_id: str,
         user_input: Any,
         *,
         release_admission: Callable[[], Awaitable[None]] | None = None,
-    ) -> tuple[bool, str | None]:
-        """Submit a user follow-up without opening a Heartbeat race window."""
+    ) -> tuple[bool, str | None, bool]:
+        """Steer the leader atomically and report whether admission was retained."""
         created_round = False
         async with self._get_round_lock(session_id):
             if self._closing_rounds.get(session_id):
-                return False, "gate_closed"
+                return False, "gate_closed", False
             current = self._active_rounds.get(session_id)
             if current is not None and current.defer_terminal_release:
-                return False, "round_busy"
+                return False, "round_busy", False
             if current is None:
                 current = _ActiveTeamRound(request_id=request_id)
                 self._active_rounds[session_id] = current
@@ -685,9 +685,10 @@ class TeamManager:
             if not success:
                 if created_round:
                     self._pop_round_unlocked(session_id, request_id)
-                return False, reason
+                return False, reason, False
 
-            if release_admission is not None:
+            admission_retained = created_round and release_admission is not None
+            if admission_retained:
                 current.release_admissions.append(release_admission)
             if not created_round:
                 completion_task = current.completion_task
@@ -697,7 +698,7 @@ class TeamManager:
                 current.completion_state = new_cron_team_round_state()
                 current.generation += 1
             current.terminal_armed = False
-            return True, None
+            return True, None, admission_retained
 
     async def finish_round(self, session_id: str) -> None:
         """Finish the current round on a runtime terminal event."""
@@ -839,8 +840,8 @@ class TeamManager:
             self._closing_rounds.get(session_id)
         )
 
-    def is_interactive_round_active(self, session_id: str) -> bool:
-        """Return whether user follow-ups may join the current Team round."""
+    def is_interactive_steer_round_active(self, session_id: str) -> bool:
+        """Return whether ordinary user text may steer the active Team round."""
         current = self._active_rounds.get(session_id)
         return current is not None and not current.defer_terminal_release
 

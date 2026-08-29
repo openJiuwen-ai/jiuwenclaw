@@ -2017,7 +2017,7 @@ async def test_heartbeat_team_followup_waits_for_real_round_and_routes_once(monk
 
 
 @pytest.mark.anyio
-async def test_interactive_followup_attaches_after_headless_heartbeat(monkeypatch):
+async def test_interactive_steer_attaches_after_headless_heartbeat(monkeypatch):
     """A user can consume a stream whose only previous waiter was Heartbeat."""
     from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
         SessionRunAdmission,
@@ -2148,7 +2148,9 @@ async def test_cancelled_heartbeat_followup_aborts_submitted_team_round(monkeypa
 
 
 @pytest.mark.anyio
-async def test_interactive_team_followup_hands_admission_to_round_state(monkeypatch):
+async def test_interactive_team_steer_starts_new_iteration_with_retained_lease(
+    monkeypatch,
+):
     from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
         SessionRunAdmission,
     )
@@ -2194,8 +2196,8 @@ async def test_interactive_team_followup_hands_admission_to_round_state(monkeypa
         team_helpers.reset_team_heartbeat_service(heartbeat_token)
 
     assert chunks[0].payload["event_type"] == "chat.processing_status_deferred"
-    # The user admission is retained until the actual Team round terminates,
-    # even though the short follow-up transport has already returned.
+    # With no active iteration, the steer creates the next iteration and its
+    # admission is retained until that Team round terminates.
     assert admission.is_user_active("sess-team-user") is True
     assert manager.is_round_active("sess-team-user") is True
 
@@ -2216,7 +2218,7 @@ async def test_interactive_team_followup_hands_admission_to_round_state(monkeypa
 
 
 @pytest.mark.anyio
-async def test_interactive_team_followup_joins_active_round_without_waiting(
+async def test_interactive_team_steer_joins_active_round_without_retained_lease(
     monkeypatch,
 ):
     from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
@@ -2278,6 +2280,10 @@ async def test_interactive_team_followup_joins_active_round_without_waiting(
 
         assert interacted.is_set()
         assert first_chunk.payload["event_type"] == "chat.processing_status_deferred"
+        # Ordinary Team text is a steer into the leader's active iteration.
+        # Its short admission protects the atomic handoff only; the original
+        # iteration remains the sole round-long user lease.
+        assert admission._states[session_id].active_users == 1
         assert (
             await admission.try_begin_heartbeat(session_id, "hb-during-user") is False
         )
@@ -4219,7 +4225,7 @@ async def test_duplicate_terminal_cannot_release_next_team_round():
 
 
 @pytest.mark.anyio
-async def test_terminal_racing_followup_cannot_release_new_generation():
+async def test_terminal_racing_steer_cannot_release_new_generation():
     from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 
     interact_started = asyncio.Event()
@@ -4234,7 +4240,7 @@ async def test_terminal_racing_followup_cannot_release_new_generation():
     manager = _FakeManager()
     session_id = "sess-terminal-followup-race"
     released_first = AsyncMock()
-    released_followup = AsyncMock()
+    released_steer = AsyncMock()
     manager.begin_round(
         session_id,
         "round-first",
@@ -4243,11 +4249,11 @@ async def test_terminal_racing_followup_cannot_release_new_generation():
     )
 
     submit_task = asyncio.create_task(
-        manager.submit_interactive_followup(
+        manager.submit_interactive_steer(
             session_id,
-            "round-followup",
+            "steer-request",
             "continue",
-            release_admission=released_followup,
+            release_admission=released_steer,
         )
     )
     await asyncio.wait_for(interact_started.wait(), timeout=1.0)
@@ -4265,12 +4271,12 @@ async def test_terminal_racing_followup_cannot_release_new_generation():
     assert stale_terminal_task.done() is False
 
     allow_interact.set()
-    assert await submit_task == (True, None)
+    assert await submit_task == (True, None, False)
     await stale_terminal_task
 
     assert manager.is_round_active(session_id) is True
     released_first.assert_not_awaited()
-    released_followup.assert_not_awaited()
+    released_steer.assert_not_awaited()
 
     await manager.broadcast_event(
         session_id,
@@ -4286,11 +4292,11 @@ async def test_terminal_racing_followup_cannot_release_new_generation():
     )
     assert manager.is_round_active(session_id) is False
     released_first.assert_awaited_once()
-    released_followup.assert_awaited_once()
+    released_steer.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_followup_during_terminal_broadcast_retries_after_old_round_closes():
+async def test_steer_during_terminal_broadcast_retries_after_old_round_closes():
     from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 
     class _FakeManager(TeamManager):
@@ -4322,21 +4328,21 @@ async def test_followup_during_terminal_broadcast_retries_after_old_round_closes
         )
     )
     for _ in range(20):
-        if not manager.is_interactive_round_active(session_id):
+        if not manager.is_interactive_steer_round_active(session_id):
             break
         await asyncio.sleep(0)
-    assert manager.is_interactive_round_active(session_id) is False
+    assert manager.is_interactive_steer_round_active(session_id) is False
     assert manager.is_round_active(session_id) is True
     released_first.assert_not_awaited()
 
     followup_waiter: asyncio.Queue = asyncio.Queue()
     manager.add_waiter(session_id, "followup-browser", followup_waiter)
-    assert await manager.submit_interactive_followup(
+    assert await manager.submit_interactive_steer(
         session_id,
         "round-followup",
         "continue",
         release_admission=released_followup,
-    ) == (False, "gate_closed")
+    ) == (False, "gate_closed", False)
     assert manager.is_round_owner(session_id, "round-followup") is False
 
     manager.remove_waiter(session_id, "browser")
@@ -4345,12 +4351,12 @@ async def test_followup_during_terminal_broadcast_retries_after_old_round_closes
     released_followup.assert_not_awaited()
     assert followup_waiter.empty()
 
-    assert await manager.submit_interactive_followup(
+    assert await manager.submit_interactive_steer(
         session_id,
         "round-followup",
         "continue",
         release_admission=released_followup,
-    ) == (True, None)
+    ) == (True, None, True)
     assert manager.is_round_owner(session_id, "round-followup") is True
 
     await manager.broadcast_event(
@@ -4386,12 +4392,12 @@ async def test_cancelled_terminal_broadcast_releases_detached_round_once():
         release_admission=released_first,
         terminal_armed=True,
     )
-    assert await manager.submit_interactive_followup(
+    assert await manager.submit_interactive_steer(
         session_id,
         "round-followup",
         "continue",
         release_admission=released_followup,
-    ) == (True, None)
+    ) == (True, None, False)
     await manager.broadcast_event(
         session_id,
         {"event_type": "team.task", "event": {"type": "team.task.created"}},
@@ -4411,7 +4417,7 @@ async def test_cancelled_terminal_broadcast_releases_detached_round_once():
         )
     )
     for _ in range(20):
-        if not manager.is_interactive_round_active(session_id):
+        if not manager.is_interactive_steer_round_active(session_id):
             break
         await asyncio.sleep(0)
     assert manager.is_round_active(session_id) is True
@@ -4421,7 +4427,7 @@ async def test_cancelled_terminal_broadcast_releases_detached_round_once():
         await terminal_task
 
     released_first.assert_awaited_once()
-    released_followup.assert_awaited_once()
+    released_followup.assert_not_awaited()
     assert manager.is_round_active(session_id) is False
 
 
@@ -4486,12 +4492,12 @@ async def test_stream_finalizer_blocks_successor_until_owned_round_is_released(
     await asyncio.wait_for(finalizer_started.wait(), timeout=1.0)
 
     assert manager.is_round_active(session_id) is True
-    assert await manager.submit_interactive_followup(
+    assert await manager.submit_interactive_steer(
         session_id,
         "round-followup",
         "continue",
         release_admission=released_followup,
-    ) == (False, "gate_closed")
+    ) == (False, "gate_closed", False)
     released_first.assert_not_awaited()
 
     allow_finalizer.set()
@@ -4499,19 +4505,19 @@ async def test_stream_finalizer_blocks_successor_until_owned_round_is_released(
     released_first.assert_awaited_once()
     assert manager.is_round_active(session_id) is False
 
-    assert await manager.submit_interactive_followup(
+    assert await manager.submit_interactive_steer(
         session_id,
         "round-followup",
         "continue",
         release_admission=released_followup,
-    ) == (True, None)
+    ) == (True, None, True)
     released_followup.assert_not_awaited()
     assert await manager.release_round(session_id, "round-followup") is True
     released_followup.assert_awaited_once()
 
 
 @pytest.mark.anyio
-async def test_failed_interactive_followup_removes_empty_round():
+async def test_failed_interactive_steer_removes_empty_round():
     from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 
     class _FakeManager(TeamManager):
@@ -4521,12 +4527,12 @@ async def test_failed_interactive_followup_removes_empty_round():
     manager = _FakeManager()
     released = AsyncMock()
 
-    assert await manager.submit_interactive_followup(
+    assert await manager.submit_interactive_steer(
         "sess-followup-failed",
         "round-followup",
         "continue",
         release_admission=released,
-    ) == (False, "runner_failed")
+    ) == (False, "runner_failed", False)
     assert manager.is_round_active("sess-followup-failed") is False
     released.assert_not_awaited()
 
