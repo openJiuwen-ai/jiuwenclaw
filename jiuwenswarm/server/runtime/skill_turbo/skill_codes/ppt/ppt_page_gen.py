@@ -3216,6 +3216,354 @@ def _build_page_gen_rewrite_hint(reason: str) -> str:
     return f"上一轮生成的 HTML 校验失败（reason={reason}）。\n{body}"
 
 
+_CHECK_LAYOUT_DENSITY = "lean"
+_ACTIVATE_TEMPLATE_CHART_TIMEOUT_SECONDS = 5
+_CHECK_LAYOUT_HARD_TAGS = (
+    "slide-boundary-overflow",
+    "footer-intrusion",
+    "chart-label-overlap",
+    "overflow",
+    "whitespace",
+    "v-gap",
+)
+_CHECK_LAYOUT_SOFT_WARNING_RE = re.compile(r"[\w-]+-warning\b", re.IGNORECASE)
+_CHECK_LAYOUT_PAGE_REF_RE = re.compile(
+    r"(?:page[-\s#:]?|\"page\"?\s*:\s*)(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _page_qualifies_for_check_layout(page_type: str) -> bool:
+    """内容页 + agenda；cover/section/ending 等其余结构页排除。"""
+    normalized = (page_type or "").strip().lower()
+    if normalized == "agenda":
+        return True
+    if normalized in _STRUCTURAL_TEMPLATE_PAGE_TYPES:
+        return False
+    return True
+
+
+def _page_qualifies_for_chart_gate(page_type: str) -> bool:
+    """纯内容页（可能有 CHART_SCAFFOLD）；排除 cover/agenda/section/ending。"""
+    normalized = (page_type or "").strip().lower()
+    return normalized not in _STRUCTURAL_TEMPLATE_PAGE_TYPES
+
+
+_COMMENTED_CHART_SCAFFOLD_BLOCK_RE = re.compile(
+    r"<!--\s*(CHART_SCAFFOLD(?:_\d+)?_BEGIN)\s*([\s\S]*?)(CHART_SCAFFOLD(?:_\d+)?_END)\s*-->",
+    re.IGNORECASE,
+)
+_CANONICAL_ACTIVE_CHART_SCAFFOLD_RE = re.compile(
+    r'<script\b[^>]*\bdata-pptx-chart-scaffold\s*=\s*(["\'])v1\1',
+    re.IGNORECASE,
+)
+
+
+def _html_requires_activate_template_chart(html: str) -> bool:
+    """是否应调用 pptx-craft activate-template-chart（与 skill 调用时机对齐）。
+
+    仅两类页需要 CLI：
+    1. 注释内 CHART_SCAFFOLD 已填 option、待 CLI 成对删除定界符；
+    2. 已暴露的 canonical active scaffold（data-pptx-chart-scaffold=v1）待验收。
+
+    非图表页保留 dormant 注释（option=null）时不调用；Turbo 已激活且不含 canonical
+    marker 的页面也不调用（与 designer.md「决定使用图表后再 activate」一致）。
+    """
+    if not html:
+        return False
+    blocks = list(_COMMENTED_CHART_SCAFFOLD_BLOCK_RE.finditer(html))
+    if blocks:
+        for block in blocks:
+            body = block.group(2) or ""
+            if re.search(r"\bconst\s+option\s*=\s*null\b", body):
+                continue
+            if re.search(r"\bconst\s+option\s*=", body):
+                return True
+        return False
+    return _CANONICAL_ACTIVE_CHART_SCAFFOLD_RE.search(html) is not None
+
+
+def _collect_check_layout_page_nums(
+    successful_pages: list[int],
+    outline_pages: dict[int, str],
+) -> list[int]:
+    """收集已通过静态校验并成功落盘、需做 check-layout 的页码。"""
+    selected: list[int] = []
+    for page_num in sorted(successful_pages):
+        outline_page = str(outline_pages.get(page_num) or "")
+        page_type = _detect_page_type(outline_page)
+        if _page_qualifies_for_check_layout(page_type):
+            selected.append(page_num)
+    return selected
+
+
+def _coerce_check_layout_page_num(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value if value > 0 else None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = re.search(r"(\d+)", text)
+    if not match:
+        return None
+    page_num = int(match.group(1))
+    return page_num if page_num > 0 else None
+
+
+def _extract_hard_tags_from_check_layout_line(line: str) -> list[str]:
+    if _CHECK_LAYOUT_SOFT_WARNING_RE.search(line):
+        return []
+    lower = line.lower()
+    found: list[str] = []
+    for tag in _CHECK_LAYOUT_HARD_TAGS:
+        if tag in lower:
+            found.append(tag)
+    if "slide-boundary-overflow" in found and "overflow" in found:
+        found = [tag for tag in found if tag != "overflow"]
+    return found
+
+
+def _extract_hard_issues_from_check_layout_value(value: Any) -> list[str]:
+    issues: list[str] = []
+    if isinstance(value, str):
+        for tag in _extract_hard_tags_from_check_layout_line(value):
+            if tag not in issues:
+                issues.append(tag)
+        return issues
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str):
+                for tag in _extract_hard_tags_from_check_layout_line(item):
+                    if tag not in issues:
+                        issues.append(tag)
+            elif isinstance(item, dict):
+                tag = str(item.get("type") or item.get("code") or item.get("id") or "")
+                summary = str(item.get("message") or item.get("summary") or tag)
+                for hard_tag in _extract_hard_tags_from_check_layout_line(
+                    f"{tag} {summary}"
+                ):
+                    if hard_tag not in issues:
+                        issues.append(hard_tag)
+    elif isinstance(value, dict):
+        for key in ("issues", "failures", "hard", "errors"):
+            nested = value.get(key)
+            if nested is not None:
+                issues.extend(_extract_hard_issues_from_check_layout_value(nested))
+        tag = str(value.get("type") or value.get("code") or value.get("id") or "")
+        summary = str(value.get("message") or value.get("summary") or tag)
+        for hard_tag in _extract_hard_tags_from_check_layout_line(f"{tag} {summary}"):
+            if hard_tag not in issues:
+                issues.append(hard_tag)
+    return issues
+
+
+def _parse_check_layout_json_payload(payload: dict[str, Any]) -> dict[int, list[str]]:
+    failures: dict[int, list[str]] = {}
+    pages_obj = (
+        payload.get("pages")
+        or payload.get("results")
+        or payload.get("failures")
+        or payload.get("pageResults")
+    )
+    if isinstance(pages_obj, dict):
+        for key, value in pages_obj.items():
+            page_num = _coerce_check_layout_page_num(key)
+            issues = _extract_hard_issues_from_check_layout_value(value)
+            if page_num and issues:
+                failures[page_num] = issues
+    failed_pages = payload.get("failedPages") or payload.get("failed_pages")
+    if isinstance(failed_pages, list):
+        for item in failed_pages:
+            if isinstance(item, dict):
+                page_num = _coerce_check_layout_page_num(
+                    item.get("page") or item.get("pageNum") or item.get("page_num")
+                )
+                issues = _extract_hard_issues_from_check_layout_value(item)
+            else:
+                page_num = _coerce_check_layout_page_num(item)
+                issues = ["overflow"] if page_num else []
+            if page_num and issues:
+                failures[page_num] = issues
+    return failures
+
+
+def _parse_check_layout_hard_failures(
+    output: str,
+    page_nums: list[int] | None = None,
+) -> dict[int, list[str]]:
+    """解析 check-layout CLI 输出中的硬项失败页（忽略 *-warning 软警告）。"""
+    text = (output or "").strip()
+    if not text:
+        return {}
+
+    stripped = text
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, count=1, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped, count=1)
+
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        parsed = _parse_check_layout_json_payload(payload)
+        if parsed:
+            return parsed
+
+    failures: dict[int, list[str]] = {}
+    current_page: int | None = None
+    for line in text.splitlines():
+        if _CHECK_LAYOUT_SOFT_WARNING_RE.search(line):
+            continue
+        page_match = _CHECK_LAYOUT_PAGE_REF_RE.search(line)
+        if page_match:
+            current_page = int(page_match.group(1))
+        tags = _extract_hard_tags_from_check_layout_line(line)
+        if not tags:
+            continue
+        target_page = current_page
+        if target_page is None and page_nums and len(page_nums) == 1:
+            target_page = page_nums[0]
+        if target_page is None:
+            continue
+        bucket = failures.setdefault(target_page, [])
+        for tag in tags:
+            if tag not in bucket:
+                bucket.append(tag)
+    return failures
+
+
+def _check_layout_timeout_seconds(page_count: int) -> int:
+    batches = max((page_count + 3) // 4, 1)
+    return max(30, batches * 3 + 15)
+
+
+def _build_check_layout_rewrite_hint(page_num: int, issues: list[str]) -> str:
+    issue_lines = "\n".join(f"- {issue}" for issue in issues if issue)
+    next_steps = _build_rewrite_hint(issues)
+    parts = [
+        f"check-layout 渲染检测未通过（page-{page_num}，density={_CHECK_LAYOUT_DENSITY}）。",
+        "硬项问题：",
+        issue_lines or "- overflow",
+    ]
+    if next_steps:
+        parts.extend(["", next_steps])
+    return "\n".join(parts)
+
+
+async def _run_check_layout(
+    node: PlanNode,
+    *,
+    pages_dir: str,
+    pptx_root: str,
+    page_nums: list[int],
+    density: str = _CHECK_LAYOUT_DENSITY,
+) -> tuple[dict[int, list[str]], bool]:
+    """运行 pptx-craft check-layout；返回 (硬项失败页, 是否跳过)。"""
+    if not page_nums or not pages_dir or not pptx_root:
+        return {}, False
+
+    pages_arg = ",".join(str(page_num) for page_num in sorted(page_nums))
+    timeout_seconds = _check_layout_timeout_seconds(len(page_nums))
+    try:
+        check_layout_cli = cli_path("check-layout", pptx_root)
+    except BashExecError as exc:
+        logger.warning("[P8.1] check-layout CLI 不可用，降级跳过: %s", exc)
+        return {}, True
+    cmd = (
+        f"{check_layout_cli} {quote_path(pages_dir)} "
+        f"--pages {pages_arg} --density {density}"
+    )
+    try:
+        result = await run_bash(
+            node,
+            cmd,
+            timeout_seconds=timeout_seconds,
+            required=False,
+            workdir=pptx_root,
+        )
+    except BashExecError as exc:
+        logger.warning("[P8.1] check-layout CLI 不可用，降级跳过: %s", exc)
+        return {}, True
+    except Exception as exc:
+        if isinstance(exc, AbortError):
+            raise
+        logger.warning("[P8.1] check-layout 异常，降级跳过: %s", exc)
+        return {}, True
+
+    detail = combined_output(result)
+    failures = _parse_check_layout_hard_failures(detail, page_nums)
+    if failures:
+        logger.warning(
+            "[P8.1] check-layout 硬项未通过 pages=%s density=%s",
+            sorted(failures),
+            density,
+        )
+        return failures, False
+    if result.exit_code != 0:
+        logger.warning(
+            "[P8.1] check-layout exit=%d 但未解析到硬项失败，降级跳过: %s",
+            result.exit_code,
+            detail[:500],
+        )
+        return {}, True
+
+    logger.info(
+        "[P8.1] check-layout 通过 pages=%s density=%s",
+        pages_arg,
+        density,
+    )
+    return {}, False
+
+
+async def _run_activate_template_chart_page(
+    node: PlanNode,
+    *,
+    pages_dir: str,
+    pptx_root: str,
+    page_num: int,
+) -> tuple[bool, str, bool]:
+    """运行 pptx-craft activate-template-chart；返回 (通过, 失败详情, 是否跳过)。"""
+    if not pages_dir or not pptx_root or page_num <= 0:
+        return True, "", True
+    page_path = f"{pages_dir}/page-{page_num}.pptx.html"
+    try:
+        chart_cli = cli_path("activate-template-chart", pptx_root)
+    except BashExecError as exc:
+        logger.warning("[P8.1] activate-template-chart 跳过：%s", exc)
+        return True, "", True
+    cmd = f"{chart_cli} --file {quote_path(page_path)}"
+    try:
+        result = await run_bash(
+            node,
+            cmd,
+            timeout_seconds=_ACTIVATE_TEMPLATE_CHART_TIMEOUT_SECONDS,
+            required=False,
+            workdir=pptx_root,
+        )
+    except BashExecError as exc:
+        logger.warning("[P8.1] activate-template-chart 跳过：%s", exc)
+        return True, "", True
+    except Exception as exc:
+        if isinstance(exc, AbortError):
+            raise
+        logger.warning("[P8.1] activate-template-chart 异常，跳过：%s", exc)
+        return True, "", True
+
+    detail = combined_output(result).strip()
+    if result.exit_code == 0:
+        logger.info("[P8.1] activate-template-chart 通过 page=%d", page_num)
+        return True, "", False
+    logger.warning(
+        "[P8.1] activate-template-chart 未通过 page=%d exit=%d detail=%s",
+        page_num,
+        result.exit_code,
+        detail[:500],
+    )
+    fail_reason = detail or f"activate-template-chart exit={result.exit_code}"
+    return False, fail_reason, False
+
+
 def _extract_page_keywords(research_page: str) -> list[str]:
     if not research_page:
         return []
@@ -3942,6 +4290,21 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
         successful_pages = [p for p in all_pages if p not in missing_pages]
         page_files = [f"page-{p}.pptx.html" for p in successful_pages]
 
+        layout_meta = await self._apply_check_layout_pass(
+            pages_dir=pages_dir,
+            pptx_root=pptx_root,
+            successful_pages=successful_pages,
+            outline_pages=outline_pages,
+            research_pages=research_pages,
+            outline_full=outline_full,
+            style_id=style_id,
+            style_text=style_text,
+            image_map=image_map,
+            designer_md_text=designer_md_text,
+            user_query=user_query,
+            total_pages=total_pages,
+        )
+
         logger.info(
             "[P8.1] per-page 生成完成 success=%d/%d missing=%d",
             len(successful_pages),
@@ -3955,7 +4318,154 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             "density_report": {},
             "outline_text": outline_full,
             "style_text": style_text,
+            **layout_meta,
         }
+
+
+    async def _apply_check_layout_pass(
+        self,
+        *,
+        pages_dir: str,
+        pptx_root: str,
+        successful_pages: list[int],
+        outline_pages: dict[int, str],
+        research_pages: dict[int, str],
+        outline_full: str,
+        style_id: str,
+        style_text: str,
+        image_map: dict[str, Any],
+        designer_md_text: str,
+        user_query: str,
+        total_pages: int,
+    ) -> dict[str, Any]:
+        """P8.1 末尾：内容页+agenda 做 check-layout，至多一轮再填槽+复检。"""
+        empty_result = {
+            "layout_check_skipped": False,
+            "layout_warning_pages": [],
+            "layout_retry_pages": [],
+        }
+        check_pages = _collect_check_layout_page_nums(successful_pages, outline_pages)
+        if not check_pages:
+            return empty_result
+        if not pptx_root:
+            logger.warning("[P8.1] check-layout 跳过：缺少 pptx_root")
+            return {**empty_result, "layout_check_skipped": True}
+
+        failures, skipped = await _run_check_layout(
+            self,
+            pages_dir=pages_dir,
+            pptx_root=pptx_root,
+            page_nums=check_pages,
+        )
+        if skipped:
+            return {**empty_result, "layout_check_skipped": True}
+        if not failures:
+            return empty_result
+
+        layout_warning_pages: list[int] = []
+        layout_retry_pages: list[int] = []
+        retried_pages: list[int] = []
+
+        async def _rewrite_one_failed_page(page_num: int) -> tuple[int, bool]:
+            """单页再填槽；返回 (page_num, 是否写盘成功)。与首轮 gather 同页隔离。"""
+            issues = failures.get(page_num) or []
+            path = f"{pages_dir}/page-{page_num}.pptx.html"
+            previous_html = await self._read_file(path)
+            rewrite_hint = _build_check_layout_rewrite_hint(page_num, issues)
+
+            outline_page = str(outline_pages.get(page_num) or outline_full)
+            research_page = str(research_pages.get(page_num) or "")
+            page_images = image_map.get(str(page_num), [])
+            image_map_page = ""
+            if page_images:
+                lines = []
+                for img in page_images:
+                    path_val = str(img.get("path", ""))
+                    lines.append(
+                        f"- path: {path_val}, usage: {img.get('usage', 'content')}, "
+                        f"description: {img.get('description', '')}, type: {img.get('type', '')}"
+                    )
+                image_map_page = "\n".join(lines)
+
+            ctx = PageGenContext(
+                page_num=page_num,
+                style_id=style_id,
+                style_text=style_text,
+                outline_page=outline_page,
+                research_page=research_page,
+                outline_is_full=page_num not in outline_pages,
+                image_map_page=image_map_page,
+                designer_md_text=designer_md_text,
+                user_query=user_query,
+                total_pages=total_pages,
+                pptx_root=pptx_root,
+                outline_full=outline_full,
+            )
+            html, _, _ = await self._generate_one(
+                ctx,
+                rewrite_hint=rewrite_hint,
+                original_html=previous_html,
+            )
+            if html and await self._write_file(path, html):
+                return page_num, True
+
+            logger.warning(
+                "[P8.1] check-layout 再填槽失败 page=%d，保留上一版 HTML",
+                page_num,
+            )
+            if previous_html:
+                await self._write_file(path, previous_html)
+            return page_num, False
+
+        # 与首轮填槽一致：失败页 asyncio.gather 并发再填（仍仅一轮）
+        rewrite_results = await asyncio.gather(
+            *[_rewrite_one_failed_page(page_num) for page_num in sorted(failures)],
+            return_exceptions=True,
+        )
+        for result in rewrite_results:
+            if isinstance(result, (AbortError, asyncio.CancelledError)):
+                raise result
+            if isinstance(result, BaseException):
+                raise result
+            page_num, ok = result
+            if ok:
+                retried_pages.append(page_num)
+                layout_retry_pages.append(page_num)
+            else:
+                layout_warning_pages.append(page_num)
+
+        retried_pages = sorted(retried_pages)
+        layout_retry_pages = sorted(layout_retry_pages)
+
+        if retried_pages:
+            recheck_failures, recheck_skipped = await _run_check_layout(
+                self,
+                pages_dir=pages_dir,
+                pptx_root=pptx_root,
+                page_nums=retried_pages,
+            )
+            if recheck_skipped:
+                return {
+                    "layout_check_skipped": True,
+                    "layout_warning_pages": sorted(set(layout_warning_pages)),
+                    "layout_retry_pages": layout_retry_pages,
+                }
+            for page_num in retried_pages:
+                if page_num in recheck_failures:
+                    if page_num not in layout_warning_pages:
+                        layout_warning_pages.append(page_num)
+                    logger.warning(
+                        "[P8.1] check-layout 复检仍失败 page=%d issues=%s",
+                        page_num,
+                        recheck_failures.get(page_num),
+                    )
+
+        return {
+            "layout_check_skipped": False,
+            "layout_warning_pages": sorted(set(layout_warning_pages)),
+            "layout_retry_pages": layout_retry_pages,
+        }
+
 
     async def _run_page_pipeline(
         self,
@@ -4006,7 +4516,10 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             outline_full=outline_full or outline_page,
         )
 
-        html = ""
+        page_type = _detect_page_type(outline_page)
+        needs_chart_gate = _page_qualifies_for_chart_gate(page_type)
+
+        final_html = ""
         last_raw_html = ""
         last_fail_reason = ""
         attempt_count = min(
@@ -4021,16 +4534,47 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
                 if last_raw_html or last_fail_reason:
                     rewrite_hint = _build_page_gen_rewrite_hint(last_fail_reason)
                     original_html = last_raw_html
-            html, last_raw_html, last_fail_reason = await self._generate_one(
+            html, last_raw_html, gen_fail_reason = await self._generate_one(
                 ctx, rewrite_hint=rewrite_hint, original_html=original_html
             )
-            if html:
-                break
-        if not html:
-            return {"missing": True, "low_density": False, "report": {}}
+            if not html:
+                if gen_fail_reason:
+                    last_fail_reason = gen_fail_reason
+                continue
 
-        ok = await self._write_file(path, html)
-        if not ok:
+            if not await self._write_file(path, html):
+                last_fail_reason = "write_file_failed"
+                continue
+
+            if needs_chart_gate:
+                if not pptx_root:
+                    logger.warning(
+                        "[P8.1] activate-template-chart 跳过：缺少 pptx_root page=%d",
+                        page_num,
+                    )
+                    final_html = html
+                    break
+                if not _html_requires_activate_template_chart(html):
+                    final_html = html
+                    break
+                passed, detail, skipped = await _run_activate_template_chart_page(
+                    self,
+                    pages_dir=pages_dir,
+                    pptx_root=pptx_root,
+                    page_num=page_num,
+                )
+                if skipped or passed:
+                    final_html = html
+                    break
+                last_fail_reason = detail or "activate-template-chart"
+                await self._delete_page_file(path)
+                continue
+
+            final_html = html
+            break
+
+        if not final_html:
+            await self._delete_page_file(path)
             return {"missing": True, "low_density": False, "report": {}}
 
         return {
@@ -4038,7 +4582,7 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             "low_density": False,
             "report": {},
             # 跨页 head 指纹投票用：落盘页的原始 HTML 与页码
-            "html": html,
+            "html": final_html,
             "page_num": page_num,
         }
 
@@ -4405,6 +4949,22 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
             logger.error("[P8.1] 写入文件失败 %s: %s", path, e)
             return False
 
+    async def _delete_page_file(self, path: str) -> None:
+        """删除落盘 HTML，防止 convert 整目录扫入坏页（skill_code 禁 direct unlink）。"""
+        if not path:
+            return
+        try:
+            await run_bash(
+                self,
+                f"rm -f {quote_path(path)}",
+                timeout_seconds=10,
+                required=False,
+            )
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8.1] 删除页面文件失败 path=%s err=%s", path, e)
+
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)
         missing = result.get("missing_pages", [])
@@ -4445,7 +5005,7 @@ class QAFixNode(PlanNode):
                 "### 执行流程\n"
                 "1. 完整性检查：列 pages_dir 下 page-*.pptx.html，比对数量与 page_count\n"
                 "2. 基础修复：node cli.js fix {pages_dir}/ --fix --style {style_file_path}\n"
-                "3. Stage 6 到此结束；可选 check-layout 按 skill 规则仅在首次导出后且显式启用时执行\n"
+                "3. Stage 6 到此结束；check-layout 已在 P8.1 对内容页与 agenda 执行（--density lean）\n"
                 "\n"
                 "### 失败兜底\n"
                 "- bash 不可用：跳过 fix，仅做完整性检查\n"
