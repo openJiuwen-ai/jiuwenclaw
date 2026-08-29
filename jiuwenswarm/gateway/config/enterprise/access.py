@@ -1,8 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """企业专属表 Repository 注入入口。
 
-迁移期不注入：``get_*`` 返回 None，EE 仍走 ``DBHandler``。
-切流后由装配层 ``set_enterprise_record_repositories`` 注入。
+企业版启动时由 ``set_enterprise_record_repositories`` 注入；
+EE Manager 写路径经 ``require_enterprise_repository``，未注入则 fail-fast。
 """
 
 from __future__ import annotations
