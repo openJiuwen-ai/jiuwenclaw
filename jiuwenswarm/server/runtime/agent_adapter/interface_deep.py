@@ -375,6 +375,7 @@ from jiuwenswarm.server.runtime.mcp.call_timeout_patch import apply_mcp_call_tim
 from jiuwenswarm.common.task_loop_config import (
     resolve_task_loop_completion_timeout,
 )
+from jiuwenswarm.common.reasoning_config import resolve_endpoint_profile_override
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
@@ -855,6 +856,15 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
     mcc_fields = {k: v for k, v in mcc.items() if k != "model_name"}
     if not mcc_fields.get("client_provider"):
         mcc_fields["client_provider"] = "OpenAI"
+    # 已知自建网关（如 DashScope 风格端点）按 api_base host 补全 endpoint_profile，
+    # 覆盖尚未重新保存过的存量条目；显式配置的方言优先。core 依赖该字段
+    # 选择线格式（enable_thinking + thinking_budget），档位仍按模型名。
+    if not mcc_fields.get("endpoint_profile"):
+        _inferred_profile = resolve_endpoint_profile_override(
+            mcc_fields.get("api_base") or mcc_fields.get("base_url")
+        )
+        if _inferred_profile:
+            mcc_fields["endpoint_profile"] = _inferred_profile
 
     # ``context_window``（模型支持的上下文总长度）可配在任意模型条目的 mco 里
     # （defaults / agentos / video / audio / vision / image_gen 均可），经

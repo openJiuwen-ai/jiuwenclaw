@@ -39,6 +39,10 @@ from jiuwenswarm.common.config import (
     update_skill_evolution_enabled_in_config,
     update_config,
 )
+from jiuwenswarm.common.reasoning_config import (
+    resolve_endpoint_profile_override,
+    validate_reasoning_level_for_model,
+)
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.context_window import resolve_context_window_tokens
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
@@ -2734,19 +2738,37 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 client_cfg["timeout"] = 1800
             if "temperature" not in model_config_obj:
                 model_config_obj["temperature"] = 0.95
-            _reasoning_level = str(model_config_obj.get("reasoning_level", "")).strip()
-            if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
-                await channel.send_response(
-                    ws,
-                    req_id,
-                    ok=False,
-                    error="reasoning_level must be one of: off, low, medium, high",
-                )
-                return
             # target 作为 model_name 的回退：若未通过 model= 参数指定，则以 target 为准
             if not client_cfg.get("model_name"):
                 client_cfg["model_name"] = target
             effective_name = client_cfg["model_name"]
+
+            # 与 web 端 models.replace_all 一致：按 core 能力表校验具体模型
+            # 支持的思考档位，并落库规范化后的值。
+            try:
+                _normalized_reasoning = validate_reasoning_level_for_model(
+                    raw_level=model_config_obj.get("reasoning_level"),
+                    model_name=resolve_env_vars(str(effective_name)),
+                    model_provider=resolve_env_vars(str(client_cfg.get("client_provider", ""))),
+                    api_base=resolve_env_vars(str(client_cfg.get("api_base", ""))),
+                    endpoint_profile=client_cfg.get("endpoint_profile"),
+                )
+            except ValueError as _reasoning_err:
+                await channel.send_response(ws, req_id, ok=False, error=str(_reasoning_err))
+                return
+            if _normalized_reasoning:
+                # 必须带引号落库：裸 on/off 会被 YAML 1.1 加载器读成布尔。
+                model_config_obj["reasoning_level"] = DoubleQuotedScalarString(_normalized_reasoning)
+            else:
+                model_config_obj.pop("reasoning_level", None)
+            # 与 web 端一致：已知自建网关按 api_base host 推断 endpoint_profile
+            # 并落库（如 vLLM 风格端点需走 core 的 "vllm" 方言才能关思考）。
+            if not client_cfg.get("endpoint_profile"):
+                _inferred_profile = resolve_endpoint_profile_override(
+                    resolve_env_vars(str(client_cfg.get("api_base", "")))
+                )
+                if _inferred_profile:
+                    client_cfg["endpoint_profile"] = _inferred_profile
 
             # alias 为顶层字段，从 client_cfg 提取；提前算最终值，
             # 确保唯一性校验基于实际存储值
@@ -2898,9 +2920,31 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                             continue
                         else:
                             _client_cfg[mapped_k] = v
-                    _reasoning_level = str(_model_cfg_obj.get("reasoning_level", "")).strip()
-                    if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
-                        raise _ModelOpError("reasoning_level must be one of: off, low, medium, high")
+                    # 与 web 端 models.replace_all 一致：按 core 能力表校验具体模型
+                    # 支持的思考档位，并落库规范化后的值。
+                    try:
+                        _normalized_reasoning = validate_reasoning_level_for_model(
+                            raw_level=_model_cfg_obj.get("reasoning_level"),
+                            model_name=resolve_env_vars(str(_client_cfg.get("model_name", ""))),
+                            model_provider=resolve_env_vars(str(_client_cfg.get("client_provider", ""))),
+                            api_base=resolve_env_vars(str(_client_cfg.get("api_base", ""))),
+                            endpoint_profile=_client_cfg.get("endpoint_profile"),
+                        )
+                    except ValueError as _reasoning_err:
+                        raise _ModelOpError(str(_reasoning_err)) from _reasoning_err
+                    if _normalized_reasoning:
+                        # 必须带引号落库：裸 on/off 会被 YAML 1.1 加载器读成布尔。
+                        _model_cfg_obj["reasoning_level"] = DoubleQuotedScalarString(_normalized_reasoning)
+                    else:
+                        _model_cfg_obj.pop("reasoning_level", None)
+                    # 与 web 端一致：已知自建网关按 api_base host 推断
+                    # endpoint_profile 并落库。
+                    if not _client_cfg.get("endpoint_profile"):
+                        _inferred_profile = resolve_endpoint_profile_override(
+                            resolve_env_vars(str(_client_cfg.get("api_base", "")))
+                        )
+                        if _inferred_profile:
+                            _client_cfg["endpoint_profile"] = _inferred_profile
                     if "verify_ssl" not in _client_cfg:
                         _client_cfg["verify_ssl"] = False
                     if "timeout" not in _client_cfg:

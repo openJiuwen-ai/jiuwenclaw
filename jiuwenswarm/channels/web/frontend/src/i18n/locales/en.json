@@ -167,11 +167,7 @@
         "anthropicUnavailable": "This provider plan does not support the Anthropic protocol"
       },
       "reasoning": {
-        "auto": "Use default",
-        "off": "Off",
-        "low": "Low",
-        "medium": "Medium",
-        "high": "High"
+        "auto": "Use default"
       },
       "openaiAccount": "OpenAI account",
       "agentOsReadonly": "AgentOS read-only",
@@ -180,8 +176,8 @@
       "reloadAfterFailure": "Reload and verify",
       "modelsResponseInvalid": "The model-list response is invalid. Please try again.",
       "catalogResponseInvalid": "The model-provider catalog response is invalid. Please try again.",
-      "catalogLoadingCustomAvailable": "Loading built-in model providers. You can still choose Custom to continue.",
-      "catalogLoadFailedCustomAvailable": "Built-in model providers failed to load. You can still choose Custom to continue.",
+      "catalogLoading": "Loading model providers and reasoning options. Please wait.",
+      "catalogLoadFailed": "Model providers and reasoning options failed to load. Retry before saving.",
       "saveResponseInvalid": "The model-save response is invalid. Reload to verify the server state.",
       "savedApplied": "Saved and applied",
       "savedRestartRequired": "Saved; takes effect after restart",
@@ -200,7 +196,8 @@
         "vendorSelectionRequired": "Select a model provider. Re-select the provider plan for a historical configuration that has no plan data",
         "vendorSelectionInvalid": "This provider plan is not in the server catalog. Select it again",
         "anthropicUnavailable": "This provider plan does not support the Anthropic protocol. Use OpenAI or select another provider",
-        "reasoningUnsupported": "The current reasoning level “{{value}}” is unsupported. Select another value",
+        "reasoningUnsupported": "The reasoning option “{{value}}” is unsupported. Select another option or use the default",
+        "reasoningUnavailable": "Reasoning options have not loaded. Retry before saving",
         "aliasConflict": "Custom name must be globally unique and cannot match another model ID",
         "modelNameConflict": "Model ID cannot match another configuration's custom name"
       },
@@ -212,17 +209,8 @@
       "webSearch": "Web search",
       "mediaTools": "Tools",
       "vision": "Image processing",
-      "visionDescription": "Enable image processing; disabling it keeps the saved model configuration.",
-      "visionConfigTitle": "Configure image processing model",
       "audio": "Audio processing",
-      "audioDescription": "Enable audio processing; disabling it keeps the saved model configuration.",
-      "audioConfigTitle": "Configure audio processing model",
       "video": "Video understanding",
-      "videoDescription": "Enable video understanding; disabling it keeps the saved model configuration.",
-      "videoConfigTitle": "Configure video understanding model",
-      "toggleCapability": "Toggle {{name}} capability",
-      "saveAndEnable": "Save and enable",
-      "savedRestartRequired": "Saved; takes effect after restart.",
       "team": "Agent team"
     },
     "browser": {
@@ -271,7 +259,7 @@
       "api_base": { "title": "API URL", "placeholder": "e.g. https://api.openai.com/v1" },
       "api_key": { "title": "API key", "placeholder": "e.g. sk-..." },
       "model_provider": { "title": "Model provider" },
-      "reasoning_level": { "title": "Reasoning level" },
+      "reasoning_level": { "title": "Reasoning" },
       "embed_api_base": { "title": "API URL" },
       "embed_api_key": { "title": "API key" },
       "embed_model": { "title": "Model name" },
