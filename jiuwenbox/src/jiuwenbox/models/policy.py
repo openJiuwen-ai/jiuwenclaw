@@ -12,6 +12,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from jiuwenbox.supervisor.daemon_ipc import SANDBOX_IP_ENV
+
 
 def _expand_path(value: str) -> str:
     """Expand shell-style path markers without requiring the path to exist."""
@@ -1011,6 +1013,16 @@ class SecurityPolicy(BaseModel):
         default_factory=InferencePrivacyProxyPolicy
     )
     conch: ConchPolicy = Field(default_factory=ConchPolicy)
+
+    @field_validator("environment")
+    @classmethod
+    def reject_reserved_environment(
+        cls,
+        value: dict[str, str],
+    ) -> dict[str, str]:
+        if SANDBOX_IP_ENV in value:
+            raise ValueError(f"{SANDBOX_IP_ENV} is reserved by the sandbox runtime")
+        return value
 
     def tostring(self) -> str:
         """Serialize the policy to a YAML string."""

@@ -136,6 +136,7 @@ JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox health
 | `400` | 请求参数错误或 policy 校验失败 |
 | `404` | 沙箱、策略、文件、目录或代理不存在 |
 | `409` | 当前状态不允许执行该操作 |
+| `422` | 请求体字段校验失败 |
 | `500` | 服务端内部错误 |
 
 ## 通用数据结构
@@ -151,8 +152,8 @@ JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox health
 | `created_at` | string | 创建时间 |
 | `started_at` | string/null | 启动时间 |
 | `error_message` | string/null | 错误信息 |
-| `env` | object | 创建沙箱时注入的环境变量 |
-| `ip_address` | string/null | 最近一次成功 create/start 后确认的 IPv4 快照。`network.mode=isolated` 时为沙箱 veth 地址；`host` 时为 jiuwenbox 与沙箱共享网络命名空间的出口 IPv4（若服务运行在 Docker/WSL 中，可能是容器或 WSL 地址，不承诺物理宿主机 LAN 地址）。`provisioning`、创建/启动失败的 `error` 为 `null`；`stopped` 保留停止前最后一次有效地址。get/list 不重新探测，只返回该快照 |
+| `env` | object | 创建沙箱时提交的环境变量；不包含 policy 或 runtime 注入的变量 |
+| `ip_address` | string/null | 最近一次成功 create/start 后确认的 IPv4 快照。`network.mode=isolated` 时为沙箱 veth 地址；`host` 时为 jiuwenbox 与沙箱共享网络命名空间的出口 IPv4（若服务运行在 Docker/WSL 中，可能是容器或 WSL 地址，不承诺物理宿主机 LAN 地址）。`process`（bwrap）后端同时将该快照注入 `SANDBOX_IP`；解析失败时变量不存在。该变量仅为便利元数据，沙箱代码可自行修改，不能用于鉴权或可信审计。`provisioning`、创建/启动失败的 `error` 为 `null`；`stopped` 保留停止前最后一次有效地址。get/list 不重新探测，只返回该快照；restart 会重新探测并注入 |
 
 示例：
 
@@ -241,7 +242,7 @@ print(resp.json())
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `env` | object | 否 | 沙箱公共环境变量 |
+| `env` | object | 否 | 沙箱公共环境变量；`SANDBOX_IP` 为 process runtime 保留键，提交时返回 422 |
 | `policy` | object/null | 否 | 覆盖或追加的 policy 数据 |
 | `policy_mode` | string | 否 | `override` 或 `append`，默认 `override` |
 | `sandbox_id` | string/null | 否 | 可选，指定沙箱 ID。长度 4~16，仅允许小写字母、数字、减号（`-`）和下划线（`_`）。省略或空字符串时服务端自动生成（形如 `6011f5ca-76a`）。格式非法返回 400；与已有 ID 冲突返回 409 |
@@ -250,6 +251,7 @@ print(resp.json())
 说明：
 
 - Conch 创建时读取有效 policy 的 `conch` 段（`template_id`、`filesystem_policy.bind_mounts`、`network`、可选成对的 `run_as_user` / `run_as_group`）。
+- process（bwrap）环境优先级为 policy `environment` → create `env` → exec `env` → runtime 保留变量。有效 policy 的 `environment` 也不能声明 `SANDBOX_IP`。
 - `conch.template_id` 解析顺序：有效 policy → 环境变量 `JIUWENBOX_CONCH_TEMPLATE_ID` → 不传（由 conchd `sandbox.default_template_id` 决定）。
 - `conch.run_as_user` / `conch.run_as_group`：可选成对；create 时在宿主机解析为 uid:gid（纯数字直通，名字走 `pwd`/`grp`）。未配置则保持 conch-agent 身份。未知名/越界 **400**。与顶层 `process.run_as_*` 无关；改身份需重建沙箱。
 - `conch.network` 仅支持 IPv4/CIDR 的 `default` + `allowed_ips` / `blocked_ips`（无域名/端口/IPv6）；映射到 Conch `allowOut`/`denyOut`/`allowIn`/`denyIn`，并由 `egress.default` 推导 SDK 内部的 `allow_internet_access`（不对用户暴露）。
@@ -499,7 +501,7 @@ print(resp.json())
 | --- | --- | --- | --- |
 | `command` | string[] | 是 | 待执行命令 |
 | `workdir` | string/null | 否 | 命令工作目录 |
-| `env` | object/null | 否 | 本次执行追加环境变量 |
+| `env` | object/null | 否 | 本次执行覆盖/追加的环境变量；不能包含保留键 `SANDBOX_IP` |
 | `stdin` | string/null | 否 | 标准输入文本 |
 | `timeout_seconds` | integer/null | 否 | 超时时间，单位秒 |
 
@@ -548,7 +550,7 @@ print(resp.json())
 | `command` | string[] | 是 | 要执行的命令 argv |
 | `job_id` | string | 否 | 自定义 job id（4–16 位，`[0-9a-z_-]`）；省略则服务端自动生成 |
 | `workdir` | string | 否 | 沙箱内工作目录 |
-| `env` | object | 否 | 额外环境变量 |
+| `env` | object | 否 | 额外环境变量；不能包含保留键 `SANDBOX_IP` |
 | `stdin` | string | 否 | 标准输入文本 |
 | `timeout_seconds` | int | 否 | 预留字段 |
 

@@ -8,9 +8,10 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from jiuwenbox.server.runtime.errors import InvalidJobIdError, InvalidSandboxIdError
+from jiuwenbox.supervisor.daemon_ipc import SANDBOX_IP_ENV
 
 
 def local_now() -> datetime:
@@ -124,6 +125,16 @@ class BackgroundExecRequest(BaseModel):
     env: dict[str, str] | None = None
     stdin: str | None = None
     timeout_seconds: int | None = None
+
+    @field_validator("env")
+    @classmethod
+    def reject_reserved_environment(
+        cls,
+        value: dict[str, str] | None,
+    ) -> dict[str, str] | None:
+        if value is not None and SANDBOX_IP_ENV in value:
+            raise ValueError(f"{SANDBOX_IP_ENV} is reserved by the sandbox runtime")
+        return value
 
 
 class BackgroundExecResult(BaseModel):
