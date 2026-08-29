@@ -3,16 +3,13 @@
 
 from __future__ import annotations
 
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, HTTPException, Request
-from openjiuwen_runtime.foundation.db.handler import DBHandler
+from fastapi import APIRouter, HTTPException, Request
 
 from ..core.instance_resource.instance_agent_resource import InstanceAgentResourceService
 from ..schemas.common_schemas import ResponseModel
 from ..schemas.instance_resource_schemas import InstanceAgentResourceUpsertRequest
 from ..schemas.sync_schemas import SyncEnvelopeOnlyBody, make_sync_body
-from .deps import build_sync_context, get_db_handler, sync_write_data
+from .deps import build_sync_context, sync_write_data
 from .runtime_notify import trigger_runtime_config_update
 
 instance_resource_router = APIRouter()
@@ -33,11 +30,10 @@ def _http_exc(exc: ValueError) -> HTTPException:
 async def upsert_instance_agent_resource(
     request: Request,
     body: AgentResourceUpsertSyncBody,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     sync = await build_sync_context(body, request.method)
     try:
-        result = await InstanceAgentResourceService(handler).upsert(
+        result = await InstanceAgentResourceService().upsert(
             sync.jiuwenclaw_id,
             sync.business,
         )
@@ -55,11 +51,10 @@ async def delete_instance_agent_resource(
     request: Request,
     resource_id: str,
     body: SyncEnvelopeOnlyBody,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     sync = await build_sync_context(body, request.method)
     try:
-        await InstanceAgentResourceService(handler).delete(
+        await InstanceAgentResourceService().delete(
             sync.jiuwenclaw_id,
             resource_id,
         )

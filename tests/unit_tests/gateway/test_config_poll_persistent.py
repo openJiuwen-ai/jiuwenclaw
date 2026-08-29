@@ -40,9 +40,6 @@ async def test_list_table_records_via_persistent_store() -> None:
 async def test_list_table_records_without_store() -> None:
     clear_persistent_store()
     with patch(
-        "jiuwenswarm.gateway.config_poll.db._list_records_via_ee_handler",
-        new=AsyncMock(return_value=None),
-    ), patch(
         "jiuwenswarm.server.runtime.enterprise_config.gateway_db.list_records",
         new=AsyncMock(return_value=[]),
     ):

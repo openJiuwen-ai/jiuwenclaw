@@ -7,8 +7,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from openjiuwen_runtime.foundation.db.handler import DBHandler
-
 from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
 
 from ...infrastructure.repository_access import require_enterprise_repository
@@ -157,8 +155,6 @@ async def _sync_embedding_templates_records(
 
 
 class EmbeddingTemplateService:
-    def __init__(self, handler: DBHandler) -> None:
-        self._handler = handler
 
     async def create(
         self,

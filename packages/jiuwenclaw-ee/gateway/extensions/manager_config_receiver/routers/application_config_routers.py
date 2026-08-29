@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
-from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from ..core.application_config.log_masking_rule import LogMaskingRuleService
 from ..core.application_config.logging_config import LoggingConfigService
@@ -26,7 +25,6 @@ from ..schemas.sync_schemas import make_sync_body
 from .deps import (
     SyncContext,
     VerifySyncEnvelopeOnly,
-    get_db_handler,
     sync_write_data,
     verify_sync,
 )
@@ -48,33 +46,12 @@ LogMaskingUpdateSyncBody = make_sync_body(
 )
 
 
-def _logging_svc(handler: DBHandler) -> LoggingConfigService:
-    return LoggingConfigService(handler)
-
-
-def _task_memory_svc(handler: DBHandler) -> TaskMemoryConfigService:
-    return TaskMemoryConfigService(handler)
-
-
-def _permissions_svc(handler: DBHandler) -> PermissionsConfigService:
-    return PermissionsConfigService(handler)
-
-
-def _memory_svc(handler: DBHandler) -> MemoryConfigService:
-    return MemoryConfigService(handler)
-
-
-def _log_masking_svc(handler: DBHandler) -> LogMaskingRuleService:
-    return LogMaskingRuleService(handler)
-
-
 @application_config_router.put("/logging", response_model=ResponseModel)
 async def upsert_logging(
     sync: Annotated[SyncContext, Depends(verify_sync(LoggingSyncBody))],
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        result = await _logging_svc(handler).upsert(sync.jiuwenclaw_id, **sync.business)
+        result = await LoggingConfigService().upsert(sync.jiuwenclaw_id, **sync.business)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -84,10 +61,9 @@ async def upsert_logging(
 @application_config_router.delete("/logging", response_model=ResponseModel)
 async def delete_logging(
     sync: VerifySyncEnvelopeOnly,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        await _logging_svc(handler).delete(sync.jiuwenclaw_id)
+        await LoggingConfigService().delete(sync.jiuwenclaw_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -97,10 +73,9 @@ async def delete_logging(
 @application_config_router.put("/task-memory", response_model=ResponseModel)
 async def upsert_task_memory(
     sync: Annotated[SyncContext, Depends(verify_sync(TaskMemorySyncBody))],
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        result = await _task_memory_svc(handler).upsert(
+        result = await TaskMemoryConfigService().upsert(
             sync.jiuwenclaw_id, sync.business
         )
     except ValueError as exc:
@@ -112,10 +87,9 @@ async def upsert_task_memory(
 @application_config_router.delete("/task-memory", response_model=ResponseModel)
 async def delete_task_memory(
     sync: VerifySyncEnvelopeOnly,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        await _task_memory_svc(handler).delete(sync.jiuwenclaw_id)
+        await TaskMemoryConfigService().delete(sync.jiuwenclaw_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -125,10 +99,9 @@ async def delete_task_memory(
 @application_config_router.put("/permissions", response_model=ResponseModel)
 async def upsert_permissions(
     sync: Annotated[SyncContext, Depends(verify_sync(PermissionsSyncBody))],
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        result = await _permissions_svc(handler).upsert(
+        result = await PermissionsConfigService().upsert(
             sync.jiuwenclaw_id, **sync.business
         )
     except ValueError as exc:
@@ -140,10 +113,9 @@ async def upsert_permissions(
 @application_config_router.delete("/permissions", response_model=ResponseModel)
 async def delete_permissions(
     sync: VerifySyncEnvelopeOnly,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        await _permissions_svc(handler).delete(sync.jiuwenclaw_id)
+        await PermissionsConfigService().delete(sync.jiuwenclaw_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -153,10 +125,9 @@ async def delete_permissions(
 @application_config_router.put("/memory", response_model=ResponseModel)
 async def upsert_memory(
     sync: Annotated[SyncContext, Depends(verify_sync(MemorySyncBody))],
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        result = await _memory_svc(handler).upsert(sync.jiuwenclaw_id, **sync.business)
+        result = await MemoryConfigService().upsert(sync.jiuwenclaw_id, **sync.business)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -166,10 +137,9 @@ async def upsert_memory(
 @application_config_router.delete("/memory", response_model=ResponseModel)
 async def delete_memory(
     sync: VerifySyncEnvelopeOnly,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        await _memory_svc(handler).delete(sync.jiuwenclaw_id)
+        await MemoryConfigService().delete(sync.jiuwenclaw_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -179,10 +149,9 @@ async def delete_memory(
 @application_config_router.post("/log-masking-rules", response_model=ResponseModel)
 async def create_log_masking_rule(
     sync: Annotated[SyncContext, Depends(verify_sync(LogMaskingCreateSyncBody))],
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        result = await _log_masking_svc(handler).create(
+        result = await LogMaskingRuleService().create(
             sync.jiuwenclaw_id, sync.business
         )
     except ValueError as exc:
@@ -197,10 +166,9 @@ async def create_log_masking_rule(
 async def patch_log_masking_rule(
     rule_id: str,
     sync: Annotated[SyncContext, Depends(verify_sync(LogMaskingUpdateSyncBody))],
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        result = await _log_masking_svc(handler).update(
+        result = await LogMaskingRuleService().update(
             sync.jiuwenclaw_id, rule_id, sync.business
         )
     except ValueError as exc:
@@ -217,10 +185,9 @@ async def patch_log_masking_rule(
 async def delete_log_masking_rule(
     rule_id: str,
     sync: VerifySyncEnvelopeOnly,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        await _log_masking_svc(handler).delete(sync.jiuwenclaw_id, rule_id)
+        await LogMaskingRuleService().delete(sync.jiuwenclaw_id, rule_id)
     except ValueError as exc:
         detail = str(exc)
         status = 404 if "not found" in detail else 400

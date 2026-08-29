@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""FastAPI 依赖：DB handler 与同步信封解析（无验签/解密）。"""
+"""FastAPI 依赖：同步信封解析（无验签/解密）。"""
 
 from __future__ import annotations
 
@@ -8,11 +8,9 @@ from dataclasses import dataclass
 from typing import Annotated, Any, TypeVar
 
 from fastapi import Depends, HTTPException, Request
-from openjiuwen_runtime.foundation.db.handler import DBHandler
 from pydantic import BaseModel
 
 from ..http.sync_security import split_envelope
-from ..infrastructure.db import ensure_db_handler
 from ..infrastructure.utils import assert_jiuwenclaw_id_matches, get_jiuwenclaw_id
 from ..schemas.sync_schemas import SyncEnvelopeOnlyBody
 
@@ -27,10 +25,6 @@ class SyncContext:
     business: dict[str, Any]
     jiuwenclaw_id: str
     method: str
-
-
-async def get_db_handler() -> DBHandler:
-    return await ensure_db_handler()
 
 
 def require_jiuwenclaw_id(business: dict[str, Any] | None = None) -> str:

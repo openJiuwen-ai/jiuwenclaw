@@ -7,7 +7,6 @@ from collections.abc import Callable
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from ..core.config_effective_policy import (
     ConfigDefaultTemplateMappingService,
@@ -31,7 +30,6 @@ from .deps import (
     SyncContext,
     VerifySyncEnvelopeOnly,
     build_sync_context,
-    get_db_handler,
     sync_write_data,
     verify_sync,
 )
@@ -49,7 +47,7 @@ MappingUpdateSyncBody = make_sync_body(
     "MappingUpdateSyncBody", ConfigDefaultTemplateMappingUpdateRequest
 )
 
-_ServiceFactory = Callable[[DBHandler], Any]
+_ServiceFactory = Callable[[], Any]
 
 
 def _http_exc(exc: ValueError) -> HTTPException:
@@ -61,10 +59,9 @@ def _http_exc(exc: ValueError) -> HTTPException:
 @mapping_router.post("/", response_model=ResponseModel)
 async def create_template_mapping(
     sync: Annotated[SyncContext, Depends(verify_sync(MappingCreateSyncBody))],
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        result = await ConfigDefaultTemplateMappingService(handler).create(
+        result = await ConfigDefaultTemplateMappingService().create(
             sync.jiuwenclaw_id, sync.business
         )
     except ValueError as exc:
@@ -77,10 +74,9 @@ async def create_template_mapping(
 async def update_template_mapping(
     mapping_id: int,
     sync: Annotated[SyncContext, Depends(verify_sync(MappingUpdateSyncBody))],
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        await ConfigDefaultTemplateMappingService(handler).update(
+        await ConfigDefaultTemplateMappingService().update(
             sync.jiuwenclaw_id, mapping_id, sync.business
         )
     except ValueError as exc:
@@ -93,10 +89,9 @@ async def update_template_mapping(
 async def delete_template_mapping(
     mapping_id: int,
     sync: VerifySyncEnvelopeOnly,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
-        await ConfigDefaultTemplateMappingService(handler).delete(
+        await ConfigDefaultTemplateMappingService().delete(
             sync.jiuwenclaw_id, mapping_id
         )
     except ValueError as exc:
@@ -118,11 +113,10 @@ def _add_policy_crud(
     async def create_policy(
         request: Request,
         body: Any,
-        handler: Annotated[DBHandler, Depends(get_db_handler)],
     ):
         sync = await build_sync_context(body, request.method)
         try:
-            result = await svc_factory(handler).create(
+            result = await svc_factory().create(
                 sync.jiuwenclaw_id, sync.business
             )
         except ValueError as exc:
@@ -136,11 +130,10 @@ def _add_policy_crud(
         request: Request,
         policy_id: int,
         body: Any,
-        handler: Annotated[DBHandler, Depends(get_db_handler)],
     ):
         sync = await build_sync_context(body, request.method)
         try:
-            await svc_factory(handler).update(
+            await svc_factory().update(
                 sync.jiuwenclaw_id, policy_id, sync.business
             )
         except ValueError as exc:
@@ -154,11 +147,10 @@ def _add_policy_crud(
         request: Request,
         policy_id: int,
         body: SyncEnvelopeOnlyBody,
-        handler: Annotated[DBHandler, Depends(get_db_handler)],
     ):
         sync = await build_sync_context(body, request.method)
         try:
-            await svc_factory(handler).delete(sync.jiuwenclaw_id, policy_id)
+            await svc_factory().delete(sync.jiuwenclaw_id, policy_id)
         except ValueError as exc:
             raise _http_exc(exc) from exc
         trigger_runtime_config_update()
@@ -191,21 +183,21 @@ def _add_policy_crud(
 
 _add_policy_crud(
     agent_policy_router,
-    lambda h: ConfigEffectiveAgentPolicyService(h),
+    ConfigEffectiveAgentPolicyService,
     "agent",
     ConfigEffectiveAgentPolicyCreateRequest,
     ConfigEffectiveAgentPolicyUpdateRequest,
 )
 _add_policy_crud(
     global_policy_router,
-    lambda h: ConfigEffectiveGlobalPolicyService(h),
+    ConfigEffectiveGlobalPolicyService,
     "global",
     ConfigEffectiveGlobalPolicyCreateRequest,
     ConfigEffectiveGlobalPolicyUpdateRequest,
 )
 _add_policy_crud(
     service_policy_router,
-    lambda h: ConfigEffectiveServicePolicyService(h),
+    ConfigEffectiveServicePolicyService,
     "service",
     ConfigEffectiveServicePolicyCreateRequest,
     ConfigEffectiveServicePolicyUpdateRequest,
