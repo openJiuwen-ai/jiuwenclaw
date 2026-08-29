@@ -1118,6 +1118,13 @@ async def test_completed_marker_requires_all_section_progress():
 async def test_completed_marker_accepts_p_numbered_sections_beneath_wrapper_heading(
     tmp_path: Path,
 ):
+    sdk_usage = {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "total_tokens": 150,
+        "llm_call_count": 2,
+        "agent_name_token_usage": [],
+    }
     outline = (
         "# 大纲：用户需求洞察报告\n"
         "## 页面规划\n"
@@ -1145,7 +1152,10 @@ async def test_completed_marker_accepts_p_numbered_sections_beneath_wrapper_head
             {
                 "__deepsearch_status__": "completed",
                 "conversation_id": "C1",
-                "final_result": {"response_content": "# Final"},
+                "final_result": {
+                    "response_content": "# Final",
+                    "workflow_llm_token_usage": sdk_usage,
+                },
             }
         ),
     ]
@@ -1180,6 +1190,7 @@ async def test_completed_marker_accepts_p_numbered_sections_beneath_wrapper_head
         "conversation_id": "C1",
         "report_delivered": True,
         "report_chars": len("# Final"),
+        "workflow_llm_token_usage": sdk_usage,
     }
 
 

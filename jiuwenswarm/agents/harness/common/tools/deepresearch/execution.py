@@ -23,6 +23,7 @@ from jiuwenswarm.common.schema.ask_user import (
 
 from .stream_router import _format_outline_card_markdown
 from .tools import _call_deepresearch_stream_impl
+from .usage import normalize_workflow_llm_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -824,7 +825,13 @@ async def _handle_outcome(
         report_chars = outcome.get("report_chars")
         content = _completion_content(state, report_chars)
         state = _persist(context, state, "completed", conversation_id=conversation_id)
-        return _result("completed", state, content=content)
+        result_fields: dict[str, Any] = {"content": content}
+        workflow_usage = normalize_workflow_llm_token_usage(
+            outcome.get("workflow_llm_token_usage")
+        )
+        if workflow_usage is not None:
+            result_fields["workflow_llm_token_usage"] = workflow_usage
+        return _result("completed", state, **result_fields)
     if status == "cancelled":
         state = _persist(context, state, "cancelled", conversation_id=conversation_id)
         return _result("cancelled", state, content="DeepResearch 任务已取消。")

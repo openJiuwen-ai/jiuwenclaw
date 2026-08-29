@@ -58,6 +58,9 @@ from jiuwenswarm.agents.harness.common.tools.deepresearch.todo_progress import (
     deepresearch_todo_path,
     persist_deepresearch_task_update,
 )
+from jiuwenswarm.agents.harness.common.tools.deepresearch.usage import (
+    normalize_workflow_llm_token_usage,
+)
 from jiuwenswarm.agents.harness.common.tools.deepresearch_task_manager import (
     extract_deepresearch_section_titles,
     get_deepresearch_manager,
@@ -2305,12 +2308,18 @@ async def _consume_stream(
                 }, chunk)
             for payload in advance_stage(state, 4, complete=True):
                 await send(payload)
-            return attach_terminal_timing({
+            completed_outcome: dict[str, Any] = {
                 "status": "completed",
                 "conversation_id": chunk.get("conversation_id", outcome_cid),
                 "report_delivered": True,
                 "report_chars": len(response_content),
-            }, chunk)
+            }
+            workflow_usage = normalize_workflow_llm_token_usage(
+                final_result.get("workflow_llm_token_usage")
+            )
+            if workflow_usage is not None:
+                completed_outcome["workflow_llm_token_usage"] = workflow_usage
+            return attach_terminal_timing(completed_outcome, chunk)
         if status_value == "error":
             return attach_terminal_timing({
                 "status": "error",
