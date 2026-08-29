@@ -82,9 +82,9 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
   const canSubmit = missingFieldLabels.length === 0 && !submitting;
 
   return (
-    <div className="space-y-4 p-4">
-      <div>
-        <label className="mb-1 block text-sm text-text-muted">
+    <div className="space-y-4 p-4" data-testid="heartbeat-panel-task-drawer">
+      <div data-testid="heartbeat-panel-name-field">
+        <label className="mb-1 block text-sm text-text-muted" data-testid="heartbeat-panel-name-label">
           {t('heartbeat.drawer.fieldName')}
           <span className="text-red-500">*</span>
         </label>
@@ -94,10 +94,11 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
           maxLength={NAME_MAX_LENGTH}
           onChange={(e) => setForm({ ...form, name: e.target.value })}
           className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
+          data-testid="heartbeat-panel-name-input"
         />
       </div>
-      <div>
-        <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldPromptHint') ?? undefined}>
+      <div data-testid="heartbeat-panel-prompt-field">
+        <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldPromptHint') ?? undefined} data-testid="heartbeat-panel-prompt-label">
           {t('heartbeat.drawer.fieldPrompt')}
           <span className="text-red-500">*</span>
         </label>
@@ -107,10 +108,11 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
           rows={4}
           onChange={(e) => setForm({ ...form, prompt: e.target.value })}
           className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
+          data-testid="heartbeat-panel-prompt-textarea"
         />
       </div>
-      <div>
-        <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldScheduleHint') ?? undefined}>
+      <div data-testid="heartbeat-panel-schedule-field">
+        <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldScheduleHint') ?? undefined} data-testid="heartbeat-panel-schedule-label">
           {t('heartbeat.drawer.fieldSchedule')}
           <span className="text-red-500">*</span>
         </label>
@@ -120,11 +122,12 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
           minIntervalSeconds={meta.limits.min_interval_seconds}
         />
       </div>
-      <div className="flex gap-4">
-        <div className="flex-1">
+      <div className="flex gap-4" data-testid="heartbeat-panel-policy-row">
+        <div className="flex-1" data-testid="heartbeat-panel-concurrency-policy-field">
           <label
             className="mb-1 block text-sm text-text-muted"
             title={t('heartbeat.drawer.fieldConcurrencyPolicyHint') ?? undefined}
+            data-testid="heartbeat-panel-concurrency-policy-label"
           >
             {t('heartbeat.drawer.fieldConcurrencyPolicy')}
           </label>
@@ -134,10 +137,11 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
             options={concurrencyOptions}
           />
         </div>
-        <div className="flex-1">
+        <div className="flex-1" data-testid="heartbeat-panel-session-deleted-policy-field">
           <label
             className="mb-1 block text-sm text-text-muted"
             title={t('heartbeat.drawer.fieldSessionDeletedPolicyHint') ?? undefined}
+            data-testid="heartbeat-panel-session-deleted-policy-label"
           >
             {t('heartbeat.drawer.fieldSessionDeletedPolicy')}
           </label>
@@ -148,8 +152,8 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
           />
         </div>
       </div>
-      <div>
-        <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldMaxRunsHint') ?? undefined}>
+      <div data-testid="heartbeat-panel-max-runs-field">
+        <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldMaxRunsHint') ?? undefined} data-testid="heartbeat-panel-max-runs-label">
           {t('heartbeat.drawer.fieldMaxRuns')}
         </label>
         <input
@@ -159,19 +163,21 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
           placeholder={t('heartbeat.drawer.fieldMaxRunsUnlimited') ?? ''}
           onChange={(e) => setForm({ ...form, maxRuns: e.target.value === '' ? null : Math.max(1, Number(e.target.value)) })}
           className="w-32 rounded-md border border-border bg-card px-2 py-1.5 text-sm"
+          data-testid="heartbeat-panel-max-runs-input"
         />
       </div>
 
-      {error && <p className="text-sm text-red-500">{error}</p>}
+      {error && <p className="text-sm text-red-500" data-testid="heartbeat-panel-drawer-error">{error}</p>}
       {!error && missingFieldLabels.length > 0 && (
-        <p className="text-xs text-text-muted">{t('heartbeat.drawer.missingFields', { fields: missingFieldLabels.join('、') })}</p>
+        <p className="text-xs text-text-muted" data-testid="heartbeat-panel-drawer-missing-fields">{t('heartbeat.drawer.missingFields', { fields: missingFieldLabels.join('、') })}</p>
       )}
 
-      <div className="flex justify-end gap-2 pt-2">
+      <div className="flex justify-end gap-2 pt-2" data-testid="heartbeat-panel-drawer-actions">
         <button
           type="button"
           onClick={onCancel}
           className="rounded-full border border-border bg-card px-6 py-1.5 text-sm text-text hover:bg-bg-hover"
+          data-testid="heartbeat-panel-drawer-cancel-btn"
         >
           {t('common.cancel')}
         </button>
@@ -180,6 +186,8 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
           disabled={!canSubmit}
           onClick={() => onSubmit(form)}
           className="rounded-full bg-cron-action px-6 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:cursor-not-allowed disabled:opacity-60"
+          data-testid="heartbeat-panel-drawer-submit-btn"
+          data-variant={mode}
         >
           {mode === 'create' ? t('heartbeat.drawer.submitCreate') : t('heartbeat.drawer.submitUpdate')}
         </button>

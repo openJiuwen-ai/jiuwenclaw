@@ -184,19 +184,19 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
   }
 
   return (
-    <div className="relative h-full overflow-y-auto bg-card px-8 py-6">
+    <div className="relative h-full overflow-y-auto bg-card px-8 py-6" data-testid="connector-market-create-plugin-page">
       {/* 返回样式跟详情页（McpDetailPage.tsx/PluginDetailPage.tsx）保持一致：ChevronLeft
           纯尖角图标 + 黑色文字，用户明确要求这个页面也照这个样式改。 */}
-      <button type="button" onClick={onBack} className="mb-4 flex items-center gap-1 text-[14px] leading-[22px] text-text hover:opacity-70">
+      <button type="button" onClick={onBack} className="mb-4 flex items-center gap-1 text-[14px] leading-[22px] text-text hover:opacity-70" data-testid="connector-market-create-plugin-back">
         <ChevronLeft size={16} />
         {t('connectorMarket.common.back')}
       </button>
 
-      <h1 className="mb-6 text-[18px] font-semibold leading-7 text-text">{t('connectorMarket.create.manual')}</h1>
+      <h1 className="mb-6 text-[18px] font-semibold leading-7 text-text" data-testid="connector-market-create-plugin-title">{t('connectorMarket.create.manual')}</h1>
 
       <Section title={t('connectorMarket.create.basicInfo')}>
         <div className="mb-4 flex items-center gap-3">
-          <label className="flex h-14 w-14 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl bg-bg-muted text-text-muted hover:bg-bg">
+          <label className="flex h-14 w-14 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl bg-bg-muted text-text-muted hover:bg-bg" data-testid="connector-market-create-plugin-avatar">
             {avatarPreviewUrl ? (
               <img src={avatarPreviewUrl} alt="" className="h-full w-full object-cover" />
             ) : (
@@ -228,6 +228,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
             if (!idTouched) setId(slugify(nextName));
           }}
           className="mb-4 h-9 w-full rounded-lg border border-border bg-card px-3 text-[13px] text-text outline-none focus:border-border-hover"
+          data-testid="connector-market-create-plugin-name"
         />
 
         <label className="mb-1.5 block text-[13px] font-medium text-text">{t('connectorMarket.create.id')}</label>
@@ -239,6 +240,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
           }}
           placeholder={t('connectorMarket.create.idPlaceholder')}
           className="mb-1.5 h-9 w-full rounded-lg border border-border bg-card px-3 text-[13px] text-text outline-none focus:border-border-hover"
+          data-testid="connector-market-create-plugin-id"
         />
         <p className="mb-4 text-[11px] leading-4 text-[color:var(--color-text-placeholder)]">{t('connectorMarket.create.idHint')}</p>
 
@@ -250,6 +252,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
             onChange={(event) => setDescription(event.target.value)}
             rows={3}
             className="w-full resize-none rounded-lg border border-border bg-card px-3 py-2 text-[13px] leading-5 text-text outline-none focus:border-border-hover"
+            data-testid="connector-market-create-plugin-description"
           />
           <span className="absolute bottom-2 right-3 text-[11px] text-text-muted">
             {description.length}/{DESCRIPTION_MAX}
@@ -267,6 +270,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
               loadSkills();
             }}
             className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[13px] text-text hover:bg-connector-add-hover-surface hover:text-[color:var(--color-chat-accent)]"
+            data-testid="connector-market-create-plugin-add-skill"
           >
             <Plus size={14} />
             {t('connectorMarket.create.addSkill')}
@@ -278,8 +282,8 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
             const label = skill.display_name || skill.name;
             const avatar = getSkillAvatar(label);
             return (
-              <div key={skill.name} className="relative rounded-xl border border-border bg-card p-4">
-                <button type="button" onClick={() => setSkillIds((prev) => prev.filter((id) => id !== skill.name))} className="absolute right-4 top-4 text-text-muted hover:text-danger">
+              <div key={skill.name} className="relative rounded-xl border border-border bg-card p-4" data-testid="connector-market-create-plugin-skill-item" data-variant={skill.name}>
+                <button type="button" onClick={() => setSkillIds((prev) => prev.filter((id) => id !== skill.name))} className="absolute right-4 top-4 text-text-muted hover:text-danger" data-testid="connector-market-create-plugin-skill-remove" data-variant={skill.name}>
                   <Trash2 size={15} />
                 </button>
                 <div className="mb-1.5 flex items-center gap-2.5 pr-6">
@@ -305,6 +309,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
               loadConnectorList('local');
             }}
             className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[13px] text-text hover:bg-connector-add-hover-surface hover:text-[color:var(--color-chat-accent)]"
+            data-testid="connector-market-create-plugin-add-mcp"
           >
             <Plus size={14} />
             {t('connectorMarket.create.addMcp')}
@@ -315,8 +320,8 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
           {selectedMcps.map((mcp) => {
             const avatar = getSkillAvatar(mcp.displayName);
             return (
-              <div key={mcp.name} className="relative rounded-xl border border-border bg-card p-4">
-                <button type="button" onClick={() => setMcpIds((prev) => prev.filter((id) => id !== mcp.name))} className="absolute right-4 top-4 text-text-muted hover:text-danger">
+              <div key={mcp.name} className="relative rounded-xl border border-border bg-card p-4" data-testid="connector-market-create-plugin-mcp-item" data-variant={mcp.name}>
+                <button type="button" onClick={() => setMcpIds((prev) => prev.filter((id) => id !== mcp.name))} className="absolute right-4 top-4 text-text-muted hover:text-danger" data-testid="connector-market-create-plugin-mcp-remove" data-variant={mcp.name}>
                   <Trash2 size={15} />
                 </button>
                 <div className="mb-1.5 flex items-center gap-2.5 pr-6">
@@ -336,13 +341,13 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
         </div>
       </Section>
 
-      {submitError && <p className="mb-3 text-[12px] text-danger">{submitError}</p>}
+      {submitError && <p className="mb-3 text-[12px] text-danger" data-testid="connector-market-create-plugin-submit-error">{submitError}</p>}
 
       <div className="flex justify-end gap-2 border-t border-border pt-4">
-        <button type="button" onClick={onBack} className="rounded-lg border border-border px-4 py-1.5 text-[13px] text-text hover:border-border-hover">
+        <button type="button" onClick={onBack} className="rounded-lg border border-border px-4 py-1.5 text-[13px] text-text hover:border-border-hover" data-testid="connector-market-create-plugin-cancel">
           {t('connectorMarket.common.cancel')}
         </button>
-        <button type="button" onClick={handleSubmit} disabled={submitting || !id.trim() || !name.trim()} className="rounded-lg bg-text px-4 py-1.5 text-[13px] text-text-inverse disabled:opacity-60">
+        <button type="button" onClick={handleSubmit} disabled={submitting || !id.trim() || !name.trim()} className="rounded-lg bg-text px-4 py-1.5 text-[13px] text-text-inverse disabled:opacity-60" data-testid="connector-market-create-plugin-confirm">
           {t('connectorMarket.common.confirm')}
         </button>
       </div>
