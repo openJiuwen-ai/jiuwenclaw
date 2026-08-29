@@ -1556,32 +1556,33 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   setSwarmflowActive: (sessionId, active, budget) => {
-    const rt = get().runtimes[sessionId];
-    if (!rt) return;
-    set((state) => ({
-      runtimes: {
-        ...state.runtimes,
-        [sessionId]: {
-          ...rt,
-          enableSwarmflow: active,
-          swarmflowBudget: active ? (budget ?? rt.swarmflowBudget ?? null) : null,
+    set((state) => {
+      const rt = state.runtimes[sessionId];
+      if (!rt) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...rt,
+            enableSwarmflow: active,
+            swarmflowBudget: active ? (budget ?? rt.swarmflowBudget ?? null) : null,
+          },
         },
-      },
-    }));
+      };
+    });
   },
 
   setSwarmflowViewActive: (sessionId) => {
-    const rt = get().runtimes[sessionId];
-    if (!rt) return;
-    set((state) => ({
-      runtimes: {
-        ...state.runtimes,
-        [sessionId]: {
-          ...rt,
-          swarmflowActive: true,
+    set((state) => {
+      const rt = state.runtimes[sessionId];
+      if (!rt) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...rt, swarmflowActive: true },
         },
-      },
-    }));
+      };
+    });
   },
 
   setAvailableModels: (models, activeModel) => {
