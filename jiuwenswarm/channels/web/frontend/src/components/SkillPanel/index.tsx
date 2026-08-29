@@ -3717,6 +3717,7 @@ export function SkillPanel({
               <button
                 type="button"
                 onClick={() => setOauthLoginOpen(false)}
+                data-testid="skill-panel-oauth-login-close-btn"
                 className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>

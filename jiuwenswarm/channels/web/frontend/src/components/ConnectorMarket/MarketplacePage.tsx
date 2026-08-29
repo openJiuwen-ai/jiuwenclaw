@@ -418,7 +418,7 @@ export function MarketplacePage({
                 key={tab}
                 type="button"
                 onClick={() => onTopTabChange(tab)}
-                aria-selected={active}
+                aria-pressed={active}
                 data-testid="connector-market-tab"
                 data-variant={tab}
                 className={`relative pb-2 text-[14px] leading-[22px] ${active ? 'font-semibold text-text' : 'font-normal text-text'}`}
@@ -467,8 +467,6 @@ export function MarketplacePage({
               <button
                 type="button"
                 onClick={() => setCreateMenuOpen((v) => !v)}
-                aria-haspopup="menu"
-                aria-expanded={createMenuOpen}
                 data-testid="connector-market-create-menu"
                 className="flex h-8 shrink-0 items-center gap-1 rounded-lg bg-text px-3 text-[12px] text-text-inverse"
               >
