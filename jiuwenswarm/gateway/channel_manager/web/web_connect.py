@@ -971,7 +971,7 @@ class WebChannel(BaseWsChannel):
                 # V2 targeted delivery bypasses _broadcast_to(), so persist
                 # usage frames here as well for child agents/team members.
                 self._log_frontend_context_usage(frame_data)
-                self._persist_frontend_context_usage(frame_data)
+                await self._persist_frontend_context_usage(frame_data)
                 for w in ws_set:
                     self._enqueue_send(w, frame_data)
                 return
@@ -1483,11 +1483,21 @@ class WebChannel(BaseWsChannel):
             serialized = json.dumps(frame, ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError):
             serialized = repr(frame)
-        logger.info("[WebChannel][frontend][context.usage] %s", serialized)
+        logger.debug("[WebChannel][frontend][context.usage] %s", serialized)
 
     @staticmethod
-    def _persist_frontend_context_usage(frame: dict[str, Any]) -> None:
-        """Append the complete frontend usage frame as one JSONL record."""
+    def _write_frontend_context_usage(serialized: str) -> None:
+        """Append one serialized frontend usage frame from a worker thread."""
+        output_path = get_logs_dir() / _CONTEXT_USAGE_JSONL_FILENAME
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with _CONTEXT_USAGE_FILE_LOCK:
+            with output_path.open("a", encoding="utf-8") as output_file:
+                output_file.write(serialized)
+                output_file.write("\n")
+
+    @staticmethod
+    async def _persist_frontend_context_usage(frame: dict[str, Any]) -> None:
+        """Append the complete frontend usage frame without blocking the loop."""
         if frame.get("event") != "context.usage":
             return
         try:
@@ -1497,13 +1507,11 @@ class WebChannel(BaseWsChannel):
                 separators=(",", ":"),
                 default=str,
             )
-            output_path = get_logs_dir() / _CONTEXT_USAGE_JSONL_FILENAME
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with _CONTEXT_USAGE_FILE_LOCK:
-                with output_path.open("a", encoding="utf-8") as output_file:
-                    output_file.write(serialized)
-                    output_file.write("\n")
-        except (OSError, TypeError, ValueError) as exc:
+            await asyncio.to_thread(
+                WebChannel._write_frontend_context_usage,
+                serialized,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             # Usage persistence is diagnostic-only and must never block the
             # websocket broadcast.
             logger.warning("[WebChannel][frontend][context.usage] JSONL persist failed: %s", exc)
@@ -1519,7 +1527,7 @@ class WebChannel(BaseWsChannel):
         # 会话 history，因此在真正进入 WebSocket writer 前记录最终帧，便于
         # 核对前端实际收到的 context_window、parts 及兼容别名。
         self._log_frontend_context_usage(frame)
-        self._persist_frontend_context_usage(frame)
+        await self._persist_frontend_context_usage(frame)
         for client in clients:
             self._enqueue_send(client, frame)
 

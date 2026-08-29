@@ -956,6 +956,61 @@ async def test_command_model_switch_sends_scoped_agent_reload(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_command_model_lists_agentos_models_without_defaults(monkeypatch):
+    """AgentOS backup models remain selectable when defaults is empty."""
+    server = FakeGatewayServer()
+    agentos_models = [
+        {
+            "alias": "backup",
+            "model_client_config": {
+                "api_key": "backup-key",
+                "api_base": "https://example.test/v1",
+                "model_name": "backup-model",
+                "client_provider": "openai",
+            },
+            "model_config_obj": {},
+        }
+    ]
+    monkeypatch.setattr(tui_connect_module, "get_model_names", lambda: [])
+    monkeypatch.setattr(
+        tui_connect_module,
+        "get_config_raw",
+        lambda: {"models": {"defaults": [], "agentos": agentos_models}},
+    )
+
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=_offline_local_client(),
+            message_handler=None,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+
+    await server.local_handlers["/tui"]["command.model"](
+        object(), "req-model-list", {}, "tui_session_1"
+    )
+
+    payload = server.responses[-1]["payload"]
+    assert payload["available_models"] == ["backup"]
+    assert payload["models"] == [
+        {
+            "index": "a0",
+            "name": "backup",
+            "alias": "backup",
+            "model_name": "backup-model",
+            "model_provider": "openai",
+            "api_base": "https://example.test/v1",
+            "reasoning_level": "",
+            "api_key_suffix": "-key",
+            "is_current": False,
+            "is_agentos": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_session_list_returns_agent_timeout_before_tui_request_timeout(monkeypatch):
     server = FakeGatewayServer()
 

@@ -303,6 +303,8 @@ def test_parse_stream_chunk_preserves_full_context_usage_snapshot():
     assert parsed["kv_cache"]["session"]["weighted_hit_rate"] == 0.8
     assert parsed["session_kv_cache_hit_rate"] == 0.8
     assert parsed["rate"] == 12.5
+    assert parsed["context_usage_summary"]["occupancy_rate"] == 0.125
+    assert parsed["context_usage_summary"]["percentage"] == 12.5
     assert parsed["context_max"] == 200000
     assert parsed["tokens_used"] == 25000
 
@@ -322,6 +324,8 @@ def test_interface_deep_parse_stream_chunk_preserves_full_context_usage_snapshot
     assert parsed["kv_cache"]["session"]["calls_observed"] == 1
     assert parsed["session_kv_cache_hit_rate"] == 0.8
     assert parsed["rate"] == 12.5
+    assert parsed["context_usage_summary"]["occupancy_rate"] == 0.125
+    assert parsed["context_usage_summary"]["percentage"] == 12.5
     assert parsed["context_max"] == 200000
     assert parsed["tokens_used"] == 25000
 

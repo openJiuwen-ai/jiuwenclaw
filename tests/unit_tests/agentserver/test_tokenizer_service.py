@@ -85,6 +85,39 @@ async def test_disabled_warmup_does_not_query_repository_metadata(
     assert not (tmp_path / "cache").exists()
 
 
+def test_huggingface_client_factory_keeps_proxy_support_and_has_timeout(monkeypatch):
+    import httpx
+    import huggingface_hub
+
+    factories = []
+    client_kwargs = []
+
+    monkeypatch.setattr(
+        huggingface_hub,
+        "set_client_factory",
+        lambda factory: factories.append(factory),
+        raising=False,
+    )
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            client_kwargs.append(kwargs)
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+
+    tokenizer_service_module._configure_huggingface_mirror_client()
+    assert len(factories) == 1
+
+    factories[0]()
+    assert client_kwargs == [
+        {
+            "follow_redirects": True,
+            "timeout": 30.0,
+            "trust_env": True,
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_tokenizer_service_warms_new_model_only_once(tmp_path, monkeypatch):
     calls: list[dict] = []

@@ -4,7 +4,29 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
+
+
+def _finite_number(value: Any) -> int | float | None:
+    """Return numeric values that are safe to expose to the frontend."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return value if math.isfinite(float(value)) else None
+    except (OverflowError, ValueError):
+        return None
+
+
+def _normalize_occupancy_rate(value: Any) -> float | None:
+    """Normalize ratio or percentage values to a ``[0, 1]`` ratio."""
+    numeric_value = _finite_number(value)
+    if numeric_value is None:
+        return None
+    occupancy_rate = float(numeric_value)
+    if occupancy_rate > 1:
+        occupancy_rate /= 100
+    return occupancy_rate if 0 <= occupancy_rate <= 1 else None
 
 
 def normalize_context_usage_payload(payload: Any) -> dict[str, Any] | None:
@@ -33,16 +55,16 @@ def normalize_context_usage_payload(payload: Any) -> dict[str, Any] | None:
     if isinstance(context_window, dict):
         # Compatibility aliases: the frontend's summary card still reads
         # these names while the full category breakdown is carried in parts.
+        occupancy_rate = _normalize_occupancy_rate(
+            context_window.get("occupancy_rate")
+        )
         if usage_payload.get("rate") is None:
-            occupancy_rate = context_window.get("occupancy_rate")
             # Core protocol percentages are ratios in [0, 1], while the
             # legacy frontend alias is displayed as a percentage in [0, 100].
             usage_payload["rate"] = (
                 occupancy_rate * 100
-                if isinstance(occupancy_rate, (int, float))
-                and not isinstance(occupancy_rate, bool)
-                and 0 <= occupancy_rate <= 1
-                else occupancy_rate or 0
+                if occupancy_rate is not None
+                else 0
             )
         if usage_payload.get("context_max") is None:
             usage_payload["context_max"] = context_window.get("limit_tokens") or 0
@@ -52,32 +74,31 @@ def normalize_context_usage_payload(payload: Any) -> dict[str, Any] | None:
         # Keep a small structured summary for the frontend. The display text
         # is rendered by the frontend so it can follow the active locale;
         # the wire payload only carries numeric values.
-        if not isinstance(usage_payload.get("context_usage_summary"), dict):
-            used_tokens = context_window.get("input_tokens")
-            limit_tokens = context_window.get("limit_tokens")
-            occupancy_rate = context_window.get("occupancy_rate")
-            if (
-                not isinstance(occupancy_rate, (int, float))
-                or isinstance(occupancy_rate, bool)
-            ) and (
-                isinstance(used_tokens, (int, float))
-                and not isinstance(used_tokens, bool)
-                and isinstance(limit_tokens, (int, float))
-                and not isinstance(limit_tokens, bool)
-                and limit_tokens > 0
-            ):
-                occupancy_rate = used_tokens / limit_tokens
-            usage_payload["context_usage_summary"] = {
-                "used_tokens": used_tokens,
-                "limit_tokens": limit_tokens,
-                "occupancy_rate": occupancy_rate,
-                "percentage": (
-                    occupancy_rate * 100
-                    if isinstance(occupancy_rate, (int, float))
-                    and not isinstance(occupancy_rate, bool)
-                    else None
-                ),
-            }
+        raw_summary = usage_payload.get("context_usage_summary")
+        summary = dict(raw_summary) if isinstance(raw_summary, dict) else {}
+        used_tokens = _finite_number(summary.get("used_tokens"))
+        if used_tokens is None:
+            used_tokens = _finite_number(context_window.get("input_tokens"))
+        limit_tokens = _finite_number(summary.get("limit_tokens"))
+        if limit_tokens is None:
+            limit_tokens = _finite_number(context_window.get("limit_tokens"))
+        summary_rate = _normalize_occupancy_rate(summary.get("occupancy_rate"))
+        if summary_rate is None:
+            summary_rate = occupancy_rate
+        if (
+            summary_rate is None
+            and used_tokens is not None
+            and limit_tokens is not None
+            and limit_tokens > 0
+        ):
+            summary_rate = float(used_tokens) / float(limit_tokens)
+        summary["used_tokens"] = used_tokens
+        summary["limit_tokens"] = limit_tokens
+        summary["occupancy_rate"] = summary_rate
+        summary["percentage"] = (
+            summary_rate * 100 if summary_rate is not None else None
+        )
+        usage_payload["context_usage_summary"] = summary
     else:
         for key in ("rate", "context_max", "tokens_used"):
             if usage_payload.get(key) is None:
@@ -134,6 +155,10 @@ def parse_stream_chunk(chunk: Any, *, _has_streamed_content: bool = False) -> di
 def _parse_dict_chunk(chunk: dict[str, Any], _has_streamed_content: bool) -> dict[str, Any] | None:
     """Parse dict chunk."""
     if "event_type" in chunk:
+        if chunk.get("event_type") == "context.usage":
+            usage_payload = normalize_context_usage_payload(chunk)
+            if usage_payload is not None:
+                return usage_payload
         if chunk.get("event_type") == "chat.tracer_agent":
             return _serialize_chunk_recursive(chunk)
         return _serialize_chunk_recursive(chunk)
@@ -614,6 +639,10 @@ def _parse_response_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, 
 
     if isinstance(payload, dict):
         if "event_type" in payload:
+            if payload.get("event_type") == "context.usage":
+                usage_payload = normalize_context_usage_payload(payload)
+                if usage_payload is not None:
+                    return usage_payload
             return payload
 
         if "output" in payload:

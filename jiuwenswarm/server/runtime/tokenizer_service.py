@@ -29,6 +29,7 @@ _NATIVE_WARM_SOURCES = frozenset({"native_tokenizer", "family_tokenizer_fallback
 _MODEL_VARIANT_SEPARATORS = frozenset({"_", "-", ":", "."})
 _HUGGINGFACE_ENDPOINT = "https://hf-mirror.com"
 _TOKENIZER_METADATA_TIMEOUT_SECONDS = 10.0
+_TOKENIZER_HTTP_TIMEOUT_SECONDS = 30.0
 _TOKENIZER_METADATA_CACHE: dict[tuple[str, str | None], dict[str, Any] | None] = {}
 _TOKENIZER_METADATA_CACHE_LOCK = threading.Lock()
 
@@ -421,8 +422,8 @@ def _configure_huggingface_mirror_client() -> None:
     def client_factory() -> httpx.Client:
         return httpx.Client(
             follow_redirects=True,
-            timeout=None,
-            trust_env=False,
+            timeout=_TOKENIZER_HTTP_TIMEOUT_SECONDS,
+            trust_env=True,
         )
 
     set_client_factory(client_factory)

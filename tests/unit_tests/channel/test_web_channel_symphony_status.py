@@ -43,12 +43,12 @@ def test_web_channel_logs_frontend_context_usage_payload():
         },
     }
 
-    with patch("jiuwenswarm.gateway.channel_manager.web.web_connect.logger.info") as log_info:
+    with patch("jiuwenswarm.gateway.channel_manager.web.web_connect.logger.debug") as log_debug:
         channel._log_frontend_context_usage(frame)
 
-    assert log_info.call_count == 1
-    message = log_info.call_args.args[1]
-    assert log_info.call_args.args[0] == "[WebChannel][frontend][context.usage] %s"
+    assert log_debug.call_count == 1
+    message = log_debug.call_args.args[1]
+    assert log_debug.call_args.args[0] == "[WebChannel][frontend][context.usage] %s"
     assert '"rate":12.5' in message
     assert '"context_max":200000' in message
     assert '"tokens_used":25000' in message
@@ -56,6 +56,24 @@ def test_web_channel_logs_frontend_context_usage_payload():
     assert '"tools":{"tokens":15000,"percentage_of_window":7.5}' in message
     assert '"cache_read_tokens":15000' in message
     assert '"weighted_hit_rate":0.75' in message
+
+
+@pytest.mark.asyncio
+async def test_web_channel_persists_frontend_context_usage_off_loop(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.web_connect.get_logs_dir",
+        lambda: tmp_path,
+    )
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    frame = {
+        "event": "context.usage",
+        "payload": {"session_id": "sess-context", "tokens_used": 12},
+    }
+
+    await channel._persist_frontend_context_usage(frame)
+
+    records = (tmp_path / "context_usage.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(record) for record in records] == [frame]
 
 
 class _FakeClient:

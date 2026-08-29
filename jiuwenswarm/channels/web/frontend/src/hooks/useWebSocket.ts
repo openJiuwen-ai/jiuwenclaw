@@ -119,6 +119,11 @@ function parseContextUsageSummary(payload: Record<string, unknown>): ContextUsag
     : null;
   const readFiniteNumber = (value: unknown): number | null =>
     typeof value === 'number' && Number.isFinite(value) ? value : null;
+  const normalizeOccupancyRate = (value: number | null): number | null => {
+    if (value === null) return null;
+    const normalized = value > 1 ? value / 100 : value;
+    return normalized >= 0 && normalized <= 1 ? normalized : null;
+  };
 
   const usedTokens = readFiniteNumber(
     summary?.used_tokens ?? contextWindow?.input_tokens ?? payload.tokens_used
@@ -126,14 +131,12 @@ function parseContextUsageSummary(payload: Record<string, unknown>): ContextUsag
   const limitTokens = readFiniteNumber(
     summary?.limit_tokens ?? contextWindow?.limit_tokens ?? payload.context_max
   );
-  let occupancyRate = readFiniteNumber(
-    summary?.occupancy_rate ?? contextWindow?.occupancy_rate
+  let occupancyRate = normalizeOccupancyRate(
+    readFiniteNumber(summary?.occupancy_rate ?? contextWindow?.occupancy_rate)
   );
   if (occupancyRate === null) {
     const legacyPercentage = readFiniteNumber(payload.rate);
-    occupancyRate = legacyPercentage === null
-      ? null
-      : legacyPercentage > 1 ? legacyPercentage / 100 : legacyPercentage;
+    occupancyRate = normalizeOccupancyRate(legacyPercentage);
   }
   if (occupancyRate === null && usedTokens !== null && limitTokens && limitTokens > 0) {
     occupancyRate = usedTokens / limitTokens;
