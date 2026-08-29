@@ -3177,6 +3177,10 @@
     "runBudgetShort": "Run",
     "budgetUnlimited": "unbounded",
     "budgetExhaustedSession": "Session budget exhausted",
-    "budgetExhaustedWorkflow": "Run budget exhausted"
+    "budgetExhaustedWorkflow": "Run budget exhausted",
+    "toggleLabel": "SwarmFlow",
+    "budgetPanelTitle": "SwarmFlow Budget",
+    "budgetPanelHint": "Set the token limit for this session (blank = unlimited). Team mode only.",
+    "budgetPlaceholder": "blank = unlimited"
   }
 }

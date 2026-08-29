@@ -17,7 +17,7 @@
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AtSign, ChevronRight, CircleX, Loader2, Plus, Square, X } from 'lucide-react';
+import { AtSign, ChevronRight, CircleX, Loader2, Plus, Square, Workflow, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -56,6 +56,7 @@ import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import { ExtensionPickerPanel } from './ExtensionPickerPanel';
 import { SkillPickerPanel } from './SkillPickerPanel';
 import { Switch } from '../Switch';
+import { Button, Input } from '../ui';
 import { ExtensionIcon } from '../ConnectorMarket/icons';
 import {
   isLikelyAbsolutePath,
@@ -639,6 +640,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [extensionAnchor, setExtensionAnchor] = useState<DOMRect | null>(null);
   const [skillPanelOpen, setSkillPanelOpen] = useState(false);
   const [skillAnchor, setSkillAnchor] = useState<DOMRect | null>(null);
+  const [swarmflowBudgetOpen, setSwarmflowBudgetOpen] = useState(false);
   const inputRef = useRef<HTMLDivElement>(null);
   const insertSkillChipRef = useRef<(skillName: string) => void>(() => undefined);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
@@ -3079,6 +3081,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     if (!activeSessionId) return;
                     if (next) {
                       if (planDisabledOn) return;
+                      // Plan 与 Swarmflow 互斥：开启 Plan 前先关掉 Swarmflow。
+                      if (useSessionStore.getState().getRuntime(activeSessionId)?.enableSwarmflow) {
+                        useSessionStore.getState().setSwarmflowActive(activeSessionId, false);
+                      }
                       // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
                       // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
                       useGoalStore.getState().setArmed(activeSessionId, false);
@@ -3109,6 +3115,34 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                         <span className="chat-mode-select__label">{t('plan.toggleLabel')}</span>
                       </span>
                       <Switch checked={planActive} disabled={planDisabled} onChange={togglePlan} />
+                    </div>
+                  );
+                })()}
+                {isTeamMode && (() => {
+                  const swarmflowActive = useSessionStore.getState().getRuntime(activeSessionId)?.enableSwarmflow ?? false;
+                  const toggleSwarmflow = (next: boolean) => {
+                    if (!activeSessionId) return;
+                    // Swarmflow 与 Plan 互斥：开启 Swarmflow 前先关掉 Plan。
+                    if (next && planActive) {
+                      usePlanStore.getState().setActive(activeSessionId, false);
+                    }
+                    useSessionStore.getState().setSwarmflowActive(activeSessionId, next);
+                    if (next) setSwarmflowBudgetOpen(true);
+                  };
+                  return (
+                    <div
+                      className="chat-mode-select__option"
+                      role="menuitem"
+                      data-testid="chat-panel-input-attach-menu-swarmflow"
+                      onClick={() => toggleSwarmflow(!swarmflowActive)}
+                    >
+                      <span className="chat-mode-select__option-main">
+                        <span className="chat-mode-select__icon" aria-hidden="true">
+                          <Workflow className="w-4 h-4" />
+                        </span>
+                        <span className="chat-mode-select__label">{t('swarmflow.toggleLabel')}</span>
+                      </span>
+                      <Switch checked={swarmflowActive} onChange={toggleSwarmflow} />
                     </div>
                   );
                 })()}
@@ -3631,6 +3665,41 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           </form>
         </div>
       ) : null}
+      {swarmflowBudgetOpen && activeSessionId && (() => {
+        const rt = useSessionStore.getState().getRuntime(activeSessionId);
+        const enableSwarmflow = rt?.enableSwarmflow ?? false;
+        return (
+          <div className="fixed inset-0 z-50 flex" onClick={() => setSwarmflowBudgetOpen(false)}>
+            <div className="absolute inset-0 bg-black/30" />
+            <div
+              className="relative ml-auto h-full w-80 bg-card p-6 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-sm font-semibold text-text-strong mb-4">
+                {t('swarmflow.budgetPanelTitle')}
+              </h3>
+              <p className="text-xs text-text-muted mb-4">{t('swarmflow.budgetPanelHint')}</p>
+              <Input
+                type="number"
+                value={rt?.swarmflowBudget ?? ''}
+                placeholder={t('swarmflow.budgetPlaceholder')}
+                disabled={!enableSwarmflow}
+                onChange={(v) => {
+                  const trimmed = v.trim();
+                  useSessionStore.getState().setSwarmflowActive(
+                    activeSessionId,
+                    true,
+                    trimmed ? Number(trimmed) : null,
+                  );
+                }}
+              />
+              <Button className="mt-4" onClick={() => setSwarmflowBudgetOpen(false)}>
+                {t('common.confirm')}
+              </Button>
+            </div>
+          </div>
+        );
+      })()}
         </div>
       </div>
     </>
