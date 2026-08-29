@@ -215,6 +215,8 @@ install_subagent_observability_hook()
 
 
 async def _run(host: str, port: int) -> None:
+    import time
+
     from openjiuwen.core.runner import Runner
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
     from jiuwenswarm.agents.harness.team.remote_member_bootstrap import run_teammate_bootstrap_daemon
@@ -222,6 +224,8 @@ async def _run(host: str, port: int) -> None:
     from jiuwenswarm.extensions.registry import ExtensionRegistry
     from jiuwenswarm.common.config import get_config
 
+    # 阶段耗时基准:冻结 EXE 排查启动超时要用各阶段时间戳对齐 Desktop 日志。
+    startup_t0 = time.monotonic()
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
     # ---------- 扩展系统初始化 ----------
@@ -235,29 +239,67 @@ async def _run(host: str, port: int) -> None:
         registry=extension_registry,
     )
     await extension_manager.load_all_extensions()
-    logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
+    logger.info(
+        "[AgentServer] 扩展加载完成，共 %d 个 (elapsed %.2fs)",
+        len(extension_manager.list_extensions()),
+        time.monotonic() - startup_t0,
+    )
 
     # 会话 metadata 的字段补全已改为惰性迁移:读取时按需推断并写回磁盘
     # (见 session_metadata._apply_metadata_defaults_with_inference),无需启动全量扫描。
 
-    # ---------- 图像模态探针预热 ----------
-    # 在开始接受连接之前把探针缓存坐实：晚于这里的话，第一批 agent（含每个
-    # subagent）会各自在后台补探，多发无谓的 LLM 请求。
-    from jiuwenswarm.server.runtime.image_modality_warmup import warm_image_modality_cache
-
-    await warm_image_modality_cache(get_config(), reason="startup")
-
-    # ---------- Opencode Zen 免费模型注入 ----------
-    # 开箱即用：从 Zen 拉取限时免费模型，追加到 models.defaults。失败兜底、不阻断启动。
-    from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
-
-    await warm_zen_free_models(reason="startup")
-
+    zen_free_models_task: asyncio.Task | None = None
     server = AgentWebSocketServer.get_instance(
         host=host,
         port=port
     )
     await server.start()
+    logger.info(
+        "[AgentServer] port listening: ws://%s:%s (elapsed %.2fs)",
+        host,
+        port,
+        time.monotonic() - startup_t0,
+    )
+
+    # ---------- 图像模态探针预热 ----------
+    # listen 之后后台 fire-and-forget:探针只往进程级缓存写 (api_base, model_name)
+    # ->bool, agent 用时缓存未命中会自己 schedule 后台探针并降级 metadata-only,
+    # 所以预热挪到 listen 之后不影响首请求可用性,只把端口开放从"等探针跑完"
+    # 解放出来(单模型最坏 10s、整体 30s 上限,原是 listen 前最大耗时项)。
+    # 经 server 统一任务槽位调度:模型配置变更会取消本轮预热、避免写回过期结论;
+    # shutdown 时由 server.stop() -> _stop_main_services 统一 cancel 回收。
+    server.schedule_image_modality_warmup(reason="startup")
+
+    # ---------- Opencode Zen 免费模型注入 ----------
+    # listen 之后后台 fire-and-forget:从 Zen 拉限时免费模型追加到可选池,失败自带
+    # 后台重试自动恢复(高频 30s→低频 60s),且免费模型只是额外追加项、主流程用
+    # 用户自配模型,所以挪到 listen 之后不影响主链路,只把端口开放从"等 Zen 拉取
+    # (15s 上限)"解放出来。shutdown 时 cancel,避免任务悬挂(见 _run finally)。
+    from jiuwenswarm.server.runtime.opencode_zen import (
+        warm_zen_free_models,
+        set_main_event_loop,
+        register_models_ready_callback,
+    )
+
+    # 注册 event loop,供后台重试线程通过 call_soon_threadsafe 调度回调。
+    set_main_event_loop(asyncio.get_running_loop())
+
+    # Zen 免费模型就绪回调:预热改异步后,首个请求可能早于 Zen 拉取完成构建
+    # _model_cache(一次性懒构建、永不重建),导致免费模型及占位符默认模型的
+    # Zen 兜底在该进程内一直解析不到。此处清空缓存,下次 _resolve_model 自然
+    # 重建并带上 Zen 条目(与 Gateway 的 _models_ready_cb 对称)。
+    def _on_zen_models_ready() -> None:
+        server.reset_model_cache()
+        logger.info(
+            "[AgentServer] zen free models ready: model cache reset for rebuild"
+        )
+
+    register_models_ready_callback(_on_zen_models_ready)
+
+    zen_free_models_task = asyncio.create_task(
+        warm_zen_free_models(reason="startup"),
+        name="zen-free-models-warmup",
+    )
 
     # ---------- ProactiveEngine 初始化 ----------
     # 适配逻辑（建专用 agent + 触发主 agent 回调）封装在 proactive_adapter，
@@ -267,7 +309,12 @@ async def _run(host: str, port: int) -> None:
     proactive_config = full_cfg.get("proactive_recommendation", {}) if isinstance(full_cfg, dict) else {}
     await init_proactive_engine(server, proactive_config)
 
-    logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
+    logger.info(
+        "[AgentServer] ready: ws://%s:%s  Ctrl+C to stop (elapsed %.2fs)",
+        host,
+        port,
+        time.monotonic() - startup_t0,
+    )
 
     stop_event = asyncio.Event()
     teammate_bootstrap_task: asyncio.Task | None = None
@@ -304,6 +351,16 @@ async def _run(host: str, port: int) -> None:
                 pass
             except Exception as exc:
                 logger.warning("[AgentServer] teammate bootstrap daemon stop failed: %s", exc)
+        # 图像模态预热任务在 server 的统一槽位里,由下方 server.stop() 内的
+        # _stop_main_services cancel 回收,这里不重复处理。
+        if zen_free_models_task is not None:
+            zen_free_models_task.cancel()
+            try:
+                await zen_free_models_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("[AgentServer] zen free models warmup stop failed: %s", exc)
         await server.stop()
         # Shutdown team observability (flush & close spans)
         try:

@@ -1670,6 +1670,8 @@ async def _run(
     from openjiuwen.core.runner import Runner
 
     logger.info("[App] Gateway starting, connecting AgentServer: %s", agent_server_url)
+    # 阶段耗时基准:冻结 EXE 排查启动超时要用各阶段时间戳对齐 Desktop 日志。
+    startup_t0 = time.monotonic()
     restart_request = GatewayRestartRequest()
 
     callback_framework = Runner.callback_framework
@@ -1680,7 +1682,11 @@ async def _run(
     )
     extension_manager = ExtensionManager(registry=extension_registry)
     await extension_manager.load_all_extensions()
-    logger.info("[App] extensions loaded: %d", len(extension_manager.list_extensions()))
+    logger.info(
+        "[App] extensions loaded: %d (elapsed %.2fs)",
+        len(extension_manager.list_extensions()),
+        time.monotonic() - startup_t0,
+    )
 
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
@@ -2854,6 +2860,11 @@ async def _run(
     # ---------- Opencode Zen 免费模型预热 ----------
     # Gateway 进程独立拉取 Zen 免费模型到内存缓存（_models_list 在此进程处理，
     # 与 AgentServer 内存不共享，故各自预热）。失败留空，不阻断启动。
+    # fire-and-forget：不再同步 await（拉取上限 15s，原直接推迟 19001/19000
+    # 端口开放，Desktop 只等 19000 且 45s 超时）。失败由 opencode_zen 自带
+    # 后台重试自动恢复；models.list 在完成前返回已有配置模型，不影响主链路。
+    # shutdown 时 cancel（见本函数 finally）。
+    zen_free_models_task: asyncio.Task | None = None
     try:
         from jiuwenswarm.server.runtime.opencode_zen import (
             warm_zen_free_models,
@@ -2877,7 +2888,10 @@ async def _run(
             asyncio.create_task(_on_zen_models_ready())
 
         register_models_ready_callback(_models_ready_cb)
-        await warm_zen_free_models(reason="gateway-startup")
+        zen_free_models_task = asyncio.create_task(
+            warm_zen_free_models(reason="gateway-startup"),
+            name="zen-free-models-warmup",
+        )
     except Exception as e:  # noqa: BLE001 - 兜底
         logger.warning("[App] zen free models warm failed (non-fatal): %s", e)
 
@@ -2893,6 +2907,10 @@ async def _run(
         logger.warning("[App] proactive.tick auto-register failed (non-fatal): %s", e)
     # 先同步完成监听绑定，避免 IDE/ACP 子进程在端口尚未就绪时连接导致多次重试。
     await gateway_server.start()
+    logger.info(
+        "[App] gateway server listening (elapsed %.2fs)",
+        time.monotonic() - startup_t0,
+    )
     gateway_server_task = asyncio.create_task(
         gateway_server.wait_until_closed(),
         name="acp-gateway-server",
@@ -2904,11 +2922,12 @@ async def _run(
     )
     if web_channel is not None:
         logger.info(
-            "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit.",
+            "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit. (elapsed %.2fs)",
             web_host,
             web_port,
             web_path,
             agent_server_url,
+            time.monotonic() - startup_t0,
         )
 
     restart_requested = False
@@ -2935,6 +2954,14 @@ async def _run(
             await prewarm_sync_task
         except asyncio.CancelledError:
             pass
+        if zen_free_models_task is not None:
+            zen_free_models_task.cancel()
+            try:
+                await zen_free_models_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("[App] zen free models warmup stop failed: %s", exc)
         if a2a_task is not None:
             a2a_task.cancel()
             try:
