@@ -21,21 +21,38 @@ trace_id 来源：优先读 DeepAdapter 在 invoke 前设置的请求级 _reques
 skill 阶段：skill 执行走 skill_step / skill_complete tool，before/after_tool_call 自动
 捕获（tool_name=skill_step），无需专门 skill 钩子。
 
-iter 语义：iter=外层 task-loop 迭代号（before_task_iteration 递增），不是内层 ReAct
-model_call 次数；一轮 iter 内可能含多次 model_call，它们共用同一 iter 号。
+iter / step 语义（model 日志两个字段）：
+- iter=外层 task-loop 迭代号（before_task_iteration 递增），仅 task-loop 模式
+  （enable_task_loop=True）才会 fire；单轮 ReAct 路径 before_task_iteration 不 fire，
+  iter 恒 0。
+- step=本次 invoke 内 LLM 调用的单调递增序号（before_model_call 自增），单轮 /
+  task-loop 两种路径都递增，且不随外层 iter 切换归零。一轮外层 iter 内可能含多次
+  model_call，此时 iter 不变、step 递增。
+- task-loop 模式下 model 日志呈现 iter=N step=M：处于第 N 轮外层迭代、且已是本次
+  invoke 的第 M 次 LLM 调用（M 是全局序号，非轮内序号）；单轮 ReAct 模式下呈现
+  iter=0 step=M：第 M 次 LLM 调用（无外层迭代划分）。
 
-日志样例（一次请求，2 轮 ReAct）::
+日志样例（单轮 ReAct，3 次 LLM 调用；before_task_iteration 不 fire，iter 恒 0）::
+
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=invoke start
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model start iter=0 step=1
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model end iter=0 step=1 elapsed_ms=5547.8
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=tool start tool=search_web
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=tool end tool=search_web elapsed_ms=1230.5
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model start iter=0 step=2
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model end iter=0 step=2 elapsed_ms=3201.1
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=invoke end elapsed_ms=10002.7
+
+日志样例（task-loop 模式，2 轮外层迭代，每轮各含一次 model_call）::
 
     [perf] trace_id=req_xxx session_id=sess_yyy phase=invoke start
     [perf] trace_id=req_xxx session_id=sess_yyy phase=iter start iter=1
-    [perf] trace_id=req_xxx session_id=sess_yyy phase=model start iter=1
-    [perf] trace_id=req_xxx session_id=sess_yyy phase=model end iter=1 elapsed_ms=5547.8
-    [perf] trace_id=req_xxx session_id=sess_yyy phase=tool start tool=search_web
-    [perf] trace_id=req_xxx session_id=sess_yyy phase=tool end tool=search_web elapsed_ms=1230.5
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model start iter=1 step=1
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model end iter=1 step=1 elapsed_ms=5547.8
     [perf] trace_id=req_xxx session_id=sess_yyy phase=iter end iter=1 elapsed_ms=6790.3
     [perf] trace_id=req_xxx session_id=sess_yyy phase=iter start iter=2
-    [perf] trace_id=req_xxx session_id=sess_yyy phase=model start iter=2
-    [perf] trace_id=req_xxx session_id=sess_yyy phase=model end iter=2 elapsed_ms=3201.1
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model start iter=2 step=2
+    [perf] trace_id=req_xxx session_id=sess_yyy phase=model end iter=2 step=2 elapsed_ms=3201.1
     [perf] trace_id=req_xxx session_id=sess_yyy phase=iter end iter=2 elapsed_ms=3205.4
     [perf] trace_id=req_xxx session_id=sess_yyy phase=invoke end elapsed_ms=10002.7
 """
@@ -72,6 +89,13 @@ _invoke_depth: ContextVar[int] = ContextVar("perf_invoke_depth", default=0)
 # 重入幂等：仅在上一轮已配对结束（in_flight=False）时才递增 _iter / 打 start，
 # after 也只在 in_flight=True 时打 end，orphan after 静默。
 _iter_in_flight: ContextVar[bool] = ContextVar("perf_iter_in_flight", default=False)
+# 内层 ReAct 的 LLM 调用计数（before_model_call 自增）。
+# 与外层 _iter 区分：_iter 是 before_task_iteration 递增的「外层 task-loop 迭代号」，
+# 仅 task-loop 模式（enable_task_loop=True）才会 fire；单轮 ReAct 路径 before_task_iteration
+# 一次不 fire，_iter 恒 0（已实跑确认）。此时 model 日志的 iter 字段无意义，故另设 _react_step
+# 记录「这是本次 invoke 的第几次 LLM 调用」，单轮 / task-loop 两种路径都有定位价值。
+# task-loop 模式下 model 日志会同时带 iter=N step=M（第 N 轮外层迭代的第 M 次 LLM 调用）。
+_react_step: ContextVar[int] = ContextVar("perf_react_step", default=0)
 
 _ENABLED = os.getenv("PERF_TRACE_ENABLED", "true").strip().lower() not in (
     "false", "0", "no", "off",
@@ -353,6 +377,8 @@ class PerfTraceRail(DeepAgentRail):
         # after_task_iteration 未被调用、_iter_in_flight 残留为 True，在上下文被
         # 复用时让本轮首个 before_task_iteration 被静默跳过（iter 不递增、start 缺失）。
         _iter_in_flight.set(False)
+        # 内层 ReAct LLM 调用计数也在此归零（与 _iter 同生命周期）。
+        _react_step.set(0)
         _mark("invoke")
         logger.info("[perf] %s phase=invoke start", _log_kv())
 
@@ -412,16 +438,25 @@ class PerfTraceRail(DeepAgentRail):
         if not _ENABLED:
             return
         n = _iter.get()
+        # 内层 ReAct LLM 调用计数：before_model_call 是唯一递增点。
+        # 单轮 ReAct 路径下 _iter 恒 0（before_task_iteration 不 fire），step 才是有定位
+        # 价值的「第几次 LLM 调用」。step 是本次 invoke 内的单调递增序号，不随外层 iter
+        # 切换归零（task-loop 模式下 iter=2 step=3 = 第 2 轮外层迭代、且已是第 3 次 LLM 调用）。
+        # 无需 in_flight 保护：step 不参与 _starts 的 key（model 用 time-based call_id），
+        # 且 model 调用同上下文内串行（ReAct for-loop await），无重入路径；get()+1 与 set()
+        # 之间无 await，asyncio 单线程下同步原子，不会交错。
+        s = _react_step.get() + 1
+        _react_step.set(s)
         call_id = str(time.monotonic_ns())
         setattr(ctx, "_perf_model_call_id", call_id)
         _mark("model", call_id)
-        logger.info("[perf] %s phase=model start iter=%d", _log_kv(), n)
+        logger.info("[perf] %s phase=model start iter=%d step=%d", _log_kv(), n, s)
         if _should_log_detail():
             inputs = getattr(ctx, "inputs", None)
             msgs = getattr(inputs, "messages", None) if inputs else None
             logger.info(
-                "[perf] %s phase=model req iter=%d msgs=%d last_user=%s",
-                _log_kv(), n, len(msgs) if msgs else 0, _truncate(_last_user_text(msgs)),
+                "[perf] %s phase=model req iter=%d step=%d msgs=%d last_user=%s",
+                _log_kv(), n, s, len(msgs) if msgs else 0, _truncate(_last_user_text(msgs)),
             )
 
     @_hook_safe
@@ -430,15 +465,15 @@ class PerfTraceRail(DeepAgentRail):
             return
         call_id = getattr(ctx, "_perf_model_call_id", "")
         logger.info(
-            "[perf] %s phase=model end iter=%d elapsed_ms=%.1f",
-            _log_kv(), _iter.get(), _elapsed("model", call_id),
+            "[perf] %s phase=model end iter=%d step=%d elapsed_ms=%.1f",
+            _log_kv(), _iter.get(), _react_step.get(), _elapsed("model", call_id),
         )
         if _should_log_detail():
             inputs = getattr(ctx, "inputs", None)
             resp = getattr(inputs, "response", None) if inputs else None
             logger.info(
-                "[perf] %s phase=model resp iter=%d %s",
-                _log_kv(), _iter.get(), _response_summary(resp),
+                "[perf] %s phase=model resp iter=%d step=%d %s",
+                _log_kv(), _iter.get(), _react_step.get(), _response_summary(resp),
             )
 
     # ------------------------------------------------------------------
