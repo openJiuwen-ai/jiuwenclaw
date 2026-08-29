@@ -24,7 +24,7 @@
 #define MyAppURL "https://openjiuwen.com"
 
 [Setup]
-AppId={{B8F3A2D1-7E4C-4A9B-8D6F-1C2E3F4A5B6C}
+AppId={{6DC96977-C194-44FE-812D-D4F0B576BD905}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -42,7 +42,7 @@ WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; Keep the legacy mutexes as a stable upgrade protocol for the existing AppId.
+; Keep the legacy and current mutexes stable across installer AppId transitions.
 ; New frozen processes also create the product-derived mutexes.
 AppMutex=JiuwenSwarm.App,Global\JiuwenSwarm.App,{#MyAppName}.App,Global\{#MyAppName}.App
 CloseApplications=yes

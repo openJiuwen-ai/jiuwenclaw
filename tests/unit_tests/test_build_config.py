@@ -168,6 +168,37 @@ def test_official_build_wrappers_auto_sync_before_uv(
     assert "scripts/sync_version.py" not in script
 
 
+def test_desktop_release_wrappers_exclude_optional_cli_dependencies() -> None:
+    for relative_path in (
+        "scripts/build-macos.sh",
+        "scripts/build-exe.ps1",
+        "scripts/build-exe.bat",
+    ):
+        script = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
+        sync_commands = [
+            line.strip().removeprefix("call ")
+            for line in script.splitlines()
+            if line.strip().removeprefix("call ").startswith("uv sync")
+        ]
+
+        assert sync_commands == ["uv sync --extra dev"]
+        assert "--extra claude" not in script
+        assert "--extra codex" not in script
+
+    spec = (PROJECT_ROOT / "scripts/jiuwenswarm.spec").read_text(encoding="utf-8")
+    assert "claude_agent_sdk" not in spec
+    assert "openai_codex" not in spec
+    assert "codex_cli_bin" not in spec
+
+
+def test_windows_installer_uses_workswarm_upgrade_identity() -> None:
+    installer = (PROJECT_ROOT / "scripts/installer.iss").read_text(encoding="utf-8")
+
+    assert installer.count("AppId=") == 1
+    assert "AppId={{6DC96977-C194-44FE-812D-D4F0B576BD905}" in installer
+    assert "B8F3A2D1-7E4C-4A9B-8D6F-1C2E3F4A5B6C" not in installer
+
+
 def test_packaging_consumers_do_not_duplicate_canonical_version() -> None:
     version = load_build_config(PROJECT_ROOT).version
     consumers = (

@@ -2,13 +2,12 @@
 r"""JiuwenSwarm PyInstaller 打包配置。
 
 构建前请先：
-1. 安装依赖: uv sync --extra dev --extra claude --extra codex
+1. 安装依赖: uv sync --extra dev
 2. 构建前端: cd jiuwenswarm/channels/web/frontend && npm run build
 3. 执行平台 wrapper: .\scripts\build-exe.ps1 或 bash scripts/build-macos.sh
 """
 
 import glob
-import importlib.util
 import os
 import runpy
 import sys
@@ -47,27 +46,6 @@ OPENJIUWEN_DATA_EXCLUDES = [
     "**/deepagents/tools/browser_move/logs/**",
     "**/deepagents/tools/browser_move/.env",
 ]
-CollectedPackage = tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]
-
-
-def collect_required_all(
-    import_name: str,
-    install_hint: str,
-) -> CollectedPackage:
-    """Collect a package and fail with an actionable build hint when missing."""
-    if importlib.util.find_spec(import_name) is None:
-        raise SystemExit(f"ERROR: missing required desktop dependency '{import_name}'. {install_hint}")
-    return collect_all(import_name)
-
-
-def copy_required_metadata(distribution_name: str, install_hint: str) -> list[tuple[str, str]]:
-    """Copy distribution metadata and fail with an actionable build hint when missing."""
-    try:
-        return copy_metadata(distribution_name, recursive=True)
-    except Exception as exc:
-        raise SystemExit(f"ERROR: missing metadata for '{distribution_name}'. {install_hint}") from exc
-
-
 def collect_tree_data_files(source_dir, target_dir, patterns):
     data_files = []
     for pattern in patterns:
@@ -284,39 +262,6 @@ _py_datas, _py_binaries, _py_hidden = collect_all("py")
 datas += _pytest_datas + _pa_datas + _py_datas
 hiddenimports += _pytest_hidden + _pa_hidden + _py_hidden
 _bundled_binaries = _bundled_binaries + _pytest_binaries + _pa_binaries + _py_binaries
-
-# Bundle external CLI SDKs. The Python modules may live in the PYZ archive, but
-# their bundled CLI executables must be present as real files for SDK path
-# discovery. External CLI SDKs are required for desktop builds because frozen
-# executables do not ship pip and cannot install optional dependencies after
-# release.
-_desktop_external_cli_hint = (
-    "Run `scripts\\build-exe.ps1`, or run `uv sync --extra dev --extra claude --extra codex` "
-    "before invoking PyInstaller directly."
-)
-_claude_datas, _claude_binaries, _claude_hidden = collect_required_all(
-    "claude_agent_sdk",
-    _desktop_external_cli_hint,
-)
-datas += _claude_datas
-datas += copy_required_metadata("claude-agent-sdk", _desktop_external_cli_hint)
-hiddenimports += _claude_hidden
-_bundled_binaries = _bundled_binaries + _claude_binaries
-
-_codex_datas, _codex_binaries, _codex_hidden = collect_required_all(
-    "openai_codex",
-    _desktop_external_cli_hint,
-)
-_codex_cli_datas, _codex_cli_binaries, _codex_cli_hidden = collect_required_all(
-    "codex_cli_bin",
-    _desktop_external_cli_hint,
-)
-datas += _codex_datas + _codex_cli_datas
-datas += collect_data_files("codex_cli_bin", include_py_files=False, includes=["**/*"])
-datas += copy_required_metadata("openai-codex", _desktop_external_cli_hint)
-datas += copy_required_metadata("openai-codex-cli-bin", _desktop_external_cli_hint)
-hiddenimports += _codex_hidden + _codex_cli_hidden
-_bundled_binaries = _bundled_binaries + _codex_binaries + _codex_cli_binaries
 
 # Bundle mypy so that `python -m mypy` works inside the frozen exe.
 # `sys.executable -m mypy`. mypy ships mypyc-compiled .pyd extensions plus
