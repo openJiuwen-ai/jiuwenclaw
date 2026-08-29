@@ -2030,26 +2030,11 @@ async def process_team_message_stream(
         nonlocal user_admitted
         if admission is None:
             return
-        is_interactive_steer_round_active = getattr(
-            team_manager,
-            "is_interactive_steer_round_active",
-            None,
-        )
-        can_join_current_round = callable(
-            is_interactive_steer_round_active
-        ) and is_interactive_steer_round_active(session_id)
-        if can_join_current_round:
-            # Ordinary Team text steers the current leader iteration. This
-            # short lease only protects the atomic submit/terminal handoff;
-            # the existing iteration keeps its original round-long lease.
-            await admission.begin_user(session_id)
-        else:
-            begin_team_user = getattr(
-                admission,
-                "begin_team_user",
-                admission.begin_user,
-            )
-            await begin_team_user(session_id)
+        # Every ordinary Team message starts with a concurrent short lease.
+        # The round lock then decides atomically whether the steer joins the
+        # active iteration or creates the next one. This avoids a lock-free
+        # active-round snapshot racing another simultaneous first steer.
+        await admission.begin_user(session_id)
         user_admitted = True
 
     async def _submit_interactive_steer(
@@ -3182,7 +3167,11 @@ async def _consume_stream_with_query(
                     None,
                 )
                 if request_id is not None and callable(finish_stream_round):
-                    await finish_stream_round(session_id, request_id)
+                    await finish_stream_round(
+                        session_id,
+                        request_id,
+                        stream_task=asyncio.current_task(),
+                    )
                 else:
                     # Compatibility for test doubles and older manager adapters.
                     release_current_round = getattr(

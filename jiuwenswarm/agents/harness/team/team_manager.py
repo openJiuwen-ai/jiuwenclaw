@@ -210,6 +210,7 @@ class _ActiveTeamRound:
     """Process-local ownership for one submitted Team interaction round."""
 
     request_id: str
+    stream_task: asyncio.Task | None = None
     release_admissions: list[Callable[[], Awaitable[None]]] = field(
         default_factory=list
     )
@@ -649,6 +650,7 @@ class TeamManager:
             )
         self._active_rounds[session_id] = _ActiveTeamRound(
             request_id=request_id,
+            stream_task=self._stream_tasks.get(session_id),
             release_admissions=(
                 [release_admission] if release_admission is not None else []
             ),
@@ -673,7 +675,10 @@ class TeamManager:
             if current is not None and current.defer_terminal_release:
                 return False, "round_busy", False
             if current is None:
-                current = _ActiveTeamRound(request_id=request_id)
+                current = _ActiveTeamRound(
+                    request_id=request_id,
+                    stream_task=self._stream_tasks.get(session_id),
+                )
                 self._active_rounds[session_id] = current
                 created_round = True
             try:
@@ -780,25 +785,45 @@ class TeamManager:
             await cleanup_task
             raise
 
-    async def finish_stream_round(self, session_id: str, request_id: str) -> bool:
+    async def finish_stream_round(
+        self,
+        session_id: str,
+        request_id: str,
+        *,
+        stream_task: asyncio.Task | None = None,
+    ) -> bool:
         """Release only generations owned by the stream that just terminated."""
         async with self._get_round_lock(session_id):
             rounds_to_release: list[_ActiveTeamRound] = []
-            current = self._pop_round_unlocked(session_id, request_id)
-            if current is not None:
-                rounds_to_release.append(current)
+            current = self._active_rounds.get(session_id)
+            owns_current = current is not None and (
+                current.stream_task is stream_task
+                if stream_task is not None
+                else current.request_id == request_id
+            )
+            if owns_current and current is not None:
+                popped = self._pop_round_unlocked(session_id, current.request_id)
+                if popped is not None:
+                    rounds_to_release.append(popped)
             closing = self._closing_rounds.get(session_id, [])
             owned_closing = [
                 round_state
                 for round_state in closing
-                if round_state.request_id == request_id
+                if (
+                    round_state.stream_task is stream_task
+                    if stream_task is not None
+                    else round_state.request_id == request_id
+                )
             ]
             if owned_closing:
                 rounds_to_release.extend(owned_closing)
                 remaining = [
                     round_state
                     for round_state in closing
-                    if round_state.request_id != request_id
+                    if not any(
+                        round_state is owned_round
+                        for owned_round in owned_closing
+                    )
                 ]
                 if remaining:
                     self._closing_rounds[session_id] = remaining
@@ -2200,6 +2225,9 @@ class TeamManager:
 
     def register_stream_task(self, session_id: str, task: asyncio.Task) -> None:
         self._stream_tasks[session_id] = task
+        current = self._active_rounds.get(session_id)
+        if current is not None and current.stream_task is None:
+            current.stream_task = task
 
     def _has_local_team_runtime(self, session_id: str) -> bool:
         """Return whether the session should use the legacy in-memory TeamAgent path."""
