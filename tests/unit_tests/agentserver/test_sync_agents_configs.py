@@ -831,6 +831,39 @@ def test_compute_content_hash_no_shared_dirs_is_stable():
     assert a == b
 
 
+def test_compute_content_hash_preserves_root_dimension_for_same_name_skill(tmp_path):
+    """两根目录存在同名 skill 子目录时，hash 必须保留根维度。
+
+    回归评审意见：basename 集合会丢根维度——root_a/shared 与 root_b/shared 都记成
+    "shared"，删首根留次根时 basename 集合不变 → 漏触发 reload，而 SkillUseRail
+    可见内容其实切到了次根那份。完整路径保留 (root, name) 身份，此场景下 hash 必变。
+    """
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+    root_a.mkdir()
+    root_b.mkdir()
+    (root_a / "shared" / "SKILL.md").parent.mkdir(parents=True)
+    (root_a / "shared" / "SKILL.md").write_text("# from root_a")
+    (root_b / "shared" / "SKILL.md").parent.mkdir(parents=True)
+    (root_b / "shared" / "SKILL.md").write_text("# from root_b")
+    dirs = f"{root_a}{os.pathsep}{root_b}"
+    env = _full_env(JIUWENSWARM_SHARED_SKILLS_DIRS=dirs)
+
+    both_hash = compute_content_hash(config={}, env=env, runtime={})
+
+    # 删首根的 shared，仅留次根同名 → 可见内容切换，hash 必变（basename 集合会漏）
+    import shutil
+
+    shutil.rmtree(root_a / "shared")
+    after_delete_hash = compute_content_hash(config={}, env=env, runtime={})
+    assert after_delete_hash != both_hash, "删首根同名 skill 后 hash 必须变化（完整路径保留根维度）"
+
+    # 恢复首根 shared → 回到 both_hash
+    (root_a / "shared" / "SKILL.md").parent.mkdir(parents=True, exist_ok=True)
+    (root_a / "shared" / "SKILL.md").write_text("# from root_a")
+    assert compute_content_hash(config={}, env=env, runtime={}) == both_hash
+
+
 # ---------------------------------------------------------------------------
 # 10. officeclaw guard
 # ---------------------------------------------------------------------------

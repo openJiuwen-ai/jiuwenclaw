@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -211,8 +212,8 @@ def synthesize_config(
     return result
 
 
-def _collect_shared_skill_disk_names(env: dict[str, Any]) -> str:
-    """扫描 env 声明的共享 skill 目录，返回排序去重的 skill 名清单（用于 content_hash）。
+def _collect_shared_skill_disk_paths(env: dict[str, Any]) -> str:
+    """扫描 env 声明的共享 skill 目录，返回排序去重的 skill 目录完整路径清单（用于 content_hash）。
 
     office agent 的 ENABLED_SKILLS 被 suppress 成 ''（allow-all），其有效 skill 集
     = 共享目录磁盘内容；装/卸 skill 只改目录子项、不改 env 本身，导致
@@ -220,6 +221,22 @@ def _collect_shared_skill_disk_names(env: dict[str, Any]) -> str:
     运行中会话的 SkillUseRail 永不重建（interface_deep.py:8146 重建块不执行）。
     把该清单纳入 content_hash，使装/卸 skill 能让 hash 变化 → "updated" → reload
     → SkillUseRail 重建。env 无 JIUWENSWARM_SHARED_SKILLS_DIRS 时返回 ""（无磁盘 I/O）。
+
+    记录「完整路径」而非「目录 basename」：共享目录可能多根（office-claw-skills 预置
+    + .office-claw/skills 用户装），若两根存在同名子目录，basename 集合会丢根维度——
+    「删首根同名 skill、次根留同名」时 SkillUseRail 可见内容会变（切到次根那份），但
+    basename 集合不变 → 漏触发 reload。完整路径保留 (root, name) 身份，hash 精确反映
+    磁盘 skill 集，对 rail 去重语义的将来变更也更稳健。
+
+    已知行为（resolve 穿透软链接）：key 用 ``Path.resolve()`` 取真实路径，
+    多个软链接若同指一个真实 skill 目录，resolve 后得到相同字符串，
+    在清单里被合并为一条。故增删其中任一软链接（只要仍有至少一个链接指向
+    该真实 skill）不改变 realpath 集合 → content_hash 不变 → 不触发 reload。
+    此为预期：内容未变（同一份 SKILL.md 仍在）时不应 reload。若业务要求
+    "增删任一软链接入口即触发 reload"，需改用 ``Path.absolute()`` 保留逻辑
+    路径身份，但代价是同一真实 skill 会被 SkillUseRail 重复加载（两条 key、
+    两份 Skill 对象、工具重复注册）；且须与 SkillUseRail 内部 key 口径
+    （``str(item.resolve())``，skill_use_rail.py:450）同步调整，避免两层错位。
     """
     if not isinstance(env, dict):
         return ""
@@ -236,7 +253,7 @@ def _collect_shared_skill_disk_names(env: dict[str, Any]) -> str:
     from jiuwenswarm.common.utils import parse_shared_skills_dirs_raw
 
     dirs = parse_shared_skills_dirs_raw(raw)  # 按 os.pathsep 切分，去重，绝对化
-    names: set[str] = set()
+    paths: set[str] = set()
     for d in dirs:
         try:
             for entry in os.scandir(d):
@@ -247,10 +264,11 @@ def _collect_shared_skill_disk_names(env: dict[str, Any]) -> str:
                 # 与 rail/relay 口径一致：仅算含 SKILL.md 的子目录
                 if not os.path.isfile(os.path.join(entry.path, "SKILL.md")):
                     continue
-                names.add(entry.name)
+                # resolve() 保留 (root, name) 身份，跨根同名目录各算一条
+                paths.add(str(Path(entry.path).resolve()))
         except OSError:
             continue
-    return ",".join(sorted(names))
+    return ",".join(sorted(paths))
 
 
 def compute_content_hash(
@@ -259,17 +277,18 @@ def compute_content_hash(
     env: dict[str, Any],
     runtime: dict[str, Any],
 ) -> str:
-    """Stable SHA-256 of config + env + runtime + shared-skill disk names JSON.
+    """Stable SHA-256 of config + env + runtime + shared-skill disk paths JSON.
 
-    shared_skill_disk_names 捕获共享 skill 目录的磁盘 skill 集（office allow-all
-    agent 的有效 skill 集），使装/卸 skill 能让 hash 变化、触发 reload+rail 重建。
+    shared_skill_disk_paths 捕获共享 skill 目录的磁盘 skill 集（office allow-all
+    agent 的有效 skill 集，按完整路径记录以保留根维度），使装/卸 skill 能让 hash
+    变化、触发 reload+rail 重建。
     """
     payload = json.dumps(
         {
             "config": config,
             "env": env,
             "runtime": runtime,
-            "shared_skill_disk_names": _collect_shared_skill_disk_names(env),
+            "shared_skill_disk_paths": _collect_shared_skill_disk_paths(env),
         },
         sort_keys=True,
         separators=(",", ":"),
