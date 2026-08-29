@@ -33,7 +33,7 @@ from jiuwenswarm.agents.harness.team import TeamManager, get_team_manager
 from jiuwenswarm.agents.harness.team.team_manager import TEAM_EVENT_QUEUE_MAXSIZE
 from jiuwenswarm.common.log_preview import DEFAULT_PREVIEW_MAX_CHARS, preview_text
 from jiuwenswarm.common.utils import get_agent_skills_dir
-from jiuwenswarm.common.config import get_skill_evolution_enabled
+from jiuwenswarm.common.config import get_config, get_skill_evolution_enabled
 from jiuwenswarm.common.cron_team_completion import (
     _cron_solo_harness_end_pending,
     _drain_cron_delegation_grace_events,
@@ -803,6 +803,52 @@ def restore_session_swarmflow_config(session_id: str) -> dict | None:
     metadata = _read_metadata(session_id, cache_bust=True)
     config = metadata.get(_SESSION_SWARMFLOW_CONFIG_KEY)
     return config if isinstance(config, dict) else None
+
+
+def _coerce_budget(value) -> int | None:
+    """Coerce a raw budget value to a positive int, else None."""
+    if value is None:
+        return None
+    try:
+        n = int(value)
+    except (ValueError, TypeError):
+        return None
+    return n if n > 0 else None
+
+
+def _resolve_session_swarmflow_config(
+    params: dict | None,
+    config_base: dict,
+    *,
+    session_id: str,
+) -> dict:
+    """Resolve session-level swarmflow config by priority:
+
+    request params > metadata persisted > config.yaml.
+    """
+    team_cfg = ((config_base.get("modes") or {}).get("team") or {}).get("jiuwen_team") or {}
+    config_enabled = bool(team_cfg.get("enable_swarmflow", False))
+    config_budget_raw = team_cfg.get("swarmflow_budget")
+    config_budget = (
+        int(config_budget_raw)
+        if isinstance(config_budget_raw, (int, float)) and config_budget_raw > 0
+        else None
+    )
+
+    if params and params.get("enable_swarmflow") is not None:
+        return {
+            "enable_swarmflow": bool(params.get("enable_swarmflow")),
+            "swarmflow_budget": _coerce_budget(params.get("swarmflow_budget")),
+        }
+
+    persisted = restore_session_swarmflow_config(session_id)
+    if persisted is not None:
+        return {
+            "enable_swarmflow": bool(persisted.get("enable_swarmflow", False)),
+            "swarmflow_budget": _coerce_budget(persisted.get("swarmflow_budget")),
+        }
+
+    return {"enable_swarmflow": config_enabled, "swarmflow_budget": config_budget}
 
 
 def _resolve_channel_id(channel_id: str | None) -> str:
@@ -2238,6 +2284,12 @@ async def process_team_message_stream(
         ) or None
         # Provider-based assembly: build members from the shared config source,
         # no pre-built parent DeepAgent required.
+        # 会话级 swarmflow 配置：请求 params > metadata > config.yaml
+        swarmflow_config = _resolve_session_swarmflow_config(
+            params_obj if isinstance(params_obj, dict) else None,
+            get_config(),
+            session_id=session_id,
+        )
         team_spec = await team_manager.get_swarm_enriched_team_spec(
             session_id=session_id,
             mode=resolved_mode,
@@ -2249,7 +2301,14 @@ async def process_team_message_stream(
             request_metadata=request_metadata,
             requested_model_name=requested_model_name,
             agent_group_name=agent_group_name,
+            swarmflow_config=swarmflow_config,
         )
+        # 请求携带了会话级配置时持久化（刷新恢复用）
+        if (
+            isinstance(params_obj, dict)
+            and params_obj.get("enable_swarmflow") is not None
+        ):
+            persist_session_swarmflow_config(session_id, swarmflow_config)
         if team_skill_names is not None:
             await _apply_team_skill_selection(
                 team_manager=team_manager,

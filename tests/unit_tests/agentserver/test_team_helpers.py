@@ -6045,3 +6045,76 @@ def test_restore_session_swarmflow_config_absent_returns_none(monkeypatch: pytes
         lambda session_id, cache_bust=True: {"session_id": "sess-swarmflow-cfg"},
     )
     assert team_helpers.restore_session_swarmflow_config("sess-swarmflow-cfg") is None
+
+
+def test_resolve_session_swarmflow_config_request_overrides_config() -> None:
+    """request params override config.yaml values."""
+    from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+        _resolve_session_swarmflow_config,
+    )
+
+    params = {"enable_swarmflow": True, "swarmflow_budget": 50000}
+    config_base = {
+        "modes": {"team": {"jiuwen_team": {"enable_swarmflow": False, "swarmflow_budget": 200000}}}
+    }
+    assert _resolve_session_swarmflow_config(params, config_base, session_id="s1") == {
+        "enable_swarmflow": True,
+        "swarmflow_budget": 50000,
+    }
+
+
+def test_resolve_session_swarmflow_config_falls_back_to_config() -> None:
+    """without request params, config.yaml values are used."""
+    from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+        _resolve_session_swarmflow_config,
+    )
+
+    params: dict[str, Any] = {}
+    config_base = {
+        "modes": {"team": {"jiuwen_team": {"enable_swarmflow": True, "swarmflow_budget": 200000}}}
+    }
+    assert _resolve_session_swarmflow_config(params, config_base, session_id="s1") == {
+        "enable_swarmflow": True,
+        "swarmflow_budget": 200000,
+    }
+
+
+def test_resolve_session_swarmflow_config_falls_back_to_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """without request params, persisted metadata is used (config disabled)."""
+    from jiuwenswarm.server.runtime.agent_adapter import team_helpers
+    from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+        _resolve_session_swarmflow_config,
+        persist_session_swarmflow_config,
+    )
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    store: dict[str, Any] = {"session_id": "sess-resolve-meta"}
+    written: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: dict(store),
+    )
+    monkeypatch.setattr(
+        session_metadata,
+        "_enqueue_write",
+        lambda session_id, metadata: written.append((session_id, dict(metadata))),
+    )
+
+    config = {"enable_swarmflow": True, "swarmflow_budget": 30000}
+    persist_session_swarmflow_config("sess-resolve-meta", config)
+    # restore reads the written metadata
+    store = {"session_id": "sess-resolve-meta", "session_swarmflow_config": config}
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: dict(store),
+    )
+
+    config_base = {"modes": {"team": {"jiuwen_team": {"enable_swarmflow": False}}}}
+    assert _resolve_session_swarmflow_config({}, config_base, session_id="sess-resolve-meta") == {
+        "enable_swarmflow": True,
+        "swarmflow_budget": 30000,
+    }
