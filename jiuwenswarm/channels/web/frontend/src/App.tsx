@@ -2324,6 +2324,13 @@ function AppContent({
           });
         }
         usePlanStore.getState().removeRuntime(NEW_CONVERSATION_ID);
+        // Swarmflow 开关同样按 session 存，欢迎页上开的必须搬到真实会话，
+        // 否则 sendMessage 取到的是新会话默认值 false，chat.send 不带 enable_swarmflow=true。
+        const newConvSwarmflow = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
+        if (newConvSwarmflow?.enableSwarmflow) {
+          useSessionStore.getState().setSwarmflowActive(newSid, true, newConvSwarmflow.swarmflowBudget);
+        }
+        useSessionStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         useWorkspaceStore.getState().upsertSession(createdSession, { isNew: true });
         sessionIdsCreatedInThisPageRef.current.add(newSid);
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
