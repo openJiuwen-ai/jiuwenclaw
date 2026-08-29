@@ -15,6 +15,8 @@ import json
 import logging
 import os
 import threading
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,8 +31,11 @@ _NATIVE_WARM_SOURCES = frozenset({"native_tokenizer", "family_tokenizer_fallback
 _MODEL_VARIANT_SEPARATORS = frozenset({"_", "-", ":", "."})
 _HUGGINGFACE_ENDPOINT = "https://hf-mirror.com"
 _TOKENIZER_METADATA_TIMEOUT_SECONDS = 10.0
-_TOKENIZER_HTTP_TIMEOUT_SECONDS = 30.0
-_TOKENIZER_METADATA_CACHE: dict[tuple[str, str | None], dict[str, Any] | None] = {}
+_TOKENIZER_METADATA_CACHE_MAX_ENTRIES = 256
+_TOKENIZER_METADATA_CACHE_TTL_SECONDS = 24 * 60 * 60
+_TOKENIZER_METADATA_CACHE: OrderedDict[
+    tuple[str, str | None], tuple[float, dict[str, Any]]
+] = OrderedDict()
 _TOKENIZER_METADATA_CACHE_LOCK = threading.Lock()
 
 # These are model-vendor identities, not API client providers. A model may be
@@ -404,31 +409,6 @@ def _same_family_repository(
     return None
 
 
-def _configure_huggingface_mirror_client() -> None:
-    """Make metadata requests go directly to the fixed domestic mirror."""
-    try:
-        import httpx
-        import huggingface_hub
-    except ImportError:
-        return
-
-    set_client_factory = getattr(huggingface_hub, "set_client_factory", None)
-    if not callable(set_client_factory):
-        try:
-            from huggingface_hub.utils._http import set_client_factory
-        except ImportError:
-            return
-
-    def client_factory() -> httpx.Client:
-        return httpx.Client(
-            follow_redirects=True,
-            timeout=_TOKENIZER_HTTP_TIMEOUT_SECONDS,
-            trust_env=True,
-        )
-
-    set_client_factory(client_factory)
-
-
 def _huggingface_repository_metadata(
     repo_id: str,
     *,
@@ -446,9 +426,13 @@ def _huggingface_repository_metadata(
         return None
     cache_key = (repo_id, revision)
     with _TOKENIZER_METADATA_CACHE_LOCK:
-        if cache_key in _TOKENIZER_METADATA_CACHE:
-            cached = _TOKENIZER_METADATA_CACHE[cache_key]
-            return dict(cached) if cached is not None else None
+        cached = _TOKENIZER_METADATA_CACHE.get(cache_key)
+        if cached is not None:
+            cached_at, cached_metadata = cached
+            if time.monotonic() - cached_at < _TOKENIZER_METADATA_CACHE_TTL_SECONDS:
+                _TOKENIZER_METADATA_CACHE.move_to_end(cache_key)
+                return dict(cached_metadata)
+            del _TOKENIZER_METADATA_CACHE[cache_key]
     if not allow_network:
         return None
 
@@ -456,7 +440,10 @@ def _huggingface_repository_metadata(
     try:
         from huggingface_hub import HfApi
 
-        _configure_huggingface_mirror_client()
+        # Keep the mirror endpoint scoped to this API instance.  In
+        # particular, do not call huggingface_hub.set_client_factory(), which
+        # changes the HTTP client used by unrelated Hugging Face consumers in
+        # the AgentServer process.
         api = HfApi(endpoint=_HUGGINGFACE_ENDPOINT)
         try:
             info = api.model_info(
@@ -535,7 +522,10 @@ def _huggingface_repository_metadata(
     # network/import failure. A later model reload can then retry discovery.
     if metadata is not None:
         with _TOKENIZER_METADATA_CACHE_LOCK:
-            _TOKENIZER_METADATA_CACHE[cache_key] = metadata
+            _TOKENIZER_METADATA_CACHE[cache_key] = (time.monotonic(), dict(metadata))
+            _TOKENIZER_METADATA_CACHE.move_to_end(cache_key)
+            while len(_TOKENIZER_METADATA_CACHE) > _TOKENIZER_METADATA_CACHE_MAX_ENTRIES:
+                _TOKENIZER_METADATA_CACHE.popitem(last=False)
     return dict(metadata) if metadata is not None else None
 
 

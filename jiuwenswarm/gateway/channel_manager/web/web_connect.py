@@ -89,6 +89,8 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
 )
 
 _CONTEXT_USAGE_JSONL_FILENAME = "context_usage.jsonl"
+_CONTEXT_USAGE_MAX_BYTES = 10 * 1024 * 1024
+_CONTEXT_USAGE_BACKUP_COUNT = 3
 _CONTEXT_USAGE_FILE_LOCK = threading.Lock()
 
 # ── 类型别名 ──────────────────────────────────────────────
@@ -970,8 +972,9 @@ class WebChannel(BaseWsChannel):
                 frame_data = self._serialize_frame(msg, routing_target, member_names=member_names)
                 # V2 targeted delivery bypasses _broadcast_to(), so persist
                 # usage frames here as well for child agents/team members.
-                self._log_frontend_context_usage(frame_data)
-                await self._persist_frontend_context_usage(frame_data)
+                if frame_data.get("event") == "context.usage":
+                    self._log_frontend_context_usage(frame_data)
+                    await self._persist_frontend_context_usage(frame_data)
                 for w in ws_set:
                     self._enqueue_send(w, frame_data)
                 return
@@ -1490,10 +1493,25 @@ class WebChannel(BaseWsChannel):
         """Append one serialized frontend usage frame from a worker thread."""
         output_path = get_logs_dir() / _CONTEXT_USAGE_JSONL_FILENAME
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        serialized_line = f"{serialized}\n"
+        serialized_size = len(serialized_line.encode("utf-8"))
         with _CONTEXT_USAGE_FILE_LOCK:
+            try:
+                current_size = output_path.stat().st_size
+            except FileNotFoundError:
+                current_size = 0
+            if (
+                current_size > 0
+                and current_size + serialized_size > _CONTEXT_USAGE_MAX_BYTES
+            ):
+                for index in range(_CONTEXT_USAGE_BACKUP_COUNT - 1, 0, -1):
+                    source = output_path.with_name(f"{output_path.name}.{index}")
+                    target = output_path.with_name(f"{output_path.name}.{index + 1}")
+                    if source.exists():
+                        source.replace(target)
+                output_path.replace(output_path.with_name(f"{output_path.name}.1"))
             with output_path.open("a", encoding="utf-8") as output_file:
-                output_file.write(serialized)
-                output_file.write("\n")
+                output_file.write(serialized_line)
 
     @staticmethod
     async def _persist_frontend_context_usage(frame: dict[str, Any]) -> None:
@@ -1526,8 +1544,9 @@ class WebChannel(BaseWsChannel):
         # context.usage 是发给前端的完整上下文 Token 使用信息。它不写入
         # 会话 history，因此在真正进入 WebSocket writer 前记录最终帧，便于
         # 核对前端实际收到的 context_window、parts 及兼容别名。
-        self._log_frontend_context_usage(frame)
-        await self._persist_frontend_context_usage(frame)
+        if frame.get("event") == "context.usage":
+            self._log_frontend_context_usage(frame)
+            await self._persist_frontend_context_usage(frame)
         for client in clients:
             self._enqueue_send(client, frame)
 

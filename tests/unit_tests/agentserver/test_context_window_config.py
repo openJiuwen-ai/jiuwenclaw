@@ -9,6 +9,7 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
 )
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _deep_agent_context_engine_config,
+    _deep_agent_context_engine_config_for_model,
     build_model_from_entry,
 )
 
@@ -40,7 +41,7 @@ def test_deep_agent_context_engine_config_tracks_selected_model_identity():
         {},
     )
 
-    config = _deep_agent_context_engine_config(
+    config = _deep_agent_context_engine_config_for_model(
         {
             "context_engine_config": {
                 "model_name": "startup-model",
@@ -66,7 +67,7 @@ def test_selected_model_does_not_keep_startup_exact_tokenizer_spec():
         {},
     )
 
-    config = _deep_agent_context_engine_config(
+    config = _deep_agent_context_engine_config_for_model(
         {
             "context_engine_config": {
                 "tokenizer_spec": {

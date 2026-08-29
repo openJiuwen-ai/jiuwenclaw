@@ -85,39 +85,6 @@ async def test_disabled_warmup_does_not_query_repository_metadata(
     assert not (tmp_path / "cache").exists()
 
 
-def test_huggingface_client_factory_keeps_proxy_support_and_has_timeout(monkeypatch):
-    import httpx
-    import huggingface_hub
-
-    factories = []
-    client_kwargs = []
-
-    monkeypatch.setattr(
-        huggingface_hub,
-        "set_client_factory",
-        lambda factory: factories.append(factory),
-        raising=False,
-    )
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            client_kwargs.append(kwargs)
-
-    monkeypatch.setattr(httpx, "Client", FakeClient)
-
-    tokenizer_service_module._configure_huggingface_mirror_client()
-    assert len(factories) == 1
-
-    factories[0]()
-    assert client_kwargs == [
-        {
-            "follow_redirects": True,
-            "timeout": 30.0,
-            "trust_env": True,
-        }
-    ]
-
-
 @pytest.mark.asyncio
 async def test_tokenizer_service_warms_new_model_only_once(tmp_path, monkeypatch):
     calls: list[dict] = []
@@ -551,6 +518,74 @@ def test_unknown_alias_remains_unresolved_without_tokenizer_metadata():
     )
 
     assert profiles[0].spec is None
+
+
+def test_repository_metadata_cache_is_bounded_and_expires(monkeypatch):
+    import huggingface_hub
+
+    now = [0.0]
+    calls: list[str] = []
+
+    class FakeApi:
+        def __init__(self, *, endpoint):
+            assert endpoint == "https://hf-mirror.com"
+
+        def model_info(self, repo_id, **kwargs):
+            del kwargs
+            calls.append(repo_id)
+            return SimpleNamespace(
+                id=repo_id,
+                siblings=[],
+                cardData={},
+                config={},
+            )
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(
+        tokenizer_service_module.time,
+        "monotonic",
+        lambda: now[0],
+    )
+    monkeypatch.setattr(
+        tokenizer_service_module,
+        "_TOKENIZER_METADATA_CACHE_MAX_ENTRIES",
+        2,
+    )
+    monkeypatch.setattr(
+        tokenizer_service_module,
+        "_TOKENIZER_METADATA_CACHE_TTL_SECONDS",
+        10.0,
+    )
+    tokenizer_service_module._TOKENIZER_METADATA_CACHE.clear()
+
+    for repo_id in ("acme/one", "acme/two"):
+        assert tokenizer_service_module._huggingface_repository_metadata(
+            repo_id,
+            allow_network=True,
+        ) is not None
+
+    # A cache hit refreshes recency, so ``acme/two`` is evicted first.
+    assert tokenizer_service_module._huggingface_repository_metadata(
+        "acme/one",
+        allow_network=True,
+    ) is not None
+    assert tokenizer_service_module._huggingface_repository_metadata(
+        "acme/three",
+        allow_network=True,
+    ) is not None
+    assert list(tokenizer_service_module._TOKENIZER_METADATA_CACHE) == [
+        ("acme/one", None),
+        ("acme/three", None),
+    ]
+    assert "acme/two" in calls
+    calls_before_expiry = len(calls)
+
+    now[0] = 11.0
+    assert tokenizer_service_module._huggingface_repository_metadata(
+        "acme/one",
+        allow_network=True,
+    ) is not None
+    assert len(calls) == calls_before_expiry + 1
 
 
 def test_repository_metadata_discovery_is_warmup_only_and_adds_one_fallback(

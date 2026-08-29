@@ -76,6 +76,28 @@ async def test_web_channel_persists_frontend_context_usage_off_loop(tmp_path, mo
     assert [json.loads(record) for record in records] == [frame]
 
 
+def test_web_channel_rotates_frontend_context_usage_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.web_connect.get_logs_dir",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.web_connect._CONTEXT_USAGE_MAX_BYTES",
+        12,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.web_connect._CONTEXT_USAGE_BACKUP_COUNT",
+        2,
+    )
+
+    WebChannel._write_frontend_context_usage("first")
+    WebChannel._write_frontend_context_usage("second")
+
+    assert (tmp_path / "context_usage.jsonl").read_text(encoding="utf-8") == "second\n"
+    assert (tmp_path / "context_usage.jsonl.1").read_text(encoding="utf-8") == "first\n"
+    assert not (tmp_path / "context_usage.jsonl.2").exists()
+
+
 class _FakeClient:
     def __init__(self):
         self.frames = []

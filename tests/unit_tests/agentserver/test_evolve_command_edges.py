@@ -524,7 +524,11 @@ def _adapter_ready_for_followup_execution(monkeypatch: pytest.MonkeyPatch) -> Ji
     monkeypatch.setattr(adapter, "_bind_runtime_cron_context", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_reset_runtime_cron_context", lambda _tokens: None)
     monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: None)
-    monkeypatch.setattr(adapter, "_apply_model_to_react_agent", lambda _model: None)
+    monkeypatch.setattr(
+        adapter,
+        "_apply_model_to_react_agent",
+        lambda _model, **_kwargs: None,
+    )
     monkeypatch.setattr(adapter, "_mark_session_active", lambda _session_id: None)
     monkeypatch.setattr(adapter, "_register_session_agent_task", lambda _session_id: None)
     monkeypatch.setattr(adapter, "_unregister_session_agent_task", lambda _session_id: None)
@@ -731,7 +735,11 @@ async def test_team_stream_injects_image_tool_context_for_non_vision_model(monke
 
     monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _model_name="": True)
     monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: object())
-    monkeypatch.setattr(adapter, "_apply_model_to_react_agent", lambda _model: None)
+    monkeypatch.setattr(
+        adapter,
+        "_apply_model_to_react_agent",
+        lambda _model, **_kwargs: None,
+    )
     monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "cn")
     monkeypatch.setattr(adapter, "_native_image_input_enabled", lambda *_args: False)
     monkeypatch.setattr(adapter, "_write_runtime_state", lambda **_kwargs: None)

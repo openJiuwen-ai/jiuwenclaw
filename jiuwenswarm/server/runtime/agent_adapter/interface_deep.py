@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_config_service import AgentDefinition
 
 import yaml
+from pydantic import ValidationError
 from openjiuwen.core.context_engine.schema.config import (
     CompressionRecallConfig,
     ContextEngineConfig,
@@ -905,7 +906,7 @@ def _parse_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
-def _deep_agent_context_engine_config(
+def _build_deep_agent_context_engine_config(
     react_cfg: dict[str, Any] | None,
     full_config: dict[str, Any] | None = None,
     model_name: str | None = None,
@@ -954,7 +955,7 @@ def _deep_agent_context_engine_config(
                     if isinstance(raw_spec, TokenizerSpec)
                     else TokenizerSpec.model_validate(raw_spec)
                 )
-            except Exception as exc:  # noqa: BLE001 - bad optional metadata must not stop startup
+            except (AttributeError, TypeError, ValidationError) as exc:
                 logger.warning("[JiuWenSwarmDeepAdapter] invalid tokenizer registry entry: %s", exc)
 
     # Model profiles may carry their tokenizer declaration next to
@@ -988,7 +989,7 @@ def _deep_agent_context_engine_config(
                 if key not in known_keys:
                     tokenizer_registry.append(spec)
                     known_keys.add(key)
-        except Exception as exc:  # noqa: BLE001 - optional warm-up metadata must be fail-open
+        except (AttributeError, ImportError, KeyError, TypeError, ValueError) as exc:
             logger.debug("[JiuWenSwarmDeepAdapter] tokenizer registry enrichment skipped: %s", exc)
 
     raw_spec = cec.get("tokenizer_spec")
@@ -1002,7 +1003,7 @@ def _deep_agent_context_engine_config(
                 if isinstance(raw_spec, TokenizerSpec)
                 else TokenizerSpec.model_validate(raw_spec)
             )
-        except Exception as exc:  # noqa: BLE001
+        except (AttributeError, TypeError, ValidationError) as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] invalid tokenizer_spec: %s", exc)
 
     tokenizer_cache_dir = None
@@ -1011,7 +1012,7 @@ def _deep_agent_context_engine_config(
 
         cache_config = effective_config if isinstance(effective_config, dict) else {"react": react_cfg}
         tokenizer_cache_dir = str(resolve_tokenizer_cache_dir(cache_config))
-    except Exception:  # noqa: BLE001
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
         tokenizer_cache_dir = cec.get("tokenizer_cache_dir") or None
 
     defaults = ReActAgentConfig().context_engine_config
@@ -1055,13 +1056,15 @@ def _deep_agent_context_engine_config(
 
     # Prefer the selected Model object so duplicate AgentOS entries with the
     # same model name cannot borrow another entry's max_tokens value.
-    selected_model_name = model_name or ""
+    selected_model_name = model_name.strip() if isinstance(model_name, str) else ""
     if not selected_model_name and model is not None:
-        selected_model_name = str(
-            getattr(getattr(model, "model_config", None), "model_name", "")
-            or getattr(getattr(model, "model_client_config", None), "model_name", "")
-            or ""
-        )
+        for candidate in (
+            getattr(getattr(model, "model_config", None), "model_name", None),
+            getattr(getattr(model, "model_client_config", None), "model_name", None),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                selected_model_name = candidate.strip()
+                break
     if selected_model_name:
         # Context usage/tokenizer selection must follow the model that will
         # actually receive this request.  The old path left these fields at
@@ -1111,6 +1114,37 @@ def _deep_agent_context_engine_config(
         supported["context_window_tokens"] = agentos_cw
 
     return ContextEngineConfig.model_validate({**defaults.model_dump(), **supported})
+
+
+def _deep_agent_context_engine_config(
+    react_cfg: dict[str, Any] | None,
+) -> ContextEngineConfig:
+    """Build a context configuration from the static ReAct settings.
+
+    Keep this small compatibility-facing helper limited to the original
+    ``react_cfg`` argument.  Model-specific state is supplied through
+    :func:`_deep_agent_context_engine_config_for_model` at the model assembly
+    and model-switch call sites.
+    """
+    return _build_deep_agent_context_engine_config(react_cfg)
+
+
+def _deep_agent_context_engine_config_for_model(
+    react_cfg: dict[str, Any] | None,
+    *,
+    full_config: dict[str, Any] | None = None,
+    model_name: str | None = None,
+    model: Any = None,
+    config_base: dict[str, Any] | None = None,
+) -> ContextEngineConfig:
+    """Build context configuration with the currently selected model state."""
+    return _build_deep_agent_context_engine_config(
+        react_cfg,
+        full_config=full_config,
+        model_name=model_name,
+        model=model,
+        config_base=config_base,
+    )
 
 
 def _deep_agent_kv_cache_affinity_config(
@@ -5540,7 +5574,7 @@ class JiuWenSwarmDeepAdapter:
             # request's cached context so message history is retained while
             # tokenizer/window/usage state follows the selected model.
             try:
-                context_config = _deep_agent_context_engine_config(
+                context_config = _deep_agent_context_engine_config_for_model(
                     self._config_cache,
                     full_config=self._config_base_cache,
                     model_name=model.model_config.model_name,
@@ -7258,7 +7292,7 @@ class JiuWenSwarmDeepAdapter:
             system_prompt=build_agent_identity_prompt(
                 language=self._resolve_prompt_language(),
             ),
-            context_engine_config=_deep_agent_context_engine_config(
+            context_engine_config=_deep_agent_context_engine_config_for_model(
                 config,
                 full_config=config_base,
                 model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
@@ -7904,7 +7938,7 @@ class JiuWenSwarmDeepAdapter:
 
         self._instance = create_deep_agent(
             **common_kwargs,
-            context_engine_config=_deep_agent_context_engine_config(
+            context_engine_config=_deep_agent_context_engine_config_for_model(
                 config,
                 full_config=config_base,
                 model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
