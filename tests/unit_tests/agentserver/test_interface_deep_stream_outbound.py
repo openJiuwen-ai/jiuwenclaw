@@ -139,11 +139,23 @@ def test_parse_unknown_chat_delta_payload_forwards_task_id() -> None:
 
 
 def test_same_round_streamed_answer_still_empty_final() -> None:
+    answer = "以下是完成情况概要"
     parsed = JiuWenSwarmDeepAdapter._parse_stream_chunk(
-        _answer_chunk(),
+        _answer_chunk(answer),
         _has_streamed_content=True,
+        _streamed_text=answer,
     )
     assert parsed == {"event_type": "chat.final", "content": ""}
+
+
+def test_streamed_flag_without_visible_text_keeps_final_for_drain() -> None:
+    answer = "以下是完成情况概要"
+    parsed = JiuWenSwarmDeepAdapter._parse_stream_chunk(
+        _answer_chunk(answer),
+        _has_streamed_content=True,
+        _streamed_text="",
+    )
+    assert parsed == {"event_type": "chat.final", "content": answer}
 
 
 def test_after_outer_tool_result_reset_answer_keeps_summary() -> None:
@@ -163,11 +175,13 @@ def test_after_outer_tool_result_reset_answer_keeps_summary() -> None:
 
 
 def test_after_inner_tool_result_answer_stays_empty_final() -> None:
+    answer = "以下是完成情况概要"
     has_streamed_content = True
     if _is_outer_react_tool_result({"tool_call_id": "BashTool_skill_turbo"}):
         has_streamed_content = False
     parsed = JiuWenSwarmDeepAdapter._parse_stream_chunk(
-        _answer_chunk(),
+        _answer_chunk(answer),
         _has_streamed_content=has_streamed_content,
+        _streamed_text=answer,
     )
     assert parsed == {"event_type": "chat.final", "content": ""}

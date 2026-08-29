@@ -15165,6 +15165,9 @@ class JiuWenSwarmDeepAdapter:
         has_streamed_content = False
         had_reasoning_output = False
         visible_text_since_last_final = False
+        # Survives tool_call resets of visible_text_since_last_final; used by the
+        # stream-end reasoning-only fallback so pre-tool deltas are not forgotten.
+        had_visible_text_ever = False
         segment_streamed_text = ""
         accumulated_text = ""
         accumulated_reasoning = ""
@@ -15224,7 +15227,7 @@ class JiuWenSwarmDeepAdapter:
             nonlocal had_assistant_output, emitted_terminal_chat_final
             nonlocal saw_approved_plan_exit_result, had_reasoning_output
             nonlocal visible_text_since_last_final, segment_streamed_text
-            nonlocal has_streamed_content
+            nonlocal has_streamed_content, had_visible_text_ever
             event_type = payload.get("event_type")
             if event_type == "chat.reasoning":
                 had_reasoning_output = True
@@ -15232,6 +15235,8 @@ class JiuWenSwarmDeepAdapter:
                 # New tool round: forget prior-segment deltas / has_streamed so
                 # post-tool answer drain can rescue empty streams, without
                 # inheriting pre-tool llm_output flags that force a re-drain.
+                # had_visible_text_ever is intentionally not cleared — terminal
+                # fallback still needs to know the user already saw pre-tool text.
                 segment_streamed_text = ""
                 has_streamed_content = False
                 visible_text_since_last_final = False
@@ -15241,6 +15246,7 @@ class JiuWenSwarmDeepAdapter:
             ):
                 segment_streamed_text += str(payload.get("content") or "")
                 visible_text_since_last_final = True
+                had_visible_text_ever = True
             elif event_type == "chat.final":
                 visible_text_since_last_final = False
                 # Do not clear segment_streamed_text on empty trailer finals.
@@ -16169,8 +16175,11 @@ class JiuWenSwarmDeepAdapter:
                 # Reasoning-only models (e.g. glm-5.2) may emit chat.reasoning with
                 # empty answer content. Non-team hosts skip empty chat.final for
                 # bubble text — fill a short stable reply so the UI is not blank.
+                # Use had_visible_text_ever (not visible_text_since_last_final): the
+                # latter is cleared on tool_call, which would wrongly inject the
+                # "no visible reply" text after pre-tool deltas + post-tool reasoning.
                 fallback_content = self._apply_reasoning_only_empty_reply_fallback(
-                    has_streamed_content=visible_text_since_last_final,
+                    has_streamed_content=had_visible_text_ever,
                     had_reasoning_output=had_reasoning_output,
                     fallback_content=fallback_content,
                     reasoning_only_fallback=self._reasoning_only_empty_reply_fallback(),
