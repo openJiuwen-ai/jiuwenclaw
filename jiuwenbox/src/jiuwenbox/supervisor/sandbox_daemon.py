@@ -179,8 +179,13 @@ def _normalize_env(env: Any) -> dict[str, str] | None:
     return {str(key): str(value) for key, value in env.items()}
 
 
-def _build_child_env(env_override: dict[str, str] | None) -> dict[str, str]:
-    """Merge an exec environment while preserving runtime-owned metadata."""
+def build_child_env(env_override: dict[str, str] | None) -> dict[str, str]:
+    """Merge an exec environment while preserving runtime-owned metadata.
+
+    Public so host-side tests can exercise reserved-key handling without
+    poking private helpers. Keep in sync with ``apply_sandbox_ip_env`` in
+    ``daemon_ipc.py`` (this script cannot import that module in-sandbox).
+    """
     sandbox_ip = os.environ.get(SANDBOX_IP_ENV)
     merged_env = dict(os.environ)
     # Children must not see the listener fd or the env var pointing at it;
@@ -257,7 +262,7 @@ def _handle_exec(conn: socket.socket, header: dict[str, Any], state: DaemonState
 
         stdin_bytes = _recv_exact(conn, stdin_size) if stdin_size else b""
 
-        merged_env = _build_child_env(env_override)
+        merged_env = build_child_env(env_override)
 
         proc_kwargs: dict[str, Any] = {
             "stdin": subprocess.PIPE if stdin_size else subprocess.DEVNULL,
@@ -788,7 +793,7 @@ def _handle_exec_background(conn: socket.socket, header: dict[str, Any]) -> None
 
         reserved = True
         try:
-            merged_env = _build_child_env(env_override)
+            merged_env = build_child_env(env_override)
 
             # Background jobs discard stdout/stderr; use ``exec`` when output
             # must be captured.

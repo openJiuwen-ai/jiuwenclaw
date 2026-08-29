@@ -26,11 +26,10 @@ from jiuwenbox.models.sandbox import (
     SANDBOX_ID_FORMAT_MESSAGE,
     local_now,
 )
-from jiuwenbox.server.runtime.process import ProcessRuntime
 from jiuwenbox.supervisor import network as network_module
 from jiuwenbox.supervisor import sandbox_daemon
 from jiuwenbox.supervisor.bwrap import BwrapConfig
-from jiuwenbox.supervisor.daemon_ipc import SANDBOX_IP_ENV
+from jiuwenbox.supervisor.daemon_ipc import SANDBOX_IP_ENV, apply_sandbox_ip_env
 
 _DEFAULT_POLICY = yaml.safe_load(
     default_policy_path().read_text(encoding="utf-8")
@@ -4325,39 +4324,28 @@ class TestSandboxIpAddress:
     @staticmethod
     def test_daemon_reserved_env_cannot_be_fabricated(monkeypatch):
         monkeypatch.delenv(SANDBOX_IP_ENV, raising=False)
-        child_env = sandbox_daemon._build_child_env({
+        child_env = sandbox_daemon.build_child_env({
             SANDBOX_IP_ENV: "198.51.100.42",
         })
         assert SANDBOX_IP_ENV not in child_env
 
         monkeypatch.setenv(SANDBOX_IP_ENV, "10.0.0.2")
-        child_env = sandbox_daemon._build_child_env({
+        child_env = sandbox_daemon.build_child_env({
             SANDBOX_IP_ENV: "198.51.100.42",
         })
         assert child_env[SANDBOX_IP_ENV] == "10.0.0.2"
 
     @staticmethod
     def test_runtime_reserved_env_replaces_or_removes_create_value():
-        runtime = ProcessRuntime()
-        policy = SecurityPolicy()
+        env = {SANDBOX_IP_ENV: "198.51.100.42", "OTHER": "ok"}
+        apply_sandbox_ip_env(env, None)
+        assert SANDBOX_IP_ENV not in env
+        assert env["OTHER"] == "ok"
 
-        def build(sandbox_ip):
-            return runtime._build_sandbox_bwrap_args(
-                "env-unit",
-                policy,
-                ["true"],
-                workdir=None,
-                sandbox_env={SANDBOX_IP_ENV: "198.51.100.42"},
-                sandbox_ip=sandbox_ip,
-                netns_attached=False,
-                seccomp_fd=None,
-            )
-
-        assert not _has_arg_pair(build(None), "--setenv", SANDBOX_IP_ENV)
-        args = build("10.0.0.2")
-        index = args.index(SANDBOX_IP_ENV)
-        assert args[index - 1] == "--setenv"
-        assert args[index + 1] == "10.0.0.2"
+        env = {SANDBOX_IP_ENV: "198.51.100.42", "OTHER": "ok"}
+        apply_sandbox_ip_env(env, "10.0.0.2")
+        assert env[SANDBOX_IP_ENV] == "10.0.0.2"
+        assert env["OTHER"] == "ok"
 
 
 class TestNetworkUplink:

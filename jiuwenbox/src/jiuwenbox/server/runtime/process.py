@@ -70,6 +70,7 @@ from jiuwenbox.supervisor.daemon_ipc import (
     SANDBOX_IP_ENV,
     SANDBOX_LAUNCHER_PATH,
     SANDBOX_RESERVED_DIR,
+    apply_sandbox_ip_env,
     encode_request,
     recv_frame,
     send_frame,
@@ -909,12 +910,7 @@ class ProcessRuntime(RuntimeAdapter):
             # Landlock can stay locked down.
             config.env[LISTENER_FD_ENV] = str(listener_fd)
 
-        # Runtime-discovered metadata is reserved and always wins over policy
-        # and create-time environment values.  Removing the key when no usable
-        # address was found also prevents callers from fabricating one.
-        config.env.pop(SANDBOX_IP_ENV, None)
-        if sandbox_ip:
-            config.env[SANDBOX_IP_ENV] = sandbox_ip
+        apply_sandbox_ip_env(config.env, sandbox_ip)
 
         if launcher_dir is not None and landlock_enabled:
             launcher_path = launcher_dir / "landlock-launcher.py"
