@@ -1950,6 +1950,100 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
     }
 
 
+def test_config_panel_flatten_reads_code_graph_knobs():
+    raw = {
+        "code_graph": {
+            "profile": "graph",
+            "agent": "root",
+            "max_files": 12,
+            "max_source_bytes": 41943040,
+            "max_build_rss_mb": 256,
+            "max_cache_size_mb": 128,
+        }
+    }
+
+    flat = app_web_handlers._flatten_code_graph_for_config_panel(raw)
+
+    assert flat == {
+        "code_graph_profile": "graph",
+        "code_graph_agent": "root",
+        "code_graph_max_files": "12",
+        "code_graph_max_source_bytes": "40",
+        "code_graph_max_build_rss_mb": "256",
+        "code_graph_max_cache_size_mb": "128",
+    }
+    from_mb = app_web_handlers._flatten_code_graph_for_config_panel(
+        {"code_graph": {"max_source_bytes": "40MB"}}
+    )
+    assert from_mb["code_graph_max_source_bytes"] == "40"
+
+
+def test_config_panel_flatten_code_graph_defaults_and_unknown_values():
+    unknown = app_web_handlers._flatten_code_graph_for_config_panel(
+        {"code_graph": {"profile": "retropus", "agent": "nope"}}
+    )
+    missing = app_web_handlers._flatten_code_graph_for_config_panel({})
+
+    assert unknown["code_graph_profile"] == "off"
+    assert unknown["code_graph_agent"] == "root"
+    assert unknown["code_graph_max_files"] == "5000"
+    assert unknown["code_graph_max_source_bytes"] == "40"
+    assert missing["code_graph_profile"] == "off"
+    assert missing["code_graph_agent"] == "root"
+    assert missing["code_graph_max_source_bytes"] == "40"
+
+
+def test_config_panel_parses_source_volume_units():
+    assert app_web_handlers._build_code_graph_config_update(
+        {"code_graph_max_source_bytes": "40"}
+    ) == {"max_source_bytes": "40MB"}
+    assert app_web_handlers._build_code_graph_config_update(
+        {"code_graph_max_source_bytes": "40MB"}
+    ) == {"max_source_bytes": "40MB"}
+    assert app_web_handlers._build_code_graph_config_update(
+        {"code_graph_max_source_bytes": "1GB"}
+    ) == {"max_source_bytes": "1GB"}
+    assert app_web_handlers._build_code_graph_config_update(
+        {"code_graph_max_source_bytes": "41943040"}
+    ) == {"max_source_bytes": "40MB"}
+
+
+@pytest.mark.asyncio
+async def test_config_set_routes_code_graph_payload_to_config_helper(monkeypatch):
+    channel = FakeWebChannel()
+    recorded: list[dict] = []
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"code_graph": {}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_code_graph_in_config",
+        lambda updates: recorded.append(updates),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-code-graph",
+        {
+            "code_graph_profile": "graph",
+            "code_graph_agent": "root",
+            "code_graph_max_files": "100",
+        },
+        "sess-code-graph",
+    )
+
+    assert recorded == [{"profile": "graph", "agent": "root", "max_files": 100}]
+    assert channel.responses[-1]["ok"] is True
+    assert "code_graph_profile" in channel.responses[-1]["payload"]["updated"]
+
+
 def test_web_exposes_graph_methods_and_rejects_legacy_symphony_methods():
     skill_graph_methods = {
         "skills.graph.build",
@@ -1970,6 +2064,11 @@ def test_web_exposes_graph_methods_and_rejects_legacy_symphony_methods():
         "symphony.evolution_rebuild",
     }
     assert legacy_symphony_methods.isdisjoint(app_web_handlers._FORWARD_REQ_METHODS)
+
+
+def test_web_forwards_command_status_like_tui():
+    assert "command.status" in app_web_handlers._FORWARD_REQ_METHODS
+    assert "command.status" in app_web_handlers._FORWARD_NO_LOCAL_HANDLER_METHODS
 
 
 # =====================================================================
