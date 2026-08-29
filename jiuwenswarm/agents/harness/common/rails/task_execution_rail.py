@@ -8,9 +8,11 @@ so downstream tool/artifact events can be attributed to the active task.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import threading
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -45,7 +47,7 @@ _IMAGE_ARTIFACT_EXTENSIONS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
 })
 
-# 非产物路径黑名单（对齐 clowder-ai artifact_emitter 排除思路）
+# 非产物路径黑名单
 # 供 TaskExecutionRail 与 SkillTurboArtifactRail 共用
 _ALWAYS_EXCLUDED_PATH_PATTERNS = [
     re.compile(r'SKILL\.md', re.IGNORECASE),
@@ -66,7 +68,7 @@ _ALWAYS_EXCLUDED_PATH_PATTERNS = [
 def _is_excluded_path(path_str: str) -> bool:
     """检查路径是否应排除（非产物）。
 
-    与 clowder-ai 对齐：用黑名单排除已知非产物路径模式，而非按扩展名
+    与 enterprise_dev 对齐：用黑名单排除已知非产物路径模式，而非按扩展名
     白名单收紧——真实交付物扩展名众多（csv/html/md 等），白名单会漏报。
     正文回退扫描另由 _ARTIFACT_PATH_PATTERNS 限定路径形态。
     """
@@ -92,7 +94,7 @@ CODE_EXEC_TOOL_NAMES = frozenset({
 INVOKE_TOOL_NAMES = frozenset({"invoke_tool"})
 # send_file_to_user：产物路径从 tool_args 显式提取
 SEND_FILE_TOOL_NAMES = frozenset({"send_file_to_user"})
-# 触发产物检测的全部工具（对齐 clowder-ai artifact_emitter 白名单思路）
+# 触发产物检测的全部工具（对齐 enterprise_dev artifact_emitter 白名单思路）
 ARTIFACT_DETECTION_TOOL_NAMES = frozenset(
     IMAGE_TOOL_NAMES | WRITE_TOOL_NAMES | CODE_EXEC_TOOL_NAMES
     | INVOKE_TOOL_NAMES | SEND_FILE_TOOL_NAMES
@@ -100,6 +102,24 @@ ARTIFACT_DETECTION_TOOL_NAMES = frozenset(
 
 # mtime 校验容差（秒）：覆盖 FAT32 2 秒时间戳粒度等文件系统精度问题
 _MTIME_TOLERANCE_S = 2.0
+
+# 产物路径检测超时（秒）：防止 stat() 对不可达网络路径同步阻塞 event loop
+# （公开常量：供 SkillTurboArtifactRail 跨模块复用）
+ARTIFACT_DETECT_TIMEOUT_S = 2.0
+
+# 正文回退扫描的单行最大长度
+_BODY_SCAN_MAX_LINE_LEN = 8192
+
+# 结构化提取时识别为路径字段的键名关键词
+_STRUCTURED_PATH_FIELD_KEYWORDS = frozenset({
+    "path", "file", "files", "output", "outputs",
+    "artifact", "artifacts", "generated", "result",
+})
+
+
+def _is_unc_path(path_str: str) -> bool:
+    """检查是否为 UNC 网络路径（\\\\host\\share），避免 stat() 同步阻塞。"""
+    return path_str.startswith("\\\\") or path_str.startswith("//")
 
 # 文件路径检测的正则表达式模式（仿 PR#1440；调用方按黑名单排除过滤）
 _FILE_PATH_PATTERNS = [
@@ -117,18 +137,22 @@ _FILE_PATH_PATTERNS = [
 _PATH_TRAILING_CHARS = "'\"`\\]\\}\\),.;:，。；、："
 _PYTHON_SCRIPT_EXTENSIONS = frozenset({".py", ".pyw"})
 
-# 允许空格的产物路径正则（用于 code/bash stdout 中含空格的 Windows 路径）
+# 产物路径正文回退扫描正则（宽松策略，允许空格，匹配任意绝对路径）
 # 与 _FILE_PATH_PATTERNS 的区别：\s → \r\n（允许空格，仅换行截断）
 # 且要求路径以扩展名结尾，避免匹配到无扩展名的目录名
 _ARTIFACT_PATH_PATTERNS = [
     # Windows绝对路径，允许空格（停在换行/引号/括号等边界）
+    # (?<![A-Za-z]) 排除 URL 协议：https:// 中的 s: 会被误认为盘符
     re.compile(
-        r'[A-Za-z]:[/\\][^\r\n\]\}\)\'\"`<>，。；、：]+'
+        r'(?<![A-Za-z])[A-Za-z]:[/\\][^\r\n\]\}\)\'\"`<>，。；、：]+'
         r'\.[a-zA-Z0-9]{1,10}'
     ),
     # Unix绝对路径，允许空格
+    # (?<![:/]) 排除 URL：避免 //host 被 normpath 转为 UNC 网络路径后
+    # stat() 同步阻塞 event loop（对齐问题201的22秒阻塞根因）
     re.compile(
-        r'/[^\r\n\]\}\)\'\"`<>，。；、：]+\.[a-zA-Z0-9]{1,10}'
+        r'(?<![:/])/[^\r\n\]\}\)\'\"`<>，。；、：]+'
+        r'\.[a-zA-Z0-9]{1,10}'
     ),
 ]
 
@@ -136,6 +160,67 @@ _ARTIFACT_PATH_PATTERNS = [
 def _clean_path_candidate(path_str: str) -> str:
     """清理正则提取到的路径候选首尾非法字符。"""
     return path_str.strip().strip(_PATH_TRAILING_CHARS).strip()
+
+
+def _iter_structured_path_values(value: Any, parent_key: str = "") -> list[str]:
+    """从结构化工具结果中递归提取路径字段值。
+
+    遍历 dict/list/tuple/set，当键名含 path/file/output/artifact 等关键词时
+    取其字符串值作为路径候选。structured 提取命中后可跳过正文正则扫描。
+    """
+    paths: list[str] = []
+    key_lower = parent_key.lower()
+    key_is_path_like = any(
+        keyword in key_lower for keyword in _STRUCTURED_PATH_FIELD_KEYWORDS
+    )
+
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            paths.extend(
+                _iter_structured_path_values(child_value, str(child_key))
+            )
+        return paths
+
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            paths.extend(_iter_structured_path_values(item, parent_key))
+        return paths
+
+    if key_is_path_like and value is not None:
+        candidate = _clean_path_candidate(str(value))
+        if candidate:
+            paths.append(candidate)
+
+    return paths
+
+
+def _scan_body_text_for_paths(
+    result_text: str,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> list[str]:
+    """逐行扫描正文提取路径候选。
+
+    逐行处理避免超长单行正则灾难；单行超 _BODY_SCAN_MAX_LINE_LEN 跳过。
+    """
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for line in result_text.splitlines():
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        if len(line) > _BODY_SCAN_MAX_LINE_LEN:
+            continue
+        for pattern in _ARTIFACT_PATH_PATTERNS:
+            for match in pattern.findall(line):
+                cleaned = _clean_path_candidate(match)
+                if not cleaned:
+                    continue
+                identity = cleaned.replace("\\", "/").lower()
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                candidates.append(cleaned)
+    return candidates
 
 
 def _parse_tool_args_payload(tool_args: Any) -> dict[str, Any]:
@@ -238,18 +323,15 @@ def _unwrap_invoke_tool(
 
 def _extract_raw_paths_from_result_text(
     tool_result: Any,
-    patterns: list[re.Pattern[str]] | None = None,
 ) -> list[str]:
     """从工具输出结果中正则提取路径候选（不按扩展名过滤）。"""
-    if patterns is None:
-        patterns = _FILE_PATH_PATTERNS
     result_text = _tool_result_to_text(tool_result)
     if not result_text:
         return []
 
     seen: set[str] = set()
     paths: list[str] = []
-    for pattern in patterns:
+    for pattern in _FILE_PATH_PATTERNS:
         for match in pattern.findall(result_text):
             cleaned = _clean_path_candidate(match)
             if not cleaned:
@@ -286,18 +368,37 @@ def _extract_file_paths_from_write_tool(
 
 
 def _extract_image_paths_from_tool_result(tool_result: Any) -> list[str]:
-    """从工具输出结果中提取图像产物路径。
+    """从工具输出结果中提取图像产物路径（结构化优先）。
 
-    使用允许空格的 _ARTIFACT_PATH_PATTERNS（generate_image 可能保存到
-    含空格的 effective_project_dir 下），再按图像扩展名白名单过滤。
-    处理字符串、字典、对象三类结果。
+    先从结果 dict 的 path/output/result 等键提取，命中即返回；
+    未命中则回退到正文逐行宽松正则扫描，再按图像扩展名白名单过滤。
     """
-    image_paths = []
-    for path in _extract_raw_paths_from_result_text(
-        tool_result, patterns=_ARTIFACT_PATH_PATTERNS
-    ):
+    image_paths: list[str] = []
+    seen: set[str] = set()
+
+    # 1. 结构化提取优先
+    result_dict: dict[str, Any] | None = None
+    if isinstance(tool_result, dict):
+        result_dict = tool_result
+    elif hasattr(tool_result, "__dict__"):
+        result_dict = tool_result.__dict__
+    if result_dict is not None:
+        for p in _iter_structured_path_values(result_dict):
+            if Path(p).suffix.lower() in _IMAGE_ARTIFACT_EXTENSIONS:
+                identity = p.replace("\\", "/").lower()
+                if identity not in seen:
+                    seen.add(identity)
+                    image_paths.append(p)
+        if image_paths:
+            return image_paths
+
+    # 2. 回退：保守正则逐行扫描
+    for path in _scan_body_text_for_paths(_tool_result_to_text(tool_result)):
         if Path(path).suffix.lower() in _IMAGE_ARTIFACT_EXTENSIONS:
-            image_paths.append(path)
+            identity = path.replace("\\", "/").lower()
+            if identity not in seen:
+                seen.add(identity)
+                image_paths.append(path)
     return image_paths
 
 
@@ -330,36 +431,25 @@ def _is_path_within(path: Path, base: Path) -> bool:
     )
 
 
-def _extract_artifact_paths_from_result(
-    tool_result: Any,
-    tool_start_time: float | None = None,
-    workspace_base: Path | None = None,
+def _validate_artifact_candidates(
+    raw_paths: list[str],
+    tool_start_time: float | None,
+    workspace_base: Path | None,
+    cancel_event: threading.Event | None = None,
 ) -> list[str]:
-    """从工具输出中提取产物路径（黑名单排除 + 存在性/mtime/工作区校验）。
+    """校验路径候选，返回通过全部校验的产物路径。
 
-    用于 code/bash/mcp_exec_command 等代码执行工具，从 stdout/stderr 中
-    正则提取文件路径。过滤规则（对齐 clowder-ai artifact_emitter）：
-    - 排除非产物路径黑名单（SKILL.md/AGENT.md/node_modules/bash_outputs 等）
-    - 文件必须实际存在
-    - mtime 校验：仅保留工具执行期间写入的文件，避免旧文件误报
-    - 工作区校验：仅保留 workspace_base 内的文件，避免处理工作区外文件
-    - 按规范化绝对路径去重（Windows 上同一绝对路径会被 Windows/Unix
-      两个正则重复命中，且 E:/x 与 /x 可能指向同一文件）
+    校验项：UNC 过滤 + 黑名单排除 + 存在性/mtime/工作区校验 + 去重。
     """
     paths: list[str] = []
     seen: set[str] = set()
-    # 使用允许空格的 _ARTIFACT_PATH_PATTERNS 提取（code/bash stdout 中
-    # 路径常含空格，_FILE_PATH_PATTERNS 在空格处截断）
-    result_text = _tool_result_to_text(tool_result)
-    raw_paths: list[str] = []
-    if result_text:
-        for pattern in _ARTIFACT_PATH_PATTERNS:
-            for match in pattern.findall(result_text):
-                cleaned = _clean_path_candidate(match)
-                if cleaned:
-                    raw_paths.append(cleaned)
     for raw_path in raw_paths:
+        if cancel_event is not None and cancel_event.is_set():
+            break
         path = os.path.normpath(raw_path)
+        if _is_unc_path(path):
+            logger.debug("[artifact-detect] skip UNC path: %s", path)
+            continue
         file_path = Path(path)
         if _is_excluded_path(path):
             continue
@@ -385,6 +475,52 @@ def _extract_artifact_paths_from_result(
     return paths
 
 
+def _extract_artifact_paths_from_result(
+    tool_result: Any,
+    tool_start_time: float | None = None,
+    workspace_base: Path | None = None,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> list[str]:
+    """从工具输出中提取产物路径（结构化优先 + 正文宽松正则回退）。
+
+    处理流程：
+    1. 结构化提取：从结果 dict 的 path/file/output/result 等键提取候选，
+       候选校验通过即返回；弱键垃圾候选（如 {"result": "ok"}）校验失败后
+       继续走正文回退，不屏蔽真实路径
+    2. 正文回退扫描：逐行宽松正则提取（单行超 _BODY_SCAN_MAX_LINE_LEN
+       跳过，正则见 _ARTIFACT_PATH_PATTERNS）
+    3. 统一校验：见 _validate_artifact_candidates
+    """
+    # 1. 结构化提取优先
+    if isinstance(tool_result, dict):
+        result_dict: dict[str, Any] | None = tool_result
+    elif hasattr(tool_result, "__dict__"):
+        result_dict = tool_result.__dict__
+    else:
+        result_dict = None
+    if result_dict is not None:
+        paths = _validate_artifact_candidates(
+            _iter_structured_path_values(result_dict),
+            tool_start_time,
+            workspace_base,
+            cancel_event,
+        )
+        if paths:
+            return paths
+
+    # 2. 结构化未命中则回退到正文逐行扫描
+    result_text = _tool_result_to_text(tool_result)
+    if not result_text:
+        return []
+    return _validate_artifact_candidates(
+        _scan_body_text_for_paths(result_text, cancel_event=cancel_event),
+        tool_start_time,
+        workspace_base,
+        cancel_event,
+    )
+
+
 class ArtifactDetection(NamedTuple):
     """统一产物检测结果。
 
@@ -403,6 +539,7 @@ def detect_artifact_paths(
     *,
     tool_start_time: float | None = None,
     workspace_base: Path | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ArtifactDetection:
     """统一产物检测入口，供 TaskExecutionRail / SkillTurboArtifactRail 共用。
 
@@ -455,20 +592,16 @@ def detect_artifact_paths(
             tool_result,
             tool_start_time=tool_start_time,
             workspace_base=workspace_base,
+            cancel_event=cancel_event,
         )
 
-    # 统一出口：仅保留实际存在的文件
-    paths = [p for p in paths if Path(p).exists()]
+    # 统一出口：仅保留实际存在的文件（跳过 UNC 网络路径避免同步阻塞）
+    paths = [p for p in paths if not _is_unc_path(p) and Path(p).exists()]
     return ArtifactDetection(tool_name, paths)
 
 
 def resolve_workspace_base() -> Path | None:
-    """解析请求级工作区根目录，用于产物路径范围校验。
-
-    与 clowder-ai artifact_emitter 对齐：只使用请求级
-    effective_project_dir，获取不到时返回 None，让 workspace 校验自然降级
-    （绝对路径仍能通过，相对路径被过滤）。
-    """
+    """解析请求级工作区根目录，用于产物路径范围校验。"""
     try:
         from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
             get_effective_request_workspace_dir,
@@ -500,6 +633,61 @@ def pop_tool_start_time(
     if not tool_call_id:
         return None
     return start_times.pop(tool_call_id, None)
+
+
+async def detect_artifact_paths_safe(
+    ctx: AgentCallbackContext,
+    session_id: str,
+    tool_start_time: float | None,
+    *,
+    log_prefix: str,
+) -> ArtifactDetection | None:
+    """线程中执行产物检测并加超时保护，超时/异常时返回 None（跳过检测）。
+
+    将同步的 detect_artifact_paths 移到线程中执行，避免 stat() 对不可达
+    网络路径同步阻塞 event loop。
+    供 TaskExecutionRail 与 SkillTurboArtifactRail 共用；调用方需保证
+    ctx.inputs 为 ToolCallInputs。
+    """
+    cancel_event = threading.Event()
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                detect_artifact_paths,
+                ctx.inputs.tool_name,
+                getattr(ctx.inputs, "tool_args", None),
+                getattr(ctx.inputs, "tool_result", None),
+                tool_start_time=tool_start_time,
+                workspace_base=resolve_workspace_base(),
+                cancel_event=cancel_event,
+            ),
+            timeout=ARTIFACT_DETECT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        # 超时后 set 通知后台线程在下一个检查点退出（stat 卡住时线程
+        # 自行结束，不影响 event loop）
+        cancel_event.set()
+        logger.warning(
+            "%s artifact detection timed out (%.1fs), skipping "
+            "session_id=%s tool=%s",
+            log_prefix,
+            ARTIFACT_DETECT_TIMEOUT_S,
+            session_id,
+            ctx.inputs.tool_name,
+        )
+        return None
+    except Exception as exc:
+        # 检测失败不应打断 rail 回调链，记录后跳过本工具的产物检测
+        logger.warning(
+            "%s artifact detection failed, skipping session_id=%s "
+            "tool=%s error=%s",
+            log_prefix,
+            session_id,
+            ctx.inputs.tool_name,
+            exc,
+            exc_info=True,
+        )
+        return None
 
 
 def filter_unhooked(
@@ -872,15 +1060,15 @@ class TaskExecutionRail(DeepAgentRail):
             )
             return
 
-        detection = detect_artifact_paths(
-            ctx.inputs.tool_name,
-            getattr(ctx.inputs, "tool_args", None),
-            getattr(ctx.inputs, "tool_result", None),
-            tool_start_time=pop_tool_start_time(
-                self._tool_start_times, ctx
-            ),
-            workspace_base=resolve_workspace_base(),
+        # 线程 + 超时 + 异常兜底执行产物检测，避免阻塞 event loop
+        detection = await detect_artifact_paths_safe(
+            ctx,
+            session_id,
+            pop_tool_start_time(self._tool_start_times, ctx),
+            log_prefix="[TaskExecutionRail]",
         )
+        if detection is None:
+            return
         task_id = _ACTIVE_TASK_ID.get()
 
         # 去重：跳过已 hook 过且内容未变化的文件

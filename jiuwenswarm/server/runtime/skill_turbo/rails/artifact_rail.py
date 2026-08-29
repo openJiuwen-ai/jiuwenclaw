@@ -2,7 +2,7 @@
 
 """Artifact detection rail for SkillTurbo tool calls.
 
-复用 TaskExecutionRail 的共享产物检测逻辑（detect_artifact_paths /
+复用 TaskExecutionRail 的共享产物检测逻辑（detect_artifact_paths_safe /
 fire_artifact_hook 等），在 SkillTurbo 工具调用后检测产物文件，同时
 触发 IMAGE_ARTIFACT_POST_PROCESS 和 ARTIFACT_POST_PROCESS 扩展 hook
 供扩展做原地后处理（如加水印），并发射 artifact.generated 事件到
@@ -25,12 +25,11 @@ from openjiuwen.core.single_agent.rail.base import (
 # 复用 jiuwenswarm TaskExecutionRail 的共享产物检测逻辑
 from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
     ARTIFACT_DETECTION_TOOL_NAMES,
-    detect_artifact_paths,
+    detect_artifact_paths_safe,
     filter_unhooked,
     fire_artifact_hook,
     mark_hooked,
     pop_tool_start_time,
-    resolve_workspace_base,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,15 +76,16 @@ class SkillTurboArtifactRail:
         task_id = self._executor.current_task_id()
         detect_start = time.perf_counter()
 
-        detection = detect_artifact_paths(
-            ctx.inputs.tool_name,
-            getattr(ctx.inputs, "tool_args", None),
-            getattr(ctx.inputs, "tool_result", None),
-            tool_start_time=pop_tool_start_time(
-                self._tool_start_times, ctx
-            ),
-            workspace_base=resolve_workspace_base(),
+        # 线程 + 超时 + 异常兜底执行产物检测，避免 stat() 阻塞 event loop
+        # （共享 TaskExecutionRail 的 detect_artifact_paths_safe）
+        detection = await detect_artifact_paths_safe(
+            ctx,
+            session_id,
+            pop_tool_start_time(self._tool_start_times, ctx),
+            log_prefix=_LOG_PREFIX,
         )
+        if detection is None:
+            return
 
         # 去重：跳过已 hook 过且内容未变化的文件
         # （存在性过滤已在 detect_artifact_paths 统一出口处理）
@@ -132,6 +132,9 @@ class SkillTurboArtifactRail:
         try:
             return str(session.get_session_id() or "?")
         except Exception:
+            logger.debug(
+                "%s failed to get session_id", _LOG_PREFIX, exc_info=True
+            )
             return "?"
 
     async def _emit_artifact_generated(
@@ -147,16 +150,17 @@ class SkillTurboArtifactRail:
         for path_str in paths:
             p = Path(path_str)
             try:
-                size = p.stat().st_size if p.exists() else 0
+                stat = p.stat()
+                size, exists = stat.st_size, True
             except OSError:
-                size = 0
+                size, exists = 0, False
             artifacts_payload.append(
                 {
                     "path": str(p),
                     "name": p.name,
                     "extension": p.suffix.lower(),
                     "size": size,
-                    "exists": p.exists(),
+                    "exists": exists,
                 }
             )
 
