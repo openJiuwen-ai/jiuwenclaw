@@ -34,6 +34,15 @@ _SKILL_TURBO_STOP_HINT = (
     "work is already done; calling any of them again would duplicate the work."
 )
 
+# 工具返回值会先被 AbilityManager 收成 ToolMessage。after_tool_call 再用
+# StreamEventRail._tool_interrupted_message（随 prompt 语言中/英）覆写 tool_msg。
+# _fix_incomplete_tool_context 认 rail 文案 + 中英文 legacy 模板，故本常量取中文
+# 默认句即可。禁止返回 {'success': False, 'error': '任务已暂停等待审批'}：
+# str(dict) 进 ToolMessage 后模型会当成加速失败并回退 skill_tool。
+_SKILL_TURBO_HITL_PLACEHOLDER = (
+    "[工具执行被中断] 工具 skill_acceleration_exec 执行过程中被用户打断，没有执行结果。"
+)
+
 # ── SkillTurbo event_type -> DeepAgent OutputSchema.type 反向映射 ──
 # SkillTurbo executor 产出的 payload.event_type 带 "chat." 前缀，而 DeepAgent 主循环 /
 # _parse_stream_chunk 期望原始 OutputSchema.type（不带前缀）。直接用 event_type 作 type
@@ -114,6 +123,65 @@ def clear_current_skill_turbo_adapter() -> None:
     避免误用 reset(None) 抛 ValueError 被吞掉导致 adapter 泄漏。
     """
     _current_skill_turbo_adapter.set(None)
+
+
+_skill_turbo_resume_answers: ContextVar[Any] = ContextVar(
+    "skill_turbo_resume_answers", default=None
+)
+
+
+def set_skill_turbo_resume_answers(answers: Any) -> Token:
+    return _skill_turbo_resume_answers.set(answers)
+
+
+def get_skill_turbo_resume_answers() -> Any:
+    return _skill_turbo_resume_answers.get()
+
+
+def reset_skill_turbo_resume_answers(token: Token) -> None:
+    _skill_turbo_resume_answers.reset(token)
+
+
+def _resume_user_input_from_raw(
+    raw: Any,
+    resume_ctx: dict[str, Any],
+    adapter: Any,
+) -> Any:
+    """把 handle_resume 的 InteractiveInput / 原始 answers 转成内层 rail 的 user_input。
+
+    InteractiveInput.user_inputs 的 key 是 interaction / 外层 tool_call_id，
+    value 是该次中断的完整 payload。此处取任意一个 value，因为外层 HITL 当前只有一个 skill_acceleration_exec interrupt。
+    resume_stream 的形态是单次中断的 payload。
+    """
+    user_inputs = getattr(raw, "user_inputs", None)
+    if isinstance(user_inputs, dict) and user_inputs:
+        return next(iter(user_inputs.values()))
+    if isinstance(raw, list) and adapter is not None:
+        convert = getattr(adapter, "_skill_turbo_answers_to_confirm_payload", None)
+        if callable(convert):
+            return convert(raw, resume_ctx)
+    return raw
+
+
+def _resolve_skill_turbo_resume_session_id(
+    external_session_id: Any,
+    parent_session: Any,
+) -> str:
+    """Align resume checkpointer key with executor: metadata sid, else parent session."""
+    sid = str(external_session_id or "").strip()
+    if sid:
+        return sid
+    if parent_session is None:
+        return ""
+    getter = getattr(parent_session, "get_session_id", None)
+    if callable(getter):
+        try:
+            sid = str(getter() or "").strip()
+        except Exception:
+            sid = ""
+    if sid:
+        return sid
+    return str(getattr(parent_session, "session_id", "") or "").strip()
 
 
 # ── ContextVar：当前请求的 metadata ──
@@ -212,7 +280,7 @@ def _wrap_skill_turbo_result(
         "此排除规则为临时措施，待 skill 加速器适配模板功能后移除。"
     ),
 )
-async def skill_turbo(query: str) -> dict[str, Any]:
+async def skill_turbo(query: str) -> dict[str, Any] | str:
     """执行 SkillAccelerationExec 任务。
 
     Args:
@@ -373,10 +441,96 @@ async def skill_turbo(query: str) -> dict[str, Any]:
     if isinstance(request_metadata, dict):
         inputs["metadata"] = request_metadata
 
+    turbo_session = None
+    resume_ctx = None
+    resume_answers = get_skill_turbo_resume_answers()
+    if resume_answers is not None:
+        try:
+            from openjiuwen.core.session.agent import create_agent_session
+            from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
+                load_resume_ctx,
+                set_skill_turbo_id,
+            )
+
+            card = getattr(getattr(adapter, "_instance", None), "card", None)
+            sid = _resolve_skill_turbo_resume_session_id(
+                external_session_id, parent_session
+            )
+            if not sid:
+                logger.warning(
+                    "[SkillTurboTool] resume load_resume_ctx missing session_id; "
+                    "checkpointer key may miss the saved resume_ctx"
+                )
+            turbo_session = (
+                create_agent_session(session_id=sid, card=card)
+                if sid
+                else create_agent_session(card=card)
+            )
+            set_skill_turbo_id(turbo_session, card)
+            resume_ctx = await load_resume_ctx(turbo_session)
+        except Exception:
+            logger.warning(
+                "[SkillTurboTool] load resume_ctx failed, falling back to run_stream",
+                exc_info=True,
+            )
+            if turbo_session is not None:
+                try:
+                    await turbo_session.post_run()
+                except Exception:
+                    logger.debug(
+                        "[SkillTurboTool] fallback turbo_session post_run failed",
+                        exc_info=True,
+                    )
+                turbo_session = None
+            resume_ctx = None
+
+    hitl_interrupt = False
+
+    release_checkpoint = False    # Only persist-clear the checkpoint when this invocation consumed it
+    # (resume finished) or it cannot be reused (SkillTurboNotHandled).
+    # Transient failures must keep the last HITL checkpoint; do not post_run
+    # either — turbo_session shares the executor checkpointer key, and stale
+    # in-memory state would clobber a still-valid resume_ctx on disk.
     try:
-        async for chunk in skill_turbo_inst.run_stream(
-            query, inputs, request_id, channel_id
-        ):
+        if resume_ctx is not None:
+            from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
+                apply_interactive_ask_to_inputs,
+                resolve_resume_interactive_ask,
+            )
+
+            raw_ia = None
+            if isinstance(request_metadata, dict) and (
+                "interactive_ask" in request_metadata
+                or "interactiveAsk" in request_metadata
+            ):
+                raw_ia = request_metadata.get(
+                    "interactive_ask", request_metadata.get("interactiveAsk")
+                )
+            resume_inputs = apply_interactive_ask_to_inputs(
+                resume_ctx.get("inputs") or inputs,
+                resolve_resume_interactive_ask(raw_ia, resume_ctx.get("inputs")),
+            )
+            logger.info(
+                "[SkillTurboTool] HITL resume via resume_stream tcid=%s",
+                resume_ctx.get("pending_tool_call_id"),
+            )
+            stream = skill_turbo_inst.resume_stream(
+                plan_code=resume_ctx["plan_code"],
+                inputs=resume_inputs,
+                request_id=request_id,
+                channel_id=channel_id,
+                pending_tool_call_id=resume_ctx["pending_tool_call_id"],
+                user_input=_resume_user_input_from_raw(
+                    resume_answers, resume_ctx, adapter
+                ),
+                task_states=resume_ctx.get("task_states"),
+            )
+        else:
+            stream = skill_turbo_inst.run_stream(
+                query, inputs, request_id, channel_id
+            )
+
+        async for chunk in stream:
             if not chunk.payload:
                 continue
 
@@ -435,6 +589,7 @@ async def skill_turbo(query: str) -> dict[str, Any]:
                 )
 
         # 过程输出已通过 write_stream 实时推给前端，tool result 仅返回精简完成信号 + 产物摘要
+        release_checkpoint = True
         return _wrap_skill_turbo_result(
             {"success": True, "result": "任务已完成"},
             artifact_holder=skill_turbo_inst.artifact_holder,
@@ -444,7 +599,7 @@ async def skill_turbo(query: str) -> dict[str, Any]:
         # HITL 中断：提取 ToolInterruptException 存入 ContextVar，
         # after_tool_call 会改写 ctx.inputs.tool_result 为 TIE 触发 harness 原生 HITL。
         # 不能直接 raise TIE（被 _execute_single_tool_call 包装为 AbilityExecutionError）。
-        # resume_ctx 已由 executor.save_resume_ctx 保存，恢复时走 _try_skill_turbo_resume。
+        # resume_ctx 已由 executor.save_resume_ctx 保存；外层 HITL 恢复后会再 invoke 本工具。
         from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
             extract_tool_interrupt,
         )
@@ -455,10 +610,8 @@ async def skill_turbo(query: str) -> dict[str, Any]:
                 tic.tool_call.id if tic.tool_call else "?",
             )
             set_skill_turbo_hitl_tic(tic)
-            return _wrap_skill_turbo_result(
-                {"success": False, "error": "任务已暂停等待审批"},
-                artifact_holder=skill_turbo_inst.artifact_holder,
-            )
+            hitl_interrupt = True
+            return _SKILL_TURBO_HITL_PLACEHOLDER
         # Fallback: AbortError 无 ToolInterruptException cause，返回错误
         logger.warning("[SkillTurboTool] AbortError without ToolInterruptException cause")
         return _wrap_skill_turbo_result(
@@ -467,6 +620,7 @@ async def skill_turbo(query: str) -> dict[str, Any]:
         )
     except SkillTurboNotHandled as exc:
         logger.info("[SkillTurboTool] SkillTurbo 未处理: %s", exc)
+        release_checkpoint = True
         return _wrap_skill_turbo_result(
             {"success": False, "error": f"SkillAccelerationExec 未处理: {exc}"},
             artifact_holder=skill_turbo_inst.artifact_holder,
@@ -477,11 +631,31 @@ async def skill_turbo(query: str) -> dict[str, Any]:
             {"success": False, "error": f"执行失败: {exc}"},
             artifact_holder=skill_turbo_inst.artifact_holder,
         )
+    finally:
+        if turbo_session is not None and not hitl_interrupt and release_checkpoint:
+            if resume_ctx is not None:
+                from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
+                    clear_resume_ctx,
+                )
+
+                try:
+                    await clear_resume_ctx(turbo_session)
+                except Exception:
+                    logger.debug(
+                        "[SkillTurboTool] clear_resume_ctx failed",
+                        exc_info=True,
+                    )
+            try:
+                await turbo_session.post_run()
+            except Exception:
+                logger.debug(
+                    "[SkillTurboTool] turbo_session post_run failed",
+                    exc_info=True,
+                )
 
 
 # PPT 加速流水线经常超过 AbilityManager 默认 300s 工具超时；与 deepresearch_stream 一样
-# 豁免外层 deadline。HITL 续跑走 adapter resume_stream，本来就不经过这次 tool.invoke。
-# timeout_s=None 后仍受 MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT（默认 3600s）约束。
+# 豁免外层 deadline。timeout_s=None 后仍受 MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT（默认 3600s）约束。
 skill_turbo.card.properties["resilience"] = {"timeout_s": None}
 
 
