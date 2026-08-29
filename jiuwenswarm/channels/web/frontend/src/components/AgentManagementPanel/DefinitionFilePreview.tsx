@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Clipboard, Download, FileText, Folder } from 'lucide-react';
+import { ArrowDownToLine, ChevronDown, ChevronRight, FileCode2, FileText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { DefinitionFileEntry, RequestStatus } from '../../features/agentManagement';
 import { isPreviewableFile } from '../../features/agentManagement';
+import FileCopyIcon from '../../assets/agent-management/file-copy.svg?react';
+import FolderAssetIcon from '../../assets/work-mode/folder.svg?react';
+import FolderFoldAssetIcon from '../../assets/work-mode/folder-fold.svg?react';
 import { CodePreview } from '../ArtifactsPanel/CodePreview';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 
@@ -20,6 +23,12 @@ type DefinitionFilePreviewProps = {
 
 function getLabel(path: string): string {
   return path.replace(/\/$/, '').split('/').filter(Boolean).pop() || path;
+}
+
+const CODE_FILE_PATTERN = /\.(?:bash|c|cc|cfg|conf|cpp|css|env|go|h|hpp|html?|ini|ipynb|java|js|json|jsx|mjs|php|py|pyw|rb|rs|sh|sql|swift|toml|ts|tsx|vue|xml|yaml|yml)$/i;
+
+function isCodeFile(fileName: string): boolean {
+  return CODE_FILE_PATTERN.test(fileName);
 }
 
 function splitMarkdownFrontMatter(content: string): { frontMatter: string | null; body: string } {
@@ -74,7 +83,11 @@ function TreeEntry({
         <span className="agent-management-file-entry__chevron" aria-hidden="true">
           {isDirectory ? isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} /> : null}
         </span>
-        {isDirectory ? <Folder size={15} aria-hidden="true" /> : <FileText size={15} aria-hidden="true" />}
+        <span className="agent-management-file-entry__icon" aria-hidden="true">
+          {isDirectory ? (
+            isExpanded ? <FolderFoldAssetIcon width={15} height={15} /> : <FolderAssetIcon width={15} height={15} />
+          ) : isCodeFile(label) ? <FileCode2 size={16} strokeWidth={1.5} /> : <FileText size={16} strokeWidth={1.5} />}
+        </span>
         <span className="agent-management-file-entry__label">{label}</span>
       </button>
       {isDirectory && isExpanded ? (
@@ -204,7 +217,7 @@ export function DefinitionFilePreview({
                   aria-label={t('agentManagement.files.copy')}
                   title={t('agentManagement.files.copy')}
                 >
-                  <Clipboard size={16} aria-hidden="true" />
+                  <FileCopyIcon width={16} height={16} aria-hidden="true" />
                   {copyState === 'copied' ? t('agentManagement.files.copied') : copyState === 'failed' ? t('agentManagement.files.copyFailed') : null}
                 </button>
                 <button
@@ -214,7 +227,7 @@ export function DefinitionFilePreview({
                   aria-label={t('agentManagement.files.download')}
                   title={t('agentManagement.files.download')}
                 >
-                  <Download size={16} aria-hidden="true" />
+                  <ArrowDownToLine size={16} strokeWidth={1.5} aria-hidden="true" />
                 </button>
               </div>
             </header>

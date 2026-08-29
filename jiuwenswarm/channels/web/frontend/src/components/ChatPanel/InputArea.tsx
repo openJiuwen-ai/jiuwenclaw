@@ -16,8 +16,7 @@
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AtSign, ChevronRight, CircleX, ClipboardList, FileText, Loader2, Plus, Search, Square, Target, X } from 'lucide-react';
-import { MoreHorizontal } from 'lucide-react';
+import { AtSign, ChevronRight, CircleX, Loader2, Plus, Square, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -63,7 +62,13 @@ import {
 } from '../../features/workspace/localFilePicker';
 import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
-import AgentPickerIcon from '../../assets/智能体.svg?react';
+import AgentPickerIcon from '../../assets/agent-management/智能体选择.svg?react';
+import AttachmentIcon from '../../assets/agent-management/attachment.svg?react';
+import GoalIcon from '../../assets/agent-management/goal.svg?react';
+import MoreIcon from '../../assets/agent-management/more.svg?react';
+import PlanIcon from '../../assets/agent-management/planned-events.svg?react';
+import SearchIcon from '../../assets/agent-management/agent-search.svg?react';
+import SkillIcon from '../../assets/agent-management/agent-skill.svg?react';
 
 const MENU_GAP = 10;
 
@@ -2780,8 +2785,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   }}
                 >
                   <span className="chat-mode-select__option-main">
-                    <span className="chat-mode-select__icon" aria-hidden="true">
-                      <FileText className="w-4 h-4" />
+                    <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
+                      <AttachmentIcon aria-hidden="true" />
                     </span>
                     <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                   </span>
@@ -2796,7 +2801,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   onClick={() => setAgentPickerOpen((open) => !open)}
                 >
                     <span className="chat-mode-select__option-main">
-                      <span className="chat-mode-select__icon" aria-hidden="true">
+                      <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
                       <AgentPickerIcon aria-hidden="true" />
                       </span>
                     <span className="chat-mode-select__label">{t('chat.agent')}</span>
@@ -2814,7 +2819,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       <span className="is-active" role="tab" aria-selected="true">{t('chat.agent')}</span>
                     </div>
                     <label className="chat-agent-picker__search">
-                      <Search size={14} aria-hidden="true" />
+                      <SearchIcon aria-hidden="true" />
                       <span className="sr-only">{t('chat.agentSearchPlaceholder')}</span>
                       <input
                         type="search"
@@ -2895,7 +2900,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                           onNavigateToAgents?.();
                         }}
                       >
-                        <MoreHorizontal size={14} aria-hidden="true" />
+                        <MoreIcon aria-hidden="true" />
                         {t('chat.agentMore')}
                       </button>
                     </div>
@@ -2934,21 +2939,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     }}
                   >
                     <span className="chat-mode-select__option-main">
-                      {/* 手绘拼图图标（ConnectorMarket/icons.tsx）在这个菜单里视觉上比旁边
-                          FileText/Target/ClipboardList 这些 lucide 图标显得更小（用户 2026-08-19
-                          反馈），单独放大到 18px。真正生效的是 CSS 里的 --lg 修饰 class（见
-                          ChatPanel.css `.chat-mode-select__icon svg { width/height: 14px }`
-                          这条共享基础规则的选择器特异度是 class+元素，Tailwind 任意值 class 在
-                          SVG 自身上加宽高属性/class 特异度更低会被它盖掉，实测确认过），不是这里
-                          ExtensionIcon 的 className。 */}
-                      <span className="chat-mode-select__icon chat-mode-select__icon--lg" aria-hidden="true">
+                      <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
                         <ExtensionIcon />
                       </span>
                       <span className="chat-mode-select__label">{t('chat.extension')}</span>
                     </span>
-                    <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
-                    </svg>
+                    <ChevronRight className="chat-mode-select__chevron" size={16} aria-hidden="true" />
                   </button>
                 )}
                 <div className="chat-mode-select__divider" role="separator" />
@@ -2968,14 +2964,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   }}
                 >
                   <span className="chat-mode-select__option-main">
-                    <span className="chat-mode-select__icon" aria-hidden="true">
-                      <span className="chat-config-icon chat-config-icon--skill" />
+                    <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
+                      <SkillIcon aria-hidden="true" />
                     </span>
                     <span className="chat-mode-select__label">{t(isTeamMode ? 'chat.swarmSkills' : 'chat.skills')}</span>
                   </span>
-                  <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
-                  </svg>
+                  <ChevronRight className="chat-mode-select__chevron" size={16} aria-hidden="true" />
                 </button>
                 {canUsePlanMenu && (() => {
                   // 对称地：已有未完成目标时不能选计划；对话进行中（isProcessing）时也先禁掉，
@@ -3019,8 +3013,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       }}
                     >
                       <span className="chat-mode-select__option-main">
-                        <span className="chat-mode-select__icon" aria-hidden="true">
-                          <ClipboardList className="w-4 h-4" />
+                        <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
+                          <PlanIcon aria-hidden="true" />
                         </span>
                         <span className="chat-mode-select__label">{t('plan.toggleLabel')}</span>
                       </span>
@@ -3070,8 +3064,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       }}
                     >
                       <span className="chat-mode-select__option-main">
-                        <span className="chat-mode-select__icon" aria-hidden="true">
-                          <Target className="w-4 h-4" />
+                        <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
+                          <GoalIcon aria-hidden="true" />
                         </span>
                         <span className="chat-mode-select__label">{t('goal.toggleLabel')}</span>
                       </span>
@@ -3226,8 +3220,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             <div className="chat-goal-tag" data-testid="chat-panel-goal-tag">
               <button type="button" className="chat-mode-select__trigger" data-testid="chat-panel-goal-tag-label">
                 <span className="chat-mode-select__value">
-                  <span className="chat-mode-select__icon" aria-hidden="true">
-                    <Target className="w-4 h-4" />
+                <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
+                  <GoalIcon aria-hidden="true" />
                   </span>
                   <span className="chat-mode-select__label">{t('goal.toolbarTag')}</span>
                 </span>
@@ -3254,8 +3248,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             <div className="chat-goal-tag" data-testid="chat-panel-plan-tag">
               <button type="button" className="chat-mode-select__trigger" data-testid="chat-panel-plan-tag-label">
                 <span className="chat-mode-select__value">
-                  <span className="chat-mode-select__icon" aria-hidden="true">
-                    <ClipboardList className="w-4 h-4" />
+                <span className="chat-mode-select__icon chat-mode-select__icon--asset" aria-hidden="true">
+                  <PlanIcon aria-hidden="true" />
                   </span>
                   <span className="chat-mode-select__label">{t('plan.toolbarTag')}</span>
                 </span>

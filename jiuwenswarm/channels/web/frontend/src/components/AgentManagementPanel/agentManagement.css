@@ -1056,6 +1056,19 @@
   justify-content: center;
 }
 
+.agent-management-file-entry__icon {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-management-file-entry__icon > svg {
+  flex: 0 0 auto;
+}
+
 .agent-management-file-entry__label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1704,13 +1717,6 @@
   font-size: 16px;
   line-height: 24px;
   white-space: pre-line;
-}
-
-.agent-management-field-count {
-  align-self: flex-end;
-  margin-top: -30px;
-  color: var(--color-text-tertiary);
-  font-size: 12px;
 }
 
 .agent-management-field-error {
@@ -2447,19 +2453,20 @@
 
 .agent-management-selection-card__action {
   display: inline-flex;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--color-border-default);
-  border-radius: var(--radius-sm);
-  color: var(--color-text-secondary);
+  border: 0;
+  border-radius: 0;
+  color: inherit;
 }
 
-.agent-management-selection-card.is-selected .agent-management-selection-card__action {
-  border-color: var(--color-action-primary);
-  color: var(--color-action-primary);
+.agent-management-selection-card__action svg {
+  display: block;
+  width: 16px;
+  height: 16px;
 }
 
 .agent-management-selection-card:hover,

@@ -1,6 +1,7 @@
-import { ChevronDown, Search } from 'lucide-react';
+import { ChevronDown } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import SearchIcon from '../../assets/agent-management/agent-search.svg?react';
 import { CatalogPage, PAGE_SIZE } from './CatalogPage';
 import { AgentEditor } from './AgentEditor';
 import { DefinitionDetailPage } from './DefinitionDetailPage';
@@ -600,7 +601,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
         </nav>
         <div className="agent-management-primary-actions">
           <label className="agent-management-search">
-            <Search size={16} aria-hidden="true" />
+            <SearchIcon aria-hidden="true" />
             <span className="sr-only">{t('agentManagement.searchLabel')}</span>
             <input
               type="search"

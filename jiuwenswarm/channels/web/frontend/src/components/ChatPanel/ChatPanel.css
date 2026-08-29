@@ -911,8 +911,8 @@ overflow: hidden;
   position: absolute;
   inset: 0;
   background: var(--color-chat-accent);
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
   opacity: 1;
 }
 
@@ -1401,8 +1401,8 @@ overflow: hidden;
   width: 20px;
   height: 20px;
   background: currentColor;
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
 }
 
 .chat-composer-suggestion__source {
@@ -1477,8 +1477,8 @@ overflow: hidden;
   flex: 0 0 auto;
   position: relative;
   box-sizing: border-box;
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
 }
 
 .chat-message-skill-chip__label {
@@ -1538,8 +1538,8 @@ overflow: hidden;
   position: absolute;
   inset: 0;
   background: var(--color-chat-accent);
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
   opacity: 1;
 }
 
@@ -1731,8 +1731,8 @@ overflow: hidden;
 .chat-config-icon--skill {
   width: 14px;
   height: 14px;
-  -webkit-mask-image: url('../../assets/skillIcon.svg');
-  mask-image: url('../../assets/skillIcon.svg');
+  -webkit-mask-image: url('../../assets/agent-management/agent-skill.svg');
+  mask-image: url('../../assets/agent-management/agent-skill.svg');
 }
 
 .chat-config-icon--settings {
@@ -1750,12 +1750,9 @@ overflow: hidden;
   height: 14px;
 }
 
-/* "+"菜单的"扩展"项单独放大图标（用户 2026-08-19 反馈手绘拼图图标比旁边 lucide 图标显得小）。
-   选择器叠两个 class（.chat-mode-select__icon.chat-mode-select__icon--lg）保证特异度稳定盖过
-   上面那条共享基础规则，不依赖源码顺序，也不影响其余三个菜单项。 */
-.chat-mode-select__icon.chat-mode-select__icon--lg svg {
-  width: 18px;
-  height: 18px;
+.chat-mode-select__icon.chat-mode-select__icon--asset svg {
+  width: 16px;
+  height: 16px;
 }
 
 .chat-mode-select__label {
