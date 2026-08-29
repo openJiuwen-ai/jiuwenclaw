@@ -28,13 +28,8 @@ class SyncContext:
 
 
 def require_jiuwenclaw_id(business: dict[str, Any] | None = None) -> str:
-    """统一从环境变量 ``JIUWENCLAW_ID`` 取实例 id；body 若带 id 则校验一致。"""
-    jid = str(get_jiuwenclaw_id() or "").strip()
-    if not jid:
-        raise HTTPException(
-            status_code=400,
-            detail="JIUWENCLAW_ID is not set; register required",
-        )
+    """统一取本机实例 id（env 优先，否则自动生成）；body 若带 id 则校验一致。"""
+    jid = get_jiuwenclaw_id()
     body_jid = ""
     if business:
         body_jid = str(business.get("jiuwenclaw_id") or "").strip()
