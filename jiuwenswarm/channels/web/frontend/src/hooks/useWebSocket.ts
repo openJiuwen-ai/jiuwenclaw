@@ -1599,6 +1599,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const inputMode = activeGoal?.status === 'active' ? 'steer' : undefined;
         const outgoingMode = resolveOutgoingMode(sessionId, currentMode);
         const sessionMetadata = useSessionStore.getState().getRuntime(sessionId)?.metadata;
+        const sessionRt = useSessionStore.getState().getRuntime(sessionId);
         await request('chat.send', {
           session_id: sessionId,
           content: outgoingContent,
@@ -1615,6 +1616,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(inputMode ? { input_mode: inputMode } : {}),
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
           ...(sessionMetadata ? { metadata: sessionMetadata } : {}),
+          enable_swarmflow: Boolean(sessionRt?.enableSwarmflow),
+          ...(sessionRt?.enableSwarmflow && sessionRt.swarmflowBudget != null
+            ? { swarmflow_budget: sessionRt.swarmflowBudget }
+            : {}),
         });
         if (sessionMetadata) {
           useSessionStore.getState().setSessionMetadata(sessionId, null);
@@ -4095,11 +4100,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       }),
 
-      // ── SwarmFlow: swarmflow.activated → 前端切换树视图 ──
+      // ── SwarmFlow: swarmflow.activated → 前端切换树视图（黏性视图标志，不触碰用户配置）──
       webClient.on('swarmflow.activated', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
-        useSessionStore.getState().setSwarmflowActive(sessionId, true);
+        useSessionStore.getState().setSwarmflowViewActive(sessionId);
       }),
 
       // ── SwarmFlow: swarmflow.deactivated → 不切回看板 ──

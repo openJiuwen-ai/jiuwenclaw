@@ -556,8 +556,10 @@ interface SessionState {
   // SwarmFlow actions
   /** 增量合并一条 workflow 更新到 workflowRuns */
   applyWorkflowUpdate: (sessionId: string, workflow: WorkflowRun) => void;
-  /** 切换 swarmflowActive（粘性：置真后不再回 false） */
+  /** 设置/关闭用户配置 enableSwarmflow 与预算 swarmflowBudget（配置态，非视图态） */
   setSwarmflowActive: (sessionId: string, active: boolean, budget?: number | null) => void;
+  /** 置位 swarmflowActive 粘性视图标志（置真后不再回 false）；后端 swarmflow.activated 事件专用 */
+  setSwarmflowViewActive: (sessionId: string) => void;
   /** 懒加载 phase 完整 agents（command.workflows get_phase） */
   loadPhaseAgents: (
     sessionId: string,
@@ -1563,6 +1565,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           ...rt,
           enableSwarmflow: active,
           swarmflowBudget: active ? (budget ?? rt.swarmflowBudget ?? null) : null,
+        },
+      },
+    }));
+  },
+
+  setSwarmflowViewActive: (sessionId) => {
+    const rt = get().runtimes[sessionId];
+    if (!rt) return;
+    set((state) => ({
+      runtimes: {
+        ...state.runtimes,
+        [sessionId]: {
+          ...rt,
+          swarmflowActive: true,
         },
       },
     }));
