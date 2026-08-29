@@ -16,6 +16,12 @@
 #ifndef BuildSetupBaseName
   #error BuildSetupBaseName is required; run scripts\build-exe.ps1
 #endif
+#ifndef BuildWebView2InstallerPath
+  #error BuildWebView2InstallerPath is required; run scripts\build-exe.ps1
+#endif
+#ifndef BuildWebView2InstallerFileName
+  #error BuildWebView2InstallerFileName is required; run scripts\build-exe.ps1
+#endif
 
 #define MyAppName BuildDisplayName
 #define MyAppVersion BuildVersion
@@ -56,6 +62,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\dist\{#BuildDistDirName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Keep the Microsoft-signed offline prerequisite inside Setup only. It is
+; extracted to {tmp} solely when no usable Evergreen Runtime is registered.
+Source: "{#BuildWebView2InstallerPath}"; Flags: dontcopy
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -74,3 +83,70 @@ Type: dirifempty; Name: "{app}"
 ; 通过 Explorer 代启动程序，使安装完成后的启动上下文更接近桌面快捷方式启动
 ; postinstall 在安装向导最后一页显示运行应用复选框，由用户决定是否启动
 Filename: "{win}\explorer.exe"; Parameters: """{app}\{#MyAppExeName}"""; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall
+
+[Code]
+const
+  WebView2RuntimeId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+
+function GetWebView2RuntimeVersion(var Version: String): Boolean;
+var
+  Key: String;
+begin
+  Key := 'SOFTWARE\Microsoft\EdgeUpdate\Clients\' + WebView2RuntimeId;
+  Result := RegQueryStringValue(HKLM32, Key, 'pv', Version) and
+    (Trim(Version) <> '') and (CompareText(Trim(Version), '0.0.0.0') <> 0);
+
+  if not Result then
+    Result := RegQueryStringValue(HKCU, Key, 'pv', Version) and
+      (Trim(Version) <> '') and (CompareText(Trim(Version), '0.0.0.0') <> 0);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  RuntimeVersion: String;
+  RuntimeInstaller: String;
+  ResultCode: Integer;
+  Executed: Boolean;
+begin
+  Result := '';
+
+  if GetWebView2RuntimeVersion(RuntimeVersion) then
+  begin
+    Log('Microsoft Edge WebView2 Runtime is already installed: ' + RuntimeVersion);
+    exit;
+  end;
+
+  Log('Microsoft Edge WebView2 Runtime is missing; running bundled installer.');
+  ExtractTemporaryFile('{#BuildWebView2InstallerFileName}');
+  RuntimeInstaller := ExpandConstant('{tmp}\{#BuildWebView2InstallerFileName}');
+  ResultCode := -1;
+  Executed := Exec(
+    RuntimeInstaller,
+    '/silent /install',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  );
+
+  { The Evergreen installer can return a non-zero code even when registration
+    succeeded. Verify Microsoft's documented pv value instead of trusting only
+    the child exit code. }
+  if GetWebView2RuntimeVersion(RuntimeVersion) then
+  begin
+    Log(
+      'Microsoft Edge WebView2 Runtime installation verified: ' +
+      RuntimeVersion + ' (installer exit code ' + IntToStr(ResultCode) + ')'
+    );
+    exit;
+  end;
+
+  if Executed then
+    Log('WebView2 Runtime installer exit code: ' + IntToStr(ResultCode))
+  else
+    Log('WebView2 Runtime installer could not be started.');
+
+  Result :=
+    'Microsoft Edge WebView2 Runtime 安装失败。' + #13#10 + #13#10 +
+    '{#MyAppName} 桌面端需要此运行环境。请检查系统策略或安全软件后重试安装。';
+end;

@@ -6,6 +6,7 @@
 
 - **uv**：项目使用的 Python 包管理器
 - **Node.js**：仅用于**构建时**编译前端，最终桌面程序不依赖 Node.js
+- **WebView2 Runtime 离线安装器**：从微软官方下载 x64 Evergreen Standalone Installer，存放在项目仓库外的构建缓存中
 - **Windows**：支持 `onedir` 分发目录，适合继续交给 Inno Setup 制作安装包
 - **macOS**：支持生成 `.app` 与 `.dmg`
 
@@ -30,8 +31,11 @@
 
 ```powershell
 # PowerShell
+$env:WEBVIEW2_INSTALLER_PATH = "$env:LOCALAPPDATA\jiuwenswarm-build-cache\webview2\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
 .\scripts\build-exe.ps1
 ```
+
+也可以通过 `-WebView2InstallerPath` 参数显式传入。构建脚本会校验安装器的文件名和微软 Authenticode 数字签名；该二进制仅嵌入最终安装包，不提交到项目仓库。
 
 或双击运行 `scripts\build-exe.bat`。
 

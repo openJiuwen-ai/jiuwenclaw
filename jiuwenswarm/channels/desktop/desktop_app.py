@@ -20,26 +20,33 @@ import time
 import uuid
 from ctypes import wintypes
 from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from logging.handlers import RotatingFileHandler
-
 import webview
 
+from jiuwenswarm.channels.desktop.webview2_runtime import (
+    is_webview2_runtime_registered,
+    show_webview2_runtime_missing_dialog,
+)
 from jiuwenswarm.common._build_config import (
     APP_BUNDLE_NAME,
     BUNDLE_IDENTIFIER,
     DISPLAY_NAME,
     EXECUTABLE_NAME,
 )
-from jiuwenswarm.common.utils import get_user_workspace_dir, get_logs_dir, wait_for_pid_exit, wait_for_tcp_port
+from jiuwenswarm.common.utils import (
+    get_logs_dir,
+    get_user_workspace_dir,
+    wait_for_pid_exit,
+    wait_for_tcp_port,
+)
 from jiuwenswarm.instance_manager.config import (
     BASE_PORTS,
     PORT_TYPES,
     find_available_ports,
 )
-
 
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = int(BASE_PORTS["web"])
@@ -2200,6 +2207,22 @@ def _setup_tui_path() -> None:
         logger.warning("[desktop] failed to update ~/.zshrc: %s", exc)
 
 
+def _ensure_webview2_runtime_before_services() -> bool:
+    if os.name != "nt":
+        return True
+
+    preflight_started = time.perf_counter()
+    available = is_webview2_runtime_registered()
+    logger.info(
+        "[desktop] WebView2 runtime preflight completed in %.2f ms: available=%s",
+        (time.perf_counter() - preflight_started) * 1000,
+        available,
+    )
+    if not available:
+        show_webview2_runtime_missing_dialog(DISPLAY_NAME)
+    return available
+
+
 def main() -> None:
     args = _parse_args()
     if getattr(args, "desktop_install_update", False):
@@ -2214,6 +2237,9 @@ def main() -> None:
 
     _cleanup_stale_update_artifacts()
     _setup_tui_path()
+
+    if not _ensure_webview2_runtime_before_services():
+        raise SystemExit(1)
 
     try:
         ports = resolve_desktop_ports()
