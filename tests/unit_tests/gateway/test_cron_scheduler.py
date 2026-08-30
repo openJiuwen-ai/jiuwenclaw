@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -14,6 +15,7 @@ from jiuwenswarm.gateway.cron.models import CronJob, CronRunState
 from jiuwenswarm.gateway.cron.scheduler import (
     CronSchedulerService,
     _Event,
+    with_workspace_dir,
 )
 from jiuwenswarm.common.cron_team_completion import (
     cron_team_round_should_end,
@@ -303,6 +305,142 @@ class TestCronLastSessionId:
         assert stored.last_session_id
         assert stored.last_session_id.startswith("cron_")
         assert stored.last_session_id == "cron_agentserver_allocated"
+
+
+class TestWithWorkspaceDir:
+    def test_appends_constraint_after_task_text(self, tmp_path):
+        workspace = tmp_path / "定时任务-ws"
+        result = with_workspace_dir("生成图片", str(workspace))
+        payload = json.dumps({"path": str(workspace)}, ensure_ascii=False, separators=(",", ":"))
+        assert result.startswith("生成图片\n\n<claw_workspace>")
+        assert payload in result
+        assert f"【工作空间】当前项目目录是 `{workspace}`" in result
+        assert result.count("<claw_workspace>") == 1
+
+    def test_skips_when_already_injected(self, tmp_path):
+        workspace = str(tmp_path / "ws")
+        once = with_workspace_dir("task", workspace)
+        twice = with_workspace_dir(once, workspace)
+        assert twice == once
+
+    def test_skips_empty_path(self):
+        assert with_workspace_dir("task", "") == "task"
+        assert with_workspace_dir("task", None) == "task"
+
+
+class TestCronExecutionCwd:
+    @pytest.mark.asyncio
+    async def test_chat_send_uses_persisted_cwd_and_session_create_omits_path(
+        self, tmp_path, monkeypatch
+    ):
+        isolated = tmp_path / "定时任务-cwd"
+        isolated.mkdir()
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(
+            description="simple reminder",
+            targets="web",
+            project_id="default_design",
+            work_mode="design",
+            project_dir=str(isolated),
+        )
+        lookup = Mock(side_effect=AssertionError("virtual id must not look up"))
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.project_store.get_project_dir_by_id",
+            lookup,
+        )
+        agent = FakeAgentClient()
+        svc = _make_scheduler(store, agent_client=agent)
+        run_id = f"{job.id}:cwd"
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        create_env, send_env = agent.unary_requests
+        assert create_env.method == "session.create"
+        assert create_env.params.get("project_dir") in ("", None)
+        assert send_env.method == "chat.send"
+        assert send_env.params["project_dir"] == str(isolated)
+        assert send_env.params["cwd"] == str(isolated)
+        assert send_env.params["trusted_dirs"] == [str(isolated)]
+        query = send_env.params["query"]
+        content = send_env.params["content"]
+        assert query == content
+        assert query.startswith("simple reminder")
+        assert "<claw_workspace>" in query
+        assert str(isolated) in query
+        assert "【工作空间】" in query
+        lookup.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "project_id, work_mode",
+        [
+            ("default", "work"),
+            ("default_code", "code"),
+            ("default_design", "design"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_virtual_id_without_cwd_skips_project_lookup(
+        self, tmp_path, monkeypatch, project_id, work_mode
+    ):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(
+            description="simple reminder",
+            targets="web",
+            project_id=project_id,
+            work_mode=work_mode,
+        )
+        lookup = Mock(return_value="/should-not-use")
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.project_store.get_project_dir_by_id",
+            lookup,
+        )
+        agent = FakeAgentClient()
+        svc = _make_scheduler(store, agent_client=agent)
+        run_id = f"{job.id}:empty"
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        lookup.assert_not_called()
+        _create_env, send_env = agent.unary_requests
+        assert send_env.params.get("project_dir") in ("", None)
+        assert "cwd" not in send_env.params
+        assert "trusted_dirs" not in send_env.params
+        assert send_env.params["query"] == "simple reminder"
+        assert send_env.params["content"] == "simple reminder"
+        assert "<claw_workspace>" not in send_env.params["query"]
+
+    @pytest.mark.asyncio
+    async def test_real_project_without_cwd_falls_back_to_lookup(
+        self, tmp_path, monkeypatch
+    ):
+        project_dir = tmp_path / "real-project"
+        project_dir.mkdir()
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(
+            description="simple reminder",
+            targets="web",
+            project_id="proj_abcdef12",
+            work_mode="code",
+        )
+        lookup = Mock(return_value=str(project_dir))
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.project_store.get_project_dir_by_id",
+            lookup,
+        )
+        agent = FakeAgentClient()
+        svc = _make_scheduler(store, agent_client=agent)
+        run_id = f"{job.id}:real"
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        lookup.assert_called_once_with("proj_abcdef12")
+        create_env, send_env = agent.unary_requests
+        assert create_env.params.get("project_dir") in ("", None)
+        assert send_env.params["cwd"] == str(project_dir)
+        assert send_env.params["trusted_dirs"] == [str(project_dir)]
+        assert send_env.params["query"].startswith("simple reminder")
+        assert "<claw_workspace>" in send_env.params["query"]
+        assert str(project_dir) in send_env.params["query"]
 
     @pytest.mark.asyncio
     async def test_run_now_info_returns_current_execution_session_id(self, tmp_path):
@@ -1710,6 +1848,33 @@ class TestCronJobStoreWakeOffset:
         reloaded = await store.get_job(job.id)
         assert reloaded is not None
         assert reloaded.wake_offset_seconds == 300
+
+    @pytest.mark.asyncio
+    async def test_create_does_not_persist_exec_cwd_and_update_keeps_project_id(
+        self, tmp_path
+    ):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        isolated = tmp_path / "定时任务-store"
+        isolated.mkdir()
+        job = await store.create_job(
+            name="design-job",
+            cron_expr="0 0 17 * * ? *",
+            timezone="Asia/Shanghai",
+            description="生成图片",
+            targets="web",
+            project_id="default_design",
+            work_mode="design",
+        )
+        assert job.project_dir == ""
+        assert "project_dir" not in job.to_dict()
+
+        updated = await store.update_job(job.id, {"project_dir": str(isolated)})
+        assert updated.project_id == "default_design"
+        assert updated.project_dir == str(isolated)
+        reloaded = await store.get_job(job.id)
+        assert reloaded is not None
+        assert reloaded.project_id == "default_design"
+        assert reloaded.project_dir == str(isolated)
 
     @pytest.mark.asyncio
     async def test_update_job_can_change_and_clear_wake_offset_seconds(self, tmp_path):

@@ -261,7 +261,8 @@ class CronTools:
 
     @staticmethod
     def _sync_patch_payload(patch: dict[str, Any]) -> dict[str, Any]:
-        payload = {k: v for k, v in patch.items() if k != "project_dir"}
+        payload = dict(patch)
+        payload.pop("workspace_id", None)
         if "model_name" in payload:
             payload["model_name"] = payload["model_name"] or ""
         return payload
@@ -318,9 +319,7 @@ class CronTools:
         model_name_raw = normalized.get("model_name")
         if model_name_raw is not None and str(model_name_raw).strip():
             model_kw["model_name"] = validate_cron_model(model_name_raw)
-        # project_dir -> project_id follows the same rules as the gateway controller.
-        # 用 key presence 区分「未传」和「显式空串」：显式传 "" 归默认项目，
-        # 未传时从 route 上下文取 project_dir（设计文档 §5.1）。
+        # 仅用 route/入参的 project_dir 解析归属 project_id，不把源会话工作空间当执行 cwd。
         if "project_dir" in normalized:
             project_dir_val = str(normalized.get("project_dir") or "").strip()
         else:
@@ -382,7 +381,6 @@ class CronTools:
         )
         try:
             sync_payload = job.to_dict()
-            sync_payload["project_dir"] = project_dir_val
             await self._send("create", sync_payload)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] sync create to gateway failed: %s", exc)
@@ -605,8 +603,11 @@ class CronTools:
                         },
                         "project_dir": {
                             "type": "string",
-                            "description": "Absolute path to the project directory. \
-                                Omit for current session's project.",
+                            "description": (
+                                "Absolute path used only to resolve ownership project_id "
+                                "(with work_mode) when project_id is omitted. Not persisted "
+                                "as the job execution cwd. Omit to use the current session."
+                            ),
                         },
                         "project_id": {
                             "type": "string",
@@ -647,9 +648,8 @@ class CronTools:
                                 "Fields to update (name, enabled, cron_expr, timezone, "
                                 "description, wake_offset_seconds, targets, mode, model_name, "
                                 "project_dir, project_id). work_mode is not accepted as an "
-                                "independent patch field; to change work_mode, patch project_id "
-                                "or project_dir + work_mode (work_mode only disambiguates the "
-                                "target project when resolving project_dir)."
+                                "independent patch field; to change work_mode, patch project_id. "
+                                "project_dir is execution cwd and does not re-resolve ownership."
                             ),
                             "properties": {
                                 "name": {"type": "string"},
@@ -678,28 +678,25 @@ class CronTools:
                                 "project_dir": {
                                     "type": "string",
                                     "description": (
-                                        "Absolute path to the project directory. Set to empty "
-                                        "string for default project. When set, project_id is "
-                                        "re-resolved from (work_mode, project_dir)."
+                                        "Execution working directory (absolute path). "
+                                        "Empty string clears it. Does not change project_id."
                                     ),
                                 },
                                 "project_id": {
                                     "type": "string",
                                     "description": (
-                                        "Directly patch the project_id (takes priority over "
-                                        "project_dir). work_mode is re-injected from the "
-                                        "project record. Must reference an existing visible "
-                                        "project or a default project "
-                                        "(default / default_code / default_design)."
+                                        "Patch ownership project_id. work_mode is re-injected "
+                                        "from the project record or virtual default id "
+                                        "(default / default_code / default_design). "
+                                        "Independent of project_dir (execution cwd)."
                                     ),
                                 },
                                 "work_mode": {
                                     "type": "string",
                                     "enum": sorted(SUPPORTED_WORK_MODES),
                                     "description": (
-                                        "Disambiguates target project when patching "
-                                        "project_dir. Ignored if project_id is patched "
-                                        "directly. Not a standalone patchable field."
+                                        "Not a standalone patchable field. To change "
+                                        "work_mode, patch project_id."
                                     ),
                                 },
                             },

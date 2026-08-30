@@ -2390,7 +2390,7 @@ class JiuWenSwarm:
             merged["reasoning_content"] = reasoning_text
             return merged
 
-        def _persist_pending_final_text() -> None:
+        def _persist_pending_final_text(aborted: bool = False) -> None:
             nonlocal durable_pending_final_chunks, durable_final_content
             pending_text = "".join(durable_pending_final_chunks)
             durable_pending_final_chunks = []
@@ -2411,12 +2411,15 @@ class JiuWenSwarm:
                 # 透传 proactive 标记到 history——刷新页面时前端靠 payload.source===
                 # 'proactive_recommendation' 渲染推荐卡片，不带则退化白色气泡。
                 # 专家身份快照：按写盘时刻会话绑定记录"当时是谁答的"。
+                # aborted：中断 flush（CancelledError 路径）写"已停止"语义标记——
+                # 重启后前端据它显示「已停止」而非回落「已完成」。
                 extra=_attach_reasoning_content({
                     **{
                         k: v for k, v in request.params.items()
                         if k in ("source", "proactive_type", "proactive_target")
                     },
                     **history_expert_identity_extra(session_id),
+                    **({"aborted": True} if aborted else {}),
                 }),
                 mode=request.params.get("mode", "unknown"),
             )
@@ -2689,12 +2692,12 @@ class JiuWenSwarm:
                                         for k, v in event_data.items():
                                             if k not in ("type", "timestamp", "content"):
                                                 extra_fields[k] = v
-                                if et in {"chat.final", "chat.tool_call"}:
+                                if et in {"chat.final", "chat.tool_call", "chat.error"}:
                                     extra_fields = _attach_reasoning_content(extra_fields)
                                 # 主应答落盘携带专家身份（无绑定显式写空串=默认角色作答标记）——
                                 # 前端据"键存在但空"区分默认角色与存量无字段；漏写会导致
                                 # 中途绑专家后历史刷新把本轮身份回落成新专家
-                                if et == "chat.final" and "expert_id" not in extra_fields:
+                                if et in ("chat.final", "chat.error") and "expert_id" not in extra_fields:
                                     from jiuwenswarm.server.runtime.expert.expert_service import (
                                         history_expert_identity_extra,
                                     )
@@ -2821,12 +2824,14 @@ class JiuWenSwarm:
                                     for k, v in event_data.items():
                                         if k not in ("type", "timestamp", "content"):
                                             extra_fields[k] = v
-                            if et in {"chat.final", "chat.tool_call"}:
+                            if et in {"chat.final", "chat.tool_call", "chat.error"}:
                                 extra_fields = _attach_reasoning_content(extra_fields)
                             # 主应答落盘携带专家身份（无绑定显式写空串=默认角色作答标记）
                             # 前端据"键存在但空"区分默认角色与存量无字段；漏写会导致
                             # 中途绑专家后历史刷新把本轮身份回落成新专家
-                            if et == "chat.final" and "expert_id" not in extra_fields:
+                            # （chat.error 同规：错误轮历史恢复 historyError 语义后身份行
+                            #  也读 extra 的 expert_id——与 chunk 分支 :2690 对齐）
+                            if et in ("chat.final", "chat.error") and "expert_id" not in extra_fields:
                                 from jiuwenswarm.server.runtime.expert.expert_service import (
                                     history_expert_identity_extra,
                                 )
@@ -2860,6 +2865,21 @@ class JiuWenSwarm:
                             is_complete=False,
                         )
         except asyncio.CancelledError:
+            # 中断/停止留痕：pending 缓冲里是本轮已流式的半截正文（思考随
+            # _persist_pending_final_text 一并附挂，aborted 标记"已停止"语义），
+            # 不落盘则重启后该轮只剩前端本地台账的「已停止」标记。
+            # 恢复重跑（pause→resume）的同 rid 最终 final 经读侧 last-wins
+            # 覆盖本条半截记录（aborted 标记随之消失），语义安全。
+            # 留痕是磁盘 I/O，失败不得顶替 CancelledError 向上传播（否则取消
+            # 链路中断：下方 log/raise 不执行，调用方收到普通异常）。
+            try:
+                _persist_pending_final_text(aborted=True)
+            except Exception:
+                logger.warning(
+                    "[JiuWenSwarm] failed to persist aborted final text: request_id=%s",
+                    rid,
+                    exc_info=True,
+                )
             logger.info("[JiuWenSwarm] 流式处理被中断: request_id=%s", rid)
             raise
         finally:

@@ -314,8 +314,49 @@ async def test_cron_tools_create_job_resolves_route_project_dir(tmp_path, monkey
 
     assert job["project_id"] == project.project_id
     synced = push.payloads[-1]["body"]["data"]
-    assert synced["project_dir"] == str(project_dir)
     assert synced["project_id"] == project.project_id
+    assert "project_dir" not in job
+    assert "project_dir" not in synced
+
+
+@pytest.mark.asyncio
+async def test_cron_tools_create_job_does_not_persist_source_workspace_cwd(
+    tmp_path, monkeypatch,
+) -> None:
+    _setup_project_store(tmp_path, monkeypatch)
+    source_dir = tmp_path / "设计工作空间"
+    source_dir.mkdir()
+    tools, push = _make_cron_tools(tmp_path, monkeypatch)
+
+    token = tools.push_cron_route(
+        CronToolRoute(
+            project_dir=str(source_dir),
+            project_id="default_design",
+            work_mode="design",
+        )
+    )
+    try:
+        job = await tools.create_job(
+            {
+                "id": "job-source-ws",
+                "name": "daily",
+                "cron_expr": "0 9 * * *",
+                "timezone": "Asia/Shanghai",
+                "description": "hello",
+                "targets": "web",
+            }
+        )
+    finally:
+        tools.reset_cron_route(token)
+
+    assert job["project_id"] == "default_design"
+    assert job["work_mode"] == "design"
+    assert "project_dir" not in job
+    synced = push.payloads[-1]["body"]["data"]
+    assert synced["project_id"] == "default_design"
+    assert "project_dir" not in synced
+    local_job = (await tools._local_store.get_job("job-source-ws")).to_dict()
+    assert local_job.get("project_dir", "") == ""
 
 
 @pytest.mark.asyncio
@@ -383,13 +424,15 @@ async def test_cron_tools_create_job_rejects_relative_project_dir(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_cron_tools_update_job_resolves_project_dir_and_syncs_public_patch(
+async def test_cron_tools_update_job_persists_exec_cwd_without_rewriting_project_id(
     tmp_path, monkeypatch
 ) -> None:
     project_store = _setup_project_store(tmp_path, monkeypatch)
-    project_dir = tmp_path / "project-b"
-    project_dir.mkdir()
-    project = project_store.create_project("P2", str(project_dir))
+    real_dir = tmp_path / "project-b"
+    real_dir.mkdir()
+    project = project_store.create_project("P2", str(real_dir))
+    isolated = tmp_path / "定时任务-2026-08-29-16-07-11"
+    isolated.mkdir()
     tools, push = _make_cron_tools(tmp_path, monkeypatch)
     await tools._local_store.create_job(
         job_id="job-1",
@@ -398,24 +441,49 @@ async def test_cron_tools_update_job_resolves_project_dir_and_syncs_public_patch
         timezone="Asia/Shanghai",
         description="hello",
         targets="web",
+        project_id=project.project_id,
+        work_mode="work",
     )
 
-    job = await tools.update_job(
-        "job-1",
-        {"project_dir": str(project_dir), "project_id": "proj_should_be_ignored"},
-    )
+    job = await tools.update_job("job-1", {"project_dir": str(isolated)})
 
     assert job["project_id"] == project.project_id
+    assert job["project_dir"] == str(isolated)
     synced_patch = push.payloads[-1]["body"]["data"]["patch"]
-    # work_mode 改造后:project_dir 已被消费删除,project_id 由 agent 侧解析后
-    # 写入 sync_patch 供 gateway 直接持久化(避免 gateway 重复解析)。
-    assert "project_dir" not in synced_patch
-    assert synced_patch["project_id"] == project.project_id
-    assert synced_patch["work_mode"] == project.work_mode
-    # 本地 job 不应存储 project_dir 字段(CronJob 无此字段)
+    assert synced_patch["project_dir"] == str(isolated)
+    assert "project_id" not in synced_patch
     local_job = (await tools._local_store.get_job("job-1")).to_dict()
-    assert "project_dir" not in local_job
+    assert local_job["project_dir"] == str(isolated)
     assert local_job["project_id"] == project.project_id
+
+
+@pytest.mark.asyncio
+async def test_cron_tools_update_isolated_dir_keeps_default_design(
+    tmp_path, monkeypatch
+) -> None:
+    _setup_project_store(tmp_path, monkeypatch)
+    isolated = tmp_path / "定时任务-isolated"
+    isolated.mkdir()
+    tools, push = _make_cron_tools(tmp_path, monkeypatch)
+    await tools._local_store.create_job(
+        job_id="job-design",
+        name="daily",
+        cron_expr="0 9 * * *",
+        timezone="Asia/Shanghai",
+        description="hello",
+        targets="web",
+        project_id="default_design",
+        work_mode="design",
+    )
+
+    job = await tools.update_job("job-design", {"project_dir": str(isolated)})
+
+    assert job["project_id"] == "default_design"
+    assert job["work_mode"] == "design"
+    assert job["project_dir"] == str(isolated)
+    synced_patch = push.payloads[-1]["body"]["data"]["patch"]
+    assert synced_patch["project_dir"] == str(isolated)
+    assert "project_id" not in synced_patch
 
 
 @pytest.mark.asyncio
@@ -467,7 +535,7 @@ async def test_cron_tools_create_job_tool_preserves_explicit_empty_project_dir(
 
     assert job["project_id"] == ""
     synced = push.payloads[-1]["body"]["data"]
-    assert synced["project_dir"] == ""
+    assert "project_dir" not in synced
 
 
 _BASE_JOB = {
@@ -525,7 +593,6 @@ async def test_cron_tools_create_job_work_mode(tmp_path, monkeypatch, scenario, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", [
     pytest.param("patch_project_id", id="patch_pid_injects_work_mode"),
-    pytest.param("patch_project_dir", id="patch_dir_re_resolves_with_work_mode"),
 ])
 async def test_cron_tools_update_job_injects_work_mode(tmp_path, monkeypatch, scenario):
     project_store = _setup_project_store(tmp_path, monkeypatch)
@@ -533,23 +600,17 @@ async def test_cron_tools_update_job_injects_work_mode(tmp_path, monkeypatch, sc
     pd.mkdir()
     project = project_store.create_project("CodeProj", str(pd), work_mode="code")
     tools, push = _make_cron_tools(tmp_path, monkeypatch)
-    create_kwargs = {"work_mode": "code"} if scenario == "patch_project_dir" else {}
     await tools._local_store.create_job(
         job_id="job-update", name="daily", cron_expr="0 9 * * *",
-        timezone="Asia/Shanghai", description="hello", targets="web", **create_kwargs,
+        timezone="Asia/Shanghai", description="hello", targets="web",
     )
-    patch = (
-        {"project_dir": str(pd)} if scenario == "patch_project_dir"
-        else {"project_id": project.project_id}
-    )
+    patch = {"project_id": project.project_id}
     job = await tools.update_job("job-update", patch)
     assert job["project_id"] == project.project_id
     assert job["work_mode"] == "code"
     synced_patch = push.payloads[-1]["body"]["data"]["patch"]
     assert synced_patch["project_id"] == project.project_id
     assert synced_patch["work_mode"] == "code"
-    if scenario == "patch_project_dir":
-        assert "project_dir" not in synced_patch
 
 
 @pytest.mark.asyncio

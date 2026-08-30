@@ -81,6 +81,44 @@ def _patch_tool_class(tool_cls: type) -> None:
         tool_cls.stream = _wrap_stream(tool_cls.stream)
 
 
+def _contains_unquoted_semicolon(command: str) -> bool:
+    quote: str | None = None
+    for char in command:
+        if char in {'"', "'"}:
+            quote = None if quote == char else char if quote is None else quote
+        elif char == ";" and quote is None:
+            return True
+    return False
+
+
+def _patch_shell_execution_plan() -> None:
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_module
+
+    operation_cls = shell_module.ShellOperation
+    original = operation_cls._resolve_execution_plan
+    if getattr(original, "jiuwenswarm_semicolon_routing_wrapped", False):
+        return
+
+    def resolve_execution_plan(command: str, shell_type: Any) -> tuple[list[str] | str, bool, str]:
+        plan, use_shell, resolved_shell = original(command, shell_type)
+        if resolved_shell != "cmd" or getattr(shell_type, "value", shell_type) != "auto":
+            return plan, use_shell, resolved_shell
+
+        if not _contains_unquoted_semicolon(command):
+            return plan, use_shell, resolved_shell
+
+        exe = shell_module._available_bash(allow_wsl=False)
+        if exe:
+            normalized = shell_module._normalize_windows_paths_for_bash(command)
+            return [exe, "-lc", normalized], False, "bash"
+
+        ps_exe = shell_module._available_powershell()
+        return [ps_exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
+
+    resolve_execution_plan.jiuwenswarm_semicolon_routing_wrapped = True
+    operation_cls._resolve_execution_plan = staticmethod(resolve_execution_plan)
+
+
 def install_shell_tool_safety_hooks() -> None:
     """Idempotently wire safety checks into harness shell tools."""
     global _installed
@@ -90,6 +128,7 @@ def install_shell_tool_safety_hooks() -> None:
     from openjiuwen.harness.tools.shell.bash._tool import BashTool
 
     _patch_tool_class(BashTool)
+    _patch_shell_execution_plan()
 
     try:
         from openjiuwen.harness.tools.shell.powershell._tool import PowerShellTool

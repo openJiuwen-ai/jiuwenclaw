@@ -203,6 +203,8 @@ class CronController:
         # 3. 无显式 project_id → 按 (work_mode, project_dir) 解析可见项目,
         #    匹配不到(含命中隐藏项目 / 无命中)归默认项目
         # 非绝对路径抛 ValueError → BAD_REQUEST
+        # create 入参 project_dir 只用于归属解析,不作为执行 cwd 落库;
+        # 执行 cwd 由后续 update 写入 job.project_dir。
         from jiuwenswarm.server.runtime.session.project_store import resolve_cron_project_binding
 
         raw_project_id = str(params.get("project_id") or "").strip()
@@ -1164,8 +1166,9 @@ class CronController:
                         "project_dir": {
                             "type": "string",
                             "description": (
-                                "Absolute path to the project directory this job belongs to. "
-                                "If omitted, uses the current session's project."
+                                "Absolute path used only to resolve ownership project_id "
+                                "(with work_mode) when project_id is omitted. Not persisted "
+                                "as the job execution cwd. Omit to use the current session."
                             ),
                         },
                         "project_id": {
@@ -1228,9 +1231,8 @@ class CronController:
                                 "Fields to update (name, enabled, cron_expr, timezone, "
                                 "description, wake_offset_seconds, targets, mode, model_name, "
                                 "project_dir, project_id). work_mode is not accepted as an "
-                                "independent patch field; to change work_mode, patch project_id "
-                                "or project_dir + work_mode (work_mode only disambiguates the "
-                                "target project when resolving project_dir)."
+                                "independent patch field; to change work_mode, patch project_id. "
+                                "project_dir is execution cwd and does not re-resolve ownership."
                             ),
                             "properties": {
                                 "targets": {
@@ -1252,23 +1254,26 @@ class CronController:
                                 },
                                 "project_dir": {
                                     "type": "string",
-                                    "description": "Absolute path to the project directory. \
-                                        Set to empty string for default project.",
+                                    "description": (
+                                        "Execution working directory (absolute path). "
+                                        "Empty string clears it. Does not change project_id."
+                                    ),
                                 },
                                 "project_id": {
                                     "type": "string",
                                     "description": (
-                                        "Directly patch the project_id (takes priority over "
-                                        "project_dir). work_mode is re-injected from the "
-                                        "project record."
+                                        "Patch ownership project_id. work_mode is re-injected "
+                                        "from the project record or virtual default id "
+                                        "(default / default_code / default_design). "
+                                        "Independent of project_dir (execution cwd)."
                                     ),
                                 },
                                 "work_mode": {
                                     "type": "string",
                                     "enum": sorted(SUPPORTED_WORK_MODES),
                                     "description": (
-                                        "Disambiguates target project when patching "
-                                        "project_dir. Not a standalone patchable field."
+                                        "Not a standalone patchable field. To change "
+                                        "work_mode, patch project_id."
                                     ),
                                 },
                             },

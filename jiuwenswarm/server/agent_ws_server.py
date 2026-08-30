@@ -163,6 +163,12 @@ from jiuwenswarm.server.reverse_rpc import (
 
 logger = logging.getLogger(__name__)
 
+_DESKTOP_SESSION_LIMIT_MESSAGE = (
+    "当前检测到多个会话正在并行处理，可能会导致所有任务的响应变慢或机器性能下降，"
+    "请等待其他会话结束后再发起新会话。"
+)
+_DEFAULT_DESKTOP_MAX_PARALLEL_SESSIONS = 3
+
 
 def format_permission_wire_diagnostic(
     *,
@@ -1042,6 +1048,9 @@ class AgentWebSocketServer:
         # for interrupt/connection cleanup only; it never decides interaction
         # output ownership.
         self._session_stream_tasks: dict[str, dict[asyncio.Task, asyncio.Event]] = {}
+        # Desktop 直连不会经过 Gateway。单独记录活跃桌面会话，在进入 Agent 前
+        # 拒绝超过上限的新会话，避免继续占用模型和运行时资源。
+        self._active_desktop_chat_streams: dict[str, int] = {}
         # Scheduler service instance (for scheduled auto_harness tasks)
         self._scheduler_service: Optional[AutoHarnessService] = None
         self._scheduler_agent: Any = None
@@ -2984,6 +2993,11 @@ class AgentWebSocketServer:
     async def _handle_stream(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
+        desktop_stream_admitted = self._begin_desktop_chat_stream(request)
+        if desktop_stream_admitted is False:
+            await self._send_desktop_session_limit_message(ws, request, send_lock)
+            return
+
         manager = getattr(self, "_agent_manager", None)
         foreground = (
             request.req_method in _CODE_MODE_SYNC_METHODS
@@ -2991,13 +3005,87 @@ class AgentWebSocketServer:
             and hasattr(manager, "begin_foreground_chat")
             and hasattr(manager, "end_foreground_chat")
         )
-        if foreground:
-            await manager.begin_foreground_chat()
         try:
-            await self._handle_stream_impl(ws, request, send_lock)
-        finally:
             if foreground:
-                await manager.end_foreground_chat()
+                await manager.begin_foreground_chat()
+            try:
+                await self._handle_stream_impl(ws, request, send_lock)
+            finally:
+                if foreground:
+                    await manager.end_foreground_chat()
+        finally:
+            if desktop_stream_admitted is True:
+                self._end_desktop_chat_stream(request)
+
+    def _begin_desktop_chat_stream(self, request: AgentRequest) -> bool | None:
+        """Register an admitted desktop chat turn; reject a new session at capacity."""
+        if (
+            str(request.channel_id or "").strip().lower() != "desktop"
+            or request.req_method != ReqMethod.CHAT_SEND
+        ):
+            return None
+
+        session_id = str(request.session_id or "default").strip() or "default"
+        active = getattr(self, "_active_desktop_chat_streams", None)
+        if active is None:
+            active = {}
+            self._active_desktop_chat_streams = active
+
+        if (
+            session_id not in active
+            and len(active) >= _DEFAULT_DESKTOP_MAX_PARALLEL_SESSIONS
+        ):
+            return False
+        active[session_id] = active.get(session_id, 0) + 1
+        return True
+
+    def _end_desktop_chat_stream(self, request: AgentRequest) -> None:
+        if (
+            str(request.channel_id or "").strip().lower() != "desktop"
+            or request.req_method != ReqMethod.CHAT_SEND
+        ):
+            return
+
+        active = getattr(self, "_active_desktop_chat_streams", None)
+        if not active:
+            return
+        session_id = str(request.session_id or "default").strip() or "default"
+        remaining = active.get(session_id, 0) - 1
+        if remaining > 0:
+            active[session_id] = remaining
+        else:
+            active.pop(session_id, None)
+
+    @staticmethod
+    async def _send_desktop_session_limit_message(
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        chunk = AgentResponseChunk(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            payload={
+                "event_type": "chat.final",
+                "content": _DESKTOP_SESSION_LIMIT_MESSAGE,
+            },
+            is_complete=True,
+            agent_ref=request.agent_ref,
+        )
+        wire = encode_agent_chunk_for_wire(
+            chunk,
+            response_id=request.request_id,
+            sequence=0,
+        )
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+        logger.info(
+            "[AgentWebSocketServer] desktop session rejected at capacity: "
+            "request_id=%s session_id=%s max_parallel_sessions=%s",
+            request.request_id,
+            request.session_id,
+            _DEFAULT_DESKTOP_MAX_PARALLEL_SESSIONS,
+        )
 
     async def _handle_stream_impl(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
