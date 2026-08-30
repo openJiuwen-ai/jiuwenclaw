@@ -319,6 +319,89 @@ function resolveWebHttpPort(wsPort: number): number {
   return port
 }
 
+function parseLoginAuthSimulate(raw: string | undefined): boolean {
+  const value = (raw ?? '').trim().toLowerCase()
+  if (!value) return true
+  if (value === 'true') return true
+  if (value === 'false') return false
+  throw new Error(
+    `LOGIN_AUTH_SIMULATE 配置非法：仅支持 true 或 false，当前值为 ${JSON.stringify(raw)}`
+  )
+}
+
+const loginAuthSimulateIncluded = parseLoginAuthSimulate(
+  process.env.INCLUDE_LOGIN_AUTH_SIMULATE ?? process.env.VITE_LOGIN_AUTH_SIMULATE_AVAILABLE
+)
+
+function loginAuthStartupCheck(): Plugin {
+  const userWebMode = (process.env.USER_WEB_MODE || process.env.VITE_USER_WEB_MODE || 'personal')
+    .trim()
+    .toLowerCase()
+  const simulateRaw = process.env.LOGIN_AUTH_SIMULATE ?? process.env.VITE_LOGIN_AUTH_SIMULATE
+  const simulate = parseLoginAuthSimulate(simulateRaw)
+
+  if (userWebMode === 'enterprise' && simulate && !loginAuthSimulateIncluded) {
+    throw new Error(
+      '配置冲突：LOGIN_AUTH_SIMULATE=true，但当前客户交付制品未包含登录认证模拟插件；' +
+      '请设置 LOGIN_AUTH_SIMULATE=false 并接入 manager ID认证服务'
+    )
+  }
+
+  return {
+    name: 'login-auth-startup-check',
+    async configureServer() {
+      if (simulateRaw === undefined || !simulateRaw.trim()) {
+        console.info(
+          '[jiuwenswarm-web] LOGIN_AUTH_SIMULATE 未配置，按默认值 true 启用登录认证模拟调试'
+        )
+      }
+      if (userWebMode !== 'enterprise') {
+        console.info('[jiuwenswarm-web] 单机版模式：跳过企业登录认证')
+        if (!simulate) {
+          console.warn(
+            '[jiuwenswarm-web] 配置冲突：USER_WEB_MODE=personal 始终跳过企业登录；' +
+            'LOGIN_AUTH_SIMULATE=false 不会启用正式身份认证'
+          )
+        }
+        return
+      }
+      if (simulate) {
+        console.info('[jiuwenswarm-web] 【登录认证模拟调试模式已开启】不调用客户侧 manager ID认证服务')
+        return
+      }
+
+      console.info('[jiuwenswarm-web] 【正式身份认证模式，依赖manager ID认证服务】')
+      const targets = [
+        { name: 'manager ID认证服务', env: 'USER_WEB_IDP_TARGET', target: process.env.USER_WEB_IDP_TARGET, path: '/v1/auth/me' },
+        { name: 'Manager业务接口', env: 'USER_WEB_MANAGER_TARGET', target: process.env.USER_WEB_MANAGER_TARGET, path: '/api/v1/user-console/gateways' },
+      ]
+      const missing = targets.filter(({ target }) => !target).map(({ env }) => env)
+      if (missing.length > 0) {
+        console.error(
+          `[jiuwenswarm-web] 正式登录模式下未配置 ${missing.join('、')}；` +
+          '请配置 manager 认证及业务接口地址'
+        )
+        return
+      }
+      for (const item of targets) {
+        const target = item.target!.replace(/\/$/, '')
+        try {
+          const response = await fetch(`${target}${item.path}`, {
+            signal: AbortSignal.timeout(3000),
+          })
+          if (response.status >= 500) throw new Error(`HTTP ${response.status}`)
+          console.info(`[jiuwenswarm-web] ${item.name}连通性检查通过：${target}`)
+        } catch (error) {
+          console.error(
+            `[jiuwenswarm-web] 当前为正式登录模式，${item.name}暂不可用；` +
+            `请检查 ${item.env}（${target}）：${error instanceof Error ? error.message : String(error)}`
+          )
+        }
+      }
+    },
+  }
+}
+
 const frontendPort = portFromEnv('FRONTEND_PORT', 5173)
 const webPort = portFromEnv('WEB_PORT', 19000)
 const webTarget =
@@ -333,13 +416,19 @@ const webHttpTarget =
 export default defineConfig({
   // 相对资源路径同时支持独立根路径与 Manager Web 的 /chat/ 同源转发。
   base: './',
-  plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), react(), svgr()],
+  plugins: [loginAuthStartupCheck(), suppressWsProxySocketErrors(), devWsTrafficLogger(), react(), svgr()],
   optimizeDeps: {
     include: ['exceljs', 'jszip', 'saxes', 'ssf'],
   },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      'virtual:login-auth-simulate-provider': path.resolve(
+        __dirname,
+        loginAuthSimulateIncluded
+          ? './src/auth/simulate/available.ts'
+          : './src/auth/simulateUnavailable.ts'
+      ),
     },
   },
   server: {

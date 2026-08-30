@@ -68,11 +68,73 @@ def _default_dist_dir() -> Path:
     return dist_dir
 
 
-def _inject_user_web_runtime_config(document: str, mode: str) -> str:
+def _inject_user_web_runtime_config(
+    document: str,
+    mode: str,
+    login_auth_simulate: bool = True,
+    login_auth_simulate_available: bool = True,
+) -> str:
     """Inject runtime mode values without modifying JavaScript property names."""
-    return document.replace("__JIUWEN_USER_WEB_MODE_VALUE__", mode).replace(
-        "__JIUWEN_USER_WEB_EMBEDDING_VALUE__",
-        "true" if mode == "enterprise" else "false",
+    return (
+        document.replace("__JIUWEN_USER_WEB_MODE_VALUE__", mode)
+        .replace(
+            "__JIUWEN_USER_WEB_EMBEDDING_VALUE__",
+            "true" if mode == "enterprise" else "false",
+        )
+        .replace(
+            "__JIUWEN_LOGIN_AUTH_SIMULATE_VALUE__",
+            "true" if login_auth_simulate else "false",
+        )
+        .replace(
+            "__JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE_VALUE__",
+            "true" if login_auth_simulate_available else "false",
+        )
+    )
+
+
+def _parse_login_auth_simulate(raw: str | None) -> bool:
+    value = "true" if raw is None or not raw.strip() else raw.strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError(
+        f"LOGIN_AUTH_SIMULATE 配置非法：期望 true 或 false，实际为 {raw!r}"
+    )
+
+
+def _probe_http_service(
+    target: str, path: str, service_name: str, timeout: float = 3.0
+) -> tuple[bool, str]:
+    """Probe an authentication dependency; 401/403 still prove reachability."""
+    parsed = urlparse(target)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False, f"{service_name}地址非法：{target!r}"
+    connection_cls = (
+        http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    )
+    connection = connection_cls(parsed.hostname, parsed.port, timeout=timeout)
+    base_path = parsed.path.rstrip("/")
+    try:
+        connection.request("GET", f"{base_path}{path}")
+        response = connection.getresponse()
+        response.read()
+        if response.status >= 500:
+            return False, f"{service_name}返回 HTTP {response.status}"
+        return True, f"HTTP {response.status}"
+    except (OSError, http.client.HTTPException) as exc:
+        return False, str(exc)
+    finally:
+        connection.close()
+
+
+def _probe_identity_service(target: str, timeout: float = 3.0) -> tuple[bool, str]:
+    return _probe_http_service(target, "/v1/auth/me", "ID认证服务", timeout)
+
+
+def _probe_manager_service(target: str, timeout: float = 3.0) -> tuple[bool, str]:
+    return _probe_http_service(
+        target, "/api/v1/user-console/gateways", "Manager业务接口", timeout
     )
 
 
@@ -97,6 +159,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     ws_disable_compress = False
     embedding_enabled = False
     user_web_mode = "personal"
+    login_auth_simulate = True
+    login_auth_simulate_available = True
     logger = logging.getLogger(__name__)
 
     _HOP_BY_HOP_HEADERS = {
@@ -627,7 +691,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         if self._is_document_request():
             index = Path(self.directory or os.getcwd()) / "index.html"
             body = _inject_user_web_runtime_config(
-                index.read_text(encoding="utf-8"), self.user_web_mode
+                index.read_text(encoding="utf-8"),
+                self.user_web_mode,
+                self.login_auth_simulate,
+                self.login_auth_simulate_available,
             ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -863,6 +930,24 @@ def main() -> None:
         legacy_embedding = os.getenv("ENABLE_USER_WEB_EMBEDDING", "")
         configured_mode = "enterprise" if legacy_embedding.strip().lower() == "true" else "personal"
     _ConfiguredHandler.user_web_mode = configured_mode
+    login_auth_simulate_raw = os.getenv("LOGIN_AUTH_SIMULATE")
+    login_auth_simulate_available_raw = os.getenv("LOGIN_AUTH_SIMULATE_AVAILABLE")
+    try:
+        login_auth_simulate = _parse_login_auth_simulate(
+            login_auth_simulate_raw
+        )
+        login_auth_simulate_available = _parse_login_auth_simulate(
+            login_auth_simulate_available_raw
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    _ConfiguredHandler.login_auth_simulate = login_auth_simulate
+    _ConfiguredHandler.login_auth_simulate_available = login_auth_simulate_available
+    if configured_mode == "enterprise" and login_auth_simulate and not login_auth_simulate_available:
+        raise SystemExit(
+            "配置冲突：LOGIN_AUTH_SIMULATE=true，但当前客户交付制品未包含登录认证模拟插件；"
+            "请设置 LOGIN_AUTH_SIMULATE=false 并接入 manager ID认证服务"
+        )
     _ConfiguredHandler.embedding_enabled = configured_mode == "enterprise"
     _ConfiguredHandler.web_http_target = web_http_target
     _ConfiguredHandler.ws_disable_compress = args.ws_disable_compress
@@ -871,6 +956,50 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), handler)
 
     logger.info("[jiuwenswarm-web] serving %s", dist_dir)
+    if login_auth_simulate_raw is None or not login_auth_simulate_raw.strip():
+        logger.info(
+            "[jiuwenswarm-web] LOGIN_AUTH_SIMULATE 未配置，按默认值 true 启用登录认证模拟调试"
+        )
+    if configured_mode == "personal":
+        logger.info("[jiuwenswarm-web] personal 模式：跳过企业登录认证")
+        if not login_auth_simulate:
+            logger.warning(
+                "[jiuwenswarm-web] 配置冲突：USER_WEB_MODE=personal 时 "
+                "LOGIN_AUTH_SIMULATE 不参与登录流程，personal 模式仍跳过企业认证"
+            )
+    elif login_auth_simulate:
+        logger.info("[jiuwenswarm-web] 【登录认证模拟调试模式已开启】")
+    else:
+        logger.info(
+            "[jiuwenswarm-web] 【正式身份认证模式，依赖manager ID认证服务】"
+        )
+        missing_targets = []
+        if not _ConfiguredHandler.idp_target:
+            missing_targets.append("USER_WEB_IDP_TARGET")
+        if not _ConfiguredHandler.manager_api_target:
+            missing_targets.append("USER_WEB_MANAGER_TARGET")
+        if missing_targets:
+            logger.error(
+                "[jiuwenswarm-web] 正式登录模式缺少 %s；请配置 manager 认证及业务接口地址",
+                "、".join(missing_targets),
+            )
+        else:
+            probes = (
+                ("manager ID认证服务", "USER_WEB_IDP_TARGET", _probe_identity_service, _ConfiguredHandler.idp_target),
+                ("Manager业务接口", "USER_WEB_MANAGER_TARGET", _probe_manager_service, _ConfiguredHandler.manager_api_target),
+            )
+            for service_name, config_name, probe, target in probes:
+                reachable, detail = probe(target)
+                if reachable:
+                    logger.info("[jiuwenswarm-web] %s连通性检查通过：%s", service_name, detail)
+                else:
+                    logger.error(
+                        "[jiuwenswarm-web] 当前为正式登录模式，%s暂不可用（%s）；"
+                        "请检查 %s、网络和服务状态",
+                        service_name,
+                        detail,
+                        config_name,
+                    )
     logger.info("[jiuwenswarm-web] http://%s:%s", args.host, args.port)
     logger.info("[jiuwenswarm-web] /api -> %s", api_target)
     logger.info("[jiuwenswarm-web] /ws  -> %s", ws_target)

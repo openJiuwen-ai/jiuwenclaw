@@ -1,4 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { isLoginAuthSimulateEnabled } from './auth/config';
+import { resolveEnterpriseAuthProvider } from './auth/providerRegistry';
+import { EnterpriseAuthError, type EnterpriseAuthProvider } from './auth/types';
 import { isEnterpriseMode } from './edition';
 import {
   EnterpriseContext,
@@ -7,30 +10,10 @@ import {
   type EnterpriseContextValue,
   type EnterpriseGateway,
   type EnterpriseOrg,
-  type EnterpriseUser,
 } from './services/enterpriseContext';
 import { parseRuntimeScope, setRuntimeScope } from './services/runtimeScope';
 
-const ACCESS_KEY = 'openjiuwen_access_token';
-const REFRESH_KEY = 'openjiuwen_refresh_token';
-
 type EntryPhase = 'loading' | 'ready' | 'empty' | 'error' | 'redirecting';
-
-class EnterpriseApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-    this.name = 'EnterpriseApiError';
-  }
-}
-
-interface ManagerResponse<T> {
-  code: number;
-  message?: string;
-  data: T;
-}
 
 interface ContextCandidate {
   gateway: EnterpriseGateway;
@@ -72,75 +55,19 @@ export function chooseAgent(agents: EnterpriseAgent[], preferredBotId?: string):
   return agents.find(agent => agentRuntimeId(agent) === preferredBotId) ?? agents[0] ?? null;
 }
 
-function accessToken(): string | null {
-  return typeof localStorage === 'undefined' ? null : localStorage.getItem(ACCESS_KEY);
-}
-
-function authHeaders(): HeadersInit {
-  const token = accessToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
-function requestMessage(body: unknown, fallback: string): string {
-  if (body && typeof body === 'object') {
-    const value = body as Record<string, unknown>;
-    if (typeof value.detail === 'string' && value.detail.trim()) return value.detail;
-    if (typeof value.message === 'string' && value.message.trim()) return value.message;
-  }
-  return fallback;
-}
-
-async function requestJson<T>(path: string): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(path, { headers: authHeaders() });
-  } catch (error) {
-    throw new EnterpriseApiError(0, `网络请求失败：${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  let body: unknown = null;
-  try {
-    body = await response.json();
-  } catch {
-    // The status code below remains the source of truth for a non-JSON error.
-  }
-  if (!response.ok) {
-    throw new EnterpriseApiError(response.status, requestMessage(body, `HTTP ${response.status}`));
-  }
-  return body as T;
-}
-
-async function loadUser(): Promise<EnterpriseUser> {
-  return requestJson<EnterpriseUser>('/idp/v1/auth/me');
-}
-
-async function loadOrgs(): Promise<EnterpriseOrg[]> {
-  const result = await requestJson<{ orgs: EnterpriseOrg[] }>('/idp/v1/auth/me/orgs');
-  return result.orgs ?? [];
-}
-
-async function loadGateways(): Promise<EnterpriseGateway[]> {
-  const result = await requestJson<ManagerResponse<{ gateways: EnterpriseGateway[] }>>('/manager-api/v1/user-console/gateways');
-  if (result.code !== 200) throw new EnterpriseApiError(result.code, result.message || '加载组网失败');
-  return result.data?.gateways ?? [];
-}
-
-async function loadAgents(groupId: string, gatewayId: string): Promise<EnterpriseAgent[]> {
-  const query = new URLSearchParams({ group_id: groupId, jiuwenclaw_id: gatewayId });
-  const result = await requestJson<ManagerResponse<{ agents: EnterpriseAgent[] }>>(`/manager-api/v1/user-console/agents?${query.toString()}`);
-  if (result.code !== 200) throw new EnterpriseApiError(result.code, result.message || '加载 Agent 失败');
-  return result.data?.agents ?? [];
-}
-
-async function resolveFirstContext(candidates: ContextCandidate[], preferredBotId?: string): Promise<ResolvedContext | null> {
+async function resolveFirstContext(
+  provider: EnterpriseAuthProvider,
+  candidates: ContextCandidate[],
+  preferredBotId?: string,
+): Promise<ResolvedContext | null> {
   let firstError: unknown = null;
   for (const candidate of candidates) {
     try {
-      const agents = await loadAgents(candidate.org.group_id, candidate.gateway.jiuwenclaw_id);
+      const agents = await provider.listAgents(candidate.org.group_id, candidate.gateway.jiuwenclaw_id);
       const selected = chooseAgent(agents, preferredBotId);
       if (selected) return { ...candidate, agents, selectedBot: agentRuntimeId(selected) };
     } catch (error) {
-      if (error instanceof EnterpriseApiError && error.status === 401) throw error;
+      if (error instanceof EnterpriseAuthError && error.status === 401) throw error;
       firstError ??= error;
     }
   }
@@ -174,21 +101,6 @@ function activateContext(userId: string, resolved: ResolvedContext, navigate: bo
   else window.history.replaceState({}, '', nextUrl);
 }
 
-function clearLogin(): void {
-  if (typeof localStorage !== 'undefined') {
-    localStorage.removeItem(ACCESS_KEY);
-    localStorage.removeItem(REFRESH_KEY);
-  }
-  if (typeof document !== 'undefined') {
-    document.cookie = `${ACCESS_KEY}=; Path=/; Max-Age=0; SameSite=Strict`;
-  }
-}
-
-function redirectToLogin(): void {
-  clearLogin();
-  window.location.replace('/auth');
-}
-
 function errorText(error: unknown): string {
   return error instanceof Error && error.message ? error.message : '加载企业用户上下文失败';
 }
@@ -218,34 +130,26 @@ function EntryStatus({ phase, error, onLogout }: { phase: EntryPhase; error: str
 
 export function EnterpriseEntry({ children }: { children: ReactNode }) {
   const enterprise = isEnterpriseMode();
-  const [phase, setPhase] = useState<EntryPhase>(() => (enterprise && !accessToken() ? 'redirecting' : 'loading'));
+  const simulateLogin = enterprise && isLoginAuthSimulateEnabled();
+  const provider = useMemo(
+    () => (enterprise ? resolveEnterpriseAuthProvider(simulateLogin) : null),
+    [enterprise, simulateLogin],
+  );
+  const [phase, setPhase] = useState<EntryPhase>(() => (provider && !provider.isAuthenticated() ? 'redirecting' : 'loading'));
   const [context, setContext] = useState<EnterpriseContextSnapshot | null>(null);
   const [error, setError] = useState('');
   const [contextError, setContextError] = useState('');
   const [contextSwitching, setContextSwitching] = useState(false);
 
   const logout = useCallback(() => {
-    void (async () => {
-      const refreshToken = typeof localStorage === 'undefined' ? null : localStorage.getItem(REFRESH_KEY);
-      if (refreshToken) {
-        try {
-          await fetch('/idp/v1/auth/logout', {
-            method: 'POST',
-            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refresh_token: refreshToken }),
-          });
-        } catch {
-          // Local logout must still complete when the identity service is unavailable.
-        }
-      }
-      redirectToLogin();
-    })();
-  }, []);
+    if (provider) void provider.logout();
+  }, [provider]);
 
   useEffect(() => {
-    if (!enterprise) return;
-    if (!accessToken()) {
-      redirectToLogin();
+    if (!enterprise || !provider) return;
+    console.info(provider.startupMessage);
+    if (!provider.isAuthenticated()) {
+      provider.redirectToLogin();
       return;
     }
 
@@ -253,8 +157,16 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
     const bootstrap = async () => {
       try {
         const preferred = parseRuntimeScope(window.location.search);
-        const [user, orgs, gateways] = await Promise.all([loadUser(), loadOrgs(), loadGateways()]);
-        const resolved = await resolveFirstContext(orderedContextCandidates(gateways, orgs, preferred.gatewayId, preferred.groupId), preferred.botId);
+        const [user, orgs, gateways] = await Promise.all([
+          provider.getCurrentUser(),
+          provider.listOrganizations(),
+          provider.listGateways(),
+        ]);
+        const resolved = await resolveFirstContext(
+          provider,
+          orderedContextCandidates(gateways, orgs, preferred.gatewayId, preferred.groupId),
+          preferred.botId,
+        );
         if (cancelled) return;
         if (!resolved) {
           setPhase('empty');
@@ -273,8 +185,8 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
         setPhase('ready');
       } catch (bootstrapError) {
         if (cancelled) return;
-        if (bootstrapError instanceof EnterpriseApiError && bootstrapError.status === 401) {
-          redirectToLogin();
+        if (bootstrapError instanceof EnterpriseAuthError && bootstrapError.status === 401) {
+          provider.redirectToLogin();
           return;
         }
         setError(errorText(bootstrapError));
@@ -285,23 +197,23 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [enterprise]);
+  }, [enterprise, provider]);
 
   const switchContext = useCallback(
     async (candidates: ContextCandidate[], preferredBotId?: string, missingMessage = '所选范围内暂无可用 Agent') => {
-      if (!context || contextSwitching) return;
+      if (!context || contextSwitching || !provider) return;
       setContextSwitching(true);
       setContextError('');
       try {
-        const resolved = await resolveFirstContext(candidates, preferredBotId);
+        const resolved = await resolveFirstContext(provider, candidates, preferredBotId);
         if (!resolved) {
           setContextError(missingMessage);
           return;
         }
         activateContext(context.user.user_id, resolved, true);
       } catch (switchError) {
-        if (switchError instanceof EnterpriseApiError && switchError.status === 401) {
-          redirectToLogin();
+        if (switchError instanceof EnterpriseAuthError && switchError.status === 401) {
+          provider.redirectToLogin();
           return;
         }
         setContextError(errorText(switchError));
@@ -309,7 +221,7 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
         setContextSwitching(false);
       }
     },
-    [context, contextSwitching],
+    [context, contextSwitching, provider],
   );
 
   const contextValue = useMemo<EnterpriseContextValue | null>(() => {
