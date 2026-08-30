@@ -14,9 +14,10 @@ from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
 from openjiuwen_runtime.foundation.db import postgresql_handler
 from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 from openjiuwen_runtime.foundation.db.sqlite_handler import SQLiteHandler
+from openjiuwen_runtime.foundation.db.utils import is_mysql, is_postgresql, is_sqlite
 from openjiuwen_runtime.foundation.log import get_logger
 
-from ..models.table_init import init_all_tables
+from jiuwenswarm.gateway.config.enterprise.tables.table_init import init_all_tables
 from .config import Settings, get_settings
 
 logger = get_logger(__name__)
@@ -67,7 +68,7 @@ class Database:
     def config_summary(self) -> dict[str, Any]:
         cfg = self.settings
         db_type = str(cfg.gateway_db_type or "").strip().lower() or "sqlite"
-        if db_type == "sqlite":
+        if is_sqlite(db_type):
             result = {
                 "db_type": db_type,
                 "sqlite_path": str(self.resolve_sqlite_path()),
@@ -79,7 +80,7 @@ class Database:
                 "port": cfg.gateway_db_port,
                 "database": cfg.gateway_db_name,
             }
-        if db_type == "postgresql":
+        if is_postgresql(db_type):
             result["schema"] = cfg.gateway_pg_schema
         return result
 
@@ -126,11 +127,11 @@ class Database:
         db_type = str(cfg.gateway_db_type or "").strip().lower() or "sqlite"
         logger.info("Using database: %s", db_type)
 
-        if db_type == "sqlite":
+        if is_sqlite(db_type):
             self._handler = self._create_sqlite_handler()
-        elif db_type == "mysql":
+        elif is_mysql(db_type):
             self._handler = self._create_mysql_handler()
-        elif db_type in ("postgresql", "postgres", "pg"):
+        elif is_postgresql(db_type):
             self._handler = self._create_pg_handler()
         else:
             raise ValueError(

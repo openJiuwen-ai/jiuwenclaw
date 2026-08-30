@@ -18,7 +18,7 @@ from ...infrastructure.utils import (
     parse_iso_datetime,
     utc_now,
 )
-from ...models.config_effective_policy_models import (
+from jiuwenswarm.gateway.config.enterprise.tables.config_effective_policy_models import (
     CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
 )
 from ...schemas.config_effective_policy_schemas import (

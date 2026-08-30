@@ -283,17 +283,6 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
     if is_enterprise():
         try:
             from jiuwenswarm.agents.harness.common.memory.config import (
-                reload_embed_config_from_gateway_db,
-            )
-
-            await reload_embed_config_from_gateway_db()
-            logger.info("[AgentServer] embed_config loaded from Gateway DB (if any)")
-        except Exception:  # noqa: BLE001
-            logger.warning("[AgentServer] embed_config cold load skipped", exc_info=True)
-
-    if is_enterprise():
-        try:
-            from jiuwenswarm.agents.harness.common.memory.config import (
                 reload_task_memory_config_from_gateway_db,
             )
 

@@ -13,7 +13,7 @@ from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRep
 
 from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import parse_iso_datetime, utc_now
-from ...models.config_effective_policy_models import (
+from jiuwenswarm.gateway.config.enterprise.tables.config_effective_policy_models import (
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
 )
 from ...schemas.config_effective_policy_schemas import (

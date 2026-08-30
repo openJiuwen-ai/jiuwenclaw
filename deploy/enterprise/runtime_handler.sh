@@ -8,6 +8,16 @@ gen_runtime_file() {
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     enable_dev_mode_if_needed ${file} runtime
 
+    if [ "${DEPLOY_VARS["DB_TYPE"]}" == "postgresql" ]; then
+        yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].env += [
+            {
+                "name": "OPENJIUWEN_SERVICE_PG_SCHEMA",
+                "value": "'"${DEPLOY_VARS["RUNTIME_PG_SCHEMA"]}"'"
+            }
+        ]' -i "${file}"
+    fi
+
     add_resource_if_set "RUNTIME" "${file}"
 }
 
@@ -52,4 +62,5 @@ uninstall_runtime() {
     info "Deleting remaining Runtime resources (ServiceAccount, Role, Service, ...)"
     exec_cmd kubectl delete -f "${file}" --ignore-not-found=true
     uninstall_secret_configmap
+    ensure_redis_down "gateway"
 }

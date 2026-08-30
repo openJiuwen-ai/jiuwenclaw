@@ -29,9 +29,9 @@ _ENTERPRISE_SKILL_ALLOWED = frozenset({"skills.list", "skills.get", "skills.ente
 
 def is_enterprise_write_forbidden(method: str) -> bool:
     """Central guard shared by WS and HTTP; Cron and locale remain user-writable."""
-    from jiuwenswarm.gateway.edition import is_gateway_enterprise
+    from jiuwenswarm.common.utils import is_enterprise
 
-    if not is_gateway_enterprise():
+    if not is_enterprise():
         return False
     if method in _ENTERPRISE_BLOCKED_EXACT or method.startswith(_ENTERPRISE_BLOCKED_PREFIXES):
         return True

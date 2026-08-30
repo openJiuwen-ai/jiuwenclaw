@@ -26,7 +26,7 @@ VALID_DEPLOYMENT_MODES: tuple[str, ...] = (
 )
 
 SessionStorageBackend = Literal["local", "redis"]
-HistoryStorageBackend = Literal["sqlite", "mysql"]
+HistoryStorageBackend = Literal["memory", "mysql"]
 
 
 def normalize_deployment_mode(raw: object) -> str:
@@ -57,15 +57,16 @@ def session_storage_backend(mode: str) -> SessionStorageBackend:
 def history_storage_backend(mode: str) -> HistoryStorageBackend:
     """Web 会话历史默认存储后端。
 
-    - standalone：本地 SQLite（可无 MySQL）
+    - standalone：纯内存（个人版不落库；web 数据库为企业版特性）
     - active-standby / distributed：MySQL 独立库 ``web``（删 Pod 不丢历史）
 
     实际运行时仍以 ``WEB_DB_TYPE`` / ``WEB_DB_HOST`` 等环境变量优先
     （见 ``resolve_history_db_type``）；本函数表达「部署模式推荐默认值」。
+    sqlite 已废弃（两端均不支持）。
     """
     if normalize_deployment_mode(mode) in (MODE_ACTIVE_STANDBY, MODE_DISTRIBUTED):
         return "mysql"
-    return "sqlite"
+    return "memory"
 
 
 def default_cron_enabled(mode: str) -> bool:

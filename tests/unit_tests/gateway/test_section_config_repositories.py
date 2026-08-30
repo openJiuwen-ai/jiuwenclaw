@@ -17,7 +17,6 @@ from jiuwenswarm.gateway.config.section import (
     DbFlatSectionCodec,
     YamlSectionCodec,
 )
-from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE, EDITION_PERSONAL
 from jiuwenswarm.gateway.storage.backends.file_persistent import FilePersistentBackend
 from jiuwenswarm.gateway.storage.backends.memory_persistent import InMemoryPersistentBackend
 from jiuwenswarm.gateway.storage_assembly.layouts import build_gateway_store_registry
@@ -168,27 +167,27 @@ async def test_section_yaml_file_overlay(tmp_path) -> None:
     assert "bar: 2" in text
 
 
-def test_factory_codec_selection() -> None:
+def test_factory_codec_selection(monkeypatch) -> None:
     store = InMemoryPersistentBackend()
-    personal = create_permissions_config_repository(store, EDITION_PERSONAL)
-    enterprise = create_permissions_config_repository(
-        store, EDITION_ENTERPRISE, instance_id="x"
-    )
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+    personal = create_permissions_config_repository(store)
     assert isinstance(personal._inner._codec, YamlSectionCodec)
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    enterprise = create_permissions_config_repository(store, instance_id="x")
     assert isinstance(enterprise._inner._codec, DbBodySectionCodec)
 
-    log_personal = create_logging_config_repository(store, EDITION_PERSONAL)
-    log_enterprise = create_logging_config_repository(
-        store, EDITION_ENTERPRISE, instance_id="x"
-    )
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+    log_personal = create_logging_config_repository(store)
     assert isinstance(log_personal._inner._codec, YamlSectionCodec)
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    log_enterprise = create_logging_config_repository(store, instance_id="x")
     assert isinstance(log_enterprise._inner._codec, DbFlatSectionCodec)
 
-    mem_personal = create_memory_config_repository(store, EDITION_PERSONAL)
-    mem_enterprise = create_memory_config_repository(
-        store, EDITION_ENTERPRISE, instance_id="x"
-    )
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+    mem_personal = create_memory_config_repository(store)
     assert isinstance(mem_personal._inner._codec, YamlSectionCodec)
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
+    mem_enterprise = create_memory_config_repository(store, instance_id="x")
     assert isinstance(mem_enterprise._inner._codec, DbBodySectionCodec)
 
 @pytest.mark.asyncio
@@ -242,7 +241,7 @@ async def test_preferred_language_scalar_overlay(tmp_path) -> None:
     assert "preferred_language:\n  preferred_language:" not in text
 
 
-def test_new_section_factory_codec_selection() -> None:
+def test_new_section_factory_codec_selection(monkeypatch) -> None:
     store = InMemoryPersistentBackend()
     for factory in (
         create_heartbeat_config_repository,
@@ -250,10 +249,12 @@ def test_new_section_factory_codec_selection() -> None:
         create_preferred_language_config_repository,
         create_a2ui_config_repository,
     ):
-        personal = factory(store, EDITION_PERSONAL)
+        monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+        personal = factory(store)
         assert isinstance(personal._inner._codec, YamlSectionCodec)
+        monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
         try:
-            factory(store, EDITION_ENTERPRISE, instance_id="x")
+            factory(store, instance_id="x")
             raise AssertionError("expected personal-only ValueError")
         except ValueError as exc:
             assert "personal-only" in str(exc)

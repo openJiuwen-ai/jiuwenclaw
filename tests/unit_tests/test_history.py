@@ -6,7 +6,6 @@ import pytest
 
 from jiuwenswarm.channels.web.history_store import (
     ChatHistoryStore,
-    default_enterprise_history_db_path,
     get_session_detail_sync,
     list_sessions_sync,
     make_history_callback,
@@ -303,10 +302,10 @@ def test_mysql_without_host_unavailable(monkeypatch: pytest.MonkeyPatch) -> None
 def test_resolve_history_db_type_prefers_web_db_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("WEB_DB_TYPE", "sqlite")
+    monkeypatch.setenv("WEB_DB_TYPE", "postgresql")
     monkeypatch.setenv("DB_TYPE", "mysql")
     monkeypatch.delenv("WEB_DB_HOST", raising=False)
-    assert resolve_history_db_type() == "sqlite"
+    assert resolve_history_db_type() == "postgresql"
 
 
 def test_resolve_history_db_type_host_implies_mysql(
@@ -327,7 +326,7 @@ def test_resolve_history_db_type_follows_deployment_mode(
     monkeypatch.setenv("DEPLOYMENT_MODE", "distributed")
     assert resolve_history_db_type() == "mysql"
     monkeypatch.setenv("DEPLOYMENT_MODE", "standalone")
-    assert resolve_history_db_type() == "sqlite"
+    assert resolve_history_db_type() == "memory"
 
 @pytest.mark.asyncio
 async def test_callback_uplink_request_id_in_payload() -> None:
@@ -363,13 +362,7 @@ async def test_callback_uplink_request_id_in_payload() -> None:
     await store.close()
 
 
-def test_default_enterprise_history_db_path_is_web_history_db() -> None:
-    path = default_enterprise_history_db_path()
-    assert path.endswith("web_history.db")
-
-
-@pytest.mark.asyncio
-async def test_sync_read_missing_sqlite_file(tmp_path) -> None:
+def test_sync_read_missing_sqlite_file(tmp_path) -> None:
     missing = tmp_path / "missing.db"
     assert list_sessions_sync(missing) == []
     assert get_session_detail_sync(missing, "x") is None

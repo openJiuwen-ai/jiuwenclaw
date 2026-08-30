@@ -13,7 +13,7 @@ from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRep
 
 from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import parse_iso_datetime, utc_now
-from ...models.instance_resource_models import INSTANCE_AGENT_RESOURCE_TABLE_DEF
+from jiuwenswarm.gateway.config.enterprise.tables.instance_resource_models import INSTANCE_AGENT_RESOURCE_TABLE_DEF
 from ...schemas.instance_resource_schemas import InstanceAgentResourceUpsertRequest
 
 _TABLE = INSTANCE_AGENT_RESOURCE_TABLE_DEF.table_name

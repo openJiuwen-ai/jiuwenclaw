@@ -74,9 +74,9 @@ logger = logging.getLogger("jiuwenswarm.gateway")
 
 def _uses_external_agent_config() -> bool:
     """企业版或外置 Runtime 托管：配置经 Manager→ConfigReceiver→runtime_notify，不经 Gateway push。"""
-    from jiuwenswarm.gateway.edition import is_gateway_enterprise
+    from jiuwenswarm.common.utils import is_enterprise
 
-    if is_gateway_enterprise():
+    if is_enterprise():
         return True
     return bool(os.getenv("GATEWAY_RUNTIME_MANAGER_URL", "").strip())
 
@@ -1682,13 +1682,13 @@ async def _run_with_telemetry(
         gateway_storage_ctx = None
 
     try:
-        from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE, resolve_gateway_edition
+        from jiuwenswarm.common.utils import is_enterprise
         from jiuwenswarm.gateway.storage_assembly.setup import (
             ensure_enterprise_storage_context,
             wire_enterprise_manager_ws_store_async,
         )
 
-        if resolve_gateway_edition(full_cfg) == EDITION_ENTERPRISE:
+        if is_enterprise():
             gateway_storage_ctx = ensure_enterprise_storage_context(
                 full_cfg,
                 existing=gateway_storage_ctx,

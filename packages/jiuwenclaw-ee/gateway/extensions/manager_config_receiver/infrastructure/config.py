@@ -9,6 +9,8 @@ from typing import Optional
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from openjiuwen_runtime.foundation.db.utils import is_sqlite
+
 
 def _resolve_env_files() -> tuple[str | Path, ...]:
     """解析可用的 .env 路径（优先 cwd，兼容 venv 安装布局）。"""
@@ -138,7 +140,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_db_fields(self) -> "Settings":
         # 如果是 SQLite，不需要校验连接参数
-        if self.gateway_db_type == "sqlite":
+        if is_sqlite(self.gateway_db_type):
             # 如果没传路径，自动设置默认值
             if self.gateway_sqlite_path is None or self.gateway_sqlite_path.strip() == "":
                 self.gateway_sqlite_path = "gateway.db"
