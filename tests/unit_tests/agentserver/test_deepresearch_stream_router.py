@@ -106,7 +106,9 @@ def test_advance_stage_backfills_every_missing_stage_in_event_order():
     frames = advance_stage(state, 4)
 
     assert [frame["event_type"] for frame in frames] == [
+        "chat.delta",
         "task.update",
+        "chat.delta",
         "chat.delta",
         "task.update",
         "chat.delta",
@@ -127,10 +129,29 @@ def test_advance_stage_backfills_every_missing_stage_in_event_order():
         for frame in frames
         if frame["event_type"] == "chat.delta"
     ] == [
+        "[DeepResearch 阶段完成] Stage 2：大纲生成\n",
         "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n",
+        "[DeepResearch 阶段完成] Stage 3：并行调研与章节撰写\n",
         "[DeepResearch 阶段切换] 开始 Stage 4：报告交付\n",
     ]
     assert state.current_stage == 4
+
+
+def test_advance_stage_marks_previous_stage_complete_before_next_stage_starts():
+    state = RouterState(current_stage=1)
+
+    frames = advance_stage(state, 2)
+
+    visible_stage_events = [
+        frame["content"]
+        for frame in frames
+        if frame["event_type"] == "chat.delta"
+    ]
+    assert visible_stage_events == [
+        "[DeepResearch 阶段完成] Stage 1：研究主题澄清\n",
+        "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n",
+    ]
+    _assert_stage(_stage_update(frames), 2)
 
 
 def test_stage_2_uses_outline_generation_title_on_all_surfaces():
@@ -1158,6 +1179,7 @@ def test_interrupt_chunk_not_forwarded():
     _assert_stage(_stage_update(frames), 2)
     assert [frame["event_type"] for frame in frames] == [
         "task.update",
+        "chat.delta",
         "chat.delta",
         "task.update",
         "chat.delta",
