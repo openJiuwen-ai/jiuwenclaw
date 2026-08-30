@@ -1,21 +1,15 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""从 Gateway DB 加载企业级生效配置（Service → Agent → Global 三级匹配）。"""
+"""从 Gateway DB 按实例 Agent 资源加载企业级生效配置。"""
 
 from __future__ import annotations
 
 from collections.abc import Collection
-from dataclasses import dataclass
 from typing import Any
 
 from openjiuwen_runtime.foundation.log import get_logger
 
-from ...infrastructure.utils import (
-    fill_missing_template_ref_slots,
-    merge_template_ref,
-    normalize_template_ref,
-)
-from . import expressions
+from ...infrastructure.utils import normalize_template_ref
 from .gateway_db import GatewayDb
 from .schemas import (
     MODEL_SLOT_KEYS,
@@ -25,79 +19,6 @@ from .schemas import (
 )
 
 logger = get_logger(__name__)
-
-# 策略/映射选路排序：priority 降序；同 priority 时 updated_at 越新越优先。
-# SQLAlchemyHandler.list_records 的 str 形式 order_by 仅支持单列；多列须用 list[tuple[field, is_desc]]。
-POLICY_MATCH_ORDER_BY: list[tuple[str, bool]] = [
-    ("priority", True),
-    ("updated_at", True),
-]
-
-
-async def _fetch_global_policy_refs() -> tuple[dict[str, Any] | None, dict[str, list[str]]]:
-    filters: dict[str, Any] = {"enabled": True}
-    global_rows = await GatewayDb.current().list_records(
-        "config_effective_global_policy",
-        filters=filters,
-        order_by=POLICY_MATCH_ORDER_BY,
-    )
-    if not global_rows:
-        return None, {}
-    matched_global = global_rows[0]
-    return matched_global, normalize_template_ref(matched_global.get("template_ref"))
-
-
-@dataclass
-class _PolicyMatchResult:
-    merged_refs: dict[str, list[str]]
-    matched_service: dict[str, Any] | None
-    matched_agent: dict[str, Any] | None
-    matched_global: dict[str, Any] | None
-
-
-async def _resolve_policy_match(ctx: RoutingContext) -> _PolicyMatchResult:
-    service_rules = await GatewayDb.current().list_records(
-        "config_effective_service_policy",
-        filters={"enabled": True},
-        order_by=POLICY_MATCH_ORDER_BY,
-    )
-
-    matched_service: dict[str, Any] | None = None
-    matched_agent: dict[str, Any] | None = None
-    matched_global, global_refs = await _fetch_global_policy_refs()
-    merged_refs: dict[str, list[str]] = {}
-
-    for rule in service_rules:
-        if expressions.evaluate_match_expr(rule.get("match_expr"), ctx):
-            matched_service = rule
-            merged_refs = normalize_template_ref(rule.get("template_ref"))
-            break
-
-    if matched_service is not None:
-        sp_policy_id = str(matched_service["policy_id"])
-        agent_rules = await GatewayDb.current().list_records(
-            "config_effective_agent_policy",
-            filters={"enabled": True, "service_policy_id": sp_policy_id},
-            order_by=POLICY_MATCH_ORDER_BY,
-        )
-        for rule in agent_rules:
-            if expressions.evaluate_match_expr(rule.get("match_expr"), ctx):
-                matched_agent = rule
-                merged_refs = merge_template_ref(
-                    merged_refs,
-                    normalize_template_ref(rule.get("template_ref")),
-                )
-                break
-        merged_refs = fill_missing_template_ref_slots(merged_refs, global_refs)
-    else:
-        merged_refs = global_refs
-
-    return _PolicyMatchResult(
-        merged_refs=merged_refs,
-        matched_service=matched_service,
-        matched_agent=matched_agent,
-        matched_global=matched_global,
-    )
 
 
 def _coerce_routing_field(value: Any) -> str:
@@ -222,140 +143,6 @@ async def _fetch_slot_entities(
             entity = _normalize_service_config_row(entity)
         entities.append(entity)
     return entities
-
-
-def resolve_policy_field(
-    policy: dict[str, Any] | None,
-    field: str,
-    ctx: RoutingContext,
-) -> str | None:
-    if not policy:
-        return None
-    raw = str(policy.get(field) or "").strip()
-    if not raw:
-        return None
-    if "${" in raw:
-        resolved = expressions.substitute_template(raw, ctx)
-        return resolved if resolved else raw
-    return raw
-
-
-async def load_effective_enterprise_config_old(
-    request: Any,
-    slots: Collection[TemplateRefSlot],
-) -> EffectiveEnterpriseConfig | None:
-    """按 Service → Agent → Global 三级匹配加载企业配置（旧路径，保留供对照）。
-
-    ``slots`` 指定要解析并加载的 ``template_ref`` 槽位，例如模型槽位、
-    ``TemplateRefSlot.EMBEDDING_MODEL``、``TemplateRefSlot.SKILL_WHITELIST``、
-    ``TemplateRefSlot.EXTENSION_CONFIG``、``TemplateRefSlot.SERVICE_CONFIG`` 等。
-    """
-    ctx = routing_context_from_request(request)
-    if not slots:
-        raise ValueError("slots must not be empty")
-    load_slots = frozenset(slot.value for slot in slots)
-    match = await _resolve_policy_match(ctx)
-
-    resolved_service_id: str | None = None
-    resolved_agent_id: str | None = None
-    resolved_workspace_dir: str | None = None
-    if TemplateRefSlot.SERVICE_CONFIG in load_slots:
-        resolved_service_id = resolve_policy_field(
-            match.matched_service,
-            "service_id",
-            ctx,
-        )
-        resolved_agent_id = resolve_policy_field(
-            match.matched_agent,
-            "agent_id",
-            ctx,
-        )
-        resolved_workspace_dir = resolve_policy_field(
-            match.matched_agent,
-            "workspace_dir",
-            ctx,
-        )
-
-    send_file_allowed = bool((match.matched_agent or {}).get("send_file_allowed", True))
-    has_policy_outcome = bool(
-        resolved_service_id
-        or resolved_agent_id
-        or resolved_workspace_dir
-        or send_file_allowed
-    )
-
-    filtered_refs = {
-        slot: refs
-        for slot, refs in match.merged_refs.items()
-        if slot in load_slots
-    }
-
-    if not filtered_refs:
-        logger.warning(
-            "[enterprise_config] no template_ref resolved for context %s slots=%s",
-            ctx.as_dict(),
-            sorted(load_slots),
-        )
-        if not has_policy_outcome:
-            return None
-        slot_template_id_map: dict[str, list[str]] = {}
-    else:
-        slot_template_id_map = await expressions.resolve_slot_template_id_map(
-            filtered_refs,
-            ctx,
-        )
-        if not slot_template_id_map:
-            logger.warning(
-                "[enterprise_config] template_ref slots unresolved for context %s refs=%s",
-                ctx.as_dict(),
-                filtered_refs,
-            )
-            if not has_policy_outcome:
-                return None
-
-    result = EffectiveEnterpriseConfig(
-        routing=ctx,
-        template_ref=slot_template_id_map,
-        service_policy_id=(
-            str(match.matched_service["policy_id"]) if match.matched_service else None
-        ),
-        agent_policy_id=(
-            int(match.matched_agent["id"]) if match.matched_agent else None
-        ),
-        global_policy_id=(
-            int(match.matched_global["id"]) if match.matched_global else None
-        ),
-        service_id=resolved_service_id,
-        agent_id=resolved_agent_id,
-        workspace_dir=resolved_workspace_dir,
-        send_file_allowed=send_file_allowed,
-        service_policy=match.matched_service,
-        agent_policy=match.matched_agent,
-        global_policy=match.matched_global,
-    )
-
-    for slot, template_ids in slot_template_id_map.items():
-        entities = await _fetch_slot_entities(slot, template_ids)
-        if entities:
-            _apply_slot_entities(result, slot, entities)
-
-    if not _any_requested_slot_loaded(result, load_slots):
-        logger.warning(
-            "[enterprise_config] no template entities loaded "
-            "template_ref=%s ctx=%s slots=%s",
-            slot_template_id_map,
-            ctx.as_dict(),
-            sorted(load_slots),
-        )
-        if not has_policy_outcome:
-            return None
-
-    logger.info(
-        "[enterprise_config] loaded enterprise config (old): slots=%s payload=%s",
-        sorted(load_slots),
-        result.as_dict(),
-    )
-    return result
 
 
 async def _fetch_instance_agent_resource(resource_id: str) -> dict[str, Any] | None:
@@ -518,8 +305,6 @@ async def load_effective_enterprise_config(
 
 
 __all__ = (
-    "POLICY_MATCH_ORDER_BY",
     "load_effective_enterprise_config",
-    "load_effective_enterprise_config_old",
     "routing_context_from_request",
 )

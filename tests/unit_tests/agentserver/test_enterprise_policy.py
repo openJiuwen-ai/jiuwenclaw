@@ -291,33 +291,8 @@ async def test_resolve_template_slot_ref_or_literal_when_no_mapping(
     assert ref == _FALLBACK_TEMPLATE_ID
 
 
-def test_fill_missing_template_ref_slots() -> None:
-    from jiuwenswarm.server.runtime.enterprise_config.loader import (
-        fill_missing_template_ref_slots,
-    )
-
-    merged = {
-        "default_model": ["m3"],
-        "vision_model": ["m2"],
-    }
-    global_refs = {
-        "default_model": ["m1"],
-        "video_model": ["m1"],
-        "audio_model": ["m1"],
-        "skill_whitelist": ["w3"],
-    }
-    out = fill_missing_template_ref_slots(merged, global_refs)
-    assert out == {
-        "default_model": ["m3"],
-        "vision_model": ["m2"],
-        "video_model": ["m1"],
-        "audio_model": ["m1"],
-        "skill_whitelist": ["w3"],
-    }
-
-
 @pytest.mark.asyncio
-async def test_load_effective_config_fills_missing_slots_from_global(
+async def test_load_effective_config_by_instance_agent_resource(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from jiuwenswarm.server.runtime.enterprise_config import gateway_db
@@ -331,11 +306,12 @@ async def test_load_effective_config_fills_missing_slots_from_global(
     monkeypatch.setenv("JIUWENCLAW_ID", "sp-demo")
 
     m2 = "22222222-2222-4222-8222-222222222222"
-    m5 = "55555555-5555-4555-8555-555555555555"
     m1 = "11111111-1111-4111-8111-111111111111"
-    w1, w2, w3 = "w1", "w2", "w3"
-    e1, e2, e4 = "e1", "e2", "e4"
+    w1, w2 = "w1", "w2"
+    e1, e2 = "e1", "e2"
     jid = "sp-demo"
+    resource_id = "bot_main"
+    ref_template_id = "agent-tmpl-1"
 
     async def _list_records(
         table: str,
@@ -344,64 +320,37 @@ async def test_load_effective_config_fills_missing_slots_from_global(
         order_by: str = "",
     ) -> list[dict]:
         scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
-        if table == "config_effective_service_policy":
-            if scoped.get("jiuwenclaw_id") not in (None, jid):
+        if table == "instance_agent_resource":
+            if scoped.get("resource_id") != resource_id:
                 return []
             return [
                 {
-                    "id": 1,
                     "jiuwenclaw_id": jid,
-                    "match_expr": "group_id == 'g_demo_sales'",
+                    "resource_id": resource_id,
+                    "resource_name": "main",
+                    "ref_template_id": ref_template_id,
+                    "grants": [{"match_expr": "", "enabled": True}],
+                }
+            ]
+        if table == "agent_template":
+            if scoped.get("template_id") != ref_template_id:
+                return []
+            return [
+                {
+                    "jiuwenclaw_id": jid,
+                    "template_id": ref_template_id,
+                    "enabled": True,
                     "template_ref": {
                         "default_model": [m2],
                         "vision_model": [m2],
+                        "video_model": [m1],
+                        "audio_model": [m1],
                         "skill_whitelist": [w1, w2],
                         "extension_config": [e1, e2],
                     },
+                    "data": {"workspace_dir": "/ws/bot_main"},
                 }
             ]
-        if table == "config_effective_agent_policy":
-            if scoped.get("jiuwenclaw_id") not in (None, jid):
-                return []
-            return [
-                {
-                    "id": 10,
-                    "jiuwenclaw_id": jid,
-                    "agent_id": "${user_id}",
-                    "match_expr": "",
-                    "template_ref": {
-                        "default_model": [f"${{group::g_demo_sales}} or {m1}"],
-                    },
-                }
-            ]
-        if table == "config_effective_global_policy":
-            if scoped.get("jiuwenclaw_id") == jid:
-                return [
-                    {
-                        "id": 99,
-                        "jiuwenclaw_id": jid,
-                        "template_ref": {
-                            "default_model": [m1],
-                            "vision_model": [m1],
-                            "video_model": [m1],
-                            "audio_model": [m1],
-                            "skill_whitelist": [w3],
-                            "extension_config": [e4],
-                        },
-                    }
-                ]
-            if scoped.get("jiuwenclaw_id") == "sp-other":
-                return [
-                    {
-                        "id": 1,
-                        "jiuwenclaw_id": "sp-other",
-                        "template_ref": {"extension_config": ["e3-old"]},
-                    }
-                ]
-            return []
-        if table == "config_default_template_mapping":
-            if scoped.get("group_id") == "g_demo_sales":
-                return [{"template_id": m5}]
         return []
 
     async def _fetch_template_by_slot(slot: str, template_id: str) -> dict | None:
@@ -414,7 +363,7 @@ async def test_load_effective_config_fills_missing_slots_from_global(
         request_id="req-test-bob",
         params={
             "group_id": "g_demo_sales",
-            "bot_id": "bot_main",
+            "bot_id": resource_id,
             "user_id": "bob",
         },
     )
@@ -423,17 +372,20 @@ async def test_load_effective_config_fills_missing_slots_from_global(
         DEFAULT_AGENT_LOAD_SLOTS,
     )
     assert loaded is not None
-    assert loaded.template_ref["default_model"] == [m5]
+    assert loaded.resource_id == resource_id
+    assert loaded.ref_template_id == ref_template_id
+    assert loaded.agent_id == resource_id
+    assert loaded.workspace_dir == "/ws/bot_main"
+    assert loaded.template_ref["default_model"] == [m2]
     assert loaded.template_ref["vision_model"] == [m2]
     assert loaded.template_ref["video_model"] == [m1]
     assert loaded.template_ref["audio_model"] == [m1]
     assert loaded.template_ref["skill_whitelist"] == [w1, w2]
     assert loaded.template_ref["extension_config"] == [e1, e2]
-    assert loaded.global_policy_id == 99
 
 
 @pytest.mark.asyncio
-async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
+async def test_load_effective_config_skips_mapping_expr_in_template_ref(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from jiuwenswarm.server.runtime.enterprise_config import gateway_db
@@ -446,9 +398,9 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
     monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("JIUWENCLAW_ID", "sp-current")
     e4 = "44444444-4444-4444-8444-444444444444"
-    e3_old = "33333333-3333-4333-8333-333333333333"
     m1 = "11111111-1111-4111-8111-111111111111"
-    w3 = "w3"
+    resource_id = "bot_main"
+    ref_template_id = "agent-tmpl-ext"
 
     async def _list_records(
         table: str,
@@ -457,32 +409,37 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
         order_by: str = "",
     ) -> list[dict]:
         scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
-        if table == "config_effective_service_policy":
-            return []
-        if table == "config_effective_global_policy":
-            jid = scoped.get("jiuwenclaw_id")
-            if jid == "sp-current":
-                return [
-                    {
-                        "id": 4,
-                        "jiuwenclaw_id": "sp-current",
-                        "template_ref": {
-                            "default_model": [m1],
-                            "vision_model": [m1],
-                            "video_model": [m1],
-                            "audio_model": [m1],
-                            "skill_whitelist": [w3],
-                            "extension_config": [e4],
-                        },
-                    }
-                ]
-            return []
+        if table == "instance_agent_resource":
+            if scoped.get("resource_id") != resource_id:
+                return []
+            return [
+                {
+                    "jiuwenclaw_id": "sp-current",
+                    "resource_id": resource_id,
+                    "ref_template_id": ref_template_id,
+                    "grants": [{"match_expr": "", "enabled": True}],
+                }
+            ]
+        if table == "agent_template":
+            if scoped.get("template_id") != ref_template_id:
+                return []
+            return [
+                {
+                    "jiuwenclaw_id": "sp-current",
+                    "template_id": ref_template_id,
+                    "enabled": True,
+                    "template_ref": {
+                        "default_model": [f"${{group::g_demo_sales}} or {m1}"],
+                        "extension_config": [e4],
+                    },
+                }
+            ]
         return []
 
     async def _fetch_template_by_slot(slot: str, template_id: str) -> dict | None:
         return {
             "template_id": template_id,
-            "template_name": "Gateway 定时清理" if template_id == e4 else "Agent Server 错误恢复",
+            "template_name": "Gateway 定时清理" if template_id == e4 else "other",
             "component": "gateway" if template_id == e4 else "agent_server",
             "slot": slot,
         }
@@ -494,7 +451,7 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
         request_id="req-test-unknown",
         params={
             "group_id": "g_unknown",
-            "bot_id": "bot_main",
+            "bot_id": resource_id,
             "user_id": "bob",
         },
     )
@@ -503,7 +460,7 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
         DEFAULT_AGENT_LOAD_SLOTS,
     )
     assert loaded is not None
-    assert loaded.global_policy_id == 4
+    assert "default_model" not in loaded.template_ref
     assert loaded.template_ref["extension_config"] == [e4]
     assert loaded.extension_config is not None
     assert loaded.extension_config[0]["template_name"] == "Gateway 定时清理"
@@ -614,6 +571,8 @@ async def test_load_effective_config_loads_embedding_template(
     jid = "embedding-demo"
     monkeypatch.setenv("JIUWENCLAW_ID", jid)
     embedding_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    resource_id = "bot_embed"
+    ref_template_id = "agent-tmpl-embed"
 
     async def _list_records(
         table: str,
@@ -622,16 +581,25 @@ async def test_load_effective_config_loads_embedding_template(
         order_by: str = "",
     ) -> list[dict]:
         scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
-        if table == "config_effective_service_policy":
-            return []
-        if (
-            table == "config_effective_global_policy"
-            and scoped.get("jiuwenclaw_id") == jid
-        ):
+        if table == "instance_agent_resource":
+            if scoped.get("resource_id") != resource_id:
+                return []
             return [
                 {
-                    "id": 8,
                     "jiuwenclaw_id": jid,
+                    "resource_id": resource_id,
+                    "ref_template_id": ref_template_id,
+                    "grants": [{"match_expr": "", "enabled": True}],
+                }
+            ]
+        if table == "agent_template":
+            if scoped.get("template_id") != ref_template_id:
+                return []
+            return [
+                {
+                    "jiuwenclaw_id": jid,
+                    "template_id": ref_template_id,
+                    "enabled": True,
                     "template_ref": {"embedding_model": [embedding_id]},
                 }
             ]
@@ -651,7 +619,10 @@ async def test_load_effective_config_loads_embedding_template(
     monkeypatch.setattr(gateway_db, "fetch_template_by_slot", _fetch_template_by_slot)
 
     loaded = await load_effective_enterprise_config(
-        AgentRequest(request_id="req-embedding"),
+        AgentRequest(
+            request_id="req-embedding",
+            params={"bot_id": resource_id},
+        ),
         DEFAULT_AGENT_LOAD_SLOTS,
     )
 
