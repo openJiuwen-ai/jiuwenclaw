@@ -12,6 +12,7 @@ import {
 import { getGatewayHttpBase } from '../utils/env';
 import i18n from '../i18n';
 import { buildRuntimeIdentityHeaders } from './runtimeScope';
+import { PauseBufferHook, PAUSABLE_STREAM_EVENTS } from './webClient';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -313,37 +314,55 @@ export function consumeSseBuffer(buffer: string): { frames: SseFrame[]; rest: st
   return { frames, rest };
 }
 
-function payloadFromData(data: string | undefined): Record<string, unknown> {
+function payloadFromData(
+  data: string | undefined
+): { payload: Record<string, unknown>; raw: Record<string, unknown> | null } {
   if (!data) {
-    return {};
+    return { payload: {}, raw: null };
   }
   try {
     const parsed: unknown = JSON.parse(data);
     if (isRecord(parsed)) {
       if (isRecord(parsed.payload)) {
-        return parsed.payload;
+        return { payload: parsed.payload, raw: parsed };
       }
-      return parsed;
+      return { payload: parsed, raw: parsed };
     }
-    return { value: parsed };
+    return { payload: { value: parsed }, raw: null };
   } catch {
-    return { raw: data };
+    return { payload: { raw: data }, raw: null };
   }
+}
+
+function extractSseRequestId(
+  raw: Record<string, unknown> | null,
+  payload: Record<string, unknown>
+): string | undefined {
+  if (raw) {
+    const top = typeof raw.request_id === 'string' ? raw.request_id : undefined;
+    if (top) return top;
+  }
+  const inner = typeof payload.request_id === 'string' ? payload.request_id : undefined;
+  if (inner) return inner;
+  const rid = typeof payload.rid === 'string' ? payload.rid : undefined;
+  return rid;
 }
 
 export function sseFrameToWsEvent(frame: SseFrame): WsEvent | null {
   let eventName = frame.event?.trim() ?? '';
-  const payload = payloadFromData(frame.data);
+  const { payload, raw } = payloadFromData(frame.data);
   if (!eventName && typeof payload.event === 'string') {
     eventName = payload.event;
   }
   if (!eventName) {
     return null;
   }
+  const requestId = extractSseRequestId(raw, payload);
   return {
     type: 'event',
     event: eventName,
     payload,
+    ...(requestId ? { request_id: requestId } : {}),
   };
 }
 
@@ -429,6 +448,8 @@ export class WebHttpClient {
   private connectPromise: Promise<void> | null = null;
   private lastConnectOptions: WebConnectOptions = {};
   private requestSeq = 0;
+  private streamEventFilter: ((event: WsEvent) => boolean) | null = null;
+  private pauseBufferHook: PauseBufferHook | null = null;
 
   getState(): WebConnectionState {
     return this.state;
@@ -443,6 +464,21 @@ export class WebHttpClient {
     return () => {
       this.stateHandlers.delete(handler);
     };
+  }
+
+  /** 丢弃已 cancel 的 chat/context 流式事件（在 dispatch 前统一过滤） */
+  setStreamEventFilter(filter: ((event: WsEvent) => boolean) | null): void {
+    this.streamEventFilter = filter;
+  }
+
+  /** 暂停期间将流式输出写入暂存区，恢复后通过 replayBufferedEvent 回放 */
+  setPauseBufferHook(hook: PauseBufferHook | null): void {
+    this.pauseBufferHook = hook;
+  }
+
+  /** 回放暂存的事件——直接派发给 handler，绕过 filter 和 buffer */
+  replayBufferedEvent(event: WsEvent): void {
+    this.dispatchEventToHandlers(event);
   }
 
   on<TPayload = Record<string, unknown>>(
@@ -507,7 +543,7 @@ export class WebHttpClient {
       );
     }
 
-    const requestId = this.generateRequestId();
+    const requestId = options.requestId ?? this.generateRequestId();
     let assembled;
     try {
       assembled = assembleWebRest(method, params, getGatewayHttpBase());
@@ -854,6 +890,23 @@ export class WebHttpClient {
   }
 
   private dispatchEvent(event: WsEvent): void {
+    if (this.streamEventFilter && !this.streamEventFilter(event)) {
+      return;
+    }
+    const hook = this.pauseBufferHook;
+    if (hook?.isActive()) {
+      if (event.event === 'chat.processing_status') {
+        return;
+      }
+      if (PAUSABLE_STREAM_EVENTS.has(event.event)) {
+        hook.onBuffer(event);
+        return;
+      }
+    }
+    this.dispatchEventToHandlers(event);
+  }
+
+  private dispatchEventToHandlers(event: WsEvent): void {
     const handlers = this.handlers.get(event.event);
     if (!handlers || handlers.size === 0) {
       return;

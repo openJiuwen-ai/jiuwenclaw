@@ -1830,6 +1830,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 proactive_cfg.get("max_recommend_per_day", 10))
             payload["proactive_recommendation_max_rounds_per_tick"] = str(
                 proactive_cfg.get("max_rounds_per_tick", 20))
+            gateway_cfg = raw.get("gateway") or {}
+            payload["gateway_web_session_storage"] = str(
+                gateway_cfg.get("web_session_storage") or "local"
+            ).strip().lower()
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("kv_cache_release_enabled", "false")
@@ -1859,6 +1863,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("proactive_recommendation_enabled", "false")
             payload.setdefault("proactive_recommendation_max_recommend_per_day", "10")
             payload.setdefault("proactive_recommendation_max_rounds_per_tick", "20")
+            payload.setdefault("gateway_web_session_storage", "local")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     def _persist_env_updates(updates: dict[str, str]) -> None:
@@ -2980,7 +2985,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         service = updater_service or UpdaterService()
         await channel.send_response(ws, req_id, ok=True, payload=service.get_runtime_config())
 
-    async def _session_list(ws, req_id, params, session_id):
+    async def _session_list(ws, req_id, params, session_id, user_id=None):
         """返回会话列表,包含完整的会话管理信息。"""
         limit = 20
         offset = 0
@@ -3004,6 +3009,35 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         limit = max(1, min(limit, 200))
         offset = max(0, offset)
+
+        from jiuwenswarm.gateway.routing.session_index import is_remote_storage
+
+        if is_remote_storage():
+            logger.warning(
+                "[session.list] remote 模式执行了 WebChannel 本地 handler（缺少入站转发时）；"
+                "将就地读网关索引。",
+            )
+            from jiuwenswarm.gateway.routing.session_index import list_sessions_page_async
+
+            _params = params if isinstance(params, dict) else {}
+            # 多用户隔离：remote 模式必须按用户过滤，否则会返回所有用户的会话。
+            # user_id 缺失（未认证/匿名连接）时回退 "guest"（与 history_store 一致），
+            # 避免空串导致 list_sessions_page 不过滤而泄露跨用户数据；同时告警便于排查。
+            _raw_uid = str(user_id or "").strip()
+            if not _raw_uid:
+                logger.warning(
+                    "[session.list] remote 模式缺少 user_id，按 guest 过滤（可能是匿名连接）",
+                )
+                _raw_uid = "guest"
+            _params = {**_params, "user": _raw_uid}
+            sessions, total, limit_ret, offset_ret = await list_sessions_page_async(_params)
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "sessions": [_to_session_info(s) for s in sessions],
+                "total": total,
+                "limit": limit_ret,
+                "offset": offset_ret,
+            })
+            return
 
         from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata
 
@@ -3066,6 +3100,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST",
+            )
+            return
+        from jiuwenswarm.gateway.routing.session_index import is_remote_storage
+
+        if is_remote_storage():
+            logger.error(
+                "[session.create] remote 模式但执行了本地 handler（转发未生效？）session_id=%s",
+                session_id,
+            )
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="remote session storage is enabled but request was not forwarded to agent",
+                code="REMOTE_STORAGE_FORWARD_FAILED",
             )
             return
         resolved_agent_client = _resolve(agent_client)
@@ -3186,6 +3233,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         session_id_to_delete = session_id_to_delete.strip()
+
+        from jiuwenswarm.gateway.routing.session_index import is_remote_storage
+
+        if is_remote_storage():
+            logger.error(
+                "[session.delete] remote 模式但执行了本地 handler（转发未生效？）session_id=%s",
+                session_id_to_delete,
+            )
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="remote session storage is enabled but request was not forwarded to agent",
+                code="REMOTE_STORAGE_FORWARD_FAILED",
+            )
+            return
 
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -5137,7 +5198,28 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                                     payload={"rss_mb": rss_mb, "total_mb": total_mb,
                                              "available_mb": available_mb})
 
-    async def _chat_send(ws, req_id, params, session_id):
+    async def _chat_send(ws, req_id, params, session_id, user_id=None):
+        # remote 模式下维护会话索引：chat.send 时写入最近一条用户消息预览
+        if session_id:
+            try:
+                from jiuwenswarm.gateway.routing.session_index import is_remote_storage, upsert_async
+                if is_remote_storage():
+                    content = ""
+                    if isinstance(params, dict):
+                        content = str(params.get("content") or params.get("query") or "")
+                    # user_id 缺失时回退 "guest"（与 history_store 一致），避免写空串
+                    # 到索引 user 字段、后续按用户过滤匹配不到而破坏多用户隔离。
+                    _raw_uid = str(user_id or "").strip()
+                    if not _raw_uid:
+                        logger.warning(
+                            "[chat.send] remote 模式缺少 user_id，索引 user 回退为 guest",
+                        )
+                        _raw_uid = "guest"
+                    await upsert_async(
+                        session_id, "user", content, time.time(), user=_raw_uid,
+                    )
+            except Exception:
+                logger.debug("[chat.send] session_index upsert skipped", exc_info=True)
         await channel.send_response(
             ws,
             req_id,

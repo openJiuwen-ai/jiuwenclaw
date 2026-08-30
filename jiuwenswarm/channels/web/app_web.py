@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import errno
 import http.client
+import io
 import json
 import logging
 import mimetypes
@@ -698,6 +699,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # 运行时配置已逐请求注入 index.html，必须禁止缓存，
+            # 否则浏览器会复用含过期/跨用户配置的旧响应。
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -751,7 +755,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def _is_document_request(self) -> bool:
         path = urlparse(self.path).path
-        return path in ("/", "/index.html") and "text/html" in self.headers.get("Accept", "")
+        # Accept header may be absent (e.g. IAB initial navigation); serve
+        # the runtime-config-injected index.html for root and index.html paths.
+        return path in ("/", "/index.html")
 
     def send_head(self):
         parsed = urlparse(self.path)
@@ -764,6 +770,44 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
         if in_base and target.exists():
             return super().send_head()
+
+        # Vite base:'./' produces relative asset URLs (./assets/...). When the
+        # SPA route is a sub-path (e.g. /chat/new), the browser resolves these
+        # to /chat/assets/... which don't exist under dist/. Strip leading path
+        # segments and retry from the dist root before falling back to index.html.
+        static_exts = (".js", ".css", ".svg", ".png", ".jpg", ".jpeg", ".ico",
+                       ".webp", ".gif", ".woff", ".woff2", ".ttf", ".eot",
+                       ".map", ".json", ".webmanifest")
+        if req_path.endswith(static_exts) and "/" in rel_path:
+            basename = rel_path.rsplit("/", 1)[-1]
+            # Try progressively shorter prefixes (e.g. chat/assets/x.js ->
+            # assets/x.js -> x.js).
+            parts = rel_path.split("/")
+            for i in range(1, len(parts)):
+                candidate_rel = "/".join(parts[i:])
+                candidate = (base_dir / candidate_rel).resolve()
+                cand_in_base = os.path.commonpath(
+                    [str(base_dir), str(candidate)]
+                ) == str(base_dir)
+                if cand_in_base and candidate.exists():
+                    self.path = "/" + candidate_rel
+                    return super().send_head()
+
+        # SPA fallback: serve index.html with runtime config injected.
+        index_path = base_dir / "index.html"
+        if index_path.exists():
+            body = _inject_user_web_runtime_config(
+                index_path.read_text(encoding="utf-8"), self.user_web_mode
+            ).encode("utf-8")
+            f = io.BytesIO(body)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            # 运行时配置已逐请求注入 index.html，必须禁止缓存，
+            # 否则浏览器会复用含过期/跨用户配置的旧响应。
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return f
 
         self.path = "/index.html"
         return super().send_head()
