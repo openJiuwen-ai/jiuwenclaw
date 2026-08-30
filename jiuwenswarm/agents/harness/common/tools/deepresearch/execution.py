@@ -670,7 +670,8 @@ def _completion_content(
         lines.extend(
             [
                 "",
-                "⚠️ HTML 视觉美化未成功，已交付基础版式；Markdown 报告内容不受影响。",
+                "⚠️ HTML 已交付内置基础视觉模板，但 AI 生成的增强样式未应用；"
+                "Markdown 报告内容不受影响。",
             ]
         )
     lines.extend(

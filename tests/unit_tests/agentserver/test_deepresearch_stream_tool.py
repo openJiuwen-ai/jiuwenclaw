@@ -2128,6 +2128,49 @@ def test_build_deepresearch_config_empty_values_are_not_forwarded():
     assert all(value != "" for value in config.values())
 
 
+def test_styled_export_auth_carries_only_maas_authorization():
+    authorization = "Basic c3R5bGUtcmVxdWVzdA=="
+    auth = dt._build_styled_export_llm_auth(
+        {
+            "default_headers": json.dumps(
+                {"authorization": authorization, "X-Unrelated": "must-not-cross"}
+            )
+        },
+        {"general": {"api_key": "huawei-maas-session"}},
+    )
+
+    assert json.loads(auth["default_headers"]) == {
+        "Authorization": authorization
+    }
+    assert "X-Unrelated" not in auth["default_headers"]
+
+
+def test_styled_export_auth_does_not_apply_to_ordinary_api_keys():
+    assert dt._build_styled_export_llm_auth(
+        {"default_headers": "not-json"},
+        {"general": {"api_key": "ordinary-api-key"}},
+    ) == {}
+
+
+@pytest.mark.parametrize(
+    "raw_headers",
+    [
+        "",
+        "{}",
+        '{"X-Other":"1"}',
+        '{"Authorization":"Basic one","authorization":"Basic two"}',
+    ],
+)
+def test_styled_export_auth_fails_closed_without_one_maas_authorization(
+    raw_headers: str,
+):
+    with pytest.raises(ValueError, match="MaaS Authorization is unavailable"):
+        dt._build_styled_export_llm_auth(
+            {"default_headers": raw_headers},
+            {"general": {"api_key": "huawei-maas-session"}},
+        )
+
+
 def test_resolve_runner_rejects_symlink_and_hardlink(tmp_path: Path):
     shared = tmp_path / "shared"
     scripts = shared / "deepresearch" / "scripts"
@@ -2807,13 +2850,23 @@ async def test_styled_html_uses_isolated_bridge_as_primary(tmp_path: Path):
         "service_id": "svc",
         "agent_id": "agent",
     }
+    authorization = "Basic c3R5bGUtY2hpbGQ="
+    runtime_config = {
+        "LLM_SSL_VERIFY": "false",
+        "TOOL_SSL_VERIFY": "true",
+        "default_headers": json.dumps(
+            {"Authorization": authorization, "X-Unrelated": "do-not-forward"}
+        ),
+    }
     with patch.object(dt, "_get_route", return_value=route), patch.object(
         dt, "_build_deepresearch_request_config",
-        return_value={"LLM_SSL_VERIFY": "false", "TOOL_SSL_VERIFY": "true"},
+        return_value=runtime_config,
     ), patch.object(
         dt, "_build_styled_export_llm_config",
-        return_value={"general": {"api_key": "secret"}},
-    ), patch.object(dt, "get_deepresearch_manager", return_value=Mock()), patch.object(
+        return_value={"general": {"api_key": "huawei-maas-session"}},
+    ) as build_llm, patch.object(
+        dt, "get_deepresearch_manager", return_value=Mock()
+    ), patch.object(
         dt, "stylize_report_archive", bridge
     ):
         result = await dt._generate_report_html(
@@ -2832,6 +2885,14 @@ async def test_styled_html_uses_isolated_bridge_as_primary(tmp_path: Path):
         "TOOL_SSL_VERIFY": True,
     }
     assert observed["session_id"] == "S1"
+    assert observed["llm_auth"] == {
+        "default_headers": json.dumps(
+            {"Authorization": authorization},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    }
+    build_llm.assert_called_once_with(runtime_config)
 
 
 @pytest.mark.asyncio
@@ -2869,6 +2930,32 @@ async def test_styled_html_primary_does_not_require_offline_markdown(tmp_path: P
     assert bridge_calls == 1
     assert result == (markdown.with_suffix(".html"), "applied", None, None)
     assert result[0].read_text(encoding="utf-8") == "<h1>styled</h1>"
+
+
+@pytest.mark.asyncio
+async def test_styled_html_missing_maas_auth_falls_back_without_starting_bridge(
+    tmp_path: Path,
+):
+    markdown = tmp_path / "report.md"
+    bridge = Mock()
+    with patch.object(
+        dt,
+        "_build_deepresearch_request_config",
+        return_value={"LLM_SSL_VERIFY": "false", "TOOL_SSL_VERIFY": "false"},
+    ), patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value={"general": {"api_key": "huawei-maas-session"}},
+    ), patch.object(
+        dt, "get_deepresearch_manager", return_value=Mock()
+    ), patch.object(
+        dt, "stylize_report_archive", bridge
+    ):
+        result = await dt._generate_report_html({}, markdown, "offline report")
+
+    assert result == (markdown.with_suffix(".html"), "fallback", None, None)
+    assert "offline report" in result[0].read_text(encoding="utf-8")
+    bridge.assert_not_called()
 
 
 @pytest.mark.asyncio

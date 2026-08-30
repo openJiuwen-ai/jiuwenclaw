@@ -45,6 +45,7 @@ _BRIDGE_ZIP_MEMBER_MAX_BYTES = 64 * 1024 * 1024
 _BRIDGE_JSON_MAX_DEPTH = 64
 _BRIDGE_JSON_MAX_NODES = 100_000
 _BRIDGE_JSON_MAX_CONTAINER = 20_000
+_BRIDGE_REQUEST_SCHEMA_VERSION = 2
 _STYLE_PHASES = frozenset({
     "build_style_context",
     "apply_prompt",
@@ -223,12 +224,15 @@ def _remove_bridge_artifact(artifact: _BridgeArtifact) -> None:
 def _encode_bridge_request(
     final_result: dict[str, Any],
     llm_config: dict[str, Any],
+    llm_auth: dict[str, str],
     tls: dict[str, bool],
 ) -> bytes:
+    _validate_bridge_llm_auth(llm_auth)
     request = {
-        "schema_version": 1,
+        "schema_version": _BRIDGE_REQUEST_SCHEMA_VERSION,
         "final_result": final_result,
         "llm_config": llm_config,
+        "llm_auth": llm_auth,
         "tls": tls,
     }
     _validate_json_tree(request)
@@ -244,6 +248,36 @@ def _encode_bridge_request(
     if len(payload) > _BRIDGE_INPUT_MAX_BYTES:
         raise DeepResearchRuntimeError("sdk_bridge_request_too_large")
     return payload
+
+
+def _validate_bridge_llm_auth(llm_auth: object) -> None:
+    if not isinstance(llm_auth, dict):
+        raise DeepResearchRuntimeError("sdk_bridge_request_invalid")
+    if not llm_auth:
+        return
+    if set(llm_auth) != {"default_headers"}:
+        raise DeepResearchRuntimeError("sdk_bridge_request_invalid")
+    raw_headers = llm_auth.get("default_headers")
+    if not isinstance(raw_headers, str) or not raw_headers.strip():
+        raise DeepResearchRuntimeError("sdk_bridge_request_invalid")
+    try:
+        headers = json.loads(raw_headers)
+    except (TypeError, ValueError) as exc:
+        raise DeepResearchRuntimeError("sdk_bridge_request_invalid") from exc
+    if not isinstance(headers, dict):
+        raise DeepResearchRuntimeError("sdk_bridge_request_invalid")
+    authorization = [
+        value
+        for key, value in headers.items()
+        if isinstance(key, str) and key.lower() == "authorization"
+    ]
+    if (
+        len(headers) != 1
+        or len(authorization) != 1
+        or not isinstance(authorization[0], str)
+        or not authorization[0].strip()
+    ):
+        raise DeepResearchRuntimeError("sdk_bridge_request_invalid")
 
 
 def _validate_json_tree(value: object) -> None:
@@ -376,6 +410,7 @@ async def stylize_report_archive(
     *,
     final_result: dict[str, Any],
     llm_config: dict[str, Any],
+    llm_auth: dict[str, str],
     tls: dict[str, bool],
     manager: Any,
     session_id: str,
@@ -383,7 +418,7 @@ async def stylize_report_archive(
     """Yield one validated private SDK ZIP and clean it after installation."""
     executable = resolve_python_executable()
     script = _bridge_script()
-    payload = _encode_bridge_request(final_result, llm_config, tls)
+    payload = _encode_bridge_request(final_result, llm_config, llm_auth, tls)
     artifact = _create_bridge_artifact()
     process = None
     tracked = False

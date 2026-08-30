@@ -19,7 +19,7 @@ import time
 import unicodedata
 import uuid
 import zipfile
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -71,6 +71,7 @@ from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.local_env_config import (
     build_effective_env_overlay,
     get_task_env_overlay,
+    parse_default_headers,
 )
 from jiuwenswarm.common.utils import (
     JIUWENSWARM_SHARED_SKILLS_DIRS_ENV,
@@ -88,6 +89,7 @@ DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES = 16 * 1024 * 1024
 DEEPRESEARCH_STDERR_TAIL_MAX_BYTES = 20_000
 DEEPRESEARCH_ERROR_TEXT_MAX_CHARS = 2048
 DEEPRESEARCH_STDERR_OUTCOME_MAX_CHARS = 2048
+_HUAWEI_MAAS_PLACEHOLDER_API_KEY = "huawei-maas-session"
 DEEPRESEARCH_STREAM_JSON_MAX_DEPTH = 64
 DEEPRESEARCH_STREAM_JSON_MAX_NODES = 100_000
 DEEPRESEARCH_STREAM_JSON_MAX_TEXT_CHARS = 16 * 1024 * 1024
@@ -533,9 +535,11 @@ def _build_deepresearch_request_config(
     return config
 
 
-def _build_styled_export_llm_config() -> dict[str, dict[str, object]]:
+def _build_styled_export_llm_config(
+    runtime_config: Mapping[str, str] | None = None,
+) -> dict[str, dict[str, object]]:
     """Build the exact JSON-safe LLM config consumed by the isolated SDK."""
-    resolved = load_deepresearch_config()
+    resolved = load_deepresearch_config(runtime_config)
     api_key = str(resolved.get("LLM_API_KEY", "")).strip()
     model_name = str(resolved.get("LLM_MODEL_NAME", "")).strip()
     base_url = str(resolved.get("LLM_BASE_URL", "")).strip()
@@ -562,6 +566,41 @@ def _build_styled_export_llm_config() -> dict[str, dict[str, object]]:
                 "extra_body": {"thinking": {"type": "disabled"}},
             },
         }
+    }
+
+
+def _build_styled_export_llm_auth(
+    runtime_config: Mapping[str, str],
+    llm_config: Mapping[str, object],
+) -> dict[str, str]:
+    """Carry only request-scoped MaaS Authorization into the style child."""
+    general = llm_config.get("general")
+    api_key = (
+        str(general.get("api_key", "") or "").strip()
+        if isinstance(general, Mapping)
+        else ""
+    )
+    if api_key != _HUAWEI_MAAS_PLACEHOLDER_API_KEY:
+        return {}
+
+    headers = parse_default_headers(
+        str(runtime_config.get("default_headers", "") or "")
+    )
+    authorization = [
+        value
+        for key, value in (headers or {}).items()
+        if key.lower() == "authorization" and value.strip()
+    ]
+    if len(authorization) != 1:
+        raise ValueError(
+            "styled HTML Huawei MaaS Authorization is unavailable"
+        )
+    return {
+        "default_headers": json.dumps(
+            {"Authorization": authorization[0]},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     }
 
 
@@ -3071,9 +3110,12 @@ async def _generate_report_html(
             "TOOL_SSL_VERIFY": runtime_config.get("TOOL_SSL_VERIFY", "false"),
         })
         manager = get_deepresearch_manager(_route_scope())
+        llm_config = _build_styled_export_llm_config(runtime_config)
+        llm_auth = _build_styled_export_llm_auth(runtime_config, llm_config)
         async with stylize_report_archive(
             final_result=final_result,
-            llm_config=_build_styled_export_llm_config(),
+            llm_config=llm_config,
+            llm_auth=llm_auth,
             tls=tls,
             manager=manager,
             session_id=str(route.get("session_id") or ""),

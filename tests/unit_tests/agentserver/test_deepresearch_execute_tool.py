@@ -442,7 +442,10 @@ async def test_completion_warns_when_html_style_falls_back():
     assert result["html_style_status"] == "fallback"
     assert result["html_style_phase"] == "invoke_llm"
     assert result["html_style_reason_code"] == "llm_call_failed"
-    assert "HTML 视觉美化未成功，已交付基础版式" in result["content"]
+    assert (
+        "HTML 已交付内置基础视觉模板，但 AI 生成的增强样式未应用"
+        in result["content"]
+    )
     assert saved[-1]["html_style_status"] == "fallback"
     assert saved[-1]["html_style_phase"] == "invoke_llm"
     assert saved[-1]["html_style_reason_code"] == "llm_call_failed"
