@@ -7,7 +7,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..infrastructure.ha import gateway_deployment_mode, is_gateway_primary
 from ..routers.application_config_routers import application_config_router
-from ..routers.config_effective_policy_routers import config_effective_policy_routers
 from ..routers.instance_resource_routers import instance_resource_router
 from ..routers.instance_routers import instance_router
 from ..routers.register_router import register_router
@@ -64,8 +63,6 @@ def create_app() -> FastAPI:
     v1.include_router(instance_router, tags=["Instances"])
     v1.include_router(instance_resource_router, tags=["Instance Resources"])
     v1.include_router(application_config_router, tags=["Application Config"])
-    for policy_router in config_effective_policy_routers:
-        v1.include_router(policy_router, tags=["Config Effective Policy"])
 
     app.include_router(v1)
     return app

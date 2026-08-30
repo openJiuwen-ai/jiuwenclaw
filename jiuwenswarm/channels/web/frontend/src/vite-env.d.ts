@@ -8,6 +8,8 @@ interface ImportMetaEnv {
   readonly VITE_TRANSPORT?: string;
   readonly VITE_GATEWAY_HTTP_BASE?: string;
   readonly VITE_WEB_HTTP_BASE?: string;
+  readonly VITE_LOGIN_AUTH_SIMULATE?: string;
+  readonly VITE_LOGIN_AUTH_SIMULATE_AVAILABLE?: string;
 }
 
 interface ImportMeta {
@@ -47,4 +49,13 @@ interface Window {
   /** Set by the User Web server for enterprise embedding mode. */
   __JIUWEN_USER_WEB_MODE__?: string;
   __JIUWEN_USER_WEB_EMBEDDING__?: boolean;
+  /** Login simulation switch injected by the User Web server. */
+  __JIUWEN_LOGIN_AUTH_SIMULATE__?: boolean | string;
+  /** Whether this frontend artifact contains the optional simulation plugin. */
+  __JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE__?: boolean | string;
+}
+
+declare module 'virtual:login-auth-simulate-provider' {
+  import type { EnterpriseAuthProvider } from './auth/types';
+  export const simulatedAuthProvider: EnterpriseAuthProvider | null;
 }

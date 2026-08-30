@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 source "${SCRIPT_DIR}/common.sh"
 source "${SCRIPT_DIR}/global_vars.sh"
+source "${SCRIPT_DIR}/args_handler.sh"
 source "${SCRIPT_DIR}/cmd_handler.sh"
 source "${SCRIPT_DIR}/envfile_handler.sh"
 source "${SCRIPT_DIR}/template_handler.sh"
@@ -32,6 +33,11 @@ assert_equal() {
 
 main() {
     check_cmd "yq"
+
+    MODULES=()
+    process_modules
+    assert_equal "GATEWAY WEB RUNTIME" "${MODULES[*]}" "default delivery must exclude Manager"
+    MODULES=()
 
     TEST_DIR="$(mktemp -d)"
     local test_dir="${TEST_DIR}"
@@ -72,17 +78,25 @@ main() {
     DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]="true"
     gen_web_file
     assert_equal \
-        "0" \
-        "$(yq eval-all '[select(.metadata.name == "jiuwenclaw-web-nodeport")] | length' "${CONFIG["WEB_FILE"]}")" \
-        "enterprise mode must not expose the User Web NodePort"
+        "NodePort" \
+        "$(yq eval-all 'select(.metadata.name == "jiuwenclaw-web-nodeport") | .spec.type' "${CONFIG["WEB_FILE"]}")" \
+        "enterprise mode must expose the independent User Web NodePort"
 
     DEPLOY_VARS["IS_UP_MANAGER_WEB"]="false"
-    if (check_user_web_mode_config) >/dev/null 2>&1; then
-        echo "FAIL: embedded mode must require Manager Web" >&2
-        exit 1
-    fi
+    DEPLOY_VARS["USER_WEB_IDP_TARGET"]="http://jiuwenclaw-identity:8770"
+    DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]="http://jiuwenclaw-manager-server:8765"
+    check_user_web_mode_config
 
     DEPLOY_VARS["IS_UP_MANAGER_WEB"]="true"
+    DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]="true"
+    check_user_web_mode_config
+
+    DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]="invalid"
+    if check_user_web_mode_config >/dev/null 2>&1; then
+        echo "FAIL: invalid LOGIN_AUTH_SIMULATE value must be rejected" >&2
+        exit 1
+    fi
+    DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]="false"
     check_user_web_mode_config
 
     DEPLOY_VARS["USER_WEB_MODE"]="invalid"
