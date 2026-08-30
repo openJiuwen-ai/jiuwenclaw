@@ -21,7 +21,16 @@ logger = logging.getLogger(__name__)
 
 
 def register_sessions_compat_routes(app: FastAPI) -> None:
-    """Mount ``GET /api/sessions`` and ``GET /api/sessions/{session_id}``."""
+    """Mount ``GET /api/sessions`` and ``GET /api/sessions/{session_id}``.
+
+    Enterprise only：``/api/sessions*``（无 ``/api/v1`` 前缀）走 ``ChatHistoryStore``；
+    个人版不注册（``/api/v1/sessions`` 走 ``session_metadata`` JSON 文件方案）。
+    """
+    if not is_enterprise():
+        logger.debug(
+            "[WebHTTP] skip enterprise history compat routes (not enterprise edition)"
+        )
+        return
 
     @app.get(
         "/api/sessions",
