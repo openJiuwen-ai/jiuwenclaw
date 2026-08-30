@@ -54,8 +54,8 @@ def _build_row_from_template(
         "template_ref": normalize_template_ref(template.get("template_ref") or {}),
         "enabled": bool(template.get("enabled", True)),
         "data": template.get("data"),
-        "created_at": parse_iso_datetime(template.get("created_at")) or now,
-        "updated_at": parse_iso_datetime(template.get("updated_at")) or now,
+        "created_at": now,
+        "updated_at": now,
     }
 
 
@@ -74,7 +74,8 @@ async def _upsert_agent_template_from_sync(
         return
     created_at = existing.get("created_at")
     if created_at is not None:
-        row_data["created_at"] = created_at
+        # existing 可能是 ISO 字符串；asyncpg 要求 datetime
+        row_data["created_at"] = parse_iso_datetime(created_at) or now
     updates = {
         key: value
         for key, value in row_data.items()
