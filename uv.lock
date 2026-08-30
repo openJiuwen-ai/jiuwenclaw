@@ -1897,12 +1897,6 @@ wheels = [
 ]
 
 [[package]]
-name = "jieba"
-version = "0.42.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c6/cb/18eeb235f833b726522d7ebed54f2278ce28ba9438e3135ab0278d9792a2/jieba-0.42.1.tar.gz", hash = "sha256:055ca12f62674fafed09427f176506079bc135638a14e23e25be909131928db2", size = 19214172, upload-time = "2020-01-20T14:27:23.5Z" }
-
-[[package]]
 name = "jinja2"
 version = "3.1.6"
 source = { registry = "https://pypi.org/simple" }
@@ -3340,12 +3334,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-observability = [
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp-proto-grpc" },
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
-]
 postgres = [
     { name = "asyncpg" },
 ]
@@ -3357,11 +3345,10 @@ zmq = [
 [[package]]
 name = "openjiuwen-deepsearch"
 version = "0.2.0"
-source = { git = "https://gitcode.com/openJiuwen/deepsearch.git?subdirectory=deepsearch&rev=dev-stable#28f28deae3440427e7a47ade15d5060cfd953a39" }
+source = { git = "https://gitcode.com/openJiuwen/deepsearch.git?subdirectory=deepsearch&rev=dev-stable#54e0404d26a255d654d51863fd279a64e3e8dc4f" }
 dependencies = [
     { name = "aiolimiter" },
     { name = "beautifulsoup4" },
-    { name = "jieba" },
     { name = "jinja2" },
     { name = "json-repair" },
     { name = "latex2mathml" },
@@ -3370,7 +3357,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "networkx" },
     { name = "numpy" },
-    { name = "openjiuwen", extra = ["observability"] },
+    { name = "openjiuwen" },
     { name = "pypdfium2" },
     { name = "python-docx" },
     { name = "pyvis" },
