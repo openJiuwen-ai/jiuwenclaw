@@ -41,6 +41,16 @@ gen_web_file() {
         }
     ]' -i "${file}"
 
+    if [ "${DEPLOY_VARS["DB_TYPE"]}" == "postgresql" ]; then
+        yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].env += [
+            {
+                "name": "WEB_PG_SCHEMA",
+                "value": "'"${DEPLOY_VARS["WEB_PG_SCHEMA"]}"'"
+            }
+        ]' -i "${file}"
+    fi
+
     add_resource_if_set "WEB" "${file}"
 
     # yq 追加资源配置时可能重复 env；Deployment strategic merge patch 不接受重复键，

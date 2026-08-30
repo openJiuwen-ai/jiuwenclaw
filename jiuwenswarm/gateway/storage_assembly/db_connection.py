@@ -9,8 +9,6 @@ from typing import Any
 
 from jiuwenswarm.gateway.storage.errors import StorageUnavailableError
 
-_SQLITE_TYPES = frozenset({"sqlite", "aiosqlite"})
-
 
 def resolve_gateway_replicas() -> int:
     """解析 ``GATEWAY_REPLICAS``；缺省为 1。"""
@@ -34,9 +32,11 @@ def resolve_gateway_db_type() -> str:
 
 def assert_replicas_db_compat() -> None:
     """``GATEWAY_REPLICAS > 1`` 时禁止 sqlite。"""
+    from openjiuwen_runtime.foundation.db.utils import is_sqlite
+
     replicas = resolve_gateway_replicas()
     db_type = resolve_gateway_db_type()
-    if replicas > 1 and db_type in _SQLITE_TYPES:
+    if replicas > 1 and is_sqlite(db_type):
         raise StorageUnavailableError(
             f"GATEWAY_REPLICAS={replicas} forbids sqlite; "
             "set GATEWAY_DB_TYPE to mysql or postgresql"

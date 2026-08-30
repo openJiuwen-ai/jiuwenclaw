@@ -8,14 +8,13 @@ import logging
 from typing import Any
 
 from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
-
+from jiuwenswarm.gateway.config.enterprise.tables.template_models import AGENT_TEMPLATE_TABLE_DEF
 from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import (
     normalize_template_ref,
     parse_iso_datetime,
     utc_now,
 )
-from ...models.template_models import AGENT_TEMPLATE_TABLE_DEF
 from ...schemas.template_schemas import AgentTemplateUpdateRequest
 
 _TABLE = AGENT_TEMPLATE_TABLE_DEF.table_name

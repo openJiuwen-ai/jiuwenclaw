@@ -59,7 +59,10 @@ async def test_api_sessions_list_and_detail(history_client):
 
 
 def test_api_sessions_empty_when_no_store(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+    # /api/sessions* is enterprise-only (history_store); personal edition doesn't
+    # register the route. Use enterprise edition with an unavailable store so the
+    # endpoint still returns 200 + empty list (graceful "no store" handling).
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     # Force unavailable default by pointing mysql without host via empty memory reset.
     store = ChatHistoryStore(settings=None, memory=False)
     set_default_store(store)

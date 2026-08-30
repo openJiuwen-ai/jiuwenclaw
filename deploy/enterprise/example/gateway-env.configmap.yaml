@@ -26,7 +26,7 @@ data:
   CLAW_MOUNT_TYPE: nfs
   CLAW_NFS_PATH: <<NFS_SHARE_PATH>>/jiuwenclaw
   CLAW_NFS_SERVER: <<NFS_SERVER_ADDR>>
-  DEPLOYMENT_MODE: active-standby
+  DEPLOYMENT_MODE: distributed
   ENTERPRISE_WEB_ENABLED: "true"
   ENTERPRISE_WEB_GATEWAY_URL: ws://jiuwenclaw-web:19000/gateway
   EXTENSION_DIRS: /app/jiuwenclaw/packages/jiuwenclaw-ee/gateway/extensions

@@ -84,14 +84,18 @@ spec:
             httpGet:
               path: /healthz
               port: rest
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
             periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
               port: rest
-            initialDelaySeconds: 10
+            initialDelaySeconds: 60
             periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
           envFrom:
             - secretRef:
                 name: <<SECRET_CM_NAME>>
@@ -118,7 +122,7 @@ spec:
             - name: OPENJIUWEN_SERVICE_DB_PORT
               value: "<<DB_PORT>>"
             - name: OPENJIUWEN_SERVICE_DB_NAME
-              value: "<<AGENT_RUNTIME_DB_NAME>>"
+              value: "<<RUNTIME_DB_NAME>>"
             - name: OPENJIUWEN_SERVICE_DB_USER
               value: "<<RUNTIME_DB_USER>>"
             - name: OPENJIUWEN_SERVICE_DEPLOY_REPLICAS

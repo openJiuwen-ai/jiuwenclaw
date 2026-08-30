@@ -33,7 +33,7 @@ gen_identity_file() {
         select(.kind == "Deployment").spec.template.spec.containers[0].env += [
             {
                 "name": "IDENTITY_PG_SCHEMA",
-                "value": "'"${DEPLOY_VARS["MANAGER_PG_SCHEMA"]}"'"
+                "value": "'"${DEPLOY_VARS["IDENTITY_PG_SCHEMA"]}"'"
             }
         ]' -i "${file}"
     fi

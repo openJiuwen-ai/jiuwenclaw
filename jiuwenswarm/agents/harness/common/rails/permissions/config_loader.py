@@ -365,7 +365,7 @@ def persist_permissions_mutate(
 
     mutate_fn(permissions)
 
-    if is_enterprise() and _gateway_db_available():
+    if is_enterprise():
         if _event_loop_is_running():
             loop = asyncio.get_running_loop()
             task = loop.create_task(
@@ -403,15 +403,6 @@ def _persist_permissions_to_yaml(permissions: dict[str, Any]) -> None:
     data["permissions"] = permissions
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
     clear_permissions_config_cache()
-
-
-def _gateway_db_available() -> bool:
-    try:
-        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
-
-        return gateway_db.is_gateway_db_available()
-    except Exception:  # noqa: BLE001
-        return False
 
 
 async def _load_permissions_body_from_db() -> dict[str, Any] | None:

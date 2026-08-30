@@ -16,13 +16,13 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.security import link_auth
 
-from ..infrastructure.repository_access import require_enterprise_repository
-from ..infrastructure.utils import utc_now
-from ..models.key_models import (
+from jiuwenswarm.gateway.config.enterprise.tables.key_models import (
     GATEWAY_ENC_KEYPAIR_TABLE_DEF,
     GATEWAY_SIGN_KEYPAIR_TABLE_DEF,
     MANAGER_SIGN_PUBKEY_TABLE_DEF,
 )
+from ..infrastructure.repository_access import require_enterprise_repository
+from ..infrastructure.utils import utc_now
 from . import crypto_primitives as cp
 
 logger = logging.getLogger(__name__)
