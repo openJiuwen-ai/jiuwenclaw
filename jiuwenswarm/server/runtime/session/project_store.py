@@ -599,13 +599,13 @@ def resolve_cron_job_patch(
     被 ``CronController.update_job`` 和 ``cron_tools.py update_job`` 共用,
     确保两条链路(Web RPC / AgentTool)的重解析逻辑一致。
 
-    规则(设计文档 §5.3 + §5.4.4):
+    规则:
       1. 拒绝直接 patch work_mode 作为独立字段(剥离后忽略)
-      2. work_mode 仅能伴随 project_dir/project_id 重解析生效;单独 patch
+      2. work_mode 仅能伴随 project_dir/project_id 生效;单独 patch
          work_mode → ValueError
-      3. patch 含 project_dir → 按 (work_mode, project_dir) 重解析 project_id,
-         从 patch 删除 project_dir,写入 project_id + work_mode
-      4. patch 含 project_id(无 project_dir)→ 从 Project 记录注入 work_mode
+      3. patch 含 project_dir → 视为执行 cwd 落库(空串清空),不按路径重解析
+         归属;未命中可见项目的独立目录必须保留原 project_id
+      4. patch 含 project_id → 从 Project 记录注入 work_mode(改归属)
 
     Args:
         patch: 待修改的 patch dict(原地修改并返回)。
@@ -646,23 +646,18 @@ def resolve_cron_job_patch(
         effective_work_mode = existing_work_mode or DEFAULT_WEB_WORK_MODE
 
     if "project_dir" in patch:
-        # project_dir 存在时,project_id 必须由解析产生,不允许直接传入
-        patch.pop("project_id", None)
         pd_raw = patch.get("project_dir")
         pd_val = (
             str(pd_raw).strip()
             if isinstance(pd_raw, str) and pd_raw.strip()
             else ""
         )
-        binding = resolve_cron_project_binding("", pd_val, effective_work_mode)
-        if binding.error is not None:
-            raise ValueError(binding.error)
-        resolved_pid = binding.project_id
-        effective_work_mode = binding.work_mode
-        patch["project_id"] = resolved_pid
-        del patch["project_dir"]
-        patch["work_mode"] = effective_work_mode
-    elif "project_id" in patch:
+        if pd_val and not os.path.isabs(pd_val):
+            raise ValueError("project_dir must be an absolute path")
+        patch["project_dir"] = pd_val
+        patch.pop("workspace_id", None)
+
+    if "project_id" in patch:
         # 允许直接 patch project_id(修改计划 §5.4.4):从 Project 记录注入 work_mode。
         raw_pid = patch.get("project_id")
         pid_val = str(raw_pid).strip() if isinstance(raw_pid, str) else ""

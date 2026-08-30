@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from collections.abc import Callable
@@ -42,6 +43,20 @@ _PROACTIVE_TICK_MODE = "proactive.tick"
 _PROACTIVE_UPDATE_ALLOWED_KEYS: frozenset[str] = frozenset(
     {"cron_expr", "timezone", "expired", "updated_at"}
 )
+
+
+def _normalize_cron_exec_dir(raw: Any) -> str:
+    """Persist optional execution cwd: empty or absolute path."""
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        return ""
+    value = raw.strip()
+    if not value:
+        return ""
+    if not os.path.isabs(value):
+        raise ValueError("project_dir must be an absolute path")
+    return value
 
 
 def _infer_work_mode_from_targets(job_item: dict[str, Any]) -> str:
@@ -242,6 +257,7 @@ class CronJobStore:
         delete_after_run: bool | None = None,
         timeout_seconds: int | None = None,
         project_id: str = "",
+        project_dir: str = "",
         model_name: str | None = None,
         app_id: str = "",
         work_mode: str = DEFAULT_WEB_WORK_MODE,
@@ -259,6 +275,7 @@ class CronJobStore:
             else None
         )
         pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else ""
+        exec_dir = _normalize_cron_exec_dir(project_dir)
         model_name_val = (
             str(model_name).strip()
             if isinstance(model_name, str) and model_name.strip()
@@ -285,6 +302,7 @@ class CronJobStore:
             delete_after_run=dar,
             timeout_seconds=timeout,
             project_id=pid,
+            project_dir=exec_dir,
             model_name=model_name_val,
             app_id=str(app_id or "").strip(),
             work_mode=normalize_work_mode(work_mode, default=DEFAULT_WEB_WORK_MODE),
@@ -371,6 +389,8 @@ class CronJobStore:
             raw_pid = patch.get("project_id")
             new_pid = str(raw_pid).strip() if isinstance(raw_pid, str) and raw_pid.strip() else ""
             updated = replace(updated, project_id=new_pid)
+        if "project_dir" in patch:
+            updated = replace(updated, project_dir=_normalize_cron_exec_dir(patch.get("project_dir")))
         if "last_session_id" in patch:
             raw_lsid = patch.get("last_session_id")
             new_lsid = (
@@ -388,8 +408,8 @@ class CronJobStore:
             )
             updated = replace(updated, model_name=new_model_name)
         if "work_mode" in patch:
-            # work_mode 由 controller 从 project_dir + work_mode 重解析后注入,
-            # 或由 project_id 变更时从 Project 记录注入。store 层仅做规范化写入。
+            # work_mode 由 controller 在显式 patch project_id 时从 Project /
+            # 虚拟桶注入；store 层仅做规范化写入。
             updated = replace(
                 updated,
                 work_mode=normalize_work_mode(patch.get("work_mode"), default=DEFAULT_WEB_WORK_MODE),

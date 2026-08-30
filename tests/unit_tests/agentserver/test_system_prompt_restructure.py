@@ -837,6 +837,46 @@ async def test_runtime_prompt_clears_directory_boundaries_outside_web_and_tui(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ("__cron__", "cron"))
+async def test_runtime_prompt_directory_boundaries_for_cron_channels(
+    tmp_path,
+    monkeypatch,
+    channel,
+):
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    agent_data_dir = tmp_path / "agent-data"
+    project_dir = tmp_path / "定时任务-workspace"
+    agent_data_dir.mkdir()
+    project_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir",
+        lambda: tmp_path / "jiuwenswarm-data",
+    )
+
+    runtime_rail = RuntimePromptRail(language="cn", channel=channel)
+    runtime_rail.init(agent)
+    runtime_rail.set_runtime_paths(cwd=str(project_dir), project_dir=str(project_dir))
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "# 目录与文件操作边界" in prompt
+    assert f"当前项目目录是：`{project_dir}`" in prompt
+    assert str(agent_data_dir) in prompt
+
+
+@pytest.mark.asyncio
 async def test_runtime_prompt_reports_powershell_and_removes_generic_shell_rules(monkeypatch):
     import jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail as runtime_module
 

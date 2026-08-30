@@ -464,7 +464,7 @@ class RuntimePromptRail(DeepAgentRail):
         self.system_prompt_builder.remove_section("directory_boundaries")
         self.system_prompt_builder.remove_section("tui_current_project_policy")
         self.system_prompt_builder.remove_section("trusted_dirs_policy")
-        if self._channel in ("tui", "web", "desktop", "ws_client"):
+        if self._channel in ("tui", "web", "desktop", "ws_client", "__cron__", "cron"):
             # This agent's own workspace. Team members each own one; without
             # it (single-agent runs) the process-wide agent workspace is the
             # same directory anyway.
