@@ -66,6 +66,42 @@ class _Reader:
         return self.payload
 
 
+class _DelayedFinalReportReader:
+    def __init__(
+        self,
+        initial: bytes,
+        terminal: bytes,
+        delay: float,
+        *,
+        initial_delay: float = 0.0,
+    ):
+        self.initial = initial
+        self.terminal = terminal
+        self.delay = delay
+        self.initial_delay = initial_delay
+        self.reads = 0
+        self.cancelled = False
+
+    async def read(self, _size: int = -1) -> bytes:
+        self.reads += 1
+        if self.reads == 1:
+            if self.initial_delay:
+                try:
+                    await asyncio.sleep(self.initial_delay)
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+            return self.initial
+        if self.reads == 2:
+            try:
+                await asyncio.sleep(self.delay)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            return self.terminal
+        return b""
+
+
 class _Proc:
     """Small asyncio subprocess double with observable lifecycle."""
 
@@ -1563,6 +1599,118 @@ async def test_completed_report_delivers_markdown_html_and_hidden_bundle(tmp_pat
     assert "/hidden/raw.md" in serialized
     assert "/hidden/citations.preview.json" in serialized
     assert "/must/not/expose.json" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_final_report_idle_stream_emits_processing_heartbeat_without_cancelling_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    initial = b"".join(
+        (
+            json.dumps(
+                {"__deepsearch_status__": "started", "conversation_id": "C1"}
+            ).encode("utf-8")
+            + b"\n",
+            json.dumps(
+                {
+                    "agent": "sub_reporter",
+                    "section_idx": "1",
+                    "section_total": 1,
+                    "event": "done",
+                }
+            ).encode("utf-8")
+            + b"\n",
+        )
+    )
+    terminal = (
+        json.dumps(
+            {
+                "__deepsearch_status__": "completed",
+                "conversation_id": "C1",
+                "final_result": {"response_content": "# Final"},
+            }
+        ).encode("utf-8")
+        + b"\n"
+    )
+    reader = _DelayedFinalReportReader(
+        initial,
+        terminal,
+        delay=0.08,
+        initial_delay=0.06,
+    )
+    proc = _Proc()
+    proc.stdout = reader
+    route = {
+        "request_id": "R1",
+        "channel_id": "CH1",
+        "session_id": "S1",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    push = AsyncMock()
+    heartbeat_observations: list[tuple[str, int]] = []
+    phase = "stream"
+
+    async def record_push(envelope: dict[str, Any]) -> None:
+        payload = envelope["payload"]
+        if (
+            payload.get("event_type") == "chat.processing_status"
+            and payload.get("current_task") == "in_progress"
+        ):
+            heartbeat_observations.append((phase, reader.reads))
+
+    push.send_push.side_effect = record_push
+
+    async def delayed_write(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        nonlocal phase
+        phase = "artifact"
+        await asyncio.sleep(0.08)
+        return {"md": str(tmp_path / "r.md")}
+
+    monkeypatch.setattr(
+        dt,
+        "DEEPRESEARCH_FINAL_REPORT_PROGRESS_INTERVAL_SECONDS",
+        0.02,
+        raising=False,
+    )
+    patches = _stream_patches(proc, route=route)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=push)
+        )
+        stack.enter_context(
+            patch.object(
+                dt,
+                "_write_report_artifacts_stream",
+                new=delayed_write,
+            )
+        )
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(action="start", query="q")
+        )
+
+    heartbeats = [
+        call.args[0]["payload"]
+        for call in push.send_push.await_args_list
+        if call.args[0]["payload"].get("event_type") == "chat.processing_status"
+        and call.args[0]["payload"].get("current_task") == "in_progress"
+    ]
+    assert len(heartbeats) >= 4
+    stream_heartbeat_reads = {
+        read_number
+        for observed_phase, read_number in heartbeat_observations
+        if observed_phase == "stream"
+    }
+    assert stream_heartbeat_reads == {2}
+    assert any(
+        observed_phase == "artifact"
+        for observed_phase, _read_number in heartbeat_observations
+    )
+    assert reader.cancelled is False
+    assert outcome["status"] == "completed"
+    assert outcome["report_delivered"] is True
 
 
 def test_offline_html_converter_sanitizes_active_content(tmp_path: Path):

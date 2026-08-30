@@ -19,6 +19,7 @@ import time
 import unicodedata
 import uuid
 import zipfile
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -90,6 +91,7 @@ DEEPRESEARCH_STDERR_OUTCOME_MAX_CHARS = 2048
 DEEPRESEARCH_STREAM_JSON_MAX_DEPTH = 64
 DEEPRESEARCH_STREAM_JSON_MAX_NODES = 100_000
 DEEPRESEARCH_STREAM_JSON_MAX_TEXT_CHARS = 16 * 1024 * 1024
+DEEPRESEARCH_FINAL_REPORT_PROGRESS_INTERVAL_SECONDS = 60.0
 DEEPRESEARCH_OUTLINE_CACHE_TENANTS = 256
 DEEPRESEARCH_OUTLINE_CACHE_CONVERSATIONS = 128
 DEEPRESEARCH_OUTLINE_CACHE_TITLES = 128
@@ -904,6 +906,41 @@ async def _iter_ndjson_lines(
             del pending[: newline + 1]
     if pending:
         yield bytes(pending)
+
+
+async def _await_with_periodic_progress(
+    awaitable: Awaitable[Any],
+    progress: Callable[[], Awaitable[None]],
+) -> Any:
+    """Wait without cancelling the underlying operation on each progress tick."""
+    pending = asyncio.ensure_future(awaitable)
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {pending},
+                timeout=DEEPRESEARCH_FINAL_REPORT_PROGRESS_INTERVAL_SECONDS,
+            )
+            if done:
+                return pending.result()
+            await progress()
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with suppress(BaseException):
+                await pending
+
+
+async def _iter_with_periodic_progress(
+    lines: AsyncIterator[bytes],
+    progress: Callable[[], Awaitable[None]],
+) -> AsyncIterator[bytes]:
+    iterator = lines.__aiter__()
+    while True:
+        try:
+            line = await _await_with_periodic_progress(anext(iterator), progress)
+        except StopAsyncIteration:
+            return
+        yield line
 
 
 def _interaction_answer_has_user_input(item: Any) -> bool:
@@ -2098,6 +2135,18 @@ async def _consume_stream(
         "error": "no terminal marker",
     }
     first_sdk_node_ns: int | None = None
+    report_delivery_settled = False
+
+    async def send_final_report_progress() -> None:
+        if not state.final_report_started or report_delivery_settled:
+            return
+        await send(
+            {
+                "event_type": "chat.processing_status",
+                "is_processing": True,
+                "current_task": "in_progress",
+            }
+        )
 
     def terminal_timing(chunk: dict[str, Any]) -> dict[str, Any] | None:
         timing = chunk.get("timing")
@@ -2119,11 +2168,14 @@ async def _consume_stream(
             result["timing"] = timing
         return result
 
-    async for raw in _iter_ndjson_lines(
-        proc.stdout,
-        request_id=str(route.get("request_id") or ""),
-        session_id=str(route.get("session_id") or ""),
-        conversation_id=conversation_id,
+    async for raw in _iter_with_periodic_progress(
+        _iter_ndjson_lines(
+            proc.stdout,
+            request_id=str(route.get("request_id") or ""),
+            session_id=str(route.get("session_id") or ""),
+            conversation_id=conversation_id,
+        ),
+        send_final_report_progress,
     ):
         try:
             line = raw.decode("utf-8").strip()
@@ -2282,11 +2334,14 @@ async def _consume_stream(
                     "error": "Markdown report file route is unavailable",
                 }, chunk)
             try:
-                artifact_result = await _write_report_artifacts_stream(
-                    final_result,
-                    file_name,
-                    str(chunk.get("conversation_id") or outcome_cid),
-                    _normalize_citation_artifacts(chunk),
+                artifact_result = await _await_with_periodic_progress(
+                    _write_report_artifacts_stream(
+                        final_result,
+                        file_name,
+                        str(chunk.get("conversation_id") or outcome_cid),
+                        _normalize_citation_artifacts(chunk),
+                    ),
+                    send_final_report_progress,
                 )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 return attach_terminal_timing({
@@ -2342,6 +2397,7 @@ async def _consume_stream(
                     "error": "Report files could not be delivered",
                     "report_path": artifacts.get("md", ""),
                 }, chunk)
+            report_delivery_settled = True
             for payload in advance_stage(state, 4, complete=True):
                 await send(payload)
             completed_outcome: dict[str, Any] = {
