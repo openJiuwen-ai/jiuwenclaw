@@ -431,7 +431,6 @@ def _stage_snapshot_frames(state: RouterState, *, complete: bool = False) -> lis
     }
     return [
         task_update,
-        {"event_type": "chat.reasoning", **message},
         {"event_type": "chat.delta", **message},
     ]
 
