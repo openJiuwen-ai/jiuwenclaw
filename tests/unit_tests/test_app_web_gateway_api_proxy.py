@@ -7,6 +7,7 @@ import pytest
 from jiuwenswarm.channels.web.app_web import (
     _SpaStaticHandler,
     _inject_user_web_runtime_config,
+    _parse_login_auth_simulate,
 )
 
 
@@ -63,3 +64,16 @@ def test_user_web_runtime_mode_injection_preserves_property_names(
     assert f"'{embedding}' === 'true'" in rendered
     assert "__JIUWEN_USER_WEB_MODE_VALUE__" not in rendered
     assert "__JIUWEN_USER_WEB_EMBEDDING_VALUE__" not in rendered
+    assert "window.__JIUWEN_LOGIN_AUTH_SIMULATE__ = 'true'" in rendered
+    assert "__JIUWEN_LOGIN_AUTH_SIMULATE_VALUE__" not in rendered
+    assert "window.__JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE__ = 'true'" in rendered
+    assert "__JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE_VALUE__" not in rendered
+
+
+def test_login_auth_simulate_config_is_strict_and_defaults_to_true() -> None:
+    assert _parse_login_auth_simulate(None) is True
+    assert _parse_login_auth_simulate("") is True
+    assert _parse_login_auth_simulate(" TRUE ") is True
+    assert _parse_login_auth_simulate("false") is False
+    with pytest.raises(ValueError, match="期望 true 或 false"):
+        _parse_login_auth_simulate("yes")

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -39,7 +40,7 @@ def get_pod_name() -> str | None:
 
 
 def get_gateway_register_identity() -> dict[str, str]:
-    """采集 Gateway 注册时上报 Manager 的运行时身份（命名空间、Pod 名）。"""
+    """采集 Gateway 运行时身份（命名空间、Pod 名）。"""
     if not is_running_in_k8s():
         return {}
     out: dict[str, str] = {}
@@ -76,27 +77,26 @@ def set_jiuwenclaw_id(jiuwenclaw_id: str | None) -> None:
         os.environ.pop("JIUWENCLAW_ID", None)
 
 
-def get_jiuwenclaw_id() -> str | None:
-    """从 ``JIUWENCLAW_ID`` 环境变量读取当前实例 id。"""
+def get_jiuwenclaw_id() -> str:
+    """优先读 ``JIUWENCLAW_ID``；未设置则生成 UUID v4 并写回 env（进程内稳定）。"""
     val = os.getenv("JIUWENCLAW_ID", "").strip()
-    return val or None
+    if val:
+        return val
+    jid = str(uuid.uuid4())
+    os.environ["JIUWENCLAW_ID"] = jid
+    return jid
 
 
 def assert_jiuwenclaw_id_matches(jiuwenclaw_id: str) -> str:
-    """校验 config.push 顶层 ``jiuwenclaw_id`` 与已注册实例一致，并返回有效 id。"""
+    """校验 config.push 顶层 ``jiuwenclaw_id`` 与本机 ``JIUWENCLAW_ID`` 一致，并返回有效 id。"""
     if not jiuwenclaw_id:
         raise ValueError("config.push payload requires jiuwenclaw_id")
-    registered = get_jiuwenclaw_id()
-    if registered and jiuwenclaw_id != registered:
+    configured = get_jiuwenclaw_id()
+    if jiuwenclaw_id != configured:
         raise ValueError(
-            f"jiuwenclaw_id mismatch: push={jiuwenclaw_id!r} registered={registered!r}"
+            f"jiuwenclaw_id mismatch: push={jiuwenclaw_id!r} configured={configured!r}"
         )
-    jid = registered or jiuwenclaw_id
-    if not jid:
-        raise ValueError(
-            "jiuwenclaw_id is not set; manager ws register.ack required"
-        )
-    return jid
+    return configured
 
 
 def utc_now() -> datetime:

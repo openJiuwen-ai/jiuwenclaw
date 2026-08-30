@@ -25,6 +25,12 @@ CRON_JOB_TABLE_DEF = TableDefinition(
         ColumnDefinition("service_id", "string", length=64, nullable=False, default="default"),
         ColumnDefinition("agent_id", "string", length=64, nullable=False, default="default"),
         ColumnDefinition("job_id", "string", length=64, nullable=False),
+        ColumnDefinition(
+            "service_id", "string", length=256, nullable=False, default="default"
+        ),
+        ColumnDefinition(
+            "agent_id", "string", length=256, nullable=False, default="default"
+        ),
         ColumnDefinition("group_id", "string", length=256, nullable=True),
         ColumnDefinition("bot_id", "string", length=256, nullable=True),
         ColumnDefinition("user_id", "string", length=256, nullable=True),

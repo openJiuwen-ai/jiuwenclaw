@@ -7,8 +7,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from openjiuwen_runtime.foundation.db.handler import DBHandler
-
 from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import format_ts, utc_now
 from jiuwenswarm.gateway.config.enterprise.tables.application_config_models import TASK_MEMORY_CONFIG_TABLE_DEF
@@ -76,8 +74,6 @@ async def _upsert_task_memory_config_record(
 
 
 class TaskMemoryConfigService:
-    def __init__(self, handler: DBHandler) -> None:
-        self._handler = handler
 
     async def upsert(
         self,

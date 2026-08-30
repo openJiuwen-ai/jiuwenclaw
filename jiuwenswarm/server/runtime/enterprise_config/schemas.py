@@ -11,7 +11,7 @@ SERVICE_CONFIG_TABLE = "service_config_template"
 
 
 class TemplateRefSlot(StrEnum):
-    """``template_ref`` JSON 键名，与 ``config_default_template_mapping.template_type`` 一致。"""
+    """``template_ref`` JSON 键名（与 agent_template.template_ref 槽位一致）。"""
 
     DEFAULT_MODEL = "default_model"
     VIDEO_MODEL = "video_model"
@@ -97,12 +97,14 @@ class EffectiveEnterpriseConfig:
     skill_whitelist: list[dict[str, Any]] | None = None
     extension_config: list[dict[str, Any]] | None = None
     service_config: list[dict[str, Any]] | None = None
-    service_policy_id: int | None = None
-    agent_policy_id: int | None = None
-    global_policy_id: int | None = None
-    service_policy: dict[str, Any] | None = None
-    agent_policy: dict[str, Any] | None = None
-    global_policy: dict[str, Any] | None = None
+    service_id: str | None = None
+    agent_id: str | None = None
+    workspace_dir: str | None = None
+    send_file_allowed: bool = True
+    resource_id: str | None = None
+    ref_template_id: str | None = None
+    agent_template: dict[str, Any] | None = None
+    instance_agent_resource: dict[str, Any] | None = None
     debug: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -114,9 +116,14 @@ class EffectiveEnterpriseConfig:
             "skill_whitelist": self.skill_whitelist,
             "extension_config": self.extension_config,
             "service_config": self.service_config,
-            "service_policy_id": self.service_policy_id,
-            "agent_policy_id": self.agent_policy_id,
-            "global_policy_id": self.global_policy_id,
+            "service_id": self.service_id,
+            "agent_id": self.agent_id,
+            "workspace_dir": self.workspace_dir,
+            "send_file_allowed": self.send_file_allowed,
+            "resource_id": self.resource_id,
+            "ref_template_id": self.ref_template_id,
+            "agent_template": self.agent_template,
+            "instance_agent_resource": self.instance_agent_resource,
             "debug": dict(self.debug),
         }
 

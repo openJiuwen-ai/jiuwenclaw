@@ -23,8 +23,21 @@ check_user_web_mode_config() {
         error "USER_WEB_MODE must be personal or enterprise, current value: ${mode}"
     fi
     check_boolean_value "IS_UP_MANAGER_WEB"
-    if [[ "${mode}" == "enterprise" && "${DEPLOY_VARS["IS_UP_MANAGER_WEB"]}" != "true" ]]; then
-        error "USER_WEB_MODE=enterprise requires IS_UP_MANAGER_WEB=true"
+    check_boolean_value "LOGIN_AUTH_SIMULATE"
+    check_boolean_value "LOGIN_AUTH_SIMULATE_AVAILABLE"
+    if [[ "${mode}" == "enterprise" && "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "true" && "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE_AVAILABLE"]}" == "false" ]]; then
+        error "配置冲突：LOGIN_AUTH_SIMULATE=true，但当前客户交付制品未包含登录认证模拟插件；请设置 LOGIN_AUTH_SIMULATE=false"
+    fi
+    if [[ "${mode}" == "personal" && "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "false" ]]; then
+        warning "配置冲突：USER_WEB_MODE=personal 始终跳过企业登录；LOGIN_AUTH_SIMULATE=false 不会启用正式身份认证"
+    fi
+    if [[ "${mode}" == "enterprise" && "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "false" ]]; then
+        if [[ -z "${DEPLOY_VARS["USER_WEB_IDP_TARGET"]:-}" ]]; then
+            error "正式身份认证模式缺少 USER_WEB_IDP_TARGET"
+        fi
+        if [[ -z "${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]:-}" ]]; then
+            error "正式身份认证模式缺少 USER_WEB_MANAGER_TARGET"
+        fi
     fi
 }
 
@@ -498,13 +511,6 @@ check_gateway_up_dependency(){
 
 check_web_up_dependency(){
     check_user_web_mode_config
-    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ] \
-        && ! module_is_selected "MANAGER"; then
-        if ! check_k8s_resource_exists \
-            "deployment" "${DEPLOY_VARS["MANAGER_WEB_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
-            error "Enterprise User Web requires the Manager Web module to be deployed"
-        fi
-    fi
     check_if_db_up
     check_if_obs_up
 
@@ -515,13 +521,6 @@ check_web_up_dependency(){
 
 check_manager_up_dependency(){
     check_user_web_mode_config
-    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ] \
-        && ! module_is_selected "WEB"; then
-        if ! check_k8s_resource_exists \
-            "deployment" "${DEPLOY_VARS["WEB_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
-            error "Enterprise User Web requires the Web module to be deployed"
-        fi
-    fi
     #check_if_rabbitmq_up
     check_if_db_up
 }

@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""实例资源表：instance_agent_resource（Gateway 本地副本，按 resource_id 聚合 grants）。"""
+"""实例资源表：instance_agent_resource（Gateway 本地副本；字段对齐 Manager，按 jiuwenclaw_id 隔离）。"""
 
 from __future__ import annotations
 
@@ -26,7 +26,11 @@ INSTANCE_AGENT_RESOURCE_TABLE_DEF = TableDefinition(
         ColumnDefinition("resource_name", "string", length=128, nullable=False),
         ColumnDefinition("resource_desc", "string", length=512, nullable=True),
         ColumnDefinition("ref_template_id", "string", length=100, nullable=False),
-        ColumnDefinition("grants", "json", nullable=False),
+        ColumnDefinition("match_expr", "json", nullable=True),
+        ColumnDefinition("granted_by", "string", length=64, nullable=True),
+        ColumnDefinition("expires_at", "datetime", nullable=True),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=True),
+        ColumnDefinition("data", "json", nullable=True),
         ColumnDefinition("created_at", "datetime", nullable=False),
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
