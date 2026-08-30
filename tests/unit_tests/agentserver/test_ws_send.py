@@ -197,6 +197,133 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
     assert foreground_manager.events == ["begin", "end"]
 
 
+@pytest.mark.asyncio
+async def test_desktop_fourth_parallel_session_is_rejected_before_agent_start(
+    monkeypatch,
+):
+    blocking_session_ids = {
+        "desktop-a",
+        "desktop-b",
+        "desktop-c",
+    }
+    stream_started = {
+        session_id: asyncio.Event() for session_id in blocking_session_ids
+    }
+    release_blocking_streams = asyncio.Event()
+
+    class FakeAgent:
+        async def process_message_stream(self, request):
+            if request.session_id in blocking_session_ids:
+                stream_started[request.session_id].set()
+                await release_blocking_streams.wait()
+
+            answer = "正常回答"
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"event_type": "chat.delta", "content": answer},
+            )
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"event_type": "chat.final", "content": answer},
+            )
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"event_type": "chat.done"},
+                is_complete=True,
+            )
+
+    class ForegroundManager:
+        async def begin_foreground_chat(self):
+            return None
+
+        async def end_foreground_chat(self):
+            return None
+
+    async def no_persistent_checkpointer():
+        return None
+
+    prepared_session_ids = []
+
+    async def prepare_turn(request, channel_id, *, sync_metadata):
+        prepared_session_ids.append(request.session_id)
+        return "work", None, FakeAgent()
+
+    async def no_plan_restore(request, mode, sub_mode, agent):
+        return False
+
+    async def no_plan_exit_check(request, agent):
+        return None
+
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    monkeypatch.setattr(
+        interface_deep,
+        "ensure_persistent_checkpointer",
+        no_persistent_checkpointer,
+    )
+    server = agent_ws_server.AgentWebSocketServer.__new__(
+        agent_ws_server.AgentWebSocketServer
+    )
+    server._agent_manager = ForegroundManager()
+    server._session_stream_tasks = {}
+    server._is_stateless_method_request = lambda request: False
+    server._is_readonly_goal_get_request = lambda request: False
+    server._prepare_code_mode_chat_turn = prepare_turn
+    server._ensure_code_mode_state = no_plan_restore
+    server._check_post_process_plan_exit = no_plan_exit_check
+
+    def desktop_request(request_id, session_id):
+        return AgentRequest(
+            request_id=request_id,
+            channel_id="desktop",
+            session_id=session_id,
+            req_method=ReqMethod.CHAT_SEND,
+            params={"query": "hello"},
+            is_stream=True,
+        )
+
+    blocking_streams = []
+    for session_id in sorted(blocking_session_ids):
+        ws = FakeWebSocket()
+        task = asyncio.create_task(
+            server._handle_stream(
+                ws,
+                desktop_request(f"{session_id}-first", session_id),
+                asyncio.Lock(),
+            )
+        )
+        blocking_streams.append((ws, task))
+        await stream_started[session_id].wait()
+
+    rejected_ws = FakeWebSocket()
+    try:
+        await server._handle_stream(
+            rejected_ws,
+            desktop_request("desktop-d-first", "desktop-d"),
+            asyncio.Lock(),
+        )
+    finally:
+        release_blocking_streams.set()
+        await asyncio.gather(*(task for _, task in blocking_streams))
+
+    warning = (
+        "当前检测到多个会话正在并行处理，可能会导致所有任务的响应变慢或机器性能下降，"
+        "请等待其他会话结束后再发起新会话。"
+    )
+    rejected_frames = [json.loads(payload) for payload in rejected_ws.sent]
+
+    assert prepared_session_ids == ["desktop-a", "desktop-b", "desktop-c"]
+    assert len(rejected_frames) == 1
+    assert rejected_frames[0]["is_final"] is True
+    assert rejected_frames[0]["body"]["result"] == {
+        "event_type": "chat.final",
+        "content": warning,
+    }
+
+
 def test_agent_ws_server_has_no_direct_websocket_send_calls():
     path = Path(agent_ws_server.__file__)
     tree = ast.parse(path.read_text(encoding="utf-8"))
