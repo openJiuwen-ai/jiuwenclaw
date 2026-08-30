@@ -325,8 +325,10 @@ async def test_sdk_is_lazy_logs_only_to_stderr_and_restores_tls(tmp_path: Path, 
         print("sdk-style-log")
         return types.SimpleNamespace(
             convert_content=base64.b64encode(_zip_bytes()).decode(),
-            style_applied=True,
-            style_status="applied",
+            style_applied=False,
+            style_status="fallback",
+            style_phase="invoke_llm",
+            style_reason_code="llm_call_failed",
         )
 
     modules = {
@@ -349,6 +351,8 @@ async def test_sdk_is_lazy_logs_only_to_stderr_and_restores_tls(tmp_path: Path, 
     result = await bridge.stylize_request(_request(), output)
     captured = capsys.readouterr()
     assert result["status"] == "completed"
+    assert result["style_phase"] == "invoke_llm"
+    assert result["style_reason_code"] == "llm_call_failed"
     assert captured.out == ""
     assert "sdk-context-log" in captured.err and "sdk-style-log" in captured.err
     assert observed["tls"] == ("false", "true")
@@ -390,6 +394,8 @@ def test_cli_stdout_is_exactly_one_versioned_result_line(tmp_path: Path, monkeyp
             "output_path": str(output),
             "style_applied": True,
             "style_status": "applied",
+            "style_phase": None,
+            "style_reason_code": None,
     }
 
     async def stylize(_request_value, _output_value):
@@ -498,8 +504,10 @@ async def test_parent_client_tracks_validates_and_cleans_owned_archive(tmp_path:
             "schema_version": 1,
             "status": "completed",
             "output_path": str(output),
-            "style_applied": True,
-            "style_status": "applied",
+            "style_applied": False,
+            "style_status": "fallback",
+            "style_phase": "invoke_llm",
+            "style_reason_code": "llm_call_failed",
         }
         output_holder["env"] = kwargs["env"]
         return _Process((json.dumps(frame) + "\n").encode(), b"sdk logs")
@@ -518,8 +526,12 @@ async def test_parent_client_tracks_validates_and_cleans_owned_archive(tmp_path:
         manager=manager,
         session_id="S1",
     ) as archive:
-        assert archive == output_holder["path"]
-        assert archive.exists()
+        assert archive.path == output_holder["path"]
+        assert archive.path.exists()
+        assert archive.style_applied is False
+        assert archive.style_status == "fallback"
+        assert archive.style_phase == "invoke_llm"
+        assert archive.style_reason_code == "llm_call_failed"
     assert not output_holder["path"].exists()
     assert not output_holder["path"].parent.exists()
     assert "LLM_SSL_VERIFY" not in output_holder["env"]

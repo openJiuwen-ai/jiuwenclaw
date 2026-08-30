@@ -421,6 +421,34 @@ async def test_feedback_answer_resumes_once_and_returns_direct_completion():
 
 
 @pytest.mark.asyncio
+async def test_completion_warns_when_html_style_falls_back():
+    completed = {
+        "status": "completed",
+        "conversation_id": "conversation-1",
+        "report_delivered": True,
+        "report_chars": 42,
+        "html_style_status": "fallback",
+        "html_style_phase": "invoke_llm",
+        "html_style_reason_code": "llm_call_failed",
+    }
+    with patch.object(
+        de,
+        "_call_deepresearch_stream_impl",
+        new=AsyncMock(return_value=json.dumps(completed, ensure_ascii=False)),
+    ):
+        result, saved = await _invoke(query="研究智能家电竞争格局")
+
+    assert result["kind"] == "completed"
+    assert result["html_style_status"] == "fallback"
+    assert result["html_style_phase"] == "invoke_llm"
+    assert result["html_style_reason_code"] == "llm_call_failed"
+    assert "HTML 视觉美化未成功，已交付基础版式" in result["content"]
+    assert saved[-1]["html_style_status"] == "fallback"
+    assert saved[-1]["html_style_phase"] == "invoke_llm"
+    assert saved[-1]["html_style_reason_code"] == "llm_call_failed"
+
+
+@pytest.mark.asyncio
 async def test_terminal_result_preserves_all_sdk_timing_windows():
     previous_window = {
         "action": "start",

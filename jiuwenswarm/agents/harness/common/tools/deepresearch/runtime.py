@@ -45,6 +45,24 @@ _BRIDGE_ZIP_MEMBER_MAX_BYTES = 64 * 1024 * 1024
 _BRIDGE_JSON_MAX_DEPTH = 64
 _BRIDGE_JSON_MAX_NODES = 100_000
 _BRIDGE_JSON_MAX_CONTAINER = 20_000
+_STYLE_PHASES = frozenset({
+    "build_style_context",
+    "apply_prompt",
+    "invoke_llm",
+    "extract_css_response",
+    "normalize_css_output",
+    "append_cover_title_contrast_safeguard",
+    "inject_css",
+})
+_STYLE_REASON_CODES = frozenset({
+    "style_context_failed",
+    "style_prompt_failed",
+    "llm_call_failed",
+    "css_response_invalid",
+    "css_response_empty",
+    "css_safeguard_failed",
+    "css_injection_failed",
+})
 
 
 class DeepResearchRuntimeError(RuntimeError):
@@ -57,6 +75,17 @@ class _BridgeArtifact:
     directory_identity: tuple[int, int]
     file_identity: tuple[int, int]
     descriptor: int
+
+
+@dataclass(frozen=True, slots=True)
+class StyledReportArchiveResult:
+    """Validated report archive plus the SDK's styling outcome."""
+
+    path: Path
+    style_applied: bool
+    style_status: str
+    style_phase: str | None = None
+    style_reason_code: str | None = None
 
 
 def _virtualenv_root(executable: Path) -> Path | None:
@@ -350,7 +379,7 @@ async def stylize_report_archive(
     tls: dict[str, bool],
     manager: Any,
     session_id: str,
-) -> AsyncIterator[Path]:
+) -> AsyncIterator[StyledReportArchiveResult]:
     """Yield one validated private SDK ZIP and clean it after installation."""
     executable = resolve_python_executable()
     script = _bridge_script()
@@ -397,17 +426,24 @@ async def stylize_report_archive(
             result = json.loads(decoded)
         except ValueError as exc:
             raise DeepResearchRuntimeError("sdk_bridge_protocol_invalid") from exc
-        expected = {
+        required = {
             "schema_version",
             "status",
             "output_path",
             "style_applied",
             "style_status",
         }
+        optional = {"style_phase", "style_reason_code"}
+        result_keys = set(result) if isinstance(result, dict) else set()
+        style_phase = result.get("style_phase") if isinstance(result, dict) else None
+        style_reason_code = (
+            result.get("style_reason_code") if isinstance(result, dict) else None
+        )
         invalid_result = (
             returncode != 0
             or not isinstance(result, dict)
-            or set(result) != expected
+            or not required.issubset(result_keys)
+            or not result_keys.issubset(required | optional)
             or not isinstance(result.get("schema_version"), int)
             or isinstance(result.get("schema_version"), bool)
             or result.get("schema_version").__class__ is not int
@@ -416,11 +452,36 @@ async def stylize_report_archive(
             or result.get("output_path") != str(artifact.path)
             or not isinstance(result.get("style_applied"), bool)
             or result.get("style_status") not in {"applied", "fallback"}
+            or (style_phase is None) != (style_reason_code is None)
+            or (
+                style_phase is not None
+                and (
+                    not isinstance(style_phase, str)
+                    or style_phase not in _STYLE_PHASES
+                )
+            )
+            or (
+                style_reason_code is not None
+                and (
+                    not isinstance(style_reason_code, str)
+                    or style_reason_code not in _STYLE_REASON_CODES
+                )
+            )
+            or (
+                result.get("style_status") != "fallback"
+                and style_phase is not None
+            )
         )
         if invalid_result:
             raise DeepResearchRuntimeError("sdk_bridge_failed")
         _validate_bridge_output(artifact)
-        yield artifact.path
+        yield StyledReportArchiveResult(
+            path=artifact.path,
+            style_applied=result["style_applied"],
+            style_status=result["style_status"],
+            style_phase=style_phase,
+            style_reason_code=style_reason_code,
+        )
     except asyncio.CancelledError:
         if process is not None:
             cleanup = asyncio.create_task(_stop_bridge_process(process))
@@ -441,6 +502,7 @@ async def stylize_report_archive(
 
 __all__ = [
     "DeepResearchRuntimeError",
+    "StyledReportArchiveResult",
     "build_child_env",
     "resolve_python_executable",
     "stylize_report_archive",

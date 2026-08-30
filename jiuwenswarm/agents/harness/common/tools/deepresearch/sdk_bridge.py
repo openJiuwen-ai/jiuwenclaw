@@ -29,6 +29,24 @@ BRIDGE_ZIP_MAX_MEMBERS = 1024
 BRIDGE_ZIP_MEMBER_MAX_BYTES = 64 * 1024 * 1024
 BRIDGE_ZIP_TOTAL_MAX_BYTES = 128 * 1024 * 1024
 _TLS_KEYS = frozenset({"LLM_SSL_VERIFY", "TOOL_SSL_VERIFY"})
+_STYLE_PHASES = frozenset({
+    "build_style_context",
+    "apply_prompt",
+    "invoke_llm",
+    "extract_css_response",
+    "normalize_css_output",
+    "append_cover_title_contrast_safeguard",
+    "inject_css",
+})
+_STYLE_REASON_CODES = frozenset({
+    "style_context_failed",
+    "style_prompt_failed",
+    "llm_call_failed",
+    "css_response_invalid",
+    "css_response_empty",
+    "css_safeguard_failed",
+    "css_injection_failed",
+})
 
 
 class BridgeError(RuntimeError):
@@ -245,12 +263,26 @@ async def stylize_request(request: dict[str, object], output: str | Path) -> dic
             async with report_style_llm_context(llm_config) as llm:
                 result = await stylize_report(request["final_result"], llm)
         write_convert_content(output, getattr(result, "convert_content", None))
+        style_status = str(getattr(result, "style_status", "fallback"))
+        style_phase = getattr(result, "style_phase", None)
+        style_reason_code = getattr(result, "style_reason_code", None)
+        if (
+            style_status != "fallback"
+            or not isinstance(style_phase, str)
+            or style_phase not in _STYLE_PHASES
+            or not isinstance(style_reason_code, str)
+            or style_reason_code not in _STYLE_REASON_CODES
+        ):
+            style_phase = None
+            style_reason_code = None
         return {
             "schema_version": 1,
             "status": "completed",
             "output_path": str(Path(output)),
             "style_applied": bool(getattr(result, "style_applied", False)),
-            "style_status": str(getattr(result, "style_status", "fallback")),
+            "style_status": style_status,
+            "style_phase": style_phase,
+            "style_reason_code": style_reason_code,
         }
     except BridgeError:
         raise

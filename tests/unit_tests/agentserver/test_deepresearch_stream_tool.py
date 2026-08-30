@@ -1522,7 +1522,12 @@ async def test_completed_report_delivers_markdown_html_and_hidden_bundle(tmp_pat
     }
     push = AsyncMock()
     write_report = AsyncMock(
-        return_value={"md": str(tmp_path / "r.md"), "html": str(tmp_path / "r.html")}
+        return_value=(
+            {"md": str(tmp_path / "r.md"), "html": str(tmp_path / "r.html")},
+            "fallback",
+            "invoke_llm",
+            "llm_call_failed",
+        )
     )
     patches = _stream_patches(proc, route=route)
     with ExitStack() as stack:
@@ -1541,6 +1546,9 @@ async def test_completed_report_delivers_markdown_html_and_hidden_bundle(tmp_pat
         "conversation_id": "C1",
         "report_delivered": True,
         "report_chars": len("# Final"),
+        "html_style_status": "fallback",
+        "html_style_phase": "invoke_llm",
+        "html_style_reason_code": "llm_call_failed",
     }
     file_payload = next(
         call.args[0]["payload"]
@@ -1548,6 +1556,9 @@ async def test_completed_report_delivers_markdown_html_and_hidden_bundle(tmp_pat
         if call.args[0]["payload"].get("event_type") == "chat.file"
     )
     assert [item["name"] for item in file_payload["files"]] == ["r.md", "r.html"]
+    assert file_payload["metadata"]["htmlStyleStatus"] == "fallback"
+    assert file_payload["metadata"]["htmlStylePhase"] == "invoke_llm"
+    assert file_payload["metadata"]["htmlStyleReasonCode"] == "llm_call_failed"
     serialized = json.dumps(file_payload)
     assert "/hidden/raw.md" in serialized
     assert "/hidden/citations.preview.json" in serialized
@@ -1712,11 +1723,19 @@ async def test_report_publication_writes_markdown_html_snapshot_and_provenance(
         "citations_preview_path": "/hidden/citations.preview.json",
     }
     with patch.object(dt, "get_cwd", return_value=str(tmp_path)):
-        artifacts = await dt._write_report_artifacts_stream(
+        (
+            artifacts,
+            html_style_status,
+            html_style_phase,
+            html_style_reason_code,
+        ) = await dt._write_report_artifacts_stream(
             final_result, "Research", "C1", citation_artifacts
         )
 
     assert set(artifacts) == {"md", "html"}
+    assert html_style_status == "fallback"
+    assert html_style_phase is None
+    assert html_style_reason_code is None
     markdown = Path(artifacts["md"])
     assert markdown.read_text(encoding="utf-8").startswith("# Report")
     assert Path(artifacts["html"]).read_text(encoding="utf-8").startswith("<!DOCTYPE html>")
@@ -1738,11 +1757,19 @@ async def test_html_failure_keeps_published_markdown(tmp_path: Path):
     with patch.object(dt, "get_cwd", return_value=str(tmp_path)), patch.object(
         dt, "_generate_report_html", new=AsyncMock(return_value=None)
     ):
-        artifacts = await dt._write_report_artifacts_stream(
+        (
+            artifacts,
+            html_style_status,
+            html_style_phase,
+            html_style_reason_code,
+        ) = await dt._write_report_artifacts_stream(
             final_result, "Research", "C1"
         )
 
     assert set(artifacts) == {"md"}
+    assert html_style_status is None
+    assert html_style_phase is None
+    assert html_style_reason_code is None
     assert Path(artifacts["md"]).is_file()
 
 
@@ -1786,11 +1813,13 @@ async def test_concurrent_same_title_report_publication_allocates_distinct_outpu
         "chart_messages": [],
     }
     with patch.object(dt, "get_cwd", return_value=str(tmp_path)):
-        first, second = await asyncio.gather(
+        first_result, second_result = await asyncio.gather(
             dt._write_report_artifacts_stream(final_result, "Same", "C1"),
             dt._write_report_artifacts_stream(final_result, "Same", "C2"),
         )
 
+    first, _, _, _ = first_result
+    second, _, _, _ = second_result
     assert first["md"] != second["md"]
     assert Path(first["md"]).is_file()
     assert Path(second["md"]).is_file()
@@ -2585,8 +2614,12 @@ async def test_offline_html_uses_verified_snapshot_and_preserves_occupied_output
 ):
     markdown = tmp_path / "report.md"
     markdown.write_text("mutated source", encoding="utf-8")
-    result = await dt._generate_report_html({}, markdown, "verified snapshot")
-    assert result is not None
+    generated = await dt._generate_report_html({}, markdown, "verified snapshot")
+    assert generated is not None
+    result, html_style_status, html_style_phase, html_style_reason_code = generated
+    assert html_style_status == "fallback"
+    assert html_style_phase is None
+    assert html_style_reason_code is None
     rendered = result.read_text(encoding="utf-8")
     assert "verified snapshot" in rendered
     assert "mutated source" not in rendered
@@ -2614,7 +2647,12 @@ async def test_styled_html_uses_isolated_bridge_as_primary(tmp_path: Path):
     @asynccontextmanager
     async def bridge(**kwargs):
         observed.update(kwargs)
-        yield archive
+        yield SimpleNamespace(
+            path=archive,
+            style_status="fallback",
+            style_phase="invoke_llm",
+            style_reason_code="llm_call_failed",
+        )
 
     route = {
         "session_id": "S1",
@@ -2634,8 +2672,13 @@ async def test_styled_html_uses_isolated_bridge_as_primary(tmp_path: Path):
             {"response_content": "report"}, markdown, "offline"
         )
 
-    assert result == markdown.with_suffix(".html")
-    assert result.read_text(encoding="utf-8") == "<h1>styled</h1>"
+    assert result == (
+        markdown.with_suffix(".html"),
+        "fallback",
+        "invoke_llm",
+        "llm_call_failed",
+    )
+    assert result[0].read_text(encoding="utf-8") == "<h1>styled</h1>"
     assert observed["tls"] == {
         "LLM_SSL_VERIFY": False,
         "TOOL_SSL_VERIFY": True,
@@ -2661,7 +2704,7 @@ async def test_styled_html_primary_does_not_require_offline_markdown(tmp_path: P
     async def bridge(**_kwargs):
         nonlocal bridge_calls
         bridge_calls += 1
-        yield archive
+        yield SimpleNamespace(path=archive, style_status="applied")
 
     route = {"session_id": "S1", "service_id": "svc", "agent_id": "agent"}
     with patch.object(dt, "_get_route", return_value=route), patch.object(
@@ -2676,8 +2719,8 @@ async def test_styled_html_primary_does_not_require_offline_markdown(tmp_path: P
         )
 
     assert bridge_calls == 1
-    assert result == markdown.with_suffix(".html")
-    assert result.read_text(encoding="utf-8") == "<h1>styled</h1>"
+    assert result == (markdown.with_suffix(".html"), "applied", None, None)
+    assert result[0].read_text(encoding="utf-8") == "<h1>styled</h1>"
 
 
 @pytest.mark.asyncio

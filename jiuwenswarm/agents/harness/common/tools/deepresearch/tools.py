@@ -2282,7 +2282,7 @@ async def _consume_stream(
                     "error": "Markdown report file route is unavailable",
                 }, chunk)
             try:
-                artifacts = await _write_report_artifacts_stream(
+                artifact_result = await _write_report_artifacts_stream(
                     final_result,
                     file_name,
                     str(chunk.get("conversation_id") or outcome_cid),
@@ -2295,6 +2295,21 @@ async def _consume_stream(
                     "error_code": "report_file_write_failed",
                     "error": type(exc).__name__,
                 }, chunk)
+            html_style_phase = None
+            html_style_reason_code = None
+            if isinstance(artifact_result, tuple) and len(artifact_result) == 4:
+                (
+                    artifacts,
+                    html_style_status,
+                    html_style_phase,
+                    html_style_reason_code,
+                ) = artifact_result
+            elif isinstance(artifact_result, tuple):
+                artifacts, html_style_status = artifact_result
+            else:
+                # Preserve compatibility with private test doubles and older callers.
+                artifacts = artifact_result
+                html_style_status = None
             files = [
                 {"path": value, "name": Path(value).name}
                 for value in artifacts.values()
@@ -2305,8 +2320,20 @@ async def _consume_stream(
             }
             markdown_index = list(artifacts).index("md")
             bundle = _build_related_artifact_bundle(chunk, markdown_index)
+            file_metadata: dict[str, Any] = {}
             if bundle:
-                file_payload["metadata"] = {"artifactBundle": bundle}
+                file_metadata["artifactBundle"] = bundle
+            if html_style_status in {"applied", "fallback"}:
+                file_metadata["htmlStyleStatus"] = html_style_status
+            if (
+                html_style_status == "fallback"
+                and isinstance(html_style_phase, str)
+                and isinstance(html_style_reason_code, str)
+            ):
+                file_metadata["htmlStylePhase"] = html_style_phase
+                file_metadata["htmlStyleReasonCode"] = html_style_reason_code
+            if file_metadata:
+                file_payload["metadata"] = file_metadata
             if not await send(file_payload):
                 return attach_terminal_timing({
                     "status": "error",
@@ -2323,6 +2350,29 @@ async def _consume_stream(
                 "report_delivered": True,
                 "report_chars": len(response_content),
             }
+            if html_style_status in {"applied", "fallback"}:
+                completed_outcome["html_style_status"] = html_style_status
+                if html_style_status == "fallback":
+                    if (
+                        isinstance(html_style_phase, str)
+                        and isinstance(html_style_reason_code, str)
+                    ):
+                        completed_outcome["html_style_phase"] = html_style_phase
+                        completed_outcome["html_style_reason_code"] = (
+                            html_style_reason_code
+                        )
+                    logger.warning(
+                        "[deepresearch_stream] HTML style fallback "
+                        "request_id=%s session_id=%s conversation_id=%s "
+                        "style_phase=%s style_reason_code=%s",
+                        _safe_log_correlation_id(route.get("request_id")),
+                        _safe_log_correlation_id(route.get("session_id")),
+                        _safe_log_correlation_id(
+                            chunk.get("conversation_id") or outcome_cid
+                        ),
+                        html_style_phase,
+                        html_style_reason_code,
+                    )
             workflow_usage = normalize_workflow_llm_token_usage(
                 final_result.get("workflow_llm_token_usage")
             )
@@ -2950,7 +3000,7 @@ async def _generate_report_html(
     final_result: dict[str, Any],
     report_path_md: Path,
     fallback_markdown: str | None,
-) -> Path | None:
+) -> tuple[Path, str, str | None, str | None] | None:
     """Prefer isolated SDK styling, then fall back to safe offline HTML."""
     report_path_html = report_path_md.with_suffix(".html")
     try:
@@ -2971,14 +3021,19 @@ async def _generate_report_html(
             tls=tls,
             manager=manager,
             session_id=str(route.get("session_id") or ""),
-        ) as archive_path:
+        ) as styled_archive:
             with tempfile.TemporaryDirectory(
                 prefix="deepresearch-report-styled-"
             ) as temporary_dir:
                 destination = Path(temporary_dir) / "extracted"
-                bundle_root = _extract_styled_archive(archive_path, destination)
+                bundle_root = _extract_styled_archive(styled_archive.path, destination)
                 _install_styled_bundle(bundle_root, report_path_html)
-        return report_path_html
+        return (
+            report_path_html,
+            styled_archive.style_status,
+            getattr(styled_archive, "style_phase", None),
+            getattr(styled_archive, "style_reason_code", None),
+        )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning(
             "SDK styled HTML export failed; using offline conversion. type=%s",
@@ -3002,7 +3057,7 @@ async def _generate_report_html(
             convert_md_to_html(source, target)
             html_bytes = target.read_bytes()
         _exclusive_write(report_path_html, html_bytes)
-        return report_path_html
+        return report_path_html, "fallback", None, None
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning(
             "Offline HTML conversion failed type=%s", type(exc).__name__
@@ -3015,7 +3070,7 @@ async def _write_report_artifacts_stream(
     file_name: str,
     conversation_id: str,
     citation_artifacts: object = None,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], str | None, str | None, str | None]:
     report_path_md = Path(
         await asyncio.to_thread(
             _write_report_markdown,
@@ -3030,12 +3085,26 @@ async def _write_report_artifacts_stream(
         fallback_markdown = report_path_md.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         fallback_markdown = None
-    report_path_html = await _generate_report_html(
+    generated_html = await _generate_report_html(
         final_result, report_path_md, fallback_markdown
     )
-    if report_path_html is not None:
+    html_style_status = None
+    html_style_phase = None
+    html_style_reason_code = None
+    if generated_html is not None:
+        (
+            report_path_html,
+            html_style_status,
+            html_style_phase,
+            html_style_reason_code,
+        ) = generated_html
         artifacts["html"] = str(report_path_html)
-    return artifacts
+    return (
+        artifacts,
+        html_style_status,
+        html_style_phase,
+        html_style_reason_code,
+    )
 
 
 def enable_deepresearch() -> bool:
