@@ -140,7 +140,9 @@ def _team_hide_teammate_enabled() -> bool:
 _INTERACT_REASON_ERROR_MAP: dict[str, str] = {
     "not_active": "Team is initializing, please try again later",
     "session_mismatch": "Session state mismatch, please refresh and retry",
-    "gate_closed": "Team is shutting down, please try again later",
+    # 与 _FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC（10s）对应：拆除中间态窗口的
+    # 诚实时长提示（重试循环最长等 10s，超时后用户可安全重试）
+    "gate_closed": "Team is shutting down, please try again later (in about 10 seconds)",
     "unknown_human_agent": "Member not found, please check the name",
     "human_agent_not_enabled": "Human agent is not yet available, please try again later",
     "no_team_backend": "Team backend not ready, please try again later",
@@ -1781,6 +1783,35 @@ async def process_team_message_stream(
                         success = boundary_result.success
                         reason = boundary_result.reason
                         first_request_ready = boundary_result.first_request_ready
+                        # 「运行时残留 + gate 已关」自愈：拆除卡死/中断留下的残留条目
+                        # （pool entry 与流标记还在、interact_gate 已关）会让 follow-up
+                        # 永远撞 gate_closed、永不自愈（用户只能重启进程）——主动拆除
+                        # 残留运行时，让本请求落入冷重建（recover_team 唤醒）而非报错。
+                        if (
+                            not success
+                            and not first_request_ready
+                            and (reason or "") == "gate_closed"
+                            and await _team_session_has_runtime(team_manager, session_id)
+                        ):
+                            logger.warning(
+                                "[TeamHelpers] stale runtime with closed gate detected, "
+                                "terminating for cold rebuild: channel_id=%s session_id=%s",
+                                _resolve_channel_id(channel_id),
+                                session_id,
+                            )
+                            try:
+                                await team_manager.terminate_session_runtime(
+                                    session_id, reason="gate_closed stale-entry recovery"
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "[TeamHelpers] stale-entry terminate failed: session_id=%s",
+                                    session_id,
+                                    exc_info=True,
+                                )
+                            first_request_ready = not await _team_session_has_runtime(
+                                team_manager, session_id
+                            )
                     if not success and first_request_ready:
                         preparation = await _prepare_first_team_request(
                             team_manager=team_manager,
@@ -1810,15 +1841,10 @@ async def process_team_message_stream(
                         reason = reason or "gate_closed"
                     if not success and not is_first_request:
                         final_reason = reason or ""
-                        # gate_closed 是 shutdown race（leader stream 正在收尾），静默结束流
-                        if final_reason == "gate_closed":
-                            yield AgentResponseChunk(
-                                request_id=rid,
-                                channel_id=channel_id,
-                                payload=None,
-                                is_complete=True,
-                            )
-                            return
+                        # gate_closed 曾在此静默结束流（视为 shutdown race）——但消息实际
+                        # 未投递到任何成员（上方投递重试已耗尽），静默 = 用户消息被吞：
+                        # 前端收到空终帧当成功空回合，整轮卡片（含身份行/头像）消失。
+                        # 与其他失败原因同规：先广播错误再收尾，前端留痕。
                         error_msg = _INTERACT_REASON_ERROR_MAP.get(
                             final_reason,
                             "Failed to send message, please try again later",
@@ -2060,6 +2086,80 @@ async def process_team_message_stream(
                 )
 
 
+# leader 模型错误后判定回合死亡的静默窗口：窗口内主流零产出（chunk 计数不涨）
+# 且期间无回合收尾信号，才认定本轮死亡。需大于模型重试回退周期（agent-core
+# StreamController 的重试间隔为数秒级），30s 覆盖典型回退且不至于让用户等太久。
+_LEADER_ROUND_DEATH_PROBE_SEC = 30.0
+
+
+def _schedule_leader_round_death_probe(
+        channel_id: str | None,
+        session_id: str,
+        round_id: Any,
+        *,
+        error_text: str,
+        liveness: Any,
+        completion_signals: Any,
+        previous: asyncio.Task | None,
+) -> asyncio.Task:
+    """（重新）调度 leader 轮死亡探针，返回新任务供调用方持有/取消。
+
+    团队模式下 chat.error 是非终态警告（流继续），但 leader 重试耗尽转 IDLE 时
+    回合实际死亡且无任何终态帧——探针在这个窗口补发 processing_status 终态。
+    三个保险：流已终结则不补（正常收尾路径负责）；窗口内有产出则不补（已恢复）；
+    窗口内已有回合收尾信号则不补（防误杀已完成回合）。
+
+    liveness / completion_signals: 零参数可调用，分别返回主流已消费 chunk 数与
+    已广播的回合收尾信号数（每次错误以最新值为基线）。
+    """
+    if previous is not None and not previous.done():
+        previous.cancel()
+
+    async def _probe() -> None:
+        baseline_chunks = liveness()
+        baseline_signals = completion_signals()
+        try:
+            await asyncio.sleep(_LEADER_ROUND_DEATH_PROBE_SEC)
+        except asyncio.CancelledError:
+            return
+        try:
+            tm = get_team_manager(channel_id)
+            if not tm.has_stream_task(session_id):
+                return
+            if liveness() != baseline_chunks or completion_signals() != baseline_signals:
+                return
+            logger.warning(
+                "[TeamHelpers] leader round presumed dead after model error: "
+                "channel_id=%s session_id=%s round_id=%s idle=%.0fs",
+                _resolve_channel_id(channel_id),
+                session_id,
+                round_id,
+                _LEADER_ROUND_DEATH_PROBE_SEC,
+            )
+            await _broadcast_event(
+                channel_id,
+                session_id,
+                {
+                    "event_type": "chat.processing_status",
+                    "session_id": session_id,
+                    "rid": round_id,
+                    "is_processing": False,
+                    "is_complete": True,
+                    "error": error_text.strip() or "Leader round did not recover after model error",
+                },
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug(
+                "[TeamHelpers] leader round death probe failed: session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+
+    return asyncio.create_task(_probe(), name=f"leader-death-probe-{session_id}")
+
+
 async def _consume_stream_with_query(
     channel_id: str | None,
     session_id: str,
@@ -2087,6 +2187,10 @@ async def _consume_stream_with_query(
     # 否则同文双发（多气泡时间线下两个 final 各开一卡 → 重复展示、历史双写）；
     # 每次 task_completion 判定后复位，不影响后续无原生 final 的纯文本回合
     leader_final_emitted = False
+    # 本周期经 task_completion 合成的 chat.final 文本：部分模型（GLM 实证）的
+    # answer 原生帧晚于 task_completion 到达（顺序与上面守卫假设相反），
+    # chat.final 分支据此文丢弃同文迟到重复帧——否则同文双发开两卡、历史同 id 双写
+    leader_synth_text = ""
     # 纯文本回合的即时收尾标记：仅当本轮无任何团队活动（无团队事件/无工具调用/
     # 无成员产出）且 leader 以 task_completion 收尾时置位——下一轮循环开头 break
     # （运行时暂停，下次发送 resume_from_pause 热恢复）。leader 先答、成员后报的
@@ -2094,6 +2198,13 @@ async def _consume_stream_with_query(
     finish_after_final = False
     saw_tool_call = False
     saw_teammate_output = False
+    # leader 模型错误后的回合死亡探针任务（chat.error 非终态化的配套：
+    # leader 重试耗尽转 IDLE 时回合实际死亡但无任何终态帧——探针在错误后
+    # 零产出的情况下补发 processing_status 终态，防前端 run 永远 running）
+    death_probe_task: asyncio.Task | None = None
+    # 本流已广播的回合收尾信号数（processing_status is_complete=true 等）：
+    # 探针据此判断"错误之后回合已正常收尾"，避免迟到误杀已完成回合
+    completion_signals = 0
     # Reset the team-events flag at the start of a new round so chat.final
     # can correctly determine whether the team is active.
     tm_ = get_team_manager(channel_id)
@@ -2190,6 +2301,16 @@ async def _consume_stream_with_query(
             # _is_leader_output returns True.
             if _team_hide_teammate_enabled() and not is_leader:
                 continue
+            # agent-core 自愈重试的可见化提示帧（llm_output + payload.retrying）：
+            # 不进业务流——不广播、不计入 leader_round_text/成员输出，防
+            # "[Retry N/10] ..." 文本污染合成 final 与成员子聊天框
+            _raw_payload = getattr(chunk, "payload", None)
+            if (
+                getattr(chunk, "type", None) == "llm_output"
+                and isinstance(_raw_payload, dict)
+                and _raw_payload.get("retrying")
+            ):
+                continue
             parsed = parse_stream_chunk(chunk)
             # leader 轮末 task_completion（携带该轮答案全文）被 parse 丢弃，
             # 纯文本/无工作流回合因此没有 chat.final、没有回合完成信号，流空转到
@@ -2212,6 +2333,8 @@ async def _consume_stream_with_query(
                             "role": TeamRole.LEADER.value,
                         }
                         final_from_completion = True
+                        # 记录合成文本：迟到的同文原生 final 在下方 chat.final 分支丢弃
+                        leader_synth_text = str(parsed["content"] or "")
                         # 合成即重置：buffer 已完成本轮使命
                         leader_round_text = ""
             if parsed is not None:
@@ -2341,6 +2464,7 @@ async def _consume_stream_with_query(
                             "is_complete": True,
                         },
                     )
+                    completion_signals += 1
                     continue
                 elif parsed.get("event_type") == "team.completed":
                     # Team completed this round — broadcast a single
@@ -2358,6 +2482,7 @@ async def _consume_stream_with_query(
                             "task_count": parsed.get("task_count"),
                         },
                     )
+                    completion_signals += 1
                     continue
                 elif parsed.get("event_type") == "chat.error":
                     await _broadcast_event(channel_id, session_id, parsed)
@@ -2371,6 +2496,18 @@ async def _consume_stream_with_query(
                                 "session_id": session_id,
                                 "rid": round_id,
                             },
+                        )
+                        # chat.error 在团队模式是非终态警告（前端只挂横幅不收尾），
+                        # 但 leader 重试耗尽转 IDLE 时回合实际死亡且再无终态帧——
+                        # 挂死亡探针：窗口内零产出且无收尾信号则补发终态
+                        death_probe_task = _schedule_leader_round_death_probe(
+                            channel_id,
+                            session_id,
+                            round_id,
+                            error_text=str(parsed.get("error") or ""),
+                            liveness=lambda: received_chunks,
+                            completion_signals=lambda: completion_signals,
+                            previous=death_probe_task,
                         )
                     continue
                 # chat.final: if team events (team.member / team.task /
@@ -2393,9 +2530,23 @@ async def _consume_stream_with_query(
                     # 客户端同 seq 覆盖（重试去重）、新 seq 封段开新卡；
                     # 随载荷进历史落盘 extra，刷新后按段恢复
                     if is_leader:
+                        # 迟到的原生 final 与本周期合成帧同文（answer chunk 晚于
+                        # task_completion 到达）→ 丢弃：不广播、不占泡序号、不落盘，
+                        # 防同文双发开两卡 + 历史同 id 双写。比对后即消费合成文本，
+                        # 避免误伤后续周期同文的新发言；不同文（真重新生成）正常放行。
+                        if (
+                            not final_from_completion
+                            and leader_synth_text
+                            and str(parsed.get("content") or "") == leader_synth_text
+                        ):
+                            leader_synth_text = ""
+                            continue
                         # 标记本周期已发 final（含合成），轮末 task_completion
                         # 据此跳过重复合成
                         leader_final_emitted = True
+                        if not final_from_completion:
+                            # 原生 final 落定：旧合成文本失效（防跨周期误伤同文新发言）
+                            leader_synth_text = ""
                         parsed["bubble_seq"] = leader_bubble_seq
                         leader_bubble_seq += 1
                         # 原生 final 同样意味着本轮落定：重置累积 buffer
@@ -2416,6 +2567,7 @@ async def _consume_stream_with_query(
                                 "is_complete": True,
                             },
                         )
+                        completion_signals += 1
                         # 即时收尾只限「纯文本回合」：本轮无团队事件、无工具调用、
                         # 无成员产出，且收尾信号来自 task_completion（leader 任务真实
                         # 完成）——运行时暂停，下次发送 resume_from_pause 热恢复，不再
@@ -2484,6 +2636,9 @@ async def _consume_stream_with_query(
             stream_cancelled = True
             raise
     finally:
+        # 回合死亡探针随流回收（流结束=回合已有定论，不再需要补终态）
+        if death_probe_task is not None and not death_probe_task.done():
+            death_probe_task.cancel()
         # Flush & close the stream trace logger if one was opened.
         if lg is not None:
             try:

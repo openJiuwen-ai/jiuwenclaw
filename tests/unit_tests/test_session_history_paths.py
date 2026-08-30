@@ -72,3 +72,19 @@ def test_load_history_records_dedups_same_id_last_wins(tmp_path, monkeypatch):
     assistant = [r for r in loaded if r.get("id") == "r1:assistant" and r.get("event_type") == "chat.final"]
     assert len(assistant) == 1
     assert assistant[0]["timestamp"] == 5.0
+
+
+def test_chat_error_records_are_restorable():
+    """chat.error 落盘记录（模型 401/连接失败等错误轮）重启后必须可恢复——
+    不在白名单时错误轮只剩前端本地台账的「失败」折叠区，错误正文丢失。"""
+    from jiuwenswarm.server.agent_ws_server import _is_restorable_history_record
+    from jiuwenswarm.server.wire_truncate import _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES
+
+    assert "chat.error" in _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES
+    assert _is_restorable_history_record(
+        {"role": "leader", "event_type": "chat.error", "content": "[181001] model call failed"}
+    )
+    # 回归：非白名单事件类型仍被过滤
+    assert not _is_restorable_history_record(
+        {"role": "assistant", "event_type": "chat.delta", "content": "流式中间帧"}
+    )

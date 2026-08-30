@@ -51,6 +51,9 @@ _TRUNCATE_SUFFIX = " [truncated]"
 _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
         "chat.final",
+        # 错误轮留痕：chat.error 落盘记录（模型 401/连接失败等）重启后可恢复，
+        # 否则错误轮只剩前端本地台账的「失败」折叠区，错误正文丢失
+        "chat.error",
         "chat.tool_call",
         "chat.tool_result",
         "chat.usage_summary",
