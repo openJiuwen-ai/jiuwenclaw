@@ -404,6 +404,7 @@ def _persist_permissions_to_yaml(permissions: dict[str, Any]) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
     clear_permissions_config_cache()
 
+
 async def _load_permissions_body_from_db() -> dict[str, Any] | None:
     from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 

@@ -6,7 +6,6 @@
 """
 
 from __future__ import annotations
-from jiuwenswarm.common.local_env_config import is_enterprise
 
 import asyncio
 import importlib
@@ -16,6 +15,7 @@ import uuid
 from importlib.metadata import entry_points
 from typing import Any
 
+from jiuwenswarm.common.local_env_config import is_enterprise
 from jiuwenswarm.extensions.redis.redis_client import RedisConfig
 
 logger = logging.getLogger(__name__)
@@ -144,7 +144,11 @@ async def init_gateway_redis_from_config(full_cfg: dict[str, Any] | None) -> Non
     gw = cfg_in.get("gateway")
     gw = gw if isinstance(gw, dict) else {}
     declared = str(gw.get("deployment_mode") or "standalone").strip().lower()
-    _declared_deployment_mode = declared if declared in ("standalone", "active-standby", "distributed") else "standalone"
+    _declared_deployment_mode = (
+        declared
+        if declared in ("standalone", "active-standby", "distributed")
+        else "standalone"
+    )
 
     iid = str(gw.get("instance_id") or "").strip()
     # active-standby / distributed 都需要 instance_id 标识（主备选主 / 多副本区分）

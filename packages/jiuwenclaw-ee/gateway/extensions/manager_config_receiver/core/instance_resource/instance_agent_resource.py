@@ -8,10 +8,9 @@ import logging
 from typing import Any
 
 from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
-
+from jiuwenswarm.gateway.config.enterprise.tables.instance_resource_models import INSTANCE_AGENT_RESOURCE_TABLE_DEF
 from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import parse_iso_datetime, utc_now
-from jiuwenswarm.gateway.config.enterprise.tables.instance_resource_models import INSTANCE_AGENT_RESOURCE_TABLE_DEF
 from ...schemas.instance_resource_schemas import InstanceAgentResourceUpsertRequest
 
 _TABLE = INSTANCE_AGENT_RESOURCE_TABLE_DEF.table_name

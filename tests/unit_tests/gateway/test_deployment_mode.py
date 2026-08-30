@@ -68,10 +68,10 @@ def test_session_storage_backend():
 
 
 def test_history_storage_backend():
-    assert history_storage_backend(MODE_STANDALONE) == "sqlite"
+    assert history_storage_backend(MODE_STANDALONE) == "memory"
     assert history_storage_backend(MODE_ACTIVE_STANDBY) == "mysql"
     assert history_storage_backend(MODE_DISTRIBUTED) == "mysql"
-    assert history_storage_backend("bogus") == "sqlite"
+    assert history_storage_backend("bogus") == "memory"
 
 
 def test_default_cron_enabled():
