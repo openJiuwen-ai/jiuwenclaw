@@ -682,8 +682,8 @@ react:
       tool_args_bailout_threshold: 2       # 工具入参规则压缩次数达此值后终止
   # Skills 在线自演进配置
   evolution:
-    enabled: true             # true = 启用在线 Skills 自演进（挂载后被动扫描始终开启）
-    signal_trigger: true      # true = 对话结束后被动 signal 扫描（run_evolution）；默认 true
+    enabled: false            # true = 启用在线 Skills 自演进（挂载后被动扫描始终开启）
+    signal_trigger: false     # true = 对话结束后被动 signal 扫描（run_evolution）；默认 true
     review_trigger: false     # true / false = Leader review follow-up；单 agent/teammate 由代码强制 false
     auto_save: true           # true = 自演进审批无需用户点击自动通过（内部开关）
     skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
@@ -742,6 +742,9 @@ task_memory:
 # ========== Redis（主备 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
 # 通过 gateway.deployment_mode 控制：standalone（不连接）/ active-standby（连接 Redis）
 redis:
+  # standalone | cluster；cluster 时下方 host 解析为逗号分隔的多节点列表
+  mode: ${REDIS_MODE:-standalone}
+  # 单机：host / host:port；cluster：逗号列表(如 10.0.0.11:6379,10.0.0.12:6379)；不带端口时用 port
   host: ${REDIS_HOST:-localhost}
   port: ${REDIS_PORT:-6379}
   password: ${REDIS_PASSWORD:-}
@@ -769,6 +772,10 @@ gateway:
   deployment_mode: ${DEPLOYMENT_MODE:-standalone}
   # 分布式下用于实例标识；空则启动时自动生成
   instance_id: ${GATEWAY_INSTANCE_ID:-}
+
+  # Web 会话存储位置：local（默认，会话文件在网关本地磁盘）| remote（会话在 Web Pod / 远程存储）
+  # remote 时前端 SessionsPanel 不再浏览网关本地会话文件，仅支持恢复会话历史。
+  web_session_storage: ${GATEWAY_WEB_SESSION_STORAGE:-local}
 
   # 企业版 Gateway 多副本：从共享库轮询 Gateway 自身配置（channel/logging/log_masking）
   config_poll:

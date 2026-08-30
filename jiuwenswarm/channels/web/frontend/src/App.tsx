@@ -11,6 +11,7 @@ import { SkillPanel } from './components/SkillPanel';
 import { AgentPanel } from './components/AgentPanel/index';
 import { TeamPanel } from './components/TeamPanel';
 import { SessionsPanel } from './components/SessionsPanel';
+import { HistoryPanel } from './components/HistoryPanel';
 import CronPanel from './components/CronPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
@@ -102,7 +103,7 @@ function shouldPreviewModelSetupGuide(): boolean {
   return PREVIEW_MODEL_SETUP_GUIDE;
 }
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel' | 'a2aingress';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'history' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel' | 'a2aingress';
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -2207,7 +2208,7 @@ function AppContent() {
         isConnected={isConnected}
         onNewSession={handleNewSession}
         showNewSession={false}
-        hiddenNavItems={enterpriseMode ? ['sessions', ...ENTERPRISE_HIDDEN_NAV_ITEMS] : ['sessions']}
+        hiddenNavItems={enterpriseMode ? ['sessions', ...ENTERPRISE_HIDDEN_NAV_ITEMS] : ['sessions', 'history']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
       />
 
@@ -2344,7 +2345,16 @@ function AppContent() {
               isConnected={isConnected}
               isProcessing={isProcessing}
               onRestoreSession={handleRestoreSession}
+              isRemoteSessionStorage={
+                typeof serverConfig?.gateway_web_session_storage === 'string' &&
+                serverConfig.gateway_web_session_storage.trim().toLowerCase() === 'remote'
+              }
             />
+          </div>
+        )}
+        {activeNav === 'history' && (
+          <div className="app-section">
+            <HistoryPanel />
           </div>
         )}
         {activeNav === 'cron' && (
