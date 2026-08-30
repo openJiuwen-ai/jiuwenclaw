@@ -131,6 +131,7 @@ Shell 选择规则：
 - Windows 且 Git Bash 可用，或 PATH bash 明确不是 WSL stub 时，可以使用 bash/Git Bash 执行 POSIX 命令，例如 `ls`、`grep`、`cat`、`mkdir -p`、bash 脚本。
 - Windows 且 Git Bash 不可用、PATH bash 也不可用或只是 WSL stub 时，不要使用 POSIX 命令；优先使用 PowerShell 或 cmd。
 - PowerShell cmdlet 不要包在 bash 里执行，应直接使用 PowerShell。
+- 安装 Python 依赖时，使用 `python -m pip install` 而非 `pip install`，确保依赖安装到与执行脚本相同的 Python 环境中。
 - 使用与当前平台匹配的命令和路径语法。"""
         return f"""Shell capabilities:
 - PowerShell: {_status(language, powershell)}
@@ -141,6 +142,7 @@ Shell selection rules:
 - On Windows, when Git Bash is available, or PATH bash is clearly not a WSL stub, use bash/Git Bash for POSIX commands such as `ls`, `grep`, `cat`, `mkdir -p`, and bash scripts.
 - On Windows, when Git Bash is unavailable and PATH bash is unavailable or only a WSL stub, do not use POSIX commands; prefer PowerShell or cmd.
 - Do not wrap PowerShell cmdlets in bash; invoke PowerShell directly.
+- When installing Python dependencies, use `python -m pip install` instead of `pip install` to ensure packages are installed into the same Python environment that will execute the scripts.
 - Use command and path syntax that matches the current platform."""
 
     shell_path = shutil.which("bash") or shutil.which("sh")
