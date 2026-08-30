@@ -157,6 +157,7 @@
         "minimax": "MiniMax",
         "mimo": "小米 MiMo",
         "openrouter": "OpenRouter",
+        "orcarouter": "OrcaRouter",
         "volcengine": "火山引擎",
         "zhipu": "智谱 GLM",
         "unrecognized": "未识别提供商（{{vendor}}）"

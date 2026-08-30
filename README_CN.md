@@ -117,7 +117,7 @@ jiuwenswarm-tui
 
 ### 配置模型
 
-JiuwenSwarm 支持多种模型平台：华为云 MaaS、OpenAI、DeepSeek、DashScope、SiliconFlow、OpenRouter 等 OpenAI 兼容接口，也支持本地模型部署。
+JiuwenSwarm 支持多种模型平台：华为云 MaaS、OpenAI、DeepSeek、DashScope、SiliconFlow、OpenRouter、OrcaRouter 等 OpenAI 兼容接口，也支持本地模型部署。
 
 ![JiuwenSwarm 模型配置](docs/assets/images/jiuwenswarm配置模型.png)
 

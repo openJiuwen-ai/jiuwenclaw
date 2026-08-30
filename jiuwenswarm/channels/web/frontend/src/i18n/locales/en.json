@@ -157,6 +157,7 @@
         "minimax": "MiniMax",
         "mimo": "Xiaomi MiMo",
         "openrouter": "OpenRouter",
+        "orcarouter": "OrcaRouter",
         "volcengine": "Volcengine",
         "zhipu": "Zhipu GLM",
         "unrecognized": "Unrecognized provider ({{vendor}})"

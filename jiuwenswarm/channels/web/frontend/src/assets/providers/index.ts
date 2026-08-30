@@ -20,6 +20,7 @@ const VENDOR_ICON_KEYS = new Map<string, string>([
   ['minimax', 'minimax'],
   ['mimo', 'mimo'],
   ['openrouter', 'openrouter'],
+  ['orcarouter', 'orcarouter'],
   ['volcengine', 'doubao'],
   ['zhipu', 'zhipu'],
 ]);

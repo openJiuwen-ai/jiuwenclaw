@@ -49,7 +49,7 @@ Each model type supports the following parameters:
 | `api_base`       | `api_base`                  | Base URL for model API        | Use the provider's API endpoint; **do not include `/chat/completions`**; appended automatically |
 | `api_key`        | `api_key`                   | Model API key                | Obtained from the model provider; keep confidential                                           |
 | `model`          | `model_name`                | Model identifier             | Use exact model ID such as `gpt-4o`, `claude-3-opus`, `deepseek-chat`                                         |
-| `model_provider` | `client_provider`           | Model provider type          | Supports `OpenAI`, `DeepSeek`, `DashScope`, `SiliconFlow`, `InferenceAffinity`, `OpenRouter` for API format adaptation; video/audio/vision models currently support `OpenAI` only |
+| `model_provider` | `client_provider`           | Model provider type          | Supports `OpenAI`, `DeepSeek`, `DashScope`, `SiliconFlow`, `InferenceAffinity`, `OpenRouter`, `OrcaRouter` for API format adaptation; video/audio/vision models currently support `OpenAI` only |
 
 > 💡 **Field Mapping**: The frontend panel uses `model` / `model_provider` as display field names; when saved to `config.yaml` they are mapped to backend fields `model_name` / `client_provider`. Both refer to the same thing, only the naming in the config file differs.
 

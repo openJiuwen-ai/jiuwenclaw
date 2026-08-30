@@ -300,6 +300,24 @@ _PRESETS: list[VendorPreset] = [
         anthropic_base="https://openrouter.ai/api/v1",  # xlsx 标 Anthropic 格式与 OpenAI 同 url(实测 /v1/messages 也 401 存在)
     ),
     VendorPreset(
+        vendor_key="orcarouter", display_name="OrcaRouter", plan=PlanKind.CUSTOM_API,
+        client_provider="OpenAI",
+        api_base="https://api.orcarouter.ai/v1",
+        # 纯 OpenAI 兼容网关,无专属方言;归因/推理注入均走默认 openai profile。
+        default_model="orcarouter/auto",
+        model_options=(
+            "orcarouter/auto",
+            "openai/gpt-5.6-terra",
+            "anthropic/claude-sonnet-4.5",
+            "deepseek/deepseek-v4-pro",
+            "google/gemini-2.5-flash",
+        ),
+        icon_key="orcarouter",
+        models_endpoint="https://api.orcarouter.ai/v1/models",
+        models_needs_key=True,
+        anthropic_base="https://api.orcarouter.ai",  # Anthropic 协议 base 不带 /v1(SDK 自行追加)
+    ),
+    VendorPreset(
         vendor_key="zhipu", display_name="智谱GLM", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
         api_base="https://open.bigmodel.cn/api/paas/v4",
