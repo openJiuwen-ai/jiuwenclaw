@@ -271,12 +271,10 @@ def _validate_bridge_llm_auth(llm_auth: object) -> None:
         for key, value in headers.items()
         if isinstance(key, str) and key.lower() == "authorization"
     ]
-    if (
-        len(headers) != 1
-        or len(authorization) != 1
-        or not isinstance(authorization[0], str)
-        or not authorization[0].strip()
-    ):
+    if len(headers) != 1 or len(authorization) != 1:
+        raise DeepResearchRuntimeError("sdk_bridge_request_invalid")
+    authorization_value = authorization[0]
+    if not isinstance(authorization_value, str) or not authorization_value.strip():
         raise DeepResearchRuntimeError("sdk_bridge_request_invalid")
 
 

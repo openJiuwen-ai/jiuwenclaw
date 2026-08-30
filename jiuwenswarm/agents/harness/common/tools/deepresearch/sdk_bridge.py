@@ -159,12 +159,10 @@ def _validate_llm_auth(llm_auth: object) -> None:
         for key, value in headers.items()
         if isinstance(key, str) and key.lower() == "authorization"
     ]
-    if (
-        len(headers) != 1
-        or len(authorization) != 1
-        or not isinstance(authorization[0], str)
-        or not authorization[0].strip()
-    ):
+    if len(headers) != 1 or len(authorization) != 1:
+        raise BridgeError("bridge_request_invalid")
+    authorization_value = authorization[0]
+    if not isinstance(authorization_value, str) or not authorization_value.strip():
         raise BridgeError("bridge_request_invalid")
 
 
@@ -316,13 +314,16 @@ async def stylize_request(request: dict[str, object], output: str | Path) -> dic
         style_status = str(getattr(result, "style_status", "fallback"))
         style_phase = getattr(result, "style_phase", None)
         style_reason_code = getattr(result, "style_reason_code", None)
-        if (
-            style_status != "fallback"
-            or not isinstance(style_phase, str)
-            or style_phase not in _STYLE_PHASES
-            or not isinstance(style_reason_code, str)
-            or style_reason_code not in _STYLE_REASON_CODES
-        ):
+        valid_style_fallback = style_status == "fallback"
+        if valid_style_fallback:
+            valid_style_fallback = isinstance(style_phase, str)
+        if valid_style_fallback:
+            valid_style_fallback = style_phase in _STYLE_PHASES
+        if valid_style_fallback:
+            valid_style_fallback = isinstance(style_reason_code, str)
+        if valid_style_fallback:
+            valid_style_fallback = style_reason_code in _STYLE_REASON_CODES
+        if not valid_style_fallback:
             style_phase = None
             style_reason_code = None
         return {
