@@ -2819,7 +2819,9 @@ class JiuWenSwarm:
                             # 主应答落盘携带专家身份（无绑定显式写空串=默认角色作答标记）
                             # 前端据"键存在但空"区分默认角色与存量无字段；漏写会导致
                             # 中途绑专家后历史刷新把本轮身份回落成新专家
-                            if et == "chat.final" and "expert_id" not in extra_fields:
+                            # （chat.error 同规：错误轮历史恢复 historyError 语义后身份行
+                            #  也读 extra 的 expert_id——与 chunk 分支 :2690 对齐）
+                            if et in ("chat.final", "chat.error") and "expert_id" not in extra_fields:
                                 from jiuwenswarm.server.runtime.expert.expert_service import (
                                     history_expert_identity_extra,
                                 )
@@ -2858,7 +2860,16 @@ class JiuWenSwarm:
             # 不落盘则重启后该轮只剩前端本地台账的「已停止」标记。
             # 恢复重跑（pause→resume）的同 rid 最终 final 经读侧 last-wins
             # 覆盖本条半截记录（aborted 标记随之消失），语义安全。
-            _persist_pending_final_text(aborted=True)
+            # 留痕是磁盘 I/O，失败不得顶替 CancelledError 向上传播（否则取消
+            # 链路中断：下方 log/raise 不执行，调用方收到普通异常）。
+            try:
+                _persist_pending_final_text(aborted=True)
+            except Exception:
+                logger.warning(
+                    "[JiuWenSwarm] failed to persist aborted final text: request_id=%s",
+                    rid,
+                    exc_info=True,
+                )
             logger.info("[JiuWenSwarm] 流式处理被中断: request_id=%s", rid)
             raise
         finally:
