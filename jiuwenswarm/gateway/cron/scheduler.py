@@ -38,6 +38,31 @@ def _now_utc_ts() -> float:
     return time.time()
 
 
+_WORKSPACE_OPEN = "<claw_workspace>"
+_WORKSPACE_CLOSE = "</claw_workspace>"
+
+
+def with_workspace_dir(text: str, workspace_dir: str | None) -> str:
+    """Append the desktop-equivalent project-directory constraint after *text*.
+
+    Matches claw_desktop ``withWorkspaceDir`` so the UI strip regex can hide it.
+    Skip when *text* already contains a workspace tag, or when *workspace_dir*
+    is empty.
+    """
+    path = (workspace_dir or "").strip()
+    if not path:
+        return text
+    if _WORKSPACE_OPEN in text:
+        return text
+    payload = json.dumps({"path": path}, ensure_ascii=False, separators=(",", ":"))
+    return (
+        f"{text}\n\n"
+        f"{_WORKSPACE_OPEN}{payload}{_WORKSPACE_CLOSE}\n"
+        f"【工作空间】当前项目目录是 `{path}`。"
+        "除非用户明确指定其他位置，否则所有新建与写入文件必须落在该目录下（可用相对路径）。"
+    )
+
+
 def resolve_cron_execution_cwd(job: CronJob) -> str:
     """Execution cwd for a cron run: persisted job path, else real-project lookup.
 
@@ -1004,9 +1029,12 @@ class CronSchedulerService:
                     "wake_at": state.wake_at_iso,
                     "current_time": datetime.fromtimestamp(self._now_fn(), tz=ZoneInfo(job.timezone)).isoformat(),
                 }
+                task_text = job.description or ""
+                if exec_project_dir:
+                    task_text = with_workspace_dir(task_text, exec_project_dir)
                 params: dict[str, Any] = {
-                    "content": job.description,
-                    "query": job.description,
+                    "content": task_text,
+                    "query": task_text,
                     "mode": mode,
                     "cron": cron_meta,
                     "cron_id": job.id,

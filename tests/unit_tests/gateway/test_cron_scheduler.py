@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from jiuwenswarm.gateway.cron.models import CronJob, CronRunState
 from jiuwenswarm.gateway.cron.scheduler import (
     CronSchedulerService,
     _Event,
+    with_workspace_dir,
 )
 from jiuwenswarm.common.cron_team_completion import (
     cron_team_round_should_end,
@@ -305,6 +307,27 @@ class TestCronLastSessionId:
         assert stored.last_session_id == "cron_agentserver_allocated"
 
 
+class TestWithWorkspaceDir:
+    def test_appends_constraint_after_task_text(self, tmp_path):
+        workspace = tmp_path / "定时任务-ws"
+        result = with_workspace_dir("生成图片", str(workspace))
+        payload = json.dumps({"path": str(workspace)}, ensure_ascii=False, separators=(",", ":"))
+        assert result.startswith("生成图片\n\n<claw_workspace>")
+        assert payload in result
+        assert f"【工作空间】当前项目目录是 `{workspace}`" in result
+        assert result.count("<claw_workspace>") == 1
+
+    def test_skips_when_already_injected(self, tmp_path):
+        workspace = str(tmp_path / "ws")
+        once = with_workspace_dir("task", workspace)
+        twice = with_workspace_dir(once, workspace)
+        assert twice == once
+
+    def test_skips_empty_path(self):
+        assert with_workspace_dir("task", "") == "task"
+        assert with_workspace_dir("task", None) == "task"
+
+
 class TestCronExecutionCwd:
     @pytest.mark.asyncio
     async def test_chat_send_uses_persisted_cwd_and_session_create_omits_path(
@@ -338,6 +361,13 @@ class TestCronExecutionCwd:
         assert send_env.params["project_dir"] == str(isolated)
         assert send_env.params["cwd"] == str(isolated)
         assert send_env.params["trusted_dirs"] == [str(isolated)]
+        query = send_env.params["query"]
+        content = send_env.params["content"]
+        assert query == content
+        assert query.startswith("simple reminder")
+        assert "<claw_workspace>" in query
+        assert str(isolated) in query
+        assert "【工作空间】" in query
         lookup.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -375,6 +405,9 @@ class TestCronExecutionCwd:
         assert send_env.params.get("project_dir") in ("", None)
         assert "cwd" not in send_env.params
         assert "trusted_dirs" not in send_env.params
+        assert send_env.params["query"] == "simple reminder"
+        assert send_env.params["content"] == "simple reminder"
+        assert "<claw_workspace>" not in send_env.params["query"]
 
     @pytest.mark.asyncio
     async def test_real_project_without_cwd_falls_back_to_lookup(
@@ -405,6 +438,9 @@ class TestCronExecutionCwd:
         assert create_env.params.get("project_dir") in ("", None)
         assert send_env.params["cwd"] == str(project_dir)
         assert send_env.params["trusted_dirs"] == [str(project_dir)]
+        assert send_env.params["query"].startswith("simple reminder")
+        assert "<claw_workspace>" in send_env.params["query"]
+        assert str(project_dir) in send_env.params["query"]
 
     @pytest.mark.asyncio
     async def test_run_now_info_returns_current_execution_session_id(self, tmp_path):
