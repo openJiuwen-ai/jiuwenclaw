@@ -6075,6 +6075,13 @@ export class AppScreen implements Component, Focusable {
     focus: "phases" | "agents" = "phases",
     selectedAgentId?: string,
   ): Promise<void> {
+    const snapshot = this.state.getSnapshot();
+    const workflow = snapshot.workflowRuns.find((item) => item.id === workflowId);
+    if (workflow && isWorkflowBudgetExhausted(workflow)) {
+      // Opening an already exhausted run is navigation, not a new exhaustion event.
+      // Keep the detail page visible; the user can still open its budget with B.
+      this.shownBudgetExhaustedWorkflowKeys.add(`${snapshot.sessionId}:${workflowId}`);
+    }
     this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
       workflowId,
       selectedPhaseId,

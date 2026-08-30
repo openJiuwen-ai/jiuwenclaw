@@ -631,6 +631,53 @@ assert.deepEqual(
   ["swarmflows", "workspace"],
 );
 
+// Opening an already exhausted workflow must keep its detail page visible.
+// Only a new exhaustion event while viewing detail may open the budget viewer.
+const exhaustedWorkflow = {
+  id: "workflow-exhausted",
+  name: "exhausted workflow",
+  status: "failed",
+  budget: { spent: 5, total: 5, remaining: 0, exhausted: true },
+};
+const exhaustedWorkflowScreen = Object.create(AppScreen.prototype);
+let exhaustedBudgetViewerOpenCount = 0;
+Object.assign(exhaustedWorkflowScreen, {
+  shownBudgetExhaustedWorkflowKeys: new Set(),
+  workflowUiSessionId: "session-1",
+  state: {
+    getSnapshot: () => ({
+      sessionId: "session-1",
+      workflowRuns: [exhaustedWorkflow],
+    }),
+    loadWorkflowDetail: async () => undefined,
+  },
+  buildSwarmWorkflowDetailState: (workflowId, _phaseId, focus, _agentId, loadingDetail) => ({
+    phase: "workflow",
+    workflowId,
+    focus,
+    loadingDetail,
+  }),
+  enterFileViewer: () => {
+    exhaustedBudgetViewerOpenCount += 1;
+  },
+  tui: { requestRender: () => undefined },
+});
+await exhaustedWorkflowScreen.openSwarmWorkflowDetail(exhaustedWorkflow.id);
+exhaustedWorkflowScreen.maybeOpenCurrentWorkflowBudgetExhausted();
+assert.deepEqual(exhaustedWorkflowScreen.swarmWorkflowsViewState, {
+  phase: "workflow",
+  workflowId: exhaustedWorkflow.id,
+  focus: "phases",
+  loadingDetail: false,
+});
+assert.equal(
+  exhaustedWorkflowScreen.shownBudgetExhaustedWorkflowKeys.has(
+    `session-1:${exhaustedWorkflow.id}`,
+  ),
+  true,
+);
+assert.equal(exhaustedBudgetViewerOpenCount, 0);
+
 // Escape and left both move from the workflow's agents panel back to phases.
 for (const key of ["\x1b", "\x1b[D"]) {
   let swarmNavigationRenderCount = 0;
