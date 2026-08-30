@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -281,15 +282,20 @@ class CronJob:
     delete_after_run: bool = False
     # 单次执行超时（秒）；未配置时普通模式与 team 模式默认均为 1 小时
     timeout_seconds: int | None = None
-    # 归属项目 ID；由创建时 project_dir 匹配获得，匹配不到可见项目为空串（默认项目）
+    # 归属项目 ID：真实工程为 proj_*；未挂工程时为虚拟桶
+    # default / default_code / default_design（或空串）。聊天创建可继承会话
+    # project_id；否则可由 create 入参 project_dir 按 work_mode 匹配可见工程。
     project_id: str = ""
+    # 执行 cwd（桌面独立「定时任务-*」目录）。与 project_id 分桶正交，不是归属解析入参。
+    # 仅绝对路径落库；空串表示尚未绑定 / 已清空。
+    project_dir: str = ""
     # 最近一次执行产生的会话 ID；调度器在创建执行会话后回写，未执行过为 None
     last_session_id: str | None = None
     # 执行时使用的模型；None 表示使用 AgentServer 默认模型
     model_name: str | None = None
     # 飞书多应用场景：创建该定时任务的 app_id，用于推送时定位到正确的 app 配置
     app_id: str = ""
-    # 工作模式派生快照：由 project_id 归属推导（"code" / "work"）。
+    # 工作模式派生快照：由 project_id 归属推导（"code" / "work" / "design"）。
     # 不作为独立隔离维度，任务归属仍以 project_id 为准。
     # from_dict 仅做 normalize + 兜底 "work"，不做跨层 Project 反查；
     # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
@@ -323,6 +329,8 @@ class CronJob:
             d["timeout_seconds"] = int(self.timeout_seconds)
         # project_id 始终输出（空串表示默认项目，与 SessionInfo.project_id 语义一致）
         d["project_id"] = self.project_id or ""
+        if self.project_dir:
+            d["project_dir"] = self.project_dir
         # work_mode 始终输出（派生快照字段，由 project_id 归属推导，与 project_id 一致）
         d["work_mode"] = self.work_mode or DEFAULT_WEB_WORK_MODE
         # last_session_id 仅在非空时输出（与 session_id/chat_type 可选字段策略一致）
@@ -424,6 +432,14 @@ class CronJob:
         # project_id / last_session_id：老数据兜底（无 project_id → ""，无 last_session_id → None）
         project_id_raw = data.get("project_id", "")
         project_id = str(project_id_raw).strip() if isinstance(project_id_raw, str) else ""
+        project_dir_raw = data.get("project_dir", "")
+        project_dir = (
+            str(project_dir_raw).strip()
+            if isinstance(project_dir_raw, str) and str(project_dir_raw).strip()
+            else ""
+        )
+        if project_dir and not os.path.isabs(project_dir):
+            project_dir = ""
         last_session_id_raw = data.get("last_session_id", None)
         last_session_id = (
             str(last_session_id_raw).strip()
@@ -470,6 +486,7 @@ class CronJob:
             delete_after_run=delete_after_run,
             timeout_seconds=timeout_seconds,
             project_id=project_id,
+            project_dir=project_dir,
             last_session_id=last_session_id,
             model_name=job_model_name,
             app_id=job_app_id,

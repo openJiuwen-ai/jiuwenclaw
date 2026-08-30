@@ -835,3 +835,49 @@ class TestResolveCronProjectBinding:
         assert binding.error is None
         assert binding.project_id == ""
         assert binding.work_mode == "design"
+
+
+class TestResolveCronJobPatch:
+    @staticmethod
+    def test_isolated_dir_keeps_project_id(project_store_dir, tmp_path):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            resolve_cron_job_patch,
+        )
+
+        isolated = tmp_path / "定时任务-2026-08-29-16-07-11"
+        isolated.mkdir()
+        patch = {"project_dir": str(isolated)}
+        resolve_cron_job_patch(patch, existing_work_mode="design")
+        assert patch["project_dir"] == str(isolated)
+        assert "project_id" not in patch
+        assert "work_mode" not in patch
+
+    @staticmethod
+    def test_explicit_project_id_still_injects_work_mode(project_store_dir, tmp_path):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_or_restore_project,
+            resolve_cron_job_patch,
+        )
+
+        pd = tmp_path / "code-proj"
+        pd.mkdir()
+        proj, _ = create_or_restore_project("Code", str(pd), work_mode="code")
+        isolated = tmp_path / "定时任务-keep"
+        isolated.mkdir()
+        patch = {"project_dir": str(isolated), "project_id": proj.project_id}
+        resolve_cron_job_patch(patch, existing_work_mode="work")
+        assert patch["project_dir"] == str(isolated)
+        assert patch["project_id"] == proj.project_id
+        assert patch["work_mode"] == "code"
+
+    @staticmethod
+    def test_relative_exec_dir_rejected(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            resolve_cron_job_patch,
+        )
+
+        with pytest.raises(ValueError, match="absolute path"):
+            resolve_cron_job_patch(
+                {"project_dir": "relative/path"},
+                existing_work_mode="work",
+            )

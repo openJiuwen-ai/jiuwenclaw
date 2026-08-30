@@ -28,7 +28,7 @@ from jiuwenswarm.gateway.cron.store import CronJobStore
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
-from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE
+from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE, is_default_project_id
 from jiuwenswarm.server.runtime.session.session_history import append_history_record
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,31 @@ logger = logging.getLogger(__name__)
 
 def _now_utc_ts() -> float:
     return time.time()
+
+
+def resolve_cron_execution_cwd(job: CronJob) -> str:
+    """Execution cwd for a cron run: persisted job path, else real-project lookup.
+
+    Virtual default project ids (default / default_code / default_design) are
+    buckets, not rows in projects.json; never call get_project_dir_by_id on them.
+    """
+    exec_dir = str(getattr(job, "project_dir", "") or "").strip()
+    if exec_dir:
+        return exec_dir
+    pid = str(job.project_id or "").strip()
+    if not pid or is_default_project_id(pid):
+        logger.warning(
+            "[Cron] no execution cwd job=%s project_id=%s", job.id, pid or "",
+        )
+        return ""
+    try:
+        from jiuwenswarm.server.runtime.session import project_store as _ps
+        return str(_ps.get_project_dir_by_id(pid) or "").strip()
+    except Exception as pdir_exc:  # noqa: BLE001
+        logger.warning(
+            "[Cron] resolve project_dir failed job=%s: %s", job.id, pdir_exc,
+        )
+        return ""
 
 
 def _resolve_cron_execution_context(
@@ -959,20 +984,14 @@ class CronSchedulerService:
                     channel_id, exec_session_id = self._make_execution_context(job)
                     state.exec_channel_id = channel_id
                     state.exec_session_id = exec_session_id
-                # 解析 project_dir 供 AgentServer 写入会话归属（与 project_id 联动）
-                try:
-                    from jiuwenswarm.server.runtime.session import project_store as _ps
-                    exec_project_dir = _ps.get_project_dir_by_id(job.project_id)
-                except Exception as pdir_exc:  # noqa: BLE001
-                    logger.warning(
-                        "[Cron] resolve project_dir failed job=%s: %s", job.id, pdir_exc,
-                    )
-                    exec_project_dir = ""
+                # 执行 cwd 与 session.create 归属路径分开:
+                # create 对虚拟 ID 不能带真实路径; 落盘靠 chat.send 的 cwd。
+                exec_project_dir = resolve_cron_execution_cwd(job)
                 if not is_team_cron_mode(mode):
                     exec_session_id = await self._allocate_single_agent_session(
                         job,
                         mode=mode,
-                        project_dir=exec_project_dir,
+                        project_dir="",
                         run_id=run_id,
                     )
                     state.exec_channel_id = "__cron__"
@@ -995,6 +1014,9 @@ class CronSchedulerService:
                     "project_dir": exec_project_dir,
                     "work_mode": job.work_mode or DEFAULT_WEB_WORK_MODE,
                 }
+                if exec_project_dir:
+                    params["cwd"] = exec_project_dir
+                    params["trusted_dirs"] = [exec_project_dir]
                 if job.model_name:
                     params["model_name"] = job.model_name
                 request_metadata: dict[str, Any] = {
