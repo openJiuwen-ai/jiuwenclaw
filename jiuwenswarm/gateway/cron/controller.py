@@ -163,7 +163,7 @@ class CronController:
     def _require_enterprise_routing(params: dict[str, Any] | None) -> tuple[str, str, str]:
         if is_enterprise() and not enterprise_cron_enabled():
             raise PermissionError(
-                "enterprise cron is not ready: jiuwenclaw_id not bound "
+                "enterprise cron is not ready: distributed deployment "
                 "(refuse write path; will not fall back to file store)"
             )
         g, b, u = extract_routing_triple(params or {})
@@ -394,7 +394,7 @@ class CronController:
     ) -> dict[str, Any]:
         if is_enterprise() and not enterprise_cron_enabled():
             raise PermissionError(
-                "enterprise cron is not ready: jiuwenclaw_id not bound"
+                "enterprise cron is not ready: distributed deployment"
             )
         patch = strip_sticky_identity_fields(dict(patch or {}))
         if "mode" in patch:
@@ -453,7 +453,7 @@ class CronController:
     ) -> bool:
         if is_enterprise() and not enterprise_cron_enabled():
             raise PermissionError(
-                "enterprise cron is not ready: jiuwenclaw_id not bound"
+                "enterprise cron is not ready: distributed deployment"
             )
         existing = await self._store.get_job(job_id)
         if existing is None:

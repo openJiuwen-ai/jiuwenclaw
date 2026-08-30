@@ -311,13 +311,11 @@ async def test_create_channel_config_repository_selects_codec(monkeypatch) -> No
     db_store = InMemoryPersistentBackend()
     monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     enterprise = create_channel_config_repository(
-        db_store, instance_id="inst-1"
+        db_store, instance_id=""
     )
     await enterprise.upsert(ChannelConfig(channel_id="web", body={"enabled": True}))
-    db_row = await db_store.get(
-        "channel_config", {"channel_id": "web", "jiuwenclaw_id": "inst-1"}
-    )
+    db_row = await db_store.get("channel_config", {"channel_id": "web"})
     assert db_row is not None
     assert db_row["channel_id"] == "web"
-    assert db_row["jiuwenclaw_id"] == "inst-1"
+    assert "jiuwenclaw_id" not in db_row
     assert db_row["config"] == {"enabled": True}

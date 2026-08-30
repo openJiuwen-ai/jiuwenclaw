@@ -40,7 +40,8 @@ def row_key(table: str, row: dict[str, Any]) -> str:
         return str(row.get("channel_id") or "").strip()
     if table == "log_masking_rule":
         return str(row.get("rule_id") or "").strip()
-    return str(row.get("jiuwenclaw_id") or row.get("id") or "default").strip()
+    # logging_config：单文档表
+    return str(row.get("id") or "default").strip()
 
 
 def row_stamp(row: dict[str, Any]) -> str:
@@ -58,21 +59,10 @@ def row_snapshot(table: str, rows: list[dict[str, Any]]) -> dict[str, str]:
     return snapshot
 
 
-def _poll_table_filters(table: str, jiuwenclaw_id: str) -> dict[str, Any]:
-    """channel_config 为全局表（当前 MySQL 无 jiuwenclaw_id 列），不按实例过滤。"""
-    if table == "channel_config":
-        return {}
-    jid = str(jiuwenclaw_id or "").strip()
-    return {"jiuwenclaw_id": jid} if jid else {}
-
-
-async def list_table_records(table: str, jiuwenclaw_id: str) -> list[dict[str, Any]]:
-    """拉取 poll 表行：优先 ``PersistentStore``，否则 ``gateway_db`` reader。"""
+async def list_table_records(table: str) -> list[dict[str, Any]]:
+    """拉取 poll 表全行：优先 ``PersistentStore``，否则 ``gateway_db`` reader。"""
     if table not in _POLL_TABLES:
         logger.warning("[ConfigPoll] unsupported table: %s", table)
-        return []
-    jid = str(jiuwenclaw_id or "").strip()
-    if table != "channel_config" and not jid:
         return []
 
     from jiuwenswarm.gateway.storage.access import get_persistent_store
@@ -80,12 +70,9 @@ async def list_table_records(table: str, jiuwenclaw_id: str) -> list[dict[str, A
     store = get_persistent_store()
     if store is not None:
         await store.ensure_ready()
-        rows = await store.list(table, filters=_poll_table_filters(table, jid))
+        rows = await store.list(table)
         return [dict(row) for row in rows or []]
 
     from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 
-    return await gateway_db.list_records(
-        table,
-        filters=_poll_table_filters(table, jid),
-    )
+    return await gateway_db.list_records(table)

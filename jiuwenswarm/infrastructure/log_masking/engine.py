@@ -269,7 +269,7 @@ class LogMaskingEngine:
         """从 Gateway 库加载 enabled 规则并刷新**本进程**单例引擎。
 
         单机版（``JIUWENSWARM_EDITION`` 非企业版）不访问 GDB，直接使用内置规则。
-        企业版在 ``JIUWENCLAW_ID`` / ``JIUWENSWARM_ID`` 未就绪时保留内置规则。
+        企业版直接读本网关 DB（每网关独立库，不依赖实例 id 绑定）。
         读库走本地 ``enterprise_config.gateway_db``，不依赖 ``packages/jiuwenclaw-ee``。
 
         ``db_authoritative``：
@@ -281,29 +281,20 @@ class LogMaskingEngine:
         if not enterprise:
             cls.reload_from_rows([])
         else:
-            jid = (
-                os.getenv("JIUWENCLAW_ID", "").strip()
-                or os.getenv("JIUWENSWARM_ID", "").strip()
-            )
-            if not jid:
-                _logger.debug(
-                    "[log_masking_db] skip GDB load: JIUWENCLAW_ID/JIUWENSWARM_ID not set yet"
+            try:
+                rows = await cls.list_enabled_log_masking_rule_rows()
+                authoritative = (
+                    db_authoritative
+                    if db_authoritative is not None
+                    else bool(rows)
                 )
-            else:
-                try:
-                    rows = await cls.list_enabled_log_masking_rule_rows()
-                    authoritative = (
-                        db_authoritative
-                        if db_authoritative is not None
-                        else bool(rows)
-                    )
-                    cls.reload_from_rows(rows, db_authoritative=authoritative)
-                except Exception as exc:  # noqa: BLE001
-                    _logger.warning(
-                        "[log_masking_db] log_masking_rule read failed: %s",
-                        exc,
-                        exc_info=True,
-                    )
+                cls.reload_from_rows(rows, db_authoritative=authoritative)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "[log_masking_db] log_masking_rule read failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         from .probes import maybe_emit_log_masking_probe_samples
 
@@ -317,22 +308,13 @@ class LogMaskingEngine:
         cls,
         *,
         table_name: str = _LOG_MASKING_RULE_TABLE,
-        jiuwenclaw_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """返回 ``enabled=true`` 的规则行（priority DESC）。"""
         from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 
-        jid = (
-            jiuwenclaw_id
-            or gateway_db.resolve_jiuwenclaw_id()
-            or os.getenv("JIUWENCLAW_ID", "").strip()
-            or os.getenv("JIUWENSWARM_ID", "").strip()
-        )
-        if not jid:
-            return []
         rows = await gateway_db.list_records(
             table_name,
-            filters={"enabled": True, "jiuwenclaw_id": jid},
+            filters={"enabled": True},
             order_by="priority DESC",
         )
         result: list[dict[str, Any]] = []
@@ -355,7 +337,6 @@ class LogMaskingEngine:
                 enabled = bool(enabled)
             return {
                 "id": obj.get("id"),
-                "jiuwenclaw_id": obj.get("jiuwenclaw_id"),
                 "rule_id": obj.get("rule_id"),
                 "rule_name": obj.get("rule_name"),
                 "description": obj.get("description"),
@@ -372,7 +353,6 @@ class LogMaskingEngine:
         updated_at = getattr(obj, "updated_at", None)
         return {
             "id": getattr(obj, "id", None),
-            "jiuwenclaw_id": getattr(obj, "jiuwenclaw_id", None),
             "rule_id": getattr(obj, "rule_id", None),
             "rule_name": getattr(obj, "rule_name", None),
             "description": getattr(obj, "description", None),

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import os
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -63,40 +62,6 @@ KNOWN_SLOT_KEYS = frozenset({
     "extension_config",
     "service_config",
 })
-
-
-def set_jiuwenclaw_id(jiuwenclaw_id: str | None) -> None:
-    """写入 ``JIUWENCLAW_ID`` 环境变量。"""
-    if jiuwenclaw_id is None:
-        os.environ.pop("JIUWENCLAW_ID", None)
-        return
-    normalized = str(jiuwenclaw_id).strip()
-    if normalized:
-        os.environ["JIUWENCLAW_ID"] = normalized
-    else:
-        os.environ.pop("JIUWENCLAW_ID", None)
-
-
-def get_jiuwenclaw_id() -> str:
-    """优先读 ``JIUWENCLAW_ID``；未设置则生成 UUID v4 并写回 env（进程内稳定）。"""
-    val = os.getenv("JIUWENCLAW_ID", "").strip()
-    if val:
-        return val
-    jid = str(uuid.uuid4())
-    os.environ["JIUWENCLAW_ID"] = jid
-    return jid
-
-
-def assert_jiuwenclaw_id_matches(jiuwenclaw_id: str) -> str:
-    """校验 config.push 顶层 ``jiuwenclaw_id`` 与本机 ``JIUWENCLAW_ID`` 一致，并返回有效 id。"""
-    if not jiuwenclaw_id:
-        raise ValueError("config.push payload requires jiuwenclaw_id")
-    configured = get_jiuwenclaw_id()
-    if jiuwenclaw_id != configured:
-        raise ValueError(
-            f"jiuwenclaw_id mismatch: push={jiuwenclaw_id!r} configured={configured!r}"
-        )
-    return configured
 
 
 def utc_now() -> datetime:

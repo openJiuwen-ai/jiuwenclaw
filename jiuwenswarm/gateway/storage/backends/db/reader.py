@@ -2,7 +2,7 @@
 """Gateway DB 只读/轻量写（OSS）：AgentServer 与 enterprise_config 共用。
 
 不依赖 jiuwenclaw-ee。按 ``GATEWAY_*`` 连 sqlite 或 MySQL/PG，与 Gateway 写库同环境变量。
-业务隔离（``jiuwenclaw_id``）由调用方在 filters 中完成。
+每网关独立数据库，读写不加行级 ``jiuwenclaw_id`` 隔离。
 """
 
 from __future__ import annotations
@@ -387,27 +387,21 @@ async def list_records(
 async def upsert_permissions_config(
     body: dict[str, Any],
     *,
-    jiuwenclaw_id: str,
     source: str = "runtime_persist",
 ) -> None:
-    """按 ``jiuwenclaw_id`` upsert ``permissions_config``。"""
+    """单例行 upsert ``permissions_config``（每网关独立 DB，无行级实例隔离）。"""
     from datetime import datetime, timezone
-
-    jid = str(jiuwenclaw_id or "").strip()
-    if not jid:
-        raise ValueError("JIUWENCLAW_ID is required for enterprise permissions persist")
 
     now = datetime.now(timezone.utc).isoformat()
     body_json = json.dumps(body, ensure_ascii=False)
 
     if use_remote_gateway_db():
-        await _upsert_permissions_remote(jid, body_json, source=source, now=now)
+        await _upsert_permissions_remote(body_json, source=source, now=now)
         return
-    await _upsert_permissions_sqlite(jid, body_json, source=source, now=now)
+    await _upsert_permissions_sqlite(body_json, source=source, now=now)
 
 
 async def _upsert_permissions_remote(
-    jid: str,
     body_json: str,
     *,
     source: str,
@@ -422,11 +416,11 @@ async def _upsert_permissions_remote(
     engine = await get_remote_engine()
     async with engine.begin() as conn:
         result = await conn.execute(
-            text(f"SELECT id, revision FROM {table} WHERE jiuwenclaw_id = :jid"),
-            {"jid": jid},
+            text(f"SELECT id, revision FROM {table} ORDER BY id ASC LIMIT 1"),
         )
         existing = result.fetchone()
         if existing is not None:
+            row_id = int(existing[0])
             revision = int(existing[1] or 1) + 1
             await conn.execute(
                 text(
@@ -434,7 +428,7 @@ async def _upsert_permissions_remote(
                     UPDATE {table}
                     SET body = :body, source = :source, revision = :revision,
                         updated_at = :updated_at
-                    WHERE jiuwenclaw_id = :jid
+                    WHERE id = :id
                     """
                 ),
                 {
@@ -442,7 +436,7 @@ async def _upsert_permissions_remote(
                     "source": source,
                     "revision": revision,
                     "updated_at": now,
-                    "jid": jid,
+                    "id": row_id,
                 },
             )
         else:
@@ -450,12 +444,11 @@ async def _upsert_permissions_remote(
                 text(
                     f"""
                     INSERT INTO {table}
-                    (jiuwenclaw_id, body, source, revision, created_at, updated_at)
-                    VALUES (:jid, :body, :source, 1, :created_at, :updated_at)
+                    (body, source, revision, created_at, updated_at)
+                    VALUES (:body, :source, 1, :created_at, :updated_at)
                     """
                 ),
                 {
-                    "jid": jid,
                     "body": body_json,
                     "source": source,
                     "created_at": now,
@@ -465,7 +458,6 @@ async def _upsert_permissions_remote(
 
 
 async def _upsert_permissions_sqlite(
-    jid: str,
     body_json: str,
     *,
     source: str,
@@ -478,31 +470,30 @@ async def _upsert_permissions_sqlite(
     table = PERMISSIONS_CONFIG_TABLE
     async with aiosqlite.connect(db_path) as conn:
         async with conn.execute(
-            f"SELECT id, revision FROM {table} WHERE jiuwenclaw_id = ?",
-            (jid,),
+            f"SELECT id, revision FROM {table} ORDER BY id ASC LIMIT 1",
         ) as cursor:
             existing = await cursor.fetchone()
         if existing is not None:
+            row_id = int(existing[0])
             revision = int(existing[1] or 1) + 1
             await conn.execute(
                 f"""
                 UPDATE {table}
                 SET body = ?, source = ?, revision = ?, updated_at = ?
-                WHERE jiuwenclaw_id = ?
+                WHERE id = ?
                 """,
-                (body_json, source, revision, now, jid),
+                (body_json, source, revision, now, row_id),
             )
         else:
             await conn.execute(
                 f"""
                 INSERT INTO {table}
-                (jiuwenclaw_id, body, source, revision, created_at, updated_at)
-                VALUES (?, ?, ?, 1, ?, ?)
+                (body, source, revision, created_at, updated_at)
+                VALUES (?, ?, 1, ?, ?)
                 """,
-                (jid, body_json, source, now, now),
+                (body_json, source, now, now),
             )
         await conn.commit()
-
 
 __all__ = [
     "PERMISSIONS_CONFIG_TABLE",

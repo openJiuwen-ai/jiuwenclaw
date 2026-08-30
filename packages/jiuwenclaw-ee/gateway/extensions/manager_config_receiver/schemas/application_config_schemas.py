@@ -56,7 +56,6 @@ class LogMaskingRuleCreateRequest(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    jiuwenclaw_id: str | None = Field(default=None, max_length=64)
     rule_id: str = Field(..., min_length=1, max_length=64)
     rule_name: str = Field(..., min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=512)
@@ -84,6 +83,9 @@ class LogMaskingRuleUpdateRequest(BaseModel):
 
 
 class InstanceDataLifecycleRequest(BaseModel):
-    """实例数据生命周期（默认 purge）。"""
+    """实例数据生命周期（默认 purge）。
+
+    ``op=purge`` 会清空本 Gateway 库内全部实例级数据（不可逆；每网关独立 DB）。
+    """
 
     op: str = Field(default="purge", max_length=32)

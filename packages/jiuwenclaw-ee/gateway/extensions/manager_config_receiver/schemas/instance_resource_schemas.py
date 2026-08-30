@@ -17,7 +17,7 @@ MatchExprField = Annotated[Any, BeforeValidator(_validate_match_expr)]
 
 
 class InstanceAgentResourceUpsertRequest(BaseModel):
-    """与 Manager ``instance_agent_resource`` 行字段对齐（仍按本机 jiuwenclaw_id 隔离落库）。"""
+    """与 Manager ``instance_agent_resource`` 行字段对齐。"""
 
     resource_id: str = Field(..., min_length=1, max_length=100)
     ref_template_id: str = Field(..., min_length=1, max_length=100)

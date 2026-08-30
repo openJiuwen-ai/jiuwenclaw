@@ -20,18 +20,16 @@ async def test_list_table_records_via_persistent_store() -> None:
     await store.create(
         "logging_config",
         {
-            "jiuwenclaw_id": "jid-1",
             "level": "INFO",
             "updated_at": "2026-01-01T00:00:00+00:00",
         },
     )
     set_persistent_store(store)
     try:
-        rows = await list_table_records("logging_config", "jid-1")
+        rows = await list_table_records("logging_config")
         assert len(rows) == 1
         assert rows[0]["level"] == "INFO"
-        assert await list_table_records("logging_config", "other") == []
-        assert await list_table_records("unknown_table", "jid-1") == []
+        assert await list_table_records("unknown_table") == []
     finally:
         clear_persistent_store()
 
@@ -43,4 +41,4 @@ async def test_list_table_records_without_store() -> None:
         "jiuwenswarm.server.runtime.enterprise_config.gateway_db.list_records",
         new=AsyncMock(return_value=[]),
     ):
-        assert await list_table_records("logging_config", "jid-1") == []
+        assert await list_table_records("logging_config") == []

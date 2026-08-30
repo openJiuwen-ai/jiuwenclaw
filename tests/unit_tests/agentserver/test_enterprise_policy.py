@@ -319,7 +319,7 @@ async def test_load_effective_config_by_instance_agent_resource(
         filters: dict | None = None,
         order_by: str = "",
     ) -> list[dict]:
-        scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
+        scoped = dict(filters or {})
         if table == "instance_agent_resource":
             if scoped.get("resource_id") != resource_id:
                 return []
@@ -408,7 +408,7 @@ async def test_load_effective_config_skips_mapping_expr_in_template_ref(
         filters: dict | None = None,
         order_by: str = "",
     ) -> list[dict]:
-        scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
+        scoped = dict(filters or {})
         if table == "instance_agent_resource":
             if scoped.get("resource_id") != resource_id:
                 return []
@@ -580,7 +580,7 @@ async def test_load_effective_config_loads_embedding_template(
         filters: dict | None = None,
         order_by: str = "",
     ) -> list[dict]:
-        scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
+        scoped = dict(filters or {})
         if table == "instance_agent_resource":
             if scoped.get("resource_id") != resource_id:
                 return []

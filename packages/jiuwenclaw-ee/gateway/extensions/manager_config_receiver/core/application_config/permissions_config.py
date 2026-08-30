@@ -36,13 +36,11 @@ class PermissionsConfigService:
 
     async def upsert(
         self,
-        jiuwenclaw_id: str,
         *,
         body: dict[str, Any] | None = None,
         source: str = "manager",
         **_extra: Any,
     ) -> dict[str, Any] | None:
-        _ = jiuwenclaw_id
         if body is None and isinstance(_extra.get("body"), dict):
             body = _extra["body"]
         if body is None:
@@ -65,8 +63,7 @@ class PermissionsConfigService:
         )
         return result
 
-    async def delete(self, jiuwenclaw_id: str) -> None:
-        _ = jiuwenclaw_id
+    async def delete(self) -> None:
         repo = require_permissions_repository()
         await repo.delete()
         _apply_permissions(None, op="delete")

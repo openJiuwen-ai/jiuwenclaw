@@ -408,14 +408,7 @@ def _persist_permissions_to_yaml(permissions: dict[str, Any]) -> None:
 async def _load_permissions_body_from_db() -> dict[str, Any] | None:
     from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 
-    jid = gateway_db.resolve_jiuwenclaw_id()
-    if not jid:
-        return None
-
-    rows = await gateway_db.list_records(
-        PERMISSIONS_CONFIG_TABLE,
-        filters={"jiuwenclaw_id": jid},
-    )
+    rows = await gateway_db.list_records(PERMISSIONS_CONFIG_TABLE)
     row = rows[0] if rows else None
     if row is None:
         return None

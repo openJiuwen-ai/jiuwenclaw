@@ -71,15 +71,15 @@ async def test_permissions_tool_and_rule_helpers() -> None:
 async def test_permissions_db_body_roundtrip() -> None:
     store = InMemoryPersistentBackend()
     repo = PermissionsConfigRepository(
-        store, DbBodySectionCodec(), instance_id="inst-1"
+        store, DbBodySectionCodec(), instance_id=""
     )
     await repo.merge({"enabled": True})
     document = await repo.get()
     assert document is not None
     assert document.body["enabled"] is True
-    row = await store.get("permissions_config", {"jiuwenclaw_id": "inst-1"})
-    assert row is not None
-    assert row["body"]["enabled"] is True
+    rows = await store.list("permissions_config", limit=1)
+    assert rows
+    assert rows[0]["body"]["enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -98,14 +98,14 @@ async def test_logging_yaml_merge_levels() -> None:
 async def test_logging_db_flat_codec() -> None:
     store = InMemoryPersistentBackend()
     repo = LoggingConfigRepository(
-        store, db_logging_codec(), instance_id="inst-1"
+        store, db_logging_codec(), instance_id=""
     )
     await repo.merge_levels({"level": "ERROR", "full": "DEBUG"})
-    row = await store.get("logging_config", {"jiuwenclaw_id": "inst-1"})
-    assert row is not None
-    assert row["level"] == "ERROR"
-    assert row["full"] == "DEBUG"
-    assert "body" not in row
+    rows = await store.list("logging_config", limit=1)
+    assert rows
+    assert rows[0]["level"] == "ERROR"
+    assert rows[0]["full"] == "DEBUG"
+    assert "body" not in rows[0]
 
 
 @pytest.mark.asyncio

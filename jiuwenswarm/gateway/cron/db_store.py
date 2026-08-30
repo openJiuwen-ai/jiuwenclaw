@@ -18,7 +18,6 @@ from jiuwenswarm.gateway.cron.cron_job_mutations import (
     build_new_cron_job,
     sort_cron_jobs,
 )
-from jiuwenswarm.gateway.cron.enterprise_gate import get_bound_jiuwenclaw_id
 from jiuwenswarm.gateway.cron.models import CronJob
 from jiuwenswarm.gateway.storage.protocols.persistent import PersistentStore
 
@@ -157,18 +156,11 @@ def _row_to_job(row: Any) -> CronJob | None:
 
 
 class GatewayDbCronJobStore:
-    """企业 cron 权威：``cron_job`` 表经 ``PersistentStore``。"""
+    """企业 cron 权威：``cron_job`` 表经 ``PersistentStore``（按 ``job_id`` 定位）。"""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._revision = 0
-
-    @staticmethod
-    def _require_jiuwenclaw_id() -> str:
-        jid = get_bound_jiuwenclaw_id()
-        if not jid:
-            raise RuntimeError("enterprise cron requires bound jiuwenclaw_id")
-        return jid
 
     @staticmethod
     async def _require_store() -> PersistentStore:
@@ -177,8 +169,8 @@ class GatewayDbCronJobStore:
         return await require_persistent_store()
 
     @staticmethod
-    def _job_identity(*, jiuwenclaw_id: str, job_id: str) -> dict[str, Any]:
-        return {"jiuwenclaw_id": jiuwenclaw_id, "job_id": job_id}
+    def _job_identity(*, job_id: str) -> dict[str, Any]:
+        return {"job_id": job_id}
 
     async def get_revision(self) -> int:
         return int(self._revision)
@@ -187,9 +179,8 @@ class GatewayDbCronJobStore:
         self._revision = int(time.time() * 1_000_000)
 
     async def list_jobs(self, *, filters: dict[str, Any] | None = None) -> list[CronJob]:
-        jid = self._require_jiuwenclaw_id()
         store = await self._require_store()
-        query: dict[str, Any] = {"jiuwenclaw_id": jid}
+        query: dict[str, Any] = {}
         filters = dict(filters or {})
         for key in ("group_id", "bot_id", "user_id"):
             val = filters.get(key)
@@ -197,7 +188,7 @@ class GatewayDbCronJobStore:
                 query[key] = val.strip()
         rows = await store.list(
             _TABLE,
-            filters=query,
+            filters=query or None,
             order_by="updated_at DESC",
         )
         jobs: list[CronJob] = []
@@ -211,11 +202,10 @@ class GatewayDbCronJobStore:
         job_id = str(job_id or "").strip()
         if not job_id:
             return None
-        jid = self._require_jiuwenclaw_id()
         store = await self._require_store()
         rows = await store.list(
             _TABLE,
-            filters=self._job_identity(jiuwenclaw_id=jid, job_id=job_id),
+            filters=self._job_identity(job_id=job_id),
             limit=1,
         )
         if not rows:
@@ -223,7 +213,7 @@ class GatewayDbCronJobStore:
         return _row_to_job(rows[0])
 
     @staticmethod
-    def _job_to_row(job: CronJob, *, jiuwenclaw_id: str) -> dict[str, Any]:
+    def _job_to_row(job: CronJob) -> dict[str, Any]:
         now_iso = _utc_now_iso()
         created_iso = (
             _epoch_to_dt(job.created_at).astimezone(dt_timezone.utc).isoformat()
@@ -232,7 +222,6 @@ class GatewayDbCronJobStore:
         )
         extra = _extra_from_job(job)
         return {
-            "jiuwenclaw_id": jiuwenclaw_id,
             "job_id": job.id,
             "group_id": job.group_id,
             "bot_id": job.bot_id,
@@ -260,11 +249,10 @@ class GatewayDbCronJobStore:
         }
 
     async def create_job(self, **kwargs: Any) -> CronJob:
-        jid = self._require_jiuwenclaw_id()
         store = await self._require_store()
         job = build_new_cron_job(**kwargs)
-        row_data = self._job_to_row(job, jiuwenclaw_id=jid)
-        identity = self._job_identity(jiuwenclaw_id=jid, job_id=job.id)
+        row_data = self._job_to_row(job)
+        identity = self._job_identity(job_id=job.id)
         async with self._lock:
             existing_rows = await store.list(_TABLE, filters=identity, limit=1)
             if existing_rows:
@@ -277,16 +265,14 @@ class GatewayDbCronJobStore:
         job_id = str(job_id or "").strip()
         if not job_id:
             raise ValueError("id is required")
-        jid = self._require_jiuwenclaw_id()
         store = await self._require_store()
-        identity = self._job_identity(jiuwenclaw_id=jid, job_id=job_id)
+        identity = self._job_identity(job_id=job_id)
         async with self._lock:
             existing = await self.get_job(job_id)
             if existing is None:
                 raise KeyError("job not found")
             updated = apply_cron_job_patch(existing, patch)
-            row_data = self._job_to_row(updated, jiuwenclaw_id=jid)
-            row_data.pop("jiuwenclaw_id", None)
+            row_data = self._job_to_row(updated)
             row_data.pop("job_id", None)
             row_data.pop("created_at", None)
             if "last_run_at" in patch:
@@ -301,9 +287,8 @@ class GatewayDbCronJobStore:
         job_id = str(job_id or "").strip()
         if not job_id:
             return False
-        jid = self._require_jiuwenclaw_id()
         store = await self._require_store()
-        identity = self._job_identity(jiuwenclaw_id=jid, job_id=job_id)
+        identity = self._job_identity(job_id=job_id)
         async with self._lock:
             deleted = await store.delete(_TABLE, identity)
             if deleted:

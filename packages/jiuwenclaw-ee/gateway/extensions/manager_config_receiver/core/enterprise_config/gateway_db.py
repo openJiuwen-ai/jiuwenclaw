@@ -1,6 +1,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""Gateway 本地库：企业配置读库（继承 ``Database``，进程内单例 + ``jiuwenclaw_id`` 隔离）。"""
+"""Gateway 本地库：企业配置读库（继承 ``Database``，进程内单例）。
+
+每网关独立数据库，列表查询不再做实例行级隔离。
+"""
 
 from __future__ import annotations
 
@@ -10,11 +13,6 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from openjiuwen_runtime.foundation.log import get_logger
-
-from jiuwenswarm.gateway.config.enterprise.instance_scope import (
-    apply_instance_scope as _apply_instance_scope,
-    list_records_requires_bound_instance,
-)
 
 from ...infrastructure.config import Settings
 from ...infrastructure.db import Database
@@ -27,13 +25,12 @@ _DEFAULT_RELATIVE_ROOT = Path(__file__).resolve().parents[2]
 
 
 class GatewayDb(Database):
-    """Gateway 企业配置读库；进程内仅一个实例持有连接池，``bind`` 只切换 ``jiuwenclaw_id``。"""
+    """Gateway 企业配置读库；进程内仅一个实例持有连接池。"""
 
     _current: ClassVar[GatewayDb | None] = None
 
     def __init__(
         self,
-        jiuwenclaw_id: str | None,
         *,
         cfg: Settings | None = None,
         relative_root: Path | None = None,
@@ -41,41 +38,17 @@ class GatewayDb(Database):
     ) -> None:
         if _with_connection:
             super().__init__(cfg=cfg, relative_root=relative_root or _DEFAULT_RELATIVE_ROOT)
-        self._jiuwenclaw_id = self._normalize_jiuwenclaw_id(jiuwenclaw_id)
-
-    @staticmethod
-    def _normalize_jiuwenclaw_id(jiuwenclaw_id: str | None) -> str | None:
-        if jiuwenclaw_id is None:
-            return None
-        normalized = str(jiuwenclaw_id).strip()
-        return normalized or None
 
     @classmethod
     def _ensure_singleton(cls) -> GatewayDb:
         if cls._current is None:
-            cls._current = cls(None, _with_connection=True)
+            cls._current = cls(_with_connection=True)
         return cls._current
 
-    @property
-    def jiuwenclaw_id(self) -> str | None:
-        return self._jiuwenclaw_id
-
-    def set_jiuwenclaw_id(self, jiuwenclaw_id: str | None) -> None:
-        """更新实例隔离 ID（不新建连接池）。"""
-        normalized = self._normalize_jiuwenclaw_id(jiuwenclaw_id)
-        if self._jiuwenclaw_id != normalized:
-            self._jiuwenclaw_id = normalized
-
-    def clear_jiuwenclaw_id(self) -> None:
-        """清空实例隔离 ID。"""
-        self._jiuwenclaw_id = None
-
     @classmethod
-    def bind(cls, jiuwenclaw_id: str | None) -> GatewayDb:
-        """设置当前进程 ``jiuwenclaw_id``（不新建连接池）。"""
-        db = cls._ensure_singleton()
-        db.set_jiuwenclaw_id(jiuwenclaw_id)
-        return db
+    def bind(cls, *_args: Any, **_kwargs: Any) -> GatewayDb:
+        """兼容旧调用：返回进程内单例（忽略历史实例 id 参数）。"""
+        return cls._ensure_singleton()
 
     @classmethod
     def current(cls) -> GatewayDb:
@@ -83,18 +56,10 @@ class GatewayDb(Database):
 
     @classmethod
     async def release(cls) -> None:
-        """断连/注销时释放连接池，并清空 ``jiuwenclaw_id``。"""
+        """断连/注销时释放连接池。"""
         if cls._current is not None:
             await cls._current.close()
-            cls._current.clear_jiuwenclaw_id()
-
-    def apply_instance_scope(self, table: str, filters: dict[str, Any]) -> dict[str, Any]:
-        """为 scoped 表查询附加 ``jiuwenclaw_id`` 隔离条件。"""
-        return _apply_instance_scope(
-            table,
-            filters,
-            instance_id=self._jiuwenclaw_id,
-        )
+            cls._current = None
 
     async def fetch_template_by_slot(
         self,
@@ -124,15 +89,8 @@ class GatewayDb(Database):
         filters: dict[str, Any] | None = None,
         order_by: str | list[tuple[str, bool]] = "",
     ) -> list[dict[str, Any]]:
-        """列表查询；策略/映射表自动按 ``jiuwenclaw_id`` 隔离。"""
-        if list_records_requires_bound_instance(table, self._jiuwenclaw_id):
-            logger.warning(
-                "[enterprise_config] list_records skipped: jiuwenclaw_id not bound for table=%s",
-                table,
-            )
-            return []
-
-        query = self.apply_instance_scope(table, dict(filters or {}))
+        """列表查询（每网关独立 DB，不加实例隔离列）。"""
+        query = dict(filters or {})
 
         try:
             handler = await self.ensure_ready(log_prefix="enterprise_config")

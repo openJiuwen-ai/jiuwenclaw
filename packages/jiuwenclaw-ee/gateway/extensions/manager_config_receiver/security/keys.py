@@ -5,7 +5,7 @@
 
 - 加密密钥对：单例持久化于 ``gateway_enc_keypair``，私钥永不外发；首启生成。
 - 签名密钥对：单例持久化于 ``gateway_sign_keypair``，握手向对端出示 link-auth 令牌；首启生成。
-- Manager 签名公钥：握手分发，存 ``manager_sign_pubkey``，按 jiuwenclaw_id 关联。
+- Manager 签名公钥：握手分发，存 ``manager_sign_pubkey``（单例，id="default"）。
 """
 
 from __future__ import annotations
@@ -125,7 +125,6 @@ async def load_gateway_enc_privkey_by_fp(fingerprint: str | None) -> bytes | Non
 
 
 async def store_manager_sign_pubkey(
-    jiuwenclaw_id: str,
     public_key_b64: str,
     *,
     key_version: str,
@@ -133,16 +132,12 @@ async def store_manager_sign_pubkey(
     sign_alg: str = "Ed25519",
     fingerprint: str | None = None,
 ) -> None:
-    """落库/更新 Manager 签名公钥（可选；用于 config.push 验签）。
-
-    读写走装配层注入的 ``manager_sign_pubkey`` Repository（按启动时 ``instance_id`` 隔离）。
-    ``jiuwenclaw_id`` 仍写入行内，供对账；lookup 以 Repository scope 为准。
-    """
+    """落库/更新 Manager 签名公钥（单例，id="default"；用于 config.push 验签）。"""
     repo = require_enterprise_repository(_SIGN_PUBKEY_TABLE)
     pub = cp.b64d(public_key_b64)
     fp = fingerprint or cp.fingerprint(pub)
     now = utc_now()
-    existing = await repo.get()
+    existing = await repo.get({"id": _KEYPAIR_ID})
     data: dict[str, Any] = {
         "manager_id": manager_id,
         "sign_alg": sign_alg,
@@ -153,33 +148,29 @@ async def store_manager_sign_pubkey(
         "updated_at": now,
     }
     if existing is not None:
-        await repo.update({}, data)
+        await repo.update({"id": _KEYPAIR_ID}, data)
     else:
         await repo.create(
             {
-                "jiuwenclaw_id": jiuwenclaw_id,
+                "id": _KEYPAIR_ID,
                 "bound_at": now,
                 **data,
             },
         )
     logger.info(
-        "[keys] bound manager sign pubkey jiuwenclaw_id=%s version=%s fp=%s",
-        jiuwenclaw_id,
+        "[keys] bound manager sign pubkey version=%s fp=%s",
         key_version,
         fp[:16],
     )
 
 
 async def load_manager_sign_pubkey(
-    jiuwenclaw_id: str, key_version: str | None = None
+    key_version: str | None = None,
 ) -> ManagerSignPublicKey | None:
-    """读取 Manager 签名公钥；指定版本时需匹配，否则返回 None。"""
+    """读取 Manager 签名公钥（单例）；指定版本时需匹配，否则返回 None。"""
     repo = require_enterprise_repository(_SIGN_PUBKEY_TABLE)
-    row = await repo.get()
+    row = await repo.get({"id": _KEYPAIR_ID})
     if not row or not row.get("public_key") or str(row.get("status")) != "bound":
-        return None
-    stored_jid = str(row.get("jiuwenclaw_id") or "")
-    if jiuwenclaw_id and stored_jid and stored_jid != jiuwenclaw_id:
         return None
     stored_version = str(row.get("key_version") or "")
     if key_version and key_version != stored_version:
@@ -188,13 +179,10 @@ async def load_manager_sign_pubkey(
     return ManagerSignPublicKey(pub, stored_version, str(row.get("fingerprint") or cp.fingerprint(pub)))
 
 
-async def delete_manager_sign_pubkey(jiuwenclaw_id: str) -> None:
-    """解绑时清除该实例的 Manager 签名公钥。"""
+async def delete_manager_sign_pubkey() -> None:
+    """清除本机 Manager 签名公钥（单例）。"""
     repo = require_enterprise_repository(_SIGN_PUBKEY_TABLE)
-    row = await repo.get()
+    row = await repo.get({"id": _KEYPAIR_ID})
     if row is None:
         return
-    stored_jid = str(row.get("jiuwenclaw_id") or "")
-    if jiuwenclaw_id and stored_jid and stored_jid != jiuwenclaw_id:
-        return
-    await repo.delete()
+    await repo.delete({"id": _KEYPAIR_ID})

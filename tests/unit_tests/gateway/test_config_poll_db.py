@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from jiuwenswarm.gateway.config_poll.db import (
-    _poll_table_filters,
     list_table_records,
     row_snapshot,
     row_stamp,
@@ -39,35 +38,25 @@ def test_row_snapshot_detects_delete_and_update() -> None:
     assert row_stamp({"updated_at": None}) == ""
 
 
-def test_poll_table_filters_channel_config_is_global() -> None:
-    assert _poll_table_filters("channel_config", "jid-1") == {}
-
-
-def test_poll_table_filters_other_tables_use_jiuwenclaw_id() -> None:
-    assert _poll_table_filters("logging_config", "jid-1") == {"jiuwenclaw_id": "jid-1"}
-    assert _poll_table_filters("log_masking_rule", "jid-1") == {"jiuwenclaw_id": "jid-1"}
-    assert _poll_table_filters("logging_config", "") == {}
-
-
 @pytest.mark.asyncio
-async def test_list_table_records_channel_config_without_jiuwenclaw_id() -> None:
+async def test_list_table_records_channel_config() -> None:
     list_mock = AsyncMock(return_value=[{"channel_id": "web", "status": "active"}])
     with patch(
         "jiuwenswarm.server.runtime.enterprise_config.gateway_db.list_records",
         list_mock,
     ):
-        rows = await list_table_records("channel_config", "")
-    list_mock.assert_awaited_once_with("channel_config", filters={})
+        rows = await list_table_records("channel_config")
+    list_mock.assert_awaited_once_with("channel_config")
     assert rows == [{"channel_id": "web", "status": "active"}]
 
 
 @pytest.mark.asyncio
-async def test_list_table_records_logging_requires_jiuwenclaw_id() -> None:
-    list_mock = AsyncMock(return_value=[])
+async def test_list_table_records_logging_without_instance_filter() -> None:
+    list_mock = AsyncMock(return_value=[{"level": "INFO"}])
     with patch(
         "jiuwenswarm.server.runtime.enterprise_config.gateway_db.list_records",
         list_mock,
     ):
-        rows = await list_table_records("logging_config", "")
-    list_mock.assert_not_awaited()
-    assert rows == []
+        rows = await list_table_records("logging_config")
+    list_mock.assert_awaited_once_with("logging_config")
+    assert rows == [{"level": "INFO"}]

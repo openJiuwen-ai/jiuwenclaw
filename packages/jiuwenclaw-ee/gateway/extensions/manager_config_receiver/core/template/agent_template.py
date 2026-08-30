@@ -9,6 +9,7 @@ from typing import Any
 
 from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
 from jiuwenswarm.gateway.config.enterprise.tables.template_models import AGENT_TEMPLATE_TABLE_DEF
+
 from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import (
     normalize_template_ref,
@@ -40,12 +41,10 @@ async def _get_row_for_instance(
 def _build_row_from_template(
     template: dict[str, Any],
     *,
-    jiuwenclaw_id: str,
     now: Any,
 ) -> dict[str, Any]:
     template_uuid = _normalize_template_id(template.get("template_id"))
     return {
-        "jiuwenclaw_id": jiuwenclaw_id,
         "template_id": template_uuid,
         "template_name": str(template["template_name"]).strip(),
         "description": template.get("description"),
@@ -60,14 +59,12 @@ def _build_row_from_template(
 
 async def _upsert_agent_template_from_sync(
     repo: EnterpriseRecordRepository,
-    template: dict[str, Any],
-    *,
-    jiuwenclaw_id: str,
+    template: dict[str, Any]
 ) -> None:
     now = utc_now()
     tid = _normalize_template_id(template.get("template_id"))
     existing = await _get_row_for_instance(repo, tid)
-    row_data = _build_row_from_template(template, jiuwenclaw_id=jiuwenclaw_id, now=now)
+    row_data = _build_row_from_template(template, now=now)
     if existing is None:
         await repo.create(row_data)
         return
@@ -78,7 +75,7 @@ async def _upsert_agent_template_from_sync(
     updates = {
         key: value
         for key, value in row_data.items()
-        if key not in ("jiuwenclaw_id", "template_id")
+        if key not in ("template_id",)
     }
     updates["updated_at"] = utc_now()
     await repo.update({"template_id": tid}, updates)
@@ -126,14 +123,13 @@ class AgentTemplateService:
 
     async def create(
         self,
-        jiuwenclaw_id: str,
         template: dict[str, Any],
     ) -> dict[str, Any]:
         if not isinstance(template, dict):
             raise ValueError("agent_templates.create requires template object")
         repo = require_enterprise_repository(_TABLE)
         await _upsert_agent_template_from_sync(
-            repo, template, jiuwenclaw_id=jiuwenclaw_id
+            repo, template
         )
         result = {"template_id": _normalize_template_id(template.get("template_id"))}
         logger.info(
@@ -144,7 +140,6 @@ class AgentTemplateService:
 
     async def update(
         self,
-        jiuwenclaw_id: str,
         template_id: str,
         updates: dict[str, Any],
     ) -> None:
@@ -163,7 +158,7 @@ class AgentTemplateService:
             tid,
         )
 
-    async def delete(self, jiuwenclaw_id: str, template_id: str) -> None:
+    async def delete(self, template_id: str) -> None:
         if template_id is None:
             raise ValueError("agent_templates.delete requires template_id")
         tid = _normalize_template_id(template_id)

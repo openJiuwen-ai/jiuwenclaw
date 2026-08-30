@@ -17,7 +17,6 @@ LOG_MASKING_RULE_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("rule_id", "string", length=64, nullable=False),
         ColumnDefinition("rule_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
@@ -37,7 +36,7 @@ LOG_MASKING_RULE_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id", "rule_id"], unique=True),
+        IndexDefinition(["rule_id"], unique=True),
     ],
 )
 
@@ -51,7 +50,6 @@ LOGGING_CONFIG_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("level", "string", length=16, nullable=False, default="INFO"),
         ColumnDefinition("console_level", "string", length=16, nullable=True),
         ColumnDefinition("gateway", "string", length=16, nullable=True),
@@ -61,9 +59,7 @@ LOGGING_CONFIG_TABLE_DEF = TableDefinition(
         ColumnDefinition("created_at", "datetime", nullable=False),
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
-    indexes=[
-        IndexDefinition(["jiuwenclaw_id"], unique=True),
-    ],
+    indexes=[],
 )
 
 TASK_MEMORY_CONFIG_TABLE_DEF = TableDefinition(
@@ -76,7 +72,6 @@ TASK_MEMORY_CONFIG_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("enabled", "boolean", nullable=False, default=False),
         ColumnDefinition("llm_model", "string", length=256, nullable=True),
         ColumnDefinition("embedding_model", "string", length=256, nullable=True),
@@ -87,9 +82,7 @@ TASK_MEMORY_CONFIG_TABLE_DEF = TableDefinition(
         ColumnDefinition("created_at", "datetime", nullable=False),
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
-    indexes=[
-        IndexDefinition(["jiuwenclaw_id"], unique=False),
-    ],
+    indexes=[],
 )
 
 PERMISSIONS_CONFIG_TABLE_DEF = TableDefinition(
@@ -102,16 +95,13 @@ PERMISSIONS_CONFIG_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("body", "json", nullable=True),
         ColumnDefinition("source", "string", length=16, nullable=False, default="manager"),
         ColumnDefinition("revision", "integer", nullable=False, default=1),
         ColumnDefinition("created_at", "datetime", nullable=False),
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
-    indexes=[
-        IndexDefinition(["jiuwenclaw_id"], unique=True),
-    ],
+    indexes=[],
 )
 
 MEMORY_CONFIG_TABLE_DEF = TableDefinition(
@@ -124,14 +114,11 @@ MEMORY_CONFIG_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("body", "json", nullable=True),
         ColumnDefinition("source", "string", length=16, nullable=False, default="manager"),
         ColumnDefinition("revision", "integer", nullable=False, default=1),
         ColumnDefinition("created_at", "datetime", nullable=False),
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
-    indexes=[
-        IndexDefinition(["jiuwenclaw_id"], unique=True),
-    ],
+    indexes=[],
 )

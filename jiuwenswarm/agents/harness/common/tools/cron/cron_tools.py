@@ -254,7 +254,6 @@ class CronTools:
         from jiuwenswarm.gateway.cron.db_store import _row_to_job
         from jiuwenswarm.gateway.cron.enterprise_gate import (
             extract_routing_triple,
-            get_bound_jiuwenclaw_id,
             routing_triple_complete,
         )
         from jiuwenswarm.server.runtime.enterprise_config import gateway_db
@@ -264,9 +263,6 @@ class CronTools:
         if not routing_triple_complete(g, b, u):
             raise ValueError("enterprise cron list requires group_id, bot_id and user_id")
         filters: dict[str, Any] = {"group_id": g, "bot_id": b, "user_id": u}
-        jid = get_bound_jiuwenclaw_id()
-        if jid:
-            filters["jiuwenclaw_id"] = jid
         rows = await gateway_db.list_records("cron_job", filters=filters, order_by="updated_at DESC")
         out: list[dict[str, Any]] = []
         for row in rows:

@@ -32,7 +32,6 @@ class LoggingConfigService:
 
     async def upsert(
         self,
-        jiuwenclaw_id: str,
         *,
         level: str = "INFO",
         console_level: str | None = None,
@@ -42,7 +41,6 @@ class LoggingConfigService:
         full: str | None = None,
         **_extra: Any,
     ) -> dict[str, Any] | None:
-        _ = jiuwenclaw_id
         repo = require_logging_repository()
         fields = {
             "level": level,
@@ -63,12 +61,8 @@ class LoggingConfigService:
         _apply_log_levels(fields)
         return result
 
-    async def delete(self, jiuwenclaw_id: str) -> None:
-        _ = jiuwenclaw_id
+    async def delete(self) -> None:
         repo = require_logging_repository()
         await repo.delete()
         apply_logging_config_payload({"op": "delete"})
-        logger.info(
-            "[ManagerConfigReceiver] logging_config deleted jiuwenclaw_id=%s",
-            jiuwenclaw_id,
-        )
+        logger.info("[ManagerConfigReceiver] logging_config deleted")

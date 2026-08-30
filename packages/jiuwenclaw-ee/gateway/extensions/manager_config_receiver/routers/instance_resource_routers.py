@@ -34,7 +34,6 @@ async def upsert_instance_agent_resource(
     sync = await build_sync_context(body, request.method)
     try:
         result = await InstanceAgentResourceService().upsert(
-            sync.jiuwenclaw_id,
             sync.business,
         )
     except ValueError as exc:
@@ -55,7 +54,6 @@ async def delete_instance_agent_resource(
     sync = await build_sync_context(body, request.method)
     try:
         await InstanceAgentResourceService().delete(
-            sync.jiuwenclaw_id,
             resource_id,
         )
     except ValueError as exc:

@@ -1,7 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""企业专属 PersistentStore name → 业务主键 / 实例作用域。
+"""企业专属 PersistentStore name → 业务主键。
 
 仅 DB 布局（见 ``storage_assembly.layouts``）；personal 无 file，调用应 fail-fast。
+每网关独立数据库，无实例隔离列。
 """
 
 from __future__ import annotations
@@ -13,12 +14,12 @@ from dataclasses import dataclass
 class EnterpriseRecordSpec:
     """一行企业表的定位方式。
 
-    - ``key_fields``：业务主键（不含 ``jiuwenclaw_id``）；空元组表示实例内至多一行。
-    - ``scope_field``：实例隔离列；``None`` 表示全局单例表（如 gateway 密钥对）。
+    - ``key_fields``：业务主键；空元组表示库内至多一行。
+    - ``scope_field``：历史兼容字段；默认 ``None``（每网关独立 DB，不再做行级实例隔离）。
     """
 
     key_fields: tuple[str, ...] = ()
-    scope_field: str | None = "jiuwenclaw_id"
+    scope_field: str | None = None
 
 
 # store name == DB 表名；与 layouts / EE TableDefinition 对齐。
@@ -34,7 +35,10 @@ ENTERPRISE_RECORD_SPECS: dict[str, EnterpriseRecordSpec] = {
     "log_masking_rule": EnterpriseRecordSpec(key_fields=("rule_id",)),
     "cron_job": EnterpriseRecordSpec(key_fields=("job_id",)),
     "task_memory_config": EnterpriseRecordSpec(key_fields=()),
-    "manager_sign_pubkey": EnterpriseRecordSpec(key_fields=()),
+    "manager_sign_pubkey": EnterpriseRecordSpec(
+        key_fields=("id",),
+        scope_field=None,
+    ),
     "gateway_enc_keypair": EnterpriseRecordSpec(
         key_fields=("id",),
         scope_field=None,

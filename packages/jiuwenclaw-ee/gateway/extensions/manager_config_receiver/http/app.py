@@ -11,7 +11,7 @@ from ..routers.template_routers import templates_router
 
 
 def create_app() -> FastAPI:
-    """Gateway 本机接口：无路径级实例段；``JIUWENCLAW_ID`` 仅作 Manager 注册/探活身份（未设则自动生成）。"""
+    """Gateway 本机配置接收接口（每网关独立 DB，无路径级实例段）。"""
     app = FastAPI(title="Gateway Manager Config Receiver", docs_url="/docs", redoc_url=None)
 
     @app.get("/api/health", tags=["System"])

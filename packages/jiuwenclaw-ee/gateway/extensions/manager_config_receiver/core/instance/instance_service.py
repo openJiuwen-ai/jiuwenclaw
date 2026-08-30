@@ -1,17 +1,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Gateway 实例身份绑定（无主动心跳）。
+"""Gateway 实例启动辅助（无主动心跳）。
 
-``JIUWENCLAW_ID`` 优先取自 env；未设置时启动时自动生成 UUID。
 存活由 Manager 周期探活本机 ``/api/health`` 确认。
 """
 
 from __future__ import annotations
 
 import logging
-import os
 
 from ...infrastructure.config import Settings, get_settings
-from ...infrastructure.utils import get_jiuwenclaw_id
 
 logger = logging.getLogger(__name__)
 
@@ -34,30 +31,21 @@ def resolve_manager_http_base(cfg: Settings | None = None) -> str:
 
 
 class InstanceService:
-    """绑定 ``JIUWENCLAW_ID`` / GatewayDb；不再向 Manager 主动心跳。"""
+    """启动时确保 GatewayDb 连接可用。"""
 
     def __init__(self, cfg: Settings | None = None) -> None:
         self._cfg = cfg or get_settings()
 
     async def start(self) -> None:
-        from_env = bool(os.getenv("JIUWENCLAW_ID", "").strip())
-        jid = get_jiuwenclaw_id()
-        if not from_env:
-            logger.info(
-                "[InstanceService] JIUWENCLAW_ID unset; generated jiuwenclaw_id=%s",
-                jid,
-            )
         try:
             from ..enterprise_config.gateway_db import GatewayDb
 
-            GatewayDb.bind(jid)
+            GatewayDb.current()
         except Exception:  # noqa: BLE001
-            logger.debug("[InstanceService] GatewayDb.bind failed", exc_info=True)
+            logger.debug("[InstanceService] GatewayDb.current failed", exc_info=True)
             return
         logger.info(
-            "[InstanceService] bound jiuwenclaw_id=%s endpoint=%s "
-            "(Manager health-probes this Gateway)",
-            jid,
+            "[InstanceService] endpoint=%s (Manager health-probes this Gateway)",
             resolve_public_endpoint(self._cfg),
         )
 

@@ -37,12 +37,10 @@ async def _get_row_for_resource(
 def _build_row_from_resource(
     resource: dict[str, Any],
     *,
-    jiuwenclaw_id: str,
     now: Any,
 ) -> dict[str, Any]:
     req = InstanceAgentResourceUpsertRequest.model_validate(resource)
     return {
-        "jiuwenclaw_id": jiuwenclaw_id,
         "resource_id": _normalize_resource_id(req.resource_id),
         "resource_name": req.resource_name.strip(),
         "resource_desc": req.resource_desc,
@@ -60,13 +58,11 @@ def _build_row_from_resource(
 async def _upsert_instance_agent_resource(
     repo: EnterpriseRecordRepository,
     resource: dict[str, Any],
-    *,
-    jiuwenclaw_id: str,
 ) -> None:
     now = utc_now()
     rid = _normalize_resource_id(resource.get("resource_id"))
     existing = await _get_row_for_resource(repo, rid)
-    row_data = _build_row_from_resource(resource, jiuwenclaw_id=jiuwenclaw_id, now=now)
+    row_data = _build_row_from_resource(resource, now=now)
     if existing is None:
         await repo.create(row_data)
         return
@@ -77,7 +73,7 @@ async def _upsert_instance_agent_resource(
     updates = {
         key: value
         for key, value in row_data.items()
-        if key not in ("jiuwenclaw_id", "resource_id")
+        if key not in ("resource_id",)
     }
     updates["updated_at"] = utc_now()
     await repo.update({"resource_id": rid}, updates)
@@ -98,15 +94,12 @@ class InstanceAgentResourceService:
 
     async def upsert(
         self,
-        jiuwenclaw_id: str,
         resource: dict[str, Any],
     ) -> dict[str, Any]:
         if not isinstance(resource, dict):
             raise ValueError("instance_agent_resources.upsert requires resource object")
         repo = require_enterprise_repository(_TABLE)
-        await _upsert_instance_agent_resource(
-            repo, resource, jiuwenclaw_id=jiuwenclaw_id
-        )
+        await _upsert_instance_agent_resource(repo, resource)
         result = {"resource_id": _normalize_resource_id(resource.get("resource_id"))}
         logger.info(
             "[ManagerConfigReceiver] instance_agent_resources upsert resource_id=%s",
@@ -114,7 +107,7 @@ class InstanceAgentResourceService:
         )
         return result
 
-    async def delete(self, jiuwenclaw_id: str, resource_id: str) -> None:
+    async def delete(self, resource_id: str) -> None:
         if resource_id is None:
             raise ValueError("instance_agent_resources.delete requires resource_id")
         rid = _normalize_resource_id(resource_id)

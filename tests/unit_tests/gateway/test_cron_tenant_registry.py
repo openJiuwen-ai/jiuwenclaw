@@ -108,6 +108,15 @@ async def test_web_create_mirrors_to_agent_home(tmp_path, monkeypatch) -> None:
         "jiuwenswarm.gateway.cron.tenant_registry.CronSchedulerService.reload",
         AsyncMock(),
     )
+    # 本用例验证文件 store 镜像；企业 cron 需路由三元组，与此无关。
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.cron.controller.enterprise_cron_enabled",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.cron.enterprise_store.enterprise_cron_enabled",
+        lambda **_kwargs: False,
+    )
 
     registry = CronTenantRegistry.get_instance(
         agent_client=MagicMock(),
