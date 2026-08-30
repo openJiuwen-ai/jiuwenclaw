@@ -22,9 +22,12 @@ globalThis.window = {
 };
 
 const { EnterpriseEntry, chooseAgent, orderedContextCandidates } = await import('../node_modules/.cache/user-web-entry/EnterpriseEntry.mjs');
+const { parseLoginAuthSimulate } = await import('../node_modules/.cache/user-web-entry/auth/config.js');
+const { buildSimulatedEnterpriseContext } = await import('../node_modules/.cache/user-web-entry/auth/simulate/SimulatedAuthProvider.js');
 
-function renderEntry(mode) {
+function renderEntry(mode, simulate = false) {
   window.__JIUWEN_USER_WEB_MODE__ = mode;
+  window.__JIUWEN_LOGIN_AUTH_SIMULATE__ = simulate;
   return renderToStaticMarkup(React.createElement(EnterpriseEntry, null, React.createElement('div', { id: 'user-web-content' }, 'user web content')));
 }
 
@@ -59,6 +62,33 @@ test('enterprise mode loads and validates an authorized context before rendering
 
   assert.match(html, /正在加载工作空间/);
   assert.doesNotMatch(html, /user web content/);
+});
+
+test('simulated enterprise login uses local defaults without an access token', () => {
+  resetBrowserState();
+  const context = buildSimulatedEnterpriseContext('');
+
+  assert.equal(context.user.user_id, 'debug-user');
+  assert.equal(context.org.group_id, 'debug-group');
+  assert.equal(context.gateway.jiuwenclaw_id, 'debug-gateway');
+  assert.equal(context.selectedBot, 'debug-agent');
+  assert.doesNotMatch(renderEntry('enterprise', true), /正在前往登录页/);
+});
+
+test('simulated enterprise login accepts URL tuple overrides', () => {
+  const context = buildSimulatedEnterpriseContext('?user_id=u1&group_id=g1&gateway_id=gw1&bot_id=b1');
+
+  assert.equal(context.user.user_id, 'u1');
+  assert.equal(context.org.group_id, 'g1');
+  assert.equal(context.gateway.jiuwenclaw_id, 'gw1');
+  assert.equal(context.selectedBot, 'b1');
+});
+
+test('LOGIN_AUTH_SIMULATE accepts only booleans and defaults to true', () => {
+  assert.equal(parseLoginAuthSimulate(undefined), true);
+  assert.equal(parseLoginAuthSimulate('true'), true);
+  assert.equal(parseLoginAuthSimulate(' FALSE '), false);
+  assert.throws(() => parseLoginAuthSimulate('yes'), /期望 true 或 false/);
 });
 
 test('context candidates prefer URL values but retain every authorized combination', () => {

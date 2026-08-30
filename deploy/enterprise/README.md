@@ -675,26 +675,55 @@ Web 为 JiuwenSwarm 企业版面向终端用户的对话可视化前端，用于
 用户面通过 `USER_WEB_MODE` 选择产品形态：
 
 ```bash
-# personal：通过 User Web NodePort 提供独立用户面
-# enterprise：通过 Manager Web 统一登录并内嵌用户面，不暴露 User Web NodePort
+# personal：独立用户面，跳过企业登录
+# enterprise：独立用户面，启用企业登录和用户上下文面板
 USER_WEB_MODE=personal
 ```
 
-`personal` 模式下，用户通过 User Web NodePort 直接使用独立用户面。`enterprise`
-模式下，Manager Web 是唯一对外入口：用户先通过 Identity Center 登录，在 Manager Web
-中选择组网、组织和 Bot，再进入同源 `/chat/` 内嵌用户面。User Web 仍保留供 Manager Web
-访问的 ClusterIP 服务，但部署脚本不会创建其 NodePort；enterprise 模式必须部署 Manager Web：
+登录认证模拟由独立参数控制：
 
 ```bash
-USER_WEB_MODE=enterprise
-IS_UP_MANAGER_WEB=true
+# 默认 true：企业模式使用 debug-user/debug-group/debug-gateway/debug-agent，
+# 不请求 Identity/Manager 用户目录接口。
+LOGIN_AUTH_SIMULATE=true
+
+# 正式模式：调用客户侧 manager 提供的 ID 认证和用户目录接口。
+LOGIN_AUTH_SIMULATE=false
+
+# 暂未配置客户接口时可以留空，部署工具会回落到当前集群内 Identity/Manager。
+USER_WEB_IDP_TARGET=""
+USER_WEB_MANAGER_TARGET=""
 ```
+
+`LOGIN_AUTH_SIMULATE` 仅接受 `true` 或 `false`。在 `personal` 模式下用户面始终跳过
+企业登录；若同时配置 `LOGIN_AUTH_SIMULATE=false`，部署和启动日志会提示该参数冲突且
+不会改变 personal 行为。正式模式启动时会分别检查 ID 认证服务和 Manager 业务接口的
+连通性并输出明确日志。
+
+认证模拟实现按插件装配。内部联调制品保持 `LOGIN_AUTH_SIMULATE_AVAILABLE=true`；
+客户正式制品使用前端 `npm run build:customer` 构建，并配置
+`LOGIN_AUTH_SIMULATE_AVAILABLE=false`、`LOGIN_AUTH_SIMULATE=false`。客户构建不会将
+`src/auth/simulate/` 内的默认用户和三元组实现打入静态产物，该目录也可从客户源码包
+直接剥离。若不含插件的制品误开模拟认证，部署检查和 User Web 启动均会明确拒绝启动。
+
+`personal` 和 `enterprise` 均通过 User Web NodePort 提供独立入口，不要求部署 Manager Web。
+`enterprise` 仅控制企业登录及用户、组织、组网、Agent 上下文面板。模拟模式完全不依赖
+Manager；正式模式保留对 Manager ID 认证及业务目录接口的调用。
+
+当前客户接口尚未提供时，目标地址留空会使用以下集群内默认值：
+
+```bash
+USER_WEB_IDP_TARGET=http://jiuwenclaw-identity:8770
+USER_WEB_MANAGER_TARGET=http://jiuwenclaw-manager-server:8765
+```
+
+这两个组件仅作为现阶段正式模式联调后端，可通过 `./deploy.sh up manager` 单独部署；
+无参数默认交付不再部署 Manager。客户接口就绪后，只需覆盖两个目标地址，不改变现有接口路径。
 
 旧配置 `ENABLE_USER_WEB_EMBEDDING` 仅作兼容输入：`true` 等价于
 `USER_WEB_MODE=enterprise`，`false` 等价于 `USER_WEB_MODE=personal`。新部署不应继续使用。
 
-Manager Web 内嵌入口使用以下同源路由，不需要额外暴露 Identity、Manager Server 或
-Gateway：
+User Web 使用以下同源代理路由访问认证、Manager 业务接口和 Gateway：
 
 | 路径 | 目标服务 | 用途 |
 |---|---|---|
@@ -703,6 +732,7 @@ Gateway：
 | `/chat/*` | User Web HTTP | 用户面对话界面 |
 | `/ws*` | Gateway WebSocket | 用户面默认消息通道 |
 | `/gateway-api/*` | Gateway Web HTTP/SSE | 用户面 REST/SSE 通道，与 Manager `/api/v1` 隔离 |
+
 | `/file-api/*`、`/share-api/*` | Gateway Web HTTP | 文件与分享接口 |
 
 Manager Web 与 `/chat/` 使用同一浏览器源，登录状态由 Manager Web 统一管理。User Web

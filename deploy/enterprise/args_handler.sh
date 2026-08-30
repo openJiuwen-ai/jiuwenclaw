@@ -51,7 +51,7 @@ parse_args() {
 }
 
 process_modules() {
-    MODULES=("GATEWAY" "WEB" "MANAGER" "RUNTIME")
+    MODULES=("GATEWAY" "WEB" "RUNTIME")
 }
 
 # Print help info and exit
