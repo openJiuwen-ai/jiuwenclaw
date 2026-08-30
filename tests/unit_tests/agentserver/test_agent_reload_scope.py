@@ -379,8 +379,8 @@ async def test_deep_adapter_global_reload_marks_sessions_stale_without_fanout(mo
 
     parent = JiuWenSwarmDeepAdapter()
     parent._instance = MagicMock()
-    # reload 路径会 await self._instance.ensure_initialized()（interface_deep.py:8307），
-    # 裸 MagicMock 的该方法返回不可 await 的对象 → TypeError，故配 AsyncMock。
+    # 补丁 3 在 reload 路径加 await self._instance.ensure_initialized()（interface_deep.py:8307），
+    # 裸 MagicMock 的 ensure_initialized() 返回不可 await 的 MagicMock → TypeError。配 AsyncMock。
     parent._instance.ensure_initialized = AsyncMock()
     session_a = FakeAgent()
     session_b = FakeAgent()
