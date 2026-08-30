@@ -28,6 +28,7 @@ from jiuwenswarm.gateway.cron.models import (
 )
 from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
 from jiuwenswarm.gateway.cron.store import CronJobStore
+from jiuwenswarm.common.work_mode import SUPPORTED_WORK_MODES
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,7 @@ class CronController:
             raise ValueError(f"invalid work_mode: {params.get('work_mode')!r}")
         # project_id / project_dir → project_id 解析(设计文档 §6.1 + work_mode 隔离):
         # 优先接受显式 project_id(修改计划 §5 链路 A,与 CronTools 保持一致):
-        # 1. 默认项目 ID(default/default_code)→ 直接使用,按 project_id 映射 work_mode
+        # 1. 默认项目 ID(default/default_code/default_design)→ 直接使用,按 project_id 映射 work_mode
         # 2. 真实 project_id → 校验存在且未隐藏,从 Project 记录注入精确 work_mode
         # 3. 无显式 project_id → 按 (work_mode, project_dir) 解析可见项目,
         #    匹配不到(含命中隐藏项目 / 无命中)归默认项目
@@ -1150,7 +1151,7 @@ class CronController:
                             "type": "integer",
                             "description": (
                                 "Execution timeout in seconds (60-259200). "
-                                "Default 600 for normal modes and 1200 for team modes."
+                                "Default 3600 (1 hour) for both normal and team modes."
                             ),
                         },
                         "model_name": {
@@ -1176,9 +1177,9 @@ class CronController:
                         },
                         "work_mode": {
                             "type": "string",
-                            "enum": ["code", "work"],
+                            "enum": sorted(SUPPORTED_WORK_MODES),
                             "description": (
-                                "Working mode of the target project (code/work). "
+                                "Working mode of the target project (code/work/design). "
                                 "Defaults to current channel default (tui->code, web->work). "
                                 "Only used when project_id is not provided; ignored if project_id "
                                 "is provided (work_mode inherited from the project)."
@@ -1264,7 +1265,7 @@ class CronController:
                                 },
                                 "work_mode": {
                                     "type": "string",
-                                    "enum": ["code", "work"],
+                                    "enum": sorted(SUPPORTED_WORK_MODES),
                                     "description": (
                                         "Disambiguates target project when patching "
                                         "project_dir. Not a standalone patchable field."

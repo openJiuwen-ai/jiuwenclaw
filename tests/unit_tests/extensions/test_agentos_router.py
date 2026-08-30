@@ -83,7 +83,15 @@ class FakeYuanRongClient:
     async def delete_sandbox(self, sandbox_id: str) -> None:
         self.delete_calls.append(sandbox_id)
 
-    async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
+    async def get_agent_info(self, instance_id: str) -> dict:
+        return {"instance_id": instance_id, "node_ip": "127.0.0.1", "sandbox_ip": "127.0.0.1"}
+
+    async def send_request(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResponse:
         self.send_calls += 1
         return AgentResponse(
             request_id=str(envelope.request_id or ""),
@@ -111,6 +119,80 @@ class FakeYuanRongClient:
 
     def set_server_push_handler(self, handler) -> None:
         self.push_handler = handler
+
+
+class FakeAgentWsClient:
+    """create 后 WS 直连 instance 的假客户端：send 委托给 FakeYuanRongClient 计数。"""
+
+    def __init__(self, yuanrong: FakeYuanRongClient) -> None:
+        self._yuanrong = yuanrong
+        self.connected_uris: list[str] = []
+        self.disconnected = False
+        self.push_handler = None
+
+    def set_server_push_handler(self, handler) -> None:
+        self.push_handler = handler
+
+    def set_or_update_server_config(self, *, config, env=None) -> None:
+        del config, env
+
+    async def connect(self, uri: str) -> None:
+        self.connected_uris.append(uri)
+        self._yuanrong.ws_connect_uris.append(uri)
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+    async def send_request(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResponse:
+        return await self._yuanrong.send_request(envelope)
+
+    def send_request_stream(
+        self, envelope: E2AEnvelope
+    ) -> AsyncIterator[AgentResponseChunk]:
+        return self._yuanrong.send_request_stream(envelope)
+
+
+class _Http502(Exception):
+    status_code = 502
+
+
+class FlakyAgentWsClient(FakeAgentWsClient):
+    """前 N 次 connect 回 502，模拟 agentserver 冷启动未就绪."""
+
+    fail_times = 2
+    instances: list["FlakyAgentWsClient"] = []
+
+    def __init__(self, yuanrong: FakeYuanRongClient) -> None:
+        super().__init__(yuanrong)
+        self.connect_attempts = 0
+        type(self).instances.append(self)
+
+    async def connect(self, uri: str) -> None:
+        self.connect_attempts += 1
+        total = sum(c.connect_attempts for c in type(self).instances)
+        if total <= self.fail_times:
+            raise _Http502("server rejected WebSocket connection: HTTP 502")
+        await super().connect(uri)
+
+
+def _router_client(
+    yuanrong: FakeYuanRongClient,
+    registry: FakeRegistryClient | None = None,
+    agent_manager: AgentManager | None = None,
+    **kwargs: Any,
+) -> AgentOSRouterClient:
+    kwargs.setdefault("ws_client_factory", lambda: FakeAgentWsClient(yuanrong))
+    return AgentOSRouterClient(
+        yuanrong,
+        registry if registry is not None else FakeRegistryClient(),
+        agent_manager if agent_manager is not None else AgentManager(),
+        **kwargs,
+    )
 
 
 class FakeRegistryClient:

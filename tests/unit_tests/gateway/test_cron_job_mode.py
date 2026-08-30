@@ -11,6 +11,7 @@ from jiuwenswarm.gateway.cron.models import (
     CronJob,
     coerce_cron_job_mode,
     cron_job_metadata,
+    is_cron_job_mode,
     is_team_cron_mode,
     normalize_cron_job_mode,
     normalize_cron_job_timeout_seconds,
@@ -60,6 +61,23 @@ def test_coerce_cron_job_mode_passthrough_unknown() -> None:
 def test_coerce_cron_job_mode_known_values() -> None:
     assert coerce_cron_job_mode("team") == "team"
     assert coerce_cron_job_mode(None, default=CRON_JOB_DEFAULT_MODE) == CRON_JOB_DEFAULT_MODE
+
+
+@pytest.mark.parametrize(
+    "mode, expected",
+    [
+        ("agent", True),
+        ("team", True),
+        ("agent.fast", True),
+        ("design", False),
+        ("code.normal", False),
+        ("future.mode", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_cron_job_mode(mode: str | None, expected: bool) -> None:
+    assert is_cron_job_mode(mode) is expected
 
 
 def test_cron_job_default_mode_matches_normalize_default() -> None:
@@ -330,12 +348,57 @@ class TestCronJobLazyMigration:
         assert disk["j3"]["work_mode"] == "work"
 
     @pytest.mark.asyncio
+    async def test_design_work_mode_not_overwritten(self, tmp_path):
+        """已有 work_mode=design 的 job 不被通道推断改写成 work。"""
+        store_path = tmp_path / "cron_jobs.json"
+        _write_cron_jobs(store_path, [
+            _make_legacy_job(
+                "j1",
+                work_mode="design",
+                project_id="default_design",
+                targets=[{"channel_id": "web"}],
+            ),
+        ])
+        original_mtime = store_path.stat().st_mtime
+
+        store = CronJobStore(path=store_path)
+        with patch(
+            "jiuwenswarm.gateway.cron.store._build_cron_project_lookup"
+        ) as mock_lookup:
+            jobs = await store.list_jobs()
+            mock_lookup.assert_not_called()
+
+        assert jobs[0].work_mode == "design"
+        assert jobs[0].project_id == "default_design"
+        assert store_path.stat().st_mtime == original_mtime
+        assert _read_cron_jobs(store_path)[0]["work_mode"] == "design"
+
+    @pytest.mark.asyncio
+    async def test_missing_work_mode_on_default_design_inferred_from_project_id(self, tmp_path):
+        """缺 work_mode 但 project_id=default_design 时,逆映射为 design,不按 web 通道写成 work。"""
+        store_path = tmp_path / "cron_jobs.json"
+        _write_cron_jobs(store_path, [
+            _make_legacy_job(
+                "j1",
+                project_id="default_design",
+                targets=[{"channel_id": "web"}],
+            ),
+        ])
+
+        store = CronJobStore(path=store_path)
+        jobs = await store.list_jobs()
+
+        assert jobs[0].work_mode == "design"
+        assert _read_cron_jobs(store_path)[0]["work_mode"] == "design"
+
+    @pytest.mark.asyncio
     async def test_no_migration_when_all_jobs_valid(self, tmp_path):
         """所有 job 都有合法 work_mode 时,不触发 lookup 与 writeback(零开销)。"""
         store_path = tmp_path / "cron_jobs.json"
         original_jobs = [
             _make_legacy_job("j1", work_mode="work", targets=[{"channel_id": "web"}]),
             _make_legacy_job("j2", work_mode="code", targets=[{"channel_id": "tui"}]),
+            _make_legacy_job("j3", work_mode="design", targets=[{"channel_id": "web"}]),
         ]
         _write_cron_jobs(store_path, original_jobs)
         original_mtime = store_path.stat().st_mtime

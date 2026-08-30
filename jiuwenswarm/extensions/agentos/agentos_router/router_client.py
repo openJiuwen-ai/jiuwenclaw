@@ -164,7 +164,12 @@ class AgentOSRouterClient(AgentServerClient):
         if callable(setter):
             setter(handler)
 
-    async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
+    async def send_request(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResponse:
         # 3rdagent.list / 3rdagent.switch are handled by Gateway ThirdAgent
         # (TUI local_handler), not via E2A send_request.
         if self._is_ssh_relay_request(envelope):
@@ -179,7 +184,12 @@ class AgentOSRouterClient(AgentServerClient):
             return self._routing_error_response(envelope, str(exc))
         try:
             runtime.attach_to_envelope(envelope)
-            return await self._yuanrong.send_request(envelope)
+            # create 后通过 YuanRong frontend WS 代理直连 instance，不走 invoke。
+            try:
+                ws_client = await self._get_ws_client(runtime)
+            except ValueError as exc:
+                return self._routing_error_response(envelope, str(exc))
+            return await ws_client.send_request(envelope, timeout=timeout)
         finally:
             await self._agent_manager.release(runtime.key)
 
