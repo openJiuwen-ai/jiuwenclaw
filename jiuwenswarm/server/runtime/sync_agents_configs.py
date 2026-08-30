@@ -227,16 +227,6 @@ def _collect_shared_skill_disk_paths(env: dict[str, Any]) -> str:
     「删首根同名 skill、次根留同名」时 SkillUseRail 可见内容会变（切到次根那份），但
     basename 集合不变 → 漏触发 reload。完整路径保留 (root, name) 身份，hash 精确反映
     磁盘 skill 集，对 rail 去重语义的将来变更也更稳健。
-
-    已知行为（resolve 穿透软链接）：key 用 ``Path.resolve()`` 取真实路径，
-    多个软链接若同指一个真实 skill 目录，resolve 后得到相同字符串，
-    在清单里被合并为一条。故增删其中任一软链接（只要仍有至少一个链接指向
-    该真实 skill）不改变 realpath 集合 → content_hash 不变 → 不触发 reload。
-    此为预期：内容未变（同一份 SKILL.md 仍在）时不应 reload。若业务要求
-    "增删任一软链接入口即触发 reload"，需改用 ``Path.absolute()`` 保留逻辑
-    路径身份，但代价是同一真实 skill 会被 SkillUseRail 重复加载（两条 key、
-    两份 Skill 对象、工具重复注册）；且须与 SkillUseRail 内部 key 口径
-    （``str(item.resolve())``，skill_use_rail.py:450）同步调整，避免两层错位。
     """
     if not isinstance(env, dict):
         return ""
