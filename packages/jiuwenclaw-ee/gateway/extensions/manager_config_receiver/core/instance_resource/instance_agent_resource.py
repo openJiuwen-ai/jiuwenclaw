@@ -48,7 +48,11 @@ def _build_row_from_resource(
         "resource_name": req.resource_name.strip(),
         "resource_desc": req.resource_desc,
         "ref_template_id": req.ref_template_id.strip(),
-        "grants": [grant.model_dump(mode="json") for grant in req.grants],
+        "match_expr": req.match_expr if req.match_expr is not None else [],
+        "granted_by": req.granted_by,
+        "expires_at": req.expires_at,
+        "enabled": bool(req.enabled),
+        "data": req.data,
         "created_at": now,
         "updated_at": now,
     }

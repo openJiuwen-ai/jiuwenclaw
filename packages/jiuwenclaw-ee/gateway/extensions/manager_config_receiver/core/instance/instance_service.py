@@ -2,7 +2,7 @@
 """Gateway 实例身份绑定（无主动心跳）。
 
 ``JIUWENCLAW_ID`` 优先取自 env；未设置时启动时自动生成 UUID。
-存活由 Manager 周期探活本机 ``/api/v1/health`` 确认。
+存活由 Manager 周期探活本机 ``/api/health`` 确认。
 """
 
 from __future__ import annotations

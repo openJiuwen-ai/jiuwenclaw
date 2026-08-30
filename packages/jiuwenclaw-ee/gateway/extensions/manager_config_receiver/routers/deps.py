@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""FastAPI 依赖：同步信封解析（无验签/解密）。"""
+"""FastAPI 依赖：同步请求 Body 解析（无验签/解密）。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Annotated, Any, TypeVar
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from ..http.sync_security import split_envelope
+from ..http.sync_security import split_business
 from ..infrastructure.utils import assert_jiuwenclaw_id_matches, get_jiuwenclaw_id
 from ..schemas.sync_schemas import SyncEnvelopeOnlyBody
 
@@ -21,7 +21,6 @@ TBody = TypeVar("TBody", bound=BaseModel)
 class SyncContext:
     """同步上下文（不含业务分发）。"""
 
-    revision: str
     business: dict[str, Any]
     jiuwenclaw_id: str
     method: str
@@ -42,12 +41,11 @@ def require_jiuwenclaw_id(business: dict[str, Any] | None = None) -> str:
 
 
 async def build_sync_context(body: BaseModel, method: str) -> SyncContext:
-    raw = body.model_dump(mode="python")
-    revision, business = split_envelope(raw)
+    raw = body.model_dump(mode="python", exclude_unset=False)
+    business = split_business(raw)
     jid = require_jiuwenclaw_id(business)
     business.pop("jiuwenclaw_id", None)
     return SyncContext(
-        revision=revision,
         business=business,
         jiuwenclaw_id=jid,
         method=method.upper(),
@@ -78,6 +76,6 @@ VerifySyncEnvelopeOnly = Annotated[
 ]
 
 
-def sync_write_data(sync: SyncContext, result: Any) -> dict[str, Any]:
-    """写接口统一 data：revision + 业务结果。"""
-    return {"revision": sync.revision, "result": result}
+def sync_write_data(_sync: SyncContext, result: Any) -> Any:
+    """写接口统一 data：业务结果（可为 null）。"""
+    return result
