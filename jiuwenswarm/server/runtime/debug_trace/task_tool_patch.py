@@ -137,6 +137,19 @@ def apply_task_tool_debug_patch() -> None:
                 source_label=f"subagent:builtin:{subagent_type}",
             )
             output = result.get("output", "")
+            result_type = result.get("result_type", "answer")
+            if result_type == "interrupt":
+                return ToolOutput(
+                    success=False,
+                    data={
+                        "output": output,
+                        "agent_id": subagent.card.id,
+                        "result_type": "interrupt",
+                        "interrupt_ids": result.get("interrupt_ids", []),
+                        "state": result.get("state", []),
+                    },
+                    error="subagent_interrupted",
+                )
             return ToolOutput(
                 success=True,
                 data={"output": output, "agent_id": subagent.card.id},
