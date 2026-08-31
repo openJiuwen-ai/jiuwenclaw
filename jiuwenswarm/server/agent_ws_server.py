@@ -85,7 +85,7 @@ from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.server.context import AgentServerServices, RequestContext
 from jiuwenswarm.server.dispatch import dispatch_to_handler
 from jiuwenswarm.server.transports.push_registry import (
-    WS_PUSH_SUBSCRIBER_ID,
+    make_ws_push_subscriber_id,
     get_push_registry,
 )
 from jiuwenswarm.server.transports.sink import WSSink
@@ -316,7 +316,7 @@ class AgentWebSocketServer:
         self._ping_timeout = ping_timeout
         self._server: Any = None
         # send_push的推送订阅者统一由PushRegistry持有，本类不持有当前连接；
-        # WS侧以固定id：`WS_PUSH_SUBSCRIBER_ID`注册。
+        # WS侧以每连接唯一id：``make_ws_push_subscriber_id(ws)``注册。
         # key是``_ws_capabilities_key``返回的str(id(ws))，与RequestContext.connection_id
         self._acp_client_capabilities_by_ws: dict[str, dict[str, Any]] = {}
         # AgentManager 实例（企业多租户入口见 TenantAgentPool，按企业版使用）
@@ -764,11 +764,12 @@ class AgentWebSocketServer:
         logger.info("[AgentWebSocketServer] 新连接: %s", remote)
 
         send_lock = asyncio.Lock()
-        # WS连接注册为推送订阅者，同id重复注册即覆盖，
-        # drop_on_stall=False：与 _GatewayWSPushSink「发送失败/变慢都不注销」的契约一致 ——
-        # gateway-ws 是固定 id 的单槽位，被摘掉后长连接不会重新注册，只能重启服务恢复。
+        # 每连接唯一订阅 id：短连接断开只清自己，不得抹掉仍存活的长连接（旧固定
+        # gateway-ws 单槽曾导致 send_push 永久失败、chat.file 到不了前台）。
+        # drop_on_stall=False：与 _GatewayWSPushSink「发送失败/变慢都不注销」一致。
+        push_subscriber_id = make_ws_push_subscriber_id(ws)
         get_push_registry().register(
-            WS_PUSH_SUBSCRIBER_ID,
+            push_subscriber_id,
             _GatewayWSPushSink(ws, send_lock),
             drop_on_stall=False,
         )
@@ -843,12 +844,8 @@ class AgentWebSocketServer:
                     IdentityStore.clear(identity_token)
                 except Exception:
                     logger.exception("[AgentWebSocketServer] identity clear failed")
-            # **无条件**注销：即使已有新连接接管，也照旧抹掉。
-            # 语义对齐重构前的 `self._current_ws = None` / `self._current_send_lock = None`，
-            # 是刻意保留的既有行为，**不要顺手改成「仅当仍是自己时才注销」** ——
-            # 它的失败方式是静默的（前端收不到推送但不报错），改动前请看
-            # `transports/push_registry.py` 模块 docstring 的单槽位语义一节。
-            get_push_registry().unregister(WS_PUSH_SUBSCRIBER_ID)
+            # 只注销本连接的唯一订阅 id，保留其他仍存活 WS 的推送订阅。
+            get_push_registry().unregister(push_subscriber_id)
             self._clear_ws_acp_client_capabilities(ws)
             connection_tasks = list(tasks)
             for task in connection_tasks:
@@ -1115,7 +1112,7 @@ class AgentWebSocketServer:
     def _tenant_pool() -> TenantAgentPool:
         return TenantAgentPool.get_instance()
 
-    async def send_push(self, msg) -> None:
+    async def send_push(self, msg) -> int:
         """AgentServer 主动向 Gateway 推送消息。
 
         payload 格式与 AgentResponse.payload 一致，
@@ -1124,20 +1121,31 @@ class AgentWebSocketServer:
         扇出给 :class:`PushRegistry` 里的全部订阅者：Gateway WS 连接与经
         ``GET /api/v1/events/stream`` 订阅的 HTTP 客户端都在其中，推送只有这一条
         路径。有订阅者即送达，一个都没有则记 warning。
+
+        Returns:
+            成功送达的订阅者数量。``0`` 表示未投递（无订阅者 / 编码失败 /
+            过滤后无人匹配 / sink 全部失败）。调用方（如 ``send_file_to_user``）
+            应用此返回值判定成败，勿再把「仅打了 warning」当成发送成功。
         """
         registry = get_push_registry()
         if registry.subscriber_count() == 0:
             # 一个去处都没有：保持原有告警与早退（连 wire 都不构造）。
             logger.warning(
-                "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接"
+                "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接 "
+                "session_id=%s request_id=%s event_type=%s",
+                msg.get("session_id", ""),
+                msg.get("request_id", ""),
+                (msg.get("payload") or {}).get("event_type", "")
+                if isinstance(msg.get("payload"), dict)
+                else "",
             )
-            return
+            return 0
 
         try:
             wire = build_server_push_wire(msg)
         except Exception as e:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
-            return
+            return 0
 
         delivered = await registry.push(wire)
 
@@ -1149,7 +1157,7 @@ class AgentWebSocketServer:
                 "（内容过大降级为错误帧，或订阅者过滤后无人匹配）: channel_id=%s",
                 msg.get("channel_id", ""),
             )
-            return
+            return 0
 
         response_kind = str(msg.get("response_kind") or "").strip()
         if response_kind:
@@ -1166,6 +1174,7 @@ class AgentWebSocketServer:
                 msg.get("channel_id", ""),
                 delivered,
             )
+        return delivered
 
     def get_agent(self):
         """获取 default agent 实例（向后兼容）."""

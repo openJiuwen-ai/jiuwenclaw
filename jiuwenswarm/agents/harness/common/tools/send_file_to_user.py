@@ -364,16 +364,6 @@ class SendFileToolkit:
             from jiuwenswarm.server.runtime.session.session_history import (
                 append_history_record,
             )
-            append_history_record(
-                session_id=route.session_id,
-                request_id=route.request_id,
-                channel_id=route.channel_id,
-                role="assistant",
-                event_type="chat.file",
-                content="",
-                timestamp=time.time(),
-                extra={"files": files_payload},
-            )
 
             msg = {
                 "request_id": route.request_id,
@@ -395,8 +385,41 @@ class SendFileToolkit:
                 merged_meta["send_file_targets"] = list(target_channel_list)
             if merged_meta:
                 msg["metadata"] = merged_meta
-            await server.send_push(msg)
+
+            delivered = await server.send_push(msg)
+            # send_push 在无订阅者时只打 warning 并返回 0；不得再伪装成「成功发送」。
+            if not isinstance(delivered, int) or delivered <= 0:
+                logger.warning(
+                    "[SendFileToolkit] send_push 未送达 session_id=%s request_id=%s delivered=%s",
+                    route.session_id,
+                    route.request_id,
+                    delivered,
+                )
+                return (
+                    "发送文件失败：推送通道无活跃订阅者或投递失败"
+                    f"（delivered={delivered!r}）。请检查 Gateway/Relay WebSocket 连接后重试。"
+                )
+
+            # 文件已通过 send_push 送达：去重标记必须先于历史记录写入，
+            # 历史 DB/IO 失败不得伪装成「提交文件失败」导致 agent 重试重复投递。
             _mark_files_sent(route.session_id, valid_files)
+            try:
+                append_history_record(
+                    session_id=route.session_id,
+                    request_id=route.request_id,
+                    channel_id=route.channel_id,
+                    role="assistant",
+                    event_type="chat.file",
+                    content="",
+                    timestamp=time.time(),
+                    extra={"files": files_payload},
+                )
+            except Exception:
+                logger.warning(
+                    "[SendFileToolkit] append_history_record 失败 session_id=%s",
+                    route.session_id,
+                    exc_info=True,
+                )
             result_parts = [f"成功发送 {len(valid_files)} 个文件"]
             if skipped_files:
                 result_parts.append("以下文件已在本次会话发送过，已跳过：")
