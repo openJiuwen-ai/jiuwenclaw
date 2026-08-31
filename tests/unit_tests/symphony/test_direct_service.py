@@ -974,6 +974,11 @@ async def test_swarm_refresh_publishes_state_when_file_changes_but_fingerprint_d
         "fingerprint_config_sha256",
         "graph_config",
         "llm_sha256",
+        "snapshot_id",
+        "source",
+        "content_hash",
+        "capability_count",
+        "metadata",
     }
     assert "symphony_graph_build" not in expected_snapshot
     assert (
@@ -981,6 +986,10 @@ async def test_swarm_refresh_publishes_state_when_file_changes_but_fingerprint_d
         == artifact["source_snapshot"]["fingerprint_sha256"]
     )
     assert expected_snapshot["llm_sha256"] == artifact["source_snapshot"]["llm_sha256"]
+    assert (
+        expected_snapshot["snapshot_id"]
+        == artifact["provider_source_snapshot"]["snapshot_id"]
+    )
 
 
 @pytest.mark.asyncio

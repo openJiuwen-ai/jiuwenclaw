@@ -6,7 +6,9 @@ from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
 from openjiuwen.symphony import (
+    CapabilityFingerprint,
     CapabilityDescriptor,
+    FingerprintArtifact,
     FingerprintSettings,
     OrchestrationConfig,
     ScanResult,
@@ -33,6 +35,24 @@ class ScanResultCapabilityProvider:
         self,
     ) -> tuple[SourceSnapshot, tuple[CapabilityDescriptor, ...]]:
         return self.result.source_snapshot, self.result.capabilities
+
+
+@dataclass(frozen=True)
+class FingerprintArtifactCapabilityProvider:
+    """Expose one immutable fingerprint artifact through CapabilityProvider."""
+
+    artifact: FingerprintArtifact
+
+    async def capabilities(self) -> tuple[CapabilityFingerprint, ...]:
+        return self.artifact.fingerprints
+
+    async def source_snapshot(self) -> SourceSnapshot:
+        return self.artifact.source_snapshot
+
+    async def inventory_snapshot(
+        self,
+    ) -> tuple[SourceSnapshot, tuple[CapabilityFingerprint, ...]]:
+        return self.artifact.source_snapshot, self.artifact.fingerprints
 
 
 class FingerprintLLMAdapter:
