@@ -1448,6 +1448,10 @@ async def test_config_set_saves_external_cli_path_after_detection(monkeypatch):
         },
     )
     monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_claude_dependency_available_or_start_install",
+        lambda: None,
+    )
+    monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
         lambda agents, publish_url=None: updates.append((agents, publish_url)),
     )
@@ -1746,9 +1750,22 @@ def test_codex_dependency_install_is_not_started_twice(monkeypatch):
     assert len(install_calls) == 1
 
 
-def test_codex_dependency_install_is_not_started_in_frozen_desktop(monkeypatch):
-    with app_web_handlers._CODEX_DEPENDENCY_INSTALL_LOCK:
-        app_web_handlers._CODEX_DEPENDENCY_INSTALL_STATUS.update({
+@pytest.mark.parametrize(
+    ("cli_agent", "required_module"),
+    [
+        ("claude", "claude_agent_sdk"),
+        ("codex", "openai_codex"),
+    ],
+)
+def test_external_cli_dependency_install_starts_managed_runtime_in_frozen_desktop(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_agent: str,
+    required_module: str,
+) -> None:
+    lock = app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]
+    status = app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUSES[cli_agent]
+    with lock:
+        status.update({
             "status": "idle",
             "phase": "idle",
             "error": "",
@@ -1761,21 +1778,113 @@ def test_codex_dependency_install_is_not_started_in_frozen_desktop(monkeypatch):
     original_find_spec = importlib.util.find_spec
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.importlib.util.find_spec",
-        lambda name: None if name == "openai_codex" else original_find_spec(name),
+        lambda name: None if name == required_module else original_find_spec(name),
     )
     monkeypatch.setattr(app_web_handlers.sys, "frozen", True, raising=False)
 
-    def fail_thread_start(*args: object, **kwargs: object) -> None:
-        raise AssertionError("frozen desktop must not start a pip install thread")
+    created_threads: list[SimpleNamespace] = []
 
-    monkeypatch.setattr(app_web_handlers.threading, "Thread", fail_thread_start)
+    class _Thread:
+        def __init__(
+            self,
+            *,
+            target: object,
+            args: tuple[str, ...],
+            name: str,
+            daemon: bool,
+        ) -> None:
+            created_threads.append(
+                SimpleNamespace(target=target, args=args, name=name, daemon=daemon, started=False)
+            )
 
-    snapshot = app_web_handlers._ensure_codex_dependency_available_or_start_install()
+        def start(self) -> None:
+            created_threads[-1].started = True
 
-    assert snapshot and snapshot["status"] == "failed"
-    assert snapshot["phase"] == "failed"
-    assert "desktop package does not include Codex support" in snapshot["error"]
-    assert snapshot["log_tail"] == []
+    monkeypatch.setattr(app_web_handlers.threading, "Thread", _Thread)
+
+    ensure_dependency = (
+        app_web_handlers._ensure_claude_dependency_available_or_start_install
+        if cli_agent == "claude"
+        else app_web_handlers._ensure_codex_dependency_available_or_start_install
+    )
+    first = ensure_dependency()
+    second = ensure_dependency()
+
+    assert first and first["status"] == "running"
+    assert first["phase"] == "preparing"
+    assert second and second["status"] == "running"
+    assert len(created_threads) == 1
+    assert created_threads[0].target is app_web_handlers._run_managed_external_cli_runtime_install
+    assert created_threads[0].args == (cli_agent,)
+    assert created_threads[0].name == f"{cli_agent}-managed-runtime-install"
+    assert created_threads[0].daemon is True
+    assert created_threads[0].started is True
+
+
+def test_optional_dependency_install_times_out_after_one_hour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Process:
+        stdout = None
+
+        def __init__(self) -> None:
+            self.killed = False
+            self.waited = False
+
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self) -> int:
+            self.waited = True
+            return 1
+
+    class _Thread:
+        def __init__(self, **_kwargs: object) -> None:
+            self.joined = False
+
+        def start(self) -> None:
+            return None
+
+        def join(self, *, timeout: int) -> None:
+            assert timeout == 1
+            self.joined = True
+
+    process = _Process()
+    monotonic_values = iter(
+        [
+            10.0,
+            10.0 + app_web_handlers._OPTIONAL_DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
+        ],
+    )
+    monkeypatch.setattr(app_web_handlers, "_is_frozen_runtime", lambda: False)
+    monkeypatch.setattr(
+        app_web_handlers,
+        "_build_optional_dependency_install_args",
+        lambda _package: ["installer"],
+    )
+    monkeypatch.setattr(
+        app_web_handlers.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(app_web_handlers.threading, "Thread", _Thread)
+    monkeypatch.setattr(
+        app_web_handlers.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="failed to install codex dependency: timed out",
+    ):
+        app_web_handlers._install_optional_dependency("codex", "package", "openai_codex")
+
+    assert process.killed is True
+    assert process.waited is True
 
 
 @pytest.mark.asyncio
@@ -1785,13 +1894,24 @@ async def test_external_cli_codex_install_status_returns_snapshot():
     with app_web_handlers._CODEX_DEPENDENCY_INSTALL_LOCK:
         app_web_handlers._CODEX_DEPENDENCY_INSTALL_STATUS.update({
             "status": "running",
-            "phase": "installing",
+            "phase": "downloading",
             "error": "",
             "last_log": "Collecting openjiuwen",
             "log_tail": ["Collecting openjiuwen"],
             "started_at": 1.0,
             "finished_at": 0.0,
             "updated_at": 2.0,
+            "downloaded_bytes": 1024,
+            "total_bytes": 4096,
+            "bytes_per_second": 512.0,
+            "eta_seconds": 6.0,
+            "artifact_index": 1,
+            "artifact_count": 2,
+            "current_package": "openai-codex-cli-bin",
+            "current_version": "0.144.4",
+            "download_attempt": 3,
+            "download_max_attempts": 5,
+            "switching_source": False,
         })
 
     await channel.methods["external_cli.codex_install_status"](
@@ -1804,9 +1924,16 @@ async def test_external_cli_codex_install_status_returns_snapshot():
     payload = channel.responses[-1]["payload"]
     assert channel.responses[-1]["ok"] is True
     assert payload["status"] == "running"
-    assert payload["phase"] == "installing"
+    assert payload["phase"] == "downloading"
     assert payload["log_tail"] == ["Collecting openjiuwen"]
     assert payload["log_tail"] is not app_web_handlers._CODEX_DEPENDENCY_INSTALL_STATUS["log_tail"]
+    assert payload["downloaded_bytes"] == 1024
+    assert payload["total_bytes"] == 4096
+    assert payload["bytes_per_second"] == 512.0
+    assert payload["eta_seconds"] == 6.0
+    assert payload["download_attempt"] == 3
+    assert payload["download_max_attempts"] == 5
+    assert payload["switching_source"] is False
 
 
 @pytest.mark.asyncio

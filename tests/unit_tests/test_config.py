@@ -3,11 +3,14 @@
 """Unit tests for config module."""
 
 import math
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 
+from jiuwenswarm.common import config as config_module
 from jiuwenswarm.common.config import (
     get_configured_read_image_multimodal,
     get_config_raw,
@@ -16,6 +19,7 @@ from jiuwenswarm.common.config import (
     get_skill_evolution_enabled,
     migrate_config_from_template,
     replace_teams_in_config,
+    reset_external_cli_agents_in_config,
     resolve_env_vars,
     update_external_cli_agents_in_config,
     update_skill_retrieval_in_config,
@@ -34,6 +38,93 @@ def test_configured_read_image_multimodal_returns_none_for_auto() -> None:
     assert get_configured_read_image_multimodal(
         {"react": {"enable_read_image_multimodal": None}}
     ) is None
+
+
+def test_reset_external_cli_agents_removes_runtime_config_and_preserves_other_values(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_config_file: Path,
+) -> None:
+    temp_config_file.write_text(
+        yaml.safe_dump(
+            {
+                "preferred_language": "zh",
+                "modes": {
+                    "team": {
+                        "jiuwen_team": {
+                            "enable_swarmflow": True,
+                            "external_cli_agents": [
+                                {"cli_agent": "claude"},
+                                {"cli_agent": "codex"},
+                            ],
+                            "external_transport": {
+                                "type": "hybrid",
+                                "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
+                            },
+                        }
+                    }
+                },
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_module, "CONFIG_YAML_PATH", temp_config_file)
+
+    reset_external_cli_agents_in_config()
+
+    saved = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    team = saved["modes"]["team"]["jiuwen_team"]
+    assert "external_cli_agents" not in team
+    assert "external_transport" not in team
+    assert team["enable_swarmflow"] is True
+    assert saved["preferred_language"] == "zh"
+
+
+def test_reset_external_cli_agents_uses_update_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    data: dict[str, Any] = {
+        "modes": {
+            "team": {
+                "jiuwen_team": {
+                    "external_cli_agents": [{"cli_agent": "claude"}],
+                    "external_transport": {"type": "hybrid"},
+                }
+            }
+        }
+    }
+
+    def _update_config(
+        mutator: Callable[[dict[str, Any]], dict[str, Any] | None],
+    ) -> dict[str, Any]:
+        calls.append(data)
+        result = mutator(data)
+        return data if result is None else result
+
+    monkeypatch.setattr(config_module, "update_config", _update_config)
+
+    reset_external_cli_agents_in_config()
+
+    assert len(calls) == 1
+    team = data["modes"]["team"]["jiuwen_team"]
+    assert "external_cli_agents" not in team
+    assert "external_transport" not in team
+
+
+def test_reset_external_cli_agents_does_not_write_when_config_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_config_file: Path,
+) -> None:
+    monkeypatch.setattr(config_module, "CONFIG_YAML_PATH", temp_config_file)
+    monkeypatch.setattr(
+        config_module,
+        "dump_yaml_round_trip",
+        lambda *_args: pytest.fail("no-op reset must not write config"),
+    )
+
+    reset_external_cli_agents_in_config()
 
 
 class TestResolveEnvVars:

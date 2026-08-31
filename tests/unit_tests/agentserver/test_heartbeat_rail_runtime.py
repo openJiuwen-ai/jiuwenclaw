@@ -185,15 +185,36 @@ async def test_other_heartbeat_is_session_busy_but_current_run_is_excluded() -> 
     await admission.end_heartbeat("s1", "run-a")
 
 
-async def test_team_round_uses_same_atomic_heartbeat_admission() -> None:
+async def test_team_activity_blocks_heartbeat_without_serializing_steers() -> None:
     admission = SessionRunAdmission()
     service = HeartbeatExecutionService(object(), admission)
 
     await admission.begin_team_user("team-busy")
+    await asyncio.wait_for(admission.begin_team_user("team-busy"), timeout=0.1)
     assert service.is_session_busy("team-busy") is True
     assert await admission.try_begin_heartbeat("team-busy", "hb-race") is False
-    await admission.end_user("team-busy")
+    await admission.complete_team_user_submission("team-busy", accepted=True)
+    await admission.complete_team_user_submission("team-busy", accepted=True)
+    await admission.end_team_user("team-busy")
     assert service.is_session_busy("team-busy") is False
+
+
+async def test_team_submission_keeps_heartbeat_out_across_stale_terminal() -> None:
+    admission = SessionRunAdmission()
+
+    await admission.begin_team_user("team-submit-race")
+    await admission.end_team_user("team-submit-race")
+    assert await admission.try_begin_heartbeat("team-submit-race", "hb-early") is False
+
+    await admission.complete_team_user_submission(
+        "team-submit-race",
+        accepted=True,
+    )
+    assert await admission.try_begin_heartbeat("team-submit-race", "hb-mid") is False
+
+    await admission.end_team_user("team-submit-race")
+    assert await admission.try_begin_heartbeat("team-submit-race", "hb-next") is True
+    await admission.end_heartbeat("team-submit-race", "hb-next")
 
 
 def test_retain_agent_transfers_pin_to_current_facade() -> None:

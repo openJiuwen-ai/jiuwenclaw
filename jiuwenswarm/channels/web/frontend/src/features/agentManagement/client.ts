@@ -169,6 +169,17 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
         return rethrowAgentError(error);
       }
     },
+    async importAgentTemplate(path) {
+      try {
+        const payload = await webRequest<{ id?: string }>('agent_templates.import_local', { path });
+        if (!payload?.id) {
+          throw new AgentManagementError('Imported Agent id is empty', 'agent_import_empty', false);
+        }
+        return { id: payload.id };
+      } catch (error) {
+        return rethrowAgentError(error);
+      }
+    },
     async installDefinition(id) {
       try {
         await webRequest('agent_templates.install', { id });
