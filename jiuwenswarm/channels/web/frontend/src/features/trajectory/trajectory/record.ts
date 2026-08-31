@@ -22,6 +22,8 @@ export type TrajectoryCellKind =
 /** Recorded inputs needed to derive assistant TTFT and decode throughput. */
 export interface AssistantMetricDetail {
   timingRecorded: boolean
+  /** Whether the provider response exposed token-level streaming timing. */
+  streaming?: boolean | null
   stepStartTime: number | null
   firstTokenTime: number | null
   completedTime: number | null

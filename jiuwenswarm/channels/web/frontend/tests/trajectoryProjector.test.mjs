@@ -258,7 +258,7 @@ test('ownerless ask_user result remains one routed TOOL while other ownerless to
   setStringAttribute(askUser, 'openjiuwen.request.id', 'resume-request');
   const turn = askUser.attributes.find(attribute => attribute.key === 'openjiuwen.turn.number');
   assert.ok(turn);
-  turn.value = { intValue: '2' };
+  askUser.attributes = askUser.attributes.filter(attribute => attribute !== turn);
   setStringAttribute(routedRoot, 'session.id', 'session-ask-user');
   setStringAttribute(routedRoot, 'gen_ai.conversation.id', 'session-ask-user');
   setStringAttribute(routedRoot, 'openjiuwen.execution.subject.id', 'main');

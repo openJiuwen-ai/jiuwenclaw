@@ -651,7 +651,6 @@ function isRoutedAskUserResult(
     && conversationId !== undefined
     && subjectId !== undefined
     && attributes.requestId !== undefined
-    && positiveSafeInteger(attributes.turnNumber) !== undefined
     && (mainSubject || subagentSubject)
     && sameRootOwner
 }
@@ -763,6 +762,7 @@ function assistantCell(span: ProjectedSpan): TrajectoryCell {
     outputBlocks: blocks.filter(block => block.type === 'text' || block.type === 'reasoning'),
     assistantMetrics: {
       timingRecorded: true,
+      streaming: span.attributes.requestStream ?? null,
       stepStartTime: start,
       firstTokenTime: firstChunkSeconds === undefined ? null : start + firstChunkSeconds * 1_000,
       completedTime: span.endTimeUnixNano === undefined

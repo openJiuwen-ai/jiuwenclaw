@@ -324,11 +324,13 @@ function totalTime(metrics: AssistantMetricDetail): string {
 function ttft(metrics: AssistantMetricDetail): string {
   if (!metrics.timingRecorded) return 'Not recorded'
   if (metrics.stepStartTime === null) return 'Step start unavailable'
+  if (metrics.streaming === false) return 'Not applicable (non-stream)'
   if (metrics.firstTokenTime === null) return 'First token unavailable'
   return formatDurationMs(Math.max(0, metrics.firstTokenTime - metrics.stepStartTime))
 }
 
 function generationTime(metrics: AssistantMetricDetail): string {
+  if (metrics.streaming === false) return 'Not separately recorded'
   if (!metrics.timingRecorded || metrics.firstTokenTime === null) return 'First token unavailable'
   if (metrics.completedTime === null) return 'Pending'
   return formatDurationMs(Math.max(0, metrics.completedTime - metrics.firstTokenTime))
@@ -337,6 +339,7 @@ function generationTime(metrics: AssistantMetricDetail): string {
 function throughput(metrics: AssistantMetricDetail): string {
   if (!metrics.usageProvided) return 'Usage unavailable'
   if (metrics.outputTokens === null) return 'Output tokens unavailable'
+  if (metrics.streaming === false) return 'Not separately recorded'
   if (!metrics.timingRecorded || metrics.firstTokenTime === null) return 'First token unavailable'
   if (metrics.completedTime === null) return 'Pending'
   const generationSeconds = (metrics.completedTime - metrics.firstTokenTime) / 1_000
