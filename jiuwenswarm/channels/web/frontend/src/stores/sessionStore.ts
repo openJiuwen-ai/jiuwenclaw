@@ -276,6 +276,8 @@ export interface TeamTaskEvent {
   team_name?: string;
   title?: string;
   content?: string;
+  /** Swarmflow run that produced this task (absent on plain team tasks). */
+  workflow_run_id?: string;
   // Truncation observability flags — backend may set these on team.task.created/
   // updated events when the title/content exceeded the wire limit. Purely
   // passthrough: the store does not render a badge; the inline marker
@@ -306,6 +308,8 @@ export interface TeamTask {
   timestamp?: number;
   skills?: string[];
   files?: string[];
+  /** Swarmflow run that produced this task (absent on plain team tasks). */
+  workflow_run_id?: string;
   // Truncation observability flags — set by the backend on team.task.created/
   // updated events when title/content exceeded the wire limit. Carried through
   // the normalize/upsert pipeline; a status-only event MUST NOT reset these

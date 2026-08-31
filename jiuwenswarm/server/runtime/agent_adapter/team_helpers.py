@@ -3444,6 +3444,7 @@ def _workflow_updated_to_team_events(
                     "task_id": task_id,
                     "title": phase.get("name") or phase_id,
                     "status": task_status,
+                    "workflow_run_id": run_id,
                 }
                 if terminal_planned:
                     task_event["content"] = _WF_TERMINAL_PLANNED_CONTENT
@@ -3473,6 +3474,7 @@ def _workflow_updated_to_team_events(
                             "member_id": member_id,
                             "name": agent.get("name") or agent_id,
                             "status": "busy",
+                            "workflow_run_id": run_id,
                         },
                     )
                 )
@@ -3491,6 +3493,7 @@ def _workflow_updated_to_team_events(
                                 "member_id": member_id,
                                 "old_status": old_status,
                                 "new_status": agent_status,
+                                "workflow_run_id": run_id,
                             },
                         )
                     )

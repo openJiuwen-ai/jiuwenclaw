@@ -356,6 +356,7 @@
     "elapsedTime": "已花费时间: {{value}}",
     "duration": "耗时",
     "noTasks": "当前暂无任务",
+    "moreTasks": "还有 {{count}} 个任务",
     "noMemberData": "暂无成员数据",
     "selectMember": "请选择 Team 成员",
     "detailTabs": {

@@ -368,6 +368,7 @@
     "elapsedTime": "Elapsed time: {{value}}",
     "duration": "Duration",
     "noTasks": "No tasks currently",
+    "moreTasks": "{{count}} more tasks",
     "noMemberData": "No member data",
     "selectMember": "Select a team member",
     "detailTabs": {

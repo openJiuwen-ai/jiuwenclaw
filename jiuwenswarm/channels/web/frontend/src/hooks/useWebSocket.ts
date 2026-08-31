@@ -4143,6 +4143,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             description?: string;
             content?: string;
             updated_at?: number | string | null;
+            workflow_run_id?: string;
           };
           if (e.type === 'team.task.created' && e.task_id) {
             useSessionStore.getState().registerConfirmedTeamTaskCreation(sessionId, e.task_id);
@@ -4160,6 +4161,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             title: e.title || e.name || e.description,
             content: e.content,
             updated_at: e.updated_at,
+            workflow_run_id: e.workflow_run_id,
           });
           const normalizedTask = normalizeTaskEvent(event);
           if (normalizedTask) {
