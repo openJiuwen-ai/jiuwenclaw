@@ -14,6 +14,7 @@ import re
 import sys
 import threading
 import time
+import weakref
 from contextlib import AsyncExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -810,9 +811,11 @@ class OfficeClawMcpRegistration:
     request_id: str
     tool_ids: tuple[str, ...]
     tool_names: tuple[str, ...]
+    tool_instances: tuple[RequestScopedOfficeClawMcpTool, ...] = ()
 
 
 OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX = "office-claw-request-"
+OFFICE_CLAW_EXPECTED_TOOL_IDS_KWARG = "_office_claw_expected_tool_ids"
 
 # Attribute name used to store the request-scoped OfficeClaw tool id allowlist.
 # The allowlist must cross the asyncio task boundary between the caller's task
@@ -830,6 +833,116 @@ _active_office_claw_tool_ids: ContextVar[frozenset[str] | None] = ContextVar(
     "active_office_claw_tool_ids",
     default=None,
 )
+
+# Process-local live registrations. DeepAgent runs tools on an interaction
+# round task created by the supervisor, which does not inherit the facade
+# task's ContextVar. ProgressiveToolRail / Tool.invoke re-bind from here.
+_live_office_claw_allowlists_by_tool_id: dict[str, frozenset[str]] = {}
+_live_office_claw_registration_count_by_tool_name: dict[str, int] = {}
+_live_office_claw_tool_instances: weakref.WeakKeyDictionary[Any, frozenset[str]] = (
+    weakref.WeakKeyDictionary()
+)
+_live_office_claw_allowlist_lock = threading.Lock()
+
+
+def _office_claw_tool_name_from_tool_id(tool_id: str) -> str:
+    normalized = str(tool_id or "").strip()
+    marker = ".office-claw."
+    if marker in normalized:
+        return normalized.split(marker, 1)[1]
+    return normalized.rsplit(".", 1)[-1]
+
+
+def publish_live_office_claw_allowlist(tool_ids: Iterable[str]) -> None:
+    """Publish a request's OfficeClaw tool ids for interaction-round re-bind."""
+
+    ids = frozenset(str(tool_id).strip() for tool_id in tool_ids if str(tool_id).strip())
+    seen_names: set[str] = set()
+    with _live_office_claw_allowlist_lock:
+        for tool_id in ids:
+            _live_office_claw_allowlists_by_tool_id[tool_id] = ids
+            tool_name = _office_claw_tool_name_from_tool_id(tool_id)
+            if tool_name in seen_names:
+                continue
+            seen_names.add(tool_name)
+            _live_office_claw_registration_count_by_tool_name[tool_name] = (
+                _live_office_claw_registration_count_by_tool_name.get(tool_name, 0) + 1
+            )
+
+
+def revoke_live_office_claw_allowlist(tool_ids: Iterable[str]) -> None:
+    """Drop live allowlist entries after request-scoped MCP cleanup."""
+
+    seen_names: set[str] = set()
+    with _live_office_claw_allowlist_lock:
+        for tool_id in tool_ids:
+            normalized = str(tool_id or "").strip()
+            if normalized:
+                _live_office_claw_allowlists_by_tool_id.pop(normalized, None)
+                tool_name = _office_claw_tool_name_from_tool_id(normalized)
+                if tool_name in seen_names:
+                    continue
+                seen_names.add(tool_name)
+                count = _live_office_claw_registration_count_by_tool_name.get(tool_name, 0)
+                if count <= 1:
+                    _live_office_claw_registration_count_by_tool_name.pop(tool_name, None)
+                else:
+                    _live_office_claw_registration_count_by_tool_name[tool_name] = count - 1
+
+
+def get_live_office_claw_allowlist_for_tool_id(tool_id: str) -> frozenset[str] | None:
+    """Return the live allowlist that currently owns ``tool_id``, if any."""
+
+    normalized = str(tool_id or "").strip()
+    if not normalized:
+        return None
+    with _live_office_claw_allowlist_lock:
+        return _live_office_claw_allowlists_by_tool_id.get(normalized)
+
+
+def is_office_claw_tool_name_live_concurrent(tool_name: str) -> bool:
+    """True when more than one live request-scoped registration owns ``tool_name``."""
+
+    normalized = str(tool_name or "").strip()
+    if not normalized:
+        return False
+    with _live_office_claw_allowlist_lock:
+        return _live_office_claw_registration_count_by_tool_name.get(normalized, 0) > 1
+
+
+def register_live_office_claw_tool_instance(
+    tool: RequestScopedOfficeClawMcpTool,
+    tool_ids: Iterable[str],
+) -> None:
+    """Track one request-scoped tool object for safe unbound re-bind."""
+
+    ids = frozenset(str(tool_id).strip() for tool_id in tool_ids if str(tool_id).strip())
+    if ids:
+        with _live_office_claw_allowlist_lock:
+            _live_office_claw_tool_instances[tool] = ids
+
+
+def unregister_live_office_claw_tool_instance(tool: RequestScopedOfficeClawMcpTool) -> None:
+    """Drop a request-scoped tool object from the live instance registry."""
+
+    with _live_office_claw_allowlist_lock:
+        _live_office_claw_tool_instances.pop(tool, None)
+
+
+def get_live_office_claw_allowlist_for_tool_instance(
+    tool: RequestScopedOfficeClawMcpTool,
+) -> frozenset[str] | None:
+    """Return the allowlist registered for this tool object, if still live."""
+
+    with _live_office_claw_allowlist_lock:
+        return _live_office_claw_tool_instances.get(tool)
+
+
+def _clear_live_office_claw_allowlists_for_tests() -> None:
+    with _live_office_claw_allowlist_lock:
+        _live_office_claw_allowlists_by_tool_id.clear()
+        _live_office_claw_registration_count_by_tool_name.clear()
+        _live_office_claw_tool_instances.clear()
 
 
 def _office_claw_tool_ids_carrier(agent: Any) -> Any:
@@ -1208,6 +1321,46 @@ class RequestScopedOfficeClawMcpTool(Tool):
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
 
     async def invoke(self, inputs: Any, **kwargs: Any) -> dict[str, Any]:
+        tool_id = str(getattr(self._card, "id", "") or "")
+        if get_active_office_claw_mcp_tool_ids() is None and tool_id.startswith(
+            OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX
+        ):
+            live = self._resolve_unbound_office_claw_allowlist(tool_id, kwargs)
+            if live is not None:
+                with bind_active_office_claw_mcp_tools(live):
+                    return await self._invoke_with_active_binding(inputs, **kwargs)
+        return await self._invoke_with_active_binding(inputs, **kwargs)
+
+    def _resolve_unbound_office_claw_allowlist(
+        self,
+        tool_id: str,
+        kwargs: Mapping[str, Any],
+    ) -> frozenset[str] | None:
+        """Re-bind only when the caller or live registry proves ownership."""
+
+        expected_raw = kwargs.get(OFFICE_CLAW_EXPECTED_TOOL_IDS_KWARG)
+        if expected_raw is not None:
+            expected = frozenset(
+                str(item).strip() for item in expected_raw if str(item).strip()
+            )
+            return expected if tool_id in expected else None
+
+        live = get_live_office_claw_allowlist_for_tool_instance(self)
+        if live is not None and tool_id in live:
+            return live
+
+        tool_name = str(getattr(self._card, "name", "") or "")
+        if is_office_claw_tool_name_live_concurrent(tool_name):
+            return None
+
+        live_by_id = get_live_office_claw_allowlist_for_tool_id(tool_id)
+        if live_by_id is not None and tool_id in live_by_id:
+            return live_by_id
+        return None
+
+    async def _invoke_with_active_binding(
+        self, inputs: Any, **kwargs: Any
+    ) -> dict[str, Any]:
         from mcp import ClientSession
         from mcp.client.stdio import stdio_client
 
@@ -1251,6 +1404,7 @@ class RequestScopedOfficeClawMcpTool(Tool):
 
 
 __all__ = [
+    "OFFICE_CLAW_EXPECTED_TOOL_IDS_KWARG",
     "OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX",
     "OfficeClawMcpRegistration",
     "RequestScopedOfficeClawMcpTool",
@@ -1265,10 +1419,17 @@ __all__ = [
     "extract_enabled_mcp_server_entries",
     "extract_office_claw_mcp",
     "get_active_office_claw_mcp_tool_ids",
+    "get_live_office_claw_allowlist_for_tool_id",
+    "get_live_office_claw_allowlist_for_tool_instance",
     "invalidate_office_claw_mcp_schema_cache",
+    "is_office_claw_tool_name_live_concurrent",
     "list_office_claw_mcp_tools",
     "preflight_mcp_server_reachable",
+    "publish_live_office_claw_allowlist",
+    "register_live_office_claw_tool_instance",
     "resolve_active_office_claw_tool_id",
+    "revoke_live_office_claw_allowlist",
+    "unregister_live_office_claw_tool_instance",
     "validate_office_claw_mcp_config",
     "_check_dangerous_args",
     "_is_blocked_host",

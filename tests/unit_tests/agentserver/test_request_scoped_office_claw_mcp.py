@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from openjiuwen.core.foundation.tool import ToolCard
@@ -105,6 +105,7 @@ def _bare_session_adapter() -> JiuWenSwarmDeepAdapter:
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = SimpleNamespace(ability_manager=_AbilityManager())
     adapter._active_office_claw_mcp = None
+    adapter._active_office_claw_tool_instances = ()
     return adapter
 
 
@@ -170,6 +171,138 @@ def test_request_scoped_tool_allowlist_rejects_unbound_invoke() -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_scoped_tool_invoke_rebinds_from_live_allowlist() -> None:
+    from jiuwenswarm.common.mcp_config import (
+        _clear_live_office_claw_allowlists_for_tests,
+        get_active_office_claw_mcp_tool_ids,
+        publish_live_office_claw_allowlist,
+        register_live_office_claw_tool_instance,
+        revoke_live_office_claw_allowlist,
+        unregister_live_office_claw_tool_instance,
+    )
+
+    _clear_live_office_claw_allowlists_for_tests()
+    tool_id = "office-claw-request-aaa.office-claw.office_claw_multi_mention"
+    card = ToolCard(
+        id=tool_id,
+        name="office_claw_multi_mention",
+        description="multi",
+        input_params={},
+    )
+    tool = RequestScopedOfficeClawMcpTool(
+        card,
+        {
+            "command": "node",
+            "args": ["index.js"],
+            "cwd": ".",
+            "env": {"OFFICE_CLAW_INVOCATION_ID": "aaa"},
+        },
+    )
+    publish_live_office_claw_allowlist([tool_id])
+    register_live_office_claw_tool_instance(tool, [tool_id])
+    seen: dict[str, object] = {}
+
+    async def _capture(inputs, **kwargs):
+        seen["allowed"] = get_active_office_claw_mcp_tool_ids()
+        return {"result": "ok"}
+
+    try:
+        with patch.object(
+            RequestScopedOfficeClawMcpTool,
+            "_invoke_with_active_binding",
+            new=AsyncMock(side_effect=_capture),
+        ):
+            result = await tool.invoke({})
+    finally:
+        unregister_live_office_claw_tool_instance(tool)
+        revoke_live_office_claw_allowlist([tool_id])
+        _clear_live_office_claw_allowlists_for_tests()
+
+    assert result == {"result": "ok"}
+    assert seen["allowed"] == frozenset({tool_id})
+    assert get_active_office_claw_mcp_tool_ids() is None
+
+
+@pytest.mark.asyncio
+async def test_request_scoped_tool_invoke_rebinds_from_expected_allowlist_kwarg() -> None:
+    from jiuwenswarm.common.mcp_config import (
+        OFFICE_CLAW_EXPECTED_TOOL_IDS_KWARG,
+        get_active_office_claw_mcp_tool_ids,
+    )
+
+    tool_id = "office-claw-request-mine.office-claw.office_claw_multi_mention"
+    foreign_id = "office-claw-request-other.office-claw.office_claw_multi_mention"
+    card = ToolCard(
+        id=tool_id,
+        name="office_claw_multi_mention",
+        description="multi",
+        input_params={},
+    )
+    tool = RequestScopedOfficeClawMcpTool(
+        card,
+        {"command": "node", "args": ["index.js"], "cwd": ".", "env": {}},
+    )
+    seen: dict[str, object] = {}
+
+    async def _capture(inputs, **kwargs):
+        seen["allowed"] = get_active_office_claw_mcp_tool_ids()
+        return {"result": "ok"}
+
+    with patch.object(
+        RequestScopedOfficeClawMcpTool,
+        "_invoke_with_active_binding",
+        new=AsyncMock(side_effect=_capture),
+    ):
+        result = await tool.invoke(
+            {},
+            **{OFFICE_CLAW_EXPECTED_TOOL_IDS_KWARG: [tool_id]},
+        )
+
+    assert result == {"result": "ok"}
+    assert seen["allowed"] == frozenset({tool_id})
+    assert get_active_office_claw_mcp_tool_ids() is None
+
+    with pytest.raises(Exception, match="without an active request binding"):
+        await tool.invoke(
+            {},
+            **{OFFICE_CLAW_EXPECTED_TOOL_IDS_KWARG: [foreign_id]},
+        )
+
+
+@pytest.mark.asyncio
+async def test_request_scoped_tool_invoke_refuses_foreign_live_rebind_when_concurrent() -> None:
+    from jiuwenswarm.common.mcp_config import (
+        _clear_live_office_claw_allowlists_for_tests,
+        publish_live_office_claw_allowlist,
+        revoke_live_office_claw_allowlist,
+    )
+
+    _clear_live_office_claw_allowlists_for_tests()
+    owned_id = "office-claw-request-mine.office-claw.office_claw_multi_mention"
+    foreign_id = "office-claw-request-other.office-claw.office_claw_multi_mention"
+    foreign_card = ToolCard(
+        id=foreign_id,
+        name="office_claw_multi_mention",
+        description="foreign",
+        input_params={},
+    )
+    foreign_tool = RequestScopedOfficeClawMcpTool(
+        foreign_card,
+        {"command": "node", "args": ["foreign.js"], "cwd": ".", "env": {}},
+    )
+    publish_live_office_claw_allowlist([owned_id])
+    publish_live_office_claw_allowlist([foreign_id])
+
+    try:
+        with pytest.raises(Exception, match="without an active request binding"):
+            await foreign_tool.invoke({})
+    finally:
+        revoke_live_office_claw_allowlist([owned_id])
+        revoke_live_office_claw_allowlist([foreign_id])
+        _clear_live_office_claw_allowlists_for_tests()
+
+
+@pytest.mark.asyncio
 async def test_request_scoped_tool_invoke_refuses_cross_request_binding() -> None:
     card = ToolCard(
         id="office-claw-request-bbb.office-claw.office_claw_multi_mention",
@@ -221,6 +354,11 @@ async def test_registers_exact_tool_names_and_cleans_them_up(
     assert set(adapter._instance.ability_manager.cards) == set(registration.tool_names)
     assert len(resource_manager.tools) == 2
     assert adapter._active_office_claw_mcp == registration
+    from jiuwenswarm.common.mcp_config import get_live_office_claw_allowlist_for_tool_id
+
+    assert get_live_office_claw_allowlist_for_tool_id(registration.tool_ids[0]) == frozenset(
+        registration.tool_ids
+    )
 
     await adapter.cleanup_request_scoped_office_claw_mcp(registration)
 
@@ -228,6 +366,7 @@ async def test_registers_exact_tool_names_and_cleans_them_up(
     assert adapter._instance.ability_manager.cards == {}
     assert resource_manager.removed == list(registration.tool_ids)
     assert adapter._active_office_claw_mcp is None
+    assert get_live_office_claw_allowlist_for_tool_id(registration.tool_ids[0]) is None
 
 
 @pytest.mark.asyncio

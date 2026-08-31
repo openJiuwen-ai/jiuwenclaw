@@ -12,8 +12,8 @@ Fixed schema maximizes LLM prefix caching while keeping rarely used tools reacha
 from __future__ import annotations
 
 import logging
-from contextlib import ExitStack, contextmanager
-from typing import Any, Callable, Iterator
+from contextlib import ExitStack, contextmanager, nullcontext
+from typing import Any, Callable, Iterable, Iterator
 
 import anyio
 from openjiuwen.core.runner import Runner
@@ -32,7 +32,11 @@ from jiuwenswarm.agents.harness.common.tools.invoke_tool_tool import (
     InvokeToolTool,
 )
 from jiuwenswarm.common.mcp_config import (
+    OFFICE_CLAW_EXPECTED_TOOL_IDS_KWARG,
+    OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX,
+    bind_active_office_claw_mcp_tools,
     bind_office_claw_from_agent,
+    get_active_office_claw_mcp_tool_ids,
     resolve_active_office_claw_tool_id,
 )
 
@@ -114,6 +118,19 @@ class ProgressiveToolRail(DeepAgentRail):
         self._owned_tool_ids: set[str] = set()
         self._cached_all_tool_infos: list[Any] = []
         self._cached_deferred_tool_infos: list[Any] = []
+        # Request-scoped OfficeClaw MCP allowlist for this session agent.
+        # Interaction rounds do not inherit the facade ContextVar, so
+        # invoke_tool re-binds from this attribute before tool execution.
+        self._office_claw_active_tool_ids: frozenset[str] | None = None
+
+    def set_office_claw_active_tool_ids(self, tool_ids: Iterable[str] | None) -> None:
+        """Publish or clear this rail's OfficeClaw request-scoped allowlist."""
+        if tool_ids is None:
+            self._office_claw_active_tool_ids = None
+            return
+        self._office_claw_active_tool_ids = frozenset(
+            str(tool_id).strip() for tool_id in tool_ids if str(tool_id).strip()
+        )
 
     @contextmanager
     def _bind_deepresearch_context(self, tool_name: str) -> Iterator[None]:
@@ -839,17 +856,47 @@ class ProgressiveToolRail(DeepAgentRail):
         """Resolve a live tool instance, recovering from stale card ids.
 
         Order:
-        1. preferred_id from deferred cache / AbilityManager card
-        2. refresh AbilityManager cache and retry if the live card id changed
-        3. this request's ``bind_active_office_claw_mcp_tools`` allowlist
-           (authoritative for OfficeClaw MCP even when short-name AM was
-           overwritten or cleaned by a concurrent request)
+        1. this request's ``bind_active_office_claw_mcp_tools`` allowlist
+           (authoritative for OfficeClaw MCP even when short-name AM / deferred
+           cache still points at a concurrent request's live card)
+        2. preferred_id from deferred cache / AbilityManager card — skipped when
+           it is a foreign ``office-claw-request-*`` id under an active allowlist
+        3. refresh AbilityManager cache and retry if the live card id changed
 
         Returns ``(tool, resolved_id, refreshed_id_for_diagnostics)``.
         """
-        target_tool = self._lookup_tool_instance(preferred_id)
-        if target_tool is not None:
-            return target_tool, preferred_id, ""
+        active_id = resolve_active_office_claw_tool_id(tool_name)
+        if active_id:
+            target_tool = self._lookup_tool_instance(active_id)
+            if target_tool is not None:
+                if active_id != preferred_id:
+                    logger.info(
+                        "%s active OfficeClaw tool_id preferred: tool_name=%s "
+                        "preferred_id=%s active_id=%s",
+                        _LOG_PREFIX,
+                        tool_name,
+                        preferred_id,
+                        active_id,
+                    )
+                return target_tool, active_id, ""
+
+        allowed = get_active_office_claw_mcp_tool_ids()
+        preferred_is_foreign_office_claw = (
+            preferred_id.startswith(OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX)
+            and allowed is not None
+            and preferred_id not in allowed
+        )
+        if not preferred_is_foreign_office_claw:
+            target_tool = self._lookup_tool_instance(preferred_id)
+            if target_tool is not None:
+                return target_tool, preferred_id, ""
+        elif preferred_id:
+            logger.info(
+                "%s skip foreign OfficeClaw preferred_id: tool_name=%s preferred_id=%s",
+                _LOG_PREFIX,
+                tool_name,
+                preferred_id,
+            )
 
         logger.info(
             "%s stale tool_id retry: tool_name=%s old_id=%s",
@@ -867,21 +914,25 @@ class ProgressiveToolRail(DeepAgentRail):
             str(getattr(refreshed_card, "id", "") or "") if refreshed_card is not None else ""
         )
         if refreshed_id and refreshed_id != preferred_id:
-            target_tool = self._lookup_tool_instance(refreshed_id)
-            if target_tool is not None:
-                return target_tool, refreshed_id, refreshed_id
+            refreshed_is_foreign = (
+                refreshed_id.startswith(OFFICE_CLAW_REQUEST_TOOL_ID_PREFIX)
+                and allowed is not None
+                and refreshed_id not in allowed
+            )
+            if not refreshed_is_foreign:
+                target_tool = self._lookup_tool_instance(refreshed_id)
+                if target_tool is not None:
+                    return target_tool, refreshed_id, refreshed_id
 
-        active_id = resolve_active_office_claw_tool_id(tool_name)
         if active_id:
-            if active_id not in {preferred_id, refreshed_id}:
+            target_tool = self._lookup_tool_instance(active_id)
+            if target_tool is not None:
                 logger.info(
                     "%s active OfficeClaw tool_id fallback: tool_name=%s active_id=%s",
                     _LOG_PREFIX,
                     tool_name,
                     active_id,
                 )
-            target_tool = self._lookup_tool_instance(active_id)
-            if target_tool is not None:
                 return target_tool, active_id, refreshed_id or active_id
 
         return None, preferred_id, refreshed_id
@@ -893,6 +944,24 @@ class ProgressiveToolRail(DeepAgentRail):
         **kwargs,
     ) -> dict[str, Any]:
         """Invoke a deferred tool with validated arguments."""
+        owned = self._office_claw_active_tool_ids
+        bind_cm = (
+            bind_active_office_claw_mcp_tools(owned)
+            if owned is not None
+            else nullcontext()
+        )
+        with bind_cm:
+            return await self._invoke_target_tool_with_binding(
+                session, params, **kwargs
+            )
+
+    async def _invoke_target_tool_with_binding(
+        self,
+        session: Any,
+        params: InvokeToolInput,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """Invoke a deferred tool after OfficeClaw allowlist ContextVar is bound."""
         tool_name = str(params.tool_name or "").strip()
         arguments = dict(params.arguments or {})
 
@@ -988,6 +1057,9 @@ class ProgressiveToolRail(DeepAgentRail):
 
             try:
                 kwargs_without_session = {k: v for k, v in kwargs.items() if k != "session"}
+                owned = self._office_claw_active_tool_ids
+                if owned is not None:
+                    kwargs_without_session[OFFICE_CLAW_EXPECTED_TOOL_IDS_KWARG] = owned
                 call_timeout = getattr(AbilityManager, "_resolve_call_timeout")(
                     target_tool_card
                 )
