@@ -212,8 +212,17 @@
       "webSearch": "Web search",
       "mediaTools": "Tools",
       "vision": "Image processing",
+      "visionDescription": "Enable image processing; disabling it keeps the saved model configuration.",
+      "visionConfigTitle": "Configure image processing model",
       "audio": "Audio processing",
+      "audioDescription": "Enable audio processing; disabling it keeps the saved model configuration.",
+      "audioConfigTitle": "Configure audio processing model",
       "video": "Video understanding",
+      "videoDescription": "Enable video understanding; disabling it keeps the saved model configuration.",
+      "videoConfigTitle": "Configure video understanding model",
+      "toggleCapability": "Toggle {{name}} capability",
+      "saveAndEnable": "Save and enable",
+      "savedRestartRequired": "Saved; takes effect after restart.",
       "team": "Agent team"
     },
     "browser": {

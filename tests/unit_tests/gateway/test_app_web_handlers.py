@@ -1148,6 +1148,70 @@ async def test_config_get_returns_setup_guide_switch(monkeypatch, raw_config, ex
     assert channel.responses[-1]["payload"]["setup_guide_enabled"] == expected
 
 
+def test_media_capability_config_uses_multimodal_hot_reload_scope():
+    for env_key in app_web_handlers._MULTIMODAL_RELOAD_ENV_KEYS:
+        change_set = app_web_handlers._ConfigChangeSet({env_key: "true"}, [])
+        assert change_set.reload_scopes == {"multimodal"}
+
+
+def test_media_capability_provider_identity_has_exact_env_contract():
+    for modality in ("vision", "audio", "video"):
+        prefix = modality.upper()
+        assert app_web_handlers._CONFIG_SET_ENV_MAP[f"{modality}_endpoint_profile"] == f"{prefix}_ENDPOINT_PROFILE"
+        assert app_web_handlers._CONFIG_SET_ENV_MAP[f"{modality}_vendor_key"] == f"{prefix}_VENDOR_KEY"
+        assert app_web_handlers._CONFIG_SET_ENV_MAP[f"{modality}_plan"] == f"{prefix}_PLAN"
+        assert f"{prefix}_ENDPOINT_PROFILE" in app_web_handlers._MULTIMODAL_RELOAD_ENV_KEYS
+        assert f"{prefix}_VENDOR_KEY" not in app_web_handlers._MULTIMODAL_RELOAD_ENV_KEYS
+        assert f"{prefix}_PLAN" not in app_web_handlers._MULTIMODAL_RELOAD_ENV_KEYS
+
+
+@pytest.mark.asyncio
+async def test_media_capability_provider_identity_round_trips_through_config_rpc(monkeypatch, tmp_path):
+    channel = FakeWebChannel()
+    monkeypatch.setattr(app_web_handlers, "_ENV_FILE", tmp_path / ".env")
+    monkeypatch.setattr(app_web_handlers, "get_config", lambda: {"models": {"defaults": []}})
+    monkeypatch.setattr(app_web_handlers, "get_config_raw", lambda: {})
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        del updated_keys, env_updates, config_payload
+        assert reload_options["reload_scopes"] == ["multimodal"]
+        return True
+
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, on_config_saved=on_config_saved)
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-media-identity-set",
+        {
+            "vision_endpoint_profile": "dashscope",
+            "vision_vendor_key": "alibaba",
+            "vision_plan": "token_plan",
+        },
+        "sess-media-identity",
+    )
+    assert channel.responses[-1]["payload"] == {
+        "updated": [
+            "vision_endpoint_profile",
+            "vision_vendor_key",
+            "vision_plan",
+        ],
+        "applied_without_restart": True,
+    }
+
+    await channel.methods["config.get"](
+        object(),
+        "req-media-identity-get",
+        {},
+        "sess-media-identity",
+    )
+    payload = channel.responses[-1]["payload"]
+    assert payload["vision_endpoint_profile"] == "dashscope"
+    assert payload["vision_vendor_key"] == "alibaba"
+    assert payload["vision_plan"] == "token_plan"
+
+
 @pytest.mark.asyncio
 async def test_models_replace_all_applies_scoped_reload_before_responding(monkeypatch):
     channel = FakeWebChannel()

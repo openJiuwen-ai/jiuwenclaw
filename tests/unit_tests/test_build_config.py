@@ -186,9 +186,11 @@ def test_desktop_release_wrappers_exclude_optional_cli_dependencies() -> None:
         assert "--extra codex" not in script
 
     spec = (PROJECT_ROOT / "scripts/jiuwenswarm.spec").read_text(encoding="utf-8")
-    assert "claude_agent_sdk" not in spec
-    assert "openai_codex" not in spec
-    assert "codex_cli_bin" not in spec
+    # Optional CLI runtimes are not installed by the desktop build wrappers.
+    # Keep them in PyInstaller's excludes as a second guard against bundling
+    # packages that happen to exist in the developer's environment.
+    for module_name in ("claude_agent_sdk", "openai_codex", "codex_cli_bin"):
+        assert f'"{module_name}"' in spec
 
 
 def test_windows_installer_uses_workswarm_upgrade_identity() -> None:

@@ -212,8 +212,17 @@
       "webSearch": "网页搜索",
       "mediaTools": "工具",
       "vision": "图片处理",
+      "visionDescription": "启用后可处理图片内容；关闭后保留已有模型配置。",
+      "visionConfigTitle": "配置图片处理模型",
       "audio": "音频处理",
+      "audioDescription": "启用后可处理音频内容；关闭后保留已有模型配置。",
+      "audioConfigTitle": "配置音频处理模型",
       "video": "视频理解",
+      "videoDescription": "启用后可理解视频内容；关闭后保留已有模型配置。",
+      "videoConfigTitle": "配置视频理解模型",
+      "toggleCapability": "切换{{name}}能力",
+      "saveAndEnable": "保存并启用",
+      "savedRestartRequired": "配置已保存，重启后生效。",
       "team": "智能体团队"
     },
     "browser": {

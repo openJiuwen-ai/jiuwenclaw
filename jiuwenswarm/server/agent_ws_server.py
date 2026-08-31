@@ -9374,7 +9374,13 @@ class AgentWebSocketServer:
                 reload_kwargs["target_session_id"] = target_session_id
             if reload_scopes:
                 reload_kwargs["reload_scopes"] = reload_scopes
-            agent_reload_scopes = {"model", "team", "permissions", "agent_runtime"}
+            agent_reload_scopes = {
+                "model",
+                "multimodal",
+                "team",
+                "permissions",
+                "agent_runtime",
+            }
             should_reload_agents = not reload_scopes or bool(reload_scopes & agent_reload_scopes)
 
             # 模型配置变了就重探图像模态：同一个 (api_base, model_name) 背后可能已换
