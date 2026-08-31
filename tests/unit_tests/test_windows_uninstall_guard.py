@@ -215,7 +215,7 @@ def test_installer_blocks_running_app_and_preserves_user_data(exe_entry):
 def test_installer_cleans_only_confirmed_stale_openjiuwen_descriptions():
     script = INSTALLER_PATH.read_text(encoding="utf-8")
 
-    assert "PrivilegesRequired=admin" in script
+    assert "PrivilegesRequired=lowest" in script
     assert "procedure CleanupStaleOpenJiuwenDescriptions();" in script
     assert "function HasNestedDescriptionReplacement" in script
     assert "CompareText(FindRec.Name, 'fragments') <> 0" in script
