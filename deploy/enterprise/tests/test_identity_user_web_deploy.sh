@@ -36,8 +36,13 @@ main() {
 
     MODULES=()
     process_modules
-    assert_equal "GATEWAY WEB RUNTIME" "${MODULES[*]}" "default delivery must exclude Manager"
+    assert_equal "GATEWAY WEB MANAGER RUNTIME" "${MODULES[*]}" "enterprise default must include Manager"
     MODULES=()
+    DEPLOY_VARS["JIUWENSWARM_EDITION"]="personal"
+    process_modules
+    assert_equal "GATEWAY WEB RUNTIME" "${MODULES[*]}" "personal default must exclude Manager"
+    MODULES=()
+    DEPLOY_VARS["JIUWENSWARM_EDITION"]="enterprise"
 
     TEST_DIR="$(mktemp -d)"
     local test_dir="${TEST_DIR}"
@@ -50,20 +55,19 @@ main() {
     DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]="31003"
 
     assert_equal \
-        "false" \
-        "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" \
-        "User Web embedding must be disabled by default"
-    printf '%s\n' 'ENABLE_USER_WEB_EMBEDDING=true' > "${test_dir}/.env.custom"
+        "enterprise" \
+        "${DEPLOY_VARS["JIUWENSWARM_EDITION"]}" \
+        "JIUWENSWARM_EDITION must default to enterprise"
+    printf '%s\n' 'JIUWENSWARM_EDITION=personal' > "${test_dir}/.env.custom"
     read_env_from_file "${test_dir}/.env.custom" "DEPLOY_VARS"
     assert_equal \
-        "true" \
-        "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]}" \
-        ".env.custom compatibility value must be read"
+        "personal" \
+        "${DEPLOY_VARS["JIUWENSWARM_EDITION"]}" \
+        ".env.custom edition value must override the default"
 
     CONFIG["WEB_FILE"]="${test_dir}/web.yaml"
 
-    DEPLOY_VARS["USER_WEB_MODE"]="personal"
-    DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]="false"
+    DEPLOY_VARS["JIUWENSWARM_EDITION"]="personal"
     gen_web_file
     assert_equal \
         "NodePort" \
@@ -73,35 +77,46 @@ main() {
         "0.0.0.0" \
         "$(yq eval-all 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "FRONTEND_HOST").value' "${CONFIG["WEB_FILE"]}")" \
         "User Web frontend must listen on all interfaces"
+    assert_equal \
+        "personal" \
+        "$(yq eval-all 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "JIUWENSWARM_EDITION").value' "${CONFIG["WEB_FILE"]}")" \
+        "personal mode must inject JIUWENSWARM_EDITION"
 
-    DEPLOY_VARS["USER_WEB_MODE"]="enterprise"
-    DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]="true"
+    DEPLOY_VARS["JIUWENSWARM_EDITION"]="enterprise"
     gen_web_file
     assert_equal \
         "NodePort" \
         "$(yq eval-all 'select(.metadata.name == "jiuwenclaw-web-nodeport") | .spec.type' "${CONFIG["WEB_FILE"]}")" \
         "enterprise mode must expose the independent User Web NodePort"
+    assert_equal \
+        "enterprise" \
+        "$(yq eval-all 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "JIUWENSWARM_EDITION").value' "${CONFIG["WEB_FILE"]}")" \
+        "enterprise mode must inject JIUWENSWARM_EDITION"
+    assert_equal \
+        "enterprise" \
+        "$(yq eval-all 'select(.kind == "Deployment").spec.template.spec.containers[0].env[] | select(.name == "VITE_JIUWENSWARM_EDITION").value' "${CONFIG["WEB_FILE"]}")" \
+        "enterprise mode must inject VITE_JIUWENSWARM_EDITION"
 
     DEPLOY_VARS["IS_UP_MANAGER_WEB"]="false"
     DEPLOY_VARS["USER_WEB_IDP_TARGET"]="http://jiuwenclaw-identity:8770"
     DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]="http://jiuwenclaw-manager-server:8765"
-    check_user_web_mode_config
+    check_jiuwenswarm_edition_config
 
     DEPLOY_VARS["IS_UP_MANAGER_WEB"]="true"
     DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]="true"
-    check_user_web_mode_config
+    check_jiuwenswarm_edition_config
 
     DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]="invalid"
-    if check_user_web_mode_config >/dev/null 2>&1; then
+    if check_jiuwenswarm_edition_config >/dev/null 2>&1; then
         echo "FAIL: invalid LOGIN_AUTH_SIMULATE value must be rejected" >&2
         exit 1
     fi
     DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]="false"
-    check_user_web_mode_config
+    check_jiuwenswarm_edition_config
 
-    DEPLOY_VARS["USER_WEB_MODE"]="invalid"
-    if (check_user_web_mode_config) >/dev/null 2>&1; then
-        echo "FAIL: invalid boolean value must be rejected" >&2
+    DEPLOY_VARS["JIUWENSWARM_EDITION"]="invalid"
+    if (check_jiuwenswarm_edition_config) >/dev/null 2>&1; then
+        echo "FAIL: invalid edition value must be rejected" >&2
         exit 1
     fi
 
@@ -191,7 +206,7 @@ main() {
     wait_k8s_resource_ready() { :; }
     success() { :; }
 
-    DEPLOY_VARS["USER_WEB_MODE"]="enterprise"
+    DEPLOY_VARS["JIUWENSWARM_EDITION"]="enterprise"
     deploy_web
     DEPLOY_VARS["IS_UP_MANAGER_WEB"]="true"
     deploy_manager

@@ -34,7 +34,7 @@ import {
 } from '../../features/workspace/projectDirectoryPicker';
 import { toDisplaySessionTitle } from '../../utils/documentMessage';
 import './ConversationSidebar.css';
-import { isEnterpriseMode } from '../../edition';
+import { isEnterprise } from '../../edition';
 import '../dialogs/dialogs.css';
 import AddProjectIcon from '../../assets/work-mode/add-project.svg?react';
 import ArrowRightIcon from '../../assets/work-mode/arrow-right.svg?react';
@@ -710,7 +710,7 @@ export function ConversationSidebar({
   isCronActive,
 }: ConversationSidebarProps) {
   const { t } = useTranslation();
-  const enterpriseMode = isEnterpriseMode();
+  const enterpriseMode = isEnterprise();
   const runtimes = useChatStore((state) => state.runtimes);
   const [relativeTimeNow, setRelativeTimeNow] = useState(Date.now);
   const [unreadSessions, setUnreadSessions] = useState(loadUnreadSessions);

@@ -103,8 +103,8 @@ spec:
             - secretRef:
                 name: <<SECRET_CM_NAME>>
           env:
-            - name: USER_WEB_MODE
-              value: "<<USER_WEB_MODE>>"
+            - name: JIUWENSWARM_EDITION
+              value: "<<JIUWENSWARM_EDITION>>"
             - name: GATEWAY_RUNTIME_MANAGER_URL
               value: "<<GATEWAY_RUNTIME_MANAGER_URL>>"
             # downward API：注入当前 Pod 身份，供 RuntimeManagementAgentClient

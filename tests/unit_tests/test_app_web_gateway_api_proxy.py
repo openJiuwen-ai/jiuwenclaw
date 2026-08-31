@@ -41,12 +41,12 @@ def test_gateway_api_prefix_is_rewritten_for_upstream(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("mode", "embedding"),
-    [("personal", "false"), ("enterprise", "true")],
+    ("edition",),
+    [("personal",), ("enterprise",)],
 )
 def test_user_web_runtime_mode_injection_preserves_property_names(
-    mode: str,
-    embedding: str,
+    edition: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frontend_index = (
         Path(__file__).resolve().parents[2]
@@ -57,13 +57,11 @@ def test_user_web_runtime_mode_injection_preserves_property_names(
         / "index.html"
     ).read_text(encoding="utf-8")
 
-    rendered = _inject_user_web_runtime_config(frontend_index, mode)
+    monkeypatch.setenv("JIUWENSWARM_EDITION", edition)
+    rendered = _inject_user_web_runtime_config(frontend_index)
 
-    assert f"window.__JIUWEN_USER_WEB_MODE__ = '{mode}'" in rendered
-    assert "window.__JIUWEN_USER_WEB_EMBEDDING__" in rendered
-    assert f"'{embedding}' === 'true'" in rendered
-    assert "__JIUWEN_USER_WEB_MODE_VALUE__" not in rendered
-    assert "__JIUWEN_USER_WEB_EMBEDDING_VALUE__" not in rendered
+    assert f"window.__JIUWENSWARM_EDITION__ = '{edition}'" in rendered
+    assert "__JIUWENSWARM_EDITION_VALUE__" not in rendered
     assert "window.__JIUWEN_LOGIN_AUTH_SIMULATE__ = 'true'" in rendered
     assert "__JIUWEN_LOGIN_AUTH_SIMULATE_VALUE__" not in rendered
     assert "window.__JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE__ = 'true'" in rendered

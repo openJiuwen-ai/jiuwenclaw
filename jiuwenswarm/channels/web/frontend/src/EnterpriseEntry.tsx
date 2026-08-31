@@ -2,7 +2,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react
 import { isLoginAuthSimulateEnabled } from './auth/config';
 import { resolveEnterpriseAuthProvider } from './auth/providerRegistry';
 import { EnterpriseAuthError, type EnterpriseAuthProvider } from './auth/types';
-import { isEnterpriseMode } from './edition';
+import { isEnterprise } from './edition';
 import {
   EnterpriseContext,
   type EnterpriseAgent,
@@ -170,7 +170,7 @@ function EntryStatus({ phase, error, onLogout }: { phase: EntryPhase; error: str
 }
 
 export function EnterpriseEntry({ children }: { children: ReactNode }) {
-  const enterprise = isEnterpriseMode();
+  const enterprise = isEnterprise();
   const simulateLogin = enterprise && isLoginAuthSimulateEnabled();
   const provider = useMemo(
     () => (enterprise ? resolveEnterpriseAuthProvider(simulateLogin) : null),

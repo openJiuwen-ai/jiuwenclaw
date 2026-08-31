@@ -119,6 +119,7 @@ declare -A DEPLOY_VARS=(
     ["ENABLE_EXTERNAL_PVC"]="false"
     ["ENABLE_EXTERNAL_RABBITMQ"]="false"
     ["ENABLE_EXTERNAL_REDIS"]="false"
+    ["JIUWENSWARM_EDITION"]="enterprise"
     ["USER_WEB_MODE"]=""
     ["LOGIN_AUTH_SIMULATE"]="true"
     ["LOGIN_AUTH_SIMULATE_AVAILABLE"]="true"

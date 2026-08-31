@@ -112,7 +112,9 @@ spec:
             - name: OPENJIUWEN_SERVICE_PORT
               value: "<<AGENT_RUNTIME_PORT>>"
             - name: OPENJIUWEN_SERVICE_REDIS_URL
-              value: "redis://<<REDIS_HOST>>:<<REDIS_PORT>>/<<AGENT_RUNTIME_REDIS_DB>>"
+              # AgentServer checkpointer 用此 URL 连接 Redis（与 gateway 的 redis client 独立）
+              # 由 runtime_handler.sh 按 REDIS_MODE 计算：cluster -> redis+cluster://host:port / standalone -> redis://host:port/db
+              value: "<<OPENJIUWEN_SERVICE_REDIS_URL>>"
             - name: OPENJIUWEN_SERVICE_REQUEST_TIMEOUT_SECONDS
               value: "<<AGENT_RUNTIME_REQUEST_TIMEOUT>>"
             - name: OPENJIUWEN_SERVICE_DB_TYPE
@@ -136,7 +138,7 @@ spec:
             - name: AGENT_RUNTIME_LOG_LEVEL
               value: "<<AGENT_RUNTIME_LOG_LEVEL>>"
             - name: JIUWENSWARM_EDITION
-              value: "enterprise"
+              value: "<<JIUWENSWARM_EDITION>>"
             - name: TZ
               value: "<<TIMEZONE>>"
 

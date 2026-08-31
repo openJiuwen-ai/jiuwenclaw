@@ -16,7 +16,7 @@ globalThis.localStorage = {
   },
 };
 globalThis.window = {
-  __JIUWEN_USER_WEB_MODE__: 'personal',
+  __JIUWENSWARM_EDITION__: 'personal',
   history: { replaceState() {} },
   location: { pathname: '/', search: '', replace() {} },
 };
@@ -31,8 +31,8 @@ const {
 const { parseLoginAuthSimulate } = await import('../node_modules/.cache/user-web-entry/auth/config.js');
 const { buildSimulatedEnterpriseContext } = await import('../node_modules/.cache/user-web-entry/auth/simulate/SimulatedAuthProvider.js');
 
-function renderEntry(mode, simulate = false) {
-  window.__JIUWEN_USER_WEB_MODE__ = mode;
+function renderEntry(edition, simulate = false) {
+  window.__JIUWENSWARM_EDITION__ = edition;
   window.__JIUWEN_LOGIN_AUTH_SIMULATE__ = simulate;
   return renderToStaticMarkup(React.createElement(EnterpriseEntry, null, React.createElement('div', { id: 'user-web-content' }, 'user web content')));
 }
@@ -42,7 +42,7 @@ function resetBrowserState() {
   window.location.search = '';
 }
 
-test('personal mode renders the standalone User Web without enterprise authentication', () => {
+test('personal edition renders the standalone User Web without enterprise authentication', () => {
   resetBrowserState();
   const html = renderEntry('personal');
 
@@ -50,7 +50,7 @@ test('personal mode renders the standalone User Web without enterprise authentic
   assert.doesNotMatch(html, /ENTERPRISE WORKSPACE/);
 });
 
-test('enterprise mode redirects unauthenticated users instead of rendering User Web', () => {
+test('enterprise edition redirects unauthenticated users instead of rendering User Web', () => {
   resetBrowserState();
   const html = renderEntry('enterprise');
 
@@ -59,7 +59,7 @@ test('enterprise mode redirects unauthenticated users instead of rendering User 
   assert.doesNotMatch(html, /user web content/);
 });
 
-test('enterprise mode loads and validates an authorized context before rendering User Web', () => {
+test('enterprise edition loads and validates an authorized context before rendering User Web', () => {
   resetBrowserState();
   localStorage.setItem('openjiuwen_access_token', 'manager-token');
   window.location.search = '?user_id=user-1&group_id=group-1&bot_id=bot-1&gateway_id=gateway-1';
