@@ -12,6 +12,7 @@ import pytest
 from jiuwenswarm.server.runtime.skill_turbo.skill_codes.ppt.ppt_page_gen import (
     PageWorkerNode,
     _fix_chart_scaffold_activation,
+    _html_has_element_id,
     _html_requires_activate_template_chart,
     _page_qualifies_for_chart_gate,
     _run_activate_template_chart_page,
@@ -470,6 +471,31 @@ CHART_SCAFFOLD_END -->"""
 
     assert result["missing"] is False
     chart_mock.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("html", "element_id", "expected"),
+    [
+        ('<div id="chart-1">', "chart-1", True),
+        ('<div class="x" id="chart-1">', "chart-1", True),
+        ('<div data-id="chart-1">', "chart-1", False),
+        ('<div chart-id="chart-1">', "chart-1", False),
+    ],
+)
+def test_html_has_element_id_matches_only_id_attribute(
+    html: str, element_id: str, expected: bool
+) -> None:
+    assert _html_has_element_id(html, element_id) is expected
+
+
+def test_validate_chart_mount_references_rejects_data_id_only_container() -> None:
+    html = """<div data-id="chart-1" class="w-full h-full"></div>
+<script>
+const el = document.getElementById("chart-1");
+const chart = echarts.init(el, null, {renderer:'svg'});
+chart.setOption({ series: [] });
+</script>"""
+    assert _validate_chart_mount_references(html) is False
 
 
 def _chart_page_html(*, container_id: str, get_element_id: str) -> str:

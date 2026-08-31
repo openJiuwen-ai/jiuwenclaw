@@ -1957,7 +1957,7 @@ def _html_has_element_id(html: str, element_id: str) -> bool:
         return False
     return (
         re.search(
-            rf'\bid\s*=\s*(["\']){re.escape(element_id)}\1',
+            rf'(?:^|\s)id\s*=\s*(["\']){re.escape(element_id)}\1',
             html,
             re.IGNORECASE,
         )
