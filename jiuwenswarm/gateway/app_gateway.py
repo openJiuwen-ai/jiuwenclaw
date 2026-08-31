@@ -1646,9 +1646,7 @@ async def _run_with_telemetry(
         ):
             gateway_storage_ctx = await setup_gateway_storage_repositories(full_cfg)
             if gateway_storage_ctx is not None:
-                from jiuwenswarm.gateway.edition import resolve_gateway_edition
-
-                if resolve_gateway_edition(full_cfg) != "enterprise":
+                if not is_enterprise():
                     from jiuwenswarm.gateway.storage_assembly import (
                         create_a2a_outbound_repository,
                     )

@@ -476,3 +476,31 @@ async def test_valid_sdk_card_is_normalized_and_compatible(monkeypatch) -> None:
     assert result.card_fingerprint.startswith("sha256:")
     assert pinned == [{"agent.example.com": "93.184.216.34"}]
     assert client_closed_states == [False]
+
+
+def test_app_gateway_wires_outbound_repository_without_removed_edition_module():
+    """`jiuwenswarm.gateway.edition` was removed from the mainline; the a2a
+    outbound repository wiring in app_gateway.py must resolve personal vs.
+    enterprise edition via `is_enterprise()` instead, or every Gateway boot
+    silently swallows the ImportError and leaves the outbound panel showing
+    "A2A 出站管理服务当前不可用" regardless of configuration.
+    """
+    import ast
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.find_spec("jiuwenswarm.gateway.app_gateway")
+    assert spec is not None and spec.origin
+    source = Path(spec.origin).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            assert not node.module.startswith("jiuwenswarm.gateway.edition"), (
+                "app_gateway.py must not import from the removed "
+                "jiuwenswarm.gateway.edition module"
+            )
+
+    from jiuwenswarm.gateway.storage_assembly import create_a2a_outbound_repository
+
+    assert callable(create_a2a_outbound_repository)
