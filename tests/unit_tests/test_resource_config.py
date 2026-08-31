@@ -12,13 +12,13 @@ def test_default_team_config_enables_managed_worktrees():
     assert data["modes"]["team"]["jiuwen_team"]["worktree"] == {"enabled": True}
 
 
-def test_default_file_operation_history_remains_enabled():
+def test_default_file_operation_history_is_disabled():
     repo_root = Path(__file__).resolve().parents[2]
     config_file = repo_root / "jiuwenswarm" / "resources" / "config.yaml"
 
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
 
-    assert data["file_operation_history"] == {"enabled": True}
+    assert data["file_operation_history"] == {"enabled": False}
 
 
 def test_default_round_level_compressor_config_uses_context_ratio():
