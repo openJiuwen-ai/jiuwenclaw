@@ -164,7 +164,19 @@ async def warmup_deep_agent_query(
     三阶段全部 try/except，失败仅告警不抛。预热 agent 独立构造，不进 AgentManager
     缓存，与生产隔离。本函数应在 ``warmup_import_and_checkpointer`` 之后单独
     ``create_task`` 调用。
+
+    企业版无请求 ``routing`` identity，DeepAgent 预热会误读空模型配置并打 ERROR，
+    故跳过阶段3（阶段1/2 import+checkpointer 仍可跑）。
     """
+    from jiuwenswarm.common.local_env_config import is_enterprise
+
+    if is_enterprise():
+        logger.info(
+            "[Prewarm] skip stage=3 deep agent query on enterprise "
+            "(no routing identity for model config)"
+        )
+        return
+
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
     t_listen = time.perf_counter()

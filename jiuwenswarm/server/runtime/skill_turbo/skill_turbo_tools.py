@@ -407,16 +407,16 @@ async def skill_turbo(query: str) -> dict[str, Any] | str:
     if channel_id:
         inputs["channel_id"] = channel_id
 
-    # user_id / chat_id：从 request_metadata 提取放到 inputs 顶层，
-    # 供 pipeline_init 的 fallback 重建 files/{user_id}/{chat_id}/output 路径。
-    # chat_id 兼容 group_id（agent_compat.py 确认两者等价）。
+    # user_id 顶层；chat_id ← routing.group_id，供 pipeline 重建路径。
     if isinstance(request_metadata, dict):
-        _uid = request_metadata.get("user_id")
-        if _uid:
-            inputs["user_id"] = str(_uid)
-        _cid = request_metadata.get("chat_id") or request_metadata.get("group_id")
-        if _cid:
-            inputs["chat_id"] = str(_cid)
+        from jiuwenswarm.common.request_identity import web_routing_identity
+
+        user_id = str(request_metadata.get("user_id") or "").strip()
+        if user_id:
+            inputs["user_id"] = user_id
+        identity = web_routing_identity(request_metadata)
+        if identity.get("group_id"):
+            inputs["chat_id"] = identity["group_id"]
 
     # effective_project_dir：adapter 在 _update_runtime_config 中已写入 ContextVar
     effective_project_dir = get_effective_request_workspace_dir()

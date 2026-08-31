@@ -33,18 +33,14 @@ def _coerce_routing_field(value: Any) -> str:
 
 
 def _routing_field_sources(request: Any) -> list[dict[str, Any]]:
-    """按优先级收集路由字段来源：``params`` → ``metadata`` → ``metadata.query``。"""
-    sources: list[dict[str, Any]] = []
-    params = getattr(request, "params", None)
-    if isinstance(params, dict):
-        sources.append(params)
+    """只读 ``metadata.routing``。"""
     metadata = getattr(request, "metadata", None)
-    if isinstance(metadata, dict):
-        sources.append(metadata)
-        query = metadata.get("query")
-        if isinstance(query, dict):
-            sources.append(query)
-    return sources
+    if not isinstance(metadata, dict):
+        return []
+    routing = metadata.get("routing")
+    if isinstance(routing, dict):
+        return [routing]
+    return []
 
 
 def _resolve_routing_field(request: Any, field: str) -> str:
@@ -54,20 +50,11 @@ def _resolve_routing_field(request: Any, field: str) -> str:
         coerced = _coerce_routing_field(source[field])
         if coerced:
             return coerced
-    if field == "group_id":
-        return _coerce_routing_field(getattr(request, "chat_id", None))
     return ""
 
 
 def routing_context_from_request(request: Any) -> RoutingContext:
-    """从 AgentRequest 解析企业策略路由上下文。
-
-    各 Channel 入参形态不一，统一在此合并：
-    - JSON ``params`` 中的 ``group_id`` / ``bot_id`` / ``user_id``（如联调脚本）；
-    - E2A ``metadata`` 扁平字段（如 IM 通道 ``chat_id`` → ``group_id``）；
-    - WebChannel URL query（``metadata.query``，``parse_qs`` 列表值）；
-    - ``request.chat_id`` 作为 ``group_id`` 兜底。
-    """
+    """从 ``request.metadata.routing`` 解析企业策略路由上下文。"""
     return RoutingContext(
         group_id=_resolve_routing_field(request, "group_id"),
         bot_id=_resolve_routing_field(request, "bot_id"),

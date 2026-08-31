@@ -361,10 +361,13 @@ async def test_load_effective_config_by_instance_agent_resource(
 
     request = AgentRequest(
         request_id="req-test-bob",
-        params={
-            "group_id": "g_demo_sales",
-            "bot_id": resource_id,
-            "user_id": "bob",
+        params={},
+        metadata={
+            "routing": {
+                "group_id": "g_demo_sales",
+                "bot_id": resource_id,
+                "user_id": "bob",
+            }
         },
     )
     loaded = await load_effective_enterprise_config(
@@ -449,10 +452,13 @@ async def test_load_effective_config_skips_mapping_expr_in_template_ref(
 
     request = AgentRequest(
         request_id="req-test-unknown",
-        params={
-            "group_id": "g_unknown",
-            "bot_id": resource_id,
-            "user_id": "bob",
+        params={},
+        metadata={
+            "routing": {
+                "group_id": "g_unknown",
+                "bot_id": resource_id,
+                "user_id": "bob",
+            }
         },
     )
     loaded = await load_effective_enterprise_config(
@@ -621,7 +627,8 @@ async def test_load_effective_config_loads_embedding_template(
     loaded = await load_effective_enterprise_config(
         AgentRequest(
             request_id="req-embedding",
-            params={"bot_id": resource_id},
+            params={},
+            metadata={"routing": {"bot_id": resource_id}},
         ),
         DEFAULT_AGENT_LOAD_SLOTS,
     )

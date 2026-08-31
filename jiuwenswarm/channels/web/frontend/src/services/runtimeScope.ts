@@ -5,6 +5,9 @@ export interface RuntimeScope {
   gatewayId?: string;
 }
 
+/** Dispatched when enterprise routing identity changes; WS should reconnect. */
+export const RUNTIME_SCOPE_CHANGED_EVENT = 'jiuwenclaw:runtime-scope-changed';
+
 function pickString(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -16,6 +19,15 @@ function pickString(value: unknown): string | undefined {
 function pickQueryValue(query: URLSearchParams, key: string): string | undefined {
   const value = query.get(key)?.trim();
   return value || undefined;
+}
+
+function scopeSignature(scope: RuntimeScope): string {
+  return JSON.stringify({
+    userId: scope.userId || '',
+    groupId: scope.groupId || '',
+    botId: scope.botId || '',
+    gatewayId: scope.gatewayId || '',
+  });
 }
 
 /**
@@ -43,12 +55,17 @@ let runtimeScope: RuntimeScope =
   typeof window === 'undefined' ? {} : parseRuntimeScope(window.location.search);
 
 export function setRuntimeScope(scope: RuntimeScope): void {
-  runtimeScope = {
+  const next = {
     userId: pickString(scope.userId),
     groupId: pickString(scope.groupId),
     botId: pickString(scope.botId),
     gatewayId: pickString(scope.gatewayId),
   };
+  const changed = scopeSignature(runtimeScope) !== scopeSignature(next);
+  runtimeScope = next;
+  if (changed && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(RUNTIME_SCOPE_CHANGED_EVENT));
+  }
 }
 
 export function getRuntimeScope(): RuntimeScope {
@@ -93,7 +110,7 @@ export function buildRuntimeIdentityHeaders(
   if (userId) headers['X-User-Id'] = userId;
   if (groupId) headers['X-Group-Id'] = groupId;
   if (botId) headers['X-Bot-Id'] = botId;
-  if (scope.gatewayId) headers['X-Jiuwenclaw-Id'] = scope.gatewayId;
+  if (scope.gatewayId) headers['X-Gateway-Id'] = scope.gatewayId;
   if (sessionId) headers['X-Session-Id'] = sessionId;
   return headers;
 }

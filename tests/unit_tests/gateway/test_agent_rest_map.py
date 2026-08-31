@@ -312,6 +312,37 @@ def test_identity_headers_omit_optional_ids():
     assert assembled.headers["X-Channel-Id"] == "web"
     assert "X-Session-Id" not in assembled.headers
     assert "X-User-Id" not in assembled.headers
+    assert "X-Bot-Id" not in assembled.headers
+    assert "X-Group-Id" not in assembled.headers
+    assert "X-Gateway-Id" not in assembled.headers
+
+
+def test_identity_headers_carry_routing_from_channel_context():
+    """REST body 不含 E2A；routing 必须经 X-* 头传到 Agent。"""
+    env = _env(
+        ReqMethod.COMMAND_GOAL,
+        params={"session_id": "sess_1", "action": "get", "mode": "agent"},
+        user_id="user1",
+    )
+    env.channel_context = {
+        "user_id": "user1",
+        "routing": {
+            "group_id": "__none__",
+            "bot_id": "d64efe50-3b44-4895-b040-df922e1df242",
+            "gateway_id": "4e3a795a-2339-4efd-895f-bc796943f57c",
+        },
+        "method": "command.goal",
+    }
+    assembled = assemble_rest_request(env, base_url=BASE)
+    assert assembled.url.endswith("/sessions/sess_1/commands/goal")
+    assert assembled.json_body == {
+        "action": "get",
+        "mode": "agent",
+    }
+    assert assembled.headers["X-User-Id"] == "user1"
+    assert assembled.headers["X-Group-Id"] == "__none__"
+    assert assembled.headers["X-Bot-Id"] == "d64efe50-3b44-4895-b040-df922e1df242"
+    assert assembled.headers["X-Gateway-Id"] == "4e3a795a-2339-4efd-895f-bc796943f57c"
 
 
 def test_normalize_base_empty_raises():

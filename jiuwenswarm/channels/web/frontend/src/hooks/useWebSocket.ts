@@ -45,6 +45,10 @@ import {
 } from '../stores';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
+import {
+  getRuntimeScope,
+  RUNTIME_SCOPE_CHANGED_EVENT,
+} from '../services/runtimeScope';
 import { getWebTransport } from '../utils/env';
 import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
 import {
@@ -381,12 +385,19 @@ export function stampGoalObjectiveMessages(sessionId: string, messages: Message[
 }
 
 function getConnectSignature(options: WebConnectOptions): string {
+  // runtimeScope 必须进入签名：bot_id 等握手 query 变化时要重连，
+  // 否则 Agent 一直拿不到 metadata.routing.bot_id。
+  const scope = getRuntimeScope();
   return JSON.stringify({
     provider: options.provider || '',
     apiKey: options.apiKey || '',
     apiBase: options.apiBase || '',
     model: options.model || '',
     projectDir: options.projectDir || '',
+    userId: scope.userId || '',
+    groupId: scope.groupId || '',
+    botId: scope.botId || '',
+    gatewayId: scope.gatewayId || '',
   });
 }
 
@@ -3875,9 +3886,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         });
       });
     };
+    const reconnectByRuntimeScope = () => {
+      void webClient.disconnect('runtime scope changed').then(() => {
+        void webClient.connect(connectOptions).catch((error) => {
+          const webError = error as WebError;
+          setConnectionStats({ lastError: webError.message });
+          onErrorRef.current?.(webError.message || 'WebSocket reconnect error');
+        });
+      });
+    };
     window.addEventListener(WS_RECONNECT_EVENT, reconnectByDebugToggle);
+    window.addEventListener(RUNTIME_SCOPE_CHANGED_EVENT, reconnectByRuntimeScope);
     return () => {
       window.removeEventListener(WS_RECONNECT_EVENT, reconnectByDebugToggle);
+      window.removeEventListener(RUNTIME_SCOPE_CHANGED_EVENT, reconnectByRuntimeScope);
     };
   }, [apiBase, apiKey, model, projectDir, provider, setConnectionStats]);
 

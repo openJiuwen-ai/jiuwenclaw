@@ -96,12 +96,23 @@ def _adapter(goal_manager: _FakeGoals) -> JiuWenSwarmDeepAdapter:
     return adapter
 
 
+def _goal_request(params: dict[str, object], *, session_id: str = "session-1") -> AgentRequest:
+    return AgentRequest(
+        request_id="req-goal-test",
+        channel_id="web",
+        session_id=session_id,
+        params=params,
+    )
+
+
 class _FakeGoalAdapter:
     async def handle_goal_command_structured(
         self,
-        params: dict[str, object],
-        session_id: str,
+        request: AgentRequest,
+        *,
+        session_id: str | None = None,
     ) -> dict[str, object]:
+        params = request.params if isinstance(request.params, dict) else {}
         return {
             "result_type": "goal_control",
             "action": params.get("action", "get"),
@@ -119,7 +130,7 @@ class _FakeSessionManager:
 async def test_structured_set_calls_goal_capability_and_returns_stream_intent() -> None:
     goals = _FakeGoals()
     result = await _adapter(goals).handle_goal_command_structured(
-        {"action": "set", "objective": "ship the feature"},
+        _goal_request({"action": "set", "objective": "ship the feature"}),
         session_id="session-1",
     )
 
@@ -132,7 +143,7 @@ async def test_structured_set_calls_goal_capability_and_returns_stream_intent() 
 @pytest.mark.asyncio
 async def test_resume_without_goal_is_a_normal_control_response() -> None:
     result = await _adapter(_FakeGoals()).handle_goal_command_structured(
-        {"action": "resume"},
+        _goal_request({"action": "resume"}),
         session_id="session-1",
     )
 
@@ -146,7 +157,7 @@ async def test_resume_without_goal_is_a_normal_control_response() -> None:
 @pytest.mark.asyncio
 async def test_pause_without_goal_returns_no_goal_error() -> None:
     result = await _adapter(_FakeGoals()).handle_goal_command_structured(
-        {"action": "pause"},
+        _goal_request({"action": "pause"}),
         session_id="session-1",
     )
     assert result is not None
@@ -157,7 +168,7 @@ async def test_pause_without_goal_returns_no_goal_error() -> None:
 @pytest.mark.asyncio
 async def test_clear_without_goal_returns_no_goal_error() -> None:
     result = await _adapter(_FakeGoals()).handle_goal_command_structured(
-        {"action": "clear"},
+        _goal_request({"action": "clear"}),
         session_id="session-1",
     )
     assert result is not None
@@ -171,7 +182,7 @@ async def test_resume_completed_goal_returns_invalid_state() -> None:
     goals.record = GoalRecord.create(session_id="session-1", objective="done")
     goals.record.status = GoalStatus.COMPLETED
     result = await _adapter(goals).handle_goal_command_structured(
-        {"action": "resume"},
+        _goal_request({"action": "resume"}),
         session_id="session-1",
     )
     assert result is not None
@@ -186,7 +197,7 @@ async def test_pause_non_active_goal_returns_invalid_state() -> None:
     goals.record = GoalRecord.create(session_id="session-1", objective="paused")
     goals.record.status = GoalStatus.PAUSED
     result = await _adapter(goals).handle_goal_command_structured(
-        {"action": "pause"},
+        _goal_request({"action": "pause"}),
         session_id="session-1",
     )
     assert result is not None
@@ -200,7 +211,7 @@ async def test_set_existing_goal_returns_confirmation_data() -> None:
     goals.record = GoalRecord.create(session_id="session-1", objective="old goal")
 
     result = await _adapter(goals).handle_goal_command_structured(
-        {"action": "set", "objective": "new goal"},
+        _goal_request({"action": "set", "objective": "new goal"}),
         session_id="session-1",
     )
 

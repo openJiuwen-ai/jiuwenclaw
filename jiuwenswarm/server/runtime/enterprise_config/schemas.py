@@ -74,6 +74,8 @@ def normalize_template_ref(value: Any) -> dict[str, list[str]]:
 
 @dataclass(frozen=True)
 class RoutingContext:
+    """企业配置路由三元组；不含 ``gateway_id``（Agent 业务不消费）。"""
+
     group_id: str
     bot_id: str
     user_id: str

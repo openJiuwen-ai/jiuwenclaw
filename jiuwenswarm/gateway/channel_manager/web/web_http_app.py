@@ -40,6 +40,7 @@ _HEADER_TO_PARAM = {
     "x-user-id": "user_id",
     "x-group-id": "group_id",
     "x-bot-id": "bot_id",
+    "x-gateway-id": "gateway_id",
     "x-session-id": "session_id",
 }
 

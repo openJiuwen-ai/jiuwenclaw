@@ -222,6 +222,10 @@ async def test_phase12_ok_completes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _patch_phase3(monkeypatch: pytest.MonkeyPatch, *, jiuwen_exc=None, create_exc=None,
                   process_exc=None) -> MagicMock:
+    monkeypatch.setattr(
+        "jiuwenswarm.common.local_env_config.is_enterprise",
+        lambda: False,
+    )
     fake_agent = MagicMock()
     fake_agent.create_instance = AsyncMock()
     if create_exc:
@@ -244,6 +248,15 @@ def _patch_phase3(monkeypatch: pytest.MonkeyPatch, *, jiuwen_exc=None, create_ex
     monkeypatch.setattr(prewarm_mod, "get_config", lambda: {}, raising=False)
     return fake_agent
 
+
+@pytest.mark.asyncio
+async def test_phase3_skipped_on_enterprise(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.common.local_env_config.is_enterprise",
+        lambda: True,
+    )
+    # 不应再走到 JiuWenSwarm 构造；若误导入/调用会在本地环境炸 import。
+    await warmup_deep_agent_query(timeout_s=1.0)
 
 @pytest.mark.asyncio
 async def test_phase3_jiuwen_constructor_failure_does_not_raise(

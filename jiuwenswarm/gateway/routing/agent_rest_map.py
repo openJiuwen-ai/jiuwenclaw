@@ -236,6 +236,16 @@ def normalize_agent_http_base(uri: str) -> str:
 
 
 def identity_headers(envelope: E2AEnvelope, *, accept: str) -> dict[str, str]:
+    """组装 REST 身份头。
+
+    REST body 只含业务 ``params``，不含整封 E2A；因此顶层 ``user_id`` 与
+    ``channel_context.routing``（``group_id`` / ``bot_id`` / ``gateway_id``）
+    必须经 ``X-*`` 头传到 Agent，由 Agent HTTP 入口重建。
+
+    ``gateway_id`` 仅透传保留；Agent 业务（如企业配置 ``RoutingContext``）当前不消费。
+    """
+    from jiuwenswarm.common.request_identity import web_routing_identity
+
     headers = {
         "X-Request-Id": str(envelope.request_id or ""),
         "X-Channel-Id": str(envelope.channel or "web"),
@@ -244,8 +254,20 @@ def identity_headers(envelope: E2AEnvelope, *, accept: str) -> dict[str, str]:
     session_id = envelope.session_id or (envelope.params or {}).get("session_id")
     if session_id:
         headers["X-Session-Id"] = str(session_id)
-    if envelope.user_id:
-        headers["X-User-Id"] = str(envelope.user_id)
+    identity = web_routing_identity(
+        envelope.channel_context if isinstance(envelope.channel_context, dict) else None
+    )
+    user_id = envelope.user_id or identity.get("user_id")
+    if user_id:
+        headers["X-User-Id"] = str(user_id)
+    for field, header_name in (
+        ("group_id", "X-Group-Id"),
+        ("bot_id", "X-Bot-Id"),
+        ("gateway_id", "X-Gateway-Id"),
+    ):
+        value = identity.get(field)
+        if value:
+            headers[header_name] = value
     return headers
 
 
