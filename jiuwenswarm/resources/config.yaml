@@ -556,7 +556,6 @@ react:
       - glob
       - grep
       - bash
-      - code
       - skill_tool
       - skill_complete
       - skill_acceleration_exec
@@ -601,7 +600,7 @@ react:
   # 默认禁用 search_skill / install_skill / uninstall_skill（技能广场界面安装不受影响，
   # 那条链路走 SkillManager.handle_skills_install，不经模型工具）。
   # 单横线 ``-`` 仅在变量未设置时使用默认值；显式 DISABLED_TOOLS= 可清空黑名单。
-  disabled_tools: ${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill}
+  disabled_tools: ${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill,code}
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
