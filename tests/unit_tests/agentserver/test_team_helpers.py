@@ -3134,6 +3134,275 @@ async def test_consume_stream_with_query_broadcasts_leader_task_failed_detail_an
 
 
 @pytest.mark.anyio
+async def test_team_completed_carries_unrecovered_leader_error(monkeypatch):
+    """leader 重试耗尽（chat.error 后无恢复产出）时，team.completed
+    转换的 processing_status 必须携带 error——否则前端把失败回合记成"已完成"。"""
+    broadcasted: list[dict] = []
+    detail = (
+        "[181001] model call failed, reason: openAI API async stream error: "
+        "AuthenticationError: Error code: 401 - invalid proxy key"
+    )
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="controller_output",
+            payload={
+                "type": "task_failed",
+                "data": [{"type": "text", "text": detail}],
+            },
+            role=TeamRole.LEADER,
+        )
+        # 零成员/零任务时 team.completed 空虚成立（OPT-26 触发形态）
+        yield SimpleNamespace(
+            type="team.completed",
+            payload={"member_count": 0, "task_count": 0},
+        )
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        _broadcast_recorder(broadcasted, fake_mgr),
+    )
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web",
+        "sess",
+        SimpleNamespace(team_name="demo-team"),
+        "hello",
+    )
+
+    assert [event["event_type"] for event in broadcasted] == [
+        "chat.processing_status",
+        "chat.error",
+        "chat.final",
+        "chat.processing_status",
+        "team.completed",
+    ]
+    completion = broadcasted[3]
+    assert completion["is_complete"] is True
+    assert completion["is_processing"] is False
+    assert "181001" in completion["error"]
+    assert "invalid proxy key" in completion["error"]
+
+
+@pytest.mark.anyio
+async def test_team_completed_clean_when_leader_recovered_after_error(monkeypatch):
+    """防误杀：leader chat.error 之后有实质正文产出（已恢复），
+    team.completed 的收尾帧不得携带 error。"""
+    broadcasted: list[dict] = []
+    detail = "[181001] model call failed, reason: transient"
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="controller_output",
+            payload={
+                "type": "task_failed",
+                "data": [{"type": "text", "text": detail}],
+            },
+            role=TeamRole.LEADER,
+        )
+        # leader 恢复产出实质正文 → 错误史应被清除
+        yield SimpleNamespace(
+            type="llm_output",
+            payload={"content": "已恢复，继续执行"},
+            role=TeamRole.LEADER,
+        )
+        yield SimpleNamespace(
+            type="team.completed",
+            payload={"member_count": 0, "task_count": 0},
+        )
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        _broadcast_recorder(broadcasted, fake_mgr),
+    )
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web",
+        "sess-recover",
+        SimpleNamespace(team_name="demo-team"),
+        "hello",
+    )
+
+    completions = [
+        event
+        for event in broadcasted
+        if event.get("event_type") == "chat.processing_status"
+        and event.get("is_complete") is True
+    ]
+    assert len(completions) == 1
+    assert "error" not in completions[0]
+
+
+@pytest.mark.anyio
+async def test_team_chat_error_persisted_as_non_terminal_warning(monkeypatch):
+    """团队 chat.error（leader/成员）广播之外必须落盘，带 warning=True
+    非终态标记——否则重启后"本轮曾出错"留痕蒸发；成员错误附 member_name 归因。"""
+    broadcasted: list[dict] = []
+    persisted: list[dict] = []
+    detail = "[181001] model call failed, reason: transient"
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="controller_output",
+            payload={"type": "task_failed", "data": [{"type": "text", "text": detail}]},
+            role=TeamRole.LEADER,
+        )
+        yield SimpleNamespace(
+            type="controller_output",
+            payload={"type": "task_failed", "data": [{"type": "text", "text": detail}]},
+            role=TeamRole.TEAMMATE,
+            source_member="analyst",
+        )
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        _broadcast_recorder(broadcasted, fake_mgr),
+    )
+    monkeypatch.setattr(
+        team_helpers,
+        "append_history_record",
+        lambda **kw: persisted.append(kw),
+    )
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web",
+        "sess-warn-persist",
+        SimpleNamespace(team_name="demo-team"),
+        "hello",
+    )
+
+    error_records = [r for r in persisted if r.get("event_type") == "chat.error"]
+    assert len(error_records) == 2
+    assert all(r["extra"].get("warning") is True for r in error_records)
+    assert all(detail in r["content"] for r in error_records)
+    assert all(r["mode"] == "team" for r in error_records)
+    # 成员错误带归因，leader 不带
+    assert any(r["extra"].get("member_name") == "analyst" for r in error_records)
+    assert any("member_name" not in r["extra"] for r in error_records)
+
+
+@pytest.mark.anyio
+async def test_leader_death_probe_survives_member_death_frame(monkeypatch):
+    """leader 重试耗尽挂探针后，成员的死讯帧（同流紧随到达）不得污染
+    探针活性基线——修复前 received_chunks 计数含成员帧，探针误判"有活动"放弃，
+    回合零终态帧、前端误标"已完成"。修复后活性只数 leader 帧，探针照常判死。"""
+    monkeypatch.setattr(team_helpers, "_LEADER_ROUND_DEATH_PROBE_SEC", 0.02)
+    broadcasted: list[dict] = []
+    detail = "[181001] model call failed, reason: APIConnectionError"
+    stream_open = asyncio.Event()
+
+    async def _fake_stream(**kwargs):
+        # leader 耗尽
+        yield SimpleNamespace(
+            type="controller_output",
+            payload={"type": "task_failed", "data": [{"type": "text", "text": detail}]},
+            role=TeamRole.LEADER,
+        )
+        # 成员的死讯帧紧随（同流，修复前会把 received_chunks 基线冲掉）
+        yield SimpleNamespace(
+            type="controller_output",
+            payload={"type": "task_failed", "data": [{"type": "text", "text": detail}]},
+            role=TeamRole.TEAMMATE,
+            source_member="frontend-dev",
+        )
+        # 长寿命流不结束：等测试放行（真实场景流跨轮次存活）
+        await stream_open.wait()
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def has_stream_task(session_id: str) -> bool:
+            return True
+
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        _broadcast_recorder(broadcasted, fake_mgr),
+    )
+    monkeypatch.setattr(team_helpers, "append_history_record", lambda **kw: None)
+
+    consumer = asyncio.create_task(
+        _TeamHelpersTestApi.consume_stream_with_query(
+            "web",
+            "sess-probe-member-death",
+            SimpleNamespace(team_name="demo-team"),
+            "hello",
+        )
+    )
+    await asyncio.sleep(0.3)  # 覆盖探针窗口（0.02s）+ 余量
+    stream_open.set()
+    await consumer
+
+    terminal = [
+        event
+        for event in broadcasted
+        if event.get("event_type") == "chat.processing_status" and event.get("is_complete") is True
+    ]
+    assert any("181001" in str(event.get("error") or "") for event in terminal)
+
+
+@pytest.mark.anyio
 async def test_consume_stream_with_query_does_not_final_teammate_task_failed(monkeypatch):
     broadcasted: list[dict] = []
     detail = (
@@ -4860,6 +5129,55 @@ async def test_retry_hint_chunk_dropped_from_business_stream(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_retry_hint_chunk_broadcast_as_retry_status(monkeypatch):
+    """retrying 帧不进文本业务流，但改道 chat.retry_status 广播（
+    重试过程可见——attempt/max_attempts/error 结构化下发，不污染 delta/final）。"""
+
+    manager = _RecordingTeamManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+
+    def _fake_parse(chunk):
+        ctype = getattr(chunk, "type", None)
+        if ctype == "llm_output":
+            payload = chunk.payload
+            return {
+                "event_type": "chat.delta",
+                "content": payload.get("content") if isinstance(payload, dict) else payload,
+            }
+        return None
+
+    monkeypatch.setattr(team_helpers, "parse_stream_chunk", _fake_parse)
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="llm_output",
+            payload={
+                "content": "[Retry 3/10] [181001] model call failed",
+                "retrying": True,
+                "attempt": 3,
+                "max_attempts": 10,
+            },
+            role=TeamRole.LEADER,
+        )
+        yield _completion_chunk("正文")
+
+    monkeypatch.setattr(team_helpers.Runner, "run_agent_team_streaming", _fake_stream)
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web", "sess-retry-status", SimpleNamespace(team_name="spec-team"), "问",
+    )
+
+    retry_events = [e for e in manager.events if e.get("event_type") == "chat.retry_status"]
+    assert len(retry_events) == 1
+    assert retry_events[0]["attempt"] == 3
+    assert retry_events[0]["max_attempts"] == 10
+    assert "181001" in retry_events[0]["error"]
+    # 不污染文本通道
+    deltas = [e for e in manager.events if e.get("event_type") == "chat.delta"]
+    assert all("[Retry" not in str(e.get("content") or "") for e in deltas)
+
+
+@pytest.mark.asyncio
 async def test_multi_speech_double_completion_single_card_each(monkeypatch):
     """每发言 = [task_completion ×2, answer 原生帧]——每次发言只留一张卡（合成帧），
     同文迟到原生均丢弃，泡序号连续不跳号。"""
@@ -4898,14 +5216,28 @@ async def test_multi_speech_double_completion_single_card_each(monkeypatch):
     assert [e.get("bubble_seq") for e in finals] == [0, 1]
 
 
+class _ProbeFakeMonitorHandler:
+    """get_team_snapshot 的可编程 fake：members 由测试随时改。"""
+
+    def __init__(self, members: list[dict] | None = None) -> None:
+        self._members = members or []
+
+    async def get_team_snapshot(self):
+        return {"members": list(self._members), "tasks": [], "team_id": "t"}
+
+
 class _ProbeFakeManager:
     """leader 轮死亡探针的最小 TeamManager fake。"""
 
-    def __init__(self, stream_alive: bool = True) -> None:
+    def __init__(self, stream_alive: bool = True, monitor_handler=None) -> None:
         self._stream_alive = stream_alive
+        self._monitor_handler = monitor_handler
 
     def has_stream_task(self, _session_id: str) -> bool:
         return self._stream_alive
+
+    def get_monitor_handler(self, _session_id: str):
+        return self._monitor_handler
 
 
 @pytest.mark.asyncio
@@ -5043,3 +5375,106 @@ async def test_leader_round_death_probe_reschedule_cancels_previous(monkeypatch:
     assert len(broadcasted) <= 1
     if broadcasted:
         assert broadcasted[0]["error"] == "第二次"
+
+
+@pytest.mark.asyncio
+async def test_leader_round_death_probe_waits_while_members_busy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """有成员在途工作 → 不补终态：先广播"团队仍在运行"等待警告并续探；
+    成员全部落定后下一次醒来才补终态。"""
+    monkeypatch.setattr(team_helpers, "_LEADER_ROUND_DEATH_PROBE_SEC", 0.02)
+    handler = _ProbeFakeMonitorHandler(
+        [{"member_id": "m1", "status": "busy", "execution_status": "running"}]
+    )
+    monkeypatch.setattr(
+        team_helpers, "get_team_manager",
+        lambda _cid: _ProbeFakeManager(stream_alive=True, monitor_handler=handler),
+    )
+    broadcasted: list[dict] = []
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _broadcast_recorder(broadcasted))
+
+    async def _settle() -> None:
+        await asyncio.sleep(0.025)  # 第一次醒来（busy→警告+续探）之后落定
+        handler._members = [{"member_id": "m1", "status": "ready", "execution_status": "idle"}]
+
+    settler = asyncio.create_task(_settle())
+    on_fired = {"n": 0}
+    task = team_helpers._schedule_leader_round_death_probe(
+        "desktop",
+        "s1",
+        1,
+        error_text="[181001] model call failed",
+        liveness=lambda: 10,
+        completion_signals=lambda: 0,
+        previous=None,
+        on_fired=lambda: on_fired.__setitem__("n", on_fired["n"] + 1),
+    )
+    await asyncio.gather(task, settler)
+
+    warnings = [e for e in broadcasted if e.get("event_type") == "chat.error"]
+    terminals = [e for e in broadcasted if e.get("event_type") == "chat.processing_status"]
+    assert len(warnings) == 1
+    assert "团队仍在运行" in warnings[0]["error"]
+    assert warnings[0]["rid"] == 1
+    assert len(terminals) == 1
+    assert terminals[0]["is_complete"] is True
+    assert terminals[0]["error"] == "[181001] model call failed"
+    # 广播顺序：先等待警告，后终态
+    assert broadcasted.index(warnings[0]) < broadcasted.index(terminals[0])
+    assert on_fired["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_leader_round_death_probe_extension_cap_forces_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """成员永忙（卡死）→ 续探上限兜底：超过上限仍补终态，轮次不永挂；
+    等待警告只在首次续探广播一次。"""
+    monkeypatch.setattr(team_helpers, "_LEADER_ROUND_DEATH_PROBE_SEC", 0.02)
+    monkeypatch.setattr(team_helpers, "_LEADER_ROUND_DEATH_PROBE_MAX_EXTENSIONS", 2)
+    handler = _ProbeFakeMonitorHandler(
+        [{"member_id": "m1", "status": "busy", "execution_status": "running"}]
+    )
+    monkeypatch.setattr(
+        team_helpers, "get_team_manager",
+        lambda _cid: _ProbeFakeManager(stream_alive=True, monitor_handler=handler),
+    )
+    broadcasted: list[dict] = []
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _broadcast_recorder(broadcasted))
+
+    task = team_helpers._schedule_leader_round_death_probe(
+        "desktop",
+        "s1",
+        1,
+        error_text="err",
+        liveness=lambda: 10,
+        completion_signals=lambda: 0,
+        previous=None,
+    )
+    await task
+
+    warnings = [e for e in broadcasted if e.get("event_type") == "chat.error"]
+    terminals = [e for e in broadcasted if e.get("event_type") == "chat.processing_status"]
+    assert len(warnings) == 1
+    assert len(terminals) == 1
+    assert terminals[0]["is_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_count_in_flight_members_status_and_exec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """busy 状态或执行中状态（starting/running/completing）均计为在途；
+    快照不可用（无 monitor handler / 返回 None）按 0，退化为补终态的旧行为。"""
+    handler = _ProbeFakeMonitorHandler([
+        {"member_id": "m1", "status": "ready", "execution_status": "idle"},
+        {"member_id": "m2", "status": "busy", "execution_status": "idle"},
+        {"member_id": "m3", "status": "ready", "execution_status": "running"},
+        {"member_id": "m4", "status": "paused", "execution_status": "idle"},
+    ])
+    monkeypatch.setattr(
+        team_helpers, "get_team_manager",
+        lambda _cid: _ProbeFakeManager(stream_alive=True, monitor_handler=handler),
+    )
+    assert await team_helpers._count_in_flight_members("desktop", "s1") == 2
+
+    monkeypatch.setattr(
+        team_helpers, "get_team_manager",
+        lambda _cid: _ProbeFakeManager(stream_alive=True),
+    )
+    assert await team_helpers._count_in_flight_members("desktop", "s1") == 0
