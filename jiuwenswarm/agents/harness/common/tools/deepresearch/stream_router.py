@@ -803,11 +803,14 @@ def _is_successful_workflow_end(chunk: dict, agent: str, event: str) -> bool:
             result,
             max_text_chars=MAX_TERMINAL_RESULT_TEXT_CHARS,
         )
+    # A non-empty response_content means the engine produced a report.
+    # exception_info may carry non-fatal per-section warnings (e.g. one
+    # sub-report failed but the rest succeeded); it must not block delivery
+    # or downgrade the terminal 16 MiB bound to the 1 MiB process limit.
     return bool(
         result
         and isinstance(result.get("response_content"), str)
         and result["response_content"].strip()
-        and not result.get("exception_info")
     )
 
 
