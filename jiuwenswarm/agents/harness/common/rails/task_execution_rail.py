@@ -88,7 +88,7 @@ WRITE_TOOL_NAMES = frozenset({
 })
 # 代码执行类工具：产物路径从 stdout/stderr 正则提取
 CODE_EXEC_TOOL_NAMES = frozenset({
-    "code", "bash", "exec_command", "mcp_exec_command",
+    "bash", "exec_command", "mcp_exec_command",
 })
 # invoke_tool：按需工具的间接调用入口，需解包内部工具名和结果
 INVOKE_TOOL_NAMES = frozenset({"invoke_tool"})

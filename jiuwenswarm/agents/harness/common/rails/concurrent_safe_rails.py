@@ -23,7 +23,6 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCal
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 from openjiuwen.harness.schema.task import TaskPlan
 from openjiuwen.harness.tools import BashTool
-from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.harness.tools.filesystem import (
     EditFileTool,
     GlobTool,
@@ -71,7 +70,6 @@ class ConcurrentSafeSysOperationRail(SysOperationRail):
         list_dir_tool = ListDirTool(self.sys_operation, lang, agent_id)
         grep_tool = GrepTool(self.sys_operation, lang, agent_id)
         bash_tool = BashTool(self.sys_operation, lang, agent_id=agent_id)
-        code_tool = CodeTool(self.sys_operation, lang, agent_id)
 
         self.tools = [
             read_tool,
@@ -81,7 +79,6 @@ class ConcurrentSafeSysOperationRail(SysOperationRail):
             list_dir_tool,
             grep_tool,
             bash_tool,
-            code_tool,
         ]
 
         new_tools = [

@@ -969,7 +969,6 @@ _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
         "write_file",
         "edit_file",
         "bash",
-        "code",
     }
 )
 _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
@@ -1195,7 +1194,6 @@ _DEFAULT_PROGRESSIVE_EAGER_TOOLS = [
     "glob",
     "grep",
     "bash",
-    "code",
     "skill_tool",
     "skill_complete",
     "todo_create",
