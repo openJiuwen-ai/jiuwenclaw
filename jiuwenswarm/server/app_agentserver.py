@@ -155,7 +155,12 @@ async def _run(host: str, port: int) -> None:
     from jiuwenswarm.extensions.manager import ExtensionManager
     from jiuwenswarm.extensions.registry import ExtensionRegistry
     from jiuwenswarm.common.config import get_config
+    from jiuwenswarm.server.runtime.file_operation_history_patch import (
+        configure_file_operation_history,
+    )
 
+    full_cfg = get_config()
+    configure_file_operation_history(full_cfg)
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
     # ---------- 扩展系统初始化 ----------
@@ -184,7 +189,6 @@ async def _run(host: str, port: int) -> None:
     # 适配逻辑（建专用 agent + 触发主 agent 回调）封装在 proactive_adapter，
     # app_agentserver 只调 init_proactive_engine。
     from jiuwenswarm.server.runtime.proactive_adapter import init_proactive_engine
-    full_cfg = get_config()
     proactive_config = full_cfg.get("proactive_recommendation", {}) if isinstance(full_cfg, dict) else {}
     await init_proactive_engine(server, proactive_config)
 
