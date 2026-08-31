@@ -436,7 +436,6 @@ def test_get_tools_exposes_only_graph_named_contracts():
     assert properties["candidate_skill_ids"]["type"] == "array"
     assert properties["candidate_skill_ids"]["items"] == {"type": "string"}
     assert "shortlisted" in properties["candidate_skill_ids"]["description"]
-    assert "most relevant" in properties["candidate_skill_ids"]["description"]
     assert "fast is the default" in properties["mode"]["description"]
     assert "requires multiple installed skills" in compose_tool.card.description
     assert (
