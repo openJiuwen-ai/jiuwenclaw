@@ -898,6 +898,8 @@ def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> 
         return False, "invalid_dom"
     if not _validate_chart_height_chain(filled_html):
         return False, "invalid_chart_height_chain"
+    if not _validate_chart_mount_references(filled_html):
+        return False, "chart_mount_id_mismatch"
     return True, ""
 
 
@@ -922,6 +924,8 @@ def _validate_custom_content_template_fill_output(
         return False, "invalid_dom"
     if not _validate_chart_height_chain(filled_html):
         return False, "invalid_chart_height_chain"
+    if not _validate_chart_mount_references(filled_html):
+        return False, "chart_mount_id_mismatch"
     return True, ""
 
 
@@ -1927,24 +1931,102 @@ def _fix_chart_height_chain(html: str) -> str:
     return result
 
 
-# CHART_SCAFFOLD HTML 注释定界符模式（仅匹配带 <!-- / --> 的注释标记，
-# 不影响 JS 块注释内的同名文字）
-_CHART_SCAFFOLD_BEGIN_RE = re.compile(r"<!--\s*CHART_SCAFFOLD(_\d+)?_BEGIN\s*\n?")
-_CHART_SCAFFOLD_END_RE = re.compile(r"\n?\s*CHART_SCAFFOLD(_\d+)?_END\s*-->")
+_CHART_SCAFFOLD_GET_ELEMENT_RE = re.compile(
+    r'document\.getElementById\(\s*(["\'])([^"\']+)\1\s*\)'
+)
+_CHART_SCAFFOLD_NULL_OPTION_RE = re.compile(r"\bconst\s+option\s*=\s*null\b")
+_CHART_SCAFFOLD_OPTION_ASSIGN_RE = re.compile(r"\bconst\s+option\s*=")
+_JS_BLOCK_COMMENT_RE = re.compile(r"/\*[\s\S]*?\*/")
+_JS_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+
+
+def _strip_js_comments(js: str) -> str:
+    """去掉 JS 块注释与行注释，供 option 填充检测（忽略说明文字中的 const option = null）。"""
+    without_block = _JS_BLOCK_COMMENT_RE.sub("", js or "")
+    return _JS_LINE_COMMENT_RE.sub("", without_block)
+
+
+def _chart_scaffold_target_id(script_body: str) -> str:
+    match = _CHART_SCAFFOLD_GET_ELEMENT_RE.search(script_body or "")
+    return match.group(2) if match else ""
+
+
+def _html_has_element_id(html: str, element_id: str) -> bool:
+    """与 pptx-craft hasChartContainer 同口径：页内存在 id="…"。"""
+    if not html or not element_id:
+        return False
+    return (
+        re.search(
+            rf'(?:^|\s)id\s*=\s*(["\']){re.escape(element_id)}\1',
+            html,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+_SCRIPT_BODY_RE = re.compile(
+    r"<script\b[^>]*>(.*?)</script\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _validate_chart_mount_references(html: str) -> bool:
+    """P8.1 写盘前校验：含 echarts.init 的活跃脚本中 getElementById 须在页内存在对应 id。
+
+    仅扫描去掉 HTML 注释后的 script 块，避免 dormant CHART_SCAFFOLD 误报；
+    与 designer.md「容器 id 须与 getElementById 一致」及方案 A 互补。
+    """
+    if not html or "echarts.init" not in html.lower():
+        return True
+    html_no_comments = _HTML_COMMENT_RE.sub("", html)
+    for match in _SCRIPT_BODY_RE.finditer(html_no_comments):
+        script_body = match.group(1) or ""
+        if "echarts.init" not in script_body.lower():
+            continue
+        for gid_match in _CHART_SCAFFOLD_GET_ELEMENT_RE.finditer(script_body):
+            element_id = gid_match.group(2)
+            if element_id and not _html_has_element_id(html, element_id):
+                return False
+    return True
+
+
+def _chart_scaffold_option_populated(script_body: str) -> bool:
+    """与 pptx-craft hasOptionAssignment ∧ ¬hasNullOption 同口径（仅看可执行代码）。"""
+    code = _strip_js_comments(script_body or "")
+    if _CHART_SCAFFOLD_NULL_OPTION_RE.search(code):
+        return False
+    return _CHART_SCAFFOLD_OPTION_ASSIGN_RE.search(code) is not None
 
 
 def _fix_chart_scaffold_activation(html: str) -> str:
     """写盘前修复：LLM 填了 option 但忘删 CHART_SCAFFOLD 注释定界符时自动激活。
 
-    仅匹配带 <!-- / --> 的 HTML 注释标记（不影响 JS 块注释内的同名文字）。
+    与 pptx-craft activateTemplateChartScaffolds 前置条件一致：仅当该注释块
+    option 非 null 且 getElementById 对应容器存在时，才剥该块定界符。
     """
-    if "CHART_SCAFFOLD" not in html:
+    if not html or "CHART_SCAFFOLD" not in html:
         return html
-    fixed = _CHART_SCAFFOLD_BEGIN_RE.sub("", html)
-    fixed = _CHART_SCAFFOLD_END_RE.sub("", fixed)
-    if fixed != html:
-        logger.info("[P8.1] repaired=chart_scaffold_activation 激活图表骨架")
-    return fixed
+    activated = 0
+    pieces: list[str] = []
+    last = 0
+    for match in _COMMENTED_CHART_SCAFFOLD_BLOCK_RE.finditer(html):
+        body = match.group(2) or ""
+        pieces.append(html[last:match.start()])
+        target_id = _chart_scaffold_target_id(body)
+        if _chart_scaffold_option_populated(body) and _html_has_element_id(
+            html, target_id
+        ):
+            pieces.append(body.strip())
+            activated += 1
+        else:
+            pieces.append(match.group(0))
+        last = match.end()
+    if not activated:
+        return html
+    pieces.append(html[last:])
+    logger.info("[P8.1] repaired=chart_scaffold_activation 激活图表骨架")
+    return "".join(pieces)
 
 
 def _extract_backup_timestamp(path: str) -> str:
@@ -3170,6 +3252,10 @@ _REWRITE_ACTIONS = {
         "必须带 flex-1 min-h-0（或 flex-[N] min-h-0），"
         "标准写法 div.flex-1.min-h-0.flex.flex-col > div#chart-1.w-full.h-full"
     ),
+    "chart_mount_id_mismatch": (
+        "图表容器 id 必须与脚本中 document.getElementById 引用完全一致；"
+        "禁止在修复或再填时改写图表 div 的 id 或 getElementById 参数字符串"
+    ),
     "invalid_html": (
         "输出完整合法 HTML 文档，须含闭合 </body></html>，"
         "且仅含 1 个 .ppt-slide 容器，禁止多页拼进同一文件、截断或夹杂解释文字"
@@ -3262,12 +3348,13 @@ _CANONICAL_ACTIVE_CHART_SCAFFOLD_RE = re.compile(
 def _html_requires_activate_template_chart(html: str) -> bool:
     """是否应调用 pptx-craft activate-template-chart（与 skill 调用时机对齐）。
 
-    仅两类页需要 CLI：
-    1. 注释内 CHART_SCAFFOLD 已填 option、待 CLI 成对删除定界符；
+    需要 CLI 的情况（对齐 activate-template-chart / designer 激活契约）：
+    1. 注释内 CHART_SCAFFOLD 已填 option（待 CLI 成对删除定界符）；
     2. 已暴露的 canonical active scaffold（data-pptx-chart-scaffold=v1）待验收。
 
-    非图表页保留 dormant 注释（option=null）时不调用；Turbo 已激活且不含 canonical
-    marker 的页面也不调用（与 designer.md「决定使用图表后再 activate」一致）。
+    纯 dormant（option=null），即使有图表容器也不调用——CLI 对 null option
+    会 exit 1；见 CHECK-LAYOUT.md §11.5。已激活且无 canonical marker 的普通
+    content-template 页也不调用（避免二次 CLI 误报 no canonical）。
     """
     if not html:
         return False
@@ -3275,11 +3362,9 @@ def _html_requires_activate_template_chart(html: str) -> bool:
     if blocks:
         for block in blocks:
             body = block.group(2) or ""
-            if re.search(r"\bconst\s+option\s*=\s*null\b", body):
-                continue
-            if re.search(r"\bconst\s+option\s*=", body):
+            if _chart_scaffold_option_populated(body):
                 return True
-        # 注释块均为 dormant：去掉注释 scaffold 后再查页内已暴露的 canonical
+        # 注释块均为纯 dormant：去掉注释 scaffold 后再查页内已暴露的 canonical
         html_outside_comments = _COMMENTED_CHART_SCAFFOLD_BLOCK_RE.sub("", html)
         return _CANONICAL_ACTIVE_CHART_SCAFFOLD_RE.search(html_outside_comments) is not None
     return _CANONICAL_ACTIVE_CHART_SCAFFOLD_RE.search(html) is not None
@@ -4956,6 +5041,12 @@ class PageWorkerNode(DisableThinkingMixin, PlanNode):
         if not _validate_chart_height_chain(html):
             logger.warning("[P8.1] 页面 %d 图表容器高度链校验失败", ctx.page_num)
             return "", html, "invalid_chart_height_chain"
+        if not _validate_chart_mount_references(html):
+            logger.warning(
+                "[P8.1] 页面 %d 图表容器 id 与 getElementById 不一致",
+                ctx.page_num,
+            )
+            return "", html, "chart_mount_id_mismatch"
         return html, "", ""
 
     async def _write_file(self, path: str, content: str) -> bool:
