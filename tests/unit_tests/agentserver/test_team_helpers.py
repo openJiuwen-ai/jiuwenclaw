@@ -5086,10 +5086,15 @@ async def test_consume_workflow_events_converts_to_team_events_for_web(monkeypat
         "web", "sess-wf-web", handler,
     )
 
-    # No raw workflow.updated leaks to web; only team.* envelopes.
+    # All channels receive the raw workflow.updated (web tree view) plus the
+    # activation notice; web additionally receives converted team.* envelopes.
     assert broadcasted
-    assert all(e["event_type"] in ("team.member", "team.task") for e in broadcasted)
-    types = [e["event"]["type"] for e in broadcasted]
+    raw_types = [e["event_type"] for e in broadcasted]
+    assert "swarmflow.activated" in raw_types
+    assert "workflow.updated" in raw_types
+    team_events = [e for e in broadcasted if e["event_type"] in ("team.member", "team.task")]
+    assert team_events
+    types = [e["event"]["type"] for e in team_events]
     assert "team.task.claimed" in types
     assert "team.member.spawned" in types
 

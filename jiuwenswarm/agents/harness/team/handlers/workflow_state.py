@@ -976,7 +976,8 @@ class WorkflowRunState(BaseModel):
                 # after sealing so its completed_agent_count reflects the just-sealed
                 # children, not only its own (possibly empty) direct-agent list.
                 self._refresh_parent_counts(parent)
-                logger.info("[WF_DBG child] sealed parent phase=%s (all sibling child phases done, status=%s)", parent.name, parent.status)
+                logger.info("[WF_DBG child] sealed parent phase=%s (all sibling child phases done, status=%s)",
+                            parent.name, parent.status)
                 return parent
         return None
 
