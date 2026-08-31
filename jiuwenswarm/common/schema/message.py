@@ -287,6 +287,12 @@ class ReqMethod(Enum):
     # AgentGroup selection + agent_template / plugin package catalog RPCs.
     AGENT_GROUPS_LIST = "agent_groups.list"
     AGENT_GROUPS_SHOW = "agent_groups.show"
+    AGENT_GROUPS_FILE_LIST = "agent_groups.file.list"
+    AGENT_GROUPS_FILE_READ = "agent_groups.file.read"
+    AGENT_GROUPS_CREATE = "agent_groups.create"
+    AGENT_GROUPS_IMPORT_LOCAL = "agent_groups.import_local"
+    AGENT_GROUPS_INSTALL = "agent_groups.install"
+    AGENT_GROUPS_UNINSTALL = "agent_groups.uninstall"
     AGENT_TEMPLATES_LIST = "agent_templates.list"
     AGENT_TEMPLATES_SHOW = "agent_templates.show"
     AGENT_TEMPLATES_FILE_LIST = "agent_templates.file.list"

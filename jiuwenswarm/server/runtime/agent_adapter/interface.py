@@ -693,6 +693,12 @@ _PLUGIN_ROUTES: dict[ReqMethod, str] = {
 _PACKAGE_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.AGENT_GROUPS_LIST: "list_agent_groups",
     ReqMethod.AGENT_GROUPS_SHOW: "show_agent_group",
+    ReqMethod.AGENT_GROUPS_FILE_LIST: "list_agent_group_files",
+    ReqMethod.AGENT_GROUPS_FILE_READ: "read_agent_group_file",
+    ReqMethod.AGENT_GROUPS_CREATE: "create_agent_group",
+    ReqMethod.AGENT_GROUPS_IMPORT_LOCAL: "import_agent_group",
+    ReqMethod.AGENT_GROUPS_INSTALL: "install_agent_group",
+    ReqMethod.AGENT_GROUPS_UNINSTALL: "uninstall_agent_group",
     ReqMethod.AGENT_TEMPLATES_LIST: "list_agent_templates",
     ReqMethod.AGENT_TEMPLATES_SHOW: "show_agent_template",
     ReqMethod.AGENT_TEMPLATES_FILE_LIST: "list_agent_template_files",
@@ -1971,6 +1977,24 @@ class JiuWenSwarm:
                 if group is None:
                     raise ValueError(f"agent_group not found: {name!r}")
                 payload = {"group": group}
+            elif method == ReqMethod.AGENT_GROUPS_FILE_LIST:
+                payload = {
+                    "tree": package_manager.list_agent_group_files(str(name or ""))
+                }
+            elif method == ReqMethod.AGENT_GROUPS_FILE_READ:
+                payload = package_manager.read_agent_group_file(
+                    str(name or ""), str(params.get("path", ""))
+                )
+            elif method == ReqMethod.AGENT_GROUPS_CREATE:
+                payload = package_manager.create_agent_group(params)
+            elif method == ReqMethod.AGENT_GROUPS_IMPORT_LOCAL:
+                payload = package_manager.import_agent_group(params)
+            elif method == ReqMethod.AGENT_GROUPS_INSTALL:
+                package_manager.install_agent_group(params)
+                payload = {}
+            elif method == ReqMethod.AGENT_GROUPS_UNINSTALL:
+                package_manager.uninstall_agent_group(params)
+                payload = {}
             elif method == ReqMethod.AGENT_TEMPLATES_LIST:
                 payload = {
                     "templates": package_manager.list_agent_templates(params)

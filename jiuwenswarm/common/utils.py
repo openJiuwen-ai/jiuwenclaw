@@ -1392,12 +1392,16 @@ def prepare_workspace(
     agent_sessions.mkdir(parents=True, exist_ok=True)
     default_project_workspace.mkdir(parents=True, exist_ok=True)
 
-    # Equipment tree: plugins/{agent_templates,agent_groups,plugin_packages}/{built_in,local}.
+    # Single-Agent equipment remains in the DeepAgent workspace. AgentGroup
+    # definitions are team-owned state and therefore live below .agent_teams.
     # Template copy ignores plugins/; package reconcile belongs to runtime equipment module.
-    for kind in ("agent_templates", "agent_groups", "plugin_packages"):
+    for kind in ("agent_templates", "plugin_packages"):
         kind_root = deepagent_workspace / "plugins" / kind
         (kind_root / "built_in").mkdir(parents=True, exist_ok=True)
         (kind_root / "local").mkdir(parents=True, exist_ok=True)
+    agent_group_root = workspace_dir / ".agent_teams" / "agent_groups"
+    (agent_group_root / "built_in").mkdir(parents=True, exist_ok=True)
+    (agent_group_root / "local").mkdir(parents=True, exist_ok=True)
 
     from jiuwenswarm.common.config import migrate_config_from_template, set_preferred_language_in_config_file
 
