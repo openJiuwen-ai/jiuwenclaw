@@ -370,6 +370,45 @@ async def test_discovery_revalidates_and_rejects_cross_host_redirect() -> None:
 
 
 @pytest.mark.asyncio
+async def test_discovery_follows_case_insensitive_same_host_redirect() -> None:
+    async def public_resolver(host: str, port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    card = {
+        "name": "Research Agent",
+        "description": "Researches",
+        "version": "1.0.0",
+        "protocolVersion": "1.0.0",
+        "url": "https://agent.example.com/a2a",
+        "preferredTransport": "JSONRPC",
+        "skills": [],
+        "capabilities": {},
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain"],
+    }
+
+    calls: list[httpx.URL] = []
+
+    async def redirect_then_respond(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        if len(calls) == 1:
+            return httpx.Response(
+                302, headers={"location": "https://Agent.Example.com/a2a"}
+            )
+        return httpx.Response(200, json=card)
+
+    service = A2AOutboundDiscoveryService(
+        address_resolver=public_resolver,
+        transport_factory=lambda _: httpx.MockTransport(redirect_then_respond),
+    )
+
+    result = await service.discover("https://agent.example.com")
+
+    assert len(calls) == 2
+    assert result.agent.name == "Research Agent"
+
+
+@pytest.mark.asyncio
 async def test_validated_ip_is_pinned_for_tcp_connection() -> None:
     calls = []
     sentinel = object()

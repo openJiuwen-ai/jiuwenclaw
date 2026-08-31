@@ -209,10 +209,9 @@ class A2AOutboundDiscoveryService:
                                 )
                             location = response.headers.get("location", "")
                             next_url = urljoin(current, location)
-                            if (
-                                urlsplit(next_url).hostname
-                                != urlsplit(current).hostname
-                            ):
+                            next_host = (urlsplit(next_url).hostname or "").lower()
+                            current_host = (urlsplit(current).hostname or "").lower()
+                            if next_host != current_host:
                                 raise A2AOutboundError(
                                     A2AOutboundErrorCode.DISCOVERY_BLOCKED
                                 )
