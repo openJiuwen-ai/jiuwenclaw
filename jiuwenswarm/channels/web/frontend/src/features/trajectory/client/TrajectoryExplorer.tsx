@@ -10,6 +10,7 @@ import type {
 } from '../trajectory/model.ts'
 import { trajectoryRecordId } from '../trajectory/record.ts'
 import {
+  resolveTimelineMode,
   trajectoryTimelineFocusIndexes,
   type TrajectoryTimelineMode,
   type TrajectoryTimeRange,
@@ -140,6 +141,7 @@ export const TrajectoryExplorer = memo(function TrajectoryExplorer({
   }, [active, hasRunningCells])
   const [actualDuration, setActualDuration] = useState(false)
   const [actualTime, setActualTime] = useState(false)
+  const [tokenView, setTokenView] = useState(false)
   const [collapsedTurns, setCollapsedTurns] = useState<ReadonlySet<number>>(EMPTY_TURN_IDS)
   const [collapsedAssistants, setCollapsedAssistants] =
     useState<ReadonlySet<string>>(EMPTY_RECORD_IDS)
@@ -164,9 +166,11 @@ export const TrajectoryExplorer = memo(function TrajectoryExplorer({
     () => translate ?? trajectoryTranslator(messages),
     [messages, translate],
   )
-  const timelineMode: TrajectoryTimelineMode = actualDuration
-    ? actualTime ? 'actual' : 'duration'
-    : actualTime ? 'time' : 'sequence'
+  const timelineMode: TrajectoryTimelineMode = resolveTimelineMode({
+    tokenView,
+    actualDuration,
+    actualTime,
+  })
   const searchMatchIndexes = useMemo(
     () => searchIndexes(searchIndex, turns, searchQuery),
     [searchIndex, searchQuery, turns],
@@ -259,9 +263,15 @@ export const TrajectoryExplorer = memo(function TrajectoryExplorer({
       >
       <TrajectoryToolbar
         actualDuration={actualDuration}
-        onActualDurationChange={(value) => { setActualDuration(value); setTimelineRange(null) }}
+        onActualDurationChange={(value) => {
+          setActualDuration(value)
+          setTokenView(false)
+          setTimelineRange(null)
+        }}
         actualTime={actualTime}
         onActualTimeChange={(value) => { setActualTime(value); setTimelineRange(null) }}
+        tokenView={tokenView}
+        onTokenViewChange={(value) => { setTokenView(value); setTimelineRange(null) }}
         allTurnsCollapsed={allTurnsCollapsed}
         onToggleAllTurns={toggleAllTurns}
         allAssistantsCollapsed={allAssistantsCollapsed}

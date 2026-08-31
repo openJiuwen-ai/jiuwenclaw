@@ -11,7 +11,10 @@ import { formatDurationMillis, liveElapsedSeconds } from './record.ts'
 import type { TrajectoryCellKind, TrajectoryCellProps } from './record.ts'
 
 /** Horizontal projection used by the trajectory timeline. */
-export type TrajectoryTimelineMode = 'sequence' | 'duration' | 'time' | 'actual'
+export type TrajectoryTimelineMode = 'sequence' | 'duration' | 'time' | 'actual' | 'tokens'
+
+/** Which half of one request's token spend a block represents. */
+export type TrajectoryTimelineSegment = 'input' | 'output'
 
 /** Inclusive selection in the active timeline projection's domain. */
 export interface TrajectoryTimeRange {
@@ -26,6 +29,19 @@ export interface TrajectoryTimelineSpan extends TrajectoryTimeRange {
   kind: TrajectoryCellKind
   label: string
   lane: number
+  /** Token-spend half represented by this block; absent outside the token projection. */
+  segment?: TrajectoryTimelineSegment
+  /**
+   * Leading-segment share in `[0, 1]` used by the two-tone block gradient:
+   * cache-written tokens for an Input block, reasoning for an Output block.
+   */
+  splitFraction?: number
+  /**
+   * Ledger records this block accounts for, which for an Input block are the
+   * records consumed by request `index` rather than the request itself.
+   * Absent when the block accounts for `index` alone.
+   */
+  coveredIndexes?: readonly number[]
 }
 
 /** One turn boundary in the active timeline domain. */
@@ -55,6 +71,25 @@ function laneFor(kind: TrajectoryCellKind): number {
   return 0
 }
 
+function isModelCell(kind: TrajectoryCellKind): boolean {
+  return kind === 'message' || kind === 'compacted'
+}
+
+/**
+ * Resolve the active projection from the toolbar's independent switches.
+ * @param options - Token view flag plus the recorded-duration and complete-time switches.
+ * @returns Projection selected by the toolbar, token cost taking precedence.
+ */
+export function resolveTimelineMode(options: {
+  tokenView: boolean
+  actualDuration: boolean
+  actualTime: boolean
+}): TrajectoryTimelineMode {
+  if (options.tokenView) return 'tokens'
+  if (options.actualDuration) return options.actualTime ? 'actual' : 'duration'
+  return options.actualTime ? 'time' : 'sequence'
+}
+
 function finite(value: number | null | undefined): value is number {
   return value !== null && value !== undefined && Number.isFinite(value)
 }
@@ -76,7 +111,7 @@ function cellRange(
 /**
  * Project every visible record into a stable three-lane timeline.
  * @param turns - Unfiltered trajectory layout.
- * @param mode - Independent equal/recorded duration and compressed/complete time projection.
+ * @param mode - Equal/recorded duration, compressed/complete time, or token-cost projection.
  * @returns Timeline model, or `null` when no record is visible.
  */
 export function deriveTrajectoryTimeline(
@@ -84,6 +119,7 @@ export function deriveTrajectoryTimeline(
   mode: TrajectoryTimelineMode = 'sequence',
   nowMilliseconds?: number,
 ): TrajectoryTimelineModel | null {
+  if (mode === 'tokens') return deriveTokenTimeline(turns)
   if (mode !== 'sequence') {
     return deriveTimedTimeline(
       turns,
@@ -121,6 +157,96 @@ export function deriveTrajectoryTimeline(
   return {
     start: 0,
     end: spans.length,
+    spans,
+    turnBoundaries,
+  }
+}
+
+function tokenCount(value: number | undefined): number {
+  return value === undefined || !Number.isFinite(value) ? 0 : Math.max(0, value)
+}
+
+/**
+ * Project recorded token spend into a cumulative two-lane timeline.
+ *
+ * Every model request contributes an Input block sized by its cache-missed input
+ * and an Output block sized by its produced tokens, laid head to tail so the full
+ * domain equals the session's total token spend. Tool, prompt, and context records
+ * do not own a block; their cost surfaces inside the Input block of the request
+ * that consumed them.
+ *
+ * @param turns - Unfiltered trajectory layout.
+ * @returns Timeline model, or `null` when no record reported usage.
+ */
+function deriveTokenTimeline(
+  turns: readonly TrajectoryTurnModel[],
+): TrajectoryTimelineModel | null {
+  const spans: TrajectoryTimelineSpan[] = []
+  const turnBoundaries: TrajectoryTimelineTurnBoundary[] = []
+  let cursor = 0
+  let pendingIndexes: number[] = []
+
+  for (const turn of turns) {
+    const spansBeforeTurn = spans.length
+    const turnStart = cursor
+    for (const cell of turn.groups.flatMap(group => group.cells)) {
+      if (cell.requestOnly === true) continue
+      if (!isModelCell(cell.kind)) {
+        pendingIndexes.push(cell.index)
+        continue
+      }
+      const uncachedInput = Math.max(0, tokenCount(cell.input) - tokenCount(cell.cacheRead))
+      const output = tokenCount(cell.output)
+      const covered = pendingIndexes
+      pendingIndexes = []
+      if (uncachedInput > 0) {
+        // A request whose new input went entirely into the cache reports no
+        // plain miss at all, so a full leading share is a real reading.
+        const cacheWrite = tokenCount(cell.cacheWrite)
+        const splitFraction = cacheWrite > 0
+          ? Math.min(1, cacheWrite / uncachedInput)
+          : null
+        spans.push({
+          start: cursor,
+          end: cursor + uncachedInput,
+          index: cell.index,
+          isError: false,
+          kind: cell.kind,
+          label: cell.text,
+          lane: 0,
+          segment: 'input',
+          coveredIndexes: covered.length === 0 ? [cell.index] : covered,
+          ...(splitFraction === null ? {} : { splitFraction }),
+        })
+        cursor += uncachedInput
+      }
+      if (output > 0) {
+        const think = tokenCount(cell.think)
+        const splitFraction = think > 0 ? Math.min(1, think / output) : null
+        spans.push({
+          start: cursor,
+          end: cursor + output,
+          index: cell.index,
+          isError: cell.isError === true,
+          kind: cell.kind,
+          label: cell.text,
+          lane: 1,
+          segment: 'output',
+          coveredIndexes: [cell.index],
+          ...(splitFraction === null ? {} : { splitFraction }),
+        })
+        cursor += output
+      }
+    }
+    if (turn.turn !== null && spans.length > spansBeforeTurn) {
+      turnBoundaries.push({ turn: turn.turn, time: turnStart })
+    }
+  }
+
+  if (spans.length === 0) return null
+  return {
+    start: 0,
+    end: cursor,
     spans,
     turnBoundaries,
   }
@@ -198,7 +324,7 @@ function deriveTimedTimeline(
  * Identify records active at any point inside an inclusive selected interval.
  * @param turns - Unfiltered trajectory layout.
  * @param range - Selected interval in the active projection.
- * @param mode - Independent equal/recorded duration and compressed/complete time projection.
+ * @param mode - Equal/recorded duration, compressed/complete time, or token-cost projection.
  * @returns Record indexes inside the focus interval.
  */
 export function trajectoryTimelineFocusIndexes(
@@ -211,6 +337,6 @@ export function trajectoryTimelineFocusIndexes(
   return new Set(
     model?.spans
       .filter(span => span.start <= range.end && span.end >= range.start)
-      .map(span => span.index),
+      .flatMap(span => span.coveredIndexes ?? [span.index]),
   )
 }

@@ -157,10 +157,6 @@ const LEGACY = {
   providerName: 'gen_ai.system',
   responseFinishReason: 'gen_ai.response.finish_reason',
   responseTimeToFirstTokenMs: 'gen_ai.response.time_to_first_token_ms',
-  usageInputTokens: 'gen_ai.usage.prompt_tokens',
-  usageOutputTokens: 'gen_ai.usage.completion_tokens',
-  usageCacheTokens: 'gen_ai.usage.cache_tokens',
-  usageReasoningTokens: 'gen_ai.usage.reasoning_tokens',
   usageTotalTokens: 'gen_ai.usage.total_tokens',
   toolCallId: 'gen_ai.tool.id',
   toolCallArguments: 'gen_ai.tool.input',
@@ -300,18 +296,6 @@ function object(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-function nonNegativeInteger(value: unknown): bigint | undefined {
-  if (typeof value === 'number') {
-    return Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : undefined
-  }
-  if (typeof value !== 'string' || !/^\d+$/.test(value)) return undefined
-  try {
-    return BigInt(value)
-  } catch {
-    return undefined
-  }
-}
-
 function langfuseOutput(attributes: OtlpAttributeMap): Resolved<Record<string, unknown>> | undefined {
   const resolved = resolveFlexible(attributes, [LEGACY.langfuseOutput])
   if (resolved === undefined) return undefined
@@ -328,20 +312,6 @@ function langfuseFinishReasons(
     return typeof choice?.finish_reason === 'string' ? [choice.finish_reason] : []
   })
   return reasons.length === 0 ? undefined : { key: output.key, value: reasons }
-}
-
-function langfuseUsage(
-  output: Resolved<Record<string, unknown>> | undefined,
-  keys: readonly string[],
-): Resolved<bigint> | undefined {
-  if (output === undefined) return undefined
-  const usage = object(output.value.usage)
-  if (usage === undefined) return undefined
-  for (const key of keys) {
-    const value = nonNegativeInteger(usage[key])
-    if (value !== undefined) return { key: output.key, value }
-  }
-  return undefined
 }
 
 function text(value: unknown): string {
@@ -796,64 +766,29 @@ export function normalizeTrajectoryAttributes(
     }
   }
 
+  // Token usage is read only in the standard shape, where every cache and
+  // reasoning count is a breakdown of the input respectively output total.
+  // Legacy and Langfuse spellings carve the cache out of the input instead, so
+  // mixing them would silently double-subtract cached tokens.
   assign(target, 'usageInputTokens', resolveNonNegativeInt64(raw, [
     STANDARD_ATTRIBUTES.usageInputTokens,
-    LEGACY.usageInputTokens,
   ]))
   assign(target, 'usageOutputTokens', resolveNonNegativeInt64(raw, [
     STANDARD_ATTRIBUTES.usageOutputTokens,
-    LEGACY.usageOutputTokens,
   ]))
   assign(target, 'usageReasoningTokens', resolveNonNegativeInt64(raw, [
     STANDARD_ATTRIBUTES.usageReasoningTokens,
-    LEGACY.usageReasoningTokens,
   ]))
   assign(target, 'usageCacheReadTokens', resolveNonNegativeInt64(raw, [
     STANDARD_ATTRIBUTES.usageCacheReadTokens,
-    LEGACY.usageCacheTokens,
   ]))
   assign(target, 'usageCacheCreationTokens', resolveNonNegativeInt64(raw, [
     STANDARD_ATTRIBUTES.usageCacheCreationTokens,
   ]))
+  // Totals have no standard attribute of their own.
   assign(target, 'usageTotalTokens', resolveNonNegativeInt64(raw, [
     LEGACY.usageTotalTokens,
   ]))
-
-  if (target.usageInputTokens === undefined) {
-    assign(target, 'usageInputTokens', langfuseUsage(observationOutput, [
-      'input_tokens',
-      'prompt_tokens',
-    ]))
-  }
-  if (target.usageOutputTokens === undefined) {
-    assign(target, 'usageOutputTokens', langfuseUsage(observationOutput, [
-      'output_tokens',
-      'completion_tokens',
-    ]))
-  }
-  if (target.usageReasoningTokens === undefined) {
-    assign(target, 'usageReasoningTokens', langfuseUsage(observationOutput, [
-      'reasoning_tokens',
-    ]))
-  }
-  if (target.usageCacheReadTokens === undefined) {
-    assign(target, 'usageCacheReadTokens', langfuseUsage(observationOutput, [
-      'cache_tokens',
-      'cache_read_input_tokens',
-      'cached_tokens',
-    ]))
-  }
-  if (target.usageCacheCreationTokens === undefined) {
-    assign(target, 'usageCacheCreationTokens', langfuseUsage(observationOutput, [
-      'cache_creation_input_tokens',
-      'cache_write_input_tokens',
-    ]))
-  }
-  if (target.usageTotalTokens === undefined) {
-    assign(target, 'usageTotalTokens', langfuseUsage(observationOutput, [
-      'total_tokens',
-    ]))
-  }
 
   assign(target, 'inputCost', resolveNonNegativeNumber(raw, [
     OPENJIUWEN_ATTRIBUTES.inputCost,

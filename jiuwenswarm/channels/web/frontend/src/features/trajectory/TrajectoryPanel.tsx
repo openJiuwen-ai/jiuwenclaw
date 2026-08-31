@@ -255,6 +255,8 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
       'toolbar.useActualDuration': '使用实际时长',
       'toolbar.useEqualWidth': '使用等宽操作',
       'toolbar.actualTime': '实际时间',
+      'toolbar.tokens': 'Tokens',
+      'toolbar.useTokenCost': '按 token 开销显示',
       'toolbar.turns': '轮次',
       'toolbar.expandTurns': '展开所有轮次',
       'toolbar.collapseTurns': '折叠所有轮次',

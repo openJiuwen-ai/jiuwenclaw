@@ -19,6 +19,10 @@ export interface TrajectoryToolbarProps {
   actualTime: boolean
   /** Select complete wall-clock timing or idle-compressed timing. */
   onActualTimeChange: (actualTime: boolean) => void
+  /** Whether timeline blocks are sized by recorded token spend. */
+  tokenView: boolean
+  /** Select token-cost or timing blocks. */
+  onTokenViewChange: (tokenView: boolean) => void
   /** Whether every collapsible turn is currently folded. */
   allTurnsCollapsed: boolean
   /** Fold or expand every collapsible turn. */
@@ -45,6 +49,8 @@ export function TrajectoryToolbar({
   onActualDurationChange,
   actualTime,
   onActualTimeChange,
+  tokenView,
+  onTokenViewChange,
   allTurnsCollapsed,
   onToggleAllTurns,
   allAssistantsCollapsed,
@@ -75,6 +81,24 @@ export function TrajectoryToolbar({
               <path d="M8 4.75V8l2.25 1.5" />
             </svg>
             {t('toolbar.duration')}
+          </button>
+          <button
+            type="button"
+            className={css.toggle}
+            aria-label={t('toolbar.useTokenCost')}
+            aria-pressed={tokenView}
+            title={tokenView ? t('toolbar.useEqualWidth') : t('toolbar.useTokenCost')}
+            onClick={() => { onTokenViewChange(!tokenView) }}
+          >
+            <svg
+              className={css.toggleIcon}
+              viewBox="0 0 16 16"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path d="M2.75 5.5h10.5M2.75 10.5h5.5" />
+            </svg>
+            {t('toolbar.tokens')}
           </button>
           <button
             type="button"

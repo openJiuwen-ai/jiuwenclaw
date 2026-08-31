@@ -13,17 +13,21 @@ import {
 import { Tooltip } from '../primitives/index.ts'
 import type { TrajectoryTurnModel } from '../trajectory/model.ts'
 import type { AssistantMetricDetail, TrajectoryCellKind, TrajectoryCellProps } from '../trajectory/record.ts'
-import { liveElapsedSeconds } from '../trajectory/record.ts'
+import { formatTokenCount, liveElapsedSeconds } from '../trajectory/record.ts'
 import {
   deriveTrajectoryTimeline,
   formatTimelineOffset,
   type TrajectoryTimelineMode,
+  type TrajectoryTimelineSegment,
+  type TrajectoryTimelineSpan,
   type TrajectoryTimeRange,
 } from '../trajectory/timeline.ts'
 import css from './TrajectoryTimeline.module.css'
 
 const MINIMUM_DRAG_PX = 3
 const MINIMUM_ZOOM_OPERATIONS = 4
+const MINIMUM_ZOOM_TOKENS = 256
+const MINIMUM_ZOOM_MILLIS = 20
 const EDGE_PAN_ZONE_FRACTION = 0.08
 const EDGE_PAN_STEP_FRACTION = 0.025
 const MAXIMUM_EDGE_PAN_PX = 32
@@ -34,6 +38,11 @@ interface TimelineRecordDetail {
   durationMs?: number
   startedAt?: number
   ttftMs?: number
+  cachedInput?: number
+  cacheWriteInput?: number
+  processedInput?: number
+  outputTokens?: number
+  reasoningTokens?: number
 }
 
 interface FractionRange {
@@ -74,6 +83,25 @@ function assistantTimingDetail(
   return { ttftMs: first - start, decodingMs: completed - first }
 }
 
+function tokenUsageDetail(
+  cell: TrajectoryCellProps,
+): Pick<
+  TimelineRecordDetail,
+  'cachedInput' | 'cacheWriteInput' | 'processedInput' | 'outputTokens' | 'reasoningTokens'
+> {
+  const cachedInput = cell.cacheRead
+  const processedInput = cell.input === undefined
+    ? undefined
+    : Math.max(0, cell.input - (cell.cacheRead ?? 0))
+  return {
+    ...(cachedInput === undefined ? {} : { cachedInput }),
+    ...(cell.cacheWrite === undefined ? {} : { cacheWriteInput: cell.cacheWrite }),
+    ...(processedInput === undefined ? {} : { processedInput }),
+    ...(cell.output === undefined ? {} : { outputTokens: cell.output }),
+    ...(cell.think === undefined ? {} : { reasoningTokens: cell.think }),
+  }
+}
+
 function timelineRecordDetail(
   cell: TrajectoryCellProps,
   nowMilliseconds: number,
@@ -89,6 +117,7 @@ function timelineRecordDetail(
     ...(durationMs === undefined ? {} : { durationMs }),
     ...(startedAt === undefined ? {} : { startedAt }),
     ...assistantTimingDetail(cell.assistantMetrics),
+    ...tokenUsageDetail(cell),
   }
 }
 
@@ -113,10 +142,48 @@ function formatRecordedTime(timestamp: number): string {
   })
 }
 
+function tokenTooltipLabel(
+  segment: TrajectoryTimelineSegment,
+  detail: TimelineRecordDetail | undefined,
+): string {
+  if (segment === 'input') {
+    const processed = detail?.processedInput
+    const cacheWrite = detail?.cacheWriteInput
+    const cached = detail?.cachedInput
+    const uncached = processed === undefined || cacheWrite === undefined
+      ? null
+      : `Uncached ${formatTokenCount(Math.max(0, processed - cacheWrite))}`
+    return [
+      'INPUT',
+      [
+        `Processed ${formatTokenCount(processed)}`,
+        uncached,
+        cacheWrite === undefined ? null : `Cache write ${formatTokenCount(cacheWrite)}`,
+        cached === undefined ? null : `Cached ${formatTokenCount(cached)}`,
+      ].filter(value => value !== null).join(' · '),
+    ].join('\n')
+  }
+  const output = detail?.outputTokens
+  const reasoning = detail?.reasoningTokens
+  const content = output === undefined || reasoning === undefined
+    ? null
+    : `Content ${formatTokenCount(Math.max(0, output - reasoning))}`
+  return [
+    'OUTPUT',
+    [
+      `Total ${formatTokenCount(output)}`,
+      reasoning === undefined ? null : `Reasoning ${formatTokenCount(reasoning)}`,
+      content,
+    ].filter(value => value !== null).join(' · '),
+  ].join('\n')
+}
+
 function timelineTooltipLabel(
   kind: TrajectoryCellKind,
   detail: TimelineRecordDetail | undefined,
+  segment: TrajectoryTimelineSegment | undefined,
 ): string {
+  if (segment !== undefined) return tokenTooltipLabel(segment, detail)
   const heading = timelineKindLabel(kind)
   if (detail === undefined) return heading
   const duration = detail.durationMs === undefined
@@ -161,6 +228,23 @@ export interface TrajectoryTimelineProps {
   nowMilliseconds?: number
 }
 
+function minimumZoomDomain(mode: TrajectoryTimelineMode): number {
+  if (mode === 'sequence') return MINIMUM_ZOOM_OPERATIONS
+  if (mode === 'tokens') return MINIMUM_ZOOM_TOKENS
+  return MINIMUM_ZOOM_MILLIS
+}
+
+function spanKey(span: TrajectoryTimelineSpan): string {
+  return `${span.lane}:${span.index}`
+}
+
+function spanCovers(span: TrajectoryTimelineSpan, index: number | null): boolean {
+  if (index === null) return false
+  return span.coveredIndexes === undefined
+    ? span.index === index
+    : span.index === index || span.coveredIndexes.includes(index)
+}
+
 function orderedRange(left: number, right: number): FractionRange {
   return left <= right ? { start: left, end: right } : { start: right, end: left }
 }
@@ -200,7 +284,15 @@ function rangeFraction(
   }
 }
 
-function LaneLabels() {
+function LaneLabels({ mode }: { mode: TrajectoryTimelineMode }) {
+  if (mode === 'tokens') {
+    return (
+      <div className={css.labels} aria-hidden="true">
+        <span>Input</span>
+        <span>Output</span>
+      </div>
+    )
+  }
   return (
     <div className={css.labels} aria-hidden="true">
       <span>Input</span>
@@ -279,6 +371,7 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
     anchorTime: number
     anchorClientX: number
     recordIndex: number | null
+    spanKey: string | null
   } | null>(null)
   const panRef = useRef<PanGesture | null>(null)
   const rootRef = useRef<HTMLElement | null>(null)
@@ -313,7 +406,7 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   }, [model])
   useEffect(() => {
     if (model === null || selectedIndex === null) return
-    const selectedSpan = model.spans.find(span => span.index === selectedIndex)
+    const selectedSpan = model.spans.find(span => spanCovers(span, selectedIndex))
     if (selectedSpan === undefined) return
     setAnimateViewport(true)
     setViewport((current) => {
@@ -393,7 +486,7 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
       const nextDuration = Math.min(
         fullDuration,
         Math.max(
-          Math.min(mode === 'sequence' ? MINIMUM_ZOOM_OPERATIONS : 20, fullDuration),
+          Math.min(minimumZoomDomain(mode), fullDuration),
           domainDuration * Math.exp(event.deltaY * 0.0015),
         ),
       )
@@ -416,7 +509,7 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
     return (
       <section ref={rootRef} className={css.root} aria-label="Trajectory timeline">
         <div className={css.plot}>
-          <LaneLabels />
+          <LaneLabels mode={mode} />
           <div className={css.track}>
             <span className={css.empty}>No timing data</span>
             {hasEarlierRecords && (
@@ -451,6 +544,12 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
     return Number.isFinite(index) ? index : null
   }
 
+  const spanKeyAt = (event: PointerEvent<HTMLDivElement>): string | null => {
+    const target = event.target instanceof HTMLElement ? event.target : null
+    return target?.closest<HTMLElement>('[data-timeline-span-key]')
+      ?.dataset.timelineSpanKey ?? null
+  }
+
   const commit = (nextRange: TrajectoryTimeRange) => {
     onRangeChange(nextRange)
   }
@@ -481,6 +580,7 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
       anchorTime,
       anchorClientX: event.clientX,
       recordIndex,
+      spanKey: spanKeyAt(event),
     }
     if (typeof event.currentTarget.setPointerCapture === 'function') {
       event.currentTarget.setPointerCapture(event.pointerId)
@@ -562,10 +662,17 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
     dragRef.current = null
     setDraft(null)
     const click = Math.abs(event.clientX - drag.anchorClientX) < MINIMUM_DRAG_PX
-    const clickedSpan = click && drag.recordIndex !== null
-      ? model.spans.find(span => span.index === drag.recordIndex)
+    const clickedSpan = click && drag.spanKey !== null
+      ? model.spans.find(span => spanKey(span) === drag.spanKey)
       : undefined
     if (clickedSpan !== undefined) {
+      // An Input block stands for the records its request consumed, so clicking it
+      // focuses that whole stretch of the ledger instead of the request row itself.
+      if (clickedSpan.segment === 'input') {
+        onRangeChange({ start: clickedSpan.start, end: clickedSpan.end })
+        onRecordFocus?.(clickedSpan.coveredIndexes?.[0] ?? clickedSpan.index)
+        return
+      }
       onRangeChange(null)
       onRecordSelect?.(clickedSpan.index)
       return
@@ -611,7 +718,7 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   return (
     <section ref={rootRef} className={css.root} aria-label="Trajectory timeline">
       <div className={css.plot}>
-        <LaneLabels />
+        <LaneLabels mode={mode} />
         <div
           ref={trackRef}
           className={css.track}
@@ -704,7 +811,7 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
           >
             {model.spans
               .filter(span =>
-                span.index === selectedIndex
+                spanCovers(span, selectedIndex)
                 || (span.end >= domainStart && span.start <= domainStart + domainDuration))
               .map((span) => {
                 const left = (span.start - model.start) / fullDuration
@@ -718,10 +825,13 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
                   || ttftMs + decodingMs <= 0
                   ? null
                   : ttftMs / (ttftMs + decodingMs)
+                const splitFraction = mode === 'tokens'
+                  ? span.splitFraction ?? null
+                  : ttftFraction
                 return (
                   <Tooltip
-                    key={span.index}
-                    label={() => timelineTooltipLabel(span.kind, detail)}
+                    key={spanKey(span)}
+                    label={() => timelineTooltipLabel(span.kind, detail, span.segment)}
                     side="bottom"
                     delayMs={TIMELINE_TOOLTIP_DELAY_MS}
                   >
@@ -730,10 +840,12 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
                       className={css.span}
                       data-timeline-span={span.kind}
                       data-timeline-record-index={span.index}
-                      data-assistant-timing={ttftFraction === null ? undefined : 'true'}
+                      data-timeline-span-key={spanKey(span)}
+                      data-timeline-segment={span.segment}
+                      data-span-split={splitFraction === null ? undefined : 'true'}
                       data-error={span.isError || undefined}
                       data-equal-duration={mode === 'time' || undefined}
-                      data-current={span.index === selectedIndex || undefined}
+                      data-current={spanCovers(span, selectedIndex) || undefined}
                       data-hovered={hover?.recordIndex === span.index || undefined}
                       data-search-match={searchMatchIndexes === null
                         ? undefined
@@ -748,9 +860,9 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
                         '--trajectory-span-width': `${widthPercent}%`,
                         '--trajectory-span-gap': `min(${widthPercent * 0.08}%, 1px)`,
                         '--trajectory-span-lane': span.lane,
-                        ...(ttftFraction === null
+                        ...(splitFraction === null
                           ? {}
-                          : { '--trajectory-assistant-ttft': `${ttftFraction * 100}%` }),
+                          : { '--trajectory-span-split': `${splitFraction * 100}%` }),
                       } as CSSProperties}
                     />
                   </Tooltip>

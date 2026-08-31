@@ -185,38 +185,67 @@
   );
 }
 
+/* Two-tone block: the leading share is TTFT under recorded time, reasoning on an
+   Output block, and cache-written tokens on an Input block; the trailing share is
+   decoding, content, respectively recomputed input. */
 .span[data-timeline-span='message'] {
-  --trajectory-assistant-decoding-color: var(--dsw-alias-brand-primary-new-colorprimary-new-color);
-  --trajectory-assistant-ttft-color: var(--dsw-alias-state-business-tertiary);
+  --trajectory-span-trail-color: var(--dsw-alias-brand-primary-new-colorprimary-new-color);
+  --trajectory-span-lead-color: var(--dsw-alias-state-business-tertiary);
 }
 
 @supports (color: color-mix(in srgb, currentColor, transparent)) {
   .span[data-timeline-span='message'] {
-    --trajectory-assistant-decoding-color: color-mix(
+    --trajectory-span-trail-color: color-mix(
       in srgb,
       var(--dsw-alias-brand-primary-new-colorprimary-new-color) 60%,
       var(--dsw-alias-state-error-secondary)
     );
-    --trajectory-assistant-ttft-color: color-mix(
+    --trajectory-span-lead-color: color-mix(
       in srgb,
-      var(--trajectory-assistant-decoding-color) 54%,
+      var(--trajectory-span-trail-color) 54%,
       var(--dsw-alias-bg-layer-2)
     );
   }
 }
 
 .span[data-timeline-span='message'] {
-  background: var(--trajectory-assistant-decoding-color);
+  background: var(--trajectory-span-trail-color);
   opacity: 1;
 }
 
-.span[data-timeline-span='message'][data-assistant-timing='true'] {
+/* Token cost of everything one request read: prompts, context, and tool results.
+   Its leading share is what this request wrote into the cache, which in an agent
+   loop is mostly the previous turn's output being paid for a second time. */
+.span[data-timeline-segment='input'] {
+  --trajectory-span-trail-color: var(--dsw-alias-state-success-primary);
+  --trajectory-span-lead-color: var(--dsw-alias-state-success-primary);
+
+  background: var(--trajectory-span-trail-color);
+  opacity: 0.78;
+}
+
+@supports (color: color-mix(in srgb, currentColor, transparent)) {
+  .span[data-timeline-segment='input'] {
+    --trajectory-span-trail-color: color-mix(
+      in srgb,
+      var(--dsw-alias-state-success-primary) 68%,
+      var(--dsw-alias-label-secondary)
+    );
+    --trajectory-span-lead-color: color-mix(
+      in srgb,
+      var(--trajectory-span-trail-color) 54%,
+      var(--dsw-alias-bg-layer-2)
+    );
+  }
+}
+
+.span[data-span-split='true'] {
   background: linear-gradient(
     to right,
-    var(--trajectory-assistant-ttft-color) 0,
-    var(--trajectory-assistant-ttft-color) var(--trajectory-assistant-ttft),
-    var(--trajectory-assistant-decoding-color) var(--trajectory-assistant-ttft),
-    var(--trajectory-assistant-decoding-color) 100%
+    var(--trajectory-span-lead-color) 0,
+    var(--trajectory-span-lead-color) var(--trajectory-span-split),
+    var(--trajectory-span-trail-color) var(--trajectory-span-split),
+    var(--trajectory-span-trail-color) 100%
   );
 }
 

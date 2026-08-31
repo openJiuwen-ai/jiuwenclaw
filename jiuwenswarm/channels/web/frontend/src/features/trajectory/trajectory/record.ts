@@ -109,6 +109,13 @@ export function formatDurationMillis(milliseconds: number | null): string {
   return `${integer.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} ms`
 }
 
+/** Format a token count with thousands separators, or an em dash when unknown. */
+export function formatTokenCount(tokens: number | null | undefined): string {
+  if (tokens === null || tokens === undefined || !Number.isFinite(tokens)) return '—'
+  const integer = String(Math.round(tokens))
+  return `${integer.replace(/\B(?=(\d{3})+(?!\d))/g, ',')} tok`
+}
+
 /** Format elapsed seconds as an integer-millisecond label. */
 export function formatElapsedSeconds(seconds: number | null): string {
   return formatDurationMillis(seconds === null ? null : seconds * 1_000)
