@@ -2139,6 +2139,8 @@
       "connecting": "连接中…",
       "uninstall": "卸载",
       "uninstalling": "卸载中…",
+      "delete": "删除",
+      "deleting": "删除中…",
       "create": "创建",
       "createFirst": "手动创建",
       "createByChat": "通过聊天创建",
