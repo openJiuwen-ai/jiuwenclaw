@@ -5805,9 +5805,9 @@ export class AppScreen implements Component, Focusable {
         lines.push(low ? palette.status.warning(`⚠ ${usedLine}`) : usedLine);
       }
     }
-    if (runBudget && typeof runBudget.total === "number" && runBudget.total > 0) {
+    if (runBudget) {
       const spent = formatTokenCount(runBudget.spent) ?? "—";
-      const total = formatTokenCount(runBudget.total) ?? "—";
+      const total = formatTokenCount(runBudget.total);
       const remaining = formatTokenCount(runBudget.remaining);
       const usedPercent = workflowBudgetUsedPercent(runBudget);
       const low = isWorkflowBudgetLow(runBudget);
@@ -5817,12 +5817,14 @@ export class AppScreen implements Component, Focusable {
         "",
         "Scope       Workflow (META.workflow_token_limit)",
         `Spent       ${spent}`,
-        `Total       ${total}`,
+        total ? `Total       ${total}` : "Limit       Unbounded",
       );
-      const remainingLine = `Remaining   ${remaining ?? "—"}`;
-      const usedLine = `Used        ${usedPercent === null ? "—" : `${usedPercent}%`}`;
-      lines.push(low ? palette.status.warning(`⚠ ${remainingLine}`) : remainingLine);
-      lines.push(low ? palette.status.warning(`⚠ ${usedLine}`) : usedLine);
+      if (total) {
+        const remainingLine = `Remaining   ${remaining ?? "—"}`;
+        const usedLine = `Used        ${usedPercent === null ? "—" : `${usedPercent}%`}`;
+        lines.push(low ? palette.status.warning(`⚠ ${remainingLine}`) : remainingLine);
+        lines.push(low ? palette.status.warning(`⚠ ${usedLine}`) : usedLine);
+      }
     }
     const exhaustedScope = workflowBudgetExhaustedScope(workflow);
     if (exhaustedScope === "workflow") {

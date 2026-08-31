@@ -200,18 +200,21 @@ export function formatWorkflowBudgetDetail(budget?: WorkflowBudget | null): stri
 }
 
 export function formatWorkflowRunBudgetInline(budget?: WorkflowBudget | null): string | null {
-  if (!budget || typeof budget.total !== "number" || budget.total <= 0) return null;
+  if (!budget) return null;
   const spent = formatTokenCount(budget.spent);
   if (!spent) return null;
-  return `run ${spent}/${formatTokenCount(budget.total)}`;
+  const total = formatTokenCount(budget.total);
+  return total ? `run ${spent}/${total}` : `run spent ${spent} · unbounded`;
 }
 
 export function formatWorkflowRunBudgetDetail(budget?: WorkflowBudget | null): string | null {
-  if (!budget || typeof budget.total !== "number" || budget.total <= 0) return null;
+  if (!budget) return null;
   const spent = formatTokenCount(budget.spent);
   if (!spent) return null;
+  const total = formatTokenCount(budget.total);
+  if (!total) return `Run budget spent ${spent} (unbounded)`;
   const percent = workflowBudgetUsedPercent(budget);
-  return `Run budget ${spent}/${formatTokenCount(budget.total)}${percent === null ? "" : ` (${percent}%)`}`;
+  return `Run budget ${spent}/${total}${percent === null ? "" : ` (${percent}%)`}`;
 }
 
 /** Single-width “human waiting” marker (text symbol — not emoji 👤/🧑). */
