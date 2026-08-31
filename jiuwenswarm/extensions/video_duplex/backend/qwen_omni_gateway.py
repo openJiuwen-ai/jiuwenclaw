@@ -60,16 +60,6 @@ class QwenOmniRealtimeConfig:
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
-def qwen_omni_realtime_enabled() -> bool:
-    provider = os.environ.get("VIDEO_REALTIME_PROVIDER", "").strip().casefold()
-    mode = os.environ.get("VIDEO_LIVE_MODE", "").strip().casefold()
-    return provider in {"qwen", "qwen_omni", "qwen-omni", "dashscope"} or mode in {
-        "qwen",
-        "qwen_omni",
-        "qwen-omni",
-    }
-
-
 async def _send_gateway_error(websocket: WebSocket, code: str, message: str) -> None:
     if websocket.client_state == WebSocketState.DISCONNECTED:
         return

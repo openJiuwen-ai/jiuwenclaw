@@ -24,6 +24,13 @@ dist/
 build/
 # 构建时下载的 Node 运行时缓存（build-macos.sh / build-exe.ps1 用），不入库
 vendor/node/
+
+# Retired MiniCPM full-duplex implementation (kept out of product commits).
+**/*minicpm*
+**/*MiniCPM*
+/jiuwenswarm/channels/web/frontend/src/utils/minicpmRealtime.ts
+/jiuwenswarm/channels/web/frontend/tests/realtimeDuplexParity.test.mjs
+/start-minicpm-tunnel.cmd
 coverage/
 jiuwenswarm/channels/web/frontend/logs/
 jiuwenswarm/channels/web/frontend/cd

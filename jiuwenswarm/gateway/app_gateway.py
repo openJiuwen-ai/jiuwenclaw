@@ -1925,6 +1925,7 @@ async def _run(
             updater_service=updater_service,
         )
     )
+    extension_registry.bind_application_plugins(web_channel, agent_client=client)
 
     def _make_norm_and_forward(
             forward_methods: set[str] | frozenset[str],

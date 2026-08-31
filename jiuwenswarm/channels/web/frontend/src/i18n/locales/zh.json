@@ -35,6 +35,7 @@
     "skills": "技能",
     "channels": "频道",
     "extensions": "Harness",
+    "applicationPlugins": "应用插件",
     "connectorMarket": "扩展",
     "rails": "Rails",
     "harnesspkg": "Harness Package",
@@ -42,9 +43,17 @@
     "settings": "设置",
     "config": "配置信息",
     "browser": "浏览器",
-    "videoLive": "视频直播",
+    "videoLive": "全双工",
     "logs": "日志",
     "update": "更新"
+  },
+  "applicationPlugins": {
+    "title": "应用插件",
+    "description": "管理带有独立页面、模型和运行时能力的全栈应用插件。",
+    "refresh": "刷新",
+    "enabled": "已启用",
+    "disabled": "已禁用",
+    "empty": "尚未发现应用插件"
   },
   "team": {
     "members": "团队成员",
@@ -902,23 +911,6 @@
       "memberNameConflictWithLeader": "Team「{{team}}」成员名称「{{name}}」与 Leader 成员名称冲突"
     },
     "keys": {
-      "videoLiveProvider": "视频直播运行时",
-      "videoRealtimePublicUrl": "Realtime WebSocket 地址",
-      "videoRealtimeRefAudioPath": "参考音频路径",
-      "qwenOmniRealtimeUrl": "千问 Realtime 地址",
-      "qwenOmniApiKey": "千问 API Key",
-      "qwenOmniModel": "千问模型",
-      "qwenOmniVoice": "千问音色",
-      "joyaiApiBase": "JoyAI API 地址",
-      "joyaiApiKey": "JoyAI API Key",
-      "joyaiModel": "JoyAI 模型",
-      "voiceProtocol": "语音协议",
-      "voiceAsrEndpoint": "ASR 完整接口",
-      "voiceTtsEndpoint": "TTS 完整接口",
-      "voiceApiKey": "语音 API Key",
-      "voiceAsrModel": "ASR 模型",
-      "voiceTtsModel": "TTS 模型",
-      "voiceTtsVoice": "TTS 音色",
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
@@ -981,18 +973,6 @@
       "teamLeaderPersona": "天才项目管理专家，擅长任务分解和团队协调"
     },
     "keyHelp": {
-      "videoLiveProvider": "选择视频直播实际使用的运行时；保存后会同步切换后端路由。",
-      "videoRealtimePublicUrl": "浏览器能够访问的 MiniCPM Realtime WebSocket 地址。",
-      "videoRealtimeRefAudioPath": "网关机器上的 MiniCPM 参考音频绝对路径。",
-      "qwenOmniRealtimeUrl": "阿里云百炼千问 Omni Realtime WebSocket 地址。",
-      "joyaiApiBase": "JoyAI OpenAI 兼容 API 基础地址，通常以 /v1 结尾。",
-      "voiceProtocol": "两种协议共用下方配置字段；JoyAI 原生选择 WebSocket，硅基流动等服务选择 OpenAI 兼容 HTTP。",
-      "voiceAsrEndpoint": "JoyAI WS 填写完整 WebSocket 地址；OpenAI HTTP 填写完整的 /audio/transcriptions 或 /chat/completions 接口。",
-      "voiceTtsEndpoint": "JoyAI WS 填写完整 WebSocket 地址；OpenAI HTTP 填写完整的 /audio/speech 接口。",
-      "voiceApiKey": "ASR 与 TTS 共用的鉴权密钥；本地 JoyAI 原生服务可留空。",
-      "voiceAsrModel": "兼容协议使用的 ASR 模型；JoyAI 原生协议可留空。",
-      "voiceTtsModel": "兼容协议使用的 TTS 模型；JoyAI 原生协议可留空。",
-      "voiceTtsVoice": "兼容协议使用的 TTS 音色；JoyAI 原生链路保持固定音色。",
       "apiBase": "模型服务的 API 基础地址，须以 http:// 或 https:// 开头，例如 https://api.openai.com/v1（一般不要带具体聊天路径）。",
       "apiKey": "调用该模型服务的鉴权密钥。本地无鉴权服务可填任意占位值（如 sk-1234）；OpenAI 账号 OAuth 登录后无需填写。",
       "model": "提供商侧的模型 ID/名称，例如 gpt-4o、qwen-plus；须与所选供应商兼容。",
@@ -1162,7 +1142,7 @@
     },
     "groups": {
       "modelDefault": { "label": "默认模型（主对话）", "hint": "主对话模型服务与鉴权参数" },
-      "modelVideo": { "label": "视频直播模型", "hint": "选择并配置 Qwen Omni 或 JoyAI 视频直播及语音运行时" },
+      "modelVideo": { "label": "视频模型", "hint": "视频理解（可选）" },
       "modelAudio": { "label": "音频模型", "hint": "语音识别（可选）" },
       "modelVision": { "label": "视觉模型", "hint": "图像理解（可选）" },
       "model": { "label": "模型配置", "hint": "模型服务与鉴权参数" },
@@ -1196,14 +1176,6 @@
       "externalCliClaude": "启用 Claude",
       "externalCliCodex": "启用 Codex",
       "externalCliUseBuiltin": "使用内置"
-    },
-    "videoProviders": {
-      "qwenOmni": "Qwen Omni Realtime",
-      "joyai": "JoyAI VL Interaction"
-    },
-    "voiceProtocols": {
-      "nativeWs": "JoyAI WS",
-      "openaiHttp": "OpenAI HTTP"
     },
     "externalCli": {
       "claude": "Claude",

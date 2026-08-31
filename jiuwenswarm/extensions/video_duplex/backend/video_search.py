@@ -10,6 +10,9 @@ from typing import Any, Awaitable, Callable
 import uuid
 
 from jiuwenswarm.common.video_tool_profile import VIDEO_TOOL_CHANNEL_ID
+from jiuwenswarm.extensions.video_duplex.backend.qwen_omni_tools import (
+    parse_qwen_omni_tool_call,
+)
 from jiuwenswarm.server.runtime.attachments.media_attachments import (
     normalize_chat_media_attachments,
 )
@@ -20,6 +23,7 @@ _IMAGE_FILENAME_SUFFIXES = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
+MAX_FRAME_CHARS = 4_000_000
 
 
 def _frame_media_item(frame_data_url: str) -> dict[str, str] | None:
@@ -245,12 +249,14 @@ class VideoSearchManager:
         agent_client: Any,
         *,
         log_event: Callable[[dict[str, Any]], None],
+        qwen_active: Callable[[], bool],
         max_concurrency: int = 2,
         max_cached_jobs: int = 128,
     ) -> None:
         self._channel = channel
         self._agent_client = agent_client
         self._log_event = log_event
+        self._qwen_active = qwen_active
         self._jobs: dict[str, dict[str, Any]] = {}
         self._tasks: set[asyncio.Task] = set()
         self._semaphore = asyncio.Semaphore(max_concurrency)
@@ -452,6 +458,76 @@ class VideoSearchManager:
                     "reused": True,
                 }
         return None
+
+    async def handle_qwen_tool(
+        self, ws: Any, req_id: Any, params: Any, session_id: Any
+    ) -> None:
+        del session_id
+        raw_params = params if isinstance(params, dict) else {}
+        question = str(raw_params.get("question") or "").strip()
+        search_session_id = str(raw_params.get("search_session_id") or "").strip()
+        frame_data_url = str(raw_params.get("frame_data_url") or "").strip()
+        request_log = {
+            "stage": "qwen_tool_requested",
+            "request_id": str(req_id),
+            "name": str(raw_params.get("name") or "").strip(),
+            "call_id": str(raw_params.get("call_id") or "").strip(),
+            "question": question,
+            "search_session_id": search_session_id,
+        }
+        await asyncio.to_thread(self._log_event, request_log)
+        try:
+            if not self._qwen_active():
+                raise ValueError("Qwen Omni Realtime is not the active video provider")
+            tool_call = parse_qwen_omni_tool_call(raw_params)
+            if not question:
+                question = tool_call.query
+            if len(question) > 500:
+                raise ValueError("question must not exceed 500 characters")
+            if not search_session_id or len(search_session_id) > 200:
+                raise ValueError("search_session_id must contain 1-200 characters")
+            if frame_data_url and (
+                len(frame_data_url) > MAX_FRAME_CHARS
+                or _frame_media_item(frame_data_url) is None
+            ):
+                raise ValueError("frame_data_url is invalid")
+        except ValueError as exc:
+            error = str(exc)
+            await asyncio.to_thread(self._log_event, {
+                **request_log,
+                "stage": "qwen_tool_rejected",
+                "error": error,
+            })
+            await self._channel.send_response(
+                ws, req_id, ok=False, error=error, code="BAD_REQUEST"
+            )
+            return
+
+        search_job = self.start(
+            ws,
+            question=question,
+            query=tool_call.query,
+            search_session_id=search_session_id,
+            frame_data_url=frame_data_url,
+            tool_call_id=tool_call.call_id,
+            tool_name=tool_call.name,
+        )
+        await asyncio.to_thread(self._log_event, {
+            **request_log,
+            "stage": "qwen_tool_accepted",
+            "query": tool_call.query,
+            "job_id": search_job["id"],
+        })
+        await self._channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "name": tool_call.name,
+                "call_id": tool_call.call_id,
+                "search_job": search_job,
+            },
+        )
 
     async def handle_status(self, ws: Any, req_id: Any, params: Any, session_id: Any) -> None:
         del session_id

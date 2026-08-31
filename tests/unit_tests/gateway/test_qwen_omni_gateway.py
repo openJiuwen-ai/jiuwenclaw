@@ -6,7 +6,7 @@ import json
 import pytest
 from starlette.websockets import WebSocketState
 
-from jiuwenswarm.gateway.channel_manager.web import qwen_omni_gateway
+from jiuwenswarm.extensions.video_duplex.backend import qwen_omni_gateway
 
 
 def test_qwen_config_adds_model_query_and_preserves_existing_query(monkeypatch) -> None:
@@ -23,14 +23,6 @@ def test_qwen_config_adds_model_query_and_preserves_existing_query(monkeypatch) 
         "wss://workspace.example/api-ws/v1/realtime"
         "?region=beijing&model=qwen3.5-omni-flash-realtime"
     )
-
-
-@pytest.mark.parametrize("provider", ["qwen", "qwen_omni", "qwen-omni", "dashscope"])
-def test_qwen_provider_aliases_enable_gateway(monkeypatch, provider) -> None:
-    monkeypatch.setenv("VIDEO_LIVE_MODE", "realtime")
-    monkeypatch.setenv("VIDEO_REALTIME_PROVIDER", provider)
-
-    assert qwen_omni_gateway.qwen_omni_realtime_enabled()
 
 
 class _BrowserSocket:

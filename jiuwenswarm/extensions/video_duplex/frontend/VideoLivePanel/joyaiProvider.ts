@@ -1,12 +1,12 @@
-import { webClient, webRequest } from '../../services/webClient';
+import { webClient, webRequest } from '../../../../channels/web/frontend/src/services/webClient';
 import {
   canPlayJoyAIResponse,
   JoyAITtsInterruptionState,
   JoyAIVoiceSession,
-} from '../../utils/joyaiVoice';
+} from './joyaiVoice';
 import {
   assistantSpeechText,
-} from '../../utils/searchPresentation';
+} from './searchPresentation';
 import {
   AgentAction,
   JoyAIFrameResult,
@@ -25,10 +25,10 @@ import {
   removeSentJoyAIToolContext,
 } from './joyaiToolContext';
 
-const MONITOR_INTERVAL_MS = 1_000;
+const FRAME_POLL_INTERVAL_MS = 1_000;
 const RATE_LIMIT_BASE_COOLDOWN_MS = 60_000;
 const RATE_LIMIT_MAX_COOLDOWN_MS = 5 * 60_000;
-const MONITOR_CLIENT_BUILD = 'joyai-tool-context-v11';
+const FRAME_POLL_CLIENT_BUILD = 'joyai-tool-context-v11';
 
 function isJoyAIRateLimit(error: unknown): boolean {
   const candidate = error as { code?: string; message?: string } | null;
@@ -44,9 +44,7 @@ export interface JoyAIProviderCallbacks {
   hasPendingTranscriptions: () => boolean;
   beginTranscription: () => void;
   finishTranscription: () => void;
-  interruptAgentRequests: () => void;
   appendChat: (role: 'user' | 'assistant' | 'tool', text: string) => void;
-  applyCurrentTask: (task: string) => void;
   commitAssistantAnswer: (text: string, toolJobId?: string) => void;
   rememberSearchJob: (job: AgentAction['search_job']) => void;
   updateSearchJob: (job: SearchJobState) => void;
@@ -59,26 +57,15 @@ export interface JoyAIProviderCallbacks {
   report: (event: string, details?: Record<string, unknown>) => void;
 }
 
-interface RequestOptions {
-  skipIfBusy?: boolean;
-  toolJobId?: string;
-  frameDataUrl?: string;
-  required?: boolean;
-  joyaiSessionId?: string;
-  commitResponse?: boolean;
-  requestKind?: 'user' | 'monitor' | 'tool';
-  frameOnly?: boolean;
-}
-
 export class JoyAIProvider {
   private callbacks: JoyAIProviderCallbacks;
   private voice: JoyAIVoiceSession | null = null;
   private sessionId = '';
-  private monitorTimer: number | null = null;
+  private framePollTimer: number | null = null;
   private requestQueue: Promise<void> = Promise.resolve();
   private queuedRequestCount = 0;
   private promptLifecycle = new JoyAIPromptLifecycle<JoyAIFrameResult>();
-  private frameClock = new JoyAIFrameClock(MONITOR_INTERVAL_MS);
+  private frameClock = new JoyAIFrameClock(FRAME_POLL_INTERVAL_MS);
   private handledTurns = new Set<string>();
   private ttsGeneration = 0;
   private activeTtsText = '';
@@ -89,7 +76,7 @@ export class JoyAIProvider {
   private activeTtsStream = '';
   private searchDeliveryQueue: Promise<void> = Promise.resolve();
   private rateLimitStrikes = 0;
-  private monitorPausedUntil = 0;
+  private framePollingPausedUntil = 0;
   private pendingToolContext: JoyAIToolContextEntry[] = [];
 
   constructor(callbacks: JoyAIProviderCallbacks) {
@@ -113,9 +100,9 @@ export class JoyAIProvider {
     this.promptLifecycle.reset();
     this.frameClock.reset();
     this.rateLimitStrikes = 0;
-    this.monitorPausedUntil = 0;
+    this.framePollingPausedUntil = 0;
     this.pendingToolContext = [];
-    this.startMonitor();
+    this.startFramePolling();
 
     const voice = new JoyAIVoiceSession({
       onSpeechStart: () => {
@@ -123,7 +110,6 @@ export class JoyAIProvider {
         this.userSpeechEpoch += 1;
         this.ttsInterruption.capture(this.activeTtsText, this.userSpeechEpoch);
         this.interruptTts();
-        this.callbacks.interruptAgentRequests();
         this.callbacks.report('joyai_barge_in_started', {
           speech_epoch: this.userSpeechEpoch,
           tts_generation: this.ttsGeneration,
@@ -175,17 +161,16 @@ export class JoyAIProvider {
     this.promptLifecycle.reset();
     this.frameClock.reset();
     this.rateLimitStrikes = 0;
-    this.monitorPausedUntil = 0;
+    this.framePollingPausedUntil = 0;
     this.pendingToolContext = [];
     this.handledTurns.clear();
-    if (this.monitorTimer !== null) {
-      window.clearInterval(this.monitorTimer);
-      this.monitorTimer = null;
+    if (this.framePollTimer !== null) {
+      window.clearInterval(this.framePollTimer);
+      this.framePollTimer = null;
     }
   }
 
   async submitUserInstruction(text: string): Promise<JoyAIFrameResult | null> {
-    this.callbacks.applyCurrentTask(text);
     if (!this.active) return null;
     const replacingPendingPrompt = this.promptLifecycle.hasPending;
     const pendingResult = this.promptLifecycle.enqueue(text, text);
@@ -346,30 +331,24 @@ export class JoyAIProvider {
     }
   }
 
-  private startMonitor(): void {
-    if (this.monitorTimer !== null) return;
-    this.callbacks.report('joyai_monitor_started', {
-      client_build: MONITOR_CLIENT_BUILD,
+  private startFramePolling(): void {
+    if (this.framePollTimer !== null) return;
+    this.callbacks.report('joyai_frame_polling_started', {
+      client_build: FRAME_POLL_CLIENT_BUILD,
       frame_count: this.callbacks.getFrameCount(),
     });
     const sendLatestFrame = () => {
       if (!this.active) return;
-      if (Date.now() < this.monitorPausedUntil) return;
+      if (Date.now() < this.framePollingPausedUntil) return;
       // The official client skips a scheduled frame while inference is busy.
       if (this.queuedRequestCount > 0) return;
       const frameDataUrl = this.callbacks.getLatestFrameDataUrl();
       if (!frameDataUrl) return;
       const pendingPrompt = this.promptLifecycle.claim();
-      const requestKind = pendingPrompt ? 'user' : 'monitor';
       const request = this.requestFrame(
         pendingPrompt?.instruction || '',
         pendingPrompt?.question || '',
-        {
-          frameDataUrl,
-          skipIfBusy: true,
-          requestKind,
-          frameOnly: !pendingPrompt,
-        },
+        frameDataUrl,
       );
       void request.then((result) => {
         pendingPrompt?.complete(result);
@@ -388,40 +367,31 @@ export class JoyAIProvider {
         } else {
           pendingPrompt?.fail(error);
         }
-        this.callbacks.setError(error instanceof Error ? error.message : 'JoyAI 监控请求失败');
+        this.callbacks.setError(error instanceof Error ? error.message : 'JoyAI 画面请求失败');
       });
     };
     sendLatestFrame();
-    this.monitorTimer = window.setInterval(sendLatestFrame, MONITOR_INTERVAL_MS);
+    this.framePollTimer = window.setInterval(sendLatestFrame, FRAME_POLL_INTERVAL_MS);
   }
 
   private async requestFrame(
     instruction: string,
     originalQuestion = '',
-    options: RequestOptions = {},
+    frameDataUrl = this.callbacks.getLatestFrameDataUrl(),
   ): Promise<JoyAIFrameResult | null> {
-    if (!this.active) {
-      if (options.required) throw new Error('JoyAI 会话已停止，无法回填搜索结果');
-      return null;
-    }
+    if (!this.active) return null;
     const activeSessionId = this.sessionId;
-    const sessionId = options.joyaiSessionId || activeSessionId;
-    const frameDataUrl = options.frameDataUrl || this.callbacks.getLatestFrameDataUrl();
-    if (!sessionId || !frameDataUrl) {
-      if (options.required) throw new Error('没有可用于搜索结果回填的 JoyAI 会话画面');
-      return null;
-    }
-    if (options.skipIfBusy && this.queuedRequestCount > 0) return null;
+    const sessionId = activeSessionId;
+    if (!sessionId || !frameDataUrl) return null;
 
     const ttsGenerationAtRequest = this.ttsGeneration;
     this.queuedRequestCount += 1;
     const execute = async (): Promise<JoyAIFrameResult | null> => {
       if (!this.active || this.sessionId !== activeSessionId) {
-        if (options.required) throw new Error('JoyAI 会话在搜索期间已结束或被替换');
         return null;
       }
-      const requestKind = options.requestKind || (originalQuestion ? 'user' : 'monitor');
-      const prompt = options.frameOnly ? '' : instruction.trim();
+      const requestKind = originalQuestion ? 'user' : 'frame';
+      const prompt = instruction.trim();
       const toolContext = requestKind === 'user'
         ? buildJoyAIToolContextBatch(this.pendingToolContext)
         : { text: '', jobIds: [] };
@@ -456,7 +426,7 @@ export class JoyAIProvider {
             RATE_LIMIT_BASE_COOLDOWN_MS * 2 ** (this.rateLimitStrikes - 1),
             RATE_LIMIT_MAX_COOLDOWN_MS,
           );
-          this.monitorPausedUntil = Date.now() + cooldownMs;
+          this.framePollingPausedUntil = Date.now() + cooldownMs;
           this.callbacks.report('joyai_rate_limited', {
             cooldown_ms: cooldownMs,
             rate_limit_strikes: this.rateLimitStrikes,
@@ -467,15 +437,12 @@ export class JoyAIProvider {
         throw error;
       }
       this.rateLimitStrikes = 0;
-      this.monitorPausedUntil = 0;
+      this.framePollingPausedUntil = 0;
       if (!this.active || this.sessionId !== activeSessionId) {
-        if (options.required) throw new Error('JoyAI 会话在搜索结果返回前已结束或被替换');
         return null;
       }
       const response = result.response?.trim() || '';
-      if (response && options.commitResponse !== false) {
-        this.commitAndSpeak(response, options.toolJobId, ttsGenerationAtRequest);
-      }
+      if (response) this.commitAndSpeak(response, undefined, ttsGenerationAtRequest);
       this.callbacks.rememberSearchJob(result.search_job);
       return result;
     };

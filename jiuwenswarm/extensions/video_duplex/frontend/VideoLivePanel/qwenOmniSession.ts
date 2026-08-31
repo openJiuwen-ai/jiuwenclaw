@@ -1,16 +1,4 @@
 import {
-  createMiniCpmAudioAppendEvent,
-  createMiniCpmCloseSessionEvent,
-  createMiniCpmContextInstructions,
-  createMiniCpmPlaybackAckEvent,
-  createMiniCpmSessionUpdate,
-  createMiniCpmTaskControl,
-  createMiniCpmTaskReminder,
-  createMiniCpmTextAppendEvent,
-  MINICPM_BASE_INSTRUCTIONS,
-  MINICPM_CURRENT_TASK_MONITORING_ENABLED,
-} from './minicpmRealtime.js';
-import {
   createQwenOmniCancelResponseEvent,
   createQwenOmniFinishSessionEvent,
   createQwenOmniSessionUpdate,
@@ -19,12 +7,11 @@ import {
   parseQwenOmniFunctionCall,
   QwenOmniFunctionCall,
   QwenOmniMediaSequencer,
-} from './qwenOmniRealtime.js';
+} from './qwenOmniProtocol.js';
+import { getWsBase } from '../../../../channels/web/frontend/src/utils/env.js';
 
 export interface RealtimeDuplexConfig {
   url: string;
-  dialect?: 'minicpm' | 'qwen_omni';
-  refAudio?: string;
   voice?: string;
   tools?: Array<Record<string, unknown>>;
 }
@@ -38,28 +25,43 @@ export interface RealtimeToolResult {
 
 export interface RealtimeDuplexCallbacks {
   getVideoFrame: () => string | null;
-  onAssistantText: (text: string, final: boolean, toolJobId?: string, turnId?: string) => void;
+  onAssistantText: (text: string, final: boolean, toolJobId?: string) => void;
   onUserText: (text: string, final: boolean) => void;
-  onUserTurnStarted: (turnId: string) => void;
-  onUserTurnAudio: (wavDataUrl: string, turnId: string) => void;
   onState: (state: 'connecting' | 'listening' | 'speaking' | 'closed') => void;
   onError: (message: string) => void;
   onDiagnostic?: (event: Record<string, unknown>) => void;
   onToolResultDispatched?: (jobId: string) => void;
-  onToolResultReady?: (toolResult: RealtimeToolResult) => void;
   onFunctionCall?: (call: QwenOmniFunctionCall) => void;
+}
+
+function resolveRealtimeUrl(configuredUrl: string): string {
+  if (/^wss?:\/\//i.test(configuredUrl)) return configuredUrl;
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const browserBase = getWsBase() || `${protocol}//${window.location.host}`;
+  const base = new URL(browserBase);
+  return new URL(configuredUrl, `${base.protocol}//${base.host}`).toString();
+}
+
+export function createRealtimeDuplexSession(
+  config: RealtimeDuplexConfig,
+  callbacks: RealtimeDuplexCallbacks,
+  onUnsupportedBrowser?: () => void,
+): RealtimeDuplexSession {
+  if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode) {
+    onUnsupportedBrowser?.();
+    throw new Error('当前浏览器不支持 Full-duplex 音频。');
+  }
+  if (!config.url) throw new Error('请配置 Full-duplex WebSocket 地址');
+  return new RealtimeDuplexSession({ ...config, url: resolveRealtimeUrl(config.url) }, callbacks);
 }
 
 const INPUT_RATE = 16_000;
 const OUTPUT_RATE = 24_000;
 const SEND_INTERVAL_MS = 200;
 const USER_TURN_SILENCE_MS = 1_200;
-const USER_TURN_PREROLL_MS = 1_000;
-const ACTIVE_TASK_REMINDER_INTERVAL_MS = 5_000;
 const REALTIME_CLIENT_BUILD = 'qwen-media-bargein-v3';
 const LISTENING_SPEECH_MS = 240;
 const INITIAL_PLAYBACK_BUFFER_MS = 400;
-type PlaybackLane = 'normal' | 'urgent';
 
 function readableError(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -111,21 +113,12 @@ export class RealtimeDuplexSession {
   private pending: Int16Array[] = [];
   private pendingSamples = 0;
   private sendTimer: number | null = null;
-  private hasActiveTask = false;
-  private activeTask = '';
-  private lastTaskReminderAt = 0;
-  private contextInstructions = `${MINICPM_BASE_INSTRUCTIONS}\n\n[当前任务]\n无`;
-  private lastSentContext = '';
   private sessionReady = false;
   private responseId: string | null = null;
-  private pendingTaskControl: string | null = null;
   private pendingToolResults: RealtimeToolResult[] = [];
   private acceptedToolResultIds = new Set<string>();
   private acceptedFunctionCallIds = new Set<string>();
   private activeToolJobId: string | null = null;
-  private lastInteractiveInputAt = 0;
-  private turnAudio: Int16Array[] = [];
-  private turnSamples = 0;
   private assistantPlaying = false;
   private responseActive = false;
   private playbackOperation: Promise<void> = Promise.resolve();
@@ -139,29 +132,12 @@ export class RealtimeDuplexSession {
   private assistantTranscript = '';
   private activeUserTurnId: string | null = null;
   private turnSequence = 0;
-  private pendingResponseLane: PlaybackLane | null = null;
-  private activeResponseLane: PlaybackLane = 'normal';
-  private responseLanes = new Map<string, PlaybackLane>();
   private qwenMedia = new QwenOmniMediaSequencer();
 
   constructor(
     private readonly config: RealtimeDuplexConfig,
     private readonly callbacks: RealtimeDuplexCallbacks,
   ) {}
-
-  updateContext(currentTask: string, recentChat: ReadonlyArray<{ role: string; text: string }>): void {
-    const requestedTask = currentTask.trim();
-    const normalizedTask = MINICPM_CURRENT_TASK_MONITORING_ENABLED ? requestedTask : '';
-    const taskChanged = normalizedTask !== this.activeTask;
-    if (MINICPM_CURRENT_TASK_MONITORING_ENABLED && taskChanged) {
-      this.lastTaskReminderAt = 0;
-      this.pendingTaskControl = createMiniCpmTaskControl(normalizedTask);
-    }
-    this.activeTask = normalizedTask;
-    this.hasActiveTask = Boolean(normalizedTask);
-    this.contextInstructions = createMiniCpmContextInstructions(normalizedTask, recentChat);
-    this.sendContextUpdate();
-  }
 
   async start(): Promise<void> {
     this.callbacks.onState('connecting');
@@ -173,15 +149,12 @@ export class RealtimeDuplexSession {
         this.playbackGeneration += 1;
         this.playbackOperation = Promise.resolve();
         this.queuedDrainResponseId = null;
-        this.acknowledgePlayback(data.responseId, data.playedMs);
         this.assistantPlaying = false;
         return;
       }
       if (data.type !== 'drained') return;
       if (this.queuedDrainResponseId === data.responseId) this.queuedDrainResponseId = null;
-      this.acknowledgePlayback(data.responseId, data.playedMs);
       this.assistantPlaying = false;
-      this.sendContextUpdate();
       if (!this.responseActive) this.callbacks.onState('listening');
     };
     this.playbackNode.connect(this.playbackContext.destination);
@@ -208,7 +181,6 @@ export class RealtimeDuplexSession {
       const frameMs = pcm.length * 1_000 / INPUT_RATE;
       const threshold = Math.max(350, this.noiseFloor * 2.5);
       if (level > threshold) {
-        this.lastInteractiveInputAt = Date.now();
         this.userSpeechMs += frameMs;
         this.userSilenceMs = 0;
         if (!this.userActivityActive && this.userSpeechMs >= LISTENING_SPEECH_MS) {
@@ -216,7 +188,6 @@ export class RealtimeDuplexSession {
           this.turnHasUserActivity = true;
           this.activeUserTurnId = this.newTurnId('voice');
           this.interruptQwenResponse(this.activeUserTurnId, this.userSpeechMs, level, threshold);
-          this.callbacks.onUserTurnStarted(this.activeUserTurnId);
           this.emitDiagnostic('realtime_user_turn_started', {
             turn_id: this.activeUserTurnId,
             speech_ms: Math.round(this.userSpeechMs),
@@ -243,9 +214,7 @@ export class RealtimeDuplexSession {
   stop(): void {
     if (this.sendTimer !== null) window.clearInterval(this.sendTimer);
     this.sendTimer = null;
-    this.send(this.config.dialect === 'qwen_omni'
-      ? createQwenOmniFinishSessionEvent()
-      : createMiniCpmCloseSessionEvent());
+    this.send(createQwenOmniFinishSessionEvent());
     this.socket?.close(1000, 'client stop');
     this.socket = null;
     this.microphone?.getTracks().forEach((track) => track.stop());
@@ -256,22 +225,13 @@ export class RealtimeDuplexSession {
     this.playbackContext = null;
     this.pending = [];
     this.pendingSamples = 0;
-    this.pendingTaskControl = null;
     this.pendingToolResults = [];
     this.acceptedToolResultIds.clear();
     this.acceptedFunctionCallIds.clear();
     this.activeToolJobId = null;
-    this.lastInteractiveInputAt = 0;
-    this.hasActiveTask = false;
-    this.activeTask = '';
-    this.lastTaskReminderAt = 0;
     this.sessionReady = false;
-    this.lastSentContext = '';
     this.responseActive = false;
     this.activeUserTurnId = null;
-    this.pendingResponseLane = null;
-    this.activeResponseLane = 'normal';
-    this.responseLanes.clear();
     this.userSpeechMs = 0;
     this.userSilenceMs = 0;
     this.userActivityActive = false;
@@ -285,14 +245,9 @@ export class RealtimeDuplexSession {
   async sendTextTurn(text: string, isFresh: () => boolean = () => true): Promise<boolean> {
     const normalized = text.trim();
     if (!normalized || !isFresh()) return false;
-    this.lastInteractiveInputAt = Date.now();
-    if (this.config.dialect === 'qwen_omni') {
-      createQwenOmniTextTurnEvents(normalized).forEach((event) => this.send(event));
-      this.emitDiagnostic('qwen_text_input_dispatched', { text: normalized });
-      return true;
-    }
-    this.emitDiagnostic('native_text_input_router_only', { text: normalized });
-    return false;
+    createQwenOmniTextTurnEvents(normalized).forEach((event) => this.send(event));
+    this.emitDiagnostic('qwen_text_input_dispatched', { text: normalized });
+    return true;
   }
 
   enqueueToolResult(toolResult: RealtimeToolResult): boolean {
@@ -301,7 +256,7 @@ export class RealtimeDuplexSession {
     const result = toolResult.result.trim();
     const callId = toolResult.callId?.trim();
     if (!jobId || !question || !result || this.acceptedToolResultIds.has(jobId)) return false;
-    if (this.config.dialect === 'qwen_omni' && !callId) return false;
+    if (!callId) return false;
     this.acceptedToolResultIds.add(jobId);
     this.pendingToolResults.push({ jobId, question, result, ...(callId ? { callId } : {}) });
     this.emitDiagnostic('search_result_queued', {
@@ -328,7 +283,6 @@ export class RealtimeDuplexSession {
   private openSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
       const url = new URL(this.config.url);
-      if (this.config.dialect !== 'qwen_omni') url.searchParams.set('duplex', '1');
       const socket = new WebSocket(url);
       this.socket = socket;
       let initSent = false;
@@ -354,16 +308,12 @@ export class RealtimeDuplexSession {
       const sendInit = async () => {
         if (initSent) return;
         initSent = true;
-        if (this.config.dialect === 'qwen_omni') {
-          this.send(createQwenOmniSessionUpdate({
-            voice: this.config.voice,
-            tools: this.config.tools,
-            inputRate: INPUT_RATE,
-            outputRate: OUTPUT_RATE,
-          }));
-        } else {
-          this.send(createMiniCpmSessionUpdate(this.config.refAudio));
-        }
+        this.send(createQwenOmniSessionUpdate({
+          voice: this.config.voice,
+          tools: this.config.tools,
+          inputRate: INPUT_RATE,
+          outputRate: OUTPUT_RATE,
+        }));
       };
       socket.onopen = () => {
         this.emitDiagnostic('realtime_websocket_open', { url: url.toString() });
@@ -395,8 +345,6 @@ export class RealtimeDuplexSession {
           }
           if (type === 'session.updated' || type === 'session.created') {
             this.sessionReady = true;
-            this.lastSentContext = this.contextInstructions;
-            this.lastTaskReminderAt = Date.now();
             this.emitDiagnostic('realtime_session_ready', {});
           }
           this.handleEvent(event);
@@ -428,22 +376,6 @@ export class RealtimeDuplexSession {
     if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(event));
   }
 
-  private acknowledgePlayback(responseId: unknown, playedMs: unknown): void {
-    if (this.config.dialect === 'qwen_omni') return;
-    const event = createMiniCpmPlaybackAckEvent(responseId, playedMs);
-    if (event) this.send(event);
-  }
-
-  private sendContextUpdate(): void {
-    if (!this.sessionReady || this.responseActive
-      || this.contextInstructions === this.lastSentContext) return;
-    // Native MiniCPM duplex owns the live listen/speak state. Mid-session
-    // session.update messages are intentionally avoided; task checks and tool
-    // results use normal input chunks below.
-    this.lastSentContext = this.contextInstructions;
-    this.emitDiagnostic('realtime_context_recorded', { has_active_task: this.hasActiveTask });
-  }
-
   private flush(): void {
     if (this.pendingSamples === 0) return;
     const outgoing = new Int16Array(this.pendingSamples);
@@ -457,18 +389,10 @@ export class RealtimeDuplexSession {
       if (count === chunk.length) this.pending.shift();
       else this.pending[0] = chunk.slice(count);
     }
-    this.turnAudio.push(outgoing.slice());
-    this.turnSamples += outgoing.length;
-    const retainedTurnSamples = this.turnHasUserActivity
-      ? INPUT_RATE * 20
-      : INPUT_RATE * USER_TURN_PREROLL_MS / 1_000;
-    while (this.turnSamples > retainedTurnSamples && this.turnAudio.length > 1) {
-      this.turnSamples -= this.turnAudio.shift()?.length || 0;
-    }
-    this.dispatchQueuedTextInput();
+    this.dispatchQueuedToolResult();
     this.sendAudio(outgoing, true);
     if (this.turnHasUserActivity && !this.userActivityActive && this.userSilenceMs >= USER_TURN_SILENCE_MS) {
-      this.dispatchUserTurn(this.activeUserTurnId || this.newTurnId('voice'));
+      this.turnHasUserActivity = false;
       this.activeUserTurnId = null;
       this.userSpeechMs = 0;
       this.userSilenceMs = 0;
@@ -490,60 +414,28 @@ export class RealtimeDuplexSession {
 
   private sendAudio(pcm: Int16Array, includeVideo: boolean): void {
     const audio = bytesToBase64(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength));
-    if (this.config.dialect === 'qwen_omni') {
-      const batch = this.qwenMedia.createBatch(
-        audio,
-        includeVideo,
-        includeVideo ? this.callbacks.getVideoFrame() : null,
-      );
-      batch.events.forEach((event) => this.send(event));
-      batch.diagnostics.forEach(({ event, details }) => this.emitDiagnostic(event, details));
-      return;
-    }
-    this.send(createMiniCpmAudioAppendEvent(
+    const batch = this.qwenMedia.createBatch(
       audio,
-      INPUT_RATE,
+      includeVideo,
       includeVideo ? this.callbacks.getVideoFrame() : null,
-    ));
+    );
+    batch.events.forEach((event) => this.send(event));
+    batch.diagnostics.forEach(({ event, details }) => this.emitDiagnostic(event, details));
   }
 
-  private dispatchQueuedTextInput(): void {
-    this.sendContextUpdate();
-    let text = '';
-    if (MINICPM_CURRENT_TASK_MONITORING_ENABLED && this.pendingTaskControl) {
-      text = this.pendingTaskControl;
-      this.pendingTaskControl = null;
-      this.emitDiagnostic('realtime_task_control_dispatched', {
-        has_active_task: this.hasActiveTask,
-      });
-    } else if (MINICPM_CURRENT_TASK_MONITORING_ENABLED
-      && this.activeTask && !this.responseActive
-      && !this.userActivityActive
-      && !this.turnHasUserActivity
-      && Date.now() - this.lastTaskReminderAt >= ACTIVE_TASK_REMINDER_INTERVAL_MS) {
-      text = createMiniCpmTaskReminder(this.activeTask);
-      this.pendingResponseLane = 'urgent';
-      this.lastTaskReminderAt = Date.now();
-      this.emitDiagnostic('active_task_reminder_sent', {
-        task: this.activeTask,
-        source: 'urgent_current_task',
-        assistant_playing: this.assistantPlaying,
-        response_active: this.responseActive,
-      });
-    } else if (this.pendingToolResults.length > 0
+  private dispatchQueuedToolResult(): void {
+    if (this.pendingToolResults.length > 0
       && !this.responseActive
       && !this.assistantPlaying
       && !this.userActivityActive
-      && !this.turnHasUserActivity
-      && (this.config.dialect === 'qwen_omni'
-        || Date.now() - this.lastInteractiveInputAt >= 2_500)) {
+      && !this.turnHasUserActivity) {
       const toolResult = this.pendingToolResults.shift();
       if (toolResult) {
         this.emitDiagnostic('search_result_dispatched', {
           job_id: toolResult.jobId,
         });
         this.callbacks.onToolResultDispatched?.(toolResult.jobId);
-        if (this.config.dialect === 'qwen_omni' && toolResult.callId) {
+        if (toolResult.callId) {
           this.activeToolJobId = toolResult.jobId;
           this.responseActive = true;
           createQwenOmniToolResultEvents(
@@ -555,32 +447,9 @@ export class RealtimeDuplexSession {
             job_id: toolResult.jobId,
             call_id: toolResult.callId,
           });
-        } else {
-          this.callbacks.onToolResultReady?.(toolResult);
         }
       }
     }
-    if (!text) return;
-    this.send(createMiniCpmTextAppendEvent(text));
-  }
-
-  private activateResponseLane(responseId: string | null): PlaybackLane {
-    const lane = this.pendingResponseLane
-      || (this.activeToolJobId ? 'normal' : this.hasActiveTask ? 'urgent' : 'normal');
-    this.pendingResponseLane = null;
-    this.activeResponseLane = lane;
-    if (responseId) {
-      this.responseLanes.set(responseId, lane);
-      if (this.responseLanes.size > 12) {
-        const oldest = this.responseLanes.keys().next().value;
-        if (oldest) this.responseLanes.delete(oldest);
-      }
-    }
-    return lane;
-  }
-
-  private responseLane(responseId: string | null): PlaybackLane {
-    return (responseId && this.responseLanes.get(responseId)) || this.activeResponseLane;
   }
 
   private handleEvent(event: Record<string, unknown>): void {
@@ -608,48 +477,15 @@ export class RealtimeDuplexSession {
         call_id: String(event.call_id || ''),
       });
       this.callbacks.onError('千问返回了无效的工具调用');
-    } else if (type === 'session.created' || type === 'response.listen') {
-      if (type === 'response.listen') {
-        this.finishOfficialTurn();
-      }
+    } else if (type === 'session.created') {
       this.callbacks.onState('listening');
-    } else if (type === 'response.output.delta') {
-      const kind = String(event.kind || '');
-      if (kind === 'listen') {
-        this.finishOfficialTurn();
-        this.callbacks.onState('listening');
-      } else if (kind === 'text') {
-        this.beginOfficialTurn(eventResponseId);
-        const delta = String(event.text || '');
-        this.assistantTranscript += delta;
-        this.callbacks.onAssistantText(
-          this.assistantTranscript,
-          false,
-          this.activeToolJobId || undefined,
-        );
-      } else if (kind === 'audio') {
-        this.beginOfficialTurn(eventResponseId);
-        const encoded = String(event.audio || '');
-        if (!encoded || !this.playbackNode) return;
-        this.enqueueAudioDelta(
-          { format: 'pcm_f32le', sample_rate_hz: OUTPUT_RATE },
-          encoded,
-          eventResponseId,
-        );
-      }
-    } else if (type === 'response.created' || type === 'response.speak') {
+    } else if (type === 'response.created') {
       if (eventResponseId) this.responseId = eventResponseId;
-      if (!this.responseActive) this.activateResponseLane(eventResponseId);
-      else if (eventResponseId && !this.responseLanes.has(eventResponseId)) {
-        this.responseLanes.set(eventResponseId, this.activeResponseLane);
-      }
       this.responseActive = true;
-      if (type === 'response.created') {
-        this.userSpeechMs = 0;
-        this.userSilenceMs = 0;
-        this.userActivityActive = false;
-        this.assistantTranscript = '';
-      }
+      this.userSpeechMs = 0;
+      this.userSilenceMs = 0;
+      this.userActivityActive = false;
+      this.assistantTranscript = '';
       this.callbacks.onState('speaking');
     } else if (type === 'response.text.delta') {
       this.beginOfficialTurn(eventResponseId);
@@ -703,23 +539,19 @@ export class RealtimeDuplexSession {
       );
     } else if (type === 'conversation.item.input_audio_transcription.completed') {
       const transcript = String(event.transcript || '');
-      if (this.config.dialect === 'qwen_omni') {
-        this.emitDiagnostic('qwen_native_asr_completed', {
-          transcript,
-          has_transcript: Boolean(transcript.trim()),
-        });
-      }
+      this.emitDiagnostic('qwen_native_asr_completed', {
+        transcript,
+        has_transcript: Boolean(transcript.trim()),
+      });
       this.callbacks.onUserText(transcript, true);
     } else if (type === 'error') {
-      if (this.config.dialect === 'qwen_omni') {
-        const media = this.qwenMedia.snapshot();
-        this.emitDiagnostic('qwen_realtime_error', {
-          raw_event: event,
-          audio_append_sequence: media.audioAppendSequence,
-          image_append_sequence: media.imageAppendSequence,
-          has_deferred_image: media.hasDeferredImage,
-        });
-      }
+      const media = this.qwenMedia.snapshot();
+      this.emitDiagnostic('qwen_realtime_error', {
+        raw_event: event,
+        audio_append_sequence: media.audioAppendSequence,
+        image_append_sequence: media.imageAppendSequence,
+        has_deferred_image: media.hasDeferredImage,
+      });
       this.callbacks.onError(readableError(event.error || event));
     }
   }
@@ -730,8 +562,7 @@ export class RealtimeDuplexSession {
     level: number,
     threshold: number,
   ): boolean {
-    if (this.config.dialect !== 'qwen_omni'
-      || (!this.responseActive && !this.assistantPlaying)) return false;
+    if (!this.responseActive && !this.assistantPlaying) return false;
     const interruptedResponseId = this.responseId;
     const cancelEventSent = this.responseActive;
     if (cancelEventSent) this.send(createQwenOmniCancelResponseEvent());
@@ -741,8 +572,6 @@ export class RealtimeDuplexSession {
     this.playbackNode?.port.postMessage({ type: 'clear', cancelResponse: false });
     this.responseActive = false;
     this.assistantPlaying = false;
-    this.pendingResponseLane = null;
-    this.activeResponseLane = 'normal';
     if (this.assistantTranscript) this.finishAssistantText();
     this.emitDiagnostic('qwen_response_interrupted_by_user', {
       turn_id: turnId,
@@ -758,26 +587,10 @@ export class RealtimeDuplexSession {
 
   private beginOfficialTurn(responseId: string | null): void {
     if (this.responseActive) return;
-    this.activateResponseLane(responseId);
+    if (responseId) this.responseId = responseId;
     this.responseActive = true;
     this.assistantTranscript = '';
     this.callbacks.onState('speaking');
-  }
-
-  private finishOfficialTurn(): void {
-    const wasSpeaking = this.responseActive || this.assistantPlaying;
-    this.responseActive = false;
-    if (this.assistantTranscript) {
-      this.finishAssistantText();
-    } else if (this.activeToolJobId) {
-      this.emitDiagnostic('search_result_response_empty', {
-        job_id: this.activeToolJobId,
-      });
-      this.activeToolJobId = null;
-    }
-    if (wasSpeaking) this.enqueuePlaybackDrain(this.responseId);
-    this.pendingResponseLane = null;
-    this.activeResponseLane = 'normal';
   }
 
   private finishAssistantText(): void {
@@ -804,7 +617,6 @@ export class RealtimeDuplexSession {
     responseId: string | null,
   ): void {
     const generation = this.playbackGeneration;
-    const lane = this.responseLane(responseId);
     this.playbackOperation = this.playbackOperation
       .then(() => this.decodeOutputAudio(event, encoded))
       .then((output) => {
@@ -812,7 +624,7 @@ export class RealtimeDuplexSession {
         this.assistantPlaying = true;
         this.playbackNode.port.postMessage({
           type: 'audio',
-          lane,
+          lane: 'normal',
           pcm: output.buffer,
           responseId,
           initialBufferMs: INITIAL_PLAYBACK_BUFFER_MS,
@@ -825,71 +637,15 @@ export class RealtimeDuplexSession {
     if (responseId && this.queuedDrainResponseId === responseId) return;
     this.queuedDrainResponseId = responseId;
     const generation = this.playbackGeneration;
-    const lane = this.responseLane(responseId);
     this.playbackOperation = this.playbackOperation.then(() => {
       if (generation !== this.playbackGeneration) return;
-      this.playbackNode?.port.postMessage({ type: 'drain', lane, responseId });
+      this.playbackNode?.port.postMessage({ type: 'drain', lane: 'normal', responseId });
     });
   }
 
-  private async decodeOutputAudio(event: Record<string, unknown>, encoded: string): Promise<Int16Array | null> {
+  private async decodeOutputAudio(_event: Record<string, unknown>, encoded: string): Promise<Int16Array> {
     const bytes = base64ToBytes(encoded);
-    const format = String(event.format || event.audio_format || 'pcm16').toLowerCase();
-    let pcm: Int16Array;
-    let sourceRate = Number(event.sample_rate_hz || event.sample_rate || OUTPUT_RATE);
-    if (format.includes('wav')) {
-      if (!this.playbackContext) return null;
-      const decoded = await this.playbackContext.decodeAudioData(Uint8Array.from(bytes).buffer);
-      const samples = decoded.getChannelData(0);
-      pcm = new Int16Array(samples.length);
-      for (let index = 0; index < samples.length; index += 1) {
-        const sample = Math.max(-1, Math.min(1, samples[index]));
-        pcm[index] = sample < 0 ? sample * 32768 : sample * 32767;
-      }
-      sourceRate = decoded.sampleRate;
-    } else if (format.includes('f32')) {
-      const samples = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4));
-      pcm = new Int16Array(samples.length);
-      for (let index = 0; index < samples.length; index += 1) {
-        const sample = Math.max(-1, Math.min(1, samples[index]));
-        pcm[index] = sample < 0 ? sample * 32768 : sample * 32767;
-      }
-    } else {
-      pcm = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
-    }
-    return resample(pcm, sourceRate, this.playbackContext?.sampleRate || OUTPUT_RATE);
-  }
-
-  private takeTurnAudio(): string {
-    const pcm = new Int16Array(this.turnSamples);
-    let offset = 0;
-    for (const chunk of this.turnAudio) { pcm.set(chunk, offset); offset += chunk.length; }
-    this.turnAudio = [];
-    this.turnSamples = 0;
-    const buffer = new ArrayBuffer(44 + pcm.byteLength);
-    const view = new DataView(buffer);
-    const write = (at: number, value: string) => {
-      for (let index = 0; index < value.length; index += 1) view.setUint8(at + index, value.charCodeAt(index));
-    };
-    write(0, 'RIFF'); view.setUint32(4, 36 + pcm.byteLength, true); write(8, 'WAVE');
-    write(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true); view.setUint32(24, INPUT_RATE, true);
-    view.setUint32(28, INPUT_RATE * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-    write(36, 'data'); view.setUint32(40, pcm.byteLength, true);
-    new Uint8Array(buffer, 44).set(new Uint8Array(pcm.buffer));
-    return `data:audio/wav;base64,${bytesToBase64(new Uint8Array(buffer))}`;
-  }
-
-  private dispatchUserTurn(turnId: string): void {
-    if (!this.turnHasUserActivity || this.turnSamples < INPUT_RATE / 2) return;
-    this.turnHasUserActivity = false;
-    if (this.config.dialect === 'qwen_omni') {
-      this.turnAudio = [];
-      this.turnSamples = 0;
-      this.emitDiagnostic('qwen_local_asr_skipped', { turn_id: turnId });
-      return;
-    }
-    this.callbacks.onUserTurnAudio(this.takeTurnAudio(), turnId);
+    return new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
   }
 
   private newTurnId(prefix: string): string {

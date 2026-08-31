@@ -21,8 +21,6 @@ import httpx
 MAX_FRAME_CHARS = 4_000_000
 MAX_INSTRUCTION_CHARS = 2_000
 MAX_TOOL_CONTEXT_CHARS = 4_000
-TOOL_SYSTEM_PROMPT_KEY = "DEFAULT_SYSTEM_PROMPT_NO_DELEGATION"
-
 _TTS_VOICE = "vivian"
 _TTS_INSTRUCTIONS = (
     "Always use the same Vivian voice. Read all Chinese text in Standard Mandarin "
@@ -44,16 +42,6 @@ _USER_KNOWLEDGE_GUARD = (
     "若画面和会话历史都无法确认搜索所需的关键对象，只选择 Speak，说明缺少的信息并请用户调整画面或补充，不要 Delegate。"
     "利用当前画面和会话历史解析‘这个品牌’、‘这个人’、‘这里’等指代。若先前因对象不明而追问，用户或后续清晰画面一旦补齐对象，"
     "立即结合先前搜索意图输出一个完整 Delegate 动作，不要只承诺搜索。纯视觉问答无需搜索。"
-)
-_CONTINUOUS_TASK_GUARD = (
-    "【持续任务规则】如果用户要求持续、实时、每当、一直、继续观察、跟踪、记录、计数、周期处理或等待某个条件，"
-    "则该要求是会话级规则：在用户明确停止或用新要求替代前始终有效。后续即使只收到画面而没有再次收到文字，"
-    "也要继续依据该规则观察；不能因为已经回应过一次就把任务视为完成。"
-    "判断画面变化时，视频内容内部的镜头、场景、字幕、对象、动作或状态发生实质变化都属于候选事件；"
-    "不要只把播放器控件出现、页面切换或视频来源改变视为画面切换。"
-    "只有当前或近期清晰画面确实满足用户的触发条件时才选择 Speak；没有新事件、证据不足或只是同一状态延续时选择 Silence。"
-    "事件发生一次后，如果近期画面显示其已经结束、消失或恢复到未触发状态，之后再次发生时应视为新的合法事件，"
-    "不得仅因对象或回答文字相似而永久忽略。严格遵循用户要求的触发时机和输出频率，不擅自降低频率。"
 )
 _RESPONSE_MARKER = re.compile(r"</?response>", flags=re.IGNORECASE)
 _SILENCE_MARKER = re.compile(r"</?silence>", flags=re.IGNORECASE)
@@ -119,7 +107,7 @@ def parse_action(raw_content: str) -> dict[str, str]:
 
 
 def ground_user_instruction(instruction: str, tool_context: str = "") -> str:
-    """Add per-turn grounding rules without changing monitor or tool turns."""
+    """Add per-turn grounding rules without changing frame-only or tool turns."""
     instruction = str(instruction or "").strip()
     if not instruction:
         return ""
@@ -134,8 +122,7 @@ def ground_user_instruction(instruction: str, tool_context: str = "") -> str:
         )
     return (
         f"{confirmed_context}【用户原话】{instruction}\n\n"
-        f"{_USER_KNOWLEDGE_GUARD}\n\n"
-        f"{_CONTINUOUS_TASK_GUARD}"
+        f"{_USER_KNOWLEDGE_GUARD}"
     )
 
 
@@ -146,7 +133,6 @@ async def request_completion(
     *,
     max_tokens: int,
     frame_time_range: str = "",
-    system_prompt_key: str = "",
 ) -> dict[str, Any]:
     api_base, api_key, model = model_config()
     if not api_base or not model:
@@ -169,8 +155,9 @@ async def request_completion(
         payload["extra_body"] = {"frame_time_range": frame_time_range}
     headers = {
         "x-streaming-session": joyai_session_id,
-        "x-system-prompt-key": system_prompt_key.strip()
-        or os.environ.get("JOYAI_SYSTEM_PROMPT_KEY", _SYSTEM_PROMPT_KEY).strip()
+        "x-system-prompt-key": os.environ.get(
+            "JOYAI_SYSTEM_PROMPT_KEY", _SYSTEM_PROMPT_KEY
+        ).strip()
         or _SYSTEM_PROMPT_KEY,
     }
     if api_key:
@@ -197,11 +184,8 @@ async def request_completion(
         streaming = {}
     return {
         "raw_content": raw_content,
-        "model": str(data.get("model") or model),
-        "joyai_session_id": joyai_session_id,
         "latency_ms": round((time.perf_counter() - started_at) * 1_000, 1),
         "timing": streaming.get("timing") if isinstance(streaming.get("timing"), dict) else {},
-        "memory": streaming.get("memory") if isinstance(streaming.get("memory"), dict) else {},
     }
 
 
@@ -210,8 +194,6 @@ async def request_frame(
     instruction: str,
     joyai_session_id: str,
     frame_time_range: str = "",
-    *,
-    system_prompt_key: str = "",
 ) -> dict[str, Any]:
     instruction = instruction.strip()
     completion = await request_completion(
@@ -220,7 +202,6 @@ async def request_frame(
         joyai_session_id,
         max_tokens=512 if instruction else 128,
         frame_time_range=frame_time_range,
-        system_prompt_key=system_prompt_key,
     )
     return {**parse_action(completion["raw_content"]), **completion}
 

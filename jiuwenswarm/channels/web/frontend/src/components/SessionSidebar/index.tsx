@@ -21,8 +21,13 @@ import AgentDesignIcon from '../../assets/智能体.svg?react';
 import MoreDesignIcon from '../../assets/更多.svg?react';
 import { webRequest } from '../../services/webClient';
 import type { SidebarNavKey } from '../../utils/frontendPlatform';
+import type {
+  ApplicationPluginContribution,
+  ApplicationPluginManagerNavKey,
+  ApplicationPluginNavKey,
+} from '../../applicationPlugins/types';
 
-type MainNavKey = SidebarNavKey | 'connectorMarket';
+type MainNavKey = SidebarNavKey | 'connectorMarket' | ApplicationPluginManagerNavKey | ApplicationPluginNavKey;
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
@@ -32,12 +37,14 @@ interface SessionSidebarProps {
   onNewSession?: () => void;
   showNewSession?: boolean;
   hiddenNavItems?: MainNavKey[];
+  applicationPlugins?: ApplicationPluginContribution[];
   onMorePanelOpenChange?: (open: boolean) => void;
 }
 
 interface NavItem {
   key: MainNavKey;
-  labelKey: string;
+  labelKey?: string;
+  label?: string;
   icon: React.ReactNode;
 }
 
@@ -68,7 +75,6 @@ const connectorMarketNavIcon = (
 
 const mainNavItems: NavItem[] = [
   { key: 'chat', labelKey: 'nav.work', icon: <WorkIcon aria-hidden /> },
-  { key: 'videolive', labelKey: 'nav.videoLive', icon: videoLiveNavIcon },
   { key: 'skills', labelKey: 'nav.skills', icon: <SkillDesignIcon aria-hidden /> },
   { key: 'channels', labelKey: 'nav.channels', icon: <ChannelIcon aria-hidden /> },
   { key: 'agents', labelKey: 'nav.agent', icon: <AgentDesignIcon aria-hidden /> },
@@ -78,6 +84,7 @@ const mainNavItems: NavItem[] = [
 
 const moreNavItems: NavItem[] = [
   { key: 'configpanel', labelKey: 'nav.config', icon: <ConfigIcon aria-hidden /> },
+  { key: 'applicationPlugins', labelKey: 'nav.applicationPlugins', icon: <PluginIcon aria-hidden /> },
   { key: 'extensions', labelKey: 'nav.extensions', icon: <PluginIcon aria-hidden /> },
   { key: 'browserpanel', labelKey: 'nav.browser', icon: <WebIcon aria-hidden /> },
   { key: 'updatepanel', labelKey: 'nav.update', icon: <UpdateIcon aria-hidden /> },
@@ -181,9 +188,10 @@ export function SessionSidebar({
   onNewSession,
   showNewSession = true,
   hiddenNavItems = [],
+  applicationPlugins = [],
   onMorePanelOpenChange,
 }: SessionSidebarProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [advancedConfigOpen, setAdvancedConfigOpen] = useState(false);
   const settingsRef = useRef<HTMLButtonElement>(null);
 
@@ -215,8 +223,19 @@ export function SessionSidebar({
     onNavigate(nav);
   };
 
-  const getNavItemLabel = (item: NavItem) => t(item.labelKey);
-  const visibleMainNavItems = mainNavItems.filter((item) => !hiddenNavItems.includes(item.key));
+  const getNavItemLabel = (item: NavItem) => (
+    item.labelKey && i18n.exists(item.labelKey) ? t(item.labelKey) : item.label || item.key
+  );
+  const applicationPluginItems: NavItem[] = applicationPlugins
+    .filter((plugin) => plugin.enabled !== false)
+    .map((plugin) => ({
+      key: plugin.nav_key as MainNavKey,
+      labelKey: plugin.title_i18n_key,
+      label: plugin.title,
+      icon: plugin.plugin_id === 'video-duplex' ? videoLiveNavIcon : <PluginIcon aria-hidden />,
+    }));
+  const visibleMainNavItems = [...mainNavItems, ...applicationPluginItems]
+    .filter((item) => !hiddenNavItems.includes(item.key));
   const visibleMoreNavItems = moreNavItems.filter((item) => !hiddenNavItems.includes(item.key));
   const isMoreActive = visibleMoreNavItems.some((item) => item.key === activeNav);
   // 定时任务（cron）是"任务"区内与会话同级的视图，没有独立的导航图标，

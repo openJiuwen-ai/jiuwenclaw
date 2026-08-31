@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from jiuwenswarm.gateway.channel_manager.web.qwen_omni_tools import (
+from jiuwenswarm.extensions.video_duplex.backend.qwen_omni_tools import (
     QWEN_OMNI_RESEARCH_TOOL_NAME,
     parse_qwen_omni_tool_call,
     qwen_omni_tools,

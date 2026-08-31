@@ -1,0 +1,119 @@
+id: video-duplex
+name: Full-duplex Video
+version: 1.0.0
+description: Camera, screen, microphone, realtime model, search, ASR and TTS workspace
+author: JiuwenSwarm
+min_jiuwenswarm_version: "0.2.5"
+package_type: application
+dependencies: {}
+permissions:
+  - camera
+  - microphone
+  - display_capture
+  - outbound_network
+  - agent_tools
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    video_live_provider:
+      type: string
+      enum: [joyai, qwen_omni]
+      default: joyai
+      title: 视频模型运行时
+      description: 选择负责实时视觉理解的模型通道。
+      x-group: 视频模型
+      x-order: 10
+    joyai_api_base:
+      type: string
+      title: JoyAI API Base
+      x-group: 视频模型
+      x-order: 20
+      x-visible-when: {video_live_provider: joyai}
+    joyai_api_key:
+      type: string
+      secret: true
+      title: JoyAI API Key
+      x-group: 视频模型
+      x-order: 30
+      x-visible-when: {video_live_provider: joyai}
+    joyai_model:
+      type: string
+      default: jdopensource/JoyAI-VL-Interaction
+      title: JoyAI 模型
+      x-group: 视频模型
+      x-order: 40
+      x-visible-when: {video_live_provider: joyai}
+    qwen_omni_realtime_url:
+      type: string
+      title: Qwen Realtime WebSocket
+      x-group: 视频模型
+      x-order: 20
+      x-visible-when: {video_live_provider: qwen_omni}
+    qwen_omni_api_key:
+      type: string
+      secret: true
+      title: Qwen API Key
+      x-group: 视频模型
+      x-order: 30
+      x-visible-when: {video_live_provider: qwen_omni}
+    qwen_omni_model:
+      type: string
+      default: qwen3.5-omni-flash-realtime
+      title: Qwen 模型
+      x-group: 视频模型
+      x-order: 40
+      x-visible-when: {video_live_provider: qwen_omni}
+    qwen_omni_voice:
+      type: string
+      default: Cherry
+      title: Qwen 音色
+      x-group: 视频模型
+      x-order: 50
+      x-visible-when: {video_live_provider: qwen_omni}
+    voice_protocol:
+      type: string
+      enum: [native_ws, openai_http]
+      default: native_ws
+      title: 语音通道
+      x-group: ASR 与 TTS
+      x-order: 100
+      x-visible-when: {video_live_provider: joyai}
+    voice_asr_endpoint:
+      type: string
+      title: ASR 完整接口
+      x-group: ASR 与 TTS
+      x-order: 110
+      x-visible-when: {video_live_provider: joyai}
+    voice_tts_endpoint:
+      type: string
+      title: TTS 完整接口
+      x-group: ASR 与 TTS
+      x-order: 120
+      x-visible-when: {video_live_provider: joyai}
+    voice_api_key:
+      type: string
+      secret: true
+      title: 语音 API Key
+      x-group: ASR 与 TTS
+      x-order: 130
+      x-visible-when: {video_live_provider: joyai, voice_protocol: openai_http}
+    voice_asr_model:
+      type: string
+      title: ASR 模型
+      x-group: ASR 与 TTS
+      x-order: 140
+      x-visible-when: {video_live_provider: joyai, voice_protocol: openai_http}
+    voice_tts_model:
+      type: string
+      title: TTS 模型
+      x-group: ASR 与 TTS
+      x-order: 150
+      x-visible-when: {video_live_provider: joyai, voice_protocol: openai_http}
+    voice_tts_voice:
+      type: string
+      default: vivian
+      title: TTS 音色
+      x-group: ASR 与 TTS
+      x-order: 160
+      x-visible-when: {video_live_provider: joyai, voice_protocol: openai_http}

@@ -5,7 +5,7 @@ import {
   mergeSearchProgressJob,
   searchProgressOptionLabel,
   selectSearchProgressJob,
-} from '../node_modules/.cache/search-progress-history/searchProgressHistory.js';
+} from '../node_modules/.cache/search-progress-history/searchPresentation.js';
 
 function payload(id, query, status = 'running', sequence = 1) {
   return {

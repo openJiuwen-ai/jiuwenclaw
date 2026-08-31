@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { RealtimeVideoFrameScheduler } from '../node_modules/.cache/realtime-video-frame-scheduler/realtimeVideoFrameScheduler.js';
+import { RealtimeVideoFrameScheduler } from '../node_modules/.cache/realtime-video-frame-scheduler/videoSource.js';
 
 const frame = (source, version) => ({
   source_id: source,

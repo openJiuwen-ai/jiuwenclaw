@@ -75,9 +75,34 @@ def test_build_app_exposes_ws_routes_only() -> None:
     paths = _route_paths(app)
     assert "/ws" in paths
     assert "/ws/git" in paths
-    assert "/ws/video/qwen-omni" in paths
+    assert "/ws/video/qwen-omni" not in paths
     assert "/container-file-api/upload" not in paths
     assert "/file-api/upload" not in paths
+
+
+def test_build_app_mounts_application_plugin_websocket_routes() -> None:
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from jiuwenswarm.extensions.video_duplex.extension import (
+        VideoDuplexApplicationPlugin,
+    )
+
+    plugin = VideoDuplexApplicationPlugin()
+    plugin.set_extension_dir(
+        Path(__file__).resolve().parents[3]
+        / "jiuwenswarm"
+        / "extensions"
+        / "video_duplex"
+    )
+    channel = _make_channel()
+    channel.application_plugin_registry = SimpleNamespace(
+        get_application_plugins=lambda: (plugin,),
+    )
+
+    paths = _route_paths(build_web_channel_app(channel))
+
+    assert "/ws/video/qwen-omni" in paths
 
 
 def test_build_app_registers_custom_config_path() -> None:

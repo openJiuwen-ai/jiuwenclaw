@@ -370,36 +370,11 @@ interface ConfigGroup {
 }
 
 const MODEL_DEFAULT_KEYS = new Set(["api_base", "api_key", "model", "model_provider"]);
-const VIDEO_LIVE_PROVIDER_KEY = "video_live_provider";
-const VOICE_PROTOCOL_KEY = "voice_protocol";
-const QWEN_OMNI_VIDEO_KEYS = new Set([
-  "qwen_omni_realtime_url",
-  "qwen_omni_api_key",
-  "qwen_omni_model",
-  "qwen_omni_voice",
-]);
-const JOYAI_VIDEO_KEYS = new Set([
-  "joyai_api_base",
-  "joyai_api_key",
-  "joyai_model",
-  VOICE_PROTOCOL_KEY,
-]);
-const JOYAI_VOICE_ENDPOINT_KEYS = new Set([
-  "voice_asr_endpoint",
-  "voice_tts_endpoint",
-]);
-const JOYAI_HTTP_VOICE_KEYS = new Set([
-  "voice_api_key",
-  "voice_asr_model",
-  "voice_tts_model",
-  "voice_tts_voice",
-]);
 const MODEL_VIDEO_KEYS = new Set([
-  VIDEO_LIVE_PROVIDER_KEY,
-  ...QWEN_OMNI_VIDEO_KEYS,
-  ...JOYAI_VIDEO_KEYS,
-  ...JOYAI_VOICE_ENDPOINT_KEYS,
-  ...JOYAI_HTTP_VOICE_KEYS,
+  "video_api_base",
+  "video_api_key",
+  "video_model",
+  "video_provider",
 ]);
 const MODEL_AUDIO_KEYS = new Set(["audio_api_base", "audio_api_key", "audio_model", "audio_provider"]);
 const MODEL_VISION_KEYS = new Set(["vision_api_base", "vision_api_key", "vision_model", "vision_provider"]);
@@ -562,7 +537,12 @@ function classifyKey(key: string): string {
   return "other";
 }
 
-const MODEL_GROUP_TAGS = new Set(["model_default", "model_video", "model_audio", "model_vision"]);
+const MODEL_GROUP_TAGS = new Set([
+  "model_default",
+  "model_video",
+  "model_audio",
+  "model_vision",
+]);
 const SECURITY_GROUP_TAGS = new Set(["permissions", "memory"]);
 
 type ConfigMainTab = "model" | "agent" | "security" | "other";
@@ -937,36 +917,9 @@ function isProviderKey(key: string): boolean {
   return key.endsWith("_provider");
 }
 
-function isVideoLiveFieldVisible(key: string, values: Record<string, string>): boolean {
-  if (key === VIDEO_LIVE_PROVIDER_KEY) return true;
-  const provider = values[VIDEO_LIVE_PROVIDER_KEY] || "qwen_omni";
-  if (provider === "qwen_omni") return QWEN_OMNI_VIDEO_KEYS.has(key);
-  if (provider !== "joyai") return false;
-  if (JOYAI_VIDEO_KEYS.has(key) || JOYAI_VOICE_ENDPOINT_KEYS.has(key)) return true;
-  const protocol = values[VOICE_PROTOCOL_KEY] || "native_ws";
-  return protocol === "openai_http" && JOYAI_HTTP_VOICE_KEYS.has(key);
-}
-
 /** 表格列显示用：video_api_base -> api_base，避免与分组标题重复 */
 /** i18n 键名映射：字段名 -> 翻译 key（显示名 / placeholder） */
 const KEY_DISPLAY_I18N: Record<string, string> = {
-  video_live_provider: "config.keys.videoLiveProvider",
-  video_realtime_public_url: "config.keys.videoRealtimePublicUrl",
-  video_realtime_ref_audio_path: "config.keys.videoRealtimeRefAudioPath",
-  qwen_omni_realtime_url: "config.keys.qwenOmniRealtimeUrl",
-  qwen_omni_api_key: "config.keys.qwenOmniApiKey",
-  qwen_omni_model: "config.keys.qwenOmniModel",
-  qwen_omni_voice: "config.keys.qwenOmniVoice",
-  joyai_api_base: "config.keys.joyaiApiBase",
-  joyai_api_key: "config.keys.joyaiApiKey",
-  joyai_model: "config.keys.joyaiModel",
-  voice_protocol: "config.keys.voiceProtocol",
-  voice_asr_endpoint: "config.keys.voiceAsrEndpoint",
-  voice_tts_endpoint: "config.keys.voiceTtsEndpoint",
-  voice_api_key: "config.keys.voiceApiKey",
-  voice_asr_model: "config.keys.voiceAsrModel",
-  voice_tts_model: "config.keys.voiceTtsModel",
-  voice_tts_voice: "config.keys.voiceTtsVoice",
   memory_forbidden_enabled: "config.keys.memoryForbiddenEnabled",
   memory_forbidden_description: "config.keys.memoryForbiddenDescription",
   swarmflow_enabled: "config.keys.swarmflowEnabled",
@@ -1009,18 +962,6 @@ const KEY_PLACEHOLDER_I18N: Record<string, string> = {
   skill_retrieval_build_root_categories: "config.keys.skillRetrievalBuildRootCategoriesPlaceholder",
 };
 const KEY_LABEL_HINT_I18N: Record<string, string> = {
-  video_live_provider: "config.keyHelp.videoLiveProvider",
-  video_realtime_public_url: "config.keyHelp.videoRealtimePublicUrl",
-  video_realtime_ref_audio_path: "config.keyHelp.videoRealtimeRefAudioPath",
-  qwen_omni_realtime_url: "config.keyHelp.qwenOmniRealtimeUrl",
-  joyai_api_base: "config.keyHelp.joyaiApiBase",
-  voice_protocol: "config.keyHelp.voiceProtocol",
-  voice_asr_endpoint: "config.keyHelp.voiceAsrEndpoint",
-  voice_tts_endpoint: "config.keyHelp.voiceTtsEndpoint",
-  voice_api_key: "config.keyHelp.voiceApiKey",
-  voice_asr_model: "config.keyHelp.voiceAsrModel",
-  voice_tts_model: "config.keyHelp.voiceTtsModel",
-  voice_tts_voice: "config.keyHelp.voiceTtsVoice",
   // 模型：仅协议/推理等易歧义项（model_name / alias / api_base / api_key 不加）
   model_provider: "config.keyHelp.modelProvider",
   provider: "config.keyHelp.modelProvider",
@@ -1067,27 +1008,10 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
 
 /** 组内字段排序优先级，数字越小越靠前 */
 const KEY_SORT_PRIORITY: Record<string, number> = {
-  video_live_provider: 0,
   video_api_base: 10,
   video_api_key: 11,
   video_model: 12,
   video_provider: 13,
-  video_realtime_public_url: 14,
-  video_realtime_ref_audio_path: 15,
-  qwen_omni_realtime_url: 10,
-  qwen_omni_api_key: 11,
-  qwen_omni_model: 12,
-  qwen_omni_voice: 13,
-  joyai_api_base: 10,
-  joyai_api_key: 11,
-  joyai_model: 12,
-  voice_protocol: 20,
-  voice_asr_endpoint: 21,
-  voice_tts_endpoint: 22,
-  voice_api_key: 23,
-  voice_asr_model: 24,
-  voice_tts_model: 25,
-  voice_tts_voice: 26,
   skill_evolution: 0,
   free_search_ddg_enabled: 0,
   free_search_bing_enabled: 1,
@@ -1411,9 +1335,7 @@ function GroupSection({
   const hint = groupMeta[group.tag]?.hint ?? t('config.groupFallback');
   const isOpen = alwaysExpanded || open;
   const showNestedChrome = nested && !alwaysExpanded;
-  const visibleGroupKeys = group.tag === "model_video"
-    ? group.keys.filter(([key]) => isVideoLiveFieldVisible(key, draftValues))
-    : group.keys;
+  const visibleGroupKeys = group.keys;
 
   const toggleFieldVisible = (key: string) => {
     setVisibleFields((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -1500,33 +1422,7 @@ function GroupSection({
                     })() : null}
                   </td>
                   <td className="px-4 py-2.5 break-all text-[13px] align-middle">
-                    {key === VIDEO_LIVE_PROVIDER_KEY ? (
-                      <div className="flex items-center gap-2">
-                        <span className="inline-flex w-3 shrink-0" aria-hidden="true" />
-                        <select
-                          value={draftValues[key] ?? value}
-                          onChange={(e) => onChange(key, e.target.value)}
-                          data-testid="config-panel-video-live-provider-select"
-                          className="min-w-0 flex-1 rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
-                        >
-                          <option value="qwen_omni">{t("config.videoProviders.qwenOmni")}</option>
-                          <option value="joyai">{t("config.videoProviders.joyai")}</option>
-                        </select>
-                      </div>
-                    ) : key === VOICE_PROTOCOL_KEY ? (
-                      <div className="flex items-center gap-2">
-                        <span className="inline-flex w-3 shrink-0" aria-hidden="true" />
-                        <select
-                          value={draftValues[key] || "native_ws"}
-                          onChange={(e) => onChange(key, e.target.value)}
-                          data-testid="config-panel-voice-protocol-select"
-                          className="min-w-0 flex-1 rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
-                        >
-                          <option value="native_ws">{t("config.voiceProtocols.nativeWs")}</option>
-                          <option value="openai_http">{t("config.voiceProtocols.openaiHttp")}</option>
-                        </select>
-                      </div>
-                    ) : isBooleanKey(key) ? (
+                    {isBooleanKey(key) ? (
                       <div className="flex items-center gap-2">
                         <span
                           className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${isRequiredModelField(key) ? "text-danger" : "text-transparent"

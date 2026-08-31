@@ -16,7 +16,6 @@ import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
 import { ChannelsPanel } from './components/ChannelsPanel';
 import { BrowserPanel } from './components/BrowserPanel';
-import { VideoLivePanel } from './components/VideoLivePanel';
 import { UpdatePanel } from './components/UpdatePanel';
 import { ExtensionsHubPanel } from './components/ExtensionsHubPanel';
 import { ConnectorMarketPanel } from './components/ConnectorMarket';
@@ -108,6 +107,14 @@ import {
 } from './features/a2ui/actionBridge';
 import { saveBlob } from './utils/desktopSave';
 import { generateUuidV4 } from './utils/uuid';
+import { ApplicationPluginOutlet } from './applicationPlugins/ApplicationPluginOutlet';
+import { ApplicationPluginsPanel } from './applicationPlugins/ApplicationPluginsPanel';
+import { enabledApplicationPlugins } from './applicationPlugins/manifest';
+import { useApplicationPlugins } from './applicationPlugins/useApplicationPlugins';
+import type {
+  ApplicationPluginManagerNavKey,
+  ApplicationPluginNavKey,
+} from './applicationPlugins/types';
 import {
   ModelSetupGuide,
   type ModelSetupGuideStep,
@@ -150,7 +157,7 @@ function normalizeConfigBoolean(value: unknown): boolean {
   );
 }
 
-type MainNavKey = SidebarNavKey | 'connectorMarket';
+type MainNavKey = SidebarNavKey | 'connectorMarket' | ApplicationPluginManagerNavKey | ApplicationPluginNavKey;
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -891,6 +898,9 @@ function AppContent() {
       }
     },
   });
+  const applicationPluginState = useApplicationPlugins(isConnected);
+  const applicationPlugins = applicationPluginState.plugins;
+  const visibleApplicationPlugins = enabledApplicationPlugins(applicationPlugins);
 
   const applySubagentHistoryReplay = useCallback((sid: string, items: HistorySubagentReplayItem[]) => {
     const subagentStore = useSubagentStore.getState();
@@ -2989,6 +2999,9 @@ function AppContent() {
   const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound && !toolPanelMaximized;
   const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
+  const activeApplicationPlugin = visibleApplicationPlugins.find(
+    (plugin) => plugin.nav_key === activeNav,
+  );
 
   useEffect(() => {
     if (!showWorkspaceDivider) clearChatPanelResize();
@@ -3012,6 +3025,7 @@ function AppContent() {
         onNewSession={handleNewSession}
         showNewSession={false}
         hiddenNavItems={hiddenNavItems}
+        applicationPlugins={visibleApplicationPlugins}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
       />
 
@@ -3248,9 +3262,19 @@ function AppContent() {
             <BrowserPanel isConnected={isConnected} request={request} />
           </div>
         )}
-        {activeNav === 'videolive' && (
+        {activeNav === 'applicationPlugins' && (
           <div className="app-section">
-            <VideoLivePanel />
+            <ApplicationPluginsPanel
+              plugins={applicationPlugins}
+              loading={applicationPluginState.loading}
+              error={applicationPluginState.error}
+              onRefresh={applicationPluginState.refresh}
+            />
+          </div>
+        )}
+        {activeApplicationPlugin && (
+          <div className="app-section">
+            <ApplicationPluginOutlet contribution={activeApplicationPlugin} />
           </div>
         )}
         {FEATURE_APP_UPDATER_UI && activeNav === 'updatepanel' && (

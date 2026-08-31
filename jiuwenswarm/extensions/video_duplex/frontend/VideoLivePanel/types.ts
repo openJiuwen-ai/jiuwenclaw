@@ -45,15 +45,10 @@ export interface SearchJobState {
   question: string;
   query: string;
   status: 'running' | 'queued' | 'failed';
-  frameDataUrl?: string;
   toolCallId?: string;
-  toolName?: string;
 }
 
 export interface AgentAction {
-  answer?: string;
-  current_task?: string;
-  tools_used?: string[];
   search_job?: {
     id?: string;
     question?: string;
@@ -66,21 +61,15 @@ export interface AgentAction {
 }
 
 export interface VideoSessionConfig {
-  provider?: 'realtime' | 'joyai' | 'qwen_omni';
-  dialect?: 'minicpm' | 'qwen_omni';
+  provider?: 'joyai' | 'qwen_omni';
   url?: string;
   model: string;
-  ref_audio_base64?: string;
   voice?: string;
   tools?: Array<Record<string, unknown>>;
 }
 
 export interface JoyAIFrameResult extends AgentAction {
-  decision?: 'silence' | 'response' | 'delegation';
   response?: string;
-  delegation?: string;
-  joyai_session_id?: string;
-  latency_ms?: number;
 }
 
 export interface TtsStreamPayload {
