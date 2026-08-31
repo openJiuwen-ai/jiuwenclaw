@@ -433,22 +433,11 @@ const FREE_SEARCH_BOOLEAN_KEYS = new Set(["free_search_ddg_enabled", "free_searc
 const FREE_SEARCH_KEYS = new Set([...FREE_SEARCH_BOOLEAN_KEYS]);
 const HIDDEN_CONFIG_KEYS = new Set([
   "free_search_proxy_url",
-  "skill_retrieval_build_branching_factor",
-  "skill_retrieval_build_root_categories",
-  "skill_retrieval_build_request_timeout_seconds",
-  "skill_retrieval_build_discovery_seed",
-  "skill_retrieval_build_postprocess_enabled",
-  "skill_retrieval_build_postprocess_max_passes",
-  "skill_retrieval_build_postprocess_min_skills",
-  "skill_retrieval_build_equivalence_enabled",
-  "skill_retrieval_retrieve_compact_codes_enabled",
-  "skill_retrieval_retrieve_flatten_tree",
-  "skill_retrieval_retrieve_max_exposure_depth",
-  "skill_retrieval_build_max_depth",
-  "skill_retrieval_build_max_workers",
-  "skill_retrieval_build_max_retries",
-  "skill_retrieval_build_total_timeout_seconds",
-  "skill_retrieval_build_classification_batch_limit",
+  "skill_retrieval_inline_max_chars",
+  "skill_retrieval_max_results_hard_limit",
+  "skill_retrieval_snippet_chars",
+  "skill_retrieval_max_reminder_items",
+  "skill_retrieval_max_reminder_chars",
 ]);
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
 const A2UI_KEYS = new Set(["a2ui_enabled"]);
@@ -475,23 +464,15 @@ const SYMPHONY_BOOLEAN_KEYS = new Set([
 ]);
 const SKILL_RETRIEVAL_BOOLEAN_KEYS = new Set([
   "skill_retrieval_enabled",
+  "skill_retrieval_index_enabled",
 ]);
-const MULTILINE_CONFIG_KEYS = new Set([
-  "skill_retrieval_build_root_categories",
-]);
+const MULTILINE_CONFIG_KEYS = new Set<string>();
 const SKILL_RETRIEVAL_KEYS = new Set([
   ...SKILL_RETRIEVAL_BOOLEAN_KEYS,
-  "skill_retrieval_build_max_depth",
-  "skill_retrieval_build_max_workers",
-  "skill_retrieval_build_max_retries",
-  "skill_retrieval_build_total_timeout_seconds",
-  "skill_retrieval_build_classification_batch_limit",
-  "skill_retrieval_retrieve_max_exposure_depth",
+  "skill_retrieval_max_output_chars",
+  "skill_retrieval_incremental_notice_max_chars",
 ]);
-const SYMPHONY_KEYS = new Set([
-  ...SYMPHONY_BOOLEAN_KEYS,
-  ...SKILL_RETRIEVAL_KEYS,
-]);
+const SYMPHONY_KEYS = new Set([...SYMPHONY_BOOLEAN_KEYS, ...SKILL_RETRIEVAL_KEYS]);
 const PROACTIVE_BOOLEAN_KEYS = new Set(["proactive_recommendation_enabled"]);
 const PROACTIVE_KEYS = new Set([
   ...PROACTIVE_BOOLEAN_KEYS,
@@ -508,6 +489,12 @@ const HIDDEN_FROM_UI_CONFIG_KEYS = new Set([
   "kv_cache_affinity_enabled",
   "symphony_enabled",
   "symphony_dynamic_graph_enabled",
+  // Legacy discovery limits remain round-trippable through the backend, but
+  // the structured directory UI no longer presents them as active controls.
+  "skill_retrieval_max_results",
+  "skill_retrieval_max_list_entries",
+  "skill_retrieval_max_output_chars",
+  "skill_retrieval_incremental_notice_max_chars",
   RUNTIME_PLATFORM_KEY,
   EXTERNAL_CLI_AGENTS_SUPPORTED_KEY,
 ]);
@@ -731,6 +718,11 @@ function isBooleanKey(key: string): boolean {
   );
 }
 
+function isBooleanToggleDisabled(key: string, values: Record<string, string>): boolean {
+  return key === "skill_retrieval_index_enabled"
+    && !parseBoolValue(values.skill_retrieval_enabled ?? "false");
+}
+
 // proactive 数值配置项：只接受 1-50 的正整数。
 // 与后端 web handler _validate_proactive_int 保持一致。
 interface ProactiveIntSpec {
@@ -850,6 +842,7 @@ function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
     symphony_enabled: t('config.booleanLabels.enabled'),
     symphony_dynamic_graph_enabled: t('config.booleanLabels.dynamicGraph'),
     skill_retrieval_enabled: t('config.booleanLabels.enabled'),
+    skill_retrieval_index_enabled: t('config.booleanLabels.skillRetrievalIndex'),
     proactive_recommendation_enabled: t('config.booleanLabels.enabled'),
   };
   return labels[key] ?? key;
@@ -937,29 +930,15 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   symphony_enabled: "config.keys.symphonyEnabled",
   symphony_dynamic_graph_enabled: "config.keys.symphonyDynamicGraphEnabled",
   skill_retrieval_enabled: "config.keys.skillRetrievalEnabled",
-  skill_retrieval_build_branching_factor: "config.keys.skillRetrievalBuildBranchingFactor",
-  skill_retrieval_build_max_depth: "config.keys.skillRetrievalBuildMaxDepth",
-  skill_retrieval_build_root_categories: "config.keys.skillRetrievalBuildRootCategories",
-  skill_retrieval_build_max_workers: "config.keys.skillRetrievalBuildMaxWorkers",
-  skill_retrieval_build_max_retries: "config.keys.skillRetrievalBuildMaxRetries",
-  skill_retrieval_build_request_timeout_seconds: "config.keys.skillRetrievalBuildTimeout",
-  skill_retrieval_build_total_timeout_seconds: "config.keys.skillRetrievalBuildTotalTimeout",
-  skill_retrieval_build_classification_batch_limit: "config.keys.skillRetrievalBuildClassificationBatchLimit",
-  skill_retrieval_build_discovery_seed: "config.keys.skillRetrievalBuildDiscoverySeed",
-  skill_retrieval_build_postprocess_enabled: "config.keys.skillRetrievalBuildPostprocessEnabled",
-  skill_retrieval_build_postprocess_max_passes: "config.keys.skillRetrievalBuildPostprocessMaxPasses",
-  skill_retrieval_build_postprocess_min_skills: "config.keys.skillRetrievalBuildPostprocessMinSkills",
-  skill_retrieval_build_equivalence_enabled: "config.keys.skillRetrievalBuildEquivalenceEnabled",
-  skill_retrieval_retrieve_compact_codes_enabled: "config.keys.skillRetrievalCompactCodes",
-  skill_retrieval_retrieve_flatten_tree: "config.keys.skillRetrievalFlattenTree",
-  skill_retrieval_retrieve_max_exposure_depth: "config.keys.skillRetrievalMaxExposureDepth",
+  skill_retrieval_index_enabled: "config.keys.skillRetrievalIndexEnabled",
+  skill_retrieval_max_output_chars: "config.keys.skillRetrievalMaxOutputChars",
+  skill_retrieval_incremental_notice_max_chars: "config.keys.skillRetrievalIncrementalNoticeMaxChars",
   proactive_recommendation_enabled: "config.keys.proactiveEnabled",
   proactive_recommendation_max_recommend_per_day: "config.keys.proactiveMaxPerDay",
   proactive_recommendation_max_rounds_per_tick: "config.keys.proactiveMaxRounds",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
   memory_forbidden_description: "config.keys.memoryForbiddenDescriptionPlaceholder",
-  skill_retrieval_build_root_categories: "config.keys.skillRetrievalBuildRootCategoriesPlaceholder",
 };
 const KEY_LABEL_HINT_I18N: Record<string, string> = {
   // 模型：仅协议/推理等易歧义项（model_name / alias / api_base / api_key 不加）
@@ -979,13 +958,9 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
   // 含义需补充（「启用」等不加）
   memory_forbidden_description: "config.keyHelp.memoryForbiddenDescription",
   symphony_dynamic_graph_enabled: "config.keyHelp.symphonyDynamicGraphEnabled",
-  skill_retrieval_build_root_categories: "config.keyHelp.skillRetrievalBuildRootCategories",
-  skill_retrieval_build_max_depth: "config.keyHelp.skillRetrievalBuildMaxDepth",
-  skill_retrieval_build_max_workers: "config.keyHelp.skillRetrievalBuildMaxWorkers",
-  skill_retrieval_build_max_retries: "config.keyHelp.skillRetrievalBuildMaxRetries",
-  skill_retrieval_build_total_timeout_seconds: "config.keyHelp.skillRetrievalBuildTotalTimeout",
-  skill_retrieval_build_classification_batch_limit: "config.keyHelp.skillRetrievalBuildClassificationBatchLimit",
-  skill_retrieval_retrieve_max_exposure_depth: "config.keyHelp.skillRetrievalMaxExposureDepth",
+  skill_retrieval_index_enabled: "config.keyHelp.skillRetrievalIndexEnabled",
+  skill_retrieval_max_output_chars: "config.keyHelp.skillRetrievalMaxOutputChars",
+  skill_retrieval_incremental_notice_max_chars: "config.keyHelp.skillRetrievalIncrementalNoticeMaxChars",
   proactive_recommendation_max_recommend_per_day: "config.keyHelp.proactiveMaxPerDay",
   proactive_recommendation_max_rounds_per_tick: "config.keyHelp.proactiveMaxRounds",
   // Agent / Team 易歧义项（名称 / 模型 / 显示名称不加）
@@ -1018,15 +993,12 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   symphony_enabled: 0,
   symphony_dynamic_graph_enabled: 1,
   skill_retrieval_enabled: 2,
+  skill_retrieval_index_enabled: 3,
   proactive_recommendation_enabled: 0,
   proactive_recommendation_max_recommend_per_day: 2,
   proactive_recommendation_max_rounds_per_tick: 3,
-  skill_retrieval_retrieve_max_exposure_depth: 10,
-  skill_retrieval_build_max_depth: 20,
-  skill_retrieval_build_max_workers: 21,
-  skill_retrieval_build_max_retries: 22,
-  skill_retrieval_build_total_timeout_seconds: 23,
-  skill_retrieval_build_classification_batch_limit: 24,
+  skill_retrieval_max_output_chars: 12,
+  skill_retrieval_incremental_notice_max_chars: 14,
   memory_forbidden_enabled: 0,
   memory_forbidden_description: 1,
   kv_cache_release_enabled: 0,
@@ -1062,7 +1034,7 @@ function getKeyLabelHintText(key: string, t: (key: string) => string): string {
 }
 
 function shouldShowKeyHelpInline(key: string): boolean {
-  return key === 'skill_evolution';
+  return key === 'skill_evolution' || key === 'skill_retrieval_index_enabled';
 }
 
 function getKeySortPriority(key: string): number {
@@ -1437,10 +1409,11 @@ function GroupSection({
                             role="switch"
                             aria-checked={parseBoolValue(draftValues[key] ?? value)}
                             onClick={() => onChange(key, parseBoolValue(draftValues[key] ?? value) ? "false" : "true")}
+                            disabled={isBooleanToggleDisabled(key, draftValues)}
                             title={getBooleanKeyLabel(key, t) ?? key}
                             data-testid="config-panel-group-section-field-toggle"
                             data-variant={key}
-                            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${parseBoolValue(draftValues[key] ?? value) ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"
+                            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 ${parseBoolValue(draftValues[key] ?? value) ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"
                               }`}
                           >
                             <span

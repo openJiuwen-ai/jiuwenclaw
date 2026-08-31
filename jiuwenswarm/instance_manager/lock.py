@@ -442,7 +442,8 @@ class GatewayLock:
 def write_pid_file(
     config: InstanceConfig,
     pid: int,
-    started_at: Optional[float] = None
+    started_at: Optional[float] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Write PID file for a running instance.
 
@@ -464,11 +465,13 @@ def write_pid_file(
     if started_at is None:
         started_at = time.time()
 
-    data = {
+    data: Dict[str, Any] = {
         "pid": pid,
         "started_at": started_at,
         "name": config.name,
     }
+    if metadata:
+        data.update(metadata)
 
     # Atomic write: temp file + rename
     pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -508,7 +511,9 @@ def read_pid_file(config: InstanceConfig) -> Optional[Dict[str, Any]]:
         return None
 
 
-def delete_pid_file(config: InstanceConfig) -> bool:
+def delete_pid_file(
+    config: InstanceConfig, expected_data: Optional[Dict[str, Any]] = None
+) -> bool:
     """Delete PID file for an instance.
 
     Args:
@@ -519,6 +524,12 @@ def delete_pid_file(config: InstanceConfig) -> bool:
     """
     pid_path = config.get_pid_file_path()
     if not pid_path.exists():
+        return False
+    if expected_data is not None and read_pid_file(config) != expected_data:
+        logger.warning(
+            "PID file for instance '%s' changed during stop; retaining newer record",
+            config.name,
+        )
         return False
     pid_path.unlink()
     logger.info(

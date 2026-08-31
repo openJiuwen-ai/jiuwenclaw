@@ -2,6 +2,8 @@ import ast
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -167,6 +169,13 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
 
     foreground_manager = ForegroundManager()
     server._agent_manager = foreground_manager
+    server._heartbeat_runtime = SimpleNamespace(
+        is_available=True,
+        admission=SimpleNamespace(
+            begin_user=AsyncMock(),
+            end_user=AsyncMock(),
+        )
+    )
 
     async def get_agent(channel_id):
         return FakeAgent()

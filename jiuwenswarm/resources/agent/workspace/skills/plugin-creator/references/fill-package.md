@@ -102,8 +102,8 @@
 | 类型    | 落点                     | 规范                          |
 | ----- | ---------------------- | --------------------------- |
 | Skill | `skills/<name>/`       | `@references/skill-spec.md` |
-| Tool  | `tools/<name>.py`      | `@references/tool-spec.md`  |
-| Rail  | `rails/<name>.py`      | `@references/rail-spec.md`  |
+| Tool  | `tools/<name>_tool.py`      | `@references/tool-spec.md`  |
+| Rail  | `rails/<name>_rail.py`      | `@references/rail-spec.md`  |
 | none  | —                      | 跳过                          |
 
 

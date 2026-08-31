@@ -37,7 +37,7 @@ manifest 是整个 plugin 插件包的总清单，声明包的元信息、组件
 
 | 字段                   | 类型         | 必填  | 说明                                             |
 | -------------------- | ---------- | --- | ---------------------------------------------- |
-| `file`               | string     | 是   | 包内相对路径，如 `tools/<name>.py` / `rails/<name>.py` |
+| `file`               | string     | 是   | 包内相对路径，如 `tools/<name>_tool.py` / `rails/<name>_rail.py` |
 | `class`              | string     | 是   | PascalCase，与 `.py` 中类名完全一致                     |
 | `display_name`        | `{en, zh}` | 是   | 卡片标题；优先与 `ToolCard.name` / rail 逻辑名一致          |
 | `display_description` | `{en, zh}` | 是   | 卡片简介，中英各一句                                     |

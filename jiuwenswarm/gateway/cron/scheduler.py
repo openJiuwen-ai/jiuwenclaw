@@ -201,10 +201,6 @@ def _extract_text_from_agent_payload(payload: dict | None) -> str:
         return str(content)
     if isinstance(content, str):
         return content
-    # Fallbacks
-    heartbeat = payload.get("heartbeat")
-    if isinstance(heartbeat, str) and heartbeat:
-        return heartbeat
     text = payload.get("text")
     if isinstance(text, str) and text:
         return text

@@ -3,6 +3,10 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { ToolExecution } from '../../types';
 import { formatToolArguments, formatToolResult } from '../../utils';
+import {
+  countResultWords,
+  isSymphonyCommandTool,
+} from '../../utils/symphonyCommandDisplay';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { SkillTreePath } from './SkillTreePath';
 import { BeamSearchTree } from './BeamSearchTree';
@@ -84,7 +88,7 @@ export function isToolExecutionFailed(execution: ToolExecution): boolean {
 function getExecutionLabel(
   execution: ToolExecution,
   sessionCompletedLabel: string,
-  t: (key: string) => string
+  t: (key: string, options?: Record<string, unknown>) => string
 ) {
   if (execution.toolCall.name === 'session') {
     return execution.toolCall.formatted_args || sessionCompletedLabel;
@@ -164,6 +168,9 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
   const resultSuccess = Boolean(result) && !failed && !isPending;
   const hasArguments = Object.keys(toolCall.arguments).length > 0;
   const toolNameLabel = toolCall.name?.trim() || result?.toolName || 'tool';
+  const resultWordCount = isSymphonyCommandTool(toolCall.name) && result
+    ? countResultWords(result.result)
+    : null;
 
   return (
     <div className="tool-tree-item__detail" data-testid="chat-panel-tool-execution-details">
@@ -212,6 +219,13 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
             {resultSuccess && (
               <span className="tool-tree-item__detail-badge is-success" data-testid="chat-panel-tool-execution-details-badge" data-variant="success">
                 {t('chatUi.toolResult.success')}
+              </span>
+            )}
+            {resultWordCount !== null && (
+              <span className="tool-tree-item__detail-badge">
+                {t('chatUi.toolGroup.symphony.resultWords', {
+                  count: resultWordCount,
+                })}
               </span>
             )}
           </div>

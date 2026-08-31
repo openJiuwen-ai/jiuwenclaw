@@ -480,7 +480,7 @@ class WechatChannel(BaseChannel):
         if msg.event_type == EventType.CHAT_PROCESSING_STATUS:
             return
 
-        if msg.event_type == EventType.HEARTBEAT_RELAY:
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY:
             user_id = self._extract_platform_user_id(msg)
             if not user_id:
                 logger.warning(
@@ -1380,9 +1380,9 @@ class WechatChannel(BaseChannel):
             err = payload.get("error", "处理出错")
             return f"⚠️ {err}"
 
-        if msg.event_type == EventType.HEARTBEAT_RELAY:
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY:
             payload = msg.payload if isinstance(msg.payload, dict) else {}
-            hb = payload.get("heartbeat")
+            hb = payload.get("health_check")
             return str(hb or "").strip()
 
         params = msg.params if isinstance(msg.params, dict) else {}

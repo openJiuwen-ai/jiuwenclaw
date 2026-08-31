@@ -162,6 +162,8 @@ def test_build_member_rails_omits_task_planning_for_leader_only():
 
     assert all(type(rail).__name__ != "TaskPlanningRail" for rail in leader_rails)
     assert any(type(rail).__name__ == "TaskPlanningRail" for rail in teammate_rails)
+    assert all(type(rail).__name__ != "HeartbeatRail" for rail in leader_rails)
+    assert all(type(rail).__name__ != "HeartbeatRail" for rail in teammate_rails)
 
 
 # -- resolve_model_config tests --

@@ -334,7 +334,7 @@ harness_element(kind=RAIL, name=..., builder=SomeRailClass)              # 直�
 
 归一后这些元素由 openjiuwen 声明 + 注册，swarm 经 `config_specs` 按 `core.*` 名引用（params 由 swarm 烘焙）：
 
-- Rail：`core.sys_operation`、`core.task_planning`、`core.security`、`core.heartbeat`、`core.confirm_interrupt`(tool_names)、`core.worktree`(enabled)、`core.lsp`(project_dir)。
+- Rail：`core.sys_operation`、`core.task_planning`、`core.security`、`swarm.heartbeat`（AgentServer-owned Job Heartbeat）、`core.confirm_interrupt`(tool_names)、`core.worktree`(enabled)、`core.lsp`(project_dir)。
 - Tool：`core.web_search`、`core.web_fetch`、`core.web_paid_search`、`core.vision`(vision_model_config)、`core.audio`(dedicated + audio_model_config)。vision/audio 的 config 由 swarm `tools.vision_model_config_params` / `audio_model_config_params` 从 yaml+env 填充后烘焙进 params。
 - Sub-agent：`core.explore_agent`、`core.plan_agent`、`core.browser_agent`（language / max_iterations 为 params，model 取 `ctx.extras["_parent_model"]`）。
 

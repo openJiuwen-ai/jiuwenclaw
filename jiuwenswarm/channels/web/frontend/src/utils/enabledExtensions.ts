@@ -48,3 +48,23 @@ export function pruneEnabledExtensions(sessionId: string): { plugins: string[]; 
 
   return { plugins, mcps };
 }
+
+/**
+ * 组装 chat.send（含 resume/激活确认等同族请求）里 plugin_names/mcp 这两个字段——语义见上面
+ * pruneEnabledExtensions 调用方 useWebSocket.ts sendMessage 原有注释：plugin_names 恒传（含
+ * 空数组，[] 和"不传"是两种不同语义，见 专家与插件装备-前端接口_v2.md §1.3/§3.6）；mcp 只在
+ * 非空时才带（缺失和 [] 效果一致，MCP 接口文档 v2 §6.2）。
+ *
+ * 2026-08-25：所有会发出 chat.send 的地方都要调这个函数，不要各自重新手写一遍——之前
+ * sendUserAnswer（ask-user 等交互确认 resume、activate_confirm 分支）、respondActivate、
+ * sendStructuredChatContent 都是独立手写 payload，漏了这两个字段，导致 resume 后插件/MCP
+ * 选中状态丢失（用户反馈：ask-user 工具被拒绝后自动 resume，chat.send 没带上 plugin_names/
+ * mcp）。
+ */
+export function buildExtensionSendPayload(sessionId: string): { plugin_names: string[]; mcp?: string[] } {
+  const { plugins, mcps } = pruneEnabledExtensions(sessionId);
+  return {
+    plugin_names: plugins,
+    ...(mcps.length > 0 ? { mcp: mcps } : {}),
+  };
+}

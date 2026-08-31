@@ -2,9 +2,9 @@
 
 """RuntimePromptRail — Assemble stable and dynamic runtime prompt state.
 
-Stable environment rules stay in the system prompt. Runtime state and git
-snapshots are managed as history attachments. Request date/time remains in the
-real user message's JSON envelope.
+Stable environment rules and the conversation-start git snapshot stay in the
+system prompt. Dynamic runtime state is managed as a prompt attachment.
+Request date/time remains in the real user message's JSON envelope.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from jiuwenswarm.common.utils import (
 
 
 class RuntimePromptRail(DeepAgentRail):
-    """Keep stable environment guidance separate from dynamic history state."""
+    """Keep stable system context separate from dynamic prompt attachments."""
 
     priority = 5  # 高优先级，确保早于其他 rail 执行
 
@@ -73,6 +73,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("directory_boundaries")
             self.system_prompt_builder.remove_section("tui_current_project_policy")
             self.system_prompt_builder.remove_section("trusted_dirs_policy")
+            self.system_prompt_builder.remove_section("git_status")
         self._agent = None
         self.system_prompt_builder = None
         self.attachment_manager = None
@@ -223,8 +224,9 @@ class RuntimePromptRail(DeepAgentRail):
         return configured_mode
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Prepare dynamic attachment state before the first user message."""
-        await self._refresh_dynamic_attachments(ctx)
+        """Prepare conversation-start context before the first model call."""
+        runtime_state = await self._refresh_dynamic_attachments(ctx)
+        await self._sync_git_system_context(ctx, runtime_state)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         runtime_state = await self._refresh_dynamic_attachments(ctx)
@@ -469,6 +471,20 @@ class RuntimePromptRail(DeepAgentRail):
             priority=95,
         )
 
+        return runtime_state
+
+    async def _sync_git_system_context(
+        self,
+        ctx: AgentCallbackContext,
+        runtime_state: dict[str, Any],
+    ) -> None:
+        """Install the conversation git snapshot in the cacheable system prefix."""
+        # Clear the legacy per-model-call attachment when upgrading a live agent.
+        await self._clear_prompt_attachment(ctx, section="git_status")
+        if self.system_prompt_builder is None:
+            return
+
+        self.system_prompt_builder.remove_section("git_status")
         git_branch = str(runtime_state.get("git_branch") or "").strip()
         if git_branch and git_branch != "N/A":
             git_main_branch = str(runtime_state.get("git_main_branch") or "").strip()
@@ -490,16 +506,12 @@ class RuntimePromptRail(DeepAgentRail):
                 git_lines.append(f"Git user: {git_user}")
             git_lines.append(f"Status:\n{git_status_text or '(clean)'}")
             git_lines.append(f"Recent commits:\n{git_recent_commits or '(none)'}")
-            await self._upsert_prompt_attachment(
-                ctx,
-                section="git_status",
-                content="\n\n".join(git_lines),
-                kind=PromptAttachmentKind.WORKSPACE_DELTA,
-                priority=87,
-            )
-        else:
-            await self._clear_prompt_attachment(ctx, section="git_status")
-        return runtime_state
+            git_content = "\n\n".join(git_lines)
+            self.system_prompt_builder.add_section(PromptSection(
+                name="git_status",
+                content={"cn": git_content, "en": git_content},
+                priority=90,
+            ))
 
     async def _upsert_prompt_attachment(
         self,

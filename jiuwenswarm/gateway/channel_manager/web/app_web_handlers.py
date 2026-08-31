@@ -54,7 +54,7 @@ from jiuwenswarm.common.config import (
     get_default_models,
     replace_teams_in_config,
     update_default_models_in_config,
-    update_heartbeat_in_config,
+    update_health_check_in_config,
     update_channel_in_config,
     replace_channel_subsection_with_cleanup,
     update_browser_in_config,
@@ -108,10 +108,6 @@ from jiuwenswarm.common.work_mode import (
     is_default_project_id,
 )
 from jiuwenswarm.common.version import __version__
-from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
-    coerce_root_categories_value,
-    root_categories_to_text,
-)
 
 for _jiuwen_log in LogManager.get_all_loggers().values():
     _jiuwen_log.set_level(logging.INFO)
@@ -635,6 +631,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.teamskillshub.validate",
     "skills.teamskillshub.pack",
     "skills.teamskillshub.search",
+    "skills.swarmskillshub.recommend",
     "skills.teamskillshub.install",
     "skills.teamskillshub.publish",
     "skills.teamskillshub.delete",
@@ -763,6 +760,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skills.teamskillshub.validate",
     "skills.teamskillshub.pack",
     "skills.teamskillshub.search",
+    "skills.swarmskillshub.recommend",
     "skills.teamskillshub.install",
     "skills.teamskillshub.publish",
     "skills.teamskillshub.delete",
@@ -971,22 +969,23 @@ _SYMPHONY_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
 _SYMPHONY_CONFIG_KEYS = tuple(_SYMPHONY_CONFIG_SPECS.keys())
 _SKILL_RETRIEVAL_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
     "skill_retrieval_enabled": (("enabled",), "bool", False),
-    "skill_retrieval_build_branching_factor": (("build", "branching_factor"), "int", 128),
-    "skill_retrieval_build_max_depth": (("build", "max_depth"), "int", 6),
-    "skill_retrieval_build_root_categories": (("build", "root_categories"), "root_categories", ""),
-    "skill_retrieval_build_max_workers": (("build", "max_workers"), "int", 2),
-    "skill_retrieval_build_max_retries": (("build", "max_retries"), "non_negative_int", 2),
-    "skill_retrieval_build_request_timeout_seconds": (("build", "request_timeout_seconds"), "float", 420.0),
-    "skill_retrieval_build_total_timeout_seconds": (("build", "total_timeout_seconds"), "float", 0.0),
-    "skill_retrieval_build_classification_batch_limit": (("build", "classification_batch_limit"), "int", 32),
-    "skill_retrieval_build_discovery_seed": (("build", "discovery_seed"), "raw_int", 42),
-    "skill_retrieval_build_postprocess_enabled": (("build", "postprocess_enabled"), "bool", True),
-    "skill_retrieval_build_postprocess_max_passes": (("build", "postprocess_max_passes"), "non_negative_int", 1),
-    "skill_retrieval_build_postprocess_min_skills": (("build", "postprocess_min_skills"), "int", 6),
-    "skill_retrieval_build_equivalence_enabled": (("build", "equivalence_enabled"), "bool", True),
-    "skill_retrieval_retrieve_compact_codes_enabled": (("retrieve", "compact_codes_enabled"), "bool", False),
-    "skill_retrieval_retrieve_flatten_tree": (("retrieve", "flatten_tree"), "bool", False),
-    "skill_retrieval_retrieve_max_exposure_depth": (("retrieve", "max_exposure_depth"), "int", 1),
+    "skill_retrieval_index_enabled": (("index", "enabled"), "bool", False),
+    "skill_retrieval_max_results": (("discovery", "max_results"), "int", 10),
+    "skill_retrieval_max_output_chars": (
+        ("discovery", "max_output_chars"),
+        "output_chars",
+        12000,
+    ),
+    "skill_retrieval_max_list_entries": (
+        ("discovery", "max_list_entries"),
+        "int",
+        40,
+    ),
+    "skill_retrieval_incremental_notice_max_chars": (
+        ("discovery", "incremental_notice_max_chars"),
+        "int",
+        4000,
+    ),
 }
 _SKILL_RETRIEVAL_CONFIG_KEYS = tuple(_SKILL_RETRIEVAL_CONFIG_SPECS.keys())
 
@@ -1014,8 +1013,20 @@ def _coerce_config_panel_value(value: Any, value_type: str, default: Any) -> Any
             return max(0.0, float(value))
         except (TypeError, ValueError):
             return default
-    if value_type == "root_categories":
-        return coerce_root_categories_value(value, allow_path=False) or ""
+    if value_type == "ratio":
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if 0.0 < parsed <= 1.0 else default
+    if value_type == "output_chars":
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_output_chars must be an integer from 512 to 48000") from exc
+        if not 512 <= parsed <= 48_000:
+            raise ValueError("max_output_chars must be from 512 to 48000")
+        return parsed
     return str(value if value is not None else default)
 
 
@@ -1046,8 +1057,6 @@ def _flatten_symphony_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
         value = _get_nested_config_value(symphony, path, default)
         if value_type == "bool":
             flat[key] = "true" if bool(value) else "false"
-        elif value_type == "root_categories":
-            flat[key] = root_categories_to_text(value)
         else:
             flat[key] = str(value)
     flat.update(_flatten_skill_retrieval_for_config_panel(raw))
@@ -1062,8 +1071,6 @@ def _flatten_skill_retrieval_for_config_panel(raw: dict[str, Any]) -> dict[str, 
         value = _get_nested_config_value(section, path, default)
         if value_type == "bool":
             flat[key] = "true" if bool(value) else "false"
-        elif value_type == "root_categories":
-            flat[key] = root_categories_to_text(value)
         else:
             flat[key] = str(value)
     return flat
@@ -2055,6 +2062,7 @@ class WebHandlersBindParams:
     on_config_saved: Any = None
     heartbeat_service: Any = None
     cron_controller: Any = None
+    heartbeat_controller: Any = None
     updater_service: UpdaterService | None = None
 
 
@@ -2380,7 +2388,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         env_updates 为本次变更的环境变量增量（仅包含更新项），
         config_payload 为当前最新配置快照；
         返回 True 表示已热更新未重启，False 表示已安排进程重启。
-    heartbeat_service: 可选，GatewayHeartbeatService 实例，用于处理 heartbeat.get_conf / heartbeat.set_conf。
+    heartbeat_service: 可选，GatewayHealthCheckService 实例，用于处理 health_check.get_conf / health_check.set_conf。
     """
     channel = bind.channel
     agent_client = bind.agent_client
@@ -2390,6 +2398,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     heartbeat_service = bind.heartbeat_service
     cron_controller = bind.cron_controller
+    heartbeat_controller = bind.heartbeat_controller
     updater_service = bind.updater_service
 
     from jiuwenswarm.common.schema.message import Message, EventType
@@ -2586,8 +2595,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             }.items():
                 if value_type == "bool":
                     default_text = "true" if default else "false"
-                elif value_type == "root_categories":
-                    default_text = root_categories_to_text(default)
                 else:
                     default_text = str(default)
                 payload.setdefault(key, default_text)
@@ -4844,22 +4851,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             label="locale.set_conf",
         )
 
-    async def _heartbeat_get_conf(ws, req_id, params, session_id):
-        """返回当前心跳配置（every / target / active_hours）。"""
+    async def _health_check_get_conf(ws, req_id, params, session_id):
+        """返回当前探活配置（every / target / active_hours）。"""
         hb = _resolve(heartbeat_service)
         if hb is None:
-            await channel.send_response(ws, req_id, ok=False, error="heartbeat service not available",
+            await channel.send_response(ws, req_id, ok=False, error="health_check service not available",
                                         code="SERVICE_UNAVAILABLE")
             return
         try:
-            payload = dict(hb.get_heartbeat_conf())
+            payload = dict(hb.get_health_check_conf())
             await channel.send_response(ws, req_id, ok=True, payload=payload)
         except Exception as e:
-            logger.exception("[heartbeat.get_conf] %s", e)
+            logger.exception("[health_check.get_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
-    async def _heartbeat_set_conf(ws, req_id, params, session_id):
-        """更新心跳配置并重启心跳服务；params 可含 every、target、active_hours。"""
+    async def _health_check_set_conf(ws, req_id, params, session_id):
+        """更新探活配置并重启探活服务；params 可含 every、target、active_hours。"""
         hb = _resolve(heartbeat_service)
         if hb is None:
             await channel.send_response(ws, req_id, ok=False, error="heartbeat service not available",
@@ -4915,51 +4922,31 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                         )
                         return
                 except Exception as e:
-                    logger.debug("[heartbeat.set_conf] 飞书目标检测异常: %s", e)
+                    logger.debug("[health_check.set_conf] 飞书目标检测异常: %s", e)
                     await channel.send_response(
                         ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR",
                     )
                     return
 
             # 检查通过后再保存配置
-            await hb.set_heartbeat_conf(every=every, target=target, active_hours=active_hours)
-            payload = dict(hb.get_heartbeat_conf())
+            await hb.set_health_check_conf(every=every, target=target, active_hours=active_hours)
+            payload = dict(hb.get_health_check_conf())
             should_clear_agent_config_cache = False
             try:
-                update_heartbeat_in_config(payload)
+                update_health_check_in_config(payload)
                 should_clear_agent_config_cache = True
             except Exception as e:  # noqa: BLE001
-                logger.warning("[heartbeat.set_conf] 写回 config.yaml 失败: %s", e)
+                logger.warning("[health_check.set_conf] 写回 config.yaml 失败: %s", e)
             try:
                 await channel.send_response(ws, req_id, ok=True, payload=payload)
             finally:
                 if should_clear_agent_config_cache:
-                    _schedule_clear_agent_config_cache("heartbeat.set_conf")
+                    _schedule_clear_agent_config_cache("health_check.set_conf")
         except ValueError as e:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
         except Exception as e:
-            logger.exception("[heartbeat.set_conf] %s", e)
+            logger.exception("[health_check.set_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
-
-    async def _heartbeat_get_path(ws, req_id, params, session_id):
-        """返回 HEARTBEAT.md 文件路径。"""
-        from jiuwenswarm.common.utils import get_deepagent_heartbeat_path, get_agent_root_dir
-
-        try:
-            heartbeat_path = get_deepagent_heartbeat_path()
-            # 返回相对于 agent 根目录的路径，与 file-api 格式一致
-            agent_root = get_agent_root_dir()
-            relative_path = heartbeat_path.relative_to(agent_root.parent)
-            await channel.send_response(
-                ws, req_id, ok=True,
-                payload={"path": str(relative_path)}
-            )
-        except Exception as e:
-            logger.exception("[heartbeat.get_path] %s", e)
-            await channel.send_response(
-                ws, req_id, ok=False,
-                error=str(e), code="INTERNAL_ERROR"
-            )
 
     def _mask_sensitive(params: dict | list, sensitive_keys: frozenset[str]) -> dict | list:
         """递归脱敏，替换敏感字段值为 ``****``。"""
@@ -6097,9 +6084,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("updater.get_conf", _updater_get_conf)
     channel.register_method("updater.reset_source", _updater_reset_source)
     channel.register_method("updater.set_conf", _updater_set_conf)
-    channel.register_method("heartbeat.get_conf", _heartbeat_get_conf)
-    channel.register_method("heartbeat.set_conf", _heartbeat_set_conf)
-    channel.register_method("heartbeat.get_path", _heartbeat_get_path)
+    channel.register_method("health_check.get_conf", _health_check_get_conf)
+    channel.register_method("health_check.set_conf", _health_check_set_conf)
+    # Deprecated aliases for clients upgrading from the pre-split probe API.
+    channel.register_method("heartbeat.get_conf", _health_check_get_conf)
+    channel.register_method("heartbeat.set_conf", _health_check_set_conf)
     channel.register_method("channel.feishu.get_conf", _channel_feishu_get_conf)
     channel.register_method("channel.feishu.set_conf", _channel_feishu_set_conf)
     channel.register_method("channel.xiaoyi.get_conf", _channel_xiaoyi_get_conf)
@@ -6129,6 +6118,339 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("cron.job.toggle", _cron_job_toggle)
     channel.register_method("cron.job.preview", _cron_job_preview)
     channel.register_method("cron.job.run_now", _cron_job_run_now)
+
+    # ---- 新 Heartbeat 任务(线程续跑) Web/RPC handlers ----
+    # 与旧探活 health_check.* 严格区分;heartbeat.job.* 只服务新心跳任务。
+    # 响应壳 {ok, payload/error, code} 对齐 cron.job.*。
+    from jiuwenswarm.gateway.heartbeat import HeartbeatServiceUnavailableError
+
+    def _get_heartbeat():
+        return _resolve(heartbeat_controller)
+
+    async def _heartbeat_unavailable(ws, req_id, error="heartbeat not available"):
+        await channel.send_response(
+            ws, req_id, ok=False, error=str(error), code="SERVICE_UNAVAILABLE"
+        )
+
+    async def _hb_job_list(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        try:
+            result = await hc.list_jobs(
+                params if isinstance(params, dict) else {},
+                access_session_id=session_id,
+                user_id=str(user_id or ""),
+            )
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
+        except ValueError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+            return
+        except HeartbeatServiceUnavailableError as e:
+            await _heartbeat_unavailable(ws, req_id, e)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"jobs": result.get("jobs", [])})
+
+    async def _hb_job_meta(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        try:
+            result = await hc.get_meta(user_id=str(user_id or ""))
+        except HeartbeatServiceUnavailableError as e:
+            await _heartbeat_unavailable(ws, req_id, e)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=result)
+
+    async def _hb_job_get(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        try:
+            job = await hc.get_job(
+                job_id,
+                access_session_id=session_id,
+                user_id=str(user_id or ""),
+            )
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
+        except HeartbeatServiceUnavailableError as e:
+            await _heartbeat_unavailable(ws, req_id, e)
+            return
+        if job is None:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+
+    async def _hb_job_create(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        # 普通 Web RPC 只能绑定当前 session；跨 session 迁移需独立管理权限入口。
+        params = {**params, "channel_id": "web", "session_id": session_id, "source": "web_rpc"}
+        try:
+            job = await hc.create_job(params, user_id=str(user_id or ""))
+        except ValueError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+            return
+        except HeartbeatServiceUnavailableError as e:
+            await _heartbeat_unavailable(ws, req_id, e)
+            return
+        except Exception as e:  # noqa: BLE001
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+
+    async def _hb_job_update(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        patch = params.get("patch")
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        if not isinstance(patch, dict):
+            await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
+            return
+        try:
+            job = await hc.update_job(
+                job_id,
+                patch,
+                access_session_id=session_id,
+                user_id=str(user_id or ""),
+            )
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
+        except ValueError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+            return
+        except HeartbeatServiceUnavailableError as e:
+            await _heartbeat_unavailable(ws, req_id, e)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+
+    async def _hb_job_delete(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        try:
+            result = await hc.delete_job(
+                job_id,
+                access_session_id=session_id,
+                user_id=str(user_id or ""),
+            )
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
+        except RuntimeError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="CONFLICT")
+            return
+        except HeartbeatServiceUnavailableError as e:
+            await _heartbeat_unavailable(ws, req_id, e)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=result)
+
+    async def _hb_job_toggle(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            await channel.send_response(ws, req_id, ok=False, error="enabled must be boolean", code="BAD_REQUEST")
+            return
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        try:
+            job = await hc.toggle_job(
+                job_id,
+                enabled,
+                access_session_id=session_id,
+                user_id=str(user_id or ""),
+            )
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
+        except ValueError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+            return
+        except HeartbeatServiceUnavailableError as e:
+            await _heartbeat_unavailable(ws, req_id, e)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+
+    async def _hb_job_preview(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        count = 5
+        raw_count = params.get("count")
+        if isinstance(raw_count, int) and raw_count > 0:
+            count = raw_count
+        try:
+            result = await hc.preview_job(
+                job_id,
+                count=count,
+                access_session_id=session_id,
+                user_id=str(user_id or ""),
+            )
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
+        except ValueError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+            return
+        except HeartbeatServiceUnavailableError as e:
+            await _heartbeat_unavailable(ws, req_id, e)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=result)
+
+    async def _hb_job_run_now(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        reschedule = params.get("reschedule", False)
+        if not isinstance(reschedule, bool):
+            await channel.send_response(ws, req_id, ok=False, error="reschedule must be boolean", code="BAD_REQUEST")
+            return
+        try:
+            result = await hc.run_now(
+                job_id,
+                reschedule=reschedule,
+                access_session_id=session_id,
+                user_id=str(user_id or ""),
+            )
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
+        except ValueError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+            return
+        except HeartbeatServiceUnavailableError as e:
+            await _heartbeat_unavailable(ws, req_id, e)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=result)
+
+    async def _hb_job_cancel(ws, req_id, params, session_id, user_id=None):
+        hc = _get_heartbeat()
+        if hc is None:
+            await _heartbeat_unavailable(ws, req_id)
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        pause_schedule = params.get("pause_schedule", False)
+        if not isinstance(pause_schedule, bool):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="pause_schedule must be boolean",
+                code="BAD_REQUEST",
+            )
+            return
+        try:
+            result = await hc.cancel_run(
+                job_id,
+                pause_schedule=pause_schedule,
+                access_session_id=session_id,
+                user_id=str(user_id or ""),
+            )
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
+        except HeartbeatServiceUnavailableError as e:
+            await _heartbeat_unavailable(ws, req_id, e)
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=result)
+
+    channel.register_method("heartbeat.job.list", _hb_job_list)
+    channel.register_method("heartbeat.job.meta", _hb_job_meta)
+    channel.register_method("heartbeat.job.get", _hb_job_get)
+    channel.register_method("heartbeat.job.create", _hb_job_create)
+    channel.register_method("heartbeat.job.update", _hb_job_update)
+    channel.register_method("heartbeat.job.delete", _hb_job_delete)
+    channel.register_method("heartbeat.job.toggle", _hb_job_toggle)
+    channel.register_method("heartbeat.job.preview", _hb_job_preview)
+    channel.register_method("heartbeat.job.run_now", _hb_job_run_now)
+    channel.register_method("heartbeat.job.cancel", _hb_job_cancel)
 
     # 数字分身 — permissions.owner_scopes：仅 Web 网关直连 config（不经 E2A / config_rpc）。
     # 其余 permissions.*（tools / rules / approval_overrides）走 _forward_permissions_to_agent。

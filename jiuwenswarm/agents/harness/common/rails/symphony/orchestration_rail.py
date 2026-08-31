@@ -19,10 +19,12 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 _ConfigBaseProvider = dict[str, Any] | Callable[[], dict[str, Any] | None] | None
 _SHORTLIST_EXTRA_KEY = "symphony_candidate_skill_ids"
 _GRAPH_BUILD_TIMEOUT_EXTRA_KEY = "symphony_graph_build_timeout"
-_GRAPH_TOOL_NAMES = frozenset({
-    "symphony_compose_graph",
-    "symphony_refresh_graph",
-})
+_GRAPH_TOOL_NAMES = frozenset(
+    {
+        "symphony_compose_graph",
+        "symphony_refresh_graph",
+    }
+)
 _ABILITY_MANAGER_TIMEOUT_PATTERN = re.compile(
     r"Tool '([^']+)' timed out after ([0-9]+(?:\.[0-9]+)?)s"
 )
@@ -127,7 +129,10 @@ class SymphonyOrchestrationRail(DeepAgentRail):
         if not isinstance(inputs, ToolCallInputs):
             return
         result = inputs.tool_result
-        if not isinstance(result, dict) or result.get("reason") != "graph_build_timeout":
+        if (
+            not isinstance(result, dict)
+            or result.get("reason") != "graph_build_timeout"
+        ):
             return
         if (
             result.get("direct_display") is True
@@ -157,7 +162,9 @@ class SymphonyOrchestrationRail(DeepAgentRail):
         if isinstance(ctx.inputs, ToolCallInputs):
             ctx.inputs.tool_result = payload
         ctx.extra[_GRAPH_BUILD_TIMEOUT_EXTRA_KEY] = True
-        ctx.request_force_finish({"output": payload["content"], "result_type": "answer"})
+        ctx.request_force_finish(
+            {"output": payload["content"], "result_type": "answer"}
+        )
 
     def _remove_graph_tools_after_timeout(self, ctx: AgentCallbackContext) -> None:
         if not ctx.extra.get(_GRAPH_BUILD_TIMEOUT_EXTRA_KEY):
@@ -168,7 +175,9 @@ class SymphonyOrchestrationRail(DeepAgentRail):
         if not isinstance(tools, list):
             return
         ctx.inputs.tools = [
-            tool for tool in tools if self._model_tool_name(tool) not in _GRAPH_TOOL_NAMES
+            tool
+            for tool in tools
+            if self._model_tool_name(tool) not in _GRAPH_TOOL_NAMES
         ]
 
     def _manual_graph_build_content(self) -> str:
@@ -178,7 +187,10 @@ class SymphonyOrchestrationRail(DeepAgentRail):
     @classmethod
     def _is_graph_tool_call(cls, ctx: AgentCallbackContext) -> bool:
         inputs = getattr(ctx, "inputs", None)
-        return isinstance(inputs, ToolCallInputs) and cls._tool_name(inputs) in _GRAPH_TOOL_NAMES
+        return (
+            isinstance(inputs, ToolCallInputs)
+            and cls._tool_name(inputs) in _GRAPH_TOOL_NAMES
+        )
 
     @classmethod
     def _is_outer_graph_timeout(cls, ctx: AgentCallbackContext) -> bool:

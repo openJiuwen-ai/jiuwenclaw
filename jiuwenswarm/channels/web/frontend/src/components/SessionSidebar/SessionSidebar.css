@@ -228,7 +228,7 @@
 }
 
 .icon-rail-nav-item--active:hover {
-  background: var(--color-sidebar-nav-active-hover);
+  background: var(--color-sidebar-nav-active);
 }
 
 .icon-rail-more-panel {

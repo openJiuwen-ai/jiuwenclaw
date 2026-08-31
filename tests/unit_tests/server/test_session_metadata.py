@@ -661,6 +661,7 @@ class TestGetAllSessionsMetadata:
 
         init_session_metadata(session_id="sess_a")
         init_session_metadata(session_id="heartbeat_abc123_deadbeef")
+        init_session_metadata(session_id="health_check_abc123_deadbeef")
         init_session_metadata(session_id="sess_b")
 
         sessions, total = get_all_sessions_metadata(limit=20)
