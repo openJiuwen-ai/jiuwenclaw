@@ -3746,18 +3746,6 @@ class MessageHandler(ABC):
                 resp.request_id,
                 resp.channel_id,
             )
-            # remote 模式下 session.delete 成功后从索引移除
-            if env.method == "session.delete" and getattr(resp, "ok", False):
-                try:
-                    from jiuwenswarm.gateway.routing.session_index import is_remote_storage, remove_async
-                    if is_remote_storage():
-                        del_session_id = msg.session_id
-                        if isinstance(msg.params, dict):
-                            del_session_id = msg.params.get("session_id") or msg.session_id
-                        if del_session_id:
-                            await remove_async(del_session_id)
-                except Exception:
-                    logger.debug("[MessageHandler] session_index remove skipped", exc_info=True)
             if (
                 self._is_interrupt_evolution_approval_chat_send(msg, method=env.method)
                 and self._approval_response_resolved(resp)

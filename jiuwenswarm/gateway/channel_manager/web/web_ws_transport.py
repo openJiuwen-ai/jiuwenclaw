@@ -873,31 +873,6 @@ class WebWsTransport(BaseWsChannel):
         }
         await self._broadcast_to(frame_data, all_clients)
 
-        # remote 模式下维护会话索引：chat.final 时写入最近一条助手消息预览
-        if event_name == "chat.final" and msg.session_id:
-            try:
-                from jiuwenswarm.gateway.routing.session_index import is_remote_storage, upsert_async
-                if is_remote_storage():
-                    _md = msg.metadata if isinstance(msg.metadata, dict) else {}
-                    # 缺少 user_id 时回退 "guest"（与 history_store 一致），避免写空串
-                    # 到索引 user 字段破坏多用户隔离；告警提示连接未携带 user_id。
-                    _raw_uid = str(_md.get("user_id") or "").strip()
-                    if not _raw_uid:
-                        logger.warning(
-                            "[WebChannel] chat.final 缺少 user_id，索引 user 回退为 guest"
-                            "（WebSocket 连接未携带 user_id，多用户隔离可能受影响）",
-                        )
-                        _raw_uid = "guest"
-                    await upsert_async(
-                        msg.session_id,
-                        "assistant",
-                        str(payload.get("content") or ""),
-                        time.time(),
-                        user=_raw_uid,
-                    )
-            except Exception:
-                logger.debug("[WebChannel] session_index upsert skipped", exc_info=True)
-
         # 维护 session busy 状态(供 /ws/git 写操作查询)
         if event_name == "chat.processing_status" and isinstance(payload, dict):
             sid = payload.get("session_id") or msg.session_id

@@ -5,23 +5,6 @@ gen_runtime_file() {
     local template_file="${CONFIG["RUNTIME_TEMPLATE_FILE"]}"
     local file="${CONFIG["RUNTIME_FILE"]}"
 
-    # 按 REDIS_MODE 计算 AgentServer checkpointer 的 Redis URL
-    # cluster：redis+cluster://host:port（cluster 只有 db 0，不能带库号）
-    # standalone：redis://host:port/db
-    local redis_mode="${DEPLOY_VARS["REDIS_MODE"]:-standalone}"
-    local redis_host="${DEPLOY_VARS["REDIS_HOST"]:-}"
-    local redis_port="${DEPLOY_VARS["REDIS_PORT"]:-}"
-    local redis_db="${DEPLOY_VARS["AGENT_RUNTIME_REDIS_DB"]:-0}"
-    # 校验非空：host/port 缺失时不能拼出残缺的 Redis URL（如 redis://:6379/0），
-    # 否则 AgentServer checkpointer 会因连接串非法而启动失败。此时跳过赋值并告警。
-    if [[ -z "${redis_host}" || -z "${redis_port}" ]]; then
-        warning "REDIS_HOST 或 REDIS_PORT 为空，跳过 OPENJIUWEN_SERVICE_REDIS_URL 赋值（AgentServer checkpointer Redis 连接串未设置）"
-    elif [[ "${redis_mode}" == "cluster" ]]; then
-        DEPLOY_VARS["OPENJIUWEN_SERVICE_REDIS_URL"]="redis+cluster://${redis_host}:${redis_port}"
-    else
-        DEPLOY_VARS["OPENJIUWEN_SERVICE_REDIS_URL"]="redis://${redis_host}:${redis_port}/${redis_db}"
-    fi
-
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     enable_dev_mode_if_needed ${file} runtime
 

@@ -7,11 +7,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from jiuwenswarm.server.utils.stream_content_sanitize import (
-    StreamProtocolBuffer,
-    strip_inline_tool_protocol,
-)
-
 logger = logging.getLogger(__name__)
 
 
@@ -30,12 +25,7 @@ def _propagate_stream_source_id(src_payload: Any) -> dict[str, Any]:
     return {}
 
 
-def parse_stream_chunk(
-    chunk: Any,
-    *,
-    _has_streamed_content: bool = False,
-    _protocol_buffer: StreamProtocolBuffer | None = None,
-) -> dict[str, Any] | None:
+def parse_stream_chunk(chunk: Any, *, _has_streamed_content: bool = False) -> dict[str, Any] | None:
     """Parse agent output chunk to frontend-consumable payload dict.
 
     统一处理所有 SDK 输出格式，包括：
@@ -55,28 +45,24 @@ def parse_stream_chunk(
         return None
 
     if isinstance(chunk, dict):
-        return _parse_dict_chunk(chunk, _has_streamed_content, _protocol_buffer)
+        return _parse_dict_chunk(chunk, _has_streamed_content)
 
     if hasattr(chunk, "type") and hasattr(chunk, "payload"):
-        return _parse_typed_chunk(chunk, _has_streamed_content, _protocol_buffer)
+        return _parse_typed_chunk(chunk, _has_streamed_content)
 
     if hasattr(chunk, "event_type"):
         return _parse_event_typed_chunk(chunk)
 
     if hasattr(chunk, "payload") and hasattr(chunk, "request_id"):
-        return _parse_response_chunk(chunk, _has_streamed_content, _protocol_buffer)
+        return _parse_response_chunk(chunk, _has_streamed_content)
 
     return {
         "event_type": "chat.delta",
-        "content": strip_inline_tool_protocol(str(chunk)),
+        "content": str(chunk),
     }
 
 
-def _parse_dict_chunk(
-    chunk: dict[str, Any],
-    _has_streamed_content: bool,
-    _protocol_buffer: StreamProtocolBuffer | None = None,
-) -> dict[str, Any] | None:
+def _parse_dict_chunk(chunk: dict[str, Any], _has_streamed_content: bool) -> dict[str, Any] | None:
     """Parse dict chunk."""
     if "event_type" in chunk:
         if chunk.get("event_type") == "chat.tracer_agent":
@@ -104,12 +90,6 @@ def _parse_dict_chunk(
         content = chunk.get("content", "")
         if not content or not content.strip():
             return None
-        if _protocol_buffer is not None:
-            content = _protocol_buffer.feed(content)
-        else:
-            content = strip_inline_tool_protocol(content)
-        if not content or not content.strip():
-            return None
         return {
             "event_type": "chat.delta" if not _has_streamed_content else "chat.final",
             "content": content,
@@ -135,13 +115,6 @@ def _parse_dict_chunk(
         output = chunk.get("output", "")
         if not output or not output.strip():
             return None
-        if _protocol_buffer is not None:
-            _flushed = _protocol_buffer.flush()
-            if _flushed:
-                output = _flushed + output
-        output = strip_inline_tool_protocol(output)
-        if not output or not output.strip():
-            return None
         return {
             "event_type": "chat.delta" if not _has_streamed_content else "chat.final",
             "content": output,
@@ -159,11 +132,7 @@ def _serialize_chunk_recursive(obj: Any) -> Any:
     return _serialize_value(obj)
 
 
-def _parse_typed_chunk(
-    chunk: Any,
-    _has_streamed_content: bool,
-    _protocol_buffer: StreamProtocolBuffer | None = None,
-) -> dict[str, Any] | None:
+def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any] | None:
     """Parse OutputSchema-like chunk with type and payload attributes."""
     chunk_type = getattr(chunk, "type", "")
     payload = getattr(chunk, "payload", {})
@@ -320,12 +289,6 @@ def _parse_typed_chunk(
         )
         if not content or not content.strip():
             return None
-        if _protocol_buffer is not None:
-            content = _protocol_buffer.feed(content)
-        else:
-            content = strip_inline_tool_protocol(content)
-        if not content or not content.strip():
-            return None
         return {
             "event_type": "chat.delta",
             "content": content,
@@ -362,14 +325,6 @@ def _parse_typed_chunk(
         else:
             content = str(payload)
             is_chunked = False
-
-        # Flush any pending buffered content from cross-chunk protocol fragments
-        if _protocol_buffer is not None:
-            _flushed = _protocol_buffer.flush()
-            if _flushed:
-                content = _flushed + content
-
-        content = strip_inline_tool_protocol(content)
 
         if not content or not content.strip():
             return None
@@ -683,11 +638,7 @@ def _serialize_value(value: Any) -> Any:
     return value
 
 
-def _parse_response_chunk(
-    chunk: Any,
-    _has_streamed_content: bool,
-    _protocol_buffer: StreamProtocolBuffer | None = None,
-) -> dict[str, Any] | None:
+def _parse_response_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any] | None:
     """Parse AgentResponseChunk-like object."""
     payload = getattr(chunk, "payload", None)
 
@@ -712,30 +663,15 @@ def _parse_response_chunk(
                     "event_type": "chat.error",
                     "error": output.get("output", ""),
                 }
-            _out = payload.get("output", "")
-            if _protocol_buffer is not None:
-                _flushed = _protocol_buffer.flush()
-                if _flushed:
-                    _out = _flushed + _out
-            _out = strip_inline_tool_protocol(_out)
-            if not _out or not _out.strip():
-                return None
             return {
                 "event_type": "chat.delta" if not _has_streamed_content else "chat.final",
-                "content": _out,
+                "content": payload.get("output", ""),
             }
 
         if "content" in payload:
-            _c = payload.get("content", "")
-            if _protocol_buffer is not None:
-                _c = _protocol_buffer.feed(_c)
-            else:
-                _c = strip_inline_tool_protocol(_c)
-            if not _c or not _c.strip():
-                return None
             return {
                 "event_type": "chat.delta" if not _has_streamed_content else "chat.final",
-                "content": _c,
+                "content": payload.get("content", ""),
             }
 
         return payload

@@ -47,7 +47,6 @@ import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
 import { getWebTransport } from '../utils/env';
 import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
-import { shouldHandleRequestEvent } from './requestEventFilter';
 import {
   fetchTtsAudio,
   playAudioBase64,
@@ -98,14 +97,6 @@ function isCompletedResumeResult(interruptResult: unknown): boolean {
     has_active_task?: unknown;
   };
   return result.intent === 'resume' && result.success === true && result.has_active_task === false;
-}
-
-function makeClientRequestId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
-}
-
-function isActiveStreamRequestId(requestId: string): boolean {
-  return requestId.startsWith('req_') || requestId.startsWith('chat-');
 }
 
 const GOAL_COMPLETED_AUTO_HIDE_MS = 4000;
@@ -805,17 +796,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   // 必须在渲染阶段同步更新，否则 effect 执行之前收到的事件会被错误过滤
   const userInputVersionRef = useRef(0);
   const activeRequestIdRef = useRef<string | undefined>(undefined);
-  /** 本会话实例发出的 interrupt 请求的 ws req id（用于识别属于本 tab 的 interrupt_result） */
-  const pendingInterruptRequestIdsRef = useRef<Set<string>>(new Set());
-  /** 已 cancel 的 chat.send request_id，用于丢弃取消后仍滞留在网关队列中的流式事件 */
-  const suppressedChatRequestIdsRef = useRef<Set<string>>(new Set());
-  /** 用户点击暂停后立即生效，暂停期间收到的流式事件写入暂存区 */
-  const pauseHoldActiveRef = useRef(false);
-  /** 被暂停的那条 chat.send 的 request_id，仅暂存与之匹配的事件 */
-  const pausedStreamRequestIdRef = useRef<string | null>(null);
-  const pausedEventsRef = useRef<WsEvent[]>([]);
-  /** supplement 后待认领的新流 request_id（后端形如 req_{hex}_{interruptId}） */
-  const pendingSupplementInterruptIdRef = useRef<string | null>(null);
   // 立即同步更新，不等待 effect
 
   const [isConnected, setIsConnected] = useState(false);
@@ -890,83 +870,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     if (!streamId) return;
     streamDeltaBatcherRef.current?.flush(streamDeltaBatchKey(sessionId, streamId));
   }, []);
-
-  // ── pause buffer 生命周期（回合自 enterprise_kub）──────────────────────────
-  const clearPauseBuffer = useCallback(() => {
-    pauseHoldActiveRef.current = false;
-    pausedStreamRequestIdRef.current = null;
-    pausedEventsRef.current = [];
-  }, []);
-
-  const tryAdoptSupplementStreamRequestId = useCallback((eventRequestId: string): boolean => {
-    const pendingInterruptId = pendingSupplementInterruptIdRef.current;
-    if (!pendingInterruptId || !eventRequestId) return false;
-    if (!eventRequestId.includes(pendingInterruptId)) return false;
-    // 仅认领 supplement 流式 chat.send（req_ 前缀）；忽略 interrupt_result 附带的 interrupt id
-    if (!eventRequestId.startsWith('req_')) return false;
-    activeRequestIdRef.current = eventRequestId;
-    pendingSupplementInterruptIdRef.current = null;
-    if (pauseHoldActiveRef.current) {
-      pausedStreamRequestIdRef.current = eventRequestId;
-    }
-    return true;
-  }, []);
-
-  const bindStreamRequestIdFromEvent = useCallback((eventRequestId: string) => {
-    if (!isActiveStreamRequestId(eventRequestId)) return;
-    const current = activeRequestIdRef.current?.trim() ?? '';
-    if (!current || current.startsWith('interrupt-')) {
-      activeRequestIdRef.current = eventRequestId;
-    }
-  }, []);
-
-  const shouldHandleCurrentRequestEvent = useCallback((event: WsEvent): boolean => {
-    return shouldHandleRequestEvent(event, {
-      activeRequestId: activeRequestIdRef.current,
-      pendingInterruptRequestIds: pendingInterruptRequestIdsRef.current,
-    });
-  }, []);
-
-  const enterPauseHold = useCallback((sessionId: string) => {
-    pauseHoldActiveRef.current = true;
-    const activeRid = activeRequestIdRef.current?.trim() ?? '';
-    pausedStreamRequestIdRef.current =
-      activeRid && isActiveStreamRequestId(activeRid) ? activeRid : null;
-    useChatStore.getState().setPaused(sessionId, true);
-    useChatStore.getState().setProcessing(sessionId, false);
-    useChatStore.getState().setThinking(sessionId, false);
-    stopAllTts();
-    const currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
-    if (currentStreamId) {
-      useChatStore.getState().updateMessage(sessionId, currentStreamId, { isStreaming: false });
-    }
-  }, []);
-
-  const exitPauseHoldForNewTurn = useCallback(
-    (sessionId: string, options?: { interruptRequestId?: string; suppressPausedStream?: boolean }) => {
-      const pausedRid = pausedStreamRequestIdRef.current ?? activeRequestIdRef.current;
-      if (options?.suppressPausedStream !== false && pausedRid) {
-        suppressedChatRequestIdsRef.current.add(pausedRid);
-      }
-      clearPauseBuffer();
-      useChatStore.getState().setPaused(sessionId, false);
-      useChatStore.getState().stopStreaming(sessionId);
-      activeRequestIdRef.current = undefined;
-      if (options?.interruptRequestId) {
-        pendingSupplementInterruptIdRef.current = options.interruptRequestId;
-      }
-    },
-    [clearPauseBuffer]
-  );
-
-  const flushPausedEvents = useCallback(() => {
-    pauseHoldActiveRef.current = false;
-    const events = pausedEventsRef.current.splice(0);
-    for (const event of events) {
-      webClient.replayBufferedEvent(event);
-    }
-  }, []);
-  // ──────────────────────────────────────────────────────────────────────────
 
   const handleTtsPlayback = useCallback(
     (sessionId: string, messageId: string, content: string) => {
@@ -1554,8 +1457,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // Goal 处于 active 时，普通输入按文档 §5.1 作为补充约束插入当前 Goal，而不是覆盖它
         const activeGoal = useGoalStore.getState().getRuntime(sessionId)?.goal;
         const inputMode = activeGoal?.status === 'active' ? 'steer' : undefined;
-        const chatRequestId = makeClientRequestId('chat');
-        activeRequestIdRef.current = chatRequestId;
         await request('chat.send', {
           session_id: sessionId,
           content: outgoingContent,
@@ -1566,7 +1467,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...workContext,
           skills: selectedSkills,
           ...(inputMode ? { input_mode: inputMode } : {}),
-        }, { requestId: chatRequestId });
+        });
         return true;
       } catch (error) {
         const webError = error as WebError;
@@ -1622,15 +1523,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useChatStore.getState().setPaused(sessionId, false);
       }
       try {
-        const chatRequestId = makeClientRequestId('chat');
-        activeRequestIdRef.current = chatRequestId;
         await request('chat.send', {
           session_id: sessionId,
           content,
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
           ...workContext,
-        }, { requestId: chatRequestId });
+        });
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
@@ -1697,30 +1596,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           timestamp: new Date().toISOString(),
         });
       }
-
-      // 乐观本地状态变更（回合自 enterprise_kub）——先改 UI，不等后端确认
-      const interruptRequestId = makeClientRequestId('interrupt');
-      pendingInterruptRequestIdsRef.current.add(interruptRequestId);
-      if (intent === 'pause') {
-        enterPauseHold(sessionId);
-      } else if (intent === 'cancel') {
-        const activeRid = activeRequestIdRef.current;
-        if (activeRid) {
-          suppressedChatRequestIdsRef.current.add(activeRid);
-        }
-        clearPauseBuffer();
-        pendingSupplementInterruptIdRef.current = null;
-        useChatStore.getState().setProcessing(sessionId, false);
-        useChatStore.getState().setThinking(sessionId, false);
-        useChatStore.getState().stopStreaming(sessionId);
-        activeRequestIdRef.current = undefined;
-        useChatStore.getState().setPaused(sessionId, false);
-      } else if (intent === 'supplement') {
-        exitPauseHoldForNewTurn(sessionId, { interruptRequestId });
-        useChatStore.getState().setProcessing(sessionId, true);
-        useChatStore.getState().setThinking(sessionId, true);
-      }
-
       try {
         const params: Record<string, unknown> = {
           session_id: sessionId,
@@ -1739,36 +1614,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const selectedModel = useSessionStore.getState().getEffectiveModelName(sessionId);
           if (selectedModel) params.model_name = selectedModel;
         }
-        await request('chat.interrupt', params, { requestId: interruptRequestId });
+        await request('chat.interrupt', params);
       } catch (error) {
         const webError = error as WebError;
-        // 回滚乐观变更
-        pendingInterruptRequestIdsRef.current.delete(interruptRequestId);
-        if (intent === 'pause') {
-          clearPauseBuffer();
-          useChatStore.getState().setPaused(sessionId, false);
-          // enterPauseHold 设了 processing/thinking=false 并停止 streaming，
-          // pause 失败说明后端仍在处理，恢复执行态让 UI 与后端一致
-          useChatStore.getState().setProcessing(sessionId, true);
-          useChatStore.getState().setThinking(sessionId, true);
-          const currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
-          if (currentStreamId) {
-            useChatStore.getState().updateMessage(sessionId, currentStreamId, { isStreaming: true });
-          }
-        } else if (intent === 'supplement') {
-          pendingSupplementInterruptIdRef.current = null;
-          useChatStore.getState().setProcessing(sessionId, false);
-          useChatStore.getState().setThinking(sessionId, false);
-        }
         setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.interruptFailed'));
       }
     },
     [
-      clearPauseBuffer,
       closeActiveTeamLeaderMessages,
-      enterPauseHold,
-      exitPauseHoldForNewTurn,
       request,
       resetContextCompressionTurn,
       setConnectionStats,
@@ -2014,27 +1868,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onConfigChangedRef.current = onConfigChanged;
   }, [onConfigChanged, onConnect, onDisconnect, onError]);
 
-  // pause buffer + stream event filter 接入传输层（回合自 enterprise_kub）
-  useEffect(() => {
-    webClient.setStreamEventFilter((event) => {
-      const rid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
-      if (!rid) return true;
-      const name = event.event;
-      if (!name.startsWith('chat.') && !name.startsWith('context.')) return true;
-      return !suppressedChatRequestIdsRef.current.has(rid);
-    });
-    webClient.setPauseBufferHook({
-      isActive: () => pauseHoldActiveRef.current,
-      onBuffer: (event) => {
-        pausedEventsRef.current.push(event);
-      },
-    });
-    return () => {
-      webClient.setStreamEventFilter(null);
-      webClient.setPauseBufferHook(null);
-    };
-  }, []);
-
   const shouldDropDuplicatedEvent = useCallback(
     (eventName: string, payload: Record<string, unknown>): boolean => {
       const now = Date.now();
@@ -2224,18 +2057,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('hello', ({ payload }) => {
         handleConnectionAck(payload);
       }),
-      webClient.on('chat.delta', (event) => {
-        if (pauseHoldActiveRef.current) return;
-        const payload = event.payload;
+      webClient.on('chat.delta', ({ payload }) => {
           const sessionId = resolveEventSessionId(payload);
           if (!sessionId) return;
-
-        // supplement 流认领：后端 supplement 后新 chat.send 的 request_id 含 interrupt id
-        const eventRid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
-        if (eventRid) {
-          tryAdoptSupplementStreamRequestId(eventRid);
-          bindStreamRequestIdFromEvent(eventRid);
-        }
 
         // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
         if (!useChatStore.getState().getRuntime(sessionId)?.isProcessing && !useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) {
@@ -2937,7 +2761,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.tool_call', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
-        if (pauseHoldActiveRef.current) return;
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
         // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
         if (!useChatStore.getState().getRuntime(sessionId)?.isProcessing && !useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) {
@@ -3009,7 +2832,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.tool_result', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
-        if (pauseHoldActiveRef.current) return;
         if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         const toolResult = normalizeToolResultPayload(payload);
@@ -3158,15 +2980,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useSessionStore.getState().setMode(sessionId, normalizeAgentMode(payload.mode));
         }
       }),
-      webClient.on('chat.processing_status', (event) => {
-        const payload = event.payload;
+      webClient.on('chat.processing_status', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
-        // supplement 流认领：后端 supplement 后新 chat.send 的 request_id 含 interrupt id
-        const eventRid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
-        if (eventRid) {
-          tryAdoptSupplementStreamRequestId(eventRid);
-        }
         if (shouldDropDuplicatedEvent('chat.processing_status', payload)) return;
         // 切换模式时忽略处理状态更新
         if (useChatStore.getState().getRuntime(sessionId)?.switchingMode) return;
@@ -3420,11 +3236,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const retractRequestId = typeof event.payload.request_id === 'string' ? event.payload.request_id : undefined;
         useChatStore.getState().clearCurrentTurnData(sessionId, retractRequestId);
       }),
-      webClient.on('chat.interrupt_result', (event) => {
-        const payload = event.payload;
+      webClient.on('chat.interrupt_result', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
-        if (!shouldHandleCurrentRequestEvent(event)) return;
         if (shouldDropDuplicatedEvent('chat.interrupt_result', payload)) return;
         // 切换模式时忽略中断结果
         if (useChatStore.getState().getRuntime(sessionId)?.switchingMode) return;
@@ -3436,45 +3250,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         if (resultPayload.intent === 'pause') {
           if (resultPayload.success) {
-            pauseHoldActiveRef.current = true;
-            const activeRid = activeRequestIdRef.current?.trim() ?? '';
-            if (!pausedStreamRequestIdRef.current) {
-              pausedStreamRequestIdRef.current =
-                activeRid && isActiveStreamRequestId(activeRid) ? activeRid : null;
-            }
             useChatStore.getState().setPaused(sessionId, true, resultPayload.paused_task);
-            useChatStore.getState().markInterruptedExecutions(sessionId);
-            useChatStore.getState().setProcessing(sessionId, false);
-            useChatStore.getState().setThinking(sessionId, false);
-            // 集群模式下输入框的"停止"按钮走的是 pause（不是 cancel，见 App.tsx
-            // handleCancel：mode==='team' 时调用 pause）。team-leader 消息的
-            // isStreaming 不经过 currentStreamId 收尾，这里同 cancel 分支一样显式
-            // 关闭还在 streaming 的 team-leader 消息，避免光标永久闪烁（bug001）。
-            closeActiveTeamLeaderMessages(sessionId);
-          } else {
-            clearPauseBuffer();
-            useChatStore.getState().setPaused(sessionId, false);
-            // pause 失败说明后端仍在处理，恢复执行态让 UI 与后端一致
-            // （与 handleInterrupt catch 块的网络错误回滚逻辑一致）
-            useChatStore.getState().setProcessing(sessionId, true);
-            useChatStore.getState().setThinking(sessionId, true);
-            const currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
-            if (currentStreamId) {
-              useChatStore.getState().updateMessage(sessionId, currentStreamId, { isStreaming: true });
-            }
           }
-          // 保留 activeRequestIdRef，恢复后 stream 事件仍能对齐原 chat.send
+          useChatStore.getState().setProcessing(sessionId, false);
+          useChatStore.getState().setThinking(sessionId, false);
+          // 集群模式下输入框的"停止"按钮走的是 pause（不是 cancel，见 App.tsx
+          // handleCancel：mode==='team' 时调用 pause）。team-leader 消息的
+          // isStreaming 不经过 currentStreamId 收尾，这里同 cancel 分支一样显式
+          // 关闭还在 streaming 的 team-leader 消息，避免光标永久闪烁（bug001）。
+          closeActiveTeamLeaderMessages(sessionId);
         } else if (resultPayload.intent === 'resume') {
           if (resultPayload.success) {
+            // 直接设置所有状态值
             if (hasActiveTask) {
               useChatStore.getState().setPaused(sessionId, false);
               useChatStore.getState().setProcessing(sessionId, true);
               useChatStore.getState().setThinking(sessionId, true);
-              flushPausedEvents();
-              const currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
-              if (currentStreamId) {
-                useChatStore.getState().updateMessage(sessionId, currentStreamId, { isStreaming: true });
-              }
             } else {
               useChatStore.getState().setPaused(sessionId, false);
               useChatStore.getState().setProcessing(sessionId, false);
@@ -3494,11 +3285,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
           }
         } else if (resultPayload.intent === 'cancel') {
-          clearPauseBuffer();
           useChatStore.getState().setPaused(sessionId, false);
           useChatStore.getState().setProcessing(sessionId, false);
           useChatStore.getState().setThinking(sessionId, false);
-          useChatStore.getState().markInterruptedExecutions(sessionId);
           // chat.interrupt_result 是一元响应，跟流式分片的 goal_intermediate 判断走的是完全
           // 独立的通道——不依赖后端把"目标已清除/暂停后这一轮该不该被当成中间态"判断对，
           // 用户主动点了停止/删除就该让当前气泡收尾，不再等一个可能被误判、永远不会来的
@@ -3508,34 +3297,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           // stopStreaming 对它无效；取消后本该到来的 chat.final 也不会再来兜底，
           // 这里显式收尾，避免 team-leader 气泡的光标永久闪烁（bug001）。
           closeActiveTeamLeaderMessages(sessionId);
-          activeRequestIdRef.current = undefined;
         } else if (resultPayload.intent === 'supplement') {
-          if (resultPayload.success) {
-            clearPauseBuffer();
-            useChatStore.getState().setPaused(sessionId, false);
-            useChatStore.getState().setProcessing(sessionId, true);
-            useChatStore.getState().setThinking(sessionId, true);
-          } else {
-            pendingSupplementInterruptIdRef.current = null;
-            // supplement 失败：exitPauseHoldForNewTurn 已把 processing/thinking 置 true，
-            // 后端未接受补充输入，恢复为未处理态（与 handleInterrupt catch 块一致）
-            useChatStore.getState().setProcessing(sessionId, false);
-            useChatStore.getState().setThinking(sessionId, false);
-          }
+          useChatStore.getState().setPaused(sessionId, false);
         }
-        // 清理本 tab 发出的 interrupt 请求 id
-        const irid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
-        if (irid) {
-          window.setTimeout(() => {
-            pendingInterruptRequestIdsRef.current.delete(irid);
-          }, 0);
-        }
-      }),
-      webClient.on('chat.invocation_paused', ({ payload }) => {
-        const sessionId = resolveEventSessionId(payload);
-        if (!sessionId) return;
-        useChatStore.getState().setProcessing(sessionId, true);
-        useChatStore.getState().setThinking(sessionId, false);
       }),
       webClient.on('chat.subtask_update', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
