@@ -901,7 +901,6 @@ function parseHistoryTimelineEntry(
   subagentId?: string,
 ): HistoryTimelineEntry | null {
   const role = normalizeHistoryRole(record.role);
-  // 无有效时间戳时用空串占位（勿用 Date.now()）；排序/工具构建侧已对空串做防护。
   const at = recordTimestampIso(record) ?? '';
 
   if (role === 'user') {
