@@ -291,7 +291,7 @@ export function ViewSwitcher({
         <BoardViewIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
       </button>
       {tooltip}
-      {showGraph && (
+      {showWorkflow && (
         <button
           type="button"
           onClick={() => onViewChange('workflow')}
