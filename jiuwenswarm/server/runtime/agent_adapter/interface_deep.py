@@ -143,20 +143,58 @@ _INTERRUPT_OUTPUT_ATTACH_RETRY_COUNT = 20
 _INTERRUPT_OUTPUT_ATTACH_RETRY_INTERVAL_SECONDS = 0.05
 
 
+# SkillTurbo 内部工具 id 后缀（如 BashTool_skill_turbo）。外层 ReAct 工具结果不含此后缀。
+_SKILL_TURBO_TOOL_ID_SUFFIX = "_skill_turbo"
+
+
 def _propagate_stream_source_id(
     src_payload: Any, result: dict[str, Any] | None
 ) -> dict[str, Any] | None:
-    """将上游 payload 中的 stream_source_id 透传到输出帧（原地写入，无则原样返回）。
+    """将上游 payload 中的 stream_source_id / task_id 透传到输出帧（原地写入）。
 
-    skill_turbo 并发节点（如 p6_1_page_worker）用它标识 source，
-    前端据其路由到 subagent 行，避免并发思考/正文混流。
+    skill_turbo 并发节点用 stream_source_id 标识 source，前端据其路由到
+    subagent 行。task_id 原样透传，供 RelayClaw 按需把 chat.delta 归入
+    taskRuns；是否进正式正文由上层决定，本函数不裁剪 content。
     """
     if result is None or not isinstance(src_payload, dict):
         return result
     source_id = src_payload.get(STREAM_SOURCE_ID_FIELD)
     if source_id:
         result[STREAM_SOURCE_ID_FIELD] = source_id
+    task_id = src_payload.get("task_id")
+    if isinstance(task_id, str) and task_id.strip():
+        result["task_id"] = task_id.strip()
     return result
+
+
+def _tool_result_lookup(payload: Any, *keys: str) -> Any:
+    """Read a field from a tool_result payload or its nested ``tool_result`` dict."""
+    if not isinstance(payload, dict):
+        return None
+    nested = payload.get("tool_result")
+    sources = (payload, nested) if isinstance(nested, dict) else (payload,)
+    for source in sources:
+        for key in keys:
+            value = source.get(key)
+            if value is not None and value != "":
+                return value
+    return None
+
+
+def _is_outer_react_tool_result(payload: Any) -> bool:
+    """True when this tool_result belongs to the outer ReAct agent, not SkillTurbo internals.
+
+    Inner PPT/bash/read_file results carry ``stream_source_id`` or a tool id ending
+    in ``_skill_turbo``. Resetting ``has_streamed_content`` on those would leak
+    nested non-streamed answers as ``chat.final``.
+    """
+    source_id = _tool_result_lookup(payload, STREAM_SOURCE_ID_FIELD)
+    if isinstance(source_id, str) and source_id.strip():
+        return False
+    tool_id = _tool_result_lookup(payload, "tool_call_id", "tool_id", "toolCallId")
+    if isinstance(tool_id, str) and tool_id.strip().endswith(_SKILL_TURBO_TOOL_ID_SUFFIX):
+        return False
+    return True
 
 
 _DEEPRESEARCH_REWRITE_REPLAY_STATE_KEY = "deepresearch_rewrite_fast_path_replays"
@@ -10230,6 +10268,29 @@ class JiuWenSwarmDeepAdapter:
             is_complete=False,
         )
 
+    def _deep_agent_has_skill_turbo_interrupt(self) -> bool:
+        """True when DeepAgent still holds an outer skill_acceleration_exec HITL."""
+        loop_session = getattr(getattr(self, "_instance", None), "_loop_session", None)
+        if loop_session is None:
+            return False
+        try:
+            state = loop_session.get_state(INTERRUPTION_KEY)
+        except Exception:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] inspect skill_turbo interrupt failed; "
+                "deferring resume to DeepAgent",
+                exc_info=True,
+            )
+            return True
+        interrupted = getattr(state, "interrupted_tools", None)
+        if not isinstance(interrupted, dict) or not interrupted:
+            return False
+        return any(
+            getattr(getattr(entry, "tool_call", None), "name", None)
+            == "skill_acceleration_exec"
+            for entry in interrupted.values()
+        )
+
     async def _try_skill_turbo_resume(
         self,
         request: AgentRequest,
@@ -10240,7 +10301,15 @@ class JiuWenSwarmDeepAdapter:
         answers: list = params.get("answers") or []
         if not answers:
             return None
+        if str(params.get("source") or "").strip() != "ask_user_interrupt":
+            return None
         if self._instance is None:
+            return None
+        if self._deep_agent_has_skill_turbo_interrupt():
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillTurbo resume deferred to DeepAgent "
+                "(outer skill_acceleration_exec interrupt present)"
+            )
             return None
         from openjiuwen.core.session.agent import create_agent_session
 
@@ -10350,7 +10419,7 @@ class JiuWenSwarmDeepAdapter:
                 if summary_chunk is not None:
                     yield summary_chunk
 
-            try:
+            async def _clear_resume_ctx() -> None:
                 await _skill_turbo_clear_resume_ctx(session)
                 try:
                     await session.post_run()
@@ -10359,6 +10428,22 @@ class JiuWenSwarmDeepAdapter:
                         "[JiuWenSwarmDeepAdapter] skill_turbo resume_stream post_run failed",
                         exc_info=True,
                     )
+
+            def _finish_text(success: bool, detail: str = "") -> str:
+                # Fallback only (no DeepAgent interrupt): template text, not a new LLM call.
+                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                    _build_artifact_summary,
+                )
+                summary = _build_artifact_summary(
+                    getattr(skill_turbo, "artifact_holder", None) or {}
+                )
+                head = detail or ("任务已完成" if success else "任务未完成")
+                if summary:
+                    return f"{head}\n\n{summary}"
+                return head
+
+            finish_text = ""
+            try:
                 async for chunk in skill_turbo.resume_stream(
                     plan_code=resume_ctx["plan_code"],
                     inputs=resume_inputs,
@@ -10382,7 +10467,10 @@ class JiuWenSwarmDeepAdapter:
                     if getattr(chunk, "is_complete", False):
                         async for summary_chunk in _emit_usage_summary():
                             yield summary_chunk
+                        continue
                     yield chunk
+                await _clear_resume_ctx()
+                finish_text = _finish_text(True)
             except _SkillTurboAbortError as e:
                 async for summary_chunk in _emit_usage_summary():
                     yield summary_chunk
@@ -10391,13 +10479,13 @@ class JiuWenSwarmDeepAdapter:
                 ):
                     yield hitl_chunk
                 return
-            except SkillTurboNotHandled:
+            except SkillTurboNotHandled as exc:
                 logger.info(
-                    "[JiuWenSwarmDeepAdapter] SkillTurbo resume fallback to DeepAgent"
+                    "[JiuWenSwarmDeepAdapter] SkillTurbo resume not handled: %s",
+                    exc,
                 )
-                async for summary_chunk in _emit_usage_summary():
-                    yield summary_chunk
-                return
+                await _clear_resume_ctx()
+                finish_text = _finish_text(False, f"SkillAccelerationExec 未处理: {exc}")
             finally:
                 _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
                 _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
@@ -10406,6 +10494,19 @@ class JiuWenSwarmDeepAdapter:
 
             async for summary_chunk in _emit_usage_summary():
                 yield summary_chunk
+            if finish_text:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "chat.delta", "content": finish_text},
+                    is_complete=False,
+                )
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"event_type": "chat.final", "content": finish_text or ""},
+                is_complete=True,
+            )
 
         return _resume_impl()
 
@@ -15751,6 +15852,13 @@ class JiuWenSwarmDeepAdapter:
                             continue
                     continue
 
+                # Outer ReAct tool_result starts a new LLM round. Inner SkillTurbo
+                # tool_results must not clear the flag or nested answers leak as chat.final.
+                if chunk_type == "tool_result" and _is_outer_react_tool_result(
+                    chunk.payload
+                ):
+                    has_streamed_content = False
+
                 if accumulated_text:
                     yield AgentResponseChunk(
                         request_id=rid,
@@ -16232,9 +16340,11 @@ class JiuWenSwarmDeepAdapter:
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    delta_payload = JiuWenSwarmDeepAdapter._stream_text_payload(
                         "chat.delta", content
                     )
+                    src = payload if isinstance(payload, dict) else {}
+                    return _propagate_stream_source_id(src, delta_payload)
 
                 if chunk_type == "answer":
                     if isinstance(payload, dict):
@@ -16573,9 +16683,11 @@ class JiuWenSwarmDeepAdapter:
                     content = payload.get("content") or payload.get("output")
                 else:
                     content = str(payload)
-                return JiuWenSwarmDeepAdapter._stream_text_payload(
+                delta_payload = JiuWenSwarmDeepAdapter._stream_text_payload(
                     "chat.delta", content
                 )
+                src = payload if isinstance(payload, dict) else {}
+                return _propagate_stream_source_id(src, delta_payload)
 
             if isinstance(chunk, dict):
                 if "traceId" in chunk or "invokeId" in chunk:
