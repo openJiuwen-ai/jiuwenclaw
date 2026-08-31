@@ -265,6 +265,11 @@ _TIMED_SDK_NODES = frozenset({
     "brief_mermaid_generator",
     "brief_source_tracer",
 })
+_RESUME_NODE_CURRENT_STAGE = {
+    "feedback_handler": 1,
+    "outline_interaction": 2,
+    "user_feedback_processor": 3,
+}
 
 
 def push_deepresearch_route(
@@ -2025,7 +2030,11 @@ async def _consume_stream(
         if isinstance(existing_state, RouterState)
         else RouterState(
             section_titles=dict(cached_titles),
-            current_stage=(1 if action == "resume" and node == "feedback_handler" else 0),
+            current_stage=(
+                _RESUME_NODE_CURRENT_STAGE.get(node, 0)
+                if action == "resume"
+                else 0
+            ),
             final_report_started=(
                 action == "resume" and node == "user_feedback_processor"
             ),

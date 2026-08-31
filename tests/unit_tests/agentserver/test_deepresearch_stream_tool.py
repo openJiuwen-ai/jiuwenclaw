@@ -2437,6 +2437,59 @@ async def test_feedback_resume_does_not_repeat_stage_one_transition():
 
 
 @pytest.mark.asyncio
+async def test_outline_resume_starts_from_stage_three_without_replaying_prior_stages():
+    proc = _Proc(
+        [
+            json.dumps({"__deepsearch_status__": "resuming", "conversation_id": "C1"}),
+            json.dumps(
+                {
+                    "agent": "collector_info_retrieval",
+                    "section_idx": "1",
+                    "section_total": 1,
+                    "event": "start",
+                    "content": "searching",
+                }
+            ),
+            json.dumps({"__deepsearch_status__": "error", "error": "stop"}),
+        ]
+    )
+    route = {
+        "request_id": "R",
+        "channel_id": "CH",
+        "session_id": "S",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    push = AsyncMock()
+    patches = _stream_patches(proc, route=route)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=push)
+        )
+        await dt.deepresearch_stream._func(
+            action="resume",
+            conversation_id="C1",
+            node="outline_interaction",
+            interaction_result=(
+                '{"status":"answered","answers":[{"question":"q",'
+                '"selected_options":["outline_confirm"],"custom_input":null}]}'
+            ),
+        )
+
+    transition_payloads = [
+        call.args[0]["payload"]
+        for call in push.send_push.await_args_list
+        if call.args[0]["payload"].get("event_type") == "chat.delta"
+        and "[DeepResearch \u9636\u6bb5\u5207\u6362]" in call.args[0]["payload"].get("content", "")
+    ]
+    assert [payload["task_id"] for payload in transition_payloads] == [
+        "deepresearch_stage_3"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_user_feedback_resume_can_complete_final_report_without_section_replay(
     tmp_path: Path,
 ):
@@ -2459,12 +2512,13 @@ async def test_user_feedback_resume_can_complete_final_report_without_section_re
         "service_id": "default",
         "agent_id": "default",
     }
+    push = AsyncMock()
     patches = _stream_patches(proc, route=route)
     with ExitStack() as stack:
         for item in patches:
             stack.enter_context(item)
         stack.enter_context(
-            patch.object(dt, "WebSocketGatewayPushTransport", return_value=AsyncMock())
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=push)
         )
         stack.enter_context(
             patch.object(
@@ -2481,6 +2535,14 @@ async def test_user_feedback_resume_can_complete_final_report_without_section_re
             )
         )
     assert outcome["status"] == "completed"
+    transition_task_ids = [
+        call.args[0]["payload"]["task_id"]
+        for call in push.send_push.await_args_list
+        if call.args[0]["payload"].get("event_type") == "chat.delta"
+        and "[DeepResearch \u9636\u6bb5\u5207\u6362]"
+        in call.args[0]["payload"].get("content", "")
+    ]
+    assert transition_task_ids == ["deepresearch_stage_4"]
 
 
 def test_artifact_bundle_ignores_blank_and_unapproved_companions():
