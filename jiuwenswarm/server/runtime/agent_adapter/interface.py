@@ -1038,6 +1038,7 @@ class JiuWenSwarm:
             config_base: dict[str, Any] | None = None,
             env_overrides: dict[str, Any] | None = None,
             target_session_id: str | None = None,
+            reload_scopes: set[str] | None = None,
     ) -> None:
         """从配置重新加载.
 
@@ -1045,6 +1046,7 @@ class JiuWenSwarm:
             config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
             env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
             target_session_id: 可选的目标 session id；传入时限制 session adapter 级联热更新范围。
+            reload_scopes: 可选的精确配置作用域，用于定向热更新。
         """
         adapter = self._ensure_adapter()
         if hasattr(adapter, "try_stop_dreaming"):
@@ -1053,6 +1055,7 @@ class JiuWenSwarm:
             config_base,
             env_overrides,
             target_session_id=target_session_id,
+            reload_scopes=reload_scopes,
         )
         logger.info("[JiuWenSwarm] Agent config reloaded: sdk=%s", self._sdk_name)
         if hasattr(adapter, "try_start_dreaming"):

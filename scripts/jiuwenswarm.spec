@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 r"""JiuwenSwarm PyInstaller 打包配置。
 
 构建前请先：
@@ -146,6 +147,11 @@ datas += collect_resources_data_files(
     os.path.join(project_root, "jiuwenswarm", "resources"),
     "jiuwenswarm/resources",
 )
+datas += collect_data_files(
+    "certifi",
+    include_py_files=False,
+    includes=["cacert.pem"],
+)
 datas += copy_metadata("fastmcp", recursive=True)
 datas += copy_metadata("mcp", recursive=True)
 datas += copy_metadata("openjiuwen", recursive=True)
@@ -183,9 +189,14 @@ for package_root in DISPATCH_PACKAGE_ROOTS:
 openjiuwen_submodules = collect_submodules("openjiuwen")
 symphony_submodules = collect_submodules("jiuwenswarm.symphony")
 dispatch_submodules = collect_tree_python_modules(symphony_root, DISPATCH_PACKAGE_ROOTS)
+http2_submodules = [
+    *collect_submodules("h2"),
+    *collect_submodules("hpack"),
+    *collect_submodules("hyperframe"),
+]
 
 # 部分包需要显式声明隐藏导入
-hiddenimports = webview_hiddenimports + [
+hiddenimports = webview_hiddenimports + http2_submodules + [
     "pandas",  # pymilvus 依赖
     "tiktoken_ext",  # tiktoken 编码插件（cl100k_base 等）
     "tiktoken_ext.openai_public",
@@ -211,6 +222,12 @@ excludes = [
     "matplotlib",
     "scipy",
     "numpy.tests",
+    # External CLI SDKs and their native executables are optional runtimes.
+    # Frozen Windows builds install verified wheels under the application directory on demand.
+    # Other platforms keep their managed optional runtimes in the user data directory.
+    "claude_agent_sdk",
+    "openai_codex",
+    "codex_cli_bin",
     # 测试框架辅助包（pytest 本体已 collect 进 PYZ）
     "tox",
     "hypothesis",

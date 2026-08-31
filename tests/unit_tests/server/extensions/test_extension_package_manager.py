@@ -791,6 +791,33 @@ class TestListShowAndFileRead:
             }
         ]
 
+    def test_show_plugin_keeps_readme_details(
+        self, extension_workspace: Path
+    ) -> None:
+        pkg = seed_package(
+            extension_workspace,
+            PLUGIN_PACKAGES,
+            "plugin-details",
+            extra_manifest={"description": "Manifest detail"},
+        )
+        (pkg / "README.md").write_text("README detail", encoding="utf-8")
+        shown = catalog.show_plugin_package("plugin-details")
+        assert shown is not None
+        assert shown["details"] == "README detail"
+
+    def test_show_plugin_without_readme_keeps_empty_details(
+        self, extension_workspace: Path
+    ) -> None:
+        seed_package(
+            extension_workspace,
+            PLUGIN_PACKAGES,
+            "plugin-without-readme",
+            extra_manifest={"description": "Manifest detail"},
+        )
+        shown = catalog.show_plugin_package("plugin-without-readme")
+        assert shown is not None
+        assert shown["details"] == ""
+
     def test_list_resources_filter_and_card_fields(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extension_workspace: Path
     ) -> None:

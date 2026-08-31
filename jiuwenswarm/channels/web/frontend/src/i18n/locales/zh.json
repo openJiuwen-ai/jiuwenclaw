@@ -212,8 +212,17 @@
       "webSearch": "网页搜索",
       "mediaTools": "工具",
       "vision": "图片处理",
+      "visionDescription": "启用后可处理图片内容；关闭后保留已有模型配置。",
+      "visionConfigTitle": "配置图片处理模型",
       "audio": "音频处理",
+      "audioDescription": "启用后可处理音频内容；关闭后保留已有模型配置。",
+      "audioConfigTitle": "配置音频处理模型",
       "video": "视频理解",
+      "videoDescription": "启用后可理解视频内容；关闭后保留已有模型配置。",
+      "videoConfigTitle": "配置视频理解模型",
+      "toggleCapability": "切换{{name}}能力",
+      "saveAndEnable": "保存并启用",
+      "savedRestartRequired": "配置已保存，重启后生效。",
       "team": "智能体团队"
     },
     "browser": {
@@ -232,6 +241,7 @@
     },
     "experimental": {
       "externalCliAgents": "三方 Agent",
+      "externalCliAgentsDescription": "仅用于集群模式。",
       "a2ui": "A2UI 界面生成",
       "proactive": "主动推荐",
       "proactiveLimits": "推荐频率限制",
@@ -298,7 +308,7 @@
         "description": "允许 Team Leader 拉起 Claude Agent。"
       },
       "external_cli_agent_claude_use_builtin": {
-        "title": "Claude 使用内置方式",
+        "title": "Claude 使用内置 CLI",
         "description": "不指定本机 CLI 路径，由 SDK 使用默认查找方式。"
       },
       "external_cli_agent_claude_cli_path": { "title": "Claude CLI 路径" },
@@ -307,7 +317,7 @@
         "description": "允许 Team Leader 拉起 Codex Agent；首次启用可能需要安装依赖。"
       },
       "external_cli_agent_codex_use_builtin": {
-        "title": "Codex 使用内置方式",
+        "title": "Codex 使用内置 CLI",
         "description": "不指定本机 CLI 路径，由 SDK 使用默认查找方式。"
       },
       "external_cli_agent_codex_cli_path": { "title": "Codex CLI 路径" },
@@ -758,9 +768,6 @@
     "approvalInputPlaceholder": "填写修改意见后点击「下一步」；留空点击「跳过」"
   },
   "persistSession": {
-    "toolbarTag": "永续会话",
-    "closeTag": "取消永续会话",
-    "lockedHint": "永续会话已在创建时锁定，当前会话中不可更改",
     "textRequired": "请在 /persist 后输入任务内容"
   },
   "goal": {
@@ -1105,9 +1112,9 @@
     "externalCli": {
       "claude": "Claude",
       "codex": "Codex",
-      "claudeHint": "可使用系统 PATH 中的 Claude，也可指定可执行文件路径。",
-      "codexHint": "可使用系统 PATH 中的 Codex，也可指定可执行文件路径。",
-      "useBuiltin": "使用内置",
+      "claudeHint": "SDK 未安装时将自动安装；CLI 可使用内置版本、系统 PATH 或指定路径。",
+      "codexHint": "SDK 未安装时将自动安装；CLI 可使用内置版本、系统 PATH 或指定路径。",
+      "useBuiltin": "使用内置 CLI",
       "detect": "检测",
       "selectFile": "选择文件",
       "selectFileTitle": "选择 {{agent}} 命令",
@@ -1120,16 +1127,37 @@
       "statusUnsupported": "路径不可用",
       "statusUnavailable": "不可用",
       "version": "版本 {{version}}",
-      "compatibilityWarning": "检测到的版本可能不兼容。可以更换可执行文件路径、升级版本，或勾选“使用内置”，改用默认启动方式。",
-      "compatibilityWarningWithVersion": "检测到的版本可能不兼容。可以更换可执行文件路径、升级到 {{version}} 或更高版本，或勾选“使用内置”，改用默认启动方式。",
-      "windowsScriptPath": "当前选择的是 Windows 脚本文件。请改选真实的可执行文件，或勾选“使用内置”。",
-      "dependencyInstalling": "正在后台安装 {{agents}} 依赖。安装期间暂未启用；安装完成后，请再次启用并保存配置。",
-      "dependencyInstalled": "请再次启用 {{agent}} 并保存配置。",
+      "compatibilityWarning": "检测到的版本可能不兼容。可以更换可执行文件路径、升级版本，或勾选“使用内置 CLI”，改用默认启动方式。",
+      "compatibilityWarningWithVersion": "检测到的版本可能不兼容。可以更换可执行文件路径、升级到 {{version}} 或更高版本，或勾选“使用内置 CLI”，改用默认启动方式。",
+      "windowsScriptPath": "当前选择的是 Windows 脚本文件。请改选真实的可执行文件，或勾选“使用内置 CLI”。",
+      "dependencyInstalling": "正在后台安装 {{agents}} 可选组件。安装期间不会启用；安装完成后，请重新启用并保存配置。",
+      "dependencyInstalled": "{{agent}} 可选组件已安装，请重新启用并保存配置。",
       "dependencyInstallPhasePreparing": "准备安装 {{agent}} 依赖",
       "dependencyInstallPhaseInstalling": "正在安装 {{agent}} 依赖",
       "dependencyInstallPhaseVerifying": "正在校验 {{agent}} 依赖",
-      "dependencyInstallPhaseSucceeded": "{{agent}} 依赖已安装",
-      "dependencyInstallPhaseFailed": "{{agent}} 依赖安装失败"
+      "dependencyInstallPhaseSucceeded": "{{agent}} 依赖已安装，请重新启用 {{agent}} 并保存配置",
+      "dependencyInstallPhaseFailed": "{{agent}} 依赖安装失败",
+      "installDialogTitle": "安装可选组件",
+      "installDialogDescription": "关闭此弹窗不会中断安装。安装完成后，请返回三方 Agent 配置，重新启用相应组件并保存配置。",
+      "installArtifact": "正在下载第 {{current}} 个文件，共 {{total}} 个：{{package}} {{version}}",
+      "installProgress": "下载进度",
+      "installEta": "预计剩余 {{eta}}",
+      "installRetry": "下载异常，正在重试（{{current}}/{{total}}）",
+      "installSwitchingSource": "正在使用备用下载源",
+      "installRunInBackground": "后台运行",
+      "installInProgress": "{{agents}} 正在安装，可随时查看进度。",
+      "installViewProgress": "查看进度",
+      "claudeCodex": "Claude / Codex",
+      "installPhase": {
+        "idle": "等待安装",
+        "preparing": "正在准备",
+        "downloading": "正在下载",
+        "installing": "正在安装",
+        "verifying": "正在校验",
+        "succeeded": "安装完成，请重新启用",
+        "failed": "安装失败",
+        "running": "正在安装"
+      }
     },
     "proactive": {
       "typeLabel": {
@@ -2113,6 +2141,8 @@
       "create": "创建",
       "createFirst": "手动创建",
       "createByChat": "通过聊天创建",
+      "createByUpload": "上传文件创建",
+      "uploading": "上传中…",
       "createViaChatPrompt": "帮我创建一个xxx专家，擅长xxx",
       "back": "返回"
     },
@@ -2133,6 +2163,8 @@
       "authRequired": "该智能体需要完成认证后才能安装",
       "connectionUnavailable": "依赖的 MCP 尚未连接，请先连接后再使用",
       "connectorUnavailableNamed": "该智能体依赖的 MCP「{{connector}}」尚未连接，请先完成连接后再重试安装。",
+      "uploadSuccess": "智能体包 {{id}} 已导入，请在我的智能体中查看",
+      "uploadError": "上传并导入智能体失败，请检查文件后重试",
       "newVersion": "该智能体有新版本，可更新",
       "teamUnavailable": "团队智能体管理暂未开放",
       "featureUnavailable": "该功能暂不在本期范围",
@@ -2215,6 +2247,12 @@
       "personaLabel": "专家人设",
       "personaPlaceholder": "输入保留 Markdown 和换行的人设内容",
       "personaPreview": "专家人设 Markdown 预览",
+      "uploadHint": "支持.zip和.tar文件，解压后的文件夹需要至少包含 manifest.json 文件、persona目录文件和 README.md，.json 文件需包含 package_type 声明包类型",
+      "uploadPlaceholder": "点击或拖动文件到此处",
+      "uploadInvalidType": "仅支持 .zip 和 .tar 文件",
+      "uploadPickerUnsupported": "当前环境暂不支持选择本地文件",
+      "uploadPickerFailed": "打开文件选择器失败，请重试",
+      "removeUpload": "移除已选文件",
       "skillsLabel": "技能配置（可选）",
       "skillsToggle": "收起或展开技能配置",
       "addSkill": "添加技能",

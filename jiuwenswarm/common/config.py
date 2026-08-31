@@ -1852,6 +1852,23 @@ def update_external_cli_agents_in_config(agents: list[str | dict[str, Any]], pub
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def reset_external_cli_agents_in_config() -> None:
+    """Disable all external CLI agents and clear their transport configuration."""
+    def _mutate(data: dict[str, Any]) -> dict[str, Any] | None:
+        current = data
+        for segment in EXTERNAL_CLI_AGENTS_CONFIG_PATH[:-1]:
+            nested = current.get(segment)
+            if not isinstance(nested, dict):
+                return None
+            current = nested
+
+        agents_removed = current.pop(EXTERNAL_CLI_AGENTS_CONFIG_PATH[-1], None) is not None
+        transport_removed = current.pop(EXTERNAL_TRANSPORT_CONFIG_PATH[-1], None) is not None
+        return data if agents_removed or transport_removed else None
+
+    update_config(_mutate)
+
+
 def update_swarmflow_budget_in_config(budget: str) -> None:
     """Update ``modes.team.jiuwen_team.swarmflow_budget`` in config.yaml.
 
