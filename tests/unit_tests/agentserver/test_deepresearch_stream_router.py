@@ -1241,6 +1241,84 @@ def test_successful_end_result_keeps_json_shape_limit(monkeypatch):
         )
 
 
+def test_end_result_with_error_event_and_exception_info_is_terminal():
+    """EndNode emits event=error when exception_info is present; it must still be terminal."""
+    state = RouterState()
+    content = json.dumps({
+        "response_content": "# Final report",
+        "exception_info": "[212000]Error when generate sub report",
+    })
+
+    frames = route_chunk(
+        {
+            "agent": "end",
+            "event": "error",
+            "section_idx": "0",
+            "content": content,
+        },
+        state,
+    )
+
+    assert state.final_report_started is True
+
+
+def test_end_result_with_error_event_bypasses_process_display_text_limit():
+    """The 12:18 crash: report > 1 MiB with exception_info must use the 16 MiB terminal bound."""
+    state = RouterState()
+    content = json.dumps({
+        "response_content": "x" * (MAX_CHUNK_TEXT_CHARS + 100),
+        "exception_info": "[212000]Error when generate sub report",
+    })
+
+    route_chunk(
+        {
+            "agent": "end",
+            "event": "error",
+            "section_idx": "0",
+            "content": content,
+        },
+        state,
+    )
+
+    assert len(content) > MAX_CHUNK_TEXT_CHARS
+    assert state.final_report_started is True
+
+
+def test_end_result_without_response_content_falls_through():
+    """EndNode with event=error but no response_content is not a terminal result."""
+    state = RouterState()
+    content = json.dumps({"exception_info": "fatal error"})
+
+    route_chunk(
+        {
+            "agent": "end",
+            "event": "error",
+            "section_idx": "0",
+            "content": content,
+        },
+        state,
+    )
+
+    assert state.final_report_started is False
+
+
+def test_all_end_marker_is_not_terminal():
+    """The trailing 'ALL END' marker has agent=end but content is not valid JSON."""
+    state = RouterState()
+
+    route_chunk(
+        {
+            "agent": "end",
+            "event": "summary_response",
+            "section_idx": "0",
+            "content": "ALL END",
+        },
+        state,
+    )
+
+    assert state.final_report_started is False
+
+
 def test_unknown_node_no_frame():
     state = RouterState()
     assert route_chunk({"agent": "mystery_node", "content": "x"}, state) == []
