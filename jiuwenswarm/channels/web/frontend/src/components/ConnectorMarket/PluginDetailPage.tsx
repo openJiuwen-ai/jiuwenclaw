@@ -75,10 +75,18 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
   // §1.6.3 首次安装：install() 半途失败会把 pending_connectors 记进 store（见
   // pluginPackageStore.ts install 注释），这里侦测到就自动起串行连接续跑；全部连完在
   // onAllConnected 里幂等重试 install（真正落盘，文档强调"再次调用同一个 install"）。
-  const installFlow = usePendingConnectorFlow(() => {
-    clearInstallPending(id);
-    void install(id);
-  });
+  const installFlow = usePendingConnectorFlow(
+    () => {
+      clearInstallPending(id);
+      void install(id);
+    },
+    () => {
+      // 依赖 connector 自动连接失败/被取消：清掉 pending 名单，否则下面这个 effect 会因为
+      // installPending 仍非空而反复重启连接续跑。安装到此终止，用户处理好依赖 MCP 后可再点"安装"。
+      // 失败原因 connectorStore 已写进自己的 error（顶层红色 Toast），这里不重复弹。
+      clearInstallPending(id);
+    },
+  );
 
   useEffect(() => {
     if (installPending && installPending.length > 0 && !installFlow.active) {
