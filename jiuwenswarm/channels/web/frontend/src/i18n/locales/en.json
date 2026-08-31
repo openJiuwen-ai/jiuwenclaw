@@ -1047,11 +1047,11 @@
       },
       "1": {
         "title": "Configure your first model",
-        "description": "Model settings are under More, in Configuration."
+        "description": "Model configuration is on the Models page in Settings."
       },
       "2": {
         "title": "Complete model configuration",
-        "description": "Enter the model name, API URL, API key, and model provider in Default model, then select Save."
+        "description": "Select Add model, choose a model provider, complete the required fields, then select Save."
       }
     },
     "quickSetup": {
