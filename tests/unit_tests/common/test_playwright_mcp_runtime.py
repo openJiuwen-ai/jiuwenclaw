@@ -177,6 +177,60 @@ def test_launch_precedence_override_bundle_and_exact_fallback(tmp_path: Path) ->
     assert fallback.args == ("-y", "@playwright/mcp@0.0.78")
 
 
+def test_legacy_template_defaults_select_bundle_without_rewriting_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resources = _make_bundle(tmp_path / "bundle")
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        runtime.logger,
+        "warning",
+        lambda message, *args: warnings.append(message % args),
+    )
+    legacy_environment = {
+        "PLAYWRIGHT_MCP_COMMAND": "npx",
+        "PLAYWRIGHT_MCP_ARGS": "-y @playwright/mcp@latest",
+    }
+
+    launch = runtime.resolve_playwright_mcp_launch(
+        environ=legacy_environment,
+        resource_dir=resources,
+        user_workspace_dir=tmp_path / "workspace",
+        which=lambda _: str(tmp_path / "Node Runtime" / "node.exe"),
+        run=_node_result(),
+    )
+
+    assert launch.source == "bundled"
+    assert launch.command.endswith("node.exe")
+    assert legacy_environment == {
+        "PLAYWRIGHT_MCP_COMMAND": "npx",
+        "PLAYWRIGHT_MCP_ARGS": "-y @playwright/mcp@latest",
+    }
+    assert any("Ignoring legacy Playwright MCP .env defaults" in item for item in warnings)
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {
+            "PLAYWRIGHT_MCP_COMMAND": "custom-npx",
+            "PLAYWRIGHT_MCP_ARGS": "-y @playwright/mcp@latest",
+        },
+        {
+            "PLAYWRIGHT_MCP_COMMAND": "npx",
+            "PLAYWRIGHT_MCP_ARGS": "-y @playwright/mcp@0.0.78",
+        },
+        {"PLAYWRIGHT_MCP_COMMAND": "npx"},
+        {"PLAYWRIGHT_MCP_ARGS": "-y @playwright/mcp@latest"},
+    ],
+)
+def test_nonlegacy_playwright_settings_remain_overrides(
+    environment: dict[str, str],
+) -> None:
+    assert runtime._environment_has_override(environment) is True
+
+
 def test_managed_environment_is_not_reclassified_as_override() -> None:
     launch = runtime.PlaywrightMcpLaunch(
         source="bundled",

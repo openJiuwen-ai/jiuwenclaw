@@ -29,6 +29,8 @@ PLAYWRIGHT_MCP_VERSION = "0.0.78"
 MINIMUM_NODE_VERSION = 20
 PINNED_NPX_COMMAND = "npx"
 PINNED_NPX_ARGS = ("-y", f"@playwright/mcp@{PLAYWRIGHT_MCP_VERSION}")
+LEGACY_TEMPLATE_COMMAND = "npx"
+LEGACY_TEMPLATE_ARGS = "-y @playwright/mcp@latest"
 MANIFEST_FILENAME = "manifest.json"
 INTERNAL_SOURCE_ENV = "JIUWENSWARM_PLAYWRIGHT_MCP_LAUNCH_SOURCE"
 INTERNAL_COMMAND_ENV = "JIUWENSWARM_PLAYWRIGHT_MCP_MANAGED_COMMAND"
@@ -292,10 +294,22 @@ def resolve_node_executable(
     return node
 
 
+def _environment_uses_legacy_template_defaults(environ: Mapping[str, str]) -> bool:
+    """Recognize the exact external launch defaults shipped by older releases."""
+    return (
+        "PLAYWRIGHT_MCP_COMMAND" in environ
+        and "PLAYWRIGHT_MCP_ARGS" in environ
+        and environ.get("PLAYWRIGHT_MCP_COMMAND", "").strip() == LEGACY_TEMPLATE_COMMAND
+        and environ.get("PLAYWRIGHT_MCP_ARGS", "").strip() == LEGACY_TEMPLATE_ARGS
+    )
+
+
 def _environment_has_override(environ: Mapping[str, str]) -> bool:
     command_present = "PLAYWRIGHT_MCP_COMMAND" in environ
     args_present = "PLAYWRIGHT_MCP_ARGS" in environ
     if not command_present and not args_present:
+        return False
+    if _environment_uses_legacy_template_defaults(environ):
         return False
     source = environ.get(INTERNAL_SOURCE_ENV, "")
     if source not in _INTERNAL_LAUNCH_SOURCES:
@@ -316,6 +330,15 @@ def resolve_playwright_mcp_launch(
 ) -> PlaywrightMcpLaunch:
     """Resolve override, bundled, then pinned-npx launch precedence."""
     environment = environ if environ is not None else os.environ
+    if _environment_uses_legacy_template_defaults(environment):
+        logger.warning(
+            "Ignoring legacy Playwright MCP .env defaults (%s %s) so the bundled "
+            "Playwright MCP %s runtime can be used. Custom command or argument "
+            "overrides remain supported.",
+            LEGACY_TEMPLATE_COMMAND,
+            LEGACY_TEMPLATE_ARGS,
+            PLAYWRIGHT_MCP_VERSION,
+        )
     if _environment_has_override(environment):
         command = (environment.get("PLAYWRIGHT_MCP_COMMAND") or PINNED_NPX_COMMAND).strip()
         raw_args = environment.get("PLAYWRIGHT_MCP_ARGS")
