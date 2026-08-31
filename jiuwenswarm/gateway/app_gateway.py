@@ -1673,6 +1673,12 @@ async def _run_with_telemetry(
                             log_exc,
                         )
     except Exception as exc:  # noqa: BLE001
+        if is_enterprise():
+            logger.error(
+                "[App] storage repository setup failed (enterprise fail-fast): %s",
+                exc,
+            )
+            raise
         logger.warning(
             "[App] storage repository setup failed, using legacy storage: %s",
             exc,
@@ -1693,6 +1699,12 @@ async def _run_with_telemetry(
             await wire_enterprise_manager_ws_store_async(gateway_storage_ctx, full_cfg)
             logger.info("[App] Manager WS write path wired to PersistentStore")
     except Exception as exc:  # noqa: BLE001
+        if is_enterprise():
+            logger.error(
+                "[App] enterprise Manager WS storage wiring failed (fail-fast): %s",
+                exc,
+            )
+            raise
         logger.warning(
             "[App] enterprise Manager WS storage wiring failed: %s",
             exc,
