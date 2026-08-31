@@ -65,6 +65,7 @@ from openjiuwen.harness.factory import (
     _inject_general_purpose_subagent,
     create_deep_agent,
 )
+from openjiuwen.harness.image_modality_probe import get_cached_image_support
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
     ModelAnomalyDetectionRail,
@@ -5180,8 +5181,9 @@ class JiuWenSwarmDeepAdapter:
         inputs: dict[str, Any],
         *,
         enable_read_image_multimodal: bool,
+        vision_tool_available: bool,
     ) -> dict[str, Any]:
-        """Add image file paths to the ReAct prompt when native image input is off."""
+        """Expose image paths when native image input is unavailable."""
         if enable_read_image_multimodal:
             return inputs
 
@@ -5230,9 +5232,16 @@ class JiuWenSwarmDeepAdapter:
             "mediaItems": media_items,
             "question": question,
             "toolHint": (
-                "当前主模型未启用原生图片输入。如果需要理解图片内容，请调用图片理解工具；"
-                "优先使用 image_reading(local_url=mediaPath, prompt=question)，"
-                "或使用 visual_question_answering(image_path_or_url=mediaPath, question=question)。"
+                (
+                    "当前主模型不支持原生图片输入。请调用已配置的图片理解工具；"
+                    "优先使用 image_reading(local_url=mediaPath, prompt=question)，"
+                    "或使用 visual_question_answering(image_path_or_url=mediaPath, question=question)。"
+                )
+                if vision_tool_available
+                else (
+                    "当前主模型不支持原生图片输入，且没有配置可用的视觉模型工具。"
+                    "请直接向用户说明当前没有图片理解能力，不要猜测图片内容。"
+                )
             ),
         }
 
@@ -5251,6 +5260,7 @@ class JiuWenSwarmDeepAdapter:
         *,
         enable_read_image_multimodal: bool,
         model: Any | None,
+        vision_tool_available: bool,
     ) -> dict[str, Any] | None:
         if enable_read_image_multimodal:
             return None
@@ -5266,7 +5276,13 @@ class JiuWenSwarmDeepAdapter:
         model_config = getattr(model, "model_config", None)
         model_name = str(getattr(model_config, "model_name", "") or "").strip()
         model_label = f"（{model_name}）" if model_name else ""
-        content = f"当前模型{model_label}不支持原生图片理解，已切换为图片理解工具处理。"
+        if vision_tool_available:
+            content = f"当前模型{model_label}不支持原生图片理解，已切换为图片理解工具处理。"
+        else:
+            content = (
+                f"当前模型{model_label}不支持原生图片理解，"
+                "且未配置可用的视觉模型工具。"
+            )
         notice = {
             "event_type": "chat.notice",
             "notice_type": "image_tool_fallback",
@@ -5280,32 +5296,11 @@ class JiuWenSwarmDeepAdapter:
             notice["model_name"] = model_name
         return notice
 
-    @staticmethod
-    def _native_image_support_from_model_name(model_name: str) -> bool | None:
-        normalized = model_name.strip().lower()
-        if not normalized:
-            return None
-
-        if re.search(r"(?:^|[/_:-])glm-[0-9]+(?:\.[0-9]+)*(?:$|[/_:-])", normalized):
-            return False
-        if re.search(r"(?:^|[/_:-])glm-[^/]*v(?:$|[/_.:-])", normalized):
-            return True
-        if any(token in normalized for token in ("vision", "vl", "omni")):
-            return True
-        return None
-
     def _native_image_input_enabled(self, config: dict[str, Any], model: Any | None) -> bool:
-        model_config = getattr(model, "model_config", None)
-        model_name = str(getattr(model_config, "model_name", "") or "").strip()
-        support = self._native_image_support_from_model_name(model_name)
-        if support is False:
-            return False
         configured = config.get("enable_read_image_multimodal")
         if isinstance(configured, bool):
             return configured
-        if support is True:
-            return True
-        return self._vision_model_config is None
+        return get_cached_image_support(model) is True
 
     def _resolve_enable_read_image_multimodal(
         self,
@@ -5314,8 +5309,6 @@ class JiuWenSwarmDeepAdapter:
         configured = config.get("enable_read_image_multimodal")
         if isinstance(configured, bool):
             return configured
-        if self._vision_model_config is not None:
-            return False
         return None
 
     def _apply_model_to_react_agent(self, model: Model) -> None:
@@ -11324,6 +11317,9 @@ class JiuWenSwarmDeepAdapter:
                 request,
                 inputs,
                 enable_read_image_multimodal=enable_read_image_multimodal,
+                vision_tool_available=(
+                    getattr(self, "_vision_model_config", None) is not None
+                ),
             )
             from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                 set_current_multimodal_image_files,
@@ -11573,11 +11569,17 @@ class JiuWenSwarmDeepAdapter:
                 request,
                 enable_read_image_multimodal=enable_read_image_multimodal,
                 model=resolved_model,
+                vision_tool_available=(
+                    getattr(self, "_vision_model_config", None) is not None
+                ),
             )
             inputs = self._prepare_react_image_tool_prompt(
                 request,
                 inputs,
                 enable_read_image_multimodal=enable_read_image_multimodal,
+                vision_tool_available=(
+                    getattr(self, "_vision_model_config", None) is not None
+                ),
             )
             if rewrite_turn_text:
                 inputs[TEAM_USER_TURN_KEY] = team_turn.with_text(inputs["query"])
@@ -11965,11 +11967,17 @@ class JiuWenSwarmDeepAdapter:
                 request,
                 enable_read_image_multimodal=enable_read_image_multimodal,
                 model=resolved_model,
+                vision_tool_available=(
+                    getattr(self, "_vision_model_config", None) is not None
+                ),
             )
             inputs = self._prepare_react_image_tool_prompt(
                 request,
                 inputs,
                 enable_read_image_multimodal=enable_read_image_multimodal,
+                vision_tool_available=(
+                    getattr(self, "_vision_model_config", None) is not None
+                ),
             )
             if image_tool_fallback_notice is not None:
                 yield AgentResponseChunk(
