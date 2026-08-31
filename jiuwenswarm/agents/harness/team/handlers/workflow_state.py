@@ -521,11 +521,21 @@ class WorkflowRunState(BaseModel):
             and prev.status == "running"
         )
         if can_seal_prev:
-            prev.status = "completed"
-            self._finalize_running_agents(prev, "completed")
+            # Phase status mirrors its agents by priority:
+            #   any stopped → stopped (external termination wins)
+            #   all failed  → failed (every agent errored)
+            #   otherwise   → completed (at least one completed, partial OK)
+            statuses = [a.status for a in prev.agents] if prev.agents else []
+            if statuses and any(s == "stopped" for s in statuses):
+                prev.status = "stopped"
+            elif statuses and all(s == "failed" for s in statuses):
+                prev.status = "failed"
+            else:
+                prev.status = "completed"
+            self._finalize_running_agents(prev, prev.status)
             sealed = prev
-            logger.info("[WF_DBG WorkflowRunState] phase %s -> completed (sealed on switch to %s)",
-                        prev.name, phase_name)
+            logger.info("[WF_DBG WorkflowRunState] phase %s -> %s (sealed on switch to %s)",
+                        prev.name, prev.status, phase_name)
 
         self._last_phase = target
         return target, sealed
@@ -801,8 +811,21 @@ class WorkflowRunState(BaseModel):
     def _seal_child_and_propagate(self, phase: WorkflowPhaseState) -> dict:
         """Seal child phase when all its agents are done, then try sealing parent."""
         if phase.phase_type == "child" and self._all_agents_terminal(phase):
-            phase.status = "completed"
-            logger.info("[WF_DBG child] sealed child phase=%s (all agents done)", phase.name)
+            # Phase status mirrors its agents by priority:
+            #   any stopped → stopped (external termination wins)
+            #   all failed  → failed (every agent errored)
+            #   otherwise   → completed (at least one completed, partial OK)
+            statuses = [a.status for a in phase.agents] if phase.agents else []
+            if statuses and any(s == "stopped" for s in statuses):
+                phase.status = "stopped"
+            elif statuses and all(s == "failed" for s in statuses):
+                phase.status = "failed"
+            else:
+                phase.status = "completed"
+            logger.info(
+                "[WF_DBG child] sealed child phase=%s (all agents done, status=%s)",
+                phase.name, phase.status,
+            )
             parent = self._propagate_child_completion_to_parent(phase)
             if parent is not None:
                 # Parent just sealed — push parent + child together.
@@ -936,13 +959,24 @@ class WorkflowRunState(BaseModel):
                 else self._find_parent_author_phase()
             )
             if parent is not None and parent.status == "running":
-                parent.status = "completed"
-                self._finalize_running_agents(parent, "completed")
+                # Parent status mirrors its children's agents by priority:
+                #   any stopped → stopped (external termination wins)
+                #   all failed  → failed (every agent errored)
+                #   otherwise   → completed (at least one completed)
+                all_child_agents = [a for ph in siblings for a in ph.agents]
+                statuses = [a.status for a in all_child_agents]
+                if statuses and any(s == "stopped" for s in statuses):
+                    parent.status = "stopped"
+                elif statuses and all(s == "failed" for s in statuses):
+                    parent.status = "failed"
+                else:
+                    parent.status = "completed"
+                self._finalize_running_agents(parent, parent.status)
                 # Parent totals are a derived sum over its child cards — refresh
                 # after sealing so its completed_agent_count reflects the just-sealed
                 # children, not only its own (possibly empty) direct-agent list.
                 self._refresh_parent_counts(parent)
-                logger.info("[WF_DBG child] sealed parent phase=%s (all sibling child phases done)", parent.name)
+                logger.info("[WF_DBG child] sealed parent phase=%s (all sibling child phases done, status=%s)", parent.name, parent.status)
                 return parent
         return None
 
