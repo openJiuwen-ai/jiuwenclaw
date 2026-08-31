@@ -3183,27 +3183,36 @@ class ProcessRuntime(RuntimeAdapter):
         except Exception:  # noqa: BLE001 - best-effort, 读注册表失败不阻断创建
             _preinstalled = set()
         _t_acl0 = time.perf_counter()
+        desktop_data_dir = win_acl.resolve_desktop_data_dir()
+
+        def _under_desktop(p: str) -> bool:
+            if not desktop_data_dir or not p:
+                return False
+            try:
+                left = os.path.normcase(str(Path(os.path.expandvars(os.path.expanduser(desktop_data_dir))).resolve()))
+                right = os.path.normcase(str(Path(os.path.expandvars(os.path.expanduser(p))).resolve()))
+            except OSError:
+                return False
+            return right == left or right.startswith(left + os.sep)
+
+        # agent workspace / skills 在桌面 dataDir 下, 由 apply_desktop_data_rw
+        # 按目录走访授权 (每个 skill 子目录打 RW ACE; node_modules 只改自身不扫内部).
+        # 不对整棵 workspace 做 SetNamedSecurityInfo 全树传播: 扫到受保护文件会
+        # WinError 5 导致整段失败, 所有 skill 都拿不到写权限.
+        _acl_write = [p for p in allow_write_paths if not _under_desktop(p)]
+        _acl_read = [p for p in allow_read_paths if not _under_desktop(p)]
         acl_paths = win_acl.apply_sandbox_acl(
             workspace,
-            allow_write_paths,
+            _acl_write,
             deny_write_paths,
-            allow_read=allow_read_paths,
+            allow_read=_acl_read,
             deny_read=deny_read_paths,
             sandbox_user_sid=sandbox_user_sid,
             preinstalled_read_paths=_preinstalled,
         )
-        desktop_data_dir = (os.environ.get("JIUWENBOX_DESKTOP_DATA_DIR") or "").strip()
-        if not desktop_data_dir:
-            _swarm_data = (os.environ.get("JIUWENSWARM_DATA_DIR") or "").strip()
-            if _swarm_data:
-                try:
-                    _swarm_parent = Path(_swarm_data).expanduser().resolve().parent
-                    if _swarm_parent.name.lower() == "claw-desktop":
-                        desktop_data_dir = str(_swarm_parent)
-                except OSError:
-                    pass
         if desktop_data_dir:
             try:
+                # 桌面 dataDir 整树可读可写, 不做 deny / 只读限制 (含 skills).
                 _desktop_acl = win_acl.apply_desktop_data_rw(
                     desktop_data_dir,
                     sandbox_user_sid=sandbox_user_sid,

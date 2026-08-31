@@ -27,11 +27,9 @@ windows:
     # 沙箱可写路径 (合成 SID 授 Allow Write+Execute+Delete). 第一个路径作为沙箱 workspace 根.
     allow_write:
       - "{{ workspace }}"
-    # 沙箱可读路径 (合成 SID + 真实 SID 授 Allow Read+Execute). runner 第一跳用真实 SID, 合成 SID 的 ACE 不生效,
-    # apply_sandbox_acl 会给真实 SID 也 grant Read. skill 脚本目录必须列出, 否则 node cli.js 读不到 skill 模板.
-    allow_read:
-      # skill 脚本目录 (pptx-craft 等), 经 JIUWENBOX_SKILLS_DIR env 注入实际路径. 未注入时跳过 (os.path.exists 守护).
-      - "%JIUWENBOX_SKILLS_DIR%"
+    # 沙箱可读路径 (合成 SID + 真实 SID 授 Allow Read+Execute).
+    # 不再单独授 skills: 可读范围由 allow_write + claw-desktop 数据目录 ACL 覆盖.
+    allow_read: []
     # 在 allow 范围内精细化封锁 (Deny Write).
     deny_write:
       - "{{ workspace }}/.git"
