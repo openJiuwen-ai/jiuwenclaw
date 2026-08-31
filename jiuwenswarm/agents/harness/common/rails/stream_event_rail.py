@@ -268,6 +268,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         ) or "cn"
 
     def _read_image_multimodal_enabled(self) -> bool:
+        if self._deep_agent is None:
+            return False
         return should_enable_read_image_multimodal(self._deep_agent)
 
     def _tool_interrupted_message(self, tool_name: str) -> str:
