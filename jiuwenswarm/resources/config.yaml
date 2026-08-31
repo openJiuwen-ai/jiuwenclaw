@@ -1017,6 +1017,8 @@ permissions:
   enabled: false
   schema: tiered_policy
   permission_mode: normal
+  # manual keeps the existing approval flow; auto enables Smart Approval.
+  mode: manual
 
   defaults:
     "*": "allow"
