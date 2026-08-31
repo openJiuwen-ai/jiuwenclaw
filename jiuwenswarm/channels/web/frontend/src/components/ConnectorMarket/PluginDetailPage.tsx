@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronLeft, Trash2, Plus, Wrench, Link2, Plug, Loader2, X, ExternalLink, Pencil } from 'lucide-react';
 import { usePluginPackageStore } from '../../stores/pluginPackageStore';
@@ -68,11 +68,6 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
   const [installing, setInstalling] = useState(false);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [uninstalling, setUninstalling] = useState(false);
-  // "使用"触发的连接续跑连完要不要自动跳转会话——见文件头注释，用 ref 不用 state，避免
-  // handleUse 里同步 set 完标记又同步起串行连接时，串行连接的收尾闭包读到本次渲染里还没生效
-  // 的旧值。
-  const pendingUseAfterConnectRef = useRef(false);
-
   useEffect(() => {
     loadDetail(id);
   }, [id, loadDetail]);
@@ -93,14 +88,11 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
   }, [installPending]);
 
   // §1.6.4 已装重连：直接用 detail.pendingConnectors 连，连完只刷新 detail（**不**再调
-  // install——文档原文强调了两次"全程不调 install"）。
+  // install——文档原文强调了两次"全程不调 install"）。连完不再自动跳转会话——"使用"按钮在
+  // 未就绪时已 disabled（2026-08-29 用户要求待连接状态使用按钮不可用），连接由断联 banner
+  // 触发，连完留在详情页让用户自己点"使用"。
   const reconnectFlow = usePendingConnectorFlow(() => {
-    void loadDetail(id).then(() => {
-      if (pendingUseAfterConnectRef.current) {
-        pendingUseAfterConnectRef.current = false;
-        onUse?.();
-      }
-    });
+    void loadDetail(id);
   });
 
   if (!detail) return null;
@@ -116,15 +108,11 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
     setInstalling(false);
   }
 
-  // "使用"：已就绪直接跳转；未就绪（已装但依赖 connector 未连）先走连接续跑，连完自动跳转
-  // （§1.6.4，全程不调 install）。未安装时这个按钮不渲染（见下方 JSX 的 installed 门控）。
+  // "使用"：仅在依赖 connector 已就绪（linked）时可点——按钮在 !linked 时 disabled（见下方
+  // JSX），进来时必然已就绪，直接跳转。未就绪时的连接走断联 banner 的"连接MCP"，不再由
+  // "使用"按钮承担触发连接续跑的职责（2026-08-29 用户要求：待连接状态使用按钮不可用）。
   function handleUse() {
-    if (linked) {
-      onUse?.();
-      return;
-    }
-    pendingUseAfterConnectRef.current = true;
-    reconnectFlow.start(detail.pendingConnectors ?? []);
+    if (linked) onUse?.();
   }
 
   async function handleUninstall() {
@@ -184,7 +172,9 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
               会直接拒绝，不是隐式 upsert，见 backend-requests.md 需求13），先做降级占位：按钮
               可见，点击提示"等待后端支持"，不假装真的能保存。等后端补上编辑接口后再接成真实表单
               （参照 McpDetailPage.tsx 的 onEdit + RegisterMcpPage editName 回填这一套做法）。 */}
-          {detail.source === 'local' && (
+          {/* 2026-08-29 用户要求：自定义插件的编辑按钮先全部隐藏（隐藏不删除），等后端编辑接口
+              就绪后去掉下面的 `&& false` 即可恢复原占位逻辑。 */}
+          {detail.source === 'local' && false && (
             <DetailLinkButton
               icon={<Pencil size={14} />}
               label={t('connectorMarket.card.edit')}
@@ -204,7 +194,7 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
             <button
               type="button"
               onClick={handleUse}
-              disabled={reconnectFlow.active}
+              disabled={!linked || reconnectFlow.active}
               className="flex items-center gap-1 text-[13px] text-text hover:text-[color:var(--color-chat-accent)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               <NewConversationIcon size={14} />

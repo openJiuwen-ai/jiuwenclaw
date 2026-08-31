@@ -480,7 +480,8 @@ export function MarketplacePage({
         </div>
       </div>
 
-      {topTab === 'mcp' && categoryTabs.length > 1 && (
+      {/* 2026-08-29 MCP 广场目前都不带 tag（category 多为空），分类 tab 行先隐藏——去掉 false 即恢复 */}
+      {false && topTab === 'mcp' && categoryTabs.length > 1 && (
         <div className="mb-5 flex flex-wrap items-center">
           {categoryTabs.map((tab, index) => (
             <span key={tab.key} className="flex items-center">
