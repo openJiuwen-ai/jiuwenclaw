@@ -7,9 +7,13 @@ from __future__ import annotations
 import hashlib
 import os
 from dataclasses import dataclass
+from typing import Any
 
 import aiohttp
+import httpx
 
+from jiuwenswarm.common.local_proxy_auth import with_local_proxy_bearer
+from jiuwenswarm.common.np_transport import is_named_pipe_url, named_pipe_transport_for
 from jiuwenswarm.common.utils import logger
 
 
@@ -20,6 +24,31 @@ class XiaoyiObsUploadConfig:
     base_url: str
     api_key: str
     uid: str
+
+
+async def _post_control_plane(
+    session: aiohttp.ClientSession,
+    pipe_client: httpx.AsyncClient | None,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    step: str,
+) -> dict[str, Any]:
+    """phase1/3 控制面 POST：np:// base 经 httpx + 命名管道 transport，否则走 aiohttp。
+
+    打本地代理（np:// 管道 / loopback 直连形态）时补 Authorization: Bearer
+    <uploadToken>（密钥包下发，取不到则不带，兼容旧版桌面零鉴权代理）。
+    """
+    headers = with_local_proxy_bearer(headers, url)
+    if pipe_client is not None:
+        resp = await pipe_client.post(url, json=payload, headers=headers)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"{step} failed: HTTP {resp.status_code}")
+        return resp.json()
+    async with session.post(url, json=payload, headers=headers) as resp:
+        if not resp.ok:
+            raise RuntimeError(f"{step} failed: HTTP {resp.status}")
+        return await resp.json()
 
 
 async def upload_local_file_public_url(
@@ -43,6 +72,14 @@ async def upload_local_file_public_url(
     """
     base = config.base_url.rstrip("/")
     uid = config.uid
+    # np:// base（桌面命名管道形态）：phase1/3 走管道 httpx；
+    # phase2（OBS 签名 URL 直传，真实外网地址）仍用传入的 aiohttp session。
+    pipe_client: httpx.AsyncClient | None = None
+    if is_named_pipe_url(base):
+        pipe_client = httpx.AsyncClient(
+            transport=named_pipe_transport_for(base),
+            timeout=httpx.Timeout(300.0, connect=10.0),
+        )
     try:
         with open(file_path, "rb") as f:
             file_content = f.read()
@@ -65,14 +102,13 @@ async def upload_local_file_public_url(
             "x-api-key": config.api_key,
             "x-request-from": "openclaw",
         }
-        async with session.post(prepare_url, json=prepare_data, headers=headers) as resp:
-            if not resp.ok:
-                raise RuntimeError(f"Prepare failed: HTTP {resp.status}")
-            prepare_resp = await resp.json()
-            if prepare_resp.get("code") != "0":
-                raise RuntimeError(
-                    f"Prepare failed: {prepare_resp.get('desc', 'Unknown error')}"
-                )
+        prepare_resp = await _post_control_plane(
+            session, pipe_client, prepare_url, prepare_data, headers, "Prepare"
+        )
+        if prepare_resp.get("code") != "0":
+            raise RuntimeError(
+                f"Prepare failed: {prepare_resp.get('desc', 'Unknown error')}"
+            )
         object_id = prepare_resp.get("objectId")
         draft_id = prepare_resp.get("draftId")
         upload_infos = prepare_resp.get("uploadInfos", [])
@@ -93,10 +129,9 @@ async def upload_local_file_public_url(
         if need_preview:
             cq_data["needPreview"] = True
             cq_data["expireTime"] = int(expire_time)
-        async with session.post(cq_url, json=cq_data, headers=headers) as resp:
-            if not resp.ok:
-                raise RuntimeError(f"completeAndQuery failed: HTTP {resp.status}")
-            cq_resp = await resp.json()
+        cq_resp = await _post_control_plane(
+            session, pipe_client, cq_url, cq_data, headers, "completeAndQuery"
+        )
         file_url = (cq_resp.get("fileDetailInfo") or {}).get("url") or ""
         if not file_url:
             raise RuntimeError("completeAndQuery 未返回 fileDetailInfo.url")
@@ -106,3 +141,6 @@ async def upload_local_file_public_url(
     except Exception as e:
         logger.error("[upload_local_file_public_url] %s", e)
         raise RuntimeError(f"OBS 上传失败: {e}") from e
+    finally:
+        if pipe_client is not None:
+            await pipe_client.aclose()

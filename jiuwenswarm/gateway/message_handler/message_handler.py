@@ -679,9 +679,16 @@ class MessageHandler(ABC):
             "mode": mode,
             "is_swarm": ChannelMode.is_team_mode(mode),
         }
-        for name in ("project_id", "project_dir", "work_mode", "model_name"):
+        for name in ("project_id", "work_mode", "model_name"):
             if params.get(name) is not None:
                 create_params[name] = params[name]
+        # project_dir 仅在伴随真实 project_id 时透传：AgentServer 侧绑定规则
+        #（project_store.resolve_session_project_binding 规则3）拒绝「仅 project_dir
+        # 无 project_id」的 session.create（BAD_REQUEST），曾致 xiaoyi 渠道带
+        # clientVariables.workspace 的消息全灭且无回复。工作空间改由每轮 chat.send
+        # 的 project_dir/cwd 生效（与桌面端本地对话同一机制，无需会话级绑定）。
+        if params.get("project_id") and params.get("project_dir") is not None:
+            create_params["project_dir"] = params["project_dir"]
         env = e2a_from_agent_fields(
             request_id=f"session-create-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
             channel_id=channel_type,
@@ -718,6 +725,11 @@ class MessageHandler(ABC):
             async with self._external_session_alias_lock:
                 resolved = self._external_session_aliases.get(key)
                 if resolved is None:
+                    logger.info(
+                        "[MessageHandler] 分配通道会话(session.create): channel=%s external=%s",
+                        channel_id,
+                        external_id,
+                    )
                     raw_mode = str((msg.params or {}).get("mode") or "agent")
                     try:
                         mode = ChannelMode(raw_mode)
@@ -727,6 +739,12 @@ class MessageHandler(ABC):
                         msg, ChannelControlState(mode=mode)
                     )
                     self._external_session_aliases[key] = resolved
+                    logger.info(
+                        "[MessageHandler] 通道会话分配完成: channel=%s external=%s -> %s",
+                        channel_id,
+                        external_id,
+                        resolved,
+                    )
         metadata = dict(msg.metadata or {})
         metadata.setdefault("external_session_id", external_id)
         msg.metadata = metadata
@@ -3526,8 +3544,18 @@ class MessageHandler(ABC):
                 msg = await self.consume_user_messages(timeout=None)
                 if msg is None:
                     continue
-                
-         
+
+                # 分段排障日志：消息从入队到派发的每一跳都要可观测
+                # （曾出现入队后无派发、无任何回复的事故，靠日志定位卡点）
+                logger.info(
+                    "[MessageHandler] 出队处理: id=%s method=%s channel_id=%s session_id=%s queue_depth=%d",
+                    msg.id,
+                    getattr(msg, "req_method", ""),
+                    msg.channel_id,
+                    msg.session_id,
+                    self._user_messages.qsize(),
+                )
+
                 # 先处理受控通道的 Channel 控制指令（如 /new_session、/mode、/skills list）
                 if await self._handle_channel_control(msg):
                     # 该消息仅用于修改 session/mode，已给 Channel 回复提示，不再转发给 Agent

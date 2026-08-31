@@ -177,13 +177,20 @@ if (Test-Truthy $BundleNode) {
 Write-Host "=== JiuwenSwarm Build Exe ===" -ForegroundColor Cyan
 Write-Host "Project root: $ProjectRoot`n" -ForegroundColor Gray
 
-# 1. Install dependencies
-Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev)..." -ForegroundColor Yellow
+# 统一走阿里云镜像，避免 uv lock 把 uv.lock 里的镜像 URL 改写成 pypi.org 噪声
+$env:UV_INDEX_URL = "https://mirrors.aliyun.com/pypi/simple/"
+
+# 1. Refresh openjiuwen hotfix pin + install dependencies
+Write-Host "[1/6] Refreshing openjiuwen hotfix pin (br_0.1.16.post2.hotfix latest)..." -ForegroundColor Yellow
+uv lock --upgrade-package openjiuwen
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Host "`n[2/6] Installing Python dependencies (uv sync --extra dev)..." -ForegroundColor Yellow
 uv sync --extra dev
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# 2. Build frontend
-Write-Host "`n[2/4] Building frontend (jiuwenswarm/channels/web/frontend)..." -ForegroundColor Yellow
+# 3. Build frontend
+Write-Host "`n[3/6] Building frontend (jiuwenswarm/channels/web/frontend)..." -ForegroundColor Yellow
 Push-Location (Join-Path $ProjectRoot "jiuwenswarm\channels\web\frontend")
 $WebDist = Join-Path $ProjectRoot "jiuwenswarm\channels\web\dist"
 if (Test-Path $WebDist) { Remove-Item $WebDist -Recurse -Force }
@@ -198,8 +205,8 @@ npm run build
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
 Pop-Location
 
-# 3. Run PyInstaller
-Write-Host "`n[3/4] Running PyInstaller..." -ForegroundColor Yellow
+# 4. Run PyInstaller
+Write-Host "`n[4/6] Running PyInstaller..." -ForegroundColor Yellow
 uv run pyinstaller scripts\jiuwenswarm.spec --noconfirm
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -216,17 +223,17 @@ if ($VerifyProcess.ExitCode -ne 0) {
     throw "Frozen A2UI bundle verification failed. See ~/.jiuwenswarm/logs/jiuwenswarm_exe_error.log"
 }
 
-# 3.5 Bundle Node.js runtime for browser tools
+# 5. Bundle Node.js runtime for browser tools
 if (Test-Truthy $BundleNode) {
-    Write-Host "`n[3.5/4] Bundling Node.js runtime..." -ForegroundColor Yellow
+    Write-Host "`n[5/6] Bundling Node.js runtime..." -ForegroundColor Yellow
     $DistDir = Join-Path $ProjectRoot "dist\jiuwenswarm"
     Copy-NodeRuntime -SourceDir $NodeSource -DistDir $DistDir
 } else {
-    Write-Host "`n[3.5/4] Skipping bundled Node.js runtime (BUNDLE_NODE=$BundleNode)" -ForegroundColor Yellow
+    Write-Host "`n[5/6] Skipping bundled Node.js runtime (BUNDLE_NODE=$BundleNode)" -ForegroundColor Yellow
 }
 
-# 4. Build installer (Inno Setup)
-Write-Host "`n[4/4] Building installer (Inno Setup)..." -ForegroundColor Yellow
+# 6. Build installer (Inno Setup)
+Write-Host "`n[6/6] Building installer (Inno Setup)..." -ForegroundColor Yellow
 $IsccPaths = @(
     "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",

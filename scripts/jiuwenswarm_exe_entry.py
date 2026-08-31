@@ -34,6 +34,13 @@ if getattr(sys, "frozen", False):
     # 设置 UTF-8 编码，避免 bash 操作乱码
     os.environ["PYTHONIOENCODING"] = "utf-8"
     os.environ["PYTHONUTF8"] = "1"
+    # openjiuwen shell_operation 在 cp936 系统上给 shell 子进程注入 LANG=C.GBK，
+    # cygwin 据此把 UTF-16 命令行转成 GBK 字节（heredoc/管道中文变 GBK），与
+    # PYTHONUTF8 的 UTF-8 stdin 解码错位 → UnicodeDecodeError；冻结解释器自身
+    # 不认 PYTHONUTF8 启动开关（PyInstaller isolated），只能靠 LC_ALL 经
+    # os.environ → exec_env 传进子进程，cygwin 优先级 LC_ALL > LANG 压住注入。
+    # setdefault：尊重独立运行场景下用户显式设置的 LC_ALL。
+    os.environ.setdefault("LC_ALL", "C.UTF-8")
     if os.name == "nt":
         # Windows 控制台 UTF-8 模式
         os.environ["PYTHONLEGACYWINDOWSSTDIO"] = "utf-8"
@@ -95,6 +102,21 @@ if getattr(sys, "frozen", False):
             _original_popen_init(self, *args, creationflags=creationflags | _CREATE_NO_WINDOW, **kwargs)
 
         subprocess.Popen.__init__ = _patched_popen_init
+
+        # botpy（QQ 渠道 SDK）在 botpy/logging.py 模块级执行 os.system("")，
+        # 借空调用触发控制台 ANSI 初始化。os.system 走 C 运行时 _wsystem，
+        # 不经过 subprocess.Popen，上面的 CREATE_NO_WINDOW 补丁盖不住；
+        # console=False 的 GUI 进程没有控制台，该调用会新建一个 conhost
+        # 窗口一闪而过（gateway 每次启动必闪）。GUI 形态下空命令本就无
+        # 意义，直接按成功返回；非空命令保持原行为（本项目代码不调用）。
+        _original_system = os.system
+
+        def _patched_system(command):
+            if not str(command or "").strip():
+                return 0
+            return _original_system(command)
+
+        os.system = _patched_system
 
 _DESKTOP_RUN_AGENT = "--desktop-run-agent"
 _DESKTOP_RUN_GATEWAY = "--desktop-run-gateway"
@@ -383,6 +405,26 @@ def _dispatch() -> None:
     # frozen exe (console=False) 主进程的 sys.stdout/stderr 可能为 None
     if getattr(sys, "frozen", False):
         _ensure_stdio()
+    # 桌面集成形态：密钥包经 stdin 首帧下发（不落 env/命令行——同用户进程可读）。
+    # 在任何子命令分发前读取（agent/gateway 的消费点启动即需要）。
+    if _pop_flag("--desktop-secrets-stdin"):
+        from jiuwenswarm.common.secrets_bootstrap import (
+            bootstrap_secrets_from_stdin,
+        )
+        from jiuwenswarm.server.e2a_transports import (
+            e2a_stdio_mode_enabled,
+            redirect_stdout_to_stderr,
+        )
+
+        bootstrap_secrets_from_stdin()
+        if e2a_stdio_mode_enabled() and _DESKTOP_RUN_AGENT in sys.argv:
+            # E2A stdio 形态（密钥包 e2aTransport=='stdio'，非「密钥包存在」——
+            # 迁移期桌面默认仍走 WS，stdout 彼时仍是日志通道）：fd 1 只承载协议帧，
+            # print/openjiuwen console 日志（default 后端 StreamHandler(sys.stdout)、
+            # loguru console sink 均为 sys.stdout，logger/sink 创建时即捕获该对象）
+            # 一律改道 stderr。必须在分发（import app_agentserver 触发模块级
+            # configure_log）之前完成；帧由 StdioMessageTransport 经 os.write(1) 直写。
+            redirect_stdout_to_stderr()
     # 已知子命令分发（不检查单实例锁）
     if len(sys.argv) >= 2 and sys.argv[1].lower() == "init":
         sys.argv.pop(1)

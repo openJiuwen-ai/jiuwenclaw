@@ -193,3 +193,68 @@ def apply_openai_sse_invoke_patch() -> None:
     OpenAIModelClient._sse_invoke_patch_applied = True  # pylint: disable=protected-access
     _PATCH_APPLIED = True
     logger.info("[llm_sse_patch] OpenAIModelClient._parse_response SSE 兼容补丁已应用")
+
+
+def apply_openai_sse_stream_patch() -> None:
+    """给 ``OpenAIModelClient._parse_stream_chunk`` 打补丁以兼容网关定制流式格式。
+
+    celia sse-api 网关的流式 chunk 把内容放在 ``choices[0].message.token_text``
+    （思考在 ``reasoning_token_text``），而非标准 OpenAI 的 ``choices[0].delta.content``。
+    openai SDK 对该形态解析出 ``delta=None``（Choice extra=allow，message 字段保留在
+    model_extra/属性上），openjiuwen 原解析读 ``delta.content`` → 内容静默为空
+    （content_len=0、对话空返回）。本补丁在 delta 缺失时从 message.token_text /
+    reasoning_token_text 兜底抽取；delta 在场（标准格式）时完全不介入。
+
+    幂等；非网关格式零影响。
+    """
+    try:
+        from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
+            OpenAIModelClient,
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning("[llm_sse_patch] 未能导入 OpenAIModelClient，跳过流式补丁: %s", exc)
+        return
+
+    if getattr(OpenAIModelClient, "_sse_stream_patch_applied", False):
+        return
+
+    _orig_parse_stream_chunk = OpenAIModelClient._parse_stream_chunk  # pylint: disable=protected-access
+
+    def _parse_stream_chunk_gateway_compat(self: Any, chunk: Any) -> Any:
+        parsed = _orig_parse_stream_chunk(self, chunk)
+        try:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                return parsed
+            choice = choices[0]
+            # 标准格式：delta 在场即由原解析处理，不介入
+            if getattr(choice, "delta", None) is not None:
+                return parsed
+            # 网关定制格式：message 字段经 SDK extra=allow 保留
+            message = getattr(choice, "message", None)
+            if not isinstance(message, dict):
+                return parsed
+            token_text = message.get("token_text") or ""
+            reasoning_token_text = message.get("reasoning_token_text") or ""
+            if not token_text and not reasoning_token_text:
+                return parsed
+            # 原解析对带 usage 的无 delta chunk 也会返回带 usage_metadata 的 chunk，沿用
+            usage_metadata = getattr(parsed, "usage_metadata", None) if parsed is not None else None
+            finish_reason = (getattr(parsed, "finish_reason", None) if parsed is not None else None) or "null"
+            from openjiuwen.core.foundation.llm.schema.message_chunk import (
+                AssistantMessageChunk,
+            )
+
+            return AssistantMessageChunk(
+                content=token_text,
+                reasoning_content=reasoning_token_text or None,
+                tool_calls=None,
+                usage_metadata=usage_metadata,
+                finish_reason=finish_reason,
+            )
+        except Exception:  # noqa: BLE001 - 兜底解析绝不影响原链路
+            return parsed
+
+    OpenAIModelClient._parse_stream_chunk = _parse_stream_chunk_gateway_compat  # pylint: disable=protected-access
+    OpenAIModelClient._sse_stream_patch_applied = True  # pylint: disable=protected-access
+    logger.info("[llm_sse_patch] OpenAIModelClient._parse_stream_chunk 网关流式格式兼容补丁已应用")

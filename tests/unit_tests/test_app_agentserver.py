@@ -28,11 +28,17 @@ async def test_run_does_not_delete_agent_teams_directory(monkeypatch: pytest.Mon
             return None
 
     class _FakeServer:
-        async def start(self) -> None:
+        async def start(self, *args, **kwargs) -> None:
+            # 桌面集成改造给 start 增加 listen_tcp 关键字参数，fake 照单全收。
             server_events.append("start")
 
         async def stop(self) -> None:
             server_events.append("stop")
+
+        async def run_connection(self, *args, **kwargs) -> None:
+            # 桌面 E2A 通道建立需要真实 server 的 run_connection 方法（桌面集成改造引入），
+            # 本用例只关心 agent_teams 目录不被清理，给空实现即可。
+            return None
 
     class _FakeExtensionManager:
         def __init__(self, registry) -> None:

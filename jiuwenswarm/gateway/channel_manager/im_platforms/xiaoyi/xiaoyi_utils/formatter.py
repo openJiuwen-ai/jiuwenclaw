@@ -551,12 +551,11 @@ def should_send_as_status_update(event_type: EventType | None) -> bool:
         return False
 
     # Status update 用于以下事件：
-    # - CHAT_TOOL_CALL: 工具调用
-    # - CHAT_TOOL_RESULT: 工具结果
     # - CHAT_PROCESSING_STATUS: 处理状态
+    # 注：CHAT_TOOL_CALL / CHAT_TOOL_RESULT 不再转 status-update
+    # （「正在使用工具：xxx」逻辑已移除）；进行中的 todo 步骤文案由
+    # todo.updated 帧的 activeForm 经 xiaoyi_connect 单独下发。
     status_events = {
-        EventType.CHAT_TOOL_CALL,
-        EventType.CHAT_TOOL_RESULT,
         EventType.CHAT_PROCESSING_STATUS,
     }
 
