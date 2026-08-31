@@ -97,6 +97,10 @@ def test_prewarm_is_enabled_unless_the_environment_opts_out(
         "jiuwenswarm.server.runtime.agent_warm_pool.get_agent_sessions_dir",
         lambda: tmp_path,
     )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.local_env_config.is_enterprise",
+        lambda: False,
+    )
 
     def build() -> AgentWarmPool:
         return AgentWarmPool(_FakeManager(_FakeRootAgent()))
@@ -109,6 +113,22 @@ def test_prewarm_is_enabled_unless_the_environment_opts_out(
 
     monkeypatch.setenv("JIUWENSWARM_AGENT_PREWARM", "1")
     assert build()._enabled is True
+
+
+def test_prewarm_disabled_on_enterprise_even_if_env_opts_in(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_warm_pool.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.local_env_config.is_enterprise",
+        lambda: True,
+    )
+    monkeypatch.setenv("JIUWENSWARM_AGENT_PREWARM", "1")
+    pool = AgentWarmPool(_FakeManager(_FakeRootAgent()))
+    assert pool._enabled is False
 
 
 @pytest.mark.asyncio

@@ -422,14 +422,31 @@ async def collect_params(request: Any) -> dict[str, Any]:
     return params
 
 
-def request_context(request: Any) -> tuple[str, str, str | None, str | None]:
-    """从请求头/路径提取 (request_id, channel_id, session_id, user_id)。"""
+def request_context(
+    request: Any,
+) -> tuple[str, str, str | None, str | None, dict[str, str]]:
+    """从请求头/路径提取 (request_id, channel_id, session_id, user_id, identity)。
+
+    ``identity`` 含 ``X-User-Id`` 与 ``X-Group/Bot/Gateway-Id``，由
+    :func:`apply_routing_metadata` 拆到顶层 ``user_id`` + ``metadata.routing``。
+    ``gateway_id`` 仅重建保留，Agent 业务不强制消费。
+    """
+    from jiuwenswarm.common.request_identity import normalize_routing_identity
+
     headers = request.headers
     request_id = headers.get("x-request-id") or new_request_id()
     channel_id = headers.get("x-channel-id") or "web"
     session_id = (request.path_params or {}).get("session_id") or headers.get("x-session-id")
     user_id = headers.get("x-user-id")
-    return request_id, channel_id, session_id, user_id
+    routing = normalize_routing_identity(
+        {
+            "user_id": user_id,
+            "group_id": headers.get("x-group-id"),
+            "bot_id": headers.get("x-bot-id"),
+            "gateway_id": headers.get("x-gateway-id"),
+        }
+    )
+    return request_id, channel_id, session_id, user_id, routing
 
 
 def _envelope_wants_stream(request: Any, envelope: dict[str, Any]) -> bool:
@@ -483,7 +500,7 @@ def build_fastapi_app(server: AgentHTTPServer) -> Any:
     def _make_endpoint(spec: RouteSpec) -> Callable:
         async def endpoint(request: Request) -> JSONResponse:
             params = await collect_params(request)
-            request_id, channel_id, session_id, user_id = request_context(request)
+            request_id, channel_id, session_id, user_id, routing = request_context(request)
             for key, default in spec.param_defaults.items():
                 if not params.get(key):
                     params[key] = (
@@ -496,6 +513,7 @@ def build_fastapi_app(server: AgentHTTPServer) -> Any:
                 session_id=session_id,
                 channel_id=channel_id,
                 user_id=user_id,
+                routing=routing,
             )
             if payload.get("ok") and status == 200:
                 status = spec.status
@@ -548,7 +566,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
         from jiuwenswarm.server.transports.push_registry import get_push_registry
         from jiuwenswarm.server.transports.sink import STREAM_DONE, SSESink
 
-        request_id, channel_id, session_id, _user_id = request_context(request)
+        request_id, channel_id, session_id, _user_id, _routing = request_context(request)
         qp = request.query_params
         session_filter = qp.get("session_id") or session_id
         channel_filter = qp.get("channel_id")
@@ -592,7 +610,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
 
     async def _chat(request: Request, method: str) -> Any:
         params = await collect_params(request)
-        request_id, channel_id, session_id, user_id = request_context(request)
+        request_id, channel_id, session_id, user_id, routing = request_context(request)
         session_id = session_id or params.get("session_id")
         if wants_stream(request, params):
             return EventSourceResponse(
@@ -603,6 +621,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
                     session_id=session_id,
                     channel_id=channel_id,
                     user_id=user_id,
+                    routing=routing,
                 ),
                 headers={"X-Request-Id": request_id},
             )
@@ -613,6 +632,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
             session_id=session_id,
             channel_id=channel_id,
             user_id=user_id,
+            routing=routing,
         )
         return JSONResponse(payload, status_code=status, headers={"X-Request-Id": request_id})
 
@@ -628,7 +648,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
     @app.get(f"{API_PREFIX}/sessions/{{session_id}}/history/stream")
     async def history_stream(request: Request) -> Any:  # noqa: ANN202
         params = await collect_params(request)
-        request_id, channel_id, session_id, user_id = request_context(request)
+        request_id, channel_id, session_id, user_id, routing = request_context(request)
         return EventSourceResponse(
             server.iter_stream(
                 ReqMethod.HISTORY_GET.value,
@@ -637,6 +657,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
                 session_id=session_id,
                 channel_id=channel_id,
                 user_id=user_id,
+                routing=routing,
             ),
             headers={"X-Request-Id": request_id},
         )
@@ -645,7 +666,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
     async def generic_rpc(request: Request) -> Any:  # noqa: ANN202
         """通用透传：任意 ``ReqMethod`` 均可直接调用，覆盖未显式建模的方法。"""
         method = (request.path_params or {}).get("method", "")
-        request_id, channel_id, session_id, user_id = request_context(request)
+        request_id, channel_id, session_id, user_id, routing = request_context(request)
         if not is_valid_req_method(method):
             return JSONResponse(
                 {
@@ -671,6 +692,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
                     session_id=session_id,
                     channel_id=channel_id,
                     user_id=user_id,
+                    routing=routing,
                 ),
                 headers={"X-Request-Id": request_id},
             )
@@ -681,6 +703,7 @@ def _register_special_routes(app: Any, server: AgentHTTPServer) -> None:
             session_id=session_id,
             channel_id=channel_id,
             user_id=user_id,
+            routing=routing,
         )
         return JSONResponse(payload, status_code=status, headers={"X-Request-Id": request_id})
 

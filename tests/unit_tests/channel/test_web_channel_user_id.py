@@ -198,6 +198,7 @@ async def test_web_channel_handle_raw_message_uses_connection_user_id():
     assert len(seen) == 1
     assert seen[0].user_id == "alice"
     assert seen[0].metadata.get("user_id") == "alice"
+    assert "user_id" not in (seen[0].metadata or {}).get("routing", {})
 
 
 @pytest.mark.asyncio

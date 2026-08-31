@@ -25,7 +25,9 @@ class SyncContext:
 
 
 async def build_sync_context(body: BaseModel, method: str) -> SyncContext:
-    raw = body.model_dump(mode="python", exclude_unset=False)
+    # PATCH/PUT 只保留客户端显式传入的字段；exclude_unset=False 会把未传可选字段
+    # 填成 None，再经 model_validate 变成「已设置」，最终把 enabled 等 NOT NULL 列写成 null。
+    raw = body.model_dump(mode="python", exclude_unset=True)
     business = split_business(raw)
     business.pop("jiuwenclaw_id", None)  # 历史字段，忽略
     return SyncContext(

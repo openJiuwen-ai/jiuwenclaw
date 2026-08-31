@@ -941,12 +941,27 @@ class WebWsTransport(BaseWsChannel):
         except Exception:
             _conn_ext = None
         setattr(ws, "_web_request_ext", _conn_ext)
+        # 连接级权威身份：user_id + group/bot/gateway（进站时再拆到顶层 / routing）。
+        from jiuwenswarm.common.request_identity import normalize_routing_identity
+
+        _routing = normalize_routing_identity(
+            _flat_query,
+            {"user_id": connection_user_id} if connection_user_id else None,
+        )
+        setattr(ws, "_web_routing", _routing)
         _ext_set(_conn_ext)
         uid_marker = "" if connection_user_id else " uid_empty=yes"
+        if not _routing.get("bot_id"):
+            logger.warning(
+                "WebChannel 新连接缺少 bot_id: remote=%s routing=%s",
+                remote,
+                _routing,
+            )
         logger.info(
-            "WebChannel 新连接: remote=%s query=%s user_id=%r%s",
+            "WebChannel 新连接: remote=%s query=%s routing=%s user_id=%r%s",
             remote,
             query,
+            _routing,
             connection_user_id,
             uid_marker,
         )
@@ -1191,6 +1206,28 @@ class WebWsTransport(BaseWsChannel):
         # Preserve client top-level is_stream (e.g. command.goal set/resume).
         # chat.send / history.get still become stream in _normalize_gateway_message
         # even when the client omits this field.
+        from jiuwenswarm.common.request_identity import (
+            apply_routing_metadata,
+            normalize_routing_identity,
+        )
+
+        # 权威：顶层 user_id + metadata.routing(group/bot/gateway)；握手 query 仅作 wire 痕迹。
+        _routing = getattr(ws, "_web_routing", None)
+        if not isinstance(_routing, dict) or not _routing:
+            _routing = normalize_routing_identity(
+                _flat_query,
+                {"user_id": req_user_id} if req_user_id else None,
+            )
+        _meta = apply_routing_metadata(
+            {
+                "query": query,
+                "method": method,
+                # V2: 注入 ws_id 供 MessageHandler 构造 WebDeliveryTarget(ws_id=真值)。
+                "ws_id": getattr(ws, "_jiuwen_ws_id", ""),
+            },
+            _routing,
+        )
+
         user_message = Message(
             id=req_id,
             type="req",
@@ -1206,13 +1243,7 @@ class WebWsTransport(BaseWsChannel):
             agent_ref={"mode": _mode, "id": _agent_id},
             user_id=req_user_id,
             metadata=_ext_attach(
-                {
-                    "query": query,
-                    "method": method,
-                    # V2: 注入 ws_id 供 MessageHandler 构造 WebDeliveryTarget(ws_id=真值)。
-                    "ws_id": getattr(ws, "_jiuwen_ws_id", ""),
-                    "user_id": req_user_id,
-                },
+                _meta,
                 ext=getattr(ws, "_web_request_ext", None),
             ),
         )

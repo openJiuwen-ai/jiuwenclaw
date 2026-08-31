@@ -146,6 +146,7 @@ async def dispatch_http_request(
             ("user_id", user_id or ""),
             ("group_id", _get_header(hdrs, "X-Group-Id")),
             ("bot_id", _get_header(hdrs, "X-Bot-Id")),
+            ("gateway_id", _get_header(hdrs, "X-Gateway-Id")),
         ):
             if hv:
                 query[hk] = [hv]
@@ -156,6 +157,25 @@ async def dispatch_http_request(
 
     mode = str(params.get("mode") or "agent")
     agent_id = str(params.get("agent_id") or "default")
+
+    from jiuwenswarm.common.request_identity import (
+        apply_routing_metadata,
+        normalize_routing_identity,
+    )
+
+    _routing = normalize_routing_identity(
+        query,
+        {"user_id": user_id} if user_id else None,
+    )
+    _meta = apply_routing_metadata(
+        {
+            "query": query,
+            "method": method,
+            "ws_id": getattr(outbound, "_jiuwen_ws_id", ""),
+            "transport": "web-http",
+        },
+        _routing,
+    )
 
     user_message = Message(
         id=req_id,
@@ -171,16 +191,7 @@ async def dispatch_http_request(
         app_id=app_id,
         agent_ref={"mode": mode, "id": agent_id},
         user_id=user_id,
-        metadata=_ext_attach(
-            {
-                "query": query,
-                "method": method,
-                "ws_id": getattr(outbound, "_jiuwen_ws_id", ""),
-                "user_id": user_id,
-                "transport": "web-http",
-            },
-            ext=ext,
-        ),
+        metadata=_ext_attach(_meta, ext=ext),
     )
 
     await invoke_web_request(

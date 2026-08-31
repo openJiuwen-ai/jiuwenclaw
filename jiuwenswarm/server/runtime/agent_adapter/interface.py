@@ -2306,7 +2306,9 @@ class JiuWenSwarm:
                     request.request_id, action, session_id,
                 )
                 # Pass protocol fields straight to the Goal capability adapter.
-                goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                goal_result = await adapter.handle_goal_command_structured(
+                    request, session_id=session_id
+                )
                 if goal_result is not None:
                     result_type = goal_result.get("result_type")
                     ok = result_type not in {"goal_error", "goal_confirm_required"}
@@ -2564,7 +2566,9 @@ class JiuWenSwarm:
                 try:
                     adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
                     session_id = self._session_manager.get_session_id(request.session_id)
-                    goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                    goal_result = await adapter.handle_goal_command_structured(
+                        request, session_id=session_id
+                    )
                     if goal_result is None:
                         yield AgentResponseChunk(
                             request_id=request.request_id,

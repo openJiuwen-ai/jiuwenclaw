@@ -2542,7 +2542,12 @@ class JiuWenSwarmDeepAdapter:
         waiters = getattr(lock, "_waiters", None)
         return any(not waiter.cancelled() for waiter in list(waiters or ()))
 
-    async def _get_or_create_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter":
+    async def _get_or_create_session_adapter(
+        self,
+        session_id: str | None,
+        *,
+        request: AgentRequest | None = None,
+    ) -> "JiuWenSwarmDeepAdapter":
         """Return the session-owned adapter, creating and initializing it once."""
         if self._is_session_scoped_adapter:
             self._touch_session_adapter(session_id)
@@ -2561,8 +2566,11 @@ class JiuWenSwarmDeepAdapter:
             config = (
                 dict(self._session_instance_config)
                 if isinstance(self._session_instance_config, dict)
-                else None
+                else {}
             )
+            # 企业版：把当前请求带进 create_instance，才能按 bot_id 加载模型模板。
+            if request is not None:
+                config["request"] = request
             create_started_at = time.monotonic()
             await adapter.create_instance(
                 config,
@@ -4459,13 +4467,17 @@ class JiuWenSwarmDeepAdapter:
         )
         self._enterprise_config = loaded
         if loaded is None:
-            p = request.params if isinstance(request.params, dict) else {}
+            from jiuwenswarm.common.request_identity import web_routing_identity
+
+            identity = web_routing_identity(
+                request.metadata if isinstance(request.metadata, dict) else None
+            )
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] no effective enterprise config loaded "
                 "(group_id=%s bot_id=%s user_id=%s)",
-                p.get("group_id"),
-                p.get("bot_id"),
-                p.get("user_id"),
+                identity.get("group_id"),
+                identity.get("bot_id"),
+                identity.get("user_id"),
             )
 
     def _inject_extension_config_into_inputs(self, inputs: dict[str, Any]) -> None:
@@ -8783,6 +8795,10 @@ class JiuWenSwarmDeepAdapter:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             set_shell_session_id,
         )
+        from jiuwenswarm.common.request_identity import (
+            apply_routing_metadata,
+            web_routing_identity,
+        )
         from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
 
         normalized_channel = str(channel_id or "").strip() or CronTargetChannel.WEB.value
@@ -8792,13 +8808,16 @@ class JiuWenSwarmDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
-        g, b, u = extract_routing_triple(params, normalized_metadata)
+        # 权威：顶层 user_id + metadata.routing；params 仅作本地 cron 已 merge 的补充。
+        g, b, u = extract_routing_triple(normalized_metadata, params)
+        routing = web_routing_identity(normalized_metadata)
         if g:
-            normalized_metadata.setdefault("group_id", g)
+            routing["group_id"] = g
         if b:
-            normalized_metadata.setdefault("bot_id", b)
+            routing["bot_id"] = b
         if u:
-            normalized_metadata.setdefault("user_id", u)
+            routing["user_id"] = u
+        normalized_metadata = apply_routing_metadata(normalized_metadata, routing)
 
         session_metadata: dict[str, Any] = {}
         if isinstance(session_id, str) and session_id.strip():
@@ -11633,7 +11652,9 @@ class JiuWenSwarmDeepAdapter:
                         await self._evict_idle_session_adapters()
             else:
                 # pause/resume：需要 session-scoped adapter 的 StreamEventRail，按原逻辑创建。
-                session_adapter = await self._get_or_create_session_adapter(request.session_id)
+                session_adapter = await self._get_or_create_session_adapter(
+                    request.session_id, request=request
+                )
                 try:
                     return await session_adapter.process_interrupt(request)
                 finally:
@@ -12048,7 +12069,9 @@ class JiuWenSwarmDeepAdapter:
     async def handle_user_answer(self, request: AgentRequest) -> AgentResponse:
         """Handle chat.user_answer request."""
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id, request=request
+            )
             try:
                 return await session_adapter.handle_user_answer(request)
             finally:
@@ -12103,7 +12126,9 @@ class JiuWenSwarmDeepAdapter:
         resolves the pending human-session future on the run's reply topic.
         """
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id, request=request
+            )
             try:
                 return await session_adapter.handle_swarmflow_reply(request)
             finally:
@@ -12221,7 +12246,9 @@ class JiuWenSwarmDeepAdapter:
         if not sid.startswith("heartbeat"):
             return None
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id, request=request
+            )
             try:
                 return await session_adapter.handle_heartbeat(request)
             finally:
@@ -13239,10 +13266,13 @@ class JiuWenSwarmDeepAdapter:
         token_budget: int | None = None,
         max_attempts: int | None = None,
         session_id: str = "default",
+        request: AgentRequest | None = None,
     ) -> dict[str, Any] | None:
         """Map JiuwenSwarm protocol fields to the independent Goal methods."""
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                session_id, request=request
+            )
             try:
                 return await session_adapter.dispatch_goal_control(
                     action=action,
@@ -13400,19 +13430,26 @@ class JiuWenSwarmDeepAdapter:
 
     async def handle_goal_command_structured(
         self,
-        params: dict[str, Any] | None,
-        session_id: str = "default",
+        request: AgentRequest,
+        *,
+        session_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Structured ``command.goal`` endpoint."""
-        raw = params if isinstance(params, dict) else {}
+        """Structured ``command.goal`` endpoint（业务字段取自 ``request.params``）。"""
+        raw = request.params if isinstance(request.params, dict) else {}
         objective = raw.get("objective")
+        sid = (
+            str(session_id).strip()
+            if isinstance(session_id, str) and session_id.strip()
+            else (request.session_id or "default")
+        )
         return await self._dispatch_goal_control(
             action=str(raw.get("action", "get")),
             objective=objective if isinstance(objective, str) else None,
             overwrite_confirmed=bool(raw.get("overwrite_confirmed", False)),
             token_budget=raw.get("token_budget"),
             max_attempts=raw.get("max_attempts"),
-            session_id=session_id,
+            session_id=sid,
+            request=request,
         )
 
     async def _handle_goal_slash_command(
@@ -14476,7 +14513,9 @@ class JiuWenSwarmDeepAdapter:
                 and getattr(self._model.model_config, "model_name", "")
                 or ""
             )
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id, request=request
+            )
             request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
                 with bind_active_office_claw_mcp_tools(
@@ -15071,7 +15110,9 @@ class JiuWenSwarmDeepAdapter:
                 and getattr(self._model.model_config, "model_name", "")
                 or ""
             )
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id, request=request
+            )
             request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
                 with bind_active_office_claw_mcp_tools(

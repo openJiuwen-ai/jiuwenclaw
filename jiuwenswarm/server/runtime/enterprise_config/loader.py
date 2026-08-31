@@ -21,14 +21,15 @@ from .schemas import (
 
 
 def routing_context_from_request(request: AgentRequest | Any) -> RoutingContext:
-    """从 ``request.params`` 解析路由上下文（调用方保证字段格式正确）。"""
-    p = getattr(request, "params", None) or {}
-    if not isinstance(p, dict):
-        p = {}
+    """从顶层 ``user_id`` + ``metadata.routing`` 解析路由上下文。"""
+    from jiuwenswarm.common.request_identity import web_routing_identity
+
+    meta = getattr(request, "metadata", None)
+    identity = web_routing_identity(meta if isinstance(meta, dict) else None)
     return RoutingContext(
-        group_id=str(p.get("group_id") or "").strip(),
-        bot_id=str(p.get("bot_id") or "").strip(),
-        user_id=str(p.get("user_id") or "").strip(),
+        group_id=str(identity.get("group_id") or "").strip(),
+        bot_id=str(identity.get("bot_id") or "").strip(),
+        user_id=str(identity.get("user_id") or "").strip(),
     )
 
 

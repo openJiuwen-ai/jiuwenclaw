@@ -126,11 +126,24 @@ def _parse_json_string(value: str) -> Any:
 
 
 def row_to_dict(row: Any) -> dict[str, Any]:
-    """DB 行 → dict；字符串 JSON 字段自动 parse。"""
+    """DB 行 → dict；字符串 JSON 字段自动 parse。
+
+    注意：SQLAlchemy ``Row`` 上 ``row.keys`` 会按**列名**解析，不能写成
+    ``row.keys()``（会触发 ``NoSuchColumnError: column 'keys'``）。优先用
+    ``_mapping``；aiosqlite.Row 等走类型上的 ``keys`` 方法。
+    """
     if isinstance(row, dict):
         items = dict(row)
     else:
-        items = {k: row[k] for k in row.keys()}
+        mapping = getattr(row, "_mapping", None)
+        if mapping is not None:
+            items = dict(mapping)
+        else:
+            keys_fn = getattr(type(row), "keys", None)
+            if callable(keys_fn):
+                items = {k: row[k] for k in keys_fn(row)}
+            else:
+                items = dict(row)
     out: dict[str, Any] = {}
     for key, value in items.items():
         if isinstance(value, str):

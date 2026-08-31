@@ -9,7 +9,10 @@ from datetime import datetime
 
 from jiuwenswarm.common.e2a.gateway_normalize import E2A_INTERNAL_CONTEXT_KEY
 from jiuwenswarm.common.e2a.models import E2AEnvelope
-from jiuwenswarm.common.request_identity import bind_web_routing_identity
+from jiuwenswarm.common.request_identity import (
+    apply_routing_metadata,
+    web_routing_identity,
+)
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 
@@ -37,18 +40,27 @@ def e2a_to_agent_request(env: E2AEnvelope) -> AgentRequest:
     if isinstance(internal, dict) and internal.get("normalize_failed"):
         raise RuntimeError("e2a_to_agent_request called on fallback envelope; use legacy path")
 
-    if env.user_id:
-        ctx.setdefault("user_id", env.user_id)
-    if env.chat_id and "group_id" not in ctx:
-        ctx.setdefault("group_id", env.chat_id)
     params = dict(env.params or {})
+    # user_id → 顶层；group/bot/gateway → routing。Web 不写入业务 params。
+    identity = web_routing_identity(ctx)
     if env.channel == "web":
-        # Web routing identity belongs to the trusted transport context rather
-        # than the business payload. Bind it here so every Agent handler sees
-        # the same values for WebSocket and HTTP/SSE requests.
-        params = bind_web_routing_identity(params, ctx, override=True)
-    elif env.user_id and "user_id" not in params:
-        params["user_id"] = env.user_id
+        if not identity.get("bot_id"):
+            logger.warning(
+                "[E2A][compat] web request missing bot_id in metadata.routing "
+                "request_id=%s identity=%s",
+                env.request_id,
+                identity,
+            )
+        if env.user_id and not identity.get("user_id"):
+            identity["user_id"] = env.user_id
+    else:
+        if env.user_id and not identity.get("user_id"):
+            identity["user_id"] = env.user_id
+        if env.chat_id and not identity.get("group_id"):
+            identity["group_id"] = env.chat_id
+        if env.user_id and "user_id" not in params:
+            params["user_id"] = env.user_id
+    ctx = apply_routing_metadata(ctx, identity)
     metadata = ctx if ctx else None
     method_str = env.method
     req_method: ReqMethod | None = None
