@@ -36,23 +36,11 @@ spec:
               value: "0.0.0.0"
             - name: JIUWENSWARM_EDITION
               value: "<<JIUWENSWARM_EDITION>>"
-            - name: VITE_JIUWENSWARM_EDITION
-              value: "<<JIUWENSWARM_EDITION>>"
             - name: LOGIN_AUTH_SIMULATE
-              value: "<<LOGIN_AUTH_SIMULATE>>"
-            - name: VITE_LOGIN_AUTH_SIMULATE
-              value: "<<LOGIN_AUTH_SIMULATE>>"
-            - name: LOGIN_AUTH_SIMULATE_AVAILABLE
-              value: "<<LOGIN_AUTH_SIMULATE_AVAILABLE>>"
-            - name: VITE_LOGIN_AUTH_SIMULATE_AVAILABLE
-              value: "<<LOGIN_AUTH_SIMULATE_AVAILABLE>>"
-            - name: USER_WEB_IDP_TARGET
-              value: "<<USER_WEB_IDP_TARGET>>"
-            - name: USER_WEB_MANAGER_TARGET
-              value: "<<USER_WEB_MANAGER_TARGET>>"
+              value: "<<APPLY_PATCH>>"
             - name: FRONTEND_PORT
               value: "<<WEB_HTTP_PORT>>"
-            - name: VITE_WEB_TRANSPORT
+            - name: WEB_TRANSPORT
               value: "http"
             - name: ENTERPRISE_WEB_WS_HOST
               value: "0.0.0.0"

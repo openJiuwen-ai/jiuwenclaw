@@ -23,8 +23,15 @@ export function getWsBase(): string {
 
 export type WebTransport = "websocket" | "http";
 
-/** 构建期选定，运行时不探测。默认 websocket。`a2` 与 `http` 同义。 */
+/** 运行时由 app_web.py 注入 window.__JIUWEN_WEB_TRANSPORT__；未注入回退构建期值。默认 websocket。`a2` 与 `http` 同义。 */
 export function getWebTransport(): WebTransport {
+  const injected = String(window.__JIUWEN_WEB_TRANSPORT__ ?? "").trim().toLowerCase();
+  if (injected && !injected.startsWith("__")) {
+    if (injected === "http" || injected === "a2") {
+      return "http";
+    }
+    return "websocket";
+  }
   const raw = String(
     import.meta.env.VITE_WEB_TRANSPORT ?? import.meta.env.VITE_TRANSPORT ?? "websocket"
   )

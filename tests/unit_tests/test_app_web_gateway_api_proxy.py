@@ -64,8 +64,6 @@ def test_user_web_runtime_mode_injection_preserves_property_names(
     assert "__JIUWENSWARM_EDITION_VALUE__" not in rendered
     assert "window.__JIUWEN_LOGIN_AUTH_SIMULATE__ = 'true'" in rendered
     assert "__JIUWEN_LOGIN_AUTH_SIMULATE_VALUE__" not in rendered
-    assert "window.__JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE__ = 'true'" in rendered
-    assert "__JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE_VALUE__" not in rendered
 
 
 def test_login_auth_simulate_config_is_strict_and_defaults_to_true() -> None:

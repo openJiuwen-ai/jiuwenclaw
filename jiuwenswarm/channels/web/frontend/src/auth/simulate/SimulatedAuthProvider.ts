@@ -3,13 +3,13 @@ import { parseRuntimeScope } from '../../services/runtimeScope';
 import type { EnterpriseAuthProvider } from '../types';
 
 const DEFAULTS = {
-  userId: 'debug-user',
+  userId: 'default',
   displayName: 'Debug User',
-  groupId: 'debug-group',
+  groupId: 'default',
   groupName: 'Debug Organization',
   gatewayId: 'debug-gateway',
   gatewayName: 'Debug Gateway',
-  botId: 'debug-agent',
+  botId: 'default',
   botName: 'Debug Agent',
 } as const;
 

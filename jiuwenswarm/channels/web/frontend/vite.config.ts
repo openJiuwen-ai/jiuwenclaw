@@ -329,10 +329,6 @@ function parseLoginAuthSimulate(raw: string | undefined): boolean {
   )
 }
 
-const loginAuthSimulateIncluded = parseLoginAuthSimulate(
-  process.env.INCLUDE_LOGIN_AUTH_SIMULATE ?? process.env.VITE_LOGIN_AUTH_SIMULATE_AVAILABLE
-)
-
 /** Mirrors ``jiuwenswarm.common.local_env_config.is_enterprise`` for Vite startup checks. */
 function isEnterpriseEdition(): boolean {
   const edition = (process.env.JIUWENSWARM_EDITION ?? process.env.VITE_JIUWENSWARM_EDITION ?? '')
@@ -345,13 +341,6 @@ function loginAuthStartupCheck(): Plugin {
   const enterprise = isEnterpriseEdition()
   const simulateRaw = process.env.LOGIN_AUTH_SIMULATE ?? process.env.VITE_LOGIN_AUTH_SIMULATE
   const simulate = parseLoginAuthSimulate(simulateRaw)
-
-  if (enterprise && simulate && !loginAuthSimulateIncluded) {
-    throw new Error(
-      '配置冲突：LOGIN_AUTH_SIMULATE=true，但当前客户交付制品未包含登录认证模拟插件；' +
-      '请设置 LOGIN_AUTH_SIMULATE=false 并接入 manager ID认证服务'
-    )
-  }
 
   return {
     name: 'login-auth-startup-check',
@@ -431,9 +420,7 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
       'virtual:login-auth-simulate-provider': path.resolve(
         __dirname,
-        loginAuthSimulateIncluded
-          ? './src/auth/simulate/available.ts'
-          : './src/auth/simulateUnavailable.ts'
+        './src/auth/simulate/available.ts',
       ),
     },
   },

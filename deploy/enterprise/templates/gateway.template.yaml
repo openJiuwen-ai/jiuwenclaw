@@ -169,3 +169,20 @@ spec:
       port: <<GATEWAY_CONFIG_HTTP_PORT>>
       targetPort: <<GATEWAY_CONFIG_HTTP_PORT>>
   type: ClusterIP                             # 集群内部访问，不需要外网
+
+---
+# NodePort Service：供外连接， 只暴露 config-http 端口
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<GATEWAY_NAME>>-nodeport
+  namespace: <<NAMESPACE>>
+spec:
+  type: NodePort
+  ports:
+    - name: config-http
+      port: <<GATEWAY_CONFIG_HTTP_PORT>>
+      targetPort: <<GATEWAY_CONFIG_HTTP_PORT>>
+      nodePort: <<GATEWAY_CONFIG_HTTP_NODE_PORT>>
+  selector:
+    app: <<GATEWAY_NAME>>

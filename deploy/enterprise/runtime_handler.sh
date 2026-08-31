@@ -5,9 +5,19 @@ gen_runtime_file() {
     local template_file="${CONFIG["RUNTIME_TEMPLATE_FILE"]}"
     local file="${CONFIG["RUNTIME_FILE"]}"
 
+    local redis_mode="${DEPLOY_VARS["REDIS_MODE"]}"
+    local redis_host="${DEPLOY_VARS["REDIS_HOST"]}"
+    local redis_port="${DEPLOY_VARS["REDIS_PORT"]}"
+    local redis_db="${DEPLOY_VARS["AGENT_RUNTIME_REDIS_DB"]}"
+
+    if [[ "${redis_mode}" == "cluster" ]]; then
+        DEPLOY_VARS["OPENJIUWEN_SERVICE_REDIS_URL"]="redis+cluster://${redis_host}:${redis_port}"
+    else
+        DEPLOY_VARS["OPENJIUWEN_SERVICE_REDIS_URL"]="redis://${redis_host}:${redis_port}/${redis_db}"
+    fi
+
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     enable_dev_mode_if_needed ${file} runtime
-
     if [ "${DEPLOY_VARS["DB_TYPE"]}" == "postgresql" ]; then
         yq eval '
         select(.kind == "Deployment").spec.template.spec.containers[0].env += [
@@ -19,11 +29,16 @@ gen_runtime_file() {
     fi
 
     add_resource_if_set "RUNTIME" "${file}"
+    if [[ "${DEPLOY_VARS["APPLY_PATCH"]}" != "true" ]]; then
+        yq eval-all -i 'select(.kind != "Service" or .spec.type != "NodePort")' "${file}"
+    fi
 }
 
 render_runtime_files() {
     render_secret_configmap
+    ensure_available_port "AGENT_RUNTIME_NODE_PORT"
     gen_runtime_file
+    render_patch_file
 }
 
 deploy_runtime() {
@@ -34,6 +49,7 @@ deploy_runtime() {
     ensure_secret_configmap
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
+    install_patch
 }
 
 uninstall_runtime() {
@@ -62,5 +78,6 @@ uninstall_runtime() {
     info "Deleting remaining Runtime resources (ServiceAccount, Role, Service, ...)"
     exec_cmd kubectl delete -f "${file}" --ignore-not-found=true
     uninstall_secret_configmap
-    ensure_redis_down "gateway"
+    ensure_redis_down
+    uninstall_patch
 }
