@@ -951,6 +951,9 @@ class TaskExecutionRail(DeepAgentRail):
             return
 
         await self._auto_advance_pending_to_in_progress(ctx)
+        # todo_create 可能已把首项写成 in_progress，但故意未发 task.start；
+        # 首个工作工具再懒启动，避免「只建待办 + 回复用户」时前端任务栈吞掉正文。
+        await self._lazy_start_in_progress_todo_on_work_tool(ctx)
 
         if tool_name in self.ARTIFACT_DETECTION_TOOLS:
             await self._trigger_artifact_hooks(ctx)
@@ -1033,6 +1036,41 @@ class TaskExecutionRail(DeepAgentRail):
             "[TaskExecutionRail] auto_advance: pending→in_progress "
             "session_id=%s task_id=%s",
             session_id,
+            raw_id,
+        )
+
+    async def _lazy_start_in_progress_todo_on_work_tool(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Emit deferred ``task.start`` when work begins on an in_progress todo.
+
+        ``todo_create`` may mark the first item ``in_progress`` without emitting
+        ``task.start`` (see ``_sync_todo_and_emit_transitions``). The first
+        non-todo work tool must open the UI task segment so subsequent tool /
+        progress events still attach correctly.
+        """
+        session = ctx.session
+        if session is None:
+            return
+        self._bind_context_to_in_progress_task()
+        active_id = _ACTIVE_TASK_ID.get()
+        if not active_id or not active_id.startswith("todo:"):
+            return
+        raw_id = active_id.removeprefix("todo:")
+        task = self._todo_map.get(raw_id)
+        if not task or str(task.get("status", "")).lower() != "in_progress":
+            return
+        if raw_id in self._todo_started:
+            return
+        parent_request_id = self._extract_request_id(ctx)
+        await self._emit_task_start_event(
+            session, raw_id, task, parent_request_id, source="todo",
+        )
+        self._todo_started.add(raw_id)
+        await self._emit_task_update_event(session, parent_request_id)
+        logger.info(
+            "[TaskExecutionRail] lazy_start: in_progress todo opened on work tool "
+            "task_id=%s",
             raw_id,
         )
 
@@ -1194,6 +1232,7 @@ class TaskExecutionRail(DeepAgentRail):
         """Diff todo state before vs after a todo tool call and emit events.
 
         - pending -> in_progress  => task.start
+          (except ``todo_create``: defer start until a work tool — see below)
         - in_progress -> completed => task.complete
         - pending -> completed (skipped in_progress) => task.start then
           task.complete. Frontend hidePending hides pending rows, and the
@@ -1201,11 +1240,22 @@ class TaskExecutionRail(DeepAgentRail):
           without start/complete the stage is invisible until the frozen
           completed snapshot appears after the run finishes.
         Always emits task.update (full snapshot) at the end.
+
+        ``todo_create`` always marks the first item ``in_progress`` and tells
+        the model to execute immediately. Emitting ``task.start`` at create
+        time forces RelayClaw/frontends to treat the following user-facing
+        reply as task-scoped text (and dual-write thinking), so create-only
+        reminder flows show empty main bubbles. Defer ``task.start`` for
+        create; ``todo_modify`` / work-tool lazy start still open the segment.
         """
         if ctx.session is None:
             return
         session_id = ctx.session.get_session_id()
         parent_request_id = self._extract_request_id(ctx)
+        # Duck-type tool_name: production uses ToolCallInputs; tests may pass
+        # SimpleNamespace. Missing attr → treat as non-create (emit start).
+        tool_name = str(getattr(ctx.inputs, "tool_name", "") or "")
+        defer_start_on_create = tool_name == "todo_create"
 
         try:
             todo_items = self._load_todo_from_json(session_id)
@@ -1229,7 +1279,14 @@ class TaskExecutionRail(DeepAgentRail):
                 curr_status == "in_progress"
                 and prev_status not in ("in_progress", "completed")
             ):
-                if task_id not in self._todo_started:
+                if defer_start_on_create:
+                    logger.info(
+                        "[TaskExecutionRail] todo_create: defer task.start "
+                        "for in_progress task_id=%s session_id=%s",
+                        task_id,
+                        session_id,
+                    )
+                elif task_id not in self._todo_started:
                     await self._emit_task_start_event(
                         ctx.session,
                         task_id,
@@ -1243,12 +1300,11 @@ class TaskExecutionRail(DeepAgentRail):
                 and prev_status != "completed"
             ):
                 completed_in_batch.append(task_id)
-                if (
-                    prev_status != "in_progress"
-                    and task_id not in self._todo_started
-                ):
+                # Include deferred todo_create in_progress (never emitted start):
+                # frontend still needs start+complete for a visible completed row.
+                if task_id not in self._todo_started:
                     logger.info(
-                        "[TaskExecutionRail] pending→completed: "
+                        "[TaskExecutionRail] completed without prior start: "
                         "emit task.start+task.complete: %s "
                         "prev_status=%r session_id=%s",
                         task_id,

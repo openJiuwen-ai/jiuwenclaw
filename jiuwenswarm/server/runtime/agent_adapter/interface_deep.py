@@ -11147,6 +11147,128 @@ class JiuWenSwarmDeepAdapter:
             return "Plan approved. Exited plan mode and switched to code.normal mode."
         return "计划已获批准，已退出 plan 模式，当前处于 code.normal 模式。"
 
+    def _reasoning_only_empty_reply_fallback(self) -> str:
+        from jiuwenswarm.common.chat_final import reasoning_only_empty_reply_fallback_text
+
+        return reasoning_only_empty_reply_fallback_text(self._resolve_runtime_language())
+
+    @staticmethod
+    def _should_fill_reasoning_only_empty_final(
+        parsed: dict[str, Any] | None,
+        *,
+        had_reasoning_output: bool,
+        visible_text_since_last_final: bool,
+    ) -> bool:
+        """Whether an empty chat.final should get the reasoning-only short reply."""
+        if not isinstance(parsed, dict):
+            return False
+        if parsed.get("event_type") != "chat.final":
+            return False
+        if str(parsed.get("content") or "").strip():
+            return False
+        if not had_reasoning_output:
+            return False
+        return not visible_text_since_last_final
+
+    def _fill_reasoning_only_empty_final_if_needed(
+        self,
+        parsed: dict[str, Any] | None,
+        *,
+        had_reasoning_output: bool,
+        visible_text_since_last_final: bool,
+    ) -> None:
+        if not self._should_fill_reasoning_only_empty_final(
+            parsed,
+            had_reasoning_output=had_reasoning_output,
+            visible_text_since_last_final=visible_text_since_last_final,
+        ):
+            return
+        assert isinstance(parsed, dict)
+        parsed["content"] = self._reasoning_only_empty_reply_fallback()
+
+    @staticmethod
+    def _iter_delta_for_unstreamed_final(
+        *, content: str, chunk_payload: Any
+    ) -> list[dict[str, Any]]:
+        """终稿正文未被 chat.delta 真正流式送达时，构造补发 delta 的 payload 列表。
+
+        非 team 前端只按 chat.delta 渲染正文，chat.final 仅作收尾标记（relay-claw
+        会直接丢弃其 content）。当模型把正文只放进 answer chunk、而 llm_output
+        只给出空白/极小片段时，这里补发 delta，保证前端能看到回复。
+        """
+        text = str(content or "")
+        if not text.strip():
+            return []
+        payload = JiuWenSwarmDeepAdapter._stream_text_payload("chat.delta", text)
+        if payload is None:
+            return []
+        _propagate_stream_source_id(chunk_payload, payload)
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] rerouted final content into chat.delta: len=%s",
+            len(text),
+        )
+        return [payload]
+
+    @staticmethod
+    def _drain_final_content_to_deltas(
+        parsed: dict[str, Any],
+        *,
+        segment_streamed_text: str,
+        chunk_payload: Any,
+    ) -> list[dict[str, Any]]:
+        """Move non-empty ``chat.final`` body onto ``chat.delta`` when needed.
+
+        Always clears ``parsed["content"]`` once the body is known to be (or about
+        to be) on the delta path. Leaving content on ``chat.final`` makes
+        RelayClaw ``computeFinalTextDelta`` append another copy — especially after
+        the post-tool ``\\n\\n`` round-break prefix — triplicating the bubble.
+        """
+        if parsed.get("event_type") != "chat.final":
+            return []
+        content = str(parsed.get("content") or "")
+        stripped = content.strip()
+        if not stripped:
+            return []
+        streamed = str(segment_streamed_text or "")
+        if stripped in streamed or streamed.rstrip().endswith(stripped):
+            parsed["content"] = ""
+            return []
+        streamed_visible = streamed.strip()
+        # llm_output already delivered a substantial body this segment; keeping
+        # final content would re-route a duplicate chat.delta.
+        if streamed_visible and len(streamed_visible) >= max(8, len(stripped) // 4):
+            parsed["content"] = ""
+            return []
+        deltas = JiuWenSwarmDeepAdapter._iter_delta_for_unstreamed_final(
+            content=content,
+            chunk_payload=chunk_payload,
+        )
+        # Body rides on delta; final is trailer-only for non-team hosts.
+        parsed["content"] = ""
+        return deltas
+
+    @staticmethod
+    def _apply_reasoning_only_empty_reply_fallback(
+        *,
+        has_streamed_content: bool,
+        had_reasoning_output: bool,
+        fallback_content: str,
+        reasoning_only_fallback: str,
+    ) -> str:
+        """Fill empty terminal final content for reasoning-only completions.
+
+        Skip the generic fill when this stream already forwarded visible
+        ``chat.delta`` text — an empty final is then only a trailer.
+        """
+        if str(fallback_content or "").strip():
+            # Preserve dedicated fallbacks (e.g. plan-exit) over the generic text.
+            return fallback_content
+        if has_streamed_content:
+            return fallback_content
+        if not had_reasoning_output:
+            return fallback_content
+        return reasoning_only_fallback
+
     async def _reattach_interrupt_output(self, session_id: str) -> Any | None:
         """Briefly wait for the interrupted consumer to release its output lease."""
         started = time.monotonic()
@@ -15195,6 +15317,12 @@ class JiuWenSwarmDeepAdapter:
                 return
 
         has_streamed_content = False
+        had_reasoning_output = False
+        visible_text_since_last_final = False
+        # Survives tool_call resets of visible_text_since_last_final; used by the
+        # stream-end reasoning-only fallback so pre-tool deltas are not forgotten.
+        had_visible_text_ever = False
+        segment_streamed_text = ""
         accumulated_text = ""
         accumulated_reasoning = ""
         had_assistant_output = False
@@ -15251,8 +15379,35 @@ class JiuWenSwarmDeepAdapter:
 
         def note_chat_payload(payload: dict[str, Any]) -> dict[str, Any]:
             nonlocal had_assistant_output, emitted_terminal_chat_final
-            nonlocal saw_approved_plan_exit_result
+            nonlocal saw_approved_plan_exit_result, had_reasoning_output
+            nonlocal visible_text_since_last_final, segment_streamed_text
+            nonlocal has_streamed_content, had_visible_text_ever
             event_type = payload.get("event_type")
+            if event_type == "chat.reasoning":
+                had_reasoning_output = True
+            if event_type == "chat.tool_call":
+                # New tool round: forget prior-segment deltas / has_streamed so
+                # post-tool answer drain can rescue empty streams, without
+                # inheriting pre-tool llm_output flags that force a re-drain.
+                # had_visible_text_ever is intentionally not cleared — terminal
+                # fallback still needs to know the user already saw pre-tool text.
+                segment_streamed_text = ""
+                has_streamed_content = False
+                visible_text_since_last_final = False
+            if (
+                event_type == "chat.delta"
+                and str(payload.get("content") or "").strip()
+            ):
+                segment_streamed_text += str(payload.get("content") or "")
+                visible_text_since_last_final = True
+                had_visible_text_ever = True
+            elif event_type == "chat.final":
+                visible_text_since_last_final = False
+                # Do not clear segment_streamed_text on empty trailer finals.
+                # Drain clears final content before note; wiping segment here
+                # makes a subsequent check miss already-streamed llm_output and
+                # re-emit the same body (history/front show the reply twice).
+                # Segment resets on tool_call / next invocation instead.
             is_plan_exit_result = (
                 event_type == "chat.tool_result"
                 and str(payload.get("tool_name") or "") == "exit_plan_mode"
@@ -15963,9 +16118,29 @@ class JiuWenSwarmDeepAdapter:
                         )
                         accumulated_reasoning = ""
                     if has_streamed_content:
-                        parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
+                        parsed = self._parse_stream_chunk(
+                            chunk,
+                            _has_streamed_content=True,
+                            _streamed_text=segment_streamed_text,
+                        )
                         parsed = self._adapt_goal_intermediate_final(parsed)
                         if parsed is not None:
+                            self._fill_reasoning_only_empty_final_if_needed(
+                                parsed,
+                                had_reasoning_output=had_reasoning_output,
+                                visible_text_since_last_final=visible_text_since_last_final,
+                            )
+                            for _delta in self._drain_final_content_to_deltas(
+                                parsed,
+                                segment_streamed_text=segment_streamed_text,
+                                chunk_payload=chunk.payload,
+                            ):
+                                yield AgentResponseChunk(
+                                    request_id=rid,
+                                    channel_id=cid,
+                                    payload=note_chat_payload(_delta),
+                                    is_complete=False,
+                                )
                             if should_skip_duplicate_ask_user(parsed):
                                 continue
                             if self._is_ask_user_payload(parsed):
@@ -15984,9 +16159,28 @@ class JiuWenSwarmDeepAdapter:
                                 suppress_stream_after_hitl = True
                                 continue
                         continue
-                    parsed = self._parse_stream_chunk(chunk)
+                    parsed = self._parse_stream_chunk(
+                        chunk,
+                        _streamed_text=segment_streamed_text,
+                    )
                     parsed = self._adapt_goal_intermediate_final(parsed)
                     if parsed is not None:
+                        self._fill_reasoning_only_empty_final_if_needed(
+                            parsed,
+                            had_reasoning_output=had_reasoning_output,
+                            visible_text_since_last_final=visible_text_since_last_final,
+                        )
+                        for _delta in self._drain_final_content_to_deltas(
+                            parsed,
+                            segment_streamed_text=segment_streamed_text,
+                            chunk_payload=chunk.payload,
+                        ):
+                            yield AgentResponseChunk(
+                                request_id=rid,
+                                channel_id=cid,
+                                payload=note_chat_payload(_delta),
+                                is_complete=False,
+                            )
                         if should_skip_duplicate_ask_user(parsed):
                             continue
                         if self._is_ask_user_payload(parsed):
@@ -16036,9 +16230,28 @@ class JiuWenSwarmDeepAdapter:
                         usage_accumulator=usage_accumulator,
                         accounted_usage_ids=accounted_deepresearch_usage_ids,
                     )
-                parsed = self._parse_stream_chunk(chunk)
+                parsed = self._parse_stream_chunk(
+                    chunk,
+                    _streamed_text=segment_streamed_text,
+                )
                 parsed = self._adapt_goal_intermediate_final(parsed)
                 if parsed is not None:
+                    self._fill_reasoning_only_empty_final_if_needed(
+                        parsed,
+                        had_reasoning_output=had_reasoning_output,
+                        visible_text_since_last_final=visible_text_since_last_final,
+                    )
+                    for _delta in self._drain_final_content_to_deltas(
+                        parsed,
+                        segment_streamed_text=segment_streamed_text,
+                        chunk_payload=getattr(chunk, "payload", None),
+                    ):
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload=note_chat_payload(_delta),
+                            is_complete=False,
+                        )
                     if should_skip_duplicate_ask_user(parsed):
                         continue
                     if self._is_ask_user_payload(parsed):
@@ -16113,6 +16326,32 @@ class JiuWenSwarmDeepAdapter:
                 fallback_content = ""
                 if saw_approved_plan_exit_result and not had_assistant_output:
                     fallback_content = self._plan_exit_fallback_content()
+                # Reasoning-only models (e.g. glm-5.2) may emit chat.reasoning with
+                # empty answer content. Non-team hosts skip empty chat.final for
+                # bubble text — fill a short stable reply so the UI is not blank.
+                # Use had_visible_text_ever (not visible_text_since_last_final): the
+                # latter is cleared on tool_call, which would wrongly inject the
+                # "no visible reply" text after pre-tool deltas + post-tool reasoning.
+                fallback_content = self._apply_reasoning_only_empty_reply_fallback(
+                    has_streamed_content=had_visible_text_ever,
+                    had_reasoning_output=had_reasoning_output,
+                    fallback_content=fallback_content,
+                    reasoning_only_fallback=self._reasoning_only_empty_reply_fallback(),
+                )
+                if str(fallback_content or "").strip():
+                    for _delta in self._iter_delta_for_unstreamed_final(
+                        content=fallback_content,
+                        chunk_payload=None,
+                    ):
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload=note_chat_payload(_delta),
+                            is_complete=False,
+                        )
+                    # Body already on delta; keep final empty to avoid RelayClaw
+                    # computeFinalTextDelta appending a duplicate copy.
+                    fallback_content = ""
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -16430,6 +16669,8 @@ class JiuWenSwarmDeepAdapter:
         *,
         _has_streamed_content: bool = False,
         _stage: str = "",
+        _streamed_text: str = "",
+        _protocol_buffer: Any = None,
     ) -> dict | None:
         """将 SDK OutputSchema 转为前端可消费的 payload dict.
 
@@ -16437,10 +16678,14 @@ class JiuWenSwarmDeepAdapter:
             chunk: OutputSchema 或 dict
             _has_streamed_content: 是否已通过 llm_output 流式发送过内容
             _stage: 当前阶段名称，用于 auto_harness harness.message 事件
+            _streamed_text: 本段已通过 chat.delta 发出的可见正文（用于空 final / drain）
+            _protocol_buffer: 调用方持有的 StreamProtocolBuffer；跨 chunk 缓冲在 call site
+                feed/flush，此处仅吸收关键字以免 TypeError
 
         Returns:
             dict  – 含 event_type 的 payload，或 None（需跳过的帧）。
         """
+        _ = _protocol_buffer
         try:
             if hasattr(chunk, "type") and hasattr(chunk, "payload"):
                 chunk_type = chunk.type
@@ -16531,10 +16776,20 @@ class JiuWenSwarmDeepAdapter:
                         return None
 
                     if _has_streamed_content and not is_chunked:
-                        # When llm_output has already streamed the full user-facing text,
-                        # keep chat.final as a completion marker only to avoid duplicating
-                        # the final answer block downstream.
-                        return {"event_type": "chat.final", "content": ""}
+                        # 已通过 chat.delta 流完 → 仅收尾标记，避免下游重复。
+                        # has_streamed_content 可能被空白/极小 delta 误置，真实答案
+                        # 却只在 answer chunk 里。此时保留正文（answer 处理器会以
+                        # chat.delta 补流），保证非 team 前端（只渲染 delta）能看到回复。
+                        if _streamed_text and content.strip() in _streamed_text:
+                            return {"event_type": "chat.final", "content": ""}
+                        streamed_visible = str(_streamed_text or "").strip()
+                        # Substantial stream already on the wire this segment —
+                        # do not keep final body for drain (would duplicate).
+                        if streamed_visible and len(streamed_visible) >= max(
+                            8, len(content.strip()) // 4
+                        ):
+                            return {"event_type": "chat.final", "content": ""}
+                        return {"event_type": "chat.final", "content": content}
                     if is_chunked:
                         return {"event_type": "chat.delta", "content": content}
                     return {"event_type": "chat.final", "content": content}

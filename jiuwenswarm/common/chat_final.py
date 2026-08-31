@@ -45,3 +45,37 @@ def ensure_final_mode_inplace(
     if isinstance(existing, str) and existing.strip():
         return
     payload["final_mode"] = final_mode
+
+
+def reasoning_only_empty_reply_fallback_text(lang: str = "zh") -> str:
+    """Fixed short user-visible reply when the model only emitted reasoning."""
+    normalized = str(lang or "").strip().lower()
+    if normalized.startswith("en"):
+        return (
+            "No visible reply was generated this turn. "
+            "If there are tool results above, please rely on them."
+        )
+    return "本轮未生成可见回复。若上方已有工具结果，请以工具结果为准。"
+
+
+def fill_reasoning_only_empty_final_content(
+    *,
+    content: str,
+    has_visible_streamed_text: bool,
+    has_reasoning: bool,
+    lang: str = "zh",
+) -> str:
+    """Fill empty chat.final content for reasoning-only completions.
+
+    Narrow gate used by both the deep adapter stream-end path and the outer
+    facade: never promote chain-of-thought, never override a non-empty final,
+    and never fill when this segment already streamed visible ``chat.delta``
+    text (empty final is then only a dedup/trailer marker).
+    """
+    if str(content or "").strip():
+        return content
+    if has_visible_streamed_text:
+        return content
+    if not has_reasoning:
+        return content
+    return reasoning_only_empty_reply_fallback_text(lang)
