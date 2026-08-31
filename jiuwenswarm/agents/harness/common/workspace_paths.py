@@ -47,6 +47,8 @@ _SANDBOX_ARTIFACT_PATTERN = re.compile(
     r"\.sandbox-artifacts/[^'\"<>)\],;:\r\n]+"
     r"(?:/[^'\"<>)\],;:\r\n]*)?"
 )
+
+
 @dataclass(frozen=True)
 class WorkspacePathResolution:
     """Canonical resolver result for workspace-scoped path checks."""
