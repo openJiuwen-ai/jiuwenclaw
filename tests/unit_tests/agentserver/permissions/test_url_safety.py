@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
-# TEST ONLY: URL fixtures use RFC-reserved domains or blocked security-test
-# addresses; policy evaluation rejects or parses them without network I/O.
+# TEST ONLY: URL and credential-shaped fixtures are synthetic. URLs use
+# RFC-reserved domains or blocked security-test addresses; policy evaluation
+# rejects or parses them without network I/O.
 
 from pathlib import Path
 
