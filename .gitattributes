@@ -1,1 +1,4 @@
 *.mp4 filter=lfs diff=lfs merge=lfs -text
+
+# interface.py 历史为 CRLF，本地已统一 LF；钉住行尾避免再次全文件冲突
+jiuwenswarm/server/runtime/agent_adapter/interface.py text eol=lf

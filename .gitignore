@@ -102,3 +102,6 @@ vendor/node/
 jiuwenswarm/channels/tui/frontend/coding_memory/
 jiuwenswarm/channels/tui/frontend/memory/
 jiuwenswarm/channels/tui/frontend/prompt_attachment/
+
+# 运行产物（单测/e2e 会再生成）
+jiuwenswarm/resources/agent/workspace/agent-data.json

@@ -134,9 +134,18 @@ install_shell_tool_safety_hooks()
 install_connector_host_exec_hooks()
 
 # 兼容 SSE-only 网关：让非流式 invoke()（subagent / 心跳等）能解析 text/event-stream 响应
-from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
+from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch, apply_openai_sse_stream_patch
 
 apply_openai_sse_invoke_patch()
+# 流式同兼容：网关 chunk 内容在 choices[0].message.token_text（非标准 delta.content），
+# 原解析读 delta → 对话空返回（content_len=0）；delta 在场时补丁零介入
+apply_openai_sse_stream_patch()
+
+# 命名管道模型通道：桌面形态 API_BASE=np:// 时 LLM 调用走 Windows 命名管道
+# （非 np:// 时零行为变化；幂等）
+from jiuwenswarm.llm_np_patch import apply_openai_np_patch
+
+apply_openai_np_patch()
 
 # /debug 模式下捕获 builtin TaskTool 分发的 subagent 流（reasoning/tool_call/usage），
 # 内联写入主 dump。非 debug 或 include_subagent_flow 关闭时走原始 invoke，零回归。
@@ -183,7 +192,22 @@ async def _run(host: str, port: int) -> None:
         host=host,
         port=port
     )
-    await server.start()
+
+    stop_event = asyncio.Event()
+
+    # 桌面 E2A stdio 形态（密钥包 e2aTransport=='stdio'——字段判定而非密钥包存在，
+    # 迁移期桌面默认仍走 WS 且同样下发密钥包）：E2A 不监听 TCP 18592——桌面主进程
+    # 走 stdio（匿名管道句柄继承），gateway 兄弟进程走命名管道（pipes.agentE2a）；
+    # stdin EOF（桌面关闭管道）即触发进程退出。其余形态返回 None，走原 TCP。
+    # 通道先于 server.start() 拉起：桌面 E2A 客户端按 connection.ack 判定就绪，
+    # 尽早建通道可让握手不被后续初始化（checkpointer 预热等）拖延。
+    from jiuwenswarm.server.e2a_desktop import start_desktop_e2a_channels
+
+    desktop_channels = await start_desktop_e2a_channels(
+        server.run_connection,
+        on_stdio_closed=stop_event.set,
+    )
+    await server.start(listen_tcp=desktop_channels is None)
 
     # ---------- ProactiveEngine 初始化 ----------
     # 适配逻辑（建专用 agent + 触发主 agent 回调）封装在 proactive_adapter，
@@ -192,9 +216,11 @@ async def _run(host: str, port: int) -> None:
     proactive_config = full_cfg.get("proactive_recommendation", {}) if isinstance(full_cfg, dict) else {}
     await init_proactive_engine(server, proactive_config)
 
-    logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
+    if desktop_channels is None:
+        logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
+    else:
+        logger.info("[AgentServer] ready: 桌面形态（E2A = stdio + 命名管道）")
 
-    stop_event = asyncio.Event()
     teammate_bootstrap_task: asyncio.Task | None = None
 
     # Distributed teammate can receive bootstrap before any team-mode request arrives.
@@ -229,6 +255,8 @@ async def _run(host: str, port: int) -> None:
                 pass
             except Exception as exc:
                 logger.warning("[AgentServer] teammate bootstrap daemon stop failed: %s", exc)
+        if desktop_channels is not None:
+            await desktop_channels.stop()
         await server.stop()
         # jiuwenbox 关停顺序: 先 DELETE 远端沙箱, 再停 box-server 子进程。
         # shutdown_jiuwenbox_sandboxes 是 HTTP DELETE 给 box-server (清本进程 provider

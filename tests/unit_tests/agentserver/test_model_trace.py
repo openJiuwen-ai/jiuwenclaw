@@ -56,13 +56,15 @@ def test_xiaoyi_exporter_emits_only_approved_trace_headers() -> None:
     }
 
 
-def test_trace_aware_model_overrides_call_trace_headers() -> None:
+def test_trace_aware_model_keeps_caller_explicit_trace_header() -> None:
+    """调用方显式携带 x-hag-trace-id 时不覆盖、不改写（计费终态虚拟调用等；
+    与 model-proxy hasTraceId 语义一致）。"""
     token = set_current_invocation_context(_invocation())
     try:
         kwargs = _trace_model(XiaoyiTraceHeaderExporter())._with_trace_headers(
             {
                 "custom_headers": {
-                    "x-hag-trace-id": "untrusted",
+                    "x-hag-trace-id": "xiaoyi-work-end-root&19&abc&0",
                     "x-request-id": "keep",
                 }
             }
@@ -71,9 +73,7 @@ def test_trace_aware_model_overrides_call_trace_headers() -> None:
         reset_current_invocation_context(token)
 
     assert kwargs["custom_headers"] == {
-        "x-hag-trace-id": "root&19&abc&0",
-        "x-session-id": "root",
-        "x-interaction-id": "19",
+        "x-hag-trace-id": "xiaoyi-work-end-root&19&abc&0",
         "x-request-id": "keep",
     }
 

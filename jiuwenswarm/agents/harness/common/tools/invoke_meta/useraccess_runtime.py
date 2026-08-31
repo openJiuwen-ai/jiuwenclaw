@@ -53,8 +53,21 @@ def resolve_runtime_uid() -> str:
 
 
 def resolve_business_credential() -> str:
-    """Product mcp/run handshake credential (desktop spawn, not .env)."""
-    return (os.environ.get(_CREDENTIAL_ENV) or "").strip()
+    """Product mcp/run handshake credential.
+
+    桌面密钥包形态（2026-08-28 合并决策）：凭证由 stdin 密钥包承载
+    （secrets_bootstrap.get_secret('businessCredential')），不经 env 下发；
+    env（CLAW_BUSINESS_CREDENTIAL）仅为实验室/旧形态兜底。
+    """
+    env_value = (os.environ.get(_CREDENTIAL_ENV) or "").strip()
+    if env_value:
+        return env_value
+    try:
+        from jiuwenswarm.common.secrets_bootstrap import get_secret
+    except Exception:  # noqa: BLE001
+        return ""
+    value = get_secret("businessCredential")
+    return str(value).strip() if value else ""
 
 
 def resolve_runtime_device_id() -> str:

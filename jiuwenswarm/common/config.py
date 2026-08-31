@@ -28,6 +28,18 @@ from jiuwenswarm.common.utils import get_config_dir, get_config_file
 
 logger = logging.getLogger(__name__)
 
+# 桌面形态（密钥包经 stdin 首帧下发、env 剔密）下 ${VAR} 的密钥包兜底映射：
+# 环境变量名 → 密钥包点路径（secrets_bootstrap.get_secret 取值）。
+# 仅当 env 无值且密钥包已加载时生效；非桌面形态（无密钥包）完全不改变行为。
+_DESKTOP_SECRET_FALLBACKS: dict[str, str] = {
+    "API_KEY": "proxyKey",
+    "CLAW_XIAOYI_AK": "localAuth.ak",
+    "CLAW_XIAOYI_SK": "localAuth.sk",
+    "CLAW_XIAOYI_AGENT_ID": "localAuth.agentId",
+    "CLAW_XIAOYI_UID": "uid",
+    "CLAW_XIAOYI_API_KEY": "apiKey",
+}
+
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
 SWARMFLOW_ENABLED_CONFIG_PATH = ("modes", "team", "jiuwen_team", "enable_swarmflow")
@@ -61,7 +73,29 @@ def resolve_env_vars(value: Any) -> Any:
             var_name = match.group(1)
             default = match.group(2)
             current = os.getenv(var_name)
-            is_need_decrypt = ("api_key" in var_name.lower() or "token" in var_name.lower()) and current
+            from_vault = False
+            # 桌面形态（密钥包已下发）且 env 无值：由密钥包兜底——桌面端 env 已剔密
+            # （密钥不落环境变量，只经 stdin 首帧进内存 vault）。
+            #   ${API_KEY} → proxyKey（模型条目的 ModelClientConfig 校验要求 api_key 非空；
+            #   真正的出站 api_key 由 llm_np_patch 在客户端构造时同样取 proxyKey）
+            #   ${CLAW_XIAOYI_*} → localAuth.ak/sk/agentId + uid + apiKey（xiaoyi 渠道
+            #   段占位符；否则 gateway 启动判定 ak/sk/agent_id 缺失、渠道不启动）
+            if current is None or current == "":
+                vault_path = _DESKTOP_SECRET_FALLBACKS.get(var_name)
+                if vault_path:
+                    try:
+                        from jiuwenswarm.common.secrets_bootstrap import get_secret, secrets_loaded
+
+                        if secrets_loaded():
+                            current = get_secret(vault_path) or None
+                            from_vault = current is not None
+                    except Exception:  # noqa: BLE001 - 防御：模块异常时按 env 原语义
+                        pass
+            # 密钥包兜底值不经过 crypto 解密（它本来就不是加密落盘的形态）
+            is_need_decrypt = (
+                ("api_key" in var_name.lower() or "token" in var_name.lower())
+                and current and not from_vault
+            )
             reg_mod = sys.modules.get("jiuwenswarm.extensions.registry")
             if reg_mod is not None and hasattr(reg_mod, "ExtensionRegistry"):
                 try:
@@ -346,6 +380,85 @@ def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> boo
         return _get_evolution_config(config).get("auto_save") is True
     except Exception:
         return False
+
+
+# ---- 渐进式工具曝光（progressive tool loading）----
+# 对齐 develop 部署默认（config.yaml 模板 progressive_tool_enabled: true）：
+# 开启后模型仅直接可见白名单工具，其余工具经 search_tools / load_tools 延迟发现。
+# 桌面 deep 适配器（interface_deep）读此开关；缺省按 True 处理。
+
+DEFAULT_PROGRESSIVE_TOOL_ENABLED = True
+
+# todo 四件套置为 always-visible：多阶段任务里始终直接可见，曝光优先级最高
+# （对齐 develop 的 _DEFAULT_DIRECT_TOOL_NAMES 把 todo 工具全部纳入直接工具名单）。
+DEFAULT_PROGRESSIVE_ALWAYS_VISIBLE_TOOLS: list[str] = [
+    "todo_create",
+    "todo_list",
+    "todo_get",
+    "todo_modify",
+]
+
+# 核心工作工具：与 develop 直接工具名单对齐。
+# 0.1.16 运行时没有的工具名会被 ProgressiveToolRail 忽略，不影响注册。
+DEFAULT_PROGRESSIVE_DEFAULT_VISIBLE_TOOLS: list[str] = [
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "bash",
+    "task_tool",
+    "ask_user",
+    "skill_tool",
+    "memory_search",
+    "memory_get",
+    "write_memory",
+    "edit_memory",
+    "read_memory",
+    "paid_search",
+    "fetch_webpage",
+    "send_file_to_user",
+    "enter_plan_mode",
+    "exit_plan_mode",
+]
+
+
+def get_progressive_tool_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return whether the ProgressiveToolRail is enabled for an agent.
+
+    The switch is the top-level ``progressive_tool_enabled`` key in
+    ``config.yaml``.  A missing key defaults to True（对齐 develop 部署默认）.
+    """
+    if config is None:
+        config = get_config()
+    if not isinstance(config, dict):
+        return DEFAULT_PROGRESSIVE_TOOL_ENABLED
+    value = config.get("progressive_tool_enabled", DEFAULT_PROGRESSIVE_TOOL_ENABLED)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return bool(value)
+
+
+def get_progressive_tool_always_visible_tools(config: dict[str, Any] | None = None) -> list[str]:
+    """Always-visible tools under progressive loading（todo 工具优先级最高）。"""
+    if config is None:
+        config = get_config()
+    value = config.get("progressive_tool_always_visible_tools") if isinstance(config, dict) else None
+    if isinstance(value, list):
+        return [str(v) for v in value if isinstance(v, str) and v.strip()]
+    return list(DEFAULT_PROGRESSIVE_ALWAYS_VISIBLE_TOOLS)
+
+
+def get_progressive_tool_default_visible_tools(config: dict[str, Any] | None = None) -> list[str]:
+    """Initially-visible tools under progressive loading（核心工作工具）。"""
+    if config is None:
+        config = get_config()
+    value = config.get("progressive_tool_default_visible_tools") if isinstance(config, dict) else None
+    if isinstance(value, list):
+        return [str(v) for v in value if isinstance(v, str) and v.strip()]
+    return list(DEFAULT_PROGRESSIVE_DEFAULT_VISIBLE_TOOLS)
 
 
 def set_auto_memory_enabled(enabled: bool) -> None:
@@ -742,6 +855,59 @@ def update_permissions_enabled_in_config(value: bool) -> None:
         data["permissions"] = {}
     data["permissions"]["enabled"] = value
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_permission_profile_in_config(profile: str) -> bool:
+    """按权限档位补丁更新 permissions 段（跨进程互斥），返回是否有实际变更。
+
+    档位映射见 jiuwenswarm/common/permission_profile.py（与桌面端三档对齐）：
+    enabled / permission_mode / tools.bash / 网络工具 / file_guard.defaults.read+write。
+    只动这些已知键，保留 rules / approval_overrides / file_guard.paths 等其余配置。
+    档位未识别时返回 False 且不写盘。调用方据返回值决定是否触发 agent.reload_config。
+    """
+    from jiuwenswarm.common.permission_profile import permission_profile_config_patch
+
+    patch = permission_profile_config_patch(profile)
+    if patch is None:
+        return False
+
+    changed = False
+
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal changed
+        section = data.get("permissions")
+        if not isinstance(section, dict):
+            section = {}
+            data["permissions"] = section
+
+        def _set(container: dict[str, Any], key: str, value: Any) -> None:
+            nonlocal changed
+            if container.get(key) != value:
+                container[key] = value
+                changed = True
+
+        _set(section, "enabled", patch["enabled"])
+        _set(section, "permission_mode", patch["permission_mode"])
+        tools = section.get("tools")
+        if not isinstance(tools, dict):
+            tools = {}
+            section["tools"] = tools
+        for tool_name, level in patch["tools"].items():
+            _set(tools, tool_name, level)
+        file_guard = section.get("file_guard")
+        if not isinstance(file_guard, dict):
+            file_guard = {}
+            section["file_guard"] = file_guard
+        defaults = file_guard.get("defaults")
+        if not isinstance(defaults, dict):
+            defaults = {}
+            file_guard["defaults"] = defaults
+        _set(defaults, "read", patch["file_guard_rw"])
+        _set(defaults, "write", patch["file_guard_rw"])
+        return data
+
+    update_config(mutator)
+    return changed
 
 
 def update_auto_recap_enabled_in_config(value: bool) -> None:

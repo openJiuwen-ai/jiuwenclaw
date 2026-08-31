@@ -9,6 +9,7 @@ from openjiuwen.core.foundation.llm import Model
 
 from .models import InvocationContext, TraceContext
 from .runtime import get_current_invocation_context
+from .billing_trace import mark_model_call
 
 
 class TraceHeaderExporter(Protocol):
@@ -67,13 +68,26 @@ class TraceAwareModel(Model):
         self._trace_header_exporters = tuple(trace_header_exporters)
 
     def _with_trace_headers(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        custom_headers = dict(kwargs.get("custom_headers") or {})
+        # 调用方显式携带 x-hag-trace-id 时不覆盖、不改写（计费终态虚拟调用等；
+        # 与 model-proxy 的 hasTraceId 语义一致）
+        if any(
+            key.lower() == "x-hag-trace-id" and str(value).strip()
+            for key, value in custom_headers.items()
+        ):
+            kwargs["custom_headers"] = custom_headers
+            return kwargs
         trace_headers = export_trace_headers(
             get_current_invocation_context(),
             self._trace_header_exporters,
         )
         if not trace_headers:
             return kwargs
-        custom_headers = dict(kwargs.get("custom_headers") or {})
+        # 临时计费标记：一轮 query 的首次模型调用加 begin- 前缀，其后加裸前缀
+        # （jiuwenswarm/common/invocation_context/billing_trace.py，最终方案上线即拆）
+        core = trace_headers.get("x-hag-trace-id")
+        if core:
+            trace_headers["x-hag-trace-id"] = mark_model_call(core)
         kwargs["custom_headers"] = {**custom_headers, **trace_headers}
         return kwargs
 

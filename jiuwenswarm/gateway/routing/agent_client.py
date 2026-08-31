@@ -1,12 +1,19 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""AgentServerClient - Gateway 与 AgentServer 的 WebSocket 客户端."""
+"""AgentServerClient - Gateway 与 AgentServer 的 WebSocket 客户端.
+
+桌面形态（stdin 密钥包携带 ``pipes.agentE2a``）：WebSocketAgentServerClient
+的连接载体自动切换为命名管道（open_pipe + auth 首帧 + 等 connection.ack），
+接收循环/断连重连语义与 WS 形态一致（PipeError/FrameCodecError ↔
+ConnectionClosed）；无密钥包时回退 ws:// 现状（行为零变化）。
+"""
 
 from __future__ import annotations
 
 import logging
 import asyncio
 import json
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
@@ -14,6 +21,8 @@ from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
 from websockets.exceptions import ConnectionClosed, PayloadTooBig
+
+from jiuwenswarm.common.np_transport import FrameCodecError, PipeClosedError, PipeError
 
 from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
 from jiuwenswarm.common.e2a.models import E2AEnvelope
@@ -34,6 +43,9 @@ logger = logging.getLogger(__name__)
 _STREAM_TRAILING_MESSAGE_GRACE_SECONDS = 0.7
 AGENT_REQUEST_TIMEOUT_SECONDS: float = 600.0
 _UNARY_REQUEST_TIMEOUT_SECONDS = AGENT_REQUEST_TIMEOUT_SECONDS
+# 流式响应空闲上限（无任何 chunk 的最长等待）：与一元请求同级 600s，
+# 防止 AgentServer 无产出时 gateway 转发循环被裸 queue.get() 永久堵住
+_STREAM_IDLE_TIMEOUT_SECONDS: float = 600.0
 
 
 class AgentServerUnaryTimeout(RuntimeError):
@@ -85,6 +97,60 @@ def _build_ws_origin(uri: str) -> str | None:
 
     scheme = "https" if parsed.scheme == "wss" else "http"
     return f"{scheme}://{parsed.netloc}"
+
+
+def resolve_agent_e2a_pipe_path() -> str | None:
+    """桌面 E2A stdio 形态下 Gateway→AgentServer 的命名管道路径（密钥包
+    ``pipes.agentE2a``）。
+
+    形态判定跟随 AgentServer 侧（``e2aTransport == 'stdio'``，而非密钥包存在）：
+    只有 stdio 形态下 AgentServer 才停开 TCP 18592 并起 agent-e2a 管道 server；
+    WS 形态（含迁移期默认）gateway 必须回退 ``AGENT_SERVER_URL`` 的 ws:// 现状。
+    非 Windows/密钥包未携带管道路径时同样返回 None。判定失败按 WS 形态处理。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        from jiuwenswarm.common.secrets_bootstrap import get_secret
+        from jiuwenswarm.server.e2a_transports import e2a_stdio_mode_enabled
+
+        if not e2a_stdio_mode_enabled():
+            return None
+        path = str(get_secret("pipes.agentE2a", "") or "").strip()
+    except Exception:  # noqa: BLE001 - 防御：模块不可用时按 WS 形态
+        return None
+    return path or None
+
+
+class _PipeWsAdapter:
+    """PipeMessageTransport 的 ws 皮（recv/send/close 鸭子形态）。
+
+    让命名管道连接直接接入 WebSocketAgentServerClient 既有的接收循环
+    （``self._ws.recv()``）与发送路径（``self._ws.send(str)``）：
+    - recv：管道对端干净关闭（recv_text None）转为 PipeClosedError——由接收循环
+      的 (ConnectionClosed, PipeError, FrameCodecError) 捕获组按断连处理；
+    - send：帧文本直写长度前缀帧（与 WS 文本帧同负载）。
+    """
+
+    def __init__(self, transport: Any) -> None:
+        self._transport = transport
+        self.remote_address = transport.remote_address
+
+    @property
+    def closed(self) -> bool:
+        return self._transport.closed
+
+    async def recv(self) -> str:
+        text = await self._transport.recv_text()
+        if text is None:
+            raise PipeClosedError("AgentServer 命名管道已关闭")
+        return text
+
+    async def send(self, data: str) -> None:
+        await self._transport.send_text(data)
+
+    async def close(self) -> None:
+        await self._transport.close()
 
 
 class AgentServerClient(ABC):
@@ -214,26 +280,33 @@ class WebSocketAgentServerClient(AgentServerClient):
     async def connect(self, uri: str) -> None:
         if self._ws is not None:
             await self.disconnect()
-        logger.info("[WebSocketAgentServerClient] 正在连接: %s", uri)
         self._uri = uri
         self._server_ready = False
         self._disconnect_notified = False
-        origin = _build_ws_origin(uri)
-        try:
-            from websockets.legacy.client import connect as legacy_connect
-            connect_fn = legacy_connect
-        except ImportError:
-            import websockets
-            connect_fn = websockets.connect
-        self._ws = await connect_fn(
-            uri,
-            origin=origin,
-            ping_interval=self._ping_interval,
-            ping_timeout=self._ping_timeout,
-            close_timeout=5.0,
-            max_size=AGENT_WS_MAX_MESSAGE_BYTES,
-        )
-        logger.info("[WebSocketAgentServerClient] 已连接: %s", uri)
+        pipe_path = resolve_agent_e2a_pipe_path()
+        if pipe_path is not None:
+            # 桌面形态：命名管道（open_pipe 自带服务端未起时的等待重试）+ auth 首帧
+            logger.info("[WebSocketAgentServerClient] 正在连接(命名管道): %s", pipe_path)
+            self._ws = await self._open_pipe_connection(pipe_path)
+            logger.info("[WebSocketAgentServerClient] 已连接(命名管道): %s", pipe_path)
+        else:
+            logger.info("[WebSocketAgentServerClient] 正在连接: %s", uri)
+            origin = _build_ws_origin(uri)
+            try:
+                from websockets.legacy.client import connect as legacy_connect
+                connect_fn = legacy_connect
+            except ImportError:
+                import websockets
+                connect_fn = websockets.connect
+            self._ws = await connect_fn(
+                uri,
+                origin=origin,
+                ping_interval=self._ping_interval,
+                ping_timeout=self._ping_timeout,
+                close_timeout=5.0,
+                max_size=AGENT_WS_MAX_MESSAGE_BYTES,
+            )
+            logger.info("[WebSocketAgentServerClient] 已连接: %s", uri)
 
         # 读取 AgentServer 的 connection.ack 事件
         try:
@@ -258,6 +331,21 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._running = True
         self._receiver_task = asyncio.create_task(self._message_receiver_loop())
         logger.info("[WebSocketAgentServerClient] 消息接收任务已启动")
+
+    async def _open_pipe_connection(self, pipe_path: str) -> _PipeWsAdapter:
+        """桌面形态建连：open_pipe → auth 首帧（e2aToken，服务端校验失败即断管）。"""
+        from jiuwenswarm.common.np_transport import open_pipe
+        from jiuwenswarm.common.secrets_bootstrap import get_secret
+        from jiuwenswarm.server.e2a_transports import PipeMessageTransport
+
+        stream = await open_pipe(pipe_path, timeout=10.0)
+        try:
+            token = str(get_secret("e2aToken", "") or "")
+            await stream.send_frame({"type": "auth", "token": token})
+        except Exception:
+            await stream.close()
+            raise
+        return _PipeWsAdapter(PipeMessageTransport(stream))
 
     async def _message_receiver_loop(self) -> None:
         """后台任务：从 WebSocket 接收消息并根据 request_id 分发到对应队列."""
@@ -335,7 +423,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                     )
                     await self._stop_receiver_after_fatal_error(e)
                     break
-                except ConnectionClosed as e:
+                except (ConnectionClosed, PipeError, FrameCodecError) as e:
                     logger.info(
                         "[WebSocketAgentServerClient] AgentServer WebSocket 已关闭: %s",
                         format_ws_diagnostics(
@@ -373,12 +461,19 @@ class WebSocketAgentServerClient(AgentServerClient):
         )
         self._running = False
         self._server_ready = False
+        ws = self._ws
         self._ws = None
         failure = _ReceiverFailure(exc)
         async with self._queue_lock:
             for queue in self._message_queues.values():
                 queue.put_nowait(failure)
         await self._notify_disconnect(exc)
+        # 收尾关闭传输（管道形态避免句柄泄漏累积；WS 形态对已关闭连接是 no-op）
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001 - 断连收尾容错
+                pass
         logger.info("[WebSocketAgentServerClient] 接收任务已停止并通知等待队列: %s", detail)
 
     async def disconnect(self) -> None:
@@ -465,7 +560,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             raise RuntimeError("未连接 AgentServer，请先调用 connect(uri)")
         try:
             await ws.send(json.dumps(payload, ensure_ascii=False))
-        except (ConnectionClosed, OSError) as exc:
+        except (ConnectionClosed, OSError, PipeError, FrameCodecError) as exc:
             logger.info(
                 "[WebSocketAgentServerClient] AgentServer WebSocket 发送失败，连接将重置: %s",
                 format_ws_diagnostics(
@@ -614,7 +709,26 @@ class WebSocketAgentServerClient(AgentServerClient):
                     except asyncio.TimeoutError:
                         break
                 else:
-                    data = await queue.get()
+                    # 首包/流中空闲必须有界：queue.get() 裸等时，一旦 AgentServer 侧
+                    # 无产出（请求丢失/模型调用挂起），gateway 串行转发循环被永久
+                    # 堵住——后续所有渠道消息只入队无回复（ws/link 无响应事故）。
+                    try:
+                        data = await asyncio.wait_for(
+                            queue.get(),
+                            timeout=_STREAM_IDLE_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError as idle_exc:
+                        logger.warning(
+                            "[WebSocketAgentServerClient] 流式响应空闲超时: request_id=%s "
+                            "chunks=%d idle_timeout=%ss",
+                            rid,
+                            chunk_count,
+                            _STREAM_IDLE_TIMEOUT_SECONDS,
+                        )
+                        raise RuntimeError(
+                            f"AgentServer 流式响应空闲超时 (request_id={rid}, "
+                            f"idle_timeout={_STREAM_IDLE_TIMEOUT_SECONDS}s)"
+                        ) from idle_exc
                 if isinstance(data, _ReceiverFailure):
                     raise RuntimeError("AgentServer WebSocket connection closed") from data.exc
                 chunk = parse_agent_server_wire_chunk(data)

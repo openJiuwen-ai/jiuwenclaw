@@ -299,6 +299,16 @@ datas += _rust_datas
 hiddenimports += _rust_hidden
 _bundled_binaries = _bundled_binaries + _rust_binaries
 
+# grpc / pycryptodome 的原生扩展必须显式全量收集：它们经 openjiuwen 动态导入链
+# （memory_tools → runner → pymilvus → grpc；凭证加解密 → Crypto）进入依赖图，
+# 静态分析只能收到纯 Python 部分，cygrpc.cp312-win_amd64.pyd / Crypto Util *.pyd
+# 会漏收，frozen exe 启动即 ImportError/OSError 退出（code=1）。
+for _native_pkg in ("grpc", "Crypto"):
+    _np_datas, _np_binaries, _np_hidden = collect_all(_native_pkg)
+    datas += _np_datas
+    hiddenimports += _np_hidden
+    _bundled_binaries = _bundled_binaries + _np_binaries
+
 # YAML 抽到 jiuwenbox_configs/, 不要落到 _internal/jiuwenbox/ 以免盖住 PYZ。
 def _reloc_jiuwenbox_yaml(entries):
     relocated = []
@@ -327,7 +337,7 @@ hiddenimports += [
     "jiuwenbox.bundled_configs",
 ]
 
-# win_setup/win_acl 惰性 import pywin32, 静态分析收集不到。
+# win_setup/win_acl/np_transport 惰性 import pywin32, 静态分析收集不到。
 if sys.platform == "win32":
     hiddenimports += [
         "win32api",
@@ -335,6 +345,10 @@ if sys.platform == "win32":
         "win32security",
         "win32crypt",
         "win32file",
+        # np_transport（命名管道传输）用：CreateNamedPipe/GetNamedPipeClientProcessId 等
+        "win32pipe",
+        "win32process",
+        "winerror",
         "pywintypes",
         "pythoncom",
     ]
@@ -354,6 +368,9 @@ if sys.platform == "win32":
             os.path.join(_sp_dir, "win32", "win32security*.pyd"),
             os.path.join(_sp_dir, "win32", "win32crypt*.pyd"),
             os.path.join(_sp_dir, "win32", "win32file*.pyd"),
+            # np_transport（命名管道传输）依赖的 pyd
+            os.path.join(_sp_dir, "win32", "win32pipe*.pyd"),
+            os.path.join(_sp_dir, "win32", "win32process*.pyd"),
             os.path.join(_sp_dir, "win32", "pywintypes*.dll"),
             os.path.join(_sp_dir, "win32", "pythoncom*.dll"),
         ):

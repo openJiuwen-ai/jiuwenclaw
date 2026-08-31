@@ -2,10 +2,13 @@
 """ExpertPackageSource 抽象 / HTTP 实现 / 本地 override / 包校验 / metadata expert_id 测试。
 
 mock 仓库契约即未来正式仓库的替换验收依据。
+np:// 命名管道形态：经 serve_pipe 假仓库端到端（HTTP/1.1 over 管道，Windows only）。
 """
 
 import io
 import json
+import os
+import sys
 import zipfile
 from pathlib import Path
 
@@ -157,6 +160,61 @@ async def test_fetch_ok_extracts_to_cache(cache_dir: Path) -> None:
     assert (package_dir / "agents" / "00-identity.md").read_text(
         encoding="utf-8"
     ) == "# 人设"
+
+
+@pytest.mark.asyncio
+async def test_fetch_strips_single_top_level_dir(cache_dir: Path) -> None:
+    """上架工具「连目录一起压缩」的形态：条目全在一个一级目录下，自动剥层。"""
+    payload = _zip_bytes(
+        {
+            "doc-writer/": "",
+            "doc-writer/manifest.json": "{}",
+            "doc-writer/agents/": "",
+            "doc-writer/agents/00-identity.md": "# 人设",
+        }
+    )
+    source = es.HttpRepoExpertPackageSource(
+        client=_mock_client(lambda request: httpx.Response(200, content=payload))
+    )
+    package_dir = await source.fetch("doc-writer")
+    assert (package_dir / "manifest.json").is_file()
+    assert not (package_dir / "doc-writer").exists()
+    assert (package_dir / "agents" / "00-identity.md").read_text(
+        encoding="utf-8"
+    ) == "# 人设"
+
+
+@pytest.mark.asyncio
+async def test_fetch_no_strip_when_multiple_top_levels(cache_dir: Path) -> None:
+    """存在第二个顶层名时不是包裹形态，原样解压（由装载校验报错）。"""
+    payload = _zip_bytes(
+        {"a/manifest.json": "{}", "b/readme.md": "x"}
+    )
+    source = es.HttpRepoExpertPackageSource(
+        client=_mock_client(lambda request: httpx.Response(200, content=payload))
+    )
+    package_dir = await source.fetch("security-reviewer")
+    assert not (package_dir / "manifest.json").exists()
+    assert (package_dir / "a" / "manifest.json").is_file()
+    assert (package_dir / "b" / "readme.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_fetch_flat_zip_with_dir_entries_not_stripped(cache_dir: Path) -> None:
+    """平铺但带目录条目的 zip：根级文件存在即判定非包裹形态，原样解压。"""
+    payload = _zip_bytes(
+        {
+            "agents/": "",
+            "agents/00-identity.md": "# 人设",
+            "manifest.json": "{}",
+        }
+    )
+    source = es.HttpRepoExpertPackageSource(
+        client=_mock_client(lambda request: httpx.Response(200, content=payload))
+    )
+    package_dir = await source.fetch("security-reviewer")
+    assert (package_dir / "manifest.json").is_file()
+    assert (package_dir / "agents" / "00-identity.md").is_file()
 
 
 @pytest.mark.asyncio
@@ -437,6 +495,158 @@ def test_metadata_legacy_session_without_key(sessions_dir: Path) -> None:
     assert sm.get_session_metadata("legacy", cache_bust=True)["expert_id"] == ""
 
 
+class TestRepoClientShape:
+    """base_url scheme 分流：np:// → 管道 transport；http(s):// → 保持现状（纯构造，跨平台）。"""
+
+    @pytest.mark.asyncio
+    async def test_np_url_uses_named_pipe_transport(self) -> None:
+        from jiuwenswarm.common import np_transport
+
+        source = es.HttpRepoExpertPackageSource(base_url="np://claw-expert-repo")
+        client = source._http()
+        try:
+            assert isinstance(client._transport, np_transport.NamedPipeTransport)
+            assert client._transport._pipe_path == r"\\.\pipe\claw-expert-repo"
+            assert client.trust_env is False, "np:// 形态须屏蔽代理 env"
+        finally:
+            await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_http_url_keeps_default_transport(self) -> None:
+        from jiuwenswarm.common import np_transport
+
+        source = es.HttpRepoExpertPackageSource(base_url="http://127.0.0.1:18901")
+        client = source._http()
+        try:
+            assert not isinstance(client._transport, np_transport.NamedPipeTransport)
+            assert client.trust_env is True, "http 形态行为不变（默认 trust_env）"
+        finally:
+            await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_injected_client_still_wins(self) -> None:
+        injected = _mock_client(lambda request: httpx.Response(200, json={"experts": []}))
+        source = es.HttpRepoExpertPackageSource(
+            base_url="np://claw-expert-repo", client=injected
+        )
+        assert source._http() is injected
+        await injected.aclose()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="命名管道仅 Windows")
+class TestHttpRepoOverNamedPipe:
+    """np:// base_url 经 serve_pipe 假仓库的端到端（HTTP/1.1 over 命名管道）。"""
+
+    async def _start_repo_pipe(self, tag: str, responder):
+        """responder(request_line: str) -> (status, body_bytes)；返回 (base_url, server)。"""
+        from jiuwenswarm.common import np_transport
+
+        base_url = f"np://claw-test-np-expert-{os.getpid()}-{tag}"
+
+        async def handle(stream) -> None:
+            buf = bytearray()
+            while b"\r\n\r\n" not in buf:
+                chunk = await stream.read()
+                if not chunk:
+                    return
+                buf.extend(chunk)
+            head = bytes(buf).split(b"\r\n\r\n", 1)[0]
+            request_line = head.split(b"\r\n", 1)[0].decode("latin-1")
+            status, body = responder(request_line)
+            payload = (
+                f"HTTP/1.1 {status} OK\r\n"
+                f"Content-Length: {len(body)}\r\n"
+                "Content-Type: application/octet-stream\r\n"
+                "\r\n"
+            ).encode("latin-1") + body
+            await stream.write(payload)
+
+        server = await np_transport.serve_pipe(
+            np_transport.pipe_path_from_url(base_url), handle
+        )
+        return base_url, server
+
+    @pytest.mark.asyncio
+    async def test_np_list_ok(self) -> None:
+        def responder(request_line: str):
+            assert request_line == "GET /api/v1/packages HTTP/1.1"
+            return 200, json.dumps(
+                {
+                    "experts": [
+                        {
+                            "id": "security-reviewer",
+                            "name": "安全评审专家",
+                            "description": "描述",
+                            "available": True,
+                            "tags": ["security"],
+                        }
+                    ]
+                }
+            ).encode()
+
+        base_url, server = await self._start_repo_pipe("list", responder)
+        try:
+            source = es.HttpRepoExpertPackageSource(base_url=base_url)
+            (summary,) = await source.list()
+            assert summary.id == "security-reviewer"
+            assert summary.source == "repo"
+            assert summary.available is True
+        finally:
+            await server.stop()
+
+    @pytest.mark.asyncio
+    async def test_np_fetch_ok_via_env(
+            self, cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """桌面注入形态：JIUWEN_EXPERT_REPO_URL=np://<管道名>（构造参数缺省走 env）。"""
+        payload = _zip_bytes({"manifest.json": "{}", "agents/00-identity.md": "# 人设"})
+
+        def responder(request_line: str):
+            assert request_line == "GET /api/v1/packages/security-reviewer HTTP/1.1"
+            return 200, payload
+
+        base_url, server = await self._start_repo_pipe("fetch", responder)
+        try:
+            monkeypatch.setenv(es.REPO_URL_ENV, base_url)
+            source = es.HttpRepoExpertPackageSource()
+            package_dir = await source.fetch("security-reviewer")
+            assert package_dir == cache_dir / "security-reviewer"
+            assert (package_dir / "manifest.json").is_file()
+            assert (package_dir / "agents" / "00-identity.md").read_text(
+                encoding="utf-8"
+            ) == "# 人设"
+        finally:
+            await server.stop()
+
+    @pytest.mark.asyncio
+    async def test_np_fetch_404_raises_not_found(self) -> None:
+        base_url, server = await self._start_repo_pipe(
+            "404", lambda request_line: (404, b"not found")
+        )
+        try:
+            source = es.HttpRepoExpertPackageSource(base_url=base_url)
+            with pytest.raises(es.ExpertNotFound):
+                await source.fetch("nope")
+        finally:
+            await server.stop()
+
+    @pytest.mark.asyncio
+    async def test_np_pipe_down_raises_unavailable(
+            self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """管道不可达（桌面代理未起）→ ExpertRepoUnavailable（与 http 连接失败同语义）。
+
+        直接桩掉 open_pipe 立即抛错，避免真实连接 10s 超时拖慢用例。
+        """
+        from jiuwenswarm.common import np_transport
+
+        async def _boom(path: str, *, timeout: float = 10.0):
+            raise np_transport.PipeTimeoutError(f"管道未监听: {path}")
+
+        monkeypatch.setattr(np_transport, "open_pipe", _boom)
+        source = es.HttpRepoExpertPackageSource(base_url="np://claw-test-np-expert-down")
+        with pytest.raises(es.ExpertRepoUnavailable):
+            await source.list()
 def test_metadata_init_defaults_expert_type_agent(sessions_dir: Path) -> None:
     sm.init_session_metadata(session_id="t1", channel_id="desktop")
     assert sm.get_session_metadata("t1", cache_bust=True)["expert_type"] == "agent"

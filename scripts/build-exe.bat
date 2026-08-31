@@ -8,12 +8,20 @@ cd /d "%~dp0\.."
 echo === JiuwenSwarm build-exe ===
 echo.
 
-echo [1/3] Installing Python deps (uv sync --extra dev)...
+REM 统一走阿里云镜像，避免 uv lock 把 uv.lock 里的镜像 URL 改写成 pypi.org 噪声
+set "UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/"
+
+echo [1/4] Refreshing openjiuwen hotfix pin (br_0.1.16.post2.hotfix latest)...
+call uv lock --upgrade-package openjiuwen
+if errorlevel 1 exit /b 1
+
+echo.
+echo [2/4] Installing Python deps (uv sync --extra dev)...
 call uv sync --extra dev
 if errorlevel 1 exit /b 1
 
 echo.
-echo [2/3] Building frontend...
+echo [3/4] Building frontend...
 pushd jiuwenswarm\channels\web\frontend
 if errorlevel 1 goto :failed_frontend
 if not exist node_modules (
@@ -28,7 +36,7 @@ if errorlevel 1 goto :failed_frontend
 popd
 
 echo.
-echo [3/3] Running PyInstaller...
+echo [4/4] Running PyInstaller...
 call uv run pyinstaller scripts\jiuwenswarm.spec --noconfirm
 if errorlevel 1 exit /b 1
 

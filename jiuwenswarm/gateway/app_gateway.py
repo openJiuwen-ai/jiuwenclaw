@@ -104,6 +104,22 @@ def _build_event_frame(msg) -> dict[str, Any]:
     return {"type": "event", "event": event_name, "payload": payload}
 
 
+def is_desktop_runtime() -> bool:
+    """桌面集成形态判定（claw_desktop 经 ``--desktop-secrets-stdin`` 下发密钥包）。
+
+    exe_entry 在 ``--desktop-run-gateway`` 分发前完成
+    ``bootstrap_secrets_from_stdin``，故「密钥包已加载」即等价于桌面集成形态；
+    CLI/源码启动与独立桌面 app（app.py 拉起的 ``--desktop-run-gateway`` 无密钥包）
+    均为 False。判定失败（模块不可用等）按非桌面形态处理，保持现状行为。
+    """
+    try:
+        from jiuwenswarm.common.secrets_bootstrap import secrets_loaded
+
+        return bool(secrets_loaded())
+    except Exception:  # noqa: BLE001 - 防御：模块不可用时按非桌面形态
+        return False
+
+
 def _normalize_gateway_message(msg):
 
     req_method = getattr(msg, "req_method", None) or ReqMethod.CHAT_SEND
@@ -263,9 +279,17 @@ async def _connect_with_retry(
     相比固定 3s 间隔: 先做轻量 TCP 端口探测, 端口通了再 ws 握手, 避免 AgentServer
     尚未 listen 时反复走完整 WS 握手; 重试间隔改为指数退避 (0.2s 起, 翻倍至上限
     ``interval``), 让 AgentServer 一旦 listen 即在亚秒级连上, 而非硬等下一个 3s 节拍.
+
+    桌面 E2A stdio 形态（密钥包 e2aTransport=='stdio' 且携带 pipes.agentE2a）:
+    gateway→agent 走命名管道, 无 TCP 端口可探测——跳过端口探测直接重试管道连接
+    （open_pipe 自带服务端未起时的等待重试）。
     """
     import socket as _socket
     from urllib.parse import urlparse as _urlparse
+
+    from jiuwenswarm.gateway.routing.agent_client import resolve_agent_e2a_pipe_path
+
+    pipe_path = resolve_agent_e2a_pipe_path()
 
     parsed = _urlparse(uri)
     host = parsed.hostname or "127.0.0.1"
@@ -281,7 +305,8 @@ async def _connect_with_retry(
     backoff = 0.2
     for attempt in range(1, max_retries + 1):
         # 先 TCP 探测: 端口未通则不浪费一次 WS 握手, 直接进入退避等待.
-        if not _tcp_ready():
+        # (桌面管道形态无端口可探, 跳过)
+        if pipe_path is None and not _tcp_ready():
             if attempt >= max_retries:
                 logger.error(
                     "[App] connect AgentServer failed after %d tries: port %s not listening  uri=%s",
@@ -1999,12 +2024,22 @@ async def _run(
         ),
     ]
 
+    # 桌面形态（密钥包已下发）：Gateway 主 WS server（/acp、/tui 路由；桌面注入
+    # 18591）无桌面消费者，直接不监听（docs/named-pipe-migration-design.md §5.4）。
+    # cron WebChannel（18590）与 xiaoyi 渠道不受影响；非桌面形态行为零变化。
+    gateway_ws_enabled = not is_desktop_runtime()
     gateway_server_config = GatewayServerConfig(
-        enabled=True,
+        enabled=gateway_ws_enabled,
         host=os.getenv("GATEWAY_HOST", "127.0.0.1"),
         port=int(os.getenv("GATEWAY_PORT", "19001")),
         routes=_build_route_config_map(route_bindings),
     )
+    if not gateway_ws_enabled:
+        logger.info(
+            "[App] 桌面形态：Gateway WS server ws://%s:%s（/acp /tui）不监听",
+            gateway_server_config.host,
+            gateway_server_config.port,
+        )
     gateway_server = GatewayServer(gateway_server_config, _DummyBus())
     gateway_server.message_handler_ref = message_handler
 
@@ -2552,6 +2587,19 @@ async def _run(
                     logger.info("[App] channels.xiaoyi.%s, XiaoyiChannel disabled", reason)
                 else:
                     xiaoyi_channel = channel_manager.build_channel("xiaoyi", xiaoyi_conf)
+                    # clientVariables.permission 档位热重载（同上，apps 形式之外的顶层 dict 形式）
+                    async def _reload_xiaoyi_permissions() -> None:
+                        reload_env = e2a_from_agent_fields(
+                            request_id=f"xiaoyi-perm-reload-{uuid_module.uuid4().hex[:8]}",
+                            channel_id="xiaoyi",
+                            req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                            params={"reload_scopes": ["permissions"]},
+                        )
+                        reload_resp = await client.send_request(reload_env)
+                        if not getattr(reload_resp, "ok", False):
+                            raise RuntimeError(f"agent.reload_config rejected: {getattr(reload_resp, 'payload', None)}")
+
+                    xiaoyi_channel.set_reload_permissions_handler(_reload_xiaoyi_permissions)
                     channel_manager.register_channel(xiaoyi_channel)
                     xiaoyi_task = asyncio.create_task(xiaoyi_channel.start(), name="xiaoyi")
                     logger.info("[App] XiaoyiChannel registered from config.yaml.channels.xiaoyi")
@@ -2593,6 +2641,21 @@ async def _run(
                         file_upload_url=str(app.get("file_upload_url") or "").strip(),
                     )
                     channel = XiaoyiChannel(config, _DummyBus())
+                    # clientVariables.permission 档位热重载：渠道改 config.yaml 后经
+                    # gateway→AgentServer E2A 连接发 agent.reload_config（对齐桌面端
+                    # 「写盘 + reload_scopes: [permissions]」流程，AgentServer 重新读盘生效）
+                    async def _reload_xiaoyi_permissions() -> None:
+                        reload_env = e2a_from_agent_fields(
+                            request_id=f"xiaoyi-perm-reload-{uuid_module.uuid4().hex[:8]}",
+                            channel_id="xiaoyi",
+                            req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                            params={"reload_scopes": ["permissions"]},
+                        )
+                        reload_resp = await client.send_request(reload_env)
+                        if not getattr(reload_resp, "ok", False):
+                            raise RuntimeError(f"agent.reload_config rejected: {getattr(reload_resp, 'payload', None)}")
+
+                    channel.set_reload_permissions_handler(_reload_xiaoyi_permissions)
                     channel_manager.register_channel(channel)
                     task = asyncio.create_task(channel.start(), name=f"xiaoyi-{api_id or 'default'}")
                     channel.start_task = task  # 挂到 channel 对象上，不另存 dict
@@ -3083,6 +3146,14 @@ async def _run(
 
 def main() -> None:
     from jiuwenswarm.dotenv_early import get_parsed_dotenv
+
+    # 命名管道模型通道：桌面形态 API_BASE=np:// 时 LLM 调用走 Windows 命名管道。
+    # gateway 进程内 IM pipeline 也有 LLM 调用（llm_sse_patch 在 gateway 侧无应用点，
+    # np 补丁加在 main 早期——openjiuwen 客户端为请求期惰性构造，此处即可全覆盖）。
+    # 非 np:// 时零行为变化；幂等。
+    from jiuwenswarm.llm_np_patch import apply_openai_np_patch
+
+    apply_openai_np_patch()
 
     parser = argparse.ArgumentParser(
         prog="jiuwenswarm-gateway",

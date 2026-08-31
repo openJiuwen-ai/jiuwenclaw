@@ -607,11 +607,13 @@ async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
     assert "## Browser Subagent Rules" not in non_web_task_section.content["en"]
 
 
-def test_task_planning_tools_remain_enabled_without_todo_prompt_section():
+def test_task_planning_rail_injects_todo_prompt_section():
+    # inject_prompt=True 是有意决策：向 system prompt 注入 todo 规划段，
+    # 仅纯简单对话（无工具调用）才不用 todo（interface_deep._build_task_planning_rail）。
     rail = JiuWenSwarmDeepAdapter._build_task_planning_rail()
     if rail is None:
         pytest.skip("TaskPlanningRail is unavailable with the installed openjiuwen API")
-    assert rail.inject_prompt is False
+    assert rail.inject_prompt is True
 
 
 @pytest.mark.asyncio

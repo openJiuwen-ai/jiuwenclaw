@@ -17,7 +17,6 @@ from typing import Any, ClassVar, Optional
 from weakref import WeakValueDictionary
 
 from openjiuwen.core.common.logging import server_logger
-from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService, reset_harness_packages_state
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools.device_command_manager import (
@@ -27,11 +26,17 @@ from jiuwenswarm.common.device_rpc.models import DeviceCommandResponse
 from jiuwenswarm.common.gui_rpc.models import GuiRpcResponse
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.server.ws_send import send_wire_payload
+from jiuwenswarm.server.e2a_transports import (
+    TRANSPORT_CLOSED_ERRORS,
+    TRANSPORT_PROTOCOL_ERRORS,
+    WsMessageTransport,
+)
 from jiuwenswarm.common.e2a.wire_trace import trace_inbound
 from jiuwenswarm.server.gui_rpc import get_gui_rpc_client
 from jiuwenswarm.server.gui_rpc.client import GuiRpcClientError
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
-from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file, mask_sensitive
+from jiuwenswarm.common.utils import get_agent_sessions_dir, get_agent_workspace_dir, get_config_file, mask_sensitive
+from jiuwenswarm.common.todo_snapshot import load_todo_snapshot_for_frontend
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
@@ -1021,6 +1026,9 @@ class AgentWebSocketServer:
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server: Any = None
+        # 桌面形态标记：start(listen_tcp=False) 后置位（stdio+命名管道替代 TCP
+        # 监听；TCP 形态的「已在运行」守卫是 self._server 非 None，桌面形态用本标记）
+        self._desktop_listenerless = False
         # 当前 Gateway 连接，用于 send_push 主动推送
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
@@ -1126,8 +1134,14 @@ class AgentWebSocketServer:
 
     # ---------- 生命周期 ----------
 
-    async def start(self) -> None:
-        """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容.
+    async def start(self, *, listen_tcp: bool = True) -> None:
+        """启动 E2A 服务端。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容.
+
+        桌面形态（``listen_tcp=False``，由 app_agentserver 在密钥包
+        ``e2aTransport=='stdio'`` 时选择）：不监听 TCP——E2A 改走 stdio
+        （桌面主进程）+ 命名管道（gateway 兄弟进程），通道由
+        ``jiuwenswarm.server.e2a_desktop`` 编排；其余启动初始化
+        （harness 状态重置、checkpointer 预热、jiuwenbox 自举）两种形态一致。
 
         注: persistent checkpointer 的初始化历史在 ``legacy_serve`` 之前同步 await,
         首次约耗时 ~14s (sqlite 文件 + openjiuwen 工厂反射), 期间 WS 端口未 listen,
@@ -1135,38 +1149,47 @@ class AgentWebSocketServer:
         之后后台预热 (fire-and-forget), 让端口尽快开放; 首条 chat 请求若赶在预热完成前
         到达, 走 ``_ensure_persistent_checkpointer_response`` 兜底等待, 不影响握手.
         """
-        if self._server is not None:
+        if self._server is not None or self._desktop_listenerless:
             logger.warning("[AgentWebSocketServer] 服务端已在运行")
             return
 
         # Reset harness package state to native on service startup
         reset_harness_packages_state()
 
-        try:
-            from websockets.legacy.server import serve as legacy_serve
-            self._server = await legacy_serve(
-                self._connection_handler,
+        if listen_tcp:
+            try:
+                from websockets.legacy.server import serve as legacy_serve
+                self._server = await legacy_serve(
+                    self._connection_handler,
+                    self._host,
+                    self._port,
+                    process_request=self._process_request,
+                    ping_interval=self._ping_interval,
+                    ping_timeout=self._ping_timeout,
+                    max_size=AGENT_WS_MAX_MESSAGE_BYTES,
+                )
+            except ImportError:
+                import websockets
+                self._server = await websockets.serve(
+                    self._connection_handler,
+                    self._host,
+                    self._port,
+                    process_request=self._process_request,
+                    ping_interval=self._ping_interval,
+                    ping_timeout=self._ping_timeout,
+                    max_size=AGENT_WS_MAX_MESSAGE_BYTES,
+                )
+            logger.info(
+                "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
+            )
+        else:
+            self._desktop_listenerless = True
+            logger.info(
+                "[AgentWebSocketServer] 桌面形态：不监听 TCP %s:%s "
+                "（E2A 走 stdio + 命名管道）",
                 self._host,
                 self._port,
-                process_request=self._process_request,
-                ping_interval=self._ping_interval,
-                ping_timeout=self._ping_timeout,
-                max_size=AGENT_WS_MAX_MESSAGE_BYTES,
             )
-        except ImportError:
-            import websockets
-            self._server = await websockets.serve(
-                self._connection_handler,
-                self._host,
-                self._port,
-                process_request=self._process_request,
-                ping_interval=self._ping_interval,
-                ping_timeout=self._ping_timeout,
-                max_size=AGENT_WS_MAX_MESSAGE_BYTES,
-            )
-        logger.info(
-            "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
-        )
 
         # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
@@ -1355,6 +1378,18 @@ class AgentWebSocketServer:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "[AgentWebSocketServer] inject JIUWENBOX_VENV_DIR failed: %s",
+                            exc,
+                        )
+                    # skills 目录注入：policy 基底 allow_read 用 %JIUWENBOX_SKILLS_DIR%
+                    # 占位（os.path.expandvars 语义），不注入则展不开 → apply_sandbox_acl
+                    # 跳过 → 沙箱受限 token 读技能文件 Errno 13（skill_tool 读取失败）。
+                    try:
+                        skills_dir = Path(get_agent_workspace_dir()) / "skills"
+                        if skills_dir.is_dir():
+                            sandbox_env["JIUWENBOX_SKILLS_DIR"] = str(skills_dir)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[AgentWebSocketServer] inject JIUWENBOX_SKILLS_DIR failed: %s",
                             exc,
                         )
                 except Exception as exc:  # noqa: BLE001
@@ -1582,22 +1617,34 @@ class AgentWebSocketServer:
     # ---------- 连接处理 ----------
 
     async def _connection_handler(self, ws: Any) -> None:
-        """处理单个 Gateway WebSocket 连接，同一连接可并发处理多个请求."""
-        remote = ws.remote_address
+        """WS 传输皮入口（websockets serve 回调；非桌面形态的通道）。"""
+        await self.run_connection(WsMessageTransport(ws))
+
+    async def run_connection(self, transport: Any, *, remote: Any = None) -> None:
+        """处理单条 E2A 连接（同一连接可并发处理多个请求）.
+
+        传输无关内核（MessageTransport：recv_text/send_text/close，
+        见 server/e2a_transports.py）——WS（非桌面形态）/ stdio（桌面主进程）/
+        命名管道（gateway 兄弟进程）三形态共用：connection.ack 首事件 →
+        消息循环（每条消息 fire-and-forget 分发 _handle_message）→
+        断连清理（fail_all / cancel inflight / 停 scheduler）。
+        """
+        if remote is None:
+            remote = getattr(transport, "remote_address", None)
         logger.info("[AgentWebSocketServer] 新连接: %s", remote)
 
         send_lock = asyncio.Lock()
-        self._current_ws = ws
+        self._current_ws = transport
         self._current_send_lock = send_lock
 
-        # 发送 connection.ack 事件，通知 Gateway 服务端已就绪
+        # 发送 connection.ack 事件，通知对端服务端已就绪
         try:
             ack_frame = {
                 "type": "event",
                 "event": "connection.ack",
                 "payload": {"status": "ready"},
             }
-            await send_wire_payload(ws, ack_frame)
+            await send_wire_payload(transport, ack_frame)
             logger.info("[AgentWebSocketServer] 已发送 connection.ack: %s", remote)
         except Exception as e:
             logger.warning("[AgentWebSocketServer] 发送 connection.ack 失败: %s", e)
@@ -1605,11 +1652,16 @@ class AgentWebSocketServer:
         tasks: set[asyncio.Task] = set()
 
         try:
-            async for raw in ws:
-                task = asyncio.create_task(self._handle_message(ws, raw, send_lock))
+            while True:
+                raw = await transport.recv_text()
+                if raw is None:
+                    # 对端干净关闭（管道/stdio EOF；WS 干净关闭由 ws 迭代协议转 None）
+                    logger.info("[AgentWebSocketServer] 连接关闭（对端 EOF）: %s", remote)
+                    break
+                task = asyncio.create_task(self._handle_message(transport, raw, send_lock))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
-        except WebSocketConnectionClosed as e:
+        except TRANSPORT_CLOSED_ERRORS as e:
             logger.info(
                 "[AgentWebSocketServer] 连接关闭: %s",
                 format_ws_diagnostics(
@@ -1620,15 +1672,22 @@ class AgentWebSocketServer:
                         "ping_interval": self._ping_interval,
                         "ping_timeout": self._ping_timeout,
                     },
-                    describe_ws_peer(ws),
+                    describe_ws_peer(transport),
                     describe_ws_exception(e),
                 ),
+            )
+        except TRANSPORT_PROTOCOL_ERRORS as e:
+            logger.warning(
+                "[AgentWebSocketServer] 连接帧协议/传输错误，关闭 (%s): %s", remote, e
             )
         except Exception as e:
             logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e)
         finally:
-            self._current_ws = None
-            self._current_send_lock = None
+            # 多连接并存（桌面 stdio + gateway 管道）时，仅清理本连接的注册，
+            # 避免旧连接的收尾清掉后建连接的 _current_ws
+            if self._current_ws is transport:
+                self._current_ws = None
+                self._current_send_lock = None
             get_device_command_manager().fail_all(RuntimeError("Gateway disconnected"))
             get_gui_rpc_client().fail_all(
                 GuiRpcClientError(
@@ -1639,7 +1698,7 @@ class AgentWebSocketServer:
             get_reverse_rpc_client().fail_all(
                 ReverseRpcTransportDisconnected("Gateway disconnected")
             )
-            self._clear_ws_acp_client_capabilities(ws)
+            self._clear_ws_acp_client_capabilities(transport)
             connection_tasks = list(tasks)
             for task in connection_tasks:
                 if not task.done():
@@ -1668,6 +1727,10 @@ class AgentWebSocketServer:
             if connection_tasks:
                 await asyncio.gather(*connection_tasks, return_exceptions=True)
             self._session_stream_tasks.clear()
+            try:
+                await transport.close()
+            except Exception:  # noqa: BLE001 - 关停路径容错
+                pass
 
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
@@ -1683,7 +1746,7 @@ class AgentWebSocketServer:
             try:
                 async with send_lock:
                     await send_wire_payload(ws, wire)
-            except WebSocketConnectionClosed as send_exc:
+            except TRANSPORT_CLOSED_ERRORS as send_exc:
                 logger.info(
                     "[AgentWebSocketServer] WebSocket 已关闭，JSON 解析错误未发送: %s",
                     format_ws_diagnostics(
@@ -1742,7 +1805,7 @@ class AgentWebSocketServer:
                 try:
                     async with send_lock:
                         await send_wire_payload(ws, wire)
-                except WebSocketConnectionClosed as send_exc:
+                except TRANSPORT_CLOSED_ERRORS as send_exc:
                     logger.info(
                         "[AgentWebSocketServer] WebSocket 已关闭，请求解析错误未发送: %s",
                         describe_ws_exception(send_exc),
@@ -2106,9 +2169,9 @@ class AgentWebSocketServer:
                 request.request_id,
                 request.session_id,
             )
-        except WebSocketConnectionClosed as e:
+        except TRANSPORT_CLOSED_ERRORS as e:
             logger.info(
-                "[AgentWebSocketServer] WebSocket 已关闭，放弃请求回包: %s",
+                "[AgentWebSocketServer] 连接已关闭，放弃请求回包: %s",
                 format_ws_diagnostics(
                     {
                         "request_id": request.request_id,
@@ -2138,7 +2201,7 @@ class AgentWebSocketServer:
             try:
                 async with send_lock:
                     await send_wire_payload(ws, wire)
-            except WebSocketConnectionClosed as send_exc:
+            except TRANSPORT_CLOSED_ERRORS as send_exc:
                 logger.info(
                     "[AgentWebSocketServer] WebSocket 已关闭，错误响应未发送: %s",
                     format_ws_diagnostics(
@@ -3130,9 +3193,9 @@ class AgentWebSocketServer:
                         )
             except asyncio.CancelledError:
                 pass
-            except WebSocketConnectionClosed:
+            except TRANSPORT_CLOSED_ERRORS:
                 logger.info(
-                    "[AgentWebSocketServer] keepalive 停止，WebSocket 已关闭: request_id=%s",
+                    "[AgentWebSocketServer] keepalive 停止，连接已关闭: request_id=%s",
                     request.request_id,
                 )
 
@@ -3222,9 +3285,9 @@ class AgentWebSocketServer:
                             chunk_count - 1,
                         )
                         return
-                except WebSocketConnectionClosed:
+                except TRANSPORT_CLOSED_ERRORS:
                     logger.info(
-                        "[AgentWebSocketServer] 流式响应停止，WebSocket 已关闭: request_id=%s",
+                        "[AgentWebSocketServer] 流式响应停止，连接已关闭: request_id=%s",
                         request.request_id,
                     )
                     return
@@ -3242,7 +3305,7 @@ class AgentWebSocketServer:
                     await heartbeat_task
                 except asyncio.CancelledError:
                     pass
-                except WebSocketConnectionClosed:
+                except TRANSPORT_CLOSED_ERRORS:
                     pass
             # 清除自身的宿主生命周期记录；同 session 的其它请求不受影响。
             entries = self._session_stream_tasks.get(session_id)
@@ -5416,6 +5479,44 @@ class AgentWebSocketServer:
                     )
                     return
 
+        done_seq = len(messages) if isinstance(messages, list) else 0
+
+        # Session open / refresh: push full todo snapshot before history "done"
+        # so the frontend todo panel restores without reading workspace files.
+        # Only page 1 — pagination must not re-flash the panel.
+        if page_idx == 1 and isinstance(session_id, str) and session_id.strip():
+            todos = load_todo_snapshot_for_frontend(session_id)
+            todo_chunk = AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={
+                    "event_type": "todo.updated",
+                    "todos": todos,
+                    "session_id": session_id.strip(),
+                },
+                is_complete=False,
+            )
+            wire_todo = encode_agent_chunk_for_wire(
+                todo_chunk,
+                response_id=request.request_id,
+                sequence=done_seq,
+            )
+            sent_todo = False
+            async with send_lock:
+                sent_todo = await send_wire_payload(ws, wire_todo)
+            if not sent_todo:
+                # chat timeline still finishes; log so oversized snapshots are visible.
+                logger.warning(
+                    "[AgentWebSocketServer] history todo.updated snapshot send failed "
+                    "(oversized or replaced): request_id=%s session_id=%s seq=%s "
+                    "todo_count=%s",
+                    request.request_id,
+                    session_id.strip(),
+                    done_seq,
+                    len(todos),
+                )
+            done_seq += 1
+
         done_chunk = AgentResponseChunk(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -5428,7 +5529,6 @@ class AgentWebSocketServer:
             },
             is_complete=True,
         )
-        done_seq = len(messages) if isinstance(messages, list) else 0
         wire_done = encode_agent_chunk_for_wire(
             done_chunk,
             response_id=request.request_id,
@@ -8941,7 +9041,7 @@ class AgentWebSocketServer:
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_xiaoyi_gui_rpc_response(
             self,
@@ -8994,7 +9094,7 @@ class AgentWebSocketServer:
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_reverse_rpc_response(
             self,
@@ -9038,7 +9138,7 @@ class AgentWebSocketServer:
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def handle_acp_tool_response_for_test(
             self,
