@@ -281,7 +281,31 @@ def _with_heartbeat_history_metadata(
     return result
 
 
+# Sentinel value marking history entries that should only live in the current
+# turn and must not leak into subsequent turns' prompt context (e.g. uploaded
+# images, file attachments).  The frontend may still read these for display.
+_HISTORY_SCOPE_CURRENT_TURN = "current_turn"
+
+
+def _unwrap_scoped(value: Any) -> Any:
+    """Return the inner ``items`` when *value* is a ``{"items": …, "scope": …}``
+    dict, otherwise return *value* unchanged.
+
+    This allows code that reads history extras to transparently handle both the
+    new scoped format and legacy flat lists/dicts.
+    """
+    if isinstance(value, dict) and "items" in value and "scope" in value:
+        return value["items"]
+    return value
+
+
 def _history_user_extra(params: Any) -> dict[str, Any] | None:
+    """Extract media/files/skills from ``params`` for the history extra.
+
+    Image attachments and uploaded files are scoped to the *current turn* only
+    so they are visible in the UI history but do not leak into later prompt
+    contexts.  Skills, on the other hand, are persisted without a scope.
+    """
     if not isinstance(params, dict):
         return None
 
@@ -294,7 +318,10 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
             if item is not None:
                 media_items.append(item)
         if media_items:
-            extra["media_items"] = media_items
+            extra["media_items"] = {
+                "items": media_items,
+                "scope": _HISTORY_SCOPE_CURRENT_TURN,
+            }
 
     raw_files = params.get("files")
     if isinstance(raw_files, dict):
@@ -307,7 +334,10 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
                 if item is not None:
                     image_items.append(item)
             if image_items:
-                files["uploaded_images"] = image_items
+                files["uploaded_images"] = {
+                    "items": image_items,
+                    "scope": _HISTORY_SCOPE_CURRENT_TURN,
+                }
         if files:
             extra["files"] = files
 
