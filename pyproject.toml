@@ -119,6 +119,7 @@ test = [
     "pytest-mock>=3.14.0",
     "pytest-cov>=7.0.0",
     "coverage>=7.7.1",
+    "playwright>=1.60.0,<2.0.0",
     "pyyaml>=6.0",
 ]
 
@@ -197,6 +198,7 @@ test = [
     "pytest-mock>=3.14.0",
     "pytest-cov>=7.0.0",
     "coverage>=7.7.1",
+    "playwright>=1.60.0,<2.0.0",
     "pyyaml>=6.0",
 ]
 # Linting & formatting

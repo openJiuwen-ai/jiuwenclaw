@@ -44,6 +44,9 @@ async def test_auto_harness_syncs_tui_channel_before_service(monkeypatch):
     adapter._instance = object()
     adapter._is_session_scoped_adapter = True
     adapter._parent_session_id = None
+    adapter._agent_name = "main_agent"
+    adapter._root_permission_queue = None
+    adapter._sys_operation = None
     adapter._auto_harness_service = _FakeAutoHarnessService()
     adapter._stream_event_rail = None
 

@@ -66,7 +66,7 @@ class _FailedCancelAgentClient:
         return SimpleNamespace(
             request_id="interrupt-failed",
             channel_id="tui",
-            ok=False,
+            ok=True,
             payload={
                 "event_type": "chat.interrupt_result",
                 "success": False,
@@ -308,6 +308,24 @@ async def test_web_channel_only_cancels_matching_session() -> None:
     assert not other_session_task.cancelled()
     await asyncio.sleep(0)
     assert len(_FakeAgentClient.sent_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_new_chat_does_not_start_when_old_continuation_cleanup_fails() -> None:
+    handler = _TestMessageHandler.create_with_client(_FailedCancelAgentClient())
+    old_task = _seed_stream_task(
+        handler,
+        rid="rid-old",
+        channel_id="web",
+        session_id="sess-replace",
+    )
+
+    with pytest.raises(RuntimeError, match="continuation cleanup failed"):
+        await handler.cancel_stream_tasks_for_channel(
+            _chat_send_message(channel_id="web", session_id="sess-replace")
+        )
+
+    assert old_task.cancelled()
 
 
 @pytest.mark.asyncio

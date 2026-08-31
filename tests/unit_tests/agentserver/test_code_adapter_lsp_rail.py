@@ -17,6 +17,7 @@ the real trajectory module before the import chain resolves so collection succee
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -31,6 +32,67 @@ _RAIL_BUILD_NAMES = getattr(_ic_mod, "_RAIL_BUILD_NAMES")
 _RailBuildInfo = getattr(_ic_mod, "_RailBuildInfo")
 JiuwenSwarmCodeAdapter = _ic_mod.JiuwenSwarmCodeAdapter
 _FIXED_RAIL_NAMES = getattr(JiuwenSwarmCodeAdapter, "_FIXED_RAIL_NAMES")
+
+
+def test_code_adapter_propagates_enabled_permission_build_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = JiuwenSwarmCodeAdapter()
+    for method_name in (
+        "_build_runtime_prompt_rail",
+        "_build_response_prompt_rail",
+        "_build_skill_retrieval_prompt_rail",
+        "_build_stream_event_rail",
+        "_build_security_rail",
+        "_build_lsp_rail_via_config",
+        "_build_project_memory_rail",
+    ):
+        monkeypatch.setattr(adapter, method_name, lambda: None)
+
+    def fail_permission_build(**_kwargs):
+        raise RuntimeError("permission_build_failed")
+
+    monkeypatch.setattr(_ic_mod, "build_permission_rail", fail_permission_build)
+
+    with pytest.raises(RuntimeError, match="permission_build_failed"):
+        adapter._build_agent_rails({}, {"permissions": {"enabled": True}})
+
+
+def test_code_browser_spec_keeps_prepared_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = JiuwenSwarmCodeAdapter()
+    settings = object()
+    adapter._browser_runtime_settings = settings
+    monkeypatch.setenv("PLAYWRIGHT_RUNTIME_MCP_ENABLED", "true")
+    monkeypatch.setenv("BROWSER_DRIVER", "managed")
+    monkeypatch.setattr(adapter, "_sync_browser_runtime_environment", MagicMock())
+    browser_spec = SimpleNamespace(factory_kwargs={"settings": settings})
+
+    with (
+        patch.object(
+            _ic_mod,
+            "build_explore_agent_config",
+            return_value=SimpleNamespace(factory_kwargs={}),
+        ),
+        patch.object(
+            _ic_mod,
+            "build_plan_agent_config",
+            return_value=SimpleNamespace(factory_kwargs={}),
+        ),
+        patch.object(
+            _ic_mod,
+            "build_browser_agent_config",
+            return_value=browser_spec,
+        ) as build_browser,
+    ):
+        adapter._build_configured_subagents(MagicMock(), {"subagents": {}}, {})
+
+    assert build_browser.call_args.kwargs["settings"] is settings
+    assert browser_spec.factory_kwargs == {
+        "settings": settings,
+        "auto_create_workspace": False,
+    }
 
 
 def _make_log_capture():

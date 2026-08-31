@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import io
 import json
 import logging
 import mimetypes
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +18,9 @@ from urllib.parse import parse_qs, quote, urlsplit
 import pytest
 
 from jiuwenswarm.agents.harness.common.tools import web_file_download
+from jiuwenswarm.agents.harness.common.tools.verified_download_assets import (
+    VerifiedDownloadAssetOwner,
+)
 from jiuwenswarm.agents.harness.common.tools.web_file_download import (
     WebFileDownloadManager,
 )
@@ -183,6 +190,59 @@ def test_tampered_token_is_rejected() -> None:
     encoded, signature = token.split(".")
 
     assert manager.validate_token(f"{encoded}x.{signature}") is None
+
+
+def _signed_token(secret: str, payload: object) -> str:
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    signature = hmac.new(
+        secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def test_strict_legacy_token_without_expiration_remains_compatible() -> None:
+    secret = "s" * 32
+    manager = WebFileDownloadManager(secret=secret)
+    token = _signed_token(
+        secret,
+        {"path": "/tmp/report.xlsx", "sid": "session-1"},
+    )
+
+    assert manager.validate_token(token) == {
+        "path": "/tmp/report.xlsx",
+        "sid": "session-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"path": "/tmp/report.xlsx"},
+        {"path": "", "sid": "session-1"},
+        {"path": "/tmp/report.xlsx", "sid": ""},
+        {"path": 1, "sid": "session-1"},
+        {"path": "/tmp/report.xlsx", "sid": 1},
+        {"path": "/tmp/report.xlsx", "sid": "session-1", "extra": "claim"},
+        {
+            "kind": "verified_asset_v1",
+            "asset_id": "asset-1",
+            "path": "/tmp/report.xlsx",
+            "size": 1,
+            "digest": "sha256:digest",
+            "name": "report.xlsx",
+            "sid": "session-1",
+        },
+    ],
+)
+def test_only_exact_legacy_no_expiration_payload_is_accepted(
+    payload: dict[str, object],
+) -> None:
+    secret = "s" * 32
+    manager = WebFileDownloadManager(secret=secret)
+
+    assert manager.validate_token(_signed_token(secret, payload)) is None
 
 
 def test_agent_http_bases_are_embedded_per_token(
@@ -443,3 +503,47 @@ def test_verified_single_user_upload_persists_without_http_bridge(
     target = tmp_path / "agent" / "sessions" / "s1" / "uploads" / "report.txt"
     assert target.read_bytes() == b"legacy upload"
     assert handler.response == (200, {"path": str(target), "size": 13})
+
+
+def test_verified_asset_retry_range_and_concurrent_get_use_same_sealed_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "media.bin"
+    source.write_bytes(b"0123456789")
+    owner = VerifiedDownloadAssetOwner(
+        root=tmp_path / "assets",
+        start_sweeper=False,
+    )
+    asset = owner.stage(
+        source,
+        file_name=source.name,
+        expires_at=time.time() + 60,
+    )
+    manager = WebFileDownloadManager("s" * 32, asset_owner=owner)
+    monkeypatch.setattr(WebFileDownloadManager, "_instance", manager)
+    token = manager.generate_verified_asset_token(
+        asset,
+        file_name=source.name,
+        session_id="session-a",
+    )
+    source.write_bytes(b"changed-after-capture")
+
+    def fetch(headers: dict[str, str] | None = None) -> _DownloadHandlerStub:
+        handler = _DownloadHandlerStub(command="GET", headers=headers)
+        _SpaStaticHandler._handle_file_download(handler, {"token": token})
+        return handler
+
+    first = fetch()
+    retry = fetch()
+    partial = fetch({"Range": "bytes=2-5"})
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        concurrent_bodies = tuple(
+            executor.map(lambda _index: fetch().wfile.getvalue(), range(4))
+        )
+
+    assert first.status == retry.status == 200
+    assert first.wfile.getvalue() == retry.wfile.getvalue() == b"0123456789"
+    assert partial.status == 206
+    assert partial.wfile.getvalue() == b"2345"
+    assert concurrent_bodies == (b"0123456789",) * 4

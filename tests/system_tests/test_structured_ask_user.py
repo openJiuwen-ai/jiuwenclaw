@@ -484,7 +484,7 @@ class TestConfirmAndPermissionInterrupts:
         assert result["questions"][0]["header"].startswith("操作确认")
 
     @staticmethod
-    def test_permission_interrupt_message_is_classified():
+    def test_permission_interrupt_without_host_locator_fails_closed():
         message = "**工具 `write_file` 需要授权才能执行**\n\n请确认是否允许该操作。"
         result = convert_interactions_to_ask_user_question([
             {
@@ -496,14 +496,11 @@ class TestConfirmAndPermissionInterrupts:
                 },
             }
         ])
-        assert result is not None
-        assert result["source"] == "permission_interrupt"
-        assert "write_file" in result["questions"][0]["question"]
-        assert result["questions"][0]["header"].startswith("权限审批")
+        assert result is None
 
     @staticmethod
-    def test_query_tool_permission_interrupt_is_not_ask_user():
-        """A query argument does not make a non-ask_user tool an ask-user interrupt."""
+    def test_query_tool_permission_without_host_locator_fails_closed():
+        """A query argument cannot substitute for a Host permission locator."""
         message = "**工具 `memory_search` 需要授权才能执行**\n\n请确认是否允许该操作。"
         result = convert_interactions_to_ask_user_question([
             {
@@ -515,10 +512,7 @@ class TestConfirmAndPermissionInterrupts:
                 },
             }
         ])
-        assert result is not None
-        assert result["source"] == "permission_interrupt"
-        assert "memory_search" in result["questions"][0]["question"]
-        assert result["questions"][0]["header"].startswith("权限审批")
+        assert result is None
 
     @staticmethod
     def test_extract_question_falls_back_for_generic_confirm_copy():

@@ -5,7 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from openjiuwen.core.common.exception.errors import ValidationError
+from openjiuwen.core.sys_operation.cwd import init_cwd
 
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_capabilities import (
+    install_permission_file_semantics,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts import (
+    build_tool_decision_facts,
+)
 from jiuwenswarm.agents.harness.common.tools.pdf_tools import (
     DEFAULT_MAX_CHARS,
     _format_page_list,
@@ -75,6 +83,13 @@ def _build_minimal_pdf(pages: list[str | None]) -> bytes:
     return b"".join(chunks)
 
 
+def test_read_pdf_exposes_core_file_spec_path_at_top_level() -> None:
+    properties = read_pdf.card.input_params["properties"]
+
+    assert "pdf_path" in properties
+    assert "inputs" not in properties
+
+
 def test_parse_page_ranges_variants():
     assert _parse_page_ranges(None) is None
     assert _parse_page_ranges("") is None
@@ -122,7 +137,7 @@ async def test_read_pdf_extracts_pages_and_flags_blank(tmp_path: Path):
         _build_minimal_pdf(["Hello page one", "Second page text", None])
     )
 
-    result = await read_pdf.invoke({"inputs": {"pdf_path": str(pdf_path)}})
+    result = await read_pdf.invoke({"pdf_path": str(pdf_path)})
     assert "total pages: 3" in result
     assert "--- Page 1 ---" in result
     assert "Hello page one" in result
@@ -137,12 +152,12 @@ async def test_read_pdf_respects_page_selection(tmp_path: Path):
     pdf_path = tmp_path / "sample.pdf"
     pdf_path.write_bytes(_build_minimal_pdf(["Alpha", "Bravo", "Charlie"]))
 
-    result = await read_pdf.invoke({"inputs": {"pdf_path": str(pdf_path), "pages": "2"}})
+    result = await read_pdf.invoke({"pdf_path": str(pdf_path), "pages": "2"})
     assert "Bravo" in result
     assert "Alpha" not in result
     assert "Charlie" not in result
 
-    result = await read_pdf.invoke({"inputs": {"pdf_path": str(pdf_path), "pages": "2,9"}})
+    result = await read_pdf.invoke({"pdf_path": str(pdf_path), "pages": "2,9"})
     assert "Bravo" in result
     assert "exceed" in result  # out-of-range note for page 9
 
@@ -155,7 +170,7 @@ async def test_read_pdf_truncates_at_max_chars(tmp_path: Path):
     pdf_path.write_bytes(_build_minimal_pdf([long_text.strip(), "Tail page"]))
 
     result = await read_pdf.invoke(
-        {"inputs": {"pdf_path": str(pdf_path), "max_chars": 1000}}
+        {"pdf_path": str(pdf_path), "max_chars": 1000}
     )
     assert "truncated at max_chars" in result
     assert "Tail page" not in result
@@ -164,33 +179,62 @@ async def test_read_pdf_truncates_at_max_chars(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_read_pdf_relative_path_anchors_to_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+async def test_read_pdf_relative_path_matches_permission_primary_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pytest.importorskip("pdfplumber")
     workspace = tmp_path / "workspace"
+    global_workspace = tmp_path / "global-workspace"
     workspace.mkdir()
+    global_workspace.mkdir()
     (workspace / "docs").mkdir()
-    (workspace / "docs" / "note.pdf").write_bytes(_build_minimal_pdf(["Workspace anchored"]))
+    (global_workspace / "docs").mkdir()
+    pdf_path = workspace / "docs" / "note.pdf"
+    pdf_path.write_bytes(_build_minimal_pdf(["Primary workspace anchored"]))
+    (global_workspace / "docs" / "note.pdf").write_bytes(
+        _build_minimal_pdf(["Wrong global workspace file"])
+    )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.tools.pdf_tools.get_agent_workspace_dir",
-        lambda: workspace,
+        "jiuwenswarm.common.utils.get_agent_workspace_dir",
+        lambda: global_workspace,
+    )
+    init_cwd(str(workspace), project_root=str(workspace), workspace=str(workspace))
+    install_permission_file_semantics()
+    facts = build_tool_decision_facts(
+        "read_pdf",
+        {"pdf_path": "docs/note.pdf"},
+        workspace_root=workspace,
+        original_args_were_valid_object=True,
     )
 
-    result = await read_pdf.invoke({"inputs": {"pdf_path": "docs/note.pdf"}})
-    assert "Workspace anchored" in result
+    result = await read_pdf.invoke({"pdf_path": "docs/note.pdf"})
+
+    assert facts.read_paths == (pdf_path.as_posix(),)
+    assert "Primary workspace anchored" in result
+    assert "Wrong global workspace file" not in result
+
+
+@pytest.mark.asyncio
+async def test_read_pdf_relative_path_fails_without_runtime_workspace() -> None:
+    init_cwd(str(Path.cwd()), project_root=str(Path.cwd()))
+
+    result = await read_pdf.invoke({"pdf_path": "docs/note.pdf"})
+
+    assert result.startswith("[ERROR]")
+    assert "runtime workspace is unavailable" in result
 
 
 @pytest.mark.asyncio
 async def test_read_pdf_error_paths(tmp_path: Path):
-    result = await read_pdf.invoke({"inputs": {"pdf_path": str(tmp_path / "missing.pdf")}})
+    result = await read_pdf.invoke({"pdf_path": str(tmp_path / "missing.pdf")})
     assert result.startswith("[ERROR]")
 
     not_pdf = tmp_path / "note.txt"
     not_pdf.write_text("hi", encoding="utf-8")
-    result = await read_pdf.invoke({"inputs": {"pdf_path": str(not_pdf)}})
+    result = await read_pdf.invoke({"pdf_path": str(not_pdf)})
     assert result.startswith("[ERROR]")
     assert "only accepts .pdf" in result
 
-    result = await read_pdf.invoke({"inputs": {}})
-    assert result.startswith("[ERROR]")
+    with pytest.raises(ValidationError, match="pdf_path"):
+        await read_pdf.invoke({})

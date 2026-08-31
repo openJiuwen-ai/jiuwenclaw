@@ -7,6 +7,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+# TEST ONLY: new URL fixtures use RFC-reserved domains; provider URLs are compared
+# only as configuration strings. These tests do not open sockets.
+
 import pytest
 import yaml
 
@@ -16,12 +19,16 @@ from jiuwenswarm.common.config import (
     get_config_raw,
     get_evolution_auto_save_enabled,
     get_evolution_review_feedback_min_confidence,
+    get_sandbox_runtime,
     get_skill_evolution_enabled,
     migrate_config_from_template,
     replace_teams_in_config,
     reset_external_cli_agents_in_config,
+    resolve_sandbox_enabled,
     resolve_env_vars,
     update_external_cli_agents_in_config,
+    update_sandbox_runtime,
+    update_permissions_profile_in_config,
     update_skill_retrieval_in_config,
     update_setup_guide_enabled_in_config,
     update_xiaoyi_runtime_in_config,
@@ -127,6 +134,217 @@ def test_reset_external_cli_agents_does_not_write_when_config_is_absent(
     reset_external_cli_agents_in_config()
 
 
+@pytest.mark.parametrize(
+    ("sandbox", "expected"),
+    [
+        (None, False),
+        ({}, False),
+        ({"type": "jiuwenbox"}, False),
+        ({"type": "jiuwenbox", "url": "http://sandbox.invalid:8321"}, False),
+        ({"url": "http://sandbox.invalid:8321", "control_token_path": "/tmp/token"}, False),
+        ({"type": "jiuwenbox", "control_token_path": "/tmp/token"}, False),
+        (
+            {
+                "type": "jiuwenbox",
+                "url": "   ",
+                "control_token_path": "/tmp/token",
+            },
+            False,
+        ),
+        (
+            {
+                "type": "jiuwenbox",
+                "url": "http://sandbox.invalid:8321",
+                "control_token_path": "   ",
+            },
+            False,
+        ),
+        (
+            {
+                "type": " JiuWenBox ",
+                "url": " http://sandbox.invalid:8321 ",
+                "control_token_path": " ~/.jiuwenbox/token ",
+            },
+            True,
+        ),
+        (
+            {
+                "type": "yuanrong",
+                "url": "http://yuanrong.invalid",
+                "control_token_path": "/tmp/token",
+            },
+            False,
+        ),
+        (
+            {
+                "type": "jiuwenbox",
+                "url": "http://sandbox.invalid:8321",
+                "control_token_path": "/tmp/token",
+                "enabled": False,
+            },
+            False,
+        ),
+        ({"enabled": True}, True),
+        (
+            {
+                "runtime": {"enabled": True},
+                "type": "jiuwenbox",
+                "url": "http://sandbox.invalid:8321",
+                "control_token_path": None,
+            },
+            False,
+        ),
+    ],
+)
+def test_resolve_sandbox_enabled_uses_provisioned_jiuwenbox_shape(
+    sandbox: object,
+    expected: bool,
+) -> None:
+    assert resolve_sandbox_enabled(sandbox) is expected
+
+
+def test_resolve_sandbox_enabled_does_not_mutate_input() -> None:
+    sandbox = {
+        "type": "jiuwenbox",
+        "url": "http://sandbox.invalid:8321",
+        "control_token_path": "/tmp/token",
+    }
+
+    assert resolve_sandbox_enabled(sandbox) is True
+    assert "enabled" not in sandbox
+
+
+def test_get_sandbox_runtime_derives_enabled_without_persisting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sandbox = {
+        "type": "jiuwenbox",
+        "url": "http://sandbox.invalid:8321",
+        "control_token_path": "/tmp/token",
+    }
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_config", lambda: {"sandbox": sandbox}
+    )
+
+    runtime = get_sandbox_runtime()
+
+    assert runtime["enabled"] is True
+    assert runtime["fallback_on_failure"] is False
+    assert "enabled" not in sandbox
+
+
+def test_get_sandbox_runtime_preserves_explicit_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sandbox = {
+        "type": "jiuwenbox",
+        "url": "http://sandbox.invalid:8321",
+        "control_token_path": "/tmp/token",
+        "enabled": False,
+    }
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_config", lambda: {"sandbox": sandbox}
+    )
+
+    assert get_sandbox_runtime()["enabled"] is False
+
+
+def test_update_sandbox_runtime_does_not_persist_derived_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sandbox = {
+        "type": "jiuwenbox",
+        "url": "http://sandbox.invalid:8321",
+        "control_token_path": "/tmp/token",
+    }
+    persisted = {"sandbox": sandbox}
+    written: dict[str, object] = {}
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_sandbox_runtime",
+        lambda: {
+            "enabled": True,
+            "fallback_on_failure": False,
+            "excluded_commands": [],
+            "files": {"allow": [], "deny": []},
+            "idle_ttl_seconds": None,
+            "idle_check_interval": None,
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config._load_yaml_round_trip", lambda _path: persisted
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config._dump_yaml_round_trip",
+        lambda _path, data: written.update(data),
+    )
+
+    runtime = update_sandbox_runtime({"excluded_commands": ["git status"]})
+
+    assert runtime["enabled"] is True
+    assert written["sandbox"]["excluded_commands"] == ["git status"]
+    assert "enabled" not in written["sandbox"]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_update_sandbox_runtime_persists_explicit_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+) -> None:
+    persisted = {"sandbox": {}}
+    written: dict[str, object] = {}
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_sandbox_runtime",
+        lambda: {
+            "enabled": False,
+            "fallback_on_failure": False,
+            "excluded_commands": [],
+            "files": {"allow": [], "deny": []},
+            "idle_ttl_seconds": None,
+            "idle_check_interval": None,
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config._load_yaml_round_trip", lambda _path: persisted
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config._dump_yaml_round_trip",
+        lambda _path, data: written.update(data),
+    )
+
+    update_sandbox_runtime({"enabled": enabled})
+
+    assert written["sandbox"]["enabled"] is enabled
+
+
+def test_update_sandbox_runtime_preserves_existing_enabled_on_unrelated_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted = {"sandbox": {"enabled": False}}
+    written: dict[str, object] = {}
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_sandbox_runtime",
+        lambda: {
+            "enabled": False,
+            "fallback_on_failure": False,
+            "excluded_commands": [],
+            "files": {"allow": [], "deny": []},
+            "idle_ttl_seconds": None,
+            "idle_check_interval": None,
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config._load_yaml_round_trip", lambda _path: persisted
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config._dump_yaml_round_trip",
+        lambda _path, data: written.update(data),
+    )
+
+    update_sandbox_runtime({"excluded_commands": ["git status"]})
+
+    assert written["sandbox"]["enabled"] is False
+
+
 class TestResolveEnvVars:
     """Test environment variable resolution in config."""
 
@@ -187,7 +405,7 @@ class TestResolveEnvVars:
 
     @staticmethod
     def test_resolve_nested_structure(monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv("HOST", "example.com")
+        monkeypatch.setenv("HOST", "example.invalid")
         input_dict = {
             "server": {
                 "host": "${HOST}",
@@ -198,7 +416,7 @@ class TestResolveEnvVars:
         result = resolve_env_vars(input_dict)
         assert result == {
             "server": {
-                "host": "example.com",
+                "host": "example.invalid",
                 "port": "8080",
             },
             "features": ["default_a", "feature_b"],
@@ -207,9 +425,9 @@ class TestResolveEnvVars:
     @staticmethod
     def test_resolve_multiple_vars_in_string(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("USER", "john")
-        monkeypatch.setenv("DOMAIN", "example.com")
+        monkeypatch.setenv("DOMAIN", "example.invalid")
         result = resolve_env_vars("${USER}@${DOMAIN}")
-        assert result == "john@example.com"
+        assert result == "john@example.invalid"
 
     @staticmethod
     def test_resolve_non_string_types():
@@ -302,7 +520,7 @@ class TestResolveEnvVars:
         lookalike = {
             "transport": "streamable-http",
             "name": "some-service",
-            "url": "https://example.com/svc",
+            "url": "https://example.invalid/svc",
             "api_key": "${SVC_API_KEY}",
         }
         # Has no headers/env/staticHeaders — is_mcp_server_entry keys only on
@@ -328,6 +546,44 @@ class TestConfigFunctions:
 
         raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
         assert raw["setup_guide"] == {"enabled": False}
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        ("profile", "enabled", "mode"),
+        [
+            ("default", True, "manual"),
+            ("automatic", True, "auto"),
+            ("full_access", False, "manual"),
+        ],
+    )
+    def test_update_permissions_profile_is_canonical_and_preserves_other_config(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+        profile: str,
+        enabled: bool,
+        mode: str,
+    ) -> None:
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_permissions_profile_in_config(profile)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert raw["permissions"]["enabled"] is enabled
+        assert raw["permissions"]["mode"] == mode
+        assert raw["channels"]["web"]["enabled"] is True
+
+    @staticmethod
+    def test_invalid_permission_profile_does_not_modify_config(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ) -> None:
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        original = temp_config_file.read_bytes()
+
+        with pytest.raises(ValueError, match="invalid permissions_profile"):
+            update_permissions_profile_in_config("future")
+
+        assert temp_config_file.read_bytes() == original
 
     @pytest.mark.parametrize(
         ("config", "expected"),
@@ -510,6 +766,62 @@ react:
         }
         assert get_skill_evolution_enabled(migrated) is True
         assert get_evolution_auto_save_enabled(migrated) is True
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        ("user_permissions", "expected_mode", "changed"),
+        [
+            (
+                {
+                    "enabled": True,
+                    "mode": "auto",
+                    "defaults": {"*": "deny"},
+                },
+                "auto",
+                False,
+            ),
+            (
+                {
+                    "enabled": True,
+                    "defaults": {"*": "deny"},
+                },
+                "manual",
+                True,
+            ),
+        ],
+    )
+    def test_migrate_config_preserves_smart_approval_mode(
+        tmp_path: Path,
+        user_permissions: dict,
+        expected_mode: str,
+        changed: bool,
+    ):
+        template_path = tmp_path / "template.yaml"
+        user_config_path = tmp_path / "config.yaml"
+        template_path.write_text(
+            """
+permissions:
+  enabled: false
+  mode: manual
+  defaults:
+    "*": allow
+""",
+            encoding="utf-8",
+        )
+        user_config_path.write_text(
+            yaml.safe_dump({"permissions": user_permissions}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        assert migrate_config_from_template(template_path, user_config_path) is changed
+
+        migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
+        assert migrated["permissions"] == {
+            "enabled": True,
+            "mode": expected_mode,
+            "defaults": {"*": "deny"},
+        }
+        assert migrate_config_from_template(template_path, user_config_path) is False
 
     @staticmethod
     def test_ensure_config_migrated_from_template_adds_missing_keys(
