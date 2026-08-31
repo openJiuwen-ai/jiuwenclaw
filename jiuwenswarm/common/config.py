@@ -1320,6 +1320,9 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
 
     优先级：models.defaults（列表） > models.default（单对象） > 环境变量回退
     返回的 api_key 已解密。每个条目可能含顶层 alias 字段。
+
+    无论走哪个分支，最后都会追加 ``models.agentos`` 备份模型条目（若有）。
+    agentos 与 defaults 并列、同等可选可切换，但 ``is_default=False`` 不抢启动默认。
     """
     if config is None:
         config = get_config()
@@ -1847,6 +1850,23 @@ def update_external_cli_agents_in_config(agents: list[str | dict[str, Any]], pub
         current.pop(EXTERNAL_TRANSPORT_CONFIG_PATH[-1], None)
 
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def reset_external_cli_agents_in_config() -> None:
+    """Disable all external CLI agents and clear their transport configuration."""
+    def _mutate(data: dict[str, Any]) -> dict[str, Any] | None:
+        current = data
+        for segment in EXTERNAL_CLI_AGENTS_CONFIG_PATH[:-1]:
+            nested = current.get(segment)
+            if not isinstance(nested, dict):
+                return None
+            current = nested
+
+        agents_removed = current.pop(EXTERNAL_CLI_AGENTS_CONFIG_PATH[-1], None) is not None
+        transport_removed = current.pop(EXTERNAL_TRANSPORT_CONFIG_PATH[-1], None) is not None
+        return data if agents_removed or transport_removed else None
+
+    update_config(_mutate)
 
 
 def update_swarmflow_budget_in_config(budget: str) -> None:

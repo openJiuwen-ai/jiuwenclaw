@@ -3,5 +3,6 @@ export * from './adapter';
 export * from './client';
 export * from './port';
 export * from './state';
+export * from './upload';
 export * from './viewModel';
 export * from './presentation';

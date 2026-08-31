@@ -212,8 +212,17 @@
       "webSearch": "Web search",
       "mediaTools": "Tools",
       "vision": "Image processing",
+      "visionDescription": "Enable image processing; disabling it keeps the saved model configuration.",
+      "visionConfigTitle": "Configure image processing model",
       "audio": "Audio processing",
+      "audioDescription": "Enable audio processing; disabling it keeps the saved model configuration.",
+      "audioConfigTitle": "Configure audio processing model",
       "video": "Video understanding",
+      "videoDescription": "Enable video understanding; disabling it keeps the saved model configuration.",
+      "videoConfigTitle": "Configure video understanding model",
+      "toggleCapability": "Toggle {{name}} capability",
+      "saveAndEnable": "Save and enable",
+      "savedRestartRequired": "Saved; takes effect after restart.",
       "team": "Agent team"
     },
     "browser": {
@@ -232,6 +241,7 @@
     },
     "experimental": {
       "externalCliAgents": "Third-Party Agents",
+      "externalCliAgentsDescription": "For Team mode only.",
       "a2ui": "A2UI generation",
       "proactive": "Proactive recommendations",
       "proactiveLimits": "Recommendation limits",
@@ -313,7 +323,7 @@
         "description": "Allow a Team Leader to spawn a Claude Agent."
       },
       "external_cli_agent_claude_use_builtin": {
-        "title": "Use built-in Claude",
+        "title": "Use built-in Claude CLI",
         "description": "Do not specify a local CLI path; let the SDK use its default lookup."
       },
       "external_cli_agent_claude_cli_path": { "title": "Claude CLI path" },
@@ -322,7 +332,7 @@
         "description": "Allow a Team Leader to spawn a Codex Agent; first use may install dependencies."
       },
       "external_cli_agent_codex_use_builtin": {
-        "title": "Use built-in Codex",
+        "title": "Use built-in Codex CLI",
         "description": "Do not specify a local CLI path; let the SDK use its default lookup."
       },
       "external_cli_agent_codex_cli_path": { "title": "Codex CLI path" },
@@ -773,9 +783,6 @@
     "approvalInputPlaceholder": "Add revision notes then click Next; leave empty and click Skip"
   },
   "persistSession": {
-    "toolbarTag": "Persist Session",
-    "closeTag": "Turn off Persist Session",
-    "lockedHint": "Persist Session was locked when this session was created and cannot be changed",
     "textRequired": "Enter a task after /persist"
   },
   "goal": {
@@ -943,6 +950,11 @@
     "disable": "Disable",
     "enableSuccess": "Enabled “{{name}}”",
     "disableSuccess": "Disabled “{{name}}”",
+    "xiaoyiEnableConfirmation": {
+      "title": "Notice",
+      "continueEnable": "Enable anyway",
+      "editConfiguration": "Edit configuration"
+    },
     "unbind": "Unbind",
     "unbindConfigurationTitle": "Unbind channel configuration",
     "unbindConfigurationMessage": "Unbind the channel configuration for “{{name}}”? The saved configuration will be cleared.",
@@ -1115,9 +1127,9 @@
     "externalCli": {
       "claude": "Claude",
       "codex": "Codex",
-      "claudeHint": "Use Claude from PATH or specify an executable path.",
-      "codexHint": "Use Codex from PATH or specify an executable path.",
-      "useBuiltin": "Use built-in",
+      "claudeHint": "The SDK is installed automatically when needed; use the built-in CLI, a CLI from PATH, or a specified path.",
+      "codexHint": "The SDK is installed automatically when needed; use the built-in CLI, a CLI from PATH, or a specified path.",
+      "useBuiltin": "Use built-in CLI",
       "detect": "Detect",
       "selectFile": "Choose file",
       "selectFileTitle": "Choose {{agent}} command",
@@ -1130,16 +1142,37 @@
       "statusUnsupported": "Unsupported path",
       "statusUnavailable": "Unavailable",
       "version": "Version {{version}}",
-      "compatibilityWarning": "The detected version may be incompatible. You can change the executable path, upgrade the version, or select \"Use built-in\" to use the default startup mode.",
-      "compatibilityWarningWithVersion": "The detected version may be incompatible. You can change the executable path, upgrade to {{version}} or later, or select \"Use built-in\" to use the default startup mode.",
-      "windowsScriptPath": "The selected file is a Windows script. Choose a real executable, or select \"Use built-in\".",
-      "dependencyInstalling": "{{agents}} dependencies are being installed in the background. The agent is not enabled during installation; after installation finishes, enable it again and save the configuration.",
-      "dependencyInstalled": "Enable {{agent}} again and save the configuration.",
+      "compatibilityWarning": "The detected version may be incompatible. You can change the executable path, upgrade the version, or select \"Use built-in CLI\" to use the default startup mode.",
+      "compatibilityWarningWithVersion": "The detected version may be incompatible. You can change the executable path, upgrade to {{version}} or later, or select \"Use built-in CLI\" to use the default startup mode.",
+      "windowsScriptPath": "The selected file is a Windows script. Choose a real executable, or select \"Use built-in CLI\".",
+      "dependencyInstalling": "Installing optional components for {{agents}} in the background. They remain disabled during installation; enable them again and save the configuration when installation finishes.",
+      "dependencyInstalled": "The optional {{agent}} component is installed. Enable it again and save the configuration.",
       "dependencyInstallPhasePreparing": "Preparing {{agent}} dependency installation",
       "dependencyInstallPhaseInstalling": "Installing {{agent}} dependencies",
       "dependencyInstallPhaseVerifying": "Verifying {{agent}} dependencies",
-      "dependencyInstallPhaseSucceeded": "{{agent}} dependencies installed",
-      "dependencyInstallPhaseFailed": "{{agent}} dependency installation failed"
+      "dependencyInstallPhaseSucceeded": "{{agent}} dependencies installed. Enable {{agent}} again and save the configuration.",
+      "dependencyInstallPhaseFailed": "{{agent}} dependency installation failed",
+      "installDialogTitle": "Install optional components",
+      "installDialogDescription": "Closing this dialog does not interrupt installation. When it finishes, return to Third-Party Agent settings, enable the component again, and save the configuration.",
+      "installArtifact": "Downloading file {{current}} of {{total}}: {{package}} {{version}}",
+      "installProgress": "Download progress",
+      "installEta": "About {{eta}} remaining",
+      "installRetry": "Download interrupted. Retrying ({{current}}/{{total}})",
+      "installSwitchingSource": "Using a fallback download source",
+      "installRunInBackground": "Run in background",
+      "installInProgress": "{{agents}} installation is in progress. You can view its progress at any time.",
+      "installViewProgress": "View progress",
+      "claudeCodex": "Claude / Codex",
+      "installPhase": {
+        "idle": "Waiting",
+        "preparing": "Preparing",
+        "downloading": "Downloading",
+        "installing": "Installing",
+        "verifying": "Verifying",
+        "succeeded": "Installed. Enable again to use",
+        "failed": "Installation failed",
+        "running": "Installing"
+      }
     },
     "proactive": {
       "typeLabel": {
@@ -2123,6 +2156,8 @@
       "create": "Create",
       "createFirst": "Create manually",
       "createByChat": "Create via chat",
+      "createByUpload": "Create from file",
+      "uploading": "Uploading…",
       "createViaChatPrompt": "Help me create an xxx Agent who is good at xxx",
       "back": "Back"
     },
@@ -2143,6 +2178,8 @@
       "authRequired": "This Agent requires authentication before it can be installed",
       "connectionUnavailable": "Required MCP connectors are not connected yet. Connect them before use.",
       "connectorUnavailableNamed": "This Agent requires the MCP connector “{{connector}}”, which is not connected. Connect it and try again.",
+      "uploadSuccess": "Agent package {{id}} was imported. Review it in My Agents.",
+      "uploadError": "Unable to upload and import the Agent package. Check the file and try again.",
       "newVersion": "This Agent has a new version available",
       "teamUnavailable": "Team Agent management is not available yet",
       "featureUnavailable": "This feature is outside this milestone",
@@ -2225,6 +2262,12 @@
       "personaLabel": "Persona",
       "personaPlaceholder": "Keep Markdown and line breaks in the persona",
       "personaPreview": "Persona Markdown preview",
+      "uploadHint": "Supports .zip and .tar files; once extracted, the folder must include manifest.json, persona files, and README.md, and the .json file must declare package_type.",
+      "uploadPlaceholder": "Click or drag a file here",
+      "uploadInvalidType": "Only .zip and .tar files are supported",
+      "uploadPickerUnsupported": "Local file selection is not supported in this environment",
+      "uploadPickerFailed": "Failed to open the local file picker. Try again.",
+      "removeUpload": "Remove selected file",
       "skillsLabel": "Skills (optional)",
       "skillsToggle": "Collapse or expand skill configuration",
       "addSkill": "Add skill",
@@ -3049,11 +3092,12 @@
       "cancelRun": "Cancel this run",
       "pause": "Pause",
       "resume": "Resume",
-      "resumeFromCompletedHint": "Job completed or expired. Click to reactivate with its current schedule (edit to a future time first)",
+      "resumeFromCompletedHint": "Job completed or expired. Edit its schedule/stop conditions to a future time first — it will reactivate automatically",
       "delete": "Delete",
       "deleteConfirm": "Delete heartbeat job \"{{name}}\"?",
       "filterLabel": "Status",
       "filterAll": "All",
+      "filterActive": "Active",
       "searchPlaceholder": "Search by name or prompt",
       "emptyFiltered": "No heartbeat jobs match this filter",
       "nextRunAt": "Next run: {{time}}",
@@ -3062,8 +3106,14 @@
       "createMenu": {
         "manual": "Create manually",
         "viaChat": "Create via chat",
-        "viaChatPrompt": "Help me create a heartbeat reminder: "
+        "viaChatPrompt": "Help me create a heartbeat reminder in the current session: "
       }
+    },
+    "pagination": {
+      "pageSize": "Per page",
+      "total": "{{total}} total",
+      "prev": "Previous",
+      "next": "Next"
     },
     "toast": {
       "paused": "Future schedule paused",

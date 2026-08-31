@@ -1,7 +1,22 @@
 // src/components/HeartbeatPanel/index.tsx
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, ChevronDown, X } from 'lucide-react';
+import {
+  Activity,
+  ArrowLeft,
+  ChevronDown,
+  CircleStop,
+  List,
+  MessageSquarePlus,
+  Pause,
+  Pencil,
+  PencilLine,
+  Play,
+  Plus,
+  RotateCcw,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { webRequest } from '../../services/webClient';
 import { useChatStore } from '../../stores';
 import type { WebError } from '../../types';
@@ -14,8 +29,15 @@ import type {
   HeartbeatTaskUI,
 } from '../../types/heartbeat';
 import { summarizeHeartbeatSchedule } from './heartbeatScheduleConvert';
-import { heartbeatRunNowMessageKey, heartbeatCancelMessageKey, heartbeatLastRunStatusLabelKey, canHeartbeatRunNow } from './heartbeatStatusText';
+import {
+  heartbeatRunNowMessageKey,
+  heartbeatCancelMessageKey,
+  heartbeatLastRunStatusLabelKey,
+  canHeartbeatRunNow,
+  canHeartbeatToggleEnable,
+} from './heartbeatStatusText';
 import HeartbeatStatusBadge from './HeartbeatStatusBadge';
+import HeartbeatPagination, { HEARTBEAT_PAGE_SIZE_DEFAULT } from './HeartbeatPagination';
 import HeartbeatTaskDrawer, {
   emptyHeartbeatTaskForm,
   jobToHeartbeatTaskForm,
@@ -112,16 +134,49 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
 
   // 后端 list 按 created_at ASC 返回，前端本地按"最近更新/创建优先"重新排序 + 按状态/关键词筛选，
   // 见接口规格说明 §16.8；只复制展示用副本，不改 jobs 本身
-  const [statusFilter, setStatusFilter] = useState<HeartbeatJobStatus | 'all'>('all');
+  const [statusFilter, setStatusFilter] = useState<HeartbeatJobStatus | 'all' | 'active'>('active');
   const [searchQuery, setSearchQuery] = useState('');
-  const displayedJobs = [...jobs]
-    .filter((job) => statusFilter === 'all' || job.status === statusFilter)
-    .filter((job) => {
-      const q = searchQuery.trim().toLowerCase();
-      if (!q) return true;
-      return job.name.toLowerCase().includes(q) || job.prompt.toLowerCase().includes(q);
-    })
-    .sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
+  const [pageSize, setPageSize] = useState(HEARTBEAT_PAGE_SIZE_DEFAULT);
+  const [currentPage, setCurrentPage] = useState(1);
+
+  // "活跃" = scheduled + running 合并计数；其余终态各自计数，用于筛选下拉里展示每种状态的数量
+  const statusCounts = useMemo(() => {
+    const counts: Record<string, number> = { all: jobs.length, active: 0, completed: 0, expired: 0, disabled: 0 };
+    for (const job of jobs) {
+      if (job.status === 'scheduled' || job.status === 'running') counts.active += 1;
+      else counts[job.status] = (counts[job.status] ?? 0) + 1;
+    }
+    return counts;
+  }, [jobs]);
+
+  const filteredJobs = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return [...jobs]
+      .filter((job) => {
+        if (statusFilter === 'all') return true;
+        if (statusFilter === 'active') return job.status === 'scheduled' || job.status === 'running';
+        return job.status === statusFilter;
+      })
+      .filter((job) => {
+        if (!q) return true;
+        return job.name.toLowerCase().includes(q) || job.prompt.toLowerCase().includes(q);
+      })
+      .sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
+  }, [jobs, statusFilter, searchQuery]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredJobs.length / pageSize));
+  // 筛选/搜索/每页条数变化时回到第 1 页；任务被删/筛结果变少导致页数缩水时把当前页钳回范围内
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [statusFilter, searchQuery, pageSize]);
+  useEffect(() => {
+    setCurrentPage((p) => Math.min(p, totalPages));
+  }, [totalPages]);
+
+  const displayedJobs = useMemo(
+    () => filteredJobs.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [filteredJobs, currentPage, pageSize],
+  );
 
   const [drawer, setDrawer] = useState<
     | { mode: 'create'; form: HeartbeatTaskFormValue; submitting: boolean; error: string | null }
@@ -318,9 +373,39 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
 
   const drawerBusy = Boolean(drawer?.submitting);
 
+  // "活跃" 已覆盖 scheduled + running，下拉里不再单列这两项
   const statusFilterOptions = [
-    { value: 'all', label: t('heartbeat.panel.filterAll') },
-    ...(meta?.statuses ?? []).map((status) => ({ value: status, label: <HeartbeatStatusBadge status={status} /> })),
+    {
+      value: 'all',
+      label: (
+        <span className="inline-flex items-center gap-1.5 text-sm text-text-muted">
+          <List size={13} />
+          {t('heartbeat.panel.filterAll')}
+          <span className="text-text-muted">({statusCounts.all})</span>
+        </span>
+      ),
+    },
+    {
+      value: 'active',
+      label: (
+        <span className="inline-flex items-center gap-1.5 text-sm text-cron-running">
+          <Activity size={13} />
+          {t('heartbeat.panel.filterActive')}
+          <span className="text-text-muted">({statusCounts.active})</span>
+        </span>
+      ),
+    },
+    ...(meta?.statuses ?? [])
+      .filter((status) => status !== 'scheduled' && status !== 'running')
+      .map((status) => ({
+        value: status,
+        label: (
+          <span className="inline-flex items-center gap-1.5">
+            <HeartbeatStatusBadge status={status} />
+            <span className="text-text-muted">({statusCounts[status] ?? 0})</span>
+          </span>
+        ),
+      })),
   ];
 
   return (
@@ -353,6 +438,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                 onClick={() => setCreateMenuOpen((v) => !v)}
                 className="flex items-center gap-1.5 rounded-full bg-cron-action px-4 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:cursor-not-allowed disabled:opacity-60"
               >
+                <Plus size={14} />
                 {t('heartbeat.panel.create')}
                 <ChevronDown size={14} />
               </button>
@@ -364,8 +450,9 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                       setCreateMenuOpen(false);
                       openCreateDrawer();
                     }}
-                    className="block w-full px-3 py-2 text-left text-sm font-semibold text-text hover:bg-bg-hover"
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-semibold text-text hover:bg-bg-hover"
                   >
+                    <PencilLine size={14} />
                     {t('heartbeat.panel.createMenu.manual')}
                   </button>
                   <button
@@ -374,8 +461,9 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                       setCreateMenuOpen(false);
                       createViaChat();
                     }}
-                    className="block w-full px-3 py-2 text-left text-sm font-semibold text-text hover:bg-bg-hover"
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-semibold text-text hover:bg-bg-hover"
                   >
+                    <MessageSquarePlus size={14} />
                     {t('heartbeat.panel.createMenu.viaChat')}
                   </button>
                 </div>
@@ -414,7 +502,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
               />
               <SimpleSelect
                 value={statusFilter}
-                onChange={(v) => setStatusFilter(v as HeartbeatJobStatus | 'all')}
+                onChange={(v) => setStatusFilter(v as HeartbeatJobStatus | 'all' | 'active')}
                 options={statusFilterOptions}
                 className="w-36"
               />
@@ -426,7 +514,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
             {!loading && !loadError && jobs.length === 0 && (
               <p className="text-sm text-text-muted">{t('heartbeat.panel.empty')}</p>
             )}
-            {!loading && !loadError && jobs.length > 0 && displayedJobs.length === 0 && (
+            {!loading && !loadError && jobs.length > 0 && filteredJobs.length === 0 && (
               <p className="text-sm text-text-muted">{t('heartbeat.panel.emptyFiltered')}</p>
             )}
             {!loading && !loadError && displayedJobs.length > 0 && meta && (
@@ -462,8 +550,9 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                           type="button"
                           disabled={actingJobId === job.id}
                           onClick={() => void handleCancel(job, false)}
-                          className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:opacity-60"
+                          className="inline-flex items-center gap-1 rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:opacity-60"
                         >
+                          <CircleStop size={13} />
                           {t('heartbeat.panel.cancelRun')}
                         </button>
                       )}
@@ -471,29 +560,40 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                         type="button"
                         disabled={actingJobId === job.id || !canHeartbeatRunNow(job.enabled, job.status)}
                         onClick={() => void handleRunNow(job)}
-                        className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+                        className="inline-flex items-center gap-1 rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
                       >
+                        <Play size={13} />
                         {t('heartbeat.panel.runNow')}
                       </button>
-                      <button
-                        type="button"
-                        disabled={actingJobId === job.id}
-                        onClick={() => void handleToggle(job)}
-                        title={
-                          job.status === 'completed' || job.status === 'expired'
-                            ? t('heartbeat.panel.resumeFromCompletedHint')
-                            : undefined
-                        }
-                        className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        {t(job.enabled ? 'heartbeat.panel.pause' : 'heartbeat.panel.resume')}
-                      </button>
+                      {(() => {
+                        const isTerminal = job.status === 'completed' || job.status === 'expired';
+                        const toggleBtn = (
+                          <button
+                            type="button"
+                            disabled={actingJobId === job.id || (!job.enabled && !canHeartbeatToggleEnable(job.status))}
+                            onClick={() => void handleToggle(job)}
+                            className="inline-flex items-center gap-1 rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {job.enabled ? <Pause size={13} /> : <RotateCcw size={13} />}
+                            {t(job.enabled ? 'heartbeat.panel.pause' : 'heartbeat.panel.resume')}
+                          </button>
+                        );
+                        // disabled 按钮本身不触发 hover tooltip，终态时用外层 span 承载"如何重新激活"的提示
+                        return isTerminal ? (
+                          <span className="inline-flex" title={t('heartbeat.panel.resumeFromCompletedHint')}>
+                            {toggleBtn}
+                          </span>
+                        ) : (
+                          toggleBtn
+                        );
+                      })()}
                       <button
                         type="button"
                         disabled={drawerBusy}
                         onClick={() => openEditDrawer(job)}
-                        className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-60"
+                        className="inline-flex items-center gap-1 rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-60"
                       >
+                        <Pencil size={13} />
                         {t('heartbeat.panel.edit')}
                       </button>
                       <button
@@ -503,8 +603,9 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                           setDeleteError(null);
                           setPendingDelete(job);
                         }}
-                        className="rounded-full border border-red-300 px-3 py-1 text-xs text-red-500 hover:bg-red-50 disabled:opacity-60"
+                        className="inline-flex items-center gap-1 rounded-full border border-red-300 px-3 py-1 text-xs text-red-500 hover:bg-red-50 disabled:opacity-60"
                       >
+                        <Trash2 size={13} />
                         {t('heartbeat.panel.delete')}
                       </button>
                     </div>
@@ -513,6 +614,16 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
               </ul>
             )}
           </div>
+          {!loading && !loadError && filteredJobs.length > 0 && (
+            <HeartbeatPagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              pageSize={pageSize}
+              totalCount={filteredJobs.length}
+              onPageChange={setCurrentPage}
+              onPageSizeChange={setPageSize}
+            />
+          )}
         </>
       )}
       {toast && (

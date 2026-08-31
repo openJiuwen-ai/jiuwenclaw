@@ -3,7 +3,11 @@ from pathlib import Path
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 
-from pdf_font_utils import select_pdf_font
+from text_utils import (
+    CJK_PDF_BLOCKED_MESSAGE,
+    collect_docx_text,
+    contains_cjk,
+)
 
 
 class BatchProcessor(Tool):
@@ -317,11 +321,13 @@ class BatchProcessor(Tool):
             from fpdf import FPDF
 
             doc = Document(source_path)
+            if contains_cjk(collect_docx_text(doc)):
+                raise ValueError(CJK_PDF_BLOCKED_MESSAGE)
+
             pdf = FPDF()
             pdf.add_page()
             pdf.set_auto_page_break(auto=True, margin=15)
-            font_name = select_pdf_font(pdf)
-            pdf.set_font(font_name, "", 11)
+            pdf.set_font("Helvetica", "", 11)
             for para in doc.paragraphs:
                 if para.text.strip():
                     pdf.multi_cell(0, 7, para.text)

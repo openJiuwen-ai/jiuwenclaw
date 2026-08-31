@@ -1,9 +1,11 @@
-import { ChevronDown, Search } from 'lucide-react';
+import { ChevronDown } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import SearchIcon from '../../assets/agent-management/agent-search.svg?react';
 import { CatalogPage, PAGE_SIZE } from './CatalogPage';
 import { AgentEditor } from './AgentEditor';
 import { DefinitionDetailPage } from './DefinitionDetailPage';
+import { AgentUploadDialog } from './AgentUploadDialog';
 import { PendingConnectorModals, usePendingConnectorFlow } from '../ConnectorMarket/usePendingConnectorFlow';
 import { useConnectorStore } from '../../stores/connectorStore';
 import {
@@ -129,6 +131,8 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [mcpOptions, setMcpOptions] = useState<McpOption[]>([]);
   const [mcpStatus, setMcpStatus] = useState<RequestStatus>('idle');
   const catalogRef = useRef<AgentCatalogItem[]>([]);
@@ -432,6 +436,32 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
     }
   };
 
+  const openUpload = () => {
+    setCreateMenuOpen(false);
+    setActionError(null);
+    setActionNotice(null);
+    setUploadError(null);
+    setUploadDialogOpen(true);
+  };
+
+  const handleUpload = async (path: string) => {
+    setActionError(null);
+    setActionNotice(null);
+    setUploadError(null);
+    try {
+      const result = await client.importAgentTemplate(path);
+      await loadCatalog();
+      setUploadDialogOpen(false);
+      setUploadError(null);
+      setMineQuery('');
+      setMinePage(1);
+      setView('mine');
+      setActionNotice(t('agentManagement.states.uploadSuccess', { id: result.id }));
+    } catch (error) {
+      setUploadError(formatActionError(error, t('agentManagement.states.uploadError')));
+    }
+  };
+
   const goBackToCatalog = () => {
     setActionError(null);
     setActionNotice(null);
@@ -444,6 +474,17 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
       <PendingConnectorModals flow={reconnectFlow} />
     </>
   );
+
+  const uploadDialog = uploadDialogOpen ? (
+    <AgentUploadDialog
+      error={uploadError}
+      onCancel={() => {
+        setUploadDialogOpen(false);
+        setUploadError(null);
+      }}
+      onConfirm={handleUpload}
+    />
+  ) : null;
 
   if (view === 'detail') {
     return (
@@ -484,6 +525,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
           />
         </main>
         {pendingConnectorModals}
+        {uploadDialog}
       </>
     );
   }
@@ -512,6 +554,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
           />
         </main>
         {pendingConnectorModals}
+        {uploadDialog}
       </>
     );
   }
@@ -558,7 +601,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
         </nav>
         <div className="agent-management-primary-actions">
           <label className="agent-management-search">
-            <Search size={16} aria-hidden="true" />
+            <SearchIcon aria-hidden="true" />
             <span className="sr-only">{t('agentManagement.searchLabel')}</span>
             <input
               type="search"
@@ -589,6 +632,9 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
                   </button>
                   <button type="button" role="menuitem" onClick={() => { setCreateMenuOpen(false); onCreateViaChat?.(); }}>
                     {t('agentManagement.actions.createByChat')}
+                  </button>
+                  <button type="button" role="menuitem" onClick={openUpload}>
+                    {t('agentManagement.actions.createByUpload')}
                   </button>
                 </div>
               ) : null}
@@ -631,6 +677,7 @@ export function AgentManagementPanel({ onUseAgent, onUsePrompt, onCreateViaChat 
         onCreate={openCreate}
       />
       {pendingConnectorModals}
+      {uploadDialog}
     </main>
   );
 }

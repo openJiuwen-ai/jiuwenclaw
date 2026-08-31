@@ -377,11 +377,11 @@ _PRESETS: list[VendorPreset] = [
     VendorPreset(
         vendor_key="mimo", display_name="小米Mimo", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
-        api_base="https://api.xiaomimimo.com/v1",  
+        api_base="https://api.xiaomimimo.com/v1",
         default_model="mimo-v2.5-pro",
         model_options=("mimo-v2.5-pro", "mimo-v2.5"),
         icon_key="mimo",
-        models_endpoint="https://api.xiaomimimo.com/v1/models", 
+        models_endpoint="https://api.xiaomimimo.com/v1/models",
         models_needs_key=True,
         anthropic_base="https://api.xiaomimimo.com/anthropic",
     ),

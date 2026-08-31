@@ -237,8 +237,16 @@ class ReqMethod(Enum):
     SKILLS_GRAPH_CANCEL = "skills.graph.cancel"
 
     PERSONAL_CONTEXT_RUNTIME_STATUS = "personal_context.runtime.status"
-    PERSONAL_CONTEXT_RUNTIME_START = "personal_context.runtime.start"
-    PERSONAL_CONTEXT_RUNTIME_STOP = "personal_context.runtime.stop"
+    PERSONAL_CONTEXT_RUNTIME_START_COLLECTION = (
+        "personal_context.runtime.start_collection"
+    )
+    PERSONAL_CONTEXT_RUNTIME_STOP_COLLECTION = (
+        "personal_context.runtime.stop_collection"
+    )
+    PERSONAL_CONTEXT_RUNTIME_START_AGENT_USE = (
+        "personal_context.runtime.start_agent_use"
+    )
+    PERSONAL_CONTEXT_RUNTIME_STOP_AGENT_USE = "personal_context.runtime.stop_agent_use"
     PERSONAL_CONTEXT_RUNTIME_GET_CONFIG = "personal_context.runtime.get_config"
     PERSONAL_CONTEXT_RUNTIME_PATCH_CONFIG = "personal_context.runtime.patch_config"
     PERSONAL_CONTEXT_RUNTIME_SELECT_MODEL = "personal_context.runtime.select_model"
@@ -248,8 +256,6 @@ class ReqMethod(Enum):
     PERSONAL_CONTEXT_FETCH_PATCH_SERVICE = "personal_context.fetch.patch_service"
     PERSONAL_CONTEXT_FETCH_START_SERVICE = "personal_context.fetch.start_service"
     PERSONAL_CONTEXT_FETCH_STOP_SERVICE = "personal_context.fetch.stop_service"
-    PERSONAL_CONTEXT_FETCH_START_SCHEDULER = "personal_context.fetch.start_scheduler"
-    PERSONAL_CONTEXT_FETCH_STOP_SCHEDULER = "personal_context.fetch.stop_scheduler"
     PERSONAL_CONTEXT_FETCH_RUN_ALL = "personal_context.fetch.run_all"
     PERSONAL_CONTEXT_FETCH_RUN_ONE = "personal_context.fetch.run_one"
     PERSONAL_CONTEXT_FETCH_GET_RUN_STATUS = "personal_context.fetch.get_run_status"
@@ -260,8 +266,10 @@ class ReqMethod(Enum):
         "personal_context.fetch.authorize_provider"
     )
     PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH = "personal_context.context.stream_graph"
+    PERSONAL_CONTEXT_CONTEXT_STREAM_TREE = "personal_context.context.stream_tree"
     PERSONAL_CONTEXT_CONTEXT_SEARCH_PAGES = "personal_context.context.search_pages"
     PERSONAL_CONTEXT_CONTEXT_GET_NODE = "personal_context.context.get_node"
+    PERSONAL_CONTEXT_CONTEXT_GET_SOURCE = "personal_context.context.get_source"
 
     # Plugin management (reuses skills marketplace infrastructure)
     PLUGINS_LIST = "plugins.list"
@@ -279,6 +287,12 @@ class ReqMethod(Enum):
     # AgentGroup selection + agent_template / plugin package catalog RPCs.
     AGENT_GROUPS_LIST = "agent_groups.list"
     AGENT_GROUPS_SHOW = "agent_groups.show"
+    AGENT_GROUPS_FILE_LIST = "agent_groups.file.list"
+    AGENT_GROUPS_FILE_READ = "agent_groups.file.read"
+    AGENT_GROUPS_CREATE = "agent_groups.create"
+    AGENT_GROUPS_IMPORT_LOCAL = "agent_groups.import_local"
+    AGENT_GROUPS_INSTALL = "agent_groups.install"
+    AGENT_GROUPS_UNINSTALL = "agent_groups.uninstall"
     AGENT_TEMPLATES_LIST = "agent_templates.list"
     AGENT_TEMPLATES_SHOW = "agent_templates.show"
     AGENT_TEMPLATES_FILE_LIST = "agent_templates.file.list"

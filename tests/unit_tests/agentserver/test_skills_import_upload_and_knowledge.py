@@ -294,7 +294,7 @@ async def test_create_from_knowledge_silent_runs_agent(
     )
     swarm._refresh_skill_rails_after_change = AsyncMock()
     swarm.create_instance = AsyncMock()
-    swarm._refresh_team_shared_skill_links = MagicMock()
+    swarm._reload_team_skill_rails = AsyncMock()
 
     monkeypatch.setattr(swarm, "_ensure_adapter", lambda **_kwargs: FakeAdapter())
     monkeypatch.setattr(
@@ -318,6 +318,8 @@ async def test_create_from_knowledge_silent_runs_agent(
     assert impl_calls
     assert impl_calls[0]["metadata"].get("skills_create_from_knowledge_silent") is True
     assert impl_calls[0]["skills"] == ["skill-omni-creation"]
+    swarm.create_instance.assert_awaited_once()
+    swarm._reload_team_skill_rails.assert_awaited_once_with("user-session")
 
 
 def test_parse_multipart_roundtrip() -> None:

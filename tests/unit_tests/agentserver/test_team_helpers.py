@@ -2027,22 +2027,6 @@ async def test_interactive_followup_attaches_after_headless_heartbeat(monkeypatc
             return SimpleNamespace(team_name="unit-team")
 
         async def interact(self, session_id: str, query: str):
-            async def _complete_round() -> None:
-                await asyncio.sleep(0)
-                await self.broadcast_event(
-                    session_id,
-                    {"event_type": "chat.final", "content": "visible"},
-                )
-                await self.broadcast_event(
-                    session_id,
-                    {
-                        "event_type": "chat.processing_status",
-                        "is_processing": False,
-                        "is_complete": True,
-                    },
-                )
-
-            asyncio.create_task(_complete_round())
             return True, None
 
     manager = _FakeManager()
@@ -2067,13 +2051,29 @@ async def test_interactive_followup_attaches_after_headless_heartbeat(monkeypatc
             {"query": "continue visibly"},
             object(),
         )
-        first = await asyncio.wait_for(anext(response_stream), timeout=1.0)
+        first_event = asyncio.create_task(anext(response_stream))
+        for _ in range(100):
+            waiters = manager.get_waiters("sess-headless-first")
+            if waiters:
+                break
+            await asyncio.sleep(0.01)
+        assert manager.has_interactive_waiter("sess-headless-first") is True
+        request_queue = waiters[0][1]
+        await request_queue.put({"event_type": "chat.final", "content": "visible"})
+        await request_queue.put(
+            {
+                "event_type": "chat.processing_status",
+                "is_processing": False,
+                "is_complete": True,
+            }
+        )
+        await admission.end_team_user("sess-headless-first")
+        first = await asyncio.wait_for(first_event, timeout=1.0)
         second = await asyncio.wait_for(anext(response_stream), timeout=1.0)
 
         assert first.payload == {"event_type": "chat.final", "content": "visible"}
         assert second.payload["event_type"] == "chat.processing_status"
         assert second.payload["is_complete"] is True
-        assert manager.has_interactive_waiter("sess-headless-first") is True
         assert admission.is_user_active("sess-headless-first") is False
 
         await response_stream.aclose()
@@ -2143,7 +2143,7 @@ async def test_cancelled_heartbeat_followup_aborts_submitted_team_round(monkeypa
 
 
 @pytest.mark.anyio
-async def test_interactive_team_followup_hands_admission_to_round_state(monkeypatch):
+async def test_interactive_team_followup_uses_round_only_for_lifecycle(monkeypatch):
     from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
         SessionRunAdmission,
     )
@@ -2194,20 +2194,172 @@ async def test_interactive_team_followup_hands_admission_to_round_state(monkeypa
     assert admission.is_user_active("sess-team-user") is True
     assert manager.is_round_active("sess-team-user") is True
 
+    terminal_token = team_helpers.bind_team_heartbeat_service(
+        SimpleNamespace(admission=admission)
+    )
+    try:
+        await team_helpers._broadcast_event(
+            "web",
+            "sess-team-user",
+            {"event_type": "chat.final", "content": "continued"},
+        )
+        await team_helpers._broadcast_event(
+            "web",
+            "sess-team-user",
+            {
+                "event_type": "chat.processing_status",
+                "is_processing": False,
+                "is_complete": True,
+            },
+        )
+    finally:
+        team_helpers.reset_team_heartbeat_service(terminal_token)
+    assert manager.is_round_active("sess-team-user") is False
+    assert admission.is_user_active("sess-team-user") is False
+
+
+@pytest.mark.anyio
+async def test_concurrent_team_steers_reach_interact_without_round_wait(monkeypatch):
+    from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
+        SessionRunAdmission,
+    )
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    class _FakeManager(TeamManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.interact_calls: list[str] = []
+
+        def has_stream_task(self, session_id: str) -> bool:
+            return True
+
+        async def get_swarm_enriched_team_spec(self, **kwargs):
+            return SimpleNamespace(team_name="unit-team")
+
+        async def interact(self, session_id: str, query: str):
+            self.interact_calls.append(query)
+            return True, None
+
+    manager = _FakeManager()
+    manager.add_waiter("sess-concurrent-steer", "req-browser", asyncio.Queue())
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda _channel_id: manager)
+    monkeypatch.setattr(team_helpers, "_persist_team_file_monitor_roots", lambda *args: None)
+    admission = SessionRunAdmission()
+
+    async def _submit(request_id: str, query: str) -> list[Any]:
+        request = SimpleNamespace(
+            session_id="sess-concurrent-steer",
+            request_id=request_id,
+            channel_id="web",
+            metadata={},
+            params={"mode": "team"},
+            user_id="owner",
+        )
+        return [
+            chunk
+            async for chunk in team_helpers.process_team_message_stream(
+                request,
+                {"query": query},
+                object(),
+            )
+        ]
+
+    token = team_helpers.bind_team_heartbeat_service(
+        SimpleNamespace(admission=admission)
+    )
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                _submit("req-steer-a", "Hangzhou weather"),
+                _submit("req-steer-b", "Shanghai weather"),
+            ),
+            timeout=1.0,
+        )
+    finally:
+        team_helpers.reset_team_heartbeat_service(token)
+
+    assert len(results) == 2
+    assert len(manager.interact_calls) == 2
+    assert manager.is_round_active("sess-concurrent-steer") is True
+    assert admission.is_user_active("sess-concurrent-steer") is True
     await manager.broadcast_event(
-        "sess-team-user",
-        {"event_type": "chat.final", "content": "continued"},
+        "sess-concurrent-steer",
+        {"event_type": "chat.reasoning", "content": "working"},
     )
     await manager.broadcast_event(
-        "sess-team-user",
+        "sess-concurrent-steer",
         {
             "event_type": "chat.processing_status",
             "is_processing": False,
             "is_complete": True,
         },
     )
-    assert manager.is_round_active("sess-team-user") is False
-    assert admission.is_user_active("sess-team-user") is False
+    assert admission.is_user_active("sess-concurrent-steer") is False
+
+
+@pytest.mark.anyio
+async def test_cron_team_followup_retains_bounded_round_ownership(monkeypatch):
+    from jiuwenswarm.agents.harness.code.rails.heartbeat.execution import (
+        SessionRunAdmission,
+    )
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    interacted = asyncio.Event()
+
+    class _FakeManager(TeamManager):
+        def has_stream_task(self, session_id: str) -> bool:
+            return True
+
+        async def get_swarm_enriched_team_spec(self, **kwargs):
+            return SimpleNamespace(team_name="unit-team")
+
+        async def interact(self, session_id: str, query: str):
+            interacted.set()
+            return True, None
+
+    manager = _FakeManager()
+    manager.add_waiter("sess-cron-bounded", "req-browser", asyncio.Queue())
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda _channel_id: manager)
+    monkeypatch.setattr(team_helpers, "_persist_team_file_monitor_roots", lambda *args: None)
+    admission = SessionRunAdmission()
+    request = SimpleNamespace(
+        session_id="sess-cron-bounded",
+        request_id="cron-job:run-1",
+        channel_id="web",
+        metadata={},
+        params={"mode": "team"},
+        user_id="owner",
+    )
+
+    token = team_helpers.bind_team_heartbeat_service(
+        SimpleNamespace(admission=admission)
+    )
+
+    async def _consume() -> None:
+        async for _chunk in team_helpers.process_team_message_stream(
+            request,
+            {"query": "scheduled work"},
+            object(),
+        ):
+            pass
+
+    task = asyncio.create_task(_consume())
+    try:
+        await asyncio.wait_for(interacted.wait(), timeout=1.0)
+        assert manager.is_round_owner("sess-cron-bounded", "cron-job:run-1") is True
+        assert admission.is_user_active("sess-cron-bounded") is True
+        assert (
+            await admission.try_begin_heartbeat("sess-cron-bounded", "hb-overlap")
+            is False
+        )
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        team_helpers.reset_team_heartbeat_service(token)
+
+    assert manager.is_round_active("sess-cron-bounded") is False
+    assert admission.is_user_active("sess-cron-bounded") is False
 
 
 @pytest.mark.anyio
@@ -4018,9 +4170,10 @@ async def test_bounded_team_round_keeps_admission_through_late_event_grace():
     old_queue: asyncio.Queue = asyncio.Queue()
 
     await admission.begin_team_user(session_id)
+    await admission.complete_team_user_submission(session_id, accepted=True)
 
     async def _release() -> None:
-        await admission.end_user(session_id)
+        await admission.end_team_user(session_id)
 
     manager.add_waiter(session_id, "cron-old", old_queue, exclusive=True)
     manager.begin_round(

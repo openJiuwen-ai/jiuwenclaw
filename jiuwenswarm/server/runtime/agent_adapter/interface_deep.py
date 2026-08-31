@@ -286,8 +286,8 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_image_gen_model_config_from_yaml,
     apply_video_model_config_from_yaml,
     apply_vision_model_config_from_yaml,
-    dedicated_multimodal_model_configured,
     complete_multimodal_model_configured,
+    multimodal_model_enabled,
 )
 from jiuwenswarm.agents.harness.common.tools.video_tools import video_understanding
 from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
@@ -1330,6 +1330,7 @@ class JiuWenSwarmDeepAdapter:
         self._session_adapter_reload_failures: dict[str, tuple[int, float]] = {}
         self._pending_session_reload_config_base: dict[str, Any] | None = None
         self._pending_session_reload_env_overrides: dict[str, Any] | None = None
+        self._pending_session_reload_scopes: set[str] | None = None
         self._session_instance_config: dict[str, Any] | None = None
         self._session_instance_mode: str = "agent"
         self._session_instance_sub_mode: str | None = None
@@ -1373,6 +1374,11 @@ class JiuWenSwarmDeepAdapter:
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
         self._model_name_to_keys: dict[str, list[str]] = {}
+        # 全局列表下标 → cache_key。通道侧（Web）用全局 origin_index 拼请求 key，
+        # 与后端 per-name 的 cache_key 序号语义分叉；此映射在 _resolve_model_by_name
+        # 回退分支把通道传入的全局序号换算成真实 cache_key，避免同名条目
+        # （如 agentos 第 2+ 个同名模型）被静默解析到 defaults 的同名首条目。
+        self._global_index_to_cache_key: dict[int, str] = {}
         # Cache system prompt to avoid re-building on every btw/recap call.
         # The system prompt is derived from project context (CLAUDE.md, skills, etc.)
         # which doesn't change within a session, so caching is safe.
@@ -2050,11 +2056,15 @@ class JiuWenSwarmDeepAdapter:
         self,
         config_base: dict[str, Any],
         env_overrides: dict[str, Any] | None,
+        reload_scopes: set[str] | None = None,
     ) -> None:
         self._session_adapter_config_version += 1
         self._pending_session_reload_config_base = copy.deepcopy(config_base)
         self._pending_session_reload_env_overrides = (
             copy.deepcopy(env_overrides) if isinstance(env_overrides, dict) else None
+        )
+        self._pending_session_reload_scopes = (
+            set(reload_scopes) if reload_scopes else None
         )
         if self._session_adapters:
             logger.info(
@@ -2096,6 +2106,7 @@ class JiuWenSwarmDeepAdapter:
                 config_base,
                 self._pending_session_reload_env_overrides,
                 target_session_id=session_id,
+                reload_scopes=self._pending_session_reload_scopes,
             )
         except Exception as exc:
             logger.warning(
@@ -4041,10 +4052,12 @@ class JiuWenSwarmDeepAdapter:
         config_base: dict[str, Any],
     ) -> VisionModelConfig | None:
         """Build DeepAgent vision config from service config/env mapping."""
-        if not dedicated_multimodal_model_configured(config_base, "vision"):
+        if not (
+            multimodal_model_enabled(config_base, "vision")
+            and complete_multimodal_model_configured(config_base, "vision")
+        ):
             logger.info(
-                "[JiuWenSwarmDeepAdapter] vision tools skipped: models.vision has no dedicated "
-                "api_key in config.yaml"
+                "[JiuWenSwarmDeepAdapter] vision tools skipped: capability disabled or config incomplete"
             )
             return None
         apply_vision_model_config_from_yaml(config_base)
@@ -4066,10 +4079,12 @@ class JiuWenSwarmDeepAdapter:
         config_base: dict[str, Any],
     ) -> AudioModelConfig | None:
         """Build DeepAgent audio config from service config/env mapping."""
-        if not complete_multimodal_model_configured(config_base, "audio"):
+        if not (
+            multimodal_model_enabled(config_base, "audio")
+            and complete_multimodal_model_configured(config_base, "audio")
+        ):
             logger.info(
-                "[JiuWenSwarmDeepAdapter] audio tools skipped: models.audio requires "
-                "api_key, api_base, and model_name in config.yaml"
+                "[JiuWenSwarmDeepAdapter] audio tools skipped: capability disabled or config incomplete"
             )
             return None
         apply_audio_model_config_from_yaml(config_base)
@@ -4114,13 +4129,15 @@ class JiuWenSwarmDeepAdapter:
         config_base: dict[str, Any],
     ) -> bool:
         """Build DeepAgent video config from service config/env mapping."""
-        apply_video_model_config_from_yaml(config_base)
-        if not complete_multimodal_model_configured(config_base, "video"):
+        if not (
+            multimodal_model_enabled(config_base, "video")
+            and complete_multimodal_model_configured(config_base, "video")
+        ):
             logger.info(
-                "[JiuWenSwarmDeepAdapter] skip video_understanding: models.video requires "
-                "api_key, api_base, and model_name in config.yaml"
+                "[JiuWenSwarmDeepAdapter] video tools skipped: capability disabled or config incomplete"
             )
             return False
+        apply_video_model_config_from_yaml(config_base)
         video_api_key = str(os.getenv("VIDEO_API_KEY", "")).strip()
         video_api_base = str(os.getenv("VIDEO_API_BASE", "")).strip()
         video_model_name = str(os.getenv("VIDEO_MODEL_NAME", "")).strip()
@@ -4141,18 +4158,16 @@ class JiuWenSwarmDeepAdapter:
         return True
 
     def _iter_runtime_audio_tools(self, agent_id: str | None) -> list[Any]:
-        """Return metadata-only audio tools unless a complete audio model is configured."""
-        cfg = self._audio_model_config or AudioModelConfig()
-        tools = list(
+        """Return audio tools only while the audio capability is enabled."""
+        if self._audio_model_config is None:
+            return []
+        return list(
             create_audio_tools(
                 language=self._resolve_runtime_language(),
-                audio_model_config=cfg,
+                audio_model_config=self._audio_model_config,
                 agent_id=agent_id,
             )
         )
-        if self._audio_model_config is not None:
-            return tools
-        return [tool for tool in tools if tool.card.name == "audio_metadata"]
 
     def _refresh_multimodal_configs(
         self,
@@ -4821,11 +4836,17 @@ class JiuWenSwarmDeepAdapter:
         self,
         entry: dict[str, Any],
         name_counter: dict[str, int],
-    ) -> None:
-        """Register one model entry into the request-selectable model cache."""
+    ) -> str | None:
+        """Register one model entry into the request-selectable model cache.
+
+        Returns the cache_key (``{model_name}#{per_name_idx}``) on success, or
+        ``None`` when the entry is skipped (missing model_name or build failure).
+        The caller pairs this return value with the entry's global list index
+        to populate ``_global_index_to_cache_key``.
+        """
         mcc = entry.get("model_client_config") or {}
         if not mcc.get("model_name"):
-            return
+            return None
         model_name = mcc["model_name"]
         idx = name_counter.get(model_name, 0)
         name_counter[model_name] = idx + 1
@@ -4841,7 +4862,7 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] 跳过无效模型条目 %s: %s",
                 model_name, exc,
             )
-            return
+            return None
         if model_name not in self._model_name_to_keys:
             self._model_name_to_keys[model_name] = []
         self._model_name_to_keys[model_name].append(cache_key)
@@ -4854,17 +4875,24 @@ class JiuWenSwarmDeepAdapter:
         if alias and alias != model_name and alias not in self._model_cache:
             self._model_cache[alias] = self._model_cache[cache_key]
 
+        return cache_key
+
     def _build_model_cache_from_defaults(self, config: dict) -> None:
         """从 models.defaults 列表构建模型缓存。
 
         key 使用 {model_name}#{index} 格式以支持同名模型共存。
-        同时记录 _model_name_to_keys 映射以便按 model_name 查找。
+        同时记录 _model_name_to_keys 映射以便按 model_name 查找，
+        以及 _global_index_to_cache_key 映射以便在 _resolve_model_by_name
+        回退分支把通道侧的全局 origin_index 换算成真实 cache_key。
         """
         self._model_name_to_keys.clear()
+        self._global_index_to_cache_key.clear()
         name_counter: dict[str, int] = {}
 
-        for entry in get_default_models(config):
-            self._register_model_cache_entry(entry, name_counter)
+        for global_idx, entry in enumerate(get_default_models(config)):
+            cache_key = self._register_model_cache_entry(entry, name_counter)
+            if cache_key is not None:
+                self._global_index_to_cache_key[global_idx] = cache_key
 
     def _build_model_cache_legacy(self, config: dict) -> None:
         """回退到旧格式（models.default / react 段）构建单条目缓存。"""
@@ -4914,6 +4942,7 @@ class JiuWenSwarmDeepAdapter:
 
         self._model_cache.clear()
         self._model_name_to_keys.clear()
+        self._global_index_to_cache_key.clear()
         self._inject_attribution_to_config(config)
         self._build_model_cache_from_defaults(config)
         if not self._model_cache:
@@ -5013,24 +5042,71 @@ class JiuWenSwarmDeepAdapter:
         return stored.strip() if isinstance(stored, str) else ""
 
     def _resolve_model_by_name(self, requested_model_name: str = "") -> Model | None:
-        """Resolve the exact model object that will be used."""
+        """Resolve the exact model object that will be used.
+
+        Accepts three request formats from channels (web/TUI/etc.):
+
+        1. Pure ``model_name`` — returns the ``is_default=true`` entry registered
+           under the bare name, if any.
+        2. ``{model_name}#{index}`` whose ``#index`` is the channel-supplied
+           global list position (e.g. Web's ``origin_index`` from models.list).
+           It is converted to the real per-name cache_key via
+           ``_global_index_to_cache_key``; if no entry is registered at that
+           global position (out of range) or the mapped key has since been
+           evicted, a warning is logged and the default model is returned
+           rather than silently falling back to the first same-name entry
+           (which would mis-resolve an agentos same-name entry to the defaults
+           entry and send the wrong api_base/api_key).
+
+        Note: the ``#index`` is *always* treated as a global position. An
+        earlier version first tried ``requested in self._model_cache`` (whose
+        keys use the per-name ``name_counter`` scheme
+        ``{model_name}#{per_name_idx}``); when a channel-supplied global index
+        happened to collide with a per-name index of a *different* same-name
+        entry, that lookup silently returned the wrong entry. Routing every
+        ``#``-bearing request through the global map removes that collision
+        while keeping the pure-name path (format 1) intact.
+        """
         requested = (requested_model_name or "").strip()
         if not requested:
             # ask_user_interrupt 等中断恢复请求不带 model_name，
             # 回退到 session 上次应用的模型，而非 config.yaml 默认占位模型。
             return getattr(self, "_last_resolved_model", None) or self._model
-        # 精确匹配（#index 格式，或已注册纯 model_name key 的默认模型）
-        if requested in self._model_cache:
-            return self._model_cache[requested]
-        # 回退：非默认模型只以 {model_name}#{index} 注册在 _model_cache 里，没有纯
-        # model_name 的 key；这里按 _model_name_to_keys 里登记的真实 cache key 去查，
-        # 而不是重复判断上面已知为 False 的 `requested in self._model_cache`
-        # （旧代码在此处写重了，导致非默认模型永远查不到，静默 fallback 回默认模型）。
-        keys = self._model_name_to_keys.get(requested)
-        if keys:
-            resolved = self._model_cache.get(keys[0])
-            if resolved is not None:
-                return resolved
+        # 含 # 的请求一律走全局 origin_index 换算（见上文 Note），避免 per-name
+        # cache_key 与通道侧全局 index 碰撞时误命中另一同名条目。
+        if "#" not in requested:
+            # 纯 model_name 精确命中（仅 is_default=true 的条目注册了纯名 key）
+            if requested in self._model_cache:
+                return self._model_cache[requested]
+            # 纯 model_name 查找（_model_name_to_keys 的 key 是纯名）
+            keys = self._model_name_to_keys.get(requested)
+            if keys:
+                resolved = self._model_cache.get(keys[0])
+                if resolved is not None:
+                    return resolved
+        # 通道侧使用全局 origin_index；将其换算成后端 per-name cache key。
+        if "#" in requested:
+            bare_name, _, index_part = requested.rpartition("#")
+            if not bare_name:
+                return self._model
+            try:
+                global_idx = int(index_part)
+            except ValueError:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] model resolve: requested %r has "
+                    "non-integer index, falling back to default model", requested,
+                )
+                return self._model
+            cache_key = self._global_index_to_cache_key.get(global_idx)
+            if cache_key is None or cache_key not in self._model_cache:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] model resolve: global index %d "
+                    "for %r not in cache map (mapped_key=%s), falling back to "
+                    "default model", global_idx, requested, cache_key,
+                )
+                return self._model
+            return self._model_cache[cache_key]
+
         # Opencode Zen 免费模型（纯内存态，不入 config.yaml）：从进程内存缓存
         # 取完整 model_client_config / model_config_obj 构建并缓存，供本次及后续请求复用。
         # 不写回 config，开关关闭（get_zen_free_model_entries 返回空）则自然查不到。
@@ -6253,10 +6329,14 @@ class JiuWenSwarmDeepAdapter:
     ) -> SubagentRail | None:
         """Build SubagentRail for subagent delegation."""
         try:
-            subagent_rail = BrowserTaskPromptRail()
+            runtime_enabled = is_subagent_runtime_enabled(config_base)
+            subagent_rail = BrowserTaskPromptRail(
+                enable_subagent_runtime=runtime_enabled,
+            )
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SubagentRail create success "
-                "(load-aware browser policy)",
+                "(subagent_runtime=%s)",
+                runtime_enabled,
             )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
@@ -6601,8 +6681,8 @@ class JiuWenSwarmDeepAdapter:
         skills_dirs = self._skill_scan_dirs()
         # Keep hot-bound plugin/template skill roots. _skill_scan_dirs() only
         # knows workspace + session MCP; package dirs live on deep_config.skills
-        # after _bind_skill. Append them so MCP refresh does not drop them, and
-        # workspace still wins on duplicate names.
+        # after _bind_skill. Prepend them so MCP refresh does not drop them and
+        # package skills retain precedence over same-named workspace skills.
         instance = getattr(self, "_instance", None)
         bound = getattr(getattr(instance, "deep_config", None), "skills", None)
         if bound:
@@ -6617,7 +6697,7 @@ class JiuWenSwarmDeepAdapter:
                     continue
                 seen.add(resolved)
                 extra.append(text)
-            skills_dirs = [*skills_dirs, *extra]
+            skills_dirs = [*extra, *skills_dirs]
         if self._skill_rail is not None:
             # Update the rail's scan roots before reload so it picks up newly
             # connected (and drops disconnected) MCP skill dirs.
@@ -6819,9 +6899,6 @@ class JiuWenSwarmDeepAdapter:
         """Build DeepAgent rails consistently for cold start and hot reload."""
         rail_infos = [
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
-            _RailBuildInfo(
-                "_eternal_conversation_rail", self._build_eternal_conversation_rail
-            ),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo(
                 "_multimodal_image_rail",
@@ -6863,6 +6940,9 @@ class JiuWenSwarmDeepAdapter:
                 "_context_processor_rail",
                 _build_context_processor_rail,
                 {"config": self._config_cache},
+            ),
+            _RailBuildInfo(
+                "_eternal_conversation_rail", self._build_eternal_conversation_rail
             ),
         ]
 
@@ -7763,11 +7843,40 @@ class JiuWenSwarmDeepAdapter:
         self._config_cache = config_base.get("react", {}).copy()
         return config_base
 
+    async def _apply_multimodal_reload_snapshot(
+        self,
+        config_base: dict[str, Any] | None,
+        env_overrides: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Refresh only multimodal configuration without resetting other runtimes."""
+        load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
+        if env_overrides is not None:
+            if not isinstance(env_overrides, dict):
+                raise TypeError("env_overrides must be a dict when provided")
+            for env_key, env_value in env_overrides.items():
+                if env_value is None:
+                    os.environ.pop(str(env_key), None)
+                else:
+                    os.environ[str(env_key)] = str(env_value)
+
+        if config_base is None:
+            clear_config_cache()
+            config_base = get_config()
+        elif not isinstance(config_base, dict):
+            raise TypeError("config_base must be a dict when provided")
+        else:
+            config_base = resolve_env_vars(config_base)
+
+        self._config_base_cache = config_base.copy()
+        self._refresh_multimodal_configs(config_base)
+        return config_base
+
     async def _fan_out_reload_to_session_adapters(
         self,
         config_base: dict[str, Any],
         env_overrides: dict[str, Any] | None,
         target_sid: str | None,
+        reload_scopes: set[str] | None = None,
     ) -> None:
         """Cascade a config reload to the live per-session adapters.
 
@@ -7782,7 +7891,11 @@ class JiuWenSwarmDeepAdapter:
         if self._is_session_scoped_adapter:
             return
         if not target_sid:
-            self._mark_session_adapters_stale_for_reload(config_base, env_overrides)
+            self._mark_session_adapters_stale_for_reload(
+                config_base,
+                env_overrides,
+                reload_scopes,
+            )
             return
         for session_id, adapter in self._iter_session_adapters_for_reload(target_sid):
             try:
@@ -7790,6 +7903,7 @@ class JiuWenSwarmDeepAdapter:
                     config_base,
                     env_overrides,
                     target_session_id=target_sid,
+                    reload_scopes=reload_scopes,
                 )
             except Exception as exc:
                 logger.warning(
@@ -7806,6 +7920,7 @@ class JiuWenSwarmDeepAdapter:
         config_base: dict[str, Any] | None = None,
         env_overrides: dict[str, Any] | None = None,
         target_session_id: str | None = None,
+        reload_scopes: set[str] | None = None,
     ) -> None:
         """从 config.yaml 重新加载配置，通过 DeepAgent.configure() 热更新当前实例（不新建 DeepAgent）。
 
@@ -7816,6 +7931,7 @@ class JiuWenSwarmDeepAdapter:
             config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
             env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
             target_session_id: 可选的目标 session id；传入时仅级联热更新该 session adapter。
+            reload_scopes: 可选的精确配置作用域。
         """
         target_sid = str(target_session_id or "").strip() or None
         if self._is_session_scoped_adapter and target_sid:
@@ -7827,6 +7943,24 @@ class JiuWenSwarmDeepAdapter:
                     own_sid,
                 )
                 return
+        scope_set = set(reload_scopes) if reload_scopes else set()
+        if scope_set == {"multimodal"}:
+            config_base = await self._apply_multimodal_reload_snapshot(
+                config_base,
+                env_overrides,
+            )
+            if self._instance is not None:
+                self._sync_multimodal_tools_for_runtime()
+            await self._fan_out_reload_to_session_adapters(
+                config_base,
+                env_overrides,
+                target_sid,
+                scope_set,
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] multimodal tools hot-reloaded"
+            )
+            return
         previous_skill_retrieval_build_profile = (
             self._skill_retrieval_build_profile(self._config_base_cache)
         )
@@ -7842,7 +7976,12 @@ class JiuWenSwarmDeepAdapter:
                 previous_skill_retrieval_build_profile,
                 config_base,
             )
-            await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
+            await self._fan_out_reload_to_session_adapters(
+                config_base,
+                env_overrides,
+                target_sid,
+                scope_set,
+            )
             logger.info(
                 "[JiuWenSwarmDeepAdapter] 配置已热更新（root 实例未构建，仅刷新缓存并级联 session adapter）"
             )
@@ -7904,7 +8043,12 @@ class JiuWenSwarmDeepAdapter:
         # re-bind so MCP/model/config saves don't strip harness tools.
         await self._load_active_packages()
 
-        await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
+        await self._fan_out_reload_to_session_adapters(
+            config_base,
+            env_overrides,
+            target_sid,
+            scope_set,
+        )
 
         # 主动刷新 memory rail（不等下次请求的 _update_rails_for_mode）：
         # 让 embedding 配置变更立即走指纹检测 + 重建 rail + 延时重索引。

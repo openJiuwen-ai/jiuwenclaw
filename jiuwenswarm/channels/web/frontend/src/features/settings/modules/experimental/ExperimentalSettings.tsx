@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+// Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Switch } from '../../../../components/ui';
 import { Form, FormDialog, useForm } from '../../../../components/form';
@@ -7,9 +9,8 @@ import {
   EXTERNAL_CLI_AGENT_KINDS,
   ExternalCliAgentsSection,
   applyExternalCliAgentAtomicUpdates,
+  externalCliDependencyInstalls,
   externalCliKey,
-  isCodexDependencyInstalling,
-  type CodexDependencyInstallStatus,
   type ExternalCliConfigSaveResult,
 } from '../../../../components/ExternalCliAgentsSection';
 import { SettingRow, SettingsConfirmDialog } from '../../components';
@@ -27,22 +28,6 @@ const CLI_DEFAULTS: Record<string, string> = Object.fromEntries(
     [externalCliKey(agent, 'cli_path'), ''],
   ]),
 );
-
-function getInstallPhaseLabel(
-  status: CodexDependencyInstallStatus | null,
-  t: (key: string, options?: Record<string, string>) => string,
-): string {
-  const phase = status?.phase || status?.status || 'idle';
-  const keys: Record<string, string> = {
-    preparing: 'config.externalCli.dependencyInstallPhasePreparing',
-    installing: 'config.externalCli.dependencyInstallPhaseInstalling',
-    verifying: 'config.externalCli.dependencyInstallPhaseVerifying',
-    succeeded: 'config.externalCli.dependencyInstallPhaseSucceeded',
-    failed: 'config.externalCli.dependencyInstallPhaseFailed',
-    running: 'config.externalCli.dependencyInstallPhaseInstalling',
-  };
-  return keys[phase] ? t(keys[phase], { agent: 'Codex' }) : phase;
-}
 
 function ProactiveLimitsDialog({
   values,
@@ -143,8 +128,15 @@ function ExternalCliSettings({
   inheritedDisabled: boolean;
 }) {
   const { t } = useTranslation();
-  const { isConnected, onDetectExternalCli, onGetCodexDependencyInstallStatus, onSelectExternalCliPath } =
-    useSettingsServices();
+  const {
+    isConnected,
+    externalCliInstallBusy,
+    externalCliInstallStatuses,
+    onDetectExternalCli,
+    onOpenExternalCliInstallDialog,
+    onSelectExternalCliPath,
+    onTrackExternalCliDependencyInstalls,
+  } = useSettingsServices();
   const sourceValues = useMemo(
     () =>
       Object.fromEntries(Object.entries(CLI_DEFAULTS).map(([key, fallback]) => [key, String(config[key] ?? fallback)])),
@@ -154,9 +146,14 @@ function ExternalCliSettings({
   const [draftValues, setDraftValues] = useState(sourceValues);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
-  const [codexInstallStatus, setCodexInstallStatus] = useState<CodexDependencyInstallStatus | null>(null);
+  const installDialogRestoredRef = useRef(false);
   const changed = Object.keys(savedValues).some((key) => draftValues[key] !== savedValues[key]);
-  const disabled = inheritedDisabled || saving || !isConnected;
+  const installAgents = EXTERNAL_CLI_AGENT_KINDS.filter(
+    (agent) => externalCliInstallStatuses?.[agent]?.status === 'running',
+  );
+  const installAgentNames = installAgents.map((agent) => (agent === 'claude' ? 'Claude' : 'Codex')).join(' / ');
+  const installBusy = externalCliInstallBusy === true;
+  const disabled = inheritedDisabled || saving || installBusy || !isConnected;
   useUnsavedChanges('external-cli', changed);
 
   useEffect(() => {
@@ -167,38 +164,20 @@ function ExternalCliSettings({
   }, [changed, sourceValues]);
 
   useEffect(() => {
-    if (!onGetCodexDependencyInstallStatus || codexInstallStatus?.status !== 'running') return undefined;
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const next = await onGetCodexDependencyInstallStatus();
-        if (!cancelled) setCodexInstallStatus(next);
-      } catch (error) {
-        if (!cancelled) {
-          setCodexInstallStatus((current) => ({
-            ...(current ?? {}),
-            status: 'failed',
-            phase: 'failed',
-            error: error instanceof Error ? error.message : t('settingsPanel.feedback.saveFailed'),
-          }));
-        }
-      }
-    };
-    const timer = window.setInterval(() => void poll(), 1500);
-    void poll();
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [codexInstallStatus?.status, onGetCodexDependencyInstallStatus, t]);
-
-  useEffect(() => {
-    if (codexInstallStatus?.status !== 'succeeded') return undefined;
-    const timer = window.setTimeout(() => setCodexInstallStatus(null), 8000);
-    return () => window.clearTimeout(timer);
-  }, [codexInstallStatus?.status]);
+    if (!installBusy) {
+      installDialogRestoredRef.current = false;
+      return;
+    }
+    if (installDialogRestoredRef.current) return;
+    installDialogRestoredRef.current = true;
+    onOpenExternalCliInstallDialog?.();
+  }, [installBusy, onOpenExternalCliInstallDialog]);
 
   const submit = async () => {
+    if (installBusy) {
+      onOpenExternalCliInstallDialog?.();
+      return;
+    }
     const updates: Record<string, string> = {};
     for (const agent of EXTERNAL_CLI_AGENT_KINDS) {
       applyExternalCliAgentAtomicUpdates(updates, agent, draftValues, savedValues);
@@ -209,14 +188,14 @@ function ExternalCliSettings({
     try {
       const result = await onSave(updates);
       const nextValues = { ...draftValues };
-      if (isCodexDependencyInstalling(result)) {
-        nextValues[externalCliKey('codex', 'enabled')] = 'false';
-        nextValues[externalCliKey('codex', 'use_builtin')] = 'false';
-        nextValues[externalCliKey('codex', 'cli_path')] = '';
-        setCodexInstallStatus(result?.codex_dependency_install ?? { status: 'running', phase: 'installing' });
-      } else {
-        setCodexInstallStatus(null);
+      const installs = externalCliDependencyInstalls(result);
+      for (const agent of EXTERNAL_CLI_AGENT_KINDS) {
+        if (installs[agent]?.status !== 'running') continue;
+        nextValues[externalCliKey(agent, 'enabled')] = 'false';
+        nextValues[externalCliKey(agent, 'use_builtin')] = 'false';
+        nextValues[externalCliKey(agent, 'cli_path')] = '';
       }
+      if (Object.keys(installs).length) onTrackExternalCliDependencyInstalls?.(installs);
       setSavedValues(nextValues);
       setDraftValues(nextValues);
       onConfigPatch(nextValues);
@@ -229,28 +208,19 @@ function ExternalCliSettings({
 
   if (config.external_cli_agents_supported !== undefined && !parseConfigBoolean(config.external_cli_agents_supported))
     return null;
-  const installLogs = codexInstallStatus?.log_tail?.filter((line) => line.trim()).slice(-4) ?? [];
-  const showInstallStatus =
-    codexInstallStatus && ['running', 'failed', 'succeeded'].includes(codexInstallStatus.status || '');
-
   return (
     <div className="settings-experimental-cli">
-      {showInstallStatus ? (
-        <div
-          className={`settings-experimental-cli__status settings-experimental-cli__status--${codexInstallStatus?.status}`}
-          role="status"
-          aria-live="polite"
-        >
-          <strong>{getInstallPhaseLabel(codexInstallStatus, t)}</strong>
+      <span className="settings-experimental-cli__scope">
+        {t('settingsPanel.experimental.externalCliAgentsDescription')}
+      </span>
+      {installBusy ? (
+        <div className="settings-experimental-cli__install-running" role="status">
           <span>
-            {codexInstallStatus?.status === 'succeeded'
-              ? t('config.externalCli.dependencyInstalled', { agent: 'Codex' })
-              : t('config.externalCli.dependencyInstalling', { agents: 'Codex' })}
+            {t('config.externalCli.installInProgress', {
+              agents: installAgentNames || t('config.externalCli.claudeCodex'),
+            })}
           </span>
-          {codexInstallStatus?.error ? <span>{codexInstallStatus.error}</span> : null}
-          {codexInstallStatus?.status !== 'succeeded' && installLogs.length ? (
-            <pre>{installLogs.join('\n')}</pre>
-          ) : null}
+          <Button onClick={onOpenExternalCliInstallDialog}>{t('config.externalCli.installViewProgress')}</Button>
         </div>
       ) : null}
       {saveError ? (
