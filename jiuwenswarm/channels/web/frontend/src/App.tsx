@@ -27,7 +27,7 @@ import {
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
-import { ENTERPRISE_HIDDEN_NAV_ITEMS, isEnterpriseMode } from './edition';
+import { ENTERPRISE_HIDDEN_NAV_ITEMS, isEnterprise } from './edition';
 import {
   beginHistoryRestore,
   fetchHistoryPage,
@@ -271,7 +271,7 @@ function AppContent() {
     return 'new';
   });
 
-  const enterpriseMode = isEnterpriseMode();
+  const enterpriseMode = isEnterprise();
   const enterpriseBlockedNav = new Set<MainNavKey>(ENTERPRISE_HIDDEN_NAV_ITEMS);
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);

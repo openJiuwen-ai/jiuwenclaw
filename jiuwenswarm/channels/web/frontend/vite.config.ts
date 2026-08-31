@@ -333,14 +333,20 @@ const loginAuthSimulateIncluded = parseLoginAuthSimulate(
   process.env.INCLUDE_LOGIN_AUTH_SIMULATE ?? process.env.VITE_LOGIN_AUTH_SIMULATE_AVAILABLE
 )
 
-function loginAuthStartupCheck(): Plugin {
-  const userWebMode = (process.env.USER_WEB_MODE || process.env.VITE_USER_WEB_MODE || 'personal')
+/** Mirrors ``jiuwenswarm.common.local_env_config.is_enterprise`` for Vite startup checks. */
+function isEnterpriseEdition(): boolean {
+  const edition = (process.env.JIUWENSWARM_EDITION ?? process.env.VITE_JIUWENSWARM_EDITION ?? '')
     .trim()
     .toLowerCase()
+  return edition === 'enterprise'
+}
+
+function loginAuthStartupCheck(): Plugin {
+  const enterprise = isEnterpriseEdition()
   const simulateRaw = process.env.LOGIN_AUTH_SIMULATE ?? process.env.VITE_LOGIN_AUTH_SIMULATE
   const simulate = parseLoginAuthSimulate(simulateRaw)
 
-  if (userWebMode === 'enterprise' && simulate && !loginAuthSimulateIncluded) {
+  if (enterprise && simulate && !loginAuthSimulateIncluded) {
     throw new Error(
       '配置冲突：LOGIN_AUTH_SIMULATE=true，但当前客户交付制品未包含登录认证模拟插件；' +
       '请设置 LOGIN_AUTH_SIMULATE=false 并接入 manager ID认证服务'
@@ -355,11 +361,11 @@ function loginAuthStartupCheck(): Plugin {
           '[jiuwenswarm-web] LOGIN_AUTH_SIMULATE 未配置，按默认值 true 启用登录认证模拟调试'
         )
       }
-      if (userWebMode !== 'enterprise') {
+      if (!enterprise) {
         console.info('[jiuwenswarm-web] 单机版模式：跳过企业登录认证')
         if (!simulate) {
           console.warn(
-            '[jiuwenswarm-web] 配置冲突：USER_WEB_MODE=personal 始终跳过企业登录；' +
+            '[jiuwenswarm-web] 配置冲突：personal 模式仍将跳过企业登录；' +
             'LOGIN_AUTH_SIMULATE=false 不会启用正式身份认证'
           )
         }
@@ -432,8 +438,12 @@ export default defineConfig({
     },
   },
   server: {
+    host: '0.0.0.0',
     port: frontendPort,
     strictPort: true,
+    // Manager Web 企业链路把 /chat 反代到 http://jiuwenclaw-web:5173，
+    // Vite 5.4+ 默认拒绝未登记 Host，会直接 403。
+    allowedHosts: true,
     proxy: {
       '/idp': { target: process.env.USER_WEB_IDP_TARGET || 'http://127.0.0.1:8770', changeOrigin: true, rewrite: (p) => p.replace(/^\/idp/, '') },
       '/manager-api': { target: process.env.USER_WEB_MANAGER_TARGET || 'http://127.0.0.1:8765', changeOrigin: true, rewrite: (p) => p.replace(/^\/manager-api/, '/api') },

@@ -35,6 +35,7 @@ parse_dotenv_early("jiuwenswarm-web")
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
+from jiuwenswarm.common.local_env_config import is_enterprise
 from jiuwenswarm.common.utils import (
     get_logs_dir,
     get_root_dir,
@@ -70,17 +71,13 @@ def _default_dist_dir() -> Path:
 
 def _inject_user_web_runtime_config(
     document: str,
-    mode: str,
     login_auth_simulate: bool = True,
     login_auth_simulate_available: bool = True,
 ) -> str:
-    """Inject runtime mode values without modifying JavaScript property names."""
+    """Inject runtime edition and login-auth flags into index.html."""
+    edition = "enterprise" if is_enterprise() else "personal"
     return (
-        document.replace("__JIUWEN_USER_WEB_MODE_VALUE__", mode)
-        .replace(
-            "__JIUWEN_USER_WEB_EMBEDDING_VALUE__",
-            "true" if mode == "enterprise" else "false",
-        )
+        document.replace("__JIUWENSWARM_EDITION_VALUE__", edition)
         .replace(
             "__JIUWEN_LOGIN_AUTH_SIMULATE_VALUE__",
             "true" if login_auth_simulate else "false",
@@ -157,8 +154,6 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     idp_target = ""
     manager_api_target = ""
     ws_disable_compress = False
-    embedding_enabled = False
-    user_web_mode = "personal"
     login_auth_simulate = True
     login_auth_simulate_available = True
     logger = logging.getLogger(__name__)
@@ -692,7 +687,6 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             index = Path(self.directory or os.getcwd()) / "index.html"
             body = _inject_user_web_runtime_config(
                 index.read_text(encoding="utf-8"),
-                self.user_web_mode,
                 self.login_auth_simulate,
                 self.login_auth_simulate_available,
             ).encode("utf-8")
@@ -925,11 +919,7 @@ def main() -> None:
     _ConfiguredHandler.ws_target = ws_target
     _ConfiguredHandler.idp_target = os.getenv("USER_WEB_IDP_TARGET", "").strip()
     _ConfiguredHandler.manager_api_target = os.getenv("USER_WEB_MANAGER_TARGET", "").strip()
-    configured_mode = os.getenv("USER_WEB_MODE", "").strip().lower()
-    if configured_mode not in {"personal", "enterprise"}:
-        legacy_embedding = os.getenv("ENABLE_USER_WEB_EMBEDDING", "")
-        configured_mode = "enterprise" if legacy_embedding.strip().lower() == "true" else "personal"
-    _ConfiguredHandler.user_web_mode = configured_mode
+    enterprise = is_enterprise()
     login_auth_simulate_raw = os.getenv("LOGIN_AUTH_SIMULATE")
     login_auth_simulate_available_raw = os.getenv("LOGIN_AUTH_SIMULATE_AVAILABLE")
     try:
@@ -943,12 +933,11 @@ def main() -> None:
         raise SystemExit(str(exc)) from exc
     _ConfiguredHandler.login_auth_simulate = login_auth_simulate
     _ConfiguredHandler.login_auth_simulate_available = login_auth_simulate_available
-    if configured_mode == "enterprise" and login_auth_simulate and not login_auth_simulate_available:
+    if enterprise and login_auth_simulate and not login_auth_simulate_available:
         raise SystemExit(
             "配置冲突：LOGIN_AUTH_SIMULATE=true，但当前客户交付制品未包含登录认证模拟插件；"
             "请设置 LOGIN_AUTH_SIMULATE=false 并接入 manager ID认证服务"
         )
-    _ConfiguredHandler.embedding_enabled = configured_mode == "enterprise"
     _ConfiguredHandler.web_http_target = web_http_target
     _ConfiguredHandler.ws_disable_compress = args.ws_disable_compress
     _ConfiguredHandler.logger = logger
@@ -960,12 +949,12 @@ def main() -> None:
         logger.info(
             "[jiuwenswarm-web] LOGIN_AUTH_SIMULATE 未配置，按默认值 true 启用登录认证模拟调试"
         )
-    if configured_mode == "personal":
+    if not enterprise:
         logger.info("[jiuwenswarm-web] personal 模式：跳过企业登录认证")
         if not login_auth_simulate:
             logger.warning(
-                "[jiuwenswarm-web] 配置冲突：USER_WEB_MODE=personal 时 "
-                "LOGIN_AUTH_SIMULATE 不参与登录流程，personal 模式仍跳过企业认证"
+                "[jiuwenswarm-web] 配置冲突：personal 模式仍将跳过企业登录认证；"
+                "LOGIN_AUTH_SIMULATE=false 不会启用正式身份认证"
             )
     elif login_auth_simulate:
         logger.info("[jiuwenswarm-web] 【登录认证模拟调试模式已开启】")

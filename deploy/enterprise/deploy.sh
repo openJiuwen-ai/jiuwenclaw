@@ -93,17 +93,21 @@ process_restart() {
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
 
-    # USER_WEB_MODE 是用户面产品形态的唯一开关；旧布尔变量仅作兼容输入。
-    if [[ -z "${DEPLOY_VARS["USER_WEB_MODE"]:-}" ]]; then
-        if [[ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]:-false}" == "true" ]]; then
-            DEPLOY_VARS["USER_WEB_MODE"]="enterprise"
-            warning "ENABLE_USER_WEB_EMBEDDING is deprecated; use USER_WEB_MODE=enterprise"
+    # JIUWENSWARM_EDITION 是产品形态的唯一开关；USER_WEB_MODE / ENABLE_USER_WEB_EMBEDDING 仅作兼容输入。
+    if [[ -z "${DEPLOY_VARS["JIUWENSWARM_EDITION"]:-}" ]]; then
+        if [[ -n "${DEPLOY_VARS["USER_WEB_MODE"]:-}" ]]; then
+            DEPLOY_VARS["JIUWENSWARM_EDITION"]="${DEPLOY_VARS["USER_WEB_MODE"]}"
+            warning "USER_WEB_MODE is deprecated; use JIUWENSWARM_EDITION=${DEPLOY_VARS["JIUWENSWARM_EDITION"]}"
+        elif [[ "${DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]:-false}" == "true" ]]; then
+            DEPLOY_VARS["JIUWENSWARM_EDITION"]="enterprise"
+            warning "ENABLE_USER_WEB_EMBEDDING is deprecated; use JIUWENSWARM_EDITION=enterprise"
         else
-            DEPLOY_VARS["USER_WEB_MODE"]="personal"
+            DEPLOY_VARS["JIUWENSWARM_EDITION"]="enterprise"
         fi
     fi
+    DEPLOY_VARS["USER_WEB_MODE"]="${DEPLOY_VARS["JIUWENSWARM_EDITION"]}"
     DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]=$(
-        [[ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]] && printf true || printf false
+        [[ "${DEPLOY_VARS["JIUWENSWARM_EDITION"]}" == "enterprise" ]] && printf true || printf false
     )
     if [[ -z "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]:-}" ]]; then
         DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]="true"
@@ -118,7 +122,7 @@ main() {
         DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]="http://${DEPLOY_VARS["MANAGER_SERVER_NAME"]}:${DEPLOY_VARS["MANAGER_REST_PORT"]}"
         user_web_manager_defaulted="true"
     fi
-    if [[ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]]; then
+    if [[ "${DEPLOY_VARS["JIUWENSWARM_EDITION"]}" == "enterprise" ]]; then
         if [[ "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "true" ]]; then
             info "【登录认证模拟调试模式已开启】"
         elif [[ "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "false" ]]; then

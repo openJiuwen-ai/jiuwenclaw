@@ -34,12 +34,10 @@ spec:
               value: "0.0.0.0"
             - name: FRONTEND_HOST
               value: "0.0.0.0"
-            - name: USER_WEB_MODE
-              value: "<<USER_WEB_MODE>>"
-            - name: VITE_USER_WEB_MODE
-              value: "<<USER_WEB_MODE>>"
-            - name: VITE_ENABLE_USER_WEB_EMBEDDING
-              value: "<<ENABLE_USER_WEB_EMBEDDING>>"
+            - name: JIUWENSWARM_EDITION
+              value: "<<JIUWENSWARM_EDITION>>"
+            - name: VITE_JIUWENSWARM_EDITION
+              value: "<<JIUWENSWARM_EDITION>>"
             - name: LOGIN_AUTH_SIMULATE
               value: "<<LOGIN_AUTH_SIMULATE>>"
             - name: VITE_LOGIN_AUTH_SIMULATE
@@ -78,8 +76,6 @@ spec:
               value: "<<WEB_DB_USER>>"
             - name: WEB_DB_NAME
               value: "<<WEB_DB_NAME>>"
-            - name: JIUWENSWARM_EDITION
-              value: "enterprise"
             - name: TZ
               value: "<<TIMEZONE>>"
 
