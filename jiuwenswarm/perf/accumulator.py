@@ -56,6 +56,7 @@ class RequestSummaryAccumulator:
     unattributed_ms: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
+    total_tokens: int = 0
     cache_read_tokens: int = 0
     tasks: list[dict[str, Any]] = field(default_factory=list)
     bottleneck_llm: list[dict[str, Any]] = field(default_factory=list)
@@ -73,6 +74,7 @@ class RequestSummaryAccumulator:
     _agent_llm: dict[str, LlmStatsAccumulator] = field(default_factory=dict)
     _agent_tool: dict[str, ToolStatsAccumulator] = field(default_factory=dict)
     _agent_tokens: dict[str, dict[str, int]] = field(default_factory=dict)
+    _recorded_external_usage_ids: set[tuple[str, str]] = field(default_factory=set)
 
     def _task_stat_pair(self, task_id: str) -> tuple[LlmStatsAccumulator, ToolStatsAccumulator]:
         pair = self._task_stats.get(task_id)
@@ -115,6 +117,7 @@ class RequestSummaryAccumulator:
         )
         self.input_tokens += max(0, event.input_tokens)
         self.output_tokens += max(0, event.output_tokens)
+        self.total_tokens += max(0, event.input_tokens) + max(0, event.output_tokens)
         if self._include_by_agent:
             agent_key = self._agent_key(event.agent_id)
             self._agent_llm.setdefault(agent_key, LlmStatsAccumulator()).record(
@@ -161,6 +164,25 @@ class RequestSummaryAccumulator:
             entry,
             top_n=self._bottleneck_top_n,
         )
+
+    def record_external_token_usage(
+        self,
+        *,
+        source: str,
+        usage_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+    ) -> bool:
+        """Add one external aggregate without fabricating an LLM timing event."""
+        key = (source.strip(), usage_id.strip())
+        if not all(key) or key in self._recorded_external_usage_ids:
+            return False
+        self._recorded_external_usage_ids.add(key)
+        self.input_tokens += max(0, input_tokens)
+        self.output_tokens += max(0, output_tokens)
+        self.total_tokens += max(0, total_tokens)
+        return True
 
     def record_tool(self, event: ToolPerfEvent) -> None:
         self.tool_stats.record(
@@ -322,6 +344,7 @@ class RequestSummaryAccumulator:
                 "tokens": {
                     "input": self.input_tokens,
                     "output": self.output_tokens,
+                    "total": self.total_tokens,
                     "cache_read": self.cache_read_tokens,
                 },
             },

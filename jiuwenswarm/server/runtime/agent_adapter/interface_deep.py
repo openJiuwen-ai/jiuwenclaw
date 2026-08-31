@@ -432,8 +432,12 @@ from jiuwenswarm.perf.interface_hooks import (
     mark_request_first_byte,
     merge_perf_summary_usage_fallback,
     maybe_mark_answer_first_byte,
+    record_deepresearch_sdk_token_usage,
     set_perf_summary_context,
     snapshot_perf_summary_usage,
+)
+from jiuwenswarm.agents.harness.common.tools.deepresearch.usage import (
+    normalize_workflow_llm_token_usage,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
@@ -9989,6 +9993,70 @@ class JiuWenSwarmDeepAdapter:
             acc[cost] += usage_meta.get(cost, 0.0) or 0.0
 
     @staticmethod
+    def _extract_deepresearch_sdk_usage(
+        payload: Any,
+    ) -> tuple[str, dict[str, Any]] | None:
+        if not isinstance(payload, dict):
+            return None
+        result_info = payload.get("tool_result", payload)
+        if not isinstance(result_info, dict):
+            return None
+        tool_name = result_info.get("tool_name") or result_info.get("name")
+        if tool_name != "deepresearch_execute":
+            return None
+        raw_output = result_info.get("raw_output")
+        if raw_output is None:
+            raw_output = result_info.get("rawOutput")
+        if raw_output is None:
+            raw_output = result_info.get("result")
+        if isinstance(raw_output, str):
+            try:
+                raw_output = json.loads(raw_output)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(raw_output, dict) or raw_output.get("kind") != "completed":
+            return None
+        usage = normalize_workflow_llm_token_usage(
+            raw_output.get("workflow_llm_token_usage")
+        )
+        if usage is None or max(
+            usage["total_tokens"],
+            usage["input_tokens"] + usage["output_tokens"],
+        ) <= 0:
+            return None
+        state = raw_output.get("state")
+        conversation_id = (
+            raw_output.get("conversation_id")
+            or (state.get("conversation_id") if isinstance(state, dict) else None)
+            or result_info.get("tool_call_id")
+            or result_info.get("toolCallId")
+        )
+        usage_id = str(conversation_id or "").strip()
+        if not usage_id:
+            return None
+        return usage_id, usage
+
+    @classmethod
+    def _account_deepresearch_sdk_usage(
+        cls,
+        payload: Any,
+        *,
+        request_id: str,
+        usage_accumulator: dict[str, Any],
+        accounted_usage_ids: set[str],
+    ) -> bool:
+        extracted = cls._extract_deepresearch_sdk_usage(payload)
+        if extracted is None:
+            return False
+        usage_id, usage = extracted
+        if usage_id in accounted_usage_ids:
+            return False
+        accounted_usage_ids.add(usage_id)
+        cls._accumulate_usage(usage_accumulator, usage)
+        record_deepresearch_sdk_token_usage(request_id, usage_id, usage)
+        return True
+
+    @staticmethod
     def _rewrite_skill_turbo_usage_chunk(
         chunk: AgentResponseChunk,
         *,
@@ -14853,6 +14921,7 @@ class JiuWenSwarmDeepAdapter:
             "total_cost": 0.0,
         }
         emitted_ask_user_request_ids: set[str] = set()
+        accounted_deepresearch_usage_ids: set[str] = set()
         approved_plan_exit_tool_call_id = self._approved_plan_exit_resume_tool_call_id(
             request.params
         )
@@ -15666,6 +15735,13 @@ class JiuWenSwarmDeepAdapter:
                         is_complete=False,
                     )
                     accumulated_reasoning = ""
+                if chunk_type == "tool_result":
+                    self._account_deepresearch_sdk_usage(
+                        chunk.payload,
+                        request_id=rid,
+                        usage_accumulator=usage_accumulator,
+                        accounted_usage_ids=accounted_deepresearch_usage_ids,
+                    )
                 parsed = self._parse_stream_chunk(chunk)
                 parsed = self._adapt_goal_intermediate_final(parsed)
                 if parsed is not None:

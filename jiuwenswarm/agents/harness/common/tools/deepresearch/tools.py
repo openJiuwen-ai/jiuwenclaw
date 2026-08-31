@@ -19,6 +19,7 @@ import time
 import unicodedata
 import uuid
 import zipfile
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -58,6 +59,9 @@ from jiuwenswarm.agents.harness.common.tools.deepresearch.todo_progress import (
     deepresearch_todo_path,
     persist_deepresearch_task_update,
 )
+from jiuwenswarm.agents.harness.common.tools.deepresearch.usage import (
+    normalize_workflow_llm_token_usage,
+)
 from jiuwenswarm.agents.harness.common.tools.deepresearch_task_manager import (
     extract_deepresearch_section_titles,
     get_deepresearch_manager,
@@ -67,6 +71,7 @@ from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.local_env_config import (
     build_effective_env_overlay,
     get_task_env_overlay,
+    parse_default_headers,
 )
 from jiuwenswarm.common.utils import (
     JIUWENSWARM_SHARED_SKILLS_DIRS_ENV,
@@ -84,9 +89,11 @@ DEEPRESEARCH_STDOUT_PENDING_MAX_BYTES = 16 * 1024 * 1024
 DEEPRESEARCH_STDERR_TAIL_MAX_BYTES = 20_000
 DEEPRESEARCH_ERROR_TEXT_MAX_CHARS = 2048
 DEEPRESEARCH_STDERR_OUTCOME_MAX_CHARS = 2048
+_HUAWEI_MAAS_PLACEHOLDER_API_KEY = "huawei-maas-session"
 DEEPRESEARCH_STREAM_JSON_MAX_DEPTH = 64
 DEEPRESEARCH_STREAM_JSON_MAX_NODES = 100_000
 DEEPRESEARCH_STREAM_JSON_MAX_TEXT_CHARS = 16 * 1024 * 1024
+DEEPRESEARCH_FINAL_REPORT_PROGRESS_INTERVAL_SECONDS = 60.0
 DEEPRESEARCH_OUTLINE_CACHE_TENANTS = 256
 DEEPRESEARCH_OUTLINE_CACHE_CONVERSATIONS = 128
 DEEPRESEARCH_OUTLINE_CACHE_TITLES = 128
@@ -265,6 +272,11 @@ _TIMED_SDK_NODES = frozenset({
     "brief_mermaid_generator",
     "brief_source_tracer",
 })
+_RESUME_NODE_CURRENT_STAGE = {
+    "feedback_handler": 1,
+    "outline_interaction": 2,
+    "user_feedback_processor": 3,
+}
 
 
 def push_deepresearch_route(
@@ -523,9 +535,11 @@ def _build_deepresearch_request_config(
     return config
 
 
-def _build_styled_export_llm_config() -> dict[str, dict[str, object]]:
+def _build_styled_export_llm_config(
+    runtime_config: Mapping[str, str] | None = None,
+) -> dict[str, dict[str, object]]:
     """Build the exact JSON-safe LLM config consumed by the isolated SDK."""
-    resolved = load_deepresearch_config()
+    resolved = load_deepresearch_config(runtime_config)
     api_key = str(resolved.get("LLM_API_KEY", "")).strip()
     model_name = str(resolved.get("LLM_MODEL_NAME", "")).strip()
     base_url = str(resolved.get("LLM_BASE_URL", "")).strip()
@@ -552,6 +566,41 @@ def _build_styled_export_llm_config() -> dict[str, dict[str, object]]:
                 "extra_body": {"thinking": {"type": "disabled"}},
             },
         }
+    }
+
+
+def _build_styled_export_llm_auth(
+    runtime_config: Mapping[str, str],
+    llm_config: Mapping[str, object],
+) -> dict[str, str]:
+    """Carry only request-scoped MaaS Authorization into the style child."""
+    general = llm_config.get("general")
+    api_key = (
+        str(general.get("api_key", "") or "").strip()
+        if isinstance(general, Mapping)
+        else ""
+    )
+    if api_key != _HUAWEI_MAAS_PLACEHOLDER_API_KEY:
+        return {}
+
+    headers = parse_default_headers(
+        str(runtime_config.get("default_headers", "") or "")
+    )
+    authorization = [
+        value
+        for key, value in (headers or {}).items()
+        if key.lower() == "authorization" and value.strip()
+    ]
+    if len(authorization) != 1:
+        raise ValueError(
+            "styled HTML Huawei MaaS Authorization is unavailable"
+        )
+    return {
+        "default_headers": json.dumps(
+            {"Authorization": authorization[0]},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     }
 
 
@@ -896,6 +945,41 @@ async def _iter_ndjson_lines(
             del pending[: newline + 1]
     if pending:
         yield bytes(pending)
+
+
+async def _await_with_periodic_progress(
+    awaitable: Awaitable[Any],
+    progress: Callable[[], Awaitable[None]],
+) -> Any:
+    """Wait without cancelling the underlying operation on each progress tick."""
+    pending = asyncio.ensure_future(awaitable)
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {pending},
+                timeout=DEEPRESEARCH_FINAL_REPORT_PROGRESS_INTERVAL_SECONDS,
+            )
+            if done:
+                return pending.result()
+            await progress()
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with suppress(BaseException):
+                await pending
+
+
+async def _iter_with_periodic_progress(
+    lines: AsyncIterator[bytes],
+    progress: Callable[[], Awaitable[None]],
+) -> AsyncIterator[bytes]:
+    iterator = lines.__aiter__()
+    while True:
+        try:
+            line = await _await_with_periodic_progress(anext(iterator), progress)
+        except StopAsyncIteration:
+            return
+        yield line
 
 
 def _interaction_answer_has_user_input(item: Any) -> bool:
@@ -2025,7 +2109,11 @@ async def _consume_stream(
         if isinstance(existing_state, RouterState)
         else RouterState(
             section_titles=dict(cached_titles),
-            current_stage=(1 if action == "resume" and node == "feedback_handler" else 0),
+            current_stage=(
+                _RESUME_NODE_CURRENT_STAGE.get(node, 0)
+                if action == "resume"
+                else 0
+            ),
             final_report_started=(
                 action == "resume" and node == "user_feedback_processor"
             ),
@@ -2086,6 +2174,18 @@ async def _consume_stream(
         "error": "no terminal marker",
     }
     first_sdk_node_ns: int | None = None
+    report_delivery_settled = False
+
+    async def send_final_report_progress() -> None:
+        if not state.final_report_started or report_delivery_settled:
+            return
+        await send(
+            {
+                "event_type": "chat.processing_status",
+                "is_processing": True,
+                "current_task": "in_progress",
+            }
+        )
 
     def terminal_timing(chunk: dict[str, Any]) -> dict[str, Any] | None:
         timing = chunk.get("timing")
@@ -2107,11 +2207,14 @@ async def _consume_stream(
             result["timing"] = timing
         return result
 
-    async for raw in _iter_ndjson_lines(
-        proc.stdout,
-        request_id=str(route.get("request_id") or ""),
-        session_id=str(route.get("session_id") or ""),
-        conversation_id=conversation_id,
+    async for raw in _iter_with_periodic_progress(
+        _iter_ndjson_lines(
+            proc.stdout,
+            request_id=str(route.get("request_id") or ""),
+            session_id=str(route.get("session_id") or ""),
+            conversation_id=conversation_id,
+        ),
+        send_final_report_progress,
     ):
         try:
             line = raw.decode("utf-8").strip()
@@ -2270,11 +2373,14 @@ async def _consume_stream(
                     "error": "Markdown report file route is unavailable",
                 }, chunk)
             try:
-                artifacts = await _write_report_artifacts_stream(
-                    final_result,
-                    file_name,
-                    str(chunk.get("conversation_id") or outcome_cid),
-                    _normalize_citation_artifacts(chunk),
+                artifact_result = await _await_with_periodic_progress(
+                    _write_report_artifacts_stream(
+                        final_result,
+                        file_name,
+                        str(chunk.get("conversation_id") or outcome_cid),
+                        _normalize_citation_artifacts(chunk),
+                    ),
+                    send_final_report_progress,
                 )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 return attach_terminal_timing({
@@ -2283,6 +2389,21 @@ async def _consume_stream(
                     "error_code": "report_file_write_failed",
                     "error": type(exc).__name__,
                 }, chunk)
+            html_style_phase = None
+            html_style_reason_code = None
+            if isinstance(artifact_result, tuple) and len(artifact_result) == 4:
+                (
+                    artifacts,
+                    html_style_status,
+                    html_style_phase,
+                    html_style_reason_code,
+                ) = artifact_result
+            elif isinstance(artifact_result, tuple):
+                artifacts, html_style_status = artifact_result
+            else:
+                # Preserve compatibility with private test doubles and older callers.
+                artifacts = artifact_result
+                html_style_status = None
             files = [
                 {"path": value, "name": Path(value).name}
                 for value in artifacts.values()
@@ -2293,8 +2414,20 @@ async def _consume_stream(
             }
             markdown_index = list(artifacts).index("md")
             bundle = _build_related_artifact_bundle(chunk, markdown_index)
+            file_metadata: dict[str, Any] = {}
             if bundle:
-                file_payload["metadata"] = {"artifactBundle": bundle}
+                file_metadata["artifactBundle"] = bundle
+            if html_style_status in {"applied", "fallback"}:
+                file_metadata["htmlStyleStatus"] = html_style_status
+            if (
+                html_style_status == "fallback"
+                and isinstance(html_style_phase, str)
+                and isinstance(html_style_reason_code, str)
+            ):
+                file_metadata["htmlStylePhase"] = html_style_phase
+                file_metadata["htmlStyleReasonCode"] = html_style_reason_code
+            if file_metadata:
+                file_payload["metadata"] = file_metadata
             if not await send(file_payload):
                 return attach_terminal_timing({
                     "status": "error",
@@ -2303,14 +2436,44 @@ async def _consume_stream(
                     "error": "Report files could not be delivered",
                     "report_path": artifacts.get("md", ""),
                 }, chunk)
+            report_delivery_settled = True
             for payload in advance_stage(state, 4, complete=True):
                 await send(payload)
-            return attach_terminal_timing({
+            completed_outcome: dict[str, Any] = {
                 "status": "completed",
                 "conversation_id": chunk.get("conversation_id", outcome_cid),
                 "report_delivered": True,
                 "report_chars": len(response_content),
-            }, chunk)
+            }
+            if html_style_status in {"applied", "fallback"}:
+                completed_outcome["html_style_status"] = html_style_status
+                if html_style_status == "fallback":
+                    if (
+                        isinstance(html_style_phase, str)
+                        and isinstance(html_style_reason_code, str)
+                    ):
+                        completed_outcome["html_style_phase"] = html_style_phase
+                        completed_outcome["html_style_reason_code"] = (
+                            html_style_reason_code
+                        )
+                    logger.warning(
+                        "[deepresearch_stream] HTML style fallback "
+                        "request_id=%s session_id=%s conversation_id=%s "
+                        "style_phase=%s style_reason_code=%s",
+                        _safe_log_correlation_id(route.get("request_id")),
+                        _safe_log_correlation_id(route.get("session_id")),
+                        _safe_log_correlation_id(
+                            chunk.get("conversation_id") or outcome_cid
+                        ),
+                        html_style_phase,
+                        html_style_reason_code,
+                    )
+            workflow_usage = normalize_workflow_llm_token_usage(
+                final_result.get("workflow_llm_token_usage")
+            )
+            if workflow_usage is not None:
+                completed_outcome["workflow_llm_token_usage"] = workflow_usage
+            return attach_terminal_timing(completed_outcome, chunk)
         if status_value == "error":
             return attach_terminal_timing({
                 "status": "error",
@@ -2932,7 +3095,7 @@ async def _generate_report_html(
     final_result: dict[str, Any],
     report_path_md: Path,
     fallback_markdown: str | None,
-) -> Path | None:
+) -> tuple[Path, str, str | None, str | None] | None:
     """Prefer isolated SDK styling, then fall back to safe offline HTML."""
     report_path_html = report_path_md.with_suffix(".html")
     try:
@@ -2947,20 +3110,28 @@ async def _generate_report_html(
             "TOOL_SSL_VERIFY": runtime_config.get("TOOL_SSL_VERIFY", "false"),
         })
         manager = get_deepresearch_manager(_route_scope())
+        llm_config = _build_styled_export_llm_config(runtime_config)
+        llm_auth = _build_styled_export_llm_auth(runtime_config, llm_config)
         async with stylize_report_archive(
             final_result=final_result,
-            llm_config=_build_styled_export_llm_config(),
+            llm_config=llm_config,
+            llm_auth=llm_auth,
             tls=tls,
             manager=manager,
             session_id=str(route.get("session_id") or ""),
-        ) as archive_path:
+        ) as styled_archive:
             with tempfile.TemporaryDirectory(
                 prefix="deepresearch-report-styled-"
             ) as temporary_dir:
                 destination = Path(temporary_dir) / "extracted"
-                bundle_root = _extract_styled_archive(archive_path, destination)
+                bundle_root = _extract_styled_archive(styled_archive.path, destination)
                 _install_styled_bundle(bundle_root, report_path_html)
-        return report_path_html
+        return (
+            report_path_html,
+            styled_archive.style_status,
+            getattr(styled_archive, "style_phase", None),
+            getattr(styled_archive, "style_reason_code", None),
+        )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning(
             "SDK styled HTML export failed; using offline conversion. type=%s",
@@ -2984,7 +3155,7 @@ async def _generate_report_html(
             convert_md_to_html(source, target)
             html_bytes = target.read_bytes()
         _exclusive_write(report_path_html, html_bytes)
-        return report_path_html
+        return report_path_html, "fallback", None, None
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning(
             "Offline HTML conversion failed type=%s", type(exc).__name__
@@ -2997,7 +3168,7 @@ async def _write_report_artifacts_stream(
     file_name: str,
     conversation_id: str,
     citation_artifacts: object = None,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], str | None, str | None, str | None]:
     report_path_md = Path(
         await asyncio.to_thread(
             _write_report_markdown,
@@ -3012,12 +3183,26 @@ async def _write_report_artifacts_stream(
         fallback_markdown = report_path_md.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         fallback_markdown = None
-    report_path_html = await _generate_report_html(
+    generated_html = await _generate_report_html(
         final_result, report_path_md, fallback_markdown
     )
-    if report_path_html is not None:
+    html_style_status = None
+    html_style_phase = None
+    html_style_reason_code = None
+    if generated_html is not None:
+        (
+            report_path_html,
+            html_style_status,
+            html_style_phase,
+            html_style_reason_code,
+        ) = generated_html
         artifacts["html"] = str(report_path_html)
-    return artifacts
+    return (
+        artifacts,
+        html_style_status,
+        html_style_phase,
+        html_style_reason_code,
+    )
 
 
 def enable_deepresearch() -> bool:

@@ -832,7 +832,14 @@ async def test_generate_rewrite_html_passes_inputs_generates_once_and_delivers_o
         "final_result": final_result,
     }
     html_path = Path("/workspace/child.html")
-    generator = AsyncMock(return_value=html_path)
+    generator = AsyncMock(
+        return_value=(
+            html_path,
+            "fallback",
+            "invoke_llm",
+            "llm_call_failed",
+        )
+    )
     delivery = AsyncMock(return_value=True)
     with patch.object(rt, "_get_route", return_value=route), patch.object(
         rt, "_get_effective_request_output_dir", return_value="/workspace"
@@ -852,6 +859,9 @@ async def test_generate_rewrite_html_passes_inputs_generates_once_and_delivers_o
         "status": "completed",
         "html_delivered": True,
         "delivery_status": "delivered",
+        "html_style_status": "fallback",
+        "html_style_phase": "invoke_llm",
+        "html_style_reason_code": "llm_call_failed",
     }
     prepare.assert_called_once_with(
         workspace_root="/workspace",
@@ -863,7 +873,13 @@ async def test_generate_rewrite_html_passes_inputs_generates_once_and_delivers_o
         Path("/workspace/child.md"),
         "rewritten",
     )
-    delivery.assert_awaited_once_with(html_path, route)
+    delivery.assert_awaited_once_with(
+        html_path,
+        route,
+        "fallback",
+        "invoke_llm",
+        "llm_call_failed",
+    )
     assert "/workspace" not in raw
 
 
@@ -1050,14 +1066,20 @@ async def test_generate_rewrite_html_unexpected_preparation_failure_is_safe(capl
 
 
 @pytest.mark.asyncio
-async def test_deliver_html_sends_exactly_one_html_file_without_metadata():
+async def test_deliver_html_sends_style_status_metadata():
     push = AsyncMock()
     route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
     with patch(
         "jiuwenswarm.server.gateway_push.transport.WebSocketGatewayPushTransport",
         return_value=push,
     ):
-        delivered = await rt._deliver_html(Path("/workspace/child.html"), route)
+        delivered = await rt._deliver_html(
+            Path("/workspace/child.html"),
+            route,
+            "fallback",
+            "invoke_llm",
+            "llm_call_failed",
+        )
 
     assert delivered is True
     push.send_push.assert_awaited_once_with({
@@ -1067,6 +1089,11 @@ async def test_deliver_html_sends_exactly_one_html_file_without_metadata():
         "payload": {
             "event_type": "chat.file",
             "files": [{"path": "/workspace/child.html", "name": "child.html"}],
+            "metadata": {
+                "htmlStyleStatus": "fallback",
+                "htmlStylePhase": "invoke_llm",
+                "htmlStyleReasonCode": "llm_call_failed",
+            },
         },
         "is_complete": False,
     })

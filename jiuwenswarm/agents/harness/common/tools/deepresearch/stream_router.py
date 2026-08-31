@@ -431,9 +431,18 @@ def _stage_snapshot_frames(state: RouterState, *, complete: bool = False) -> lis
     }
     return [
         task_update,
-        {"event_type": "chat.reasoning", **message},
         {"event_type": "chat.delta", **message},
     ]
+
+
+def _stage_completion_frame(stage: int) -> dict:
+    title = DEEPRESEARCH_STAGES[stage - 1]
+    return {
+        "event_type": "chat.delta",
+        "task_id": f"deepresearch_stage_{stage}",
+        "task_content": title,
+        "content": f"[DeepResearch 阶段完成] Stage {stage}：{title}\n",
+    }
 
 
 def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> list[dict]:
@@ -452,6 +461,8 @@ def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> 
 
     frames: list[dict] = []
     for next_stage in range(state.current_stage + 1, stage + 1):
+        if state.current_stage > 0:
+            frames.append(_stage_completion_frame(state.current_stage))
         state.current_stage = next_stage
         frames.extend(_stage_snapshot_frames(state))
     return frames
