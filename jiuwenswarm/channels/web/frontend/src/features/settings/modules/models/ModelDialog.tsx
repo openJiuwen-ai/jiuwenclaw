@@ -403,6 +403,7 @@ export function ModelDialog({
     label: t('settingsPanel.models.model'),
     component: 'custom',
     required: true,
+    helpTips: t('settingsPanel.models.modelIdHint'),
     render: ({ id, value, error, disabled, onChange, onBlur }) => (
       <ModelNameField
         id={id}
