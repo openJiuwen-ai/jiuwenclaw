@@ -94,7 +94,19 @@ CODE_EXEC_TOOL_NAMES = frozenset({
 INVOKE_TOOL_NAMES = frozenset({"invoke_tool"})
 # send_file_to_user：产物路径从 tool_args 显式提取
 SEND_FILE_TOOL_NAMES = frozenset({"send_file_to_user"})
-# 触发产物检测的全部工具（对齐 enterprise_dev artifact_emitter 白名单思路）
+
+# invoke_tool 解包后的只读查询类内部工具（不产文件）跳过产物检测：
+# 其大文本结果（如 evaluate_script ~800K HTML）会触发 _ARTIFACT_PATH_PATTERNS
+# findall 爆炸 + 逐条 stat()，阻塞事件循环数百秒（实测 633s → WS 1006）。
+READONLY_INNER_TOOLS = frozenset({
+    # chrome-devtools / 浏览器自动化只读查询
+    "evaluate_script", "list_pages", "get_page_content", "get_page_text",
+    "snapshot", "take_snapshot", "get_console_logs", "get_cookies",
+    "get_network_log", "screenshot",  # 截图产物由调用方另行处理
+    # 通用只读探查
+    "search_skill", "tools_search",
+})
+# 触发产物检测的全部工具（对齐 clowder-ai artifact_emitter 白名单思路）
 ARTIFACT_DETECTION_TOOL_NAMES = frozenset(
     IMAGE_TOOL_NAMES | WRITE_TOOL_NAMES | CODE_EXEC_TOOL_NAMES
     | INVOKE_TOOL_NAMES | SEND_FILE_TOOL_NAMES
@@ -156,6 +168,11 @@ _ARTIFACT_PATH_PATTERNS = [
     ),
 ]
 
+# 产物路径正则扫描的文本长度上限：超过直接跳过 findall，避免超大正文
+# （如 evaluate_script ~800K HTML）爆炸匹配 + 逐条 stat() 阻塞事件循环。
+# 64K 覆盖正常 code/bash stdout 的产物路径声明。
+_ARTIFACT_SCAN_MAX_TEXT_BYTES = 64 * 1024
+
 
 def _clean_path_candidate(path_str: str) -> str:
     """清理正则提取到的路径候选首尾非法字符。"""
@@ -203,6 +220,16 @@ def _scan_body_text_for_paths(
 
     逐行处理避免超长单行正则灾难；单行超 _BODY_SCAN_MAX_LINE_LEN 跳过。
     """
+    # 纵深防御：主防线是 detect_artifact_paths 的 READONLY_INNER_TOOLS 短路，
+    # 这里兜底非 invoke_tool 通道直接走正文扫描的超大输出（633s stat 风暴）。
+    if len(result_text) > _ARTIFACT_SCAN_MAX_TEXT_BYTES:
+        logger.warning(
+            "[TaskExecutionRail] artifact scan skipped: result text too "
+            "large len=%d max=%d (super-large tool output would block "
+            "event loop on stat() storm)",
+            len(result_text), _ARTIFACT_SCAN_MAX_TEXT_BYTES,
+        )
+        return []
     candidates: list[str] = []
     seen: set[str] = set()
     for line in result_text.splitlines():
@@ -558,6 +585,9 @@ def detect_artifact_paths(
         inner_name, inner_result = _unwrap_invoke_tool(tool_args, tool_result)
         if inner_name is None:
             return ArtifactDetection(tool_name, [])
+        # 只读内部工具不产文件，短路避免 633s stat 风暴（见 READONLY_INNER_TOOLS）。
+        if inner_name in READONLY_INNER_TOOLS:
+            return ArtifactDetection(inner_name, [])
         tool_name = inner_name
         tool_result = inner_result
         # 内部工具参数位于 invoke_tool 的 arguments 字段中

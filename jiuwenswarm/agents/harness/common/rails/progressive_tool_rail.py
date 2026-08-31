@@ -1092,6 +1092,7 @@ class ProgressiveToolRail(DeepAgentRail):
                     _LOG_PREFIX,
                     tool_name,
                     exc,
+                    exc_info=True,
                 )
                 return {
                     "success": False,

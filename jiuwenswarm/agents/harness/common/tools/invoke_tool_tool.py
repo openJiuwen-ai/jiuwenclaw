@@ -84,7 +84,7 @@ class InvokeToolTool(Tool):
                 session, parsed, **kwargs_without_session
             )
         except Exception as exc:
-            logger.warning("[InvokeTool] invoke failed: %s", exc)
+            logger.warning("[InvokeTool] invoke failed: %s", exc, exc_info=True)
             return {
                 "success": False,
                 "error": str(exc),
