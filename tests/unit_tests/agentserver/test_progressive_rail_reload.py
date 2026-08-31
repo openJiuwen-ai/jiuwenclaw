@@ -207,9 +207,6 @@ def _prepare_reload_adapter(
 
     instance.configure.side_effect = _configure
     instance.unregister_rail = AsyncMock(side_effect=_unregister)
-    # reload 路径会 await self._instance.ensure_initialized()（interface_deep.py:8307），
-    # 裸 MagicMock 的该方法返回不可 await 的对象 → TypeError，故配 AsyncMock。
-    instance.ensure_initialized = AsyncMock()
     adapter._instance = instance
 
     new_config = {

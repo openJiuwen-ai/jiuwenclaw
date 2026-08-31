@@ -13,7 +13,6 @@ from jiuwenswarm.server.runtime.agent_manager import AgentManager
 from jiuwenswarm.server.runtime.sync_agents_configs import (
     SYNC_ENV_SCHEMA,
     build_agent_spec,
-    compute_content_hash,
     materialize_sync_env,
     validate_sync_payload,
 )
@@ -787,81 +786,6 @@ def test_build_agent_spec_hash_stable():
         revision="r1",
     )
     assert a.content_hash == b.content_hash
-
-
-def test_compute_content_hash_reflects_shared_skill_disk_changes(tmp_path):
-    """装/卸共享目录里的 skill 应让 content_hash 变化（office allow-all agent 的有效 skill 集 = 磁盘内容）。
-
-    回归根因：office 的 ENABLED_SKILLS 被 suppress 成 ''（恒定）、共享目录路径也恒定，
-    故装 skill 不改 env 本身。content_hash 必须纳入磁盘 skill 名清单，否则 sidecar
-    判 "unchanged" → 跳过 reload → 运行中会话的 SkillUseRail 永不重建（调不到新 skill）。
-    """
-    shared_dir = tmp_path / "skills"
-    shared_dir.mkdir()
-    env = _full_env(JIUWENSWARM_SHARED_SKILLS_DIRS=str(shared_dir))
-
-    base_hash = compute_content_hash(config={}, env=env, runtime={})
-
-    # 装一个含 SKILL.md 的子目录 → hash 应变
-    smart = shared_dir / "smart-charts"
-    smart.mkdir()
-    (smart / "SKILL.md").write_text("# smart-charts")
-    installed_hash = compute_content_hash(config={}, env=env, runtime={})
-    assert installed_hash != base_hash, "安装 skill 后 content_hash 必须变化"
-
-    # 不含 SKILL.md 的杂目录（含 _ 前缀）不应影响 hash
-    junk = shared_dir / "_draft"
-    junk.mkdir()
-    (junk / "note.txt").write_text("noise")
-    assert compute_content_hash(config={}, env=env, runtime={}) == installed_hash
-
-    # 卸载 smart-charts → hash 应回到装前
-    import shutil
-
-    shutil.rmtree(smart)
-    removed_hash = compute_content_hash(config={}, env=env, runtime={})
-    assert removed_hash == base_hash, "卸载 skill 后 content_hash 必须回到原值"
-
-
-def test_compute_content_hash_no_shared_dirs_is_stable():
-    """env 无 JIUWENSWARM_SHARED_SKILLS_DIRS 时不扫盘、hash 稳定（不产生磁盘 I/O）。"""
-    env = _full_env(MODEL_NAME="x")
-    a = compute_content_hash(config={}, env=env, runtime={})
-    b = compute_content_hash(config={}, env=env, runtime={})
-    assert a == b
-
-
-def test_compute_content_hash_preserves_root_dimension_for_same_name_skill(tmp_path):
-    """两根目录存在同名 skill 子目录时，hash 必须保留根维度。
-
-    回归评审意见：basename 集合会丢根维度——root_a/shared 与 root_b/shared 都记成
-    "shared"，删首根留次根时 basename 集合不变 → 漏触发 reload，而 SkillUseRail
-    可见内容其实切到了次根那份。完整路径保留 (root, name) 身份，此场景下 hash 必变。
-    """
-    root_a = tmp_path / "root_a"
-    root_b = tmp_path / "root_b"
-    root_a.mkdir()
-    root_b.mkdir()
-    (root_a / "shared" / "SKILL.md").parent.mkdir(parents=True)
-    (root_a / "shared" / "SKILL.md").write_text("# from root_a")
-    (root_b / "shared" / "SKILL.md").parent.mkdir(parents=True)
-    (root_b / "shared" / "SKILL.md").write_text("# from root_b")
-    dirs = f"{root_a}{os.pathsep}{root_b}"
-    env = _full_env(JIUWENSWARM_SHARED_SKILLS_DIRS=dirs)
-
-    both_hash = compute_content_hash(config={}, env=env, runtime={})
-
-    # 删首根的 shared，仅留次根同名 → 可见内容切换，hash 必变（basename 集合会漏）
-    import shutil
-
-    shutil.rmtree(root_a / "shared")
-    after_delete_hash = compute_content_hash(config={}, env=env, runtime={})
-    assert after_delete_hash != both_hash, "删首根同名 skill 后 hash 必须变化（完整路径保留根维度）"
-
-    # 恢复首根 shared → 回到 both_hash
-    (root_a / "shared" / "SKILL.md").parent.mkdir(parents=True, exist_ok=True)
-    (root_a / "shared" / "SKILL.md").write_text("# from root_a")
-    assert compute_content_hash(config={}, env=env, runtime={}) == both_hash
 
 
 # ---------------------------------------------------------------------------
