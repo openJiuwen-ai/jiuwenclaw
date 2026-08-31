@@ -785,10 +785,18 @@ def _all_sections_completed(state: RouterState) -> bool:
 
 
 def _is_successful_workflow_end(chunk: dict, agent: str, event: str) -> bool:
-    """Recognize the SDK EndNode result emitted after the workflow has finished."""
+    """Recognize the SDK EndNode result emitted after the workflow has finished.
+
+    The EndNode emits the final result with either ``summary_response`` (no
+    exceptions) or ``error`` (non-fatal per-section warnings recorded in
+    ``exception_info``).  Both carry the complete report in ``content`` and
+    must use the terminal 16 MiB bound, not the 1 MiB process-display limit.
+    The trailing ``"ALL END"`` marker also has ``agent == "end"`` but its
+    content is not valid JSON, so ``_as_json_object`` returns ``None`` and the
+    function falls through to ``False``.
+    """
     if (
         agent != "end"
-        or event != "summary_response"
         or str(chunk.get("section_idx", "0")).strip() not in {"", "0"}
     ):
         return False
