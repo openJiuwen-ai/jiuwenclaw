@@ -50,6 +50,18 @@ if getattr(sys, "frozen", False):
         except Exception:  # noqa: BLE001
             pass
 
+    # 解释器启动后 env 变量不再影响已创建的 stdio：显式重配 stdout/stderr
+    # 为 UTF-8（对 pipe/文件句柄同样生效；SetConsoleOutputCP 只作用于控制台）。
+    # 否则 Windows 中文环境下：
+    #   1) 日志出现 ⚠️ 等非 GBK 字符 → UnicodeEncodeError（Logging error）
+    #   2) 前端按 UTF-8 捕获 stderr 时中文变乱码（GBK 字节被误解）
+    for _stream in (sys.stdout, sys.stderr):
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                pass
+
     # macOS：把 .app 内置的 node-runtime/bin 前置到 PATH，使 shutil.which("npx")
     # 与 playwright_runtime 默认的 "npx" 命令命中内置 Node（> v18），
     # 用户无需单独安装 Node。入口脚本是所有冻结进程（主进程 + --desktop-run-*
