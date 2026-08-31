@@ -3001,7 +3001,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         if _del_target_name:
                             _idx_mcc = _raw_defs[_idx].get("model_client_config") or {}
                             _idx_mn = resolve_env_vars(str(_idx_mcc.get("model_name", "")))
-                            _idx_al = resolve_env_vars(str(_raw_defs[_idx].get("alias", ""))) if _raw_defs[_idx].get("alias") else ""
+                            _idx_entry = _raw_defs[_idx]
+                            _idx_alias_raw = _idx_entry.get("alias", "")
+                            _idx_al = (
+                                resolve_env_vars(str(_idx_alias_raw))
+                                if _idx_alias_raw else ""
+                            )
                             if _idx_mn != _del_target_name and _idx_al != _del_target_name:
                                 raise _ModelOpError(
                                     "Model '%s' no longer at index %d; list may have changed, please refresh and retry"
