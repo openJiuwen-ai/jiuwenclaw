@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from pathlib import Path
 
@@ -82,14 +83,14 @@ def isolated_pool(monkeypatch, tmp_path: Path):
     )
 
     def factory(agent: _FakeRootAgent) -> AgentWarmPool:
-        # Prewarming is off by default; stay explicit so a developer environment
-        # that opts in cannot silently turn these cases into no-ops.
+        # Prewarming is on by default; stay explicit so a developer environment
+        # that opts out cannot silently turn these cases into no-ops.
         return AgentWarmPool(_FakeManager(agent), max_concurrency=4, enabled=True)
 
     yield factory
 
 
-def test_prewarm_is_disabled_unless_the_environment_opts_in(
+def test_prewarm_is_enabled_unless_the_environment_opts_out(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
@@ -101,7 +102,7 @@ def test_prewarm_is_disabled_unless_the_environment_opts_in(
         return AgentWarmPool(_FakeManager(_FakeRootAgent()))
 
     monkeypatch.delenv("JIUWENSWARM_AGENT_PREWARM", raising=False)
-    assert build()._enabled is False
+    assert build()._enabled is True
 
     monkeypatch.setenv("JIUWENSWARM_AGENT_PREWARM", " OFF ")
     assert build()._enabled is False
@@ -150,7 +151,7 @@ def test_warm_key_normalizes_project_directory(tmp_path: Path) -> None:
         work_mode="CODE",
     )
     assert key.channel_id == "web"
-    assert key.project_dir == str(tmp_path.resolve()).lower()
+    assert key.project_dir == os.path.normcase(str(tmp_path.resolve()))
     assert key.agent_mode == "code"
     assert key.agent_sub_mode == "normal"
 

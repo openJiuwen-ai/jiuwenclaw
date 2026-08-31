@@ -17,6 +17,7 @@ from jiuwenswarm.common.e2a.gateway_normalize import (
 )
 from jiuwenswarm.common.e2a.models import E2AEnvelope, E2AResponse
 from jiuwenswarm.common.schema.message import Message, ReqMethod
+from jiuwenswarm.server.runtime.tenant_agent_pool import TenantAgentPool
 
 
 def test_message_to_e2a_or_fallback_basic():
@@ -59,6 +60,62 @@ def test_envelope_from_dict_merges_metadata_when_channel_context_nonempty():
     assert req.metadata["wecom_chat_id"] == "user1"
 
 
+def test_envelope_from_dict_preserves_officeclaw_tenant_ids():
+    """relay-claw sends top-level agent_id; E2A ingress must not drop it to default/default."""
+    env = E2AEnvelope.from_dict(
+        {
+            "request_id": "relay-req-1",
+            "channel_id": "officeclaw",
+            "session_id": "officeclaw_sess",
+            "agent_id": "office",
+            "service_id": "default",
+            "params": {"query": "hello"},
+            "is_stream": True,
+            "req_method": "chat.send",
+        }
+    )
+    assert env.agent_id == "office"
+    assert env.service_id == "default"
+
+    req = e2a_to_agent_request(env)
+    assert req.agent_id == "office"
+    assert req.service_id == "default"
+
+
+def test_envelope_from_dict_derives_agent_id_from_agent_ref():
+    env = E2AEnvelope.from_dict(
+        {
+            "request_id": "r-agent-ref",
+            "channel_id": "officeclaw",
+            "agent_ref": {"mode": "code", "id": "office"},
+            "params": {"query": "hi"},
+            "is_stream": True,
+            "method": "chat.send",
+        }
+    )
+    assert env.agent_id == "office"
+    req = e2a_to_agent_request(env)
+    assert req.agent_id == "office"
+
+
+def test_officeclaw_e2a_tenant_ids_reach_extract_ids():
+    env = E2AEnvelope.from_dict(
+        {
+            "request_id": "relay-req-2",
+            "channel_id": "officeclaw",
+            "agent_id": "office",
+            "params": {"query": "hello"},
+            "is_stream": True,
+            "method": "chat.send",
+        }
+    )
+    req = e2a_to_agent_request(env)
+    agent_id, service_id, workspace_key = TenantAgentPool.extract_ids(req)
+    assert agent_id == "office"
+    assert service_id == "default"
+    assert workspace_key == "default"
+
+
 def test_e2a_to_agent_request_roundtrip():
     msg = Message(
         id="r2",
@@ -78,6 +135,64 @@ def test_e2a_to_agent_request_roundtrip():
     assert req.channel_id == "wecom"
     assert req.req_method == ReqMethod.CHAT_SEND
     assert req.metadata == {"wecom_req_id": "abc"}
+
+
+def test_web_transport_scope_is_bound_to_agent_params():
+    env = E2AEnvelope.from_dict(
+        {
+            "request_id": "web-scope",
+            "channel_id": "web",
+            "session_id": "s1",
+            "user_id": "resolved-user",
+            "method": "chat.send",
+            "params": {
+                "content": "hello",
+                "user_id": "payload-user",
+                "group_id": "payload-group",
+            },
+            "metadata": {
+                "query": {
+                    "user_id": ["query-user"],
+                    "group_id": ["group-1"],
+                    "bot_id": ["bot-1"],
+                }
+            },
+        }
+    )
+
+    req = e2a_to_agent_request(env)
+
+    assert req.params["user_id"] == "resolved-user"
+    assert req.params["group_id"] == "group-1"
+    assert req.params["bot_id"] == "bot-1"
+    assert req.params["content"] == "hello"
+
+
+def test_message_to_e2a_or_fallback_preserves_user_id():
+    msg = Message(
+        id="r-user",
+        type="req",
+        channel_id="tui",
+        session_id="s1",
+        params={"content": "hi"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.CHAT_SEND,
+        user_id="alice",
+    )
+    env = message_to_e2a_or_fallback(msg)
+    assert env.user_id == "alice"
+
+
+def test_e2a_from_agent_fields_user_id():
+    env = e2a_from_agent_fields(
+        request_id="r1",
+        channel_id="tui",
+        session_id="s1",
+        req_method=ReqMethod.CHAT_SEND,
+        user_id="bob",
+    )
+    assert env.user_id == "bob"
 
 
 def test_channel_context_for_channel_reply_strips_internal():

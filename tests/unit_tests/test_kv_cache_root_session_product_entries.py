@@ -71,6 +71,26 @@ class _FailingAgentClient:
         raise RuntimeError("agent server unavailable")
 
 
+from jiuwenswarm.server.handlers import team as team_module
+from jiuwenswarm.server.handlers import session as session_handlers
+from jiuwenswarm.server.handlers import team as team_handlers
+from tests.unit_tests.conftest import patch_handler_name
+
+
+def _ctx_for_test(ws, request, send_lock, server=None):
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    return RequestContext(
+        request=request,
+        sink=WSSink(ws, send_lock),
+        connection_id=str(id(ws)),
+        services=AgentServerServices(server) if server is not None else None,
+    )
+
+
+
+
 class _AgentServer(agent_ws_server_module.AgentWebSocketServer):
     def __init__(self) -> None:
         super().__init__()
@@ -80,8 +100,13 @@ class _AgentServer(agent_ws_server_module.AgentWebSocketServer):
     async def _ensure_persistent_checkpointer_response(self, _request):
         return None
 
-    async def _find_team_session_ids(self, _team_name: str) -> list[str]:
-        return list(self.team_session_ids)
+
+def _patch_find_team_session_ids(monkeypatch, server) -> None:
+    async def _fake_find_team_session_ids(_team_name: str, *, sessions_root=None) -> list[str]:
+        _ = sessions_root
+        return list(server.team_session_ids)
+
+    monkeypatch.setattr(team_module, "_find_team_session_ids", _fake_find_team_session_ids)
 
 
 def _wire_response(response, *, response_id):
@@ -111,12 +136,17 @@ async def test_plan_agentserver_delete_evicts_self_parent_and_preserves_release(
     async def fake_release(session_id: str) -> None:
         release_calls.append(session_id)
 
-    monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: sessions_root)
-    monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
-    monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
+    patch_handler_name(monkeypatch, "get_agent_sessions_dir", lambda: sessions_root)
+    patch_handler_name(
+        monkeypatch, "_sessions_dir_for_request", lambda _request: sessions_root
+    )
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", _wire_response)
+    patch_handler_name(
+        monkeypatch, "remove_session_metadata_cache", lambda _sid, **_kwargs: None
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _sid: {"mode": "agent.plan", "channel_id": "web"},
+        lambda _sid, **_kwargs: {"mode": "agent.plan", "channel_id": "web"},
     )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
@@ -135,7 +165,7 @@ async def test_plan_agentserver_delete_evicts_self_parent_and_preserves_release(
         req_method=ReqMethod.SESSION_DELETE,
         params={"session_id": "plan-root"},
     )
-    await server._handle_session_delete(ws, request, asyncio.Lock())
+    await session_handlers.handle_session_delete(_ctx_for_test(ws, request, asyncio.Lock(), server))
 
     assert len(evict_calls) == 1
     assert evict_calls[0]["session_id"] == "plan-root"
@@ -428,14 +458,23 @@ async def test_team_session_delete_delegates_terminal_kvc_to_agent_core(
         deleted_teams.append(kwargs)
         return True
 
-    monkeypatch.setattr(manager, "_resolve_delete_session_team_name", lambda _sid: "demo-team")
+    monkeypatch.setattr(
+        manager,
+        "_resolve_delete_session_team_name",
+        lambda _sid, **_kwargs: "demo-team",
+    )
     monkeypatch.setattr(manager, "stop_session_runtime", AsyncMock(return_value=True))
-    monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: sessions_root)
-    monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
-    monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
+    patch_handler_name(monkeypatch, "get_agent_sessions_dir", lambda: sessions_root)
+    patch_handler_name(
+        monkeypatch, "_sessions_dir_for_request", lambda _request: sessions_root
+    )
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", _wire_response)
+    patch_handler_name(
+        monkeypatch, "remove_session_metadata_cache", lambda _sid, **_kwargs: None
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _sid: {"mode": "team", "channel_id": "web"},
+        lambda _sid, **_kwargs: {"mode": "team", "channel_id": "web"},
     )
     monkeypatch.setattr("jiuwenswarm.agents.harness.team.get_team_manager", lambda _cid: manager)
     monkeypatch.setattr(
@@ -457,7 +496,7 @@ async def test_team_session_delete_delegates_terminal_kvc_to_agent_core(
         req_method=ReqMethod.SESSION_DELETE,
         params={"session_id": "team-root"},
     )
-    await server._handle_session_delete(ws, request, asyncio.Lock())
+    await session_handlers.handle_session_delete(_ctx_for_test(ws, request, asyncio.Lock(), server))
 
     assert calls == []
     assert deleted_teams == [
@@ -477,6 +516,7 @@ async def test_team_delete_delegates_terminal_kvc_to_agent_core(
         (sessions_root / session_id).mkdir(parents=True)
     server = _AgentServer()
     server.team_session_ids = ["team-root-1", "team-root-2"]
+    _patch_find_team_session_ids(monkeypatch, server)
     ws = _WireWebSocket()
     calls: list[dict] = []
     stop_calls: list[str] = []
@@ -490,9 +530,14 @@ async def test_team_delete_delegates_terminal_kvc_to_agent_core(
         assert kwargs == {"stop_runner": False}
         return True
 
-    monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: sessions_root)
-    monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
-    monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
+    patch_handler_name(monkeypatch, "get_agent_sessions_dir", lambda: sessions_root)
+    patch_handler_name(
+        monkeypatch, "_sessions_dir_for_request", lambda _request: sessions_root
+    )
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", _wire_response)
+    patch_handler_name(
+        monkeypatch, "remove_session_metadata_cache", lambda _sid, **_kwargs: None
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
         fake_evict,
@@ -516,7 +561,7 @@ async def test_team_delete_delegates_terminal_kvc_to_agent_core(
         req_method=ReqMethod.TEAM_DELETE,
         params={"mode": "team", "team_name": "demo-team"},
     )
-    await server._handle_team_delete(ws, request, asyncio.Lock())
+    await team_handlers.handle_team_delete(_ctx_for_test(ws, request, asyncio.Lock(), server))
 
     assert calls == []
     assert stop_calls == ["team-root-1", "team-root-2"]
@@ -532,6 +577,7 @@ async def test_team_delete_keeps_original_stop_order_when_affinity_disabled(
     (sessions_root / "team-root").mkdir(parents=True)
     server = _AgentServer()
     server.team_session_ids = ["team-root"]
+    _patch_find_team_session_ids(monkeypatch, server)
     ws = _WireWebSocket()
     stop_kwargs: list[dict] = []
 
@@ -539,9 +585,14 @@ async def test_team_delete_keeps_original_stop_order_when_affinity_disabled(
         stop_kwargs.append(kwargs)
         return True
 
-    monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: sessions_root)
-    monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
-    monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
+    patch_handler_name(monkeypatch, "get_agent_sessions_dir", lambda: sessions_root)
+    patch_handler_name(
+        monkeypatch, "_sessions_dir_for_request", lambda _request: sessions_root
+    )
+    patch_handler_name(monkeypatch, "encode_agent_response_for_wire", _wire_response)
+    patch_handler_name(
+        monkeypatch, "remove_session_metadata_cache", lambda _sid, **_kwargs: None
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.is_kv_cache_affinity_enabled",
         lambda: False,
@@ -561,7 +612,7 @@ async def test_team_delete_keeps_original_stop_order_when_affinity_disabled(
         req_method=ReqMethod.TEAM_DELETE,
         params={"mode": "team", "team_name": "demo-team"},
     )
-    await server._handle_team_delete(ws, request, asyncio.Lock())
+    await team_handlers.handle_team_delete(_ctx_for_test(ws, request, asyncio.Lock(), server))
 
     assert stop_kwargs == [{}]
     assert ws.sent[-1]["ok"] is True
@@ -688,7 +739,11 @@ async def test_team_session_delete_keeps_baseline_stop_before_runner_delete(
         events.append("baseline-delete")
         return True
 
-    monkeypatch.setattr(manager, "_resolve_delete_session_team_name", lambda _sid: "demo-team")
+    monkeypatch.setattr(
+        manager,
+        "_resolve_delete_session_team_name",
+        lambda _sid, **_kwargs: "demo-team",
+    )
     monkeypatch.setattr(manager, "stop_session_runtime", _stop)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.Runner.delete_agent_team",

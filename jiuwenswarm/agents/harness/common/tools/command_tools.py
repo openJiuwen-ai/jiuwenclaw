@@ -658,6 +658,15 @@ def _resolve_execution_plan(command: str, shell_type: str) -> tuple[list[str] | 
     raise RuntimeError(f"Unsupported shell_type: {normalized}")
 
 
+def _build_subprocess_env(extra_env: dict[str, str] | None) -> dict[str, str] | None:
+    """Merge skill-injected env vars into a copy of os.environ."""
+    if not extra_env:
+        return None
+    merged = dict(os.environ)
+    merged.update(extra_env)
+    return merged
+
+
 def _resolve_encoding(resolved_shell: str) -> str:
     """Choose subprocess text encoding based on the resolved shell type.
 
@@ -677,6 +686,8 @@ def _run_command_sync(
     workdir: Path,
     shell_type: str,
     session_id: str | None = None,
+    *,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     plan, use_shell, resolved_shell = _resolve_execution_plan(command, shell_type)
     encoding = _resolve_encoding(resolved_shell)
@@ -685,6 +696,9 @@ def _run_command_sync(
         _jw_start_new_session = os.getenv("JW_START_NEW_SESSION", "true").strip().lower()
         if _jw_start_new_session not in ("0", "false", "no", "off"):
             popen_kw["start_new_session"] = True
+    subprocess_env = _build_subprocess_env(extra_env)
+    if subprocess_env is not None:
+        popen_kw["env"] = subprocess_env
     proc = subprocess.Popen(
         plan,
         shell=use_shell,
@@ -755,6 +769,8 @@ def _run_command_background(
     workdir: Path,
     shell_type: str,
     grace_seconds: float = 5.0,
+    *,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[int, str, str | None]:
     """Start command in background. Returns (pid, resolved_shell, error_msg).
     error_msg is None on success.
@@ -765,6 +781,9 @@ def _run_command_background(
         _jw_start_new_session = os.getenv("JW_START_NEW_SESSION", "true").strip().lower()
         if _jw_start_new_session not in ("0", "false", "no", "off"):
             popen_kw["start_new_session"] = True
+    subprocess_env = _build_subprocess_env(extra_env)
+    if subprocess_env is not None:
+        popen_kw["env"] = subprocess_env
     proc = subprocess.Popen(
         plan,
         shell=use_shell,
@@ -787,14 +806,13 @@ def _run_command_background(
 @tool(
     name="mcp_exec_command",
     description=(
-        "Execute simple cross-platform command-line command in project workspace. "
-        "Supports Windows cmd/PowerShell and macOS/Linux bash/sh. "
-        "Optional shell_type=auto|cmd|powershell|bash|sh. "
-        "Set background=True to run non-blocking (e.g. start a server); "
-        "returns immediately on success, error on failure. "
-        "Set max_output_chars=0 to disable output clipping. "
-        "Use a larger timeout_seconds for long-running commands. "
-        "Returns JSON: exit_code/stdout/stderr (blocking) or pid/status (background)."
+        "在项目工作区执行跨平台命令行命令。"
+        "支持 Windows cmd/PowerShell 与 macOS/Linux bash/sh。"
+        "可选 shell_type=auto|cmd|powershell|bash|sh。"
+        "设置 background=True 可非阻塞运行（如启动服务）；成功立即返回，失败返回错误。"
+        "设置 max_output_chars=0 可禁用输出截断。"
+        "长时间命令可增大 timeout_seconds。"
+        "返回 JSON：exit_code/stdout/stderr（阻塞）或 pid/status（后台）。"
     ),
 )
 async def mcp_exec_command(
@@ -804,6 +822,7 @@ async def mcp_exec_command(
     max_output_chars: int = 0,
     shell_type: str = "auto",
     background: bool = False,
+    env: dict[str, str] | None = None,
 ) -> str:
     command = (command or "").strip()
     if not command:
@@ -853,6 +872,7 @@ async def mcp_exec_command(
                 command,
                 resolved_workdir,
                 normalized_shell_type,
+                extra_env=env,
             )
         except Exception as exc:
             return f"[ERROR]: command failed to start: {exc}"
@@ -877,6 +897,7 @@ async def mcp_exec_command(
             resolved_workdir,
             normalized_shell_type,
             resolve_shell_session_id(),
+            extra_env=env,
         )
     except CommandCancelled:
         payload = {

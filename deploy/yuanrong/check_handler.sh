@@ -91,7 +91,10 @@ check_gateway_up_dependency() {
             DEPLOY_VARS["MASTER_NODE_IP"]="${_gw_host_list[0]}"
             info "MASTER_NODE_IP inferred from CLUSTER_HOSTS: ${DEPLOY_VARS["MASTER_NODE_IP"]}"
         else
-            error "MASTER_NODE_IP is not set. Please set it in .env.custom or deploy jiuwenswarm first."
+            local local_ip
+            local_ip=$(get_local_ip)
+            DEPLOY_VARS["MASTER_NODE_IP"]="${local_ip}"
+            info "MASTER_NODE_IP not set, defaulting to local: ${local_ip}"
         fi
     fi
 
@@ -130,18 +133,6 @@ check_gateway_up_dependency() {
     if [ -z "${DEPLOY_VARS["WEB_PORT"]:-}" ]; then
         DEPLOY_VARS["WEB_PORT"]="19000"
         warning "WEB_PORT not set, using default: 19000"
-    fi
-
-    # AgentOS IAM：空则默认 http://MASTER_NODE_IP:8090（与 registry/frontend 同 host 约定）。
-    # 外置 / K8s Service 等场景请在 .env.custom 写完整 URL 覆盖。
-    if [ -z "${DEPLOY_VARS["AGENTOS_AUTH_SERVICE_URL"]:-}" ]; then
-        DEPLOY_VARS["AGENTOS_AUTH_SERVICE_URL"]="http://${DEPLOY_VARS["MASTER_NODE_IP"]}:8090"
-        info "AGENTOS_AUTH_SERVICE_URL not set, using MASTER_NODE_IP: ${DEPLOY_VARS["AGENTOS_AUTH_SERVICE_URL"]}"
-    fi
-
-    if [ -z "${DEPLOY_VARS["AGENTOS_AUTH_TIMEOUT"]:-}" ]; then
-        DEPLOY_VARS["AGENTOS_AUTH_TIMEOUT"]="10"
-        warning "AGENTOS_AUTH_TIMEOUT not set, using default: 10"
     fi
 
     if [ -z "${DEPLOY_VARS["FUNCTION_ID"]:-}" ]; then

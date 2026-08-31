@@ -1,7 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from jiuwenswarm.extensions.agentos.agentos_router import (
-    AgentCreateFailed,
     AgentCreatingTimeout,
     AgentInfo,
     AgentManager,
@@ -14,7 +13,6 @@ from jiuwenswarm.extensions.agentos.agentos_router import (
 )
 
 __all__ = [
-    "AgentCreateFailed",
     "AgentCreatingTimeout",
     "AgentInfo",
     "AgentManager",

@@ -17,6 +17,9 @@ from .memory_tools import (
 
 from .send_file_to_user import (
     SendFileToolkit,
+    get_send_file_request_context,
+    reset_send_file_request_context,
+    set_send_file_request_context,
 )
 from .skill_toolkits import (
     SkillToolkit,
@@ -63,6 +66,9 @@ __all__ = [
     "set_group_chat_mode",
     "is_group_chat_mode",
     "SendFileToolkit",
+    "get_send_file_request_context",
+    "reset_send_file_request_context",
+    "set_send_file_request_context",
     "SkillToolkit",
     "is_skill_retrieval_enabled",
     "SkillRetrievalToolkit",

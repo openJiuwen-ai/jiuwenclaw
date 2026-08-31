@@ -178,8 +178,8 @@ Write-Host "=== JiuwenSwarm Build Exe ===" -ForegroundColor Cyan
 Write-Host "Project root: $ProjectRoot`n" -ForegroundColor Gray
 
 # 1. Install dependencies
-Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev --extra codex)..." -ForegroundColor Yellow
-uv sync --extra dev --extra codex
+Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev)..." -ForegroundColor Yellow
+uv sync --extra dev
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 2. Build frontend

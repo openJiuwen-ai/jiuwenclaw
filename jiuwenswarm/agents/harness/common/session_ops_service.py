@@ -16,6 +16,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
     load_history_records,
     write_history_records,
     _write_records_to_path,
+    flush_session_history,
 )
 
 if TYPE_CHECKING:
@@ -83,6 +84,7 @@ def fork_session(
     history_data: list[dict[str, Any]] = []
     if history_exists(source_session_id):
         try:
+            flush_session_history(source_session_id)
             data = load_history_records(source_session_id)
             if isinstance(data, list):
                 history_data = data
@@ -175,6 +177,7 @@ def rewind_session(
 
     from jiuwenswarm.server.runtime.session.session_history import truncate_history_records
 
+    flush_session_history(session_id)
     history = load_history_records(session_id)
     if not isinstance(history, list):
         raise ValueError("invalid history format")
@@ -264,6 +267,7 @@ def compact_partial_session(
     if not history_path.exists():
         raise ValueError("session history not found")
 
+    flush_session_history(session_id)
     history = load_history_records(session_id)
     if not isinstance(history, list):
         raise ValueError("invalid history format")
@@ -452,6 +456,7 @@ def list_session_turns(
         return {"turns": [], "total": 0}
 
     try:
+        flush_session_history(session_id)
         history = load_history_records(session_id)
     except Exception as exc:
         logger.warning("list_session_turns: failed to read history: %s", exc)
@@ -1012,13 +1017,12 @@ async def rewind_session_context(
     )
 
 
-def resolve_live_agent_session(deep_agent: "DeepAgent", session_id: str) -> Any | None:
+def _resolve_live_agent_session(deep_agent: "DeepAgent", session_id: str) -> Any | None:
     """Return DeepAgent's long-lived Session if it matches ``session_id``.
 
-    Chat rounds reuse ``_interaction_session`` (pre_run once). Writing through a
-    fresh Session only updates the checkpointer; the next turn still reads the
-    stale in-memory snapshot cached on the bound session — this bites both the
-    rewound context and ``DeepAgentState.plan_mode``.
+    Chat rounds reuse ``_interaction_session`` (pre_run once). Rewinding via a
+    fresh Session only updates checkpointer; the next turn still loads stale
+    in-memory context from the bound session.
     """
     for attr in ("_interaction_session", "_loop_session"):
         session_obj = getattr(deep_agent, attr, None)
@@ -1032,9 +1036,9 @@ def resolve_live_agent_session(deep_agent: "DeepAgent", session_id: str) -> Any 
                 return session_obj
         except Exception as exc:
             # Skip this candidate and try the next attr / fall back to a temp
-            # Session; a broken get_session_id must not abort the caller.
+            # Session; a broken get_session_id must not abort rewind.
             logger.warning(
-                "resolve_live_agent_session: get_session_id failed on %s for %s: %s",
+                "rewind_session_context: get_session_id failed on %s for %s: %s",
                 attr, session_id, exc,
             )
             continue
@@ -1136,7 +1140,7 @@ async def _apply_rewound_context(
         )
     await context_engine.clear_context(session_id=session_id)
 
-    live_session = resolve_live_agent_session(deep_agent, session_id)
+    live_session = _resolve_live_agent_session(deep_agent, session_id)
     is_live_session = live_session is not None
     if is_live_session:
         session = live_session

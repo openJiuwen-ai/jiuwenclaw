@@ -50,7 +50,6 @@ _TRUNCATE_SUFFIX = " [truncated]"
 
 _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
-        "chat.reasoning",
         "chat.final",
         "chat.tool_call",
         "chat.tool_result",
@@ -94,7 +93,6 @@ _WORKFLOW_SNAPSHOT_KEEP_KEYS = {
     "duration_ms",
     "token_count",
     "estimated_token_count",
-    "budget",
 }
 
 _WORKFLOW_LIST_SUMMARY_KEEP_KEYS = (
@@ -108,7 +106,6 @@ _WORKFLOW_LIST_SUMMARY_KEEP_KEYS = (
     "duration_ms",
     "token_count",
     "estimated_token_count",
-    "budget",
 )
 
 
@@ -349,8 +346,6 @@ def _workflow_agent_for_collapse(agent: dict[str, Any]) -> dict[str, Any]:
         "status": agent.get("status", "running"),
         "kind": agent.get("kind", "agent"),
     }
-    if agent.get("token_count") is not None:
-        collapsed_agent["token_count"] = agent["token_count"]
     if agent.get("model"):
         collapsed_agent["model"] = agent["model"]
     if agent.get("correlation_id"):
@@ -414,9 +409,6 @@ def _collapse_oversized_workflow_snapshot_item(item: dict[str, Any]) -> dict[str
                 "agent_count": phase.get("agent_count", 0),
                 "completed_agent_count": phase.get("completed_agent_count", 0),
             }
-            for child_key in ("phase_type", "nested_phase", "parent_phase"):
-                if child_key in phase:
-                    collapsed_phase[child_key] = phase[child_key]
             agents = phase.get("agents")
             if isinstance(agents, list):
                 collapsed_agents = []
@@ -551,18 +543,11 @@ def _workflow_list_summary_phase(phase: dict[str, Any]) -> dict[str, Any]:
 
 def _workflow_list_summary_item(item: dict[str, Any]) -> dict[str, Any]:
     """Compact workflow row for ``command.workflows`` list — omits large text fields."""
-    summary: dict[str, Any] = {}
-    for key in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS:
-        value = item.get(key)
-        if value is None:
-            continue
-        # budget is a small dict object; must not be str()'d by
-        # _compact_wire_metadata_value, or the frontend receives a string
-        # instead of an object and cannot read spent/total/remaining.
-        if key == "budget" and isinstance(value, dict):
-            summary[key] = value
-        else:
-            summary[key] = _compact_wire_metadata_value(value)
+    summary: dict[str, Any] = {
+        key: _compact_wire_metadata_value(item.get(key))
+        for key in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS
+        if item.get(key) is not None
+    }
     for key in ("summary", "error", "result"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():

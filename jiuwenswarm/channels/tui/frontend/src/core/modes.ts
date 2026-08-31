@@ -5,9 +5,7 @@ export type ClientMode =
   | "code.normal"
   | "code.team"
   | "team"
-  | "team.plan"
-  | "team.plan.normal"
-  | "team.plan.code";
+  | "team.plan";
 
 export function isClientMode(value: string): value is ClientMode {
   return (
@@ -17,23 +15,10 @@ export function isClientMode(value: string): value is ClientMode {
     value === "code.normal" ||
     value === "code.team" ||
     value === "team" ||
-    value === "team.plan" ||
-    value === "team.plan.normal" ||
-    value === "team.plan.code"
+    value === "team.plan"
   );
 }
 
 export function isTeamMode(mode: ClientMode): boolean {
-  return (
-    mode === "team" ||
-    mode === "team.plan" ||
-    mode === "team.plan.normal" ||
-    mode === "team.plan.code" ||
-    mode === "code.team"
-  );
-}
-
-/** Keep runtime identifiers canonical while presenting the public TUI hierarchy. */
-export function formatModeForDisplay(mode: string): string {
-  return mode === "code.team" ? "team.code" : mode;
+  return mode === "team" || mode === "team.plan" || mode === "code.team";
 }

@@ -12,7 +12,7 @@ JiuwenSwarm's skill self-evolution mechanism uses a built-in evolution signal de
 
 The core value of the skill self-evolution mechanism lies in:
 
-- **Lower day-to-day intervention cost**: The agent identifies reusable experience automatically and saves it according to the approval policy
+- **No manual intervention required**: The agent automatically improves itself during daily operation
 - **Continuous capability improvement**: Skills become more accurate and reliable with increased usage time
 - **Adaptive to scene changes**: Automatically adjusts and optimizes based on actual usage scenarios
 - **Reduced maintenance costs**: Decreases manual effort for updating and maintaining skills
@@ -21,28 +21,15 @@ The core value of the skill self-evolution mechanism lies in:
 
 ### 2.1 Self-Evolution Configuration Switch
 
-Automatic Skill learning is enabled with `react.evolution.skill_evolution`, which defaults to `false`. The Web and TUI configuration pages expose only this switch. When enabled, the system can extract experience automatically, suggest creating Skills, and provide the `/evolve` commands and evolution tools.
-
-Turning the switch off disables both automatic learning and manual evolution capabilities, but does not prevent explicit use of the general `skill-creator` or `swarmskill-creator` capabilities. Configurations that previously used `enabled`, `auto_scan`, `skill_create`, or the related environment variables do not automatically enable the new switch and must be migrated explicitly.
-
-The minimum configuration is:
-
-```yaml
-react:
-  evolution:
-    skill_evolution: true
-    auto_save: false
-```
-
-`auto_save` is an advanced YAML-only approval option. With `false`, regular evolution results for a Single Agent or Team leader require approval. With `true`, regular evolution results can be saved automatically. Teammates use a fixed automatic-approval policy.
+The skill auto-evolution feature is enabled by turning on the master switch `react.evolution.enabled` in the configuration. After the evolution rail is mounted, passive signal scanning runs automatically after chat and tool execution; optionally enable `review_trigger` (soft review follow-ups) and `auto_save` (auto-approve).
 
 ![Enable auto-evolution detection](../assets/images/skill演进_自动检测开关.png)
 
-### 2.2 Automatic Evolution
+### 2.2 Automatic Evolution (No Intervention Required)
 
-The system automatically detects evolution signals after each complete conversation ends (in the after_invoke phase). When execution exceptions or user corrections are detected, it generates evolution records.
+The system automatically detects evolution signals after each tool execution and dialogue completion. When execution exceptions or user corrections are detected, it automatically generates evolution records and stores them in `evolutions.json`.
 
-The system identifies evolution signals and generates candidate experience automatically. Whether user confirmation is required depends on the role and the `auto_save` setting. After experience is saved, it is loaded automatically the next time the Skill is used.
+No user action is required—evolution proceeds silently in the background. When the skill is called next time, it automatically loads content including evolution experience.
 
 ![Auto-trigger](../assets/images/skill演进_自动触发.png)
 
@@ -78,27 +65,25 @@ The system lists all skills containing pending evolution records and their speci
 
 ### 2.5 Manage Evolution Experience
 
-Evolution experience is stored in the `evolutions.json` file under the skill directory. **Note**: This file is dynamically generated when evolution is first triggered and may not exist if no evolution has occurred. You can edit this file directly to manage evolution experience:
+Evolution experience is stored in the `evolutions.json` file under the skill directory. You can directly edit this file to manage evolution experience:
 
 **Directory location:**
 ```
-~/.jiuwenswarm/agent/workspace/skills/<skill_name>/
+~/.jiuwenswarm/workspace/agent/skills/<skill_name>/
 ├── SKILL.md           # Skill source document
-├── evolutions.json    # Evolution experience records (dynamically generated)
+├── evolutions.json    # Evolution experience records ← Edit here
 └── ...
 ```
-
-> **In Agent Team mode the path is exactly the same.** There is only one copy of each skill, in the global skill library above; team workspaces and member workspaces hold no `skills/` directory and no copies. Evolution records produced by a team member are therefore written to that very same `evolutions.json` under the global library. Which skills of the library a member can see is decided by its visibility declaration — see the "Team Skills" section of [Agent Team](AgentTeam.md).
 
 **Common operations:**
 - Add new records: Append new objects to the `entries` array
 - Modify records: Edit the `change.content` field to update evolution content
 - Delete records: Remove from the array
-- Mark as solidified: Set `applied` to `true` (system will also toggle this during solidification)
+- Mark as solidified: Set `applied` to `true` (system will also toggle this during solidify)
 
 ⚠️ **Important**: Do not modify system-managed fields such as `id`, `source`, `timestamp`, `context`, `section`, `action`, `target`, or `relevant`. These fields are generated and maintained by the system.
 
-**Before editing**, consider backing up the file. After editing, the changes take effect automatically in the next conversation.
+Changes take effect automatically in the next dialogue.
 
 ## 3. Case Practice: Triggering Code Modifications Through Text Dialogue Fields
 
@@ -195,27 +180,27 @@ SkillCallOperator is the core entry point for interaction between JiuwenSwarm an
 
 When the system detects areas for improvement, these improvements are first stored in `evolutions.json`, and SkillCallOperator merges them before returning them to the Agent.
 
-#### 4.1.2 SkillExperienceOptimizer
+#### 4.1.2 SkillOptimizer
 
-SkillExperienceOptimizer is the optimizer that drives the entire skill evolution process:
+SkillOptimizer is the optimizer that drives the entire skill evolution process:
 
 1. **Receive signals**: Receives exception signals from SignalDetector to understand what problems the current skill is encountering
 2. **Analyze and judge**: Combines dialogue context to determine if the problem is worth recording
 3. **Generate improvements**: Calls LLM to generate specific improvement suggestions
 4. **Execute recording**: Writes generated improvement plans to evolution records
 
-When you use the `/evolve` command, it's SkillExperienceOptimizer working behind the scenes.
+When you use the `/evolve` command, it's SkillOptimizer working behind the scenes.
 
-#### 4.1.3 SkillEvolutionRail
+#### 4.1.3 SkillEvolutionManager
 
-SkillEvolutionRail is the core manager of the evolution lifecycle, responsible for coordinating various stages of evolution work:
+SkillEvolutionManager is the core manager of the evolution lifecycle, responsible for coordinating various stages of evolution work:
 
 - **Signal scanning**: Calls SignalDetector to extract events that require evolution
 - **Record generation**: Calls LLM to convert signals into executable improvement plans
 - **Storage management**: Maintains reading and writing of `evolutions.json` files
 - **Content solidification**: Merges pending evolution records into the original SKILL.md
 
-It connects SignalDetector, SkillExperienceOptimizer, and SkillCallOperator to form a complete evolution loop.
+It connects SignalDetector, SkillOptimizer, and SkillCallOperator to form a complete evolution loop.
 
 #### 4.1.4 SignalDetector
 
@@ -262,14 +247,14 @@ User chat / tool run
          │
          ▼
 ┌─────────────────────────────┐
-│    SkillEvolutionRail    │
-│     run_evolution()        │  Extracts evolution signals
+│    SkillEvolutionManager    │
+│         .scan()             │  Extracts evolution signals
 └────────────┬───────────────┘
              │
              ▼
 ┌─────────────────────────────┐
-│    SkillEvolutionRail    │
-│ generate_and_emit_experience() │  LLM generates evolution records
+│    SkillEvolutionManager    │
+│       .generate()           │  LLM generates evolution records
 └────────────┬───────────────┘
              │
              ▼
@@ -278,9 +263,9 @@ User chat / tool run
 │    (Under Skill directory) │
 └────────────┬───────────────┘
              │
-             ▼ (via /evolve rebuild or auto-load)
+             ▼ (optional)
 ┌─────────────────────────────┐
-│      rewrite_skill()         │  Merges into SKILL.md
+│         .solidify()         │  Merges into SKILL.md
 └─────────────────────────────┘
 ```
 

@@ -123,12 +123,53 @@ def test_has_persistable_assistant_payload_processing_status_still_rejected():
     ) is False
 
 
-def test_has_persistable_assistant_payload_tool_update_still_rejected():
+def test_has_persistable_assistant_payload_keeps_usage_events():
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.usage_summary",
+        extra={"usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}},
+    ) is True
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.usage_metadata",
+        extra={"metadata": {"usage_metadata": {"input_tokens": 10}}},
+    ) is True
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.llm_usage",
+        extra={"usage_metadata": {"input_tokens": 1000, "output_tokens": 50, "total_tokens": 1050}},
+    ) is True
+    assert session_history._has_persistable_assistant_payload(
+        content_text="",
+        event_type="chat.usage_summary",
+        extra={},
+    ) is False
+
+
+def test_append_history_persists_usage_summary(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
+    session_history.append_history_record(
+        session_id="s-usage",
+        request_id="r-usage",
+        channel_id="web",
+        role="assistant",
+        event_type="chat.usage_summary",
+        content="",
+        timestamp=1.0,
+        extra={"usage": {"input_tokens": 33709, "output_tokens": 4, "total_tokens": 33713, "cache_tokens": 10880}},
+    )
+    data = _wait_history("s-usage", min_count=1)
+    assert data[0]["event_type"] == "chat.usage_summary"
+    assert data[0]["usage"]["input_tokens"] == 33709
+    assert data[0]["content"] == ""
+
+
+def test_has_persistable_assistant_payload_tool_update_is_merged():
     assert session_history._has_persistable_assistant_payload(
         content_text="",
         event_type="chat.tool_update",
         extra={"tool_call_id": "call_abc", "beam_search": {}},
-    ) is False
+    ) is True
 
 
 def test_append_history_persists_tool_result(tmp_path, monkeypatch):
@@ -172,34 +213,6 @@ def test_append_history_persists_tool_result(tmp_path, monkeypatch):
     assert tool_result_record["event_type"] == "chat.tool_result"
     assert tool_result_record["tool_call_id"] == "call_abc"
     assert tool_result_record["tool_name"] == "list_files"
-
-
-def test_request_completion_is_persisted_after_prior_history(tmp_path, monkeypatch):
-    monkeypatch.setattr(session_history, "get_agent_sessions_dir", lambda: tmp_path)
-
-    session_history.append_history_record(
-        session_id="s-complete",
-        request_id="r1",
-        channel_id="web",
-        role="assistant",
-        event_type="chat.final",
-        content="Done",
-        timestamp=1.0,
-    )
-    receipt = session_history.enqueue_history_request_completion(
-        "s-complete",
-        "r1",
-        terminal_status="success",
-    )
-    assert receipt is not None
-    receipt.result(timeout=2)
-
-    records = session_history.load_history_records("s-complete")
-    assert [record.get("event_type") for record in records] == [
-        "chat.final",
-        session_history.SESSION_REQUEST_COMPLETED_EVENT,
-    ]
-    assert records[-1]["status"] == "success"
 
 
 def test_append_history_persists_tool_result_with_nested_payload(tmp_path, monkeypatch):

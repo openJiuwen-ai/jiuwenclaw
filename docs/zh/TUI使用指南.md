@@ -47,14 +47,14 @@
 
 ### `--session`：按 id 恢复或新建会话
 
-`--session <id>` 让 TUI 在启动时**以指定 session id 为身份**连接后端。连接建立后，TUI 统一向 AgentServer 注册该 id；由于身份来自外部，这条兼容路径明确绕过预热池。
+`--session <id>` 让 TUI 在启动时**以指定 session id 为身份**连接后端，并在连接建立后按 id 是否已存在走两条路径之一：
 
 | id 状态 | 启动行为 | 后端 RPC |
 |------|------|------|
-| **已存在** | AgentServer 保留已落盘的项目与模式绑定，执行切换生命周期，随后前端拉取并回显历史 | 显式 ID 的 `session.create` + `history.get` + `session.rename`（取标题） |
-| **不存在** | AgentServer 校验 id，在该 id 的互斥锁内解析 TUI 项目并写入 `metadata.json`，以空历史启动且不领取预热实例 | 显式 ID 的 `session.create` + `history.get`（空）|
+| **已存在** | 恢复该会话：触发 `session.switch` 生命周期（KV cache affinity / Team 状态迁移），前端按后端返回的 `mode` 对齐当前模式，随后拉取历史并回显到界面 | `session.switch` + `history.get` + `session.rename`（取标题） |
+| **不存在** | 新建并落盘该会话：触发 `session.create`（建目录 + 写 `metadata.json` + 生命周期初始化），界面为空会话。**已落盘即可下次恢复** | `session.create` + `history.get`（空）|
 
-显式 ID 的 `session.create` 仅对 TUI 开放且保持幂等，AgentServer 会记录该兼容请求绕过预热。该逻辑在收到 `connection.ack` 后由 `app-state.ts` 的 `initializeBootSession` 放行，重连时只执行一次；普通启动、`/new` 和 `/clear` 不传 `session_id`，仍由 AgentServer 分配新 ID。
+判定方式为 **try-create-then-switch**：先尝试 `session.create(<id>)`，返回 `ALREADY_EXISTS` 则转 `session.switch` 恢复。该逻辑在连接收到 `connection.ack` 后由 `app-state.ts` 的 `resumeOrCreateBootSession` 驱动，仅执行一次（重连/重发幂等）。
 
 **示例**：
 
@@ -67,7 +67,7 @@ jiuwenswarm-tui --session tui_myproj_001
 jiuwenswarm-tui --session tui_myproj_001
 ```
 
-**与运行时 `/resume` 的关系**：`--session` 是**启动时**的外部 id 兼容入口，调用显式 ID 的 `session.create`；`/resume` 是 TUI 已启动后切换到已有会话的命令，调用 `session.switch`。
+**与运行时 `/resume` 的关系**：`--session` 是**启动时**的恢复/新建入口；`/resume` 是 TUI 已启动后**运行中**切换到另一会话的命令。两者调同一套后端 RPC（`session.switch`/`session.create`），但 `--session` 在握手首帧触发、`/resume` 在用户手动输入时触发。正常时序无冲突。
 
 **id 命名约束**（前端在启动前校验，不合规直接报错退出，不进入 TUI）：
 
@@ -126,7 +126,7 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 
 当前 **已注册** 的顶层命令来自 `createBuiltinCommands()`（`registry.ts`），按名称排序如下表。
 
-> **与文档 [Slash命令表.md](Slash命令表.md) 的差异**：`jiuwenswarm/channels/tui/frontend/src/core/commands/builtins/` 下另有 `cancel.ts`、`new.ts`、`sessions.ts` 等实现文件，但当前没有把它们注册为独立顶层命令。`/new` 仍然可用，因为它是 `/clear` 的别名；默认构建没有独立 `/cancel`，中断任务请优先使用 **`Ctrl+C`**（第一次中断，连按两次退出）。`/switch` 仅在 `agentos-tui` 托管环境（`AGENTOS_TUI_SUPERVISED=1`）中注册，用于 `/switch claude`、`/switch list` 等第三方 TUI handoff；它不同于 Gateway 受控频道的模式切换指令。Gateway 侧行为仍以 `jiuwenswarm/gateway/slash_command.py` 与 Slash命令表为准。
+> **与文档 [Slash命令表.md](Slash命令表.md) 的差异**：`jiuwenswarm/cli/src/core/commands/builtins/` 下另有 **`switch.ts`（`/switch`）**、**`cancel.ts`（`/cancel`）**、**`new.ts`（`/new` 独立建会话）**、**`sessions.ts`（会话列表 RPC）** 等实现，但 **当前 `registry.ts` 未注册**这些顶层命令，输入后会得到 `Unknown command`。中断任务请优先使用 **`Ctrl+C`**（第一次中断，连按两次退出）。Gateway 侧受控指令仍以 `jiuwenswarm/gateway/slash_command.py` 与 Slash命令表为准。
 
 ### 命令总表
 
@@ -143,11 +143,12 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 | `/compact` | - | 压缩上下文，保留摘要 | `/compact` | 全部 |
 | `/config` | `/settings`, `/setting` | 查看/设置后端配置 | `/config`、`/config get`、`/config set key value` | 全部 |
 | `/context` | - | 查看上下文窗口占用与 Token 用量明细 | `/context` | 全部 |
-| `/diff` | - | 交互式查看工作树与按轮次的文件改动 | `/diff` | 全部 |
+| `/diff` | - | 交互式回顾按轮次 diff + 未提交工作树改动 | `/diff` | 全部 |
 | `/evolve` | - | 触发技能演进 | `/evolve myskill 修正错误处理` | `agent.plan` / `team`（见下） |
 | `/evolve_list` | - | 列出某技能的演进条目 | `/evolve_list myskill --sort score` | `agent.plan` / `team` |
-| `/evolve_rebuild` | - | 从归档与演进记录重建 SKILL.md | `/evolve_rebuild myskill 强化错误处理` | `agent.plan` / `team` |
+| `/evolve_rollback` | - | 回滚到归档 SemVer 版本 | `/evolve_rollback myskill latest` | `agent.plan` / `team` |
 | `/evolve_simplify` | - | 整理、合并某技能的演进经验 | `/evolve_simplify myskill 合并重复经验` | `agent.plan` / `team` |
+| `/evolve_rebuild` | - | 采纳经验并生成 Skill 新版本 | `/evolve_rebuild myskill 加强示例` | `agent.plan` / `team` |
 | `/init` | - | 在 **Code 模式** 下初始化 `JIUWENSWARM.md` / `JIUWENSWARM.local.md` | `/init` | **仅 `code.*`** |
 | `/mcp` | - | 管理 MCP 服务 | `/mcp list`、`/mcp add ...` | 全部 |
 | `/mode` | - | 切换或查看模式 | `/mode`、`/mode code`、`/mode team` | 全部 |
@@ -170,10 +171,6 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 | `/sandbox` | - | 进出沙箱模式 / 管理 excluded_commands / files | `/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/` | 全部 |
 | `/security-review` | - | 安全审查当前分支待定变更 | `/security-review`、`/security-review 重点关注认证` | 全部 |
 | `/simplify` | - | 代码精简审查（复用性、质量、效率），自动修复问题 | `/simplify`、`/simplify src/auth/` | **仅 `code.*`** |
-| `/swarmflow` | - | SwarmFlow 开关/状态/预算（`on`/`off`/`--budget`） | `/swarmflow on` | **推荐 `team`** |
-| `/swarmflows` | `/swarmworkflows` | 全屏 SwarmFlow 运行树 | `/swarmflows` | **推荐 `team`**（需 `/swarmflow on`） |
-
-> SwarmFlow 完整说明见 **[TUI 使用 SwarmFlow 指南](TUI使用SwarmFlow指南.md)**。
 
 #### `/resume` 与 `/continue` 在 TUI 中的特殊行为
 
@@ -219,7 +216,7 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 
 #### `/workspace`（可信目录）
 
-- 系统默认工作空间：`~/.jiuwenswarm/agent/workspace`（始终可用）。
+- 系统默认工作空间：`~/.jiuwenswarm/agent/jiuwenswarm_workspace`（始终可用）。
 - `add`：默认路径为当前工作目录；成功后会 `command.add_dir` 同步到服务端并 `remember: true`。
 - `set`：重置为单个可信目录；若已有列表会二次确认。
 - 详见 [Slash命令表.md](Slash命令表.md) 的 `/workspace` 小节。
@@ -286,7 +283,9 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 
 #### `/diff`（交互式改动回顾）
 
-- **`/diff`**：调用 `command.diff`，获取工作树（uncommitted changes）及本会话内有文件变更的轮次，然后打开 **交互式 Diff 查看器**（全屏覆盖模式）。
+- **`/diff`**：调用 `command.diff`（60s 超时），处理器从请求元数据解析 `session_id` 与 `project_dir`，并行获取两组数据后打开 **交互式 Diff 查看器**（全屏覆盖模式）：
+  - **按轮次改动**：基于 `.agent_history` 文件操作日志计算，涵盖 agent 工作区、用户工作区和项目目录三处日志，去重合并后按用户消息边界划分轮次；
+  - **工作树改动**：基于 `git diff HEAD` 获取未提交的已跟踪文件改动。
 
   **快捷键**：
 
@@ -300,7 +299,14 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
   | `Home` / `g` | 列表 → 跳至顶部；详情 → 跳至文件开头 |
   | `End` / `Shift+g` | 列表 → 跳至底部；详情 → 跳至文件末尾 |
 
-  注意：未提交的工作树改动通过 `git diff HEAD` 获取；同一文件在工作树和某轮次中均出现时会重复列出，来源标注为 `working` 或 `Turn N`。
+  **效果边界**：
+  - 同一文件在工作树和某轮次中均出现时会重复列出，来源标注为 `working` 或 `Turn N`；
+  - 按轮次 diff 仅追踪 agent 的文件操作日志，不覆盖手动或 bash 编辑的文件；
+  - git diff 部分仅覆盖已跟踪文件的未提交改动，不包含未跟踪文件和已提交历史；
+  - 在 merge/rebase/cherry-pick/revert 等瞬态 git 状态下，git diff 返回 `None`；
+  - 单文件 hunk 超过 400 行会被截断；单文件 diff 超过 1 MB 跳过 hunk 解析；变更文件超过 500 时仅返回统计；
+  - 非 git 仓库或无法解析 `project_dir` 时，仅返回按轮次 diff；
+  - 详见 [Slash命令表](Slash命令表.md#diff交互式改动回顾)。
 
 - **`/compact`**：调用 `command.compact`，返回 `busy` | `compressed` | `noop`；成功时展示 token 节省比例（`compact.ts`）。
 
@@ -351,12 +357,13 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 | `/evolve <skill_name> [user_query]` | 为单个 Skill 生成演进记录 | `agent.plan` 下会先扫描当前会话中的工具失败和用户纠错信号；若没有信号且未给 `user_query`，返回“未发现明确演进信号”。Team 模式必须提供 `<user_query>`。 |
 | `/evolve_list <skill_name> [--sort score]` | 查看某 Skill 的经验库 | 展示记录数、平均分、使用/反馈统计、目标 section 与内容预览；当前实现按 score 获取记录。 |
 | `/evolve_simplify <skill_name> [user_intent]` | 智能整理经验库 | 生成可审批的整理方案，用于合并、拆分或清理演进经验。尾随文本会作为整理意图传给后端，不是独立 CLI flag。 |
-| `/evolve_rebuild <skill_name> [user_intent]` | 重建 SKILL.md | 由后端生成 follow-up prompt，并继续作为普通 Agent / Team 任务执行，用归档历史与演进记录重建 Skill 文档。 |
+| `/evolve_rebuild <skill_name> [user_intent]` | 重建 Skill 版本 | 与控制面 `skills.evolution.rebuild` 同源：采纳经验并生成新版本（prepare → 改写 → finalize）。
+| `/evolve_rollback <skill_name> [version\|latest]` | 回滚归档版本 | 省略 version 时列出可用成对归档；回滚后清空 live `evolutions.json`。 |
 
 适用条件：
 
 - `agent.plan`：用于单 Agent Skill 自演进；其它 Agent / Code 子模式不处理这组命令。
-- `team`：使用团队技能演进 rail；`/evolve <skill_name> <user_query>`、`/evolve_list`、`/evolve_simplify`、`/evolve_rebuild` 可用。
+- `team`：使用团队技能演进 rail；`/evolve <skill_name> <user_query>`、`/evolve_list`、`/evolve_simplify`、`/evolve_rebuild`、`/evolve_rollback` 可用。
 - 无参数 `/evolve` 仅在 `agent.plan` 下返回待处理演进记录摘要；Team 模式会要求补充 Skill 名称和演进意图。
 
 审批与状态：
@@ -399,7 +406,7 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 
 - 别名：`/fork`。
 - 约束：当前会话忙时或无对话记录时拒绝执行。
-- 行为：TUI 调用 `session.fork` 时发送当前 `source_session_id` 与可选标题，由 AgentServer 分配并返回新 `session_id`；随后 TUI 自动切换到新分支会话，清空 transcript 并恢复分支历史。提示用户可用 `/resume <原会话ID>` 返回原会话。
+- 行为：生成新 `session_id` 并调用 `session.fork`；TUI 自动切换到新分支会话，清空 transcript 并恢复分支历史。提示用户可用 `/resume <原会话ID>` 返回原会话。
 - 示例：`/branch`、`/branch fix-login-bug`。
 
 #### `/btw`（旁路提问）
@@ -452,7 +459,6 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
   - code mode：`memory_enabled`（记忆功能总开关）、`auto_coding_memory`（每轮对话后自动提取记忆（需总开关开启））、`memory_forbidden_enabled`（过滤敏感信息）。
   - 切换后若需重启会话生效会给出提示。
 - Tab 补全：`/memory edit ` 后显示文件列表（路径用 `getDisplayPath` 展示，去重）；`/memory toggle ` 后显示当前 mode 的 key 列表；均支持前缀过滤。
-- `/memory edit <path>` 只允许打开已存在且通过记忆目录路径校验的文件，不负责创建缺失文件；运行时 auto/coding memory 文件为只读。
 - 示例：`/memory`（打开控制台）、`/memory status`、`/memory toggle memory_enabled`、`/memory edit memory/MEMORY.md`。
 
 #### `/sandbox`（沙箱模式管理）
@@ -467,7 +473,7 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
   - `landlock` — jiuwenbox Landlock 支持情况（`supported` + `compatibility`）。
   - `files.allow_write` / `files.deny_write` — 生效（auto-managed ∪ user-configured，去重）的写入策略，显示 `(rw)` / `(ro)`。
 - 自动配置路径：当前工作路径。`preserve_file_sharing_mode` 仅支持 `mount`。
-- `excluded_commands` 的匹配：按 simple-command 叶子做 fnmatch；写 glob 时建议覆盖参数（例如 `"git *"`）。混合管道会本地/远端拆分执行，不安全结构则整条进沙箱。本质仍是沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
+- `excluded_commands` 的匹配：按完整命令字符串匹配，不仅看 `argv[0]`；写 glob 时要把参数也覆盖进去（例如 `"git *"` 而不是 `git`）。本质等同于沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
 - add / remove 严格校验：`exclude add` 已存在 pattern、`exclude remove` 不存在 pattern 都会报错；`files allow|deny` 在同 bucket 已有 path 或对侧 bucket 已有 path（allow/deny 冲突）会报错，先 `files remove` 再 add；`files remove` 没匹配到也会报错。避免"看起来执行了实际什么也没改"。
 - 写入策略：`allow` / `deny` 控制写访问（rw/ro），不是 Unix 八进制权限；支持「父 allow + 子 deny」，不支持「子 allow + 父 deny」。
 - 示例：`/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/`、`/sandbox exclude add "git *"`。
@@ -528,8 +534,6 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 #### `/clear` 与忙状态
 
 - 若 `session is busy`（正在处理），`/clear` 会拒绝执行，需先中断任务（**`Ctrl+C`** 第一次中断；默认构建无 `/cancel` 命令）。
-- `/clear` 会调用后端 `session.create` 创建全新会话，由 AgentServer 分配并返回新的 `session_id`，随后切换会话、清空 transcript 并恢复新会话的空历史；它不是只清理当前屏幕。
-- `/new`、`/reset` 是 `/clear` 的别名，执行相同的新建会话流程。若 `session.create` 失败，TUI 保持在原会话，不会先行切换到一个本地生成的 ID。
 
 ---
 
@@ -763,9 +767,3 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 - [MCP配置](MCP配置.md)
 - [配置信息](配置信息.md)
 - [Claude Code CLI 参考（结构参考）](https://code.claude.com/docs/zh-CN/cli-reference)
----
-
-## 返回导航
-
-- [返回文档首页](../README.md)
-- [返回项目首页](../../README_CN.md)

@@ -214,9 +214,6 @@ react:
     enable_reload: true
     enabled: true
     message_summary_offloader_config:
-      # read_pdf outputs are page-level source text; keep them verbatim like
-      # read_file so summaries are not built from doubly-compressed digests.
-      protected_tool_names: ["read_file", "read_pdf"]
       add_message_threshold_ratio: 0.1
       ttl_seconds: 300
       ttl_context_occupancy_ratio: 0.5
@@ -232,10 +229,21 @@ react:
       trigger_context_ratio: 0.8
       min_target_context_ratio: 0.1
       keep_recent_messages: 4
+    reasoning_tool_loop_compact_config:
+      enabled: true
+      consecutive_threshold: 3
+      tool_args_consecutive_threshold: 5
+      reasoning_min_chars: 4
+      reasoning_preview_max_chars: 512
+      bailout_threshold: 3
+      tool_args_bailout_threshold: 2
   # Skills 在线自演进配置
   evolution:
-    skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
-    auto_save: false           # leader/single 审批是否自动保存；teammate 固定自动保存
+    enabled: true             # true = 启用在线 Skills 自演进（挂载后被动扫描始终开启）
+    review_trigger:            # teammate 默认不启用软触发；true / false 显式覆盖
+    skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
+    auto_save: true            # true = 自演进审批无需用户点击自动通过（内部开关）
+    skill_base_dir: "agent/skills"  # Skill 根目录
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
@@ -294,24 +302,6 @@ heartbeat:
   active_hours:
     start: 08:00
     end: 22:00
-
-# 执行护栏：工具循环检测与主动中断（分布式模板为完整配置，不合并基础 config.yaml）
-execution_guard:
-  # 模型异常检测护栏：重复输出/流式帧超时重试，以及连续相同工具调用压缩
-  model_anomaly_detection_rail:
-    enabled: true
-    max_retries: 2
-    repeat_min_pattern_chars: 2
-    repeat_max_pattern_chars: 64
-    repeat_min_count: 6
-    repeat_min_total_chars: 160
-    repeat_window_chars: 1024
-    single_char_repeat_count: 90
-    # 连续相同工具名+入参+返回值时，折叠重复轮次；第 N 次命中时兜底中止
-    tool_loop_compact:
-      enabled: true
-      consecutive_threshold: 4
-      bailout_threshold: 3
 
 channels:
   web:
@@ -497,8 +487,7 @@ permissions:
     viking_browse: allow
     viking_remember: allow
     viking_add_resource: allow
-    mcp_free_search: allow
-    mcp_paid_search: allow
+    web_search: allow
     mcp_fetch_webpage: allow
     cron_list_jobs: allow
     cron_get_job: allow
@@ -731,9 +720,8 @@ modes:
     # send_file_to_user 由运行时 _update_session_tools 注册，不在此配置
     # coding_memory_read/write/edit 由 CodingMemoryRail 在 subagent 内部注册，不在此配置
     tools:
-      - web_free_search
+      - web_search
       - web_fetch_webpage
-      - web_paid_search
       - user_todos
       - skill_toolkit
 

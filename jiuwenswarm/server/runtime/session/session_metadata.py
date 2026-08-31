@@ -13,8 +13,7 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
 
-from jiuwenswarm.common.utils import get_agent_sessions_dir
-from jiuwenswarm.common.mode_matrix import is_team_mode
+from jiuwenswarm.common.utils import get_agent_sessions_dir, get_agent_workspace_dir
 from jiuwenswarm.server.runtime.session.work_mode import (
     DEFAULT_WEB_WORK_MODE,
     SUPPORTED_WORK_MODES,
@@ -24,51 +23,32 @@ from jiuwenswarm.server.runtime.session.work_mode import (
 
 logger = logging.getLogger(__name__)
 
+_TEAM_TEMPLATE_SNAPSHOT_FILE = ".team-template-snapshot.json"
+
 # ---------- 异步写入队列(与 session_history 保持一致的模式) ----------
-# 队列项: (session_id, metadata, preserve_pin_fields, rebind_gen_at_enqueue)
-# rebind_gen_at_enqueue 用于检测"入队后发生过 rebind"的陈旧快照:
-# worker 处理时若发现该值 < 当前 rebind_gen, 说明此快照早于一次 project 重绑,
-# 需从磁盘保留 rebind 写入的 project 字段, 防止陈旧快照覆盖重绑结果。
-_METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any], bool, int]] = queue.Queue(maxsize=5000)
+# (session_id, metadata, sessions_root|None, preserve_pin_fields)
+_METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any], str | None, bool]] = queue.Queue(
+    maxsize=5000
+)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
-# Reentrant: the read path now holds this lock too (see _read_metadata).
-# RLock guards against a same-thread nesting (read->write or write->read)
-# deadlocking in the future.
-_FILE_LOCK = threading.RLock()
+_FILE_LOCK = threading.Lock()
 
-# 内存缓存: 解决异步写入时读取到陈旧磁盘数据的竞态条件
+# 内存缓存: key = f"{sessions_root}\n{session_id}"，避免多租户同 session_id 串缓存
 _METADATA_CACHE: dict[str, dict[str, Any]] = {}
 _CACHE_LOCK = threading.Lock()
-
-# 会话级 project 重绑版本号: 每次 rebind_session_project 自增。
-# _enqueue_write 入队时捕获当前值; worker 处理时若发现入队值 < 当前值,
-# 说明该快照早于一次重绑, 需从磁盘保留 rebind 写入的 project 字段
-# (project_id/project_dir/work_mode/channel_metadata), 防止陈旧异步快照
-# 在 worker 写回时覆盖刚完成的 rebind。
-_SESSION_REBIND_GEN: dict[str, int] = {}
-_REBIND_GEN_LOCK = threading.Lock()
-
-
-def _get_rebind_gen(session_id: str) -> int:
-    """读取会话当前的重绑版本号（无重绑时为 0）。"""
-    with _REBIND_GEN_LOCK:
-        return _SESSION_REBIND_GEN.get(session_id, 0)
-
-
-def _bump_rebind_gen(session_id: str) -> None:
-    """自增会话的重绑版本号, 使此前已入队但尚未处理的陈旧快照失效。"""
-    with _REBIND_GEN_LOCK:
-        _SESSION_REBIND_GEN[session_id] = _SESSION_REBIND_GEN.get(session_id, 0) + 1
-
 
 # 会话标题自动生成的截取长度
 _TITLE_MAX_LEN = 50
 # 心跳任务会话目录前缀，不参与 session.list 等列表展示
 _HEARTBEAT_SESSION_PREFIX = "heartbeat_"
 _DELIVERY_KIND_SERVER_PUSH = "server_push"
-# user_id 白名单: 仅允许字母数字及 _-, 拒绝路径遍历字符
-_SAFE_USER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def resolve_session_runtime_team_name(metadata: dict[str, Any] | None) -> str:
+    """Return the Agent Teams runtime identity, with legacy metadata fallback."""
+    values = metadata if isinstance(metadata, dict) else {}
+    return str(values.get("runtime_team_name") or values.get("team_name") or "").strip()
 
 # 匹配所有小写 XML 块:
 # 如 <system-reminder>、<file-content>、<command-name> 等系统/工具注入内容
@@ -136,6 +116,7 @@ def _apply_metadata_defaults_with_inference(
     dir_to_projects: dict[str, list[tuple[str, str]]] | None = None,
     id_to_work_mode: dict[str, str] | None = None,
     enable_writeback: bool = True,
+    sessions_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """统一兜底 + 推断缺失字段,并在确定性推断时异步写盘。
 
@@ -253,7 +234,12 @@ def _apply_metadata_defaults_with_inference(
     # 确定性推断成功时异步写盘(不阻塞读路径)
     if changed and enable_writeback:
         try:
-            _enqueue_write(session_id, metadata, preserve_pin_fields=True)
+            _enqueue_write(
+                session_id,
+                metadata,
+                preserve_pin_fields=True,
+                sessions_root=sessions_root,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("惰性迁移写回会话 %s 失败: %s", session_id, exc)
 
@@ -298,160 +284,373 @@ def _current_timestamp() -> float:
     return datetime.now(timezone.utc).timestamp()
 
 
-def _metadata_file(session_id: str) -> Path:
+def _is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+def _safe_session_subdir(
+    session_id: str, sessions_root: str | Path | None = None
+) -> Path | None:
+    """解析 sessions 根下安全子目录；非法 session_id 返回 None（不 mkdir）。"""
+    stripped = (session_id or "").strip()
+    if not stripped or "\x00" in stripped:
+        return None
+    from jiuwenswarm.server.runtime.prompt_attachment_loader import sanitize_session_id
+
+    if sanitize_session_id(stripped) != stripped:
+        return None
+    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
+    try:
+        base = root.resolve()
+        candidate = base / stripped
+        if candidate.is_symlink():
+            return None
+        try:
+            if candidate.lstat().st_file_attributes & 0x400:
+                return None
+        except (AttributeError, FileNotFoundError):
+            pass
+        target = candidate.resolve()
+    except OSError:
+        return None
+    if target == base or not _is_relative_to(target, base):
+        return None
+    return target
+
+
+def resolve_session_subdir(
+    session_id: str,
+    *,
+    sessions_root: str | Path | None = None,
+) -> Path | None:
+    """Resolve a session directory without escaping the selected sessions root."""
+    return _safe_session_subdir(session_id, sessions_root)
+
+
+def get_session_team_template_snapshot(
+    session_id: str,
+    *,
+    sessions_root: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Read the private Team template snapshot pinned to one session."""
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        return None
+    path = session_dir / _TEAM_TEMPLATE_SNAPSHOT_FILE
+    if not path.is_file():
+        return None
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError) as exc:
+        logger.warning("failed to read session Team snapshot session=%s: %s", session_id, exc)
+        return None
+    return snapshot if isinstance(snapshot, dict) and snapshot else None
+
+
+def _write_session_team_template_snapshot(
+    session_id: str,
+    snapshot: dict[str, Any],
+    *,
+    sessions_root: str | Path | None = None,
+) -> None:
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        raise ValueError("invalid session_id")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    path = session_dir / _TEAM_TEMPLATE_SNAPSHOT_FILE
+    tmp_path = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    with _FILE_LOCK:
+        try:
+            tmp_path.write_text(
+                json.dumps(snapshot, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(path)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+
+def write_session_team_template_snapshot(
+    session_id: str,
+    snapshot: dict[str, Any],
+    *,
+    sessions_root: str | Path | None = None,
+) -> None:
+    """Persist a session's team template snapshot atomically (public wrapper).
+
+    Delegates to the existing atomic tmp+replace writer under ``_FILE_LOCK``.
+    Use this from refresh paths that must write synchronously without the
+    ``update_session_metadata`` side effects (async queueing,
+    ``touch_last_message_at``).
+    """
+    _write_session_team_template_snapshot(
+        session_id, snapshot, sessions_root=sessions_root
+    )
+
+
+def capture_session_team_binding_artifacts(
+    session_id: str,
+    *,
+    sessions_root: str | Path | None = None,
+) -> tuple[bytes | None, bytes | None]:
+    """Capture metadata and Team snapshot bytes for bind rollback."""
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        raise ValueError("invalid session_id")
+    metadata_path = session_dir / "metadata.json"
+    snapshot_path = session_dir / _TEAM_TEMPLATE_SNAPSHOT_FILE
+    with _FILE_LOCK:
+        metadata = metadata_path.read_bytes() if metadata_path.is_file() else None
+        snapshot = snapshot_path.read_bytes() if snapshot_path.is_file() else None
+    return metadata, snapshot
+
+
+def restore_session_team_binding_artifacts(
+    session_id: str,
+    artifacts: tuple[bytes | None, bytes | None],
+    *,
+    sessions_root: str | Path | None = None,
+) -> None:
+    """Restore metadata and Team snapshot after a failed bind transaction."""
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        raise ValueError("invalid session_id")
+    root_s = _normalize_sessions_root_s(sessions_root)
+    paths = (
+        session_dir / "metadata.json",
+        session_dir / _TEAM_TEMPLATE_SNAPSHOT_FILE,
+    )
+    with _FILE_LOCK:
+        for path, content in zip(paths, artifacts, strict=True):
+            if content is None:
+                path.unlink(missing_ok=True)
+                continue
+            tmp_path = path.with_name(
+                f"{path.name}.{os.getpid()}.{threading.get_ident()}.rollback.tmp"
+            )
+            try:
+                tmp_path.write_bytes(content)
+                tmp_path.replace(path)
+            except OSError:
+                tmp_path.unlink(missing_ok=True)
+                raise
+    with _CACHE_LOCK:
+        _METADATA_CACHE.pop(_metadata_cache_key(session_id, root_s), None)
+
+
+def validate_project_dir(path: str, *, default: Path | None = None) -> Path:
+    """Normalize ``project_dir``; create missing dirs; fall back on failure."""
+    fallback = default if default is not None else get_agent_workspace_dir().resolve()
+    raw = (path or "").strip()
+    if not raw:
+        return fallback
+    try:
+        candidate = Path(raw).expanduser().resolve()
+        if not candidate.exists():
+            logger.info("[session_metadata] 目录不存在，正在创建: %s", candidate)
+            candidate.mkdir(parents=True, exist_ok=True)
+        if not candidate.is_dir():
+            raise NotADirectoryError(f"[session_metadata] 路径不是目录: {candidate}")
+        return candidate
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "[session_metadata] project_dir 处理失败 path=%r: %s，自动使用默认路径 %s",
+            path,
+            exc,
+            fallback,
+        )
+        return fallback
+
+
+def _normalize_sessions_root_s(sessions_root: str | Path | None) -> str | None:
+    if sessions_root is None:
+        return None
+    return str(sessions_root)
+
+
+def _metadata_cache_key(session_id: str, sessions_root: str | None) -> str:
+    root = sessions_root if sessions_root is not None else str(get_agent_sessions_dir())
+    return f"{root}\n{session_id}"
+
+
+def _peek_project_dir_from_root(session_id: str, sessions_root: Path) -> str | None:
+    """Read ``project_dir`` from ``{sessions_root}/{session_id}/metadata.json`` (no write)."""
+    root_s = str(sessions_root)
+    cache_key = _metadata_cache_key(session_id, root_s)
+    with _CACHE_LOCK:
+        cached = _METADATA_CACHE.get(cache_key)
+    if isinstance(cached, dict):
+        pd = cached.get("project_dir")
+        if isinstance(pd, str) and pd.strip():
+            return pd.strip()
+
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        return None
+    fpath = session_dir / "metadata.json"
+    if not fpath.is_file():
+        return None
+    try:
+        data = json.loads(fpath.read_text(encoding="utf-8") or "{}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("读取 metadata.json 失败 session=%s: %s", session_id, exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    pd = data.get("project_dir")
+    if isinstance(pd, str) and pd.strip():
+        return pd.strip()
+    return None
+
+
+def get_resolved_project_dir(
+    session_id: str,
+    sessions_root: str | Path | None = None,
+    *,
+    default: str | Path | None = None,
+) -> str:
+    """Resolve per-session ``project_dir`` for IM detect / tools.
+
+    Lookup order:
+      1. ``{sessions_root}/{session_id}/metadata.json`` when ``sessions_root`` given
+      2. Global ``get_agent_sessions_dir()`` (where dig-stable chat sync writes today)
+      3. ``default`` (typically tenant ``…/agent/workspace``), else ``get_agent_workspace_dir()``
+
+    Does not write defaults back into metadata (writers stay on chat sync path).
+    """
+    if default is not None:
+        default_path = Path(default).expanduser().resolve()
+    else:
+        default_path = get_agent_workspace_dir().resolve()
+    default_s = str(default_path)
+
+    sess = (session_id or "").strip() or "default"
+    probe_root = Path(sessions_root) if sessions_root is not None else get_agent_sessions_dir()
+    if _safe_session_subdir(sess, probe_root) is None:
+        return default_s
+
+    roots: list[Path] = []
+    if sessions_root is not None:
+        roots.append(Path(sessions_root))
+    global_root = get_agent_sessions_dir()
+    try:
+        global_key = global_root.resolve()
+    except OSError:
+        global_key = global_root
+    if not roots:
+        roots.append(global_root)
+    else:
+        try:
+            if roots[0].resolve() != global_key:
+                roots.append(global_root)
+        except OSError:
+            roots.append(global_root)
+
+    for root in roots:
+        pd = _peek_project_dir_from_root(sess, root)
+        if pd:
+            return str(validate_project_dir(pd, default=default_path))
+    return default_s
+
+
+def _metadata_file(session_id: str, sessions_root: str | None = None) -> Path:
     """获取会话元数据文件路径"""
-    session_dir = get_agent_sessions_dir() / session_id
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        raise ValueError("invalid session_id")
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir / "metadata.json"
 
 
-def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
+def _read_metadata(
+    session_id: str,
+    cache_bust: bool = False,
+    *,
+    sessions_root: str | Path | None = None,
+) -> dict[str, Any]:
     """读取会话元数据(优先从内存缓存读取,避免异步写入未落盘时读到陈旧数据)
 
     读路径不应产生副作用：即便 session 目录不存在，也不触发 mkdir，
     否则会导致仅查询(session.rename 无 title 参数时)隐式创建空 session 目录，
     污染 session.list 结果。
-
-    Args:
-        session_id: 会话 ID
-        cache_bust: 强制跳过缓存，直接从磁盘读取（用于跨进程同步场景，如 session.list）
     """
+    root_s = _normalize_sessions_root_s(sessions_root)
+    cache_key = _metadata_cache_key(session_id, root_s)
     if not cache_bust:
         with _CACHE_LOCK:
-            cached = _METADATA_CACHE.get(session_id)
+            cached = _METADATA_CACHE.get(cache_key)
             if cached is not None:
                 return cached.copy()
-    # cache_bust=True 或缓存没有数据时，强制读磁盘
-    fpath = get_agent_sessions_dir() / session_id / "metadata.json"
-    if not fpath.exists():
+    session_dir = resolve_session_subdir(session_id, sessions_root=root_s)
+    if session_dir is None:
         return {}
-    # Reading must be mutually exclusive with _write_metadata_sync: the writer
-    # replaces the whole file, so an unlocked read can land inside the
-    # replacement window and observe empty content.
-    try:
-        with _FILE_LOCK:
-            raw = fpath.read_text(encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "failed to read metadata.json: %s (session_id=%s)", exc, session_id,
-        )
-        return {}
-    if not raw.strip():
-        # An empty file is a FAILURE, not "empty metadata". It must never be
-        # returned as a valid {}: callers do read-modify-write and would write
-        # the empty dict back, erasing session_id/title and other identity
-        # fields, leaving the session without an ID and impossible to open.
-        logger.warning(
-            "metadata.json is empty, treating as read failure (session_id=%s)",
-            session_id,
-        )
-        return {}
-    try:
-        data = json.loads(raw)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "failed to parse metadata.json: %s (session_id=%s, size=%d)",
-            exc, session_id, len(raw),
-        )
-        return {}
-    if not isinstance(data, dict):
-        logger.warning(
-            "metadata.json content is not a dict: %s (session_id=%s)",
-            type(data).__name__, session_id,
-        )
-        return {}
-    return data
-
-
-def _read_metadata_file_in(session_dir: Path) -> dict[str, Any]:
-    """直接读指定会话目录下的 metadata.json,不走全局 sessions 目录单例。
-
-    供 ``collect_all_sessions_metadata(user_id=...)`` 按用户家目录读时使用:
-    避免触碰进程级 ``get_agent_sessions_dir`` 全局态,多 web 连接并发各读各目录无串扰。
-    与 ``_read_metadata`` cache_bust 语义一致(直接读盘,不读内存缓存)。
-    """
     fpath = session_dir / "metadata.json"
     if not fpath.exists():
         return {}
     try:
-        data = json.loads(fpath.read_text(encoding="utf-8") or '{}')
+        data = json.loads(fpath.read_text(encoding="utf-8") or "{}")
         if isinstance(data, dict):
             return data
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("读取 %s 失败: %s", fpath, exc)
+    except Exception as exc:
+        logger.warning("读取 metadata.json 失败: %s", exc)
     return {}
+
+
+def _read_metadata_prefer_root(
+    session_id: str,
+    cache_bust: bool = False,
+    *,
+    sessions_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Read an explicit tenant root, or the legacy global root when omitted."""
+    if sessions_root is not None:
+        return _read_metadata(
+            session_id, cache_bust=cache_bust, sessions_root=sessions_root
+        )
+    return _read_metadata(session_id, cache_bust=cache_bust, sessions_root=None)
 
 
 def _write_metadata_sync(
     session_id: str,
     metadata: dict[str, Any],
     preserve_pin_fields: bool = False,
-    preserve_rebound_fields: bool = False,
-    rebind_gen_at_enqueue: int | None = None,
+    *,
+    sessions_root: str | None = None,
 ) -> dict[str, Any]:
     """同步写入会话元数据(由后台 worker 或 fallback 调用)
 
     注意: 不更新 _METADATA_CACHE。缓存仅由 _enqueue_write 维护,
     避免 gateway 进程的 init_session_metadata 污染缓存导致后续
     读取不到 agentserver 进程写入的最新数据。
-
-    rebind 版本检查: 调用方可传入快照入队/捕获时记录的 ``rebind_gen_at_enqueue``。
-    本函数持 ``_FILE_LOCK`` 后重比 ``_get_rebind_gen(session_id)``, 使"gen 比较"与
-    "文件读写"在同一临界区内完成, 消除 worker 队列路径(P3)的 TOCTOU 窗口:
-    即使调用方在持锁前比 gen 为"非陈旧", 持锁后又发生了 rebind, 此处也能发现
-    并从磁盘当前值保留 rebind 写入的 project 字段。``rebind_session_project``
-    自身传入的 gen 已被 bump, 等于当前 gen, 不触发合并。``preserve_rebound_fields``
-    作为无 gen 追踪路径(外部直写/测试)的回退开关保留。
     """
-    fpath = _metadata_file(session_id)
+    fpath = _metadata_file(session_id, sessions_root)
     to_write = metadata
     with _FILE_LOCK:
-        current: dict[str, Any] | None = None
-        if fpath.exists():
+        if preserve_pin_fields and fpath.exists():
             try:
-                raw = fpath.read_text(encoding="utf-8")
-                parsed = json.loads(raw) if raw.strip() else None
-                if isinstance(parsed, dict):
-                    current = parsed
+                current = json.loads(fpath.read_text(encoding="utf-8") or "{}")
+                if isinstance(current, dict):
+                    to_write = _merge_pin_fields(current, metadata)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("failed to read metadata.json: %s", exc)
-
-        # Identity guard: a caller that received an empty/partial dict and
-        # writes it back would permanently erase session_id, title, created_at
-        # and friends (writes replace the whole file, they do not merge). When
-        # disk has an identity and the incoming payload does not, treat it as a
-        # race-induced dirty write and restore the missing fields.
-        if current and current.get("session_id") and not metadata.get("session_id"):
-            recovered = {k: v for k, v in current.items() if k not in metadata}
-            to_write = {**current, **metadata}
-            logger.warning(
-                "blocked overwrite of session identity (session_id=%s): payload "
-                "has no session_id, restored %d field(s) from disk: %s",
-                session_id, len(recovered), sorted(recovered),
-            )
-
-        if preserve_pin_fields and current is not None:
-            to_write = _merge_pin_fields(current, to_write)
-        # 权威 rebind 版本检查: 持锁后重比 gen, 判定调用方传入的快照是否已陈旧。
-        # 比调用方持锁前的 pre-check 更可靠 —— 消除"gen 比较与文件写入"之间的
-        # TOCTOU 窗口(P3)。rebind 自身传入的 gen 已 bump, 等于当前 gen, 不触发合并。
-        effective_preserve_rebound = preserve_rebound_fields
-        if rebind_gen_at_enqueue is not None and current is not None:
-            if rebind_gen_at_enqueue < _get_rebind_gen(session_id):
-                effective_preserve_rebound = True
-        if effective_preserve_rebound and current is not None:
-            to_write = _merge_rebound_fields(current, to_write)
-
-        # Atomic write: write a temp file then rename, so that truncation by
-        # write_text can never expose empty content to a concurrent reader
-        # (precisely how session identity was being lost).
-        payload = json.dumps(to_write, ensure_ascii=False, indent=2)
-        tmp = fpath.with_name(f"{fpath.name}.{os.getpid()}.tmp")
+                logger.warning("读取 metadata.json 置顶字段失败: %s", exc)
+        tmp_path = fpath.with_name(
+            f"{fpath.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
         try:
-            tmp.write_text(payload, encoding="utf-8")
-            os.replace(tmp, fpath)
-        except Exception:
-            tmp.unlink(missing_ok=True)
+            tmp_path.write_text(
+                json.dumps(to_write, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(fpath)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
             raise
     return to_write
 
@@ -465,23 +664,17 @@ def _merge_pin_fields(current: dict[str, Any], metadata: dict[str, Any]) -> dict
     return merged
 
 
-def _merge_rebound_fields(current: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
-    """从磁盘当前值保留 rebind 写入的 project 字段, 防止陈旧快照覆盖重绑结果。
-
-    用于 worker 处理"入队早于 rebind"的陈旧快照: 该快照的 project_id/
-    project_dir/work_mode/channel_metadata 是重绑前的旧值, 直接写回会覆盖
-    rebind。这里以磁盘当前值为准覆盖这几个字段, 其余字段仍用快照值。
-    """
-    merged = metadata.copy()
-    for field in ("project_id", "project_dir", "work_mode", "channel_metadata"):
-        if field in current:
-            merged[field] = current[field]
-    return merged
-
-
-def _merge_pin_fields_from_disk(session_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+def _merge_pin_fields_from_disk(
+    session_id: str,
+    metadata: dict[str, Any],
+    *,
+    sessions_root: str | None = None,
+) -> dict[str, Any]:
     """Preserve latest disk pin state for async writes that do not own pin fields."""
-    fpath = get_agent_sessions_dir() / session_id / "metadata.json"
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        return metadata
+    fpath = session_dir / "metadata.json"
     if not fpath.exists():
         return metadata
     try:
@@ -506,21 +699,24 @@ def _ensure_worker_started() -> None:
 
         def _worker() -> None:
             while True:
-                sid, metadata, preserve_pin_fields, rebind_gen_at_enqueue = _METADATA_QUEUE.get()
+                item = _METADATA_QUEUE.get()
                 try:
-                    # rebind 版本检查已下沉到 _write_metadata_sync 内部, 持
-                    # _FILE_LOCK 后重比 gen, 消除"gen 比较与文件写入"的 TOCTOU 窗口(P3)。
+                    # Backward-compatible unpack during rolling reload.
+                    if len(item) == 4:
+                        sid, metadata, sessions_root, preserve_pin_fields = item
+                    else:
+                        sid, metadata, preserve_pin_fields = item  # type: ignore[misc]
+                        sessions_root = None
                     written = _write_metadata_sync(
                         sid,
                         metadata,
                         preserve_pin_fields=preserve_pin_fields,
-                        rebind_gen_at_enqueue=rebind_gen_at_enqueue,
+                        sessions_root=sessions_root,
                     )
-                    # gen 追踪启用时, _write_metadata_sync 可能在持锁后才发现陈旧
-                    # 并合并 rebound 字段, 故只要启用了 gen 追踪就刷新缓存为落盘结果。
-                    if preserve_pin_fields or rebind_gen_at_enqueue is not None:
+                    if preserve_pin_fields:
+                        cache_key = _metadata_cache_key(sid, sessions_root)
                         with _CACHE_LOCK:
-                            _METADATA_CACHE[sid] = written.copy()
+                            _METADATA_CACHE[cache_key] = written.copy()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("metadata 异步写入失败: %s", exc)
                 finally:
@@ -536,6 +732,8 @@ def _enqueue_write(
     metadata: dict[str, Any],
     sync_write: bool = False,
     preserve_pin_fields: bool = False,
+    *,
+    sessions_root: str | Path | None = None,
 ) -> None:
     """将写入操作放入异步队列,队列满时退化为同步写。
 
@@ -546,48 +744,47 @@ def _enqueue_write(
     注意: ``_write_metadata_sync`` 本身不更新缓存,缓存更新统一在此函数
     顶部完成,与异步路径行为一致,避免 ``init_session_metadata`` 污染缓存。
     """
+    root_s = _normalize_sessions_root_s(sessions_root)
+    cache_key = _metadata_cache_key(session_id, root_s)
     # 立即更新缓存,确保后续读取能看到最新状态
-    # 入队前捕获 rebind 版本号: worker 处理时据此判断本快照是否早于一次重绑
-    rebind_gen_at_enqueue = _get_rebind_gen(session_id)
     if preserve_pin_fields:
-        metadata = _merge_pin_fields_from_disk(session_id, metadata)
+        metadata = _merge_pin_fields_from_disk(
+            session_id, metadata, sessions_root=root_s
+        )
     with _CACHE_LOCK:
-        _METADATA_CACHE[session_id] = metadata.copy()
+        _METADATA_CACHE[cache_key] = metadata.copy()
     if sync_write:
-        # P2: sync_write 路径同样需要 rebind 版本检查 —— set_session_pinned 等
-        # sync_write=True 调用方读取磁盘早于一次 rebind 时, 其快照含旧 project
-        # 字段, 回写会覆盖 rebind。版本检查下沉到 _write_metadata_sync 持锁后执行,
-        # 与 queue.Full 退化路径、worker 异步路径保持同一保护级别。
         written = _write_metadata_sync(
             session_id,
             metadata,
             preserve_pin_fields=preserve_pin_fields,
-            rebind_gen_at_enqueue=rebind_gen_at_enqueue,
+            sessions_root=root_s,
         )
-        if preserve_pin_fields or rebind_gen_at_enqueue is not None:
+        if preserve_pin_fields:
             with _CACHE_LOCK:
-                _METADATA_CACHE[session_id] = written.copy()
+                _METADATA_CACHE[cache_key] = written.copy()
         return
     _ensure_worker_started()
     try:
         _METADATA_QUEUE.put_nowait(
-            (session_id, metadata, preserve_pin_fields, rebind_gen_at_enqueue)
+            (session_id, metadata, root_s, preserve_pin_fields)
         )
     except queue.Full:
         if preserve_pin_fields:
-            metadata = _merge_pin_fields_from_disk(session_id, metadata)
+            metadata = _merge_pin_fields_from_disk(
+                session_id, metadata, sessions_root=root_s
+            )
             with _CACHE_LOCK:
-                _METADATA_CACHE[session_id] = metadata.copy()
-        # 队列满退化为同步写: 版本检查同样下沉到 _write_metadata_sync 持锁后执行
+                _METADATA_CACHE[cache_key] = metadata.copy()
         written = _write_metadata_sync(
             session_id,
             metadata,
             preserve_pin_fields=preserve_pin_fields,
-            rebind_gen_at_enqueue=rebind_gen_at_enqueue,
+            sessions_root=root_s,
         )
-        if preserve_pin_fields or rebind_gen_at_enqueue is not None:
+        if preserve_pin_fields:
             with _CACHE_LOCK:
-                _METADATA_CACHE[session_id] = written.copy()
+                _METADATA_CACHE[cache_key] = written.copy()
 
 
 def _auto_title(content: str) -> str:
@@ -618,6 +815,7 @@ def init_session_metadata(
     cron_id: str = "",
     work_mode: str = "",
     channel_metadata: dict[str, Any] | None = None,
+    sessions_root: str | Path | None = None,
 ) -> None:
     """初始化会话元数据(同步写,确保创建后立即可读)
 
@@ -654,7 +852,8 @@ def init_session_metadata(
     }
     if isinstance(channel_metadata, dict) and channel_metadata:
         metadata["channel_metadata"] = channel_metadata
-    _write_metadata_sync(session_id, metadata)
+    root_s = _normalize_sessions_root_s(sessions_root)
+    _write_metadata_sync(session_id, metadata, sessions_root=root_s)
 
 
 def update_session_metadata(
@@ -670,7 +869,9 @@ def update_session_metadata(
     channel_metadata: dict[str, Any] | None = None,
     mode: str | None = None,
     team_name: str | None = None,
+    runtime_team_name: str | None = None,
     team_template_id: str | None = None,
+    team_template_snapshot: dict[str, Any] | None = None,
     accent_color: str | None = None,
     project_dir: str | None = None,
     project_id: str | None = None,
@@ -683,6 +884,7 @@ def update_session_metadata(
     sync: bool = False,
     sync_write: bool = False,
     work_mode: str | None = None,
+    sessions_root: str | Path | None = None,
 ) -> None:
     """更新会话元数据(异步写入,不阻塞调用方)
 
@@ -708,7 +910,16 @@ def update_session_metadata(
     ``True``:返回成功前落盘,否则只读磁盘的另一进程(AgentServer)在窗口期
     内会读到陈旧数据,后续整份 metadata 回写会覆盖刚写入的 ``pinned`` 状态。
     """
-    metadata = _read_metadata(session_id, cache_bust=cache_bust)
+    root_s = _normalize_sessions_root_s(sessions_root)
+    if isinstance(team_template_snapshot, dict) and team_template_snapshot:
+        _write_session_team_template_snapshot(
+            session_id,
+            team_template_snapshot,
+            sessions_root=root_s,
+        )
+    metadata = _read_metadata_prefer_root(
+        session_id, cache_bust=cache_bust, sessions_root=root_s
+    )
 
     if not metadata:
         # 如果元数据不存在,创建新的(外部渠道隐式创建 session 的兜底)
@@ -743,6 +954,7 @@ def update_session_metadata(
             "message_count": 1 if increment_message_count else 0,
             "mode": mode if mode is not None else "unknown",
             "team_name": team_name or "",
+            "runtime_team_name": runtime_team_name or "",
             "team_template_id": team_template_id or "",
             "round_id": 0,
             "project_dir": project_dir or "",
@@ -764,10 +976,12 @@ def update_session_metadata(
             metadata["channel_id"] = channel_id
         if user_id is not None:
             metadata["user_id"] = user_id
-        if mode is not None:
+        if mode is not None and mode != "unknown":
             metadata["mode"] = mode
         if team_name is not None:
             metadata["team_name"] = team_name
+        if runtime_team_name is not None:
+            metadata["runtime_team_name"] = runtime_team_name
         if team_template_id is not None:
             metadata["team_template_id"] = team_template_id
         if accent_color is not None:
@@ -824,6 +1038,7 @@ def update_session_metadata(
         metadata,
         sync_write=sync_write or sync,
         preserve_pin_fields=pinned is None and pin_order is None,
+        sessions_root=root_s,
     )
 
 
@@ -836,12 +1051,12 @@ def sync_session_request_metadata(
     project_dir: str | None = None,
     project_id: str | None = None,
     cron_id: str | None = None,
-    user_id: str | None = None,
     last_user_message_at: float | None = None,
     is_chat_turn: bool = True,
     explicit_mode_provided: bool = False,
     explicit_model_provided: bool = False,
     work_mode: str | None = None,
+    sessions_root: str | Path | None = None,
 ) -> str | None:
     """校验请求带来的参数与磁盘 metadata.json 是否需要更新，并按字段语义写入。
 
@@ -889,7 +1104,10 @@ def sync_session_request_metadata(
     if not session_id:
         return None
 
-    metadata = _read_metadata(session_id, cache_bust=True)
+    root_s = _normalize_sessions_root_s(sessions_root)
+    metadata = _read_metadata_prefer_root(
+        session_id, cache_bust=True, sessions_root=root_s
+    )
     effective_project_dir: str | None = None
 
     if not metadata:
@@ -904,7 +1122,7 @@ def sync_session_request_metadata(
         metadata = {
             "session_id": session_id,
             "channel_id": channel_id or "",
-            "user_id": user_id or "",
+            "user_id": "",
             "created_at": now,
             "last_message_at": now,
             "title": "",
@@ -970,17 +1188,18 @@ def sync_session_request_metadata(
             metadata["mode"] = mode
         if channel_id is not None:
             metadata["channel_id"] = channel_id
-        # user_id：首次锁定，已锁定则忽略请求值（与 project_id/cron_id 一致不可改）。
-        # 由 envelope.user_id 透传，供 gateway 列表接口按用户隔离会话历史。
-        if user_id and not (isinstance(metadata.get("user_id"), str) and metadata.get("user_id", "").strip()):
-            metadata["user_id"] = user_id
         # last_message_at：仅 chat 轮次刷新。语义为「agent 最后输出时间」，
         # 只读 RPC 无 agent 输出，不应刷新——否则只读查询会把历史会话的排序时间
         # 刷新成「现在」，导致旧会话被置顶。
         if is_chat_turn:
             metadata["last_message_at"] = _current_timestamp()
 
-    _enqueue_write(session_id, metadata, preserve_pin_fields=True)
+    _enqueue_write(
+        session_id,
+        metadata,
+        preserve_pin_fields=True,
+        sessions_root=root_s,
+    )
     return effective_project_dir
 
 
@@ -989,6 +1208,7 @@ def get_session_metadata(
     cache_bust: bool = False,
     *,
     enable_writeback: bool = True,
+    sessions_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """获取会话元数据
 
@@ -999,16 +1219,26 @@ def get_session_metadata(
             原行为;只读校验场景(如 ``discard_turn_changes`` 的绑定校验)应传
             ``False``,避免读路径触发写盘副作用,同时仍享受推断能力(存量会话
             缺 ``project_id`` 时可从 ``project_dir`` 反查补全,避免误拒)。
+        sessions_root: 租户 sessions 根；缺省为全局 ``get_agent_sessions_dir()``。
+            显式传入时只读取该根，不回退全局树。
     """
-    metadata = _read_metadata(session_id, cache_bust)
+    root_s = _normalize_sessions_root_s(sessions_root)
+    metadata = _read_metadata_prefer_root(
+        session_id, cache_bust, sessions_root=root_s
+    )
     if isinstance(metadata, dict) and metadata:
+        session_dir = resolve_session_subdir(session_id, sessions_root=root_s)
+        if session_dir is None:
+            return {}
         metadata = _apply_metadata_defaults_with_inference(
             session_id,
             metadata,
-            session_dir=get_agent_sessions_dir() / session_id,
+            session_dir=session_dir,
             enable_writeback=enable_writeback,
+            sessions_root=root_s,
         )
         metadata.setdefault("team_name", "")
+        metadata.setdefault("runtime_team_name", "")
         metadata.setdefault("team_template_id", "")
     return metadata
 
@@ -1107,84 +1337,17 @@ def increment_session_round_count(session_id: str) -> int:
     return new_round
 
 
-def rebind_session_project(
-    *,
+def remove_session_metadata_cache(
     session_id: str,
-    project_id: str,
-    project_dir: str,
-    work_mode: str,
-) -> dict[str, Any] | None:
-    """强制重绑 session 的 ``project_id`` / ``project_dir`` / ``work_mode``。
-
-    打破 ``sync_session_request_metadata`` / ``update_session_metadata`` 的
-    "首次锁定不可改"约束，专供 TUI ``/workspace set`` 切换工作目录时同步迁移
-    当前会话的 project 归属使用。其他场景不应调用本函数。
-
-    语义：
-      - 三字段全部**覆盖式**写入（非首次锁定）；
-      - ``pinned`` / ``pin_order`` 等 Gateway 拥有的字段通过
-        ``preserve_pin_fields=True`` 合并保留，不被整份回写覆盖；
-      - ``last_message_at`` 不刷新（重绑不是消息，避免腐蚀排序时间）。
-
-    Args:
-        session_id: 目标会话 ID。
-        project_id: 新绑定的项目 ID（须为真实 ``proj_<hex>``）。
-        project_dir: 新绑定的项目目录绝对路径。
-        work_mode: 新工作模式（``"code"`` / ``"work"``）。
-
-    Returns:
-        更新后的完整 metadata；会话不存在（metadata 缺失）时返回 ``None``。
-    """
-    session_id = (session_id or "").strip()
-    if not session_id:
-        return None
-    metadata = _read_metadata(session_id, cache_bust=True)
-    if not metadata:
-        return None
-    clean_dir = (project_dir or "").strip()
-    metadata["project_id"] = (project_id or "").strip()
-    metadata["project_dir"] = clean_dir
-    metadata["work_mode"] = normalize_work_mode(work_mode)
-    # 同步 channel_metadata.project_dir / cwd：/resume 的 current-dir 过滤
-    # 优先读 channel_metadata（见 resolve_tui_session_project_path），只改顶层
-    # project_dir 会导致会话仍被归到旧目录。
-    if clean_dir:
-        ch_meta = metadata.get("channel_metadata")
-        if not isinstance(ch_meta, dict):
-            ch_meta = {}
-        ch_meta["project_dir"] = clean_dir
-        ch_meta["cwd"] = clean_dir
-        try:
-            from jiuwenswarm.common.utils import resolve_git_branch
-
-            ch_meta["git_branch"] = resolve_git_branch(clean_dir)
-        except Exception:  # noqa: BLE001
-            logger.debug(
-                "rebind_session_project: resolve_git_branch failed for %s",
-                clean_dir, exc_info=True,
-            )
-        metadata["channel_metadata"] = ch_meta
-    # 自增 rebind 版本号, 使此前已入队但尚未处理的陈旧异步快照失效:
-    # worker 处理它们时会发现 gen_at_enqueue < 当前 gen, 从而从磁盘保留
-    # rebind 写入的 project 字段, 避免陈旧快照写回覆盖刚完成的重绑。
-    # 必须在 sync_write 之前 bump, 否则在 sync 写盘窗口内被 worker 处理的
-    # 陈旧快照无法被识别。
-    _bump_rebind_gen(session_id)
-    _enqueue_write(
-        session_id,
-        metadata,
-        sync_write=True,
-        preserve_pin_fields=True,
-    )
-    return metadata
-
-
-def remove_session_metadata_cache(session_id: str) -> None:
+    *,
+    sessions_root: str | Path | None = None,
+) -> None:
     """Remove cached session metadata after the session directory is deleted."""
+    root_s = _normalize_sessions_root_s(sessions_root)
+    cache_key = _metadata_cache_key(session_id, root_s)
     with _CACHE_LOCK:
+        _METADATA_CACHE.pop(cache_key, None)
         _METADATA_CACHE.pop(session_id, None)
-    with _REBIND_GEN_LOCK:
-        _SESSION_REBIND_GEN.pop(session_id, None)
 
 
 def set_session_delivery_context(
@@ -1324,7 +1487,7 @@ def remove_team_mode_session_dirs_at_startup() -> None:
         if not isinstance(raw, dict):
             continue
         mode = str(raw.get("mode") or "").strip().lower()
-        if not is_team_mode(mode):
+        if mode not in {"team", "team.plan", "code.team"}:
             continue
         if not bool(raw.get("temporary_team_session") or raw.get("team_temporary")):
             continue
@@ -1480,28 +1643,15 @@ def get_all_sessions_metadata(
     return sessions[offset: offset + limit], total
 
 
-def collect_all_sessions_metadata(
-    user_id: str | None = None,
-) -> list[dict[str, Any]]:
+def collect_all_sessions_metadata() -> list[dict[str, Any]]:
     """收集全部会话元数据(不分页、不排序),供项目统计与置顶会话聚合使用。
 
     跳过 heartbeat 会话;强制读盘(``cache_bust=True``)以跨进程拿最新数据。
     无 ``metadata.json`` 的旧会话以目录时间戳构造最小兜底信息
     (``project_id=""``、``project_dir=""``、``pinned=False``),归入默认项目统计。
     返回的每个 dict 已对新增字段应用默认值兜底。
-
-    user_id: 非空时,扫描该用户家目录 ``/home/<user_id>/.jiuwenswarm/agent/sessions``
-    (与 faas 沙箱按 OS 用户写入的目录一致;前提:业务 user_id == OS 用户名)。
-    该路径下直接读盘,不走进程级全局 ``get_agent_sessions_dir`` 单例,避免多连接
-    并发时全局态串扰。为空(None)时维持原行为(扫 gateway 进程默认目录)。
     """
-    if user_id:
-        if not _SAFE_USER_ID_RE.match(user_id):
-            logger.warning("[session_metadata] invalid user_id rejected: %r", user_id)
-            return []
-        sessions_dir = Path("/home") / user_id / ".jiuwenswarm" / "agent" / "sessions"
-    else:
-        sessions_dir = get_agent_sessions_dir()
+    sessions_dir = get_agent_sessions_dir()
     if not sessions_dir.is_dir():
         return []
     result: list[dict[str, Any]] = []
@@ -1513,12 +1663,7 @@ def collect_all_sessions_metadata(
         sid = session_dir.name
         if sid.startswith(_HEARTBEAT_SESSION_PREFIX):
             continue
-        if user_id:
-            # 按用户家目录读时,绕过走全局单例的 _read_metadata,直接读该目录下文件,
-            # 避免改全局态(并发安全)。仅 cache_bust 语义:直接读盘。
-            meta = _read_metadata_file_in(session_dir)
-        else:
-            meta = _read_metadata(sid, cache_bust=True)
+        meta = _read_metadata(sid, cache_bust=True)
         if not meta:
             # 旧会话无 metadata.json: 构造最小兜底,归入默认项目。
             # 不做推断写盘(无 metadata.json 通常是异常残留)。

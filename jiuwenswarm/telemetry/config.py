@@ -1,205 +1,266 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-
-"""Telemetry configuration — environment variables take precedence over config.yaml."""
+"""Telemetry configuration loaded from environment variables and config.yaml."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from math import isfinite
+from typing import Any, Callable, TypeVar
 
-
-def _normalize_exporter(value: str, default: str) -> str:
-    normalized = str(value or "").strip().lower()
-    return normalized or default
-
-
-def _normalize_protocol(value: str, default: str) -> str:
-    normalized = str(value or "").strip().lower()
-    return normalized or default
+from jiuwenswarm.common.config import get_config
 
 
 @dataclass(frozen=True)
 class TelemetryConfig:
     enabled: bool = False
-    exporter: str = "none"          # otlp / console / none
+    exporter: str = "none"
     endpoint: str = "http://localhost:4317"
-    protocol: str = "grpc"          # grpc / http
+    protocol: str = "grpc"
     headers: dict[str, str] = field(default_factory=dict)
-    traces_exporter: str = "none"   # otlp / console / sqlite / none
+    traces_exporter: str = "none"
     traces_endpoint: str = "http://localhost:4317"
-    traces_protocol: str = "grpc"   # grpc / http
+    traces_protocol: str = "grpc"
     traces_headers: dict[str, str] = field(default_factory=dict)
-    metrics_exporter: str = "none"  # otlp / console / none
+    metrics_exporter: str = "none"
     metrics_endpoint: str = "http://localhost:4317"
-    metrics_protocol: str = "grpc"  # grpc / http
+    metrics_protocol: str = "grpc"
     metrics_headers: dict[str, str] = field(default_factory=dict)
-    log_messages: bool = True       # record full message content in span events
-    service_name: str = "jiuwenswarm"
-    sqlite_db_path: str = "traces.db"
-    session_stuck_threshold_ms: float = 300000.0     # 5 min
-    session_stuck_check_interval_s: float = 30.0     # check every 30s
+    service_name: str = "jiuwenclaw"
+    sample_rate: float = 1.0
+    max_attributes: int = 128
+    attribute_value_max_length: int = 10240
+    redact_prompts: bool = False
+    redact_completions: bool = False
+    log_messages: bool = True
+    claw_id: str | None = None
+    session_stuck_threshold_ms: float = 300000.0
+    session_stuck_check_interval_s: float = 30.0
+
+    @property
+    def unified_mode(self) -> bool:
+        return self.enabled
 
 
-def _str_env(key: str, default: str) -> str:
-    val = os.getenv(key)
-    if val is None:
-        return default
-    return val.strip() or default
-
-
-def _bool_env(key: str, default: bool) -> bool:
-    val = os.getenv(key)
-    if val is None:
-        return default
-    return val.strip().lower() in ("true", "1", "yes")
-
-
-def _coerce_float(value, fallback: float) -> float:
-    candidate = value.strip() if isinstance(value, str) else value
-    try:
-        return float(candidate)
-    except (ValueError, TypeError):
-        return fallback
-
-
-def _float_env(key: str, default, fallback: float) -> float:
-    default_float = _coerce_float(default, fallback)
-    env_val = os.getenv(key)
-    if env_val is None:
-        return default_float
-    return _coerce_float(env_val, default_float)
-
-
-def _optional_str_env(key: str, default: str | None = None) -> str | None:
-    val = os.getenv(key)
-    if val is None:
-        val = default
-    if val is None:
+def _nonempty(value: Any) -> Any | None:
+    if value is None:
         return None
-    normalized = str(val).strip()
-    return normalized or None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
 
 
-def _parse_headers(value) -> dict[str, str]:
-    if not value:
-        return {}
+def _parse_headers_with_validity(value: Any) -> tuple[dict[str, str], bool]:
     if isinstance(value, dict):
-        return {
-            str(k).strip(): str(v).strip()
-            for k, v in value.items()
-            if str(k).strip()
+        mapping_headers = {
+            str(key).strip(): str(header_value).strip()
+            for key, header_value in value.items()
+            if str(key).strip()
         }
+        return mapping_headers, bool(mapping_headers)
     if isinstance(value, str):
-        headers: dict[str, str] = {}
+        if not value.strip():
+            return {}, False
+        string_headers: dict[str, str] = {}
         for item in value.split(","):
-            item = item.strip()
-            if not item or "=" not in item:
+            if "=" not in item:
                 continue
-            key, raw_val = item.split("=", 1)
+            key, header_value = item.split("=", 1)
             key = key.strip()
-            raw_val = raw_val.strip()
             if key:
-                headers[key] = raw_val
-        return headers
+                string_headers[key] = header_value.strip()
+        return string_headers, bool(string_headers)
+    return {}, False
+
+
+def _parse_headers(value: Any) -> dict[str, str]:
+    return _parse_headers_with_validity(value)[0]
+
+
+def _yaml_signal_value(yaml_cfg: dict[str, Any], signal: str, key: str) -> Any:
+    flat_key = f"{signal}_{key}"
+    flat_value = yaml_cfg.get(flat_key)
+    if _nonempty(flat_value) is not None:
+        return flat_value
+    signal_cfg = yaml_cfg.get(signal)
+    return signal_cfg.get(key) if isinstance(signal_cfg, dict) else None
+
+
+def _yaml_signal_headers_value(yaml_cfg: dict[str, Any], signal: str) -> Any:
+    flat_key = f"{signal}_headers"
+    flat_value = yaml_cfg.get(flat_key)
+    _, flat_is_valid = _parse_headers_with_validity(flat_value)
+    if flat_is_valid:
+        return flat_value
+    signal_cfg = yaml_cfg.get(signal)
+    return signal_cfg.get("headers") if isinstance(signal_cfg, dict) else None
+
+
+def _parse_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if type(value) is int:
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _parse_float(value: Any) -> float | None:
+    try:
+        parsed = float(value.strip() if isinstance(value, str) else value)
+        return parsed if isfinite(parsed) else None
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+
+def _parse_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and (not isfinite(value) or not value.is_integer()):
+        return None
+    try:
+        return int(value.strip() if isinstance(value, str) else value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+
+T = TypeVar("T")
+
+
+def _coerce_value(
+    env_key: str,
+    yaml_value: Any,
+    default: T,
+    parser: Callable[[Any], T | None],
+) -> T:
+    for value in (os.getenv(env_key), yaml_value, default):
+        if _nonempty(value) is None:
+            continue
+        parsed = parser(value)
+        if parsed is not None:
+            return parsed
+    return default
+
+
+def _string_value(env_key: str, yaml_value: Any, default: str) -> str:
+    for value in (os.getenv(env_key), yaml_value, default):
+        value = _nonempty(value)
+        if value is not None:
+            return str(value).strip()
+    return default
+
+
+def _headers_value(
+    env_key: str, yaml_value: Any, fallback: dict[str, str]
+) -> dict[str, str]:
+    for value in (os.getenv(env_key), yaml_value, fallback):
+        headers, valid = _parse_headers_with_validity(value)
+        if valid:
+            return headers
     return {}
 
 
-def _headers_env(key: str, default) -> dict[str, str]:
-    if key in os.environ:
-        return _parse_headers(os.getenv(key, ""))
-    return _parse_headers(default)
+def _normalize(value: str, default: str) -> str:
+    return value.strip().lower() or default
 
 
-def _yaml_signal_cfg(yaml_cfg: dict, signal: str) -> dict:
-    cfg = yaml_cfg.get(signal, {}) or {}
-    return cfg if isinstance(cfg, dict) else {}
-
-
-def _yaml_signal_value(yaml_cfg: dict, signal: str, key: str):
-    flat_key = f"{signal}_{key}"
-    if flat_key in yaml_cfg:
-        return yaml_cfg.get(flat_key)
-    return _yaml_signal_cfg(yaml_cfg, signal).get(key)
+def _load_yaml_config() -> dict[str, Any]:
+    try:
+        config = get_config()
+        telemetry = config.get("telemetry") if isinstance(config, dict) else None
+        return telemetry if isinstance(telemetry, dict) else {}
+    except Exception:
+        return {}
 
 
 def load_telemetry_config() -> TelemetryConfig:
-    """Load telemetry config from env vars, falling back to config.yaml."""
-    # Try config.yaml first
-    yaml_cfg: dict = {}
-    try:
-        from jiuwenswarm.common.config import get_config
-        yaml_cfg = get_config().get("telemetry", {}) or {}
-    except Exception:
-        pass
+    """Load telemetry settings, with environment variables taking precedence."""
+    yaml_cfg = _load_yaml_config()
+    session_cfg = yaml_cfg.get("session")
+    session_cfg = session_cfg if isinstance(session_cfg, dict) else {}
 
-    session_cfg = yaml_cfg.get("session", {}) or {}
-    common_exporter = _normalize_exporter(
-        _str_env("OTEL_EXPORTER_TYPE", str(yaml_cfg.get("exporter", "none"))),
-        "none",
+    exporter = _normalize(
+        _string_value("OTEL_EXPORTER_TYPE", yaml_cfg.get("exporter"), "none"), "none"
     )
-    common_endpoint = _str_env(
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
-        str(yaml_cfg.get("endpoint", "http://localhost:4317")),
+    endpoint = _string_value(
+        "OTEL_EXPORTER_OTLP_ENDPOINT", yaml_cfg.get("endpoint"), "http://localhost:4317"
     )
-    common_protocol = _normalize_protocol(
-        _str_env("OTEL_EXPORTER_OTLP_PROTOCOL", str(yaml_cfg.get("protocol", "grpc"))),
+    protocol = _normalize(
+        _string_value("OTEL_EXPORTER_OTLP_PROTOCOL", yaml_cfg.get("protocol"), "grpc"),
         "grpc",
     )
-    common_headers = _headers_env(
-        "OTEL_EXPORTER_OTLP_HEADERS",
-        yaml_cfg.get("headers", {}),
+    headers = _headers_value("OTEL_EXPORTER_OTLP_HEADERS", yaml_cfg.get("headers"), {})
+
+    def signal_value(signal: str, key: str, env_key: str, common: str, default: str) -> str:
+        signal_yaml = _yaml_signal_value(yaml_cfg, signal, key)
+        signal_yaml = signal_yaml if _nonempty(signal_yaml) is not None else common
+        return _string_value(env_key, signal_yaml, default)
+
+    traces_exporter = _normalize(
+        signal_value("traces", "exporter", "OTEL_TRACES_EXPORTER", exporter, exporter), exporter
     )
-    traces_exporter = _normalize_exporter(
-        _str_env(
-            "OTEL_TRACES_EXPORTER",
-            str(_yaml_signal_value(yaml_cfg, "traces", "exporter") or common_exporter),
-        ),
-        common_exporter,
+    traces_endpoint = signal_value(
+        "traces", "endpoint", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", endpoint, endpoint
     )
-    traces_endpoint = _str_env(
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-        str(_yaml_signal_value(yaml_cfg, "traces", "endpoint") or common_endpoint),
+    traces_protocol = _normalize(
+        signal_value("traces", "protocol", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", protocol, protocol),
+        protocol,
     )
-    traces_protocol = _normalize_protocol(
-        _str_env(
-            "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
-            str(_yaml_signal_value(yaml_cfg, "traces", "protocol") or common_protocol),
-        ),
-        common_protocol,
-    )
-    traces_headers = _headers_env(
+    traces_headers = _headers_value(
         "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
-        _yaml_signal_value(yaml_cfg, "traces", "headers") or common_headers,
-    )
-    metrics_exporter = _normalize_exporter(
-        _str_env(
-            "OTEL_METRICS_EXPORTER",
-            str(_yaml_signal_value(yaml_cfg, "metrics", "exporter") or common_exporter),
-        ),
-        common_exporter,
-    )
-    metrics_endpoint = _str_env(
-        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-        str(_yaml_signal_value(yaml_cfg, "metrics", "endpoint") or common_endpoint),
-    )
-    metrics_protocol = _normalize_protocol(
-        _str_env(
-            "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
-            str(_yaml_signal_value(yaml_cfg, "metrics", "protocol") or common_protocol),
-        ),
-        common_protocol,
-    )
-    metrics_headers = _headers_env(
-        "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
-        _yaml_signal_value(yaml_cfg, "metrics", "headers") or common_headers,
+        _yaml_signal_headers_value(yaml_cfg, "traces"),
+        headers,
     )
 
+    metrics_exporter = _normalize(
+        signal_value("metrics", "exporter", "OTEL_METRICS_EXPORTER", exporter, exporter), exporter
+    )
+    metrics_endpoint = signal_value(
+        "metrics", "endpoint", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", endpoint, endpoint
+    )
+    metrics_protocol = _normalize(
+        signal_value(
+            "metrics", "protocol", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", protocol, protocol
+        ),
+        protocol,
+    )
+    metrics_headers = _headers_value(
+        "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+        _yaml_signal_headers_value(yaml_cfg, "metrics"),
+        headers,
+    )
+
+    sample_rate = _coerce_value("OTEL_SAMPLE_RATE", yaml_cfg.get("sample_rate"), 1.0, _parse_float)
+    max_attributes = _coerce_value(
+        "OTEL_MAX_ATTRIBUTES", yaml_cfg.get("max_attributes"), 128, _parse_int
+    )
+    attribute_value_max_length = _coerce_value(
+        "OTEL_ATTRIBUTE_VALUE_MAX_LENGTH",
+        yaml_cfg.get("attribute_value_max_length"),
+        10240,
+        _parse_int,
+    )
+    threshold_yaml = session_cfg.get(
+        "stuck_threshold_ms", yaml_cfg.get("session_stuck_threshold_ms")
+    )
+    interval_yaml = session_cfg.get(
+        "stuck_check_interval_s", yaml_cfg.get("session_stuck_check_interval_s")
+    )
+
+    claw_id = _string_value("OTEL_CLAW_ID", yaml_cfg.get("claw_id"), "") or None
     return TelemetryConfig(
-        enabled=_bool_env("OTEL_ENABLED", yaml_cfg.get("enabled", False)),
-        exporter=common_exporter,
-        endpoint=common_endpoint,
-        protocol=common_protocol,
-        headers=common_headers,
+        enabled=_coerce_value("OTEL_ENABLED", yaml_cfg.get("enabled"), False, _parse_bool),
+        exporter=exporter,
+        endpoint=endpoint,
+        protocol=protocol,
+        headers=headers,
         traces_exporter=traces_exporter,
         traces_endpoint=traces_endpoint,
         traces_protocol=traces_protocol,
@@ -208,23 +269,32 @@ def load_telemetry_config() -> TelemetryConfig:
         metrics_endpoint=metrics_endpoint,
         metrics_protocol=metrics_protocol,
         metrics_headers=metrics_headers,
-        log_messages=_bool_env("OTEL_LOG_MESSAGES", yaml_cfg.get("log_messages", True)),
-        service_name=os.getenv(
-            "OTEL_SERVICE_NAME",
-            yaml_cfg.get("service_name", "jiuwenswarm"),
-        ).strip(),
-        session_stuck_threshold_ms=_float_env(
-            "OTEL_SESSION_STUCK_THRESHOLD_MS",
-            session_cfg.get("stuck_threshold_ms", 300000.0),
-            300000.0,
+        service_name=_string_value(
+            "OTEL_SERVICE_NAME", yaml_cfg.get("service_name"), "jiuwenclaw"
         ),
-        session_stuck_check_interval_s=_float_env(
-            "OTEL_SESSION_STUCK_CHECK_INTERVAL_S",
-            session_cfg.get("stuck_check_interval_s", 30.0),
-            30.0,
+        sample_rate=max(0.0, min(1.0, sample_rate)),
+        max_attributes=max(1, max_attributes),
+        attribute_value_max_length=max(1, attribute_value_max_length),
+        redact_prompts=_coerce_value(
+            "OTEL_REDACT_PROMPTS", yaml_cfg.get("redact_prompts"), False, _parse_bool
         ),
-        sqlite_db_path=_str_env(
-            "OTEL_SQLITE_DB_PATH",
-            yaml_cfg.get("sqlite_db_path", "traces.db"),
+        redact_completions=_coerce_value(
+            "OTEL_REDACT_COMPLETIONS", yaml_cfg.get("redact_completions"), False, _parse_bool
+        ),
+        log_messages=_coerce_value(
+            "OTEL_LOG_MESSAGES", yaml_cfg.get("log_messages"), True, _parse_bool
+        ),
+        claw_id=claw_id,
+        session_stuck_threshold_ms=max(
+            0.0,
+            _coerce_value(
+                "OTEL_SESSION_STUCK_THRESHOLD_MS", threshold_yaml, 300000.0, _parse_float
+            ),
+        ),
+        session_stuck_check_interval_s=max(
+            0.0,
+            _coerce_value(
+                "OTEL_SESSION_STUCK_CHECK_INTERVAL_S", interval_yaml, 30.0, _parse_float
+            ),
         ),
     )

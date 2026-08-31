@@ -13,7 +13,6 @@ from jiuwenswarm.common.schema import Message
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.gateway.message_handler.message_handler import ChannelMode, MessageHandler
-from jiuwenswarm.gateway.routing.session_sharing import SubRole
 
 
 class _FakeAgentClient:
@@ -121,21 +120,6 @@ def _chat_send_message(
     )
 
 
-def _team_transport_message(*, request_id: str, method: ReqMethod, ws_id: str) -> Message:
-    return Message(
-        id=request_id,
-        type="req",
-        channel_id="web",
-        session_id="sess-godview",
-        params={"mode": "team"},
-        timestamp=0.0,
-        ok=True,
-        req_method=method,
-        is_stream=method == ReqMethod.CHAT_SEND,
-        metadata={"ws_id": ws_id, "user_id": "web-user"},
-    )
-
-
 def _seed_stream_task(
     handler: _TestMessageHandler,
     *,
@@ -202,7 +186,7 @@ async def test_tui_non_stream_request_times_out_before_frontend_request(monkeypa
     )
 
     await asyncio.wait_for(
-        handler._process_non_stream_request(msg, env),
+        handler._process_non_stream_request(msg, env),  # pylint: disable=protected-access
         timeout=0.2,
     )
 
@@ -308,6 +292,47 @@ async def test_web_channel_only_cancels_matching_session() -> None:
     assert not other_session_task.cancelled()
     await asyncio.sleep(0)
     assert len(_FakeAgentClient.sent_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_stream_tasks_interrupts_agent_before_gateway_consumer() -> None:
+    """HTTP 南向必须先 interrupt 再 abort SSE，否则旧 token 会打上新 request_id。"""
+
+    class _OrderClient:
+        def __init__(self) -> None:
+            self.stream_alive_at_interrupt: bool | None = None
+            self.stream_task: asyncio.Task | None = None
+
+        async def send_request(self, env: object) -> SimpleNamespace:
+            task = self.stream_task
+            self.stream_alive_at_interrupt = task is not None and not task.done()
+            return SimpleNamespace(
+                request_id="interrupt-1",
+                channel_id="web",
+                ok=True,
+                payload={"event_type": "chat.interrupt_result", "success": True},
+                metadata=None,
+            )
+
+        @staticmethod
+        async def send_request_stream(env: object):
+            if False:
+                yield env
+
+    client = _OrderClient()
+    handler = _TestMessageHandler.create_with_client(client)
+    stream_task = _seed_stream_task(
+        handler, rid="rid-old", channel_id="web", session_id="sess_a",
+    )
+    client.stream_task = stream_task
+
+    cancelled = await handler.cancel_stream_tasks_for_channel(
+        _chat_send_message(channel_id="web", session_id="sess_a"),
+    )
+
+    assert cancelled == 1
+    assert client.stream_alive_at_interrupt is True
+    assert stream_task.cancelled()
 
 
 @pytest.mark.asyncio
@@ -669,19 +694,6 @@ async def test_disconnect_recovers_session_from_stale_request_keys() -> None:
     assert len(_FakeAgentClient.sent_requests) == 1
 
 
-def test_disconnect_accepts_agent_ref_scoped_route_keys() -> None:
-    handler = _TestMessageHandler.create()
-    handler._stream_sessions["rid-scoped"] = "sess_request"
-
-    merged, recovered = handler._merge_disconnect_session_keys(
-        [("tui", "sess_direct", "team:default")],
-        stale_request_keys=[("tui", "rid-scoped", "team:default")],
-    )
-
-    assert merged == [("tui", "sess_direct"), ("tui", "sess_request")]
-    assert recovered == [("tui", "sess_request")]
-
-
 @pytest.mark.asyncio
 async def test_disconnect_cancel_marks_request_as_client_disconnect() -> None:
     handler = _TestMessageHandler.create()
@@ -816,46 +828,6 @@ async def test_disconnect_backward_compatible_without_request_keys_kwarg() -> No
 
 
 # ---------- ChannelMode.is_team_mode ----------
-
-
-@pytest.mark.asyncio
-async def test_team_mq_publish_does_not_register_publisher_as_godview() -> None:
-    handler = _TestMessageHandler.create()
-
-    await handler._maybe_register_godview(
-        _team_transport_message(
-            request_id="publisher-request",
-            method=ReqMethod.TEAM_MQ_PUBLISH,
-            ws_id="publisher-ws",
-        )
-    )
-
-    registry = handler.get_session_sharing_registry()
-    assert registry.lookup_member("sess-godview", SubRole.GODVIEW) == []
-
-
-@pytest.mark.asyncio
-async def test_godview_registration_is_unique_per_websocket() -> None:
-    handler = _TestMessageHandler.create()
-
-    first = _team_transport_message(
-        request_id="web-request-1",
-        method=ReqMethod.CHAT_SEND,
-        ws_id="web-ws-1",
-    )
-    second = _team_transport_message(
-        request_id="web-request-2",
-        method=ReqMethod.CHAT_SEND,
-        ws_id="web-ws-2",
-    )
-    await handler._maybe_register_godview(first)
-    await handler._maybe_register_godview(first)
-    await handler._maybe_register_godview(second)
-
-    registry = handler.get_session_sharing_registry()
-    subscriptions = registry.lookup_member("sess-godview", SubRole.GODVIEW)
-    assert {sub.delivery.ws_id for sub in subscriptions} == {"web-ws-1", "web-ws-2"}
-    assert len(subscriptions) == 2
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,8 @@
+import { useTranslation } from 'react-i18next';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import pendingIcon from '../../assets/pending.svg';
 import {
-  getMemberPlainName,
+  getMemberDisplayName,
   getMemberStatusKey,
   type TeamMember,
 } from './shared';
@@ -24,7 +25,8 @@ export function MemberListItem({
   onClick?: () => void;
   taskProgress?: TaskProgress;
 }) {
-  const displayName = getMemberPlainName(member);
+  const { t } = useTranslation();
+  const displayName = getMemberDisplayName(member);
   const statusKey = getMemberStatusKey(member);
 
   const progressPercent = taskProgress && taskProgress.total > 0
@@ -63,12 +65,11 @@ export function MemberListItem({
             {displayName}
           </span>
         </div>
-        {/* 第二行固定给 member_id：display name 由 leader 起，同队重名很常见
-            （三个"通用协作专员"），而 @ 时要敲的正是 id。形态与输入框的 @ 下拉
-            一致，两处对得上。主行因此用不消歧的纯展示名，避免和这里重复。 */}
-        <div className="mt-0.5 truncate text-xs text-text-muted">
-          @{member.member_id}
-        </div>
+        {!compact && member.mode && (
+          <div className="mt-0.5 truncate text-xs text-text-muted">
+            {t('team.runningMode', { mode: member.mode })}
+          </div>
+        )}
       </div>
       {compact ? (
         isRunning ? (

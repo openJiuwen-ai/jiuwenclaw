@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import ctypes
 import http.client
 import json
@@ -17,11 +18,10 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 from logging.handlers import RotatingFileHandler
 
@@ -45,46 +45,8 @@ WEB_CHILD_FLAG = "--desktop-run-web"
 UPDATE_HELPER_FLAG = "--desktop-install-update"
 DESKTOP_ENV_FLAG = "JIUWENSWARM_DESKTOP"
 STARTUP_TIMEOUT_SECONDS = 45.0
+PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-DESKTOP_BLOB_CHUNK_SIZE = 1024 * 1024
-MAX_JAVASCRIPT_SAFE_INTEGER = 9_007_199_254_740_991
-
-
-@dataclass(frozen=True)
-class _DataUrlExportSpec:
-    allowed_suffixes: frozenset[str]
-    allowed_parameters: frozenset[str]
-    file_types: tuple[str, ...]
-
-
-@dataclass
-class _BlobSaveTransfer:
-    expected_size: int
-    export_file: BinaryIO
-    mime_type: str
-    target_path: Path
-    temp_path: Path
-    bytes_written: int = 0
-    signature: bytes = b""
-
-
-DATA_URL_EXPORT_SPECS = {
-    "image/png": _DataUrlExportSpec(
-        allowed_suffixes=frozenset({".png"}),
-        allowed_parameters=frozenset(),
-        file_types=("PNG Image (*.png)",),
-    ),
-    "image/svg+xml": _DataUrlExportSpec(
-        allowed_suffixes=frozenset({".svg"}),
-        allowed_parameters=frozenset({"charset=utf-8"}),
-        file_types=("SVG Image (*.svg)",),
-    ),
-    "text/plain": _DataUrlExportSpec(
-        allowed_suffixes=frozenset({".mmd"}),
-        allowed_parameters=frozenset({"charset=utf-8"}),
-        file_types=("Mermaid Diagram (*.mmd)",),
-    ),
-}
 DesktopSaveResult = dict[str, bool]
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".jfif"})
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -365,6 +327,11 @@ def _build_child_env(name: str, ports: dict[str, int]) -> dict[str, str]:
     env["AGENT_SERVER_PORT"] = str(ports["agent_server"])
     env["AGENT_PORT"] = str(ports["agent_server"])
     env["FRONTEND_PORT"] = str(ports["frontend"])
+    # AgentServer 的 HTTP/SSE 入口端口。是否真正监听由 config.yaml 的
+    # http_server.enabled 决定；端口无条件下发，这样开启时不会撞上别的实例。
+    # get 兜底：兼容不含 http_api 的历史端口组。
+    if ports.get("http_api"):
+        env["AGENT_HTTP_PORT"] = str(ports["http_api"])
     # Gateway prefers AGENT_SERVER_URL over AGENT_SERVER_PORT; drop any stale
     # URL from the parent shell so the remapped port is used.
     env.pop("AGENT_SERVER_URL", None)
@@ -571,26 +538,8 @@ class _WindowApi:
         return self._runtime.download_file(full_url, filename)
 
     def save_data_url(self, data_url: str, filename: str) -> DesktopSaveResult:
-        """保存前端生成的 data URL 文件，供分享图片和图表导出使用。"""
+        """保存前端生成的 data URL 文件，供分享图片导出使用。"""
         return self._runtime.save_data_url(data_url, filename)
-
-    def begin_blob_save(
-        self, filename: str, mime_type: str, total_size: int
-    ) -> dict[str, bool | str]:
-        """选择保存位置并创建分块写入事务。"""
-        return self._runtime.begin_blob_save(filename, mime_type, total_size)
-
-    def append_blob_save(self, transfer_id: str, encoded_chunk: str) -> bool:
-        """向桌面保存事务追加一个 base64 编码的数据块。"""
-        return self._runtime.append_blob_save(transfer_id, encoded_chunk)
-
-    def finish_blob_save(self, transfer_id: str) -> DesktopSaveResult:
-        """校验并原子提交桌面保存事务。"""
-        return self._runtime.finish_blob_save(transfer_id)
-
-    def abort_blob_save(self, transfer_id: str) -> bool:
-        """中止桌面保存事务并删除部分文件。"""
-        return self._runtime.abort_blob_save(transfer_id)
 
     def select_project_directory(self) -> str | None:
         """打开系统目录选择器，返回用户选择的项目目录绝对路径。"""
@@ -610,17 +559,6 @@ class _WindowApi:
         return self._runtime.select_local_files(
             allow_multiple=bool(allow_multiple),
             initial_dir=initial_dir,
-        )
-
-    def select_local_file_path(
-        self,
-        initial_path: str | None = None,
-        title: str | None = None,
-    ) -> str | None:
-        """Open a native file picker and return the selected absolute path."""
-        return self._runtime.select_local_file_path(
-            initial_path=initial_path,
-            title=title,
         )
 
     def describe_local_files(self, paths: list[str] | None = None) -> list[dict[str, Any]]:
@@ -718,8 +656,6 @@ class DesktopRuntime:
         self.processes: dict[str, subprocess.Popen[bytes]] = {}
         self.window = None
         self._lock = threading.Lock()
-        self._blob_save_lock = threading.Lock()
-        self._blob_save_transfers: dict[str, _BlobSaveTransfer] = {}
         self._is_shutting_down = False
         self._desktop_dnd_bound = False
 
@@ -885,200 +821,6 @@ class DesktopRuntime:
         except Exception:  # noqa: BLE001
             return str(Path(selected_path).expanduser())
 
-    @staticmethod
-    def _resolve_blob_export(
-        filename: str, mime_type: str, total_size: int
-    ) -> tuple[str, str, _DataUrlExportSpec]:
-        safe_name = DesktopRuntime._sanitize_filename(filename)
-        if isinstance(total_size, bool) or not isinstance(total_size, int):
-            raise ValueError("invalid_blob_size")
-        if total_size < 0 or total_size > MAX_JAVASCRIPT_SAFE_INTEGER:
-            raise ValueError("invalid_blob_size")
-        if not isinstance(mime_type, str):
-            raise ValueError("invalid_blob_mime_type")
-
-        metadata = [part.strip().lower() for part in mime_type.split(";")]
-        normalized_mime_type = metadata[0]
-        export_spec = DATA_URL_EXPORT_SPECS.get(normalized_mime_type)
-        if export_spec is None:
-            raise ValueError("unsupported_blob_mime_type")
-
-        parameters = metadata[1:]
-        if len(parameters) != len(set(parameters)) or any(
-            parameter not in export_spec.allowed_parameters for parameter in parameters
-        ):
-            raise ValueError("unsupported_blob_mime_parameters")
-        if Path(safe_name).suffix.lower() not in export_spec.allowed_suffixes:
-            raise ValueError("blob_filename_extension_mismatch")
-        return safe_name, normalized_mime_type, export_spec
-
-    @staticmethod
-    def _discard_blob_save_transfer(transfer: _BlobSaveTransfer) -> None:
-        try:
-            transfer.export_file.close()
-        except OSError as exc:
-            logger.warning("[desktop] failed to close partial blob export: %s", exc)
-        try:
-            transfer.temp_path.unlink(missing_ok=True)
-        except OSError as exc:
-            logger.warning(
-                "[desktop] failed to remove partial blob export %s: %s",
-                transfer.temp_path,
-                exc,
-            )
-
-    def begin_blob_save(
-        self, filename: str, mime_type: str, total_size: int
-    ) -> dict[str, bool | str]:
-        """选择目标路径并创建有界内存的分块保存事务。"""
-        try:
-            safe_name, normalized_mime_type, export_spec = self._resolve_blob_export(
-                filename, mime_type, total_size
-            )
-            target_path = self._select_save_path(safe_name, export_spec.file_types)
-        except (OSError, RuntimeError, ValueError) as exc:
-            logger.error("[desktop] failed to begin blob export: %s", exc)
-            return {"ok": False, "cancelled": False}
-
-        if target_path is None:
-            logger.info("[desktop] blob export cancelled by user")
-            return {"ok": False, "cancelled": True}
-
-        temp_fd: int | None = None
-        temp_path: Path | None = None
-        export_file: BinaryIO | None = None
-        try:
-            temp_fd, temp_name = tempfile.mkstemp(
-                dir=target_path.parent,
-                prefix=f".{target_path.name}.",
-                suffix=".part",
-            )
-            temp_path = Path(temp_name)
-            export_file = os.fdopen(temp_fd, "wb")
-            temp_fd = None
-            transfer = _BlobSaveTransfer(
-                expected_size=total_size,
-                export_file=export_file,
-                mime_type=normalized_mime_type,
-                target_path=target_path,
-                temp_path=temp_path,
-            )
-            with self._blob_save_lock:
-                transfer_id = uuid.uuid4().hex
-                while transfer_id in self._blob_save_transfers:
-                    transfer_id = uuid.uuid4().hex
-                self._blob_save_transfers[transfer_id] = transfer
-            return {"ok": True, "cancelled": False, "transfer_id": transfer_id}
-        except OSError as exc:
-            logger.error("[desktop] failed to create blob export transaction: %s", exc)
-            if export_file is not None:
-                try:
-                    export_file.close()
-                except OSError:
-                    pass
-            if temp_fd is not None:
-                try:
-                    os.close(temp_fd)
-                except OSError:
-                    pass
-            if temp_path is not None:
-                try:
-                    temp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            return {"ok": False, "cancelled": False}
-
-    def append_blob_save(self, transfer_id: str, encoded_chunk: str) -> bool:
-        """解码并追加一个不超过协议上限的数据块。"""
-        if not isinstance(transfer_id, str):
-            return False
-        max_encoded_size = ((DESKTOP_BLOB_CHUNK_SIZE + 2) // 3) * 4
-        transfer_to_discard: _BlobSaveTransfer | None = None
-
-        with self._blob_save_lock:
-            transfer = self._blob_save_transfers.get(transfer_id)
-            if transfer is None:
-                return False
-            try:
-                if (
-                    not isinstance(encoded_chunk, str)
-                    or not encoded_chunk
-                    or len(encoded_chunk) > max_encoded_size
-                ):
-                    raise ValueError("invalid_blob_chunk")
-                chunk = base64.b64decode(encoded_chunk, validate=True)
-                if not chunk or len(chunk) > DESKTOP_BLOB_CHUNK_SIZE:
-                    raise ValueError("invalid_blob_chunk_size")
-                if transfer.bytes_written + len(chunk) > transfer.expected_size:
-                    raise ValueError("blob_size_exceeded")
-
-                written = transfer.export_file.write(chunk)
-                if written != len(chunk):
-                    raise OSError("incomplete_blob_chunk_write")
-                transfer.bytes_written += written
-                if len(transfer.signature) < len(PNG_SIGNATURE):
-                    remaining = len(PNG_SIGNATURE) - len(transfer.signature)
-                    transfer.signature += chunk[:remaining]
-            except (OSError, ValueError) as exc:
-                logger.error("[desktop] failed to append blob export: %s", exc)
-                transfer_to_discard = self._blob_save_transfers.pop(transfer_id)
-
-        if transfer_to_discard is not None:
-            self._discard_blob_save_transfer(transfer_to_discard)
-            return False
-        return True
-
-    def finish_blob_save(self, transfer_id: str) -> DesktopSaveResult:
-        """校验字节数和文件签名，然后原子提交分块保存事务。"""
-        if not isinstance(transfer_id, str):
-            return _desktop_save_result(False)
-        with self._blob_save_lock:
-            transfer = self._blob_save_transfers.pop(transfer_id, None)
-        if transfer is None:
-            return _desktop_save_result(False)
-
-        committed = False
-        try:
-            if transfer.bytes_written != transfer.expected_size:
-                raise ValueError("blob_size_mismatch")
-            if (
-                transfer.mime_type == "image/png"
-                and transfer.signature != PNG_SIGNATURE
-            ):
-                raise ValueError("invalid_png_signature")
-
-            transfer.export_file.flush()
-            os.fsync(transfer.export_file.fileno())
-            transfer.export_file.close()
-            os.replace(transfer.temp_path, transfer.target_path)
-            committed = True
-            logger.info("[desktop] blob export saved to: %s", transfer.target_path)
-            return _desktop_save_result(True)
-        except (OSError, ValueError) as exc:
-            logger.error("[desktop] failed to finish blob export: %s", exc)
-            return _desktop_save_result(False)
-        finally:
-            if not committed:
-                self._discard_blob_save_transfer(transfer)
-
-    def abort_blob_save(self, transfer_id: str) -> bool:
-        """中止事务并删除尚未提交的部分文件。"""
-        if not isinstance(transfer_id, str):
-            return False
-        with self._blob_save_lock:
-            transfer = self._blob_save_transfers.pop(transfer_id, None)
-        if transfer is None:
-            return False
-        self._discard_blob_save_transfer(transfer)
-        return True
-
-    def _abort_all_blob_saves(self) -> None:
-        with self._blob_save_lock:
-            transfers = list(self._blob_save_transfers.values())
-            self._blob_save_transfers.clear()
-        for transfer in transfers:
-            self._discard_blob_save_transfer(transfer)
-
     def select_local_files(
         self,
         allow_multiple: bool = True,
@@ -1121,43 +863,6 @@ class DesktopRuntime:
         if results:
             remember_file_picker_dir(results[0].get("path") or path_list[0])
         return results
-
-    def select_local_file_path(
-        self,
-        initial_path: str | None = None,
-        title: str | None = None,
-    ) -> str | None:
-        """Open a native file picker and return the selected absolute path."""
-        if self.window is None or not hasattr(self.window, "create_file_dialog"):
-            logger.error("[desktop] local file path picker unavailable")
-            return None
-
-        initial_dir = str(Path.home())
-        if isinstance(initial_path, str) and initial_path.strip():
-            candidate = Path(initial_path.strip()).expanduser()
-            parent = candidate.parent if candidate.name else candidate
-            if parent.is_dir():
-                initial_dir = str(parent)
-
-        file_types = ("Executable files (*.exe)", "All files (*.*)") if sys.platform == "win32" else ()
-        try:
-            selected_paths = self.window.create_file_dialog(
-                webview.FileDialog.OPEN,
-                directory=initial_dir,
-                allow_multiple=False,
-                file_types=file_types,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("[desktop] local file path picker failed: %s", exc)
-            return None
-
-        if not selected_paths:
-            return None
-        selected_path = selected_paths if isinstance(selected_paths, (str, Path)) else selected_paths[0]
-        try:
-            return str(Path(selected_path).expanduser().resolve())
-        except Exception:  # noqa: BLE001
-            return str(Path(selected_path).expanduser())
 
     @staticmethod
     def _describe_local_file(raw_path: str | Path) -> dict[str, Any] | None:
@@ -1447,101 +1152,33 @@ class DesktopRuntime:
         threading.Timer(3.0, _retry).start()
 
     def save_data_url(self, data_url: str, filename: str) -> DesktopSaveResult:
-        """选择保存位置并保存受支持的 base64 data URL。"""
-        try:
-            safe_name = self._sanitize_filename(filename)
-        except ValueError as exc:
-            logger.error("[desktop] invalid export filename: %s", exc)
-            return _desktop_save_result(False)
-
-        if not isinstance(data_url, str) or not data_url.startswith("data:"):
-            logger.error("[desktop] invalid data url for export")
-            return _desktop_save_result(False)
-
-        header, separator, encoded_data = data_url.partition(",")
-        metadata = header[5:].split(";")
-        if not separator or len(metadata) < 2 or metadata[-1].lower() != "base64":
-            logger.error("[desktop] export data url must use base64 encoding")
-            return _desktop_save_result(False)
-
-        mime_type = metadata[0].lower()
-        export_spec = DATA_URL_EXPORT_SPECS.get(mime_type)
-        if export_spec is None:
-            logger.error("[desktop] unsupported export data url type: %s", mime_type)
-            return _desktop_save_result(False)
-
-        parameters = [parameter.lower() for parameter in metadata[1:-1]]
-        if len(parameters) != len(set(parameters)) or any(
-            parameter not in export_spec.allowed_parameters for parameter in parameters
-        ):
-            logger.error(
-                "[desktop] unsupported export data url parameters for %s: %s",
-                mime_type,
-                parameters,
-            )
-            return _desktop_save_result(False)
-
-        if Path(safe_name).suffix.lower() not in export_spec.allowed_suffixes:
-            logger.error(
-                "[desktop] export filename extension does not match %s: %s",
-                mime_type,
-                safe_name,
-            )
+        """选择保存位置并保存 PNG data URL。"""
+        if not isinstance(data_url, str) or not data_url.startswith(PNG_DATA_URL_PREFIX):
+            logger.error("[desktop] invalid data url for share export")
             return _desktop_save_result(False)
 
         try:
-            file_bytes = base64.b64decode(encoded_data, validate=True)
-        except ValueError as exc:
-            logger.error("[desktop] failed to decode export data url: %s", exc)
+            image_bytes = base64.b64decode(data_url[len(PNG_DATA_URL_PREFIX):], validate=True)
+        except binascii.Error as exc:
+            logger.error("[desktop] failed to decode share export data url: %s", exc)
             return _desktop_save_result(False)
 
-        if mime_type == "image/png" and not file_bytes.startswith(PNG_SIGNATURE):
-            logger.error("[desktop] export data is not a PNG")
+        if not image_bytes.startswith(PNG_SIGNATURE):
+            logger.error("[desktop] share export data is not a PNG")
             return _desktop_save_result(False)
 
-        temp_fd: int | None = None
-        temp_path: Path | None = None
         try:
-            selected_path = self._select_save_path(safe_name, export_spec.file_types)
+            selected_path = self._select_save_path(filename, ("PNG Image (*.png)",))
             if selected_path is None:
-                logger.info("[desktop] data url export cancelled by user")
+                logger.info("[desktop] share image save cancelled by user")
                 return _desktop_save_result(False, cancelled=True)
 
-            temp_fd, temp_name = tempfile.mkstemp(
-                dir=selected_path.parent,
-                prefix=f".{selected_path.name}.",
-                suffix=".part",
-            )
-            temp_path = Path(temp_name)
-            export_file = os.fdopen(temp_fd, "wb")
-            temp_fd = None
-            with export_file:
-                export_file.write(file_bytes)
-            os.replace(temp_path, selected_path)
-            temp_path = None
-            logger.info("[desktop] data url export saved to: %s", selected_path)
+            selected_path.write_bytes(image_bytes)
+            logger.info("[desktop] share image saved to: %s", selected_path)
             return _desktop_save_result(True)
         except (OSError, RuntimeError, ValueError) as exc:
-            logger.error("[desktop] failed to save data url export: %s", exc)
+            logger.error("[desktop] failed to save share image: %s", exc)
             return _desktop_save_result(False)
-        finally:
-            if temp_fd is not None:
-                try:
-                    os.close(temp_fd)
-                except OSError as cleanup_exc:
-                    logger.warning(
-                        "[desktop] failed to close partial export: %s",
-                        cleanup_exc,
-                    )
-            if temp_path is not None:
-                try:
-                    temp_path.unlink(missing_ok=True)
-                except OSError as cleanup_exc:
-                    logger.warning(
-                        "[desktop] failed to remove partial export %s: %s",
-                        temp_path,
-                        cleanup_exc,
-                    )
 
     @staticmethod
     def _show_download_complete(file_path: str) -> None:
@@ -1852,7 +1489,6 @@ nohup {q_executable} >/dev/null 2>&1 &
                 return
             self._is_shutting_down = True
 
-        self._abort_all_blob_saves()
         deadline = time.monotonic() + 8.0
         logger.info("[desktop] shutting down child processes")
 
@@ -2040,6 +1676,11 @@ setInterval(showTip,3500);
                 self.window.maximize()
             self.window.events.loaded -= self._on_loaded_first
             self.window.events.loaded += self._on_loaded
+        # loading HTML → load_url(frontend) 与 handler 切换存在竞态：
+        # 若真实前端的 loaded 落在 _on_loaded_first 上，会只 maximize/换 handler，
+        # 永远不绑定拖拽。延迟再绑一次，覆盖该竞态（_schedule 会重置 bound 标志）。
+        threading.Timer(1.5, self._schedule_desktop_file_dnd_bind).start()
+        threading.Timer(4.0, self._schedule_desktop_file_dnd_bind).start()
 
     def _on_loaded(self) -> None:
         # Frontend navigation completed; bind OS file drop path bridge for the new document.

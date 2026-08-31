@@ -12,6 +12,8 @@ Covers commits:
 from __future__ import annotations
 
 import asyncio
+
+from jiuwenswarm.server.handlers import commands as commands_handlers
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,6 +29,21 @@ from jiuwenswarm.server.runtime.agent_adapter.recap_prompts import (
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _try_add_cache_control,
 )
+from tests.unit_tests.conftest import patch_handler_name
+
+
+def _ctx_for_test(ws, request, send_lock, server=None):
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    return RequestContext(
+        request=request,
+        sink=WSSink(ws, send_lock),
+        connection_id=str(id(ws)),
+        services=AgentServerServices(server) if server is not None else None,
+    )
+
+
 
 
 # =============================================================================
@@ -47,7 +64,9 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
     async def handle_command_btw_for_test(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        await self._handle_command_btw(ws, request, send_lock)
+        await commands_handlers.handle_command_btw(
+            _ctx_for_test(ws, request, send_lock, self)
+        )
 
     def get_agent_manager_for_test(self) -> Any:
         return self._agent_manager
@@ -75,10 +94,8 @@ def fake_ws() -> FakeWebSocket:
 
 @pytest.fixture(autouse=True)
 def _patch_wire_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        fake_encode_agent_response_for_wire,
+    patch_handler_name(
+        monkeypatch, "encode_agent_response_for_wire", fake_encode_agent_response_for_wire
     )
 
 
@@ -105,7 +122,6 @@ def _make_adapter(**overrides: Any) -> Any:
 
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = None
-    adapter._is_session_scoped_adapter = True
     adapter._last_system_prompt = overrides.get("_last_system_prompt", "")
     adapter._model = overrides.get("_model", None)
     adapter._resolve_prompt_language = MagicMock(return_value="en")
@@ -802,28 +818,6 @@ class TestGenerateBtwAnswer:
     """Tests for JiuWenSwarmDeepAdapter.generate_btw_answer."""
 
     @pytest.mark.asyncio
-    async def test_root_delegates_to_session_adapter_with_model(self):
-        """A lazy root without a model must use the session-owned model."""
-        root = _make_adapter(_model=None)
-        root._is_session_scoped_adapter = False
-        root._evict_idle_session_adapters = AsyncMock()
-
-        session_adapter = _make_adapter(_last_system_prompt="sys")
-        session_adapter._get_recent_messages = MagicMock(
-            return_value=[_make_msg(role="user", content="hello")]
-        )
-        session_adapter._call_model_for_recap = AsyncMock(return_value="session answer")
-        root._get_or_create_session_adapter = AsyncMock(return_value=session_adapter)
-
-        result = await root.generate_btw_answer("code-session", "question?")
-
-        assert result == {"status": "ok", "answer": "session answer"}
-        assert root._model is None
-        root._get_or_create_session_adapter.assert_awaited_once_with("code-session")
-        session_adapter._call_model_for_recap.assert_awaited_once()
-        root._evict_idle_session_adapters.assert_awaited_once_with()
-
-    @pytest.mark.asyncio
     async def test_no_context_when_no_messages_and_no_system_prompt(self):
         """When there are no messages AND no system prompt, return no_context."""
         adapter = _make_adapter(_last_system_prompt="")
@@ -1023,11 +1017,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-ok",
@@ -1048,40 +1038,6 @@ class TestHandleCommandBtw:
         ]
 
     @pytest.mark.asyncio
-    async def test_prefers_agent_that_owns_session(self, server, fake_ws, monkeypatch):
-        """An active session must not be routed to a new mode/project root."""
-
-        class SessionAgent:
-            async def generate_btw_answer(self, session_id, question):
-                return {"status": "ok", "answer": "from session"}
-
-        manager = server.get_agent_manager_for_test()
-        session_agent = SessionAgent()
-        get_agent = AsyncMock()
-        monkeypatch.setattr(manager, "get_agent", get_agent)
-        monkeypatch.setattr(
-            manager,
-            "get_agent_for_session_nowait",
-            MagicMock(return_value=session_agent),
-        )
-
-        request = AgentRequest(
-            request_id="req-btw-session-owner",
-            channel_id="tui",
-            session_id="sess-1",
-            req_method=ReqMethod.COMMAND_BTW,
-            params={"question": "test?", "mode": "code"},
-        )
-
-        await server.handle_command_btw_for_test(fake_ws, request, asyncio.Lock())
-
-        assert fake_ws.sent[0]["payload"] == {
-            "status": "ok",
-            "answer": "from session",
-        }
-        get_agent.assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_agent_not_found_returns_error(self, server, fake_ws, monkeypatch):
         """When agent_manager returns None, handler should return ok=False."""
 
@@ -1093,11 +1049,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent_none,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-no-agent",
@@ -1127,11 +1079,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-crash",
@@ -1166,11 +1114,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-mode",
@@ -1199,11 +1143,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-nocontext",
@@ -1241,11 +1181,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-defaultsid",

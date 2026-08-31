@@ -7,9 +7,14 @@ import mimetypes
 import os
 import re
 import time
+from contextvars import ContextVar
 from typing import Any
 
 from jiuwenswarm.common.utils import logger
+
+_FEISHU_FILE_TENANT: ContextVar[tuple[str, str] | None] = ContextVar(
+    "feishu_file_tenant", default=None
+)
 
 # 类型别名，用于类型提示
 FeishuConfig = Any  # 避免循环导入
@@ -95,7 +100,7 @@ class FeishuFileService:
         self,
         api_client: Any,
         config: FeishuConfig,
-        workspace_dir: str,
+        workspace_dir: str | None = None,
     ):
         """
         初始化文件服务。
@@ -103,11 +108,14 @@ class FeishuFileService:
         Args:
             api_client: 飞书 API 客户端（lark.Client 实例）
             config: 飞书通道配置（FeishuConfig）
-            workspace_dir: 工作空间目录
+            workspace_dir: 可选覆盖根目录（如 config.temp_file_dir）；
+                为 None 时按消息 sid/aid 懒解析租户 workspace。
         """
         self._api_client = api_client
         self._config = config
-        self._workspace_dir = workspace_dir
+        self._workspace_dir_override = (
+            str(workspace_dir).strip() if workspace_dir else None
+        ) or None
         self._download_semaphore = asyncio.Semaphore(3)  # 限制并发下载数
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -118,9 +126,41 @@ class FeishuFileService:
         """确保目录存在。"""
         os.makedirs(path, exist_ok=True)
 
+    @staticmethod
+    def tenant_scope(
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ):
+        """Context manager: bind tenant for download path resolution in this task."""
+        from contextlib import contextmanager
+        from jiuwenswarm.gateway.tenant_paths import normalize_channel_tenant_ids
+
+        @contextmanager
+        def _cm():
+            token = _FEISHU_FILE_TENANT.set(
+                normalize_channel_tenant_ids(service_id, agent_id)
+            )
+            try:
+                yield
+            finally:
+                _FEISHU_FILE_TENANT.reset(token)
+
+        return _cm()
+
+    def _resolve_workspace_dir(self) -> str:
+        if self._workspace_dir_override:
+            return self._workspace_dir_override
+        from jiuwenswarm.gateway.tenant_paths import resolve_channel_agent_workspace
+
+        bound = _FEISHU_FILE_TENANT.get()
+        if bound is not None:
+            return str(resolve_channel_agent_workspace(bound[0], bound[1]))
+        return str(resolve_channel_agent_workspace("default", "default"))
+
     def _get_download_dir(self, file_type: str) -> str:
         """获取下载目录路径，并确保目录存在。"""
-        base_dir = os.path.join(self._workspace_dir, "feishu_files", "downloads", file_type)
+        workspace = self._resolve_workspace_dir()
+        base_dir = os.path.join(workspace, "feishu_files", "downloads", file_type)
         self._ensure_dir(base_dir)
         return base_dir
 
@@ -370,23 +410,17 @@ class FeishuFileService:
         """
         下载音频文件。
 
-        飞书音频消息(msg_type=audio)的 file_key 同为 file.create 上传产物，
-        下载 type 取 "file"（与视频/普通文件一致，非图片资源统一用 file）。
+        飞书音频消息的原生格式为 Opus，messageResource 返回的也是 opus 编码数据。
         """
         try:
             from lark_oapi.api.im.v1 import GetMessageResourceRequest
-
-            logger.info(
-                "飞书音频下载: message_id=%s file_key=%s",
-                message_id, file_key,
-            )
 
             def _do_download():
                 request = (
                     GetMessageResourceRequest.builder()
                     .message_id(message_id)
                     .file_key(file_key)
-                    .type("file")
+                    .type("audio")
                     .build()
                 )
                 return self._api_client.im.v1.message_resource.get(request)
@@ -434,25 +468,17 @@ class FeishuFileService:
         """
         下载视频/媒体文件。
 
-        飞书视频消息(msg_type=media)的 content.file_key 实为 file.create
-        上传返回的文件 key（前缀 file_v3_），下载时 GetMessageResource
-        的 type 参数应传 "file"。传 "media"/"video" 均会被服务端拒绝，
-        返回 234001 Invalid request param。
+        飞书视频消息通过 messageResource 接口下载。
         """
         try:
             from lark_oapi.api.im.v1 import GetMessageResourceRequest
-
-            logger.info(
-                "飞书视频下载: message_id=%s file_key=%s",
-                message_id, file_key,
-            )
 
             def _do_download():
                 request = (
                     GetMessageResourceRequest.builder()
                     .message_id(message_id)
                     .file_key(file_key)
-                    .type("file")
+                    .type("media")
                     .build()
                 )
                 return self._api_client.im.v1.message_resource.get(request)

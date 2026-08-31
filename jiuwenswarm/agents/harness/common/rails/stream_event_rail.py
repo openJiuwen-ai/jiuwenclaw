@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import re
 from typing import Any, List, Optional
 
@@ -21,6 +22,7 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
 )
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -28,6 +30,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.tools import TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
@@ -40,15 +43,62 @@ from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyToolStreamHandler,
 )
+from jiuwenswarm.agents.harness.common.rails.read_file_validation import (
+    extract_path_from_arguments,
+    handle_read_file_before_tool_call,
+    is_read_file_tool,
+    normalize_read_file_tool_outcome,
+)
 from jiuwenswarm.common.tool_display import (
     build_tool_display_name,
     extract_call_goal,
     inject_call_goal_schema,
 )
-from jiuwenswarm.common.utils import logger
-from jiuwenswarm.common.todo_snapshot import format_todos_for_frontend
+from jiuwenswarm.common.utils import fix_json_arguments, logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
+_EARLY_CHECKPOINT_EXTRA_KEY = "_jiuwenswarm_early_checkpoint_done"
+_EARLY_CHECKPOINT_ENV = "JIUWENCLAW_EARLY_CHECKPOINT"
+
+
+def _early_checkpoint_disabled_by_env() -> bool:
+    raw = (os.getenv(_EARLY_CHECKPOINT_ENV) or "").strip().lower()
+    return raw in {"0", "false", "no", "off"}
+
+
+# When TOOL_RESULT_DISPLAY_MAX_CHARS is unset, keep the historical emit cap for
+# non-enterprise runs. Enterprise deploy normally sets the env (e.g. 500).
+_DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS = 60000
+_TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT = 100_000
+
+
+def _resolve_tool_result_display_max_chars() -> int:
+    """Resolve streamed tool_result.result max chars.
+
+    - env configured and valid -> use TOOL_RESULT_DISPLAY_MAX_CHARS
+      (0 = no truncation; max 100000)
+    - unset / invalid -> 60000 (legacy default in jiuwenswarm)
+    """
+    raw = os.getenv("TOOL_RESULT_DISPLAY_MAX_CHARS")
+    if raw is None or str(raw).strip() == "":
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    if parsed < 0 or parsed > _TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT:
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    return parsed
+
+
+def _format_tool_result_for_stream(result: Any) -> str:
+    if result is None:
+        return ""
+    text = str(result)
+    limit = _resolve_tool_result_display_max_chars()
+    if limit == 0 or len(text) <= limit:
+        return text
+    return text[:limit]
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -73,19 +123,34 @@ def _parse_tool_call_arguments(tool_call: Any) -> dict[str, Any]:
     return {}
 
 
-def _extract_tool_interrupt(value: Any) -> Any | None:
-    if value is None:
-        return None
-    if value.__class__.__name__ == "ToolInterruptException" and hasattr(value, "request"):
-        return value
+def extract_tool_interrupt(value: Any) -> Any | None:
+    """Find a tool interrupt in wrapped exception chains without looping.
 
-    for attr_name in ("cause", "__cause__"):
-        cause = getattr(value, attr_name, None)
-        if cause is not None and cause is not value:
-            interrupt = _extract_tool_interrupt(cause)
-            if interrupt is not None:
-                return interrupt
+    Class-name matching intentionally supports exceptions crossing duplicated
+    SDK import boundaries, where ``isinstance`` can be false for equivalent
+    ToolInterruptException classes.
+    """
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if (
+            current.__class__.__name__ == "ToolInterruptException"
+            and hasattr(current, "request")
+        ):
+            return current
+        for attr_name in ("cause", "__cause__"):
+            cause = getattr(current, attr_name, None)
+            if cause is not None and cause is not current:
+                pending.append(cause)
     return None
+
+
+# Backward-compatible private alias for existing tests/imports.
+_extract_tool_interrupt = extract_tool_interrupt
 
 
 def _normalize_ask_user_interrupt_value(value_obj: Any, tool_args: dict[str, Any]) -> Any:
@@ -218,6 +283,76 @@ def _infer_tool_result_error(value: Any) -> bool | None:
     return None
 
 
+_SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_adapter_token"
+_SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_metadata_token"
+_SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_workspace_token"
+_SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_interactive_ask_token"
+_SKILL_TURBO_RESUME_ANSWERS_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_resume_answers_token"
+_SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY = "_jiuwenswarm_subagent_parent_session_token"
+
+
+def _reset_skill_turbo_adapter_token(ctx: AgentCallbackContext) -> None:
+    """Restore SkillTurbo adapter ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+            reset_current_skill_turbo_adapter,
+        )
+        reset_current_skill_turbo_adapter(token)
+
+
+def _reset_skill_turbo_metadata_token(ctx: AgentCallbackContext) -> None:
+    """Restore request-metadata ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+            reset_current_request_metadata,
+        )
+        reset_current_request_metadata(token)
+
+
+def _reset_skill_turbo_workspace_token(ctx: AgentCallbackContext) -> None:
+    """Restore effective_request_workspace_dir ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+            reset_effective_request_workspace_dir,
+        )
+        reset_effective_request_workspace_dir(token)
+
+
+def _reset_skill_turbo_interactive_ask_token(ctx: AgentCallbackContext) -> None:
+    """Restore interactive_ask ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+            reset_interactive_ask,
+        )
+        reset_interactive_ask(token)
+
+
+def _reset_skill_turbo_resume_answers_token(ctx: AgentCallbackContext) -> None:
+    extra = getattr(ctx, "extra", None)
+    if not isinstance(extra, dict):
+        return
+    token = extra.pop(_SKILL_TURBO_RESUME_ANSWERS_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+            reset_skill_turbo_resume_answers,
+        )
+        reset_skill_turbo_resume_answers(token)
+
+
+def _reset_subagent_parent_session_token(ctx: AgentCallbackContext) -> None:
+    """Restore subagent parent session ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+            reset_subagent_parent_session,
+        )
+        reset_subagent_parent_session(token)
+
+
 class JiuSwarmStreamEventRail(DeepAgentRail):
     """Emit frontend stream events and enforce pause/abort checkpoints.
 
@@ -255,6 +390,210 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # cross-session leakage in concurrent collect→get→clear sequences).
         self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
         self._symphony_stream_handler = SymphonyToolStreamHandler()
+        # Tenant-scoped checkpointer for early checkpoint (prefer over Factory default).
+        self._checkpointer: Optional[Any] = None
+        self._skill_turbo_adapter: Any | None = None
+        # 当前请求的 metadata（由 adapter 在 _apply_runtime_config_stages 注入）。
+        # metadata 的 ContextVar 在请求任务中设置，但工具在 harness 执行任务里运行，
+        # ContextVar 不跨任务传播，故经由本属性在 before_tool_call（工具执行上下文）转绑。
+        self._skill_turbo_request_metadata: Optional[dict[str, Any]] = None
+        # Per-request openjiuwen CwdState paths (cwd / project_root / workspace).
+        # Seeded by the adapter in the request task; rebound here because the
+        # interaction supervisor / round task does not inherit that ContextVar.
+        self._runtime_cwd: Optional[str] = None
+        self._runtime_project_root: Optional[str] = None
+        self._runtime_workspace: Optional[str] = None
+
+    def set_checkpointer(self, checkpointer: Optional[Any]) -> None:
+        """Bind tenant-scoped checkpointer for early checkpoint saves."""
+        self._checkpointer = checkpointer
+
+    def set_skill_turbo_adapter(self, adapter: Any) -> None:
+        """注入 SkillTurbo adapter，用于 HITL 中断/恢复桥接。"""
+        self._skill_turbo_adapter = adapter
+
+    def set_skill_turbo_request_metadata(self, metadata: Optional[dict]) -> None:
+        """注入当前请求 metadata，供 skill_turbo 工具在工具执行上下文中读取。"""
+        self._skill_turbo_request_metadata = (
+            dict(metadata) if isinstance(metadata, dict) else None
+        )
+
+    def set_runtime_cwd_paths(
+        self,
+        *,
+        cwd: str | None = None,
+        project_root: str | None = None,
+        workspace: str | None = None,
+    ) -> None:
+        """Store per-request CWD layers for rebind in the interaction task.
+
+        ``write_file`` / ``bash`` / ``glob`` / etc. resolve relative paths via
+        ``get_cwd()`` / ``get_workspace()``. Those ContextVars are seeded in the
+        request task but tools run under the DeepAgent supervisor round task,
+        so this rail must re-apply the paths at invoke / tool boundaries.
+        """
+        def _norm(value: str | None) -> str | None:
+            if not isinstance(value, str):
+                return None
+            stripped = value.strip()
+            return stripped or None
+
+        self._runtime_cwd = _norm(cwd)
+        self._runtime_project_root = _norm(project_root) or self._runtime_cwd
+        self._runtime_workspace = _norm(workspace) or self._runtime_cwd
+        if self._runtime_cwd:
+            logger.info(
+                "[StreamEventRail] runtime cwd paths stored cwd=%s project_root=%s "
+                "workspace=%s",
+                self._runtime_cwd,
+                self._runtime_project_root,
+                self._runtime_workspace,
+            )
+
+    def _resolve_runtime_cwd_paths(self) -> tuple[str, str, str] | None:
+        """Resolve cwd / project_root / workspace for the current request."""
+        cwd = self._runtime_cwd
+        project_root = self._runtime_project_root
+        workspace = self._runtime_workspace
+        if not cwd and isinstance(self._skill_turbo_request_metadata, dict):
+            epd = self._skill_turbo_request_metadata.get("effective_project_dir")
+            if isinstance(epd, str) and epd.strip():
+                cwd = project_root = workspace = epd.strip()
+        if not cwd:
+            return None
+        return (
+            cwd,
+            project_root or cwd,
+            workspace or cwd,
+        )
+
+    def _rebind_runtime_cwd(self, *, replace: bool) -> None:
+        """Apply stored runtime paths onto openjiuwen CwdState in this task.
+
+        Args:
+            replace: When True, ``init_cwd`` installs a fresh CwdState (use in
+                ``before_invoke`` before tool ``asyncio.gather`` copies the
+                ContextVar reference). When False, mutate the shared CwdState
+                via ``set_cwd`` / ``set_project_root`` / ``set_workspace`` so
+                gather siblings already holding the reference see the update.
+        """
+        paths = self._resolve_runtime_cwd_paths()
+        if paths is None:
+            return
+        cwd, project_root, workspace = paths
+        try:
+            if replace:
+                from openjiuwen.core.sys_operation.cwd import init_cwd
+
+                init_cwd(cwd, project_root=project_root, workspace=workspace)
+            else:
+                from openjiuwen.core.sys_operation.cwd import (
+                    set_cwd,
+                    set_project_root,
+                    set_workspace,
+                )
+
+                set_cwd(cwd)
+                set_project_root(project_root)
+                set_workspace(workspace)
+            logger.debug(
+                "[StreamEventRail] rebound runtime cwd replace=%s cwd=%s",
+                replace,
+                cwd,
+            )
+        except Exception:
+            logger.warning(
+                "[StreamEventRail] rebind runtime cwd failed replace=%s cwd=%s",
+                replace,
+                cwd,
+                exc_info=True,
+            )
+
+    # Agent-internal subtrees that must stay under the agent workspace even when
+    # a per-request project_dir is bound (todos, context offload, memory, …).
+    _AGENT_INTERNAL_PATH_PREFIXES = frozenset(
+        {
+            "todo",
+            "context",
+            "skills",
+            "memory",
+            "sub_agents",
+            ".agent_history",
+            ".checkpoint",
+            ".workspace",
+        }
+    )
+
+    def _rebase_path_from_agent_workspace(self, file_path: str) -> str | None:
+        """Rebase absolute agent-workspace user paths onto the request project_dir.
+
+        OfficeClaw models often emit absolute paths under ``agent_default`` when
+        the prompt lacked project_dir context. Relative resolution alone cannot
+        fix those; rewrite only non-internal artifact paths.
+        """
+        if not isinstance(file_path, str) or not file_path.strip():
+            return None
+        expanded = os.path.expanduser(file_path.strip())
+        if not (os.path.isabs(expanded) or expanded.startswith("\\\\") or expanded.startswith("//")):
+            return None
+        paths = self._resolve_runtime_cwd_paths()
+        if paths is None:
+            return None
+        runtime_cwd, _, _ = paths
+        try:
+            from jiuwenswarm.common.utils import get_agent_workspace_dir
+        except Exception:
+            return None
+        try:
+            agent_ws = os.path.abspath(str(get_agent_workspace_dir()))
+            abs_path = os.path.abspath(expanded)
+            runtime_cwd_abs = os.path.abspath(runtime_cwd)
+        except (OSError, TypeError, ValueError):
+            return None
+        if os.path.normcase(agent_ws) == os.path.normcase(runtime_cwd_abs):
+            return None
+        try:
+            rel = os.path.relpath(abs_path, agent_ws)
+        except ValueError:
+            return None
+        if rel.startswith("..") or os.path.isabs(rel):
+            return None
+        first = rel.replace("\\", "/").split("/", 1)[0].lower()
+        if first in self._AGENT_INTERNAL_PATH_PREFIXES or first.startswith("."):
+            return None
+        rebased = os.path.abspath(os.path.join(runtime_cwd_abs, rel))
+        if os.path.normcase(rebased) == os.path.normcase(abs_path):
+            return None
+        return rebased
+
+    def _rebase_user_artifact_path_args(self, tool_call: Any, tool_name: str) -> None:
+        """Rewrite write/edit file_path when model hardcodes agent workspace."""
+        args = getattr(tool_call, "arguments", None)
+        if not isinstance(args, dict):
+            return
+        key = "file_path" if "file_path" in args else ("path" if "path" in args else None)
+        if key is None:
+            return
+        original = args.get(key)
+        rebased = self._rebase_path_from_agent_workspace(original) if isinstance(original, str) else None
+        if not rebased:
+            return
+        try:
+            new_args = dict(args)
+            new_args[key] = rebased
+            tool_call.arguments = new_args
+            logger.info(
+                "[StreamEventRail] rebased %s path from agent workspace: %s -> %s",
+                tool_name,
+                original,
+                rebased,
+            )
+        except (AttributeError, TypeError) as exc:
+            logger.warning(
+                "[StreamEventRail] failed to rebase %s path: %s",
+                tool_name,
+                exc,
+            )
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -571,6 +910,11 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         except Exception:
             logger.debug("[StreamEventRail] set_shell_session_id failed", exc_info=True)
 
+        # Install request CwdState before tool gather copies the ContextVar ref.
+        # Without this, relative write_file/bash/glob resolve against the default
+        # agent workspace instead of relay/project_dir.
+        self._rebind_runtime_cwd(replace=True)
+
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         token = ctx.extra.pop(self._SHELL_SID_TOKEN_KEY, None)
         if token is None:
@@ -584,6 +928,28 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         except Exception:
             logger.debug("[StreamEventRail] reset_shell_session_id failed", exc_info=True)
 
+        # SkillTurbo: ensure adapter token is reset after invoke
+        if self._skill_turbo_adapter is not None:
+            try:
+                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                    clear_current_skill_turbo_adapter,
+                )
+                # 兜底清理：token 已丢失或需无条件清空时用 None 覆盖
+                clear_current_skill_turbo_adapter()
+            except Exception:
+                logger.debug(
+                    "[StreamEventRail] clear skill_turbo adapter failed after invoke",
+                    exc_info=True,
+                )
+
+        # SkillTurbo: 确保请求级 ContextVar token 在 invoke 后还原
+        # （与 after_tool_call / on_model_exception 对称，幂等：已 reset 则 pop 得 None 跳过）
+        _reset_skill_turbo_metadata_token(ctx)
+        _reset_skill_turbo_workspace_token(ctx)
+        _reset_skill_turbo_interactive_ask_token(ctx)
+        _reset_skill_turbo_resume_answers_token(ctx)
+        _reset_subagent_parent_session_token(ctx)
+
     # ------------------------------------------------------------------
     # before_model_call: pause check + context fix + compression info
     # ------------------------------------------------------------------
@@ -594,12 +960,75 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
+        # Some task-loop paths reach model call without before_invoke; keep cwd
+        # aligned for any rail/tool that reads get_cwd during the model turn.
+        self._rebind_runtime_cwd(replace=False)
+
         self._inject_tool_call_goal_schema(ctx)
+        self._ensure_tool_call_goal_prompt()
 
         if ctx.context is not None:
             if not self._read_image_multimodal_enabled():
                 strip_image_content_from_model_context(ctx.context)
             await self._fix_incomplete_tool_context(ctx)
+
+        await self._maybe_early_checkpoint(ctx)
+
+    async def _maybe_early_checkpoint(self, ctx: AgentCallbackContext) -> None:
+        """Persist context + agent state once per invoke before the first LLM call.
+
+        Mitigates losing the user message if the process dies before ``post_run``:
+        ``save_contexts`` then ``post_agent_execute`` (not ``post_run``, which closes
+        the stream). Skipped on later ReAct iterations via ``ctx.extra`` flag.
+        """
+        if _early_checkpoint_disabled_by_env():
+            return
+        if ctx.extra.get(_EARLY_CHECKPOINT_EXTRA_KEY):
+            return
+        sid = self._resolve_sid(ctx, ctx.session)
+        cid = (self._conversation_ids.get(sid, "") or "").strip()
+        if cid.startswith("heartbeat"):
+            return
+        session = getattr(ctx, "session", None)
+        agent = getattr(ctx, "agent", None)
+        if session is None or agent is None:
+            return
+        context_engine = getattr(agent, "context_engine", None)
+        if context_engine is None:
+            return
+
+        actual_session = getattr(session, "_parent", session) if session else None
+        if actual_session is None:
+            return
+
+        try:
+            await context_engine.save_contexts(actual_session)
+            inner = getattr(actual_session, "_inner", actual_session)
+            cp = (
+                self._checkpointer
+                if self._checkpointer is not None
+                else CheckpointerFactory.get_checkpointer()
+            )
+            await cp.post_agent_execute(inner)
+            ctx.extra[_EARLY_CHECKPOINT_EXTRA_KEY] = True
+            session_id = ""
+            gs = getattr(actual_session, "get_session_id", None)
+            if callable(gs):
+                session_id = str(gs())
+            else:
+                fn = getattr(actual_session, "session_id", None)
+                if callable(fn):
+                    session_id = str(fn())
+            logger.debug(
+                "[StreamEventRail] early checkpoint saved session_id=%s",
+                session_id or "",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[StreamEventRail] early checkpoint failed: %s",
+                exc,
+                exc_info=True,
+            )
 
     @staticmethod
     def _inject_tool_call_goal_schema(ctx: AgentCallbackContext) -> None:
@@ -653,6 +1082,51 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     exc,
                 )
 
+    def _ensure_tool_call_goal_prompt(self) -> None:
+        builder = getattr(self._deep_agent, "system_prompt_builder", None)
+        if builder is None:
+            return
+        try:
+            from openjiuwen.harness.prompts import PromptSection
+            cn_text = (
+                "# 工具 call_goal\n\n"
+                "每次调用工具时，请填写参数 `call_goal`：用一句简短中文说明"
+                "这次调用要达成的目标（如「调研 openJiuwen 官网信息」「创建三子棋对战团队」），"
+                "不要只写工具名或裸 URL。"
+                "该字段仅用于界面展示，不影响工具实际执行。\n"
+                "若工具参数里已有 `description`：`call_goal` 必须与 `description` 使用同一句，"
+                "禁止再写一句近义复述（避免同一信息输出两遍）。\n"
+                "团队工具也必须填 `call_goal`，且不能用其它字段代替：\n"
+                "- `spawn_member` / `spawn_teammate`：`call_goal` 写「为何创建该成员」；"
+                "`display_name` 仍是成员展示名，两者都要填。\n"
+                "- `send_message`：`call_goal` 写「这次消息的目的」；"
+                "`summary` 可继续填，但不能省略 `call_goal`。\n"
+                "- `build_team`：`call_goal` 写建队目标；`display_name` 仍是团队名。"
+            )
+            en_text = (
+                "# Tool call_goal\n\n"
+                "When calling any tool, set `call_goal`: one short phrase for the goal of this call "
+                "(e.g. \"Research openJiuwen official site\", \"Create tic-tac-toe team\"). "
+                "Do not just repeat the tool name or raw URL. UI only; does not affect execution.\n"
+                "If the tool already has a `description` parameter: set `call_goal` to the exact same "
+                "string — do not invent a second near-duplicate phrase.\n"
+                "Team tools must also set `call_goal`; do not substitute other fields:\n"
+                "- `spawn_member` / `spawn_teammate`: `call_goal` = why spawn this member; "
+                "`display_name` remains the member label — fill both.\n"
+                "- `send_message`: `call_goal` = purpose of this message; "
+                "`summary` may still be set, but `call_goal` is required too.\n"
+                "- `build_team`: `call_goal` = team goal; `display_name` remains the team name."
+            )
+            builder.add_section(
+                PromptSection(
+                    name="tool_call_goal",
+                    content={"cn": cn_text, "en": en_text},
+                    priority=40,
+                )
+            )
+        except (ImportError, AttributeError, TypeError, ValueError) as exc:
+            logger.warning("[StreamEventRail] inject call_goal prompt failed: %s", exc)
+
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         await self._emit_context_usage(
             ctx,
@@ -666,9 +1140,22 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
+        # Mutate shared CwdState (gather children hold the same reference).
+        # Covers write_file/edit_file/bash/glob/grep/command_tools/etc.
+        self._rebind_runtime_cwd(replace=False)
+
         session = ctx.session
         if session is not None and isinstance(ctx.inputs, ToolCallInputs):
             tc = ctx.inputs.tool_call
+            tool_name = str(
+                getattr(ctx.inputs, "tool_name", "") or getattr(tc, "name", "") or ""
+            )
+            if tool_name in ("write_file", "edit_file"):
+                self._rebase_user_artifact_path_args(tc, tool_name)
+            if is_read_file_tool(tool_name):
+                path = extract_path_from_arguments(getattr(tc, "arguments", {}))
+                if path:
+                    handle_read_file_before_tool_call(ctx, path)
             # 主模型随 tool_call 产出的目标文案（call_goal）：取出后剥掉，避免 schema 拒收。
             # 绝不碰 display_name（team 成员名等业务字段）。
             model_display, cleaned_args = extract_call_goal(
@@ -685,8 +1172,18 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                         exc,
                     )
                 ctx.inputs.tool_args = cleaned_args
-            await self._emit_tool_call(session, tc, model_display_name=model_display)
-            await self._emit_tool_update(session, tc, status="in_progress")
+            extra = getattr(ctx, "extra", None)
+            if not isinstance(extra, dict):
+                extra = {}
+            from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
+            skip_resume_tool_call = (
+                tool_name == "skill_acceleration_exec"
+                and extra.get(RESUME_USER_INPUT_KEY) is not None
+            )
+            if not skip_resume_tool_call:
+                await self._emit_tool_call(session, tc, model_display_name=model_display)
+                if not ctx.extra.get("_skip_tool"):
+                    await self._emit_tool_update(session, tc, status="in_progress")
             self._symphony_stream_handler.bind_progress(ctx, session, tc)
             # Track in-flight tool call for cancellation
             tc_id = getattr(tc, "id", "")
@@ -697,11 +1194,89 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     "session_id": sid,
                 }
 
+        # SkillTurbo adapter ContextVar 绑定
+        if self._skill_turbo_adapter is not None:
+            try:
+                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                    set_current_skill_turbo_adapter,
+                )
+                token = set_current_skill_turbo_adapter(self._skill_turbo_adapter)
+                if not hasattr(ctx, 'extra'):
+                    ctx.extra = {}
+                ctx.extra[_SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY] = token
+            except Exception:
+                logger.debug(
+                    "[StreamEventRail] bind skill_turbo adapter token failed",
+                    exc_info=True,
+                )
+
+        # SkillTurbo request metadata ContextVar 转绑：
+        # 请求任务里 set_current_request_metadata 的绑定无法传播到本工具执行上下文，
+        # 这里用 rail 上保存的副本重新绑定，供 skill_turbo 工具读取 session_id 等。
+        if self._skill_turbo_request_metadata is not None:
+            if not hasattr(ctx, 'extra'):
+                ctx.extra = {}
+            from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                set_current_request_metadata,
+            )
+            meta_token = set_current_request_metadata(self._skill_turbo_request_metadata)
+            ctx.extra[_SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY] = meta_token
+
+        # SkillTurbo effective_project_dir / interactive_ask ContextVar 转绑：
+        # 与 metadata 同机制，从 rail 保存的副本中提取并在工具执行上下文重新绑定，
+        # 供 skill_turbo 工具读取 effective_project_dir、rail 判定非引导模式跳过。
+        if isinstance(self._skill_turbo_request_metadata, dict):
+            if not hasattr(ctx, 'extra'):
+                ctx.extra = {}
+            _md = self._skill_turbo_request_metadata
+            from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+                set_effective_request_workspace_dir,
+                set_interactive_ask,
+            )
+            _epd = _md.get("effective_project_dir")
+            if isinstance(_epd, str) and _epd.strip():
+                ws_token = set_effective_request_workspace_dir(_epd.strip())
+                ctx.extra[_SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY] = ws_token
+            _ia = _md.get("interactive_ask")
+            if _ia is not None:
+                ia_token = set_interactive_ask(bool(_ia))
+                ctx.extra[_SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY] = ia_token
+
+        # Parent session for subagent / SkillTurbo event forwarding: tools such as
+        # skill_acceleration_exec read get_subagent_parent_session() and write_stream
+        # internal chunks back to the DeepAgent main session for frontend + history.
+        parent_bind_session = session
+        if parent_bind_session is not None:
+            if not hasattr(ctx, "extra"):
+                ctx.extra = {}
+            from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+                set_subagent_parent_session,
+            )
+
+            actual_session = getattr(parent_bind_session, "_parent", parent_bind_session)
+            parent_token = set_subagent_parent_session(actual_session)
+            ctx.extra[_SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY] = parent_token
+
+        extra = getattr(ctx, "extra", None)
+        if isinstance(extra, dict):
+            from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
+            resume_answers = extra.get(RESUME_USER_INPUT_KEY)
+            if resume_answers is not None:
+                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                    set_skill_turbo_resume_answers,
+                )
+                extra[_SKILL_TURBO_RESUME_ANSWERS_TOKEN_EXTRA_KEY] = (
+                    set_skill_turbo_resume_answers(resume_answers)
+                )
+
     # ------------------------------------------------------------------
     # after_tool_call: emit tool_result + todo.updated
     # ------------------------------------------------------------------
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        _reset_subagent_parent_session_token(ctx)
+        _reset_skill_turbo_resume_answers_token(ctx)
+
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
             return
@@ -713,12 +1288,79 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if tc_id:
             self._inflight_tool_calls.pop(tc_id, None)
 
-        await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
-        self._symphony_stream_handler.request_force_finish(
-            ctx,
-            tc,
-            ctx.inputs.tool_result,
-        )
+        # SkillTurbo HITL: skill_turbo_tools 在 ContextVar 存了 ToolInterruptException，
+        # 此处改写 ctx.inputs.tool_result 为 TIE，使 harness 原生 HITL 机制检测并暂停。
+        if self._skill_turbo_adapter is not None:
+            _reset_skill_turbo_adapter_token(ctx)
+            _reset_skill_turbo_metadata_token(ctx)
+            _reset_skill_turbo_workspace_token(ctx)
+            _reset_skill_turbo_interactive_ask_token(ctx)
+            # Already reset at after_tool_call entry for the session-is-None
+            # early return; this pop is defensive if that path was skipped.
+            _reset_skill_turbo_resume_answers_token(ctx)
+            try:
+                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                    get_skill_turbo_hitl_tic,
+                    set_skill_turbo_hitl_tic,
+                )
+                _skill_turbo_tic = get_skill_turbo_hitl_tic()
+                if _skill_turbo_tic is not None:
+                    set_skill_turbo_hitl_tic(None)
+                    if isinstance(ctx.inputs, ToolCallInputs):
+                        from openjiuwen.core.single_agent.interrupt.exception import (
+                            ToolInterruptException,
+                        )
+                        new_tic = ToolInterruptException(
+                            request=_skill_turbo_tic.request,
+                            tool_call=ctx.inputs.tool_call,
+                        )
+                        ctx.inputs.tool_result = new_tic
+                        ctx.inputs.tool_msg = ToolMessage(
+                            content=self._tool_interrupted_message(
+                                ctx.inputs.tool_name or "skill_acceleration_exec"
+                            ),
+                            tool_call_id=ctx.inputs.tool_call.id,
+                        )
+                    logger.info(
+                        "[StreamEventRail] SkillTurbo HITL: rewrote tool_result to TIE. "
+                        "original_tcid=%s harness_tcid=%s",
+                        _skill_turbo_tic.tool_call.id if _skill_turbo_tic.tool_call else "?",
+                        ctx.inputs.tool_call.id if isinstance(ctx.inputs, ToolCallInputs) else "?",
+                    )
+                    # 主路径必须主动 emit：外层 tool_name 是 skill_acceleration_exec，
+                    # _emit_ask_user_question_if_interrupted 不会命中；也不能只依赖
+                    # harness __interaction__（同 tool_call_id 二次 HITL 时常哑火）。
+                    await self._emit_skill_turbo_ask_user_question(
+                        session,
+                        outer_tool_call=ctx.inputs.tool_call,
+                        skill_turbo_tic=_skill_turbo_tic,
+                    )
+                    return  # 跳过 _emit_tool_result；ask_user 已在上方强制发出
+            except Exception:
+                logger.debug(
+                    "[StreamEventRail] skill_turbo HITL rewrite failed",
+                    exc_info=True,
+                )
+
+        if (
+            str(getattr(tc, "name", "") or "").strip() == "deepresearch_execute"
+            and _extract_tool_interrupt(ctx.inputs.tool_result) is not None
+        ):
+            return
+
+        normalize_read_file_tool_outcome(ctx)
+        # A call suspended for user input (approval card, ask_user) has no
+        # result yet: ToolCallResilienceRail only left a failure placeholder
+        # on ctx.inputs.tool_result.  Emitting it would show the tool as
+        # failed before the user has answered; the resumed call emits the
+        # real result.
+        if _extract_tool_interrupt(ctx.exception) is None:
+            await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
+            self._symphony_stream_handler.request_force_finish(
+                ctx,
+                tc,
+                ctx.inputs.tool_result,
+            )
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,
@@ -730,20 +1372,29 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         tool_name = ctx.inputs.tool_name
         sid = self._resolve_sid(ctx, session)
         conv_id = self._conversation_ids.get(sid, "")
-        if not conv_id:
-            return
         if tool_name in _TODO_TOOL_NAMES:
-            # Emit the main-agent todo snapshot after every todo tool call.  The
-            # todo tool itself is loaded from the main workspace below, so this
-            # stays authoritative even when a resumed/supplement turn uses a
-            # different stream session object.
-            await self._emit_todo_updated(session, conv_id)
+            # Prefer conversation_id (main session key for todo.json). Fall back
+            # to resolved sid so perf/todo.updated still fire if mapping is late.
+            todo_sid = conv_id or sid
+            if todo_sid:
+                # Emit the main-agent todo snapshot after every todo tool call.
+                # The todo tool itself is loaded from the main workspace below, so
+                # this stays authoritative even when a resumed/supplement turn uses
+                # a different stream session object.
+                await self._emit_todo_updated(session, todo_sid)
 
     # ------------------------------------------------------------------
     # on_model_exception: attempt context repair
     # ------------------------------------------------------------------
 
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
+        # Clear context on exception（四个 token 全清，避免异常时 ContextVar 泄漏）
+        _reset_skill_turbo_adapter_token(ctx)
+        _reset_skill_turbo_metadata_token(ctx)
+        _reset_skill_turbo_workspace_token(ctx)
+        _reset_skill_turbo_interactive_ask_token(ctx)
+        _reset_skill_turbo_resume_answers_token(ctx)
+        _reset_subagent_parent_session_token(ctx)
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
             await self._fix_incomplete_tool_context(ctx)
@@ -794,7 +1445,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             tool_result_payload = {
                 "tool_name": getattr(tool_call, "name", "") if tool_call else "",
                 "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
-                "result": str(result)[:60000] if result is not None else "",
+                "result": _format_tool_result_for_stream(result),
             }
             if raw_output is not None:
                 tool_result_payload["raw_output"] = raw_output
@@ -820,6 +1471,61 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("tool_result emit failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_skill_turbo_ask_user_question(
+        session: Session,
+        *,
+        outer_tool_call: Any,
+        skill_turbo_tic: Any,
+    ) -> None:
+        """Emit chat.ask_user_question for SkillTurbo nested ask_user HITL.
+
+        Questions come from the inner ask_user tool_call; request_id is the
+        outer skill_acceleration_exec tool_call.id so OfficeClaw resume keeps
+        matching harness interrupt keys (e.g. call_c2967...).
+        """
+        inner_tc = getattr(skill_turbo_tic, "tool_call", None)
+        payload = _ask_user_question_payload_from_interrupt(
+            inner_tc or outer_tool_call,
+            skill_turbo_tic,
+        )
+        if not payload:
+            logger.debug(
+                "[StreamEventRail] SkillTurbo HITL ask_user payload unavailable"
+            )
+            return
+        # OfficeClaw resume matches harness interrupt keys on the outer
+        # skill_acceleration_exec id. Emitting with the nested ask_user id is
+        # worse than skipping: the UI would show a question that cannot resume.
+        harness_id = str(getattr(outer_tool_call, "id", "") or "").strip()
+        if not harness_id:
+            logger.warning(
+                "[StreamEventRail] SkillTurbo HITL ask_user skipped: "
+                "outer skill_acceleration_exec tool_call.id unavailable "
+                "(would mismatch harness interrupt key); inner_request_id=%s",
+                payload.get("request_id"),
+            )
+            return
+        payload["request_id"] = harness_id
+        try:
+            await session.write_stream(
+                OutputSchema(
+                    type="chat.ask_user_question",
+                    index=0,
+                    payload=payload,
+                )
+            )
+            logger.info(
+                "[StreamEventRail] SkillTurbo HITL emitted chat.ask_user_question "
+                "request_id=%s",
+                payload.get("request_id"),
+            )
+        except Exception:
+            logger.debug(
+                "[StreamEventRail] SkillTurbo HITL ask_user emit failed",
+                exc_info=True,
+            )
 
     @staticmethod
     async def _emit_ask_user_question_if_interrupted(
@@ -884,6 +1590,24 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
             return
 
+        # Parent StreamEventRail only: team-member rails use their own
+        # workspace and must not feed request_summaries.tasks.
+        if not self._member_name:
+            from jiuwenswarm.perf.guard import run_perf_safe
+            from jiuwenswarm.perf.todo_tracker import (
+                sync_main_agent_todos,
+                todos_from_items,
+            )
+
+            run_perf_safe(
+                "StreamEventRail",
+                "perf sync main-agent todos",
+                lambda: sync_main_agent_todos(
+                    todos_from_items(todos_data),
+                    session_id=session_id,
+                ),
+            )
+
         todos = self._format_todos_for_frontend(todos_data)
 
         try:
@@ -936,10 +1660,32 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     ) -> List[dict[str, Any]]:
         """Format todo items for frontend compatibility.
 
-        Delegates to the shared snapshot helper so history restore and live
-        tool-call emits stay on one field mapping.
+        Maps internal TodoStatus values to frontend-compatible status strings.
+        Cancelled items are omitted because the frontend todo panel tracks
+        actionable or completed tasks only.
+
+        Args:
+            todos_data: List of TodoItem objects from TodoListTool.
+
+        Returns:
+            List of formatted todo dictionaries.
         """
-        return format_todos_for_frontend(todos_data)
+        status_mapping = {
+            TodoStatus.PENDING: "pending",
+            TodoStatus.IN_PROGRESS: "in_progress",
+            TodoStatus.COMPLETED: "completed",
+        }
+
+        return [
+            {
+                "id": item.id,
+                "content": item.content,
+                "activeForm": item.activeForm,
+                "status": status_mapping.get(item.status, item.status.value),
+            }
+            for item in todos_data
+            if item.status != TodoStatus.CANCELLED
+        ]
 
     @staticmethod
     async def _emit_context_usage(
@@ -1031,102 +1777,12 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if isinstance(arguments, dict):
             return json.dumps(arguments, ensure_ascii=False)
         if isinstance(arguments, str):
-            _arguments = arguments.strip()
-            if not _arguments:
-                return "{}"
-
-            # First attempt: direct parsing
-            try:
-                json.loads(_arguments)
-                return arguments
-            except json.JSONDecodeError:
-                pass
-
-            # Second attempt: json_repair library
-            try:
-                import json_repair
-                repaired = json_repair.loads(_arguments)
-                if isinstance(repaired, dict):
-                    logger.info(
-                        "[_ensure_json_arguments] stage=json_repair outcome=success."
-                    )
-                    return json.dumps(repaired, ensure_ascii=False)
-                # json_repair returned non-dict (e.g., list, str, int)
-                logger.warning(
-                    "[_ensure_json_arguments] stage=json_repair outcome=failed."
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[_ensure_json_arguments] stage=json_repair, error=%s",
-                    str(exc),
-                )
-
-            # Third attempt: rule-based quote fixing
-            fixed = self._fix_missing_quotes(_arguments)
-            if fixed != _arguments:
-                try:
-                    result = json.loads(fixed)
-                    logger.info(
-                        "[_ensure_json_arguments] stage=rule_fix outcome=success"
-                    )
-                    return json.dumps(result, ensure_ascii=False)
-                except json.JSONDecodeError as exc:
-                    logger.warning(
-                        "[_ensure_json_arguments] stage=rule_fix outcome=failed, error=%s",
-                        str(exc),
-                    )
-            else:
-                # rule_fix made no structural change
-                logger.warning(
-                    "[_ensure_json_arguments] stage=rule_fix outcome=failed"
-                )
-
-            logger.warning(
-                "[_ensure_json_arguments] outcome=failed_all_stages"
-            )
+            repaired = fix_json_arguments(arguments)
+            if isinstance(repaired, dict):
+                return json.dumps(repaired, ensure_ascii=False)
+            logger.warning("Illegal Tool call arguments after repair: %s", arguments)
             return "{}"
         return "{}"
-
-    @staticmethod
-    def _fix_missing_quotes(json_str: str) -> str:
-        """Attempt to fix missing quotes in JSON string.
-
-        Common repair scenarios:
-        1. Missing end quote: {"query": hello} -> {"query": "hello"}
-        2. Missing key quote: {query: "hello"} -> {"query": "hello"}
-        3. Windows path without quotes: {"path": D:/work/file.txt} -> {"path": "D:/work/file.txt"}
-
-        Args:
-            json_str: Possibly malformed JSON string
-
-        Returns:
-            Repaired JSON string, or original if no repair possible
-        """
-        s = json_str.strip()
-
-        # Pattern 1: Fix Windows paths (D:/path, C:/path)
-        s = re.sub(
-            r':\s+([A-Za-z]:/[^\{\[]*?)(?=\s*[,\}\]])',
-            lambda m: f': "{m.group(1)}"',
-            s
-        )
-
-        # Pattern 2: Fix missing end quote for string values (non-path)
-        # Match ": value" where value is unquoted string
-        s = re.sub(
-            r':\s+(?!"|true|false|null|\d+|{|\[|:|"|[A-Za-z]:/)([^\s,\}\[\]""]+?)(?=\s*[,}\]])',
-            lambda m: f': "{m.group(1)}"',
-            s
-        )
-
-        # Pattern 3: Fix missing key quotes ({key: value} -> {"key": value})
-        s = re.sub(
-            r'{\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*:',
-            r'{"\1":',
-            s
-        )
-
-        return s
 
     async def _fix_incomplete_tool_context(self, ctx: AgentCallbackContext) -> None:
         """Repair incomplete tool-call history with minimal, rule-based replay.

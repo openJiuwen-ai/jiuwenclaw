@@ -56,6 +56,7 @@ def message_to_legacy_agent_dict(msg: "Message") -> dict[str, Any]:
         "request_id": msg.id,
         "channel_id": msg.channel_id,
         "session_id": msg.session_id,
+        "user_id": msg.user_id,
         "req_method": rm_val,
         "params": dict(msg.params or {}),
         "is_stream": bool(msg.is_stream),
@@ -103,6 +104,7 @@ def build_fallback_e2a(legacy: dict[str, Any]) -> E2AEnvelope:
         request_id=rid or None,
         channel=str(legacy.get("channel_id") or "") or None,
         session_id=legacy.get("session_id"),
+        user_id=legacy.get("user_id"),
         method=None,
         params={},
         is_stream=bool(legacy.get("is_stream", False)),
@@ -116,11 +118,16 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
         "request_id": msg.id,
         "channel_id": msg.channel_id,
         "session_id": msg.session_id,
+        "user_id": msg.user_id,
         "chat_id": msg.chat_id,
         "params": dict(msg.params or {}),
         "is_stream": bool(msg.is_stream),
         "timestamp": msg.timestamp,
     }
+    if getattr(msg, "bot_id", None):
+        params = d["params"]
+        if isinstance(params, dict) and "bot_id" not in params:
+            params["bot_id"] = msg.bot_id
     if msg.req_method is not None:
         d["method"] = msg.req_method.value
     # 合并 metadata 和独立字段（enable_memory, group_digital_avatar 等）
@@ -156,6 +163,16 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
         d["agent_ref"] = msg.agent_ref
     if getattr(msg, "app_id", None):
         d["app_id"] = msg.app_id
+
+    # 企业版：SessionMap 写入的 service_id / agent_id 提升到信封顶层（供 AgentServer 多租户路由）
+    params = d.get("params")
+    if isinstance(params, dict):
+        svc = str(params.get("service_id") or "").strip()
+        if svc:
+            d["service_id"] = svc
+        if "agent_id" in params:
+            ag = params.get("agent_id")
+            d["agent_id"] = str(ag).strip() if ag is not None and str(ag).strip() else None
 
     return E2AEnvelope.from_dict(d)
 
@@ -204,6 +221,7 @@ def e2a_from_agent_fields(
         "request_id": request_id,
         "channel_id": channel_id,
         "session_id": session_id,
+        "user_id": user_id,
         "params": dict(params or {}),
         "is_stream": is_stream,
         "timestamp": timestamp,
@@ -215,8 +233,6 @@ def e2a_from_agent_fields(
             d["method"] = str(req_method)
     if metadata:
         d["metadata"] = dict(metadata)
-    if user_id:
-        d["user_id"] = user_id
     return E2AEnvelope.from_dict(d)
 
 
@@ -363,6 +379,34 @@ def e2a_response_from_agent_chunk(
             metadata=_chunk_metadata,
         )
 
+    # Tool / HITL: stream transport closes but invocation is not a successful
+    # terminal (e.g. permission or ask_user_question waiting for chat.user_answer).
+    # Emit in_progress chunk with is_final=False so clients do not treat as "task done".
+    # 镜像 vendor(clowder-ai) 的 e2a_response_from_agent_chunk 同款特判。
+    if chunk.is_complete and isinstance(pl, dict) and pl.get("awaiting_user_input") is True:
+        return E2AResponse(
+            protocol_version=E2A_PROTOCOL_VERSION,
+            response_id=response_id,
+            request_id=chunk.request_id,
+            sequence=sequence,
+            is_final=False,
+            status=E2A_RESPONSE_STATUS_IN_PROGRESS,
+            response_kind=E2A_RESPONSE_KIND_E2A_CHUNK,
+            timestamp=ts,
+            provenance=prov,
+            body={
+                "delta_kind": "custom",
+                "delta": pl,
+                "event_type": "chat.invocation_paused",
+                "awaiting_user_input": True,
+            },
+            channel=chunk.channel_id or None,
+            identity_origin=IdentityOrigin.AGENT,
+            is_stream=is_stream,
+            agent_ref=_chunk_agent_ref,
+            metadata=_chunk_metadata,
+        )
+
     if chunk.is_complete:
         return E2AResponse(
             protocol_version=E2A_PROTOCOL_VERSION,
@@ -397,6 +441,18 @@ def e2a_response_from_agent_chunk(
             _val = pl.get(_key)
             if _val is not None:
                 body_chunk[_key] = _val
+        # 并发节点（skill_turbo p6_1_page_worker 等）用它标识 source，前端据其路由到
+        # subagent 行。chat.delta 走白名单构造，须显式透传（chat.reasoning 走 delta: pl
+        # 整包所以不受影响）。
+        _stream_source_id = pl.get("stream_source_id")
+        if _stream_source_id is not None:
+            body_chunk["stream_source_id"] = _stream_source_id
+            # relayclaw e2aToLegacyFrame 对 chat.delta 仅从 body.role 提取
+            # stream_source_id（delta 是字符串时 Object.assign 不执行），故
+            # 同时设 role 作兼容回退。role 仅 team 模式用于 leader/teammate 归属，
+            # 非 team 不影响 teamExpertId 解析（teamCtx 为 None）。
+            if pl.get("role") is None:
+                body_chunk["role"] = _stream_source_id
     else:
         body_chunk = {
             "delta_kind": "custom",
@@ -472,6 +528,13 @@ def e2a_response_to_agent_response(e2a: E2AResponse) -> "AgentResponse":
     )
 
 
+def _is_hitl_stream_terminal_body(body: dict[str, Any]) -> bool:
+    """HITL 暂停帧：Agent 以 is_final=False 下发，但 Gateway 流式会话应在此结束。"""
+    if body.get("awaiting_user_input") is True:
+        return True
+    return body.get("event_type") == "chat.invocation_paused"
+
+
 def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
     """
     ``E2AResponse`` → ``AgentResponseChunk``（与 ``e2a_response_from_agent_chunk`` 对仗）。
@@ -529,6 +592,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
         et = body.get("event_type")
         delta = body.get("delta")
         sct_in = body.get("source_chunk_type")
+        hitl_terminal = _is_hitl_stream_terminal_body(body)
 
         if et == "chat.delta" or dk in ("text", "reasoning"):
             sct = "llm_reasoning" if dk == "reasoning" else sct_in
@@ -547,7 +611,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
                 request_id=rid,
                 channel_id=ch,
                 payload=pl,
-                is_complete=False,
+                is_complete=hitl_terminal,
             )
 
         if isinstance(delta, dict):
@@ -564,7 +628,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             request_id=rid,
             channel_id=ch,
             payload=pl2,
-            is_complete=False,
+            is_complete=hitl_terminal,
         )
 
     if kind == E2A_RESPONSE_KIND_CRON:

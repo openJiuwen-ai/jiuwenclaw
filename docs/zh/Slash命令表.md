@@ -31,15 +31,14 @@
 | `/evolve` | Skill 自演进入口：触发 Skill 演进（见下文） |
 | `/evolve_list` | 查看某个 Skill 的演进经验库（见下文） |
 | `/evolve_simplify` | 整理、合并某个 Skill 的演进经验（见下文） |
-| `/evolve_rebuild` | 基于归档与演进记录重建 `SKILL.md`（见下文） |
+| `/evolve_rebuild` | 采纳演进经验并生成 Skill 新版本（见下文） |
+| `/evolve_rollback` | 回滚 Skill 到归档 SemVer 版本（见下文） |
 | `/hooks` | 浏览已配置的 hooks（只读，见下文） |
 | `/simplify` | 代码精简审查：检查复用性、质量、效率并自动修复（仅 `code.*`，见下文） |
 | `/sandbox` | 设置沙箱模式（见下文） |
 | `/agents` | 管理 Agent 配置（list, get, create, update, enable, disable, delete，见下文） |
 | `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`/`issue`，见下文） |
 | `/btw` | 旁路快速提问，不中断主对话（见下文） |
-| `/swarmflow` | SwarmFlow 开关、状态查询与 token 预算（`on` / `off` / `--budget`，见 [TUI SwarmFlow 指南](TUI使用SwarmFlow指南.md)） |
-| `/swarmflows` | 全屏 SwarmFlow 运行树查看器（别名 `/swarmworkflows`，同上） |
 
 > 说明：本页的 `/mode` 与 `/switch` 以 Gateway 受控通道行为为主。TUI 本地命令另支持 `/mode plan`、`/mode team.normal`，详见 [TUI 使用指南](TUI使用指南.md)。
 
@@ -57,7 +56,7 @@
 | `/skills` | 技能管理（列表、安装、卸载、市场源、ClawHub、SkillNet） |
 | `/model` | 模型查看、新增、编辑、删除、切换（见下文） |
 | `/mcp` | MCP 服务管理（见下文） |
-| `/diff` | 查看当前会话按轮次改动（见下文） |
+| `/diff` | 交互式改动回顾：按轮次 diff + 未提交工作树改动（见下文） |
 | `/compact` | 压缩当前上下文（见下文） |
 | `/init` | 项目初始化（见下文） |
 | `/branch` | 从当前对话点创建分支会话（见下文） |
@@ -71,19 +70,6 @@
 
 ## 重点命令说明
 
-### `/swarmflow` 与 `/swarmflows`（TUI 本地）
-
-SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使用SwarmFlow指南.md)**。
-
-| 命令 | 说明 |
-|------|------|
-| `/swarmflow` | 查询状态，如 `swarmflow: on · mode: team · budget: unbounded` |
-| `/swarmflow on` | 写入 `enable_swarmflow=true`；非 team 时一并切到 team；可选 `--budget <tokens\|none>` |
-| `/swarmflow off` | 写入 `enable_swarmflow=false`；不自动离开 team |
-| `/swarmflows` | 打开全屏运行树（工作流 → 阶段 → 节点）；别名 `/swarmworkflows` |
-
-配置变更后当前 session **不热更新**，提示 `Use /new to apply.`；主界面 **`h`** 用于 pending 人工回复（非本命令）。
-
 ### `/workspace`（TUI 可信目录管理）
 
 管理 AI 可访问的目录范围，用于文件读取、编辑、执行等操作。
@@ -94,15 +80,14 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 |---|---|
 | `/workspace` 或 `/workspace get` | 查看系统默认工作空间与当前可信目录列表 |
 | `/workspace add [path]` | 添加可信目录（默认为当前目录，路径不存在时提示错误） |
-| `/workspace set <path>` | 切换当前项目作用域，并把该路径加入对应项目的可信目录 |
+| `/workspace set <path>` | 重置可信目录为单个路径（已有可信目录时需确认） |
 | `/workspace remove <path>` | 移除指定可信目录 |
 | `/workspace clear` | 清空所有可信目录（仅使用默认工作空间） |
 
 #### 概念说明
 
-- **系统默认工作空间（workspace）**：固定路径 `~/.jiuwenswarm/agent/workspace`，始终可用
+- **系统默认工作空间（workspace）**：固定路径 `~/.jiuwenswarm/agent/jiuwenswarm_workspace`，始终可用
 - **可信目录（trusted_dirs）**：用户授权的可访问目录，由 TUI 管理，传递给后端 Agent
-- **项目作用域（project scope）**：用于选择对应的可信目录集合，并填充请求中的 `project_dir` / `cwd`
 
 #### 控制逻辑
 
@@ -110,9 +95,9 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
    - 选择「信任」：将当前目录添加为可信目录
    - 选择「不信任」：仅使用默认工作空间
 
-2. **按项目持久化**：可信目录以规范化后的项目路径为键，保存到 `~/.jiuwenswarm-tui/config.json`。`/workspace set` 对项目作用域的切换仅在当前 TUI 进程中有效；重启后重新以启动目录作为项目作用域。
+2. **会话级管理**：可信目录会持久化到./jiuwenswarm-tui/config.json文件里
 
-3. **后端传递**：TUI 通过请求参数传递 `trusted_dirs`、`project_dir` 和 `cwd`，Agent 据此限制文件操作范围并解析项目上下文
+3. **后端传递**：TUI 通过请求参数 `trusted_dirs` 传递可信目录列表，Agent 据此限制文件操作范围
 
 4. **路径限制**：Agent 收到可信目录后，文件操作需限制在可信目录范围内；超出范围需向用户确认
 
@@ -205,7 +190,11 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 ### `/diff`（交互式改动回顾）
 
 - 用法：`/diff`（无子命令）。
-- 数据来源：TUI 通过 `command.diff` 请求 Agent 侧 diff 服务，按当前 `session_id` 返回 `turns`（每轮改动集合）及 `gitDiff`（未提交的工作树改动）。
+- 适用模式：全部模式。
+- 数据来源：TUI 通过 `command.diff` 请求 AgentServer diff 服务（60s 超时），处理器从请求元数据解析当前 `session_id` 与 `project_dir`，然后**并行**通过 worker 线程获取两组数据：
+  - `turns` — 基于 `.agent_history` 文件操作日志计算的每轮改动集合；
+  - `gitDiff` — 基于 `git diff HEAD` 获取的未提交工作树改动。
+- 响应格式：`{ type: "list", turns: [...], gitDiff?: {...} }`；出错时返回 `{ ok: false, error: "..." }`。
 - 展示方式：打开 **交互式 Diff 查看器**（全屏覆盖模式）：
   - **列表视图**：展示所有变更文件（含工作树 `working` 和按轮次 `Turn N`），显示相对路径、来源、增删行数；
   - **详情视图**：选中文件后 `Enter` 进入，展示完整的 hunk diff，支持上下滚动。
@@ -221,14 +210,13 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
   - `Home` / `g` — 跳至文件开头；
   - `End` / `Shift+g` — 跳至文件末尾；
   - `←` / `Esc` — 返回列表视图。
-- 作用范围：同时覆盖工作树（`git diff HEAD`）和会话按轮次改动轨迹，不替代 `git diff` 的完整版本控制视角。
 - 回退行为：当 TUI 不提供 `enterDiffViewer` 能力时，回退为内联展示（仅显示文件名、来源和增删行数）。
 
 #### 按轮次 diff 数据来源
 
 按轮次 diff 基于 `.agent_history/file_ops_jiuwenswarm*.json` 日志计算，而非 git。服务从多个位置读取并合并文件操作日志：
 
-1. Agent 工作区（`~/.jiuwenswarm/agent/workspace/.agent_history/`）
+1. Agent 工作区（`~/.jiuwenswarm/agent/jiuwenswarm_workspace/.agent_history/`）
 2. 用户工作区 `.agent_history/`
 3. 项目目录 `.agent_history/`（含 session 专属文件和全局文件）
 
@@ -358,7 +346,8 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 | `/evolve <skill_name> [user_query]` | 为指定 Skill 触发演进。`agent.plan` 会扫描当前会话中的工具失败、用户纠错等信号；Team 模式必须提供 `user_query`。 |
 | `/evolve_list <skill_name> [--sort score]` | 按分数查看某个 Skill 的演进经验，展示记录数、平均分、使用/反馈统计、section 与内容预览。 |
 | `/evolve_simplify <skill_name> [user_intent]` | 生成经验库整理方案，用于合并重复经验、拆分过长经验或清理低价值经验；尾随文本会作为整理意图传入后端。 |
-| `/evolve_rebuild <skill_name> [user_intent]` | 生成重建 `SKILL.md` 的 follow-up prompt，并继续作为一次普通 Agent / Team 任务执行。 |
+| `/evolve_rebuild <skill_name> [user_intent]` | 与控制面 `skills.evolution.rebuild` 同源：采纳 live 演进经验并生成新版本（prepare → 改写 → finalize）。|
+| `/evolve_rollback <skill_name> [version\|latest]` | 回滚到成对 SemVer 归档；省略 version 时列出可用版本。 |
 
 #### 审批流程
 
@@ -373,7 +362,8 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 /evolve pptx 修复导出失败时的错误处理
 /evolve_list pptx --sort score
 /evolve_simplify pptx 合并重复的导出失败经验
-/evolve_rebuild pptx 强化 Troubleshooting 和 Examples
+/evolve_rebuild pptx 加强 Troubleshooting 和 Examples
+/evolve_rollback pptx latest
 ```
 
 ### `/branch`（分支会话）
@@ -385,7 +375,7 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
   - 当前会话正在处理中（`session is busy`）时拒绝执行；
   - 当前会话无对话记录时拒绝执行。
 - 行为：
-  1. 向后端发送 `session.fork` RPC，只携带 `source_session_id` 与可选标题；AgentServer 分配目标 `session_id` 并在响应中返回。
+  1. 生成新 `session_id`，向后端发送 `session.fork` RPC（携带 `source_session_id`、`target_session_id` 与可选标题）。
   2. TUI 自动切换到新分支会话，清空当前 transcript 并恢复分支的历史记录。
   3. 提示用户已在新分支，并告知可用 `/resume <原会话ID>` 返回原会话。
 - 示例：
@@ -396,7 +386,7 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 
 - 用法：`/rewind [turn_number]`。
 - 别名：`/checkpoint`。
-- 功能：围绕指定轮次回退或压缩当前会话，支持仅回退对话、仅恢复文件、两者同时恢复，或摘要部分历史。
+- 功能：将当前会话回退到指定轮次之前，支持仅回退对话、仅恢复文件、或两者同时恢复。
 - 约束：
   - 当前会话正在处理中（`session is busy`）时拒绝执行；
   - 无对话轮次时拒绝执行。
@@ -406,17 +396,12 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
      - **Restore conversation and code** — 截断对话并恢复文件到该轮次之前的状态；
      - **Restore conversation only** — 仅截断对话，文件保持不变；
      - **Restore code only** — 仅恢复文件，对话保持不变（仅当目标轮次有文件变更时显示）；
-     - **Summarize from here** — 保留更早的消息，把所选轮次及之后的内容替换为压缩摘要；
-     - **Summarize up to here** — 摘要所选轮次之前的消息，保留所选轮次及之后的内容；
      - **Cancel** — 取消操作。
   3. 根据选择调用对应后端 RPC：
      - `both` → `session.rewind_and_restore`
      - `conversation` → `session.rewind`
      - `code` → `session.restore_files`
-     - `summarize` → `command.rewind_compact`，`direction=from`
-     - `summarize_up_to` → `command.rewind_compact`，`direction=up_to`
 - 回退后：TUI 清空 transcript 并重新加载历史；若回退内容包含用户输入，会自动填入输入框。
-- 仅恢复文件时，如果没有需要还原的文件，会明确显示 `No file changes to restore`；若部分文件恢复失败，会逐项列出失败文件并保持这些文件不变，不再统一报告为成功。
 - 局限：回退不影响通过 bash 命令或手动编辑的文件。
 - 示例：
   - `/rewind` — 交互式选择轮次并确认恢复方式
@@ -437,11 +422,6 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 | `/memory toggle` | 打开页签控制台并选中 toggle 页签 |
 | `/memory toggle <key>` | 直接切换指定记忆系统开关 |
 | `/memory open` | 打开页签控制台并选中 open 页签 |
-
-- 编辑安全边界：
-  - 目标文件必须已经存在并位于允许的记忆目录中；`/memory edit` 不负责新建文件。
-  - 运行时 auto/coding memory 文件为只读，禁止手动编辑。
-  - 项目目录或其祖先目录中的 `JIUWENSWARM.md` / `JIUWENSWARM.local.md` 只有在文件已存在且通过路径校验时才能打开。
 
 - 页签控制台：无参数或仅指定子命令（不带操作对象）时打开，包含 edit / status / toggle / open 四个页签。
   - ←/→ 切换页签；
@@ -505,9 +485,9 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 | `name` | 是 | 任务名称 |
 | `cron_expr` | 是 | Cron 表达式，支持两种格式：5 字段（分 时 日 月 周）或 7 字段 Quartz（秒 分 时 日 月 周 年）。5 字段会自动转换为 7 字段（补 second=0, year=*）。示例：每天 9 点 = `0 9 * * *`（5 字段）或 `0 0 9 * * ? *`（7 字段） |
 | `description` | 是 | 任务描述，即 Agent 执行时收到的输入指令 |
-| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>`。`targets=tui` 时结果会广播到所有已连接的 TUI 窗口，详见 [定时任务 — 推送到 TUI](定时任务.md#推送到-tui-频道) |
+| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>`。`targets=tui` 时结果会广播到所有已连接的 TUI 窗口，详见 [定时任务 — 推送到 TUI](定时任务.md#5-推送到-tui-频道) |
 | `timezone` | 否 | IANA 时区，默认 `Asia/Shanghai` |
-| `mode` | 否 | 执行模式，默认 `agent.fast`。可选：`agent`、`agent.fast`、`agent.plan`、`plan`、`team`、`team.plan`、`code.team`。`team` 系列走多 Agent 流式执行，详见 [定时任务 — Team 模式](定时任务.md#team-模式与-swarmflow多智能体定时任务) |
+| `mode` | 否 | 执行模式，默认 `agent.fast`。可选：`agent`、`agent.fast`、`agent.plan`、`plan`、`team`、`team.plan`、`code.team`。`team` 系列走多 Agent 流式执行，详见 [定时任务 — Team 模式](定时任务.md#6-team-模式与-swarmflow多智能体定时任务) |
 | `timeout_seconds` | 否 | 单次执行超时（秒），范围 60～259200。未设置时普通模式默认 600，Team 模式默认 1200 |
 | `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 0 |
 | `delete_after_run` | 否 | 执行一次后自动删除，默认 false |
@@ -555,7 +535,7 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 - **市场源（Marketplace source）**：托管可用技能的远程 Git 仓库，每个源包含名称、URL 和启用/禁用状态。
 - **规格标识（Spec）**：安装时使用的标识格式，支持以下几种：`<技能名>@builtin`（内置）、`<slug>@clawhub`（ClawHub）、`<技能名>@<市场源名>`（Git 市场源）；裸名不带 `@` 时系统会自动检测是否为内置技能。
 - **本地安装（Local install）**：通过 `/skills install <path>` 将本地目录（需包含 `SKILL.md`）或远程归档 URL 安装为自定义技能；路径/URL 会自动识别并走本地导入流程。
-- **安装位置（Install location）**：技能安装后的存储目录（`~/.jiuwenswarm/agent/workspace/skills/`）。
+- **安装位置（Install location）**：技能安装后的存储目录（`~/.jiuwenswarm/agent/jiuwenswarm_workspace/skills/`）。
 - **来源标签（Source tag）**：列表中每项技能标注来源，`[builtin]` 表示内置、`[local]` 表示本地导入、`[clawhub]` 表示从 ClawHub 安装、`[project]` 或市场源名表示其他来源。
 
 #### 列表分组展示
@@ -729,9 +709,9 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 - **平台限制**：`/sandbox` 仅支持 Linux 平台（jiuwenbox 依赖 bwrap / Landlock / Linux namespace 等内核能力）。 在 Windows / macOS 上运行的 agent-server 收到任何 `/sandbox` 子命令都会返回 `SANDBOX_BAD_REQUEST` 错误；如果 TUI 在 Mac/Windows 上、agent-server 在 Linux 主机上，是支持的（看 agent-server 所在主机的平台）。
 - **写入策略语义**：`allow` / `deny` 控制的是沙箱内的**写访问**（rw/ro），不是 Unix 八进制权限；enforcement 由 bwrap bind mount + `--remount-ro` 实现，Landlock 为纵深防御（`landlock.compatibility=disabled` 时主要依赖 bwrap）。
 - **嵌套路径**：支持「父 allow + 子 deny」（例如 allow `/tmp`、deny `/tmp/secret`）；不支持「子 allow + 父 deny」（父 deny 会覆盖子 allow），服务端会拒绝此类配置。
-- **生效写入策略**：状态面板里的 `files.allow_write` / `files.deny_write` 是 auto-managed 与 user-configured 合并后的视图，每条路径显示 `(rw)` 或 `(ro)`。auto-managed 条目由服务端自动注入（intrinsic 文件 `AGENT.md`、`HEARTBEAT.md`、`IDENTITY.md`、`SOUL.md`、`USER.md`，`memory/daily_memory/` 目录，以及按 mode 决定的 `project_dir` 与 `config/config.yaml`），不能通过 `/sandbox files remove` 移除。
+- **生效写入策略**：状态面板里的 `files.allow_write` / `files.deny_write` 是 auto-managed 与 user-configured 合并后的视图，每条路径显示 `(rw)` 或 `(ro)`。
 - **preserve_file_sharing_mode**：由 jiuwenswarm 配置决定，不通过 `/sandbox` 切换。仅支持 `mount`：intrinsic 文件与 `project_dir` 通过 bind mount 注入沙箱，`project_dir/config/config.yaml` 会显式加进 `deny_write`；yaml 里写入其它值会被服务端拒绝。
-- **excluded_commands**：按 simple-command 叶子做 fnmatch（可匹配完整叶子文本或命令名）。全命中则整条本地；全未命中则整条沙箱；混合命中时由本地 bash 编排，远端段走 `jiuwenbox sandbox exec`（需宿主 CLI）。
+- **excluded_commands**：按完整命令字符串匹配（不是只看 `argv[0]`），命中后该次调用穿透到本地，相当于把对应命令的副作用授权给本地环境。
 - **add / remove 的去重与冲突**：`exclude add` 在已存在同名 pattern 时报错；`exclude remove` 在不存在该 pattern 时报错。`files allow|deny` 在同一 bucket 已有同 path 时报错，在对侧 bucket（allow vs deny）已登记同 path 时也报错，需要先 `files remove` 再 add；`files remove` 在用户配置里找不到该 path 时报错。
 - **enable / disable**：会触发 agent 重建，响应里会列出 `rebuilt_modes`（典型 `agent.*` / `code.*`）和 jiuwenbox 端点。
 
@@ -1021,22 +1001,18 @@ hooks:
 
 | 命令 | 说明 |
 |---|---|
-| `/statusline` | 启动内置 setup 子 agent，创建、检查、修改或删除状态栏 |
-| `/statusline get` | 始终只查看当前状态栏配置，不触发 setup agent |
+| `/statusline` 或 `/statusline get` | 查看当前状态栏配置 |
 | `/statusline set <shell-command>` | 设置状态栏命令（命令输出将显示在 TUI 底部） |
-| `/statusline padding <number>` | 设置左右 padding；参数必须为非负整数，且需要先配置状态栏命令 |
 | `/statusline clear` | 清除状态栏配置（底部栏将不再显示） |
 | `/statusline help` | 显示使用指南（含写法模式、实用示例、字段列表） |
 | `/statusline json` | 显示当前实际的 JSON 数据值（方便调试 jq 表达式） |
-| `/statusline <prompt>` | 根据自然语言描述让 Agent 自动生成并配置状态栏脚本 |
 
 #### 概念说明
 
 - **状态栏（StatusLine）**：TUI 底部的文字区域，实时显示用户自定义的动态信息，支持多行输出。配置了自定义状态栏后，内置状态栏会自动隐藏，避免信息冗余。
 - **Shell 命令**：用户配置的 shell 命令每 2 秒自动执行一次，其 stdout 输出渲染为状态栏文字。
-- **Agent 自动生成模式**：无论是否附带自然语言描述，`/statusline` 都会交给内置 `statusline-setup` 子 agent。未配置时，它会引导创建并自动应用配置；已配置时，它会检查当前设置，并可说明、修改或删除状态栏。若只想查看原始配置，请使用 `/statusline get`。
-- **JSON 输入**：每次执行时，系统通过 stdin 将当前会话信息以 JSON 格式传入命令，可用 `jq`、PowerShell `ConvertFrom-Json` 或其他可用工具解析。
-- **Shell 选择**：Windows 优先使用已安装的 Git Bash，否则回退到 PowerShell；macOS/Linux 使用 `sh`。setup 子 agent 会生成适合当前平台的持久化脚本，Windows 不强制依赖 `jq`。
+- **JSON 输入**：每次执行时，系统将当前会话信息以 JSON 格式传入命令，用户可在命令中用 `jq` 等工具解析。POSIX（Linux/macOS）通过 stdin 管道传入；Windows 上因 MSYS2 管道继承限制，系统自动将 JSON 写入临时文件，并将命令中的 `$(cat)` 替换为 `$(cat "文件路径")`，用户无需修改命令格式。
+- **前置依赖**：需要 `jq`（https://stedolan.github.io/jq/）用于解析 JSON；Windows 用户还需将 Git Bash 的 `usr\bin` 目录加入系统 PATH（如 `E:\Git\usr\bin`）。
 
 #### JSON 输入字段
 
@@ -1117,8 +1093,7 @@ hooks:
 
 #### 更多示例
 
-- `/statusline` — 启动内置 setup 子 agent，创建、检查、修改或删除状态栏
-- `/statusline get` — 查看当前配置，不触发 setup agent
+- `/statusline` — 查看当前配置
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — 只显示模型名
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — 显示是否在处理和模型名
 - `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — 显示上下文窗口占用百分比
@@ -1137,7 +1112,7 @@ hooks:
 - **故障静默**：命令执行失败时不显示错误，保持上一次成功输出或隐藏状态栏。
 - **持久化**：配置保存在 `~/.jiuwenswarm-tui/config.json` 的 `statusLine` 字段，重启 TUI 后自动恢复。
 - **别名**：`/sl`
-- **Windows 适配**：运行器通过 stdin 传入 JSON，已安装 Git Bash 时使用 Git Bash，否则回退到 PowerShell；未安装 Git Bash 或 `jq` 时，建议使用持久化 PowerShell 脚本。
+- **Windows 适配**：系统自动将 `$(cat)` 替换为读取临时文件，用户命令格式不变；需确保 Git Bash 的 `usr\bin` 在系统 PATH 中。
 
 #### 配置文件结构
 
@@ -1396,9 +1371,3 @@ Pipeline 执行过程中，扩展包**默认自动激活生效**，无需用户�
 ## 待开发
 
 （暂无）
----
-
-## 返回导航
-
-- [返回文档首页](../README.md)
-- [返回项目首页](../../README_CN.md)

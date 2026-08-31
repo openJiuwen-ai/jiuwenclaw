@@ -352,7 +352,8 @@ export async function describeLocalFiles(paths: string[]): Promise<LocalFilePick
 }
 
 export async function getClipboardFilePicks(): Promise<LocalFilePick[]> {
-  if (!isDesktopLocalFilePicker()) return [];
+  // Prefer the dedicated clipboard bridge; fall back once api is present even if
+  // select_local_files was not yet enumerated on the proxy object.
   const api = window.pywebview?.api?.get_clipboard_files;
   if (typeof api !== 'function') return [];
   try {

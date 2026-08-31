@@ -137,17 +137,11 @@ jiuwenswarm_ensure_func_code() {
 
 jiuwenswarm_detect_session_dir() {
     local master_host="$1"
-    local fatal="${2:-true}"
 
     DEPLOY_VARS["YR_SESSION_DIR"]=$(exec_on_host "${master_host}" "readlink /tmp/yr_sessions/latest 2>/dev/null || echo ''" | tr -d '\r')
 
     if [ -z "${DEPLOY_VARS["YR_SESSION_DIR"]}" ]; then
-        if [ "${fatal}" = "true" ]; then
-            error "Could not detect yuanrong session dir on ${master_host}. Please ensure yuanrong is deployed and started (run yuanrong_deploy.sh up first)."
-        else
-            warning "Could not detect yuanrong session dir on ${master_host}. yuanrong may not be running."
-            return 1
-        fi
+        error "Could not detect yuanrong session dir on ${master_host}. Please ensure yuanrong is deployed and started (run yuanrong_deploy.sh up first)."
     fi
 
     info "Detected yuanrong session dir on ${master_host}: ${DEPLOY_VARS["YR_SESSION_DIR"]}"
@@ -261,10 +255,12 @@ deploy_jiuwenswarm() {
 }
 
 uninstall_jiuwenswarm() {
-    local hosts_str="${DEPLOY_VARS["CLUSTER_HOSTS"]}"
+    local hosts_str="${DEPLOY_VARS["CLUSTER_HOSTS"]:-}"
 
     if [ -z "${hosts_str}" ]; then
-        error "CLUSTER_HOSTS is not set. Cannot determine master host."
+        hosts_str=$(get_local_ip)
+        DEPLOY_VARS["CLUSTER_HOSTS"]="${hosts_str}"
+        warning "CLUSTER_HOSTS not set, using local IP: ${hosts_str}"
     fi
 
     IFS=',' read -ra JIUWENSWARM_HOST_LIST <<< "${hosts_str}"
@@ -278,34 +274,28 @@ uninstall_jiuwenswarm() {
     info "Unregistering jiuwenswarm function on yr master (${master_host})..."
 
     # 复用 up 流程的检测逻辑，获取 session dir 和 meta port
-    # down 流程中 yuanrong 可能未运行，使用非致命模式：检测失败则跳过注销
-    if ! jiuwenswarm_detect_session_dir "${master_host}" "false"; then
-        warning "yuanrong is not running on ${master_host}, skipping function unregistration."
+    jiuwenswarm_detect_session_dir "${master_host}"
+    jiuwenswarm_get_meta_port "${master_host}"
+
+    local delete_url="http://${master_host}:${META_PORT}/serverless/v1/functions/${func_svc_name}"
+    info "curl -H \"Content-type: application/json\" -X DELETE ${delete_url}"
+
+    local res
+    res=$(curl -s -H "Content-type: application/json" -X DELETE "${delete_url}" || true)
+    info "Function unregistration result: ${res}"
+
+    # DELETE 成功返回 {}（无 code 字段）或 code=0；其他视为失败
+    local code
+    code=$(echo "${res}" | jq -r '.code // "none"' 2>/dev/null || echo "error")
+    if [[ "${code}" == "0" || "${code}" == "none" ]]; then
+        success "Serverless function unregistered successfully: ${func_svc_name}"
     else
-        jiuwenswarm_get_meta_port "${master_host}"
-
-        local delete_url="http://${master_host}:${META_PORT}/serverless/v1/functions/${func_svc_name}"
-        info "curl -H \"Content-type: application/json\" -X DELETE ${delete_url}"
-
-        local res
-        res=$(curl -s -H "Content-type: application/json" -X DELETE "${delete_url}" || true)
-        info "Function unregistration result: ${res}"
-
-        # DELETE 成功返回 {}（无 code 字段）或 code=0；其他视为失败
-        local code
-        code=$(echo "${res}" | jq -r '.code // "none"' 2>/dev/null || echo "error")
-        if [[ "${code}" == "0" || "${code}" == "none" ]]; then
-            success "Serverless function unregistered successfully: ${func_svc_name}"
-        else
-            warning "Failed to unregister serverless function (may not exist): ${res}"
-        fi
+        warning "Failed to unregister serverless function (may not exist): ${res}"
     fi
 
-    # 注意: down 仅停止服务并注销 function，不卸载 pip 包。
-    # pip 包卸载由 agentos uninstall 流程（module.sh 的 jiuwenswarm_uninstall 钩子）负责。
     echo ""
     echo "=========================================="
-    success "jiuwenswarm down completed!"
+    success "jiuwenswarm uninstall completed!"
     echo "=========================================="
     echo "  YR Master: ${master_host}"
     echo "  Function: ${func_svc_name}"

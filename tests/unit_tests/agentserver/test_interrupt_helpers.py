@@ -1,8 +1,10 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    build_permission_rail,
     convert_interactions_to_ask_user_question,
 )
 
@@ -124,7 +126,13 @@ def _scene_hook_input(normalized_tool_name: str, user_input):
     )
 
 
-def _permission_scene_hook():
+def _permission_scene_hook(monkeypatch: pytest.MonkeyPatch):
+    # build_permission_rail reads the process-effective permissions config, not
+    # the unused ``config`` argument — enable it explicitly for these unit tests.
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.permissions.config_loader.get_effective_permissions_config",
+        lambda **_kwargs: {"enabled": True, "tools": {}, "rules": []},
+    )
     rail = build_permission_rail({"permissions": {"enabled": True}})
     assert rail is not None
     hook = rail._host.permission_scene_hook
@@ -132,7 +140,7 @@ def _permission_scene_hook():
     return hook
 
 
-def test_scene_hook_approves_ask_user_on_resume():
+def test_scene_hook_approves_ask_user_on_resume(monkeypatch: pytest.MonkeyPatch):
     """Regression for issue #1976.
 
     The permission rail intercepts every tool. On resume it would otherwise
@@ -140,7 +148,7 @@ def test_scene_hook_approves_ask_user_on_resume():
     interrupt, making the option card re-pop forever. The scene hook must
     approve ask_user so its answer reaches the model.
     """
-    hook = _permission_scene_hook()
+    hook = _permission_scene_hook(monkeypatch)
     resume_answer = {"answers": {"__free_text__": "数据处理"}, "original_request": "..."}
 
     outcome = asyncio.run(hook(_scene_hook_input("ask_user", resume_answer)))
@@ -148,18 +156,61 @@ def test_scene_hook_approves_ask_user_on_resume():
     assert outcome == ("approve",)
 
 
-def test_scene_hook_approves_ask_user_on_first_pass():
-    hook = _permission_scene_hook()
+def test_scene_hook_approves_ask_user_on_first_pass(monkeypatch: pytest.MonkeyPatch):
+    hook = _permission_scene_hook(monkeypatch)
 
     outcome = asyncio.run(hook(_scene_hook_input("ask_user", None)))
 
     assert outcome == ("approve",)
 
 
-def test_scene_hook_leaves_other_tools_to_engine():
+def test_scene_hook_approves_deepresearch_execute_workflow_answer(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A DeepResearch card answer belongs to its execution rail, not permissions."""
+    hook = _permission_scene_hook(monkeypatch)
+    resume_answer = {
+        "status": "answered",
+        "answers": [
+            {
+                "question": "您希望这份报告是精简版还是专业版？",
+                "selected_options": ["精简版"],
+            }
+        ],
+    }
+
+    outcome = asyncio.run(
+        hook(_scene_hook_input("deepresearch_execute", resume_answer))
+    )
+
+    assert outcome == ("approve",)
+
+
+@pytest.mark.parametrize(
+    "user_input",
+    [
+        None,
+        {"approved": True, "auto_confirm": False, "feedback": ""},
+    ],
+)
+def test_scene_hook_keeps_deepresearch_execute_permission_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    user_input,
+):
+    """Initial execution and permission decisions still use the permission engine."""
+    hook = _permission_scene_hook(monkeypatch)
+
+    outcome = asyncio.run(
+        hook(_scene_hook_input("deepresearch_execute", user_input))
+    )
+
+    assert outcome is None
+
+
+def test_scene_hook_leaves_other_tools_to_engine(monkeypatch: pytest.MonkeyPatch):
     """Non-interactive tools must still fall through to the tiered engine
     (returns ``None``) when no owner-scope context is set."""
-    hook = _permission_scene_hook()
+    hook = _permission_scene_hook(monkeypatch)
 
     outcome = asyncio.run(hook(_scene_hook_input("bash", None)))
 
@@ -205,3 +256,39 @@ def test_build_multi_questions_appends_other_for_valid_options():
     )
 
     assert [opt["label"] for opt in questions[0]["options"]] == ["A", "B", "Other"]
+
+
+def test_build_multi_questions_preserves_question_preview():
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+        _build_multi_questions,
+    )
+
+    questions = _build_multi_questions(
+        [
+            {
+                "question": "Review the outline?",
+                "header": "Outline",
+                "options": [
+                    {"label": "Confirm", "description": "Continue"},
+                    {"label": "Edit", "description": "Revise"},
+                ],
+                "preview": {
+                    "title": "Research outline",
+                    "text": "# Outline\n\n## P1: Scope",
+                    "format": "markdown",
+                    "editable": True,
+                    "outline_ref": "outline-1",
+                    "meta": {"currentRound": 1},
+                },
+            }
+        ]
+    )
+
+    assert questions[0]["preview"] == {
+        "title": "Research outline",
+        "text": "# Outline\n\n## P1: Scope",
+        "format": "markdown",
+        "editable": True,
+        "outline_ref": "outline-1",
+        "meta": {"currentRound": 1},
+    }

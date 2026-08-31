@@ -15,19 +15,61 @@ from __future__ import annotations
 import json
 import os
 import logging
-import shutil
-from pathlib import Path
-from typing import Any, List, Union
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
+from typing import Any, List, Optional, Union
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 
 logger = logging.getLogger(__name__)
 
+# Per-request send_file routing context (session_id / request_id / channel_id / metadata).
+# send_file_to_user 工具按全局名注册成单例时，并发请求会互相覆盖实例字段。
+# 此 ContextVar 按 async 上下文隔离；工具执行时优先据此解析当前请求路由，
+# 避免「最后一次注册的 session/request」串扰（对齐 test/jiuwenclaw）。
+_send_file_request_context: ContextVar[Optional[dict[str, Any]]] = ContextVar(
+    "send_file_request_context", default=None
+)
+
 # Session-level dedup for send_file_to_user. Compression may drop prior tool
 # results, so the agent can re-call the same path; IM request-level dedup alone
 # cannot stop cross-turn duplicates.
 _SENT_FILE_PATHS_BY_SESSION: dict[str, set[str]] = {}
+
+
+def set_send_file_request_context(
+    *,
+    request_id: str | None = None,
+    session_id: str | None = None,
+    channel_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Token:
+    """Bind send_file routing context for the current async request.
+
+    返回 Token 供调用方在请求结束时 ``reset_send_file_request_context`` 恢复。
+    仅记录非空字段；调用方应在请求入口设置、finally 中重置。
+    """
+    ctx: dict[str, Any] = {}
+    if request_id is not None:
+        ctx["request_id"] = request_id
+    if session_id is not None:
+        ctx["session_id"] = session_id
+    if channel_id is not None:
+        ctx["channel_id"] = channel_id
+    if metadata is not None:
+        ctx["metadata"] = dict(metadata)
+    return _send_file_request_context.set(ctx)
+
+
+def get_send_file_request_context() -> dict[str, Any] | None:
+    """Return send_file routing context for the current request, or None if unset."""
+    return _send_file_request_context.get()
+
+
+def reset_send_file_request_context(token: Token) -> None:
+    """Restore the previous send_file routing context binding."""
+    _send_file_request_context.reset(token)
 
 
 def _normalize_sent_file_path(path: str) -> str:
@@ -65,6 +107,16 @@ def clear_sent_files_for_session(session_id: str | None) -> None:
     _SENT_FILE_PATHS_BY_SESSION.pop(sid, None)
 
 
+@dataclass
+class SendFileRoute:
+    """Per-request routing context for send_file (resolved from contextvars)."""
+
+    request_id: str
+    session_id: str
+    channel_id: str
+    metadata: dict[str, Any] | None
+
+
 class SendFileToolkit:
     """Toolkit for sending files to users."""
 
@@ -75,8 +127,6 @@ class SendFileToolkit:
         channel_id: str,
         *,
         metadata: dict[str, Any] | None = None,
-        project_dir: str | None = None,
-        team_workspace_root: str | None = None,
     ) -> None:
         """Initialize SendFileToolkit.
 
@@ -90,10 +140,6 @@ class SendFileToolkit:
         self.session_id = session_id
         self.channel_id = channel_id
         self._request_metadata = dict(metadata) if metadata else None
-        self._project_dir = str(Path(project_dir).resolve()) if project_dir else None
-        self._team_workspace_root = (
-            str(Path(team_workspace_root).resolve()) if team_workspace_root else None
-        )
         logger.debug(
             "[SendFileToolkit] 初始化 request_id=%s session_id=%s channel_id=%s has_metadata=%s",
             request_id,
@@ -109,8 +155,6 @@ class SendFileToolkit:
         session_id: str,
         channel_id: str,
         metadata: dict[str, Any] | None = None,
-        project_dir: str | None = None,
-        team_workspace_root: str | None = None,
     ) -> None:
         """Update per-request runtime context without recreating the toolkit/tool.
         """
@@ -118,10 +162,6 @@ class SendFileToolkit:
         self.session_id = session_id
         self.channel_id = channel_id
         self._request_metadata = dict(metadata) if metadata else None
-        self._project_dir = str(Path(project_dir).resolve()) if project_dir else None
-        self._team_workspace_root = (
-            str(Path(team_workspace_root).resolve()) if team_workspace_root else None
-        )
         logger.debug(
             "[SendFileToolkit] update_runtime_context request_id=%s session_id=%s channel_id=%s has_metadata=%s",
             request_id,
@@ -130,93 +170,42 @@ class SendFileToolkit:
             bool(self._request_metadata),
         )
 
-    def _resolve_project_dir(self) -> str | None:
-        """Resolve the project root, including persistent session fallback."""
-        if self._project_dir:
-            return self._project_dir
-        if not self.session_id:
-            return None
-        try:
-            from jiuwenswarm.server.runtime.session.session_metadata import (
-                get_session_metadata,
-            )
+    def _resolve_route(self) -> SendFileRoute:
+        """执行时解析路由信息。
 
-            metadata = get_session_metadata(
-                self.session_id,
-                cache_bust=True,
-                enable_writeback=False,
-            )
-            project_dir = str((metadata or {}).get("project_dir") or "").strip()
-            if project_dir:
-                self._project_dir = str(Path(project_dir).resolve())
-        except Exception as exc:
-            logger.warning(
-                "[SendFileToolkit] failed to resolve project_dir from session metadata: %s",
-                exc,
-            )
-        return self._project_dir
+        优先从请求级 ``send_file_request_context`` ContextVar 取（按 async 上下文
+        隔离，并发安全），缺失时回退到实例字段。
 
-    @staticmethod
-    def _infer_team_workspace_root(source: Path) -> Path | None:
-        """Recognize an OpenJiuwen ``.agent_teams/*/team-workspace`` path."""
-        for candidate in (source, *source.parents):
-            if (
-                candidate.name == "team-workspace"
-                and candidate.parent.parent.name == ".agent_teams"
-            ):
-                return candidate
-        return None
-
-    def _materialize_team_deliverable(self, file_path: str) -> str:
-        """Copy a team-workspace deliverable into the active user project.
-
-        The team workspace is an internal collaboration area.  Files selected
-        for user delivery are project artifacts, so preserve their path
-        relative to the team workspace under the current project before
-        building download metadata.  Files outside the team workspace keep
-        their original path.
+        不再读取 ``_CRON_TOOL_CHANNEL_ID``：该 ContextVar 默认值是 ``web``，
+        请求结束后 reset 仍会返回默认 web，导致过期 request 的 chat.file 被推到
+        错误 channel（对齐 test/jiuwenclaw 的隔离语义）。
         """
-        project_dir = self._resolve_project_dir()
-        if not project_dir:
-            return file_path
-
-        source = Path(file_path).resolve()
-        configured_team_root = (
-            Path(self._team_workspace_root) if self._team_workspace_root else None
+        ctx = get_send_file_request_context() or {}
+        request_id = ctx.get("request_id") or self.request_id
+        session_id = ctx.get("session_id") or self.session_id
+        channel_id = ctx.get("channel_id") or self.channel_id
+        # ctx 已绑定时以其为权威：缺失即视为本请求无 metadata，避免回退到被并发
+        # 请求覆盖的脏实例字段；仅在无 ContextVar 时回退实例 metadata。
+        if ctx:
+            metadata = ctx.get("metadata")
+            if (
+                ctx.get("session_id")
+                and ctx.get("session_id") != self.session_id
+            ):
+                logger.info(
+                    "[SendFileToolkit] route 由 ContextVar 修正 "
+                    "instance_session=%s ctx_session=%s",
+                    self.session_id,
+                    ctx.get("session_id"),
+                )
+        else:
+            metadata = self._request_metadata
+        return SendFileRoute(
+            request_id=request_id,
+            session_id=session_id,
+            channel_id=channel_id,
+            metadata=dict(metadata) if metadata else None,
         )
-        team_root = configured_team_root or self._infer_team_workspace_root(source)
-        if team_root is None:
-            return file_path
-        project_root = Path(project_dir)
-        try:
-            relative_path = source.relative_to(team_root)
-        except ValueError:
-            return file_path
-
-        destination = (project_root / relative_path).resolve()
-        try:
-            destination.relative_to(project_root)
-        except ValueError as exc:
-            raise OSError(
-                f"project delivery path escapes the project root: {destination}"
-            ) from exc
-        if destination == source:
-            return str(source)
-
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            if destination.is_file() and source.read_bytes() == destination.read_bytes():
-                return str(destination)
-            raise FileExistsError(
-                f"refusing to overwrite an existing project file: {destination}"
-            )
-        shutil.copy2(source, destination)
-        logger.info(
-            "[SendFileToolkit] materialized team deliverable source=%s destination=%s",
-            source,
-            destination,
-        )
-        return str(destination)
 
     @staticmethod
     def _normalize_target_channels(target_channels: Any) -> list[str]:
@@ -264,11 +253,12 @@ class SendFileToolkit:
         Returns:
             Success message or error description.
         """
+        route = self._resolve_route()
         target_channel_list = SendFileToolkit._normalize_target_channels(target_channels)
         if target_channel_list:
             logger.info(
                 "[SendFileToolkit] send_file target_channels=%s session_id=%s",
-                target_channel_list, self.session_id,
+                target_channel_list, route.session_id,
             )
         if isinstance(abs_file_path_list, str):
             try:
@@ -297,35 +287,17 @@ class SendFileToolkit:
                 missing_files.append(fp)
                 logger.warning("[SendFileToolkit] 文件不存在: %s", fp)
 
-        source_files = list(valid_files)
-        materialized_files: list[str] = []
-        for fp in valid_files:
-            try:
-                materialized_files.append(self._materialize_team_deliverable(fp))
-            except OSError as exc:
-                logger.error(
-                    "[SendFileToolkit] 团队交付文件复制到项目目录失败: %s: %s",
-                    fp,
-                    exc,
-                )
-                return f"发送文件失败：无法将团队交付文件写入当前项目目录\n  - {fp}: {exc}"
-        valid_files = materialized_files
-        copied_to_project = any(
-            Path(source).resolve() != Path(delivered).resolve()
-            for source, delivered in zip(source_files, valid_files)
-        )
-
         if not valid_files:
             msg_parts = ["发送文件失败：所有文件均不存在"]
             for mf in missing_files:
                 msg_parts.append(f"  - {mf}")
             return "\n".join(msg_parts)
 
-        valid_files, skipped_files = _partition_sent_files(self.session_id, valid_files)
+        valid_files, skipped_files = _partition_sent_files(route.session_id, valid_files)
         if not valid_files:
             logger.info(
                 "[SendFileToolkit] skip duplicate send session_id=%s skipped=%s missing=%s",
-                self.session_id,
+                route.session_id,
                 skipped_files,
                 missing_files,
             )
@@ -344,7 +316,7 @@ class SendFileToolkit:
 
         logger.info(
             "[SendFileToolkit] send_file 开始 session_id=%s 有效文件=%d 缺失=%d 跳过重复=%d",
-            self.session_id,
+            route.session_id,
             len(valid_files),
             len(missing_files),
             len(skipped_files),
@@ -364,7 +336,7 @@ class SendFileToolkit:
                 for file_path in valid_files:
                     base_name = os.path.basename(file_path)
                     download_info = build_file_download_info(
-                        file_path, base_name, self.session_id
+                        file_path, base_name, route.session_id
                     )
                     files_payload.append({
                         "path": file_path,
@@ -373,6 +345,7 @@ class SendFileToolkit:
                         "mime_type": download_info["mime_type"],
                         "download_url": download_info["download_url"],
                         "download_token": download_info["download_token"],
+                        "expires_at": download_info.get("expires_at"),
                     })
             except Exception as download_err:
                 logger.warning(
@@ -391,21 +364,11 @@ class SendFileToolkit:
             from jiuwenswarm.server.runtime.session.session_history import (
                 append_history_record,
             )
-            append_history_record(
-                session_id=self.session_id,
-                request_id=self.request_id,
-                channel_id=self.channel_id,
-                role="assistant",
-                event_type="chat.file",
-                content="",
-                timestamp=time.time(),
-                extra={"files": files_payload},
-            )
 
             msg = {
-                "request_id": self.request_id,
-                "channel_id": self.channel_id,
-                "session_id": self.session_id,
+                "request_id": route.request_id,
+                "channel_id": route.channel_id,
+                "session_id": route.session_id,
                 "payload": {
                     "event_type": "chat.file",
                     "files": files_payload,
@@ -416,19 +379,48 @@ class SendFileToolkit:
             # send_file_targets 由 Gateway 的 dispatch 层解析为 fan_out_targets，
             # 使文件可跨 channel 投递到 team 会话已接入的 channel（如飞书）。
             merged_meta: dict[str, Any] = {}
-            if self._request_metadata:
-                merged_meta.update(self._request_metadata)
+            if route.metadata:
+                merged_meta.update(route.metadata)
             if target_channel_list:
                 merged_meta["send_file_targets"] = list(target_channel_list)
             if merged_meta:
                 msg["metadata"] = merged_meta
-            await server.send_push(msg)
-            _mark_files_sent(self.session_id, valid_files)
+
+            delivered = await server.send_push(msg)
+            # send_push 在无订阅者时只打 warning 并返回 0；不得再伪装成「成功发送」。
+            if not isinstance(delivered, int) or delivered <= 0:
+                logger.warning(
+                    "[SendFileToolkit] send_push 未送达 session_id=%s request_id=%s delivered=%s",
+                    route.session_id,
+                    route.request_id,
+                    delivered,
+                )
+                return (
+                    "发送文件失败：推送通道无活跃订阅者或投递失败"
+                    f"（delivered={delivered!r}）。请检查 Gateway/Relay WebSocket 连接后重试。"
+                )
+
+            # 文件已通过 send_push 送达：去重标记必须先于历史记录写入，
+            # 历史 DB/IO 失败不得伪装成「提交文件失败」导致 agent 重试重复投递。
+            _mark_files_sent(route.session_id, valid_files)
+            try:
+                append_history_record(
+                    session_id=route.session_id,
+                    request_id=route.request_id,
+                    channel_id=route.channel_id,
+                    role="assistant",
+                    event_type="chat.file",
+                    content="",
+                    timestamp=time.time(),
+                    extra={"files": files_payload},
+                )
+            except Exception:
+                logger.warning(
+                    "[SendFileToolkit] append_history_record 失败 session_id=%s",
+                    route.session_id,
+                    exc_info=True,
+                )
             result_parts = [f"成功发送 {len(valid_files)} 个文件"]
-            if copied_to_project:
-                result_parts.append("最终交付文件已位于当前项目目录：")
-                for delivered_path in valid_files:
-                    result_parts.append(f"  - {delivered_path}")
             if skipped_files:
                 result_parts.append("以下文件已在本次会话发送过，已跳过：")
                 for sf in skipped_files:
@@ -441,29 +433,31 @@ class SendFileToolkit:
         except Exception as e:
             logger.exception(
                 "[SendFileToolkit] send_file 失败 session_id=%s error=%s",
-                self.session_id,
+                route.session_id,
                 str(e),
             )
             return f"提交文件失败: {str(e)}"
 
-    def get_tools(self) -> List[Tool]:
+    def get_tools(self, *, tool_id: str | None = None) -> List[Tool]:
         """Return tools for registration in Runner.
 
-        Returns:
-            List of tools for sending files.
+        Args:
+            tool_id: Optional stable id for the tool card before owner qualification.
         """
-
         def make_tool(
             name: str,
             description: str,
             input_params: dict,
             func,
         ) -> Tool:
-            card = ToolCard(
-                name=name,
-                description=description,
-                input_params=input_params,
-            )
+            card_kwargs: dict[str, Any] = {
+                "name": name,
+                "description": description,
+                "input_params": input_params,
+            }
+            if tool_id:
+                card_kwargs["id"] = tool_id
+            card = ToolCard(**card_kwargs)
             return LocalFunction(card=card, func=func)
 
         return [
@@ -472,8 +466,8 @@ class SendFileToolkit:
                 description=(
                     "【文件发送工具】当需要将生成的文件、导出的数据、创建的文档等发送给用户时使用此工具。"
                     "使用场景包括：用户请求导出/下载文件、任务完成后需要交付文件、生成报告/文档后发送给用户。"
-                    "参数格式：abs_file_path_list 接受单个路径字符串或路径数组，路径必须是绝对路径。"
-                    "示例：'/tmp/report.pdf' 或 ['/tmp/file1.csv', '/tmp/file2.xlsx']。"
+                    "参数格式：abs_file_path_list 接受路径数组，路径必须是绝对路径。"
+                    "示例：['/tmp/file1.csv', '/tmp/file2.xlsx']。"
                     "target_channels 可选：指定文件投递目标，每项可以是 channel id（如 'web'）"
                     "或 team 人类席位名（如 'human-player-1'）。"
                     "省略时默认投给最近发起请求的人类成员（按 session 记录的发起者）；web 发起或无人类成员时投 web。"
@@ -484,11 +478,12 @@ class SendFileToolkit:
                     "type": "object",
                     "properties": {
                         "abs_file_path_list": {
-                            "type": "string",
+                            "type": "array",
+                            "items": {"type": "string"},
                             "description": (
-                                "要发送的文件绝对路径。"
-                                "可以是单个路径字符串如 '/path/to/file.pdf'，"
-                                "或 JSON 数组字符串如 '[\"/path/file1.csv\", \"/path/file2.xlsx\"]'。"
+                                "要发送的文件绝对路径。\n"
+                                "必须是数组格式，例如 ['/path/file1.csv', '/path/file2.xlsx']。\n"
+                                "建议使用 get_effective_request_output_dir() 获取的 output_dir 作为文件保存位置。\n"
                                 "支持任意文件类型（pdf、xlsx、docx、png、zip等）。"
                             ),
                         },

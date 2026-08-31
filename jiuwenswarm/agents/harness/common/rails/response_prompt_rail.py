@@ -14,8 +14,8 @@ from jiuwenswarm.common.context_keys import JIUWENSWARM_CHANNEL_CONTEXT_KEY
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
     LocalSectionName,
     PromptPriority,
-    _input_prompt,
-    _output_prompt,
+    _final_visible_reply_prompt,
+    _response_prompt,
 )
 from jiuwenswarm.server.runtime.a2ui.prompt_instructions import (
     is_a2ui_browser_workflow_request,
@@ -25,10 +25,11 @@ logger = logging.getLogger(__name__)
 
 SKIP_A2UI_PROMPT_CONTEXT_KEY = "skip_a2ui"
 A2UI_BROWSER_WORKFLOW_CONTEXT_KEY = "a2ui_browser_workflow"
+_RESPONSE_SECTION_NAMES = ("response", LocalSectionName.FINAL_VISIBLE_REPLY)
 
 
 class ResponsePromptRail(DeepAgentRail):
-    """Inject stable input and output instruction sections."""
+    """Inject response format and final-reply rules as independent prompt sections."""
 
     priority = 5
 
@@ -42,9 +43,8 @@ class ResponsePromptRail(DeepAgentRail):
 
     def uninit(self, agent) -> None:
         if self.system_prompt_builder is not None:
-            self.system_prompt_builder.remove_section("response")
-            self.system_prompt_builder.remove_section("input")
-            self.system_prompt_builder.remove_section("output")
+            for name in _RESPONSE_SECTION_NAMES:
+                self.system_prompt_builder.remove_section(name)
             self.system_prompt_builder.remove_section(LocalSectionName.A2UI)
         self.system_prompt_builder = None
         self._runtime_channel = None
@@ -76,9 +76,8 @@ class ResponsePromptRail(DeepAgentRail):
             return
 
         language = self.system_prompt_builder.language or "cn"
-        self.system_prompt_builder.remove_section("response")
-        self.system_prompt_builder.add_section(_input_prompt(language))
-        self.system_prompt_builder.add_section(_output_prompt(language))
+        self.system_prompt_builder.add_section(_response_prompt(language))
+        self.system_prompt_builder.add_section(_final_visible_reply_prompt(language))
         self._sync_a2ui_prompt_section(
             self._resolve_channel(ctx),
             skip_a2ui=self._should_skip_a2ui(ctx),

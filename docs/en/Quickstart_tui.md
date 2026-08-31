@@ -60,14 +60,14 @@ Suitable for users who manage their own Python environment. Follow these steps:
 
 ### `--session`: resume or create a session by id
 
-`--session <id>` makes the TUI connect with a specific session id. After the connection is established, the TUI registers that id with AgentServer. This compatibility path deliberately bypasses the prewarm pool because the runtime identity was supplied externally.
+`--session <id>` makes the TUI connect with a specific session id and, after the connection is established, take one of two paths depending on whether the id already exists:
 
 | id state | Startup behavior | Backend RPC |
 |------|------|------|
-| **exists** | AgentServer preserves the persisted project/mode binding, runs the switch lifecycle, and the TUI replays history | explicit-ID `session.create` + `history.get` + `session.rename` (title) |
-| **does not exist** | AgentServer validates the id, resolves the TUI project under a per-id lock, writes `metadata.json`, and starts with empty history without claiming a warm slot | explicit-ID `session.create` + `history.get` (empty) |
+| **exists** | Resume the session: triggers `session.switch` lifecycle (KV cache affinity / Team state migration), aligns the frontend mode to the backend-resolved mode, then fetches history and replays it in the UI | `session.switch` + `history.get` + `session.rename` (title) |
+| **does not exist** | Create and persist the session: triggers `session.create` (creates the directory + `metadata.json` + lifecycle init); the UI starts as an empty session. Once persisted it can be resumed next time | `session.create` + `history.get` (empty) |
 
-The explicit-ID form of `session.create` is TUI-only and idempotent. AgentServer logs that this compatibility request bypasses prewarming. It is released by `app-state.ts` `initializeBootSession` after `connection.ack` and runs once on reconnect; normal startup, `/new`, and `/clear` omit `session_id` so AgentServer allocates a new one.
+Detection is **try-create-then-switch**: first attempt `session.create(<id>)`; on `ALREADY_EXISTS`, fall back to `session.switch` to resume. Driven by `app-state.ts` `resumeOrCreateBootSession` after `connection.ack`, runs once (idempotent on reconnect).
 
 **Examples**:
 
@@ -80,7 +80,7 @@ jiuwenswarm-tui --session tui_myproj_001
 jiuwenswarm-tui --session tui_myproj_001
 ```
 
-**Relationship with runtime `/resume`**: `--session` is the **startup-time** external-id compatibility entry and uses explicit-ID `session.create`; `/resume` is the **runtime** command for switching to an already persisted session and uses `session.switch`.
+**Relationship with runtime `/resume`**: `--session` is the **startup-time** resume/create entry; `/resume` is the **runtime** command to switch to another session after the TUI is already running. Both invoke the same backend RPCs (`session.switch`/`session.create`), but `--session` fires on the handshake first frame and `/resume` fires on user input. No conflict in normal sequencing.
 
 **id naming constraints** (validated by the frontend before startup; invalid ids exit immediately without entering the TUI):
 

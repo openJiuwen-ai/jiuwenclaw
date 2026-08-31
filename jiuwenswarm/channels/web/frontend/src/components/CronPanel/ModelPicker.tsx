@@ -58,7 +58,7 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
   };
 
   return (
-    <div ref={rootRef} className={clsx('chat-mode-select', open && 'chat-mode-select--open')} data-testid="cron-model-picker-root">
+    <div ref={rootRef} className={clsx('chat-mode-select', open && 'chat-mode-select--open')}>
       <button
         type="button"
         className="chat-mode-select__trigger"
@@ -67,7 +67,7 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
         title={t('chat.modelSelector.tooltip')}
         aria-haspopup="menu"
         aria-expanded={open}
-        data-testid="cron-model-picker-trigger"
+        data-testid="cron-model-picker"
       >
         {selected ? (
           <span className="chat-mode-select__value">
@@ -97,16 +97,15 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
           ref={menuPortalRef}
           className="chat-mode-select__menu model-select__menu"
           role="menu"
-          data-testid="cron-model-menu"
           style={menuDirection === 'up'
             ? { position: 'fixed', bottom: window.innerHeight - menuAnchor.top + 10, left: menuAnchor.left, zIndex: 9999 }
             : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
           }
         >
           {availableModels.length === 0 ? (
-            <div className="px-2 py-2 text-xs text-text-muted" data-testid="cron-model-empty">{t('cron.modelPicker.empty')}</div>
+            <div className="px-2 py-2 text-xs text-text-muted">{t('cron.modelPicker.empty')}</div>
           ) : (
-            <div className="model-select__section-header" data-testid="cron-model-menu-section-header">{t('cron.modelPicker.configured')}</div>
+            <div className="model-select__section-header">{t('cron.modelPicker.configured')}</div>
           )}
           {availableModels.map((m) => {
             const key = m.model_name;
@@ -122,7 +121,6 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
                 )}
                 role="menuitemradio"
                 aria-checked={active}
-                data-testid={`cron-model-option-${key}`}
               >
                 <span className="chat-mode-select__option-main">
                   <span className="chat-mode-select__icon" aria-hidden="true">

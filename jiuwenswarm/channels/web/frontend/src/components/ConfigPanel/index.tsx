@@ -1,19 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import {
-  AlertCircle,
-  CheckCircle2,
-  Copy,
-  ExternalLink,
-  FileSearch,
-  KeyRound,
-  Loader2,
-  LogOut,
-  Music2,
-  RefreshCw,
-  SquareTerminal,
-  Workflow,
-} from "lucide-react";
+import { AlertCircle, CheckCircle2, Copy, ExternalLink, KeyRound, Loader2, LogOut, Music2, RefreshCw, Workflow } from "lucide-react";
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore } from '../../stores';
 import type { ModelEntry } from '../../types';
@@ -23,6 +10,7 @@ import {
   modelEntriesEqual,
   patchModelSnapshot,
   preserveConfiguredModelName,
+  resolveConfiguredModelIndex,
   shouldContinueOpenAIAccountLoginPoll,
   syncAgentsWithModelChanges,
   type ModelIdentity,
@@ -150,6 +138,7 @@ function MultiSelectDropdown({
 }
 
 interface AgentModel {
+  ref: string;
   provider: string;
   api_base: string;
   api_key: string;
@@ -181,20 +170,12 @@ interface TeamMember {
   agent_key: string;
 }
 
-type ExternalCliAgentKind = "claude" | "codex";
-
-interface ExternalCliAgentPayload {
-  cli_agent: ExternalCliAgentKind;
-  cli_path?: string;
-}
-
 interface TeamEntry {
   team_name: string;
   lifecycle: string;
   teammate_mode: string;
   spawn_mode: string;
   enable_permissions: boolean;
-  external_cli_agents: ExternalCliAgentPayload[];
   leader: Leader;
   teammate: Teammate;
   predefined_members: TeamMember[];
@@ -204,9 +185,8 @@ interface ConfigPanelProps {
   config: Record<string, unknown> | null;
   isConnected: boolean;
   sessionId?: string;
-  onSaveConfig: (updates: Record<string, string>) => Promise<ConfigSaveResult | void>;
-  onSaveAllConfig?: (payload: ConfigSaveAllPayload) => Promise<ConfigSaveResult | void>;
-  onGetCodexDependencyInstallStatus?: () => Promise<CodexDependencyInstallStatus>;
+  onSaveConfig: (updates: Record<string, string>) => Promise<void>;
+  onSaveAllConfig?: (payload: ConfigSaveAllPayload) => Promise<void>;
   /** 校验默认模型配置（api_base / api_key / model / model_provider）能否完成一次最小 LLM 请求 */
   onValidateModel?: (fields: {
     api_base: string;
@@ -223,7 +203,7 @@ interface ConfigPanelProps {
   /** 多Agent和Teams操作回调 */
   onAgentsTeamsSave?: (payload: {
     agents: Record<string, {
-      model: { provider: string; api_base: string; api_key: string; model: string };
+      model: { ref: string };
       skills: string[];
     }>;
     team: Array<{
@@ -232,7 +212,6 @@ interface ConfigPanelProps {
       teammate_mode: string;
       spawn_mode: string;
       enable_permissions: boolean;
-      external_cli_agents?: ExternalCliAgentPayload[];
       leader: { member_name: string; display_name: string; persona: string; agent_key: string };
       teammate: { agent_key: string };
       predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
@@ -240,13 +219,11 @@ interface ConfigPanelProps {
   }, showRestartModal?: boolean) => Promise<void>;
   /** Reports unsaved drafts so cross-window config updates cannot silently overwrite them. */
   onHasChangesChange?: (hasChanges: boolean) => void;
-  onDetectExternalCli?: (cliAgent: ExternalCliAgentKind, cliPath?: string) => Promise<ExternalCliDetectResult>;
-  onSelectExternalCliPath?: (cliAgent: ExternalCliAgentKind, initialPath?: string) => Promise<string | null>;
 }
 
 interface AgentsTeamsPayload {
   agents: Record<string, {
-    model: { provider: string; api_base: string; api_key: string; model: string };
+    model: { ref: string };
     skills: string[];
   }>;
   team: Array<{
@@ -255,40 +232,10 @@ interface AgentsTeamsPayload {
     teammate_mode: string;
     spawn_mode: string;
     enable_permissions: boolean;
-    external_cli_agents?: ExternalCliAgentPayload[];
     leader: { member_name: string; display_name: string; persona: string; agent_key: string };
     teammate: { agent_key: string };
     predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
   }>;
-}
-
-interface ConfigSaveResult {
-  updated?: string[];
-  applied_without_restart?: boolean;
-  models_count?: number | null;
-  codex_dependency_install?: CodexDependencyInstallStatus;
-}
-
-interface CodexDependencyInstallStatus {
-  status?: string;
-  phase?: string;
-  error?: string;
-  last_log?: string;
-  log_tail?: string[];
-  started_at?: number;
-  finished_at?: number;
-  updated_at?: number;
-}
-
-interface ExternalCliDetectResult {
-  cli_agent: ExternalCliAgentKind;
-  status: "ok" | "warning" | "missing" | "unsupported" | "unavailable";
-  path?: string;
-  version?: string;
-  reference_version?: string;
-  reason?: string;
-  suffix?: string;
-  message?: string;
 }
 
 interface ConfigSaveAllPayload {
@@ -312,46 +259,27 @@ function buildAgentsTeamsPayload(
   for (const agent of agents) {
     if (!agent.name) continue;
     agentsPayload[agent.name] = {
-      model: { ...agent.model },
+      model: { ref: agent.model.ref },
       skills: agent.skills,
     };
   }
   const validAgentKeys = new Set(Object.keys(agentsPayload));
   return {
     agents: agentsPayload,
-    team: teams.map((team) => {
-      const externalCliAgents = new Map<ExternalCliAgentKind, ExternalCliAgentPayload>();
-      for (const item of team.external_cli_agents || []) {
-        if (item.cli_agent === "claude" || item.cli_agent === "codex") {
-          externalCliAgents.set(item.cli_agent, item);
-        }
-      }
-      return {
-        team_name: team.team_name,
-        lifecycle: team.lifecycle,
-        teammate_mode: team.teammate_mode,
-        spawn_mode: team.spawn_mode,
-        enable_permissions: team.enable_permissions,
-        external_cli_agents: Array.from(externalCliAgents.values()).map((item) => {
-          const payload: ExternalCliAgentPayload = { cli_agent: item.cli_agent };
-          if (item.cli_path) {
-            payload.cli_path = item.cli_path;
-          }
-          return payload;
-        }),
-        leader: {
-          ...team.leader,
-          agent_key: validAgentKeys.has(team.leader?.agent_key || "") ? team.leader?.agent_key : "",
-        },
-        teammate: {
-          ...team.teammate,
-          agent_key: validAgentKeys.has(team.teammate?.agent_key || "") ? team.teammate?.agent_key : "",
-        },
-        predefined_members: (team.predefined_members || [])
-          .filter((member) => member.agent_key && validAgentKeys.has(member.agent_key))
-          .map((member) => ({ ...member })),
-      };
-    }),
+    team: teams.map((team) => ({
+      ...team,
+      leader: {
+        ...team.leader,
+        agent_key: validAgentKeys.has(team.leader?.agent_key || "") ? team.leader?.agent_key : "",
+      },
+      teammate: {
+        ...team.teammate,
+        agent_key: validAgentKeys.has(team.teammate?.agent_key || "") ? team.teammate?.agent_key : "",
+      },
+      predefined_members: (team.predefined_members || [])
+        .filter((member) => member.agent_key && validAgentKeys.has(member.agent_key))
+        .map((member) => ({ ...member })),
+    })),
   };
 }
 
@@ -377,7 +305,7 @@ const THIRD_PARTY_API_KEYS = new Set([
 ]);
 const REQUIRED_MODEL_FIELDS = ["api_base", "api_key", "model", "model_provider"] as const;
 const REQUIRED_MODEL_FIELD_SET = new Set<string>(REQUIRED_MODEL_FIELDS);
-const EVOLUTION_KEYS = new Set(["skill_evolution"]);
+const EVOLUTION_KEYS = new Set(["evolution_enabled", "skill_create"]);
 
 // 模型字段长度校验常量
 const MAX_MODEL_NAME_LENGTH = 100;
@@ -410,13 +338,6 @@ function getFieldLengthErrorKey(field: keyof ModelEntry, value: string): string 
 }
 const AGENT_KEYS = new Set(["name", "model", "skills"]);
 const TEAM_KEYS = new Set(["team_name", "lifecycle", "teammate_mode", "spawn_mode"]);
-const EXTERNAL_CLI_AGENT_CLAUDE_ENABLED_KEY = "external_cli_agent_claude_enabled";
-const EXTERNAL_CLI_AGENT_CLAUDE_USE_BUILTIN_KEY = "external_cli_agent_claude_use_builtin";
-const EXTERNAL_CLI_AGENT_CLAUDE_CLI_PATH_KEY = "external_cli_agent_claude_cli_path";
-const EXTERNAL_CLI_AGENT_CODEX_ENABLED_KEY = "external_cli_agent_codex_enabled";
-const EXTERNAL_CLI_AGENT_CODEX_USE_BUILTIN_KEY = "external_cli_agent_codex_use_builtin";
-const EXTERNAL_CLI_AGENT_CODEX_CLI_PATH_KEY = "external_cli_agent_codex_cli_path";
-const EXTERNAL_CLI_AGENT_KINDS: ExternalCliAgentKind[] = ["claude", "codex"];
 const FREE_SEARCH_BOOLEAN_KEYS = new Set(["free_search_ddg_enabled", "free_search_bing_enabled"]);
 const FREE_SEARCH_KEYS = new Set([...FREE_SEARCH_BOOLEAN_KEYS]);
 const HIDDEN_CONFIG_KEYS = new Set([
@@ -441,22 +362,6 @@ const HIDDEN_CONFIG_KEYS = new Set([
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
 const A2UI_KEYS = new Set(["a2ui_enabled"]);
 const SWARMFLOW_KEYS = new Set(["swarmflow_enabled"]);
-const RUNTIME_PLATFORM_KEY = "runtime_platform";
-const EXTERNAL_CLI_AGENTS_SUPPORTED_KEY = "external_cli_agents_supported";
-const EXTERNAL_CLI_AGENT_KEYS = new Set([
-  EXTERNAL_CLI_AGENT_CLAUDE_ENABLED_KEY,
-  EXTERNAL_CLI_AGENT_CLAUDE_USE_BUILTIN_KEY,
-  EXTERNAL_CLI_AGENT_CLAUDE_CLI_PATH_KEY,
-  EXTERNAL_CLI_AGENT_CODEX_ENABLED_KEY,
-  EXTERNAL_CLI_AGENT_CODEX_USE_BUILTIN_KEY,
-  EXTERNAL_CLI_AGENT_CODEX_CLI_PATH_KEY,
-]);
-const EXTERNAL_CLI_AGENT_BOOLEAN_KEYS = new Set([
-  EXTERNAL_CLI_AGENT_CLAUDE_ENABLED_KEY,
-  EXTERNAL_CLI_AGENT_CLAUDE_USE_BUILTIN_KEY,
-  EXTERNAL_CLI_AGENT_CODEX_ENABLED_KEY,
-  EXTERNAL_CLI_AGENT_CODEX_USE_BUILTIN_KEY,
-]);
 const SYMPHONY_BOOLEAN_KEYS = new Set([
   "symphony_enabled",
   "symphony_dynamic_graph_enabled",
@@ -491,10 +396,6 @@ const HIDDEN_FROM_UI_CONFIG_KEYS = new Set([
   "proactive_recommendation_tick_interval_minutes",
   "kv_cache_release_enabled",
   "kv_cache_affinity_enabled",
-  "symphony_enabled",
-  "symphony_dynamic_graph_enabled",
-  RUNTIME_PLATFORM_KEY,
-  EXTERNAL_CLI_AGENTS_SUPPORTED_KEY,
 ]);
 
 function classifyKey(key: string): string {
@@ -512,7 +413,6 @@ function classifyKey(key: string): string {
   if (MEMORY_KEYS.has(key)) return "memory";
   if (A2UI_KEYS.has(key)) return "a2ui";
   if (SWARMFLOW_KEYS.has(key)) return "swarmflow";
-  if (EXTERNAL_CLI_AGENT_KEYS.has(key)) return "external_cli_agents";
   if (SYMPHONY_KEYS.has(key)) return "symphony";
   if (PROACTIVE_KEYS.has(key)) return "proactive";
   if (key === "context_engine_enabled") return "context_engine";
@@ -629,9 +529,6 @@ function getGroupIcon(tag: string) {
   if (tag === "swarmflow") {
     return <Workflow className="w-3.5 h-3.5" strokeWidth={1.8} />;
   }
-  if (tag === "external_cli_agents") {
-    return <SquareTerminal className="w-3.5 h-3.5" strokeWidth={1.8} />;
-  }
   if (tag === "symphony") {
     return <Music2 className="w-3.5 h-3.5" strokeWidth={1.8} />;
   }
@@ -704,7 +601,6 @@ function isBooleanKey(key: string): boolean {
     key === "memory_forbidden_enabled" ||
     key === "a2ui_enabled" ||
     key === "swarmflow_enabled" ||
-    EXTERNAL_CLI_AGENT_BOOLEAN_KEYS.has(key) ||
     SYMPHONY_BOOLEAN_KEYS.has(key) ||
     SKILL_RETRIEVAL_BOOLEAN_KEYS.has(key) ||
     PROACTIVE_BOOLEAN_KEYS.has(key)
@@ -752,47 +648,10 @@ function parseBoolValue(value: string): boolean {
   return value.toLowerCase() === "true" || value === "1";
 }
 
-function hasExternalCliAgentInFlatConfig(values: Record<string, string>, cliAgent: ExternalCliAgentKind): boolean {
-  for (let i = 0; i < 10; i++) {
-    const rawValue = values[`team_external_cli_agents_${i}`] || values[`team_${i}_external_cli_agents`];
-    if (!rawValue) {
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(rawValue);
-      if (!Array.isArray(parsed)) {
-        continue;
-      }
-      if (parsed.some((item) => item === cliAgent || (typeof item === "object" && item?.cli_agent === cliAgent))) {
-        return true;
-      }
-    } catch {
-      continue;
-    }
-  }
-  return false;
-}
-
-function isCodexDependencyInstalling(result: ConfigSaveResult | void): boolean {
-  return result?.codex_dependency_install?.status === "running";
-}
-
-function getCodexInstallPhaseLabel(status: CodexDependencyInstallStatus | null, t: (key: string) => string): string {
-  const phase = status?.phase || status?.status || "idle";
-  const labels: Record<string, string> = {
-    preparing: t("config.externalCli.codexInstallPhasePreparing"),
-    installing: t("config.externalCli.codexInstallPhaseInstalling"),
-    verifying: t("config.externalCli.codexInstallPhaseVerifying"),
-    succeeded: t("config.externalCli.codexInstallPhaseSucceeded"),
-    failed: t("config.externalCli.codexInstallPhaseFailed"),
-    running: t("config.externalCli.codexInstallPhaseInstalling"),
-  };
-  return labels[phase] || phase;
-}
-
 function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
   const labels: Record<string, string> = {
-    skill_evolution: t('config.booleanLabels.skillEvolution'),
+    evolution_enabled: t('config.booleanLabels.evolutionEnabled'),
+    skill_create: t('config.booleanLabels.skillCreate'),
     free_search_ddg_enabled: t('config.booleanLabels.freeSearchDdg'),
     free_search_bing_enabled: t('config.booleanLabels.freeSearchBing'),
     context_engine_enabled: t('config.booleanLabels.enabled'),
@@ -802,10 +661,6 @@ function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
     memory_forbidden_enabled: t('config.booleanLabels.enabled'),
     a2ui_enabled: t('config.booleanLabels.enabled'),
     swarmflow_enabled: t('config.booleanLabels.enabled'),
-    external_cli_agent_claude_enabled: t('config.booleanLabels.externalCliClaude'),
-    external_cli_agent_claude_use_builtin: t('config.booleanLabels.externalCliUseBuiltin'),
-    external_cli_agent_codex_enabled: t('config.booleanLabels.externalCliCodex'),
-    external_cli_agent_codex_use_builtin: t('config.booleanLabels.externalCliUseBuiltin'),
     symphony_enabled: t('config.booleanLabels.enabled'),
     symphony_dynamic_graph_enabled: t('config.booleanLabels.dynamicGraph'),
     skill_retrieval_enabled: t('config.booleanLabels.enabled'),
@@ -858,7 +713,6 @@ function getGroupMeta(t: (key: string) => string): Record<string, { label: strin
     permissions: { label: t('config.groups.permissions.label'), order: 9, hint: t('config.groups.permissions.hint') },
     a2ui: { label: t('config.groups.a2ui.label'), order: 10, hint: t('config.groups.a2ui.hint') },
     swarmflow: { label: t('config.groups.swarmflow.label'), order: 10.2, hint: t('config.groups.swarmflow.hint') },
-    external_cli_agents: { label: t('config.groups.externalCliAgents.label'), order: 10.3, hint: t('config.groups.externalCliAgents.hint') },
     symphony: { label: t('config.groups.symphony.label'), order: 10.4, hint: t('config.groups.symphony.hint') },
     skill_retrieval: { label: t('config.groups.skillRetrieval.label'), order: 10.5, hint: t('config.groups.skillRetrieval.hint') },
     proactive: { label: t('config.groups.proactive.label'), order: 10.6, hint: t('config.groups.proactive.hint') },
@@ -882,12 +736,6 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   memory_forbidden_enabled: "config.keys.memoryForbiddenEnabled",
   memory_forbidden_description: "config.keys.memoryForbiddenDescription",
   swarmflow_enabled: "config.keys.swarmflowEnabled",
-  external_cli_agent_claude_enabled: "config.keys.externalCliAgentClaudeEnabled",
-  external_cli_agent_claude_use_builtin: "config.keys.externalCliAgentUseBuiltin",
-  external_cli_agent_claude_cli_path: "config.keys.externalCliAgentCliPath",
-  external_cli_agent_codex_enabled: "config.keys.externalCliAgentCodexEnabled",
-  external_cli_agent_codex_use_builtin: "config.keys.externalCliAgentUseBuiltin",
-  external_cli_agent_codex_cli_path: "config.keys.externalCliAgentCliPath",
   kv_cache_release_enabled: "config.keys.kvCacheReleaseEnabled",
   kv_cache_affinity_enabled: "config.keys.kvCacheAffinityEnabled",
   name: "config.keys.agentName",
@@ -934,7 +782,8 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
   // 免费搜索 / 演进
   free_search_ddg_enabled: "config.keyHelp.freeSearchDdg",
   free_search_bing_enabled: "config.keyHelp.freeSearchBing",
-  skill_evolution: "config.keyHelp.skillEvolution",
+  evolution_enabled: "config.keyHelp.evolutionEnabled",
+  skill_create: "config.keyHelp.skillCreate",
   // 含义需补充（「启用」等不加）
   memory_forbidden_description: "config.keyHelp.memoryForbiddenDescription",
   symphony_dynamic_graph_enabled: "config.keyHelp.symphonyDynamicGraphEnabled",
@@ -953,12 +802,6 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
   teammate_mode: "config.keyHelp.teamTeammateMode",
   spawn_mode: "config.keyHelp.teamSpawnMode",
   enable_permissions: "config.keyHelp.teamEnablePermissions",
-  external_cli_agent_claude_enabled: "config.keyHelp.externalCliAgentClaude",
-  external_cli_agent_claude_use_builtin: "config.keyHelp.externalCliAgentUseBuiltin",
-  external_cli_agent_claude_cli_path: "config.keyHelp.externalCliAgentCliPath",
-  external_cli_agent_codex_enabled: "config.keyHelp.externalCliAgentCodex",
-  external_cli_agent_codex_use_builtin: "config.keyHelp.externalCliAgentUseBuiltin",
-  external_cli_agent_codex_cli_path: "config.keyHelp.externalCliAgentCliPath",
   member_name: "config.keyHelp.teamMemberName",
   persona: "config.keyHelp.teamPersona",
   prompt_hint: "config.keyHelp.teamPromptHint",
@@ -967,7 +810,8 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
 
 /** 组内字段排序优先级，数字越小越靠前 */
 const KEY_SORT_PRIORITY: Record<string, number> = {
-  skill_evolution: 0,
+  evolution_enabled: 0,
+  skill_create: 1,
   free_search_ddg_enabled: 0,
   free_search_bing_enabled: 1,
   symphony_enabled: 0,
@@ -986,12 +830,6 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   memory_forbidden_description: 1,
   kv_cache_release_enabled: 0,
   kv_cache_affinity_enabled: 1,
-  external_cli_agent_claude_enabled: 0,
-  external_cli_agent_claude_use_builtin: 1,
-  external_cli_agent_claude_cli_path: 2,
-  external_cli_agent_codex_enabled: 10,
-  external_cli_agent_codex_use_builtin: 11,
-  external_cli_agent_codex_cli_path: 12,
   model: 0,
   skills: 1,
 };
@@ -1016,236 +854,8 @@ function getKeyLabelHintText(key: string, t: (key: string) => string): string {
   return hintKey ? t(hintKey) : "";
 }
 
-function shouldShowKeyHelpInline(key: string): boolean {
-  return key === 'skill_evolution';
-}
-
 function getKeySortPriority(key: string): number {
   return KEY_SORT_PRIORITY[key] ?? 50;
-}
-
-function externalCliKey(cliAgent: ExternalCliAgentKind, suffix: "enabled" | "use_builtin" | "cli_path"): string {
-  return `external_cli_agent_${cliAgent}_${suffix}`;
-}
-
-function applyExternalCliAgentAtomicUpdates(
-  updates: Record<string, string>,
-  cliAgent: ExternalCliAgentKind,
-  draftValues: Record<string, string>,
-  normalizedConfig: Record<string, string>,
-): void {
-  const enabledKey = externalCliKey(cliAgent, "enabled");
-  const useBuiltinKey = externalCliKey(cliAgent, "use_builtin");
-  const cliPathKey = externalCliKey(cliAgent, "cli_path");
-  const enabled = draftValues[enabledKey] === "true";
-  const persistedEnabled = normalizedConfig[enabledKey] === "true";
-  if (!enabled && !persistedEnabled) {
-    return;
-  }
-  const useBuiltin = draftValues[useBuiltinKey] === "true";
-  const cliPath = (draftValues[cliPathKey] ?? "").trim();
-  const changed = (
-    draftValues[enabledKey] !== normalizedConfig[enabledKey] ||
-    draftValues[useBuiltinKey] !== normalizedConfig[useBuiltinKey] ||
-    draftValues[cliPathKey] !== normalizedConfig[cliPathKey]
-  );
-  if (!changed) {
-    return;
-  }
-  updates[enabledKey] = enabled ? "true" : "false";
-  updates[useBuiltinKey] = enabled && useBuiltin ? "true" : "false";
-  updates[cliPathKey] = enabled && !useBuiltin ? cliPath : "";
-}
-
-function ExternalCliAgentsSection({
-  draftValues,
-  onChange,
-  onDetect,
-  onSelectFile,
-  t,
-}: {
-  draftValues: Record<string, string>;
-  onChange: (key: string, value: string) => void;
-  onDetect?: (cliAgent: ExternalCliAgentKind, cliPath?: string) => Promise<ExternalCliDetectResult>;
-  onSelectFile?: (cliAgent: ExternalCliAgentKind, initialPath?: string) => Promise<string | null>;
-  t: (key: string, options?: Record<string, unknown>) => string;
-}) {
-  const [detecting, setDetecting] = useState<Record<ExternalCliAgentKind, boolean>>({ claude: false, codex: false });
-  const [selecting, setSelecting] = useState<Record<ExternalCliAgentKind, boolean>>({ claude: false, codex: false });
-  const [results, setResults] = useState<Partial<Record<ExternalCliAgentKind, ExternalCliDetectResult>>>({});
-
-  const detect = useCallback(async (cliAgent: ExternalCliAgentKind, cliPath?: string) => {
-    if (!onDetect) return;
-    setDetecting((prev) => ({ ...prev, [cliAgent]: true }));
-    try {
-      const result = await onDetect(cliAgent, cliPath);
-      setResults((prev) => ({ ...prev, [cliAgent]: result }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setResults((prev) => ({
-        ...prev,
-        [cliAgent]: {
-          cli_agent: cliAgent,
-          status: "unavailable",
-          message,
-        },
-      }));
-    } finally {
-      setDetecting((prev) => ({ ...prev, [cliAgent]: false }));
-    }
-  }, [onDetect]);
-
-  const selectFile = useCallback(async (cliAgent: ExternalCliAgentKind, cliPathKey: string) => {
-    if (!onSelectFile) return;
-    setSelecting((prev) => ({ ...prev, [cliAgent]: true }));
-    try {
-      const selectedPath = await onSelectFile(cliAgent, draftValues[cliPathKey] || "");
-      if (!selectedPath) return;
-      onChange(cliPathKey, selectedPath);
-      await detect(cliAgent, selectedPath);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setResults((prev) => ({
-        ...prev,
-        [cliAgent]: {
-          cli_agent: cliAgent,
-          status: "unavailable",
-          message: message || t("config.externalCli.selectFileFailed"),
-        },
-      }));
-    } finally {
-      setSelecting((prev) => ({ ...prev, [cliAgent]: false }));
-    }
-  }, [detect, draftValues, onChange, onSelectFile, t]);
-
-  useEffect(() => {
-    if (!onDetect) return;
-    for (const cliAgent of EXTERNAL_CLI_AGENT_KINDS) {
-      void detect(cliAgent, draftValues[externalCliKey(cliAgent, "cli_path")] || "");
-    }
-  }, [detect, onDetect]);
-
-  const statusClass = (status?: ExternalCliDetectResult["status"]) => {
-    if (status === "ok") return "text-ok";
-    if (status === "warning") return "text-warn";
-    return "text-danger";
-  };
-
-  const statusText = (result?: ExternalCliDetectResult) => {
-    if (!result) return t("config.externalCli.statusUnknown");
-    if (result.status === "ok") return t("config.externalCli.statusOk");
-    if (result.status === "warning") return t("config.externalCli.statusWarning");
-    if (result.status === "missing") return t("config.externalCli.statusMissing");
-    if (result.status === "unsupported") return t("config.externalCli.statusUnsupported");
-    return t("config.externalCli.statusUnavailable");
-  };
-
-  const resultMessage = (result: ExternalCliDetectResult | undefined, useBuiltin: boolean) => {
-    if (!result) return "";
-    if (useBuiltin) {
-      return "";
-    }
-    if (result.status === "warning") {
-      if (result.reference_version) {
-        return t("config.externalCli.compatibilityWarningWithVersion", { version: result.reference_version });
-      }
-      return t("config.externalCli.compatibilityWarning");
-    }
-    if (result.reason === "windows_script") {
-      return t("config.externalCli.windowsScriptPath");
-    }
-    return result.message || "";
-  };
-
-  return (
-    <div className="border-t border-border p-3 space-y-3">
-      {EXTERNAL_CLI_AGENT_KINDS.map((cliAgent) => {
-        const enabledKey = externalCliKey(cliAgent, "enabled");
-        const useBuiltinKey = externalCliKey(cliAgent, "use_builtin");
-        const cliPathKey = externalCliKey(cliAgent, "cli_path");
-        const enabled = parseBoolValue(draftValues[enabledKey] ?? "false");
-        const useBuiltin = parseBoolValue(draftValues[useBuiltinKey] ?? "false");
-        const result = results[cliAgent];
-        const displayResult = useBuiltin ? undefined : result;
-        const message = resultMessage(displayResult, useBuiltin);
-        const label = cliAgent === "claude" ? t("config.externalCli.claude") : t("config.externalCli.codex");
-        return (
-          <div key={cliAgent} className="rounded-md border border-border bg-secondary/10 p-3 space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-sm font-medium text-text-strong">{label}</div>
-                <div className="text-[11px] text-text-muted">{t(`config.externalCli.${cliAgent}Hint`)}</div>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={enabled}
-                onClick={() => onChange(enabledKey, enabled ? "false" : "true")}
-                className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent focus:outline-none ${enabled ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"}`}
-                title={t("config.booleanLabels.enabled")}
-              >
-                <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow ${enabled ? "translate-x-4" : "translate-x-0"}`} />
-              </button>
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <label className="inline-flex items-center gap-2 text-xs text-text">
-                <input
-                  type="checkbox"
-                  checked={useBuiltin}
-                  disabled={!enabled}
-                  onChange={(event) => onChange(useBuiltinKey, event.target.checked ? "true" : "false")}
-                  className="h-3.5 w-3.5 rounded border-border"
-                />
-                {t("config.externalCli.useBuiltin")}
-              </label>
-              <button
-                type="button"
-                className="btn !px-2.5 !py-1 text-xs"
-                disabled={!onDetect || detecting[cliAgent] || useBuiltin}
-                onClick={() => void detect(cliAgent, draftValues[cliPathKey] || "")}
-              >
-                {detecting[cliAgent] ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                {t("config.externalCli.detect")}
-              </button>
-              {!useBuiltin ? (
-                <span className={`text-xs ${statusClass(displayResult?.status)}`}>
-                  {displayResult?.status === "ok" ? <CheckCircle2 className="inline w-3.5 h-3.5 mr-1" /> : <AlertCircle className="inline w-3.5 h-3.5 mr-1" />}
-                  {statusText(displayResult)}
-                </span>
-              ) : null}
-              {displayResult?.version ? (
-                <span className="text-xs text-text-muted">
-                  {t("config.externalCli.version", { version: displayResult.version })}
-                </span>
-              ) : null}
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={draftValues[cliPathKey] ?? ""}
-                disabled={!enabled || useBuiltin}
-                onChange={(event) => onChange(cliPathKey, event.target.value)}
-                placeholder={displayResult?.path || t("config.externalCli.cliPathPlaceholder", { agent: cliAgent })}
-                className="flex-1 rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60"
-              />
-              <button
-                type="button"
-                className="inline-flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md border border-border bg-bg text-text-muted hover:bg-secondary/30 disabled:opacity-50"
-                disabled={!enabled || useBuiltin || !onSelectFile || selecting[cliAgent]}
-                title={t("config.externalCli.selectFile")}
-                onClick={() => void selectFile(cliAgent, cliPathKey)}
-              >
-                {selecting[cliAgent] ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSearch className="w-4 h-4" />}
-              </button>
-            </div>
-            {message ? (
-              <div className="text-[11px] leading-4 text-text-muted">{message}</div>
-            ) : null}
-          </div>
-        );
-      })}
-    </div>
-  );
 }
 
 function GroupSection({
@@ -1257,8 +867,6 @@ function GroupSection({
   nested = false,
   afterTable,
   alwaysExpanded = false,
-  onDetectExternalCli,
-  onSelectExternalCliPath,
 }: {
   group: ConfigGroup;
   draftValues: Record<string, string>;
@@ -1270,8 +878,6 @@ function GroupSection({
   afterTable?: ReactNode;
   /** Static header, content always visible (no collapse). */
   alwaysExpanded?: boolean;
-  onDetectExternalCli?: (cliAgent: ExternalCliAgentKind, cliPath?: string) => Promise<ExternalCliDetectResult>;
-  onSelectExternalCliPath?: (cliAgent: ExternalCliAgentKind, initialPath?: string) => Promise<string | null>;
 }) {
   const [open, setOpen] = useState(alwaysExpanded || defaultOpen);
   const [visibleFields, setVisibleFields] = useState<Record<string, boolean>>({});
@@ -1336,15 +942,6 @@ function GroupSection({
       )}
       {isOpen && (
         <>
-          {group.tag === "external_cli_agents" ? (
-            <ExternalCliAgentsSection
-              draftValues={draftValues}
-              onChange={onChange}
-              onDetect={onDetectExternalCli}
-              onSelectFile={onSelectExternalCliPath}
-              t={t}
-            />
-          ) : (
           <table className="w-full text-sm border-t border-border">
             <tbody>
               {group.keys.map(([key, value]) => (
@@ -1353,9 +950,8 @@ function GroupSection({
                     <ConfigFieldHintLabel
                       mono
                       label={getKeyDisplayLabel(key, t)}
-                      help={shouldShowKeyHelpInline(key) ? undefined : getKeyLabelHintText(key, t) || undefined}
+                      help={getKeyLabelHintText(key, t) || undefined}
                     />
-                    {shouldShowKeyHelpInline(key) ? <div className="mt-1 text-[11px] leading-4 text-text-muted">{getKeyLabelHintText(key, t)}</div> : null}
                     {PROACTIVE_INT_SPECS[key] ? (() => {
                       const e = validateProactiveInt(key, draftValues[key] ?? "", t);
                       return e ? (
@@ -1487,7 +1083,6 @@ function GroupSection({
               ))}
             </tbody>
           </table>
-          )}
           {afterTable}
         </>
       )}
@@ -2307,13 +1902,17 @@ function MultiModelSection({
     });
   };
 
-  const getModelAgentReferences = (modelName: string, modelProvider: string, modelApiBase: string): string[] => {
+  const getModelAgentReferences = (modelIndex: number, modelName: string, modelProvider: string, modelApiBase: string): string[] => {
     if (!agents) return [];
     const references: string[] = [];
     agents.forEach((agent) => {
-      if (agent.model.model === modelName &&
-        agent.model.provider === modelProvider &&
-        agent.model.api_base === modelApiBase) {
+      const separatorIndex = agent.model.ref.lastIndexOf("#");
+      const referencedIndex = separatorIndex >= 0 ? Number(agent.model.ref.slice(separatorIndex + 1)) : -1;
+      const hasIndexedRef = Number.isInteger(referencedIndex) && referencedIndex >= 0;
+      if ((hasIndexedRef && referencedIndex === modelIndex) ||
+        (!hasIndexedRef && agent.model.model === modelName &&
+          agent.model.provider === modelProvider &&
+          agent.model.api_base === modelApiBase)) {
         references.push(agent.name);
       }
     });
@@ -2429,7 +2028,7 @@ function MultiModelSection({
     }
     setLocalError(null);
     const model = models[idx];
-    const references = getModelAgentReferences(model.model_name, model.model_provider, model.api_base);
+    const references = getModelAgentReferences(idx, model.model_name, model.model_provider, model.api_base);
     if (onDeleteModel) {
       onDeleteModel(idx, model.model_name, references);
     }
@@ -2867,7 +2466,7 @@ function MultiAgentSection({
   const [newAgentError, setNewAgentError] = useState<string | null>(null);
   const [newAgent, setNewAgent] = useState<AgentEntry>({
     name: "",
-    model: { provider: "", api_base: "", api_key: "", model: "" },
+    model: { ref: "", provider: "", api_base: "", api_key: "", model: "" },
     skills: [],
   });
 
@@ -2955,6 +2554,7 @@ function MultiAgentSection({
     copy[idx] = {
       ...copy[idx],
       model: {
+        ref: modelKey,
         provider: selectedModel.model_provider || "",
         api_base: selectedModel.api_base || "",
         api_key: selectedModel.api_key || "",
@@ -2980,7 +2580,7 @@ function MultiAgentSection({
     onAgentsChange([...agents, { ...newAgent, name }]);
     setExpandedIdx(agents.length);
     setAddingNew(false);
-    setNewAgent({ name: "", model: { provider: "", api_base: "", api_key: "", model: "" }, skills: [] });
+    setNewAgent({ name: "", model: { ref: "", provider: "", api_base: "", api_key: "", model: "" }, skills: [] });
   };
 
   const agentFields: (keyof AgentEntry)[] = ["name", "skills"];
@@ -3131,6 +2731,7 @@ function MultiAgentSection({
                 setNewAgent((p) => ({
                   ...p,
                   model: {
+                    ref: modelKey,
                     provider: selectedModel!.model_provider || "",
                     api_base: selectedModel!.api_base || "",
                     api_key: selectedModel!.api_key || "",
@@ -3820,7 +3421,6 @@ function TeamsSection({
     teammate_mode: "plan_mode",
     spawn_mode: "inprocess",
     enable_permissions: false,
-    external_cli_agents: [],
     leader: { member_name: "", display_name: "", persona: "", agent_key: "" },
     teammate: { agent_key: "" },
     predefined_members: [],
@@ -3860,7 +3460,6 @@ function TeamsSection({
       teammate_mode: "plan_mode",
       spawn_mode: "inprocess",
       enable_permissions: false,
-      external_cli_agents: [],
       leader: { member_name: "", display_name: "", persona: "", agent_key: "" },
       teammate: { agent_key: "" },
       predefined_members: [],
@@ -3953,9 +3552,6 @@ export function ConfigPanel({
   onModelsRefresh,
   onAgentsTeamsSave,
   onHasChangesChange,
-  onDetectExternalCli,
-  onSelectExternalCliPath,
-  onGetCodexDependencyInstallStatus,
 }: ConfigPanelProps) {
   const { t, i18n } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -3989,60 +3585,12 @@ export function ConfigPanel({
   const [configTab, setConfigTab] = useState<ConfigMainTab>("model");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [codexInstallStatus, setCodexInstallStatus] = useState<CodexDependencyInstallStatus | null>(null);
   const [modelError, setModelError] = useState<string | null>(null);
   const [deleteAgentConfirm, setDeleteAgentConfirm] = useState<{ idx: number; agentName: string; references: string[] } | null>(null);
   const [deleteModelConfirm, setDeleteModelConfirm] = useState<{ idx: number; modelName: string; references: string[] } | null>(null);
   const [deleteTeamConfirm, setDeleteTeamConfirm] = useState<{ idx: number; teamName: string } | null>(null);
   const [deleteTeamMemberConfirm, setDeleteTeamMemberConfirm] = useState<{ teamIdx: number; memberIdx: number; memberName: string } | null>(null);
   const [installedSkills, setInstalledSkills] = useState<{ name: string; installed?: boolean }[]>([]);
-
-  useEffect(() => {
-    if (!onGetCodexDependencyInstallStatus || codexInstallStatus?.status !== "running") {
-      return;
-    }
-    let cancelled = false;
-    const pollStatus = async () => {
-      try {
-        const status = await onGetCodexDependencyInstallStatus();
-        if (!cancelled) {
-          setCodexInstallStatus(status);
-        }
-      } catch (pollError) {
-        if (!cancelled) {
-          const message = pollError instanceof Error ? pollError.message : t("config.errors.saveFailed");
-          setCodexInstallStatus((prev) => ({
-            ...(prev ?? {}),
-            status: "failed",
-            phase: "failed",
-            error: message,
-          }));
-        }
-      }
-    };
-    const timer = window.setInterval(() => {
-      void pollStatus();
-    }, 1500);
-    void pollStatus();
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [codexInstallStatus?.status, onGetCodexDependencyInstallStatus, t]);
-
-  useEffect(() => {
-    if (codexInstallStatus?.status !== "succeeded") {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      setCodexInstallStatus(null);
-      setNotice(null);
-    }, 8000);
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [codexInstallStatus?.status]);
 
   const markAgentsTeamsEdited = () => {
     setAgentsTeamsEdited(true);
@@ -4120,16 +3668,18 @@ export function ConfigPanel({
           }
         }
         const mainModel = next[0];
-        setDraftAgents((prev) =>
-          prev.map((agent) => {
-            if (
-              agent.model.model === model.model_name &&
-              (agent.model.provider || "") === (model.model_provider || "") &&
-              (agent.model.api_base || "") === (model.api_base || "")
-            ) {
+        const reboundAgents = draftAgents.map((agent) => {
+            const separatorIndex = agent.model.ref.lastIndexOf("#");
+            const referencedIndex = separatorIndex >= 0 ? Number(agent.model.ref.slice(separatorIndex + 1)) : -1;
+            const hasIndexedRef = Number.isInteger(referencedIndex) && referencedIndex >= 0;
+            if ((hasIndexedRef && referencedIndex === deleteModelConfirm.idx) ||
+              (!hasIndexedRef && agent.model.model === model.model_name &&
+                (agent.model.provider || "") === (model.model_provider || "") &&
+                (agent.model.api_base || "") === (model.api_base || ""))) {
               return {
                 ...agent,
                 model: {
+                  ref: `${mainModel.model_name || ""}#0`,
                   provider: mainModel.model_provider || "",
                   api_base: mainModel.api_base || "",
                   api_key: mainModel.api_key || "",
@@ -4138,10 +3688,12 @@ export function ConfigPanel({
               };
             }
             return agent;
-          })
-        );
+          });
+        setDraftAgents(reboundAgents);
+        handleModelsChange(next, reboundAgents);
+      } else {
+        handleModelsChange(next);
       }
-      handleModelsChange(next);
     }
     setDeleteModelConfirm(null);
   };
@@ -4216,41 +3768,11 @@ export function ConfigPanel({
         next[key] = normalizeConfigValue(value);
       }
     }
-    if (!(EXTERNAL_CLI_AGENT_CLAUDE_ENABLED_KEY in next)) {
-      next[EXTERNAL_CLI_AGENT_CLAUDE_ENABLED_KEY] = String(hasExternalCliAgentInFlatConfig(next, "claude"));
-    }
-    if (!(EXTERNAL_CLI_AGENT_CLAUDE_USE_BUILTIN_KEY in next)) {
-      next[EXTERNAL_CLI_AGENT_CLAUDE_USE_BUILTIN_KEY] = "false";
-    }
-    if (!(EXTERNAL_CLI_AGENT_CLAUDE_CLI_PATH_KEY in next)) {
-      next[EXTERNAL_CLI_AGENT_CLAUDE_CLI_PATH_KEY] = "";
-    }
-    if (!(EXTERNAL_CLI_AGENT_CODEX_ENABLED_KEY in next)) {
-      next[EXTERNAL_CLI_AGENT_CODEX_ENABLED_KEY] = String(hasExternalCliAgentInFlatConfig(next, "codex"));
-    }
-    if (!(EXTERNAL_CLI_AGENT_CODEX_USE_BUILTIN_KEY in next)) {
-      next[EXTERNAL_CLI_AGENT_CODEX_USE_BUILTIN_KEY] = "false";
-    }
-    if (!(EXTERNAL_CLI_AGENT_CODEX_CLI_PATH_KEY in next)) {
-      next[EXTERNAL_CLI_AGENT_CODEX_CLI_PATH_KEY] = "";
-    }
     return next;
   }, [config, i18n.language]);
 
   useEffect(() => {
-    setDraftValues((prev) => {
-      const next = { ...normalizedConfig };
-      if (!normalizedConfig[EXTERNAL_CLI_AGENT_CODEX_CLI_PATH_KEY] && prev[EXTERNAL_CLI_AGENT_CODEX_CLI_PATH_KEY]) {
-        next[EXTERNAL_CLI_AGENT_CODEX_CLI_PATH_KEY] = prev[EXTERNAL_CLI_AGENT_CODEX_CLI_PATH_KEY];
-      }
-      if (
-        normalizedConfig[EXTERNAL_CLI_AGENT_CODEX_USE_BUILTIN_KEY] !== "true" &&
-        prev[EXTERNAL_CLI_AGENT_CODEX_USE_BUILTIN_KEY] === "true"
-      ) {
-        next[EXTERNAL_CLI_AGENT_CODEX_USE_BUILTIN_KEY] = "true";
-      }
-      return next;
-    });
+    setDraftValues(normalizedConfig);
     setError(null);
     setModelError(null);
   }, [normalizedConfig]);
@@ -4265,16 +3787,20 @@ export function ConfigPanel({
     for (let i = 0; i < 10; i++) {
       const name = normalizedConfig[`agent_name_${i}`] || normalizedConfig[`agent_${i}_name`];
       if (!name) continue;
-      const modelName = normalizedConfig[`agent_model_${i}`] || normalizedConfig[`agent_${i}_model`] || "";
-      const matchedModel = storeAvailableModels.find((m) => m.model_name === modelName);
+      const modelRef = normalizedConfig[`agent_model_${i}`] || normalizedConfig[`agent_${i}_model`] || "";
+      const separatorIndex = modelRef.lastIndexOf("#");
+      const referencedName = separatorIndex >= 0 ? modelRef.slice(0, separatorIndex) : modelRef;
+      const matchedIndex = resolveConfiguredModelIndex(storeAvailableModels, modelRef);
+      const matchedModel = matchedIndex >= 0 ? storeAvailableModels[matchedIndex] : undefined;
       agents.push({
         name,
         model: matchedModel ? {
+          ref: `${matchedModel.model_name}#${matchedIndex}`,
           provider: matchedModel.model_provider || "",
           api_base: matchedModel.api_base || "",
           api_key: matchedModel.api_key || "",
           model: matchedModel.model_name || "",
-        } : { provider: "", api_base: "", api_key: "", model: modelName },
+        } : { ref: modelRef, provider: "", api_base: "", api_key: "", model: referencedName },
         skills: (normalizedConfig[`agent_skills_${i}`] || normalizedConfig[`agent_${i}_skills`] || "").split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
       });
     }
@@ -4301,30 +3827,6 @@ export function ConfigPanel({
           console.error('[ConfigPanel] Failed to parse predefined_members:', e);
         }
       }
-      let externalCliAgents: ExternalCliAgentPayload[] = [];
-      const externalCliJson = normalizedConfig[`team_external_cli_agents_${i}`] || normalizedConfig[`team_${i}_external_cli_agents`];
-      if (externalCliJson) {
-        try {
-          const parsed = JSON.parse(externalCliJson);
-          if (Array.isArray(parsed)) {
-            const byKind = new Map<ExternalCliAgentKind, ExternalCliAgentPayload>();
-            for (const item of parsed) {
-              const cliAgent = typeof item === "string" ? item : item?.cli_agent;
-              if (cliAgent !== "claude" && cliAgent !== "codex") {
-                continue;
-              }
-              const cliPath = typeof item === "object" && typeof item?.cli_path === "string" ? item.cli_path : "";
-              byKind.set(cliAgent, {
-                cli_agent: cliAgent,
-                ...(cliPath ? { cli_path: cliPath } : {}),
-              });
-            }
-            externalCliAgents = Array.from(byKind.values());
-          }
-        } catch (e) {
-          console.error('[ConfigPanel] Failed to parse external_cli_agents:', e);
-        }
-      }
       const leaderAgentKey = normalizedConfig[`team_leader_agent_key_${i}`] || normalizedConfig[`team_${i}_leader_agent_key`] || "";
       const teammateAgentKey = normalizedConfig[`team_teammate_agent_key_${i}`] || normalizedConfig[`team_${i}_teammate_agent_key`] || "";
       teams.push({
@@ -4337,7 +3839,6 @@ export function ConfigPanel({
             normalizedConfig[`team_${i}_enable_permissions`] ||
             "false",
         ),
-        external_cli_agents: externalCliAgents,
         leader: {
           member_name: normalizedConfig[`team_leader_member_name_${i}`] || normalizedConfig[`team_${i}_leader_member_name`] || "",
           display_name: normalizedConfig[`team_leader_display_name_${i}`] || normalizedConfig[`team_${i}_leader_display_name`] || "",
@@ -4400,12 +3901,10 @@ export function ConfigPanel({
 
   const groups = useMemo<ConfigGroup[]>(() => {
     if (!Object.keys(normalizedConfig).length) return [];
-    const externalCliAgentsSupported = parseBoolValue(normalizedConfig[EXTERNAL_CLI_AGENTS_SUPPORTED_KEY] ?? "true");
     const buckets: Record<string, [string, string][]> = {};
     for (const [key, value] of Object.entries(normalizedConfig)) {
       if (HIDDEN_CONFIG_KEYS.has(key) || HIDDEN_FROM_UI_CONFIG_KEYS.has(key)) continue;
       const tag = classifyKey(key);
-      if (tag === "external_cli_agents" && !externalCliAgentsSupported) continue;
       // 临时注释：先隐藏邮件配置，后续需要时可恢复。
       if (tag === "email") continue;
       // 飞书配置已迁移到 ChannelsPanel 管理，这里不再展示。
@@ -4476,22 +3975,21 @@ export function ConfigPanel({
 
   const totalItems = useMemo(() => groups.reduce((sum, group) => sum + group.keys.length, 0), [groups]);
   const topLevelGroupCount = groups.length;
+  const hasConfigChanges = useMemo(() => {
+    const keys = Object.keys(normalizedConfig);
+    return keys.some((key) => !HIDDEN_FROM_UI_CONFIG_KEYS.has(key) && (draftValues[key] ?? "") !== normalizedConfig[key]);
+  }, [draftValues, normalizedConfig]);
   const configUpdates = useMemo(() => {
     const updates: Record<string, string> = {};
     for (const key of Object.keys(normalizedConfig)) {
       if (HIDDEN_FROM_UI_CONFIG_KEYS.has(key)) continue;
-      if (EXTERNAL_CLI_AGENT_KEYS.has(key)) continue;
       const draftValue = draftValues[key] ?? "";
       if (draftValue !== normalizedConfig[key]) {
         updates[key] = draftValue;
       }
     }
-    for (const cliAgent of EXTERNAL_CLI_AGENT_KINDS) {
-      applyExternalCliAgentAtomicUpdates(updates, cliAgent, draftValues, normalizedConfig);
-    }
     return updates;
   }, [draftValues, normalizedConfig]);
-  const hasConfigChanges = Object.keys(configUpdates).length > 0;
   const hasModelChanges = useMemo(() => {
     if (draftModels.length !== storeAvailableModels.length) return true;
     return draftModels.some((draftModel, index) => {
@@ -4509,7 +4007,7 @@ export function ConfigPanel({
       if (!ia) return true;
       if (da.name !== ia.name) return true;
       if (da.skills.length !== ia.skills.length || da.skills.some((s, j) => s !== ia.skills[j])) return true;
-      if (da.model.provider !== ia.model.provider || da.model.api_base !== ia.model.api_base
+      if (da.model.ref !== ia.model.ref || da.model.provider !== ia.model.provider || da.model.api_base !== ia.model.api_base
           || da.model.api_key !== ia.model.api_key || da.model.model !== ia.model.model) return true;
     }
     // 比较 teams
@@ -4644,15 +4142,12 @@ export function ConfigPanel({
     if (error) {
       setError(null);
     }
-    if (notice) {
-      setNotice(null);
-    }
     if (modelError) {
       setModelError(null);
     }
   };
 
-  const handleModelsChange = (models: ModelEntry[]) => {
+  const handleModelsChange = (models: ModelEntry[], agents = draftAgents) => {
     const oldModels = draftModels;
     const defaultIndex = getDefaultModelIndex(models);
     const defaultProvider = defaultIndex >= 0 ? models[defaultIndex].model_provider : "";
@@ -4669,8 +4164,8 @@ export function ConfigPanel({
       setError(null);
     }
 
-    const updatedAgents = syncAgentsWithModelChanges(draftAgents, oldModels, models);
-    if (updatedAgents !== draftAgents) {
+    const updatedAgents = syncAgentsWithModelChanges(agents, oldModels, models);
+    if (updatedAgents !== agents) {
       setDraftAgents(updatedAgents);
       setAgentsTeamsEdited(true);
     }
@@ -4750,13 +4245,6 @@ export function ConfigPanel({
   const resetEditStateAfterSave = () => {
     setAgentsTeamsEdited(false);
     setAgentsTeamsUserEdited(false);
-  };
-
-  const resetCodexEnabledDraftForDependencyInstall = () => {
-    setDraftValues((prev) => ({
-      ...prev,
-      [EXTERNAL_CLI_AGENT_CODEX_ENABLED_KEY]: "false",
-    }));
   };
 
 
@@ -4850,12 +4338,11 @@ export function ConfigPanel({
 
     setSaving(true);
     setError(null);
-    setNotice(null);
     setModelError(null);
     try {
       if (onSaveAllConfig) {
         const payload: ConfigSaveAllPayload = {};
-        if (Object.keys(configUpdates).length > 0) {
+        if (hasConfigChanges) {
           payload.config = configUpdates;
         }
         if (hasModelChanges) {
@@ -4866,14 +4353,7 @@ export function ConfigPanel({
           payload.agents = agentsTeamsPayload.agents;
           payload.team = agentsTeamsPayload.team;
         }
-        const result = await onSaveAllConfig(payload);
-        if (isCodexDependencyInstalling(result)) {
-          resetCodexEnabledDraftForDependencyInstall();
-          setCodexInstallStatus(result?.codex_dependency_install ?? { status: "running", phase: "installing" });
-          setNotice(t("config.externalCli.codexDependencyInstalling"));
-          return;
-        }
-        setCodexInstallStatus(null);
+        await onSaveAllConfig(payload);
         if (hasModelChanges && onModelsRefresh) await onModelsRefresh();
         if (hasAgentsTeamsChanges) {
           setAgentsTeamsJustSaved(true);
@@ -4881,7 +4361,6 @@ export function ConfigPanel({
           savedAgentsRef.current = draftAgents;
           savedTeamsRef.current = draftTeams;
           setInitialAgents(draftAgents);
-          setDraftTeams(draftTeams);
           setInitialTeams(draftTeams);
           resetEditStateAfterSave();
         }
@@ -4893,40 +4372,27 @@ export function ConfigPanel({
         }
         if (hasAgentsTeamsChanges && onAgentsTeamsSave) {
           const agentsTeamsPayload = buildAgentsTeamsPayload(draftAgents, draftTeams);
-          const showRestartModal = !(Object.keys(configUpdates).length > 0 || hasModelChanges);
+          const showRestartModal = !(hasConfigChanges || hasModelChanges);
           await onAgentsTeamsSave(agentsTeamsPayload, showRestartModal);
           setAgentsTeamsJustSaved(true);
           // 记录保存后的配置到ref，用于后续比较
           savedAgentsRef.current = draftAgents;
           savedTeamsRef.current = draftTeams;
           setInitialAgents(draftAgents);
-          setDraftTeams(draftTeams);
           setInitialTeams(draftTeams);
           resetEditStateAfterSave();
         }
-        if (Object.keys(configUpdates).length > 0) {
-          const result = await onSaveConfig(configUpdates);
-          if (isCodexDependencyInstalling(result)) {
-            resetCodexEnabledDraftForDependencyInstall();
-            setCodexInstallStatus(result?.codex_dependency_install ?? { status: "running", phase: "installing" });
-            setNotice(t("config.externalCli.codexDependencyInstalling"));
-            return;
-          }
-          setCodexInstallStatus(null);
+        if (hasConfigChanges) {
+          await onSaveConfig(configUpdates);
         }
       }
-  } catch (saveError) {
+    } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');
       setError(message);
     } finally {
       setSaving(false);
     }
   };
-
-  const codexInstallLogs = codexInstallStatus?.log_tail?.filter((line: string) => line.trim()).slice(-4) ?? [];
-  const shouldShowCodexInstallStatus = !!codexInstallStatus && ["running", "failed", "succeeded"].includes(
-    codexInstallStatus.status || "",
-  );
 
   return (
     <div className="flex-1 min-h-0">
@@ -4963,37 +4429,6 @@ export function ConfigPanel({
         {error ? (
           <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {error}
-          </div>
-        ) : null}
-        {!error && shouldShowCodexInstallStatus ? (
-          <div className={`mb-4 rounded-md border px-3 py-2 text-sm ${
-            codexInstallStatus?.status === "failed"
-              ? "border-[var(--color-border-danger)] bg-danger-subtle text-danger"
-              : "border-[var(--color-border-warning)] bg-warn-subtle text-warn"
-          }`}>
-            <div className="font-medium">
-              {getCodexInstallPhaseLabel(codexInstallStatus, t)}
-            </div>
-            <div className="mt-1">
-              {codexInstallStatus?.status === "succeeded"
-                ? t("config.externalCli.codexDependencyInstalled")
-                : notice || t("config.externalCli.codexDependencyInstalling")}
-            </div>
-            {codexInstallStatus?.error ? (
-              <div className="mt-1 break-words">{codexInstallStatus.error}</div>
-            ) : null}
-            {codexInstallStatus?.status !== "succeeded" && codexInstallLogs.length > 0 ? (
-              <div className="mt-2">
-                <div className="mb-1 text-xs opacity-80">{t("config.externalCli.codexInstallRecentOutput")}</div>
-                <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/10 px-2 py-1 text-xs">
-                  {codexInstallLogs.join("\n")}
-                </pre>
-              </div>
-            ) : null}
-          </div>
-        ) : !error && notice ? (
-          <div className="mb-4 rounded-md border border-[var(--color-border-warning)] bg-warn-subtle px-3 py-2 text-sm text-warn">
-            {notice}
           </div>
         ) : null}
         {!error && configTab !== "model" && hasMissingRequiredModelFields ? (
@@ -5036,7 +4471,7 @@ export function ConfigPanel({
               <span className="mono">{t('config.paramsCount', { count: totalItems })}</span>
             </div>
             <div className="app-subtabs shrink-0" role="tablist" aria-label={t('config.tabsAriaLabel')}>
-              {(["model", "security", "other"] as const).map((tab) => (
+              {(["model", "agent", "security", "other"] as const).map((tab) => (
                 <button
                   key={tab}
                   type="button"
@@ -5110,8 +4545,6 @@ export function ConfigPanel({
                       defaultOpen
                       alwaysExpanded
                       t={t}
-                      onDetectExternalCli={onDetectExternalCli}
-                      onSelectExternalCliPath={onSelectExternalCliPath}
                     />
                   ))}
                   {embedGroups.map((group) => (
@@ -5208,8 +4641,6 @@ export function ConfigPanel({
                         defaultOpen={initialExpandGroupTag != null && group.tag === initialExpandGroupTag}
                         alwaysExpanded
                         t={t}
-                        onDetectExternalCli={onDetectExternalCli}
-                        onSelectExternalCliPath={onSelectExternalCliPath}
                         afterTable={
                           group.tag === "permissions" ? (
                             <PermissionsToolsEditor isConnected={isConnected} />
@@ -5234,8 +4665,6 @@ export function ConfigPanel({
                         onChange={handleFieldChange}
                         defaultOpen={initialExpandGroupTag != null && group.tag === initialExpandGroupTag}
                         t={t}
-                        onDetectExternalCli={onDetectExternalCli}
-                        onSelectExternalCliPath={onSelectExternalCliPath}
                       />
                     ))
                   )}

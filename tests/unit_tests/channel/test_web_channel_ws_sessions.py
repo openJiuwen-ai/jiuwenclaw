@@ -54,6 +54,7 @@ async def test_ws_sessions_tracks_explicit_session_id():
     )
 
     assert channel._ws_sessions.get(id(ws)) == {"sess-real"}
+    await channel.unregister_ws(ws)
 
 
 @pytest.mark.asyncio
@@ -73,6 +74,7 @@ async def test_ws_sessions_ignores_temporary_session_without_explicit_id():
     assert id(ws) not in channel._ws_sessions
     assert len(seen) == 1
     assert seen[0].session_id.startswith("sess_")
+    await channel.unregister_ws(ws)
 
 
 @pytest.mark.asyncio
@@ -112,6 +114,7 @@ async def test_ws_sessions_does_not_accumulate_temp_ids_across_requests():
     )
 
     assert channel._ws_sessions.get(id(ws)) == {"sess-a", "sess-b"}
+    await channel.unregister_ws(ws)
 
 
 @pytest.mark.asyncio
@@ -131,3 +134,4 @@ async def test_ws_sessions_ignores_empty_string_session_id():
     )
 
     assert id(ws) not in channel._ws_sessions
+    await channel.unregister_ws(ws)

@@ -50,11 +50,58 @@ class AgentServerChatHookContext:
 
 
 @dataclass
+class AgentWsServerStartHookContext:
+    """AgentWebSocketServer.start 入口、create_instance 之前"""
+
+    skills_dir: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class SystemPromptHookContext:
     # 扩展可设置此目录，用于覆盖默认的 home_dir
     home_dir: str | None = None
     # 扩展可设置此目录，用于扩展默认的 skill_dir
     skill_dir: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ImageArtifactHookContext:
+    """图像产物落盘后的扩展回调上下文（兼容旧版扩展）。
+
+    新版产物检测对所有产物同时触发 IMAGE_ARTIFACT_POST_PROCESS 和
+    ARTIFACT_POST_PROCESS，扩展在 handler 中按扩展名自行过滤。
+    """
+
+    session_id: str
+    tool_name: str
+    task_id: str | None = None
+    artifact_paths: list[str] = field(default_factory=list)
+    # 输出扩展
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ArtifactPostProcessHookContext:
+    """产物落盘检测后、向前端发送 ``artifact.generated`` 之前的扩展回调上下文。
+
+    扩展可在 handler 中按 ``artifact_paths`` 对文件做原地后处理（如水印、源码可读性转换）。
+    """
+
+    session_id: str
+    tool_name: str
+    task_id: str | None = None
+    subagent_id: str | None = None
+    artifact_paths: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

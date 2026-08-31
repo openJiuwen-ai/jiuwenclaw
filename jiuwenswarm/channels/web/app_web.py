@@ -2,6 +2,10 @@
 
 """Serve built frontend static files with optional reverse proxy.
 
+Production role: SPA + health; business file/share/sessions HTTP lives on
+Gateway Web HTTP — this process proxies those paths when Ingress still hits Web.
+``/api`` (non-sessions) and ``/ws`` proxy to Gateway WebChannel remain.
+
 Supports ``--dotenv <path>`` for multi-instance isolation.
 """
 
@@ -18,12 +22,10 @@ import select
 import socket
 import ssl
 import sys
-import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import unquote, urlparse
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early
@@ -31,22 +33,16 @@ parse_dotenv_early("jiuwenswarm-web")
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
-from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
-from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
-    get_agent_sessions_dir, get_user_workspace_dir, \
-    wait_for_tcp_port, SensitiveDataFilter
-from jiuwenswarm.server.runtime.session.session_history import history_exists, load_history_records
-
-configure_agent_teams_home()
-
-
-def _get_agent_teams_root() -> Path:
-    """Return the agent teams root after dotenv initialization."""
-    from openjiuwen.agent_teams.paths import get_agent_teams_home
-
-    return get_agent_teams_home().resolve()
+from jiuwenswarm.common.utils import (
+    get_logs_dir,
+    get_root_dir,
+    get_user_workspace_dir,
+    wait_for_tcp_port,
+    SensitiveDataFilter,
+)
+from jiuwenswarm.gateway.channel_manager.web.web_http_server import resolve_web_http_port
 
 
 def _get_package_dir() -> Path:
@@ -57,124 +53,89 @@ def _get_package_dir() -> Path:
 
 
 def _default_dist_dir() -> Path:
-    """Return default dist directory for frontend static files.
-
-    The version-controlled frontend build ships alongside the code in all
-    three run modes, so the package-internal dist is the only correct
-    source of truth:
-    - source dev: <repo>/jiuwenswarm/channels/web/frontend/dist
-      (overwritten by ``npm run build``, loaded live)
-    - whl install: <site-packages>/jiuwenswarm/channels/web/frontend/dist
-    - frozen exe: <_MEIPASS>/jiuwenswarm/channels/web/frontend/dist
-
-    A user-data dist (e.g. ``~/.jiuwenswarm/channels/web/frontend/dist``)
-    is never code, is not maintained by any build/upgrade flow, and once
-    stale silently overrides the shipped version — causing the
-    "backend upgraded but frontend still old" mismatch. Do not load it.
-    """
+    """Return default dist directory for frontend static files."""
+    # Priority 1: user workspace channels/web/frontend/dist
+    root = get_root_dir()
+    user_dist = root / "channels" / "web" / "frontend" / "dist"
+    if user_dist.exists():
+        return user_dist
+    # Priority 2: package internal channels/web/frontend/dist
     package_dir = _get_package_dir()
     dist_dir = package_dir / "frontend" / "dist"
+    if dist_dir.exists():
+        return dist_dir
+    # Fallback: return package internal path
     return dist_dir
 
 
-def _normalize_lang_suffix(name: str) -> str:
-    """将 xxxx_zh.MD / xxxx_en.MD 规范为 xxxx.MD（去除 _zh/_en 后缀）。"""
-    stem, suffix = name.rpartition(".")[0], name.rpartition(".")[2]
-    suffix_lower = suffix.lower()
-    if suffix_lower in ("md", "mdx"):
-        stem_lower = stem.lower()
-        if stem_lower.endswith("_zh"):
-            stem = stem[:-3]
-        elif stem_lower.endswith("_en"):
-            stem = stem[:-3]
-    return f"{stem}.{suffix}" if stem else name
-
-
-def _generate_agent_data(project_root: Path) -> None:
-    """Generate agent/workspace/agent-data.json from agent tree."""
-    agent_root = (project_root / "agent").resolve()
-    workspace_root = (agent_root / "workspace").resolve()
-    output_path = (workspace_root / "agent-data.json").resolve()
-    root_folder_key = "__root__"
-
-    if not agent_root.exists():
-        raise FileNotFoundError("agent directory not found")
-    if not agent_root.is_dir():
-        raise NotADirectoryError("agent is not a directory")
-
-    folder_data: dict[str, list[dict[str, str | bool]]] = {}
-    seen_paths: dict[str, set[str]] = {}  # folder_key -> normalized paths，用于去重
-    for entry in sorted(workspace_root.rglob("*")):
-        if not entry.is_file() or entry.name.startswith("."):
-            continue
-        # Skip files in hidden directories (e.g., .agent_history)
-        if any(part.startswith(".") for part in entry.relative_to(workspace_root).parts):
-            continue
-        relative_folder_path = entry.parent.relative_to(agent_root).as_posix()
-        folder_key = root_folder_key if relative_folder_path == "." else relative_folder_path
-
-        display_name = _normalize_lang_suffix(entry.name)
-        display_path = (
-            f"agent/{relative_folder_path}/{display_name}".replace("/.", "/").replace("//", "/")
-            if relative_folder_path != "."
-            else f"agent/{display_name}"
+def _inject_user_web_runtime_config(
+    document: str,
+    mode: str,
+    login_auth_simulate: bool = True,
+    login_auth_simulate_available: bool = True,
+) -> str:
+    """Inject runtime mode values without modifying JavaScript property names."""
+    return (
+        document.replace("__JIUWEN_USER_WEB_MODE_VALUE__", mode)
+        .replace(
+            "__JIUWEN_USER_WEB_EMBEDDING_VALUE__",
+            "true" if mode == "enterprise" else "false",
         )
-        seen = seen_paths.setdefault(folder_key, set())
-        if display_path in seen:
-            continue  # 同一文件夹内 _zh 与 _en 并存时只保留先出现的
-        seen.add(display_path)
-
-        folder_data.setdefault(folder_key, []).append(
-            {
-                "name": display_name,
-                "path": display_path,
-                "isMarkdown": entry.suffix.lower() in {".md", ".mdx"},
-            }
+        .replace(
+            "__JIUWEN_LOGIN_AUTH_SIMULATE_VALUE__",
+            "true" if login_auth_simulate else "false",
         )
-
-    sorted_folder_data = {
-        folder_key: sorted(files, key=lambda item: item["path"])
-        for folder_key, files in sorted(folder_data.items(), key=lambda item: item[0])
-    }
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(sorted_folder_data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+        .replace(
+            "__JIUWEN_LOGIN_AUTH_SIMULATE_AVAILABLE_VALUE__",
+            "true" if login_auth_simulate_available else "false",
+        )
     )
 
 
-def _parse_single_byte_range(
-    range_header: str,
-    file_size: int,
-) -> tuple[int, int] | None:
-    """Parse one HTTP byte range, returning inclusive start and end offsets."""
-    if file_size == 0 or not range_header.startswith("bytes=") or "," in range_header:
-        return None
+def _parse_login_auth_simulate(raw: str | None) -> bool:
+    value = "true" if raw is None or not raw.strip() else raw.strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError(
+        f"LOGIN_AUTH_SIMULATE 配置非法：期望 true 或 false，实际为 {raw!r}"
+    )
 
-    range_value = range_header[6:]
-    if "-" not in range_value:
-        return None
 
-    start_text, end_text = range_value.split("-", 1)
-    if not start_text:
-        if not end_text.isascii() or not end_text.isdecimal():
-            return None
-        suffix_length = int(end_text)
-        if suffix_length <= 0:
-            return None
-        return max(0, file_size - suffix_length), file_size - 1
+def _probe_http_service(
+    target: str, path: str, service_name: str, timeout: float = 3.0
+) -> tuple[bool, str]:
+    """Probe an authentication dependency; 401/403 still prove reachability."""
+    parsed = urlparse(target)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False, f"{service_name}地址非法：{target!r}"
+    connection_cls = (
+        http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    )
+    connection = connection_cls(parsed.hostname, parsed.port, timeout=timeout)
+    base_path = parsed.path.rstrip("/")
+    try:
+        connection.request("GET", f"{base_path}{path}")
+        response = connection.getresponse()
+        response.read()
+        if response.status >= 500:
+            return False, f"{service_name}返回 HTTP {response.status}"
+        return True, f"HTTP {response.status}"
+    except (OSError, http.client.HTTPException) as exc:
+        return False, str(exc)
+    finally:
+        connection.close()
 
-    if not start_text.isascii() or not start_text.isdecimal():
-        return None
-    if end_text and (not end_text.isascii() or not end_text.isdecimal()):
-        return None
 
-    start = int(start_text)
-    end = int(end_text) if end_text else file_size - 1
-    if start >= file_size or end < start:
-        return None
-    return start, min(end, file_size - 1)
+def _probe_identity_service(target: str, timeout: float = 3.0) -> tuple[bool, str]:
+    return _probe_http_service(target, "/v1/auth/me", "ID认证服务", timeout)
+
+
+def _probe_manager_service(target: str, timeout: float = 3.0) -> tuple[bool, str]:
+    return _probe_http_service(
+        target, "/api/v1/user-console/gateways", "Manager业务接口", timeout
+    )
 
 
 class _SpaStaticHandler(SimpleHTTPRequestHandler):
@@ -192,12 +153,14 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     api_target = ""
     ws_target = ""
+    web_http_target = ""
+    idp_target = ""
+    manager_api_target = ""
     ws_disable_compress = False
-    project_root = get_user_workspace_dir()
-    workspace_root = get_agent_root_dir()
-    agent_teams_root = _get_agent_teams_root()
-    logs_root = get_logs_dir()
-    auto_harness_root = project_root / "auto-harness"
+    embedding_enabled = False
+    user_web_mode = "personal"
+    login_auth_simulate = True
+    login_auth_simulate_available = True
     logger = logging.getLogger(__name__)
 
     _HOP_BY_HOP_HEADERS = {
@@ -380,12 +343,6 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def _is_ws_route(self) -> bool:
         return urlparse(self.path).path.startswith("/ws")
-
-    def _is_file_api_route(self) -> bool:
-        return urlparse(self.path).path.startswith("/file-api/")
-
-    def _is_share_api_route(self) -> bool:
-        return urlparse(self.path).path.startswith("/share-api/")
 
     def _is_websocket_upgrade(self) -> bool:
         upgrade = self.headers.get("Upgrade", "")
@@ -651,6 +608,16 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 pass
 
     def _dispatch_proxy(self) -> bool:
+        # 用户面认证和目录请求仍走同源地址，由本服务转发到集群内的 Identity/Manager。
+        path = urlparse(self.path).path
+        if path == "/idp" or path.startswith("/idp/"):
+            return self._proxy_named_http(self.idp_target, "/idp")
+        if path == "/manager-api" or path.startswith("/manager-api/"):
+            return self._proxy_named_http(self.manager_api_target, "/manager-api", "/api")
+        # /api/sessions* is handled by _is_web_http_route (Gateway Web HTTP), not WebChannel.
+        if self._is_web_http_route():
+            self._proxy_web_http()
+            return True
         if self._is_api_route():
             self._proxy_http()
             return True
@@ -662,456 +629,84 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             return True
         return False
 
-    @staticmethod
-    def _is_markdown(path_obj: Path) -> bool:
-        ext = path_obj.suffix.lower()
-        return ext in {".md", ".mdx"}
 
-    @classmethod
-    def _is_path_under_allowed_root(cls, target: Path) -> bool:
-        target_resolved = target.resolve()
-        try:
-            in_workspace = (
-                os.path.commonpath([str(cls.workspace_root), str(target_resolved)])
-                == str(cls.workspace_root)
-            )
-            in_agent_teams = (
-                os.path.commonpath([str(cls.agent_teams_root), str(target_resolved)]) == str(cls.agent_teams_root)
-            )
-            in_logs = os.path.commonpath([str(cls.logs_root), str(target_resolved)]) == str(cls.logs_root)
-            in_auto_harness = \
-                os.path.commonpath([str(cls.auto_harness_root), str(target_resolved)]) == str(cls.auto_harness_root)
-            return in_workspace or in_agent_teams or in_logs or in_auto_harness
-        except ValueError:
-            return False
+    def _is_web_http_route(self) -> bool:
+        """Paths served by Gateway Web HTTP; proxy when Ingress still points at Web static."""
+        path = urlparse(self.path).path
+        if path == "/gateway-api" or path.startswith("/gateway-api/"):
+            return True
+        if path.startswith("/file-api/") or path.startswith("/share-api/"):
+            return True
+        if path == "/api/sessions" or path.startswith("/api/sessions/"):
+            return True
+        if path == "/api/v1" or path.startswith("/api/v1/"):
+            return True
+        return False
 
-    def _write_json(self, status: int, payload: dict) -> None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(data)
-
-    @staticmethod
-    def _parse_query(query: str) -> dict[str, str]:
-        parsed: dict[str, str] = {}
-        if not query:
-            return parsed
-        for pair in query.split("&"):
-            if "=" in pair:
-                k, v = pair.split("=", 1)
-            else:
-                k, v = pair, ""
-            parsed[unquote(k)] = unquote(v)
-        return parsed
-
-    def _resolve_session_title(self, session_dir: Path, history: list[dict[str, Any]]) -> str:
-        metadata_path = session_dir / "metadata.json"
-        if metadata_path.exists():
-            try:
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                title = metadata.get("title") if isinstance(metadata, dict) else None
-                if isinstance(title, str) and title.strip():
-                    return title.strip()
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                pass
-        for record in history:
-            if record.get("role") == "user":
-                content = record.get("content")
-                if isinstance(content, str) and content.strip():
-                    return content.strip().replace("\n", " ")[:80]
-        return session_dir.name
-
-    def _build_share_snapshot(
-        self,
-        *,
-        session_id: str,
-    ) -> tuple[dict[str, Any], str]:
-        sessions_root = get_agent_sessions_dir().resolve()
-        session_dir = (sessions_root / session_id).resolve()
-        try:
-            if os.path.commonpath([str(sessions_root), str(session_dir)]) != str(sessions_root):
-                raise FileNotFoundError("history_not_found")
-        except ValueError as exc:
-            raise FileNotFoundError("history_not_found") from exc
-
-        if not session_dir.exists() or not history_exists(session_id):
-            raise FileNotFoundError("history_not_found")
-        try:
-            history_raw = load_history_records(session_id)
-        except Exception as exc:
-            raise ValueError("invalid_history_json") from exc
-        if not isinstance(history_raw, list):
-            raise ValueError("invalid_history_shape")
-
-        history = [item for item in history_raw if isinstance(item, dict)]
-        exported_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"jiuwenswarm-share-{timestamp}.png"
-        snapshot = {
-            "session_id": session_id,
-            "metadata": {
-                "title": self._resolve_session_title(session_dir, history),
-                "exported_at": exported_at,
-                "filename": filename,
-            },
-            "records": history_raw,
-        }
-        return snapshot, filename
-
-    def _handle_share_api_get(self, parsed) -> None:
-        if parsed.path != "/share-api/snapshot":
-            self._write_json(404, {"error": "not_found"})
-            return
-        query = self._parse_query(parsed.query)
-        session_id = query.get("session_id", "").strip()
-        if not session_id:
-            self._write_json(400, {"error": "missing_session_id"})
-            return
-        try:
-            snapshot, filename = self._build_share_snapshot(
-                session_id=session_id,
-            )
-        except FileNotFoundError:
-            self._write_json(404, {"error": "history_not_found"})
-            return
-        except ValueError as exc:
-            self._write_json(400, {"error": str(exc)})
-            return
-        self._write_json(200, {"filename": filename, "snapshot": snapshot})
-
-    def _handle_file_api_get(self, parsed) -> None:
+    def _proxy_named_http(self, target: str, prefix: str, replacement: str = "") -> bool:
+        if not target:
+            self.send_error(502, "proxy target not configured")
+            return True
+        original_path = self.path
+        parsed = urlparse(original_path)
         path = parsed.path
-        query = self._parse_query(parsed.query)
-
-        if path == "/file-api/list-markdown":
-            dir_arg = query.get("dir", "")
-            if not dir_arg:
-                self._write_json(400, {"error": "missing_dir"})
-                return
-            full_dir = (self.project_root / dir_arg).resolve()
-            if not self._is_path_under_allowed_root(full_dir):
-                self._write_json(403, {"error": "forbidden_dir"})
-                return
-            if not full_dir.exists() or not full_dir.is_dir():
-                self._write_json(200, {"files": []})
-                return
-            files = []
-            for entry in sorted(full_dir.iterdir(), key=lambda p: p.name.lower()):
-                if not entry.is_file() or not self._is_markdown(entry):
-                    continue
-                files.append(
-                    {
-                        "name": entry.name,
-                        "path": str(entry.relative_to(self.project_root)),
-                    }
-                )
-            self._write_json(200, {"files": files})
-            return
-
-        if path == "/file-api/list-files":
-            dir_arg = query.get("dir", "")
-            if not dir_arg:
-                self._write_json(400, {"error": "missing_dir"})
-                return
-            full_dir = (self.project_root / dir_arg).resolve()
-            if not self._is_path_under_allowed_root(full_dir):
-                self._write_json(403, {"error": "forbidden_dir"})
-                return
-            if not full_dir.exists() or not full_dir.is_dir():
-                self._write_json(200, {"files": []})
-                return
-            files = []
-            entries = sorted(
-                full_dir.iterdir(),
-                key=lambda p: (not p.is_dir(), p.name.lower()),
-            )
-            for entry in entries:
-                files.append(
-                    {
-                        "name": entry.name,
-                        "path": str(entry.relative_to(self.project_root)),
-                        "isMarkdown": self._is_markdown(entry) if entry.is_file() else False,
-                        "isDirectory": entry.is_dir(),
-                    }
-                )
-            self._write_json(200, {"files": files})
-            return
-
-        if path == "/file-api/raw-file":
-            file_arg = query.get("path", "")
-            if not file_arg:
-                self._write_json(400, {"error": "missing_file_path"})
-                return
-            full_path = (self.project_root / file_arg).resolve()
-            if not self._is_path_under_allowed_root(full_path):
-                self._write_json(403, {"error": "forbidden_path"})
-                return
-            if not full_path.is_file():
-                self._write_json(404, {"error": "file_not_found"})
-                return
-
-            mime_type, _ = mimetypes.guess_type(full_path.name)
-            self.send_response(200)
-            self.send_header("Content-Type", mime_type or "application/octet-stream")
-            self.send_header("Content-Length", str(full_path.stat().st_size))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            if self.command != "HEAD":
-                with full_path.open("rb") as file_obj:
-                    while True:
-                        chunk = file_obj.read(65536)
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-            return
-
-        if path == "/file-api/file-content":
-            file_arg = query.get("path", "")
-            encoding_arg = query.get("encoding", "utf-8")
-            if not file_arg:
-                self._write_json(400, {"error": "missing_file_path"})
-                return
-            full_path = (self.project_root / file_arg).resolve()
-            if not self._is_path_under_allowed_root(full_path):
-                self._write_json(403, {"error": "forbidden_path"})
-                return
-            if not full_path.exists():
-                if file_arg.replace("\\", "/") == "agent/workspace/agent-data.json":
-                    try:
-                        _generate_agent_data(self.project_root)
-                    except Exception as exc:  # noqa: BLE001
-                        self._write_json(500, {"error": "generate_failed", "detail": str(exc)})
-                        return
-                if not full_path.exists():
-                    self._write_json(404, {"error": "file_not_found", "fullPath": str(full_path)})
-                    return
-
-            def read_file_with_encoding(file_path: Path, encoding: str) -> tuple[str, str]:
-                if encoding == "auto":
-                    import charset_normalizer
-                    raw_data = file_path.read_bytes()
-                    detected = charset_normalizer.from_bytes(raw_data).best()
-                    if detected is None:
-                        detected_encoding = "utf-8"
-                    else:
-                        detected_encoding = detected.encoding or "utf-8"
-                    try:
-                        return raw_data.decode(detected_encoding), detected_encoding
-                    except (UnicodeDecodeError, LookupError) as decode_exc:
-                        for try_encoding in ["gbk", "gb2312", "big5", "shift_jis", "euc_kr"]:
-                            try:
-                                return raw_data.decode(try_encoding), try_encoding
-                            except (UnicodeDecodeError, LookupError):
-                                continue
-                        raise OSError(f"Unable to decode file with any known encoding") from decode_exc
-                else:
-                    return file_path.read_text(encoding=encoding), encoding
-
-            try:
-                data, used_encoding = read_file_with_encoding(full_path, encoding_arg)
-            except OSError as exc:
-                self._write_json(500, {"error": str(exc)})
-                return
-            body = data.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("X-Original-Encoding", used_encoding)
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(body)
-            return
-
-        if path == "/file-api/download":
-            self._handle_file_download(query)
-            return
-
-        if path == "/file-api/ws-debug-config":
-            self._write_json(
-                200,
-                {
-                    "wsDisableCompress": bool(type(self).ws_disable_compress),
-                },
-            )
-            return
-
-        self._write_json(404, {"error": "not_found"})
-
-    def _handle_file_download(self, query: dict[str, str]) -> None:
-        token = query.get("token", "")
-        if not token:
-            self._write_json(400, {"error": "missing_token"})
-            return
-
+        if path == prefix:
+            path = replacement or "/"
+        elif replacement:
+            path = replacement + path[len(prefix):]
+        else:
+            path = path[len(prefix):] or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        self.path = path
+        self.__dict__["api_target"] = target
         try:
-            from jiuwenswarm.agents.harness.common.tools.web_file_download import (
-                validate_file_download_token,
-            )
-        except ImportError:
-            self._write_json(500, {"error": "download_module_unavailable"})
-            return
+            self._proxy_http()
+        finally:
+            self.path = original_path
+            self.__dict__.pop("api_target", None)
+        return True
 
-        payload = validate_file_download_token(token)
-        if payload is None:
-            self._write_json(403, {"error": "invalid_or_expired_token"})
+    def _proxy_web_http(self) -> None:
+        if not self.web_http_target:
+            self.send_error(502, "web http proxy target not configured")
             return
-
-        file_path = payload.get("path", "")
-        if not file_path or not os.path.isfile(file_path):
-            self._write_json(404, {"error": "file_not_found"})
-            return
-
+        original_path = self.path
+        parsed_path = urlparse(original_path).path
+        if parsed_path == "/gateway-api" or parsed_path.startswith("/gateway-api/"):
+            self.path = f"/api{original_path[len('/gateway-api'):]}"
+        self.__dict__["api_target"] = self.web_http_target
         try:
-            file_size = os.path.getsize(file_path)
-            file_name = os.path.basename(file_path)
-
-            mime_type, _ = mimetypes.guess_type(file_name)
-            if not mime_type:
-                mime_type = "application/octet-stream"
-
-            range_header = self.headers.get("Range")
-            byte_range = None
-            if range_header:
-                byte_range = _parse_single_byte_range(range_header, file_size)
-                if byte_range is None:
-                    self.send_response(416)
-                    self.send_header("Content-Range", f"bytes */{file_size}")
-                    self.end_headers()
-                    return
-
-            start, end = byte_range or (0, max(0, file_size - 1))
-            content_length = 0 if file_size == 0 else end - start + 1
-            self.send_response(206 if byte_range is not None else 200)
-            self.send_header("Content-Type", mime_type)
-            self.send_header("Content-Length", str(content_length))
-            self.send_header("Accept-Ranges", "bytes")
-            encoded_name = quote(file_name, safe="")
-            disposition = (
-                "inline"
-                if query.get("inline", "").lower() in {"1", "true"}
-                else "attachment"
-            )
-            self.send_header(
-                "Content-Disposition",
-                f"{disposition}; filename*=UTF-8''{encoded_name}",
-            )
-            self.send_header("Cache-Control", "no-store")
-            if byte_range is not None:
-                self.send_header(
-                    "Content-Range",
-                    f"bytes {start}-{end}/{file_size}",
-                )
-            self.end_headers()
-
-            if self.command != "HEAD":
-                with open(file_path, "rb") as f:
-                    f.seek(start)
-                    remaining = content_length
-                    while remaining > 0:
-                        chunk = f.read(min(65536, remaining))
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        remaining -= len(chunk)
-        except Exception as exc:
-            self.log_error("file download error: %s", exc)
-            try:
-                self._write_json(500, {"error": "download_failed", "detail": str(exc)})
-            except Exception:
-                # Connection may already be closed or broken; nothing more we can do.
-                self.log_error("failed to send download error response")
-
-    def _handle_file_api_post(self, parsed) -> None:
-        if parsed.path == "/file-api/rebuild-agent-data":
-            try:
-                _generate_agent_data(self.project_root)
-            except Exception as exc:  # noqa: BLE001
-                self._write_json(500, {"error": "rebuild_failed", "detail": str(exc)})
-                return
-
-            self._write_json(200, {"ok": True})
-            return
-
-        if parsed.path == "/file-api/file-content":
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            raw = self.rfile.read(length) if length > 0 else b""
-            try:
-                payload = json.loads(raw.decode("utf-8") if raw else "{}")
-            except json.JSONDecodeError:
-                self._write_json(400, {"error": "invalid_json"})
-                return
-
-            request_path = payload.get("path")
-            request_content = payload.get("content")
-            if not isinstance(request_path, str) or not request_path.strip():
-                self._write_json(400, {"error": "missing_file_path"})
-                return
-            if not isinstance(request_content, str):
-                self._write_json(400, {"error": "missing_file_content"})
-                return
-
-            full_path = (self.project_root / request_path).resolve()
-            if not self._is_path_under_allowed_root(full_path):
-                self._write_json(403, {"error": "forbidden_path"})
-                return
-            if not self._is_markdown(full_path):
-                self._write_json(400, {"error": "only_markdown_supported"})
-                return
-            if not full_path.exists():
-                self._write_json(404, {"error": "file_not_found"})
-                return
-
-            try:
-                full_path.write_text(request_content, encoding="utf-8")
-            except OSError as exc:
-                self._write_json(500, {"error": str(exc)})
-                return
-            self._write_json(200, {"ok": True})
-            return
-
-        if parsed.path == "/file-api/ws-debug-config":
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            raw = self.rfile.read(length) if length > 0 else b""
-            try:
-                payload = json.loads(raw.decode("utf-8") if raw else "{}")
-            except json.JSONDecodeError:
-                self._write_json(400, {"error": "invalid_json"})
-                return
-
-            ws_disable_compress = payload.get("wsDisableCompress")
-            if not isinstance(ws_disable_compress, bool):
-                self._write_json(400, {"error": "invalid_ws_disable_compress"})
-                return
-
-            type(self).ws_disable_compress = ws_disable_compress
-            self.logger.info(
-                "[jiuwenswarm-web] ws disable compress updated: %s",
-                ws_disable_compress,
-            )
-            self._write_json(200, {"ok": True, "wsDisableCompress": ws_disable_compress})
-            return
-
-        self._write_json(404, {"error": "not_found"})
+            self._proxy_http()
+        finally:
+            self.__dict__.pop("api_target", None)
+            self.path = original_path
 
     def do_GET(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if self._is_share_api_route():
-            self._handle_share_api_get(parsed)
-            return
-        if self._is_file_api_route():
-            self._handle_file_api_get(parsed)
+        if self._is_web_http_route():
+            self._proxy_web_http()
             return
         if self._dispatch_proxy():
+            return
+        if self._is_document_request():
+            index = Path(self.directory or os.getcwd()) / "index.html"
+            body = _inject_user_web_runtime_config(
+                index.read_text(encoding="utf-8"),
+                self.user_web_mode,
+                self.login_auth_simulate,
+                self.login_auth_simulate_available,
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         super().do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if self._is_file_api_route():
-            self._handle_file_api_post(parsed)
+        if self._is_web_http_route():
+            self._proxy_web_http()
             return
         if self._dispatch_proxy():
             return
@@ -1133,14 +728,16 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self.send_error(405, "method not allowed")
 
     def do_OPTIONS(self) -> None:  # noqa: N802
+        if self._is_web_http_route():
+            self._proxy_web_http()
+            return
         if self._dispatch_proxy():
             return
         self.send_error(405, "method not allowed")
 
     def do_HEAD(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if self._is_file_api_route():
-            self._handle_file_api_get(parsed)
+        if self._is_web_http_route():
+            self._proxy_web_http()
             return
         if self._dispatch_proxy():
             return
@@ -1151,6 +748,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def log_error(self, format: str, *args) -> None:  # noqa: A002
         self.logger.error("%s - %s", self.address_string(), format % args)
+
+    def _is_document_request(self) -> bool:
+        path = urlparse(self.path).path
+        return path in ("/", "/index.html") and "text/html" in self.headers.get("Accept", "")
 
     def send_head(self):
         parsed = urlparse(self.path)
@@ -1307,36 +908,106 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    # default_project_root should be the user workspace root (~/.jiuwenswarm in package mode)
-    # get_root_dir() already handles this correctly
-    default_project_root = get_user_workspace_dir()
-
-    project_root = default_project_root
-    workspace_root = (project_root / "agent").resolve()
-    agent_teams_root = _get_agent_teams_root()
     logs_root = get_logs_dir().resolve()
     logger = _setup_logger(logs_root, args.log_level)
+
+    web_port_int = int(os.getenv("WEB_PORT", "19000"))
+    web_http_port = resolve_web_http_port(web_port_int)
+    web_http_target = f"http://127.0.0.1:{web_http_port}"
+    explicit_web_http = os.getenv("GATEWAY_WEB_HTTP_URL", "").strip()
+    if explicit_web_http:
+        web_http_target = explicit_web_http.rstrip("/")
 
     class _ConfiguredHandler(_SpaStaticHandler):
         pass
 
     _ConfiguredHandler.api_target = api_target
     _ConfiguredHandler.ws_target = ws_target
+    _ConfiguredHandler.idp_target = os.getenv("USER_WEB_IDP_TARGET", "").strip()
+    _ConfiguredHandler.manager_api_target = os.getenv("USER_WEB_MANAGER_TARGET", "").strip()
+    configured_mode = os.getenv("USER_WEB_MODE", "").strip().lower()
+    if configured_mode not in {"personal", "enterprise"}:
+        legacy_embedding = os.getenv("ENABLE_USER_WEB_EMBEDDING", "")
+        configured_mode = "enterprise" if legacy_embedding.strip().lower() == "true" else "personal"
+    _ConfiguredHandler.user_web_mode = configured_mode
+    login_auth_simulate_raw = os.getenv("LOGIN_AUTH_SIMULATE")
+    login_auth_simulate_available_raw = os.getenv("LOGIN_AUTH_SIMULATE_AVAILABLE")
+    try:
+        login_auth_simulate = _parse_login_auth_simulate(
+            login_auth_simulate_raw
+        )
+        login_auth_simulate_available = _parse_login_auth_simulate(
+            login_auth_simulate_available_raw
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    _ConfiguredHandler.login_auth_simulate = login_auth_simulate
+    _ConfiguredHandler.login_auth_simulate_available = login_auth_simulate_available
+    if configured_mode == "enterprise" and login_auth_simulate and not login_auth_simulate_available:
+        raise SystemExit(
+            "配置冲突：LOGIN_AUTH_SIMULATE=true，但当前客户交付制品未包含登录认证模拟插件；"
+            "请设置 LOGIN_AUTH_SIMULATE=false 并接入 manager ID认证服务"
+        )
+    _ConfiguredHandler.embedding_enabled = configured_mode == "enterprise"
+    _ConfiguredHandler.web_http_target = web_http_target
     _ConfiguredHandler.ws_disable_compress = args.ws_disable_compress
-    _ConfiguredHandler.project_root = project_root
-    _ConfiguredHandler.workspace_root = workspace_root
-    _ConfiguredHandler.agent_teams_root = agent_teams_root
-    _ConfiguredHandler.logs_root = logs_root
     _ConfiguredHandler.logger = logger
     handler = partial(_ConfiguredHandler, directory=str(dist_dir))
     server = ThreadingHTTPServer((args.host, args.port), handler)
 
     logger.info("[jiuwenswarm-web] serving %s", dist_dir)
+    if login_auth_simulate_raw is None or not login_auth_simulate_raw.strip():
+        logger.info(
+            "[jiuwenswarm-web] LOGIN_AUTH_SIMULATE 未配置，按默认值 true 启用登录认证模拟调试"
+        )
+    if configured_mode == "personal":
+        logger.info("[jiuwenswarm-web] personal 模式：跳过企业登录认证")
+        if not login_auth_simulate:
+            logger.warning(
+                "[jiuwenswarm-web] 配置冲突：USER_WEB_MODE=personal 时 "
+                "LOGIN_AUTH_SIMULATE 不参与登录流程，personal 模式仍跳过企业认证"
+            )
+    elif login_auth_simulate:
+        logger.info("[jiuwenswarm-web] 【登录认证模拟调试模式已开启】")
+    else:
+        logger.info(
+            "[jiuwenswarm-web] 【正式身份认证模式，依赖manager ID认证服务】"
+        )
+        missing_targets = []
+        if not _ConfiguredHandler.idp_target:
+            missing_targets.append("USER_WEB_IDP_TARGET")
+        if not _ConfiguredHandler.manager_api_target:
+            missing_targets.append("USER_WEB_MANAGER_TARGET")
+        if missing_targets:
+            logger.error(
+                "[jiuwenswarm-web] 正式登录模式缺少 %s；请配置 manager 认证及业务接口地址",
+                "、".join(missing_targets),
+            )
+        else:
+            probes = (
+                ("manager ID认证服务", "USER_WEB_IDP_TARGET", _probe_identity_service, _ConfiguredHandler.idp_target),
+                ("Manager业务接口", "USER_WEB_MANAGER_TARGET", _probe_manager_service, _ConfiguredHandler.manager_api_target),
+            )
+            for service_name, config_name, probe, target in probes:
+                reachable, detail = probe(target)
+                if reachable:
+                    logger.info("[jiuwenswarm-web] %s连通性检查通过：%s", service_name, detail)
+                else:
+                    logger.error(
+                        "[jiuwenswarm-web] 当前为正式登录模式，%s暂不可用（%s）；"
+                        "请检查 %s、网络和服务状态",
+                        service_name,
+                        detail,
+                        config_name,
+                    )
     logger.info("[jiuwenswarm-web] http://%s:%s", args.host, args.port)
     logger.info("[jiuwenswarm-web] /api -> %s", api_target)
     logger.info("[jiuwenswarm-web] /ws  -> %s", ws_target)
+    logger.info(
+        "[jiuwenswarm-web] /gateway-api,/file-api,/share-api,/api/sessions*,/api/v1* -> %s",
+        web_http_target,
+    )
     logger.info("[jiuwenswarm-web] ws disable compress: %s", args.ws_disable_compress)
-    logger.info("[jiuwenswarm-web] /file-api roots -> %s, %s, %s", workspace_root, agent_teams_root, logs_root)
 
     _wait_for_gateway(ws_target, logger)
 

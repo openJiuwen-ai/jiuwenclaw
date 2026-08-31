@@ -16,6 +16,33 @@ from weakref import WeakValueDictionary
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config, get_default_models
+from jiuwenswarm.common.local_env_config import (
+    is_enterprise,
+    apply_env_overrides_to_active,
+    apply_env_removals,
+    bind_task_env_overlay,
+    build_effective_env_overlay,
+    promote_staged_env,
+    replace_active_env,
+    reset_task_env_overlay,
+    seal_env_mapping,
+    stage_env_overrides,
+)
+from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
+    infer_multimodal_env_removals,
+    merge_reload_env_snapshot,
+    sync_multimodal_env_omission_state,
+)
+from jiuwenswarm.server.runtime.reload_result import (
+    ReloadAggregateResult,
+    ReloadResult,
+    log_agent_config_hot_reload,
+    log_agent_config_hot_reload_replay,
+    log_reload_config_changes,
+)
+from jiuwenswarm.agents.harness.common.rails.skill_credential_injection_rail import (
+    coalesce_config_skill_envs,
+)
 
 if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -25,6 +52,15 @@ logger = logging.getLogger(__name__)
 
 
 ACP_DEFAULT_CAPABILITIES: dict[str, Any] = build_acp_initialize_result()
+
+# Disk control-plane RPCs: list/rollback archives via EvolutionStore only.
+# Must not call create_instance() (which constructs llm clients).
+_DISK_ONLY_EVOLUTION_METHODS: frozenset[str] = frozenset(
+    {
+        "skills.evolution.archives",
+        "skills.evolution.rollback",
+    }
+)
 
 
 def _normalize_channel_id(channel_id: str | None) -> str:
@@ -49,37 +85,9 @@ def _normalize_project_dir(project_dir: str | None) -> str:
         return raw
 
 
-# 单 agent 的 plan 是**会话运行期状态**（``DeepAgentState.plan_mode``），不是另一种
-# agent 装配：plan 与非 plan 用的是同一套 rails 和工具，差别只在模型这一轮能看到
-# 哪些工具。所以这里把 plan 子模式并回它的普通形态，用户开关 Plan 时命中同一个
-# 实例——否则换实例就等于换掉 ``context_engine``，整段对话历史会凭空消失。
-#
-# 集群不在此列：``team.plan`` 解析出的子模式是 ``team``，本来就不带 plan。
-_PLAN_SUB_MODE_ALIASES: dict[str, str] = {
-    "agent": "",
-    "code": "normal",
-}
-
-
-def collapse_plan_sub_mode(mode: str | None, sub_mode: str | None) -> str:
-    """把单 agent 的 ``plan`` 子模式并回普通子模式。
-
-    Args:
-        mode: 归一化前后的 manager mode。
-        sub_mode: 归一化前后的子模式。
-
-    Returns:
-        并轨后的子模式；非单 agent plan 时原样返回。
-    """
-    sub_mode_key = _normalize_sub_mode(sub_mode)
-    if sub_mode_key != "plan":
-        return sub_mode_key
-    return _PLAN_SUB_MODE_ALIASES.get(_normalize_mode(mode), sub_mode_key)
-
-
 def _make_agent_cache_key(mode: str | None, sub_mode: str | None, project_dir: str | None) -> str:
     mode_key = _normalize_mode(mode)
-    sub_mode_key = collapse_plan_sub_mode(mode_key, sub_mode)
+    sub_mode_key = _normalize_sub_mode(sub_mode)
     project_key = _normalize_project_dir(project_dir)
     return f"{mode_key}:{sub_mode_key}:{project_key}"
 
@@ -111,12 +119,63 @@ class AgentManager:
     - "default": 默认通道
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        agent_id: str | None = None,
+        service_id: str | None = None,
+        user_workspace_dir: Any | None = None,
+        config_base: Any | None = None,
+        env_overrides: dict[str, Any] | None = None,
+        last_reload_trace_id: str | None = None,
+        env_agent_id: str | None = None,
+        env_service_id: str | None = None,
+    ) -> None:
         self.agents: dict[str, dict[str, "JiuWenSwarm"]] = {}
         # 记录每个 (channel_id, mode) 的创建参数, 便于 recreate_agent 立刻重建
         self._agent_create_params: dict[str, dict[str, dict[str, Any]]] = {}
         self._client_capabilities_by_channel: dict[str, dict[str, Any]] = {}
-        self._latest_env_overrides: dict[str, Any] = {}
+        self._latest_env_overrides: dict[str, Any] = dict(env_overrides) if env_overrides else {}
+        self._latest_env_snapshot: dict[str, Any] | None = None
+        if isinstance(config_base, dict):
+            self._latest_config_base: dict[str, Any] | None = dict(config_base)
+        else:
+            self._latest_config_base = config_base
+        self._last_reload_trace_id: str | None = last_reload_trace_id
+        # 租户环境命名空间标识（用于 env tip 袋的 (service_id, agent_id) 键）
+        self.agent_id = agent_id or "default"
+        self.service_id = service_id or "default"
+        self._env_agent_id: str = env_agent_id or agent_id or "default"
+        self._env_service_id: str = env_service_id or service_id or "default"
+        self._user_workspace_dir = user_workspace_dir
+        if env_overrides is not None and isinstance(env_overrides, dict):
+            omission_removals = infer_multimodal_env_removals(
+                None,
+                env_overrides,
+                active_env=None,
+                service_id=self._env_service_id,
+                agent_id=self._env_agent_id,
+            )
+            if omission_removals:
+                apply_env_removals(
+                    omission_removals,
+                    service_id=self._env_service_id,
+                    agent_id=self._env_agent_id,
+                )
+            sync_multimodal_env_omission_state(
+                omission_removals,
+                env_overrides,
+                service_id=self._env_service_id,
+                agent_id=self._env_agent_id,
+            )
+            self._latest_env_overrides = seal_env_mapping(
+                merge_reload_env_snapshot(None, env_overrides)
+            )
+            apply_env_overrides_to_active(
+                env_overrides,
+                service_id=self._env_service_id,
+                agent_id=self._env_agent_id,
+            )
         # reload 串行锁: 防止并发 reload 叠加导致内存爆炸
         self._reload_lock: asyncio.Lock = asyncio.Lock()
         self._last_reload_fingerprint: str | None = None
@@ -139,6 +198,23 @@ class AgentManager:
         from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
 
         self.warm_pool = AgentWarmPool(self)
+        if self._user_workspace_dir is not None and is_enterprise():
+            logger.info(
+                "[AgentManager] enterprise init: agent_id=%s service_id=%s user_workspace=%s",
+                self.agent_id,
+                self.service_id,
+                self._user_workspace_dir,
+            )
+
+    @property
+    def env_agent_id(self) -> str:
+        """Return the env namespace agent_id for this manager."""
+        return self._env_agent_id
+
+    @property
+    def env_service_id(self) -> str:
+        """Return the env namespace service_id for this manager."""
+        return self._env_service_id
 
     def _get_agent_create_lock(
         self,
@@ -390,6 +466,17 @@ class AgentManager:
             topology[str(channel_id)] = sorted((str(agent_key), id(agent)) for agent_key, agent in agents.items())
         return topology
 
+    def iter_jiuwenswarm_instances(self) -> list["JiuWenSwarm"]:
+        """Return initialized agents from the current two-level cache."""
+        instances: list["JiuWenSwarm"] = []
+        for channel_agents in self.agents.values():
+            if not isinstance(channel_agents, dict):
+                continue
+            instances.extend(
+                agent for agent in channel_agents.values() if agent is not None
+            )
+        return instances
+
     async def _create_agent(
         self,
         agent_key: str,
@@ -409,44 +496,60 @@ class AgentManager:
         """
         from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
-        for env_key, env_value in self._latest_env_overrides.items():
-            key = str(env_key)
-            if env_value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = str(env_value)
-        channel_key = _normalize_channel_id(agent_key)
-        mode_key = _normalize_mode(mode)
-        # 用并轨后的子模式装配实例，和缓存键保持同一套语义。
-        sub_mode_key = collapse_plan_sub_mode(mode_key, sub_mode)
-        project_dir = _normalize_project_dir((config or {}).get("project_dir"))
-        if project_dir:
-            config = dict(config or {})
-            config["project_dir"] = project_dir
-        agent_cache_key = cache_key or _make_agent_cache_key(mode_key, sub_mode_key, project_dir)
-        logger.info(
-            "[AgentManager] Creating %s agent (mode=%s, sub_mode=%s, project_dir=%s)",
-            channel_key,
-            mode_key,
-            sub_mode_key or None,
-            project_dir or None,
-        )
-        agent = JiuWenSwarm()
-        await agent.create_instance(config, mode=mode_key, sub_mode=sub_mode_key or None)
-        setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
-        setattr(agent, "_jiuwenswarm_agent_mode", mode_key)
-        setattr(agent, "_jiuwenswarm_agent_sub_mode", sub_mode_key)
-        setattr(agent, "_jiuwenswarm_agent_project_dir", project_dir)
-        self.agents.setdefault(channel_key, {})[agent_cache_key] = agent
-        # 记录创建参数, recreate_agent() 时可原样复用
-        self._agent_create_params.setdefault(channel_key, {})[agent_cache_key] = {
-            "mode": mode_key,
-            "sub_mode": sub_mode_key or None,
-            "config": dict(config or {}),
-            "cache_key": agent_cache_key,
-        }
-        logger.info("[AgentManager] %s agent created cache_key=%s", channel_key, agent_cache_key)
-        return agent
+        overlay_token = None
+        try:
+            if self._latest_env_overrides:
+                effective_overlay = build_effective_env_overlay(self._latest_env_overrides)
+                overlay_token = bind_task_env_overlay(effective_overlay)
+            channel_key = _normalize_channel_id(agent_key)
+            mode_key = _normalize_mode(mode)
+            sub_mode_key = _normalize_sub_mode(sub_mode)
+            project_dir = _normalize_project_dir((config or {}).get("project_dir"))
+            if project_dir:
+                config = dict(config or {})
+                config["project_dir"] = project_dir
+            agent_cache_key = cache_key or _make_agent_cache_key(mode_key, sub_mode_key, project_dir)
+            logger.info(
+                "[AgentManager] Creating %s agent (mode=%s, sub_mode=%s, project_dir=%s)",
+                channel_key,
+                mode_key,
+                sub_mode_key or None,
+                project_dir or None,
+            )
+            agent = JiuWenSwarm(
+                user_workspace_dir=str(self._user_workspace_dir)
+                if self._user_workspace_dir is not None
+                else None,
+                agent_id=self.agent_id,
+                service_id=self.service_id,
+            )
+            setattr(agent, "_env_agent_id", self._env_agent_id)
+            setattr(agent, "_env_service_id", self._env_service_id)
+            if self._user_workspace_dir is not None:
+                setattr(agent, "_user_workspace_dir", self._user_workspace_dir)
+            await agent.create_instance(
+                config,
+                mode=mode_key,
+                sub_mode=sub_mode_key or None,
+                config_base=self._latest_config_base,
+            )
+            setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
+            setattr(agent, "_jiuwenswarm_agent_mode", mode_key)
+            setattr(agent, "_jiuwenswarm_agent_sub_mode", sub_mode_key)
+            setattr(agent, "_jiuwenswarm_agent_project_dir", project_dir)
+            self.agents.setdefault(channel_key, {})[agent_cache_key] = agent
+            # 记录创建参数, recreate_agent() 时可原样复用
+            self._agent_create_params.setdefault(channel_key, {})[agent_cache_key] = {
+                "mode": mode_key,
+                "sub_mode": sub_mode_key or None,
+                "config": dict(config or {}),
+                "cache_key": agent_cache_key,
+            }
+            logger.info("[AgentManager] %s agent created cache_key=%s", channel_key, agent_cache_key)
+            return agent
+        finally:
+            if overlay_token is not None:
+                reset_task_env_overlay(overlay_token)
 
     async def initialize(
         self, channel_id: str = "", extra_config: dict[str, Any] | None = None
@@ -708,7 +811,8 @@ class AgentManager:
             channel_id: str = "",
             mode: str = "agent",
             project_dir: str = None,
-            sub_mode: str = None
+            sub_mode: str = None,
+            request: Any | None = None,
     ) -> "JiuWenSwarm | None":
         """获取 Agent 实例（自动创建）.
 
@@ -719,13 +823,14 @@ class AgentManager:
             mode: 每个模式对应的实例
             project_dir: user project dir (e.g. trusted_dirs[0])
             sub_mode: 子模式
+            request: 可选 AgentRequest，企业版用于模型策略 routing 上下文
 
         Returns:
             JiuWenSwarm | None: Agent 实例
         """
         channel_key = _normalize_channel_id(channel_id)
         mode_key = _normalize_mode(mode)
-        sub_mode_key = collapse_plan_sub_mode(mode_key, sub_mode)
+        sub_mode_key = _normalize_sub_mode(sub_mode)
         project_key = _normalize_project_dir(project_dir)
         cache_key = _make_agent_cache_key(mode_key, sub_mode_key, project_key)
         channel_agents = self.agents.get(channel_key, {})
@@ -746,6 +851,9 @@ class AgentManager:
                     **config,
                     **_build_acp_agent_config()
                 }
+            # 企业版：创建 agent 时附带完整 request，供 create_instance 加载企业配置
+            if request is not None and is_enterprise():
+                config = {**config, "request": request}
             agent = await self._create_agent(
                 channel_key,
                 mode_key,
@@ -754,38 +862,6 @@ class AgentManager:
                 cache_key=cache_key,
             )
             return self._borrow_agent(agent)
-
-    def get_agent_for_session_nowait(
-        self,
-        channel_id: str,
-        session_id: str,
-    ) -> "JiuWenSwarm | None":
-        """Return the cached channel agent that owns ``session_id`` runtime."""
-        sid = str(session_id or "").strip()
-        if not sid:
-            return None
-
-        channel_key = _normalize_channel_id(channel_id)
-        channel_agents = self.agents.get(channel_key, {})
-        if not isinstance(channel_agents, dict):
-            return None
-
-        for cache_key, agent in channel_agents.items():
-            has_runtime = getattr(agent, "has_session_runtime", None)
-            if not callable(has_runtime):
-                continue
-            try:
-                if has_runtime(sid):
-                    return self._borrow_agent(agent)
-            except Exception:
-                logger.exception(
-                    "[AgentManager] session runtime lookup failed: "
-                    "channel_id=%s session_id=%s cache_key=%s",
-                    channel_key,
-                    sid,
-                    cache_key,
-                )
-        return None
 
     def get_agent_nowait(
         self,
@@ -814,9 +890,7 @@ class AgentManager:
                 return self._borrow_agent(agent)
 
         requested_mode = _normalize_mode(mode) if mode is not None else ""
-        requested_sub_mode = (
-            collapse_plan_sub_mode(mode, sub_mode) if sub_mode is not None else ""
-        )
+        requested_sub_mode = _normalize_sub_mode(sub_mode) if sub_mode is not None else ""
         requested_project_dir = _normalize_project_dir(project_dir) if project_dir is not None else ""
         for agent in channel_agents.values():
             if requested_mode and getattr(agent, "_jiuwenswarm_agent_mode", "") != requested_mode:
@@ -925,6 +999,24 @@ class AgentManager:
                         exc,
                     )
 
+    def is_working(self) -> bool:
+        """True when any managed agent reports in-flight work."""
+        for agents in self.agents.values():
+            if not isinstance(agents, dict):
+                continue
+            for agent in agents.values():
+                checker = getattr(agent, "is_working", None)
+                if callable(checker):
+                    try:
+                        if checker():
+                            return True
+                    except Exception:
+                        logger.warning(
+                            "[AgentManager] is_working checker failed; treating as not working",
+                            exc_info=True,
+                        )
+        return False
+
     async def reload_agents_config(
         self,
         config,
@@ -933,11 +1025,15 @@ class AgentManager:
         target_channel_id: str | None = None,
         target_session_id: str | None = None,
         reload_scopes: set[str] | None = None,
-    ) -> None:
+        reload_trace_id: str | None = None,
+    ) -> ReloadAggregateResult:
         """reload agent config.
 
         使用 ``self._reload_lock`` 串行化, 避免高频触发(如批量 MCP 增删)时多个
         reload 并发叠加, 同时重建大量 agent 实例导致内存暴涨被 OOM kill.
+
+        Env is staged into tip bags; ``promote_staged_env`` runs only when idle so
+        in-flight requests keep reading the previous tip (or a sealed overlay).
 
         ``reload_scopes`` 含 ``"model"`` 时, 模型配置属于所有 channel 共享的
         全局配置段, 此时忽略 ``target_channel_id`` 的窄化, fan-out 到全部
@@ -945,14 +1041,30 @@ class AgentManager:
         (xiaoyi 等)的 session adapter 会继续用旧错误模型, 直到用户手动
         /new_session 才恢复.
         """
+        aggregate = ReloadAggregateResult()
         async with self._reload_lock:
+            if reload_trace_id:
+                self._last_reload_trace_id = reload_trace_id
             self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
-            for env_key, env_value in self._latest_env_overrides.items():
-                key = str(env_key)
-                if env_value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = str(env_value)
+
+            # 推断多模态环境变量移除并应用
+            previous_env = self._latest_env_snapshot
+            multimodal_removals = infer_multimodal_env_removals(
+                previous_env, self._latest_env_overrides,
+            )
+            if multimodal_removals:
+                apply_env_removals(multimodal_removals)
+            sync_multimodal_env_omission_state(
+                multimodal_removals, self._latest_env_overrides,
+            )
+
+            # 更新 env snapshot
+            self._latest_env_snapshot = merge_reload_env_snapshot(
+                previous_env, self._latest_env_overrides,
+            )
+
+            # Stage tip only; promote when idle (in-flight tasks keep old tip).
+            stage_env_overrides(self._latest_env_overrides)
 
             target_channel = str(target_channel_id or "").strip() or None
             target_session = str(target_session_id or "").strip() or None
@@ -973,6 +1085,9 @@ class AgentManager:
                     effective_config = get_config()
                 except Exception:
                     effective_config = None
+            previous_config = self._latest_config_base
+            if isinstance(effective_config, dict):
+                effective_config = coalesce_config_skill_envs(effective_config, previous_config)
             fingerprint = self._reload_fingerprint(
                 effective_config,
                 self._latest_env_overrides,
@@ -988,7 +1103,7 @@ class AgentManager:
                     effective_target_channel or "*",
                     target_session or "*",
                 )
-                return
+                return aggregate
             channel_items = (
                 [(effective_target_channel, self.agents.get(effective_target_channel, {}))]
                 if effective_target_channel
@@ -1005,14 +1120,35 @@ class AgentManager:
                         type(agents),
                     )
                     continue
-                for _, agent in list(agents.items()):
+                for agent_key, agent in list(agents.items()):
                     reload_kwargs = {
                         "config_base": effective_config,
                         "env_overrides": self._latest_env_overrides,
                     }
                     if target_session:
                         reload_kwargs["target_session_id"] = target_session
-                    await agent.reload_agent_config(**reload_kwargs)
+                    try:
+                        result = await agent.reload_agent_config(**reload_kwargs)
+                        if isinstance(result, ReloadResult):
+                            aggregate.merge(
+                                result,
+                                session_key=f"{channel_id}:{agent_key}",
+                            )
+                        else:
+                            aggregate.applied += 1
+                    except Exception as exc:
+                        reload_completed = False
+                        logger.exception(
+                            "[AgentManager] reload_agent_config failed: channel=%s agent=%s",
+                            channel_id,
+                            agent_key,
+                        )
+                        aggregate.failed.append(
+                            {
+                                "session": f"{channel_id}:{agent_key}",
+                                "error": str(exc),
+                            }
+                        )
                 try:
                     team_config = effective_config if isinstance(effective_config, dict) else get_config()
                     await get_team_manager(channel_id).update_evolution_config(team_config)
@@ -1024,10 +1160,20 @@ class AgentManager:
                         exc,
                     )
                 logger.info(f"channel {channel_id} reload agent config success.")
+            idle = not self.is_working()
+            if idle:
+                promote_staged_env()
+            else:
+                logger.info(
+                    "[AgentManager] promote_staged_env deferred (agents working); "
+                    "trace=%s",
+                    self._last_reload_trace_id or "unknown",
+                )
             if reload_completed:
                 self._last_reload_fingerprint = fingerprint
                 if isinstance(effective_config, dict):
                     self._latest_effective_config = dict(effective_config)
+                    self._latest_config_base = dict(effective_config)
                 asyncio.create_task(
                     self.warm_pool.refresh(
                         config=effective_config,
@@ -1038,6 +1184,79 @@ class AgentManager:
             # 模型配置变更时, 关闭已被删除/改掉凭证的旧 LLM 连接 (增量关闭)。
             if model_scope:
                 await self._evict_stale_llm_clients(effective_config)
+        return aggregate
+
+    async def apply_sync_config(
+        self,
+        config: dict[str, Any],
+        env: dict[str, Any],
+    ) -> ReloadAggregateResult:
+        """Apply sync_agents_configs write-through config/env to live adapters."""
+        previous_config = self._latest_config_base
+        config = coalesce_config_skill_envs(config, previous_config)
+        self._latest_config_base = config
+        self._latest_env_overrides = seal_env_mapping(env)
+        replace_active_env(
+            env,
+            service_id=self.env_service_id,
+            agent_id=self.env_agent_id,
+            clear_staged=True,
+        )
+
+        aggregate = ReloadAggregateResult()
+        for channel_id, channel_agents in self.agents.items():
+            if not isinstance(channel_agents, dict):
+                continue
+            for cache_key, agent in channel_agents.items():
+                session_key = f"{channel_id}:{cache_key}"
+                try:
+                    if agent.is_working():
+                        ensure_fn = getattr(agent, "ensure_adapter", None)
+                        adapter = ensure_fn() if callable(ensure_fn) else None
+                        queue_fn = getattr(adapter, "queue_pending_reload", None) if adapter else None
+                        if callable(queue_fn):
+                            queue_fn(config, env)
+                            aggregate.deferred += 1
+                            continue
+                    ensure_fn = getattr(agent, "ensure_adapter", None)
+                    adapter = ensure_fn() if callable(ensure_fn) else None
+                    reload_fn = getattr(adapter, "reload_agent_config", None) if adapter else None
+                    if callable(reload_fn):
+                        result = await reload_fn(
+                            config,
+                            env,
+                            _force_apply=True,
+                        )
+                    else:
+                        result = await agent.reload_agent_config(
+                            config_base=config,
+                            env_overrides=env,
+                        )
+                    if isinstance(result, ReloadResult):
+                        aggregate.merge(result, session_key=session_key)
+                    else:
+                        aggregate.applied += 1
+                except Exception as exc:
+                    logger.exception(
+                        "[AgentManager] apply_sync_config failed for adapter"
+                    )
+                    aggregate.failed.append({"session": session_key, "error": str(exc)})
+
+        try:
+            from jiuwenswarm.agents.harness.common.tools.browser_tools import (
+                notify_browser_runtime_after_reload,
+            )
+
+            notify_browser_runtime_after_reload(
+                idle=not self.is_working(),
+                service_id=self.env_service_id,
+                agent_id=self.env_agent_id,
+            )
+        except Exception:
+            logger.exception(
+                "[AgentManager] browser runtime sync-config notify failed"
+            )
+        return aggregate
 
     async def _evict_stale_llm_clients(self, effective_config: Any) -> None:
         """模型热更新后, 关闭"已从 models.defaults 删除/改掉凭证"的 LLM 连接。
@@ -1112,9 +1331,10 @@ class AgentManager:
         agents = self.agents.get(channel_key)
         if not agents:
             logger.info(
-                "[AgentManager] recreate_agent: no active agent on channel %s",
+                "[AgentManager] recreate_agent: no active agent on channel %s, skip",
                 channel_key,
             )
+            return
 
         # 1. 备份 (mode -> create_params)
         existing_modes = list(agents.keys())
@@ -1174,6 +1394,184 @@ class AgentManager:
             existing_modes,
         )
 
+    async def _process_disk_only_evolution(self, request: Any) -> Any:
+        """Handle archives/rollback without create_instance / LLM client.
+
+        Prefer a warm agent if one already exists; otherwise use an ephemeral
+        JiuWenSwarm that only needs DeepAdapter + EvolutionStore.
+        """
+        from jiuwenswarm.server.runtime.agent_adapter.evolution_version import (
+            disk_only_evolution_skill_dirs,
+        )
+        from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+        from jiuwenswarm.server.runtime.agent_adapter.session_skill_dirs import (
+            bind_session_registered_skill_dirs,
+            reset_session_registered_skill_dirs,
+        )
+
+        channel_id = getattr(request, "channel_id", "") or "default"
+        params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
+        mode_full = params.get("mode", "agent")
+        mode = str(mode_full).split(".")[0] if mode_full else "agent"
+        workspace_dir = params.get("workspace_dir")
+
+        bound_skill_dirs = disk_only_evolution_skill_dirs(params)
+        skill_dirs_token = None
+        overlay_token = None
+        try:
+            if bound_skill_dirs:
+                skill_dirs_token = bind_session_registered_skill_dirs(bound_skill_dirs)
+
+            existing = self.get_agent_nowait(
+                channel_id,
+                mode,
+                project_dir=workspace_dir,
+            )
+            if existing is not None:
+                return await existing.process_message(request)
+
+            agent = JiuWenSwarm(
+                user_workspace_dir=str(self._user_workspace_dir)
+                if self._user_workspace_dir
+                else None,
+                agent_id=self.agent_id,
+                service_id=self.service_id,
+            )
+            if self._latest_env_overrides:
+                overlay = build_effective_env_overlay(self._latest_env_overrides)
+                if overlay:
+                    overlay_token = bind_task_env_overlay(overlay)
+            logger.info(
+                "[AgentManager] disk-only evolution RPC via ephemeral agent "
+                "(skip create_instance): method=%s channel=%s",
+                getattr(getattr(request, "req_method", None), "value", getattr(request, "req_method", None)),
+                channel_id,
+            )
+            return await agent.process_message(request)
+        finally:
+            if overlay_token is not None:
+                reset_task_env_overlay(overlay_token)
+            if skill_dirs_token is not None:
+                reset_session_registered_skill_dirs(skill_dirs_token)
+
+    def _resolve_request_mode(self, request: Any, params: dict) -> str:
+        """解析请求的 agent 模式.
+
+        优先取 params["mode"]；interrupt resume 请求（权限审批/确认/ask_user）
+        未携带 mode 时，从 session metadata 读取原始请求的 mode，避免从
+        code.normal 降级为 agent，导致 adapter 实例不匹配、无法恢复原
+        interaction；其余情况默认 "agent"。
+
+        Args:
+            request: AgentRequest 对象
+            params: request.params 字典
+
+        Returns:
+            完整 mode 字符串（如 "code.normal"、"agent.plan"）
+        """
+        mode_full = params.get("mode")
+        if mode_full:
+            return str(mode_full)
+
+        source = str(params.get("source") or "").strip()
+        answers = params.get("answers")
+        req_id = str(params.get("request_id") or "").strip()
+        if (
+            source in {"permission_interrupt", "confirm_interrupt", "ask_user_interrupt"}
+            and isinstance(answers, list)
+            and bool(req_id)
+        ):
+            sid = getattr(request, "session_id", "") or ""
+            if sid:
+                try:
+                    from jiuwenswarm.common.utils import resolve_tenant_sessions_dir
+                    from jiuwenswarm.server.runtime.session.session_metadata import (
+                        get_session_metadata,
+                    )
+                    sessions_root = resolve_tenant_sessions_dir(
+                        self.service_id, self.agent_id,
+                    )
+                    meta = get_session_metadata(
+                        sid, cache_bust=True, enable_writeback=False,
+                        sessions_root=sessions_root,
+                    )
+                    stored_mode = str(meta.get("mode") or "").strip()
+                    if stored_mode and stored_mode != "unknown":
+                        # 回写 params，让下游 run_stream 等也能拿到正确 mode
+                        params["mode"] = stored_mode
+                        logger.info(
+                            "[AgentManager] interrupt resume mode resolved"
+                            " from session metadata: session_id=%s"
+                            " mode=%s source=%s",
+                            sid, stored_mode, source,
+                        )
+                        return stored_mode
+                except Exception:
+                    logger.debug(
+                        "[AgentManager] resolve mode from session metadata failed",
+                        exc_info=True,
+                    )
+        return "agent"
+
+    def _agent_lookup_from_request(self, request: Any) -> tuple[str, str | None, str | None]:
+        """Resolve get_agent keys from a chat request.
+
+        Must match ``AgentWebSocketServer._prepare_code_mode_chat_turn`` so the
+        tenant-pool path reuses the same cached instance after plan-mode sync.
+        """
+        from jiuwenswarm.server.handlers._shared import resolve_agent_request_mode
+
+        params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
+        mode_full = self._resolve_request_mode(request, params)
+        mode, sub_mode, _canonical = resolve_agent_request_mode(mode_full)
+        agent_mode = "agent" if mode == "auto_harness" else mode
+        project_dir = (
+            params.get("project_dir")
+            or params.get("workspace_dir")
+            or params.get("cwd")
+        )
+        if isinstance(project_dir, str):
+            project_dir = project_dir.strip() or None
+        else:
+            project_dir = None
+        source = str(params.get("source") or "").strip()
+        is_interrupt_continuation = (
+            source
+            in {"permission_interrupt", "confirm_interrupt", "ask_user_interrupt"}
+            and isinstance(params.get("answers"), list)
+            and bool(str(params.get("request_id") or "").strip())
+        )
+        if project_dir is None and is_interrupt_continuation:
+            sid = str(getattr(request, "session_id", "") or "").strip()
+            if sid:
+                try:
+                    from jiuwenswarm.common.utils import resolve_tenant_sessions_dir
+                    from jiuwenswarm.server.runtime.session.session_metadata import (
+                        get_session_metadata,
+                    )
+
+                    sessions_root = resolve_tenant_sessions_dir(
+                        self.service_id, self.agent_id,
+                    )
+                    meta = get_session_metadata(
+                        sid,
+                        cache_bust=True,
+                        enable_writeback=False,
+                        sessions_root=sessions_root,
+                    )
+                    stored_project_dir = (
+                        meta.get("project_dir") if isinstance(meta, dict) else None
+                    )
+                    if isinstance(stored_project_dir, str) and stored_project_dir.strip():
+                        project_dir = stored_project_dir.strip()
+                        params["project_dir"] = project_dir
+                except Exception:
+                    logger.debug(
+                        "[AgentManager] resolve project_dir from session metadata failed",
+                        exc_info=True,
+                    )
+        return agent_mode, sub_mode, project_dir
+
     async def process_message(self, request: Any) -> Any:
         """处理非流式请求.
 
@@ -1185,16 +1583,19 @@ class AgentManager:
         """
         try:
             await self.wait_for_session_prewarm(getattr(request, "session_id", None))
+            req_method = getattr(request, "req_method", None)
+            req_method_value = getattr(req_method, "value", req_method)
+            if isinstance(req_method_value, str) and req_method_value in _DISK_ONLY_EVOLUTION_METHODS:
+                return await self._process_disk_only_evolution(request)
+
             channel_id = getattr(request, "channel_id", "")
-            params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
-            mode_full = params.get("mode", "agent")
-            mode = str(mode_full).split(".")[0] if mode_full else "agent"
-            workspace_dir = params.get("workspace_dir")
+            mode, sub_mode, project_dir = self._agent_lookup_from_request(request)
 
             agent = await self.get_agent(
                 channel_id=channel_id,
                 mode=mode,
-                project_dir=workspace_dir,
+                project_dir=project_dir,
+                sub_mode=sub_mode,
             )
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
@@ -1216,15 +1617,13 @@ class AgentManager:
         try:
             await self.wait_for_session_prewarm(getattr(request, "session_id", None))
             channel_id = getattr(request, "channel_id", "")
-            params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
-            mode_full = params.get("mode", "agent")
-            mode = str(mode_full).split(".")[0] if mode_full else "agent"
-            workspace_dir = params.get("workspace_dir")
+            mode, sub_mode, project_dir = self._agent_lookup_from_request(request)
 
             agent = await self.get_agent(
                 channel_id=channel_id,
                 mode=mode,
-                project_dir=workspace_dir,
+                project_dir=project_dir,
+                sub_mode=sub_mode,
             )
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")

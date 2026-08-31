@@ -77,7 +77,6 @@ export const DEFAULT_BINDINGS: KeybindingBlock[] = [
       p: "swarm:viewPrompt",
       o: "swarm:viewOutcome",
       e: "swarm:viewError",
-      "shift+b": "swarm:budget",
       r: "swarm:refresh",
     },
   },

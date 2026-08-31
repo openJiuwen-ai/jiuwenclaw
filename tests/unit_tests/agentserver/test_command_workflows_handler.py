@@ -1,12 +1,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Tests for _handle_command_workflows handler in AgentWebSocketServer."""
+"""Tests for the ``command.workflows`` handler in handlers/commands.py。"""
 
 
 
 from __future__ import annotations
 
 import asyncio
+
+from jiuwenswarm.server.handlers import commands as commands_handlers
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -17,6 +19,18 @@ import pytest
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.e2a.wire_codec import encode_agent_response_for_wire
+
+
+def _ctx_for_test(ws, request, send_lock, server=None):
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    return RequestContext(
+        request=request,
+        sink=WSSink(ws, send_lock),
+        connection_id=str(id(ws)),
+        services=AgentServerServices(server) if server is not None else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +117,7 @@ class TestHandleCommandWorkflows:
             "jiuwenswarm.server.runtime.agent_adapter.team_helpers.restore_workflow_runs",
             return_value={},
         ):
-            await server._handle_command_workflows(ws, request, send_lock)
+            await commands_handlers.handle_command_workflows(_ctx_for_test(ws, request, send_lock, server))
 
         assert len(ws.sent) == 1
         wire = json.loads(ws.sent[0])
@@ -136,7 +150,7 @@ class TestHandleCommandWorkflows:
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
         ):
-            await server._handle_command_workflows(ws, request, send_lock)
+            await commands_handlers.handle_command_workflows(_ctx_for_test(ws, request, send_lock, server))
 
         assert len(ws.sent) == 1
         wire = json.loads(ws.sent[0])
@@ -190,7 +204,7 @@ class TestHandleCommandWorkflows:
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
         ):
-            await server._handle_command_workflows(ws, request, send_lock)
+            await commands_handlers.handle_command_workflows(_ctx_for_test(ws, request, send_lock, server))
 
         payload = self._extract_payload_from_wire(json.loads(ws.sent[0]))
         assert payload["type"] == "workflow_run_detail"
@@ -230,7 +244,7 @@ class TestHandleCommandWorkflows:
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
         ):
-            await server._handle_command_workflows(ws, request, send_lock)
+            await commands_handlers.handle_command_workflows(_ctx_for_test(ws, request, send_lock, server))
 
         assert len(ws.sent) == 1
         encoded_size = len(ws.sent[0].encode("utf-8"))
@@ -273,7 +287,7 @@ class TestHandleCommandWorkflows:
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
         ):
-            await server._handle_command_workflows(ws, request, send_lock)
+            await commands_handlers.handle_command_workflows(_ctx_for_test(ws, request, send_lock, server))
 
         encoded_size = len(ws.sent[0].encode("utf-8"))
         assert encoded_size <= 2048
@@ -324,7 +338,7 @@ class TestHandleCommandWorkflows:
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
         ):
-            await server._handle_command_workflows(ws, request, send_lock)
+            await commands_handlers.handle_command_workflows(_ctx_for_test(ws, request, send_lock, server))
 
         payload = self._extract_payload_from_wire(json.loads(ws.sent[0]))
         budget = max(
@@ -359,7 +373,7 @@ class TestHandleCommandWorkflows:
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
         ):
-            await server._handle_command_workflows(ws, request, send_lock)
+            await commands_handlers.handle_command_workflows(_ctx_for_test(ws, request, send_lock, server))
 
         assert len(ws.sent) == 1
         wire = json.loads(ws.sent[0])
@@ -384,7 +398,7 @@ class TestHandleCommandWorkflows:
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
         ):
-            await server._handle_command_workflows(ws, request, send_lock)
+            await commands_handlers.handle_command_workflows(_ctx_for_test(ws, request, send_lock, server))
 
         wire = json.loads(ws.sent[0])
         # The ok field should be accessible in the wire format
@@ -409,7 +423,7 @@ class TestHandleCommandWorkflows:
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
         ):
-            await server._handle_command_workflows(ws, request, send_lock)
+            await commands_handlers.handle_command_workflows(_ctx_for_test(ws, request, send_lock, server))
 
         wire = json.loads(ws.sent[0])
         payload = self._extract_payload_from_wire(wire)
@@ -437,7 +451,7 @@ class TestHandleCommandWorkflows:
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
         ):
-            await server._handle_command_workflows(ws, request, send_lock)
+            await commands_handlers.handle_command_workflows(_ctx_for_test(ws, request, send_lock, server))
 
         # Verify the response was sent and channel_id defaulted to "web"
         assert len(ws.sent) == 1
@@ -505,28 +519,17 @@ def _find_payload_recursive(data: Any) -> dict[str, Any]:
 class TestCommandWorkflowsDispatch:
     """Test that COMMAND_WORKFLOWS req_method triggers the correct handler."""
 
-    @pytest.mark.anyio
-    async def test_command_workflows_dispatch_calls_handler(self) -> None:
-        """Verify the dispatch routing for ReqMethod.COMMAND_WORKFLOWS."""
+    def test_command_workflows_dispatch_routes_to_handler(self) -> None:
+        """``ReqMethod.COMMAND_WORKFLOWS`` 必须在分发表里指向本域 handler。"""
         # This is a structural test that verifies the dispatch was added.
         # We mock the handler method and verify it gets called through
         # the dispatch chain.
-        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.server.dispatch import HANDLERS
 
-        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-
-        # Mock the handler method
-        server._handle_command_workflows = AsyncMock()
-
-        # Create a minimal request
-        request = _make_request()
-        ws = _FakeWS()
-        send_lock = asyncio.Lock()
-
-        # Call the handler directly to verify it exists and is callable
-        await server._handle_command_workflows(ws, request, send_lock)
-
-        server._handle_command_workflows.assert_called_once_with(ws, request, send_lock)
+        spec = HANDLERS.get(ReqMethod.COMMAND_WORKFLOWS)
+        assert spec is not None, "COMMAND_WORKFLOWS 应在分发表内"
+        assert spec.fn is commands_handlers.handle_command_workflows
 
 
 class TestWorkflowHumanPromptWireHelpers:
@@ -625,7 +628,7 @@ class TestWorkflowHumanPromptWireHelpers:
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
         ):
-            await server._handle_command_workflows(ws, request, send_lock)
+            await commands_handlers.handle_command_workflows(_ctx_for_test(ws, request, send_lock, server))
 
         assert len(ws.sent) == 1
         payload = TestHandleCommandWorkflows()._extract_payload_from_wire(json.loads(ws.sent[0]))

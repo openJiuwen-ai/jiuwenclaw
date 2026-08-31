@@ -3,6 +3,7 @@
 """Shared WebSocket Origin validation helpers."""
 
 from __future__ import annotations
+from jiuwenswarm.common.local_env_config import is_enterprise
 
 import os
 from http import HTTPStatus
@@ -29,6 +30,10 @@ def get_allowed_origin_hosts() -> set[str]:
 
 def is_allowed_browser_origin(origin: str | None) -> bool:
     """校验浏览器 Origin 是否允许访问 WebSocket 服务。"""
+    # 企业版时允许所有连接（非浏览器场景）
+    if is_enterprise():
+        return True
+
     allowed_hosts = get_allowed_origin_hosts()
     if origin is None:
         return "none" in allowed_hosts

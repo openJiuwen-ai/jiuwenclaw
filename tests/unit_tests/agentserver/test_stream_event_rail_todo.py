@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
 import pytest
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRequest
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
     JiuSwarmStreamEventRail,
 )
@@ -193,6 +196,113 @@ async def test_ask_user_interrupt_emits_question_event_from_tool_args():
 
 
 @pytest.mark.asyncio
+async def test_skill_turbo_hitl_emits_ask_user_with_outer_request_id():
+    """Nested ask_user questions, but resume key is outer skill_acceleration_exec id."""
+    class ToolInterruptException(Exception):
+        def __init__(self):
+            super().__init__()
+            self.request = SimpleNamespace(
+                tool_call_id="skill_turbo-tc-ask_user-54ee111d-0",
+                tool_name="ask_user",
+                tool_args={
+                    "questions": [
+                        {
+                            "question": "需要多少页？",
+                            "header": "页数",
+                            "options": [{"label": "10页", "description": ""}],
+                        }
+                    ]
+                },
+            )
+            self.tool_call = SimpleNamespace(
+                id="skill_turbo-tc-ask_user-54ee111d-0",
+                name="ask_user",
+                arguments={
+                    "questions": [
+                        {
+                            "question": "需要多少页？",
+                            "header": "页数",
+                            "options": [{"label": "10页", "description": ""}],
+                        }
+                    ]
+                },
+            )
+
+    session = _FakeSession()
+    outer_tc = SimpleNamespace(id="call_c2967f3aec5c412583a203b9", name="skill_acceleration_exec")
+
+    await JiuSwarmStreamEventRail._emit_skill_turbo_ask_user_question(
+        session,
+        outer_tool_call=outer_tc,
+        skill_turbo_tic=ToolInterruptException(),
+    )
+
+    assert len(session.outputs) == 1
+    output = session.outputs[0]
+    assert output.type == "chat.ask_user_question"
+    assert output.payload["request_id"] == "call_c2967f3aec5c412583a203b9"
+    assert output.payload["source"] == "ask_user_interrupt"
+    assert output.payload["questions"][0]["question"] == "需要多少页？"
+
+
+@pytest.mark.asyncio
+async def test_skill_turbo_hitl_skips_emit_when_outer_tool_call_missing(monkeypatch):
+    """Without outer harness id, do not emit a nested ask_user request_id."""
+    class ToolInterruptException(Exception):
+        def __init__(self):
+            super().__init__()
+            self.request = SimpleNamespace(
+                tool_call_id="skill_turbo-tc-ask_user-54ee111d-0",
+                tool_name="ask_user",
+                tool_args={
+                    "questions": [
+                        {
+                            "question": "需要多少页？",
+                            "header": "页数",
+                            "options": [{"label": "10页", "description": ""}],
+                        }
+                    ]
+                },
+            )
+            self.tool_call = SimpleNamespace(
+                id="skill_turbo-tc-ask_user-54ee111d-0",
+                name="ask_user",
+                arguments={
+                    "questions": [
+                        {
+                            "question": "需要多少页？",
+                            "header": "页数",
+                            "options": [{"label": "10页", "description": ""}],
+                        }
+                    ]
+                },
+            )
+
+    session = _FakeSession()
+    warnings: list[str] = []
+
+    def _capture_warning(msg, *args, **kwargs):
+        warnings.append(msg % args if args else str(msg))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.stream_event_rail.logger.warning",
+        _capture_warning,
+    )
+
+    await JiuSwarmStreamEventRail._emit_skill_turbo_ask_user_question(
+        session,
+        outer_tool_call=None,
+        skill_turbo_tic=ToolInterruptException(),
+    )
+
+    assert session.outputs == []
+    assert any(
+        "outer skill_acceleration_exec tool_call.id unavailable" in message
+        for message in warnings
+    )
+
+
+@pytest.mark.asyncio
 async def test_ask_user_interrupt_emits_question_event_from_exception_cause():
     class ToolInterruptException(Exception):
         def __init__(self):
@@ -228,3 +338,34 @@ async def test_ask_user_interrupt_emits_question_event_from_exception_cause():
     assert output.type == "chat.ask_user_question"
     assert output.payload["request_id"] == "tool-ask-2"
     assert output.payload["questions"][0]["question"] == "是否继续"
+
+
+@pytest.mark.asyncio
+async def test_deepresearch_native_interrupt_is_left_for_harness_without_tool_result():
+    session = _FakeSession()
+    tool_call = SimpleNamespace(
+        id="deepresearch-1",
+        name="deepresearch_execute",
+        arguments={"query": "q"},
+    )
+    interrupt = ToolInterruptException(
+        request=AskUserRequest(
+            message="请选择",
+            questions=[{"question": "专业版还是精简版？", "options": []}],
+        ),
+        tool_call=tool_call,
+    )
+    ctx = SimpleNamespace(
+        session=session,
+        inputs=ToolCallInputs(
+            tool_call=tool_call,
+            tool_name="deepresearch_execute",
+            tool_args=tool_call.arguments,
+            tool_result=interrupt,
+        ),
+        extra={},
+    )
+
+    await _TestRail().after_tool_call(ctx)
+
+    assert session.outputs == []

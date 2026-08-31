@@ -5,14 +5,25 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
+import time
 from html import unescape
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 import urllib3
 from openjiuwen.core.foundation.tool import tool
+
+from jiuwenswarm.common.http_proxy_config import requests_get
+from jiuwenswarm.common.local_env_config import get_local_config
+
+logger = logging.getLogger(__name__)
+# 独立 baseline logger，命名空间挂在 jiuwenswarm 日志树下，避免被日志框架丢弃。
+# 日志行以 "BASELINE " 前缀开头，便于 grep 摸底。
+baseline = logging.getLogger("jiuwenswarm.agents.harness.common.tools.web_fetch_tools.baseline")
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -22,6 +33,7 @@ _USER_AGENT = (
 _REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
 _FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
+_JINA_FETCH_ENABLED_ENV = "JIUWENSWARM_ENABLE_JINA_FETCH"
 _FREE_SEARCH_DEFAULT_NO_PROXY = (
     "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.com"
 )
@@ -29,6 +41,73 @@ _CHARSET_HEADER_RE = re.compile(r"charset=([^\s;]+)", flags=re.IGNORECASE)
 _CHARSET_META_RE = re.compile(
     br"""<meta[^>]+charset=["']?\s*([A-Za-z0-9._-]+)""",
     flags=re.IGNORECASE,
+)
+# Non-webpage binaries that historically leaked as mojibake via text decode.
+_BINARY_URL_SUFFIXES = (
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".pdf",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".gz",
+    ".tar",
+    ".tgz",
+    ".exe",
+    ".dll",
+    ".msi",
+    ".dmg",
+    ".apk",
+    ".iso",
+    ".mp3",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".wav",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
+    ".eot",
+)
+_BINARY_CONTENT_TYPE_MARKERS = (
+    "application/msword",
+    "application/pdf",
+    "application/zip",
+    "application/x-zip",
+    "application/gzip",
+    "application/x-gzip",
+    "application/x-rar",
+    "application/x-7z-compressed",
+    "application/vnd.openxmlformats",
+    "application/vnd.ms-",
+    "application/vnd.oasis",
+    "image/",
+    "audio/",
+    "video/",
+    "font/",
+)
+_BINARY_MAGIC_PREFIXES = (
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "ole/cfbf"),
+    (b"%PDF", "pdf"),
+    (b"PK\x03\x04", "zip"),
+    (b"\x89PNG", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"GIF8", "gif"),
+    (b"Rar!\x1a\x07", "rar"),
+    (b"7z\xbc\xaf'\x1c", "7z"),
 )
 
 
@@ -49,11 +128,11 @@ def _extract_declared_charset(response: requests.Response) -> str:
 
 
 def _get_free_search_proxy_url() -> str:
-    return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
+    return str(get_local_config(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
-    raw = str(os.environ.get(name, "") or "").strip().lower()
+    raw = str(get_local_config(name, "") or "").strip().lower()
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on", "enabled"}
@@ -139,21 +218,14 @@ def _decode_response_text(response: requests.Response) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _http_get(url: str, **kwargs) -> requests.Response:
-    """Try normal requests first; retry without env proxies on ProxyError."""
-    explicit_proxy = _apply_free_search_proxy(url, kwargs)
+def _http_get(url: str, **kwargs) -> Any:
+    """HTTP GET via overlay-aware proxy helpers; free-search proxy still applied."""
+    _apply_free_search_proxy(url, kwargs)
     verify = _free_search_ssl_verify()
     kwargs.setdefault("verify", verify)
     if verify is False:
         _disable_insecure_request_warning()
-    try:
-        return requests.get(url, **kwargs)
-    except requests.exceptions.ProxyError:
-        if explicit_proxy:
-            raise
-        with requests.Session() as session:
-            session.trust_env = False
-            return session.get(url, **kwargs)
+    return requests_get(url, **kwargs)
 
 
 def _clip_text(value: str, max_chars: int) -> str:
@@ -188,6 +260,95 @@ def _normalize_url(url: str) -> str:
     return f"https://{decoded}"
 
 
+def _binary_url_reason(url: str) -> str:
+    """Return a short reason when the URL path looks like a non-webpage binary."""
+    path = unquote(urlparse(url).path or "").lower()
+    for suffix in _BINARY_URL_SUFFIXES:
+        if path.endswith(suffix):
+            return f"url ends with {suffix}"
+    return ""
+
+
+def _binary_magic_reason(raw: bytes) -> str:
+    if not raw:
+        return ""
+    for magic, name in _BINARY_MAGIC_PREFIXES:
+        if raw.startswith(magic):
+            return f"magic:{name}"
+    return ""
+
+
+def _looks_like_textual_payload(raw: bytes) -> bool:
+    """Best-effort sniff for text/HTML when Content-Type is octet-stream."""
+    sample = (raw or b"")[:2048].lstrip(b"\xef\xbb\xbf \t\r\n")
+    if not sample:
+        return True
+    if sample.startswith(
+        (b"<!DOCTYPE", b"<!doctype", b"<html", b"<HTML", b"<?xml", b"{", b"[")
+    ):
+        return True
+    if sample.count(b"\x00") > 2:
+        return False
+    for enc in ("utf-8", "gb18030"):
+        try:
+            text = sample.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        if not text:
+            return True
+        printable = sum(1 for c in text if c.isprintable() or c in "\n\r\t")
+        return (printable / len(text)) >= 0.9
+    return False
+
+
+def _binary_content_type_reason(content_type: str, raw: bytes) -> str:
+    ct = (content_type or "").lower().split(";", 1)[0].strip()
+    if not ct:
+        return ""
+    if (
+        "html" in ct
+        or ct.startswith("text/")
+        or ct
+        in {
+            "application/json",
+            "application/xml",
+            "application/javascript",
+            "application/xhtml+xml",
+            "image/svg+xml",
+        }
+    ):
+        return ""
+    if ct == "application/octet-stream":
+        magic = _binary_magic_reason(raw)
+        if magic:
+            return f"content-type={ct}; {magic}"
+        if _looks_like_textual_payload(raw):
+            return ""
+        return f"content-type={ct}"
+    for marker in _BINARY_CONTENT_TYPE_MARKERS:
+        if marker in ct:
+            return f"content-type={ct}"
+    return ""
+
+
+def _unsupported_binary_reason(
+    *,
+    url: str,
+    content_type: str = "",
+    raw: bytes | None = None,
+) -> str:
+    """Detect non-text payloads that must not be decoded as webpage text."""
+    url_reason = _binary_url_reason(url)
+    if url_reason:
+        return url_reason
+    if raw is None:
+        return ""
+    magic = _binary_magic_reason(raw)
+    if magic:
+        return magic
+    return _binary_content_type_reason(content_type, raw)
+
+
 def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
     reader_url = f"https://r.jina.ai/{url}"
     response = _http_get(reader_url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
@@ -201,13 +362,28 @@ def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str
 
 
 def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
+    binary_reason = _binary_url_reason(url)
+    if binary_reason:
+        raise ValueError(f"unsupported binary content ({binary_reason})")
+
     response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
-    if response.status_code in {401, 403, 429}:
+    if response.status_code in {401, 403, 429} and _env_bool(
+        _JINA_FETCH_ENABLED_ENV,
+        default=False,
+    ):
         return _fetch_via_jina_reader_sync(url, timeout_seconds)
     response.raise_for_status()
 
+    content_type = response.headers.get("Content-Type", "") or ""
+    raw = response.content or b""
+    binary_reason = _unsupported_binary_reason(url=url, content_type=content_type, raw=raw)
+    final_url = str(response.url or "")
+    if not binary_reason and final_url and final_url != url:
+        binary_reason = _binary_url_reason(final_url)
+    if binary_reason:
+        raise ValueError(f"unsupported binary content ({binary_reason})")
+
     text = _decode_response_text(response)
-    content_type = response.headers.get("Content-Type", "")
     title_match = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.IGNORECASE | re.DOTALL)
     title = _strip_tags(title_match.group(1)) if title_match else ""
 
@@ -226,19 +402,133 @@ def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
     }
 
 
-@tool(
-    name="mcp_fetch_webpage",
-    description=(
-        "Fetch webpage text content from URL. Returns status/title/plain text content. "
-        "Set max_chars=0 to disable output clipping. "
-        "Use a larger timeout_seconds for slow websites."
-    ),
-)
-async def mcp_fetch_webpage(url: str, max_chars: int = 0, timeout_seconds: int = 30) -> str:
-    url = _normalize_url(url)
-    if not url:
-        return "[ERROR]: url cannot be empty."
+async def _fetch_single_url(
+    raw_url: str,
+    *,
+    max_chars: int,
+    timeout_seconds: int,
+    use_cache: bool,
+    cache: Any | None,
+) -> dict[str, Any]:
+    """Fetch a single URL and return one result-item dict.
 
+    The returned dict always carries the (normalized) ``url`` key plus either
+    success fields (``status_code``/``title``/``content``/``provider``/
+    ``from_cache``...) or an ``error`` field when fetching failed.
+    """
+    url = _normalize_url(raw_url)
+    if not url:
+        return {
+            "url": str(raw_url or "").strip(),
+            "status_code": None,
+            "title": "",
+            "content": "",
+            "provider": "",
+            "from_cache": False,
+            "error": "url cannot be empty.",
+        }
+
+    binary_reason = _binary_url_reason(url)
+    if binary_reason:
+        return {
+            "url": url,
+            "status_code": None,
+            "title": "",
+            "content": "",
+            "provider": "",
+            "from_cache": False,
+            "error": f"unsupported binary content ({binary_reason})",
+        }
+
+    # 模式 1：查缓存
+    if cache is not None and use_cache:
+        cached = await cache.get(url)
+        if cached is not None:
+            now = time.time()
+            cache_age_days = round((now - float(cached.cached_at or 0)) / 86400, 1)
+            update_time = cached.update_time
+            page_update_days = None
+            if update_time is not None:
+                page_update_days = round((now - float(update_time)) / 86400, 1)
+            return {
+                "url": cached.url,
+                "status_code": 200,
+                "title": cached.title or "",
+                "content": _clip_text(str(cached.content or ""), max_chars) or "[empty]",
+                "provider": f"cache:{cached.source or 'unknown'}",
+                "from_cache": True,
+                "cache_age_days": cache_age_days,
+                "page_update_days": page_update_days,
+            }
+    elif cache is not None and not use_cache:
+        cache.bypassed += 1
+
+    # 模式 2：实时抓取（不回写缓存）
+    _fetch_start = time.perf_counter()
+    try:
+        data = await asyncio.to_thread(_fetch_webpage_sync, url, timeout_seconds)
+    except Exception as exc:
+        cost_ms = int((time.perf_counter() - _fetch_start) * 1000)
+        baseline.info(
+            "BASELINE fetch url=%s ok=N cost_ms=%d",
+            url,
+            cost_ms,
+        )
+        reason = str(exc).strip() or "unknown error"
+        return {
+            "url": url,
+            "status_code": None,
+            "title": "",
+            "content": "",
+            "provider": "",
+            "from_cache": False,
+            "error": f"fetch failed ({reason})",
+        }
+
+    cost_ms = int((time.perf_counter() - _fetch_start) * 1000)
+    content_chars = len(str(data.get("content", "") or ""))
+    baseline.info(
+        "BASELINE fetch url=%s ok=Y cost_ms=%d chars=%d provider=direct",
+        url,
+        cost_ms,
+        content_chars,
+    )
+
+    return {
+        "url": data.get("url", url),
+        "status_code": data.get("status_code"),
+        "title": data.get("title", ""),
+        "content": _clip_text(str(data.get("content", "") or ""), max_chars) or "[empty]",
+        "provider": "direct",
+        "from_cache": False,
+    }
+
+
+def _coerce_url_list(url: str | list[str]) -> list[str]:
+    """Normalize the ``url`` argument into a flat list of URL strings."""
+    if url is None:
+        return []
+    if isinstance(url, str):
+        return [url] if url.strip() else []
+    if isinstance(url, (list, tuple)):
+        return [str(u).strip() for u in url if str(u).strip()]
+    return [str(url).strip()] if str(url).strip() else []
+
+
+async def mcp_fetch_webpage_impl(
+    url: str | list[str],
+    max_chars: int = 0,
+    timeout_seconds: int = 30,
+    use_cache: bool = True,
+    cache: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch one or more webpages.
+
+    ``url`` accepts either a single URL string or a list of URLs. Each URL is
+    fetched concurrently (cache-first when ``use_cache`` is true). Returns a
+    list of per-URL items preserving the input order.
+    """
+    urls = _coerce_url_list(url)
     try:
         max_chars = int(max_chars)
     except (TypeError, ValueError):
@@ -257,17 +547,51 @@ async def mcp_fetch_webpage(url: str, max_chars: int = 0, timeout_seconds: int =
     max_timeout_seconds = max(1, max_timeout_seconds)
     timeout_seconds = max(1, min(timeout_seconds, max_timeout_seconds))
 
-    try:
-        data = await asyncio.to_thread(_fetch_webpage_sync, url, timeout_seconds)
-    except Exception as exc:
-        return f"[ERROR]: failed to fetch webpage: {exc}"
+    if not urls:
+        if cache is not None:
+            _log_cache_stats(cache)
+        return []
 
-    lines = [
-        f"URL: {data.get('url', url)}",
-        f"Status: {data.get('status_code', '')}",
+    tasks = [
+        _fetch_single_url(
+            u,
+            max_chars=max_chars,
+            timeout_seconds=timeout_seconds,
+            use_cache=use_cache,
+            cache=cache,
+        )
+        for u in urls
     ]
-    if data.get("title"):
-        lines.append(f"Title: {data['title']}")
-    lines.append("Content:")
-    lines.append(_clip_text(str(data.get("content", "") or ""), max_chars) or "[empty]")
-    return "\n".join(lines)
+    items = await asyncio.gather(*tasks)
+
+    if cache is not None:
+        _log_cache_stats(cache)
+
+    return list(items)
+
+
+mcp_fetch_webpage = tool(
+    name="mcp_fetch_webpage",
+    description=(
+        "抓取网页文本内容，支持一次传入多个 URL 并行抓取。"
+        "默认优先从内存缓存读取（use_cache=true），"
+        "若缓存内容不够新或需要最新数据，请用 use_cache=false 重新从原站抓取。"
+        "返回列表，每个元素含一个 URL 的状态码、标题、纯文本正文与是否命中缓存。"
+    ),
+)(mcp_fetch_webpage_impl)
+
+
+def _log_cache_stats(cache: Any) -> None:
+    """输出缓存命中率汇总日志（与 enterprise_dev [FetchCache] 风格对齐）。"""
+    try:
+        stats = cache.stats()
+        logger.info(
+            "[FetchCache] hits=%d misses=%d bypassed=%d hit_rate=%.1f%% entries=%d",
+            stats["hits"],
+            stats["misses"],
+            stats["bypassed"],
+            stats["hit_rate_pct"],
+            stats["entries"],
+        )
+    except Exception:
+        logger.debug("[FetchCache] stats log failed", exc_info=True)

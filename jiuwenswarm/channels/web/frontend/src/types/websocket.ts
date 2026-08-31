@@ -55,6 +55,7 @@ export interface WebError extends Error {
   code?: string;
   requestId?: string;
   retriable?: boolean;
+  payload?: unknown;
 }
 
 export interface ConnectionAckPayload {
@@ -62,6 +63,8 @@ export interface ConnectionAckPayload {
   mode?: string;
   tools?: string[];
   protocol_version?: string;
+  /** 当前全局是否有任务在跑（后端 ack 推送，用于初始化配置保存锁）。 */
+  task_running?: boolean;
 }
 
 export interface ProcessingStatusPayload {
@@ -166,11 +169,15 @@ export interface UserAnswer {
   custom_input?: string;
 }
 
+/** AskUser 交互的显式完成状态。缺失时后端按 answered 处理。 */
+export type UserAnswerStatus = 'answered' | 'skipped';
+
 /**
  * 用户回答 Payload（客户端 -> 服务端）
  */
 export interface UserAnswerPayload {
   request_id: string;
+  status?: UserAnswerStatus;
   answers: UserAnswer[];
   evolution_meta?: Record<string, unknown>;
   plan_approval_kind?: string;

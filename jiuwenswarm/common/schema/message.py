@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 """统一消息模型."""
 
@@ -45,7 +45,6 @@ class ReqMethod(Enum):
     SESSION_DELETE = "session.delete"
     SESSION_RENAME = "session.rename"
     SESSION_FORK = "session.fork"
-    SESSION_REBIND_PROJECT = "session.rebind_project"
     SESSION_REWIND = "session.rewind"
     SESSION_REWIND_AND_RESTORE = "session.rewind_and_restore"
     SESSION_REWIND_CONTEXT = "session.rewind_context"
@@ -58,6 +57,8 @@ class ReqMethod(Enum):
     TEAM_BINDING_GENERATE = "team.binding.generate"
     TEAM_SESSION_BIND = "team.session.bind"
     TEAM_DELETE = "team.delete"
+    TEAM_SESSION_RESET = "team.session.reset"
+    TEAM_RUNTIME_DISSOLVE = "team.runtime.dissolve"
 
     PATH_GET = "path.get"
     PATH_SET = "path.set"
@@ -66,7 +67,9 @@ class ReqMethod(Enum):
 
     CONFIG_CACHE_CLEAR = "config.cache_clear"
     AGENT_RELOAD_CONFIG = "agent.reload_config"
+    SYNC_AGENTS_CONFIGS = "sync_agents_configs"
     AGENT_PREWARM_SYNC = "agent.prewarm.sync"
+    LOGGING_SET = "logging.set"
 
     MEMORY_COMPUTE = "memory.compute"
 
@@ -93,12 +96,6 @@ class ReqMethod(Enum):
     SKILLS_INSTALLED = "skills.installed"
     SKILLS_GET = "skills.get"
     SKILLS_TOGGLE = "skills.toggle"
-    # Per-workspace Skill visibility (team mode): the Skill entities themselves
-    # live in exactly one global library, so who may see which Skill is metadata
-    # stored next to a member / team workspace rather than a directory layout.
-    SKILLS_VISIBILITY_GET = "skills.visibility.get"
-    SKILLS_VISIBILITY_SET = "skills.visibility.set"
-    SKILLS_VISIBILITY_UPDATE = "skills.visibility.update"
     SKILLS_INSTALL = "skills.install"
     SKILLS_IMPORT_LOCAL = "skills.import_local"
     SKILLS_MARKETPLACE_ADD = "skills.marketplace.add"
@@ -130,13 +127,18 @@ class ReqMethod(Enum):
     SKILLS_EVOLUTION_STATUS = "skills.evolution.status"
     SKILLS_EVOLUTION_GET = "skills.evolution.get"
     SKILLS_EVOLUTION_SAVE = "skills.evolution.save"
+    SKILLS_EVOLUTION_ARCHIVES = "skills.evolution.archives"
+    SKILLS_EVOLUTION_ROLLBACK = "skills.evolution.rollback"
+    SKILLS_EVOLUTION_REBUILD = "skills.evolution.rebuild"
+    SKILLS_ENTERPRISE_LIST = "skills.enterprise.list"
+    SKILLS_ENTERPRISE_INSTALL = "skills.enterprise.install"
+    SKILLS_ENTERPRISE_UNINSTALL = "skills.enterprise.uninstall"
 
-    # Skill Graph Web panel transport. The implementation is provided by
-    # agent-core Symphony, while the public transport remains skill-domain API.
-    SKILLS_GRAPH_BUILD = "skills.graph.build"
-    SKILLS_GRAPH_STATUS = "skills.graph.status"
-    SKILLS_GRAPH_GET = "skills.graph.get"
-    SKILLS_GRAPH_CANCEL = "skills.graph.cancel"
+    SYMPHONY_BUILD_SCORE = "symphony.build_score"
+    SYMPHONY_PAUSE_BUILD = "symphony.pause_build"
+    SYMPHONY_SCORE_STATUS = "symphony.score_status"
+    SYMPHONY_GRAPH = "symphony.graph"
+    SYMPHONY_PLAN = "symphony.plan"
 
     # Plugin management (reuses skills marketplace infrastructure)
     PLUGINS_LIST = "plugins.list"
@@ -157,7 +159,10 @@ class ReqMethod(Enum):
     HEARTBEAT_SET_CONF = "heartbeat.set_conf"
 
     # 安全防护 permissions（与 Web ``register_method`` 同名，经 E2A → AgentServer 处理；owner_scopes 仅走 Web 直连）
+    PERMISSIONS_ENABLED_GET = "permissions.enabled.get"
+    PERMISSIONS_ENABLED_SET = "permissions.enabled.set"
     PERMISSIONS_TOOLS_GET = "permissions.tools.get"
+    PERMISSIONS_TOOLS_LIST = "permissions.tools.list"
     PERMISSIONS_TOOLS_SET = "permissions.tools.set"
     PERMISSIONS_TOOLS_UPDATE = "permissions.tools.update"
     PERMISSIONS_TOOLS_DELETE = "permissions.tools.delete"
@@ -167,6 +172,10 @@ class ReqMethod(Enum):
     PERMISSIONS_RULES_DELETE = "permissions.rules.delete"
     PERMISSIONS_APPROVAL_OVERRIDES_GET = "permissions.approval_overrides.get"
     PERMISSIONS_APPROVAL_OVERRIDES_DELETE = "permissions.approval_overrides.delete"
+    PERMISSIONS_WORKSPACE_ENABLE_GET = "permissions.file_guard.workspace.rw_enabled.get"
+    PERMISSIONS_WORKSPACE_ENABLE_SET = "permissions.file_guard.workspace.rw_enabled.set"
+    PERMISSIONS_WORKSPACE_ACCESS_GET = "permissions.file_guard.workspace.access.get"
+    PERMISSIONS_WORKSPACE_ACCESS_SET = "permissions.file_guard.workspace.access.set"
 
     CHANNEL_FEISHU_GET_CONF = "channel.feishu.get_conf"
     CHANNEL_FEISHU_SET_CONF = "channel.feishu.set_conf"
@@ -241,6 +250,9 @@ class EventType(Enum):
     CHAT_SYMPHONY_STATUS = "chat.symphony_status"
     CONTEXT_USAGE = "context.usage"
     TODO_UPDATED = "todo.updated"
+    TASK_START = "task.start"
+    TASK_UPDATE = "task.update"
+    TASK_COMPLETE = "task.complete"
     CHAT_PROCESSING_STATUS = "chat.processing_status"
     CHAT_ERROR = "chat.error"
     CHAT_INTERRUPT_RESULT = "chat.interrupt_result"
@@ -260,6 +272,7 @@ class EventType(Enum):
     HEARTBEAT_RELAY = "heartbeat.relay"
     HISTORY_GET = "history.message"
     PROACTIVE_RECOMMENDATION = "proactive_recommendation"
+    SYNC_AGENTS_CONFIGS_RESULT = "sync_agents_configs.result"
 
 
 class Mode(Enum):
@@ -271,8 +284,6 @@ class Mode(Enum):
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
     TEAM = "team"
-    TEAM_PLAN_NORMAL = "team.plan.normal"
-    TEAM_PLAN_CODE = "team.plan.code"
 
     @classmethod
     def from_raw(cls, raw_mode: Any, default: "Mode | None" = None) -> "Mode":
@@ -295,8 +306,6 @@ class Mode(Enum):
         # 不依赖 fallback 默认值恰好等于 AGENT。
         if normalized in ("plan", "fast"):
             return cls.AGENT
-        if normalized == "team.plan":
-            return cls.TEAM_PLAN_NORMAL
         try:
             return cls(normalized)
         except ValueError:

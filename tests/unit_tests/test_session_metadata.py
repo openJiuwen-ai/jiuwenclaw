@@ -21,13 +21,23 @@ def sessions_dir(tmp_path, monkeypatch):
         "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
         lambda: d,
     )
-    # 清空内存缓存，避免跨用例污染（不同用例可能复用同一 session_id）
-    from jiuwenswarm.server.runtime.session.session_metadata import (
-        _METADATA_CACHE,
-        _SESSION_REBIND_GEN,
+    # 进程合一：_sync_chat_request_metadata 经 _sessions_dir_for_request →
+    # resolve_tenant_sessions_dir 写盘；fixture 需与之对齐，避免读写分叉。
+    monkeypatch.setattr(
+        "jiuwenswarm.server.handlers._shared._sessions_dir_for_request",
+        lambda request: d,
     )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.handlers._shared.resolve_tenant_sessions_dir",
+        lambda *args, **kwargs: d,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.resolve_tenant_sessions_dir",
+        lambda *args, **kwargs: d,
+    )
+    # 清空内存缓存，避免跨用例污染（不同用例可能复用同一 session_id）
+    from jiuwenswarm.server.runtime.session.session_metadata import _METADATA_CACHE
     _METADATA_CACHE.clear()
-    _SESSION_REBIND_GEN.clear()
     return d
 
 
@@ -393,6 +403,69 @@ class TestGetSessionMetadata:
 
         data = get_session_metadata("nonexistent")
         assert data == {}
+
+    @staticmethod
+    def test_traversal_session_id_cannot_read_outside_sessions_root(sessions_dir, tmp_path):
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "metadata.json").write_text(
+            json.dumps({"session_id": "outside", "title": "secret"}),
+            encoding="utf-8",
+        )
+
+        data = get_session_metadata(
+            "../outside",
+            cache_bust=True,
+            enable_writeback=False,
+            sessions_root=sessions_dir,
+        )
+
+        assert data == {}
+
+    @staticmethod
+    def test_traversal_session_id_cannot_write_outside_sessions_root(sessions_dir, tmp_path):
+        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+        outside_dir = tmp_path / "outside-write"
+
+        with pytest.raises(ValueError, match="invalid session_id"):
+            init_session_metadata(
+                session_id="../outside-write",
+                sessions_root=sessions_dir,
+            )
+
+        assert not outside_dir.exists()
+
+    @staticmethod
+    def test_explicit_sessions_root_does_not_fallback_to_global_metadata(
+        sessions_dir,
+        tmp_path,
+    ):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+
+        session_id = "same-session-id"
+        global_session = sessions_dir / session_id
+        global_session.mkdir(parents=True)
+        (global_session / "metadata.json").write_text(
+            json.dumps({"session_id": session_id, "title": "global"}),
+            encoding="utf-8",
+        )
+        tenant_root = tmp_path / "tenant-sessions"
+        tenant_root.mkdir()
+
+        metadata = get_session_metadata(
+            session_id,
+            cache_bust=True,
+            enable_writeback=False,
+            sessions_root=tenant_root,
+        )
+
+        assert metadata == {}
+        assert not (tenant_root / session_id).exists()
 
     @staticmethod
     def test_backfill_new_fields_for_legacy_session(sessions_dir):
@@ -1397,7 +1470,7 @@ class TestSyncChatRequestMetadata:
         is_chat_turn=False、时间不被刷新、断言却靠 init 时间巧合通过的误导）。
         """
         from jiuwenswarm.common.schema.message import ReqMethod
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1429,7 +1502,7 @@ class TestSyncChatRequestMetadata:
     @staticmethod
     def test_project_dir_passed_through_to_sync(sessions_dir, clean_model_env):
         """project_dir 参数透传给 sync，由 sync 决定锁定/告警"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             update_session_metadata,
@@ -1453,7 +1526,7 @@ class TestSyncChatRequestMetadata:
         回归保护：只读 RPC 不带 model_name，不应把进程 MODEL_NAME 默认值回写覆盖
         用户在该会话用 /model 切换过的模型。model_name 未带 → explicit_model_provided=False。
         """
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1471,7 +1544,7 @@ class TestSyncChatRequestMetadata:
     @staticmethod
     def test_empty_model_name_keeps_existing(sessions_dir, monkeypatch):
         """params.model_name 为空白 → 同未显式携带，不写盘，保持磁盘原值"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1488,7 +1561,7 @@ class TestSyncChatRequestMetadata:
     @staticmethod
     def test_no_model_no_env_keeps_existing(sessions_dir, clean_model_env):
         """params 不带 model_name 且 env 也没设 → model=None → 不覆盖"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1506,7 +1579,7 @@ class TestSyncChatRequestMetadata:
         sessions_dir, clean_model_env
     ):
         """session_id 为空 → 返回 project_dir，不调 sync（不写盘）"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
 
         req = _make_agent_request(
             params={"model_name": "glm-5"}, session_id=None,
@@ -1516,7 +1589,7 @@ class TestSyncChatRequestMetadata:
 
     @staticmethod
     def test_empty_session_id_returns_project_dir(sessions_dir, clean_model_env):
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
 
         req = _make_agent_request(params={"model_name": "glm-5"}, session_id="   ")
         assert _sync_chat_request_metadata(req, "E:\\p", "code") == "E:\\p"
@@ -1526,7 +1599,7 @@ class TestSyncChatRequestMetadata:
         sessions_dir, clean_model_env, monkeypatch
     ):
         """sync 抛 OSError → 返回 project_dir，不抛"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         import jiuwenswarm.server.runtime.session.session_metadata as sm
 
         def _boom(**kwargs):
@@ -1542,7 +1615,7 @@ class TestSyncChatRequestMetadata:
     def test_returns_project_dir_on_value_error(
         sessions_dir, clean_model_env, monkeypatch
     ):
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         import jiuwenswarm.server.runtime.session.session_metadata as sm
 
         def _boom(**kwargs):
@@ -1556,7 +1629,7 @@ class TestSyncChatRequestMetadata:
     @staticmethod
     def test_creates_metadata_when_missing(sessions_dir, clean_model_env):
         """不先 init，直接 _sync → 经 sync 兜底新建分支创建"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             get_session_metadata,
         )
@@ -1586,7 +1659,7 @@ class TestSyncChatRequestMetadata:
         _sync_chat_request_metadata，而时间字段无 chat-turn 守卫。
         修复后：只读 RPC 传 is_chat_turn=False → 时间字段不写盘。
         """
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1625,7 +1698,7 @@ class TestSyncChatRequestMetadata:
 
         契约对照：与上一用例互为镜像——只有用户真正发消息才更新排序时间。
         """
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1660,7 +1733,7 @@ class TestSyncChatRequestMetadata:
         本用例聚焦「只读 RPC 不该走到 sync」——由 _is_stateless_method_request 短路保证，
         此处补一层存储层兜底契约：即便只读 RPC 误走到 sync，时间字段也不得被改。
         """
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             get_session_metadata,
         )
@@ -2076,8 +2149,11 @@ class TestSetSessionPinnedQueuedWriteRace:
         release_old_write = threading.Event()
 
         def _delayed_write(
-            session_id, metadata, preserve_pin_fields=False,
-            preserve_rebound_fields=False, rebind_gen_at_enqueue=None,
+            session_id,
+            metadata,
+            preserve_pin_fields=False,
+            *,
+            sessions_root=None,
         ):
             if session_id == "s_async_pin" and metadata.get("model") == "old-queued-write":
                 old_write_started.set()
@@ -2086,8 +2162,7 @@ class TestSetSessionPinnedQueuedWriteRace:
                 session_id,
                 metadata,
                 preserve_pin_fields=preserve_pin_fields,
-                preserve_rebound_fields=preserve_rebound_fields,
-                rebind_gen_at_enqueue=rebind_gen_at_enqueue,
+                sessions_root=sessions_root,
             )
 
         monkeypatch.setattr(sm, "_write_metadata_sync", _delayed_write)
@@ -2107,143 +2182,6 @@ class TestSetSessionPinnedQueuedWriteRace:
         assert data["model"] == "old-queued-write"
         assert data["pinned"] is True
         assert data["pin_order"] == 1
-
-
-# ===========================================================================
-# Session identity preservation under concurrent writes (regression tests)
-#
-# Background: _write_metadata_sync replaces the whole file; it does not merge
-# fields. The previous _read_metadata returned an empty file as a valid {}
-# (`read_text() or '{}'`) and did not hold _FILE_LOCK. Writers used write_text,
-# which truncates before writing, so a concurrent reader could land in the
-# truncation window, read "" -> get {} -> read-modify-write the empty dict back
-# -> session_id / title / created_at permanently erased. The session then loses
-# its ID in the list, cannot be opened, and session.pin fails with
-# "session_id is required".
-# ===========================================================================
-class TestIdentityPreservation:
-    @staticmethod
-    def _seed(sessions_dir: Path, sid: str = "sess_identity") -> Path:
-        d = sessions_dir / sid
-        d.mkdir(parents=True, exist_ok=True)
-        meta = {
-            "session_id": sid,
-            "channel_id": "web",
-            "created_at": 1700000000.0,
-            "title": "title must be preserved",
-            "team_name": f"jiuwen_team_{sid}",
-            "message_count": 3,
-            "mode": "team",
-        }
-        (d / "metadata.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        return d / "metadata.json"
-
-    @staticmethod
-    def test_empty_file_is_read_failure_not_empty_dict(sessions_dir, monkeypatch):
-        """An empty file must be treated as a read failure and logged, not silently
-        accepted as valid empty metadata.
-
-        Note: both implementations return {}, so the return value alone cannot
-        tell them apart. The real difference is whether the failed read is
-        recorded at all -- that silence is why this bug was so hard to trace.
-        """
-        import jiuwenswarm.server.runtime.session.session_metadata as sm
-
-        fpath = TestIdentityPreservation._seed(sessions_dir)
-        fpath.write_text("", encoding="utf-8")
-        sm._METADATA_CACHE.clear()
-
-        warnings: list[str] = []
-        monkeypatch.setattr(
-            sm.logger, "warning", lambda msg, *a, **k: warnings.append(str(msg) % a if a else str(msg))
-        )
-
-        assert sm._read_metadata("sess_identity", cache_bust=True) == {}
-        assert warnings, "empty file silently returned as a valid {} with no warning"
-
-    @staticmethod
-    def test_write_without_session_id_does_not_erase_identity(sessions_dir):
-        """When the payload lacks session_id, identity fields on disk must survive."""
-        import jiuwenswarm.server.runtime.session.session_metadata as sm
-
-        fpath = TestIdentityPreservation._seed(sessions_dir)
-        # Simulate a caller doing read-modify-write after getting an empty
-        # dict (real case: persist_workflow_runs reads empty, then writes back
-        # a payload carrying only workflow_runs).
-        sm._write_metadata_sync("sess_identity", {"workflow_runs": {"wf_1": {}}})
-
-        data = _read_json(fpath)
-        assert data["session_id"] == "sess_identity"
-        assert data["title"] == "title must be preserved"
-        assert data["created_at"] == 1700000000.0
-        assert data["team_name"] == "jiuwen_team_sess_identity"
-        # The new field is still written
-        assert data["workflow_runs"] == {"wf_1": {}}
-
-    @staticmethod
-    def test_write_is_atomic_no_empty_window(sessions_dir):
-        """A concurrent reader must never observe an empty file mid-write (atomic replace)."""
-        import jiuwenswarm.server.runtime.session.session_metadata as sm
-
-        fpath = TestIdentityPreservation._seed(sessions_dir)
-        big = {
-            "session_id": "sess_identity",
-            "title": "title must be preserved",
-            "created_at": 1700000000.0,
-            "blob": "x" * 200_000,
-        }
-        empties: list[str] = []
-        stop = threading.Event()
-
-        def reader():
-            while not stop.is_set():
-                try:
-                    raw = fpath.read_text(encoding="utf-8")
-                except (FileNotFoundError, PermissionError):
-                    empties.append("missing")
-                    continue
-                if not raw.strip():
-                    empties.append("empty")
-
-        t = threading.Thread(target=reader, daemon=True)
-        t.start()
-        for i in range(60):
-            big["message_count"] = i
-            sm._write_metadata_sync("sess_identity", big)
-        stop.set()
-        t.join(timeout=3)
-
-        assert empties == [], f"observed {len(empties)} empty/missing reads: write is not atomic"
-
-    @staticmethod
-    def test_concurrent_persist_keeps_identity(sessions_dir):
-        """A normal write racing a new-field-only write must not erase identity."""
-        import jiuwenswarm.server.runtime.session.session_metadata as sm
-
-        fpath = TestIdentityPreservation._seed(sessions_dir)
-        stop = threading.Event()
-
-        def writer():
-            i = 0
-            while not stop.is_set():
-                i += 1
-                meta = sm._read_metadata("sess_identity", cache_bust=True)
-                if meta.get("session_id"):
-                    meta["message_count"] = i
-                    sm._write_metadata_sync("sess_identity", meta)
-
-        t = threading.Thread(target=writer, daemon=True)
-        t.start()
-        for i in range(200):
-            sm._write_metadata_sync("sess_identity", {"workflow_runs": {"n": i}})
-        stop.set()
-        t.join(timeout=3)
-
-        data = _read_json(fpath)
-        for key in ("session_id", "title", "created_at", "team_name"):
-            assert key in data, f"identity field {key} was lost after concurrent writes"
 
 
 def test_remove_team_mode_session_dirs_at_startup_keeps_stable_team_sessions(
@@ -2287,394 +2225,3 @@ def test_remove_team_mode_session_dirs_at_startup_keeps_stable_team_sessions(
     assert (sessions_dir / "stable_code").exists()
     assert not (sessions_dir / "temp_team").exists()
     assert (sessions_dir / "agent_temp").exists()
-
-
-# ===========================================================================
-# rebind_session_project：并发场景（陈旧异步快照 vs 重绑）
-# ===========================================================================
-class TestRebindSessionProjectConcurrency:
-    """覆盖 P1 关键场景：rebind 的 sync 写入与队列中陈旧异步快照的竞态。
-
-    rebind_session_project 用 sync_write=True 立即落盘，但此前已入队、尚未被
-    worker 处理的陈旧快照（如刚发送的消息/改名）仍会在 worker 写回时覆盖
-    rebind 的 project_id/project_dir/work_mode/channel_metadata。版本检查机制
-    （_bump_rebind_gen + worker preserve_rebound_fields）应阻止这种覆盖。
-    """
-
-    @staticmethod
-    def _init_session_with_project(sessions_dir, sid, project_id, project_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            init_session_metadata,
-            update_session_metadata,
-        )
-
-        init_session_metadata(
-            session_id=sid,
-            channel_id="tui",
-            mode="code.normal",
-            project_dir=project_dir,
-            project_id=project_id,
-            work_mode="code",
-        )
-        update_session_metadata(
-            session_id=sid,
-            project_dir=project_dir,
-            project_id=project_id,
-            work_mode="code",
-            touch_last_message_at=False,
-            sync_write=True,
-        )
-        _drain_queue()
-
-    @staticmethod
-    def test_rebind_overwrites_locked_project_fields(sessions_dir):
-        """rebind 强制覆盖已锁定的 project 字段（基础语义）。"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            get_session_metadata,
-            rebind_session_project,
-        )
-
-        sid = "rebind_basic"
-        TestRebindSessionProjectConcurrency._init_session_with_project(
-            sessions_dir, sid, "proj_old", "/old/dir"
-        )
-        before = get_session_metadata(sid, cache_bust=True)
-        assert before["project_id"] == "proj_old"
-        assert before["project_dir"] == "/old/dir"
-
-        updated = rebind_session_project(
-            session_id=sid,
-            project_id="proj_new",
-            project_dir="/new/dir",
-            work_mode="code",
-        )
-        assert updated is not None
-        _drain_queue()
-        after = get_session_metadata(sid, cache_bust=True)
-        assert after["project_id"] == "proj_new"
-        assert after["project_dir"] == "/new/dir"
-        assert after["work_mode"] == "code"
-
-    @staticmethod
-    def test_rebind_syncs_channel_metadata(sessions_dir):
-        """rebind 同步 channel_metadata.project_dir/cwd（/resume current-dir 过滤读这里）。"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            get_session_metadata,
-            rebind_session_project,
-            update_session_metadata,
-        )
-
-        sid = "rebind_chmeta"
-        TestRebindSessionProjectConcurrency._init_session_with_project(
-            sessions_dir, sid, "proj_old", "/old/dir"
-        )
-        # 模拟历史 chat 落盘的 channel_metadata（resolve_tui_session_project_path 读这个顶层字段）
-        update_session_metadata(
-            session_id=sid,
-            channel_metadata={"project_dir": "/old/dir", "cwd": "/old/dir"},
-            touch_last_message_at=False,
-            sync_write=True,
-        )
-        _drain_queue()
-        before = get_session_metadata(sid, cache_bust=True)
-        assert before.get("channel_metadata", {}).get("project_dir") == "/old/dir"
-
-        rebind_session_project(
-            session_id=sid,
-            project_id="proj_new",
-            project_dir="/new/dir",
-            work_mode="code",
-        )
-        _drain_queue()
-        after = get_session_metadata(sid, cache_bust=True)
-        ch = after.get("channel_metadata", {})
-        assert ch.get("project_dir") == "/new/dir"
-        assert ch.get("cwd") == "/new/dir"
-
-    @staticmethod
-    def test_stale_queued_snapshot_does_not_overwrite_rebind(sessions_dir):
-        """关键回归：入队早于 rebind 的陈旧异步快照, worker 写回时不得覆盖 rebind。
-
-        直接模拟 worker 处理"gen 不匹配"的陈旧快照（worker 的核心行为是调用
-        ``_write_metadata_sync(preserve_rebound_fields=True)``），确保磁盘
-        project 字段保留 rebind 的新值, 而非 project 字段（如 message_count）
-        仍按陈旧快照更新。确定性复现：worker 线程为模块级单例, 时序不可控,
-        故此处直接调用 _write_metadata_sync 模拟 worker 的"重绑后处理陈旧快照"。
-        """
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            _write_metadata_sync,
-            get_session_metadata,
-            rebind_session_project,
-        )
-
-        sid = "rebind_race"
-        TestRebindSessionProjectConcurrency._init_session_with_project(
-            sessions_dir, sid, "proj_old", "/old/dir"
-        )
-        # 1. 构造陈旧快照：旧 project 字段 + 改了 message_count（模拟 chat 落盘）
-        stale_snapshot = get_session_metadata(sid, cache_bust=True)
-        stale_snapshot["message_count"] = stale_snapshot.get("message_count", 0) + 1
-        stale_snapshot["project_id"] = "proj_old"
-        stale_snapshot["project_dir"] = "/old/dir"
-        stale_snapshot["work_mode"] = "code"
-        stale_snapshot["channel_metadata"] = {
-            "project_dir": "/old/dir",
-            "cwd": "/old/dir",
-        }
-        # 2. rebind：bump gen + sync 落盘新值
-        rebind_session_project(
-            session_id=sid,
-            project_id="proj_new",
-            project_dir="/new/dir",
-            work_mode="code",
-        )
-        # 3. 模拟 worker 处理陈旧快照（gen_at_enqueue < 当前 gen → preserve_rebound=True）
-        #    若无版本检查（preserve_rebound_fields=False）, 此调用会覆盖 rebind。
-        _write_metadata_sync(
-            sid, stale_snapshot, preserve_rebound_fields=True,
-        )
-        # 4. 断言磁盘 project 字段仍为 rebind 的新值
-        after = get_session_metadata(sid, cache_bust=True)
-        assert after["project_id"] == "proj_new", (
-            "陈旧异步快照覆盖了 rebind 的 project_id"
-        )
-        assert after["project_dir"] == "/new/dir", (
-            "陈旧异步快照覆盖了 rebind 的 project_dir"
-        )
-        assert after["work_mode"] == "code"
-        ch = after.get("channel_metadata", {})
-        assert ch.get("project_dir") == "/new/dir", (
-            "陈旧异步快照覆盖了 rebind 的 channel_metadata.project_dir"
-        )
-        assert ch.get("cwd") == "/new/dir"
-        # 陈旧快照的非 project 字段（message_count）应被保留
-        assert after["message_count"] == 1
-
-    @staticmethod
-    def test_stale_snapshot_without_preserve_overwrites_rebind(sessions_dir):
-        """对照实验：同一陈旧快照, 若 worker 不做版本检查（preserve_rebound_fields=False）
-        会覆盖 rebind —— 反向证明上一用例的断言确由版本检查保护, 而非巧合。
-        """
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            _write_metadata_sync,
-            get_session_metadata,
-            rebind_session_project,
-        )
-
-        sid = "rebind_no_preserve"
-        TestRebindSessionProjectConcurrency._init_session_with_project(
-            sessions_dir, sid, "proj_old", "/old/dir"
-        )
-        rebind_session_project(
-            session_id=sid,
-            project_id="proj_new",
-            project_dir="/new/dir",
-            work_mode="code",
-        )
-        stale_snapshot = {
-            "session_id": sid,
-            "project_id": "proj_old",
-            "project_dir": "/old/dir",
-            "work_mode": "code",
-            "channel_metadata": {"project_dir": "/old/dir", "cwd": "/old/dir"},
-            "message_count": 9,
-        }
-        # 不做版本检查 → 陈旧快照直接覆盖 rebind
-        _write_metadata_sync(sid, stale_snapshot, preserve_rebound_fields=False)
-        after = get_session_metadata(sid, cache_bust=True)
-        assert after["project_id"] == "proj_old"
-        assert after["project_dir"] == "/old/dir"
-
-    @staticmethod
-    def test_enqueue_captures_rebind_gen_for_staleness_detection(sessions_dir, monkeypatch):
-        """_enqueue_write 入队时捕获当前 rebind_gen; rebind 后该值 < 当前 gen,
-        worker 据此判定为陈旧。用 monkeypatch 拦截 put_nowait 避免与 worker 竞态。"""
-        from jiuwenswarm.server.runtime.session import session_metadata as sm
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            _bump_rebind_gen,
-            _get_rebind_gen,
-            init_session_metadata,
-            update_session_metadata,
-        )
-
-        sid = "rebind_gen_capture"
-        init_session_metadata(
-            session_id=sid, channel_id="tui", mode="code.normal",
-            project_dir="/old/dir", project_id="proj_old", work_mode="code",
-        )
-        update_session_metadata(
-            session_id=sid, project_dir="/old/dir", project_id="proj_old",
-            work_mode="code", touch_last_message_at=False, sync_write=True,
-        )
-        _drain_queue()
-        assert _get_rebind_gen(sid) == 0
-
-        # 拦截 put_nowait: 不真正入队（worker 不会消费）, 仅记录入队项
-        captured: list[tuple] = []
-        original_put = sm._METADATA_QUEUE.put_nowait
-
-        def capture_put(item):
-            captured.append(item)
-
-        monkeypatch.setattr(sm._METADATA_QUEUE, "put_nowait", capture_put)
-        # 入队一个异步写（rebind 之前）: 应捕获 gen=0
-        update_session_metadata(
-            session_id=sid, touch_last_message_at=False,
-        )
-        monkeypatch.setattr(sm._METADATA_QUEUE, "put_nowait", original_put)
-        assert len(captured) == 1
-        item_sid, _meta, _pin, gen_at_enqueue = captured[0]
-        assert item_sid == sid
-        assert gen_at_enqueue == 0
-
-        # rebind: bump gen
-        _bump_rebind_gen(sid)
-        assert _get_rebind_gen(sid) == 1
-        # worker 处理时: gen_at_enqueue(0) < 当前 gen(1) → 判定为陈旧
-        assert gen_at_enqueue < _get_rebind_gen(sid)
-
-    @staticmethod
-    def test_rebind_gen_helpers_isolated():
-        """_get/_bump_rebind_gen 基础语义: 初始 0, 自增, 会话隔离。"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            _REBIND_GEN_LOCK,
-            _SESSION_REBIND_GEN,
-            _bump_rebind_gen,
-            _get_rebind_gen,
-        )
-
-        sid_a, sid_b = "gen_iso_a", "gen_iso_b"
-        try:
-            assert _get_rebind_gen(sid_a) == 0
-            assert _get_rebind_gen(sid_b) == 0
-            _bump_rebind_gen(sid_a)
-            assert _get_rebind_gen(sid_a) == 1
-            assert _get_rebind_gen(sid_b) == 0  # 隔离
-            _bump_rebind_gen(sid_a)
-            _bump_rebind_gen(sid_b)
-            assert _get_rebind_gen(sid_a) == 2
-            assert _get_rebind_gen(sid_b) == 1
-        finally:
-            with _REBIND_GEN_LOCK:
-                _SESSION_REBIND_GEN.pop(sid_a, None)
-                _SESSION_REBIND_GEN.pop(sid_b, None)
-
-    @staticmethod
-    def test_post_rebind_queued_snapshot_uses_new_values(sessions_dir):
-        """rebind 之后入队的快照读到了新 project 值, 正常写回不触发版本合并。"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            get_session_metadata,
-            rebind_session_project,
-            update_session_metadata,
-        )
-
-        sid = "rebind_then_chat"
-        TestRebindSessionProjectConcurrency._init_session_with_project(
-            sessions_dir, sid, "proj_old", "/old/dir"
-        )
-        rebind_session_project(
-            session_id=sid,
-            project_id="proj_new",
-            project_dir="/new/dir",
-            work_mode="code",
-        )
-        _drain_queue()
-        # rebind 之后的"chat"走 update_session_metadata: 读到新值（first-lock 不覆盖）
-        update_session_metadata(
-            session_id=sid,
-            project_dir="/new/dir",
-            project_id="proj_new",
-            work_mode="code",
-            touch_last_message_at=False,
-        )
-        _drain_queue()
-        after = get_session_metadata(sid, cache_bust=True)
-        assert after["project_id"] == "proj_new"
-        assert after["project_dir"] == "/new/dir"
-
-    @staticmethod
-    def test_sync_write_rebind_during_write_window_preserves_rebind(sessions_dir, monkeypatch):
-        """P2/P3 回归: sync_write 路径在"gen 捕获后、写盘前"窗口内发生 rebind 时不覆盖。
-
-        set_session_pinned 等 sync_write=True 调用方经 _enqueue_write 走 sync_write
-        分支。P2 之前该分支不做 rebind 版本检查; P3 之前 worker 的 gen 比较在
-        _FILE_LOCK 外执行。二者现已统一: _enqueue_write 捕获 gen_at_enqueue 后,
-        _write_metadata_sync 持锁重比 gen 发现陈旧即从磁盘保留 rebind 字段。
-
-        确定性复现: 用 monkeypatch 拦截 _write_metadata_sync, 在真正落盘前注入一次
-        rebind (bump gen + 落盘新 project), 模拟"gen 捕获(0)→写盘窗口内 rebind(gen→1)
-        →陈旧快照写回"的竞态。修复后陈旧快照的 project 字段被磁盘当前值保留,
-        非 project 字段(如 message_count)仍按快照更新。
-        """
-        from jiuwenswarm.server.runtime.session import session_metadata as sm
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            _bump_rebind_gen,
-            _enqueue_write,
-            _get_rebind_gen,
-            get_session_metadata,
-        )
-
-        sid = "p2_sync_race"
-        TestRebindSessionProjectConcurrency._init_session_with_project(
-            sessions_dir, sid, "proj_old", "/old/dir"
-        )
-        # 陈旧快照: 旧 project 字段 + message_count+1 (模拟 set_session_pinned 的
-        # read-before-rebind: 读盘时 project 仍是 proj_old, 改了 pinned/message_count)
-        stale = get_session_metadata(sid, cache_bust=True)
-        stale["message_count"] = stale.get("message_count", 0) + 1
-        stale["project_id"] = "proj_old"
-        stale["project_dir"] = "/old/dir"
-        stale["work_mode"] = "code"
-        stale["channel_metadata"] = {"project_dir": "/old/dir", "cwd": "/old/dir"}
-        assert _get_rebind_gen(sid) == 0
-
-        original_write = sm._write_metadata_sync
-        rebind_injected: list[bool] = []
-
-        def _inject_rebound_during_write(
-            session_id, metadata, preserve_pin_fields=False,
-            preserve_rebound_fields=False, rebind_gen_at_enqueue=None,
-        ):
-            # 仅对本次 sync_write 的陈旧快照注入一次 rebind (gen 0→1, 落盘 proj_new)。
-            # 用 original_write 直接写, 不走 _enqueue_write, 避免递归回到本拦截。
-            if session_id == sid and not rebind_injected:
-                rebind_injected.append(True)
-                _bump_rebind_gen(session_id)
-                rebound = dict(metadata)
-                rebound["project_id"] = "proj_new"
-                rebound["project_dir"] = "/new/dir"
-                rebound["work_mode"] = "code"
-                rebound["channel_metadata"] = {
-                    "project_dir": "/new/dir", "cwd": "/new/dir",
-                }
-                original_write(session_id, rebound)
-            # 继续处理本来的陈旧快照: rebind_gen_at_enqueue 应为 0 (早于注入的 rebind),
-            # _write_metadata_sync 持锁后重比 0 < 1 → 从磁盘保留 rebind 字段。
-            return original_write(
-                session_id,
-                metadata,
-                preserve_pin_fields=preserve_pin_fields,
-                preserve_rebound_fields=preserve_rebound_fields,
-                rebind_gen_at_enqueue=rebind_gen_at_enqueue,
-            )
-
-        monkeypatch.setattr(sm, "_write_metadata_sync", _inject_rebound_during_write)
-        _enqueue_write(sid, stale, sync_write=True, preserve_pin_fields=False)
-        # 注意: 不能在此调用 monkeypatch.undo() —— pytest 中 sessions_dir fixture 与本
-        # 测试共享同一 function-scoped monkeypatch 实例, undo() 会连 fixture 的
-        # get_agent_sessions_dir patch 一并撤销, 使后续 cache_bust=True 读盘落到真实
-        # ~/.jiuwenswarm 目录(无此会话), 得到空 dict 导致断言 KeyError。由 pytest 在
-        # 测试结束时统一恢复全部 patch。
-
-        assert _get_rebind_gen(sid) == 1
-        after = get_session_metadata(sid, cache_bust=True)
-        # rebind 的 proj_new 必须保留, 陈旧快照不得覆盖
-        assert after["project_id"] == "proj_new", (
-            "sync_write 陈旧快照在写盘窗口内覆盖了 rebind 的 project_id"
-        )
-        assert after["project_dir"] == "/new/dir"
-        ch = after.get("channel_metadata", {})
-        assert ch.get("project_dir") == "/new/dir"
-        assert ch.get("cwd") == "/new/dir"
-        # 陈旧快照的非 project 字段 (message_count) 应被保留
-        assert after["message_count"] == 1

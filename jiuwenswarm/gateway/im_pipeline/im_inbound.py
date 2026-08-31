@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +13,7 @@ from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 
 from jiuwenswarm.common.config import _parse_custom_headers
+from jiuwenswarm.common.local_env_config import read_env
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.gateway.routing.interaction_context import PendingInteraction
 from jiuwenswarm.common.schema.message import Message, ReqMethod
@@ -89,7 +89,12 @@ class IMPlatformAdapter(Protocol):
         ...
 
     def load_recent_messages(
-        self, thread_id: str, limit: int = 500
+        self,
+        thread_id: str,
+        limit: int = 500,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
     ) -> list[IMHistoryMessage]:
         ...
 
@@ -166,7 +171,7 @@ class IMConversationProcessor:
             (model_name_override or "").strip()
             or react.get("model_name", "")
             or mcc.get("model_name", "")
-            or os.getenv("MODEL_NAME", "").strip()
+            or read_env("MODEL_NAME", "").strip()
             or "gpt-4o"
         )
         return name, mcc, mco
@@ -229,6 +234,9 @@ class IMConversationProcessor:
                 reason="always-reply",
             )
 
+        service_id, agent_id = self._resolve_memory_tenant_ids(
+            msg, sender_user_id=sender_user_id
+        )
         prompt = self._build_prompt(
             thread_id=thread_id,
             sender_user_id=sender_user_id,
@@ -237,6 +245,8 @@ class IMConversationProcessor:
             principal_name=principal_name,
             adapter=adapter,
             pending_context=pending_context,
+            service_id=service_id,
+            agent_id=agent_id,
         )
         rewritten_content = await self._rewrite_query(prompt, principal_name, adapter)
         if not rewritten_content:
@@ -327,6 +337,36 @@ class IMConversationProcessor:
             return True
         return False
 
+    @staticmethod
+    def _resolve_memory_tenant_ids(
+        msg: Message,
+        *,
+        sender_user_id: str = "",
+    ) -> tuple[str | None, str | None]:
+        """Resolve tenant ids for group-chat memory (align with connect write path).
+
+        Priority (matches source ``msg.params`` + dig-stable write identity):
+          1. ``msg.params`` service_id / agent_id
+          2. ``tenant_ids_from_im_identity(chat_id, bot_id, user_id)``
+          3. ``None, None`` → MessageStore normalizes to default/default
+        """
+        params = msg.params if isinstance(msg.params, dict) else None
+        if params is not None and (
+            params.get("service_id") is not None or params.get("agent_id") is not None
+        ):
+            return params.get("service_id"), params.get("agent_id")
+
+        chat_id = str(getattr(msg, "chat_id", None) or msg.session_id or "").strip()
+        bot_id = str(
+            getattr(msg, "bot_id", None) or getattr(msg, "app_id", None) or ""
+        ).strip()
+        user_id = str(getattr(msg, "user_id", None) or sender_user_id or "").strip()
+        if chat_id and bot_id:
+            from jiuwenswarm.gateway.tenant_paths import tenant_ids_from_im_identity
+
+            return tenant_ids_from_im_identity(chat_id, bot_id, user_id)
+        return None, None
+
     def _build_prompt(
         self,
         *,
@@ -337,10 +377,17 @@ class IMConversationProcessor:
         principal_name: str,
         adapter: IMPlatformAdapter,
         pending_context: str | None = None,
+        service_id: str | None = None,
+        agent_id: str | None = None,
     ) -> str:
         prompt_parts: list[str] = []
         prompt_parts.append("=== 群聊历史消息 ===")
-        history = adapter.load_recent_messages(thread_id, limit=500)
+        history = adapter.load_recent_messages(
+            thread_id,
+            limit=500,
+            service_id=service_id,
+            agent_id=agent_id,
+        )
         if history:
             prompt_parts.append(f"最近 {len(history)} 条消息：\n")
             for msg in history:
@@ -392,12 +439,12 @@ class IMConversationProcessor:
                 "temperature": 0.2,
                 "top_p": 0.7,
             }
-            api_key = (mcc.get("api_key") or os.getenv("API_KEY") or "").strip()
-            api_base = (mcc.get("api_base") or os.getenv("API_BASE") or "").strip()
+            api_key = (mcc.get("api_key") or read_env("API_KEY") or "").strip()
+            api_base = (mcc.get("api_base") or read_env("API_BASE") or "").strip()
             if api_base.endswith("/chat/completions"):
                 api_base = api_base.rsplit("/chat/completions", 1)[0]
-            client_provider = mcc.get("client_provider") or os.getenv("MODEL_PROVIDER", "OpenAI")
-            custom_headers = _parse_custom_headers(mcc.get("custom_headers") or os.getenv("CUSTOM_HEADERS"))
+            client_provider = mcc.get("client_provider") or read_env("MODEL_PROVIDER", "OpenAI")
+            custom_headers = _parse_custom_headers(mcc.get("custom_headers") or read_env("CUSTOM_HEADERS"))
             reasoning_mcc = {
                 **dict(mcc or {}),
                 "client_provider": client_provider,

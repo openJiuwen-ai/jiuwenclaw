@@ -10,6 +10,7 @@ import './SessionSidebar.css';
 import ChannelIcon from '../../assets/sidebar/channel.svg?react';
 import PluginIcon from '../../assets/sidebar/plugin.svg?react';
 import ConfigIcon from '../../assets/sidebar/config.svg?react';
+import A2AIcon from '../../assets/sidebar/a2a.svg?react';
 import WebIcon from '../../assets/sidebar/web.svg?react';
 import PlusIcon from '../../assets/sidebar/plus.svg?react';
 import logoIcon from '/logo.svg';
@@ -20,8 +21,11 @@ import SkillDesignIcon from '../../assets/技能.svg?react';
 import AgentDesignIcon from '../../assets/智能体.svg?react';
 import MoreDesignIcon from '../../assets/更多.svg?react';
 import { webRequest } from '../../services/webClient';
+import { useEnterpriseContext } from '../../services/enterpriseContext';
+import { EditableCombobox } from './EditableCombobox';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey =
+  'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel' | 'a2aingress';
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
@@ -32,7 +36,6 @@ interface SessionSidebarProps {
   showNewSession?: boolean;
   hiddenNavItems?: MainNavKey[];
   onMorePanelOpenChange?: (open: boolean) => void;
-  onSetupGuideRequest: () => void;
 }
 
 interface NavItem {
@@ -43,7 +46,11 @@ interface NavItem {
 
 const teamNavIcon = (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a8.96 8.96 0 01-12 0m12 0a3.75 3.75 0 00-6 0m6 0A8.96 8.96 0 0012 15.75a8.96 8.96 0 00-6 2.97m12 0A9 9 0 1012 21a8.96 8.96 0 006-2.28zM15 9.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M18 18.72a8.96 8.96 0 01-12 0m12 0a3.75 3.75 0 00-6 0m6 0A8.96 8.96 0 0012 15.75a8.96 8.96 0 00-6 2.97m12 0A9 9 0 1012 21a8.96 8.96 0 006-2.28zM15 9.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z"
+    />
   </svg>
 );
 
@@ -59,6 +66,7 @@ const moreNavItems: NavItem[] = [
   { key: 'configpanel', labelKey: 'nav.config', icon: <ConfigIcon aria-hidden /> },
   { key: 'extensions', labelKey: 'nav.extensions', icon: <PluginIcon aria-hidden /> },
   { key: 'browserpanel', labelKey: 'nav.browser', icon: <WebIcon aria-hidden /> },
+  { key: 'a2aingress', labelKey: 'nav.a2aIngress', icon: <A2AIcon aria-hidden /> },
   { key: 'updatepanel', labelKey: 'nav.update', icon: <UpdateIcon aria-hidden /> },
 ];
 
@@ -81,12 +89,7 @@ function AdvancedConfigPanel({
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (
-        panelRef.current &&
-        !panelRef.current.contains(event.target as Node) &&
-        buttonRef.current &&
-        !buttonRef.current.contains(event.target as Node)
-      ) {
+      if (panelRef.current && !panelRef.current.contains(event.target as Node) && buttonRef.current && !buttonRef.current.contains(event.target as Node)) {
         onClose();
       }
     }
@@ -113,9 +116,7 @@ function AdvancedConfigPanel({
         <span className="config-row__label">{t('sessionSidebar.connectionStatus')}</span>
         <div className={`connection-status ${isConnected ? 'connection-status--connected' : 'connection-status--disconnected'}`}>
           <span className="connection-status__dot" />
-          <span className="connection-status__text">
-            {isConnected ? t('connection.connected') : t('connection.disconnected')}
-          </span>
+          <span className="connection-status__text">{isConnected ? t('connection.connected') : t('connection.disconnected')}</span>
         </div>
       </div>
 
@@ -129,21 +130,14 @@ function AdvancedConfigPanel({
       <div className="config-row">
         <span className="config-row__label">{t('sessionSidebar.language')}</span>
         <div className="segmented-control">
-          <button
-            className={`segmented-control__btn ${isZh ? 'segmented-control__btn--active' : ''}`}
-            onClick={() => handleLanguageChange('zh')}
-          >
+          <button className={`segmented-control__btn ${isZh ? 'segmented-control__btn--active' : ''}`} onClick={() => handleLanguageChange('zh')}>
             中
           </button>
-          <button
-            className={`segmented-control__btn ${!isZh ? 'segmented-control__btn--active' : ''}`}
-            onClick={() => handleLanguageChange('en')}
-          >
+          <button className={`segmented-control__btn ${!isZh ? 'segmented-control__btn--active' : ''}`} onClick={() => handleLanguageChange('en')}>
             En
           </button>
         </div>
       </div>
-
     </div>
   );
 }
@@ -157,11 +151,12 @@ export function SessionSidebar({
   showNewSession = true,
   hiddenNavItems = [],
   onMorePanelOpenChange,
-  onSetupGuideRequest,
 }: SessionSidebarProps) {
   const { t } = useTranslation();
   const [advancedConfigOpen, setAdvancedConfigOpen] = useState(false);
   const settingsRef = useRef<HTMLButtonElement>(null);
+  const enterprise = useEnterpriseContext();
+  const [contextOpen, setContextOpen] = useState(false);
 
   const handleNewSession = useCallback(() => {
     onNavigate('chat');
@@ -192,13 +187,12 @@ export function SessionSidebar({
   };
 
   const getNavItemLabel = (item: NavItem) => t(item.labelKey);
-  const visibleMainNavItems = mainNavItems.filter((item) => !hiddenNavItems.includes(item.key));
-  const visibleMoreNavItems = moreNavItems.filter((item) => !hiddenNavItems.includes(item.key));
-  const isMoreActive = visibleMoreNavItems.some((item) => item.key === activeNav);
-  // 定时任务（cron）是"任务"区内与会话同级的视图，没有独立的导航图标，
-  // 因此进入定时任务时"任务"导航项也应保持选中态
-  const isNavItemActive = (item: NavItem) =>
-    activeNav === item.key || (item.key === 'chat' && activeNav === 'cron');
+  const visibleMainNavItems = mainNavItems.filter(item => !hiddenNavItems.includes(item.key));
+  const visibleMoreNavItems = moreNavItems.filter(item => !hiddenNavItems.includes(item.key));
+  const isMoreActive = visibleMoreNavItems.some(item => item.key === activeNav);
+  // 定时任务（cron）是"工作"区内与会话同级的视图，没有独立的导航图标，
+  // 因此进入定时任务时"工作"导航项也应保持选中态
+  const isNavItemActive = (item: NavItem) => activeNav === item.key || (item.key === 'chat' && activeNav === 'cron');
 
   useLayoutEffect(() => {
     onMorePanelOpenChange?.(isMoreActive);
@@ -212,10 +206,7 @@ export function SessionSidebar({
       </div>
 
       {showNewSession && (
-        <button
-          className="icon-rail-nav-item"
-          onClick={handleNewSession}
-        >
+        <button className="icon-rail-nav-item" onClick={handleNewSession}>
           <span className="icon-rail-nav-item__icon">
             <PlusIcon aria-hidden width="16" height="16" />
           </span>
@@ -223,7 +214,7 @@ export function SessionSidebar({
         </button>
       )}
 
-      {visibleMainNavItems.map((item) => (
+      {visibleMainNavItems.map(item => (
         <button
           key={item.key}
           className={`icon-rail-nav-item${isNavItemActive(item) ? ' icon-rail-nav-item--active' : ''}`}
@@ -251,7 +242,7 @@ export function SessionSidebar({
             <div className="icon-rail-more-panel">
               <div className="icon-rail-more-panel__title">{t('sessionSidebar.moreSettings')}</div>
               <nav className="icon-rail-more-panel__list" aria-label={t('sessionSidebar.moreSettings')}>
-                {visibleMoreNavItems.map((item) => (
+                {visibleMoreNavItems.map(item => (
                   <button
                     key={item.key}
                     className={`icon-rail-more-panel__item${activeNav === item.key ? ' icon-rail-more-panel__item--active' : ''}`}
@@ -269,33 +260,66 @@ export function SessionSidebar({
 
       <div className="icon-rail-spacer" />
 
-      <button
-        type="button"
-        className="icon-rail-nav-item icon-rail-help-button"
-        onClick={onSetupGuideRequest}
-        aria-label={t('modelSetupGuide.open')}
-        title={t('modelSetupGuide.open')}
-      >
-        <span className="icon-rail-nav-item__icon">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden>
-            <circle cx="12" cy="12" r="8.25" stroke="currentColor" strokeWidth="1.5" />
-            <path
-              d="M9.8 9.35a2.35 2.35 0 014.55.82c0 1.57-1.2 2.05-2.02 2.7-.48.38-.73.74-.73 1.38"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
+      {enterprise && (
+        <button
+          type="button"
+          className={`icon-rail-nav-item${contextOpen ? ' icon-rail-nav-item--active' : ''}`}
+          onClick={() => setContextOpen(open => !open)}
+          aria-label="用户上下文"
+          title="用户上下文"
+        >
+          <span className="icon-rail-nav-item__icon">{(enterprise.user.display_name || enterprise.user.user_id).slice(0, 1).toUpperCase()}</span>
+          <span className="icon-rail-nav-item__label">用户</span>
+        </button>
+      )}
+      {enterprise && contextOpen && (
+        <div className="enterprise-context-popover">
+          <div className="enterprise-context-popover__user">
+            {enterprise.user.display_name || enterprise.user.user_id}
+            <small>{enterprise.user.user_id}</small>
+          </div>
+          <label>
+            组织（group_id）
+            <EditableCombobox
+              ariaLabel="组织（group_id）"
+              value={enterprise.org.group_id}
+              disabled={enterprise.contextSwitching}
+              options={enterprise.orgs.map(item => ({ value: item.group_id, label: `${item.name} · ${item.group_id}` }))}
+              onChange={enterprise.onOrgChange}
             />
-            <circle cx="11.6" cy="17.15" r=".85" fill="currentColor" />
-          </svg>
-        </span>
-      </button>
+          </label>
+          <label>
+            组网（gateway_id）
+            <EditableCombobox
+              ariaLabel="组网（gateway_id）"
+              value={enterprise.gateway.jiuwenclaw_id}
+              disabled={enterprise.contextSwitching}
+              options={enterprise.gateways.map(item => ({ value: item.jiuwenclaw_id, label: `${item.jiuwenclaw_name} · ${item.jiuwenclaw_id}` }))}
+              onChange={enterprise.onGatewayChange}
+            />
+          </label>
+          <label>
+            Agent（bot_id）
+            <EditableCombobox
+              ariaLabel="Agent（bot_id）"
+              value={enterprise.selectedBot}
+              disabled={enterprise.contextSwitching}
+              options={enterprise.agents.map(item => ({
+                value: item.resource_id || item.template_id,
+                label: `${item.template_name} · ${item.resource_id || item.template_id}`,
+              }))}
+              onChange={enterprise.onBotChange}
+            />
+          </label>
+          {enterprise.contextSwitching && <div className="enterprise-context-popover__status">正在切换...</div>}
+          {enterprise.contextError && <div className="enterprise-context-popover__error">{enterprise.contextError}</div>}
+          <button type="button" className="enterprise-context-popover__logout" onClick={enterprise.onLogout}>
+            注销登录
+          </button>
+        </div>
+      )}
 
-      <button
-        ref={settingsRef}
-        className="icon-rail-nav-item icon-rail-settings-button"
-        onClick={toggleAdvancedConfig}
-        aria-label={t('sessionSidebar.moreSettings')}
-      >
+      <button ref={settingsRef} className="icon-rail-nav-item" onClick={toggleAdvancedConfig} aria-label={t('sessionSidebar.moreSettings')}>
         <span className="icon-rail-nav-item__icon">
           <AdvancedConfigIcon aria-hidden width="16" height="16" />
         </span>

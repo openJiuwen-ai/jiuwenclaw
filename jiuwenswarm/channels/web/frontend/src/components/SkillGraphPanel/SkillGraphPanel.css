@@ -243,8 +243,7 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 
 .skill-graph-panel__log-list {

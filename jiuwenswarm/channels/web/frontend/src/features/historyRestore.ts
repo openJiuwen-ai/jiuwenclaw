@@ -13,16 +13,6 @@ import {
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
 
-/**
- * 历史加载兜底超时（毫秒）。
- * faas 侧 history.get 流若因旧 session runtime 过 TTL 被回收而 init 超时
- * （60s timed out），后端不会发 done/batch_end 结束帧，也不会发匹配的
- * chat.error；前端若无限等待会让 isLoadingHistory 永久卡 true，进而吞掉
- * 后续所有 chat.processing_status(is_processing=false)，表现为「一直加载中」。
- * 到期强制 finalize，让调用方 setLoadingHistory(false) 恢复可交互。
- */
-const HISTORY_RESTORE_TIMEOUT_MS = 30_000;
-
 /** 助手侧仅恢复这些事件；用户消息无 event_type，单独保留 */
 const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'chat.final',
@@ -35,8 +25,7 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'team.task',
   'harness.message',
   'harness.stage_result',
-  'harness.extension_ready',
-  'context.compact_boundary'
+  'harness.extension_ready'
 ]);
 
 /** 后端约定：最后一帧 `history.message` 使用 `payload.status: done`（兼容旧版 `payload.content: done`） */
@@ -52,8 +41,6 @@ export interface HistoryToolReplayItem {
 export interface HistoryReasoningReplayItem {
   at: string;
   text: string;
-  /** 末帧时刻（epoch ms）；异常结束时即使无收尾事件，耗时终点也能落在最后一个真实帧。 */
-  updatedAt?: number;
 }
 
 export interface HistoryHarnessReplayItem {
@@ -87,14 +74,7 @@ type HistoryTimelineEntry =
   | { kind: 'team_task'; at: string; payload: { event: Record<string, unknown> } }
   | { kind: 'harness_message'; at: string; content: string; stage?: string }
   | { kind: 'harness_stage_result'; at: string; stage: string; status: string; error: string; messages: string[]; metrics: Record<string, unknown> }
-  | { kind: 'compaction'; at: string; summary: string }
-  | { kind: 'reasoning'; at: string; text: string; updatedAt?: number };
-
-/** 历史回放出的压缩汇总：boundary 记录计数，metadata 拼 tooltip 明细行 */
-export interface HistoryCompactionReplay {
-  count: number;
-  summaries: string[];
-}
+  | { kind: 'reasoning'; at: string; text: string };
 
 interface BeginHistoryRestoreOptions {
   sessionId: string;
@@ -107,8 +87,6 @@ interface BeginHistoryRestoreOptions {
   onTeamReplay?: (items: HistoryTeamReplayItem[]) => void;
   /** 与消息同一时间线顺序，用于恢复模型思考块（chat.reasoning） */
   onReasoningReplay?: (items: HistoryReasoningReplayItem[]) => void;
-  /** 恢复上下文压缩汇总（context.compact_boundary），用于回显「本轮完成上下文压缩 N 次」 */
-  onCompactionReplay?: (info: HistoryCompactionReplay) => void;
   /** 无消息且无工具回放时调用；`totalPages` 来自流中最后一帧（若有） */
   onEmpty?: (totalPages: number | null) => void;
   onError?: (message: string) => void;
@@ -153,28 +131,6 @@ function extractHistoryReasoningText(record: Record<string, unknown>): string {
     }
   }
   return '';
-}
-
-/** 提取 reasoning 末帧时刻（reasoning_updated_at 可能在顶层或 payload 内），非有效时刻返回 undefined。 */
-function extractHistoryReasoningUpdatedAt(record: Record<string, unknown>): number | undefined {
-  const direct = record.reasoning_updated_at;
-  const raw = typeof direct === 'number' || (typeof direct === 'string' && direct.trim())
-    ? direct
-    : (() => {
-        const payload = record.payload;
-        if (!isRecord(payload)) {
-          return undefined;
-        }
-        const nested = payload.reasoning_updated_at;
-        return typeof nested === 'number' || (typeof nested === 'string' && nested.trim())
-          ? nested
-          : undefined;
-      })();
-  if (raw === undefined) {
-    return undefined;
-  }
-  const ms = parseTimestampToMs(raw);
-  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
 }
 
 function pickFirstString(input: Record<string, unknown>, keys: string[]): string | undefined {
@@ -419,52 +375,6 @@ function isTruthyHistoryFlag(value: unknown): boolean {
   return value === true || value === 'true' || value === 1 || value === '1';
 }
 
-function compactTokenCount(value: number): string {
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
-  if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return String(value);
-}
-
-/** 从 boundary 记录的 compact_metadata 拼一行 tooltip 明细（兼容手动 compact 的 stats 结构） */
-function formatCompactBoundarySummary(record: Record<string, unknown>): string {
-  const meta = isRecord(record.compact_metadata) ? record.compact_metadata : null;
-  if (!meta) return '';
-  const before = isRecord(meta.before) ? meta.before : null;
-  const after = isRecord(meta.after) ? meta.after : null;
-  const saved = isRecord(meta.saved) ? meta.saved : null;
-  const beforeTokens =
-    typeof before?.tokens === 'number'
-      ? before.tokens
-      : typeof meta.raw_total_tokens === 'number'
-        ? meta.raw_total_tokens
-        : null;
-  const afterTokens =
-    typeof after?.tokens === 'number'
-      ? after.tokens
-      : typeof meta.total_tokens === 'number'
-        ? meta.total_tokens
-        : null;
-  const percent =
-    typeof saved?.percent === 'number'
-      ? saved.percent
-      : typeof meta.rate === 'number'
-        ? meta.rate
-        : null;
-  const processor =
-    typeof meta.processor === 'string' && meta.processor.trim() ? meta.processor.trim() : '';
-  const parts: string[] = [];
-  if (beforeTokens != null && afterTokens != null) {
-    parts.push(`~${compactTokenCount(beforeTokens)} -> ~${compactTokenCount(afterTokens)} tokens`);
-  }
-  if (percent != null) {
-    parts.push(`saved ${percent.toFixed(1)}%`);
-  }
-  const line = parts.join(', ');
-  if (processor && line) return `${processor}: ${line}`;
-  return processor || line;
-}
-
 function parseHistoryTimelineEntry(
   record: Record<string, unknown>,
   sessionId: string
@@ -552,14 +462,7 @@ function parseHistoryTimelineEntry(
   const payload = buildEventPayloadForRecord(record);
 
   if (eventType === 'chat.final') {
-    // Goal 完成卡片落盘的是 `goal.completed:` + JSON 信封，不是展示文本。
-    // normalizeFinalContent 会把字面 `\n` 还原成真换行（GFM 表格要靠这个），信封里的
-    // JSON 字符串于是带上非法控制符，parseGoalCompletedContent 解析失败 →
-    // GoalCompletedCard 返回 null → 整张卡片在历史里凭空消失。信封原样透传。
-    const rawContent = typeof payload.content === 'string' ? payload.content : '';
-    let content = isGoalCompletedContent(rawContent)
-      ? rawContent
-      : normalizeFinalContent(payload);
+    let content = normalizeFinalContent(payload);
     const isGoalCompletedMessage =
       isTruthyHistoryFlag(record.is_goal_completed_message) ||
       isTruthyHistoryFlag(record.isGoalCompletedMessage) ||
@@ -601,14 +504,6 @@ function parseHistoryTimelineEntry(
     const histSource = typeof payload.source === 'string' ? payload.source : '';
     const isProactiveRecommendation = histSource === 'proactive_recommendation';
     const histProactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
-    // completed_at：收尾时刻（耗时）；timestamp 已是气泡出现/首包时刻（排序）
-    const completedAt =
-      (typeof record.completed_at === 'number' || typeof record.completed_at === 'string'
-        ? recordTimestampIso({ timestamp: record.completed_at })
-        : undefined) ||
-      (typeof payload.completed_at === 'number' || typeof payload.completed_at === 'string'
-        ? recordTimestampIso({ timestamp: payload.completed_at })
-        : undefined);
     return {
       kind: 'message',
       message: {
@@ -616,7 +511,6 @@ function parseHistoryTimelineEntry(
         role: 'assistant',
         content,
         timestamp: at,
-        ...(completedAt ? { completedAt } : {}),
         ...(isProactiveRecommendation ? { isProactiveRecommendation } : {}),
         ...(isProactiveRecommendation && histProactiveType
           ? { proactiveType: histProactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' }
@@ -691,10 +585,6 @@ function parseHistoryTimelineEntry(
     return { kind: 'harness_message', at, content, stage };
   }
 
-  if (eventType === 'context.compact_boundary') {
-    return { kind: 'compaction', at, summary: formatCompactBoundarySummary(record) };
-  }
-
   if (eventType === 'harness.stage_result') {
     const stage = typeof payload.stage === 'string' ? payload.stage : '';
     const status = typeof payload.status === 'string' ? payload.status : 'success';
@@ -754,65 +644,8 @@ interface MaterializedHistoryTimeline {
   reasoningReplay: HistoryReasoningReplayItem[];
 }
 
-function entryTimestamp(entry: HistoryTimelineEntry): string {
-  return entry.kind === 'message' ? entry.message.timestamp : entry.at;
-}
-
-/**
- * Goal 完成卡片沉到本轮末尾。
- *
- * 实时侧这张卡是「本轮内容都落地后」才插进对话流的（见 useWebSocket 的
- * scheduleAfterTurnSettles），历史里它的落盘时刻却可能早于同轮后续的收尾正文。
- * 不重新盖章，历史就会把完成卡片排到最后一句回答上面，和实时反过来。
- */
-function sinkGoalCompletionCardsToTurnEnd(
-  entries: HistoryTimelineEntry[]
-): HistoryTimelineEntry[] {
-  const out = [...entries];
-  let changed = false;
-
-  for (let i = 0; i < out.length; i += 1) {
-    const entry = out[i];
-    if (entry.kind !== 'message' || !isGoalCompletedContent(entry.message.content)) {
-      continue;
-    }
-    const cardMs = safeTimestampMs(entryTimestamp(entry));
-    let turnEndMs = cardMs;
-    for (let j = i + 1; j < out.length; j += 1) {
-      const next = out[j];
-      if (next.kind === 'message' && next.message.role === 'user') {
-        break;
-      }
-      turnEndMs = Math.max(turnEndMs, safeTimestampMs(entryTimestamp(next)));
-    }
-    if (turnEndMs <= cardMs) {
-      continue;
-    }
-    const iso = timestampMsToIso(turnEndMs + 1);
-    if (!iso) {
-      continue;
-    }
-    out[i] = { ...entry, message: { ...entry.message, timestamp: iso } };
-    changed = true;
-  }
-
-  if (!changed) {
-    return entries;
-  }
-  return out.sort(
-    (a, b) => safeTimestampMs(entryTimestamp(a)) - safeTimestampMs(entryTimestamp(b))
-  );
-}
-
-/** 将 history 条目折叠成消息/工具/思考，供 restore / page / 文件预览共用。入口统一升序。 */
-function materializeHistoryTimeline(
-  rawEntries: HistoryTimelineEntry[]
-): MaterializedHistoryTimeline {
-  // restore 用 unshift 倒序入列；sink / 折叠依赖时间升序，这里统一排一次。
-  const sortedEntries = [...rawEntries].sort(
-    (a, b) => safeTimestampMs(entryTimestamp(a)) - safeTimestampMs(entryTimestamp(b))
-  );
-  const entries = sinkGoalCompletionCardsToTurnEnd(sortedEntries);
+/** 将已按时间升序的 history 条目折叠成消息/工具/思考，供 restore / page / 文件预览共用。 */
+function materializeHistoryTimeline(entries: HistoryTimelineEntry[]): MaterializedHistoryTimeline {
   const messages: Message[] = [];
   const toolReplay: HistoryToolReplayItem[] = [];
   const harnessReplay: HistoryHarnessReplayItem[] = [];
@@ -873,11 +706,7 @@ function materializeHistoryTimeline(
       continue;
     }
     if (e.kind === 'reasoning') {
-      reasoningReplay.push({ at: e.at, text: e.text, updatedAt: e.updatedAt });
-      continue;
-    }
-    if (e.kind === 'compaction') {
-      // 压缩边界不进 toolReplay，由 beginHistoryRestore 在循环结束后统一汇总回放
+      reasoningReplay.push({ at: e.at, text: e.text });
       continue;
     }
     toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
@@ -900,7 +729,7 @@ export function parseHistoryJsonFileToPreviewMessages(
 export interface HistoryTimelinePreview {
   messages: Message[];
   executions: ToolExecution[];
-  reasoningSegments: { id: string; text: string; startedAt: number; closed: true; updatedAt?: number; closedAt?: number }[];
+  reasoningSegments: { id: string; text: string; startedAt: number; closed: true; closedAt?: number }[];
   mode: 'team' | null;
 }
 
@@ -931,12 +760,7 @@ export function parseHistoryJsonFileToTimelinePreview(
     }
     const reasoningText = extractHistoryReasoningText(item);
     if (reasoningText) {
-      entries.push({
-        kind: 'reasoning',
-        at: recordTimestampIso(item) ?? '',
-        text: reasoningText,
-        updatedAt: extractHistoryReasoningUpdatedAt(item),
-      });
+      entries.push({ kind: 'reasoning', at: recordTimestampIso(item) ?? '', text: reasoningText });
     }
   }
 
@@ -977,20 +801,12 @@ function buildReasoningSegmentsFromReplay(
       return;
     }
     const startedAt = parsed - 1;
-    // updatedAt 取落盘的 reasoning_updated_at（末帧时刻）；缺失/非法时回退 startedAt
-    // （老历史无该字段，保持原有保守终点）。
-    const replayUpdatedAt = parseTimestampToMs(item.updatedAt);
-    const updatedAt =
-      Number.isFinite(replayUpdatedAt) && replayUpdatedAt > 1_000_000_000_000
-        ? replayUpdatedAt
-        : startedAt;
     segments.push({
       id: `hist-preview-rsn-${sessionId}-${index}`,
       text,
       startedAt,
       closed: true,
       closedAt: startedAt,
-      updatedAt,
     });
   });
   segments.sort((a, b) => a.startedAt - b.startedAt);
@@ -1153,7 +969,6 @@ function shouldProcessHistoryPayload(
 
 export function beginHistoryRestore(options: BeginHistoryRestoreOptions): HistoryRestoreHandle {
   const requestKey = makeHistoryRestoreKey(options.sessionId);
-  const releaseLiveEvents = webClient.suspendSessionEvents(options.sessionId);
   replaceActiveHistoryRequest(requestKey);
 
   const generation = restoreGeneration + 1;
@@ -1162,8 +977,6 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
-  let finalized = false;
-  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1193,12 +1006,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
       }
       const reasoningText = extractHistoryReasoningText(record);
       if (reasoningText) {
-        entries.unshift({
-          kind: 'reasoning',
-          at: recordTimestampIso(record) ?? '',
-          text: reasoningText,
-          updatedAt: extractHistoryReasoningUpdatedAt(record),
-        });
+        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record) ?? '', text: reasoningText });
       }
     }
 
@@ -1207,82 +1015,44 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
   });
 
-  function stopListening(): void {
+  function dispose(): void {
     if (disposed) return;
     disposed = true;
-    if (restoreTimer) {
-      clearTimeout(restoreTimer);
-      restoreTimer = null;
-    }
     unsubscribe();
     if (activeHistoryRequests.get(requestKey)?.generation === generation) {
       activeHistoryRequests.delete(requestKey);
     }
   }
 
-  function dispose(): void {
-    stopListening();
-    releaseLiveEvents();
-  }
-
   function finalize(): void {
-    if (disposed || finalized) return;
-    finalized = true;
+    if (disposed) return;
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
 
-    stopListening();
+    dispose();
 
-    try {
-      if (messages.length === 0 && toolReplay.length === 0 && harnessReplay.length === 0 && teamReplay.length === 0) {
-        options.onEmpty?.(totalPages);
-        return;
-      }
-      options.onReady(messages, totalPages);
-      if (toolReplay.length > 0) {
-        options.onToolReplay?.(toolReplay);
-      }
-      if (harnessReplay.length > 0) {
-        options.onHarnessReplay?.(harnessReplay);
-      }
-      if (teamReplay.length > 0) {
-        options.onTeamReplay?.(teamReplay);
-      }
-      if (reasoningReplay.length > 0) {
-        options.onReasoningReplay?.(reasoningReplay);
-      }
-      const compactionCount = entries.reduce((n, e) => (e.kind === 'compaction' ? n + 1 : n), 0);
-      if (compactionCount > 0) {
-        const compactionSummaries = entries.flatMap((e) =>
-          e.kind === 'compaction' && e.summary.trim() ? [e.summary] : []
-        );
-        options.onCompactionReplay?.({ count: compactionCount, summaries: compactionSummaries });
-      }
-    } finally {
-      releaseLiveEvents();
+    if (messages.length === 0 && toolReplay.length === 0 && harnessReplay.length === 0 && teamReplay.length === 0) {
+      options.onEmpty?.(totalPages);
+      return;
+    }
+    options.onReady(messages, totalPages);
+    if (toolReplay.length > 0) {
+      options.onToolReplay?.(toolReplay);
+    }
+    if (harnessReplay.length > 0) {
+      options.onHarnessReplay?.(harnessReplay);
+    }
+    if (teamReplay.length > 0) {
+      options.onTeamReplay?.(teamReplay);
     }
     if (reasoningReplay.length > 0) {
       options.onReasoningReplay?.(reasoningReplay);
-    }
-    const compactionCount = entries.reduce((n, e) => (e.kind === 'compaction' ? n + 1 : n), 0);
-    if (compactionCount > 0) {
-      const compactionSummaries = entries.flatMap((e) =>
-        e.kind === 'compaction' && e.summary.trim() ? [e.summary] : []
-      );
-      options.onCompactionReplay?.({ count: compactionCount, summaries: compactionSummaries });
     }
   }
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeHistoryRequests.set(requestKey, handle);
-  // 兜底：后端 history.get 流超时（faas 旧 session runtime 过 TTL 被
-  // 回收、init 60s 超时）时不发结束帧，强制 finalize 恢复 isLoadingHistory，
-  // 避免前端永久转圈、吞掉后续 chat.processing_status(is_processing=false)。
-  restoreTimer = setTimeout(() => {
-    if (disposed || finalized) return;
-    finalize();
-  }, HISTORY_RESTORE_TIMEOUT_MS);
   return handle;
 }
 
@@ -1317,8 +1087,6 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
-  let finalized = false;
-  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1348,12 +1116,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
       }
       const reasoningText = extractHistoryReasoningText(record);
       if (reasoningText) {
-        entries.unshift({
-          kind: 'reasoning',
-          at: recordTimestampIso(record) ?? '',
-          text: reasoningText,
-          updatedAt: extractHistoryReasoningUpdatedAt(record),
-        });
+        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record) ?? '', text: reasoningText });
       }
     }
 
@@ -1365,10 +1128,6 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   function dispose(): void {
     if (disposed) return;
     disposed = true;
-    if (restoreTimer) {
-      clearTimeout(restoreTimer);
-      restoreTimer = null;
-    }
     unsubscribe();
     if (activeHistoryRequests.get(requestKey)?.generation === generation) {
       activeHistoryRequests.delete(requestKey);
@@ -1376,8 +1135,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   }
 
   function finalize(): void {
-    if (disposed || finalized) return;
-    finalized = true;
+    if (disposed) return;
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
@@ -1393,10 +1151,5 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeHistoryRequests.set(requestKey, handle);
-  // 同 beginHistoryRestore：兜底超时，避免分页 history.get 流卡死。
-  restoreTimer = setTimeout(() => {
-    if (disposed || finalized) return;
-    finalize();
-  }, HISTORY_RESTORE_TIMEOUT_MS);
   return handle;
 }

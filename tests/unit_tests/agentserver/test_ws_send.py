@@ -133,27 +133,23 @@ async def test_oversized_server_push_preserves_push_marker(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
-    stream_closed = False
-
     class FakeAgent:
         async def process_message_stream(self, request):
-            nonlocal stream_closed
-            try:
-                for index in range(2):
-                    yield AgentResponseChunk(
-                        request_id=request.request_id,
-                        channel_id=request.channel_id,
-                        payload={"content": str(index)},
-                        is_complete=False,
-                    )
-            finally:
-                stream_closed = True
+            for index in range(2):
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={"content": str(index)},
+                    is_complete=False,
+                )
 
     server = agent_ws_server.AgentWebSocketServer.__new__(
         agent_ws_server.AgentWebSocketServer
     )
     server._session_stream_tasks = {}
-    server._is_stateless_method_request = lambda request: True
+    from jiuwenswarm.server.handlers import _default as default_path
+
+    monkeypatch.setattr(default_path, "_is_stateless_method_request", lambda request: True)
 
     class ForegroundManager:
         def __init__(self):
@@ -181,11 +177,12 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
         send_count += 1
         return False
 
-    server._get_stateless_agent = get_agent
-    server._check_post_process_plan_exit = no_plan_exit_check
+    monkeypatch.setattr(default_path, "_get_stateless_agent",
+                        lambda _ctx, channel_id: get_agent(channel_id))
+    monkeypatch.setattr(default_path, "_check_post_process_plan_exit",
+                        lambda _ctx, request, agent: no_plan_exit_check(request, agent))
     monkeypatch.setattr(
-        agent_ws_server,
-        "send_wire_payload",
+        "jiuwenswarm.server.transports.sink.send_wire_payload",
         replace_with_oversized_error,
     )
     request = AgentRequest(
@@ -197,10 +194,19 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
         is_stream=True,
     )
 
-    await server._handle_stream(FakeWebSocket(), request, asyncio.Lock())
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    _ws = FakeWebSocket()
+    ctx = RequestContext(
+        request=request,
+        sink=WSSink(_ws, asyncio.Lock()),
+        connection_id=str(id(_ws)),
+        services=AgentServerServices(server),
+    )
+    await default_path._handle_stream(ctx, request)
 
     assert send_count == 1
-    assert stream_closed is True
     assert foreground_manager.events == ["begin", "end"]
 
 

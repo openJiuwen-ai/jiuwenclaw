@@ -100,6 +100,14 @@ class ExtensionManager:
                 logger.warning("[ExtensionManager] 关闭扩展失败: %s, error=%s", ext, e)
         self._loaded_extensions.clear()
 
+    def claim_loaded_extension(self, extension: Any) -> bool:
+        """Transfer shutdown responsibility for one loaded extension."""
+        for index, loaded in enumerate(self._loaded_extensions):
+            if loaded is extension:
+                self._loaded_extensions.pop(index)
+                return True
+        return False
+
     def list_extensions(self) -> list[dict]:
         return [
             {"id": p.metadata.id, "name": p.metadata.name, "version": p.metadata.version}

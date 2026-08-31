@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jiuwenswarm"
-version = "0.2.4.beta4"
+version = "0.2.3"
 description = "JiuwenSwarm"
 requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }
@@ -17,12 +17,17 @@ dependencies = [
     "ruamel.yaml>=0.18.0",
     "lark-oapi>=1.5.3",
     "loguru>=0.7.3",
-    "openjiuwen[claude] @ git+https://gitcode.com/openJiuwen/agent-core.git@develop",
+    "markdown>=3.4,<4",
+    "openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@dev-stable",
+    "openjiuwen_deepsearch @ git+https://gitcode.com/openJiuwen/deepsearch.git@dev-stable#subdirectory=deepsearch",
     "pgvector>=0.4.2",
     "portalocker>=3.2.0",
     "websockets>=12.0",
     "psutil>=7.2.2",
     "aiosqlite>=0.22.1",
+    "pymysql>=1.1.0",
+    "cryptography>=42.0.0",
+    "asyncpg>=0.29",
     "croniter>=2.0.0",
     "python-telegram-bot>=20.0",
     "discord.py>=2.4.0",
@@ -41,19 +46,22 @@ dependencies = [
     "sqlite-vec==0.1.6",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
-    "python-multipart>=0.0.31",  # CVE-2026-42561 MultipartParser DoS
+    "python-multipart>=0.0.27",  # CVE-2026-42561 MultipartParser DoS
     # Transitive dep floors for known CVEs (prevent resolve downgrade)
     "lxml>=6.1.0",  # CVE-2026-41066 XXE
     "pillow>=12.2.0",  # CVE-2026-40192 FITS gzip bomb DoS
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "httpx[socks]>=0.27",
-    "json-repair>=0.30.0",
+    "json-repair>=0.58.0",
     "gitcode-api>=1.2.20",
     "faiss-cpu>=1.7.0",
     "numpy>=1.24.0",
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",
+    "minio>=7.2.0",
+    "uvloop==0.22.1; sys_platform != 'win32'",
+    "python-json-logger>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -66,7 +74,7 @@ harmony = [
     "ruamel.yaml>=0.18.0",
     "lark-oapi>=1.5.3",
     "loguru>=0.7.3",
-    "openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@develop",
+    "openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@dev-stable",
     "pgvector>=0.4.2",
     "aiosqlite>=0.22.1",
     "croniter>=2.0.0",
@@ -87,21 +95,21 @@ harmony = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "httptools>=0.6.3",
-    "python-multipart>=0.0.31",  # CVE-2026-42561
+    "python-multipart>=0.0.27",  # CVE-2026-42561
     "lxml>=6.1.0",  # CVE-2026-41066
     "pillow>=12.2.0",  # CVE-2026-40192
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "httpx[socks]>=0.27",
-    "json-repair>=0.30.0",
+    "json-repair>=0.58.0",
 ]
 a2a = ["a2a-sdk[http-server]==1.0.0"]
 ssh = ["asyncssh>=2.14.0,<2.24"]
+redis = ["redis>=5.0.0"]
 desktop = ["pywebview>=5.4"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4"]
-tui = ["jiuwenswarm-tui==0.2.4.beta4"]
+tui = ["jiuwenswarm-tui==0.2.3"]
 distribute = ["openjiuwen[postgres,zmq]"]
-codex = ["openjiuwen[codex]"]
 shell-ast = []
 # Same packages as [dependency-groups] test (pip install -e ".[test]")
 test = [
@@ -116,6 +124,9 @@ test = [
     "pyyaml>=6.0",
 ]
 
+[project.entry-points."jiuwenswarm.gateway.redis"]
+redis = "jiuwenswarm.extensions.redis.redis_client:RedisClient"
+
 [project.scripts]
 jiuwenswarm = "jiuwenswarm.cli.main:main"
 jiuwenswarm-app = "jiuwenswarm.app:main"
@@ -123,14 +134,12 @@ jiuwenswarm-agentserver = "jiuwenswarm.server.app_agentserver:main"
 jiuwenswarm-gateway = "jiuwenswarm.gateway.app_gateway:main"
 jiuwenswarm-web = "jiuwenswarm.channels.web.app_web:main"
 jiuwenswarm-start = "jiuwenswarm.start_services:main"
-jiuwenswarm-stop = "jiuwenswarm.debug_launcher:main"
 jiuwenswarm-init = "jiuwenswarm.init_workspace:main"
 jiuwenswarm-desktop = "jiuwenswarm.channels.desktop.desktop_app:main"
 jiuwenswarm-acp = "jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect:main"
 jiuwenswarm-acp-chat = "jiuwenswarm.acp.cli:main"
 jiuwenbox = "jiuwenbox.cli.jiuwenbox:main"
 jiuwenbox-server = "jiuwenbox.server.launcher:main"
-jiuwenswarm-evolve = "jiuwenswarm.evolve.cli:main"
 
 [tool.setuptools]
 # 入口脚本现在是 jiuwenswarm 包内的一部分，不需要 py-modules
@@ -179,7 +188,6 @@ default-groups = ['dev']
 
 [tool.uv.sources]
 jiuwenswarm-tui = { path = "./packages/jiuwenswarm-tui" }
-openjiuwen = { git = "https://gitcode.com/openJiuwen/agent-core.git", branch = "develop" }
 
 [dependency-groups]
 # Testing (keep in sync with optional-dependencies.test)

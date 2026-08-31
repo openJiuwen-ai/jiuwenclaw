@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import datetime
 import logging
 import json
@@ -8,28 +9,25 @@ import queue
 import re
 import threading
 import time
-from concurrent.futures import Future
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Tuple
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir
 
 
 logger = logging.getLogger(__name__)
 _FILE_LOCK = threading.Lock()
-_WRITE_QUEUE: queue.Queue[
-    tuple[str, dict[str, Any], Future[None] | None]
-] = queue.Queue(maxsize=20000)
-_QUEUE_ENQUEUE_LOCK = threading.Lock()
+_WRITE_QUEUE: queue.Queue[tuple[str, dict[str, Any], str | None]] = queue.Queue(maxsize=20000)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _LEGACY_HISTORY_FILENAME = "history.json"
 _JSONL_HISTORY_FILENAME = "history.jsonl"
 _LEGACY_HISTORY_ENV = "JIUWENSWARM_USE_LEGACY_HISTORY_JSON"
 _HEARTBEAT_OK = "HEARTBEAT_OK"
-SESSION_REQUEST_COMPLETED_EVENT = "chat.request_completed"
 _VALID_SESSION_ID = re.compile(
-    r"^[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,78}[A-Za-z0-9_])?$"
+    r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,78}[A-Za-z0-9])?$"
 )
 # Gateway may inline @path as <file-content>...</file-content> before chat.send.
 # History should keep the short @path form so jsonl rows stay one physical line
@@ -38,6 +36,43 @@ _FILE_CONTENT_BLOCK_RE = re.compile(
     r"\n?<file-content\s+path=\"([^\"]*)\">.*?</file-content>\n?",
     re.DOTALL,
 )
+
+
+def _strip_tool_arguments_env(arguments: Any) -> Any:
+    """Drop ``env`` from tool-call arguments so skill_envs never hit history disk."""
+    if isinstance(arguments, dict):
+        if "env" not in arguments:
+            return arguments
+        cleaned = dict(arguments)
+        cleaned.pop("env", None)
+        return cleaned
+    if isinstance(arguments, str) and arguments.strip().startswith("{"):
+        try:
+            parsed = json.loads(arguments)
+        except (TypeError, ValueError):
+            return arguments
+        if not isinstance(parsed, dict) or "env" not in parsed:
+            return arguments
+        parsed = dict(parsed)
+        parsed.pop("env", None)
+        return json.dumps(parsed, ensure_ascii=False)
+    return arguments
+
+
+def _strip_skill_env_from_history_item(item: dict[str, Any]) -> None:
+    """Remove tool_args.env from a history record before persist."""
+    tool_call = item.get("tool_call")
+    if isinstance(tool_call, dict) and "arguments" in tool_call:
+        tool_call["arguments"] = _strip_tool_arguments_env(tool_call.get("arguments"))
+
+    tool_calls = item.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if isinstance(call, dict) and "arguments" in call:
+                call["arguments"] = _strip_tool_arguments_env(call.get("arguments"))
+
+    if "arguments" in item:
+        item["arguments"] = _strip_tool_arguments_env(item.get("arguments"))
 
 
 def collapse_file_content_blocks(content: str) -> str:
@@ -64,6 +99,35 @@ def is_valid_session_id(session_id: str) -> bool:
     """Return whether a session id is safe to use as one path component."""
 
     return _VALID_SESSION_ID.fullmatch(session_id) is not None
+
+# 缓冲层分两组：普通缓冲层（_session_buffer，合并后批量写）与暂留层（_session_pending，
+# tool_calls.delta 等对应 chat.tool_call 命中后再决定丢弃/落盘）。
+BUFFERABLE_EVENT_TYPES = {
+    "chat.delta",
+    "chat.reasoning",
+    "chat.tool_update",
+    "chat.tool_calls.delta",
+}
+NORMAL_BUFFER_EVENT_TYPES = BUFFERABLE_EVENT_TYPES - {"chat.tool_calls.delta"}
+PENDING_EVENT_TYPE = "chat.tool_calls.delta"
+BUFFER_FLUSH_INTERVAL = 5.0
+BUFFER_MAX_SIZE = 100
+PENDING_MAX_SECONDS = 2.0
+
+_buffer_lock = threading.Lock()
+_session_buffer: dict[str, dict[str, Any]] = {}
+_session_buffer_type: dict[str, str] = {}
+_session_buffer_request_id: dict[str, str] = {}
+_session_buffer_root: dict[str, str | None] = {}
+_session_tool_update_buffer: dict[str, "OrderedDict[str, dict[str, Any]]"] = {}
+_session_tool_update_root: dict[str, str | None] = {}
+_session_pending: dict[str, "_PendingState"] = {}
+_pending_raw_counter: int = 0
+_FLUSH_THREAD_STARTED = False
+_FLUSH_THREAD_LOCK = threading.Lock()
+_flush_stop_event = threading.Event()
+_FLUSH_THREAD: threading.Thread | None = None
+_SHUTDOWN_DONE: bool = False
 
 
 def _is_ephemeral_heartbeat_session(session_id: str) -> bool:
@@ -94,10 +158,24 @@ def _has_persistable_assistant_payload(
         return True
     if et == "chat.tool_result" and (payload.get("tool_result") or payload.get("tool_call_id")):
         return True
+    if et in BUFFERABLE_EVENT_TYPES:
+        # Mergeable stream events: persist structured extras even without content.
+        if et in {"chat.delta", "chat.reasoning"}:
+            return False
+        return bool(payload)
     if payload.get("error") or payload.get("files"):
         return True
     if payload.get("tool_call") or payload.get("tool_calls"):
         return True
+    # Token diagnostic rows have empty content; numbers live in extras.
+    # chat.llm_usage is SkillTurbo's raw event; resume rewrites it to
+    # chat.usage_metadata, but keep the original persistable as a fallback.
+    if et in {"chat.usage_summary", "chat.usage_metadata", "chat.llm_usage"}:
+        return bool(
+            payload.get("usage")
+            or payload.get("metadata")
+            or payload.get("usage_metadata")
+        )
     # Empty chat.final / chat.* status shells and other blank assistants: skip.
     if et.startswith("chat.") or et in {"", "chat.final"}:
         return False
@@ -143,8 +221,134 @@ def _serialize_value(obj: Any) -> Any:
     return _serialize_value_with_flag(obj)[0]
 
 
-def _session_dir(session_id: str, *, create: bool = True) -> Path:
-    session_dir = get_agent_sessions_dir() / session_id
+@dataclass
+class _PendingState:
+    """tool_calls.delta 暂留状态。
+
+    暂留期间整个 session 不落盘（其它事件进 pending_queue 候着），等对应的
+    chat.tool_call 命中丢弃（条件 A）或超时落盘（条件 B）。
+    """
+    item: dict[str, Any]
+    request_id: str
+    pending_queue: "OrderedDict[Tuple[str, str], dict[str, Any]]" = field(default_factory=OrderedDict)
+    start_time: float = 0.0
+    sessions_root: str | None = None
+
+
+def _is_empty_value(v: Any) -> bool:
+    """None / 空串 / 空集合为"空"。注意数值 0、False 不算空（避免误判）。"""
+    if v is None:
+        return True
+    if isinstance(v, str) and v == "":
+        return True
+    if isinstance(v, (list, dict, tuple, set)) and len(v) == 0:
+        return True
+    return False
+
+
+def _merge_delta_events(existing: dict, new: dict) -> dict:
+    merged = dict(existing)
+    merged["content"] = existing.get("content", "") + new.get("content", "")
+    merged.setdefault("start_ts", existing.get("timestamp"))
+    merged["timestamp"] = new.get("timestamp", merged.get("timestamp"))
+    merged["delta_count"] = existing.get("delta_count", 1) + 1
+    if _is_empty_value(merged.get("source_chunk_type")) and not _is_empty_value(new.get("source_chunk_type")):
+        merged["source_chunk_type"] = new["source_chunk_type"]
+    return merged
+
+
+def _merge_reasoning_events(existing: dict, new: dict) -> dict:
+    merged = dict(existing)
+    merged["content"] = existing.get("content", "") + new.get("content", "")
+    merged.setdefault("start_ts", existing.get("timestamp"))
+    merged["timestamp"] = new.get("timestamp", merged.get("timestamp"))
+    merged["delta_count"] = existing.get("delta_count", 1) + 1
+    return merged
+
+
+def _merge_tool_update_events(existing: dict, new: dict) -> dict:
+    merged = dict(existing)
+    if "status" in new:
+        merged["status"] = new["status"]
+    if "arguments" in new:
+        merged["arguments"] = new["arguments"]
+    for k in ("tool_name", "tool_call_id"):
+        if _is_empty_value(merged.get(k)) and not _is_empty_value(new.get(k)):
+            merged[k] = new[k]
+    merged.setdefault("start_ts", existing.get("timestamp"))
+    merged["timestamp"] = new.get("timestamp", merged.get("timestamp"))
+    merged["delta_count"] = existing.get("delta_count", 1) + 1
+    return merged
+
+
+def _get_tool_call_key(call: dict) -> tuple[str, int]:
+    call_id = call.get("id", "") or call.get("tool_call_id", "") or ""
+    index = call.get("index", 0)
+    return (call_id, index)
+
+
+def _merge_tool_call(existing: dict, new: dict) -> dict:
+    merged = dict(existing)
+    merged["arguments"] = existing.get("arguments", "") + new.get("arguments", "")
+    for k in ("id", "tool_call_id", "name", "type"):
+        if _is_empty_value(merged.get(k)) and not _is_empty_value(new.get(k)):
+            merged[k] = new[k]
+    if "index" not in merged and "index" in new:
+        merged["index"] = new["index"]
+    return merged
+
+
+def _merge_tool_calls_delta_events(existing: dict, new: dict) -> dict:
+    merged = dict(existing)
+    calls_by_key: dict[tuple, dict] = {}
+    by_index: dict[int, tuple] = {}
+    for call in existing.get("tool_calls", []):
+        key = _get_tool_call_key(call)
+        calls_by_key[key] = call
+        idx = call.get("index", 0)
+        if idx not in by_index:
+            by_index[idx] = key
+
+    for call in new.get("tool_calls", []):
+        key = _get_tool_call_key(call)
+        call_id = call.get("id", "") or call.get("tool_call_id", "") or ""
+        if key in calls_by_key:
+            calls_by_key[key] = _merge_tool_call(calls_by_key[key], call)
+        elif not call_id:
+            idx = call.get("index", 0)
+            matched_key = by_index.get(idx)
+            if matched_key is not None and matched_key in calls_by_key:
+                calls_by_key[matched_key] = _merge_tool_call(calls_by_key[matched_key], call)
+            else:
+                calls_by_key[key] = dict(call)
+                by_index.setdefault(idx, key)
+        else:
+            calls_by_key[key] = dict(call)
+            by_index.setdefault(call.get("index", 0), key)
+
+    merged["tool_calls"] = list(calls_by_key.values())
+    merged.setdefault("start_ts", existing.get("timestamp"))
+    merged["timestamp"] = new.get("timestamp", merged.get("timestamp"))
+    merged["delta_count"] = existing.get("delta_count", 1) + 1
+    return merged
+
+
+_MERGE = {
+    "chat.delta": _merge_delta_events,
+    "chat.reasoning": _merge_reasoning_events,
+    "chat.tool_update": _merge_tool_update_events,
+}
+
+
+def _session_dir(
+    session_id: str, *, create: bool = True, sessions_root: str | None = None
+) -> Path:
+    from jiuwenswarm.server.runtime.session.session_metadata import resolve_session_subdir
+
+    selected_root = sessions_root if sessions_root is not None else get_agent_sessions_dir()
+    session_dir = resolve_session_subdir(session_id, sessions_root=selected_root)
+    if session_dir is None:
+        raise ValueError("invalid session_id")
     if create:
         session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir
@@ -155,9 +359,9 @@ def resolve_session_dir(
 ) -> tuple[Path | None, str | None]:
     """安全解析 session 目录路径（防路径遍历）。
 
-    采用严格白名单判据：session id 只能包含 ASCII 字母、数字、点、横线和下划线，
-    长度不超过 80；首尾允许下划线，以兼容 ``__cron__`` 等内部会话 ID，
-    但点和横线仍只允许出现在中间。不合法输入直接拒绝，根本不拼路径。
+    采用白名单判据：``sanitize_session_id(session_id) == session_id`` 才认为合法，
+    原样使用；否则直接拒绝，根本不拼路径。这样删除类破坏性操作不会因 sanitize 后的
+    字符串（如 ``../config`` -> ``config``）误伤同名合法 session。
 
     再用 ``resolve()`` + ``relative_to`` 做纵深防御，兜底白名单逻辑被绕过的极端情况。
 
@@ -170,61 +374,66 @@ def resolve_session_dir(
         ``(resolved_path, None)`` —— 合法，返回解析后的绝对路径（确认在 sessions 目录内）。
         ``(None, error_reason)`` —— 非法，根本未触碰磁盘路径。
     """
-    if not session_id or not is_valid_session_id(session_id):
-        return None, "invalid session_id"
+    from jiuwenswarm.server.runtime.session.session_metadata import resolve_session_subdir
 
-    if sessions_root is None:
-        sessions_root = get_agent_sessions_dir()
-    session_dir = sessions_root / session_id
+    selected_root = sessions_root if sessions_root is not None else get_agent_sessions_dir()
+    resolved = resolve_session_subdir(session_id, sessions_root=selected_root)
+    if resolved is None:
+        return None, "invalid session_id"
     # 纵深防御必须在 mkdir 之前：先 resolve + relative_to 确认路径仍在 sessions
     # 目录内，通过后才允许创建。否则白名单一旦被绕过，mkdir(parents=True) 会
     # 先在 sessions 根目录之外越界创建目录，relative_to 才事后检测到——此时
     # 副作用已发生，越界空目录残留在磁盘上（虽不触发 rmtree，但仍是文件系统泄漏）。
-    try:
-        resolved = session_dir.resolve(strict=False)
-        resolved.relative_to(sessions_root.resolve(strict=False))
-    except (ValueError, OSError):
-        return None, "invalid session_id"
     if create:
         resolved.mkdir(parents=True, exist_ok=True)
     return resolved, None
 
 
-def _history_file(session_id: str, *, create: bool = True) -> Path:
-    return _session_dir(session_id, create=create) / _LEGACY_HISTORY_FILENAME
+def _history_file(
+    session_id: str, *, create: bool = True, sessions_root: str | None = None
+) -> Path:
+    return _session_dir(session_id, create=create, sessions_root=sessions_root) / _LEGACY_HISTORY_FILENAME
 
 
-def _history_jsonl_file(session_id: str, *, create: bool = True) -> Path:
-    return _session_dir(session_id, create=create) / _JSONL_HISTORY_FILENAME
+def _history_jsonl_file(
+    session_id: str, *, create: bool = True, sessions_root: str | None = None
+) -> Path:
+    return _session_dir(session_id, create=create, sessions_root=sessions_root) / _JSONL_HISTORY_FILENAME
 
 
 def use_legacy_history_json() -> bool:
-    raw = str(os.environ.get(_LEGACY_HISTORY_ENV, "") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    """Prefer ``history.json`` with JSONL content, matching OfficeClaw / test.
+
+    Set ``JIUWENSWARM_USE_LEGACY_HISTORY_JSON=0`` to force ``history.jsonl`` writes.
+    """
+    raw = os.environ.get(_LEGACY_HISTORY_ENV)
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def get_write_history_path(session_id: str) -> Path:
+def get_write_history_path(session_id: str, sessions_root: str | None = None) -> Path:
     """Return the preferred durable history write target for a session."""
     if use_legacy_history_json():
-        return _history_file(session_id)
-    return _history_jsonl_file(session_id)
+        return _history_file(session_id, sessions_root=sessions_root)
+    return _history_jsonl_file(session_id, sessions_root=sessions_root)
 
 
-def get_read_history_path(session_id: str) -> Path:
+def get_read_history_path(session_id: str, sessions_root: str | None = None) -> Path:
     """Return the preferred history source, falling back to legacy json."""
     if use_legacy_history_json():
-        legacy_path = _history_file(session_id, create=False)
+        legacy_path = _history_file(session_id, create=False, sessions_root=sessions_root)
         if legacy_path.exists():
             return legacy_path
-        jsonl_path = _history_jsonl_file(session_id, create=False)
+        jsonl_path = _history_jsonl_file(session_id, create=False, sessions_root=sessions_root)
         if jsonl_path.exists():
             return jsonl_path
         return legacy_path
 
-    jsonl_path = _history_jsonl_file(session_id, create=False)
+    jsonl_path = _history_jsonl_file(session_id, create=False, sessions_root=sessions_root)
     if jsonl_path.exists():
         return jsonl_path
-    legacy_path = _history_file(session_id, create=False)
+    legacy_path = _history_file(session_id, create=False, sessions_root=sessions_root)
     if legacy_path.exists():
         return legacy_path
     return jsonl_path
@@ -244,17 +453,40 @@ def get_history_mtime(session_id: str) -> float | None:
         return None
 
 
+def _peek_first_non_ws_char(path: Path) -> str | None:
+    """Return the first non-whitespace character, or None if empty/unreadable."""
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            while True:
+                ch = fh.read(1)
+                if not ch:
+                    return None
+                if not ch.isspace():
+                    return ch
+    except OSError:
+        return None
+    return None
+
+
+def _history_file_is_json_array(path: Path) -> bool:
+    """True when the file is a legacy pretty/minified JSON array (not JSONL)."""
+    return _peek_first_non_ws_char(path) == "["
+
+
 def _read_history(path: Path) -> list[dict[str, Any]]:
+    """Read history.json / history.jsonl. Accepts JSONL or a legacy JSON array."""
     if not path.exists():
         return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("读取 history.json 失败，已忽略并重建: %s", exc)
+    if _history_file_is_json_array(path):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取 history.json 失败，已忽略并重建: %s", exc)
+            return []
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
         return []
-    if isinstance(data, list):
-        return data
-    return []
+    return _read_history_jsonl(path)
 
 
 def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -300,42 +532,40 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def load_history_records(session_id: str) -> list[dict[str, Any]]:
-    path = get_read_history_path(session_id)
-    if path.suffix.lower() == ".jsonl":
-        return _read_history_jsonl(path)
-    return _read_history(path)
+    return _read_history(get_read_history_path(session_id))
 
 
 def _write_records_to_path(path: Path, records: list[dict[str, Any]]) -> None:
+    """Rewrite history as JSONL (one object per line), including ``history.json``."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.suffix.lower() == ".jsonl":
-        payload = "\n".join(
-            json.dumps(record, ensure_ascii=False) for record in records
-        )
-        if payload:
-            payload += "\n"
-        path.write_text(payload, encoding="utf-8")
-        return
-
-    path.write_text(
-        json.dumps(records, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    payload = "\n".join(json.dumps(record, ensure_ascii=False) for record in records)
+    if payload:
+        payload += "\n"
+    with path.open("w", encoding="utf-8", newline="\n") as fh:
+        fh.write(payload)
 
 
 def _append_record_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(record, ensure_ascii=False))
         fh.write("\n")
 
 
-def _ensure_jsonl_bootstrap(session_id: str) -> Path:
-    jsonl_path = _history_jsonl_file(session_id)
+def _rewrite_json_array_as_jsonl(path: Path) -> None:
+    """Convert a legacy JSON-array history.json to JSONL before appending."""
+    if not path.exists() or not _history_file_is_json_array(path):
+        return
+    records = _read_history(path)
+    _write_records_to_path(path, records)
+
+
+def _ensure_jsonl_bootstrap(session_id: str, sessions_root: str | None = None) -> Path:
+    jsonl_path = _history_jsonl_file(session_id, sessions_root=sessions_root)
     if jsonl_path.exists():
         return jsonl_path
 
-    legacy_path = _history_file(session_id)
+    legacy_path = _history_file(session_id, sessions_root=sessions_root)
     if legacy_path.exists():
         legacy_records = _read_history(legacy_path)
         _write_records_to_path(jsonl_path, legacy_records)
@@ -344,12 +574,12 @@ def _ensure_jsonl_bootstrap(session_id: str) -> Path:
     return jsonl_path
 
 
-def _ensure_legacy_json_bootstrap(session_id: str) -> Path:
-    legacy_path = _history_file(session_id)
+def _ensure_legacy_json_bootstrap(session_id: str, sessions_root: str | None = None) -> Path:
+    legacy_path = _history_file(session_id, sessions_root=sessions_root)
     if legacy_path.exists():
         return legacy_path
 
-    jsonl_path = _history_jsonl_file(session_id)
+    jsonl_path = _history_jsonl_file(session_id, sessions_root=sessions_root)
     if jsonl_path.exists():
         jsonl_records = _read_history_jsonl(jsonl_path)
         _write_records_to_path(legacy_path, jsonl_records)
@@ -364,7 +594,7 @@ def write_history_records(
     *,
     preserve_existing_format: bool = True,
 ) -> Path:
-    """Rewrite a session's history in its current format, defaulting new sessions to jsonl."""
+    """Rewrite a session's history in JSONL, defaulting new sessions to history.json."""
     path = (
         get_read_history_path(session_id)
         if preserve_existing_format
@@ -429,9 +659,7 @@ def read_team_history_records(session_id: str) -> list[dict[str, Any]]:
 
 
 def _read_history_by_path(path: Path) -> list[dict[str, Any]]:
-    """根据文件扩展名选择正确的读取函数。"""
-    if path.suffix.lower() == ".jsonl":
-        return _read_history_jsonl(path)
+    """Read a history file; content (JSONL or JSON array) decides the parser."""
     return _read_history(path)
 
 
@@ -518,17 +746,24 @@ def read_session_history_records(session_id: str) -> list[dict[str, Any]]:
     return [item for item in all_records if isinstance(item, dict)]
 
 
-def _write_item(session_id: str, item: dict[str, Any]) -> None:
+def _batch_write_items(session_id: str, items: list[dict], sessions_root: str | None) -> None:
+    """批量写入 history.json（一次 open 写多行）。_FILE_LOCK 串行化磁盘写。"""
+    if not items:
+        return
     with _FILE_LOCK:
         if use_legacy_history_json():
-            target_path = _ensure_legacy_json_bootstrap(session_id)
-            records = _read_history(target_path)
-            records.append(item)
-            _write_records_to_path(target_path, records)
-            return
+            target_path = _ensure_legacy_json_bootstrap(session_id, sessions_root=sessions_root)
+            _rewrite_json_array_as_jsonl(target_path)
+        else:
+            target_path = _ensure_jsonl_bootstrap(session_id, sessions_root=sessions_root)
+        with target_path.open("a", encoding="utf-8", newline="\n") as fh:
+            for item in items:
+                fh.write(json.dumps(item, ensure_ascii=False))
+                fh.write("\n")
 
-        target_path = _ensure_jsonl_bootstrap(session_id)
-        _append_record_jsonl(target_path, item)
+
+def _write_item(session_id: str, item: dict[str, Any], sessions_root: str | None = None) -> None:
+    _batch_write_items(session_id, [item], sessions_root)
 
 
 def _ensure_worker_started() -> None:
@@ -541,16 +776,11 @@ def _ensure_worker_started() -> None:
 
         def _worker() -> None:
             while True:
-                sid, item, receipt = _WRITE_QUEUE.get()
+                sid, item, sessions_root = _WRITE_QUEUE.get()
                 try:
-                    _write_item(sid, item)
+                    _write_item(sid, item, sessions_root)
                 except Exception as exc:  # noqa: BLE001
-                    if receipt is not None:
-                        receipt.set_exception(exc)
                     logger.warning("history 异步写入失败: %s", exc)
-                else:
-                    if receipt is not None:
-                        receipt.set_result(None)
                 finally:
                     _WRITE_QUEUE.task_done()
 
@@ -559,22 +789,304 @@ def _ensure_worker_started() -> None:
         _WORKER_STARTED = True
 
 
-def _enqueue_history_item(
-    session_id: str,
-    item: dict[str, Any],
-    *,
-    receipt: Future[None] | None = None,
-) -> None:
-    """Keep all history records on one FIFO path, including under pressure."""
+def _flush_buffer_unlocked(session_id: str) -> tuple[list[dict], str | None]:
+    """落盘并清空普通缓冲层（调用方已持锁）。返回 (items, recorded_root)，
+    调用方锁外执行 IO。tool_update 走 per-call 缓冲可返回多条。"""
+    per_call = _session_tool_update_buffer.pop(session_id, None)
+    if per_call is not None:
+        _session_buffer_type.pop(session_id, None)
+        _session_buffer_request_id.pop(session_id, None)
+        _session_buffer_root.pop(session_id, None)
+        recorded_root = _session_tool_update_root.pop(session_id, None)
+        return list(per_call.values()), recorded_root
+    item = _session_buffer.pop(session_id, None)
+    if item is None:
+        return [], None
+    _session_buffer_type.pop(session_id, None)
+    _session_buffer_request_id.pop(session_id, None)
+    recorded_root = _session_buffer_root.pop(session_id, None)
+    return [item], recorded_root
 
-    _ensure_worker_started()
-    with _QUEUE_ENQUEUE_LOCK:
+
+def _flush_buffer(session_id: str, sessions_root: str | None) -> None:
+    """落盘并清空普通缓冲层。sessions_root 为 None 时回退到缓冲时记录的 root。"""
+    with _buffer_lock:
+        items, recorded_root = _flush_buffer_unlocked(session_id)
+    if items:
+        root = sessions_root if sessions_root is not None else recorded_root
+        _batch_write_items(session_id, items, root)
+
+
+def _flush_on_request_switch(session_id: str, request_id: str, sessions_root: str | None) -> None:
+    """新 request_id 到达：落盘旧请求的缓冲 + 激活的暂留层（按条件 B）。"""
+    with _buffer_lock:
+        current_rid = _session_buffer_request_id.get(session_id, "")
+        pending = _session_pending.get(session_id)
+        pending_rid = pending.request_id if pending is not None else ""
+        old_rid = current_rid or pending_rid
+        switched = bool(request_id and old_rid and request_id != old_rid)
+        if switched:
+            buf_items, buf_root = _flush_buffer_unlocked(session_id)
+            _session_pending.pop(session_id, None)
+        else:
+            buf_items = []
+            pending = None
+    if buf_items:
+        _batch_write_items(session_id, buf_items, buf_root)
+    if pending is not None:
+        pending_items = [pending.item] + list(pending.pending_queue.values())
+        _batch_write_items(session_id, pending_items, pending.sessions_root)
+
+
+def _flush_on_type_switch_unlocked(session_id: str, event_type: str, request_id: str) -> tuple[list[dict], str | None]:
+    """类型/请求切换判定（调用方已持锁）。返回 (待落盘 items, recorded_root)。"""
+    current_type = _session_buffer_type.get(session_id)
+    current_rid = _session_buffer_request_id.get(session_id, "")
+    type_switch = current_type is not None and current_type != event_type
+    request_switch = request_id and current_rid and request_id != current_rid
+    if type_switch or request_switch:
+        return _flush_buffer_unlocked(session_id)
+    return [], None
+
+
+def _extract_tool_call_id(item: dict) -> str:
+    """从 chat.tool_call 提取 id（嵌套 item["tool_call"]["tool_call_id"]）。"""
+    tc = item.get("tool_call") or {}
+    if not isinstance(tc, dict):
+        return ""
+    return (tc.get("tool_call_id") or tc.get("id")
+            or item.get("tool_call_id") or item.get("id") or "")
+
+
+def _extract_pending_call_ids(pending_item: dict) -> set[str]:
+    ids: set[str] = set()
+    for call in pending_item.get("tool_calls", []):
+        if not isinstance(call, dict):
+            continue
+        cid = call.get("id") or call.get("tool_call_id") or ""
+        if cid:
+            ids.add(cid)
+    return ids
+
+
+def _get_buffer_key(item: dict) -> Tuple[str, str]:
+    return (item.get("request_id", ""), item.get("event_type", ""))
+
+
+def _buffer_into(pending_queue: "OrderedDict[Tuple[str, str], dict]", item: dict, event_type: str) -> None:
+    """合并事件进 pending_queue（同类型合并，非缓冲事件按到达顺序原样进）。"""
+    global _pending_raw_counter
+    if event_type in NORMAL_BUFFER_EVENT_TYPES:
+        key = _get_buffer_key(item)
+        pending_queue[key] = _MERGE[event_type](pending_queue[key], item) if key in pending_queue else dict(item)
+    else:
+        _pending_raw_counter += 1
+        pending_queue[(item.get("request_id", ""), f"__raw_{_pending_raw_counter}")] = dict(item)
+
+
+def _route_event(sid: str, item: dict, event_type: str, sessions_root_s: str | None) -> None:
+    """事件分发：暂留层 / 普通缓冲层 / 非缓冲事件。"""
+    rid = item.get("request_id", "")
+
+    flush_items: list[dict] | None = None
+    flush_root: str | None = sessions_root_s
+    with _buffer_lock:
+        pending = _session_pending.get(sid)
+        if pending is not None:
+            if event_type == PENDING_EVENT_TYPE:
+                pending.item = _merge_tool_calls_delta_events(pending.item, item)
+                return
+            if event_type == "chat.tool_call" and _extract_tool_call_id(item) in \
+               _extract_pending_call_ids(pending.item):
+                _session_pending.pop(sid, None)
+                flush_items = list(pending.pending_queue.values()) + [item]
+                flush_root = pending.sessions_root
+            else:
+                _buffer_into(pending.pending_queue, item, event_type)
+                return
+    if flush_items is not None:
+        _batch_write_items(sid, flush_items, flush_root)
+        return
+
+    if event_type == PENDING_EVENT_TYPE:
+        with _buffer_lock:
+            flush_items, _ = _flush_on_type_switch_unlocked(sid, event_type, rid)
+            _session_pending[sid] = _PendingState(
+                item=dict(item),
+                request_id=rid,
+                pending_queue=OrderedDict(),
+                start_time=time.monotonic(),
+                sessions_root=sessions_root_s,
+            )
+        if flush_items:
+            _batch_write_items(sid, flush_items, sessions_root_s)
+        return
+
+    if event_type in NORMAL_BUFFER_EVENT_TYPES:
+        with _buffer_lock:
+            switch_items, switch_root = _flush_on_type_switch_unlocked(sid, event_type, rid)
+            if event_type == "chat.tool_update":
+                call_id = (item.get("tool_call_id") or item.get("id") or "")
+                per_call = _session_tool_update_buffer.setdefault(sid, OrderedDict())
+                existing_call = per_call.get(call_id)
+                per_call[call_id] = _merge_tool_update_events(existing_call, item) if existing_call else dict(item)
+                _session_buffer_type[sid] = event_type
+                _session_buffer_request_id[sid] = rid
+                _session_buffer_root[sid] = sessions_root_s
+                _session_tool_update_root[sid] = sessions_root_s
+                cap_items, cap_root = ([], None)
+                if len(per_call) >= BUFFER_MAX_SIZE:
+                    cap_items, cap_root = _flush_buffer_unlocked(sid)
+            else:
+                existing = _session_buffer.get(sid)
+                if existing is not None and _session_buffer_type.get(sid) == event_type:
+                    merged = _MERGE[event_type](existing, item)
+                else:
+                    merged = dict(item)
+                _session_buffer[sid] = merged
+                _session_buffer_type[sid] = event_type
+                _session_buffer_request_id[sid] = rid
+                _session_buffer_root[sid] = sessions_root_s
+                cap_items, cap_root = ([], None)
+                if merged.get("delta_count", 1) >= BUFFER_MAX_SIZE:
+                    cap_items, cap_root = _flush_buffer_unlocked(sid)
+        if switch_items and cap_items and switch_root == cap_root:
+            _batch_write_items(sid, switch_items + cap_items, switch_root if switch_root is not None else cap_root)
+        else:
+            if switch_items:
+                _batch_write_items(sid, switch_items, switch_root)
+            if cap_items:
+                _batch_write_items(sid, cap_items, cap_root)
+        return
+
+    with _buffer_lock:
+        switch_items, switch_root = _flush_on_type_switch_unlocked(sid, event_type, rid)
+    if not switch_items:
+        _batch_write_items(sid, [item], sessions_root_s)
+    elif switch_root is not None and sessions_root_s is not None and switch_root == sessions_root_s:
+        _batch_write_items(sid, switch_items + [item], sessions_root_s)
+    else:
+        _batch_write_items(sid, switch_items, switch_root if switch_root is not None else sessions_root_s)
+        _batch_write_items(sid, [item], sessions_root_s)
+
+
+def _ensure_flush_thread_started() -> None:
+    """启动定时刷新线程：每 BUFFER_FLUSH_INTERVAL 秒刷新普通缓冲层 + 检查暂留超时。"""
+    global _FLUSH_THREAD_STARTED, _FLUSH_THREAD
+    if _FLUSH_THREAD_STARTED and _FLUSH_THREAD is not None and _FLUSH_THREAD.is_alive():
+        return
+    with _FLUSH_THREAD_LOCK:
+        if _FLUSH_THREAD_STARTED and _FLUSH_THREAD is not None and _FLUSH_THREAD.is_alive():
+            return
+
+        def _flush_worker() -> None:
+            while not _flush_stop_event.wait(BUFFER_FLUSH_INTERVAL):
+                try:
+                    _periodic_flush()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("history 定时刷新失败: %s", exc)
+
+        t = threading.Thread(target=_flush_worker, name="session-history-flusher", daemon=True)
+        t.start()
+        _FLUSH_THREAD = t
+        _FLUSH_THREAD_STARTED = True
+
+
+def _force_flush_all_pending() -> None:
+    """强制落盘所有剩余暂留（忽略超时），shutdown 收尾兜底。"""
+    with _buffer_lock:
+        remaining = list(_session_pending.items())
+        _session_pending.clear()
+    for sid, pending in remaining:
         try:
-            _WRITE_QUEUE.put_nowait((session_id, item, receipt))
-        except queue.Full:
-            # A synchronous disk-write fallback can overtake queued records.
-            # Block only under backpressure so request boundaries remain FIFO.
-            _WRITE_QUEUE.put((session_id, item, receipt))
+            _batch_write_items(sid, [pending.item] + list(pending.pending_queue.values()), pending.sessions_root)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("history shutdown 暂留落盘失败 sid=%s: %s", sid, exc)
+
+
+def shutdown() -> None:
+    """进程退出前收尾：停定时线程 + flush 落盘（含强制落剩余暂留）+ 排空异步写队列。"""
+    global _FLUSH_THREAD_STARTED, _FLUSH_THREAD, _SHUTDOWN_DONE
+    with _buffer_lock:
+        if _SHUTDOWN_DONE:
+            return
+        _SHUTDOWN_DONE = True
+    _flush_stop_event.set()
+    if _FLUSH_THREAD is not None and _FLUSH_THREAD is not threading.current_thread():
+        _FLUSH_THREAD.join(timeout=2.0)
+    try:
+        _periodic_flush()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("history shutdown flush 失败: %s", exc)
+    try:
+        _force_flush_all_pending()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("history shutdown 强制暂留落盘失败: %s", exc)
+    deadline = time.monotonic() + 5.0
+    try:
+        while _WRITE_QUEUE.unfinished_tasks > 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _periodic_flush()
+        _force_flush_all_pending()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("history shutdown 末次复扫失败: %s", exc)
+    _flush_stop_event.clear()
+    _FLUSH_THREAD_STARTED = False
+    _FLUSH_THREAD = None
+
+
+atexit.register(shutdown)
+
+
+def _periodic_flush() -> None:
+    """定时刷新：普通缓冲层落盘 + 暂留层超时检查（条件 B）。"""
+    with _buffer_lock:
+        buffer_sids = list(set(_session_buffer.keys()) | set(_session_tool_update_buffer.keys()))
+        pending_sids = [
+            (sid, p) for sid, p in _session_pending.items()
+            if time.monotonic() - p.start_time >= PENDING_MAX_SECONDS
+        ]
+        for sid, _ in pending_sids:
+            _session_pending.pop(sid, None)
+
+    for sid in buffer_sids:
+        _flush_buffer(sid, None)
+
+    for sid, pending in pending_sids:
+        try:
+            _batch_write_items(sid, [pending.item] + list(pending.pending_queue.values()), pending.sessions_root)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("history 暂留超时落盘失败 sid=%s: %s", sid, exc)
+
+
+def flush_session_history(session_id: str, sessions_root: str | None = None) -> None:
+    """Flush in-memory merge buffers for one session, then drain the async writer."""
+    sid = (session_id or "default").strip() or "default"
+    _flush_buffer(sid, sessions_root)
+    with _buffer_lock:
+        pending = _session_pending.pop(sid, None)
+    if pending is not None:
+        root = sessions_root if sessions_root is not None else pending.sessions_root
+        _batch_write_items(sid, [pending.item] + list(pending.pending_queue.values()), root)
+    _WRITE_QUEUE.join()
+
+
+def enrich_history_messages_session_id(
+    messages: Iterable[dict[str, Any]],
+    resolved_session_id: str,
+) -> list[dict[str, Any]]:
+    """为缺少 session_id 的历史记录做浅拷贝补全（兼容旧数据）。"""
+    sid = resolved_session_id.strip()
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        if "session_id" not in m:
+            out.append({**m, "session_id": sid})
+        else:
+            out.append(m)
+    return out
 
 
 def append_history_record(
@@ -589,8 +1101,10 @@ def append_history_record(
     extra: dict[str, Any] | None = None,
     channel_metadata: dict[str, Any] | None = None,
     mode: str | None = None,
+    sessions_root: str | Path | None = None,
+    task_id: str | None = None,
 ) -> None:
-    """向指定 session 的当前激活历史文件异步追加一条记录."""
+    """向指定 session 的 history.json 追加一条 JSONL 记录（可合并事件先缓冲）。"""
     sid = (session_id or "default").strip() or "default"
     if _is_ephemeral_heartbeat_session(sid):
         logger.debug("skip heartbeat session history: session_id=%s event_type=%s", sid, event_type)
@@ -621,6 +1135,8 @@ def append_history_record(
     }
     if role_norm == "assistant" and event_type:
         item["event_type"] = event_type
+    if task_id:
+        item["task_id"] = task_id
     if isinstance(extra, dict) and extra:
         serialized_extra, extra_changed = _serialize_value_with_flag(extra)
         if isinstance(serialized_extra, dict):
@@ -635,8 +1151,24 @@ def append_history_record(
                 )
     if mode:
         item["mode"] = str(mode)
+    item["session_id"] = sid
+    # skill_envs injected into bash tool_args.env must not be persisted.
+    _strip_skill_env_from_history_item(item)
 
-    _enqueue_history_item(sid, item)
+    sessions_root_s = str(sessions_root) if sessions_root else None
+    et = event_type if (role_norm == "assistant" and event_type) else None
+
+    _ensure_flush_thread_started()
+    try:
+        _flush_on_request_switch(sid, rid, sessions_root_s)
+        _route_event(sid, item, et, sessions_root_s)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("history 缓冲写入失败，降级直写: %s", exc)
+        _ensure_worker_started()
+        try:
+            _WRITE_QUEUE.put_nowait((sid, item, sessions_root_s))
+        except queue.Full:
+            _write_item(sid, item, sessions_root_s)
 
     # 更新会话元数据
     try:
@@ -656,6 +1188,7 @@ def append_history_record(
             # 用户消息时刷新 last_user_message_at(用消息时间戳,比请求到达时刻更精确;
             # 与 AgentServer 的 _sync_chat_request_metadata 互补,覆盖所有记录用户消息的路径)
             last_user_message_at=float(timestamp) if role_norm == "user" else None,
+            sessions_root=sessions_root_s,
         )
         if role_norm == "user":
             set_session_delivery_context(
@@ -666,38 +1199,6 @@ def append_history_record(
             )
     except Exception as exc:
         logger.warning("更新会话元数据失败: %s", exc)
-
-
-def enqueue_history_request_completion(
-    session_id: str,
-    request_id: str,
-    *,
-    terminal_status: str = "success",
-) -> Future[None] | None:
-    """Persist a request boundary after its previously enqueued history."""
-
-    sid = (session_id or "default").strip() or "default"
-    rid = str(request_id or "").strip()
-    if not rid or _is_ephemeral_heartbeat_session(sid):
-        return None
-    status = str(terminal_status or "success").strip().lower() or "success"
-    receipt: Future[None] = Future()
-    _enqueue_history_item(
-        sid,
-        {
-            "id": f"{rid}:request_completed",
-            "role": "assistant",
-            "request_id": rid,
-            "channel_id": "",
-            "timestamp": time.time(),
-            "content": "",
-            "event_type": SESSION_REQUEST_COMPLETED_EVENT,
-            "feedback_only": True,
-            "status": status,
-        },
-        receipt=receipt,
-    )
-    return receipt
 
 
 def append_compact_history_records(
@@ -759,7 +1260,7 @@ def truncate_history_records(*, session_id: str, cut_index: int) -> dict[str, An
     返回截断结果 dict，包含 remaining / removed 计数。
     """
     sid = (session_id or "default").strip() or "default"
-    _WRITE_QUEUE.join()
+    flush_session_history(sid)
 
     fpath = get_read_history_path(sid)
     with _FILE_LOCK:

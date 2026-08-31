@@ -74,6 +74,7 @@ function isSearchLikeTool(name: string): boolean {
     normalized === "rg" ||
     normalized === "ripgrep" ||
     normalized === "memory_search" ||
+    normalized === "web_search" ||
     normalized === "mcp_free_search" ||
     normalized === "mcp_paid_search" ||
     normalized === "glob" ||

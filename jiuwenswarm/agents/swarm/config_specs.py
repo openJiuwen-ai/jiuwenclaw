@@ -10,10 +10,10 @@ source and the member role. It deliberately depends on **no DeepAgent instance**
 :mod:`jiuwenswarm.agents.swarm.registry`.
 
 ``build_member_deep_agent_spec`` folds those specs onto a base ``DeepAgentSpec``
-so openjiuwen builds the member from the merged spec. Two profiles are supported:
+so openjiuwen builds the member from the merged spec. Two modes are supported:
 
 * ``team`` — the chat team profile (common rails + base tools).
-* ``code.team`` / ``team.plan.code`` — the code profile (``swarm.code_*`` rails, code
+* ``code.team`` / ``team.plan`` — the code profile (``swarm.code_*`` rails, code
     sub-agents, code system prompt), all still purely declarative.
 """
 
@@ -33,21 +33,21 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import (
     SubAgentSpec,
 )
 from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
-from openjiuwen.agent_teams.rails.elements import TEAM_SKILL_USE
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SkillUseRail
 
-from jiuwenswarm.agents.harness.common.browser_defaults import (
-    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
-)
 from jiuwenswarm.common.config import (
     ASCEND_AFFINITY_PROVIDER,
     get_default_model_provider,
     get_evolution_auto_save_enabled,
-    get_skill_evolution_enabled,
+    get_evolution_review_trigger_enabled,
+    get_evolution_signal_trigger_enabled,
+    get_passive_skill_evolution_triggers,
+    get_skill_create_enabled,
+    resolve_string_or_list_config,
 )
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     get_context_engine_enabled,
@@ -55,13 +55,9 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
 )
 from jiuwenswarm.agents.swarm import registry
 from jiuwenswarm.agents.swarm.providers import tools as _tools
-from jiuwenswarm.common.mode_matrix import (
-    TEAM_PLAN_CODE_MODE,
-    TEAM_PLAN_NORMAL_MODE,
-)
 
 # Modes that route to the code adapter and get the code member profile.
-_CODE_MODES: frozenset[str] = frozenset({"code.team", TEAM_PLAN_CODE_MODE})
+_CODE_MODES: frozenset[str] = frozenset({"code.team", "team.plan"})
 logger = logging.getLogger(__name__)
 
 
@@ -91,23 +87,20 @@ def _kv_cache_affinity_config(config: dict[str, Any]) -> KVCacheAffinityConfig:
 _COMMON_RAIL_NAMES: tuple[str, ...] = (
     registry.RUNTIME_PROMPT,
     registry.TEAM_SKILL_STORAGE_POLICY,
-    # Reloads the member's Skill view after a write into the single library.
-    # Replaces the former link-refresh rail: there is no per-team link view.
-    registry.TEAM_SKILL_LIBRARY_RELOAD,
+    registry.TEAM_SHARED_SKILL_LINK_REFRESH,
     registry.RESPONSE_PROMPT,
     registry.SYS_OPERATION,
     registry.STREAM_EVENT,
     registry.TASK_PLANNING,
     registry.SECURITY,
-    registry.MODEL_ANOMALY_DETECTION,
     registry.HEARTBEAT,
     registry.AVATAR_PROMPT,
-    registry.MULTIMODAL_IMAGE,
     registry.TEAM_WORKSPACE_REPORT_PATH,
     registry.CONTEXT_PROCESSOR,
     registry.PLUGIN_RAILS,
     registry.SKILL_RETRIEVAL_PROMPT,
     registry.SYMPHONY_ORCHESTRATION_PROMPT,
+    registry.DISABLED_TOOLS,
 )
 
 # Tools common to both roles. Each element self-gates on config, so all are
@@ -115,15 +108,13 @@ _COMMON_RAIL_NAMES: tuple[str, ...] = (
 _COMMON_TOOL_NAMES: tuple[str, ...] = (
     registry.WEB_SEARCH,
     registry.WEB_FETCH,
-    registry.WEB_PAID_SEARCH,
     registry.VISION,
     registry.AUDIO,
     # Skill-management tools (search/install/uninstall_skill) are registered by
-    # the MEMBER_SKILL_TOOLKIT rail (appended below), which owns them and
-    # reloads the member's Skill view after a mutation. Declaring SKILL_TOOLKIT
-    # here too only double-registers the same-named tools, logging a refresh +
-    # duplicate-ability warning per tool every build; the rail is the sole
-    # registrar.
+    # the MEMBER_SKILL_TOOLKIT rail (appended below), which owns them with a
+    # link-refresh callback. Declaring SKILL_TOOLKIT here too only double-
+    # registers the same-named tools, logging a refresh + duplicate-ability
+    # warning per tool every build; the rail is the sole registrar.
     registry.SKILL_RETRIEVAL,
     registry.SYMPHONY_TOOLKIT,
     registry.USER_TODOS,
@@ -135,16 +126,13 @@ _COMMON_TOOL_NAMES: tuple[str, ...] = (
 )
 
 # Parameterless code-profile rails (the code variant of the common rails plus
-# code-specific rails). ``code_confirm_interrupt`` carries params and is
-# appended separately, as is ``member_skill_toolkit``, which is appended next
-# to the Skill rail it complements.
+# code-specific rails). ``code_confirm_interrupt`` and ``member_skill_toolkit``
+# carry params and are appended separately.
 _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.CODE_RUNTIME_PROMPT,
     registry.RESPONSE_PROMPT,
     registry.STREAM_EVENT,
-    registry.MULTIMODAL_IMAGE,
     registry.SECURITY,
-    registry.MODEL_ANOMALY_DETECTION,
     registry.CODE_LSP,
     registry.CODE_PROJECT_MEMORY,
     registry.PERMISSION_INTERRUPT,
@@ -156,10 +144,10 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.CODE_TASK_PLANNING,
     registry.CODE_AGENT_RAIL,
     registry.USER_HOOKS,
-    # The Skill rail is appended separately: it is the team-owned
-    # ``core.team.skill_use``, shared with the chat profile.
+    registry.CODE_SKILL_USE,
     registry.SKILL_RETRIEVAL_PROMPT,
     registry.SYMPHONY_ORCHESTRATION_PROMPT,
+    registry.DISABLED_TOOLS,
 )
 
 # Rails shared with the team profile, appended to the code profile.
@@ -172,7 +160,6 @@ _CODE_SHARED_RAIL_NAMES: tuple[str, ...] = (
 _CODE_TOOL_NAMES: tuple[str, ...] = (
     registry.WEB_SEARCH,
     registry.WEB_FETCH,
-    registry.WEB_PAID_SEARCH,
     registry.VISION,
     registry.AUDIO,
     # See _COMMON_TOOL_NAMES: skill tools come from the MEMBER_SKILL_TOOLKIT
@@ -198,28 +185,17 @@ def _is_code_mode(mode: str) -> bool:
 
 
 def _resolve_member_skills(config: dict[str, Any], role: str) -> list[str]:
-    """Resolve the seed allow-list for *role* from the config source.
+    """Resolve the skill names selected for *role* from the config source.
 
-    Reads ``config.agents.<role>.skills`` and returns the cleaned, non-empty
-    names.
-
-    This is **no longer the runtime authority**. The value is only the seed for
-    a member's ``skills-visibility.json``, carried by the ``core.team.skill_use``
-    rail as its ``bootstrap_allow`` and written once — by
-    ``openjiuwen.agent_teams.rails.team_skill_use_rail.create_team_skill_use_rail``,
-    the single seeder — when the file does not exist yet; afterwards the
-    document decides what the member sees and editing this config key changes
-    nothing for members that already have one. The value is also per *role*,
-    while the document is per member *instance*: the rail resolves the member
-    identity at setup time, so nothing else has to expand role to instance.
+    Mirrors the legacy ``resolve_member_skills``: reads ``config.agents.<role>.skills``
+    and returns the cleaned, non-empty names.
 
     Args:
         config: The resolved ``config.yaml`` mapping (team blueprint shape).
         role: The member role ("leader" or "teammate").
 
     Returns:
-        The seed skill names for the role (possibly empty; empty means the
-        member inherits the whole Skill library).
+        The selected skill names for the role (possibly empty).
     """
     agents = config.get("agents") if isinstance(config, dict) else None
     if not isinstance(agents, dict):
@@ -282,75 +258,23 @@ def _retrieval_enabled(config: dict[str, Any] | None = None) -> bool:
     return False
 
 
-def _team_skill_use_rail_spec(config: dict[str, Any], role: str) -> RailSpec:
-    """Declare the team Skill rail for a member of either profile.
-
-    Only the exposure mode and the seed allow-list are declared here. The rail
-    reads the one physical Skill library narrowed by the member's and the team's
-    ``skills-visibility.json``, and those declaration paths are keyed on a
-    member identity that is minted per spawn, long after this spec is built —
-    ``openjiuwen.agent_teams.skill.rail_spec.complete_declared_team_skill_rails``
-    fills them in during member setup, together with the library root.
-
-    Declaring the rail here rather than leaving it to the team's auto-add is
-    what keeps ``react.skill_mode`` / agentic retrieval honoured: the auto-add
-    has no config to read and would default to ALL mode.
-
-    Args:
-        config: The resolved config mapping.
-        role: Member role, whose ``config.agents.<role>.skills`` seeds the
-            member declaration the first time it is written.
-
-    Returns:
-        A ``core.team.skill_use`` RailSpec.
-    """
-    return RailSpec(
-        type=TEAM_SKILL_USE,
-        params={
-            "skill_mode": _skill_mode(config),
-            "bootstrap_allow": _resolve_member_skills(config, role),
-        },
-    )
-
-
-def _collapse_skill_use_rails(rails: list[RailSpec], *, retrieval_enabled: bool) -> list[RailSpec]:
-    """Keep exactly one Skill rail, the first declared one.
-
-    A member must never mount two Skill rails: they scan the same library and
-    register the same ``skill`` / ``list_skill`` tools, which costs a duplicate
-    prompt section and a duplicate-ability warning per tool on every build. The
-    base spec's rails come first, so a blueprint that declares its own Skill
-    rail wins over the one this module appends — the same precedence
-    ``openjiuwen.agent_teams.skill.rail_spec`` applies on the team side.
-
-    When agentic retrieval is on, the survivor is additionally pinned to
-    auto-list: the model discovers Skills through the retrieval tools instead
-    of having the whole library injected into its prompt.
-
-    Args:
-        rails: The merged rail declarations, base spec first.
-        retrieval_enabled: Whether agentic skill retrieval is enabled.
-
-    Returns:
-        The rail list with at most one Skill rail left.
-    """
-    skill_rail_types = {CORE_SKILL_USE, TEAM_SKILL_USE, "skill_use", "SkillUseRail"}
+def _normalize_skill_use_rails_for_agentic_retrieval(rails: list[RailSpec]) -> list[RailSpec]:
+    """Normalize skill-use rails to auto-list mode and remove duplicates."""
+    skill_rail_types = {CORE_SKILL_USE, "skill_use", "SkillUseRail", registry.CODE_SKILL_USE}
     has_skill_rail = False
-    collapsed: list[RailSpec] = []
+    normalized: list[RailSpec] = []
     for rail in rails:
         if rail.type in skill_rail_types:
             if has_skill_rail:
                 continue
             has_skill_rail = True
-            if retrieval_enabled:
-                params = dict(rail.params or {})
-                params["skill_mode"] = SkillUseRail.SKILL_MODE_AUTO_LIST
-                params["include_tools"] = False
-                rail = rail.model_copy(update={"params": params})
-            collapsed.append(rail)
+            params = dict(rail.params or {})
+            params["skill_mode"] = SkillUseRail.SKILL_MODE_AUTO_LIST
+            params["include_tools"] = False
+            normalized.append(rail.model_copy(update={"params": params}))
             continue
-        collapsed.append(rail)
-    return collapsed
+        normalized.append(rail)
+    return normalized
 
 
 def _additional_directories(config: dict[str, Any]) -> list[str]:
@@ -396,14 +320,6 @@ def _context_processor_params(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _model_anomaly_detection_params(config: dict[str, Any]) -> dict[str, Any]:
-    """Attribute params for the model-anomaly / tool-loop compact rail."""
-    guard = _config_section(config, "execution_guard")
-    return {
-        "rail_config": _config_section(guard, "model_anomaly_detection_rail"),
-    }
-
-
 def _permission_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the permission-interrupt rail."""
     return {
@@ -416,21 +332,29 @@ def _team_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the leader team skill-evolution rail."""
     return {
         "evolution_model_config": _evolution_model_config(config),
+        "review_trigger": get_evolution_review_trigger_enabled(config),
         "auto_save": get_evolution_auto_save_enabled(config),
     }
 
 
 def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the member skill-evolution rail."""
+    triggers = get_passive_skill_evolution_triggers(config)
     return {
         "evolution_model_config": _evolution_model_config(config),
+        "signal_trigger": triggers["signal_trigger"],
+        "review_trigger": triggers["review_trigger"],
     }
 
 
 # Per-element attribute params, keyed by provider name; empty for parameterless.
 _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    registry.DISABLED_TOOLS: lambda c: {
+        "disabled_tools": resolve_string_or_list_config(
+            _config_section(c, "react").get("disabled_tools")
+        )
+    },
     registry.CONTEXT_PROCESSOR: _context_processor_params,
-    registry.MODEL_ANOMALY_DETECTION: _model_anomaly_detection_params,
     registry.CODE_PROJECT_MEMORY: lambda c: {
         "additional_directories": _additional_directories(c)
     },
@@ -445,6 +369,10 @@ _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
         "embed_config": _config_section(c, "embed")
     },
     registry.USER_HOOKS: lambda c: {"hooks_section": _config_section(c, "hooks")},
+    registry.CODE_SKILL_USE: lambda c: {
+        "skill_mode": _skill_mode(c),
+        "include_tools": not _retrieval_enabled(c),
+    },
     registry.CODE_WORKTREE: lambda c: {"enabled": True},
 }
 
@@ -492,9 +420,10 @@ def _team_common_rail_names(role: str) -> tuple[str, ...]:
 def _code_base_rail_names(role: str) -> tuple[str, ...]:
     """Code-profile rails minus permission interrupt; leaders omit code todo planning.
 
-    ``PERMISSION_INTERRUPT`` is excluded for all team members: it relies on a
-    frontend user response that headless teammates cannot provide, and even the
-    leader's interrupt path is unreliable in a team context.
+    ``PERMISSION_INTERRUPT`` remains excluded from code.team/team.plan for all
+    members: teammates are headless, and these profiles retain their historical
+    Leader-mediated approval path.  Ordinary chat-team Leaders are assembled by
+    ``_build_team_capability_specs`` and do receive the user-facing interrupt.
     """
     names = tuple(
         name for name in _CODE_RAIL_NAMES
@@ -507,21 +436,15 @@ def _code_base_rail_names(role: str) -> tuple[str, ...]:
 
 def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
     """Return the role-specific skill-evolution rails (shared by both profiles)."""
-    if not get_skill_evolution_enabled(config):
-        return []
     if role == "leader":
         return [
             RailSpec(
                 type=registry.TEAM_SKILL_EVOLUTION,
                 params=_team_evolution_rail_params(config),
             ),
-            # No params: the Skill library and the team visibility metadata
-            # path are per-team runtime values resolved from the build context.
-            # The team name is not known at spec-build time, so neither path
-            # can be baked in here.
             RailSpec(
                 type=registry.TEAM_SKILL_CREATE,
-                params={},
+                params={"skill_create": get_skill_create_enabled(config)},
             ),
         ]
     return [
@@ -534,7 +457,6 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
 
 def _build_team_capability_specs(
     config: dict[str, Any],
-    mode: str,
     role: str,
     *,
     enable_permissions: bool = False,
@@ -546,18 +468,28 @@ def _build_team_capability_specs(
     ]
     if role == "leader":
         rails_specs.append(RailSpec(type=registry.STRUCTURED_ASK_USER))
-        if mode == TEAM_PLAN_NORMAL_MODE:
-            rails_specs.extend(
-                [
-                    RailSpec(type=registry.CODE_AGENT_MODE),
-                    RailSpec(type=registry.TEAM_PLAN_APPROVAL),
-                ]
-            )
 
-    rails_specs.append(_team_skill_use_rail_spec(config, role))
-    rails_specs.append(RailSpec(type=registry.MEMBER_SKILL_TOOLKIT))
+    if _retrieval_enabled(config):
+        rails_specs.append(
+            RailSpec(
+                type=CORE_SKILL_USE,
+                params={
+                    "skill_mode": SkillUseRail.SKILL_MODE_AUTO_LIST,
+                    "include_tools": False,
+                },
+            )
+        )
+    rails_specs.append(
+        RailSpec(
+            type=registry.MEMBER_SKILL_TOOLKIT,
+            params={"skills": _resolve_member_skills(config, role)},
+        )
+    )
 
     if enable_permissions and role == "teammate":
+        # Teammates are headless in a Team run.  TeamPermissionRail forwards
+        # ASK decisions to the Leader's approve_tool flow instead of creating
+        # a frontend interrupt for the teammate itself.
         rails_specs.append(
             RailSpec(
                 type=registry.TEAM_PERMISSION,
@@ -566,11 +498,22 @@ def _build_team_capability_specs(
         )
 
     if enable_permissions and role == "leader":
-        rails_specs.append(
-            RailSpec(
-                type=registry.TEAM_PERMISSION_POLICY,
-                params=_rail_params(registry.TEAM_PERMISSION_POLICY, config),
-            ),
+        # These Rails serve different consumers: the policy Rail teaches the
+        # Leader how to approve teammate requests, while PermissionInterruptRail
+        # exposes the Leader's own ASK decisions through the user-facing Team
+        # stream.  Keeping both mounted avoids silently auto-approving Leader
+        # tool calls and does not change teammate approval semantics.
+        rails_specs.extend(
+            [
+                RailSpec(
+                    type=registry.TEAM_PERMISSION_POLICY,
+                    params=_rail_params(registry.TEAM_PERMISSION_POLICY, config),
+                ),
+                RailSpec(
+                    type=registry.PERMISSION_INTERRUPT,
+                    params=_rail_params(registry.PERMISSION_INTERRUPT, config),
+                ),
+            ]
         )
 
     rails_specs.extend(_role_evolution_rails(config, role))
@@ -589,7 +532,7 @@ def _build_code_capability_specs(
     *,
     enable_permissions: bool = False,
 ) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
-    """Build the code profile (code.team / team.plan.code) specs for a member.
+    """Build the code profile (code.team / team.plan) rail/tool specs for a member.
 
     PermissionInterruptRail (``swarm.permission_interrupt``) cannot resolve ASK
     interrupts on headless team members: the user-facing confirmation path
@@ -600,7 +543,7 @@ def _build_code_capability_specs(
     When ``enable_permissions`` is false the permission interrupt rail is
     removed entirely: it would deadlock a teammate on any ASK-level tool call.
     """
-    is_team_plan_leader = mode == TEAM_PLAN_CODE_MODE and role == "leader"
+    is_team_plan_leader = mode == "team.plan" and role == "leader"
 
     rails_specs: list[RailSpec] = [
         RailSpec(type=name, params=_rail_params(name, config))
@@ -626,17 +569,19 @@ def _build_code_capability_specs(
             ),
         )
 
-    # The plan-only approval gate belongs to the Leader. A code Team Plan
-    # teammate must otherwise be assembled exactly like a code.team teammate.
-    if not is_team_plan_leader:
+    if mode != "team.plan":
         rails_specs.append(
             RailSpec(
                 type=registry.CODE_CONFIRM_INTERRUPT,
                 params={"tool_names": ["switch_mode", "exit_plan_mode"]},
             ),
         )
-    rails_specs.append(_team_skill_use_rail_spec(config, role))
-    rails_specs.append(RailSpec(type=registry.MEMBER_SKILL_TOOLKIT))
+    rails_specs.append(
+        RailSpec(
+            type=registry.MEMBER_SKILL_TOOLKIT,
+            params={"skills": _resolve_member_skills(config, role)},
+        )
+    )
     rails_specs.extend(
         RailSpec(type=name, params=_rail_params(name, config))
         for name in _CODE_SHARED_RAIL_NAMES
@@ -666,7 +611,7 @@ def build_member_capability_specs(
 
     Args:
         config: The resolved ``config.yaml`` mapping (team blueprint shape).
-        mode: The canonical team request mode.
+        mode: The request mode ("team" / "code.team" / "team.plan").
         role: The member role ("leader" or "teammate").
         enable_permissions: Effective team permission toggle from TeamAgentSpec.
 
@@ -675,9 +620,7 @@ def build_member_capability_specs(
     """
     if _is_code_mode(mode):
         return _build_code_capability_specs(config, mode, role, enable_permissions=enable_permissions)
-    return _build_team_capability_specs(
-        config, mode, role, enable_permissions=enable_permissions
-    )
+    return _build_team_capability_specs(config, role, enable_permissions=enable_permissions)
 
 
 def _is_subagent_enabled(sub_cfg: Any) -> bool:
@@ -685,19 +628,14 @@ def _is_subagent_enabled(sub_cfg: Any) -> bool:
     return isinstance(sub_cfg, dict) and bool(sub_cfg.get("enabled", False))
 
 
-def _is_subagent_default_enabled(sub_cfg: Any) -> bool:
-    """Return true unless a subagent is explicitly disabled."""
-    return not isinstance(sub_cfg, dict) or sub_cfg.get("enabled", True) is not False
-
-
 def _subagent_language(mode: str, role: str, config: dict[str, Any]) -> str:
     """Resolve the code sub-agent runtime language (mirrors ``code_runtime_language``).
 
-    Code mode is English-only except the team.plan.code leader, which uses the
+    Code mode is English-only except the team.plan leader, which uses the
     configured preferred language. Baked into ``factory_kwargs`` so the generic
     openjiuwen sub-agent providers stay free of swarm mode/role policy.
     """
-    if mode == TEAM_PLAN_CODE_MODE and role == "leader":
+    if mode == "team.plan" and role == "leader":
         return resolve_language((config or {}).get("preferred_language", "zh"))
     return "en"
 
@@ -718,22 +656,11 @@ def _code_subagent_spec(
         react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
     )
     sub_cfg = subagents_cfg.get(name) if isinstance(subagents_cfg, dict) else None
-    if name == "browser_agent":
-        max_iterations = DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
-    elif name == "statusline-setup":
-        max_iterations = registry.DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS
-    else:
-        max_iterations = react_cfg.get(
-            "max_iterations",
-            _DEFAULT_SUBAGENT_MAX_ITERATIONS,
-        )
+    max_iterations = react_cfg.get("max_iterations", _DEFAULT_SUBAGENT_MAX_ITERATIONS)
     if isinstance(sub_cfg, dict) and sub_cfg.get("max_iterations"):
         max_iterations = sub_cfg["max_iterations"]
-    card_kwargs: dict[str, Any] = {"name": name}
-    if name == "statusline-setup":
-        card_kwargs["id"] = "jiuwenswarm.statusline-setup"
     return SubAgentSpec(
-        agent_card=AgentCard(**card_kwargs),
+        agent_card=AgentCard(name=name),
         system_prompt="",
         factory_name=factory_name,
         factory_kwargs={
@@ -743,37 +670,15 @@ def _code_subagent_spec(
     )
 
 
-def _is_explore_subagent(spec: Any) -> bool:
-    """Return whether ``spec`` declares the explore sub-agent.
-
-    Upstream team specs reach us in more than one shape, so all three identity
-    carriers are checked: ``subagent_type`` (present on some platform spec
-    objects), ``factory_name``, and the agent card name.
-
-    Args:
-        spec: A sub-agent spec from a base team spec or from
-            :func:`build_member_subagent_specs`.
-
-    Returns:
-        True when the spec declares ``explore_agent``.
-    """
-    return (
-        getattr(spec, "subagent_type", None) == "explore_agent"
-        or getattr(spec, "factory_name", None) == registry.EXPLORE_AGENT
-        or getattr(getattr(spec, "agent_card", None), "name", None) == "explore_agent"
-    )
-
-
 def build_member_subagent_specs(
     config: dict[str, Any],
     mode: str,
     role: str,
 ) -> list[SubAgentSpec]:
-    """Build declarative member subagent specs.
+    """Build the declarative code sub-agent specs (empty for non-code modes).
 
-    The status-line setup agent is available in every mode when enabled.
-    Code modes additionally include explore / plan, while code / browser are
-    config-gated via ``react.subagents.<name>.enabled``.
+    explore / plan are always present, while code / browser are config-gated via
+    ``react.subagents.<name>.enabled``.
 
     Args:
         config: The resolved ``config.yaml`` mapping.
@@ -781,36 +686,19 @@ def build_member_subagent_specs(
         role: The member role (reserved, both roles get the same sub-agents).
 
     Returns:
-        The ``SubAgentSpec`` list. Non-code modes contain only the default-enabled
-        status-line setup agent; code modes also contain their code sub-agents.
+        The ``SubAgentSpec`` list (empty when not a code mode).
     """
+    if not _is_code_mode(mode):
+        return []
     react = (config or {}).get("react", {})
     react = react if isinstance(react, dict) else {}
     subagents_cfg = react.get("subagents", {}) if isinstance(react, dict) else {}
     language = _subagent_language(mode, role, config)
 
-    specs: list[SubAgentSpec] = []
-    if _is_subagent_default_enabled(
-        subagents_cfg.get("statusline-setup") if isinstance(subagents_cfg, dict) else None
-    ):
-        specs.append(
-            _code_subagent_spec(
-                "statusline-setup",
-                registry.STATUSLINE_SETUP_AGENT,
-                react,
-                language,
-            )
-        )
-
-    if not _is_code_mode(mode):
-        return specs
-
-    specs.extend(
-        [
-            _code_subagent_spec("explore_agent", registry.EXPLORE_AGENT, react, language),
-            _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
-        ]
-    )
+    specs: list[SubAgentSpec] = [
+        _code_subagent_spec("explore_agent", registry.EXPLORE_AGENT, react, language),
+        _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
+    ]
     if isinstance(subagents_cfg, dict):
         if _is_subagent_enabled(subagents_cfg.get("code_agent")):
             specs.append(
@@ -842,7 +730,7 @@ def build_member_deep_agent_spec(
 
     Args:
         config: The resolved ``config.yaml`` mapping.
-        mode: The canonical team request mode.
+        mode: The request mode ("team" / "code.team" / "team.plan").
         role: The member role ("leader" or "teammate").
         base_spec: The base member ``DeepAgentSpec`` to extend.
         enable_permissions: Effective team permission toggle from TeamAgentSpec.
@@ -862,7 +750,8 @@ def build_member_deep_agent_spec(
     merged_mcps = _merge_mcp_configs(base_spec.mcps, mcp_configs)
 
     retrieval_enabled = _retrieval_enabled(config)
-    merged_rails = _collapse_skill_use_rails(merged_rails, retrieval_enabled=retrieval_enabled)
+    if retrieval_enabled:
+        merged_rails = _normalize_skill_use_rails_for_agentic_retrieval(merged_rails)
 
     update: dict[str, Any] = {
         "rails": merged_rails,
@@ -900,16 +789,6 @@ def build_member_deep_agent_spec(
 
     if subagent_specs or team_browser_spec:
         merged_subagents = list(base_spec.subagents or [])
-        # Drop a base_spec explore_agent when we contribute our own: code modes
-        # always declare one in build_member_subagent_specs, and two specs under
-        # the same name would just shadow each other in create_subagent.
-        # SubAgentSpec has no subagent_type field, so the name / factory_name
-        # checks are what actually match here.
-        if any(_is_explore_subagent(spec) for spec in subagent_specs):
-            merged_subagents = [
-                spec for spec in merged_subagents
-                if not _is_explore_subagent(spec)
-            ]
         # Remove any browser_agent from base_spec to prevent the shared
         # playwright_official_stdio entry from co-existing with our isolated one.
         if team_browser_spec or any(

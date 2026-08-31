@@ -42,17 +42,6 @@ if getattr(sys, "frozen", False):
         except Exception:  # noqa: BLE001
             pass
 
-    _frozen_exe_dir = Path(sys.executable).resolve().parent
-    _frozen_internal_dir = Path(getattr(sys, "_MEIPASS", _frozen_exe_dir / "_internal")).resolve()
-    _path_prefixes = [
-        str(path)
-        for path in (_frozen_exe_dir, _frozen_internal_dir)
-        if path.exists()
-    ]
-    if _path_prefixes:
-        _old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = os.pathsep.join([*_path_prefixes, _old_path] if _old_path else _path_prefixes)
-
     # macOS：把 .app 内置的 node-runtime/bin 前置到 PATH，使 shutil.which("npx")
     # 与 playwright_runtime 默认的 "npx" 命令命中内置 Node（> v18），
     # 用户无需单独安装 Node。入口脚本是所有冻结进程（主进程 + --desktop-run-*

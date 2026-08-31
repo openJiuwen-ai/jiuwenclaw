@@ -4,11 +4,35 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from jiuwenswarm.server.hooks.executor import HookExecutor, HookResult, HookOutcome
+
+
+def _fake_proc(*, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b""):
+    """Build a fake asyncio subprocess for HookExecutor unit tests."""
+    proc = MagicMock()
+    proc.returncode = returncode
+    proc.communicate = AsyncMock(return_value=(stdout, stderr))
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock(return_value=None)
+    return proc
+
+
+def _close_awaitable(awaitable) -> None:
+    """Avoid 'coroutine was never awaited' when timeout mocks skip awaiting."""
+    close = getattr(awaitable, "close", None)
+    if callable(close):
+        close()
+
+
+async def _raise_timeout(awaitable, timeout=None):
+    _close_awaitable(awaitable)
+    raise asyncio.TimeoutError
 
 
 # ============================================================
@@ -49,10 +73,15 @@ class TestRunAll:
     @pytest.mark.asyncio
     async def test_dispatches_command_by_default():
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "echo ok"}],
-            {"event": "Test"},
-        )
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_fake_proc(stdout=b"ok\n"),
+        ):
+            results = await e.run_all(
+                [{"command": "echo ok"}],
+                {"event": "Test"},
+            )
         assert len(results) == 1
         assert results[0].outcome == HookOutcome.SUCCESS
 
@@ -71,28 +100,43 @@ class TestRunAll:
     @staticmethod
     @pytest.mark.asyncio
     async def test_parallel_execution():
-        """多个 hook 应并行执行."""
+        """多个 hook 应并行调度并各自返回结果."""
         e = HookExecutor()
-        results = await e.run_all(
-            [
-                {"command": "echo a"},
-                {"command": "echo b"},
-                {"command": "echo c"},
-            ],
-            {"event": "Test"},
-        )
+        create = AsyncMock(side_effect=[
+            _fake_proc(stdout=b"a\n"),
+            _fake_proc(stdout=b"b\n"),
+            _fake_proc(stdout=b"c\n"),
+        ])
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new=create,
+        ):
+            results = await e.run_all(
+                [
+                    {"command": "echo a"},
+                    {"command": "echo b"},
+                    {"command": "echo c"},
+                ],
+                {"event": "Test"},
+            )
         assert len(results) == 3
         assert all(r.outcome == HookOutcome.SUCCESS for r in results)
+        assert create.await_count == 3
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_exception_wrapped_as_error():
-        """异常应包装为 non_blocking_error."""
+        """子进程非 0/2 退出应包装为 non_blocking_error."""
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "exit 1"}],
-            {"event": "Test"},
-        )
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_fake_proc(returncode=1, stderr=b"boom"),
+        ):
+            results = await e.run_all(
+                [{"command": "exit 1"}],
+                {"event": "Test"},
+            )
         assert len(results) == 1
         assert results[0].outcome == HookOutcome.NON_BLOCKING_ERROR
 
@@ -106,20 +150,30 @@ class TestCommandHookExitCodes:
     @pytest.mark.asyncio
     async def test_exit_0_is_success():
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "exit 0", "timeout": 5}],
-            {"event": "PreToolUse", "tool_name": "Bash"},
-        )
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_fake_proc(returncode=0),
+        ):
+            results = await e.run_all(
+                [{"command": "exit 0", "timeout": 5}],
+                {"event": "PreToolUse", "tool_name": "Bash"},
+            )
         assert results[0].outcome == HookOutcome.SUCCESS
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_exit_2_is_blocking():
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "echo 'blocked by policy' >&2; exit 2", "timeout": 5}],
-            {"event": "PreToolUse", "tool_name": "Bash"},
-        )
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_fake_proc(returncode=2, stderr=b"blocked by policy"),
+        ):
+            results = await e.run_all(
+                [{"command": "echo 'blocked by policy' >&2; exit 2", "timeout": 5}],
+                {"event": "PreToolUse", "tool_name": "Bash"},
+            )
         r = results[0]
         assert r.outcome == HookOutcome.BLOCKING
         assert r.show_to_model is True
@@ -128,20 +182,30 @@ class TestCommandHookExitCodes:
     @pytest.mark.asyncio
     async def test_exit_1_is_non_blocking_error():
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "exit 1", "timeout": 5}],
-            {"event": "PreToolUse"},
-        )
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_fake_proc(returncode=1),
+        ):
+            results = await e.run_all(
+                [{"command": "exit 1", "timeout": 5}],
+                {"event": "PreToolUse"},
+            )
         assert results[0].outcome == HookOutcome.NON_BLOCKING_ERROR
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_exit_127_is_non_blocking_error():
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "exit 127", "timeout": 5}],
-            {"event": "Test"},
-        )
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_fake_proc(returncode=127),
+        ):
+            results = await e.run_all(
+                [{"command": "exit 127", "timeout": 5}],
+                {"event": "Test"},
+            )
         assert results[0].outcome == HookOutcome.NON_BLOCKING_ERROR
 
 
@@ -153,35 +217,54 @@ class TestCommandHookEnvVars:
     @staticmethod
     @pytest.mark.asyncio
     async def test_arguments_env_var_set():
-        """$ARGUMENTS 环境变量包含 hook input JSON."""
+        """ARGUMENTS 环境变量包含 hook input JSON."""
         e = HookExecutor()
         hook_input = {"event": "PreToolUse", "tool_name": "Write", "key": "value123"}
-        results = await e.run_all(
-            [{"command": "echo $ARGUMENTS", "timeout": 5}],
-            hook_input,
-        )
-        # exit 0, stdout 包含 "value123"
+        create = AsyncMock(return_value=_fake_proc(returncode=0, stdout=b"ok\n"))
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new=create,
+        ):
+            results = await e.run_all(
+                [{"command": "echo $ARGUMENTS", "timeout": 5}],
+                hook_input,
+            )
         assert results[0].outcome == HookOutcome.SUCCESS
+        env = create.await_args.kwargs["env"]
+        assert "value123" in env["ARGUMENTS"]
+        assert json.loads(env["ARGUMENTS"]) == hook_input
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_tool_name_env_var_set():
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": 'test "$TOOL_NAME" = "Write"', "timeout": 5}],
-            {"event": "PreToolUse", "tool_name": "Write"},
-        )
+        create = AsyncMock(return_value=_fake_proc(returncode=0))
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new=create,
+        ):
+            results = await e.run_all(
+                [{"command": 'test "$TOOL_NAME" = "Write"', "timeout": 5}],
+                {"event": "PreToolUse", "tool_name": "Write"},
+            )
         assert results[0].outcome == HookOutcome.SUCCESS
+        assert create.await_args.kwargs["env"]["TOOL_NAME"] == "Write"
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_tool_name_empty_when_missing():
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": 'test "$TOOL_NAME" = ""', "timeout": 5}],
-            {"event": "Stop"},
-        )
+        create = AsyncMock(return_value=_fake_proc(returncode=0))
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new=create,
+        ):
+            results = await e.run_all(
+                [{"command": 'test "$TOOL_NAME" = ""', "timeout": 5}],
+                {"event": "Stop"},
+            )
         assert results[0].outcome == HookOutcome.SUCCESS
+        assert create.await_args.kwargs["env"]["TOOL_NAME"] == ""
 
 
 # ============================================================
@@ -193,26 +276,54 @@ class TestCommandHookTimeout:
     @pytest.mark.asyncio
     async def test_timeout_returns_non_blocking_error():
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "sleep 5", "timeout": 1}],
-            {"event": "Test"},
-        )
+        proc = _fake_proc()
+
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=proc,
+        ), patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.wait_for",
+            side_effect=_raise_timeout,
+        ):
+            results = await e.run_all(
+                [{"command": "sleep 5", "timeout": 1}],
+                {"event": "Test"},
+            )
         r = results[0]
         assert r.outcome == HookOutcome.NON_BLOCKING_ERROR
         assert "timeout" in r.error.lower()
+        proc.kill.assert_called()
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_timeout_does_not_block_execution():
         """超时不应阻止后续 hook 或其他工具."""
         e = HookExecutor()
-        results = await e.run_all(
-            [
-                {"command": "sleep 5", "timeout": 1},
-                {"command": "echo ok", "timeout": 5},
-            ],
-            {"event": "Test"},
-        )
+        timed_out = _fake_proc()
+        ok_proc = _fake_proc(stdout=b"ok\n")
+        create = AsyncMock(side_effect=[timed_out, ok_proc])
+
+        async def _wait_for(awaitable, timeout=None):
+            if timeout == 1:
+                _close_awaitable(awaitable)
+                raise asyncio.TimeoutError
+            return await awaitable
+
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new=create,
+        ), patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.wait_for",
+            side_effect=_wait_for,
+        ):
+            results = await e.run_all(
+                [
+                    {"command": "sleep 5", "timeout": 1},
+                    {"command": "echo ok", "timeout": 5},
+                ],
+                {"event": "Test"},
+            )
         assert results[0].outcome == HookOutcome.NON_BLOCKING_ERROR
         assert results[1].outcome == HookOutcome.SUCCESS
 
@@ -243,31 +354,59 @@ class TestCommandHookShell:
     @pytest.mark.asyncio
     async def test_default_shell_bash():
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "echo $SHELL", "timeout": 5}],
-            {"event": "Test"},
-        )
+        create = AsyncMock(return_value=_fake_proc(stdout=b"/bin/bash\n"))
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new=create,
+        ):
+            results = await e.run_all(
+                [{"command": "echo $SHELL", "timeout": 5}],
+                {"event": "Test"},
+            )
         assert results[0].outcome == HookOutcome.SUCCESS
+        assert create.await_args.args[0] == "bash"
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_sh_shell():
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "echo ok", "shell": "sh", "timeout": 5}],
-            {"event": "Test"},
-        )
+        create = AsyncMock(return_value=_fake_proc(stdout=b"ok\n"))
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new=create,
+        ):
+            results = await e.run_all(
+                [{"command": "echo ok", "shell": "sh", "timeout": 5}],
+                {"event": "Test"},
+            )
         assert results[0].outcome == HookOutcome.SUCCESS
+        assert create.await_args.args[0] == "sh"
+        assert create.await_args.args[1:3] == ("-c", "echo ok")
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_default_timeout_30():
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "echo ok"}],  # no timeout specified → default 30
-            {"event": "Test"},
-        )
+        create = AsyncMock(return_value=_fake_proc(stdout=b"ok\n"))
+        captured = {}
+
+        async def _wait_for(awaitable, timeout=None):
+            captured["timeout"] = timeout
+            return await awaitable
+
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new=create,
+        ), patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.wait_for",
+            side_effect=_wait_for,
+        ):
+            results = await e.run_all(
+                [{"command": "echo ok"}],  # no timeout specified → default 30
+                {"event": "Test"},
+            )
         assert results[0].outcome == HookOutcome.SUCCESS
+        assert captured["timeout"] == 30
 
 
 # ============================================================
@@ -440,17 +579,22 @@ class TestExtractJsonFromResponse:
 # ============================================================
 
 class TestCommandHookE2E:
-    """端到端 command hook 流程测试."""
+    """端到端 command hook 流程测试（子进程通过 mock 注入，避免依赖真实 shell）."""
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_simple_logging_hook():
         """模拟最简单的日志 hook：echo 内容到 stdout."""
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "echo log: tool=$TOOL_NAME", "timeout": 5}],
-            {"event": "PreToolUse", "tool_name": "Read"},
-        )
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_fake_proc(stdout=b"log: tool=Read\n"),
+        ):
+            results = await e.run_all(
+                [{"command": "echo log: tool=$TOOL_NAME", "timeout": 5}],
+                {"event": "PreToolUse", "tool_name": "Read"},
+            )
         assert results[0].outcome == HookOutcome.SUCCESS
 
     @staticmethod
@@ -458,13 +602,19 @@ class TestCommandHookE2E:
     async def test_blocking_hook_via_json_stdout():
         """通过 stdout JSON decision: block 阻止执行."""
         e = HookExecutor()
-        results = await e.run_all(
-            [{
-                "command": 'echo \'{"decision":"block","reason":"not allowed"}\'',
-                "timeout": 5,
-            }],
-            {"event": "PreToolUse", "tool_name": "Bash"},
-        )
+        payload = b'{"decision":"block","reason":"not allowed"}\n'
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_fake_proc(stdout=payload),
+        ):
+            results = await e.run_all(
+                [{
+                    "command": 'echo \'{"decision":"block","reason":"not allowed"}\'',
+                    "timeout": 5,
+                }],
+                {"event": "PreToolUse", "tool_name": "Bash"},
+            )
         r = results[0]
         assert r.outcome == HookOutcome.BLOCKING
         assert "not allowed" in r.error
@@ -474,10 +624,15 @@ class TestCommandHookE2E:
     async def test_blocking_hook_via_exit_2():
         """通过退出码 2 阻止执行（无 JSON stdout）."""
         e = HookExecutor()
-        results = await e.run_all(
-            [{"command": "echo blocked >&2; exit 2", "timeout": 5}],
-            {"event": "PreToolUse", "tool_name": "Bash"},
-        )
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_fake_proc(returncode=2, stderr=b"blocked"),
+        ):
+            results = await e.run_all(
+                [{"command": "echo blocked >&2; exit 2", "timeout": 5}],
+                {"event": "PreToolUse", "tool_name": "Bash"},
+            )
         r = results[0]
         assert r.outcome == HookOutcome.BLOCKING
         assert r.show_to_model is True
@@ -487,13 +642,19 @@ class TestCommandHookE2E:
     async def test_modify_input_hook():
         """通过 stdout JSON modifiedInput 修改工具输入."""
         e = HookExecutor()
-        results = await e.run_all(
-            [{
-                "command": 'echo \'{"modifiedInput":{"file_path":"/safe/path.txt"}}\'',
-                "timeout": 5,
-            }],
-            {"event": "PreToolUse", "tool_name": "Write"},
-        )
+        payload = b'{"modifiedInput":{"file_path":"/safe/path.txt"}}\n'
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_fake_proc(stdout=payload),
+        ):
+            results = await e.run_all(
+                [{
+                    "command": 'echo \'{"modifiedInput":{"file_path":"/safe/path.txt"}}\'',
+                    "timeout": 5,
+                }],
+                {"event": "PreToolUse", "tool_name": "Write"},
+            )
         r = results[0]
         assert r.outcome == HookOutcome.SUCCESS
         assert r.modified_input == {"file_path": "/safe/path.txt"}
@@ -503,13 +664,19 @@ class TestCommandHookE2E:
     async def test_additional_context_hook():
         """通过 stdout JSON additionalContext 注入上下文."""
         e = HookExecutor()
-        results = await e.run_all(
-            [{
-                "command": 'echo \'{"additionalContext":"file was last modified 2h ago"}\'',
-                "timeout": 5,
-            }],
-            {"event": "PostToolUse", "tool_name": "Read"},
-        )
+        payload = b'{"additionalContext":"file was last modified 2h ago"}\n'
+        with patch(
+            "jiuwenswarm.server.hooks.executor.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_fake_proc(stdout=payload),
+        ):
+            results = await e.run_all(
+                [{
+                    "command": 'echo \'{"additionalContext":"file was last modified 2h ago"}\'',
+                    "timeout": 5,
+                }],
+                {"event": "PostToolUse", "tool_name": "Read"},
+            )
         r = results[0]
         assert r.outcome == HookOutcome.SUCCESS
         assert "2h ago" in r.additional_context

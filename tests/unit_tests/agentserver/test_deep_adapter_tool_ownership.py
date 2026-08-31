@@ -14,6 +14,10 @@ from jiuwenswarm.common.tool_ownership import (
     register_tool,
     unregister_tool,
 )
+from jiuwenswarm.agents.harness.common.tools.deepresearch.tools import _get_route
+from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
+    get_send_file_request_context,
+)
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _AGENT_CARD_ID,
     JiuWenSwarmDeepAdapter,
@@ -49,6 +53,9 @@ class _FakeResourceMgr:
             return
         self.tools[tool.card.id] = tool
 
+    def get_tool(self, tool_id: str) -> _FakeTool | None:
+        return self.tools.get(tool_id)
+
     def remove_tool(self, tool_id: str) -> None:
         self.removed.append(tool_id)
         self.tools.pop(tool_id, None)
@@ -80,21 +87,21 @@ def test_agent_owned_tool_is_qualified_by_owner(resource_mgr: _FakeResourceMgr) 
 
 
 def test_shared_tool_keeps_bare_id_and_first_instance(resource_mgr: _FakeResourceMgr) -> None:
-    """A stateless tool keeps its bare id and a repeat add is a no-op."""
+    """A stateless tool keeps its bare id and a repeat register is a no-op."""
     first = _FakeTool("video_understanding")
     second = _FakeTool("video_understanding")
     mark_stateless([first, second])
 
-    register_tool(first, "jiuwenswarm_sess_a")
-    register_tool(second, "jiuwenswarm_sess_b")
+    registered_first = register_tool(first, "jiuwenswarm_sess_a")
+    registered_second = register_tool(second, "jiuwenswarm_sess_b")
 
     assert first.card.id == "video_understanding"
     assert second.card.id == "video_understanding"
-    assert resource_mgr.adds == [
-        ("video_understanding", False, True),
-        ("video_understanding", False, True),
-    ]
+    # Second register hits get_tool and returns the existing instance without add_tool.
+    assert resource_mgr.adds == [("video_understanding", False, True)]
     assert resource_mgr.tools["video_understanding"] is first
+    assert registered_first is first
+    assert registered_second is first
 
 
 def test_missing_owner_degrades_to_shared(resource_mgr: _FakeResourceMgr) -> None:
@@ -183,3 +190,77 @@ def test_shared_declaration_on_the_card_wins_over_the_call_site(
 
     assert tool.card.id == "user_todos"
     assert resource_mgr.adds == [("user_todos", False, True)]
+
+
+def test_runtime_context_binds_request_route_with_adapter_tenant_ids() -> None:
+    adapter = _make_adapter("sess_route")
+    adapter._env_service_id = "service-a"
+    adapter._env_agent_id = "agent-a"
+
+    tokens = adapter._bind_runtime_cron_context(
+        channel_id="tui",
+        session_id="sess_route",
+        metadata={},
+        request_id="req-route",
+        mode="agent",
+    )
+    try:
+        assert _get_route() == {
+            "request_id": "req-route",
+            "channel_id": "tui",
+            "session_id": "sess_route",
+            "service_id": "service-a",
+            "agent_id": "agent-a",
+        }
+        assert get_send_file_request_context() == {
+            "request_id": "req-route",
+            "session_id": "sess_route",
+            "channel_id": "tui",
+            "metadata": {"request_id": "req-route"},
+        }
+    finally:
+        adapter._reset_runtime_cron_context(tokens)
+
+    assert _get_route() == {
+        "request_id": "",
+        "channel_id": "",
+        "session_id": "",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    assert get_send_file_request_context() is None
+
+
+def test_nested_runtime_context_reset_restores_outer_deepresearch_route() -> None:
+    outer = _make_adapter("outer")
+    outer._env_service_id = "service-outer"
+    outer._env_agent_id = "agent-outer"
+    inner = _make_adapter("inner")
+    inner._env_service_id = "service-inner"
+    inner._env_agent_id = "agent-inner"
+
+    outer_tokens = outer._bind_runtime_cron_context(
+        channel_id="web",
+        session_id="outer",
+        metadata={},
+        request_id="req-outer",
+        mode="agent",
+    )
+    try:
+        inner_tokens = inner._bind_runtime_cron_context(
+            channel_id="tui",
+            session_id="inner",
+            metadata={},
+            request_id="req-inner",
+            mode="agent",
+        )
+        inner._reset_runtime_cron_context(inner_tokens)
+        assert _get_route() == {
+            "request_id": "req-outer",
+            "channel_id": "web",
+            "session_id": "outer",
+            "service_id": "service-outer",
+            "agent_id": "agent-outer",
+        }
+    finally:
+        outer._reset_runtime_cron_context(outer_tokens)

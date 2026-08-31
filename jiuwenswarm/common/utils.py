@@ -1,4 +1,5 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+from jiuwenswarm.common.local_env_config import is_enterprise
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 """Path management for JiuWenSwarm.
 
@@ -27,6 +28,8 @@ Runtime layout:
 内置模板位于包内 ``jiuwenswarm/resources/``（含 ``agent/`` 下各技能模板以及 ``skills_state.json``）。
 """
 
+import asyncio
+import copy
 import ctypes
 import hashlib
 import json
@@ -36,14 +39,29 @@ import sys
 import datetime
 import shutil
 import socket
-import stat
 import time
+from collections import OrderedDict
+from collections.abc import Hashable
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Optional
 import logging
-from logging.handlers import BaseRotatingHandler
+import queue as _queue
+from logging.handlers import BaseRotatingHandler, QueueHandler, QueueListener
+from collections import OrderedDict
+import yaml
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
+
+# 尝试导入 pythonjsonlogger（用于 JSON 格式化输出，缺失时优雅降级为文本 Formatter）
+try:
+    from pythonjsonlogger import jsonlogger
+except ImportError:
+    jsonlogger = None
+
+# read_file 工具：False 时不把图片字节注入主模型对话，改走 image_reading / VQA 等视觉工具。
+# 用于 create_deep_agent(enable_read_image_multimodal=...) 与 MultimodalImageRail(enable_image_multimodal=...)。
+DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL: bool = False
 
 _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 20
@@ -303,16 +321,177 @@ class _CompositeFilter(logging.Filter):
         return any(f.filter(record) for f in self.filters)
 
 
-def _load_logging_config_from_yaml() -> dict[str, Any]:
-    """读取 ~/.jiuwenswarm/config/config.yaml 中的 logging 段（无则空）。"""
+# ---------------------------------------------------------------------------
+# Sparse-override config merge utilities
+# ---------------------------------------------------------------------------
+
+def merge_template_with_override(
+    template: dict[str, Any],
+    override: dict[str, Any],
+) -> dict[str, Any]:
+    """模板默认值 + 用户 override；用户键覆盖模板。
+
+    - override 中独有的顶层键**不会保留**，会被清理（与 migrate_config_from_template
+      的 Remove 规则一致）。
+    - 深度递归（上限 4 层）。
+    """
+    return _deep_merge(template, override, depth=0)
+
+
+def _deep_merge(
+    template: dict[str, Any],
+    override: dict[str, Any],
+    depth: int = 0,
+) -> dict[str, Any]:
+    """Recursively merge template with user override, cleaning deprecated fields.
+
+    Rules:
+    - Add: fields only in template → use template value
+    - Keep: override values for fields that exist in template (preserve user settings)
+    - Remove: fields only in override (deprecated config, cleanup)
+    - Max recursion depth: 4
+    """
+    if depth >= 4:
+        return override
+
+    result: dict[str, Any] = {}
+
+    for key, tmpl_val in template.items():
+        if key not in override:
+            result[key] = copy.deepcopy(tmpl_val)
+        elif isinstance(tmpl_val, dict) and isinstance(override.get(key), dict):
+            result[key] = _deep_merge(tmpl_val, override[key], depth + 1)
+        else:
+            result[key] = override[key]
+
+    return result
+
+
+def fill_template_defaults(
+    target: dict[str, Any],
+    template: dict[str, Any],
+    depth: int = 0,
+) -> dict[str, Any]:
+    """模板补缺型合并：以 target 为主体，模板仅补全 target 缺失的键。
+
+    与 merge_template_with_override 不同：
+    - target 独有的键（模板中没有）**原样保留**，不做清理；
+    - target 显式设置的值不被模板覆盖；
+    - 双方均为 dict 的键递归补缺（上限 4 层，与 merge_template_with_override 一致）。
+    适用于外部传入的稀疏配置（如企业同步 spec.config）：补齐模板默认值
+    （如 react.subagents）且不丢弃外部配置的任何键。
+    """
+    if depth >= 4:
+        return target
+    result = copy.deepcopy(target)
+    for key, tmpl_val in template.items():
+        if key not in result:
+            result[key] = copy.deepcopy(tmpl_val)
+        elif isinstance(result[key], dict) and isinstance(tmpl_val, dict):
+            result[key] = fill_template_defaults(result[key], tmpl_val, depth + 1)
+    return result
+
+
+def load_yaml_dict(path: Path) -> dict[str, Any]:
+    """用 yaml.safe_load 读取 YAML 文件为 dict；不存在或无效时返回空 dict。"""
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_shipped_template_config_path() -> Path:
+    """包内 shipped 模板：jiuwenswarm/resources/config.yaml。"""
+    return Path(__file__).resolve().parent.parent / "resources" / "config.yaml"
+
+
+def _read_template_version_value(template_path: Path) -> Any:
+    """读取模板 config.yaml 顶层的 ``version``（缺省 ``1.0``）。"""
+    if not template_path.exists():
+        return 1.0
     try:
-        cf = get_config_file()
-        if not cf.exists():
-            return {}
         rt = YAML()
-        with open(cf, "r", encoding="utf-8") as f:
-            data = rt.load(f) or {}
-        raw = data.get("logging")
+        rt.preserve_quotes = True
+        with open(template_path, "r", encoding="utf-8") as f:
+            tpl = rt.load(f)
+        if isinstance(tpl, dict) and tpl.get("version") is not None:
+            return tpl["version"]
+    except OSError as e:
+        logger.warning("Failed to read template version from %s: %s", template_path, e)
+    return 1.0
+
+
+def _write_initial_user_override_config(template_src: Path, dest: Path) -> None:
+    """首次初始化用户目录时写入稀疏 override（仅 ``version``，取自模板）。"""
+    version_val = _read_template_version_value(template_src)
+    rt = YAML()
+    rt.preserve_quotes = True
+    rt.default_flow_style = False
+    rt.indent(mapping=2, sequence=4, offset=2)
+    rt.width = 4096
+    data = CommentedMap()
+    data["version"] = version_val
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
+        rt.dump(data, f)
+
+
+def migrate_legacy_user_config_if_needed() -> None:
+    """无 ``version`` 的旧版完整 config 迁移为稀疏 override：仅保留 permissions + version。
+
+    已有 ``version`` 的用户文件不修改。
+    """
+    cfg_path = get_config_file()
+    if not cfg_path.exists():
+        return
+    try:
+        rt = YAML()
+        rt.preserve_quotes = True
+        rt.default_flow_style = False
+        rt.indent(mapping=2, sequence=4, offset=2)
+        rt.width = 4096
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = rt.load(f)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            return
+        ver = data.get("version")
+        if ver is not None and str(ver).strip() != "":
+            return
+
+        package_root = _find_package_root()
+        tpl_file = (package_root / "resources" / "config.yaml") if package_root else None
+        version_val = _read_template_version_value(tpl_file) if tpl_file else 1.0
+
+        new_data = CommentedMap()
+        new_data["version"] = version_val
+        if "permissions" in data:
+            new_data["permissions"] = data["permissions"]
+
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            rt.dump(new_data, f)
+        logger.info(
+            "[jiuwenswarm] migrated legacy config.yaml to sparse override (schema version %s)",
+            version_val,
+        )
+    except OSError as e:
+        logger.warning("[jiuwenswarm] legacy config migration failed: %s", e)
+
+
+def _load_logging_config_from_yaml() -> dict[str, Any]:
+    """读取合并后的 logging 段（包内模板 + 用户 config.yaml override）。
+
+    仅用于 import-time ``setup_logger`` / 无 Repository 时的回退。
+    PersistentStore 权威源请走 :func:`reload_logging_levels`（storage 装配后），
+    避免在 ``utils`` 导入期拉起 ``gateway`` 包造成循环导入。
+    """
+    try:
+        template = load_yaml_dict(resolve_shipped_template_config_path())
+        override = load_yaml_dict(get_config_file())
+        merged = merge_template_with_override(template, override)
+        raw = merged.get("logging")
         if isinstance(raw, dict):
             return raw
     except Exception as e:
@@ -333,14 +512,15 @@ def _resolve_logging_levels(
         return base
 
     console = _coerce("console_level")
-    env_console = os.getenv("LOG_LEVEL")
-    if env_console:
-        console = _parse_log_level(env_console, console)
-
     gateway = _coerce("gateway")
     channel = _coerce("channel")
     agent_server = _coerce("agent_server")
     full = _coerce("full")
+
+    env_log_level = os.getenv("LOG_LEVEL")
+    if env_log_level:
+        env_level = _parse_log_level(env_log_level, console)
+        console = gateway = channel = agent_server = full = env_level
 
     if log_level_override is not None:
         v = _parse_log_level(log_level_override)
@@ -399,7 +579,7 @@ def get_user_workspace_dir() -> Path:
 
     Priority:
     1. Cached value (if already set via set_user_workspace_dir or previous call)
-    2. JIUWENSWARM_DATA_DIR environment variable (for multi-instance isolation)
+    2. ``JIUWENSWARM_DATA_DIR`` (or relay ``JIUWENCLAW_DATA_DIR``) for isolation
     3. get_user_home() / ".jiuwenswarm" (default instance)
 
     Also performs one-time migration from ~/.jiuwenclaw/ to ~/.jiuwenswarm/ if needed.
@@ -407,7 +587,9 @@ def get_user_workspace_dir() -> Path:
     global _workspace_base_dir
     if _workspace_base_dir is not None:
         return _workspace_base_dir
-    env_workspace = os.getenv("JIUWENSWARM_DATA_DIR")
+    env_workspace = (
+        os.getenv("JIUWENSWARM_DATA_DIR") or os.getenv("JIUWENCLAW_DATA_DIR") or ""
+    ).strip()
     if env_workspace:
         _workspace_base_dir = Path(env_workspace)
         return _workspace_base_dir
@@ -485,20 +667,22 @@ def _find_package_root() -> Path | None:
 def _resolve_preferred_language(
     config_yaml_dest: Path, explicit: Optional[str]
 ) -> str:
-    """确定初始化使用的语言：显式参数优先，否则读已复制的 config，默认 zh。"""
+    """确定初始化使用的语言：显式参数优先，否则读 override + 模板，默认 zh。"""
     if explicit is not None:
         lang = str(explicit).strip().lower()
         return lang if lang in ("zh", "en") else "zh"
-    if config_yaml_dest.exists():
-        try:
-            rt = YAML()
-            with open(config_yaml_dest, "r", encoding="utf-8") as f:
-                data = rt.load(f) or {}
-            lang = str(data.get("preferred_language") or "zh").strip().lower()
-            if lang in ("zh", "en"):
-                return lang
-        except Exception as e:
-            logger.error(f"Failed to load config.yaml: {e}")
+    # 稀疏 override 模式：先读 override，再读模板
+    for cfg_path in (config_yaml_dest, resolve_shipped_template_config_path()):
+        if cfg_path.exists():
+            try:
+                rt = YAML()
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = rt.load(f) or {}
+                lang = str(data.get("preferred_language") or "").strip().lower()
+                if lang in ("zh", "en"):
+                    return lang
+            except Exception as e:
+                logger.error(f"Failed to load config.yaml: {e}")
     return "zh"
 
 
@@ -545,10 +729,23 @@ def prompt_preferred_language() -> Optional[Literal["zh", "en"]]:
 
 def _get_builtin_skill_names() -> set[str]:
     """Get the set of built-in skill names from package resources."""
+    return get_builtin_skill_names()
+
+
+def get_builtin_skill_names() -> set[str]:
+    """Return official package builtin skill directory names."""
     builtin_skills_dir = get_builtin_skills_dir()
     if not builtin_skills_dir.exists():
         return set()
     return {item.name for item in builtin_skills_dir.iterdir() if item.is_dir()}
+
+
+def is_builtin_skill(skill_name: str) -> bool:
+    """Whether *skill_name* is an official package builtin skill."""
+    normalized = (skill_name or "").strip().lower()
+    if not normalized:
+        return False
+    return normalized in {name.lower() for name in get_builtin_skill_names()}
 
 
 def _update_skills_state_for_builtin(
@@ -976,6 +1173,40 @@ def cleanup_team_files(workspace_dir: Path) -> None:
                 logger.warning(f"[Cleanup] Failed to remove legacy team database file: {e}")
 
 
+def update_config() -> None:
+    """稀疏 override 模式：迁移旧版全量 config（无 version 字段）并清理 override 中模板已删除的字段。
+
+    - migrate_legacy_user_config_if_needed: 旧版全量 config → 稀疏 override
+    - 清理 override 中模板已不存在的字段（Remove 规则）
+    """
+    migrate_legacy_user_config_if_needed()
+
+    package_root = _find_package_root()
+    if not package_root:
+        raise RuntimeError("package root not found")
+
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    resources_dir = package_root / "resources"
+    config_yaml_src_candidates = [
+        resources_dir / "config.yaml",
+        package_root / "config" / "config.yaml",
+    ]
+    config_yaml_src = next((p for p in config_yaml_src_candidates if p.exists()), None)
+    if not config_yaml_src:
+        raise RuntimeError(
+            "config.yaml template not found; tried: "
+            + ", ".join(str(p) for p in config_yaml_src_candidates)
+        )
+
+    config_yaml_dest = workspace_dir / "config" / "config.yaml"
+    # 稀疏 override 模式：清理 override 中模板已删除的废弃字段
+    from jiuwenswarm.common.config import cleanup_override_against_template
+
+    cleanup_override_against_template(config_yaml_src, config_yaml_dest)
+
+
 def prepare_workspace(
     overwrite: bool = True,
     preferred_language: Optional[str] = None,
@@ -993,6 +1224,7 @@ def prepare_workspace(
     # 初始化累积结果（用于追踪所有复制操作）
     cumulative_diff = CopyDiffResult([], [], [])
     workspace_dir.mkdir(parents=True, exist_ok=True)
+    migrate_legacy_user_config_if_needed()
 
     # Migrate from legacy jiuwenclaw_workspace directory name to workspace
     _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir)
@@ -1047,13 +1279,7 @@ def prepare_workspace(
     config_yaml_dest = config_dest_dir / "config.yaml"
 
     if overwrite or not config_yaml_dest.exists():
-        with TrackCopyDiff(
-            dest=config_yaml_dest,
-            is_file=True,
-            cumulative=cumulative_diff,
-            overwrite=overwrite,
-        ):
-            shutil.copy2(config_yaml_src, config_yaml_dest)
+        _write_initial_user_override_config(config_yaml_src, config_yaml_dest)
 
     builtin_rules_src = resources_dir / "builtin_rules.yaml"
     builtin_rules_dest = config_dest_dir / "builtin_rules.yaml"
@@ -1095,23 +1321,19 @@ def prepare_workspace(
         ):
             shutil.copy2(env_template_src, env_dest)
 
-    # ----- model_routing JSON templates → config/routing_state/ -----
-    routing_state_dir = config_dest_dir / "routing_state"
-    routing_state_dir.mkdir(parents=True, exist_ok=True)
-    model_routing_src_dir = resources_dir / "model_routing"
-    if model_routing_src_dir.is_dir():
-        for mr_filename in ("classifier_mapper.json", "model_routing_privacy.json", "model_capability_map.json"):
-            mr_src = model_routing_src_dir / mr_filename
-            if mr_src.is_file():
-                mr_dst = routing_state_dir / mr_filename
-                if overwrite or not mr_dst.exists():
-                    shutil.copy2(mr_src, mr_dst)
+    # ----- copy runtime dirs (multi-tenant layout) -----
+    service_root = get_service_root_dir()
+    service_root.mkdir(parents=True, exist_ok=True)
+    (service_root / ".logs").mkdir(parents=True, exist_ok=True)
 
-    # ----- copy runtime dirs (new layout) -----
-    agent_root = workspace_dir / "agent"
+    agent_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+    if agent_workspace is None:
+        raise RuntimeError("failed to resolve default multi-tenant workspace")
+    agent_workspace.mkdir(parents=True, exist_ok=True)
+    (agent_workspace / ".checkpoint").mkdir(parents=True, exist_ok=True)
+    agent_root = agent_workspace / "agent"
+    agent_root.mkdir(parents=True, exist_ok=True)
     agent_sessions = agent_root / "sessions"
-    (agent_root / ".checkpoint").mkdir(parents=True, exist_ok=True)
-    (agent_root / ".logs").mkdir(parents=True, exist_ok=True)
 
     # ----- DeepAgent workspace (standard DeepAgents schema) -----
     deepagent_workspace = agent_root / "workspace"
@@ -1222,9 +1444,8 @@ def prepare_workspace(
     agent_sessions.mkdir(parents=True, exist_ok=True)
     default_project_workspace.mkdir(parents=True, exist_ok=True)
 
-    from jiuwenswarm.common.config import migrate_config_from_template, set_preferred_language_in_config_file
+    from jiuwenswarm.common.config import set_preferred_language_in_config_file
 
-    migrate_config_from_template(config_yaml_src, config_yaml_dest)
     set_preferred_language_in_config_file(config_yaml_dest, resolved_lang)
 
     # ----- 默认安装内置技能: skill-creator 和 swarmskill-creator -----
@@ -1234,6 +1455,8 @@ def prepare_workspace(
         overwrite=overwrite,
         cumulative_diff=cumulative_diff,
     )
+
+    _resolve_paths(force=True)
 
     return cumulative_diff
 
@@ -1371,11 +1594,11 @@ def init_user_workspace(
     return workspace_dir
 
 
-def _resolve_paths() -> None:
+def _resolve_paths(force=False) -> None:
     """Resolve and cache all paths."""
     global _initialized, _config_dir, _workspace_dir, _root_dir
 
-    if _initialized:
+    if not force and _initialized:
         return
 
     workspace_dir = get_user_workspace_dir()
@@ -1386,7 +1609,12 @@ def _resolve_paths() -> None:
     # 优先使用已初始化的用户工作区 (~/.jiuwenswarm)，
     # 保证源码运行与安装包运行后的读写路径完全一致。
     user_config_dir = workspace_dir / "config"
-    user_workspace_dir = workspace_dir / "agent" / "workspace"
+    # 多租户路径：service_default/agent_default/agent/workspace
+    multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+    if multi_tenant_workspace is not None:
+        user_workspace_dir = multi_tenant_workspace / "agent" / "workspace"
+    else:
+        user_workspace_dir = workspace_dir / "agent" / "workspace"
     if user_config_dir.exists():
         _root_dir = workspace_dir
         _config_dir = user_config_dir
@@ -1447,8 +1675,18 @@ def get_agent_workspace_dir() -> Path:
     It contains standard nodes like skills, memory, todo, messages, etc.
 
     Returns:
-        Path to agent workspace: ~/.jiuwenswarm/agent/workspace
+        Path to agent workspace:
+        ``~/.jiuwenswarm/service_default/agent_default/agent/workspace``
+        (or the request-bound tenant workspace when ContextVar is set).
     """
+    try:
+        from jiuwenswarm.server.runtime.tenant_context import get_bound_jiuwenclaw_workspace
+
+        bound = get_bound_jiuwenclaw_workspace()
+        if bound is not None:
+            return bound
+    except ImportError:
+        logger.debug("tenant_context unavailable for workspace bind", exc_info=True)
     return get_agent_root_dir() / "workspace"
 
 
@@ -1486,8 +1724,183 @@ def get_default_project_session_workspace_dir(session_id: str | None = None) -> 
     return workspace
 
 
+def get_prompt_attachment_dir() -> Path:
+    """Get the jiuwenswarm prompt attachment directory path."""
+
+    return get_agent_workspace_dir() / "prompt_attachment"
+
+
+def get_service_root_dir(service_id: str = "default") -> Path:
+    """Get the service-level directory path.
+
+    多租户架构下，service 级别存放共享数据（如日志）。
+    Path: ``~/.jiuwenswarm/service_{service_id}/``
+    """
+    sid = str(service_id or "default").strip() or "default"
+    return get_user_workspace_dir() / f"service_{sid}"
+
+
 def get_agent_root_dir() -> Path:
-    return get_user_workspace_dir() / "agent"
+    """Get the agent root directory path (multi-tenant default).
+
+    Path: ``~/.jiuwenswarm/service_default/agent_default/agent/``
+    (or the request-bound agent root when ContextVar is set).
+    """
+    try:
+        from jiuwenswarm.server.runtime.tenant_context import get_bound_agent_root
+
+        bound = get_bound_agent_root()
+        if bound is not None:
+            return bound
+    except ImportError:
+        logger.debug("tenant_context unavailable for agent root bind", exc_info=True)
+    return get_multi_tenant_user_workspace_dir("default", "default") / "agent"
+
+
+def get_agent_root_relative_dir() -> Path:
+    """Get the agent root relative path under a tenant workspace root."""
+    return Path("agent")
+
+
+def get_agent_workspace_relative_dir() -> Path:
+    """Get the agent workspace relative path under a tenant workspace root."""
+    return get_agent_root_relative_dir() / "workspace"
+
+
+_AGENT_WORKSPACE_DIR_NAMES = frozenset({"workspace", "jiuwenclaw_workspace"})
+
+
+def collapse_nested_agent_workspace_dir(path: Path | str) -> Path:
+    """Collapse ``.../workspace/workspace`` back to the agent workspace.
+
+    The agent workspace is ``.../agent/workspace`` (this project) or
+    ``.../agent/jiuwenclaw_workspace`` (upstream). PPT tooling historically
+    used ``{cwd}/workspace`` as the session parent, which nests a second
+    ``workspace`` directory when cwd is already the agent workspace.
+    """
+    resolved = Path(path).expanduser()
+    try:
+        resolved = resolved.resolve()
+    except OSError:
+        resolved = resolved.absolute()
+    parent_name = resolved.parent.name.lower()
+    if resolved.name.lower() == "workspace" and parent_name in _AGENT_WORKSPACE_DIR_NAMES:
+        return resolved.parent
+    return resolved
+
+
+def get_agent_sessions_relative_dir() -> Path:
+    """Get the agent sessions relative path under a tenant workspace root."""
+    return get_agent_root_relative_dir() / "sessions"
+
+
+def _normalize_tenant_id(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[str, str]:
+    """Require non-empty ``service_id`` and ``agent_id`` for path construction."""
+    sid = _normalize_tenant_id(service_id)
+    aid = _normalize_tenant_id(agent_id)
+    if not sid or not aid:
+        raise ValueError(
+            f"tenant id required: agent_id={agent_id!r}, service_id={service_id!r}"
+        )
+    return sid, aid
+
+
+def get_multi_tenant_user_workspace_dir(
+    service_id: str | None,
+    agent_id: str | None = None,
+) -> Path | None:
+    """Get multi-tenant user workspace directory path.
+
+    Path format: ``~/.jiuwenswarm/service_{service_id}/agent_{agent_id}``
+
+    Aligns with test/jiuwenclaw and OfficeClaw on-disk layout
+    (e.g. ``service_default/agent_office``).
+    """
+    if not service_id and not agent_id:
+        return None
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir = (
+        workspace_dir / f"service_{service_id}" if service_id else workspace_dir / "service"
+    )
+    workspace_dir = (
+        workspace_dir / f"agent_{agent_id}" if agent_id else workspace_dir / "agents"
+    )
+    return workspace_dir
+
+
+def resolve_tenant_env_ns(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> tuple[str, str]:
+    """Resolve ``(service_id, agent_id)``: explicit pair > bound env_ns > TypeError."""
+    from jiuwenswarm.common.local_env_config import (
+        get_bound_agent_env_ns,
+        normalize_env_ns_id,
+    )
+
+    if service_id is not None or agent_id is not None:
+        if service_id is None or agent_id is None:
+            raise TypeError(
+                "tenant scope requires both service_id and agent_id when either is passed"
+            )
+        sid = str(service_id).strip()
+        aid = str(agent_id).strip()
+        if not sid or not aid:
+            raise TypeError("tenant service_id/agent_id must be non-empty strings")
+        return normalize_env_ns_id(sid), normalize_env_ns_id(aid)
+    bound = get_bound_agent_env_ns()
+    if bound is not None:
+        return normalize_env_ns_id(bound[0]), normalize_env_ns_id(bound[1])
+    raise TypeError(
+        "tenant scope is required: pass service_id=... and agent_id=..., "
+        "or bind_agent_env_ns before resolving tenant paths"
+    )
+
+
+def get_tenant_agent_workspace_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """多租户 DeepAgent 工作区：``service_{sid}/agent_{aid}/agent/workspace``."""
+    sid, aid = resolve_tenant_env_ns(service_id, agent_id)
+    workspace = get_multi_tenant_user_workspace_dir(sid, aid)
+    if workspace is None:
+        raise TypeError(
+            f"invalid tenant for workspace path: service_id={sid!r}, agent_id={aid!r}"
+        )
+    return workspace / get_agent_workspace_relative_dir()
+
+
+# 兼容旧命名（上游 jiuwenclaw_workspace）
+get_tenant_agent_jiuwenclaw_workspace_dir = get_tenant_agent_workspace_dir
+
+
+def get_tenant_agent_skills_dirs(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> list[Path]:
+    """多租户 skills 目录（与 ``JiuWenSwarm`` / ``SkillManager`` 落盘路径一致）."""
+    workspace = get_tenant_agent_workspace_dir(service_id, agent_id)
+    return [workspace / "skills"]
+
+
+def get_multi_tenant_skill_dirs(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> list[Path]:
+    """Resolve the skills directory list for multi-tenant / single-tenant mode.
+
+    - Multi-tenant（提供 ``service_id`` / ``agent_id``）: returns
+      ``[service_{sid}/agent_{aid}/agent/workspace/skills]``.
+    - Single-tenant（均未提供）: returns ``[get_agent_skills_dir()]``.
+    """
+    if service_id or agent_id:
+        return get_tenant_agent_skills_dirs(service_id, agent_id)
+    return [get_agent_skills_dir()]
 
 
 def get_agent_home_dir() -> Path:
@@ -1516,413 +1929,99 @@ def get_agent_skills_dir() -> Path:
     return get_agent_workspace_dir() / "skills"
 
 
-# Last directory handed to openJiuWen's ``configure_global_skills_dir``. Kept so
-# the override is applied once instead of on every call, while a changed user
-# home (tests, named instances) still re-pins the library.
-_openjiuwen_skill_library: Path | None = None
+JIUWENSWARM_SHARED_SKILLS_DIRS_ENV = "JIUWENSWARM_SHARED_SKILLS_DIRS"
+# Relay still emits the legacy name; tip ingest remaps it to the canonical key.
+JIUWENCLAW_SHARED_SKILLS_DIRS_ENV = "JIUWENCLAW_SHARED_SKILLS_DIRS"
 
 
-def configure_skill_library() -> Path:
-    """Register the JiuWenSwarm Skill library as the process-wide single library.
+def parse_shared_skills_dirs_raw(raw: str) -> list[Path]:
+    """Parse SHARED_SKILLS_DIRS value into deduplicated absolute paths."""
+    text = (raw or "").strip()
+    if not text:
+        return []
 
-    openJiuWen teams resolve every member / team / rail Skill lookup through
-    ``openjiuwen.agent_teams.paths.global_skills_dir()``. Without this override it
-    falls back to ``~/.openjiuwen/workspace/skills`` and the two runtimes read
-    different libraries. Single-agent mode is unaffected: it already reads
-    :func:`get_agent_skills_dir` directly.
-
-    Idempotent; safe to call from any startup path. Call it before assembling any
-    team, member or rail so they all resolve the same physical directory.
-
-    Returns:
-        Path of the single Skill library.
-    """
-    global _openjiuwen_skill_library
-    skills_dir = get_agent_skills_dir()
-    if _openjiuwen_skill_library == skills_dir:
-        return skills_dir
-    try:
-        from openjiuwen.agent_teams.paths import configure_global_skills_dir
-    except ImportError as exc:
-        logger.warning("[SkillLibrary] openjiuwen paths unavailable, keeping default library: %s", exc)
-        return skills_dir
-    configure_global_skills_dir(skills_dir)
-    _openjiuwen_skill_library = skills_dir
-    return skills_dir
-
-
-def _is_directory_link(path: Path) -> bool:
-    """Return whether a path entry is a symlink or a Windows reparse point.
-
-    Windows directory junctions created by ``mklink /J`` are not symlinks: they
-    show up as ordinary directories unless the reparse-point attribute is read.
-
-    Args:
-        path: Entry to inspect.
-
-    Returns:
-        True when the entry is a link rather than a real directory.
-    """
-    if path.is_symlink():
-        return True
-    if sys.platform != "win32":
-        return False
-    try:
-        file_attributes = os.lstat(path).st_file_attributes
-    except (AttributeError, OSError):
-        return False
-    return bool(file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
-
-
-def _library_skill_names(library: Path) -> set[str]:
-    """Return the names of every valid Skill directory in the shared library.
-
-    Args:
-        library: The single Skill library directory.
-
-    Returns:
-        Set of Skill directory names; empty when the library is missing.
-    """
-    names: set[str] = set()
-    try:
-        entries = list(library.iterdir())
-    except OSError:
-        return names
-    for entry in entries:
-        if entry.is_dir() and (entry / "SKILL.md").is_file():
-            names.add(entry.name)
-    return names
-
-
-def _is_library_replica(entry: Path, library: Path) -> bool:
-    """Return whether a real directory is an untouched copy of a library Skill.
-
-    Sandboxed runtimes (e.g. the HarmonyOS app sandbox) forbid ``symlink(2)``
-    even inside the app's own files directory, so the legacy view layer fell back
-    to copying the Skill directory. Those copies are indistinguishable from links
-    except by content, and they are the only real directories the migration is
-    allowed to delete.
-
-    Args:
-        entry: Real directory inside a legacy view directory.
-        library: The single Skill library directory.
-
-    Returns:
-        True when the library holds a Skill of the same name and the same
-        ``SKILL.md`` bytes, meaning nothing would be lost by removing the copy.
-    """
-    source = library / entry.name
-    entry_md = entry / "SKILL.md"
-    source_md = source / "SKILL.md"
-    if not entry_md.is_file() or not source_md.is_file():
-        return False
-    try:
-        return entry_md.read_bytes() == source_md.read_bytes()
-    except OSError:
-        return False
-
-
-def _read_skill_view_names(view_dir: Path) -> set[str]:
-    """Return the Skill names a legacy view directory exposed.
-
-    The scan reports every directory-shaped entry, including one a user dropped
-    in by hand: the removal step needs to see those too, so it can keep them
-    instead of deleting them. Names that do not exist in the shared library are
-    filtered out again before anything is seeded from them, in
-    :func:`_seed_visibility_from_view`.
-
-    Args:
-        view_dir: Legacy ``skills/`` directory of a team or member workspace.
-
-    Returns:
-        Set of Skill names, covering links, junctions and sandbox copies alike.
-    """
-    names: set[str] = set()
-    try:
-        entries = list(view_dir.iterdir())
-    except OSError:
-        return names
-    for entry in entries:
-        if entry.name.startswith(".") or entry.name.startswith("_"):
+    dirs: list[Path] = []
+    seen: set[str] = set()
+    for part in [part.strip() for part in text.split(os.pathsep) if part.strip()]:
+        path = Path(part).expanduser().resolve()
+        key = str(path)
+        if key in seen:
             continue
-        if _is_directory_link(entry) or entry.is_dir():
-            names.add(entry.name)
-    return names
+        seen.add(key)
+        dirs.append(path)
+    return dirs
 
 
-def _remove_skill_view_entry(entry: Path, library: Path) -> bool:
-    """Remove one legacy view entry, never a real directory the user owns.
+def get_shared_agent_skills_dirs() -> list[Path]:
+    """Read shared skill roots from tip/env (OfficeClaw ``office-claw-skills`` etc.).
 
-    Only three shapes are removable: a POSIX symlink (``unlink``), a Windows
-    junction / reparse point (``os.rmdir`` removes the link, not its target), and
-    a sandbox fallback copy that still matches the library byte for byte. Any
-    other real directory is a Skill somebody put there by hand and is kept —
-    this judgement is the whole reason the legacy remover refused to ``rmtree``.
-
-    Args:
-        entry: Entry inside a legacy view directory.
-        library: The single Skill library directory.
-
-    Returns:
-        True when the entry was removed.
+    Reads canonical ``JIUWENSWARM_SHARED_SKILLS_DIRS``; ``read_env`` also
+    resolves relay ``JIUWENCLAW_SHARED_SKILLS_DIRS`` via product-key aliasing.
     """
-    try:
-        if entry.is_symlink():
-            entry.unlink()
-            return True
-        if _is_directory_link(entry):
-            # Junction: rmdir detaches the link and leaves the target intact.
-            os.rmdir(entry)
-            return True
-        if entry.is_file():
-            entry.unlink()
-            return True
-        if entry.is_dir() and _is_library_replica(entry, library):
-            shutil.rmtree(entry)
-            return True
-    except OSError as exc:
-        logger.warning("[SkillViewMigration] failed to remove legacy view entry %s: %s", entry, exc)
-        return False
-    logger.info("[SkillViewMigration] kept user-owned directory: %s", entry)
-    return False
+    from jiuwenswarm.common.local_env_config import read_env
+
+    raw = read_env(JIUWENSWARM_SHARED_SKILLS_DIRS_ENV, "")
+    if not raw or not raw.strip():
+        return []
+    return parse_shared_skills_dirs_raw(raw.strip())
 
 
-def _seed_visibility_from_view(
-    metadata_path: Path,
-    scope: str,
-    entity_id: str,
-    view_names: set[str],
-    library_names: set[str],
-) -> None:
-    """Seed a workspace visibility document from its legacy view directory.
+def merge_shared_skills_trusted_dirs(
+    trusted_dirs: list[str] | None = None,
+) -> list[str]:
+    """Union CLI ``trusted_dirs`` with shared skill roots for file_guard allow.
 
-    The seed is written at ``AUTHORITY_MIGRATION``, which ranks above the
-    default/config seeds every assembly path writes: the view directory records
-    what the workspace was *actually* allowed to see, a config seed only records
-    a default. The rank — not the call order — is what decides the outcome, so a
-    config-seeded document written earlier is replaced here instead of silently
-    winning, and a document already carrying an explicit authorization
-    (``AUTHORITY_EXPLICIT``) is never touched.
-
-    A view that covered the whole library — the common case, since the legacy
-    sync linked every valid Skill — is recorded as an empty allow list rather
-    than a frozen snapshot: an empty allow list means "inherit the library", so
-    Skills installed later stay visible.
-
-    Only names the library actually holds become a grant. A view directory can
-    also contain a directory somebody put there by hand, and such a name would
-    otherwise be written into the allow list forever: it can never resolve to a
-    Skill, but its presence turns the list from empty ("inherit the library")
-    into a restriction, permanently narrowing what the workspace may see. When
-    the intersection is empty there is no grant left to preserve and the
-    document is seeded unrestricted, exactly like an empty view.
-
-    Args:
-        metadata_path: Target ``skills-visibility.json`` path.
-        scope: ``member`` or ``team``.
-        entity_id: Member name or team name.
-        view_names: Skill names the legacy view exposed.
-        library_names: Skill names currently in the shared library.
+    Aligns GitCode !4622 ``file_guard.global`` whitelist: tip/overlay (via
+    ``get_shared_agent_skills_dirs``) ∪ ``os.environ``, pathsep-split.
+    ``PermissionInterruptRail.set_trusted_dirs`` replaces the list, so callers
+    must re-merge on every hot update.
     """
-    from openjiuwen.agent_teams.skill.visibility import AUTHORITY_MIGRATION, bootstrap_skill_visibility
+    merged: list[str] = []
+    seen: set[str] = set()
 
-    granted = view_names & library_names
-    unrestricted = not granted or granted >= library_names
-    allow: list[str] = [] if unrestricted else sorted(granted)
-    try:
-        bootstrap_skill_visibility(
-            metadata_path,
-            scope=scope,
-            entity_id=entity_id,
-            allow=allow,
-            bootstrapped_from="migration:symlinks",
-            authority=AUTHORITY_MIGRATION,
-        )
-    except OSError as exc:
-        logger.warning("[SkillViewMigration] failed to seed %s: %s", metadata_path, exc)
-
-
-def _remove_empty_skill_view(view_dir: Path, library: Path) -> None:
-    """Drop a ``skills/`` directory that exposes no Skill.
-
-    Older workspace schemas materialized an empty ``skills/`` directory in every
-    team and member workspace, complete with a ``.workspace`` marker file. It
-    grants nothing and no Skill lookup reads it, so it is removed rather than
-    migrated. Only the shapes :func:`_remove_skill_view_entry` accepts are
-    deleted, so a directory somebody put there by hand survives untouched and
-    the removal is simply skipped.
-
-    Args:
-        view_dir: The ``skills/`` directory of a team or member workspace.
-        library: The single Skill library directory.
-    """
-    try:
-        entries = list(view_dir.iterdir())
-    except OSError as exc:
-        logger.warning("[SkillViewMigration] failed to scan %s: %s", view_dir, exc)
-        return
-    for entry in entries:
-        if not _remove_skill_view_entry(entry, library):
+    def _add(raw: str) -> None:
+        text = str(raw).strip()
+        if not text:
             return
-    try:
-        view_dir.rmdir()
-    except OSError as exc:
-        logger.warning("[SkillViewMigration] failed to remove empty view dir %s: %s", view_dir, exc)
-
-
-def _migrate_one_skill_view(
-    *,
-    view_dir: Path,
-    metadata_path: Path,
-    scope: str,
-    entity_id: str,
-    library: Path,
-    library_names: set[str],
-) -> int:
-    """Migrate one legacy view directory into visibility metadata and drop it.
-
-    Metadata is written before anything is deleted: a partial cleanup then leaves
-    a correct document behind and the next run simply retries the removal.
-
-    A directory that exposes no Skill at all is a bare scaffold, not a legacy
-    view — older workspace schemas created an empty ``skills/`` in every team and
-    member workspace. It is still removed, but nothing is seeded from it (there
-    is no grant to preserve, and config bootstrap is the right source for such a
-    workspace) and it is not counted as a migrated view, so an empty scaffold
-    cannot keep reporting a migration that never happens.
-
-    Args:
-        view_dir: Legacy ``skills/`` directory of the workspace.
-        metadata_path: Target ``skills-visibility.json`` path.
-        scope: ``member`` or ``team``.
-        entity_id: Member name or team name.
-        library: The single Skill library directory.
-        library_names: Skill names currently in the shared library.
-
-    Returns:
-        1 when the workspace still carried a legacy view directory, 0 otherwise.
-    """
-    if not view_dir.is_dir():
-        return 0
-
-    view_names = _read_skill_view_names(view_dir)
-    if not view_names:
-        _remove_empty_skill_view(view_dir, library)
-        return 0
-
-    _seed_visibility_from_view(metadata_path, scope, entity_id, view_names, library_names)
-
-    kept = 0
-    try:
-        entries = list(view_dir.iterdir())
-    except OSError as exc:
-        logger.warning("[SkillViewMigration] failed to scan %s: %s", view_dir, exc)
-        return 1
-    for entry in entries:
-        if not _remove_skill_view_entry(entry, library):
-            kept += 1
-    if kept == 0:
         try:
-            view_dir.rmdir()
-        except OSError as exc:
-            logger.warning("[SkillViewMigration] failed to remove empty view dir %s: %s", view_dir, exc)
-    logger.info(
-        "[SkillViewMigration] migrated %s view: names=%d kept=%d -> %s",
-        scope,
-        len(view_names),
-        kept,
-        metadata_path,
-    )
-    return 1
+            text = str(Path(text).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            pass
+        if text in seen:
+            return
+        seen.add(text)
+        merged.append(text)
+
+    for item in trusted_dirs or []:
+        if item:
+            _add(str(item))
+    for path in get_shared_agent_skills_dirs():
+        _add(str(path))
+    for key in (
+        JIUWENSWARM_SHARED_SKILLS_DIRS_ENV,
+        JIUWENCLAW_SHARED_SKILLS_DIRS_ENV,
+    ):
+        for path in parse_shared_skills_dirs_raw(os.environ.get(key, "") or ""):
+            _add(str(path))
+    return merged
 
 
-def migrate_team_skill_views(library_dir: Path | None = None) -> int:
-    """Convert legacy per-workspace Skill view directories into visibility metadata.
-
-    Teams used to materialize a ``skills/`` directory inside every team and
-    member workspace, filled with directory links — or, on sandboxed runtimes
-    that forbid ``symlink(2)``, real copies — pointing at the shared library.
-    Skills now live in exactly one physical library and visibility is metadata,
-    so each view directory is read once, turned into the workspace's initial
-    allow list, and then removed. Single-agent workspaces are never scanned:
-    only ``agent_teams`` homes ever carried these view directories.
-
-    Idempotent: a second run writes no metadata, because the documents it wrote
-    already carry ``AUTHORITY_MIGRATION`` and a seed never overwrites its own
-    rank; it only retries removals that a user-owned directory kept alive.
-
-    Must run after :func:`configure_skill_library`, which pins the library this
-    scan compares against. It does *not* have to run before team assembly: the
-    migrated allow lists win over config-seeded ones by rank rather than by
-    ordering, so moving this call later can no longer silently widen a
-    workspace's Skill view (see :func:`_seed_visibility_from_view`).
-
-    Args:
-        library_dir: The single Skill library. Defaults to
-            :func:`get_agent_skills_dir`.
-
-    Returns:
-        Number of workspaces that still carried a legacy view directory.
-    """
-    library = Path(library_dir) if library_dir is not None else get_agent_skills_dir()
+def resolve_agent_registered_skill_dirs() -> list[Path]:
+    """Resolve skill dirs: request-bound override, shared tip dirs, else workspace."""
     try:
-        from openjiuwen.agent_teams.paths import (
-            get_agent_teams_home,
-            member_skill_visibility_path,
-            team_skill_visibility_path,
+        from jiuwenswarm.server.runtime.agent_adapter.session_skill_dirs import (
+            get_session_registered_skill_dirs,
         )
-        from openjiuwen.agent_teams.skill.visibility import SCOPE_MEMBER, SCOPE_TEAM
-    except ImportError as exc:
-        logger.warning("[SkillViewMigration] openjiuwen skill visibility unavailable: %s", exc)
-        return 0
 
-    teams_home = get_agent_teams_home()
-    if not teams_home.is_dir():
-        return 0
-
-    library_names = _library_skill_names(library)
-    migrated = 0
-    try:
-        team_dirs = sorted(entry for entry in teams_home.iterdir() if entry.is_dir())
-    except OSError as exc:
-        logger.warning("[SkillViewMigration] failed to scan %s: %s", teams_home, exc)
-        return 0
-
-    for team_dir in team_dirs:
-        team_name = team_dir.name
-        migrated += _migrate_one_skill_view(
-            view_dir=team_dir / "team-workspace" / "skills",
-            metadata_path=team_skill_visibility_path(team_name),
-            scope=SCOPE_TEAM,
-            entity_id=team_name,
-            library=library,
-            library_names=library_names,
-        )
-        workspaces_root = team_dir / "workspaces"
-        if not workspaces_root.is_dir():
-            continue
-        try:
-            member_dirs = sorted(entry for entry in workspaces_root.iterdir() if entry.is_dir())
-        except OSError as exc:
-            logger.warning("[SkillViewMigration] failed to scan %s: %s", workspaces_root, exc)
-            continue
-        for member_ws in member_dirs:
-            if not member_ws.name.endswith("_workspace"):
-                continue
-            member_name = member_ws.name[: -len("_workspace")]
-            if not member_name:
-                continue
-            migrated += _migrate_one_skill_view(
-                view_dir=member_ws / "skills",
-                metadata_path=member_skill_visibility_path(team_name, member_name),
-                scope=SCOPE_MEMBER,
-                entity_id=member_name,
-                library=library,
-                library_names=library_names,
-            )
-    if migrated:
-        logger.info("[SkillViewMigration] migrated %d legacy skill views", migrated)
-    return migrated
+        bound = get_session_registered_skill_dirs()
+    except Exception:
+        bound = None
+    if bound:
+        return [Path(p) for p in bound]
+    shared = get_shared_agent_skills_dirs()
+    if shared:
+        return shared
+    return [get_agent_skills_dir()]
 
 
 def get_interactions_dir() -> Path:
@@ -1935,8 +2034,98 @@ def get_interactions_dir() -> Path:
 
 
 def get_cron_jobs_path() -> Path:
-    """Canonical path for cron_jobs.json shared by gateway and agentserver."""
-    return get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
+    """Legacy global cron_jobs.json (pre-tenant Gateway). Prefer per-tenant helpers."""
+    return get_agent_home_dir() / "cron_jobs.json"
+
+
+def resolve_gateway_cron_jobs_path_template() -> str:
+    """Absolute path template for Gateway cron PersistentStore / CronJobStore."""
+    return str(
+        (
+            get_user_workspace_dir()
+            / "gateway"
+            / "cron"
+            / "service_{service_id}"
+            / "agent_{agent_id}"
+            / "cron_jobs.json"
+        ).resolve()
+    )
+
+
+def resolve_gateway_cron_jobs_path(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Gateway per-tenant cron store: ``gateway/cron/service_{sid}/agent_{aid}/cron_jobs.json``."""
+    sid = str(service_id or "default").strip() or "default"
+    aid = str(agent_id or "default").strip() or "default"
+    return Path(
+        resolve_gateway_cron_jobs_path_template().format(
+            service_id=sid,
+            agent_id=aid,
+        )
+    )
+
+
+def resolve_tenant_agent_root_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Resolve ``service_{sid}/agent_{aid}/agent``."""
+    sid, aid = resolve_tenant_env_ns(service_id, agent_id)
+    workspace = get_multi_tenant_user_workspace_dir(sid, aid)
+    if workspace is None:
+        raise TypeError(
+            f"invalid tenant for agent root: service_id={sid!r}, agent_id={aid!r}"
+        )
+    return workspace / "agent"
+
+
+def resolve_tenant_agent_workspace_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Resolve ``service_{sid}/agent_{aid}/agent/workspace``."""
+    return resolve_tenant_agent_root_dir(service_id, agent_id) / "workspace"
+
+
+def resolve_tenant_sessions_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Resolve ``service_{sid}/agent_{aid}/agent/sessions`` for a tenant pair."""
+    return resolve_tenant_agent_root_dir(service_id, agent_id) / "sessions"
+
+
+def resolve_cron_tenant_scope(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+    metadata: dict | None = None,
+    params: dict | None = None,
+    log_prefix: str = "[Cron]",
+) -> tuple[str, str]:
+    """Resolve cron tenant ids; missing values fall back to default/default."""
+    sid = service_id
+    aid = agent_id
+    if sid is None and isinstance(metadata, dict):
+        sid = metadata.get("service_id")
+    if aid is None and isinstance(metadata, dict):
+        aid = metadata.get("agent_id")
+    if sid is None and isinstance(params, dict):
+        sid = params.get("service_id")
+    if aid is None and isinstance(params, dict):
+        aid = params.get("agent_id")
+    sid_s = str(sid).strip() if sid is not None else ""
+    aid_s = str(aid).strip() if aid is not None else ""
+    if not sid_s or not aid_s:
+        logger.warning(
+            "%s missing service_id/agent_id; fallback to default/default (sid=%r aid=%r)",
+            log_prefix,
+            sid,
+            aid,
+        )
+    return sid_s or "default", aid_s or "default"
 
 
 def get_deepagent_todo_dir() -> Path:
@@ -2024,7 +2213,24 @@ def get_builtin_skills_dir() -> Path:
 
 
 def get_agent_sessions_dir() -> Path:
+    """Get sessions directory (bound tenant or ``service_default/agent_default``).
+
+    Path: ``~/.jiuwenswarm/service_default/agent_default/agent/sessions``
+    """
     return get_agent_root_dir() / "sessions"
+
+
+def get_agent_evolution_trajectories_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Get the evolution execution trajectories directory.
+
+    Path: ``service_{sid}/agent_{aid}/agent/evolution_trajectories``
+    """
+    if service_id is not None or agent_id is not None:
+        return resolve_tenant_agent_root_dir(service_id, agent_id) / "evolution_trajectories"
+    return get_agent_root_dir() / "evolution_trajectories"
 
 
 # 当前 git 分支解析（带短 TTL 缓存），用于 /resume 按分支过滤会话。
@@ -2066,35 +2272,47 @@ def resolve_git_branch(project_dir: str | None) -> str:
     return branch
 
 
-_legacy_migration_done: bool = False
-
-
-def _migrate_legacy_checkpoint_and_logs() -> None:
-    """One-time migration: move ~/.jiuwenswarm/.checkpoint and .logs to ~/.jiuwenswarm/agent/."""
-    global _legacy_migration_done
-    if _legacy_migration_done:
-        return
-    _legacy_migration_done = True
-
-    workspace = get_user_workspace_dir()
-    agent_root = workspace / "agent"
-
-    for name in (".checkpoint", ".logs"):
-        legacy = workspace / name
-        new_path = agent_root / name
-        if legacy.exists() and not new_path.exists():
-            agent_root.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(legacy), str(new_path))
-
-
 def get_checkpoint_dir() -> Path:
-    _migrate_legacy_checkpoint_and_logs()
-    return get_agent_root_dir() / ".checkpoint"
+    """Get the default checkpoint directory (agent_default).
+
+    Path: ``~/.jiuwenswarm/service_default/agent_default/.checkpoint``
+
+    Per-agent isolation uses ``set_checkpoint`` / ``get_multi_tenant_user_workspace_dir``.
+    """
+    workspace = get_multi_tenant_user_workspace_dir("default", "default")
+    if workspace:
+        return workspace / ".checkpoint"
+    return get_agent_root_dir().parent / ".checkpoint"
 
 
-def get_logs_dir() -> Path:
-    _migrate_legacy_checkpoint_and_logs()
-    return get_agent_root_dir() / ".logs"
+def _resolve_logs_service_id(service_id: str | None = None) -> str:
+    """Resolve service_id for logs: explicit > bound env_ns > default."""
+    if service_id is not None:
+        return str(service_id).strip() or "default"
+    try:
+        from jiuwenswarm.common.local_env_config import get_bound_agent_env_ns
+
+        ns = get_bound_agent_env_ns()
+        if ns is not None:
+            return str(ns[0]).strip() or "default"
+    except Exception:
+        logger.debug("resolve logs service_id from bound env_ns failed", exc_info=True)
+    return "default"
+
+
+def get_logs_dir(service_id: str | None = None) -> Path:
+    """Get the logs directory path (service-level).
+
+    Path: ``~/.jiuwenswarm/service_{sid}/.logs``
+
+    ``service_id`` 解析顺序：显式参数 > 当前 ``bind_agent_env_ns`` 的 sid > ``default``。
+    进程启动时的 FileHandler（``setup_logger``）通常无 bind，仍落在 ``service_default/.logs``。
+    """
+    log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
+    if log_root_path:
+        return Path(log_root_path).expanduser().resolve()
+    sid = _resolve_logs_service_id(service_id)
+    return get_service_root_dir(sid) / ".logs"
 
 
 def get_xy_tmp_dir() -> Path:
@@ -2106,25 +2324,6 @@ def get_xy_tmp_dir() -> Path:
 
 def get_env_file() -> Path:
     return get_config_dir() / ".env"
-
-
-def env_url(name: str, default: str) -> str:
-    """Read an endpoint URL from the environment, falling back when blank.
-
-    ``os.environ.get(name, default)`` only falls back when the key is absent.
-    The shipped ``.env`` template declares the endpoint overrides as empty
-    values and documents "leave blank to use official default URLs", so a
-    plain ``get`` would hand back an empty URL and the request would fail with
-    a message-less transport error. Treat unset and blank alike.
-
-    Args:
-        name: Environment variable name holding the endpoint override.
-        default: Official endpoint used when the variable is unset or blank.
-
-    Returns:
-        The configured endpoint URL, or ``default`` when unset or blank.
-    """
-    return os.environ.get(name, "").strip() or default
 
 
 def reset_free_search_runtime_flags() -> None:
@@ -2217,6 +2416,9 @@ def _fingerprint(value: str) -> str:
 # 导致跨日志关联失效（如 stream_logger._mask_secrets 先脱敏，_write_raw 再脱敏）。
 _ALREADY_MASKED_PATTERN = re.compile(rf"^{re.escape(_SENSITIVE_MASK)}(\(fp:[0-9a-f]{{8}}\))?$")
 
+# LogMaskingEngine 回退失败计数（避免在日志 Filter 热路径上静默吞异常）。
+_sanitize_engine_fallback_failures = 0
+
 
 def _is_already_masked(value: Any) -> bool:
     """判断 value 是否已是脱敏产物（纯掩码或带指纹），避免重复脱敏。"""
@@ -2248,6 +2450,26 @@ def _masked_with_fp(value: Any) -> str:
 def _sanitize_log_text(text: str) -> str:
     if not text:
         return text
+
+    # 企业版：若已从 Gateway DB 下发脱敏规则，优先走 LogMaskingEngine。
+    if is_enterprise():
+        try:
+            from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+
+            engine = LogMaskingEngine.get_instance()
+            if engine.uses_external_rules:
+                return engine.sanitize(text)
+        except Exception as exc:
+            # 回退到本地正则脱敏。不能走 logging：本函数会被 SensitiveDataFilter 调用，
+            # 写日志会递归进脱敏路径。仅首次 stderr 提示，避免静默吞掉异常。
+            global _sanitize_engine_fallback_failures
+            _sanitize_engine_fallback_failures += 1
+            if _sanitize_engine_fallback_failures == 1:
+                print(
+                    "[jiuwenswarm] LogMaskingEngine sanitize failed, "
+                    f"falling back to local masking: {exc!r}",
+                    file=sys.stderr,
+                )
 
     masked = text
     masked = _DATA_IMAGE_PATTERN.sub("data:image/*;base64,******", masked)
@@ -2398,23 +2620,379 @@ def install_source_record_masking() -> None:
     _source_record_masking_installed = True
 
 
+def _resolve_logging_format() -> str:
+    """解析日志格式（text/json/dual）。优先级 env > config.yaml > default(text)。"""
+    env_format = os.getenv("JIUWENSWARM_LOG_FORMAT")
+    if env_format:
+        v = env_format.strip().lower()
+        if v in ("text", "json", "dual"):
+            return v
+        logger.warning("无效的 JIUWENSWARM_LOG_FORMAT: '%s'，使用默认 'text'", env_format)
+    try:
+        cfg = _load_logging_config_from_yaml()
+        if cfg:
+            v = cfg.get("format")
+            if v and v in ("text", "json", "dual"):
+                return v
+            # 向后兼容：dual_output.enabled=true -> dual
+            dual = cfg.get("dual_output")
+            if isinstance(dual, dict) and dual.get("enabled") is True:
+                logger.warning("检测到旧配置 dual_output.enabled=true，已映射为 format=dual")
+                return "dual"
+    except Exception as e:
+        logger.warning("加载 config.yaml 的 logging.format 失败: %s", e)
+    return "text"
+
+
+def _resolve_output_switches() -> dict[str, bool]:
+    """解析 console_enabled/file_enabled。优先级 env > config.yaml > default(True)。"""
+    result = {"console_enabled": True, "file_enabled": True}
+
+    def _env_bool(env_name: str) -> bool | None:
+        raw = os.getenv(env_name)
+        if raw is None:
+            return None
+        v = raw.strip().lower()
+        if v in ("true", "1", "yes", "on"):
+            return True
+        if v in ("false", "0", "no", "off"):
+            return False
+        logger.warning("无效的 %s: '%s'，使用默认 true", env_name, raw)
+        return None
+
+    ce = _env_bool("JIUWENSWARM_LOG_CONSOLE_ENABLED")
+    fe = _env_bool("JIUWENSWARM_LOG_FILE_ENABLED")
+    try:
+        cfg = _load_logging_config_from_yaml()
+    except Exception:
+        cfg = {}
+    if ce is None and cfg:
+        ce = cfg.get("console_enabled")
+    if fe is None and cfg:
+        fe = cfg.get("file_enabled")
+    if isinstance(ce, bool):
+        result["console_enabled"] = ce
+    elif ce is not None:
+        logger.warning("config.yaml logging.console_enabled 非布尔: %s，使用默认 true", ce)
+    if isinstance(fe, bool):
+        result["file_enabled"] = fe
+    elif fe is not None:
+        logger.warning("config.yaml logging.file_enabled 非布尔: %s，使用默认 true", fe)
+    return result
+
+
+def _validate_json_config(config: dict) -> dict:
+    """验证 logging.json.* 字段。"""
+    if config.get("timestamp_format") not in ("text", "iso8601"):
+        logger.warning("无效 logging.json.timestamp_format，使用默认 'text'")
+        config["timestamp_format"] = "text"
+    if "include_component" in config and not isinstance(config["include_component"], bool):
+        logger.warning("无效 logging.json.include_component，使用默认 True")
+        config["include_component"] = True
+    if "sanitize_sensitive_data" in config and not isinstance(config["sanitize_sensitive_data"], bool):
+        logger.warning("无效 logging.json.sanitize_sensitive_data，使用默认 True")
+        config["sanitize_sensitive_data"] = True
+    if config.get("exc_info_style", "simple") not in ("simple", "full"):
+        config["exc_info_style"] = "simple"
+    return config
+
+
+def _resolve_json_config() -> dict[str, Any]:
+    """解析 logging.json 子段（带默认值 + 验证）。"""
+    default = {
+        "timestamp_format": "text",
+        "include_component": True,
+        "sanitize_sensitive_data": True,
+        "exc_info_style": "simple",
+    }
+    cfg = _load_logging_config_from_yaml()
+    if not cfg:
+        return default
+    json_cfg = cfg.get("json", {})
+    if not isinstance(json_cfg, dict):
+        return default
+    result = default.copy()
+    result.update(json_cfg)
+    return _validate_json_config(result)
+
+
+class JsonUserVisibleFormatter(jsonlogger.JsonFormatter if jsonlogger else logging.Formatter):
+    """JSON 格式化日志输出。
+
+    继承 pythonjsonlogger.JsonFormatter（缺失时降级为 logging.Formatter）。
+    字段顺序：timestamp → process → level → user_tag → user_id/domain_id/app_id →
+    logger → lineno → message → component → user_visible。
+    身份字段始终输出（null 便于聚合）。复用 dev-stable 的 _log_component_from_logger_name 与 _sanitize_log_text。
+    """
+
+    _FIELD_RENAME_MAP = {"asctime": "timestamp", "levelname": "level", "name": "logger"}
+
+    def __init__(self, timestamp_format: str = "text", include_component: bool = True,
+                 sanitize_sensitive_data: bool = True, exc_info_style: str = "simple", *args, **kwargs):
+        if jsonlogger is None:
+            fmt = kwargs.pop("fmt", "%(asctime)s %(levelname)s %(name)s %(message)s")
+            datefmt = kwargs.pop("datefmt", "%Y-%m-%d %H:%M:%S")
+            super().__init__(fmt, datefmt)
+        else:
+            fmt = "%(asctime)s %(levelname)s %(name)s %(message)s"
+            datefmt = "%Y-%m-%d %H:%M:%S"
+            kwargs["json_ensure_ascii"] = False
+            super().__init__(fmt, datefmt, *args, **kwargs)
+        self.timestamp_format = timestamp_format
+        self.include_component = include_component
+        self.sanitize_sensitive_data = sanitize_sensitive_data
+        self.exc_info_style = exc_info_style
+
+    def add_fields(self, log_record: dict, record: logging.LogRecord, message_dict: dict) -> None:
+        if jsonlogger is None:
+            return
+        super().add_fields(log_record, record, message_dict)
+        if "user_visible" in log_record:
+            del log_record["user_visible"]
+        for old, new in self._FIELD_RENAME_MAP.items():
+            if old in log_record:
+                log_record[new] = log_record.pop(old)
+        if "timestamp" in log_record and self.timestamp_format == "text":
+            ts = log_record["timestamp"]
+            if isinstance(ts, str):
+                try:
+                    dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    log_record["timestamp"] = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                except (ValueError, TypeError):
+                    log_record["timestamp"] = ts  # 解析失败保留原 ISO 字符串
+        ordered: OrderedDict = OrderedDict()
+        if "timestamp" in log_record:
+            ordered["timestamp"] = log_record["timestamp"]
+        ordered["process"] = record.process
+        if "level" in log_record:
+            ordered["level"] = log_record["level"]
+        user_tag = getattr(record, "user_tag", None)
+        if user_tag:
+            ordered["user_tag"] = user_tag
+        ordered["user_id"] = getattr(record, "user_id", None)
+        ordered["domain_id"] = getattr(record, "domain_id", None)
+        ordered["app_id"] = getattr(record, "app_id", None)
+        if "logger" in log_record:
+            ordered["logger"] = log_record["logger"]
+        ordered["lineno"] = record.lineno
+        if "message" in log_record:
+            ordered["message"] = log_record["message"]
+        for k, v in log_record.items():
+            if k not in ordered:
+                ordered[k] = v
+        log_record.clear()
+        log_record.update(ordered)
+        if self.include_component:
+            log_record["component"] = _log_component_from_logger_name(record.name)
+        uv = getattr(record, "user_visible", None)
+        if uv in ("critical", "progress"):
+            log_record["user_visible"] = uv
+        elif uv is not None:
+            logger.warning("无效 user_visible 值: '%s'，期望 'critical'/'progress'", uv)
+        if self.sanitize_sensitive_data and "message" in log_record:
+            log_record["message"] = _sanitize_log_text(log_record["message"])
+        if "exc_info" in log_record and log_record["exc_info"] and self.exc_info_style == "simple":
+            ei = log_record["exc_info"]
+            if isinstance(ei, tuple) and len(ei) >= 2:
+                log_record["exc_info"] = f"{ei[0].__name__}: {ei[1]}"
+
+
+class LoggingTagConfig:
+    """用户可见性 Tag 配置。env > config.yaml > default(True)。"""
+
+    user_visible: bool = True
+    user_progress_visible: bool = True
+    _env_prefix: str = "JIUWENSWARM_LOG_"
+    _skip_env_load: bool = False
+
+    def __init__(self, skip_env_load: bool = False):
+        self._skip_env_load = skip_env_load
+        self._load_config()
+
+    def _load_config(self) -> None:
+        if self._skip_env_load:
+            self.user_visible = True
+            self.user_progress_visible = True
+            return
+        base_uv = True
+        base_upv = True
+        self.user_visible = self._load_from_env("USER_VISIBLE", base_uv)
+        self.user_progress_visible = self._load_from_env("USER_PROGRESS_VISIBLE", base_upv)
+        if os.getenv(f"{self._env_prefix}USER_VISIBLE") is None:
+            self.user_visible = self._load_from_yaml("user_visible", self.user_visible)
+        if os.getenv(f"{self._env_prefix}USER_PROGRESS_VISIBLE") is None:
+            self.user_progress_visible = self._load_from_yaml("user_progress_visible", self.user_progress_visible)
+
+    def _load_from_env(self, key: str, default: bool) -> bool:
+        raw = os.getenv(f"{self._env_prefix}{key}")
+        if raw is None:
+            return default
+        v = raw.strip().lower()
+        if v in ("true", "1", "yes", "on"):
+            return True
+        if v in ("false", "0", "no", "off"):
+            return False
+        logger.warning("无效的 env %s: '%s'，使用默认 %s", f"{self._env_prefix}{key}", raw, default)
+        return default
+
+    @staticmethod
+    def _load_from_yaml(key: str, default: bool) -> bool:
+        try:
+            cfg = _load_logging_config_from_yaml()
+            if not cfg:
+                return default
+            tags = cfg.get("tags")
+            v = tags.get(key) if isinstance(tags, dict) else None
+            if v is None:
+                return default
+            if isinstance(v, bool):
+                return v
+            logger.warning("config.yaml logging.tags.%s 非布尔: %s，使用默认 %s", key, v, default)
+            return default
+        except Exception as e:
+            logger.warning("加载 logging.tags.%s 失败: %s，使用默认 %s", key, e, default)
+            return default
+
+    def is_user_visible_enabled(self) -> bool:
+        return self.user_visible
+
+    def is_user_progress_visible_enabled(self) -> bool:
+        return self.user_progress_visible
+
+
+class UserVisibleTagFilter(logging.Filter):
+    """按 record.user_visible 设 record.user_tag（[USER]/[USER_PROGRESS]/""）。从不丢日志，幂等。"""
+
+    def __init__(self, tag_config: Optional[LoggingTagConfig] = None):
+        super().__init__()
+        self.tag_config = tag_config if tag_config is not None else LoggingTagConfig()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        uv = getattr(record, "user_visible", None)
+        if uv == "critical" and self.tag_config.is_user_visible_enabled():
+            record.user_tag = "[USER] "
+        elif uv == "progress" and self.tag_config.is_user_progress_visible_enabled():
+            record.user_tag = "[USER_PROGRESS] "
+        else:
+            record.user_tag = ""
+        return True
+
+
+class IdentityFieldFilter(logging.Filter):
+    """从 IdentityStore（contextvar）读身份，塞 record.user_id/domain_id/app_id。始终放行。
+
+    import 链失败时身份降级为 null——日志 filter 绝不因自身 import 失败而中断日志
+    （Python logging 不兜 filter 异常，filter 抛会透传到 logger.* 调用方）。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            from jiuwenswarm.extensions.identity_provider import IdentityStore
+            identity = IdentityStore.get_identity()
+        except Exception:
+            identity = None
+        if identity is not None:
+            record.user_id = identity.user_id
+            record.domain_id = identity.domain_id
+            record.app_id = identity.app_id
+        else:
+            record.user_id = None
+            record.domain_id = None
+            record.app_id = None
+        return True
+
+
+class IdentityTextFormatter(logging.Formatter):
+    """文本 Formatter：构建 record.identity = " user_id=.. domain_id=.. app_id=.. "（null 输出 "null"）。"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        parts = []
+        for field in ("user_id", "domain_id", "app_id"):
+            v = getattr(record, field, None)
+            parts.append(f"{field}={v if v is not None else 'null'}")
+        record.identity = " " + " ".join(parts) + " "
+        return super().format(record)
+
+
+_log_queue: _queue.SimpleQueue | None = None
+_log_listener: QueueListener | None = None
+# respect_handler_level is Python 3.12+; cache once for setup_logger.
+_SUPPORTS_RESPECT_HANDLER_LEVEL: bool = sys.version_info >= (3, 12)
+
+
+def _iter_log_output_handlers() -> list[logging.Handler]:
+    """Return handlers that actually write logs (listener targets when queued)."""
+    if _log_listener is not None:
+        return list(_log_listener.handlers)
+    return list(logging.getLogger("jiuwenswarm").handlers)
+
+
+def flush_queued_logs() -> None:
+    """Block until queued log records are written (tests / graceful drain).
+
+    Stops the ``QueueListener`` (which drains the queue through the sentinel),
+    flushes target handlers, then restarts the listener so logging keeps working.
+    """
+    global _log_listener
+    listener = _log_listener
+    if listener is None or _log_queue is None:
+        return
+    targets = list(listener.handlers)
+    listener.stop()
+    for handler in targets:
+        try:
+            handler.flush()
+        except OSError as exc:
+            logger.warning(
+                "[jiuwenswarm] log handler flush failed during drain: %s",
+                exc,
+            )
+    if _SUPPORTS_RESPECT_HANDLER_LEVEL:
+        _log_listener = QueueListener(
+            _log_queue,
+            *targets,
+            respect_handler_level=True,
+        )
+    else:
+        _log_listener = QueueListener(_log_queue, *targets)
+    _log_listener.start()
+
+
 def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     """配置 ``jiuwenswarm`` 根日志：控制台 + 分组件文件 + 汇总 full.log。
 
-    各模块应使用 ``logging.getLogger(__name__)``，分文件规则：
-    - ``jiuwenswarm.channel.*`` → channel.log
-    - ``jiuwenswarm.agents.*`` 或 ``jiuwenswarm.server.*`` → agent_server.log
-    - 其余 ``jiuwenswarm.*``（含 ``jiuwenswarm.app``、gateway、evolution、utils 等）→ gateway.log
+    扩展功能（迁移自 enterprise_dev）：
+    - format（text/json/dual）：env JIUWENSWARM_LOG_FORMAT 或 config.yaml logging.format
+    - console_enabled/file_enabled：输出开关
+    - JSON：JsonUserVisibleFormatter（.json 文件）
+    - 身份字段：IdentityFieldFilter（每 handler）
+    - user_visible Tag：UserVisibleTagFilter（text/dual）
+    保留 dev-stable 既有的 SensitiveDataFilter + install_source_record_masking 双层脱敏。
 
-    所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenswarm/agent/.logs/``。
-
-    级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
-    （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
+    File/console handlers are served by a ``QueueListener`` thread so emit/flush
+    I/O does not block the asyncio event loop. Source-record masking still runs
+    on the caller thread (covers third-party loggers outside this root).
     """
-    logs_root = get_logs_dir()
+    global _log_queue, _log_listener
+
+    # Stop previous listener (supports repeated setup_logger calls).
+    if _log_listener is not None:
+        _log_listener.stop()
+        for old_h in _log_listener.handlers:
+            old_h.close()
+        _log_listener = None
+    _log_queue = _queue.SimpleQueue()
+    listener_targets: list[logging.Handler] = []
+
+    log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
+    logs_root = Path(log_root_path).expanduser().resolve() if log_root_path else get_logs_dir()
     logs_root.mkdir(parents=True, exist_ok=True)
 
     levels = _resolve_logging_levels(log_level)
+    log_format = _resolve_logging_format()
+    output_switches = _resolve_output_switches()
+    console_enabled = output_switches["console_enabled"]
+    file_enabled = output_switches["file_enabled"]
 
     root = logging.getLogger("jiuwenswarm")
     root.setLevel(levels.logger)
@@ -2423,18 +3001,38 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         handler.close()
         root.removeHandler(handler)
 
-    formatter = logging.Formatter(
-        fmt="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    json_config = _resolve_json_config() if log_format in ("json", "dual") else {}
+    # 文本格式串（含 process/identity/user_tag/lineno）
+    text_fmt = (
+        "%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s "
+        "%(identity)s%(user_tag)s%(name)s:%(lineno)d: %(message)s"
     )
+
+    if log_format in ("json", "dual"):
+        json_formatter = JsonUserVisibleFormatter(
+            timestamp_format=json_config.get("timestamp_format", "text"),
+            include_component=json_config.get("include_component", True),
+            sanitize_sensitive_data=json_config.get("sanitize_sensitive_data", True),
+            exc_info_style=json_config.get("exc_info_style", "simple"),
+        )
+        text_formatter = IdentityTextFormatter(fmt=text_fmt, datefmt="%Y-%m-%d %H:%M:%S")
+    else:
+        text_formatter = IdentityTextFormatter(fmt=text_fmt, datefmt="%Y-%m-%d %H:%M:%S")
+        json_formatter = None
+
     privacy_filter = SensitiveDataFilter()
+    tag_config = LoggingTagConfig() if log_format in ("text", "dual", "json") else None
+    identity_filter = IdentityFieldFilter()
 
     def _add_rotating(
         filename: str,
         level: int,
-        name_filter: Optional[_ComponentNameFilter] = None,
+        name_filter: Optional[logging.Filter] = None,
         custom_formatter: Optional[logging.Formatter] = None,
+        use_json: bool = False,
     ) -> None:
+        if not file_enabled:
+            return
         h = SafeRotatingFileHandler(
             filename=logs_root / filename,
             maxBytes=_LOG_FILE_MAX_BYTES,
@@ -2442,28 +3040,72 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             encoding="utf-8",
         )
         h.setLevel(level)
-        h.setFormatter(custom_formatter if custom_formatter is not None else formatter)
+        if custom_formatter is not None:
+            h.setFormatter(custom_formatter)
+        elif use_json and json_formatter is not None:
+            h.setFormatter(json_formatter)
+        else:
+            h.setFormatter(text_formatter)
         h.addFilter(privacy_filter)
+        h.addFilter(identity_filter)
+        if tag_config:
+            h.addFilter(UserVisibleTagFilter(tag_config))
         if name_filter is not None:
             h.addFilter(name_filter)
-        root.addHandler(h)
+        listener_targets.append(h)
 
-    _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
-    _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
-    _add_rotating("agent_server.log", levels.agent_server,
-        _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
-    _add_rotating("full.log", levels.full, None)
-    json_formatter = JsonOnlyFormatter()
-    _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
+    def _component_files(ext: str, use_json: bool) -> None:
+        _add_rotating(f"gateway.{ext}", levels.gateway, _ComponentNameFilter("gateway"), use_json=use_json)
+        _add_rotating(f"channel.{ext}", levels.channel, _ComponentNameFilter("channel"), use_json=use_json)
+        _add_rotating(f"agent_server.{ext}", levels.agent_server,
+                      _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]),
+                      use_json=use_json)
+        _add_rotating(f"full.{ext}", levels.full, None, use_json=use_json)
 
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(levels.console)
-    stream_handler.setFormatter(formatter)
-    stream_handler.addFilter(privacy_filter)
-    root.addHandler(stream_handler)
+    if log_format == "text":
+        _component_files("log", use_json=False)
+    elif log_format == "json":
+        _component_files("json", use_json=True)
+    elif log_format == "dual":
+        _component_files("log", use_json=False)
+        _component_files("json", use_json=True)
 
-    # 源头脱敏：覆盖 jiuwenswarm 命名空间之外的第三方 logger（openjiuwen/openai/
-    # httpx 等），在 LogRecord 创建时统一脱敏，保证任何来源的 api_key 都不明文落盘。
+    # permissions.log 始终用 JsonOnlyFormatter
+    _add_rotating("permissions.log", levels.agent_server,
+                  _ComponentNameFilter("permissions"), JsonOnlyFormatter())
+
+    # 控制台
+    if console_enabled:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(levels.console)
+        if log_format == "json":
+            stream_handler.setFormatter(json_formatter)
+        else:
+            stream_handler.setFormatter(text_formatter)
+        if tag_config:
+            stream_handler.addFilter(UserVisibleTagFilter(tag_config))
+        stream_handler.addFilter(identity_filter)
+        stream_handler.addFilter(privacy_filter)
+        listener_targets.append(stream_handler)
+
+    # QueueHandler keeps file I/O / flush off the asyncio event-loop thread.
+    if listener_targets:
+        queue_handler = QueueHandler(_log_queue)
+        queue_handler.setLevel(logging.NOTSET)
+        root.addHandler(queue_handler)
+        if _SUPPORTS_RESPECT_HANDLER_LEVEL:
+            _log_listener = QueueListener(
+                _log_queue,
+                *listener_targets,
+                respect_handler_level=True,
+            )
+        else:
+            for target in listener_targets:
+                target.addFilter(lambda record, handler=target: record.levelno >= handler.level)
+            _log_listener = QueueListener(_log_queue, *listener_targets)
+        _log_listener.start()
+
+    # 保留 dev-stable 既有的源头脱敏（与 handler 层 SensitiveDataFilter 双保险）
     install_source_record_masking()
     return root
 
@@ -2555,5 +3197,475 @@ def wait_for_pid_exit(pid: int, timeout: float = 60.0) -> None:
     logger.warning("process %d did not exit within %.1f seconds", pid, timeout)
 
 
+
+_FILE_HANDLER_LEVEL_MAP: dict[str, str] = {
+    "gateway.log": "gateway",
+    "gateway.json": "gateway",
+    "channel.log": "channel",
+    "channel.json": "channel",
+    "agent_server.log": "agent_server",
+    "agent_server.json": "agent_server",
+    "full.log": "full",
+    "full.json": "full",
+    "permissions.log": "agent_server",
+}
+
+
+def update_log_levels(
+    log_level: Optional[str] = None,
+    *,
+    console_level: Optional[str] = None,
+    gateway: Optional[str] = None,
+    channel: Optional[str] = None,
+    agent_server: Optional[str] = None,
+    full: Optional[str] = None,
+) -> logging.Logger:
+    """运行时动态更新 ``jiuwenswarm`` 根日志及各 handler 的级别，无需重建 handler。"""
+    levels = _resolve_logging_levels(log_level)
+
+    if console_level is not None:
+        levels = replace(levels, console=_parse_log_level(console_level, levels.console))
+    if gateway is not None:
+        levels = replace(levels, gateway=_parse_log_level(gateway, levels.gateway))
+    if channel is not None:
+        levels = replace(levels, channel=_parse_log_level(channel, levels.channel))
+    if agent_server is not None:
+        levels = replace(levels, agent_server=_parse_log_level(agent_server, levels.agent_server))
+    if full is not None:
+        levels = replace(levels, full=_parse_log_level(full, levels.full))
+
+    logger_level = min(levels.gateway, levels.channel, levels.agent_server, levels.full)
+    levels = replace(levels, logger=logger_level)
+
+    root = logging.getLogger("jiuwenswarm")
+    root.setLevel(levels.logger)
+
+    # File/console handlers live on the QueueListener after setup_logger.
+    for h in _iter_log_output_handlers():
+        if isinstance(h, SafeRotatingFileHandler):
+            fname = Path(h.baseFilename).name
+            attr = _FILE_HANDLER_LEVEL_MAP.get(fname)
+            if attr is not None:
+                h.setLevel(getattr(levels, attr))
+        elif isinstance(h, logging.StreamHandler):
+            h.setLevel(levels.console)
+
+    return root
+
+
+_LOGGING_CONFIG_TABLE = "logging_config"
+
+
+def _logging_config_row_to_dict(obj: dict[str, Any] | Any) -> dict[str, Any]:
+    if isinstance(obj, dict):
+        return {
+            "level": obj.get("level", "INFO"),
+            "console_level": obj.get("console_level"),
+            "gateway": obj.get("gateway"),
+            "channel": obj.get("channel"),
+            "agent_server": obj.get("agent_server"),
+            "full": obj.get("full"),
+        }
+    return {
+        "level": getattr(obj, "level", "INFO"),
+        "console_level": getattr(obj, "console_level", None),
+        "gateway": getattr(obj, "gateway", None),
+        "channel": getattr(obj, "channel", None),
+        "agent_server": getattr(obj, "agent_server", None),
+        "full": getattr(obj, "full", None),
+    }
+
+
+def apply_logging_config_payload(payload: dict[str, Any] | None) -> None:
+    """将 DB 行 / WS payload 转为 :func:`update_log_levels` 调用。"""
+    if not payload or payload.get("op") == "delete":
+        update_log_levels()
+        return
+
+    kwargs: dict[str, Any] = {}
+    if payload.get("level") is not None:
+        kwargs["log_level"] = str(payload["level"])
+    for key in ("console_level", "gateway", "channel", "agent_server", "full"):
+        if payload.get(key) is not None:
+            kwargs[key] = str(payload[key])
+    update_log_levels(**kwargs)
+
+
+async def reload_logging_levels() -> None:
+    """从权威存储加载 logging 配置并刷新**本进程**日志级别。
+
+    优先级：PersistentStore Repository → config.yaml（非 AgentRuntime）→ Gateway DB（企业 AgentServer）。
+    """
+    try:
+        from jiuwenswarm.gateway.config.logging.access import (
+            get_logging_body_in_config,
+            get_logging_config_repository,
+        )
+
+        if get_logging_config_repository() is not None:
+            body = await get_logging_body_in_config()
+            apply_logging_config_payload(body if body else {"op": "delete"})
+            return
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[logging_config] repository reload failed: %s",
+            exc,
+            exc_info=True,
+        )
+
+    if not is_enterprise():
+        update_log_levels()
+        return
+    try:
+        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+
+        jid = gateway_db.resolve_jiuwenclaw_id()
+        if not jid:
+            update_log_levels()
+            return
+
+        rows = await gateway_db.list_records(
+            _LOGGING_CONFIG_TABLE,
+            filters={"jiuwenclaw_id": jid},
+        )
+        row = rows[0] if rows else None
+        apply_logging_config_payload(
+            _logging_config_row_to_dict(row) if row is not None else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[logging_config_db] logging_config read failed: %s",
+            exc,
+            exc_info=True,
+        )
+        update_log_levels()
+
+
+
+class AsyncLRUCache:
+    """带过期时间的 LRU 缓存（异步并发安全）."""
+
+    def __init__(self, max_size: int = 100, ttl_seconds: int = 600) -> None:
+        self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: str) -> Any | None:
+        """获取缓存值，如果不存在或已过期则返回 None."""
+        async with self._lock:
+            if key not in self._cache:
+                return None
+
+            value, timestamp = self._cache[key]
+            if time.time() - timestamp > self._ttl:
+                self._cache.pop(key, None)
+                return None
+
+            self._cache.move_to_end(key)
+            return value
+
+    async def put(self, key: str, value: Any) -> None:
+        """存入缓存值，如果超过容量则淘汰最久未使用的."""
+        async with self._lock:
+            if key in self._cache:
+                self._cache.pop(key)
+            elif len(self._cache) >= self._max_size:
+                self._cache.popitem(last=False)
+
+            self._cache[key] = (value, time.time())
+
+    async def remove(self, key: str) -> None:
+        """删除缓存项."""
+        async with self._lock:
+            self._cache.pop(key, None)
+
+    async def clear(self) -> None:
+        """清空缓存."""
+        async with self._lock:
+            self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def values(self) -> list[Any]:
+        """返回当前缓存值快照（同步，不做 TTL 清理）."""
+        return [value for value, _ts in self._cache.values()]
+
+    async def keys(self) -> list[str]:
+        async with self._lock:
+            now = time.time()
+            expired_keys = [
+                key for key, (_, timestamp) in self._cache.items()
+                if now - timestamp > self._ttl
+            ]
+            for key in expired_keys:
+                del self._cache[key]
+            return list(self._cache.keys())
+
+
 logger = logging.getLogger(__name__)
 setup_logger()
+
+
+_TOOL_ARGS_LOG_MAX_DEFAULT = 480
+
+
+def _truncate_tool_args_log_fragment(text: str, *, full_detail: bool) -> str:
+    if full_detail or len(text) <= _TOOL_ARGS_LOG_MAX_DEFAULT:
+        return text
+    return text[:_TOOL_ARGS_LOG_MAX_DEFAULT] + "..."
+
+
+def _log_tool_args_repair_stage(
+    *,
+    stage: str,
+    before_raw: str,
+    outcome: Literal["success", "failed"],
+    after_dict: Optional[dict] = None,
+    error: Optional[str] = None,
+) -> None:
+    full_detail = logger.isEnabledFor(logging.DEBUG)
+    before_shown = _truncate_tool_args_log_fragment(before_raw, full_detail=full_detail)
+    if outcome == "success":
+        after_raw = (
+            json.dumps(after_dict, ensure_ascii=False)
+            if isinstance(after_dict, dict)
+            else ""
+        )
+        after_shown = _truncate_tool_args_log_fragment(after_raw, full_detail=full_detail)
+        logger.info(
+            "[fix_json_arguments] stage=%s outcome=success before=%s after=%s",
+            stage,
+            before_shown,
+            after_shown,
+        )
+    else:
+        err_shown = _truncate_tool_args_log_fragment(error or "", full_detail=full_detail)
+        logger.warning(
+            "[fix_json_arguments] stage=%s outcome=failed before=%s error=%s",
+            stage,
+            before_shown,
+            err_shown,
+        )
+
+
+def _fix_missing_quotes(json_str: str) -> str:
+    s = json_str.strip()
+
+    s = re.sub(
+        r':\s+([A-Za-z]:/[^\{\[]*?)(?=\s*[,\}\]])',
+        lambda m: f': "{m.group(1)}"',
+        s
+    )
+
+    s = re.sub(
+        r':\s+(?!"|true|false|null|\d+|{|\[|:|"|[A-Za-z]:/)([^\s,\}\[\]""]+?)(?=\s*[,}\]])',
+        lambda m: f': "{m.group(1)}"',
+        s
+    )
+
+    s = re.sub(
+        r'{\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*:',
+        r'{"\1":',
+        s
+    )
+
+    return s
+
+
+def fix_json_arguments(arguments: str | dict) -> str | dict:
+    if not isinstance(arguments, str):
+        return arguments
+
+    s = arguments.strip()
+
+    if not s:
+        return {}
+
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+
+    full_detail = logger.isEnabledFor(logging.DEBUG)
+
+    try:
+        import json_repair
+
+        repaired = json_repair.loads(s)
+    except Exception as exc:
+        _log_tool_args_repair_stage(
+            stage="json_repair",
+            before_raw=s,
+            outcome="failed",
+            error=str(exc),
+        )
+    else:
+        if isinstance(repaired, dict):
+            _log_tool_args_repair_stage(
+                stage="json_repair",
+                before_raw=s,
+                outcome="success",
+                after_dict=repaired,
+            )
+            return repaired
+        _log_tool_args_repair_stage(
+            stage="json_repair",
+            before_raw=s,
+            outcome="failed",
+            error=f"repaired_not_object:{type(repaired).__name__}",
+        )
+
+    fixed = _fix_missing_quotes(s)
+    if fixed != s:
+        try:
+            result = json.loads(fixed)
+        except json.JSONDecodeError as exc:
+            _log_tool_args_repair_stage(
+                stage="rule_fix",
+                before_raw=s,
+                outcome="failed",
+                error=str(exc),
+            )
+        else:
+            _log_tool_args_repair_stage(
+                stage="rule_fix",
+                before_raw=s,
+                outcome="success",
+                after_dict=result,
+            )
+            return result
+    else:
+        _log_tool_args_repair_stage(
+            stage="rule_fix",
+            before_raw=s,
+            outcome="failed",
+            error="no_structural_change_from_rules",
+        )
+
+    before_final = _truncate_tool_args_log_fragment(s, full_detail=full_detail)
+    logger.warning(
+        "[fix_json_arguments] outcome=failed_all_stages before=%s error=all_repair_attempts_exhausted",
+        before_final,
+    )
+    return s
+
+
+class AsyncLRUCache:
+    """带可选过期时间与容量上限的 LRU 缓存（异步并发安全）.
+
+    ``max_size=None`` / ``ttl_seconds=None`` 表示不启用对应限制。
+    """
+
+    def __init__(
+        self,
+        max_size: int | None = None,
+        ttl_seconds: int | None = None,
+    ) -> None:
+        self._cache: OrderedDict[Hashable, tuple[Any, float]] = OrderedDict()
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+        self._lock = asyncio.Lock()
+
+    def _is_expired(self, timestamp: float) -> bool:
+        if self._ttl is None:
+            return False
+        return time.time() - timestamp > self._ttl
+
+    async def get(self, key: Hashable) -> Any | None:
+        """获取缓存值，如果不存在或已过期则返回 None.
+
+        命中时会刷新访问时间（滑动过期：自最后一次 get/put 起算 ttl）。
+        """
+        async with self._lock:
+            if key not in self._cache:
+                return None
+
+            value, timestamp = self._cache[key]
+            if self._is_expired(timestamp):
+                self._cache.pop(key, None)
+                return None
+
+            # 刷新访问时间并移动到末尾（最近使用）
+            self._cache[key] = (value, time.time())
+            self._cache.move_to_end(key)
+            return value
+
+    async def put(self, key: Hashable, value: Any) -> None:
+        """存入缓存值，如果超过容量则淘汰最久未使用的."""
+        async with self._lock:
+            if key in self._cache:
+                self._cache.pop(key)
+            elif self._max_size is not None and len(self._cache) >= self._max_size:
+                # 淘汰最久未使用的（头部）
+                self._cache.popitem(last=False)
+
+            self._cache[key] = (value, time.time())
+
+    async def touch_if_same(self, key: Hashable, value: Any) -> bool:
+        """若 key 存在且缓存值与 value 为同一对象，则刷新访问时间.
+
+        用于请求结束时续约 TTL，避免无条件 put 用旧实例覆盖并发创建的新实例。
+        同一对象仍挂在 cache 上时，即使时间戳已过期也会续期（执行期间无 get 触达）。
+        """
+        async with self._lock:
+            if key not in self._cache:
+                return False
+
+            cached_value, _timestamp = self._cache[key]
+            if cached_value is not value:
+                return False
+
+            self._cache[key] = (value, time.time())
+            self._cache.move_to_end(key)
+            return True
+
+    async def remove(self, key: Hashable) -> None:
+        """删除缓存项."""
+        async with self._lock:
+            self._cache.pop(key, None)
+
+    async def clear(self) -> None:
+        """清空缓存."""
+        async with self._lock:
+            self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def snapshot_values_nowait(self) -> list[Any]:
+        """Return cached values for sync callers (best-effort, no async lock).
+
+        Entries are stored as ``(value, timestamp)``; malformed entries are skipped.
+        """
+        values: list[Any] = []
+        for entry in self._cache.values():
+            if not isinstance(entry, tuple) or len(entry) < 1:
+                continue
+            values.append(entry[0])
+        return values
+
+    async def keys(self) -> list[Hashable]:
+        async with self._lock:
+            if self._ttl is not None:
+                expired_keys = [
+                    key
+                    for key, (_, timestamp) in self._cache.items()
+                    if self._is_expired(timestamp)
+                ]
+                for key in expired_keys:
+                    del self._cache[key]
+            return list(self._cache.keys())
+
+
+def normalize_tenant_scope_id(value: str | None, *, default: str = "default") -> str:
+    """Normalize and validate a tenant scope ID (service_id / agent_id)."""
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    if "__" in text:
+        raise ValueError(f"tenant scope ID must not contain '__': {text!r}")
+    return text
