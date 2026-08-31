@@ -2307,6 +2307,12 @@ function AppContent({
         const pendingAgentSelection = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.agentSelectionIntent ?? { kind: 'keep' as const };
         useSessionStore.getState().setAgentSelectionIntent(newSid, pendingAgentSelection);
         useSessionStore.getState().clearAgentSelectionIntent(NEW_CONVERSATION_ID);
+        // Swarmflow 开关同样按 session 存，必须在 removeRuntime('new') 之前搬到真实会话，
+        // 否则 NEW_CONVERSATION_ID 的 runtime 被删后读到 undefined，chat.send 不带 enable_swarmflow=true。
+        const newConvSwarmflow = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
+        if (newConvSwarmflow?.enableSwarmflow) {
+          useSessionStore.getState().setSwarmflowActive(newSid, true, newConvSwarmflow.swarmflowBudget);
+        }
         pendingNewConversationRef.current = false;
         useSessionStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         // Plan 开关是按 session 存的。欢迎页上开关记在 'new' 名下，这里必须搬到真实
@@ -2324,13 +2330,6 @@ function AppContent({
           });
         }
         usePlanStore.getState().removeRuntime(NEW_CONVERSATION_ID);
-        // Swarmflow 开关同样按 session 存，欢迎页上开的必须搬到真实会话，
-        // 否则 sendMessage 取到的是新会话默认值 false，chat.send 不带 enable_swarmflow=true。
-        const newConvSwarmflow = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
-        if (newConvSwarmflow?.enableSwarmflow) {
-          useSessionStore.getState().setSwarmflowActive(newSid, true, newConvSwarmflow.swarmflowBudget);
-        }
-        useSessionStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         useWorkspaceStore.getState().upsertSession(createdSession, { isNew: true });
         sessionIdsCreatedInThisPageRef.current.add(newSid);
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
