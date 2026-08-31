@@ -57,7 +57,6 @@ export interface NormalizedTrajectoryAttributes {
   usageReasoningTokens?: bigint
   usageCacheReadTokens?: bigint
   usageCacheCreationTokens?: bigint
-  usageTotalTokens?: bigint
   inputCost?: number
   outputCost?: number
   totalCost?: number
@@ -154,10 +153,8 @@ interface NormalizedMessage {
 
 const LEGACY = {
   openJiuwenSessionId: 'openjiuwen.session_id',
-  providerName: 'gen_ai.system',
   responseFinishReason: 'gen_ai.response.finish_reason',
   responseTimeToFirstTokenMs: 'gen_ai.response.time_to_first_token_ms',
-  usageTotalTokens: 'gen_ai.usage.total_tokens',
   toolCallId: 'gen_ai.tool.id',
   toolCallArguments: 'gen_ai.tool.input',
   toolCallResult: 'gen_ai.tool.output',
@@ -699,7 +696,6 @@ export function normalizeTrajectoryAttributes(
   ]))
   assign(target, 'providerName', resolveString(raw, [
     STANDARD_ATTRIBUTES.providerName,
-    LEGACY.providerName,
   ]))
   assign(target, 'requestId', resolveString(raw, [
     OPENJIUWEN_ATTRIBUTES.requestId,
@@ -785,11 +781,6 @@ export function normalizeTrajectoryAttributes(
   assign(target, 'usageCacheCreationTokens', resolveNonNegativeInt64(raw, [
     STANDARD_ATTRIBUTES.usageCacheCreationTokens,
   ]))
-  // Totals have no standard attribute of their own.
-  assign(target, 'usageTotalTokens', resolveNonNegativeInt64(raw, [
-    LEGACY.usageTotalTokens,
-  ]))
-
   assign(target, 'inputCost', resolveNonNegativeNumber(raw, [
     OPENJIUWEN_ATTRIBUTES.inputCost,
   ]))

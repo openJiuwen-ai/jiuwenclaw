@@ -32,7 +32,9 @@ def _record(
         "openjiuwen.execution.subject.id": subject_id,
         "gen_ai.usage.input_tokens": input_tokens,
         "gen_ai.usage.output_tokens": 1,
-        "gen_ai.usage.total_tokens": input_tokens + 1,
+        "gen_ai.usage.cache_read.input_tokens": input_tokens // 2,
+        "gen_ai.usage.cache_tokens": 999998,
+        "gen_ai.usage.total_tokens": 999999,
     }
     raw_json = json.dumps({
         "resourceSpans": [{
@@ -104,6 +106,8 @@ async def test_session_usage_partitions_subjects_and_uses_physical_identity(
         (item["trace_id"], item["inference_id"]): item for item in items
     }
     assert len(by_identity) == 3
+    assert by_identity[("1" * 32, "shared")]["usage"]["total"] == 11
+    assert by_identity[("1" * 32, "shared")]["usage"]["cacheRead"] == 5
     assert by_identity[("1" * 32, "main-next")]["cumulative_usage"]["input"] == 15
     assert by_identity[("2" * 32, "shared")]["cumulative_usage"]["input"] == 20
 

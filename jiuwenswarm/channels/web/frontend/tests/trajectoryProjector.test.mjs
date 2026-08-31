@@ -42,6 +42,15 @@ function setStringAttribute(span, key, value) {
   current.value = { stringValue: value };
 }
 
+function setIntAttribute(span, key, value) {
+  const current = span.attributes.find(attribute => attribute.key === key);
+  if (current === undefined) {
+    span.attributes.push({ key, value: { intValue: String(value) } });
+    return;
+  }
+  current.value = { intValue: String(value) };
+}
+
 function structuredMessage(role, content) {
   return { role, parts: [{ type: 'text', content }] };
 }
@@ -355,7 +364,11 @@ test('system and external user lead pre-model tools while generated context foll
 });
 
 test('standard and OpenJiuwen fields win over conflicting legacy aliases', async () => {
-  const snapshot = await projectFixture('core-contract-records.json');
+  const records = await fixtureRecords('core-contract-records.json');
+  const inference = spansOf(records).find(span => span.name === 'llm.call');
+  assert.ok(inference);
+  setIntAttribute(inference, 'gen_ai.usage.total_tokens', 999);
+  const snapshot = projectOtelTrajectory(records);
   const request = snapshot.requests?.[0];
   const assistant = cellsOf(snapshot).find(cell => cell.kind === 'message');
 
@@ -366,7 +379,26 @@ test('standard and OpenJiuwen fields win over conflicting legacy aliases', async
   assert.equal(request.recordedFacts?.correlation?.sessionId, 'core-session');
   assert.deepEqual(request.recordedFacts?.response?.finishReasons, ['tool_calls']);
   assert.equal(request.usage?.input, 0);
+  assert.equal(request.usage?.cacheRead, 3);
+  assert.equal(request.usage?.cacheWrite, 2);
+  assert.equal(request.usage?.output, 7);
+  assert.equal(request.usage?.total, 7);
   assert.equal(assistant?.text, 'Core answer');
+});
+
+test('unknown request model falls back to the recorded response model', async () => {
+  const records = await fixtureRecords('core-contract-records.json');
+  const inference = spansOf(records).find(span => span.name === 'llm.call');
+  assert.ok(inference);
+  setStringAttribute(inference, 'gen_ai.request.model', 'unknown');
+  setStringAttribute(inference, 'gen_ai.response.model', 'openai/Qwen3.7-Plus');
+
+  const snapshot = projectOtelTrajectory(records);
+  const request = snapshot.requests?.[0];
+
+  assert.ok(request);
+  assert.equal(request.model, 'openai/Qwen3.7-Plus');
+  assert.equal(request.requestConfig?.model, 'openai/Qwen3.7-Plus');
 });
 
 test('schema-v2 context events preserve occurrence identity and never read Langfuse fields', () => {

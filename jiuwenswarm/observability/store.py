@@ -1917,12 +1917,11 @@ def _request_usage_fact(
         return None
     subject_id = str(attributes.get("openjiuwen.execution.subject.id") or "main").strip()
     usage_keys = {
-        "input": ("gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens"),
-        "cacheRead": ("gen_ai.usage.cache_read.input_tokens", "gen_ai.usage.cache_tokens"),
+        "input": ("gen_ai.usage.input_tokens",),
+        "cacheRead": ("gen_ai.usage.cache_read.input_tokens",),
         "cacheWrite": ("gen_ai.usage.cache_creation.input_tokens",),
-        "output": ("gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens"),
-        "reasoning": ("gen_ai.usage.reasoning.output_tokens", "gen_ai.usage.reasoning_tokens"),
-        "total": ("gen_ai.usage.total_tokens",),
+        "output": ("gen_ai.usage.output_tokens",),
+        "reasoning": ("gen_ai.usage.reasoning.output_tokens",),
     }
     usage: dict[str, int] = {}
     for output_key, attribute_keys in usage_keys.items():
@@ -1940,6 +1939,12 @@ def _request_usage_fact(
             continue
         if 0 <= value <= _MAX_SQLITE_INTEGER:
             usage[output_key] = value
+    input_tokens = usage.get("input")
+    output_tokens = usage.get("output")
+    if input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+        if total_tokens <= _MAX_SQLITE_INTEGER:
+            usage["total"] = total_tokens
     return {
         "trace_id": trace_id,
         "inference_id": inference_id,

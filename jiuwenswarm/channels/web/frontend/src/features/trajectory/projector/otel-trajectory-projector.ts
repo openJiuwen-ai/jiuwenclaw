@@ -343,9 +343,17 @@ function partText(parts: readonly StructuredPart[], type: string): string | unde
   return text === '' ? undefined : text
 }
 
+function knownModel(...values: readonly (string | undefined)[]): string | undefined {
+  return values.find(value => (
+    value !== undefined
+    && value.trim() !== ''
+    && value.trim().toLowerCase() !== 'unknown'
+  ))
+}
+
 function requestConfig(attributes: NormalizedTrajectoryAttributes): TrajectoryRequestConfig {
   const provider = attributes.providerName ?? 'unknown'
-  const model = attributes.requestModel ?? attributes.responseModel ?? 'unknown'
+  const model = knownModel(attributes.requestModel, attributes.responseModel) ?? 'unknown'
   const stop = attributes.requestStopSequences
   const purpose = attributes.requestPurpose
   const reasoningEffort = attributes.requestReasoningLevel
@@ -524,7 +532,8 @@ function usage(attributes: NormalizedTrajectoryAttributes): TrajectoryUsage {
   const cacheWrite = nonNegativeSafeInteger(attributes.usageCacheCreationTokens)
   const output = nonNegativeSafeInteger(attributes.usageOutputTokens)
   const reasoning = nonNegativeSafeInteger(attributes.usageReasoningTokens)
-  const total = nonNegativeSafeInteger(attributes.usageTotalTokens)
+  const rawTotal = input === undefined || output === undefined ? undefined : input + output
+  const total = rawTotal !== undefined && Number.isSafeInteger(rawTotal) ? rawTotal : undefined
   return {
     ...(input === undefined ? {} : { input }),
     ...(cacheRead === undefined ? {} : { cacheRead }),
@@ -1310,7 +1319,7 @@ function requestFor(
     retry: nonNegativeSafeInteger(span.attributes.requestRetryCount),
     maxRetries: nonNegativeSafeInteger(span.attributes.requestMaxRetries),
     provider: span.attributes.providerName,
-    model: span.attributes.requestModel ?? span.attributes.responseModel,
+    model: knownModel(span.attributes.requestModel, span.attributes.responseModel),
     requestConfig: requestConfig(span.attributes),
     recordedFacts: facts,
     usage: usageValue,
