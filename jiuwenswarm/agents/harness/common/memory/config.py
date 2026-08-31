@@ -167,14 +167,7 @@ async def reload_memory_config_from_gateway_db() -> dict[str, Any]:
     try:
         from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 
-        jid = gateway_db.resolve_jiuwenclaw_id()
-        if not jid:
-            return apply_memory_config_payload({"op": "delete"})
-
-        rows = await gateway_db.list_records(
-            MEMORY_CONFIG_TABLE,
-            filters={"jiuwenclaw_id": jid},
-        )
+        rows = await gateway_db.list_records(MEMORY_CONFIG_TABLE)
         row = rows[0] if rows else None
         body = row.get("body") if isinstance(row, dict) else None
         if isinstance(body, dict) and body:
@@ -556,15 +549,7 @@ async def reload_task_memory_config_from_gateway_db() -> None:
     try:
         from jiuwenswarm.server.runtime.enterprise_config import gateway_db
 
-        jid = gateway_db.resolve_jiuwenclaw_id()
-        if not jid:
-            _task_memory_config_db_cache = None
-            return
-
-        rows = await gateway_db.list_records(
-            "task_memory_config",
-            filters={"jiuwenclaw_id": jid},
-        )
+        rows = await gateway_db.list_records("task_memory_config")
         row = rows[0] if rows else None
         if row is not None:
             _task_memory_config_db_cache = {

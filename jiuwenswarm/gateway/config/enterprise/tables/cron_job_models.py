@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""企业级定时任务表 ``cron_job``（按 ``jiuwenclaw_id`` 实例隔离）。"""
+"""企业级定时任务表 ``cron_job``（Gateway 本地库，按 job_id 唯一）。"""
 
 from __future__ import annotations
 
@@ -21,9 +21,6 @@ CRON_JOB_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
-        ColumnDefinition("service_id", "string", length=64, nullable=False, default="default"),
-        ColumnDefinition("agent_id", "string", length=64, nullable=False, default="default"),
         ColumnDefinition("job_id", "string", length=64, nullable=False),
         ColumnDefinition(
             "service_id", "string", length=256, nullable=False, default="default"
@@ -53,14 +50,14 @@ CRON_JOB_TABLE_DEF = TableDefinition(
         ColumnDefinition("data", "json", nullable=True),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id", "service_id", "agent_id", "job_id"], unique=True),
-        # 该索引暂时注释掉：jiuwenclaw_id(64)+group_id(256)+bot_id(256)+user_id(256)
-        # 在 utf8mb4 下共 3328 字节，超过 MySQL 索引键上限 3072 字节。
+        IndexDefinition(["job_id"], unique=True),
+        # 该索引暂时注释掉：group_id(256)+bot_id(256)+user_id(256)
+        # 在 utf8mb4 下共 3072 字节，接近 MySQL 索引键上限。
         # 缩短 group_id/bot_id/user_id 列长度或改用前缀索引后再启用。
-        # IndexDefinition(["jiuwenclaw_id", "group_id", "bot_id", "user_id"]),
-        IndexDefinition(["jiuwenclaw_id", "group_id", "bot_id"]),
-        IndexDefinition(["jiuwenclaw_id", "user_id"]),
-        IndexDefinition(["jiuwenclaw_id", "enabled", "expired", "next_run_at"]),
+        # IndexDefinition(["group_id", "bot_id", "user_id"]),
+        IndexDefinition(["group_id", "bot_id"]),
+        IndexDefinition(["user_id"]),
+        IndexDefinition(["enabled", "expired", "next_run_at"]),
     ],
 )
 

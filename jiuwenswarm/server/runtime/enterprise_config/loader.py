@@ -238,7 +238,6 @@ async def load_effective_enterprise_config(
         agent_template=agent_template_row,
         instance_agent_resource=resource_row,
         debug={
-            "jiuwenclaw_id": gateway_db.resolve_jiuwenclaw_id(),
             "group_id": ctx.group_id,
             "bot_id": ctx.bot_id,
             "user_id": ctx.user_id,

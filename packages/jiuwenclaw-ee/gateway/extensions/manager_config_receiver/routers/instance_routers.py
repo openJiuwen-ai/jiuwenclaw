@@ -28,7 +28,7 @@ async def instance_data_lifecycle(
             status_code=400, detail=f"unsupported instance_data_lifecycle.op: {op!r}"
         )
     try:
-        result = await InstanceDataLifecycleService().purge(sync.jiuwenclaw_id)
+        result = await InstanceDataLifecycleService().purge()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=sync_write_data(sync, result))

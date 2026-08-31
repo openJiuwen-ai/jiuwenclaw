@@ -66,12 +66,11 @@ class YamlMapChannelCodec:
 class DbRowChannelCodec:
     """enterprise：``channel_config`` 表行的编解码。
 
-    业务配置在 ``config`` JSON 列；``channel_id`` / ``jiuwenclaw_id`` 作主键。
+    业务配置在 ``config`` JSON 列；主键为 ``channel_id``（每网关独立 DB）。
 
     表行示例::
 
         {
-            "jiuwenclaw_id": "inst-1",  # 由 instance_id 注入
             "channel_id": "web",
             "channel_name": "web",
             "channel_type": "web",
@@ -82,13 +81,11 @@ class DbRowChannelCodec:
     """
 
     def __init__(self, *, instance_id: str = "") -> None:
-        self._instance_id = str(instance_id or "").strip()
+        _ = instance_id  # 兼容旧构造参数；不再写入行键
 
-    def identity(self, channel_id: str) -> dict[str, Any]:
-        key: dict[str, Any] = {"channel_id": str(channel_id)}
-        if self._instance_id:
-            key["jiuwenclaw_id"] = self._instance_id
-        return key
+    @staticmethod
+    def identity(channel_id: str) -> dict[str, Any]:
+        return {"channel_id": str(channel_id)}
 
     @staticmethod
     def from_record(record: dict[str, Any]) -> ChannelConfig:
@@ -103,9 +100,10 @@ class DbRowChannelCodec:
             status=str(record.get("status") or "active"),
         )
 
-    def to_record(self, config: ChannelConfig) -> dict[str, Any]:
+    @staticmethod
+    def to_record(config: ChannelConfig) -> dict[str, Any]:
         channel_id = config.channel_id
-        row: dict[str, Any] = {
+        return {
             "channel_id": channel_id,
             "channel_name": config.channel_name or channel_id,
             "channel_type": config.channel_type or channel_id,
@@ -113,14 +111,10 @@ class DbRowChannelCodec:
             "config": dict(config.body),
             "status": config.status or "active",
         }
-        if self._instance_id:
-            row["jiuwenclaw_id"] = self._instance_id
-        return row
 
     def to_updates(self, config: ChannelConfig) -> dict[str, Any]:
         record = self.to_record(config)
         record.pop("channel_id", None)
-        record.pop("jiuwenclaw_id", None)
         return record
 
 

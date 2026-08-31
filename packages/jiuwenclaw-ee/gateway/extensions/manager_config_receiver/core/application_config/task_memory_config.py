@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 def _row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row.get("id"),
-        "jiuwenclaw_id": row.get("jiuwenclaw_id"),
         "enabled": row.get("enabled", False),
         "llm_model": row.get("llm_model", ""),
         "embedding_model": row.get("embedding_model", ""),
@@ -77,11 +76,9 @@ class TaskMemoryConfigService:
 
     async def upsert(
         self,
-        jiuwenclaw_id: str,
         request: dict[str, Any] | None = None,
         **fields: Any,
     ) -> dict[str, Any] | None:
-        _ = jiuwenclaw_id
         payload = dict(request or {})
         payload.update({k: v for k, v in fields.items() if v is not None or k in fields})
         # HTTP body 可能直接摊平字段，也可能嵌套 task_memory
@@ -89,11 +86,7 @@ class TaskMemoryConfigService:
             payload = dict(payload["task_memory"])
         return await _upsert_task_memory_config_record(payload)
 
-    async def delete(self, jiuwenclaw_id: str) -> None:
-        _ = jiuwenclaw_id
+    async def delete(self) -> None:
         repo = require_enterprise_repository(_TABLE)
         await repo.delete()
-        logger.info(
-            "[ManagerConfigReceiver] task_memory_config deleted jiuwenclaw_id=%s",
-            jiuwenclaw_id,
-        )
+        logger.info("[ManagerConfigReceiver] task_memory_config deleted")

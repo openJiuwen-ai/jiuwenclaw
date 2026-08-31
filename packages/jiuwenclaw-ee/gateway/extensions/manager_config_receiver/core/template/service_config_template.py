@@ -10,6 +10,7 @@ from typing import Any
 
 from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
 from jiuwenswarm.gateway.config.enterprise.tables.template_models import SERVICE_CONFIG_TEMPLATE_TABLE_DEF
+
 from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import parse_iso_datetime, utc_now
 from ...schemas.template_schemas import ServiceConfigTemplateUpdateRequest
@@ -111,12 +112,10 @@ async def delete_service_config_template(
 def _build_row_from_template(
     template: dict[str, Any],
     *,
-    jiuwenclaw_id: str,
     now: datetime,
 ) -> dict[str, Any]:
     template_uuid = _normalize_template_id(template.get("template_id"))
     return {
-        "jiuwenclaw_id": jiuwenclaw_id,
         "template_id": template_uuid,
         "template_name": str(template["template_name"]).strip(),
         "description": template.get("description"),
@@ -210,15 +209,13 @@ def _build_row_from_template(
 
 async def _upsert_service_config_template_from_sync(
     repo: EnterpriseRecordRepository,
-    template: dict[str, Any],
-    *,
-    jiuwenclaw_id: str,
+    template: dict[str, Any]
 ) -> None:
     now = utc_now()
     tid = _normalize_template_id(template.get("template_id"))
     existing = await _get_row_for_instance(repo, tid)
     row_data = _build_row_from_template(
-        template, jiuwenclaw_id=jiuwenclaw_id, now=now
+        template, now=now
     )
     if existing is None:
         await repo.create(row_data)
@@ -228,7 +225,7 @@ async def _upsert_service_config_template_from_sync(
         # existing 可能是 ISO 字符串；asyncpg 要求 datetime
         row_data["created_at"] = parse_iso_datetime(created_at) or now
     updates = {
-        k: v for k, v in row_data.items() if k not in ("jiuwenclaw_id", "template_id")
+        k: v for k, v in row_data.items() if k not in ("template_id",)
     }
     updates["updated_at"] = utc_now()
     await repo.update({"template_id": tid}, updates)
@@ -236,9 +233,7 @@ async def _upsert_service_config_template_from_sync(
 
 async def _sync_service_config_templates_records(
     repo: EnterpriseRecordRepository,
-    templates: list[dict[str, Any]],
-    *,
-    jiuwenclaw_id: str,
+    templates: list[dict[str, Any]]
 ) -> dict[str, Any]:
     incoming_ids: set[str] = set()
     synced = 0
@@ -248,7 +243,7 @@ async def _sync_service_config_templates_records(
         tid = _normalize_template_id(item.get("template_id"))
         incoming_ids.add(tid)
         await _upsert_service_config_template_from_sync(
-            repo, item, jiuwenclaw_id=jiuwenclaw_id
+            repo, item
         )
         synced += 1
     deleted = 0
@@ -264,14 +259,13 @@ class ServiceConfigTemplateService:
 
     async def create(
         self,
-        jiuwenclaw_id: str,
         template: dict[str, Any],
     ) -> dict[str, Any]:
         if not isinstance(template, dict):
             raise ValueError("service_config_templates.create requires template object")
         repo = require_enterprise_repository(_TABLE)
         await _upsert_service_config_template_from_sync(
-            repo, template, jiuwenclaw_id=jiuwenclaw_id
+            repo, template
         )
         result = {
             "template_id": _normalize_template_id(template.get("template_id")),
@@ -284,7 +278,6 @@ class ServiceConfigTemplateService:
 
     async def update(
         self,
-        jiuwenclaw_id: str,
         template_id: str,
         updates: dict[str, Any],
     ) -> None:
@@ -306,7 +299,7 @@ class ServiceConfigTemplateService:
             tid,
         )
 
-    async def delete(self, jiuwenclaw_id: str, template_id: str) -> None:
+    async def delete(self, template_id: str) -> None:
         if template_id is None:
             raise ValueError("service_config_templates.delete requires template_id")
         tid = _normalize_template_id(template_id)

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""Gateway 实例生命周期：响应 Manager purge 指令并清理 GDB 实例级数据。"""
+"""Gateway 实例生命周期：响应 Manager purge 指令并清理本机库全部实例数据。"""
 
 from __future__ import annotations
 
@@ -88,14 +88,14 @@ async def _purge_channel_config() -> int:
     return deleted
 
 
-async def purge_jiuwenclaw_instance_data_on_handler(
-    jiuwenclaw_id: str,
-) -> dict[str, int]:
-    """删除 Gateway 本地库中指定 ``jiuwenclaw_id`` 的全部实例数据（幂等）。"""
-    jid = str(jiuwenclaw_id or "").strip()
-    if not jid:
-        return {}
+async def purge_gateway_instance_data() -> dict[str, int]:
+    """清空本 Gateway 本地库中的全部实例级数据（幂等）。
 
+    前提：每网关独立数据库，无跨实例行级隔离。此操作不可逆，将删除本库内
+    模板 / 资源 / 应用配置 / channel / cron / Manager 公钥等实例数据，
+    而非按 ``jiuwenclaw_id`` 过滤单实例。若未来改为多实例共享同一库，
+    需重新引入按实例范围清理，否则会误删其它实例数据。
+    """
     deleted_counts: dict[str, int] = {}
 
     for table in _ENTERPRISE_PURGE_TABLES:
@@ -124,8 +124,7 @@ async def purge_jiuwenclaw_instance_data_on_handler(
         deleted_counts[_MANAGER_SIGN_PUBKEY_TABLE] = 1
 
     logger.info(
-        "[instance_data_lifecycle] purged gateway instance data jiuwenclaw_id=%s counts=%s",
-        jid,
+        "[instance_data_lifecycle] purged gateway instance data counts=%s",
         deleted_counts,
     )
     return deleted_counts
@@ -133,11 +132,10 @@ async def purge_jiuwenclaw_instance_data_on_handler(
 
 class InstanceDataLifecycleService:
 
-    async def purge(self, jiuwenclaw_id: str) -> dict[str, Any]:
-        counts = await purge_jiuwenclaw_instance_data_on_handler(jiuwenclaw_id)
+    async def purge(self) -> dict[str, Any]:
+        counts = await purge_gateway_instance_data()
         logger.info(
-            "[ManagerConfigReceiver] instance_data_lifecycle purge jiuwenclaw_id=%s counts=%s",
-            jiuwenclaw_id,
+            "[ManagerConfigReceiver] instance_data_lifecycle purge counts=%s",
             counts,
         )
         return {"purged": counts}
@@ -146,5 +144,5 @@ class InstanceDataLifecycleService:
 __all__ = (
     "INSTANCE_PURGE_TABLES",
     "InstanceDataLifecycleService",
-    "purge_jiuwenclaw_instance_data_on_handler",
+    "purge_gateway_instance_data",
 )

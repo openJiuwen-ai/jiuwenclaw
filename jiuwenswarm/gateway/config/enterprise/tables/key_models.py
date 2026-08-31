@@ -5,7 +5,7 @@
 
 - ``gateway_enc_keypair``：Gateway 自身 X25519 加密密钥对（单例，私钥本地受保护）。
 - ``gateway_sign_keypair``：Gateway 自身 Ed25519 link-auth 签名密钥对（单例，握手出示令牌）。
-- ``manager_sign_pubkey``：握手分发的 Manager Ed25519 签名公钥，按 jiuwenclaw_id 关联。
+- ``manager_sign_pubkey``：握手分发的 Manager Ed25519 签名公钥（单例，id="default"）。
 """
 
 from __future__ import annotations
@@ -46,11 +46,11 @@ GATEWAY_SIGN_KEYPAIR_TABLE_DEF = TableDefinition(
     indexes=[],
 )
 
-# Manager 签名公钥（握手分发），按 jiuwenclaw_id 关联实例与对端 Manager。
+# Manager 签名公钥（握手分发），单例，固定主键 id="default"。
 MANAGER_SIGN_PUBKEY_TABLE_DEF = TableDefinition(
     table_name="manager_sign_pubkey",
     columns=[
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, primary_key=True, nullable=False),
+        ColumnDefinition("id", "string", length=32, primary_key=True, nullable=False),
         ColumnDefinition("manager_id", "string", length=64, nullable=False, default="default"),
         ColumnDefinition("sign_alg", "string", length=32, nullable=False),
         ColumnDefinition("public_key", "string", length=256, nullable=False),

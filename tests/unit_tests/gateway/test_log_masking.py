@@ -201,8 +201,8 @@ async def test_reload_log_masking_rule_db_authoritative_when_rows_present(monkey
 
 
 @pytest.mark.asyncio
-async def test_reload_log_masking_rule_skips_gdb_without_jiuwenclaw_id(monkeypatch):
-    """企业版 ``JIUWENCLAW_ID`` 未就绪时不访问 GDB，保留内置规则。"""
+async def test_reload_log_masking_rule_loads_gdb_without_jiuwenclaw_id(monkeypatch):
+    """企业版不依赖 ``JIUWENCLAW_ID``，直接读本网关 DB。"""
     import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
     from jiuwenswarm.infrastructure.config import Settings
 
@@ -217,14 +217,14 @@ async def test_reload_log_masking_rule_skips_gdb_without_jiuwenclaw_id(monkeypat
             LogMaskingEngine,
             "list_enabled_log_masking_rule_rows",
             new_callable=AsyncMock,
+            return_value=[],
         ) as list_rows,
         patch.object(LogMaskingEngine, "reload_from_rows") as reload_from_rows,
     ):
         await LogMaskingEngine.reload_log_masking_rule()
 
-    list_rows.assert_not_called()
-    reload_from_rows.assert_not_called()
-    assert "******" in LogMaskingEngine.get_instance().sanitize("token=abc123")
+    list_rows.assert_awaited_once()
+    reload_from_rows.assert_called_once_with([], db_authoritative=False)
 
 
 @pytest.mark.asyncio

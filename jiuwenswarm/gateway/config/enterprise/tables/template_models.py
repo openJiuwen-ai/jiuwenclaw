@@ -23,7 +23,6 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("template_id", "string", length=100, nullable=False),
         ColumnDefinition("template_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
@@ -45,7 +44,7 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id", "template_id"], unique=True),
+        IndexDefinition(["template_id"], unique=True),
     ],
 )
 
@@ -59,7 +58,6 @@ EMBEDDING_TEMPLATE_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("template_id", "string", length=100, nullable=False),
         ColumnDefinition("template_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
@@ -76,7 +74,7 @@ EMBEDDING_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id", "template_id"], unique=True),
+        IndexDefinition(["template_id"], unique=True),
     ],
 )
 
@@ -90,7 +88,6 @@ EXTENSION_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("template_id", "string", length=100, nullable=False),
         ColumnDefinition("template_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
@@ -104,7 +101,7 @@ EXTENSION_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id", "template_id"], unique=True),
+        IndexDefinition(["template_id"], unique=True),
     ],
 )
 
@@ -118,7 +115,6 @@ SKILL_WHITELIST_TEMPLATE_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("template_id", "string", length=100, nullable=False),
         ColumnDefinition("template_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
@@ -131,7 +127,7 @@ SKILL_WHITELIST_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id", "template_id"], unique=True),
+        IndexDefinition(["template_id"], unique=True),
     ],
 )
 
@@ -145,7 +141,6 @@ SERVICE_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("template_id", "string", length=100, nullable=False),
         ColumnDefinition("template_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
@@ -199,7 +194,7 @@ SERVICE_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id", "template_id"], unique=True),
+        IndexDefinition(["template_id"], unique=True),
     ],
 )
 
@@ -213,7 +208,6 @@ AGENT_TEMPLATE_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("template_id", "string", length=100, nullable=False),
         ColumnDefinition("template_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
@@ -225,6 +219,6 @@ AGENT_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id", "template_id"], unique=True),
+        IndexDefinition(["template_id"], unique=True),
     ],
 )

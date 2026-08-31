@@ -21,12 +21,12 @@ from jiuwenswarm.gateway.storage_assembly.setup import (
 
 
 @pytest.mark.asyncio
-async def test_instance_agent_resource_crud_and_scope() -> None:
+async def test_instance_agent_resource_crud() -> None:
     store = InMemoryPersistentBackend()
     repo = EnterpriseRecordRepository(
         store,
         "instance_agent_resource",
-        instance_id="inst-1",
+        instance_id="",
     )
     created = await repo.create(
         {
@@ -36,7 +36,7 @@ async def test_instance_agent_resource_crud_and_scope() -> None:
             "grants": [{"match_expr": "", "enabled": True}],
         }
     )
-    assert created["jiuwenclaw_id"] == "inst-1"
+    assert "jiuwenclaw_id" not in created
     assert created["resource_id"] == "bot-main"
 
     got = await repo.get(resource_id="bot-main")
@@ -50,12 +50,6 @@ async def test_instance_agent_resource_crud_and_scope() -> None:
     assert updated is not None
     assert updated["resource_name"] == "main agent v2"
 
-    other = EnterpriseRecordRepository(
-        store,
-        "instance_agent_resource",
-        instance_id="inst-2",
-    )
-    assert await other.list() == []
     assert await repo.delete(resource_id="bot-main") is True
     assert await repo.get(resource_id="bot-main") is None
 
@@ -129,10 +123,10 @@ async def test_singleton_keypair_no_scope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cron_job_repository_scope_and_key() -> None:
+async def test_cron_job_repository_key() -> None:
     store = InMemoryPersistentBackend()
     repo = create_enterprise_record_repository(
-        store, "cron_job", instance_id="inst-1"
+        store, "cron_job", instance_id=""
     )
     created = await repo.create(
         {
@@ -143,7 +137,7 @@ async def test_cron_job_repository_scope_and_key() -> None:
             "targets": "web",
         }
     )
-    assert created["jiuwenclaw_id"] == "inst-1"
+    assert "jiuwenclaw_id" not in created
     assert created["job_id"] == "job-1"
     assert await repo.get(job_id="job-1") is not None
 
@@ -152,13 +146,13 @@ async def test_cron_job_repository_scope_and_key() -> None:
 async def test_task_memory_single_document_sync() -> None:
     store = InMemoryPersistentBackend()
     repo = EnterpriseRecordRepository(
-        store, "task_memory_config", instance_id="inst-1"
+        store, "task_memory_config", instance_id=""
     )
     await repo.sync_by_business_key([{"enabled": True, "llm_model": "m"}])
     body = await repo.get()
     assert body is not None
     assert body["enabled"] is True
-    assert body["jiuwenclaw_id"] == "inst-1"
+    assert "jiuwenclaw_id" not in body
 
     await repo.sync_by_business_key([])
     assert await repo.get() is None

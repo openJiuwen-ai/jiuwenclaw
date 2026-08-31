@@ -104,13 +104,9 @@ def _create_ephemeral_factory():
 
 
 def resolve_storage_instance_id(cfg: dict[str, Any] | None = None) -> str:
-    """企业表 ``jiuwenclaw_id``（与 AgentServer 读库共用 ``resolve_gateway_instance_id``）。"""
-    from jiuwenswarm.gateway.config.enterprise.instance_scope import (
-        resolve_gateway_instance_id,
-    )
-
-    resolved = resolve_gateway_instance_id(cfg)
-    return resolved or ""
+    """每网关独立 DB，装配层固定传空 ``instance_id``（不再解析 Manager/env 身份）。"""
+    _ = cfg
+    return ""
 
 
 def _storage_flag(
@@ -211,7 +207,7 @@ def _wire_personal_yaml_section_repositories(
     if is_enterprise():
         return
 
-    instance_id = resolve_storage_instance_id(cfg)
+    instance_id = ""
     set_heartbeat_config_repository(
         create_heartbeat_config_repository(store, instance_id=instance_id)
     )
@@ -240,7 +236,7 @@ def _wire_config_and_cron_repositories(
     from jiuwenswarm.gateway.cron.job_access import set_cron_persistent_store
     from jiuwenswarm.gateway.storage.access import set_persistent_store
 
-    instance_id = resolve_storage_instance_id(cfg)
+    instance_id = ""
     set_channel_config_repository(
         create_channel_config_repository(store, instance_id=instance_id)
     )
@@ -334,7 +330,7 @@ async def setup_gateway_storage_repositories(
         set_enterprise_record_repositories(
             create_enterprise_record_repositories(
                 store,
-                instance_id=resolve_storage_instance_id(cfg),
+                instance_id="",
             )
         )
 
@@ -420,7 +416,7 @@ async def wire_enterprise_manager_ws_store_async(
     set_enterprise_record_repositories(
         create_enterprise_record_repositories(
             store,
-            instance_id=resolve_storage_instance_id(cfg),
+            instance_id="",
         )
     )
     if get_persistent_store() is None:

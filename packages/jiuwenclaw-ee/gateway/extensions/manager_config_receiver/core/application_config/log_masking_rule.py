@@ -11,7 +11,7 @@ from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRep
 from jiuwenswarm.gateway.config.enterprise.tables.application_config_models import LOG_MASKING_RULE_TABLE_DEF
 from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 from ...infrastructure.repository_access import require_enterprise_repository
-from ...infrastructure.utils import assert_jiuwenclaw_id_matches, format_ts, utc_now
+from ...infrastructure.utils import format_ts, utc_now
 from ...schemas.application_config_schemas import (
     LogMaskingRuleCreateRequest,
     LogMaskingRuleUpdateRequest,
@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 def _rule_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row.get("id"),
-        "jiuwenclaw_id": row.get("jiuwenclaw_id"),
         "rule_id": row.get("rule_id"),
         "rule_name": row.get("rule_name"),
         "description": row.get("description"),
@@ -42,8 +41,6 @@ def _rule_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
 async def _create_log_masking_rule_record(
     repo: EnterpriseRecordRepository,
     request: LogMaskingRuleCreateRequest,
-    *,
-    jiuwenclaw_id: str,
 ) -> dict[str, Any]:
     from jiuwenswarm.infrastructure.log_masking.engine import (
         normalize_replacement,
@@ -60,7 +57,6 @@ async def _create_log_masking_rule_record(
     source = normalize_source(request.source)
     now = utc_now()
     row_data: dict[str, Any] = {
-        "jiuwenclaw_id": jiuwenclaw_id,
         "rule_id": rule_id,
         "rule_name": request.rule_name,
         "description": request.description,
@@ -85,8 +81,6 @@ async def _update_log_masking_rule_record(
     repo: EnterpriseRecordRepository,
     rule_id: str,
     request: LogMaskingRuleUpdateRequest,
-    *,
-    jiuwenclaw_id: str,
 ) -> dict[str, Any] | None:
     from jiuwenswarm.infrastructure.log_masking.engine import (
         normalize_replacement,
@@ -95,7 +89,6 @@ async def _update_log_masking_rule_record(
         validate_pattern,
     )
 
-    _ = jiuwenclaw_id
     rid = normalize_rule_id(rule_id)
     existing = await repo.get(rule_id=rid)
     if existing is None:
@@ -128,12 +121,9 @@ async def _update_log_masking_rule_record(
 async def _delete_log_masking_rule_record(
     repo: EnterpriseRecordRepository,
     rule_id: str,
-    *,
-    jiuwenclaw_id: str,
 ) -> bool:
     from jiuwenswarm.infrastructure.log_masking.engine import normalize_rule_id
 
-    _ = jiuwenclaw_id
     rid = normalize_rule_id(rule_id)
     return await repo.delete(rule_id=rid)
 
@@ -142,16 +132,13 @@ class LogMaskingRuleService:
 
     async def create(
         self,
-        jiuwenclaw_id: str,
         rule: dict[str, Any],
     ) -> dict[str, Any]:
         if not isinstance(rule, dict):
             raise ValueError("log_masking_rule.create requires rule object")
         req = LogMaskingRuleCreateRequest.model_validate(rule)
-        jid = str(req.jiuwenclaw_id or jiuwenclaw_id).strip()
-        assert_jiuwenclaw_id_matches(jid)
         repo = require_enterprise_repository(_TABLE)
-        row = await _create_log_masking_rule_record(repo, req, jiuwenclaw_id=jid)
+        row = await _create_log_masking_rule_record(repo, req)
         await LogMaskingEngine.reload_log_masking_rule(db_authoritative=True)
         result = {"rule_id": row["rule_id"]}
         logger.info(
@@ -162,7 +149,6 @@ class LogMaskingRuleService:
 
     async def update(
         self,
-        jiuwenclaw_id: str,
         rule_id: str,
         updates: dict[str, Any],
     ) -> dict[str, Any]:
@@ -173,9 +159,7 @@ class LogMaskingRuleService:
             raise ValueError("log_masking_rule.update requires non-empty updates")
         req = LogMaskingRuleUpdateRequest.model_validate(updates)
         repo = require_enterprise_repository(_TABLE)
-        row = await _update_log_masking_rule_record(
-            repo, rid, req, jiuwenclaw_id=jiuwenclaw_id
-        )
+        row = await _update_log_masking_rule_record(repo, rid, req)
         if row is None:
             raise ValueError(f"log masking rule id={rid!r} not found")
         await LogMaskingEngine.reload_log_masking_rule(db_authoritative=True)
@@ -186,14 +170,12 @@ class LogMaskingRuleService:
         )
         return result
 
-    async def delete(self, jiuwenclaw_id: str, rule_id: str) -> None:
+    async def delete(self, rule_id: str) -> None:
         rid = str(rule_id or "").strip()
         if not rid:
             raise ValueError("log_masking_rule.delete requires rule_id")
         repo = require_enterprise_repository(_TABLE)
-        deleted = await _delete_log_masking_rule_record(
-            repo, rid, jiuwenclaw_id=jiuwenclaw_id
-        )
+        deleted = await _delete_log_masking_rule_record(repo, rid)
         if not deleted:
             raise ValueError(f"log masking rule id={rid!r} not found")
         await LogMaskingEngine.reload_log_masking_rule(db_authoritative=True)

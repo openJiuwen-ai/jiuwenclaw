@@ -46,7 +46,7 @@ class YamlSectionCodec:
         body = {
             key: value
             for key, value in dict(record).items()
-            if key not in ("id", "jiuwenclaw_id", "source", "revision")
+            if key not in ("id", "source", "revision")
         }
         return SectionDocument(body=body)
 
@@ -66,8 +66,8 @@ class DbBodySectionCodec:
 
     @staticmethod
     def identity(instance_id: str = "") -> dict[str, Any]:
-        iid = str(instance_id or "").strip()
-        return {"jiuwenclaw_id": iid} if iid else {}
+        _ = instance_id
+        return {}
 
     @staticmethod
     def from_record(record: dict[str, Any]) -> SectionDocument:
@@ -83,15 +83,12 @@ class DbBodySectionCodec:
     def to_record(
         document: SectionDocument, *, instance_id: str = ""
     ) -> dict[str, Any]:
-        row: dict[str, Any] = {
+        _ = instance_id
+        return {
             "body": dict(document.body),
             "source": document.source or "local",
             "revision": int(document.revision or 1),
         }
-        iid = str(instance_id or "").strip()
-        if iid:
-            row["jiuwenclaw_id"] = iid
-        return row
 
     @staticmethod
     def to_updates(document: SectionDocument) -> dict[str, Any]:
@@ -110,8 +107,8 @@ class DbFlatSectionCodec:
 
     @staticmethod
     def identity(instance_id: str = "") -> dict[str, Any]:
-        iid = str(instance_id or "").strip()
-        return {"jiuwenclaw_id": iid} if iid else {}
+        _ = instance_id
+        return {}
 
     def from_record(self, record: dict[str, Any]) -> SectionDocument:
         body = {
@@ -124,14 +121,12 @@ class DbFlatSectionCodec:
     def to_record(
         self, document: SectionDocument, *, instance_id: str = ""
     ) -> dict[str, Any]:
+        _ = instance_id
         row: dict[str, Any] = {
             key: document.body.get(key) for key in self._fields if key in document.body
         }
         if "level" not in row:
             row["level"] = document.body.get("level") or "INFO"
-        iid = str(instance_id or "").strip()
-        if iid:
-            row["jiuwenclaw_id"] = iid
         return row
 
     def to_updates(self, document: SectionDocument) -> dict[str, Any]:
@@ -220,13 +215,11 @@ class SectionDocumentRepository:
         identity = self._identity()
         existing_row = await self._load_row()
         if existing_row is not None:
-            # YAML 单文档用 {} 匹配；DB 优先用 instance_id，否则用已有行的 jiuwenclaw_id
+            # YAML 单文档用 {} 匹配；DB 单例按自增 id
             key = identity
             if not key:
                 key = {}
-                if "jiuwenclaw_id" in existing_row:
-                    key = {"jiuwenclaw_id": existing_row["jiuwenclaw_id"]}
-                elif "id" in existing_row:
+                if "id" in existing_row:
                     key = {"id": existing_row["id"]}
             row = await self._store.update(
                 self._store_name,
@@ -249,9 +242,7 @@ class SectionDocumentRepository:
         if row is None:
             return False
         key: dict[str, Any] = {}
-        if "jiuwenclaw_id" in row:
-            key = {"jiuwenclaw_id": row["jiuwenclaw_id"]}
-        elif "id" in row:
+        if "id" in row:
             key = {"id": row["id"]}
         return await self._store.delete(self._store_name, key)
 

@@ -7,11 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any, TypeVar
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, Request
 from pydantic import BaseModel
 
 from ..http.sync_security import split_business
-from ..infrastructure.utils import assert_jiuwenclaw_id_matches, get_jiuwenclaw_id
 from ..schemas.sync_schemas import SyncEnvelopeOnlyBody
 
 TBody = TypeVar("TBody", bound=BaseModel)
@@ -22,32 +21,15 @@ class SyncContext:
     """同步上下文（不含业务分发）。"""
 
     business: dict[str, Any]
-    jiuwenclaw_id: str
     method: str
-
-
-def require_jiuwenclaw_id(business: dict[str, Any] | None = None) -> str:
-    """统一取本机实例 id（env 优先，否则自动生成）；body 若带 id 则校验一致。"""
-    jid = get_jiuwenclaw_id()
-    body_jid = ""
-    if business:
-        body_jid = str(business.get("jiuwenclaw_id") or "").strip()
-    if body_jid:
-        try:
-            assert_jiuwenclaw_id_matches(body_jid)
-        except ValueError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-    return jid
 
 
 async def build_sync_context(body: BaseModel, method: str) -> SyncContext:
     raw = body.model_dump(mode="python", exclude_unset=False)
     business = split_business(raw)
-    jid = require_jiuwenclaw_id(business)
-    business.pop("jiuwenclaw_id", None)
+    business.pop("jiuwenclaw_id", None)  # 历史字段，忽略
     return SyncContext(
         business=business,
-        jiuwenclaw_id=jid,
         method=method.upper(),
     )
 

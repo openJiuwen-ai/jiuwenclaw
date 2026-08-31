@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""实例资源表：instance_agent_resource（Gateway 本地副本；字段对齐 Manager，按 jiuwenclaw_id 隔离）。"""
+"""实例资源表：instance_agent_resource（Gateway 本地副本；字段对齐 Manager，每网关独立 DB）。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ INSTANCE_AGENT_RESOURCE_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("resource_id", "string", length=100, nullable=False),
         ColumnDefinition("resource_name", "string", length=128, nullable=False),
         ColumnDefinition("resource_desc", "string", length=512, nullable=True),
@@ -35,7 +34,7 @@ INSTANCE_AGENT_RESOURCE_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["jiuwenclaw_id", "resource_id"], unique=True),
+        IndexDefinition(["resource_id"], unique=True),
     ],
 )
 

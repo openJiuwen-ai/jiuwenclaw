@@ -14,23 +14,8 @@ from jiuwenswarm.deployment_mode import MODE_DISTRIBUTED, normalize_deployment_m
 logger = logging.getLogger(__name__)
 
 STICKY_IDENTITY_FIELDS = frozenset(
-    {"group_id", "bot_id", "user_id", "jiuwenclaw_id", "job_id", "created_at"}
+    {"group_id", "bot_id", "user_id", "job_id", "created_at"}
 )
-
-
-def get_bound_jiuwenclaw_id() -> str | None:
-    """读取当前绑定的实例 id。"""
-    try:
-        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
-
-        return gateway_db.resolve_jiuwenclaw_id()
-    except Exception:
-        logger.debug("Failed to read jiuwenclaw_id from gateway_db", exc_info=True)
-    env = (
-        os.getenv("JIUWENCLAW_ID", "").strip()
-        or os.getenv("JIUWENSWARM_ID", "").strip()
-    )
-    return env or None
 
 
 def _resolve_deployment_mode() -> str:
@@ -46,8 +31,8 @@ def _resolve_deployment_mode() -> str:
 
 
 def enterprise_cron_enabled(*, deployment_mode: str | None = None) -> bool:
-    """企业 cron 真正开门：实例 id 已绑定，且非 distributed。"""
-    if not get_bound_jiuwenclaw_id():
+    """企业 cron 真正开门：企业版且非 distributed（每网关独立 DB）。"""
+    if not is_enterprise():
         return False
     mode = deployment_mode if deployment_mode is not None else _resolve_deployment_mode()
     return normalize_deployment_mode(mode) != MODE_DISTRIBUTED
@@ -159,7 +144,6 @@ __all__ = (
     "coerce_routing_id",
     "enterprise_cron_enabled",
     "extract_routing_triple",
-    "get_bound_jiuwenclaw_id",
     "job_matches_routing",
     "routing_triple_complete",
     "strip_sticky_identity_fields",

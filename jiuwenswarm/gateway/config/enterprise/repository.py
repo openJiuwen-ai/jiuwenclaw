@@ -18,7 +18,7 @@ class EnterpriseRecordRepository:
     """企业配置 / 模板 / 密钥等表的通用 CRUD。
 
     record 即业务 dict（与 EE ``DBHandler`` 行形状对齐）；不引入领域 dataclass。
-    实例作用域由 ``instance_id`` + ``spec.scope_field`` 注入，调用方不必每次传。
+    ``instance_id`` / ``scope_field`` 保留兼容；默认无 scope（每网关独立 DB）。
     """
 
     def __init__(
@@ -31,6 +31,7 @@ class EnterpriseRecordRepository:
     ) -> None:
         self._store = store
         self._store_name = store_name
+        # 保留构造参数以兼容旧调用方；scope_field 为 None 时不参与读写。
         self._instance_id = str(instance_id or "").strip()
         self._spec = spec if spec is not None else get_enterprise_record_spec(store_name)
 
@@ -160,7 +161,7 @@ class EnterpriseRecordRepository:
         return await self._store.delete(self._store_name, self.identity(parts))
 
     async def get_by_row_id(self, row_id: int) -> dict[str, Any] | None:
-        """按自增 ``id`` 取行，并校验实例 scope（Manager WS update/delete）。"""
+        """按自增 ``id`` 取行（若有 scope_field 则校验，默认无）。"""
         row = await self._store.get(self._store_name, {"id": int(row_id)})
         if row is None:
             return None
@@ -194,7 +195,7 @@ class EnterpriseRecordRepository:
         *,
         key_field: str | None = None,
     ) -> dict[str, int]:
-        """按业务主键 upsert，并删除本实例下不在 incoming 集合中的行。
+        """按业务主键 upsert，并删除不在 incoming 集合中的行。
 
         默认 ``key_field`` 取 ``spec.key_fields[0]``（如 ``policy_id`` / ``template_id``）。
         无业务主键（单文档表）时只支持 0～1 条：有则 upsert，空列表则 delete。

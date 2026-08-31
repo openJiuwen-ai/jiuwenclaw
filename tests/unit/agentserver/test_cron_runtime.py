@@ -113,6 +113,11 @@ def _make_cron_tools(tmp_path, monkeypatch) -> tuple[CronTools, _FakeGatewayPush
         return None
 
     monkeypatch.setattr(tools, "_reload_scheduler", _noop_reload)
+    # 本文件测本地 store / push 同步路径，不走企业 DB cron。
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.cron.enterprise_gate.enterprise_cron_enabled",
+        lambda **_kwargs: False,
+    )
     return tools, push
 
 

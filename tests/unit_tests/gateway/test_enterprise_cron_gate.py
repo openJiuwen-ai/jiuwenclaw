@@ -1,10 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Enterprise cron gate / identity sticky unit tests."""
+"""Enterprise cron gate / sticky identity unit tests."""
 
 from __future__ import annotations
-
-import os
-from unittest.mock import patch
 
 import pytest
 
@@ -107,21 +104,20 @@ def test_job_matches_routing_and() -> None:
     )
 
 
-def test_enterprise_cron_enabled_requires_jiuwenclaw_id(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_enterprise_cron_enabled_by_deployment_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
-    monkeypatch.delenv("JIUWENCLAW_ID", raising=False)
-    with patch(
-        "jiuwenswarm.gateway.cron.enterprise_gate.get_bound_jiuwenclaw_id",
-        return_value=None,
-    ):
-        assert enterprise_cron_enabled(deployment_mode="standalone") is False
+    assert enterprise_cron_enabled(deployment_mode="standalone") is True
+    assert enterprise_cron_enabled(deployment_mode="distributed") is False
 
-    with patch(
-        "jiuwenswarm.gateway.cron.enterprise_gate.get_bound_jiuwenclaw_id",
-        return_value="jid-1",
-    ):
-        assert enterprise_cron_enabled(deployment_mode="standalone") is True
-        assert enterprise_cron_enabled(deployment_mode="distributed") is False
+
+def test_enterprise_cron_disabled_for_personal_edition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("JIUWENSWARM_EDITION", raising=False)
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "personal")
+    assert enterprise_cron_enabled(deployment_mode="standalone") is False
 
 
 def test_routing_triple_complete() -> None:

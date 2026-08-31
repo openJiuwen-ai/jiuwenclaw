@@ -51,7 +51,7 @@ async def upsert_logging(
     sync: Annotated[SyncContext, Depends(verify_sync(LoggingSyncBody))],
 ):
     try:
-        result = await LoggingConfigService().upsert(sync.jiuwenclaw_id, **sync.business)
+        result = await LoggingConfigService().upsert(**sync.business)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -63,7 +63,7 @@ async def delete_logging(
     sync: VerifySyncEnvelopeOnly,
 ):
     try:
-        await LoggingConfigService().delete(sync.jiuwenclaw_id)
+        await LoggingConfigService().delete()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -75,9 +75,7 @@ async def upsert_task_memory(
     sync: Annotated[SyncContext, Depends(verify_sync(TaskMemorySyncBody))],
 ):
     try:
-        result = await TaskMemoryConfigService().upsert(
-            sync.jiuwenclaw_id, sync.business
-        )
+        result = await TaskMemoryConfigService().upsert(sync.business)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -89,7 +87,7 @@ async def delete_task_memory(
     sync: VerifySyncEnvelopeOnly,
 ):
     try:
-        await TaskMemoryConfigService().delete(sync.jiuwenclaw_id)
+        await TaskMemoryConfigService().delete()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -101,9 +99,7 @@ async def upsert_permissions(
     sync: Annotated[SyncContext, Depends(verify_sync(PermissionsSyncBody))],
 ):
     try:
-        result = await PermissionsConfigService().upsert(
-            sync.jiuwenclaw_id, **sync.business
-        )
+        result = await PermissionsConfigService().upsert(**sync.business)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -115,7 +111,7 @@ async def delete_permissions(
     sync: VerifySyncEnvelopeOnly,
 ):
     try:
-        await PermissionsConfigService().delete(sync.jiuwenclaw_id)
+        await PermissionsConfigService().delete()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -127,7 +123,7 @@ async def upsert_memory(
     sync: Annotated[SyncContext, Depends(verify_sync(MemorySyncBody))],
 ):
     try:
-        result = await MemoryConfigService().upsert(sync.jiuwenclaw_id, **sync.business)
+        result = await MemoryConfigService().upsert(**sync.business)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -139,7 +135,7 @@ async def delete_memory(
     sync: VerifySyncEnvelopeOnly,
 ):
     try:
-        await MemoryConfigService().delete(sync.jiuwenclaw_id)
+        await MemoryConfigService().delete()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -151,9 +147,7 @@ async def create_log_masking_rule(
     sync: Annotated[SyncContext, Depends(verify_sync(LogMaskingCreateSyncBody))],
 ):
     try:
-        result = await LogMaskingRuleService().create(
-            sync.jiuwenclaw_id, sync.business
-        )
+        result = await LogMaskingRuleService().create(sync.business)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     trigger_runtime_config_update()
@@ -168,9 +162,7 @@ async def patch_log_masking_rule(
     sync: Annotated[SyncContext, Depends(verify_sync(LogMaskingUpdateSyncBody))],
 ):
     try:
-        result = await LogMaskingRuleService().update(
-            sync.jiuwenclaw_id, rule_id, sync.business
-        )
+        result = await LogMaskingRuleService().update(rule_id, sync.business)
     except ValueError as exc:
         detail = str(exc)
         status = 404 if "not found" in detail else 400
@@ -187,7 +179,7 @@ async def delete_log_masking_rule(
     sync: VerifySyncEnvelopeOnly,
 ):
     try:
-        await LogMaskingRuleService().delete(sync.jiuwenclaw_id, rule_id)
+        await LogMaskingRuleService().delete(rule_id)
     except ValueError as exc:
         detail = str(exc)
         status = 404 if "not found" in detail else 400

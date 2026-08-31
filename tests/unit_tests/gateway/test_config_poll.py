@@ -51,16 +51,13 @@ async def test_syncer_applies_when_row_updated_at_changes() -> None:
     apply_mock = AsyncMock()
     syncer = ConfigPollSyncer()
 
-    async def _rows(table: str, _jid: str) -> list[dict]:
+    async def _rows(table: str) -> list[dict]:
         if table != "logging_config":
             return []
         ts = ts1 if "logging_config" not in syncer._last_rows else ts2
         return [{"updated_at": ts.isoformat()}]
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
-        return_value="jid-1",
-    ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",
         side_effect=_rows,
     ), patch.dict(
@@ -83,15 +80,12 @@ async def test_syncer_skips_when_snapshot_unchanged() -> None:
     apply_mock = AsyncMock()
     syncer = ConfigPollSyncer()
 
-    async def _rows(table: str, _jid: str) -> list[dict]:
+    async def _rows(table: str) -> list[dict]:
         if table != "logging_config":
             return []
         return [{"updated_at": ts.isoformat()}]
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
-        return_value="jid-1",
-    ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",
         side_effect=_rows,
     ), patch.dict(
@@ -110,7 +104,7 @@ async def test_syncer_applies_when_all_rows_deleted() -> None:
     apply_mock = AsyncMock()
     syncer = ConfigPollSyncer()
 
-    async def _rows(table: str, _jid: str) -> list[dict]:
+    async def _rows(table: str) -> list[dict]:
         if table != "logging_config":
             return []
         if "logging_config" not in syncer._last_rows:
@@ -118,9 +112,6 @@ async def test_syncer_applies_when_all_rows_deleted() -> None:
         return []
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
-        return_value="jid-1",
-    ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",
         side_effect=_rows,
     ), patch.dict(
@@ -140,7 +131,7 @@ async def test_syncer_detects_deleted_channel_row() -> None:
     apply_mock = AsyncMock()
     syncer = ConfigPollSyncer()
 
-    async def _rows(table: str, _jid: str) -> list[dict]:
+    async def _rows(table: str) -> list[dict]:
         if table != "channel_config":
             return []
         if "channel_config" not in syncer._last_rows:
@@ -160,9 +151,6 @@ async def test_syncer_detects_deleted_channel_row() -> None:
         ]
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
-        return_value="jid-1",
-    ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",
         side_effect=_rows,
     ), patch.dict(
@@ -173,7 +161,7 @@ async def test_syncer_detects_deleted_channel_row() -> None:
         await syncer.run_once()
         await syncer.run_once()
         assert apply_mock.await_count == 2
-        second_ctx = apply_mock.await_args_list[1].args[1]
+        second_ctx = apply_mock.await_args_list[1].args[0]
         assert second_ctx.removed_channel_ids == frozenset({"c1"})
 
 
@@ -183,15 +171,12 @@ async def test_syncer_keeps_snapshot_when_apply_fails() -> None:
     apply_mock = AsyncMock(side_effect=RuntimeError("boom"))
     syncer = ConfigPollSyncer()
 
-    async def _rows(table: str, _jid: str) -> list[dict]:
+    async def _rows(table: str) -> list[dict]:
         if table != "logging_config":
             return []
         return [{"updated_at": ts.isoformat()}]
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
-        return_value="jid-1",
-    ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",
         side_effect=_rows,
     ), patch.dict(
@@ -216,7 +201,7 @@ async def test_syncer_normalizes_updated_at_for_snapshot() -> None:
     syncer = ConfigPollSyncer()
     calls = {"n": 0}
 
-    async def _rows(table: str, _jid: str) -> list[dict]:
+    async def _rows(table: str) -> list[dict]:
         if table != "logging_config":
             return []
         calls["n"] += 1
@@ -225,9 +210,6 @@ async def test_syncer_normalizes_updated_at_for_snapshot() -> None:
         return [{"updated_at": ts.isoformat()}]
 
     with patch(
-        "jiuwenswarm.gateway.config_poll.syncer.get_bound_jiuwenclaw_id",
-        return_value="jid-1",
-    ), patch(
         "jiuwenswarm.gateway.config_poll.syncer.list_table_records",
         side_effect=_rows,
     ), patch.dict(
@@ -248,7 +230,6 @@ async def test_apply_logging_config_table_uses_passed_rows() -> None:
         "jiuwenswarm.common.utils.apply_logging_config_payload",
     ) as apply_payload:
         await apply_logging_config_table(
-            "jid-1",
             TableApplyContext(
                 rows=[{"level": "DEBUG", "gateway": "WARNING"}],
             ),

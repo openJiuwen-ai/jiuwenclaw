@@ -42,13 +42,11 @@ class MemoryConfigService:
 
     async def upsert(
         self,
-        jiuwenclaw_id: str,
         *,
         body: dict[str, Any] | None = None,
         source: str = "manager",
         **_extra: Any,
     ) -> dict[str, Any] | None:
-        _ = jiuwenclaw_id
         if body is None and isinstance(_extra.get("body"), dict):
             body = _extra["body"]
         if body is None:
@@ -71,12 +69,8 @@ class MemoryConfigService:
         )
         return result
 
-    async def delete(self, jiuwenclaw_id: str) -> None:
-        _ = jiuwenclaw_id
+    async def delete(self) -> None:
         repo = require_memory_repository()
         await repo.delete()
         _apply_memory(None, op="delete")
-        logger.info(
-            "[ManagerConfigReceiver] memory_config deleted jiuwenclaw_id=%s",
-            jiuwenclaw_id,
-        )
+        logger.info("[ManagerConfigReceiver] memory_config deleted")

@@ -61,7 +61,7 @@ def _add_template_crud(
         sync = await build_sync_context(body, request.method)
         try:
             result = await svc_factory().create(
-                sync.jiuwenclaw_id, sync.business
+                sync.business
             )
         except ValueError as exc:
             raise _http_exc(exc) from exc
@@ -78,7 +78,7 @@ def _add_template_crud(
         sync = await build_sync_context(body, request.method)
         try:
             await svc_factory().update(
-                sync.jiuwenclaw_id, template_id, sync.business
+                template_id, sync.business
             )
         except ValueError as exc:
             raise _http_exc(exc) from exc
@@ -94,7 +94,7 @@ def _add_template_crud(
     ):
         sync = await build_sync_context(body, request.method)
         try:
-            await svc_factory().delete(sync.jiuwenclaw_id, template_id)
+            await svc_factory().delete(template_id)
         except ValueError as exc:
             raise _http_exc(exc) from exc
         trigger_runtime_config_update()
