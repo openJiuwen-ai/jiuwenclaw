@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 from typing import Any
 
@@ -91,6 +92,59 @@ def test_disable_file_operation_history_patches_all_direct_bindings(
     assert powershell_tool._record_rm_targets_before_deletion is history_patch._noop_async
     assert powershell_tool._detect_and_record_deletions is history_patch._noop_async
     assert any("file_operation_history.enabled=false" in message for message in info_messages)
+
+
+def test_missing_agent_core_import_fails_open(
+    restored_history_helpers: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    filesystem = restored_history_helpers["filesystem"]
+    original_append = filesystem._append_op_history
+    warning_messages: list[str] = []
+    monkeypatch.setattr(
+        history_patch.logger,
+        "warning",
+        lambda message, *args: warning_messages.append(
+            message % args if args else message
+        ),
+    )
+    original_import = builtins.__import__
+
+    def blocked_agent_core_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name.startswith("openjiuwen.harness.tools"):
+            raise ImportError("Agent-Core helpers unavailable")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_agent_core_import)
+
+    history_patch.disable_file_operation_history()
+
+    assert history_patch._PATCHED is False
+    assert filesystem._append_op_history is original_append
+    assert any("保持原行为" in message for message in warning_messages)
+
+
+def test_missing_agent_core_helpers_are_not_created(
+    restored_history_helpers: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    filesystem = restored_history_helpers["filesystem"]
+    missing_name = "_detect_and_record_deletions"
+    monkeypatch.delattr(filesystem, missing_name)
+    warning_messages: list[str] = []
+    monkeypatch.setattr(
+        history_patch.logger,
+        "warning",
+        lambda message, *args: warning_messages.append(
+            message % args if args else message
+        ),
+    )
+
+    history_patch.disable_file_operation_history()
+
+    assert not hasattr(filesystem, missing_name)
+    assert filesystem._append_op_history is history_patch._noop_async
+    assert any(missing_name in message for message in warning_messages)
 
 
 def test_enabled_configuration_keeps_original_helpers(

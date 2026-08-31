@@ -23,11 +23,38 @@ logger = logging.getLogger(__name__)
 
 _PATCHED = False
 
+_FILESYSTEM_HISTORY_HELPERS = (
+    "_append_op_history",
+    "_record_rm_targets_before_deletion",
+    "_detect_and_record_deletions",
+)
+_SHELL_HISTORY_HELPERS = (
+    "_record_rm_targets_before_deletion",
+    "_detect_and_record_deletions",
+)
+
 
 async def _noop_async(*args: Any, **kwargs: Any) -> None:
     """No-op replacement for Agent-Core's async history helpers."""
     del args, kwargs
     return None
+
+
+def _patch_module_helpers(module: Any, helper_names: tuple[str, ...]) -> bool:
+    """Replace helpers that still exist and warn for changed Agent-Core APIs."""
+    patched_any = False
+    module_name = getattr(module, "__name__", repr(module))
+    for name in helper_names:
+        if not hasattr(module, name):
+            logger.warning(
+                "Agent-Core 模块 %s 中未找到 %s，可能版本已变更；跳过该补丁",
+                module_name,
+                name,
+            )
+            continue
+        setattr(module, name, _noop_async)
+        patched_any = True
+    return patched_any
 
 
 def disable_file_operation_history() -> None:
@@ -44,30 +71,39 @@ def disable_file_operation_history() -> None:
     if _PATCHED:
         return
 
-    import openjiuwen.harness.tools.filesystem as filesystem
-    import openjiuwen.harness.tools.shell.bash._tool as bash_tool
-    import openjiuwen.harness.tools.shell.powershell._tool as powershell_tool
+    try:
+        import openjiuwen.harness.tools.filesystem as filesystem
+        import openjiuwen.harness.tools.shell.bash._tool as bash_tool
+        import openjiuwen.harness.tools.shell.powershell._tool as powershell_tool
+    except ImportError as exc:
+        # ModuleNotFoundError is an ImportError subclass.  Keep AgentServer
+        # startup fail-open when Agent-Core changes or is not installed.
+        logger.warning(
+            "无法导入 Agent-Core 模块，跳过文件操作历史补丁，保持原行为: %s",
+            exc,
+        )
+        return
 
     # write_file / edit_file history persistence and filesystem-side deletion
     # history processing.
-    for name in (
-        "_append_op_history",
-        "_record_rm_targets_before_deletion",
-        "_detect_and_record_deletions",
-    ):
-        setattr(filesystem, name, _noop_async)
+    patched_any = _patch_module_helpers(filesystem, _FILESYSTEM_HISTORY_HELPERS)
 
     # These shell modules import the deletion helpers directly, which creates
     # independent module-local bindings that are not changed by patching
     # filesystem.* alone.
     for shell_module in (bash_tool, powershell_tool):
-        for name in (
-            "_record_rm_targets_before_deletion",
-            "_detect_and_record_deletions",
-        ):
-            setattr(shell_module, name, _noop_async)
+        patched_any = (
+            _patch_module_helpers(shell_module, _SHELL_HISTORY_HELPERS)
+            or patched_any
+        )
 
-    _PATCHED = True
+    _PATCHED = patched_any
+    if not _PATCHED:
+        logger.warning(
+            "Agent-Core 模块中未找到可替换的文件操作历史辅助函数，保持原行为"
+        )
+        return
+
     logger.info(
         "file_operation_history.enabled=false; Agent-Core file operation "
         "history disabled for this AgentServer process"
