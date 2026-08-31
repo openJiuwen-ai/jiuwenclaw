@@ -198,13 +198,19 @@ def test_desktop_release_builds_exclude_optional_cli_dependencies() -> None:
     }
 
     excludes_assignment = next(
-        node
-        for node in spec_tree.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "excludes"
-            for target in node.targets
-        )
+        (
+            node
+            for node in spec_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "excludes"
+                for target in node.targets
+            )
+        ),
+        None,
+    )
+    assert excludes_assignment is not None, (
+        "PyInstaller spec must define a top-level excludes list"
     )
     assert isinstance(excludes_assignment.value, ast.List)
     excluded_modules = {
