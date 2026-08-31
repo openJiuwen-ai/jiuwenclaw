@@ -181,7 +181,11 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
               onClick={() => window.alert(t('connectorMarket.card.editNotSupportedYet'))}
             />
           )}
-          {installed && (
+          {/* 2026-08-31 用户要求：自定义插件（source==='local'）无论安装/连接处于什么状态，
+              都要能卸载（刚 create 完还没安装时也不例外）——卸载走的就是后端
+              uninstall_plugin_package（会把包目录整个删掉，见 pluginPackageStore.ts），对自定义
+              插件语义上等同于"删除这个插件"。built-in 插件仍保持"装了才有卸载"。 */}
+          {(installed || detail.source === 'local') && (
             <DetailLinkButton
               icon={<Trash2 size={14} />}
               label={t('connectorMarket.card.uninstall')}
