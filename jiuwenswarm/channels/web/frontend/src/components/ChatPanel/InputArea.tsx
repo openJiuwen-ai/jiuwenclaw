@@ -27,19 +27,17 @@ import {
   usePlanStore,
   useSessionStore,
   useWorkspaceStore,
-  resolveChatModelSelection,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
-import { requestSettingsModule } from '../../features/settings/settingsNavigation';
-import { AgentMode, MediaItem, ModelEntry, Permission, type ProjectInfo } from '../../types';
+import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
 import { projectCreateErrorKey } from '../../multi-session/sidebar/projectCreateErrors';
 import { AGENT_MODE_OPTIONS, PERMISSION_OPTIONS } from '../../config/chatConfig';
 import clsx from 'clsx';
 import { PermissionWarningDialog } from './PermissionWarningDialog';
-import { ModelProviderIcon } from '../ModelProviderIcon';
+import ChatModelSelector from './ChatModelSelector';
 import { FileIcon } from '../FileIcon';
 import { getEvolutionPillLabel } from './evolution-status';
 import { webRequest } from '../../services/webClient';
@@ -3386,7 +3384,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </button>
           )} */}
 
-          <ModelSelector
+          <ChatModelSelector
             disabled={isProcessing || isCompactRunning || (!isAgentMode && activeSessionId !== NEW_CONVERSATION_ID)}
           />
 
@@ -3836,173 +3834,6 @@ function ComposerSuggestionMenu({
           );
         })}
       </div>
-    </div>
-  );
-}
-
-function ModelSelector({
-  disabled = false,
-}: {
-  disabled?: boolean;
-}) {
-  const chatAvailableModels = useSessionStore((s) => s.chatAvailableModels);
-  const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const selectedModelName = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.selectedModelName ?? null);
-  const defaultModelName = useSessionStore((s) => s.defaultModelName);
-  const setSelectedModelName = useSessionStore((s) => s.setSelectedModelName);
-  const { t } = useTranslation();
-
-  const [isOpen, setIsOpen] = useState(false);
-  const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
-  const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const menuPortalRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handler = (e: PointerEvent) => {
-      if (
-        !menuRef.current?.contains(e.target as Node) &&
-        !menuPortalRef.current?.contains(e.target as Node)
-      ) setIsOpen(false);
-    };
-    document.addEventListener('pointerdown', handler);
-    return () => document.removeEventListener('pointerdown', handler);
-  }, [isOpen]);
-
-  if (chatAvailableModels.length === 0) return null;
-
-  // 单 Agent 与集群（team）模式共用同一套解析，展示会话自选模型（含 metadata 恢复值），
-  // 失配时回退默认模型。与实际发给后端的 model_name（sessionStore.getEffectiveModelName）
-  // 复用同一套解析逻辑，避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的
-  // 兜底结果（bug003）。
-  const selectedModel =
-    resolveChatModelSelection(chatAvailableModels, selectedModelName, defaultModelName) ??
-    chatAvailableModels[0];
-
-  const handleSelect = (modelKey: string) => {
-    setIsOpen(false);
-    if (activeSessionId) setSelectedModelName(activeSessionId, modelKey);
-  };
-
-  const handleAddModel = () => {
-    setIsOpen(false);
-    requestSettingsModule('models');
-  };
-
-  return (
-    <div
-      ref={menuRef}
-      className={clsx('chat-mode-select', isOpen && 'chat-mode-select--open')}
-      data-testid="chat-panel-model-selector-root"
-    >
-      <button
-        type="button"
-        className="chat-mode-select__trigger"
-        title={t('chat.modelSelector.tooltip')}
-        onClick={() => {
-          if (disabled) return;
-          if (!isOpen && menuRef.current) {
-            const rect = menuRef.current.getBoundingClientRect();
-            setMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
-            setMenuAnchor(rect);
-          }
-          setIsOpen((v) => !v);
-        }}
-        style={disabled ? { cursor: 'default' } : undefined}
-        aria-disabled={disabled}
-        aria-haspopup="menu"
-        aria-expanded={isOpen}
-        data-testid="chat-panel-model-selector-trigger"
-      >
-        <span className="chat-mode-select__value">
-          <span className="chat-mode-select__icon" aria-hidden="true">
-            <ModelProviderIcon model={selectedModel} />
-          </span>
-          <span className="chat-mode-select__label">
-            {selectedModel.alias || selectedModel.model_name}
-          </span>
-        </span>
-        {!disabled && (
-          <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
-          </svg>
-        )}
-      </button>
-
-      {isOpen && menuAnchor && createPortal(
-        <div
-          ref={menuPortalRef}
-          className="chat-mode-select__menu model-select__menu"
-          role="menu"
-          data-testid="chat-panel-model-selector-menu"
-          style={menuDirection === 'up'
-            ? { position: 'fixed', bottom: window.innerHeight - menuAnchor.top + 10, left: menuAnchor.left, zIndex: 9999 }
-            : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
-          }
-        >
-          {(() => {
-            const isFree = (m: ModelEntry) => m.is_free === true;
-            const freeModels = chatAvailableModels.filter(isFree);
-            const configuredModels = chatAvailableModels.filter((m) => !isFree(m));
-            const renderGroup = (label: string, models: ModelEntry[]) =>
-              models.length === 0 ? null : (
-                <>
-                  <div className="model-select__section-header" data-testid="chat-panel-model-selector-section-header" data-variant={label === t('chat.modelSelector.free') ? 'free' : 'configured'}>{label}</div>
-                  {models.map((m, idx) => {
-                    const key = m.alias || m.model_name;
-                    const isActive = key === (selectedModel.alias || selectedModel.model_name);
-                    return (
-                      <button
-                        type="button"
-                        key={`${m.model_name}-${idx}`}
-                        onClick={() => handleSelect(key)}
-                        className={clsx(
-                          'chat-mode-select__option',
-                          isActive && 'chat-mode-select__option--active',
-                        )}
-                        role="menuitemradio"
-                        aria-checked={isActive}
-                        data-testid="chat-panel-model-selector-option"
-                        data-variant={key}
-                      >
-                        <span className="chat-mode-select__option-main">
-                          <span className="chat-mode-select__icon" aria-hidden="true">
-                            <ModelProviderIcon model={m} />
-                          </span>
-                          <span className="chat-mode-select__label">{key}</span>
-                        </span>
-                        {isActive && (
-                          <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
-                          </svg>
-                        )}
-                      </button>
-                    );
-                  })}
-                </>
-              );
-            return (
-              <>
-                {renderGroup(t('chat.modelSelector.free'), freeModels)}
-                {renderGroup(t('chat.modelSelector.configured'), configuredModels)}
-              </>
-            );
-          })()}
-          <button
-            type="button"
-            className="model-select__add-btn"
-            data-testid="chat-panel-model-selector-add"
-            onClick={handleAddModel}
-          >
-            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} width={14} height={14} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M10 4v12M4 10h12" />
-            </svg>
-            {t('chat.modelSelector.addModel')}
-          </button>
-        </div>,
-        document.body
-      )}
     </div>
   );
 }

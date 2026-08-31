@@ -635,6 +635,7 @@
       "configured": "Configured Models",
       "free": "Free Models",
       "addModel": "Add Custom Model",
+      "empty": "No models available. Add a model in Settings first.",
       "placeholder": "Select Model"
     },
     "configLockedHistory": "Session has messages — create a new session to change config",
@@ -1357,10 +1358,6 @@
       "wakeOffset": "Wake early",
       "wakeOffsetUnit": "minutes",
       "wakeOffsetHelp": "Start the agent this many minutes before the scheduled push time; 0 means run at the scheduled time"
-    },
-    "modelPicker": {
-      "configured": "Configured",
-      "empty": "No models available yet, add one in the config panel first"
     },
     "timePicker": {
       "hour": "Hr",
