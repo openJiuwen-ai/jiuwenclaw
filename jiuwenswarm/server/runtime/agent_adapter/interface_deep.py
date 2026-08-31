@@ -314,7 +314,6 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
 )
 from jiuwenswarm.server.runtime.agent_adapter import evolution_version as evolution_version_ctl
 from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
-from jiuwenswarm.server.utils.stream_content_sanitize import StreamProtocolBuffer, strip_inline_tool_protocol
 from jiuwenswarm.common.local_env_config import (
     is_enterprise,
     bind_agent_env_ns,
@@ -14945,7 +14944,6 @@ class JiuWenSwarmDeepAdapter:
         accumulated_reasoning = ""
         had_assistant_output = False
         emitted_terminal_chat_final = False
-        _protocol_buffer = StreamProtocolBuffer()
         usage_accumulator = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -15536,7 +15534,7 @@ class JiuWenSwarmDeepAdapter:
                     if run_failure is None:
                         run_failure = self._run_failure(chunk)
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
-                    parsed = self._parse_stream_chunk(chunk, _protocol_buffer=_protocol_buffer)
+                    parsed = self._parse_stream_chunk(chunk)
                     # Only stamp provenance / inject split on new visible deltas.
                     # A late user-round chat.final must keep the prior content kind.
                     if isinstance(parsed, dict) and parsed.get("event_type") == "chat.delta":
@@ -15656,9 +15654,6 @@ class JiuWenSwarmDeepAdapter:
                         if isinstance(chunk.payload, dict)
                         else str(chunk.payload)
                     )
-                    # Feed through the protocol buffer to suppress cross-chunk
-                    # inline-tool-protocol fragments before emitting the delta.
-                    content = _protocol_buffer.feed(content)
                     delta_payload = self._stream_text_payload("chat.delta", content)
                     if delta_payload is None:
                         continue
@@ -15713,9 +15708,7 @@ class JiuWenSwarmDeepAdapter:
                         )
                         accumulated_reasoning = ""
                     if has_streamed_content:
-                        parsed = self._parse_stream_chunk(
-                            chunk, _has_streamed_content=True, _protocol_buffer=_protocol_buffer,
-                        )
+                        parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
                         parsed = self._adapt_goal_intermediate_final(parsed)
                         if parsed is not None:
                             if should_skip_duplicate_ask_user(parsed):
@@ -15736,7 +15729,7 @@ class JiuWenSwarmDeepAdapter:
                                 suppress_stream_after_hitl = True
                                 continue
                         continue
-                    parsed = self._parse_stream_chunk(chunk, _protocol_buffer=_protocol_buffer)
+                    parsed = self._parse_stream_chunk(chunk)
                     parsed = self._adapt_goal_intermediate_final(parsed)
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
@@ -15815,17 +15808,6 @@ class JiuWenSwarmDeepAdapter:
                     is_complete=False,
                 )
                 emitted_chat_error = True
-
-            # Flush any content still buffered in the protocol buffer (stream
-            # ended without an answer chunk, or answer branch already flushed).
-            _buffered = _protocol_buffer.flush()
-            if _buffered and not hitl_pending_stream:
-                yield AgentResponseChunk(
-                    request_id=rid,
-                    channel_id=cid,
-                    payload=note_chat_payload({"event_type": "chat.delta", "content": _buffered}),
-                    is_complete=False,
-                )
 
             if accumulated_text and not hitl_pending_stream:
                 # Same rule as _adapt_goal_intermediate_final: demote host
@@ -16121,17 +16103,8 @@ class JiuWenSwarmDeepAdapter:
         event_type: str,
         content: Any,
     ) -> dict[str, Any] | None:
-        """Build a text event without discarding formatting-only chunks.
-
-        Applies per-chunk ``strip_inline_tool_protocol`` so inline tool-protocol
-        fragments (e.g. ``<tool_calls_begin>...``) that fall fully within one
-        delta are stripped before reaching the client. Cross-chunk fragments
-        are handled by the ``StreamProtocolBuffer`` at the call site.
-        """
+        """Build a text event without discarding formatting-only chunks."""
         if content is None or content == "":
-            return None
-        content = strip_inline_tool_protocol(content)
-        if not content:
             return None
         return {"event_type": event_type, "content": content}
 
@@ -16289,8 +16262,6 @@ class JiuWenSwarmDeepAdapter:
                     else:
                         content = str(payload)
                         is_chunked = False
-
-                    content = strip_inline_tool_protocol(content)
 
                     if not content or not content.strip():
                         return None

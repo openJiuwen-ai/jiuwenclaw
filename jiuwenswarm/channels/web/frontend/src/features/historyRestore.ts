@@ -78,7 +78,6 @@ type HistoryTimelineEntry =
 
 interface BeginHistoryRestoreOptions {
   sessionId: string;
-  requestId?: string;
   onReady: (messages: Message[], totalPages: number | null) => void;
   /** 与消息同一时间线顺序，用于恢复 ToolGroupDisplay */
   onToolReplay?: (items: HistoryToolReplayItem[]) => void;
@@ -948,24 +947,16 @@ function isHistoryBatchEnd(payload: Record<string, unknown>): boolean {
 /**
  * 仅处理属于当前 `history.get` 会话的帧，避免多标签/乱序下的串台。
  * 无 `session_id` 时：丢弃数据行；仍接受明确的结束帧（兼容未注入 id 的旧链路）。
- * 若提供了 `expectedRequestId`，则同时验证 `request_id` 是否匹配。
  */
 function shouldProcessHistoryPayload(
   payload: Record<string, unknown>,
   expectedSessionId: string,
   expectedPageIdx?: number,
-  allowLegacyNoSession = false,
-  expectedRequestId?: string
+  allowLegacyNoSession = false
 ): boolean {
   const sid = typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
   if (sid && sid !== expectedSessionId) {
     return false;
-  }
-  if (expectedRequestId) {
-    const rid = typeof payload.request_id === 'string' ? payload.request_id.trim() : '';
-    if (rid && rid !== expectedRequestId) {
-      return false;
-    }
   }
   if (expectedPageIdx !== undefined && payload.page_idx !== expectedPageIdx) {
     return false;
@@ -992,11 +983,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
       return;
     }
 
-    const payload = { ...event.payload };
-    if (event.request_id) {
-      payload.request_id = event.request_id;
-    }
-    if (!shouldProcessHistoryPayload(payload, options.sessionId, undefined, activeHistoryRequests.size === 1, options.requestId)) {
+    const payload = event.payload;
+    if (!shouldProcessHistoryPayload(payload, options.sessionId, undefined, activeHistoryRequests.size === 1)) {
       return;
     }
 
@@ -1079,7 +1067,6 @@ export interface FetchHistoryPageResult {
 
 export interface FetchHistoryPageOptions {
   sessionId: string;
-  requestId?: string;
   pageIdx: number;
   onReady: (result: FetchHistoryPageResult) => void;
   onEmpty?: (totalPages: number | null) => void;
@@ -1106,11 +1093,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
       return;
     }
 
-    const payload = { ...event.payload };
-    if (event.request_id) {
-      payload.request_id = event.request_id;
-    }
-    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.pageIdx, activeHistoryRequests.size === 1, options.requestId)) {
+    const payload = event.payload;
+    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.pageIdx, activeHistoryRequests.size === 1)) {
       return;
     }
 

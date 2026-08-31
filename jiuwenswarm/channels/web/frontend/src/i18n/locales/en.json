@@ -28,7 +28,6 @@
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
-    "history": "History",
     "cron": "Scheduled Tasks",
     "skills": "Skills",
     "channels": "Channels",
@@ -503,7 +502,6 @@
     "folder": "Folder",
     "notPreviewable": "Not previewable",
     "selectFile": "Select a file to view",
-    "remoteFilesUnavailable": "In distributed mode, only session history restore is supported for now; browsing gateway-local session files is unavailable.",
     "noneSelected": "No session selected",
     "unknownSession": "Unknown session-unknown time",
     "unknownTime": "unknown time",
@@ -537,17 +535,6 @@
     "version": "Version",
     "language": "Language",
     "moreSettings": "More Settings"
-  },
-  "history": {
-    "title": "Session History",
-    "subtitle": "Browse session history stored on the Web Pod",
-    "refresh": "Refresh",
-    "loading": "Loading...",
-    "empty": "No session history",
-    "emptyMessages": "This session has no messages",
-    "notFound": "Session not found",
-    "back": "Back to list",
-    "messageCount": "{{count}} messages"
   },
   "a2aIngress": {
     "title": "A2A Control Center",
