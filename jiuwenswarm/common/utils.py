@@ -855,12 +855,27 @@ def ensure_config_migrated_from_template(
     版本号短路：用户 config.config_version == 程序 VERSION 时跳过迁移；
     不一致时迁移，迁移成功后由 migrate_config_from_template 把 config_version 写回程序版本。
     """
-    from jiuwenswarm.common.config import migrate_config_from_template, load_yaml_round_trip
+    from jiuwenswarm.common.config import (
+        MergeReport,
+        load_yaml_round_trip,
+        migrate_config_from_template,
+        run_versioned_migration,
+    )
     from jiuwenswarm.common._build_config import VERSION
 
     root = Path(workspace_dir) if workspace_dir else get_user_workspace_dir()
     config_path = root / "config" / "config.yaml"
 
+    # 1. 版本驱动结构迁移（fresh install 跳过，upgrade 执行，normal 只跑 pending）
+    try:
+        report = MergeReport()
+        run_versioned_migration(config_path, report)
+        if report.migrated:
+            logger.info("已执行版本驱动结构迁移: %s", report.migrated)
+    except Exception as exc:
+        logger.warning("版本驱动迁移失败，继续模板合并: %s", exc)
+
+    # 2. 模板合并（补齐新增字段，保留用户值/注释/格式）
     try:
         template_path = _find_config_template_path()
     except RuntimeError as e:

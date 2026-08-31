@@ -8,12 +8,24 @@ import sys
 import threading
 import time
 import uuid
+import io
+import shutil
+from collections.abc import Mapping, MutableMapping
+from dataclasses import dataclass, field
+from datetime import datetime
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString, PlainScalarString
+
+# 模块级 ruamel 实例（写路径，保注释），用于 _fingerprint_yaml 和合并引擎
+_RT_YAML = YAML()
+_RT_YAML.preserve_quotes = True
+_RT_YAML.default_flow_style = False
+_RT_YAML.indent(mapping=2, sequence=4, offset=2)
+_RT_YAML.width = 4096
 import yaml
 import portalocker
 
@@ -476,6 +488,378 @@ def update_config(mutator, *, lock_timeout: float = 10.0) -> Any:
 _CONFIG_YAML_PATH = CONFIG_YAML_PATH
 _load_yaml_round_trip = load_yaml_round_trip
 _dump_yaml_round_trip = dump_yaml_round_trip
+
+
+# ============================================================
+# 配置迁移引擎（v3 重写）
+# ============================================================
+# 设计原则（v3 整改方案 §2）：
+#   1. 迁移必须无损（值 / 独有字段 / 注释与格式）
+#   2. 合并方向是「模板补进用户」，不是「用模板重建」
+#   3. 列表按 key 增量下发，不整体替换
+#   4. 结构迁移是根级 pre-pass，set-if-absent
+#   5. 迁移幂等（指纹判据，无变化不写盘）
+# ============================================================
+
+# --- 列表合并策略 ---
+# 按 key 增量下发：模板条目中 user 缺少的条目追加到 user 列表尾部。
+LIST_MERGE_BY_KEY: dict[str, str] = {
+    "permissions.rules": "id",
+    "permissions.file_guard.paths": "path",
+    "models.defaults": "alias",
+    "channels.feishu.apps": "app_id",
+    "channels.xiaoyi.apps": "app_id",
+}
+
+# 整体 user 优先（不增量）的列表路径。
+LIST_USER_WINS: frozenset[str] = frozenset()
+
+
+@dataclass
+class MergeReport:
+    """迁移操作报告，供调用方记录日志。"""
+
+    added: list[str] = field(default_factory=list)
+    list_added: list[str] = field(default_factory=list)
+    migrated: list[tuple[str, str]] = field(default_factory=list)
+    orphaned: list[str] = field(default_factory=list)
+
+    def log(self, logger: logging.Logger) -> None:
+        if self.added:
+            logger.info("配置迁移：补齐 %d 个模板新增字段：%s", len(self.added), self.added)
+        if self.list_added:
+            logger.info("配置迁移：下发 %d 条列表条目：%s", len(self.list_added), self.list_added)
+        for old, new in self.migrated:
+            logger.warning("配置迁移：字段 %s 已搬迁至 %s", old, new)
+        if self.orphaned:
+            logger.warning(
+                "配置中存在 %d 个模板未定义的字段（已保留，可能是废弃项）：%s",
+                len(self.orphaned), self.orphaned,
+            )
+
+
+def _fingerprint_yaml(data: Any) -> str:
+    """序列化 YAML 树为字符串指纹，用于幂等判据。
+
+    就地合并后 user_data 被原地修改，before/after 是同一对象，
+    直接比较恒等。用序列化后的文本做指纹能捕捉值、注释与格式变化。
+    """
+    buf = io.StringIO()
+    _RT_YAML.dump(data, buf)
+    return buf.getvalue()
+
+
+def merge_template_into_user(
+    template: Mapping,
+    user: MutableMapping,
+    *,
+    path: str = "",
+    report: MergeReport,
+) -> MutableMapping:
+    """把 template 的缺省值就地补进 user 树。
+
+    - 保留 user 的值、注释与格式（在 user 的 CommentedMap 上就地操作）
+    - 无 depth 守卫：YAML 是无环树，递归必然终止
+    - user 独有 key：循环不触碰，天然保留
+    - 列表按 LIST_MERGE_BY_KEY 策略增量下发
+    """
+    for key, tmpl_value in template.items():
+        child = f"{path}.{key}" if path else str(key)
+
+        if key not in user:
+            user[key] = deepcopy(tmpl_value)
+            report.added.append(child)
+            continue
+
+        user_value = user[key]
+        if isinstance(tmpl_value, Mapping) and isinstance(user_value, MutableMapping):
+            merge_template_into_user(tmpl_value, user_value, path=child, report=report)
+        elif isinstance(tmpl_value, list) and isinstance(user_value, list):
+            _merge_list(child, tmpl_value, user_value, report)
+        # else: 保留用户值
+
+    return user
+
+
+def _merge_list(
+    path: str,
+    tmpl_list: list,
+    user_list: list,
+    report: MergeReport,
+) -> None:
+    """列表合并。未登记路径默认 user-wins（整体保留），与现状一致。"""
+    if path in LIST_USER_WINS:
+        return
+    key = LIST_MERGE_BY_KEY.get(path)
+    if key is None:
+        return
+
+    existing = {e.get(key) for e in user_list if isinstance(e, Mapping)}
+    for entry in tmpl_list:
+        if not isinstance(entry, Mapping):
+            continue
+        entry_id = entry.get(key)
+        if entry_id is None or entry_id in existing:
+            continue
+        user_list.append(deepcopy(entry))
+        report.list_added.append(f"{path}[{key}={entry_id}]")
+
+
+def _collect_orphans(
+    template: Mapping,
+    user: Mapping,
+    *,
+    path: str = "",
+    report: MergeReport,
+) -> None:
+    """采集 user 中模板未定义的字段。只读，不修改。"""
+    for key, user_value in user.items():
+        child = f"{path}.{key}" if path else str(key)
+        if key not in template:
+            report.orphaned.append(child)
+            continue
+        tmpl_value = template[key]
+        if isinstance(tmpl_value, Mapping) and isinstance(user_value, Mapping):
+            _collect_orphans(tmpl_value, user_value, path=child, report=report)
+
+
+# ============================================================
+# 路径操作原语（根级结构迁移用）
+# ============================================================
+
+def _get_by_path(root: Mapping, path: str) -> tuple[bool, Any]:
+    """按点分路径读取嵌套 dict。返回 (是否找到, 值)。"""
+    keys = path.split(".")
+    current: Any = root
+    for key in keys:
+        if isinstance(current, Mapping) and key in current:
+            current = current[key]
+        else:
+            return False, None
+    return True, current
+
+
+def _has_path(root: Mapping, path: str) -> bool:
+    """检查路径是否存在。"""
+    found, _ = _get_by_path(root, path)
+    return found
+
+
+def _set_by_path(root: MutableMapping, path: str, value: Any) -> None:
+    """按点分路径写入嵌套 dict，自动创建中间节点。"""
+    keys = path.split(".")
+    current: MutableMapping = root
+    for key in keys[:-1]:
+        if key not in current or not isinstance(current[key], MutableMapping):
+            current[key] = {}
+        current = current[key]
+    current[keys[-1]] = value
+
+
+def _del_by_path(root: MutableMapping, path: str) -> bool:
+    """按点分路径删除嵌套 dict 中的叶子节点。返回是否删除成功。"""
+    keys = path.split(".")
+    current: Any = root
+    for key in keys[:-1]:
+        if isinstance(current, MutableMapping) and key in current:
+            current = current[key]
+        else:
+            return False
+    if isinstance(current, MutableMapping) and keys[-1] in current:
+        del current[keys[-1]]
+        return True
+    return False
+
+
+# ============================================================
+# 结构迁移（根级 pre-pass，set-if-absent）
+# ============================================================
+
+# 旧路径 → (新路径, 说明)。路径均为根相对。
+DEPRECATED_FIELDS: dict[str, tuple[str, str]] = {
+    "heartbeat.every":          ("health_check.every",          "moved to health_check"),
+    "heartbeat.target":          ("health_check.target",         "moved to health_check"),
+    "heartbeat.active_hours":    ("health_check.active_hours",   "moved to health_check"),
+    "modes.agent.fast.memory.enabled": ("modes.agent.memory.enabled", "merged into agent.memory"),
+    "modes.agent.plan.memory.enabled": ("modes.agent.memory.enabled", "merged into agent.memory"),
+}
+
+_LEGACY_AGENT_SUBMODE_KEYS: tuple[str, ...] = ("plan", "fast", "agent.plan", "agent.fast")
+
+
+def _migrate_legacy_agent_submode_memory(user_data: dict[str, Any]) -> None:
+    """将旧 plan/fast 子模式 memory 配置合并到 modes.agent.memory。
+
+    保持原逻辑不变：只提取 enabled 值，取 all() 后写入（若新路径未设值）。
+    """
+    modes = user_data.get("modes")
+    if not isinstance(modes, dict):
+        return
+    agent_node = modes.get("agent")
+    if not isinstance(agent_node, dict):
+        return
+
+    legacy_enabled_values: list[bool] = []
+    for key in _LEGACY_AGENT_SUBMODE_KEYS:
+        sub_node = agent_node.get(key)
+        if isinstance(sub_node, dict):
+            sub_memory = sub_node.get("memory")
+            if isinstance(sub_memory, dict) and "enabled" in sub_memory:
+                legacy_enabled_values.append(bool(sub_memory["enabled"]))
+
+    if not legacy_enabled_values:
+        return
+
+    flat_memory = agent_node.get("memory")
+    if not isinstance(flat_memory, dict):
+        flat_memory = {}
+        agent_node["memory"] = flat_memory
+
+    if "enabled" not in flat_memory:
+        flat_memory["enabled"] = all(legacy_enabled_values)
+
+
+def apply_structural_migrations(root: MutableMapping, report: MergeReport) -> None:
+    """根级结构迁移。必须在 merge_template_into_user 之前调用。
+
+    语义为 set-if-absent：用户已在新路径设过值时，不被旧值覆盖。
+    """
+    # 1. 旧 plan/fast 子模式 memory → modes.agent.memory
+    _migrate_legacy_agent_submode_memory(root)
+
+    # 2. DEPRECATED_FIELDS 逐条 set-if-absent
+    for old_path, (new_path, _reason) in DEPRECATED_FIELDS.items():
+        found, value = _get_by_path(root, old_path)
+        if not found:
+            continue
+        if _has_path(root, new_path):
+            _del_by_path(root, old_path)
+            report.migrated.append((old_path, f"{new_path} (已存在，仅清理旧字段)"))
+            continue
+        _set_by_path(root, new_path, value)
+        _del_by_path(root, old_path)
+        report.migrated.append((old_path, new_path))
+
+
+# ============================================================
+# 版本化迁移链
+# ============================================================
+
+CONFIG_VERSION = "2.0"
+
+MIGRATIONS: list[tuple[str, str, "Callable[[MutableMapping, MergeReport], None]"]] = [
+    # ("1.0", "2.0", migrate_1_to_2),  # 暂无需要版本门控的结构迁移
+]
+
+
+def _read_version(version_file: Path) -> str:
+    """读取 version.json，返回当前版本号。不存在返回空串。"""
+    if not version_file.exists():
+        return ""
+    try:
+        import json as _json
+        data = _json.loads(version_file.read_text(encoding="utf-8"))
+        return str(data.get("config_version", "")).strip()
+    except Exception:
+        return ""
+
+
+def _write_version(version_file: Path, version: str) -> None:
+    """写入 version.json。"""
+    version_file.parent.mkdir(parents=True, exist_ok=True)
+    import json as _json
+    payload = {
+        "config_version": version,
+        "last_migration_time": datetime.now().isoformat(timespec="seconds"),
+    }
+    version_file.write_text(
+        _json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _vcmp(a: str, b: str) -> int:
+    """简单版本比较，返回 -1/0/1。仅支持点分数字（如 "1.0" vs "2.0"）。"""
+    def _parts(v: str) -> tuple[int, ...]:
+        return tuple(int(p) for p in v.split(".") if p.isdigit())
+    pa, pb = _parts(a), _parts(b)
+    n = max(len(pa), len(pb))
+    pa = pa + (0,) * (n - len(pa))
+    pb = pb + (0,) * (n - len(pb))
+    if pa < pb:
+        return -1
+    elif pa > pb:
+        return 1
+    return 0
+
+
+def backup_config(config_path: Path, tag: str = "") -> Path:
+    """迁移前快照。保留最近 N 份，避免无限增长。"""
+    backup_dir = config_path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    name = f"{config_path.stem}.{ts}{'.' + tag if tag else ''}.yaml"
+    dest = backup_dir / name
+    shutil.copy2(config_path, dest)
+    _prune_backups(backup_dir, keep=10)
+    return dest
+
+
+def _prune_backups(backup_dir: Path, keep: int = 10) -> None:
+    """保留最近 keep 份备份，删除旧的。"""
+    if not backup_dir.exists():
+        return
+    files = sorted(
+        [f for f in backup_dir.iterdir() if f.is_file() and f.suffix == ".yaml"],
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    for f in files[keep:]:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
+def run_versioned_migration(
+    config_path: Path,
+    report: MergeReport,
+) -> bool:
+    """版本驱动的结构迁移。返回是否发生了改动。
+
+    三种情形：
+      fresh install   version.json 无 + config.yaml 无 → 不迁移，由 init_workspace 生成
+      upgrade         version.json 无 + config.yaml 有 → 视为 1.0，跑完整链
+      normal startup  version.json 有                  → 只跑 pending
+    """
+    version_file = config_path.parent / "version.json"
+
+    if not version_file.exists():
+        if not config_path.exists():
+            return False  # fresh install
+        current = "1.0"     # upgrade from pre-version era
+    else:
+        current = _read_version(version_file)
+        if not current:
+            current = "1.0"
+
+    pending = [
+        (f, t, fn) for f, t, fn in MIGRATIONS if _vcmp(current, t) < 0
+    ]
+    if not pending:
+        if not version_file.exists():
+            _write_version(version_file, CONFIG_VERSION)
+        return False
+
+    backup_config(config_path, tag=f"pre-{current}-to-{CONFIG_VERSION}")
+
+    data = load_yaml_round_trip(config_path)
+    for _from_v, _to_v, migrate_fn in pending:
+        migrate_fn(data, report)
+        current = _to_v
+    dump_yaml_round_trip(config_path, data)
+    _write_version(version_file, CONFIG_VERSION)
+    return True
 
 
 def update_health_check_in_config(payload: dict[str, Any]) -> None:
@@ -2266,72 +2650,17 @@ def update_a2ui_in_config(updates: dict[str, Any]) -> None:
 
 
 def _deep_merge(
-    template: dict[str, Any],
-    user: dict[str, Any],
-    depth: int = 0,
-) -> dict[str, Any]:
-    """Recursively merge template with user config, cleaning deprecated fields.
+    template: Mapping,
+    user: MutableMapping,
+) -> MutableMapping:
+    """向后兼容别名：委托给 merge_template_into_user。
 
-    Rules:
-    - Add: fields only in template (new config options)
-    - Keep: user values for fields that exist in template (preserve user settings)
-    - Remove: fields only in user (deprecated config, cleanup)
-    - Max recursion depth: 4 (covers deep nested config like context_engine_config)
-
-    Args:
-        template: Template config dict with default values
-        user: User config dict
-        depth: Current recursion depth
-
-    Returns:
-        Merged dict synced with template structure, preserving user values.
+    .. deprecated:: v3
+        使用 ``merge_template_into_user`` 代替。此函数仅为兼容
+        外部直接调用而保留，行为已与 v3 合并引擎一致。
     """
-    if depth >= 4:
-        return user
-
-    result: dict[str, Any] = {}
-
-    for key, template_value in template.items():
-        if key not in user:
-            result[key] = template_value
-        elif isinstance(template_value, dict) and isinstance(user.get(key), dict):
-            result[key] = _deep_merge(template_value, user[key], depth + 1)
-        else:
-            result[key] = user[key]
-
-    return result
-
-
-
-_LEGACY_AGENT_SUBMODE_KEYS: tuple[str, ...] = ("plan", "fast", "agent.plan", "agent.fast")
-
-
-def _migrate_legacy_agent_submode_memory(user_data: dict[str, Any]) -> None:
-    modes = user_data.get("modes")
-    if not isinstance(modes, dict):
-        return
-    agent_node = modes.get("agent")
-    if not isinstance(agent_node, dict):
-        return
-
-    legacy_enabled_values: list[bool] = []
-    for key in _LEGACY_AGENT_SUBMODE_KEYS:
-        sub_node = agent_node.get(key)
-        if isinstance(sub_node, dict):
-            sub_memory = sub_node.get("memory")
-            if isinstance(sub_memory, dict) and "enabled" in sub_memory:
-                legacy_enabled_values.append(bool(sub_memory["enabled"]))
-
-    if not legacy_enabled_values:
-        return
-
-    flat_memory = agent_node.get("memory")
-    if not isinstance(flat_memory, dict):
-        flat_memory = {}
-        agent_node["memory"] = flat_memory
-
-    if "enabled" not in flat_memory:
-        flat_memory["enabled"] = all(legacy_enabled_values)
+    report = MergeReport()
+    return merge_template_into_user(template, user, report=report)
 
 
 def migrate_config_from_template(
@@ -2340,15 +2669,12 @@ def migrate_config_from_template(
 ) -> bool:
     """Sync user config with template structure, preserving user values.
 
-    Three-way merge:
-    - Add: new fields from template (new config options)
-    - Keep: user values for fields that exist in template
-    - Remove: deprecated fields not in template (cleanup)
-
-    This preserves user settings like:
-    - models.*.model_config_obj.temperature
-    - react.context_engine_config.enabled
-    - react.context_engine_config.message_summary_offloader_config.*
+    v3 重写后的合并流程：
+    1. 版本驱动结构迁移（run_versioned_migration，已在调用方完成）
+    2. 根级结构迁移（apply_structural_migrations，set-if-absent）
+    3. 采集 orphaned 字段（保留 + 告警，不删除）
+    4. merge_template_into_user（就地、保注释、无守卫、列表策略化）
+    5. 幂等：落盘指纹无变化则不写
 
     Args:
         template_path: Path to template config.yaml
@@ -2366,35 +2692,41 @@ def migrate_config_from_template(
     template_data = load_yaml_round_trip(template_path)
     user_data = load_yaml_round_trip(user_config_path)
 
-    if not isinstance(template_data, dict):
+    if not isinstance(template_data, Mapping):
         return False
 
     if user_data is None:
         user_data = {}
 
-    # 结构性迁移：plan/fast 子模式 memory 配置 -> 合并后的 modes.agent.memory
-    # 必须在 _deep_merge 之前执行，否则旧子节点会被静默丢弃而非迁移。
-    _migrate_legacy_agent_submode_memory(user_data)
+    report = MergeReport()
 
-    # Deep merge: template provides defaults, user values preserved
-    merged_data = _deep_merge(template_data, user_data)
+    # 1. 根级结构迁移（set-if-absent，在合并之前）
+    apply_structural_migrations(user_data, report)
 
-    # Guard against empty merged_data overwriting valid user config
-    if merged_data is None or not merged_data:
+    # 2. 采集 orphaned 字段（只读，不修改）
+    _collect_orphans(template_data, user_data, report=report)
+
+    # 3. 就地合并：模板补进用户，保留值/注释/格式
+    before = _fingerprint_yaml(user_data)
+    merge_template_into_user(template_data, user_data, report=report)
+
+    report.log(logger)
+
+    if not user_data:
         return False
 
-    # 写回程序版本号，与合并内容原子落盘；放在 diff 判断之前，
+    # 写回程序版本号，与合并内容原子落盘；放在指纹判据之前，
     # 使旧 config（无版本号或版本号旧）必走写盘分支把版本号写回，
     # 已写回的最新 config 下次启动被 ensure_config_migrated_from_template 短路。
     from jiuwenswarm.common._build_config import VERSION
-    merged_data["config_version"] = VERSION
+    user_data["config_version"] = VERSION
 
-    # Only write if there are actual changes
-    if merged_data != user_data:
-        dump_yaml_round_trip(user_config_path, merged_data)
-        return True
+    # 4. 幂等判据：指纹无变化则不写盘
+    if _fingerprint_yaml(user_data) == before:
+        return False
 
-    return False
+    dump_yaml_round_trip(user_config_path, user_data)
+    return True
 
 
 # ---------- 模型配置管理 ----------
@@ -3070,3 +3402,106 @@ def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
         sandbox_block[key] = merged[key]
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
     return merged
+
+
+# ============================================================
+# 环境变量校验（feature 门控降噪）
+# ============================================================
+
+# feature → 必须定义的环境变量（仅无 ${VAR:-default} 默认值的才校验）
+_FEATURE_REQUIRED_ENV: dict[str, list[str]] = {
+    "task_memory": [
+        "TASK_MEMORY_LLM_MODEL",
+        "TASK_MEMORY_EMBED_MODEL",
+        "TASK_MEMORY_API_KEY",
+        "TASK_MEMORY_API_BASE",
+    ],
+}
+
+
+def _is_feature_enabled(config: Mapping, feature: str) -> bool:
+    """检查 config 中某 feature 是否启用。"""
+    if feature == "task_memory":
+        tm = config.get("task_memory")
+        return isinstance(tm, Mapping) and tm.get("enabled") is True
+    return False
+
+
+def validate_env_vars(
+    config_path: Path | None = None,
+    env_path: Path | None = None,
+) -> list[str]:
+    """校验 config.yaml 中无默认值的环境变量是否有 .env 定义。
+
+    只校验：
+    1. 无 :- 默认值的 ${VAR} 引用
+    2. 且对应 feature 在 config 中已启用
+
+    跳过：
+    - 有 ${VAR:-default} 的变量（已自带兜底）
+    - feature 未启用的变量
+
+    Returns:
+        缺失变量名的排序列表（空列表 = 全部匹配）。仅告警，不阻塞启动。
+    """
+    if config_path is None:
+        config_path = CONFIG_YAML_PATH
+    if env_path is None:
+        env_path = config_path.parent / ".env"
+
+    if not config_path.exists():
+        return []
+
+    config_text = config_path.read_text(encoding="utf-8")
+
+    # 所有无默认值的 ${VAR} 引用（不匹配 ${VAR:-...}）
+    no_default = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*)\}", config_text))
+    # 排除有默认值的（${VAR:-...} 中的 VAR 也会被上面的正则匹配到，
+    # 但 ${VAR:-...} 中的 VAR 在带 :- 的模式里，我们用排除法）
+    with_default = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*)[:-]", config_text))
+    truly_bare = no_default - with_default
+
+    # .env 已定义的变量
+    env_vars: set[str] = set()
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                var_name = line.split("=", 1)[0].strip()
+                env_vars.add(var_name)
+
+    # 进程环境变量也计入（如 OPENAI_API_KEY 由父进程注入）
+    env_vars.update(
+        k for k in truly_bare if os.getenv(k)
+    )
+
+    # 按 feature 门控过滤
+    try:
+        config = get_config()
+    except Exception:
+        config = {}
+
+    missing: list[str] = []
+    for feature, required_vars in _FEATURE_REQUIRED_ENV.items():
+        if not _is_feature_enabled(config, feature):
+            continue
+        for var in required_vars:
+            if var in truly_bare and var not in env_vars:
+                missing.append(var)
+
+    return sorted(missing)
+
+
+def check_env_vars_on_startup() -> None:
+    """启动时校验环境变量，缺失的输出告警（不阻塞）。"""
+    try:
+        missing = validate_env_vars()
+        if missing:
+            logger.warning(
+                "config.yaml 引用了 %d 个未在 .env 中定义的环境变量"
+                "（feature 已启用）: %s",
+                len(missing),
+                missing,
+            )
+    except Exception:
+        logger.debug("环境变量校验失败", exc_info=True)

@@ -775,8 +775,8 @@ health_check:
   target: web
   # 探活生效时间段（本地时间），start <= now < end 时探活生效
   active_hours:
-    start: 08:00
-    end: 22:00
+    start: "08:00"
+    end: "22:00"
 
 # 执行护栏：工具循环检测与主动中断
 execution_guard:
