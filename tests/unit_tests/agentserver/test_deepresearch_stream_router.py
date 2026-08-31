@@ -85,19 +85,11 @@ class _CountingList(list):
         self.items_visited = 0
 
 
-def test_advance_stage_emits_status_only_to_task_list_and_foreground():
+def test_advance_stage_emits_status_only_to_task_list():
     frames = advance_stage(RouterState(), 1)
 
-    assert [frame["event_type"] for frame in frames] == [
-        "task.update",
-        "chat.delta",
-    ]
-    assert frames[1] == {
-        "event_type": "chat.delta",
-        "task_id": "deepresearch_stage_1",
-        "task_content": "研究主题澄清",
-        "content": "[DeepResearch 阶段切换] 开始 Stage 1：研究主题澄清\n",
-    }
+    assert [frame["event_type"] for frame in frames] == ["task.update"]
+    _assert_stage(frames[0], 1)
 
 
 def test_advance_stage_backfills_every_missing_stage_in_event_order():
@@ -106,12 +98,8 @@ def test_advance_stage_backfills_every_missing_stage_in_event_order():
     frames = advance_stage(state, 4)
 
     assert [frame["event_type"] for frame in frames] == [
-        "chat.delta",
         "task.update",
-        "chat.delta",
-        "chat.delta",
         "task.update",
-        "chat.delta",
     ]
     updates = [
         frame for frame in frames if frame["event_type"] == "task.update"
@@ -124,42 +112,26 @@ def test_advance_stage_backfills_every_missing_stage_in_event_order():
         )
         for update in updates
     ] == [3, 4]
-    assert [
-        frame["content"]
-        for frame in frames
-        if frame["event_type"] == "chat.delta"
-    ] == [
-        "[DeepResearch 阶段完成] Stage 2：大纲生成\n",
-        "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n",
-        "[DeepResearch 阶段完成] Stage 3：并行调研与章节撰写\n",
-        "[DeepResearch 阶段切换] 开始 Stage 4：报告交付\n",
-    ]
     assert state.current_stage == 4
 
 
-def test_advance_stage_marks_previous_stage_complete_before_next_stage_starts():
+def test_advance_stage_marks_previous_stage_complete_in_next_snapshot():
     state = RouterState(current_stage=1)
 
     frames = advance_stage(state, 2)
 
-    visible_stage_events = [
-        frame["content"]
-        for frame in frames
-        if frame["event_type"] == "chat.delta"
-    ]
-    assert visible_stage_events == [
-        "[DeepResearch 阶段完成] Stage 1：研究主题澄清\n",
-        "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n",
-    ]
+    assert [frame["event_type"] for frame in frames] == ["task.update"]
     _assert_stage(_stage_update(frames), 2)
 
 
-def test_stage_2_uses_outline_generation_title_on_all_surfaces():
-    frames = advance_stage(RouterState(), 2)[-2:]
+def test_stage_2_uses_outline_generation_title_in_task_list():
+    frames = advance_stage(RouterState(), 2)
 
-    assert frames[0]["tasks"][1]["task_content"] == "大纲生成"
-    assert frames[1]["task_content"] == "大纲生成"
-    assert frames[1]["content"] == "[DeepResearch 阶段切换] 开始 Stage 2：大纲生成\n"
+    assert [frame["event_type"] for frame in frames] == [
+        "task.update",
+        "task.update",
+    ]
+    assert frames[-1]["tasks"][1]["task_content"] == "大纲生成"
 
 
 def test_advance_stage_completion_keeps_all_four_completed_tasks_visible():
@@ -168,20 +140,16 @@ def test_advance_stage_completion_keeps_all_four_completed_tasks_visible():
 
     frames = advance_stage(state, 4, complete=True)
 
-    assert [frame["event_type"] for frame in frames] == [
-        "task.update",
-        "chat.delta",
-    ]
+    assert [frame["event_type"] for frame in frames] == ["task.update"]
     update = frames[0]
     assert len(update["tasks"]) == 4
     assert [task["task_id"] for task in update["tasks"]] == [
         f"deepresearch_stage_{index}" for index in range(1, 5)
     ]
     assert all(task["status"] == "completed" for task in update["tasks"])
-    assert frames[1]["content"] == "[DeepResearch 阶段完成] Stage 4：报告交付\n"
 
 
-def test_advance_stage_does_not_repeat_or_regress_transition_messages():
+def test_advance_stage_does_not_repeat_or_regress_snapshots():
     state = RouterState()
 
     assert advance_stage(state, 4)
@@ -1179,10 +1147,7 @@ def test_interrupt_chunk_not_forwarded():
     _assert_stage(_stage_update(frames), 2)
     assert [frame["event_type"] for frame in frames] == [
         "task.update",
-        "chat.delta",
-        "chat.delta",
         "task.update",
-        "chat.delta",
     ]
 
 
@@ -1774,19 +1739,14 @@ def test_brief_outline_uses_stage_two_and_outline_preview_contract():
         "brief_source_tracer",
     ],
 )
-def test_brief_research_nodes_advance_stage_three_in_foreground(agent):
+def test_brief_research_nodes_advance_stage_three_in_task_list(agent):
     frames = route_chunk(
         {"agent": agent, "event": "start", "content": "处理中"},
         RouterState(current_stage=2),
     )
 
     _assert_stage(_stage_update(frames), 3)
-    assert any(
-        frame["event_type"] == "chat.delta"
-        and frame["content"]
-        == "[DeepResearch 阶段切换] 开始 Stage 3：并行调研与章节撰写\n"
-        for frame in frames
-    )
+    assert all(frame["event_type"] != "chat.delta" for frame in frames)
 
 
 @pytest.mark.parametrize(
