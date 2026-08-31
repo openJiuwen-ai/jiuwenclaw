@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
 
-from jiuwenswarm.common.utils import get_agent_sessions_dir
+from jiuwenswarm.common.utils import get_agent_sessions_dir, is_persistable_session_id
 from jiuwenswarm.server.runtime.session.work_mode import (
     DEFAULT_WEB_WORK_MODE,
     SUPPORTED_WORK_MODES,
@@ -21,6 +21,7 @@ from jiuwenswarm.server.runtime.session.work_mode import (
 )
 
 logger = logging.getLogger(__name__)
+
 
 # ---------- 异步写入队列(与 session_history 保持一致的模式) ----------
 _METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any], bool]] = queue.Queue(maxsize=5000)
@@ -470,6 +471,11 @@ def init_session_metadata(
     ``channel_metadata`` 可选：TUI ``session.create`` 需在首条聊天前写入
     ``cwd``/``project_dir``，供 ``/resume`` current-dir 过滤（见 Issue #2503）。
     """
+    if not is_persistable_session_id(session_id):
+        # 空 id 或 "default"（上游 or "default" 兜底占位符）拒绝落盘：
+        # 这类 id 不是真实会话，落盘只会凭空 mkdir 出空的 default 目录。
+        logger.debug("init_session_metadata: non-persistable session_id=%r, skip", session_id)
+        return
     # work_mode：未传时按 channel_id 推断默认值（tui→code，其他→work）
     resolved_work_mode = (
         normalize_work_mode(work_mode, default=default_work_mode_for_channel(channel_id))
@@ -564,6 +570,11 @@ def update_session_metadata(
     ``True``:返回成功前落盘,否则只读磁盘的另一进程(AgentServer)在窗口期
     内会读到陈旧数据,后续整份 metadata 回写会覆盖刚写入的 ``pinned`` 状态。
     """
+    if not is_persistable_session_id(session_id):
+        # 空 id 或 "default"（上游 or "default" 兜底占位符）拒绝落盘：
+        # 避免凭空 mkdir 出空的 default 会话目录。
+        logger.debug("update_session_metadata: non-persistable session_id=%r, skip", session_id)
+        return
     metadata = _read_metadata(session_id, cache_bust=cache_bust)
 
     if not metadata:
@@ -973,6 +984,11 @@ def increment_session_round_count(session_id: str) -> int:
     - 首次调用时从 metadata 中读取 round_id（默认 0），先 ++ 再返回。
     - 持久化到 session metadata，确保重启后 round_id 不丢失。
     """
+    if not is_persistable_session_id(session_id):
+        # 空 id 或 "default"（上游兜底占位符）拒绝落盘，避免凭空 mkdir
+        # 出空的 default 会话目录。
+        logger.debug("increment_session_round_count: non-persistable session_id=%r, skip", session_id)
+        return 0
     metadata = _read_metadata(session_id)
     current_round = int(metadata.get("round_id", 0))
     new_round = current_round + 1
@@ -997,6 +1013,11 @@ def set_session_delivery_context(
     delivery_kind: str = _DELIVERY_KIND_SERVER_PUSH,
 ) -> dict[str, Any]:
     """刷新 session 级 delivery context，供异步 server_push 恢复路由上下文。"""
+    if not is_persistable_session_id(session_id):
+        # 空 id 或 "default"（上游兜底占位符）拒绝落盘，避免凭空 mkdir
+        # 出空的 default 会话目录。
+        logger.debug("set_session_delivery_context: non-persistable session_id=%r, skip", session_id)
+        return {}
     metadata = _read_metadata(session_id)
     current_context_raw = metadata.get("delivery_context")
     current_context = (
