@@ -54,4 +54,5 @@ export interface ApplicationPluginSettingsPayload {
   config_schema: ApplicationPluginConfigSchema;
   values: Record<string, unknown>;
   configured_secrets: string[];
+  configured_secret_lengths?: Record<string, number>;
 }

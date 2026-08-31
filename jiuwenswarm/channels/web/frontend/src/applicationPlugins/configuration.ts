@@ -3,6 +3,12 @@ import type { ApplicationPluginConfigProperty } from './types';
 export type ApplicationPluginDraftValue = string | boolean;
 export const APPLICATION_PLUGIN_SECRET_MASK = '******';
 
+export function applicationPluginSecretMask(length?: number): string {
+  return Number.isSafeInteger(length) && Number(length) > 0
+    ? '*'.repeat(Number(length))
+    : APPLICATION_PLUGIN_SECRET_MASK;
+}
+
 function isSecretProperty(definition: ApplicationPluginConfigProperty): boolean {
   return definition.secret === true || definition.format === 'password';
 }
@@ -11,12 +17,13 @@ export function applicationPluginSettingsToDraft(
   values: Record<string, unknown>,
   properties: Record<string, ApplicationPluginConfigProperty>,
   configuredSecrets: string[] = [],
+  configuredSecretLengths: Record<string, number> = {},
 ): Record<string, ApplicationPluginDraftValue> {
   const configured = new Set(configuredSecrets);
   return Object.fromEntries(
     Object.entries(properties).map(([key, definition]) => {
       if (isSecretProperty(definition) && configured.has(key)) {
-        return [key, APPLICATION_PLUGIN_SECRET_MASK];
+        return [key, applicationPluginSecretMask(configuredSecretLengths[key])];
       }
       const value = values[key] ?? definition.default ?? '';
       if (definition.type === 'boolean') return [key, value === true];
@@ -32,12 +39,14 @@ export function serializeApplicationPluginDraft(
   draft: Record<string, ApplicationPluginDraftValue>,
   properties: Record<string, ApplicationPluginConfigProperty>,
   configuredSecrets: string[] = [],
+  configuredSecretLengths: Record<string, number> = {},
 ): Record<string, unknown> {
   const configured = new Set(configuredSecrets);
   return Object.fromEntries(
     Object.entries(properties).map(([key, definition]) => {
       const value = draft[key];
-      if (isSecretProperty(definition) && configured.has(key) && value === APPLICATION_PLUGIN_SECRET_MASK) {
+      const secretMask = applicationPluginSecretMask(configuredSecretLengths[key]);
+      if (isSecretProperty(definition) && configured.has(key) && value === secretMask) {
         return [key, ''];
       }
       if (definition.type === 'boolean') return [key, value === true];

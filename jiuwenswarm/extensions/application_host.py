@@ -87,6 +87,9 @@ def application_plugin_settings_payload(plugin: ApplicationPluginExtension) -> d
     configured_secrets = sorted(
         key for key in secret_fields if values.get(key) not in (None, "")
     )
+    configured_secret_lengths = {
+        key: len(str(values[key])) for key in configured_secrets
+    }
     public_values = dict(values)
     for key in secret_fields:
         if key in public_values:
@@ -97,6 +100,7 @@ def application_plugin_settings_payload(plugin: ApplicationPluginExtension) -> d
         "config_schema": schema,
         "values": public_values,
         "configured_secrets": configured_secrets,
+        "configured_secret_lengths": configured_secret_lengths,
     }
 
 

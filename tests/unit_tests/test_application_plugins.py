@@ -155,6 +155,7 @@ async def test_generic_plugin_settings_and_enabled_state_are_persisted(tmp_path:
     public = application_plugin_settings_payload(restored)
     assert public["values"]["api_key"] == ""
     assert public["configured_secrets"] == ["api_key"]
+    assert public["configured_secret_lengths"] == {"api_key": 6}
 
 
 @pytest.mark.asyncio
@@ -263,6 +264,7 @@ def test_application_plugin_management_api_masks_and_preserves_secrets(tmp_path:
     assert saved.status_code == 200
     assert saved.json()["values"]["api_key"] == ""
     assert saved.json()["configured_secrets"] == ["api_key"]
+    assert saved.json()["configured_secret_lengths"] == {"api_key": 13}
 
     preserved = client.put(
         "/api/application-plugins/example-plugin/settings",

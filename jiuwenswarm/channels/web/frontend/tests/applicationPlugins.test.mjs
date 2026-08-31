@@ -125,17 +125,27 @@ test('rejects empty numeric and malformed JSON settings before saving', () => {
   assert.throws(() => serializeApplicationPluginDraft({ headers: '{' }, { headers: { type: 'object' } }), /有效的 JSON/);
 });
 
-test('shows configured secrets as a fixed mask and preserves them on save', () => {
+test('shows configured secrets with their original length and preserves them on save', () => {
   const properties = {
     api_key: { type: 'string', secret: true },
     endpoint: { type: 'string' },
   };
-  const draft = applicationPluginSettingsToDraft({ api_key: '', endpoint: 'https://example.test' }, properties, ['api_key']);
+  const secretLengths = { api_key: 17 };
+  const draft = applicationPluginSettingsToDraft(
+    { api_key: '', endpoint: 'https://example.test' },
+    properties,
+    ['api_key'],
+    secretLengths,
+  );
 
-  assert.equal(draft.api_key, APPLICATION_PLUGIN_SECRET_MASK);
-  assert.deepEqual(serializeApplicationPluginDraft(draft, properties, ['api_key']), { api_key: '', endpoint: 'https://example.test' });
-  assert.deepEqual(serializeApplicationPluginDraft({ ...draft, api_key: 'replacement' }, properties, ['api_key']), {
+  assert.equal(draft.api_key, '*'.repeat(17));
+  assert.deepEqual(serializeApplicationPluginDraft(draft, properties, ['api_key'], secretLengths), { api_key: '', endpoint: 'https://example.test' });
+  assert.deepEqual(serializeApplicationPluginDraft({ ...draft, api_key: 'replacement' }, properties, ['api_key'], secretLengths), {
     api_key: 'replacement',
     endpoint: 'https://example.test',
   });
+  assert.equal(
+    applicationPluginSettingsToDraft({ api_key: '' }, properties, ['api_key']).api_key,
+    APPLICATION_PLUGIN_SECRET_MASK,
+  );
 });

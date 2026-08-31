@@ -3,7 +3,7 @@ import { LoaderCircle, Power, Save, Settings2, X } from 'lucide-react';
 
 import { fetchApplicationPluginSettings, setApplicationPluginEnabled, updateApplicationPluginSettings } from './api';
 import {
-  APPLICATION_PLUGIN_SECRET_MASK,
+  applicationPluginSecretMask,
   applicationPluginSettingsToDraft,
   isApplicationPluginSettingVisible,
   serializeApplicationPluginDraft,
@@ -34,7 +34,12 @@ export function ApplicationPluginConfiguration({
 
   const applySettings = (payload: ApplicationPluginSettingsPayload) => {
     setSettings(payload);
-    setDraft(applicationPluginSettingsToDraft(payload.values, payload.config_schema.properties || {}, payload.configured_secrets));
+    setDraft(applicationPluginSettingsToDraft(
+      payload.values,
+      payload.config_schema.properties || {},
+      payload.configured_secrets,
+      payload.configured_secret_lengths,
+    ));
   };
 
   useEffect(() => {
@@ -57,6 +62,7 @@ export function ApplicationPluginConfiguration({
 
   const enabled = settings?.enabled ?? contribution.enabled !== false;
   const configuredSecrets = new Set(settings?.configured_secrets || []);
+  const configuredSecretLengths = settings?.configured_secret_lengths || {};
 
   const toggleEnabled = async () => {
     if (saving || loading) return;
@@ -77,7 +83,12 @@ export function ApplicationPluginConfiguration({
     setSaving(true);
     setError('');
     try {
-      const values = serializeApplicationPluginDraft(draft, properties, settings?.configured_secrets);
+      const values = serializeApplicationPluginDraft(
+        draft,
+        properties,
+        settings?.configured_secrets,
+        settings?.configured_secret_lengths,
+      );
       applySettings(await updateApplicationPluginSettings(contribution.plugin_id, values, []));
       setExpanded(false);
       onManifestChanged();
@@ -117,6 +128,7 @@ export function ApplicationPluginConfiguration({
             const showGroup = group !== previousGroup;
             const secret = definition.secret === true || definition.format === 'password';
             const configured = secret && configuredSecrets.has(key);
+            const secretMask = applicationPluginSecretMask(configuredSecretLengths[key]);
             const label = definition.title || key;
             return (
               <div className="application-plugin-configuration__field-wrap" key={key}>
@@ -149,9 +161,9 @@ export function ApplicationPluginConfiguration({
                         value={String(draft[key] ?? '')}
                         min={definition.minimum}
                         max={definition.maximum}
-                        placeholder={configured ? APPLICATION_PLUGIN_SECRET_MASK : ''}
+                        placeholder={configured ? secretMask : ''}
                         onFocus={() => {
-                          if (configured && draft[key] === APPLICATION_PLUGIN_SECRET_MASK) {
+                          if (configured && draft[key] === secretMask) {
                             setDraft(current => ({ ...current, [key]: '' }));
                           }
                         }}
