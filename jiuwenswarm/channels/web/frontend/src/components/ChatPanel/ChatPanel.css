@@ -2969,6 +2969,59 @@ overflow: hidden;
   min-width: 0;
 }
 
+.chat-input-swarmflow-config {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-top: 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-card);
+}
+
+.chat-input-swarmflow-config__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.chat-input-swarmflow-config__title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-strong);
+}
+
+.chat-input-swarmflow-config__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.chat-input-swarmflow-config__close:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.chat-input-swarmflow-config__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-input-swarmflow-config__label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
 .chat-skill-select__trigger {
   display: inline-flex;
   align-items: center;

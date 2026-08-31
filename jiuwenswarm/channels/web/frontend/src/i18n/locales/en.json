@@ -476,7 +476,8 @@
         "list": "List view",
         "structure": "Structure view",
         "board": "Board view",
-        "graph": "Graph view"
+        "graph": "Graph view",
+        "workflow": "Workflow view"
       },
       "metrics": {
         "progress": "Progress"
@@ -3175,6 +3176,8 @@
     "budgetExhaustedSession": "Session budget exhausted",
     "budgetExhaustedWorkflow": "Run budget exhausted",
     "toggleLabel": "SwarmFlow",
+    "tagHint": "SwarmFlow is active for this session",
+    "configTitle": "SwarmFlow Configuration",
     "budgetPanelTitle": "SwarmFlow Budget",
     "budgetPanelHint": "Set the token limit for this session (blank = unlimited). Team mode only.",
     "budgetPlaceholder": "blank = unlimited",

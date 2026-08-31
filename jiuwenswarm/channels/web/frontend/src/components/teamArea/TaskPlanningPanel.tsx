@@ -215,11 +215,11 @@ export function ProgressSection({
 export function ViewSwitcher({
   view,
   onViewChange,
-  showGraph = false,
+  showWorkflow = false,
 }: {
-  view: 'board' | 'list' | 'graph';
-  onViewChange: (view: 'board' | 'list' | 'graph') => void;
-  showGraph?: boolean;
+  view: 'board' | 'list' | 'workflow';
+  onViewChange: (view: 'board' | 'list' | 'workflow') => void;
+  showWorkflow?: boolean;
 }) {
   const { t } = useTranslation();
   const { tooltip, handlers: tooltipHandlers } = useAdaptiveTooltip();
@@ -258,12 +258,12 @@ export function ViewSwitcher({
       {showGraph && (
         <button
           type="button"
-          onClick={() => onViewChange('graph')}
-          data-testid="team-area-task-planning-view-graph-button"
-          className={`flex h-6 w-6 items-center justify-center rounded-[4px] transition-colors ${view === 'graph' ? 'bg-card text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
-          aria-label={t('team.planning.views.graph')}
-          title={t('team.planning.views.graph')}
-          aria-pressed={view === 'graph'}
+          onClick={() => onViewChange('workflow')}
+          data-testid="team-area-task-planning-view-workflow-button"
+          className={`flex h-6 w-6 items-center justify-center rounded-[4px] transition-colors ${view === 'workflow' ? 'bg-card text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
+          aria-label={t('team.planning.views.workflow')}
+          title={t('team.planning.views.workflow')}
+          aria-pressed={view === 'workflow'}
         >
           <GitBranch className="h-4 w-4 shrink-0" aria-hidden="true" />
         </button>
@@ -292,12 +292,8 @@ export function TaskPlanningPanel({
   emptyIllustration,
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
-  const [view, setView] = useState<'board' | 'list' | 'graph'>('list');
-  // SwarmFlow: 激活时用树视图替换看板/列表
+  const [view, setView] = useState<'board' | 'list' | 'workflow'>('list');
   const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const swarmflowActive = useSessionStore(
-    (s) => s.runtimes[activeSessionId ?? '']?.swarmflowActive ?? false,
-  );
   const workflowRuns = useSessionStore(
     (s) => s.runtimes[activeSessionId ?? '']?.workflowRuns ?? [],
   );
@@ -320,43 +316,6 @@ export function TaskPlanningPanel({
 
   if (variant === 'compact') {
     const allTasks = tasks;
-
-    if (swarmflowActive && workflowRuns.length > 0) {
-      return (
-        <div
-          className={`flex flex-[2] flex-col overflow-hidden min-h-0 ${hideBorder ? '' : ' border-b border-border'}`}
-          data-testid="team-area-task-planning-panel"
-          data-variant="compact"
-        >
-          {hideHeader ? null : (
-            <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3" data-testid="team-area-task-planning-header">
-              <div className="flex items-center gap-2">
-                <img src={recentTasksIcon} width={16} height={16} aria-hidden="true" />
-                <span className="text-sm font-medium text-text" data-testid="team-area-task-planning-title">{t('swarmflow.workflowList')}</span>
-              </div>
-              {hideExpandButton ? null : (
-                <button
-                  onClick={onExpand}
-                  data-testid="team-area-task-planning-expand-button"
-                  className="rounded p-2 text-text-muted hover:bg-secondary hover:text-text"
-                  title={t('team.expand')}
-                >
-                  <Maximize2 size={12} aria-hidden="true" />
-                </button>
-              )}
-            </div>
-          )}
-          <div className="flex-1 overflow-y-auto">
-            {workflowRuns.map((run) => (
-              <div key={run.id} className="border-b border-border px-4 py-2 text-sm text-text">
-                <span className="font-medium">{run.name ?? run.id}</span>
-                <span className="ml-2 text-text-muted">({run.status})</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      );
-    }
 
     return (
       <div
@@ -402,7 +361,7 @@ export function TaskPlanningPanel({
   }
 
   const viewSwitcher = (
-    <ViewSwitcher view={view} onViewChange={setView} showGraph={workflowRuns.length > 0} />
+    <ViewSwitcher view={view} onViewChange={setView} showWorkflow={workflowRuns.length > 0} />
   );
 
   const header = (
@@ -417,28 +376,27 @@ export function TaskPlanningPanel({
       {view === 'list' ? (
         <div className="flex h-full flex-col px-6 pb-6" data-testid="team-area-task-planning-list-view">
           {header}
-          {swarmflowActive && workflowRuns.length > 0 && activeSessionId ? (
-            <SwarmflowTreeView runs={workflowRuns} sessionId={activeSessionId} />
-          ) : (
-            <ProgressSection
-              tasks={tasks}
-              progressTasks={progressTasks}
-              now={now}
-              groupedTasks={groupedTasks}
-              completedTasks={completedTasks}
-              totalTasks={totalTasks}
-              displayMode="percent"
-              members={members}
-              hideAssignee={hideAssignee}
-              emptyIllustration={emptyIllustration}
-            />
-          )}
+          <ProgressSection
+            tasks={tasks}
+            progressTasks={progressTasks}
+            now={now}
+            groupedTasks={groupedTasks}
+            completedTasks={completedTasks}
+            totalTasks={totalTasks}
+            displayMode="percent"
+            members={members}
+            hideAssignee={hideAssignee}
+            emptyIllustration={emptyIllustration}
+          />
         </div>
-      ) : view === 'graph' ? (
-        <div className="flex h-full flex-col px-6 pb-6" data-testid="team-area-task-planning-graph-view">
+      ) : view === 'workflow' ? (
+        <div className="flex h-full flex-col px-6 pb-6" data-testid="team-area-task-planning-workflow-view">
           {header}
           {workflowRuns.length > 0 && activeSessionId ? (
-            <SwarmflowGraphView runs={workflowRuns} sessionId={activeSessionId} />
+            <>
+              <SwarmflowTreeView runs={workflowRuns} sessionId={activeSessionId} />
+              <SwarmflowGraphView runs={workflowRuns} sessionId={activeSessionId} />
+            </>
           ) : null}
         </div>
       ) : (

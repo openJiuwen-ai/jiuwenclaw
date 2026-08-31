@@ -56,7 +56,7 @@ import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import { ExtensionPickerPanel } from './ExtensionPickerPanel';
 import { SkillPickerPanel } from './SkillPickerPanel';
 import { Switch } from '../Switch';
-import { Button, Input } from '../ui';
+import { Input } from '../ui';
 import { ExtensionIcon } from '../ConnectorMarket/icons';
 import {
   isLikelyAbsolutePath,
@@ -640,7 +640,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [extensionAnchor, setExtensionAnchor] = useState<DOMRect | null>(null);
   const [skillPanelOpen, setSkillPanelOpen] = useState(false);
   const [skillAnchor, setSkillAnchor] = useState<DOMRect | null>(null);
-  const [swarmflowBudgetOpen, setSwarmflowBudgetOpen] = useState(false);
+  const [swarmflowConfigPanelOpen, setSwarmflowConfigPanelOpen] = useState(false);
   const inputRef = useRef<HTMLDivElement>(null);
   const insertSkillChipRef = useRef<(skillName: string) => void>(() => undefined);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
@@ -3093,7 +3093,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       // Plan 与 Swarmflow 互斥：开启 Plan 前先关掉 Swarmflow。
                       if (useSessionStore.getState().getRuntime(activeSessionId)?.enableSwarmflow) {
                         useSessionStore.getState().setSwarmflowActive(activeSessionId, false);
-                        setSwarmflowBudgetOpen(false);
+                        setSwarmflowConfigPanelOpen(false);
                       }
                       // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
                       // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
@@ -3129,22 +3129,25 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   );
                 })()}
                 {isTeamMode && (() => {
+                  // 进入真实会话后开关置灰，仅新建对话页可修改
+                  const swarmflowToggleDisabled = isProcessing || (activeSessionId !== NEW_CONVERSATION_ID && hasHistory);
                   const toggleSwarmflow = (next: boolean) => {
-                    if (!activeSessionId) return;
+                    if (!activeSessionId || swarmflowToggleDisabled) return;
                     // Swarmflow 与 Plan 互斥：开启 Swarmflow 前先关掉 Plan。
                     if (next && planActive) {
                       usePlanStore.getState().setActive(activeSessionId, false);
                     }
                     useSessionStore.getState().setSwarmflowActive(activeSessionId, next);
-                    if (next) setSwarmflowBudgetOpen(true);
-                    else setSwarmflowBudgetOpen(false);
                   };
                   return (
                     <div
-                      className="chat-mode-select__option"
+                      className={cx('chat-mode-select__option', swarmflowToggleDisabled && 'chat-mode-select__option--disabled')}
                       role="menuitem"
                       data-testid="chat-panel-input-attach-menu-swarmflow"
-                      onClick={() => toggleSwarmflow(!swarmflowActive)}
+                      onClick={() => {
+                        if (swarmflowToggleDisabled) return;
+                        toggleSwarmflow(!swarmflowActive);
+                      }}
                     >
                       <span className="chat-mode-select__option-main">
                         <span className="chat-mode-select__icon" aria-hidden="true">
@@ -3152,7 +3155,24 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                         </span>
                         <span className="chat-mode-select__label">{t('swarmflow.toggleLabel')}</span>
                       </span>
-                      <Switch checked={swarmflowActive} onChange={toggleSwarmflow} />
+                      {swarmflowActive ? (
+                        <button
+                          type="button"
+                          className="chat-mode-select__chevron-btn"
+                          aria-haspopup="menu"
+                          aria-expanded={swarmflowConfigPanelOpen}
+                          data-testid="chat-panel-input-attach-menu-swarmflow-config"
+                          title={t('swarmflow.configTitle')}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSwarmflowConfigPanelOpen((open) => !open);
+                          }}
+                        >
+                          <ChevronRight className="chat-mode-select__chevron" size={16} aria-hidden="true" />
+                        </button>
+                      ) : (
+                        <Switch checked={swarmflowActive} disabled={swarmflowToggleDisabled} onChange={toggleSwarmflow} />
+                      )}
                     </div>
                   );
                 })()}
@@ -3401,6 +3421,27 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 }}
               >
                 <X size={11} strokeWidth={2.5} />
+              </button>
+            </div>
+          )}
+
+          {swarmflowActive && (
+            <div className="chat-goal-tag" data-testid="chat-panel-swarmflow-tag">
+              <button
+                type="button"
+                className="chat-mode-select__trigger"
+                data-testid="chat-panel-swarmflow-tag-label"
+                title={t('swarmflow.tagHint')}
+              >
+                <span className="chat-mode-select__value">
+                  <span className="chat-mode-select__icon" aria-hidden="true">
+                    <Workflow className="w-3.5 h-3.5" />
+                  </span>
+                  <span className="chat-mode-select__label">{t('swarmflow.toggleLabel')}</span>
+                  {swarmflowBudget != null && (
+                    <span className="chat-mode-select__sublabel">{t('swarmflow.runBudgetShort')}: {swarmflowBudget}</span>
+                  )}
+                </span>
               </button>
             </div>
           )}
@@ -3675,54 +3716,36 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           </form>
         </div>
       ) : null}
-      {swarmflowBudgetOpen && activeSessionId && (() => {
+      {swarmflowConfigPanelOpen && activeSessionId && swarmflowActive && (() => {
         return (
-          <div
-            className="fixed inset-0 z-50 flex justify-end"
-            data-testid="swarmflow-budget-drawer-root"
-            onClick={() => setSwarmflowBudgetOpen(false)}
-          >
-            <div className="absolute inset-0 bg-black/30" />
-            <div
-              className="relative w-[380px] max-w-full h-full bg-bg shadow-xl flex flex-col animate-slide-in-right"
-              data-testid="swarmflow-budget-drawer-panel"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-card">
-                <h3 className="text-sm font-semibold text-text-strong">
-                  {t('swarmflow.budgetPanelTitle')}
-                </h3>
-                <button
-                  onClick={() => setSwarmflowBudgetOpen(false)}
-                  className="rounded p-1.5 text-text-muted hover:bg-secondary hover:text-text"
-                  aria-label={t('common.close')}
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-              <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-                <p className="text-xs text-text-muted">{t('swarmflow.budgetPanelHint')}</p>
-                <Input
-                  type="number"
-                  value={swarmflowBudget ?? ''}
-                  placeholder={t('swarmflow.budgetPlaceholder')}
-                  disabled={!swarmflowActive}
-                  onChange={(v) => {
-                    const trimmed = v.trim();
-                    useSessionStore.getState().setSwarmflowActive(
-                      activeSessionId,
-                      true,
-                      trimmed ? Number(trimmed) : null,
-                    );
-                  }}
-                />
-                <Button
-                  className="w-full"
-                  onClick={() => setSwarmflowBudgetOpen(false)}
-                >
-                  {t('common.confirm')}
-                </Button>
-              </div>
+          <div className="chat-input-swarmflow-config" data-testid="chat-panel-swarmflow-config-panel">
+            <div className="chat-input-swarmflow-config__header">
+              <span className="chat-input-swarmflow-config__title">{t('swarmflow.configTitle')}</span>
+              <button
+                type="button"
+                onClick={() => setSwarmflowConfigPanelOpen(false)}
+                className="chat-input-swarmflow-config__close"
+                aria-label={t('common.close')}
+                data-testid="chat-panel-swarmflow-config-close"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="chat-input-swarmflow-config__field">
+              <label className="chat-input-swarmflow-config__label">{t('swarmflow.budgetPanelHint')}</label>
+              <Input
+                type="number"
+                value={swarmflowBudget ?? ''}
+                placeholder={t('swarmflow.budgetPlaceholder')}
+                onChange={(v) => {
+                  const trimmed = v.trim();
+                  useSessionStore.getState().setSwarmflowActive(
+                    activeSessionId,
+                    true,
+                    trimmed ? Number(trimmed) : null,
+                  );
+                }}
+              />
             </div>
           </div>
         );
