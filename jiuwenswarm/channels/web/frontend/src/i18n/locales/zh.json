@@ -1848,6 +1848,7 @@
         "readFailed": "无法读取技能图谱，请先刷新图谱。",
         "refreshFailed": "技能图谱刷新失败",
         "cancelFailed": "技能图谱取消失败",
+        "primaryModelProbeFailed": "主模型连接测试未通过：{{detail}}",
         "buildFailedWithDetail": "Symphony 图谱构建失败: {{detail}}"
       },
       "serverDetails": {
@@ -1861,6 +1862,8 @@
       "buildStages": {
         "idle": "暂无构建日志",
         "updateStart": "开始构建技能图谱",
+        "modelProbeStart": "测试主模型连接",
+        "modelProbeDone": "主模型连接测试通过",
         "updateCancelRequested": "正在取消技能图谱构建",
         "updateCancelled": "技能图谱构建已取消",
         "scanStart": "扫描技能目录",

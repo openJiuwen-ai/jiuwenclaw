@@ -223,6 +223,17 @@ def fake_graph_llm(monkeypatch):
     return client
 
 
+@pytest.fixture(autouse=True)
+def stub_model_connection_probe(monkeypatch):
+    async def probe(_config):
+        return None
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.probe_model_connection",
+        probe,
+    )
+
+
 def _config(tmp_path, *, evolution=True):
     return SimpleNamespace(
         paths=SimpleNamespace(
@@ -638,11 +649,20 @@ async def test_swarm_build_publishes_public_graph_artifact(
         (2, 3),
         (3, 3),
     ]
+    assert (
+        _build_progress(
+            [
+                {"stage": "fingerprint.extract.start", **item}
+                for item in fingerprint_progress[:3]
+            ]
+        )["percent"]
+        < 48
+    )
     assert _build_progress(
-        [{"stage": "fingerprint.extract.start", **item} for item in fingerprint_progress[:3]]
-    )["percent"] < 48
-    assert _build_progress(
-        [{"stage": "fingerprint.extract.start", **item} for item in fingerprint_progress]
+        [
+            {"stage": "fingerprint.extract.start", **item}
+            for item in fingerprint_progress
+        ]
     ) == {
         "stage": "fingerprint.extract.start",
         "label": "提取技能指纹",
@@ -1538,7 +1558,12 @@ async def test_refresh_keeps_build_guard_until_slow_progress_is_drained(
     first_result = await first
 
     assert first_result["success"] is True
-    assert first_events == ["update.start", "update.done"]
+    assert first_events == [
+        "update.start",
+        "model.probe.start",
+        "model.probe.done",
+        "update.done",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1592,7 +1617,11 @@ async def test_start_refresh_graph_runs_in_background_and_reuses_active_task(
     assert reused["success"] is True
     assert reused["background"] is True
     assert reused["build_status"] == "running"
-    assert [entry["stage"] for entry in reused["build_log"]] == ["update.start"]
+    assert [entry["stage"] for entry in reused["build_log"]] == [
+        "update.start",
+        "model.probe.start",
+        "model.probe.done",
+    ]
     assert service._active_build_task is first_task
 
     release_build.set()
@@ -1970,7 +1999,180 @@ async def test_refresh_build_failure_returns_business_payload(monkeypatch, tmp_p
 
     assert result["success"] is False
     assert "LLM unavailable" in result["detail"]
+    assert result["build_error"] == result["detail"]
+    assert result["build_progress"]["detail"] == result["detail"]
+    assert result["build_progress"]["error"] == "LLM unavailable"
     assert result["build_progress"]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_model_preflight_failure_is_preserved_by_status_and_graph_get(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path)
+    model_error = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg="model unavailable",
+    )
+    build_called = False
+
+    async def fail_probe(_config):
+        raise model_error
+
+    async def unexpected_build(*args, **kwargs):
+        nonlocal build_called
+        del args, kwargs
+        build_called = True
+        raise AssertionError(
+            "graph build must not start after a failed model preflight"
+        )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: LLMConfig(model="failing-model"),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.probe_model_connection",
+        fail_probe,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.service_build_graph",
+        unexpected_build,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.graph_status",
+        lambda *args, **kwargs: SimpleNamespace(
+            to_dict=lambda: {
+                "success": True,
+                "exists": False,
+                "stale": True,
+                "detail": "Symphony graph is missing",
+            }
+        ),
+    )
+    service = SwarmSymphonyService()
+    monkeypatch.setattr(
+        service,
+        "_read_graph_artifact",
+        lambda _graph_dir: (_ for _ in ()).throw(FileNotFoundError("graph missing")),
+    )
+
+    result = await service.refresh_graph()
+    status = await service.graph_status()
+    graph = await service.graph()
+
+    expected = (
+        "主模型连接测试未通过：[181001] model call failed, reason: model unavailable"
+    )
+    assert build_called is False
+    assert result["success"] is False
+    assert result["detail"] == expected
+    assert result["build_error"] == expected
+    assert result["build_progress"]["error"] == str(model_error)
+    assert status["detail"] == expected
+    assert status["build_error"] == expected
+    assert graph["success"] is False
+    assert graph["detail"] == expected
+    assert graph["build_error"] == expected
+    assert [item["stage"] for item in graph["build_log"]] == [
+        "update.start",
+        "model.probe.start",
+        "update.failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_background_model_preflight_failure_is_visible_without_running_poll(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path)
+    model_error = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg="connection refused",
+    )
+
+    async def fail_probe(_config):
+        raise model_error
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: LLMConfig(model="failing-model"),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.probe_model_connection",
+        fail_probe,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.graph_status",
+        lambda *args, **kwargs: SimpleNamespace(
+            to_dict=lambda: {
+                "success": True,
+                "exists": False,
+                "detail": "Symphony graph is missing",
+            }
+        ),
+    )
+    service = SwarmSymphonyService()
+
+    started = await service.start_refresh_graph()
+    task = service._active_build_task
+    assert task is not None
+    result = await asyncio.wait_for(task, timeout=0.5)
+    status = await service.graph_status()
+
+    expected = (
+        "主模型连接测试未通过：[181001] model call failed, reason: connection refused"
+    )
+    assert started["build_progress"]["status"] == "running"
+    assert result["detail"] == expected
+    assert status["build_progress"]["status"] == "error"
+    assert status["build_error"] == expected
+    assert status["detail"] == expected
+
+
+@pytest.mark.asyncio
+async def test_graph_keeps_recent_build_failure_when_old_graph_is_readable(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path, evolution=False)
+    detail = "Symphony 总谱构建失败: matcher unavailable"
+    _BuildProcessLogger(config.paths.graph_dir / "build_log.jsonl").record(
+        "update.failed",
+        error="matcher unavailable",
+        detail=detail,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_execution_disabled_skills",
+        lambda: set(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service._web_graph_payload",
+        lambda *args, **kwargs: {"success": True, "graph": {"nodes": [], "edges": []}},
+    )
+    service = SwarmSymphonyService()
+    monkeypatch.setattr(service, "_read_graph_artifact", lambda _graph_dir: {})
+
+    graph = await service.graph()
+
+    assert graph["success"] is True
+    assert graph["build_progress"]["status"] == "error"
+    assert graph["build_error"] == detail
+    assert graph["detail"] == detail
 
 
 @pytest.mark.asyncio
@@ -2009,7 +2211,9 @@ async def test_refresh_preserves_downstream_failure_result(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_refresh_propagates_framework_model_failure_from_core(monkeypatch, tmp_path):
+async def test_refresh_propagates_framework_model_failure_from_core(
+    monkeypatch, tmp_path
+):
     config = symphony_config_from_dict(
         {
             "paths": {

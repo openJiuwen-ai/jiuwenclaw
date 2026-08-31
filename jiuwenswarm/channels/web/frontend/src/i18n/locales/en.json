@@ -1860,6 +1860,7 @@
         "readFailed": "Unable to read the skill graph. Refresh the graph first.",
         "refreshFailed": "Failed to refresh the skill graph",
         "cancelFailed": "Failed to cancel the skill graph build",
+        "primaryModelProbeFailed": "Primary model connection test failed: {{detail}}",
         "buildFailedWithDetail": "Symphony graph build failed: {{detail}}"
       },
       "serverDetails": {
@@ -1873,6 +1874,8 @@
       "buildStages": {
         "idle": "No build logs",
         "updateStart": "Starting skill graph build",
+        "modelProbeStart": "Testing primary model connection",
+        "modelProbeDone": "Primary model connection test passed",
         "updateCancelRequested": "Cancelling skill graph build",
         "updateCancelled": "Skill graph build cancelled",
         "scanStart": "Scanning skill directories",
