@@ -918,16 +918,22 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     agent = _validate_identifier(chunk.get("agent", ""))
     event = str(chunk.get("event", "")).strip()
     section_idx = _validate_identifier(chunk.get("section_idx", "0")) or "0"
-    # The successful EndNode embeds the complete final result in ``content``.
+    # The EndNode embeds the complete final result in ``content`` (1+ MiB).
     # It is a workflow boundary, not process text for the frontend, so keep it
     # under the terminal 16 MiB protocol bound without applying the 1 MiB
-    # process-display accumulator limit.
+    # process-display accumulator limit — even when the result carries
+    # non-fatal exception_info (the SDK then emits event=error).  Delivery is
+    # still gated by _is_successful_workflow_end below.
+    is_end_node = (
+        agent == "end"
+        and section_idx in {"", "0"}
+    )
     successful_workflow_end = _is_successful_workflow_end(chunk, agent, event)
 
     _validate_router_input(
         chunk,
         state,
-        terminal_result_content=successful_workflow_end,
+        terminal_result_content=is_end_node,
     )
     frames: list[dict] = []
     if "__deepsearch_status__" in chunk:
