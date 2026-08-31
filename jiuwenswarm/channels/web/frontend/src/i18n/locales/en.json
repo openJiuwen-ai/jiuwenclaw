@@ -3177,6 +3177,8 @@
     "budgetExhaustedWorkflow": "Run budget exhausted",
     "toggleLabel": "SwarmFlow",
     "tagHint": "SwarmFlow is active for this session",
+    "closeTag": "Close SwarmFlow",
+    "closeTagDisabled": "Cannot close while processing",
     "configTitle": "SwarmFlow Configuration",
     "configReadonlyHint": "Session is active, config is read-only",
     "budgetPanelTitle": "SwarmFlow Budget",

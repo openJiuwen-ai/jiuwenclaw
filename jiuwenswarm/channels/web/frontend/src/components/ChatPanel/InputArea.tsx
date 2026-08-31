@@ -3453,6 +3453,21 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   <span className="chat-mode-select__label">{t('swarmflow.toggleLabel')}</span>
                 </span>
               </button>
+              <button
+                type="button"
+                className="chat-goal-tag__close"
+                data-testid="chat-panel-swarmflow-tag-close"
+                disabled={swarmflowToggleDisabled}
+                title={swarmflowToggleDisabled ? t('swarmflow.closeTagDisabled') : t('swarmflow.closeTag')}
+                onClick={() => {
+                  if (swarmflowToggleDisabled) return;
+                  if (!activeSessionId) return;
+                  useSessionStore.getState().setSwarmflowActive(activeSessionId, false);
+                  setSwarmflowConfigPanelOpen(false);
+                }}
+              >
+                <X size={11} strokeWidth={2.5} />
+              </button>
             </div>
           )}
 

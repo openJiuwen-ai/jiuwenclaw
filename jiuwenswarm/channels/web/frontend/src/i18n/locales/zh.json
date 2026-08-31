@@ -3158,6 +3158,8 @@
     "budgetExhaustedWorkflow": "运行预算耗尽",
     "toggleLabel": "动态工作流",
     "tagHint": "本次会话已启用动态工作流",
+    "closeTag": "关闭动态工作流",
+    "closeTagDisabled": "会话进行中，无法关闭",
     "configTitle": "动态工作流配置",
     "configReadonlyHint": "会话已开启，配置不可修改",
     "budgetPanelTitle": "SwarmFlow 预算",
