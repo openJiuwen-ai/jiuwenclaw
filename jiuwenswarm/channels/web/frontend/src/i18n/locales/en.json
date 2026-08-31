@@ -3178,6 +3178,7 @@
     "toggleLabel": "SwarmFlow",
     "tagHint": "SwarmFlow is active for this session",
     "configTitle": "SwarmFlow Configuration",
+    "configReadonlyHint": "Session is active, config is read-only",
     "budgetPanelTitle": "SwarmFlow Budget",
     "budgetPanelHint": "Set the token limit for this session (blank = unlimited). Team mode only.",
     "budgetPlaceholder": "blank = unlimited",

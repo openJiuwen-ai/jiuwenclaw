@@ -3064,6 +3064,12 @@ overflow: hidden;
   line-height: 1.4;
 }
 
+.chat-swarmflow-config-panel__readonly-hint {
+  font-size: var(--font-size-2xs, 11px);
+  color: var(--color-text-secondary);
+  opacity: 0.7;
+}
+
 .chat-skill-select__trigger {
   display: inline-flex;
   align-items: center;

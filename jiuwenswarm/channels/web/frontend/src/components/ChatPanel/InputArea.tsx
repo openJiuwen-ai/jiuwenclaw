@@ -787,6 +787,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const swarmflowBudget = useSessionStore(
     (s) => s.runtimes[activeSessionId ?? '']?.swarmflowBudget ?? null,
   );
+  // 进入真实会话后开关只读：仅新建对话页可修改，真实会话可查看不可改
+  const swarmflowToggleDisabled = isProcessing || (activeSessionId !== NEW_CONVERSATION_ID && hasHistory);
   // Plan 已经真正生效：开关打开且至少发出过一条 Plan 消息（pendingExplicitEntry 已被消费）。
   // 区别于"刚打开开关但还没发消息"的未提交态——后者和 Goal 的 armed 一样可以被对方随手顶替。
   const planCommitted = planActive && !planPendingExplicitEntry;
@@ -3135,8 +3137,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   );
                 })()}
                 {isTeamMode && (() => {
-                  // 进入真实会话后开关置灰，仅新建对话页可修改
-                  const swarmflowToggleDisabled = isProcessing || (activeSessionId !== NEW_CONVERSATION_ID && hasHistory);
                   const toggleSwarmflow = (next: boolean) => {
                     if (!activeSessionId || swarmflowToggleDisabled) return;
                     // Swarmflow 与 Plan 互斥：开启 Swarmflow 前先关掉 Plan。
@@ -3451,9 +3451,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     <Workflow className="w-3.5 h-3.5" />
                   </span>
                   <span className="chat-mode-select__label">{t('swarmflow.toggleLabel')}</span>
-                  {swarmflowBudget != null && (
-                    <span className="chat-mode-select__sublabel">{t('swarmflow.runBudgetShort')}: {swarmflowBudget}</span>
-                  )}
                 </span>
               </button>
             </div>
@@ -3760,7 +3757,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               type="number"
               value={swarmflowBudget ?? ''}
               placeholder={t('swarmflow.budgetPlaceholder')}
+              readOnly={swarmflowToggleDisabled}
               onChange={(v) => {
+                if (swarmflowToggleDisabled) return;
                 const trimmed = v.trim();
                 useSessionStore.getState().setSwarmflowActive(
                   activeSessionId,
@@ -3769,6 +3768,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 );
               }}
             />
+            {swarmflowToggleDisabled && (
+              <span className="chat-swarmflow-config-panel__readonly-hint">{t('swarmflow.configReadonlyHint')}</span>
+            )}
           </div>
         </div>,
         document.body,
