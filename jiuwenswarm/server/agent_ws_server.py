@@ -567,11 +567,17 @@ def _is_restorable_history_record(record: Any) -> bool:
     return event_type in _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES
 
 
-def resolve_request_project_dir(request: AgentRequest) -> str | None:
+def resolve_request_project_dir(
+    request: AgentRequest,
+    *,
+    include_legacy_fallbacks: bool = True,
+) -> str | None:
     """Resolve the stable project identity for agent construction.
 
     New clients send ``project_dir`` separately from dynamic ``cwd``. Keep
-    legacy fallbacks for older clients that only send cwd/trusted_dirs.
+    legacy fallbacks for older clients that only send cwd/trusted_dirs when
+    the caller opts in. Projectless Agent/Code turns deliberately leave those
+    fields dynamic so the adapter can allocate their task workspace.
     """
     params = request.params or {}
     project_dir = params.get("project_dir")
@@ -581,6 +587,8 @@ def resolve_request_project_dir(request: AgentRequest) -> str | None:
     metadata_project_dir = metadata.get("project_dir") if isinstance(metadata, dict) else None
     if isinstance(metadata_project_dir, str) and metadata_project_dir.strip():
         return metadata_project_dir.strip()
+    if not include_legacy_fallbacks:
+        return None
     cwd = params.get("cwd")
     if isinstance(cwd, str) and cwd.strip():
         return cwd.strip()
@@ -900,6 +908,28 @@ def _file_entry_matches_path(entry: Any, path: str) -> bool:
         _canonicalize_sandbox_files_path(entry_path)
         == _canonicalize_sandbox_files_path(path)
     )
+
+
+def _uses_projectless_task_workspace(
+    params: dict[str, Any],
+    channel_id: str,
+) -> bool:
+    """Return whether request mode uses Agent/Code task workspace rules."""
+    raw_work_mode = params.get("work_mode")
+    if not isinstance(raw_work_mode, str) or raw_work_mode.strip().lower() not in {
+        "code",
+        "work",
+    }:
+        from jiuwenswarm.server.runtime.session.work_mode import (
+            default_work_mode_for_channel,
+        )
+
+        raw_work_mode = default_work_mode_for_channel(channel_id)
+    manager_mode, _, _ = resolve_agent_request_mode(
+        params.get("mode", "agent"),
+        work_mode=raw_work_mode,
+    )
+    return manager_mode in {"agent", "code"}
 
 
 def _canonicalize_sandbox_files_path(path: str) -> str:
@@ -2808,7 +2838,10 @@ class AgentWebSocketServer:
             work_mode=runtime_work_mode,
         )
         agent_mode = "agent" if mode == "auto_harness" else mode
-        requested_project_dir = resolve_request_project_dir(request)
+        requested_project_dir = resolve_request_project_dir(
+            request,
+            include_legacy_fallbacks=mode not in {"agent", "code"},
+        )
         # [改动] 写盘用 canonical mode（request.params["mode"]，已被规范化为
         # "agent.plan"/"team" 等），而非一级 mode（"agent"），使磁盘出现你期望的两类值。
         canonical_mode = (
@@ -9936,18 +9969,23 @@ class AgentWebSocketServer:
                         find_or_create_code_project_for_tui_params,
                     )
 
-                    project = find_or_create_code_project_for_tui_params(params)
-                    if project is not None:
-                        params["project_id"] = project.project_id
-                        params["project_dir"] = project.project_dir
-                        params["work_mode"] = project.work_mode
+                    if not _uses_projectless_task_workspace(params, channel_id):
+                        project = find_or_create_code_project_for_tui_params(params)
+                        if project is not None:
+                            params["project_id"] = project.project_id
+                            params["project_dir"] = project.project_dir
+                            params["work_mode"] = project.work_mode
             # TUI 无显式 session_id（未带 --session）创建时：AgentServer 侧按
             # cwd/project_dir 解析真实的 code 项目并写回，避免落到默认 default_code
             # （AgentOS 迁移前由 TUI 本地解析，现收敛到 AgentServer 保证归属一致）。
             if (
                 not external_tui_session
                 and channel_id.strip().lower() == "tui"
+                and not _uses_projectless_task_workspace(params, channel_id)
             ):
+                # Team sessions keep the TUI compatibility behavior that
+                # promotes cwd to a registered project. Projectless Agent/Code
+                # requests leave cwd dynamic for the dated task workspace.
                 from jiuwenswarm.server.runtime.session.project_store import (
                     find_or_create_code_project_for_tui_params,
                 )
@@ -10150,7 +10188,10 @@ class AgentWebSocketServer:
                 channel_metadata = None
                 if channel_id.strip().lower() == "tui":
                     workspace = str(params.get("cwd") or project_dir or "").strip()
-                    if workspace:
+                    if workspace and (
+                        not _uses_projectless_task_workspace(params, channel_id)
+                        or project_dir
+                    ):
                         channel_metadata = {
                             "cwd": workspace,
                             "project_dir": project_dir or workspace,

@@ -819,6 +819,67 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
 
 
 @pytest.mark.asyncio
+async def test_runtime_attachment_request_mode_wins_over_localized_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    runtime_rail = RuntimePromptRail(language="cn", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_mode("agent")
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    # The first refresh falls back to the request-bound canonical mode while
+    # the asynchronous diagnostic snapshot does not exist yet.
+    await runtime_rail.before_invoke(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    first_rendered = agent.prompt_attachment_manager.render(items)
+    assert "当前模式：agent" in first_rendered
+
+    # Once the snapshot appears, its localized representation must not create
+    # a false attachment update for the same effective mode.
+    runtime_state = tmp_path / "runtime_state" / "default.yaml"
+    runtime_state.parent.mkdir(parents=True, exist_ok=True)
+    runtime_state.write_text("mode: 智能体模式\n", encoding="utf-8")
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    second_rendered = agent.prompt_attachment_manager.render(items)
+    assert second_rendered == first_rendered
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_tracks_request_mode_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
+    builder = SystemPromptBuilder(language="en")
+    agent = _FakeAgent(builder)
+    runtime_rail = RuntimePromptRail(language="en", channel="web")
+    runtime_rail.init(agent)
+    runtime_rail.set_mode("agent")
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    rendered = agent.prompt_attachment_manager.render(items)
+    assert "Current mode: agent" in rendered
+
+    runtime_rail.set_mode("team")
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    rendered = agent.prompt_attachment_manager.render(items)
+    assert "Current mode: team" in rendered
+    assert "Current mode: agent" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_browser_policy_is_injected_only_when_browser_agent_is_loaded():
     rail = BrowserTaskPromptRail()
     assert rail is not None
@@ -883,6 +944,7 @@ async def test_runtime_attachment_tracks_live_code_agent_mode(tmp_path, monkeypa
     agent = _FakeLiveModeAgent(builder, mode="plan")
     runtime_rail = RuntimePromptRail(language="en", channel="tui")
     runtime_rail.init(agent)
+    runtime_rail.set_mode("code.normal")
     ctx = AgentCallbackContext(
         # Inner ReactAgent callbacks do not expose DeepAgent.load_state().
         agent=SimpleNamespace(),
@@ -992,8 +1054,8 @@ async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, 
     assert "# Directory and File-Operation Boundaries" in prompt
     assert "# Runtime Directory Context" not in prompt
     assert "# Working Directory Runtime Values" not in prompt
-    assert "The project directory is your current workspace" in prompt
-    assert f"the current project directory is: `{project_dir}`" in prompt
+    assert "## Current Project Directory" in prompt
+    assert f"current runtime workspace: `{project_dir}`" in prompt
     assert "Agent internal data directory" in prompt
     assert "## JiuwenSwarm Internal Directories" in prompt
     assert str(project_dir) in prompt
@@ -1036,8 +1098,8 @@ async def test_runtime_prompt_describes_external_cwd_without_project(tmp_path, m
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "The project directory is your current workspace" in prompt
-    assert f"the current project directory is: `{task_dir}`" in prompt
+    assert "## Current Project Directory" in prompt
+    assert f"current runtime workspace: `{task_dir}`" in prompt
     assert "Other accessible directories" not in prompt
     assert "fallen back to the Agent internal data directory" not in prompt
 
@@ -1071,7 +1133,7 @@ async def test_runtime_prompt_describes_agent_data_cwd_fallback(tmp_path, monkey
 
     prompt = builder.build()
     assert "# 目录与文件操作边界" in prompt
-    assert f"当前项目目录是：`{agent_data_dir}`" in prompt
+    assert f"当前运行时工作空间：`{agent_data_dir}`" in prompt
     assert "其他可访问目录" not in prompt
 
 
@@ -1135,7 +1197,7 @@ async def test_runtime_prompt_reports_powershell_and_removes_generic_shell_rules
     prompt = builder.build()
     assert "- Shell：PowerShell" in prompt
     assert "Shell 规则：" not in prompt
-    assert "### 项目目录规则" in prompt
+    assert "## 当前项目目录" in prompt
     assert "### 项目录规则" not in prompt
 
 
