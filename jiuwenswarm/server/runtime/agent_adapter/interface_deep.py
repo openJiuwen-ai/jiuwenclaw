@@ -5296,14 +5296,15 @@ class JiuWenSwarmDeepAdapter:
             notice["model_name"] = model_name
         return notice
 
-    def _native_image_input_enabled(self, config: dict[str, Any], model: Any | None) -> bool:
+    @staticmethod
+    def _native_image_input_enabled(config: dict[str, Any], model: Any | None) -> bool:
         configured = config.get("enable_read_image_multimodal")
         if isinstance(configured, bool):
             return configured
         return get_cached_image_support(model) is True
 
+    @staticmethod
     def _resolve_enable_read_image_multimodal(
-        self,
         config: dict[str, Any],
     ) -> bool | None:
         configured = config.get("enable_read_image_multimodal")
