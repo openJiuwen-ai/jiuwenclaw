@@ -636,6 +636,21 @@
       "addModel": "Add Custom Model",
       "placeholder": "Select Model"
     },
+    "contextUsage": {
+      "title": "Context usage",
+      "ariaLabel": "Context usage {{rate}}",
+      "hoverMetric": "{{rate}} ({{used}}/{{limit}})",
+      "detailMetric": "{{rate}} ({{used}}/{{limit}})",
+      "kvCacheHitRate": "KV hit rate",
+      "detailTitle": "Context usage",
+      "systemPrompt": "System prompt",
+      "messages": "Conversation messages",
+      "tools": "Tools & MCP",
+      "skills": "Skills",
+      "notReported": "Not reported",
+      "close": "Close context details",
+      "noBreakdown": "No category details returned by the backend"
+    },
     "configLockedHistory": "Session has messages — create a new session to change config",
     "modeSwitchDisabledProcessing": "This conversation is running. Start a new conversation to choose another mode",
     "modeSwitchTitle": "Switch Mode",

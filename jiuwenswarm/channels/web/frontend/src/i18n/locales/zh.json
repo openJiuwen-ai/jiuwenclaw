@@ -621,6 +621,21 @@
       "addModel": "添加自定义模型",
       "placeholder": "选择模型"
     },
+    "contextUsage": {
+      "title": "上下文用量",
+      "ariaLabel": "上下文用量 {{rate}}",
+      "hoverMetric": "{{rate}}（{{used}}/{{limit}}）",
+      "detailMetric": "{{rate}} ({{used}}/{{limit}})",
+      "kvCacheHitRate": "KV命中率",
+      "detailTitle": "上下文用量",
+      "systemPrompt": "系统提示词",
+      "messages": "对话消息",
+      "tools": "工具及MCP",
+      "skills": "技能",
+      "notReported": "未报告",
+      "close": "关闭上下文详情",
+      "noBreakdown": "后端未返回分类明细"
+    },
     "modeSwitchDisabledProcessing": "当前对话运行中，请新建对话后选择模式",
     "configLockedHistory": "会话已有消息，请新建会话后更改配置",
     "modeSwitchTitle": "切换模式",
