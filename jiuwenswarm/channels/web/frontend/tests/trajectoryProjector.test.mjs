@@ -798,6 +798,50 @@ test('schema-v2 compaction stays at its event position without replaying removed
   assert.equal(cells[2].compactionDetail.model, 'openai/Deepseek-V4-Flash-0731');
 });
 
+test('schema-v2 context moves do not replay unchanged timeline rows', () => {
+  const system = contextMessage(
+    'message-moved-system',
+    'system',
+    'stable system instructions',
+    'harness_internal',
+  );
+  const query = contextMessage('message-moved-user', 'user', 'current user request');
+  const memory = contextMessage(
+    'message-moved-context',
+    'user',
+    '<memory_block_dialogue>retained history</memory_block_dialogue>',
+    'harness_internal',
+  );
+  const baseline = v2Record({
+    eventId: 'event-before-context-moves',
+    sequence: 1,
+    payload: contextCommit('window-before-context-moves', null, [system, query, memory], []),
+  });
+  const reordered = v2Record({
+    eventId: 'event-after-context-moves',
+    sequence: 2,
+    payload: contextCommit(
+      'window-after-context-moves',
+      'window-before-context-moves',
+      [query, system, memory],
+      [
+        { op: 'move', message_id: system.message_id, from_index: 0, index: 2 },
+        { op: 'move', message_id: query.message_id, from_index: 0, index: 1 },
+        { op: 'move', message_id: memory.message_id, from_index: 0, index: 2 },
+      ],
+    ),
+  });
+
+  const cells = cellsOf(projectOtelTrajectory([reordered, baseline]));
+
+  assert.deepEqual(cells.map(cell => cell.text), [
+    'stable system instructions',
+    'current user request',
+    '<memory_block_dialogue>retained history</memory_block_dialogue>',
+  ]);
+  assert.ok(cells.every(cell => cell.messageSource.operation !== 'move'));
+});
+
 test('schema-v2 compaction never guesses missing or conflicting output correlation', () => {
   const build = (correlation) => {
     const retained = contextMessage('retained-user', 'user', 'retained user');
@@ -1332,7 +1376,7 @@ test('one-to-many compaction inferences retain physical request boundaries', () 
   assert.notEqual(compactedCell?.requestRecordId, assistantCell?.requestRecordId);
 });
 
-test('schema-v2 reducer retains delta history for remove, move, and replace operations', () => {
+test('schema-v2 reducer keeps raw moves without replaying them as timeline rows', () => {
   const alpha = contextMessage('alpha', 'user', 'alpha');
   const beta = contextMessage('beta', 'user', 'beta');
   const replacement = contextMessage('alpha', 'user', 'alpha replaced');
@@ -1358,10 +1402,21 @@ test('schema-v2 reducer retains delta history for remove, move, and replace oper
 
   const cells = cellsOf(projectOtelTrajectory(records));
   assert.deepEqual(cells.map(cell => cell.messageSource.operation), [
-    'insert', 'insert', 'move', 'remove', 'replace',
+    'insert', 'insert', 'remove', 'replace',
   ]);
   assert.ok(cells.some(cell => cell.text === 'alpha'));
   assert.ok(cells.some(cell => cell.text === 'alpha replaced'));
+  const replaced = cells.find(cell => cell.messageSource.operation === 'replace');
+  assert.ok(replaced);
+  const rawSpan = spansOf([replaced.traceDetail])[0];
+  const payloadAttribute = rawSpan.attributes.find(attribute => (
+    attribute.key === 'openjiuwen.trajectory.payload'
+  ));
+  assert.ok(payloadAttribute);
+  const rawPayload = JSON.parse(payloadAttribute.value.stringValue);
+  assert.deepEqual(rawPayload.delta.map(operation => operation.op), [
+    'move', 'remove', 'replace',
+  ]);
 });
 
 test('schema-v2 complete checkpoints recover across gaps and remain idempotent when gaps arrive later', () => {

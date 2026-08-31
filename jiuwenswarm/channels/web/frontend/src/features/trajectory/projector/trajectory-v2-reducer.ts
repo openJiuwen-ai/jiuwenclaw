@@ -632,8 +632,10 @@ function contextDisplayOperations(
     }
   }
   return operations.flatMap((operation): ContextDelta[] => {
-    if (operation.op === 'move'
-      && ephemeralContextSlot(baseById.get(operation.message_id)) !== undefined) return []
+    // A move only changes the position of an existing occurrence inside the
+    // context window. Keep it in the raw checkpoint delta, but do not replay
+    // unchanged SYSTEM/USER/CONTEXT content as a fresh timeline row.
+    if (operation.op === 'move') return []
     if (operation.op === 'remove') {
       const slot = ephemeralContextSlot(baseById.get(operation.message_id))
       return slot !== undefined && removedBySlot.has(slot) ? [] : [operation]
