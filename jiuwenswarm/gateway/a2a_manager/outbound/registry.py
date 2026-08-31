@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 from uuid import uuid4
@@ -39,31 +39,43 @@ def _pending_payload(card: DiscoveredCard) -> dict[str, Any]:
     }
 
 
-def _critical_identity(agent: A2AOutboundAgent) -> tuple[Any, ...]:
+@dataclass(frozen=True)
+class _CriticalIdentity:
+    """The subset of an Agent Card that must not silently change underfoot."""
+
+    url: str
+    protocol_binding: str
+    security_requirements: tuple[Any, ...]
+    security_schemes: tuple[str, ...]
+    provider_url: str
+    signature_protected: tuple[str, ...]
+
+
+def _critical_identity(agent: A2AOutboundAgent) -> _CriticalIdentity:
     card = agent.agent_card
-    return (
-        agent.selected_interface.url,
-        agent.selected_interface.protocol_binding,
-        tuple(card.get("securityRequirements") or ()),
-        tuple(sorted((card.get("securitySchemes") or {}).keys())),
-        str((card.get("provider") or {}).get("url") or ""),
-        tuple(
+    return _CriticalIdentity(
+        url=agent.selected_interface.url,
+        protocol_binding=agent.selected_interface.protocol_binding,
+        security_requirements=tuple(card.get("securityRequirements") or ()),
+        security_schemes=tuple(sorted((card.get("securitySchemes") or {}).keys())),
+        provider_url=str((card.get("provider") or {}).get("url") or ""),
+        signature_protected=tuple(
             str((signature or {}).get("protected") or "")
             for signature in card.get("signatures") or ()
         ),
     )
 
 
-def _critical_discovered_identity(card: DiscoveredCard) -> tuple[Any, ...]:
+def _critical_discovered_identity(card: DiscoveredCard) -> _CriticalIdentity:
     selected = card.agent.compatible_interfaces[0]
     payload = card.agent_card
-    return (
-        selected.url,
-        selected.protocol_binding,
-        tuple(payload.get("securityRequirements") or ()),
-        tuple(sorted((payload.get("securitySchemes") or {}).keys())),
-        str((payload.get("provider") or {}).get("url") or ""),
-        tuple(
+    return _CriticalIdentity(
+        url=selected.url,
+        protocol_binding=selected.protocol_binding,
+        security_requirements=tuple(payload.get("securityRequirements") or ()),
+        security_schemes=tuple(sorted((payload.get("securitySchemes") or {}).keys())),
+        provider_url=str((payload.get("provider") or {}).get("url") or ""),
+        signature_protected=tuple(
             str((signature or {}).get("protected") or "")
             for signature in payload.get("signatures") or ()
         ),

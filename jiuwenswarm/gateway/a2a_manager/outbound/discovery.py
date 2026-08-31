@@ -307,7 +307,8 @@ class A2AOutboundDiscoveryService:
             warnings=(),
         )
 
-    def _normalize(self, url: str, card_path: str | None) -> tuple[str, str, str]:
+    @staticmethod
+    def _normalize(url: str, card_path: str | None) -> tuple[str, str, str]:
         text = str(url or "").strip()
         if not text or len(text) > MAX_DISCOVERY_URL_LENGTH:
             raise A2AOutboundError(A2AOutboundErrorCode.DISCOVERY_URL_INVALID)
@@ -356,16 +357,12 @@ class A2AOutboundDiscoveryService:
             port = parts.port or (443 if scheme == "https" else 80)
         except ValueError as exc:
             raise A2AOutboundError(A2AOutboundErrorCode.DISCOVERY_URL_INVALID) from exc
-        if (
-            scheme not in {"https", "http"}
-            or not parts.hostname
-            or parts.username
-            or parts.password
-        ):
+        has_credentials = bool(parts.username or parts.password)
+        if scheme not in {"https", "http"} or not parts.hostname or has_credentials:
             raise A2AOutboundError(A2AOutboundErrorCode.DISCOVERY_URL_INVALID)
         try:
             addresses = await self._address_resolver(parts.hostname, port)
-        except (OSError, socket.gaierror) as exc:
+        except OSError as exc:
             raise A2AOutboundError(A2AOutboundErrorCode.CARD_FETCH_FAILED) from exc
         if not addresses:
             raise A2AOutboundError(A2AOutboundErrorCode.CARD_FETCH_FAILED)
