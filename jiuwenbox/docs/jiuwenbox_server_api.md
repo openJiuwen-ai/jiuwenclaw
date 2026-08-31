@@ -861,7 +861,8 @@ print(resp.json())
 接口：`GET /api/v1/policies`
 
 用途：返回当前生效的**默认沙箱策略**，即新建沙箱继承的基线。
-它等于 server 启动时加载的 policy YAML，叠加此后所有带
+它等于 `~/.jiuwenbox/update_policy.yaml`（若存在）中保存的**已合并**默认策略，
+否则等于启动时加载的 policy YAML；再叠加此后所有带
 `update_default_policy: true` 的 `PUT /api/v1/policies` 更新。
 创建沙箱时不传 `policy`（或 `policy_mode: append`）就以它为基线。
 
@@ -917,7 +918,8 @@ print(resp.json())
 
 - `runtime=process`：只接受 `policy.network.egress` / `policy.network.ingress`（与既有 bwrap 行为一致）。
 - `runtime=conch`：只接受 `policy.conch.network.egress` / `policy.conch.network.ingress`。
-- `override` 只替换请求中提供的方向；未提供方向保持不变。`append` 合并列表；方向内 `default` 仅当请求显式给出时覆盖。
+- `append`：字典递归合并，列表去重追加，标量覆盖；未出现的叶子保留。
+- `override`：字典递归合并，列表整段替换，标量覆盖；未出现的叶子保留。
 - Conch 热更新始终把合并后的完整 `conch.network` 映射为五个 Conch 字段后做 full-replace `update_network`（不能把 append fragment 直接发给 SDK）。运行中沙箱先应用 runtime 规则，再落盘；落盘失败会 best-effort 回滚 runtime。STOPPED/ERROR 只持久化，下次 start 生效。
 - 仅对新连接生效；已建立连接不会因热更新断开。
 - 响应中的 `conch.network` 含 `default`，不含 `allow_internet_access` / 合成 `0.0.0.0/0`。
@@ -981,39 +983,36 @@ resp = requests.put(
 
 成功时返回更新后的完整 `SecurityPolicy` JSON（与 `GET /policies/{sandbox_id}` 同形）。
 
-### 批量更新所有沙箱网络策略
+### 批量更新策略
 
 接口：`PUT /api/v1/policies`
 
-用途：对当前所有已注册沙箱应用网络规则更新。
-请求体非法时整请求 400，不落任何沙箱。
-批量请求可同时带 `network` 与 `conch.network`；每个沙箱只消费与其 runtime 匹配的片段，缺少对应片段的沙箱记入 `skipped`。`host` 模式 process 沙箱记入 `skipped`；单个沙箱热更新失败记入 `failed`，不阻断其余沙箱。
+用途：更新 server 默认沙箱策略，和/或对当前已注册沙箱热更新网络规则。
+请求体非法时整请求 400，不落盘、不改默认策略、不碰沙箱。
 
-请求体可同时包含 `policy.network` 与 `policy.conch`。额外可选字段：
+- `update_default_policy=true`：将 `policy` 作为完整沙箱策略 fragment 深度合并进默认策略，并把**合并后的完整默认策略**覆盖写入 `~/.jiuwenbox/update_policy.yaml`（只保留一份）。重启时若该文件存在则直接作为默认策略。含 `timeout` 时立即重启 idle reaper。`inference_privacy_proxies` 会被忽略。
+- `update_existing_sandboxes=true`（默认）：只消费 `network` / `conch.network` 的 egress/ingress，按 runtime 热更新现有沙箱；缺少对应片段记入 `skipped`，`host` 模式 process 沙箱记入 `skipped`，单个失败记入 `failed`。
+- `update_existing_sandboxes=false`：不枚举现有沙箱，`updated`/`skipped`/`failed` 为空。
+
+请求字段：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `policy` | object | 是 | 可含 `network` 和/或 `conch.network`；每个沙箱只消费匹配片段 |
-| `policy_mode` | string | 否 | `override`（默认）或 `append` |
-| `update_default_policy` | bool | 否 | 默认 `false`。为 `true` 时同一套规则也会写入 server 的**默认沙箱策略**，使**此后新建**的沙箱复用更新过的策略 |
+| `policy` | object | 是 | 沙箱相关完整 fragment；现有沙箱仅使用其中的网络 egress/ingress |
+| `policy_mode` | string | 否 | `override`（默认）或 `append`（深度合并，见上） |
+| `update_default_policy` | bool | 否 | 默认 `false`。为 `true` 时更新默认策略并落盘增量 |
+| `update_existing_sandboxes` | bool | 否 | 默认 `true`。为 `false` 时不热更新现有沙箱 |
 
 关于 `update_default_policy`：
 
 - 只影响**之后**创建、且未自带完整 policy 的沙箱：不传 `policy` 或
   `policy_mode: append` 创建时会继承新规则；用 `policy_mode: override`
   创建时完全以请求体为准，不受影响。
-- 默认策略不做 `host` 模式跳过——它只是模板，即便 `network.mode` 为 `host`
-  也照常写入字段。这与运行中的 host 沙箱被记入 `skipped` 不同，后者是
-  iptables 热更新能力的限制。
 - 注册表为空时依然生效，可用于「先设好默认，再批量建沙箱」。
-- **仅在进程内生效，不回写 policy YAML**：重启后默认策略回落到
-  `JIUWENBOX_POLICY_PATH` / 内置 `default-policy.yaml` 的内容。
+- 合并结果落在 `~/.jiuwenbox/update_policy.yaml`（整文件覆盖），不改写 `JIUWENBOX_POLICY_PATH` /
+  包内 `default-policy.yaml`。文件损坏会导致启动失败。若要重新以 base YAML 为准，删除该文件后重启即可。
 - 该字段只在批量接口上有效。发给 `PUT /api/v1/policies/{sandbox_id}`
   会被静默忽略（不报错），单沙箱更新永远不会改动默认策略。
-- **`override` 会清空未列出的字段**：`override` 是整方向替换，请求体里没写的
-  键会落回模型默认值（列表清空、`default` 变回 `deny`）。作用在默认策略上时
-  这是全局影响。想做增量修改请用 `append`；想整体替换请把该方向的字段写全。
-- process 片段写入 `self.policy.network`，conch 片段写入 `self.policy.conch.network`。
 
 Python 请求示例：
 
@@ -1025,11 +1024,15 @@ resp = requests.put(
     json={
         "policy_mode": "append",
         "update_default_policy": True,
+        "update_existing_sandboxes": False,
         "policy": {
             "network": {
                 "egress": {
                     "blocked_ips": ["203.0.113.50/32"],
                 },
+            },
+            "timeout": {
+                "idle_timeout": 1200,
             },
             "conch": {
                 "network": {

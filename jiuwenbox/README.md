@@ -378,8 +378,11 @@ ls /tmp/jiuwenbox-logs
 
 ## Policy Files
 
-The server loads one static default policy at startup. Policy dynamic update is
-not enabled.
+The server loads `~/.jiuwenbox/update_policy.yaml` as the default policy when
+that file exists; otherwise it loads `JIUWENBOX_POLICY_PATH` (or the bundled
+`default-policy.yaml`). `PUT /api/v1/policies` with `update_default_policy: true`
+merges the request into the in-memory default and overwrites
+`update_policy.yaml` with the full merged result.
 
 ### Field Reference
 
@@ -1012,11 +1015,12 @@ jiuwenbox sandbox rm "$ID" --yes
 # Policy
 jiuwenbox policy get "$ID"
 jiuwenbox policy get-default
-# Update network rules everywhere, and let later sandboxes inherit them too
+# Persist default-policy update without touching existing sandboxes
 jiuwenbox policy update-all --policy-mode append --update-default-policy \
+  --no-update-existing-sandboxes \
   --policy '{"network":{"egress":{"blocked_ips":["203.0.113.50/32"]}}}'
 jiuwenbox policy get-default
-# Update network rules everywhere, and let later sandboxes inherit them too
+# Hot-update network rules on existing sandboxes too
 jiuwenbox policy update-all --policy-mode append --update-default-policy \
   --policy '{"network":{"egress":{"blocked_ips":["203.0.113.50/32"]}}}'
 

@@ -272,7 +272,10 @@ ls /tmp/jiuwenbox-logs
 
 ## Policy 文件
 
-服务启动时会加载一个静态默认 policy。当前不启用 policy 动态更新功能。
+服务启动时若存在 `~/.jiuwenbox/update_policy.yaml`，则以其作为默认策略；
+否则从 `JIUWENBOX_POLICY_PATH`（或包内 `default-policy.yaml`）加载。
+`PUT /api/v1/policies` 在 `update_default_policy: true` 时会把请求合并进
+内存默认策略，并用合并后的完整结果覆盖写入该文件（只保留一份）。
 
 ### 字段说明
 
@@ -922,11 +925,12 @@ jiuwenbox sandbox rm "$ID" --yes
 # 沙箱策略
 jiuwenbox policy get "$ID"
 jiuwenbox policy get-default
-# 批量改网络规则，并让此后新建的沙箱也复用更新过的策略
+# 只更新默认策略并落盘，不热更新现有沙箱
 jiuwenbox policy update-all --policy-mode append --update-default-policy \
+  --no-update-existing-sandboxes \
   --policy '{"network":{"egress":{"blocked_ips":["203.0.113.50/32"]}}}'
 jiuwenbox policy get-default
-# 批量改网络规则，并让此后新建的沙箱也复用更新过的策略
+# 同时热更新现有沙箱网络规则
 jiuwenbox policy update-all --policy-mode append --update-default-policy \
   --policy '{"network":{"egress":{"blocked_ips":["203.0.113.50/32"]}}}'
 

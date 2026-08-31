@@ -83,6 +83,7 @@ from jiuwenbox.models.sandbox import (
 from jiuwenbox.server.audit_logger import AuditLogger
 from jiuwenbox.server.policy_engine import PolicyEngine
 from jiuwenbox.server.policy_reader import PolicyReader
+from jiuwenbox.server.policy_update_store import PolicyUpdateStore
 from jiuwenbox.server.runtime.base import (
     RuntimeAdapter,
     RuntimeBackgroundExecRequest,
@@ -160,6 +161,7 @@ class SandboxManager:
         state_dir: Path | None = None,
         policy_reader: PolicyReader | None = None,
         policy_path: Path | None = None,
+        update_policy_path: Path | None = None,
     ) -> None:
         self.runtime = runtime or ProcessRuntime()
         self._conch_runtime = ConchRuntime()
@@ -171,7 +173,9 @@ class SandboxManager:
             policy_engine=self.policy_engine,
             policy_path=policy_path,
         )
-        self.policy = self.policy_reader.load_policy()
+        self.update_store = PolicyUpdateStore(path=update_policy_path)
+        base_policy = self.policy_reader.load_policy()
+        self.policy = self.update_store.resolve(base_policy)
 
         self._lock = asyncio.Lock()
         self._sandboxes: dict[str, SandboxRef] = {}
@@ -190,6 +194,60 @@ class SandboxManager:
         # subsequent jiuwenbox launch never sees stale sandbox descriptors. This
         # avoids accidentally "reviving" dead sandboxes whose backing bubblewrap
         # processes / netns / cgroup state no longer exist.
+        # ``update_policy.yaml`` is intentionally NOT wiped: the merged default
+        # policy must survive restarts.
+
+    @staticmethod
+    def _strip_batch_policy_fragment(
+        policy_data: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        if policy_data is None:
+            raise PolicyValidationError("'policy' is required")
+        if not isinstance(policy_data, Mapping):
+            raise PolicyValidationError("'policy' must be an object")
+        fragment = dict(policy_data)
+        fragment.pop("inference_privacy_proxies", None)
+        return fragment
+
+    def _extract_hot_update_network_fragments(
+        self,
+        policy_data: Mapping[str, object],
+    ) -> dict[str, tuple[dict[str, object] | None, dict[str, object] | None] | None]:
+        """Pull egress/ingress for live sandboxes; ignore other policy fields."""
+        result: dict[
+            str, tuple[dict[str, object] | None, dict[str, object] | None] | None
+        ] = {"network": None, "conch": None}
+
+        network = policy_data.get("network")
+        if isinstance(network, Mapping) and (
+            "egress" in network or "ingress" in network
+        ):
+            result["network"] = self._parse_network_directions(
+                {
+                    key: network[key]
+                    for key in ("egress", "ingress")
+                    if key in network
+                },
+                label="network",
+                model_cls=NetworkRulePolicy,
+            )
+
+        conch = policy_data.get("conch")
+        if isinstance(conch, Mapping) and "network" in conch:
+            conch_network = conch["network"]
+            if not isinstance(conch_network, Mapping):
+                raise PolicyValidationError("'policy.conch.network' must be an object")
+            if "egress" in conch_network or "ingress" in conch_network:
+                result["conch"] = self._parse_network_directions(
+                    {
+                        key: conch_network[key]
+                        for key in ("egress", "ingress")
+                        if key in conch_network
+                    },
+                    label="conch.network",
+                    model_cls=ConchDirectionPolicy,
+                )
+        return result
 
     def _resolve_effective_policy(
         self,
@@ -1671,21 +1729,15 @@ class SandboxManager:
         policy_mode: PolicyMode,
     ) -> SecurityPolicy:
         """Apply egress/ingress update onto a sandbox's current effective policy."""
-        if policy_mode == PolicyMode.APPEND:
-            network_fragment: dict[str, object] = {}
-            if egress is not None:
-                network_fragment["egress"] = egress
-            if ingress is not None:
-                network_fragment["ingress"] = ingress
-            fragment: dict[str, object] = {"network": network_fragment}
-            return self.policy_engine.merge_policy(current, fragment)
-
-        new_network = current.network.model_copy(deep=True)
+        network_fragment: dict[str, object] = {}
         if egress is not None:
-            new_network.egress = NetworkRulePolicy.model_validate(egress)
+            network_fragment["egress"] = egress
         if ingress is not None:
-            new_network.ingress = NetworkRulePolicy.model_validate(ingress)
-        return current.model_copy(deep=True, update={"network": new_network})
+            network_fragment["ingress"] = ingress
+        fragment: dict[str, object] = {"network": network_fragment}
+        return self.policy_engine.merge_policy(
+            current, fragment, mode=policy_mode.value,
+        )
 
     def _merge_conch_network_rules_update(
         self,
@@ -1695,26 +1747,17 @@ class SandboxManager:
         policy_mode: PolicyMode,
     ) -> SecurityPolicy:
         """Apply Conch egress/ingress update onto current effective policy."""
-        if policy_mode == PolicyMode.APPEND:
-            network_fragment: dict[str, object] = {}
-            if egress is not None:
-                network_fragment["egress"] = egress
-            if ingress is not None:
-                network_fragment["ingress"] = ingress
-            fragment: dict[str, object] = {
-                "conch": {"network": network_fragment},
-            }
-            return self.policy_engine.merge_policy(current, fragment)
-
-        new_conch_network = current.conch.network.model_copy(deep=True)
+        network_fragment: dict[str, object] = {}
         if egress is not None:
-            new_conch_network.egress = ConchDirectionPolicy.model_validate(egress)
+            network_fragment["egress"] = egress
         if ingress is not None:
-            new_conch_network.ingress = ConchDirectionPolicy.model_validate(ingress)
-        new_conch = current.conch.model_copy(
-            deep=True, update={"network": new_conch_network},
+            network_fragment["ingress"] = ingress
+        fragment: dict[str, object] = {
+            "conch": {"network": network_fragment},
+        }
+        return self.policy_engine.merge_policy(
+            current, fragment, mode=policy_mode.value,
         )
-        return current.model_copy(deep=True, update={"conch": new_conch})
 
     async def _load_sandbox_policy_unlocked(self, sandbox_id: str) -> SecurityPolicy:
         policy = self._policies.get(sandbox_id)
@@ -1908,67 +1951,73 @@ class SandboxManager:
         policy_data: Mapping[str, object] | None,
         policy_mode: PolicyMode = PolicyMode.OVERRIDE,
         update_default_policy: bool = False,
+        update_existing_sandboxes: bool = True,
     ) -> dict[str, object]:
-        """Apply network updates to every registered sandbox.
+        """Apply a policy fragment to the default template and/or live sandboxes.
 
-        Request-body validation failures raise before any sandbox is touched.
-        Batch payloads may include ``network`` and/or ``conch.network``; each
-        sandbox consumes only the fragment matching its runtime. Missing
-        fragments and host-mode process sandboxes are skipped.
+        When ``update_default_policy`` is true the (full sandbox) fragment is
+        deep-merged into ``self.policy`` and the result is written to
+        ``update_policy.yaml`` (single merged document, overwritten each time).
+        On restart that file becomes the default policy when present.
+        ``timeout`` changes also restart the idle reaper.
+        ``inference_privacy_proxies`` is ignored.
 
-        When ``update_default_policy`` is set, matching fragments are also
-        merged into ``self.policy`` -- the base every future ``create_sandbox``
-        call resolves against -- so sandboxes created after this request inherit
-        the new rules. This only mutates process state; the policy YAML on
-        disk is never rewritten (same contract as
-        :meth:`update_timeout_policy`), so a restart falls back to the file.
+        When ``update_existing_sandboxes`` is true only ``network`` /
+        ``conch.network`` egress/ingress are hot-applied to registered sandboxes.
         """
-        fragments = self.validate_policy_update_payload(
-            policy_data,
-            allow_network=True,
-            allow_conch=True,
-            require_any=True,
-        )
-        process_fragment = fragments["network"]
-        conch_fragment = fragments["conch"]
+        fragment = self._strip_batch_policy_fragment(policy_data)
+        process_fragment = None
+        conch_fragment = None
+        if update_existing_sandboxes:
+            hot_fragments = self._extract_hot_update_network_fragments(fragment)
+            process_fragment = hot_fragments["network"]
+            conch_fragment = hot_fragments["conch"]
+
+        candidate: SecurityPolicy | None = None
+        if update_default_policy:
+            candidate = self.policy_engine.merge_policy(
+                self.policy, fragment, mode=policy_mode.value,
+            )
+            self.policy_engine.validate_policy(candidate)
+            self.policy_engine.validate_conch_policy(candidate)
 
         default_policy: dict[str, object] | None = None
+        sandbox_ids: list[str] = []
         async with self._lock:
             if update_default_policy:
-                # Rebase the default *before* snapshotting the registry:
-                # a sandbox created while the loop below is running is absent
-                # from ``sandbox_ids``, so it must already inherit the new
-                # rules from the default or it would miss this update.
-                # Replace only the fragment that was supplied so a concurrent
-                # ``update_timeout_policy`` cannot be swallowed by a wholesale copy.
-                updates: dict[str, object] = {}
-                if process_fragment is not None:
-                    egress, ingress = process_fragment
-                    merged = self._merge_network_rules_update(
-                        self.policy, egress, ingress, policy_mode,
-                    )
-                    self.policy_engine.validate_policy(merged)
-                    updates["network"] = merged.network
-                if conch_fragment is not None:
-                    egress, ingress = conch_fragment
-                    merged_conch = self._merge_conch_network_rules_update(
-                        self.policy, egress, ingress, policy_mode,
-                    )
-                    self.policy_engine.validate_conch_policy(merged_conch)
-                    updates["conch"] = merged_conch.conch
-                if updates:
-                    self.policy = self.policy.model_copy(update=updates)
+                assert candidate is not None
+                previous_timeout = self.policy.timeout
+                self.update_store.save(candidate)
+                self.policy = candidate
                 default_policy = self.policy.model_dump(mode="json")
                 logger.info(
-                    "default sandbox policy network rules updated (mode=%s); "
-                    "applies to sandboxes created from now on",
+                    "default sandbox policy updated (mode=%s); "
+                    "persisted to %s",
                     policy_mode.value,
+                    self.update_store.path,
                 )
-            sandbox_ids = list(self._sandboxes.keys())
+                if self.policy.timeout != previous_timeout:
+                    # update_timeout_policy grabs no outer lock itself; we already
+                    # hold ``self._lock``. Re-apply timeout via stop/start reaper
+                    # without re-entering the lock-dependent paths that mutate
+                    # ``self.policy`` twice: set timeout is already on self.policy.
+                    await self.stop_idle_reaper()
+                    self.start_idle_reaper()
+            if update_existing_sandboxes:
+                sandbox_ids = list(self._sandboxes.keys())
 
         updated_ids: list[str] = []
         skipped: list[dict[str, str]] = []
         failed: list[dict[str, str]] = []
+
+        if not update_existing_sandboxes:
+            return {
+                "updated": updated_ids,
+                "skipped": skipped,
+                "failed": failed,
+                "default_updated": update_default_policy,
+                "default_policy": default_policy,
+            }
 
         for sandbox_id in sandbox_ids:
             try:
