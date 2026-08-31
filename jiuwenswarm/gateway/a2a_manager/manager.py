@@ -1,9 +1,10 @@
-"""Lifecycle and management operations for the Gateway's inbound A2A adapter."""
+"""Lifecycle and management operations for Gateway A2A services."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections import deque
 from collections.abc import Callable
@@ -13,6 +14,13 @@ from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChan
 
 from .config import A2AIngressConfigRepository
 from .models import A2AIngressConfig, A2AIngressError, A2AIngressSnapshot, A2AIngressState
+from .outbound import (
+    A2AOutboundDiscoveryService,
+    A2AOutboundError,
+    A2AOutboundErrorCode,
+    A2AOutboundRegistry,
+    A2AOutboundRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +52,8 @@ class A2AManager:
         repository: A2AIngressConfigRepository | Any | None = None,
         channel_factory: ChannelFactory = A2AChannel,
         initial_error: A2AIngressError | None = None,
+        outbound_repository: A2AOutboundRepository | None = None,
+        outbound_registry: A2AOutboundRegistry | None = None,
     ) -> None:
         self._channel_manager = channel_manager
         self._router = router
@@ -61,10 +71,63 @@ class A2AManager:
         self._request_history: deque[dict[str, Any]] = deque(maxlen=200)
         self._lock = asyncio.Lock()
         self._pending_callbacks: set[asyncio.Task[None]] = set()
+        allow_loopback_http = os.getenv(
+            "A2A_OUTBOUND_ALLOW_LOOPBACK_HTTP", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._outbound = outbound_registry
+        if self._outbound is None and outbound_repository is not None:
+            self._outbound = A2AOutboundRegistry(
+                outbound_repository,
+                discovery_service=A2AOutboundDiscoveryService(
+                    allow_loopback_http=allow_loopback_http
+                ),
+            )
 
     @property
     def channel(self) -> _ManagedA2AChannel | None:
         return self._channel
+
+    @property
+    def outbound_available(self) -> bool:
+        return self._outbound is not None
+
+    def _require_outbound(self) -> A2AOutboundRegistry:
+        if self._outbound is None:
+            raise A2AOutboundError(A2AOutboundErrorCode.STORE_INVALID)
+        return self._outbound
+
+    async def outbound_discover(
+        self, url: str, card_path: str | None = None
+    ) -> dict[str, Any]:
+        return await self._require_outbound().discover(url, card_path)
+
+    async def outbound_register(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._require_outbound().register(params)
+
+    async def outbound_list(self) -> dict[str, Any]:
+        return await self._require_outbound().list_agents()
+
+    async def outbound_get(self, agent_id: str) -> dict[str, Any]:
+        return await self._require_outbound().get_agent(agent_id)
+
+    async def outbound_update(
+        self, agent_id: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._require_outbound().update_agent(agent_id, params)
+
+    async def outbound_refresh(self, agent_id: str) -> dict[str, Any]:
+        return await self._require_outbound().refresh_agent(agent_id)
+
+    async def outbound_confirm_revision(
+        self, agent_id: str, *, accept: bool
+    ) -> dict[str, Any]:
+        return await self._require_outbound().confirm_revision(agent_id, accept=accept)
+
+    async def outbound_delete(self, agent_id: str) -> dict[str, Any]:
+        return await self._require_outbound().delete_agent(agent_id)
+
+    async def outbound_dispatch_get(self, dispatch_id: str) -> dict[str, Any]:
+        return await self._require_outbound().get_dispatch(dispatch_id)
 
     def snapshot(self) -> A2AIngressSnapshot:
         config = self._config
