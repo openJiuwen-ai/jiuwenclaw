@@ -97,8 +97,15 @@ class CronJobRepository:
     def _bump_revision(self) -> None:
         self._revision = int(time.time() * 1_000_000)
 
-    async def list_jobs(self) -> list[CronJob]:
-        rows = await self._store.list(CRON_JOB_STORE_NAME, filters=self._scope())
+    async def list_jobs(self, *, filters: dict[str, Any] | None = None) -> list[CronJob]:
+        # 与 GatewayDbCronJobStore / EnterpriseAwareCronJobStore 对齐：企业路径
+        # CronController.list_jobs 会传 filters={group_id, bot_id, user_id}。
+        query = dict(self._scope())
+        for key in ("group_id", "bot_id", "user_id"):
+            val = (filters or {}).get(key)
+            if isinstance(val, str) and val.strip():
+                query[key] = val.strip()
+        rows = await self._store.list(CRON_JOB_STORE_NAME, filters=query)
         jobs: list[CronJob] = []
         for row in rows:
             job = self._codec.from_record(row)
@@ -144,6 +151,9 @@ class CronJobRepository:
         work_mode: str = DEFAULT_WEB_WORK_MODE,
         service_id: str | None = None,
         agent_id: str | None = None,
+        group_id: str | None = None,
+        bot_id: str | None = None,
+        user_id: str | None = None,
     ) -> CronJob:
         job = build_new_cron_job(
             job_id=job_id,
@@ -163,6 +173,9 @@ class CronJobRepository:
             model_name=model_name,
             app_id=app_id,
             work_mode=work_mode,
+            group_id=group_id,
+            bot_id=bot_id,
+            user_id=user_id,
         )
         tenant_sid = str(service_id or self._service_id).strip() or self._service_id
         tenant_aid = str(agent_id or self._agent_id).strip() or self._agent_id
