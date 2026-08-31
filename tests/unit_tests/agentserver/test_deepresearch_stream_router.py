@@ -1241,15 +1241,15 @@ def test_successful_end_result_keeps_json_shape_limit(monkeypatch):
         )
 
 
-def test_end_result_with_error_event_and_exception_info_is_terminal():
-    """EndNode emits event=error when exception_info is present; it must still be terminal."""
+def test_end_result_with_error_event_does_not_crash():
+    """EndNode event=error (exception_info present) must not crash, but delivery is gated."""
     state = RouterState()
     content = json.dumps({
         "response_content": "# Final report",
         "exception_info": "[212000]Error when generate sub report",
     })
 
-    frames = route_chunk(
+    route_chunk(
         {
             "agent": "end",
             "event": "error",
@@ -1259,11 +1259,11 @@ def test_end_result_with_error_event_and_exception_info_is_terminal():
         state,
     )
 
-    assert state.final_report_started is True
+    assert state.final_report_started is False
 
 
 def test_end_result_with_error_event_bypasses_process_display_text_limit():
-    """The 12:18 crash: report > 1 MiB with exception_info must use the 16 MiB terminal bound."""
+    """The 12:18 crash: report > 1 MiB with exception_info must use the 16 MiB terminal bound, not crash."""
     state = RouterState()
     content = json.dumps({
         "response_content": "x" * (MAX_CHUNK_TEXT_CHARS + 100),
@@ -1281,7 +1281,7 @@ def test_end_result_with_error_event_bypasses_process_display_text_limit():
     )
 
     assert len(content) > MAX_CHUNK_TEXT_CHARS
-    assert state.final_report_started is True
+    assert state.final_report_started is False
 
 
 def test_end_result_without_response_content_falls_through():

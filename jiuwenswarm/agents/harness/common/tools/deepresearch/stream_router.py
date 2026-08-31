@@ -785,18 +785,10 @@ def _all_sections_completed(state: RouterState) -> bool:
 
 
 def _is_successful_workflow_end(chunk: dict, agent: str, event: str) -> bool:
-    """Recognize the SDK EndNode result emitted after the workflow has finished.
-
-    The EndNode emits the final result with either ``summary_response`` (no
-    exceptions) or ``error`` (non-fatal per-section warnings recorded in
-    ``exception_info``).  Both carry the complete report in ``content`` and
-    must use the terminal 16 MiB bound, not the 1 MiB process-display limit.
-    The trailing ``"ALL END"`` marker also has ``agent == "end"`` but its
-    content is not valid JSON, so ``_as_json_object`` returns ``None`` and the
-    function falls through to ``False``.
-    """
+    """Recognize the SDK EndNode result emitted after the workflow has finished."""
     if (
         agent != "end"
+        or event != "summary_response"
         or str(chunk.get("section_idx", "0")).strip() not in {"", "0"}
     ):
         return False
@@ -811,14 +803,11 @@ def _is_successful_workflow_end(chunk: dict, agent: str, event: str) -> bool:
             result,
             max_text_chars=MAX_TERMINAL_RESULT_TEXT_CHARS,
         )
-    # A non-empty response_content means the engine produced a report.
-    # exception_info may carry non-fatal per-section warnings (e.g. one
-    # sub-report failed but the rest succeeded); it must not block delivery
-    # or downgrade the terminal 16 MiB bound to the 1 MiB process limit.
     return bool(
         result
         and isinstance(result.get("response_content"), str)
         and result["response_content"].strip()
+        and not result.get("exception_info")
     )
 
 
@@ -929,16 +918,22 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     agent = _validate_identifier(chunk.get("agent", ""))
     event = str(chunk.get("event", "")).strip()
     section_idx = _validate_identifier(chunk.get("section_idx", "0")) or "0"
-    # The successful EndNode embeds the complete final result in ``content``.
+    # The EndNode embeds the complete final result in ``content`` (1+ MiB).
     # It is a workflow boundary, not process text for the frontend, so keep it
     # under the terminal 16 MiB protocol bound without applying the 1 MiB
-    # process-display accumulator limit.
+    # process-display accumulator limit — even when the result carries
+    # non-fatal exception_info (the SDK then emits event=error).  Delivery is
+    # still gated by _is_successful_workflow_end below.
+    is_end_node = (
+        agent == "end"
+        and section_idx in {"", "0"}
+    )
     successful_workflow_end = _is_successful_workflow_end(chunk, agent, event)
 
     _validate_router_input(
         chunk,
         state,
-        terminal_result_content=successful_workflow_end,
+        terminal_result_content=is_end_node,
     )
     frames: list[dict] = []
     if "__deepsearch_status__" in chunk:
