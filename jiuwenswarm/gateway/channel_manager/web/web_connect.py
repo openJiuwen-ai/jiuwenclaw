@@ -13,6 +13,7 @@ import inspect
 import json
 import logging
 import secrets
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
+from jiuwenswarm.common.utils import get_logs_dir
 from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter, ConnectHook
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
@@ -85,6 +87,11 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "proactive_recommendation",
     }
 )
+
+_CONTEXT_USAGE_JSONL_FILENAME = "context_usage.jsonl"
+_CONTEXT_USAGE_MAX_BYTES = 10 * 1024 * 1024
+_CONTEXT_USAGE_BACKUP_COUNT = 3
+_CONTEXT_USAGE_FILE_LOCK = threading.Lock()
 
 # ── 类型别名 ──────────────────────────────────────────────
 # 方法处理器签名: (ws, req_id, params, session_id) -> None
@@ -963,6 +970,10 @@ class WebChannel(BaseWsChannel):
                             ws_set.add(w)
             if ws_set:
                 frame_data = self._serialize_frame(msg, routing_target, member_names=member_names)
+                # V2 targeted delivery bypasses _broadcast_to(), so persist
+                # usage frames here as well for child agents/team members.
+                if frame_data.get("event") == "context.usage":
+                    await self._persist_frontend_context_usage(frame_data)
                 for w in ws_set:
                     self._enqueue_send(w, frame_data)
                 return
@@ -1465,6 +1476,59 @@ class WebChannel(BaseWsChannel):
                 error=f"unknown method: {method}", code="METHOD_NOT_FOUND",
             )
 
+    @staticmethod
+    def _write_frontend_context_usage(serialized: str) -> None:
+        """Append one serialized frontend usage frame from a worker thread."""
+        output_path = get_logs_dir() / _CONTEXT_USAGE_JSONL_FILENAME
+        output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        serialized_line = f"{serialized}\n"
+        serialized_size = len(serialized_line.encode("utf-8"))
+        with _CONTEXT_USAGE_FILE_LOCK:
+            try:
+                current_size = output_path.stat().st_size
+            except FileNotFoundError:
+                current_size = 0
+            if (
+                current_size > 0
+                and current_size + serialized_size > _CONTEXT_USAGE_MAX_BYTES
+            ):
+                for index in range(_CONTEXT_USAGE_BACKUP_COUNT - 1, 0, -1):
+                    source = output_path.with_name(f"{output_path.name}.{index}")
+                    target = output_path.with_name(f"{output_path.name}.{index + 1}")
+                    try:
+                        source.replace(target)
+                    except FileNotFoundError:
+                        continue
+                output_path.replace(output_path.with_name(f"{output_path.name}.1"))
+            output_path.touch(mode=0o600, exist_ok=True)
+            output_path.chmod(0o600)
+            with output_path.open("a", encoding="utf-8") as output_file:
+                output_file.write(serialized_line)
+
+    @staticmethod
+    async def _persist_frontend_context_usage(frame: dict[str, Any]) -> None:
+        """Append the complete frontend usage frame without blocking the loop."""
+        if frame.get("event") != "context.usage":
+            return
+        try:
+            serialized = json.dumps(
+                frame,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
+            await asyncio.to_thread(
+                WebChannel._write_frontend_context_usage,
+                serialized,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            # Usage persistence is diagnostic-only and must never block the
+            # websocket broadcast.
+            logger.warning(
+                "[WebChannel][frontend][context.usage] JSONL persist failed",
+                exc_info=True,
+            )
+
     async def _broadcast_to(self, frame: dict[str, Any], clients: set[Any]) -> None:
         """向指定 clients 集合广播帧（走 per-ws writer，非阻塞入队）.
 
@@ -1472,6 +1536,11 @@ class WebChannel(BaseWsChannel):
         """
         if not clients:
             return
+        # context.usage 是发给前端的完整上下文 Token 使用信息。它不写入
+        # 会话 history，因此在真正进入 WebSocket writer 前记录最终帧，便于
+        # 核对前端实际收到的 context_window、parts 及兼容别名。
+        if frame.get("event") == "context.usage":
+            await self._persist_frontend_context_usage(frame)
         for client in clients:
             self._enqueue_send(client, frame)
 
