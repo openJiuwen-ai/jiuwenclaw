@@ -146,18 +146,14 @@ def resolve_agent_http_base_for_token(token: str, *, endpoint: str) -> str:
             except TypeError:
                 base = resolver(payload)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[agent_http_bridge] agent http base resolver failed: %s", exc
-            )
+            logger.warning("[agent_http_bridge] agent http base resolver failed: %s", exc)
             base = None
         if base:
             return str(base).rstrip("/")
     return ""
 
 
-def upload_file_bytes(
-    content: bytes, target_rel_path: str
-) -> tuple[bool, dict[str, Any]]:
+def upload_file_bytes(content: bytes, target_rel_path: str) -> tuple[bool, dict[str, Any]]:
     """把文件字节经受认证 HTTP bridge 上传到目标 AgentServer，返回 ``(ok, payload)``。
 
     - ``target_rel_path`` 为相对用户目录根的目标路径（如
@@ -202,19 +198,14 @@ def upload_file_bytes(
             raw = exc.read()
         except Exception:  # noqa: BLE001
             raw = b""
-        message = (
-            raw.decode("utf-8", errors="replace").strip()
-            or f"upload failed: {exc.code}"
-        )
+        message = raw.decode("utf-8", errors="replace").strip() or f"upload failed: {exc.code}"
         return False, {"error": message, "code": "UPLOAD_FAILED"}
     except Exception as exc:  # noqa: BLE001
         logger.warning("[agent_http_bridge] upload 转发失败: %s", exc)
         return False, {"error": str(exc), "code": "SERVICE_UNAVAILABLE"}
 
     if status != 200:
-        message = (
-            raw.decode("utf-8", errors="replace").strip() or f"upload failed: {status}"
-        )
+        message = raw.decode("utf-8", errors="replace").strip() or f"upload failed: {status}"
         return False, {"error": message, "code": "UPLOAD_FAILED"}
     try:
         payload = _json.loads(raw.decode("utf-8"))
@@ -253,7 +244,7 @@ async def upload_file_bytes_via_e2a(
     resolved_path = ""
     last_payload: dict[str, Any] = {}
     for offset in range(0, len(content), _E2A_UPLOAD_CHUNK_BYTES):
-        chunk = content[offset : offset + _E2A_UPLOAD_CHUNK_BYTES]
+        chunk = content[offset:offset + _E2A_UPLOAD_CHUNK_BYTES]
         ok, payload = await fetch_agent_unary(
             agent_client=agent_client,
             req_method=ReqMethod.FILE_UPLOAD_CHUNK,
@@ -273,9 +264,6 @@ async def upload_file_bytes_via_e2a(
             return False, payload
         resolved_path = str(payload.get("path") or "").strip()
         if not resolved_path:
-            return False, {
-                "error": "upload response missing path",
-                "code": "UPLOAD_FAILED",
-            }
+            return False, {"error": "upload response missing path", "code": "UPLOAD_FAILED"}
         last_payload = payload
     return True, last_payload
