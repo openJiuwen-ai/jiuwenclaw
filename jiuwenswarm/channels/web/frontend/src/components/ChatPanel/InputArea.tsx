@@ -12,6 +12,7 @@
   useImperativeHandle,
   FormEvent,
   Fragment,
+  type CSSProperties,
   type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -3741,17 +3742,25 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           </form>
         </div>
       ) : null}
-      {swarmflowConfigPanelOpen && swarmflowConfigAnchor && activeSessionId && swarmflowActive && createPortal(
+      {swarmflowConfigPanelOpen && swarmflowConfigAnchor && activeSessionId && swarmflowActive && (() => {
+        // 方向自适应：齿轮下方空间不足时向上展开，避免卡片被视口底部截断
+        const panelHeight = 180;
+        const spaceBelow = window.innerHeight - swarmflowConfigAnchor.bottom;
+        const openUpward = spaceBelow < panelHeight + 16;
+        const panelStyle: CSSProperties = {
+          position: 'fixed',
+          ...(openUpward
+            ? { bottom: window.innerHeight - swarmflowConfigAnchor.top + 8 }
+            : { top: swarmflowConfigAnchor.top }),
+          left: swarmflowConfigAnchor.right + 8,
+          zIndex: 9999,
+        };
+        return createPortal(
         <div
           ref={swarmflowConfigPanelRef}
           className="chat-swarmflow-config-panel"
           data-testid="chat-panel-swarmflow-config-panel"
-          style={{
-            position: 'fixed',
-            top: swarmflowConfigAnchor.top,
-            left: swarmflowConfigAnchor.right + 8,
-            zIndex: 9999,
-          }}
+          style={panelStyle}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="chat-swarmflow-config-panel__header">
@@ -3789,7 +3798,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           </div>
         </div>,
         document.body,
-      )}
+      );})()}
         </div>
       </div>
     </>
