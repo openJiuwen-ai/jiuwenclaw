@@ -131,7 +131,16 @@ import {
   shouldCatchUpTrajectory,
   trajectoryArchiveView,
 } from '../node_modules/.cache/trajectory-window/trajectoryArchive.mjs';
-import { liveElapsedSeconds } from '../node_modules/.cache/trajectory-window/record.mjs';
+import {
+  formatTokenCount,
+  liveElapsedSeconds,
+} from '../node_modules/.cache/trajectory-window/record.mjs';
+
+test('token counts use grouped thousands for readability', () => {
+  assert.equal(formatTokenCount(48111), '48,111 tok');
+  assert.equal(formatTokenCount(999), '999 tok');
+  assert.equal(formatTokenCount(undefined), '—');
+});
 
 const SESSION_ID = 'session-1';
 const STORE_EPOCH = 'epoch-1';

@@ -25,7 +25,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import ParseResult, quote, unquote, urlparse
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early
@@ -468,26 +468,43 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         connection = self.headers.get("Connection", "")
         return "websocket" in upgrade.lower() and "upgrade" in connection.lower()
 
+    @staticmethod
+    def _is_malformed_raw_host(raw_host: str) -> bool:
+        """Return whether a raw Host header value is unusable before parsing."""
+        if not raw_host or len(raw_host) > 512:
+            return True
+        if not raw_host.isascii() or raw_host.endswith(":"):
+            return True
+        has_control_character = any(
+            character.isspace() or ord(character) < 32 or ord(character) == 127
+            for character in raw_host
+        )
+        if has_control_character:
+            return True
+        return any(
+            separator in raw_host
+            for separator in ("/", "\\", "?", "#", "@", ",")
+        )
+
+    @staticmethod
+    def _has_unexpected_host_parts(parsed_host: ParseResult) -> bool:
+        """Return whether a parsed Host authority carries non-authority parts."""
+        if parsed_host.username is not None or parsed_host.password is not None:
+            return True
+        return bool(
+            parsed_host.path
+            or parsed_host.params
+            or parsed_host.query
+            or parsed_host.fragment
+        )
+
     def _clean_outer_host(self) -> str | None:
         """Return one canonical browser-facing Host value for proxying."""
         host_values = self.headers.get_all("Host") or []
         if len(host_values) != 1:
             return None
         raw_host = str(host_values[0] or "").strip()
-        if (
-            not raw_host
-            or len(raw_host) > 512
-            or not raw_host.isascii()
-            or raw_host.endswith(":")
-            or any(
-                character.isspace() or ord(character) < 32 or ord(character) == 127
-                for character in raw_host
-            )
-            or any(
-                separator in raw_host
-                for separator in ("/", "\\", "?", "#", "@", ",")
-            )
-        ):
+        if self._is_malformed_raw_host(raw_host):
             return None
         try:
             parsed_host = urlparse(f"//{raw_host}")
@@ -495,15 +512,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             port = parsed_host.port
         except ValueError:
             return None
-        if (
-            hostname is None
-            or parsed_host.username is not None
-            or parsed_host.password is not None
-            or parsed_host.path
-            or parsed_host.params
-            or parsed_host.query
-            or parsed_host.fragment
-        ):
+        if hostname is None or self._has_unexpected_host_parts(parsed_host):
             return None
         normalized_hostname = hostname.lower().rstrip(".")
         if (

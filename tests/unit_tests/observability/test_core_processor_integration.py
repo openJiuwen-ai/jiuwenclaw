@@ -331,7 +331,9 @@ async def test_native_context_event_is_queryable_before_parent_request_ends(
         payload = json.loads(_attribute(span, "openjiuwen.trajectory.payload"))
         assert payload["complete"] is True
         assert payload["messages"][0]["message_id"] == "user-1"
-        assert payload["delta"][0]["op"] == "insert"
+        # First window is the epoch baseline: no delta against a prior window.
+        assert payload["transition_kind"] == "epoch_baseline"
+        assert payload["delta"] == []
     finally:
         if parent is not None:
             parent.end()

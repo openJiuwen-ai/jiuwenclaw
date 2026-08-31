@@ -19,10 +19,6 @@
   background: var(--color-surface-card);
 }
 
-.chat-workspace--trajectory-floating-tools {
-  padding-right: 364px;
-}
-
 .chat-layout__surface {
   min-width: 512px;
   background: var(--color-surface-card);
@@ -99,6 +95,12 @@
   bottom: 0;
   left: 0;
   background: var(--color-surface-card);
+}
+
+.chat-workspace--trajectory-floating-tools
+  .single-agent-surface--trajectory
+  .chat-surface-view[data-testid='single-agent-trajectory-view'] {
+  right: 364px;
 }
 
 .chat-surface-tabs {

@@ -112,6 +112,16 @@ def _stored_record(**overrides: object) -> TraceRecordData:
     return TraceRecordData.from_core_record(_core_record(**overrides))
 
 
+def _team_raw_record(trace_id: str, span_id: str) -> bytes:
+    payload = json.loads(_raw_record(trace_id, span_id))
+    attributes = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+    attributes.append({
+        "key": "openjiuwen.team.id",
+        "value": {"stringValue": "research-team"},
+    })
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
 def _snapshot_record_for(
     span_id: str,
     revision: int,
@@ -804,7 +814,7 @@ async def test_malformed_raw_is_stored_and_exposed_without_projection(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_reader_rejects_team_unknown_and_mixed_mode_traces(
+async def test_reader_accepts_agent_and_team_modes_but_rejects_unknown_traces(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "trajectory.sqlite3"
@@ -849,11 +859,13 @@ async def test_reader_rejects_team_unknown_and_mixed_mode_traces(
     reader = AsyncTrajectoryReader(database_path)
     items, _cursor = await reader.list_traces("session-1", limit=30, cursor=None)
 
-    assert [item["trace_id"] for item in items] == [_TRACE_ID]
+    assert [item["trace_id"] for item in items] == [
+        _TRACE_ID,
+        team_trace_id,
+        mixed_trace_id,
+    ]
     for rejected_trace_id, span_id in (
-        (mixed_trace_id, "1" * 16),
         (unknown_trace_id, "3" * 16),
-        (team_trace_id, "4" * 16),
     ):
         assert await reader.get_trace_records(
             "session-1",
@@ -866,7 +878,78 @@ async def test_reader_rejects_team_unknown_and_mixed_mode_traces(
             rejected_trace_id,
             span_id,
         ) is None
-    test_logger.info("trace-level mode allowlist rejected Team, unknown, and mixed scopes")
+    assert await reader.get_trace_records(
+        "session-1",
+        team_trace_id,
+        since_revision=0,
+        limit=1000,
+    ) is not None
+    assert await reader.get_trace_records(
+        "session-1",
+        mixed_trace_id,
+        since_revision=0,
+        limit=1000,
+    ) is not None
+    test_logger.info("trace-level allowlist accepted Agent and Team while rejecting unknown modes")
+
+
+@pytest.mark.asyncio
+async def test_initialize_repairs_mode_less_team_trace_from_raw_contract(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "trajectory.sqlite3"
+    store = TrajectoryStore(database_path)
+    store.initialize()
+    try:
+        store.write_records([
+            _stored_record(
+                agent_mode=None,
+                raw_json=_team_raw_record(_TRACE_ID, _ROOT_SPAN_ID),
+            ),
+            _stored_record(
+                span_id=_CHILD_SPAN_ID,
+                parent_span_id=_ROOT_SPAN_ID,
+                agent_mode=None,
+                raw_json=_raw_record(
+                    _TRACE_ID,
+                    _CHILD_SPAN_ID,
+                    parent_span_id=_ROOT_SPAN_ID,
+                    name="llm.call",
+                ),
+            ),
+        ])
+    finally:
+        store.close()
+
+    before, _cursor = await AsyncTrajectoryReader(database_path).list_traces(
+        "session-1",
+        limit=30,
+        cursor=None,
+    )
+    assert before == []
+
+    reopened = TrajectoryStore(database_path)
+    reopened.initialize()
+    reopened.close()
+
+    after, _cursor = await AsyncTrajectoryReader(database_path).list_traces(
+        "session-1",
+        limit=30,
+        cursor=None,
+    )
+    assert [item["trace_id"] for item in after] == [_TRACE_ID]
+    with sqlite3.connect(database_path) as connection:
+        for table in (
+            "otlp_span_records",
+            "trajectory_current_records",
+            "trajectory_changes",
+        ):
+            modes = connection.execute(
+                f"SELECT DISTINCT agent_mode FROM {table} WHERE trace_id = ?",
+                (_TRACE_ID,),
+            ).fetchall()
+            assert modes == [("team",)]
+    test_logger.info("startup repaired a legacy mode-less Team trace without rewriting raw OTLP")
 
 
 @pytest.mark.asyncio
@@ -1517,7 +1600,7 @@ async def test_partial_retention_rotates_epoch_and_rebuilds_remaining_view(
 
 
 @pytest.mark.asyncio
-async def test_global_trace_eligibility_fails_closed_across_sessions(
+async def test_global_trace_eligibility_accepts_team_and_keeps_sessions_isolated(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "trajectory.sqlite3"
@@ -1556,34 +1639,33 @@ async def test_global_trace_eligibility_fails_closed_across_sessions(
     finally:
         store.close()
 
-    assert new_epoch != old_epoch
+    assert new_epoch == old_epoch
     session_one_items, _cursor = await reader.list_traces(
         "session-1", limit=30, cursor=None
     )
     session_two_items, _cursor = await reader.list_traces(
         "session-2", limit=30, cursor=None
     )
-    assert session_one_items == []
-    assert session_two_items == []
+    assert len(session_one_items) == 1
+    assert len(session_two_items) == 1
     assert await reader.get_trace_records(
         "session-1", _TRACE_ID, since_revision=0, limit=100
-    ) is None
+    ) is not None
     assert await reader.get_raw_record(
         "session-1", _TRACE_ID, _ROOT_SPAN_ID
-    ) is None
+    ) is not None
     assert await reader.get_raw_record(
         "session-2", _TRACE_ID, team_span_id
-    ) is None
+    ) is not None
 
     revisions = await reader.list_trace_revisions(
         "session-1",
         after_revision=old_cursor,
         limit=30,
     )
-    assert revisions[0] == []
-    assert revisions[4] is True
+    assert revisions[4] is False
     assert revisions[5] == new_epoch
-    test_logger.info("one Team span hid a reused trace ID in every session")
+    test_logger.info("Agent and Team records sharing a trace ID remained session isolated")
 
 
 @pytest.mark.asyncio

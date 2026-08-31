@@ -517,13 +517,14 @@ agent_observability:
 # ============================================================
 # 单 Agent 轨迹观测 Web 数据面
 # ============================================================
-# enabled=true 会作为单 Agent OTel provider 的额外 demand，但仍完整复用
-# agent_observability 的 exporter、采样、脱敏、字段长度与 Langfuse 配置。
-# Processor 后的数据由 AgentServer 有界队列写入 SQLite；Gateway 只读查询。
-# Team / auto harness 本期不会向 Web 暴露轨迹。
+# enabled=true 会作为 Agent / Team OTel provider 的额外 demand，但仍完整复用
+# agent_observability / team_observability 的 exporter、采样、脱敏、字段长度
+# 与 Langfuse 配置。Processor 后的数据由 AgentServer 有界队列写入 SQLite；
+# Gateway 只读查询。Agent 与 Team 会话均向 Web 暴露轨迹。
+# auto_harness 不向 Web 暴露轨迹。
 # ============================================================
 trajectory_ui:
-  enabled: true                     # 启用“对话 / 轨迹”数据链路
+  enabled: false                     # 启用“对话 / 轨迹”数据链路
   db_path: ""                       # Session database root; defaults to ~/.jiuwenswarm/.trace/sessions
   retention_days: 7                 # SQLite 轨迹保留天数
   queue_size: 4096                  # Agent 主线程非阻塞写入队列上限
@@ -581,8 +582,6 @@ react:
   skill_mode: all
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent: code.team 路径通过此 key 门控（单 agent 路径仍由 browser runtime 开关决定）
-  # statusline-setup / explore_agent / plan_agent 反过来：默认启用，只有显式
-  # enabled: false 才关闭（不写该 key 即为开启）
   subagents:
     statusline-setup:
       enabled: true
@@ -594,13 +593,6 @@ react:
       # max_iterations: 15
     research_agent:
       enabled: false
-      # max_iterations: 15
-    # explore_agent / plan_agent 仅在 code 模式（含 code.team、team.plan.code）下挂载
-    explore_agent:
-      enabled: true
-      # max_iterations: 15
-    plan_agent:
-      enabled: true
       # max_iterations: 15
     browser_agent:
       enabled: true
@@ -1445,14 +1437,14 @@ modes:
       #                        start / 送审 / 返工 / 验收等 leader 身份的
       #                        邮箱消息；成员失去 claim_task，改用
       #                        member_complete_task。
-      dispatch_mode: scheduled
+      dispatch_mode: autonomous
 
       # 调度模式下的验收开关（TeamAgentSpec.enable_task_verification）：
       # 纯 prompt 驱动，开启后 leader 建任务时会按自己的判断给部分任务
       # 指派 0..N 个 reviewer（无强制校验，leader 认为无需验收的任务可以
       # 不带 reviewer）。reviewer 机制（列、guard、投票）本身始终可用，
       # 与本开关无关；本开关只影响 leader 的建任务引导语。见 F_62。
-      enable_task_verification: true
+      enable_task_verification: false
 
       leader:
         member_name: team-leader

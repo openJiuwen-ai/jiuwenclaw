@@ -69,6 +69,7 @@ import {
   groupTrajectorySubjects,
   MAIN_TRAJECTORY_SUBJECT_ID,
 } from './trajectorySubjects';
+import { TeamTrajectoryWorkspace } from './TeamTrajectoryWorkspace';
 import css from './TrajectoryPanel.module.css';
 import './client/theme.css';
 
@@ -95,6 +96,7 @@ interface RawInspectorResizeDrag {
 
 export interface TrajectoryPanelProps {
   active: boolean;
+  mode?: string;
   sessionId: string;
 }
 
@@ -163,10 +165,12 @@ const EMPTY_PUBLISHED_WINDOW: PublishedTrajectoryWindow = {
  */
 export const TrajectoryPanel = memo(function TrajectoryPanel({
   active,
+  mode = 'agent',
   sessionId,
 }: TrajectoryPanelProps) {
   const { i18n } = useTranslation();
   const chinese = (i18n.resolvedLanguage ?? i18n.language).toLowerCase().startsWith('zh');
+  const teamMode = mode === 'team';
   const windowStateRef = useRef(createTrajectoryWindowState());
   const operationCoordinatorRef = useRef(createTrajectoryOperationCoordinator());
   const loadedSessionRef = useRef<string | null>(null);
@@ -195,7 +199,11 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
   const [publishedWindow, setPublishedWindow] = useState<PublishedTrajectoryWindow>(
     EMPTY_PUBLISHED_WINDOW,
   );
-  const [selectedSubjectId, setSelectedSubjectId] = useState(MAIN_TRAJECTORY_SUBJECT_ID);
+  // Team mode: `null` collapses every lane (only the swimlane grid is shown);
+  // a subject id expands that member's trajectory drawer.
+  const [selectedSubjectId, setSelectedSubjectId] = useState<string | null>(
+    teamMode ? null : MAIN_TRAJECTORY_SUBJECT_ID,
+  );
   const [hasEarlier, setHasEarlier] = useState(false);
   const [loading, setLoading] = useState(false);
   const [initialLoadProgress, setInitialLoadProgress] = useState<InitialLoadProgress | null>(null);
@@ -218,7 +226,9 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
     loading: '正在加载轨迹…',
     loadingProgress: (loaded: number, total: number) => `正在加载轨迹 ${loaded} / ${total}`,
     emptyTitle: '暂无轨迹',
-    emptyText: '运行一次单 Agent 对话后，这里会展示模型、推理和工具调用轨迹。',
+    emptyText: teamMode
+      ? '运行一次集群对话后，这里会并行展示 Leader 与各 Teammate 成员的操作泳道。'
+      : '运行一次单 Agent 对话后，这里会展示模型、推理和工具调用轨迹。',
     newTitle: '尚未创建会话',
     newText: '发送第一条消息后可查看轨迹。',
     retry: '重试',
@@ -270,7 +280,9 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
     loading: 'Loading trajectory…',
     loadingProgress: (loaded: number, total: number) => `Loading trajectory ${loaded} / ${total}`,
     emptyTitle: 'No trajectory yet',
-    emptyText: 'Run a single-Agent conversation to see model, reasoning, and tool traces here.',
+    emptyText: teamMode
+      ? 'Run a cluster conversation to see Leader and Teammate member lanes side by side.'
+      : 'Run a single-Agent conversation to see model, reasoning, and tool traces here.',
     newTitle: 'No conversation yet',
     newText: 'Send the first message to view its trajectory.',
     retry: 'Retry',
@@ -302,7 +314,7 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
     rawExpand: 'Expand raw OTel panel',
     rawResize: 'Resize raw OTel panel height',
     toolbar: undefined,
-  }, [chinese]);
+  }, [chinese, teamMode]);
 
   const publish = useCallback((generation: number) => {
     if (!operationCoordinatorRef.current.isCurrent(generation)) return;
@@ -357,7 +369,7 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
     setPublishedWindow(EMPTY_PUBLISHED_WINDOW);
     initialLoadProgressRef.current = null;
     setInitialLoadProgress(null);
-    setSelectedSubjectId(MAIN_TRAJECTORY_SUBJECT_ID);
+    setSelectedSubjectId(teamMode ? null : MAIN_TRAJECTORY_SUBJECT_ID);
     setHasEarlier(false);
     setInvalidRecordSeen(false);
     setError(null);
@@ -802,6 +814,7 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
       allDisplayedRawRecords,
       allDisplayedLifecycle,
       replayArchive?.session_id ?? sessionId,
+      { teamMode },
     ),
     group => projectOtelTrajectory(group.records, {
       lifecycleByRecordId: group.lifecycleByRecordId,
@@ -818,11 +831,13 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
     publishedWindow.sessionCumulativeUsageByRequestIdentity,
     replayArchive?.session_id,
     sessionId,
+    teamMode,
   ]);
   const subjectGroups = subjectView.groups;
-  const selectedSubjectGroup = subjectGroups.byId.get(selectedSubjectId)
-    ?? subjectGroups.byId.get(MAIN_TRAJECTORY_SUBJECT_ID)
-    ?? subjectGroups.groups[0];
+  const selectedSubjectGroup = selectedSubjectId === null
+    ? undefined
+    : (subjectGroups.byId.get(selectedSubjectId)
+      ?? subjectGroups.groups[0]);
   const displayedRecords = selectedSubjectGroup?.records ?? [];
   const displayedRawRecords = selectedSubjectGroup?.rawRecords ?? [];
   const displayedTraceCount = selectedSubjectGroup?.traceCount ?? 0;
@@ -831,18 +846,39 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
     ? undefined
     : subjectSnapshots.get(selectedSubjectGroup.subject.id);
 
-  const selectSubject = useCallback((subjectId: string) => {
-    rawSelectionBySubjectRef.current.set(selectedSubjectId, rawSelection);
+  const selectSubject = useCallback((subjectId: string | null) => {
+    if (subjectId === null) {
+      setSelectedSubjectId(null);
+      return;
+    }
+    rawSelectionBySubjectRef.current.set(selectedSubjectId ?? '', rawSelection);
     setSelectedSubjectId(subjectId);
     setRawSelection(rawSelectionBySubjectRef.current.get(subjectId) ?? '');
   }, [rawSelection, selectedSubjectId]);
 
   useEffect(() => {
+    if (!teamMode) {
+      if (!subjectGroups.byId.has(selectedSubjectId ?? '')) {
+        selectSubject(MAIN_TRAJECTORY_SUBJECT_ID);
+      }
+      return;
+    }
+    // Team mode: keep the collapsed state by default; only repair an expired
+    // expansion to the first record-bearing lane.
+    if (selectedSubjectId === null) return;
     if (subjectGroups.byId.has(selectedSubjectId)) return;
-    selectSubject(MAIN_TRAJECTORY_SUBJECT_ID);
-  }, [selectSubject, selectedSubjectId, subjectGroups]);
+    const fallback = subjectGroups.groups.find(group => (
+      group.records.length > 0 || group.rawRecords.length > 0
+    ))?.subject.id ?? null;
+    selectSubject(fallback);
+  }, [selectSubject, selectedSubjectId, subjectGroups, teamMode]);
 
   useEffect(() => {
+    if (selectedSubjectId === null) {
+      windowStateRef.current.rawSelection = '';
+      setRawSelection('');
+      return;
+    }
     if (displayedRawRecords.length === 0) {
       windowStateRef.current.rawSelection = '';
       setRawSelection('');
@@ -951,7 +987,7 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
       if (file.size > MAX_ARCHIVE_BYTES) throw new Error(copy.archiveTooLarge);
       const archive = parseTrajectoryArchive(await file.text());
       setReplayArchive(archive);
-      setSelectedSubjectId(MAIN_TRAJECTORY_SUBJECT_ID);
+      setSelectedSubjectId(teamMode ? null : MAIN_TRAJECTORY_SUBJECT_ID);
       setRawSelection('');
       setFetchedRaw(null);
       setRawError(null);
@@ -963,7 +999,7 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
   const exitReplay = useCallback(() => {
     const transition = exitTrajectoryReplay(replayArchive);
     setReplayArchive(transition.archive);
-    setSelectedSubjectId(MAIN_TRAJECTORY_SUBJECT_ID);
+    setSelectedSubjectId(teamMode ? null : MAIN_TRAJECTORY_SUBJECT_ID);
     setArchiveError(null);
     setArchiveNotice(null);
     setRawSelection('');
@@ -1089,7 +1125,9 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
               onChange={(event) => {
                 const nextSelection = event.currentTarget.value;
                 windowStateRef.current.rawSelection = nextSelection;
-                rawSelectionBySubjectRef.current.set(selectedSubjectId, nextSelection);
+                if (selectedSubjectId !== null) {
+                  rawSelectionBySubjectRef.current.set(selectedSubjectId, nextSelection);
+                }
                 setRawSelection(nextSelection);
               }}
             >
@@ -1134,11 +1172,75 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
     sessionId: replayArchive?.session_id ?? sessionId,
     loading: replayArchive === null ? loading : false,
     error: replayArchive === null ? error : null,
-    projectedCount: displayedRecords.length,
-    rawCount: displayedRawRecords.length,
+    projectedCount: teamMode ? allDisplayedRecords.length : displayedRecords.length,
+    rawCount: teamMode ? allDisplayedRawRecords.length : displayedRawRecords.length,
   });
+  const teamContent = teamMode && contentMode !== 'new'
+    && contentMode !== 'loading' && contentMode !== 'blocking-error'
+    && contentMode !== 'empty'
+    ? (
+      <TeamTrajectoryWorkspace
+        active={active}
+        groups={subjectGroups}
+        messages={copy.toolbar}
+        selectedSubjectId={selectedSubjectId}
+        onSelectSubject={selectSubject}
+        memberView={(subjectId, {
+          expanded,
+          viewState,
+          toolbarAddon,
+          onOverviewActivate,
+        }) => {
+          const group = subjectGroups.byId.get(subjectId);
+          const groupSnapshot = group === undefined
+            ? undefined
+            : subjectSnapshots.get(group.subject.id);
+          const records = group?.records ?? [];
+          const rawRecords = group?.rawRecords ?? [];
+          const diagnosticError = aggregateDiagnostics(groupSnapshot?.diagnostics ?? [])
+            .map(diagnostic => (
+              `${copy.diagnostic(diagnostic.code)}${diagnostic.count > 1 ? ` × ${diagnostic.count}` : ''}`
+            ))
+            .join(' · ');
+          const memberError = [
+            diagnosticError,
+            expanded && replayArchive === null ? error : null,
+          ].filter((message): message is string => (
+            typeof message === 'string' && message !== ''
+          )).join(' · ');
+          const expandedError = memberError !== ''
+            ? memberError
+            : records.length === 0 ? copy.rawOnly : null;
+          return (
+            <>
+              <TrajectoryExplorer
+                active={active}
+                snapshot={groupSnapshot ?? { turns: [] }}
+                loading={expanded && replayArchive === null ? loading : false}
+                loadingEarlier={expanded && replayArchive === null ? loadingEarlier : false}
+                hasEarlier={expanded && replayArchive === null ? hasEarlier : false}
+                loadEarlier={loadEarlier}
+                error={expanded ? expandedError : null}
+                messages={copy.toolbar}
+                colorMode="light"
+                displayMode={expanded ? 'full' : 'overview'}
+                showToolbarViewControls={false}
+                toolbarAddon={toolbarAddon}
+                viewState={viewState}
+                onOverviewActivate={onOverviewActivate}
+                className={expanded ? css.explorer : undefined}
+              />
+              {expanded && rawRecords.length > 0 ? rawInspector : null}
+            </>
+          );
+        }}
+      />
+    )
+    : null;
   let content;
-  if (contentMode === 'new') {
+  if (teamContent !== null) {
+    content = teamContent;
+  } else if (contentMode === 'new') {
     content = (
       <div className={css.state}>
         <div className={css.stateContent}>
@@ -1313,7 +1415,7 @@ export const TrajectoryPanel = memo(function TrajectoryPanel({
           </div>
         </div>
       ) : null}
-      {subjectGroups.groups.length > 1 ? (
+      {!teamMode && subjectGroups.groups.length > 1 ? (
         <div className={css.subjectBar}>
           <div className={css.subjectTabs} role="tablist" aria-label={copy.subjectTabs}>
             {subjectGroups.groups.map(group => (

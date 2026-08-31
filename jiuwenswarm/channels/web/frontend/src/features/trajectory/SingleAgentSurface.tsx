@@ -1,6 +1,6 @@
 // Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-/** Stable host boundary for the single-Agent chat and trajectory surfaces. */
+/** Stable host boundary for the Agent and Team chat and trajectory surfaces. */
 
 import type { ReactNode } from 'react';
 
@@ -14,6 +14,7 @@ export interface SingleAgentSurfaceProps {
   onViewChange: (view: ChatSurfaceView) => void;
   tabListLabel: string;
   trajectory: ReactNode;
+  trajectoryEnabled: boolean;
   trajectoryLabel: string;
   trajectoryRequested: boolean;
   showNavigation?: boolean;
@@ -21,7 +22,8 @@ export interface SingleAgentSurfaceProps {
 
 /**
  * Keep the chat subtree mounted while gating the trajectory subtree until its
- * first explicit request. Non-agent modes never expose or mount trajectory UI.
+ * first explicit request. Agent and Team modes share this lifecycle boundary;
+ * other modes never expose or mount trajectory UI.
  */
 export function SingleAgentSurface({
   activeView,
@@ -31,12 +33,13 @@ export function SingleAgentSurface({
   onViewChange,
   tabListLabel,
   trajectory,
+  trajectoryEnabled,
   trajectoryLabel,
   trajectoryRequested,
   showNavigation = true,
 }: SingleAgentSurfaceProps) {
-  const agentMode = mode === 'agent';
-  const navigationVisible = agentMode && showNavigation;
+  const trajectoryMode = trajectoryEnabled && (mode === 'agent' || mode === 'team');
+  const navigationVisible = trajectoryMode && showNavigation;
   const resolvedView: ChatSurfaceView = navigationVisible ? activeView : 'chat';
 
   return (

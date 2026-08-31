@@ -1,25 +1,27 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Lossless SQLite storage and read queries for single-Agent OTLP records."""
+"""Lossless SQLite storage and read queries for Agent OTLP records."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
 import json
 import logging
 import math
 import sqlite3
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import aiosqlite
 
-from jiuwenswarm.common.mode_matrix import SINGLE_AGENT_CANONICAL_MODES
+from jiuwenswarm.common.mode_matrix import (
+    SINGLE_AGENT_CANONICAL_MODES,
+    TEAM_CANONICAL_MODES,
+)
 from jiuwenswarm.observability.config import (
     DEFAULT_DETAIL_MAX_BYTES,
     session_database_path,
@@ -29,6 +31,10 @@ from jiuwenswarm.observability.models import (
     TraceRecordData,
     WriteBatchResult,
 )
+from jiuwenswarm.observability.projection import (
+    TrajectoryScope,
+    project_trajectory_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +43,10 @@ _BUSY_TIMEOUT_MS = 5000
 _MAX_SQLITE_INTEGER = (1 << 63) - 1
 _MAX_JSON_NESTING_DEPTH = 256
 _ABSENT_STORE_EPOCH = "absent"
-_SINGLE_AGENT_MODE_VALUES = tuple(sorted(SINGLE_AGENT_CANONICAL_MODES))
-_SINGLE_AGENT_MODE_PLACEHOLDERS = ",".join("?" for _ in _SINGLE_AGENT_MODE_VALUES)
+_TRAJECTORY_MODE_VALUES = tuple(
+    sorted(SINGLE_AGENT_CANONICAL_MODES | TEAM_CANONICAL_MODES),
+)
+_TRAJECTORY_MODE_PLACEHOLDERS = ",".join("?" for _ in _TRAJECTORY_MODE_VALUES)
 _ELIGIBLE_TRACES_CTE = f"""
 eligible_traces AS (
     SELECT trace_id
@@ -48,7 +56,7 @@ eligible_traces AS (
         CASE
             WHEN agent_mode IS NOT NULL
              AND TRIM(agent_mode) <> ''
-             AND LOWER(TRIM(agent_mode)) IN ({_SINGLE_AGENT_MODE_PLACEHOLDERS})
+             AND LOWER(TRIM(agent_mode)) IN ({_TRAJECTORY_MODE_PLACEHOLDERS})
             THEN 1 ELSE 0
         END
     ) > 0
@@ -56,7 +64,7 @@ eligible_traces AS (
         CASE
             WHEN agent_mode IS NOT NULL
              AND TRIM(agent_mode) <> ''
-             AND LOWER(TRIM(agent_mode)) NOT IN ({_SINGLE_AGENT_MODE_PLACEHOLDERS})
+             AND LOWER(TRIM(agent_mode)) NOT IN ({_TRAJECTORY_MODE_PLACEHOLDERS})
             THEN 1 ELSE 0
         END
     ) = 0
@@ -177,6 +185,26 @@ class TrajectoryCursorError(ValueError):
     """Raised when an opaque trajectory cursor is malformed."""
 
 
+class TraceRevisionPage(NamedTuple):
+    """One bounded page of trace summaries changed after a revision cursor.
+
+    Attributes:
+        items: Trace summaries changed within the page window.
+        next_cursor: Cursor resuming the same polling pass.
+        watermark: Cursor pinned to the bound captured on the first page.
+        has_more: Whether the current pass still has pages left.
+        reset: Whether the caller's cursor no longer matches the store.
+        store_epoch: Epoch the page was read under.
+    """
+
+    items: list[dict[str, Any]]
+    next_cursor: str
+    watermark: str
+    has_more: bool
+    reset: bool
+    store_epoch: str
+
+
 class TrajectoryStore:
     """Single-threaded SQLite writer that preserves raw record bytes unchanged."""
 
@@ -202,9 +230,10 @@ class TrajectoryStore:
             removed = self._remove_missing_final_current(connection)
             migrated = self._migrate_final_current(connection)
             self._abandon_running_current(connection)
+            team_modes_backfilled = self._backfill_inferred_team_modes(connection)
             connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             self._initialize_store_state(connection)
-            if migrated or removed:
+            if migrated or removed or team_modes_backfilled:
                 self._rotate_store_epoch(connection)
             connection.commit()
         except Exception:
@@ -606,6 +635,76 @@ class TrajectoryStore:
             )
         return len(rows)
 
+    @staticmethod
+    def _backfill_inferred_team_modes(connection: sqlite3.Connection) -> int:
+        """Repair mode-less Team traces produced before the Team routing fix.
+
+        Raw OTLP remains immutable. Only the derived routing column is filled,
+        and only when an authoritative Team scope exists and the trace has no
+        conflicting non-Team mode.
+        """
+        rows = connection.execute(
+            """
+            SELECT trace_id, raw_json
+            FROM trajectory_current_records
+            WHERE agent_mode IS NULL OR TRIM(agent_mode) = ''
+            ORDER BY change_seq ASC
+            """
+        ).fetchall()
+        inferred_trace_ids: set[str] = set()
+        for row in rows:
+            trace_id = str(row["trace_id"])
+            if trace_id in inferred_trace_ids:
+                continue
+            try:
+                payload = json.loads(bytes(row["raw_json"]))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            scope = project_trajectory_scope(payload)
+            if scope.team_id is not None or scope.team_name is not None:
+                inferred_trace_ids.add(trace_id)
+
+        repaired = 0
+        allowed_team_modes = tuple(sorted(TEAM_CANONICAL_MODES))
+        mode_placeholders = ",".join("?" for _ in allowed_team_modes)
+        for trace_id in sorted(inferred_trace_ids):
+            conflict = connection.execute(
+                f"""
+                SELECT 1
+                FROM trajectory_current_records
+                WHERE trace_id = ?
+                  AND agent_mode IS NOT NULL
+                  AND TRIM(agent_mode) <> ''
+                  AND LOWER(TRIM(agent_mode)) NOT IN ({mode_placeholders})
+                LIMIT 1
+                """,
+                (trace_id, *allowed_team_modes),
+            ).fetchone()
+            if conflict is not None:
+                logger.warning(
+                    "Trajectory Team mode backfill skipped conflicting trace: trace_id=%s",
+                    trace_id,
+                )
+                continue
+            for table in (
+                "otlp_span_records",
+                "trajectory_current_records",
+                "trajectory_changes",
+            ):
+                connection.execute(
+                    f"""
+                    UPDATE {table}
+                    SET agent_mode = 'team'
+                    WHERE trace_id = ?
+                      AND (agent_mode IS NULL OR TRIM(agent_mode) = '')
+                    """,
+                    (trace_id,),
+                )
+            repaired += 1
+        return repaired
+
     def delete_expired(self, *, now: int | None = None) -> int:
         """Delete records older than the configured retention window."""
         connection = self._require_connection()
@@ -716,13 +815,11 @@ class TrajectoryStore:
             stored_epoch = ""
             stored_max = -1
             stored_change_max = -1
-        if (
-            not stored_epoch
-            or stored_max < 0
-            or stored_change_max < 0
-            or current_max < stored_max
-            or current_change_max < stored_change_max
-        ):
+        stored_state_invalid = not stored_epoch or stored_max < 0 or stored_change_max < 0
+        watermark_regressed = (
+            current_max < stored_max or current_change_max < stored_change_max
+        )
+        if stored_state_invalid or watermark_regressed:
             TrajectoryStore._rotate_store_epoch(connection)
             return
         if current_max > stored_max or current_change_max > stored_change_max:
@@ -790,7 +887,7 @@ class TrajectoryStore:
                            WHEN agent_mode IS NOT NULL
                             AND TRIM(agent_mode) <> ''
                             AND LOWER(TRIM(agent_mode)) IN (
-                                {_SINGLE_AGENT_MODE_PLACEHOLDERS}
+                                {_TRAJECTORY_MODE_PLACEHOLDERS}
                             )
                            THEN 1 ELSE 0
                        END
@@ -800,7 +897,7 @@ class TrajectoryStore:
                            WHEN agent_mode IS NOT NULL
                             AND TRIM(agent_mode) <> ''
                             AND LOWER(TRIM(agent_mode)) NOT IN (
-                                {_SINGLE_AGENT_MODE_PLACEHOLDERS}
+                                {_TRAJECTORY_MODE_PLACEHOLDERS}
                             )
                            THEN 1 ELSE 0
                        END
@@ -810,8 +907,8 @@ class TrajectoryStore:
             GROUP BY trace_id
             """,
             (
-                *_SINGLE_AGENT_MODE_VALUES,
-                *_SINGLE_AGENT_MODE_VALUES,
+                *_TRAJECTORY_MODE_VALUES,
+                *_TRAJECTORY_MODE_VALUES,
                 *trace_ids,
             ),
         ).fetchall()
@@ -1081,7 +1178,7 @@ class AsyncTrajectoryReader:
                          records.span_id ASC
             """
             params: tuple[Any, ...] = (
-                *_single_agent_scope_params(),
+                *_trajectory_scope_params(),
                 session_id,
             )
             async with connection.execute(query, params) as statement:
@@ -1143,7 +1240,7 @@ class AsyncTrajectoryReader:
                     LIMIT ?
                 """
                 params: tuple[Any, ...] = (
-                    *_single_agent_scope_params(),
+                    *_trajectory_scope_params(),
                     session_id,
                     limit + 1,
                 )
@@ -1183,7 +1280,7 @@ class AsyncTrajectoryReader:
                     LIMIT ?
                 """
                 params = (
-                    *_single_agent_scope_params(),
+                    *_trajectory_scope_params(),
                     session_id,
                     cursor_ingest_seq,
                     cursor_ingest_seq,
@@ -1220,7 +1317,7 @@ class AsyncTrajectoryReader:
         *,
         after_revision: str,
         limit: int,
-    ) -> tuple[list[dict[str, Any]], str, str, bool, bool, str]:
+    ) -> TraceRevisionPage:
         """List trace summaries changed after an opaque revision cursor.
 
         One polling pass is bounded by the watermark captured on its first page.
@@ -1243,7 +1340,14 @@ class AsyncTrajectoryReader:
                 or after_ingest_seq > 0
                 or (through_ingest_seq is not None and through_ingest_seq > 0)
             )
-            return [], stable_cursor, stable_cursor, False, reset, store_epoch
+            return TraceRevisionPage(
+                items=[],
+                next_cursor=stable_cursor,
+                watermark=stable_cursor,
+                has_more=False,
+                reset=reset,
+                store_epoch=store_epoch,
+            )
         try:
             await connection.execute("BEGIN")
             store_epoch = await _read_store_epoch(connection)
@@ -1263,13 +1367,13 @@ class AsyncTrajectoryReader:
                     store_epoch,
                     current_watermark,
                 )
-                return (
-                    [],
-                    stable_cursor,
-                    stable_cursor,
-                    False,
-                    True,
-                    store_epoch,
+                return TraceRevisionPage(
+                    items=[],
+                    next_cursor=stable_cursor,
+                    watermark=stable_cursor,
+                    has_more=False,
+                    reset=True,
+                    store_epoch=store_epoch,
                 )
             if through_ingest_seq is None:
                 through_ingest_seq = current_watermark
@@ -1287,7 +1391,7 @@ class AsyncTrajectoryReader:
                 LIMIT ?
             """
             params: tuple[Any, ...] = (
-                *_single_agent_scope_params(),
+                *_trajectory_scope_params(),
                 session_id,
                 after_ingest_seq,
                 through_ingest_seq,
@@ -1330,7 +1434,14 @@ class AsyncTrajectoryReader:
             next_ingest_seq,
             through_ingest_seq=through_ingest_seq if has_more else None,
         )
-        return items, next_cursor, watermark, has_more, False, store_epoch
+        return TraceRevisionPage(
+            items=items,
+            next_cursor=next_cursor,
+            watermark=watermark,
+            has_more=has_more,
+            reset=False,
+            store_epoch=store_epoch,
+        )
 
     async def get_trace_records(
         self,
@@ -1359,7 +1470,7 @@ class AsyncTrajectoryReader:
                 WHERE records.session_id = ? AND records.trace_id = ?
                 """,
                 (
-                    *_single_agent_scope_params(),
+                    *_trajectory_scope_params(),
                     session_id,
                     trace_id,
                 ),
@@ -1494,7 +1605,7 @@ class AsyncTrajectoryReader:
                   AND records.span_id = ?
                 """,
                 (
-                    *_single_agent_scope_params(),
+                    *_trajectory_scope_params(),
                     session_id,
                     trace_id,
                     span_id,
@@ -1586,11 +1697,11 @@ def _unique_text_hint(rows: Sequence[sqlite3.Row], column: str) -> str | None:
     return next(iter(values))
 
 
-def _single_agent_scope_params() -> tuple[Any, ...]:
+def _trajectory_scope_params() -> tuple[Any, ...]:
     """Return parameters for the trace-level single-Agent eligibility CTE."""
     return (
-        *_SINGLE_AGENT_MODE_VALUES,
-        *_SINGLE_AGENT_MODE_VALUES,
+        *_TRAJECTORY_MODE_VALUES,
+        *_TRAJECTORY_MODE_VALUES,
     )
 
 
@@ -1609,7 +1720,7 @@ async def _session_revision_watermark(
         WHERE records.session_id = ?
         """,
         (
-            *_single_agent_scope_params(),
+            *_trajectory_scope_params(),
             session_id,
         ),
     )
@@ -1658,7 +1769,7 @@ async def _trace_summaries_by_id(
         GROUP BY records.trace_id
     """
     params: tuple[Any, ...] = (
-        *_single_agent_scope_params(),
+        *_trajectory_scope_params(),
         through_ingest_seq,
         through_ingest_seq,
         session_id,
@@ -1715,7 +1826,7 @@ def decode_revision_cursor(cursor: str) -> tuple[str, str, int, int | None]:
         )
     except TrajectoryCursorError:
         raise
-    except (KeyError, TypeError, ValueError, UnicodeError, OverflowError) as exc:
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise TrajectoryCursorError("invalid trajectory revision cursor") from exc
     if through_ingest_seq is not None and through_ingest_seq < after_ingest_seq:
         raise TrajectoryCursorError("invalid trajectory revision cursor")
@@ -1753,7 +1864,7 @@ def decode_trace_cursor(cursor: str) -> tuple[str, str, int, str]:
         trace_id = _cursor_text(payload["t"])
     except TrajectoryCursorError:
         raise
-    except (KeyError, TypeError, ValueError, UnicodeError, OverflowError) as exc:
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise TrajectoryCursorError("invalid trajectory cursor") from exc
     return session_id, store_epoch, first_ingest_seq, trace_id
 
@@ -1789,14 +1900,7 @@ def _decode_cursor_payload(cursor: str) -> dict[str, Any]:
         payload = json.loads(decoded, object_pairs_hook=_unique_cursor_object)
     except TrajectoryCursorError:
         raise
-    except (
-        binascii.Error,
-        json.JSONDecodeError,
-        RecursionError,
-        TypeError,
-        UnicodeError,
-        ValueError,
-    ) as exc:
+    except (RecursionError, TypeError, ValueError) as exc:
         raise TrajectoryCursorError("invalid trajectory cursor") from exc
     if not isinstance(payload, dict):
         raise TrajectoryCursorError("invalid trajectory cursor")
@@ -1998,7 +2102,7 @@ def _detail_record_from_row(row: aiosqlite.Row) -> dict[str, Any]:
     raw_json = bytes(row["raw_json"])
     try:
         otlp = _strict_otlp_payload(raw_json)
-    except (RecursionError, TypeError, ValueError, UnicodeError, OverflowError):
+    except (RecursionError, TypeError, ValueError, OverflowError):
         otlp = None
     return {
         "ingest_seq": int(row["ingest_seq"]),
@@ -2040,7 +2144,7 @@ def _archive_record_from_row(row: aiosqlite.Row) -> dict[str, Any]:
     raw_json = bytes(row["raw_json"])
     try:
         otlp = _strict_otlp_payload(raw_json)
-    except (RecursionError, TypeError, ValueError, UnicodeError, OverflowError):
+    except (RecursionError, TypeError, ValueError, OverflowError):
         otlp = None
     return {
         "record_id": f'{row["trace_id"]}:{row["span_id"]}',

@@ -23,7 +23,7 @@ import type {
   AssistantMetricDetail, TrajectoryCellKind, TrajectoryCellProps, TrajectorySourceBlock,
 } from '../trajectory/record.ts'
 import {
-  formatElapsedSeconds, liveElapsedSeconds, trajectoryRecordId,
+  formatElapsedSeconds, formatTokenCount, liveElapsedSeconds, trajectoryRecordId,
 } from '../trajectory/record.ts'
 import type {
   TrajectoryPromptSnapshot,
@@ -676,18 +676,18 @@ function TokenRows({ cell }: { cell: TrajectoryCellProps }) {
     <>
       <div>
         <dt>Tokens</dt>
-        <dd>{cell.output === undefined ? '—' : `${cell.output} tok`}</dd>
+        <dd>{formatTokenCount(cell.output)}</dd>
       </div>
       {cell.think !== undefined && (
         <div className={css.requestTokenDetail}>
           <dt>Reasoning</dt>
-          <dd>{cell.think} tok</dd>
+          <dd>{formatTokenCount(cell.think)}</dd>
         </div>
       )}
       {content !== undefined && (
         <div className={css.requestTokenDetail}>
           <dt>Content</dt>
-          <dd>{content} tok</dd>
+          <dd>{formatTokenCount(content)}</dd>
         </div>
       )}
     </>
@@ -710,42 +710,42 @@ function UsageRows({ usage }: { usage: TrajectoryUsage | undefined }) {
   return (
     <dl className={css.overview}>
       {totalInput !== undefined && (
-        <div><dt>Input</dt><dd>{totalInput} tok</dd></div>
+        <div><dt>Input</dt><dd>{formatTokenCount(totalInput)}</dd></div>
       )}
       {usage.cacheRead !== undefined && (
         <div className={css.requestTokenDetail}>
           <dt>Cached</dt>
-          <dd>{usage.cacheRead} tok</dd>
+          <dd>{formatTokenCount(usage.cacheRead)}</dd>
         </div>
       )}
       {usage.cacheWrite !== undefined && (
         <div className={css.requestTokenDetail}>
           <dt>Cache created</dt>
-          <dd>{usage.cacheWrite} tok</dd>
+          <dd>{formatTokenCount(usage.cacheWrite)}</dd>
         </div>
       )}
       {uncachedInput !== undefined && (
         <div className={css.requestTokenDetail}>
           <dt>Uncached</dt>
-          <dd>{uncachedInput} tok</dd>
+          <dd>{formatTokenCount(uncachedInput)}</dd>
         </div>
       )}
       {usage.output !== undefined && (
-        <div><dt>Output</dt><dd>{usage.output} tok</dd></div>
+        <div><dt>Output</dt><dd>{formatTokenCount(usage.output)}</dd></div>
       )}
       {usage.total !== undefined && (
-        <div><dt>Total</dt><dd>{usage.total} tok</dd></div>
+        <div><dt>Total</dt><dd>{formatTokenCount(usage.total)}</dd></div>
       )}
       {usage.reasoning !== undefined && (
         <div className={css.requestTokenDetail}>
           <dt>Reasoning</dt>
-          <dd>{usage.reasoning} tok</dd>
+          <dd>{formatTokenCount(usage.reasoning)}</dd>
         </div>
       )}
       {otherOutput !== undefined && (
         <div className={css.requestTokenDetail}>
           <dt>Content</dt>
-          <dd>{otherOutput} tok</dd>
+          <dd>{formatTokenCount(otherOutput)}</dd>
         </div>
       )}
     </dl>

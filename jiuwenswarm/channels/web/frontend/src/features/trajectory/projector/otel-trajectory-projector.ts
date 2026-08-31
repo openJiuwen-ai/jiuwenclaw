@@ -7,12 +7,13 @@ import {
   readStringAttribute,
 } from '../semconv/attributes.ts'
 import {
-  GEN_AI_OPERATIONS, OPENJIUWEN_ATTRIBUTES, STANDARD_ATTRIBUTES,
+  GEN_AI_OPERATIONS, STANDARD_ATTRIBUTES,
 } from '../semconv/constants.ts'
 import {
   createTrajectoryV2Reducer,
   isTrajectoryV2Record,
   reduceTrajectoryV2,
+  trajectoryV2SubjectIds,
 } from './trajectory-v2-reducer.ts'
 import type {
   TrajectoryV2EventProjection,
@@ -89,11 +90,13 @@ interface MutableGroup {
   title: string
   description?: string
   cells: TrajectoryCell[]
+  order: number
+  step: number
 }
 
 interface MutableTurn {
   turn: number
-  groups: Map<number, MutableGroup>
+  groups: Map<string, MutableGroup>
 }
 
 interface InferenceInputProjection {
@@ -730,15 +733,19 @@ function inputCells(
   return cells
 }
 
-function assistantCell(span: ProjectedSpan): TrajectoryCell {
+function assistantParts(span: ProjectedSpan): readonly StructuredPart[] {
   const messages = structuredMessages(span.attributes.outputMessages)
   const completedParts = messages.flatMap(message => message.parts)
   const replayParts = streamParts(span.streamEvents)
   const completedTypes = new Set(completedParts.map(part => part.type))
-  const parts = [
+  return [
     ...completedParts,
     ...replayParts.filter(part => !completedTypes.has(part.type)),
   ]
+}
+
+function assistantCell(span: ProjectedSpan): TrajectoryCell {
+  const parts = assistantParts(span)
   const blocks = sourceBlocks(parts)
   const output = partText(parts, 'text')
   const thinking = partText(parts, 'reasoning')
@@ -1160,7 +1167,7 @@ function promptCellProjections(
 
 function projectInferenceInputs(
   spans: readonly ProjectedSpan[],
-  v2RequestIds: ReadonlySet<string>,
+  v2InferenceIds: ReadonlySet<string>,
 ): {
   inputsBySpanId: ReadonlyMap<string, InferenceInputProjection>
   toolResultById: ReadonlyMap<string, ToolResultFact>
@@ -1182,8 +1189,9 @@ function projectInferenceInputs(
       ? undefined
       : behaviorSessionKey(span, lineage.slice(0, -1))
     const currentInputs = structuredMessages(span.attributes.inputMessages)
-    const handledByV2 = span.attributes.requestId !== undefined
-      && v2RequestIds.has(span.attributes.requestId)
+    const handledByV2 = v2InferenceIds.has(span.span.spanId)
+      || (span.attributes.inferenceId !== undefined
+        && v2InferenceIds.has(span.attributes.inferenceId))
     if (handledByV2) {
       inputsBySpanId.set(span.span.spanId, { messages: [], prompts: [] })
       previousOutputsBySession.set(sessionKey, structuredMessages(span.attributes.outputMessages))
@@ -1449,11 +1457,20 @@ function assignRequestOwnership(spans: readonly ProjectedSpan[]): ProjectedSpan[
   })
 }
 
-function group(turn: MutableTurn, step: number): MutableGroup {
-  const existing = turn.groups.get(step)
-  if (existing !== undefined) return existing
-  const created: MutableGroup = { title: `Step ${step}`, cells: [] }
-  turn.groups.set(step, created)
+function group(
+  turn: MutableTurn,
+  step: number,
+  stepId: string | undefined,
+  order: number,
+): MutableGroup {
+  const key = stepId === undefined ? `number:${step}` : `id:${stepId}`
+  const existing = turn.groups.get(key)
+  if (existing !== undefined) {
+    existing.order = Math.min(existing.order, order)
+    return existing
+  }
+  const created: MutableGroup = { title: `Step ${step}`, cells: [], order, step }
+  turn.groups.set(key, created)
   return created
 }
 
@@ -1573,21 +1590,17 @@ export function projectOtelTrajectory(
   const v2Records = records.filter(isTrajectoryV2Record)
   const legacyRecords = records.filter(record => !isTrajectoryV2Record(record))
   const v2Reduction = options.v2Reducer?.apply(v2Records) ?? reduceTrajectoryV2(v2Records)
-  const currentV2SubjectIds = new Set(v2Records.flatMap((record): string[] => {
-    const subjectId = readStringAttribute(
-      exactAttributeMap(soleSpan(record).attributes),
-      OPENJIUWEN_ATTRIBUTES.trajectorySubjectId,
-    )
-    return subjectId === undefined ? [] : [subjectId]
-  }))
+  const currentV2SubjectIds = new Set(v2Records.flatMap(trajectoryV2SubjectIds))
   const v2Subjects = [...v2Reduction.subjects.values()].filter(subject => (
     currentV2SubjectIds.has(subject.subjectId)
   ))
-  const v2RequestIds = new Set(v2Subjects.flatMap(subject => [...subject.handledRequestIds]))
+  const v2InferenceIds = new Set(v2Subjects.flatMap(subject => (
+    [...subject.handledInferenceIds]
+  )))
   const spans = normalize(legacyRecords, options)
   const mutableTurns = new Map<number, MutableTurn>()
   const requests: TrajectoryRequest[] = []
-  const inputProjection = projectInferenceInputs(spans, v2RequestIds)
+  const inputProjection = projectInferenceInputs(spans, v2InferenceIds)
   const toolSpanIds = new Set(spans.filter(isTool).map(span => span.span.spanId))
   const toolBySpanId = new Map(spans.filter(isTool).map(span => [span.span.spanId, span]))
   const authoritativeToolCallIds = new Set(spans
@@ -1617,6 +1630,13 @@ export function projectOtelTrajectory(
   ]> => span.attributes.inferenceId === undefined
     ? []
     : [[`${span.traceId}\u0000${span.attributes.inferenceId}`, span]]))
+  const inferenceByToolCallId = new Map(spans.filter(isInference).flatMap(span => (
+    assistantParts(span).flatMap((part): Array<[string, ProjectedSpan]> => (
+      part.type !== 'tool_call' || part.id === undefined
+        ? []
+        : [[`${span.traceId}\u0000${part.id}`, span]]
+    ))
+  )))
 
   for (const span of spans.filter(isInference)) {
     for (const schema of toolSchemas(span.attributes.toolDefinitions)) {
@@ -1640,10 +1660,13 @@ export function projectOtelTrajectory(
         ))
         continue
       }
-      const target = group(turn, step)
+      const target = group(turn, step, span.attributes.stepId, startedAt(span))
       const inputs = inputProjection.inputsBySpanId.get(span.span.spanId)
         ?? { messages: [], prompts: [] }
-      target.cells.push(...inputCells(span, inputs), assistantCell(span))
+      target.cells.push(
+        ...inputCells(span, inputs),
+        assistantCell(span),
+      )
       requests.push(requestFor(
         span,
         'assistant',
@@ -1683,7 +1706,7 @@ export function projectOtelTrajectory(
       const correlatedResult = span.attributes.toolCallId === undefined
         ? inputProjection.toolResultBySpanId.get(span.span.spanId)
         : inputProjection.toolResultById.get(`${span.traceId}\u0000${span.attributes.toolCallId}`)
-      group(turn, step).cells.push(toolCell(
+      group(turn, step, span.attributes.stepId, startedAt(span)).cells.push(toolCell(
         span,
         toolSpanIds,
         toolSchemaByTurnAndName.get(`${span.turn}\u0000${name}`),
@@ -1700,9 +1723,16 @@ export function projectOtelTrajectory(
       v2CompactionEvents.push(event)
       continue
     }
+    const askUserSource = object(event.cells[0]?.messageSource)
+    const askUserCallId = askUserSource?.kind === 'trajectory_ask_user'
+      && typeof askUserSource.callId === 'string'
+      ? askUserSource.callId
+      : undefined
     const anchorInferenceId = event.cells.at(-1)?.physicalInferenceId
     const inference = anchorInferenceId === undefined
-      ? undefined
+      ? askUserCallId === undefined
+        ? undefined
+        : inferenceByToolCallId.get(`${event.traceId}\u0000${askUserCallId}`)
       : inferenceById.get(`${event.traceId}\u0000${anchorInferenceId}`)
     const eventTurn = inference?.turn ?? event.turn
     const eventStep = inference === undefined
@@ -1713,7 +1743,10 @@ export function projectOtelTrajectory(
       : promptSnapshot(inference.attributes)
     const turn = mutableTurns.get(eventTurn) ?? { turn: eventTurn, groups: new Map() }
     mutableTurns.set(eventTurn, turn)
-    group(turn, eventStep).cells.push(...event.cells.map((cell) => {
+    const eventOrder = inference === undefined
+      ? Math.min(...event.cells.map(cell => cell.startedAt ?? 0))
+      : startedAt(inference)
+    group(turn, eventStep, inference?.attributes.stepId, eventOrder).cells.push(...event.cells.map((cell) => {
       const physicalInferenceId = cell.physicalInferenceId
       const cellInference = physicalInferenceId === undefined
         ? undefined
@@ -1739,7 +1772,9 @@ export function projectOtelTrajectory(
                 }),
           }),
         ...(physicalInferenceId === undefined
-          ? {}
+          ? inference === undefined || askUserCallId === undefined
+            ? {}
+            : { requestRecordId: inferenceRequestIdentity(inference) }
           : {
               requestRecordId: cellInference === undefined
                 ? `${event.traceId}:inference:${physicalInferenceId}`
@@ -1752,9 +1787,12 @@ export function projectOtelTrajectory(
   const turns: TrajectoryTurnModel[] = []
   for (const turn of [...mutableTurns.values()].sort((left, right) => left.turn - right.turn)) {
     const groups = [...turn.groups.entries()]
-      .sort((left, right) => left[0] - right[0])
+      .sort((left, right) => left[1].order - right[1].order
+        || left[1].step - right[1].step
+        || left[0].localeCompare(right[0]))
       .map(([, value]) => ({
-        ...value,
+        title: value.title,
+        ...(value.description === undefined ? {} : { description: value.description }),
         cells: [...value.cells].sort(compareTrajectoryCells),
       }))
       .filter(value => value.cells.length > 0)

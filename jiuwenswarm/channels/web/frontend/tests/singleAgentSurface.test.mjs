@@ -9,6 +9,11 @@ import { JSDOM } from 'jsdom';
 import { createRoot } from 'react-dom/client';
 
 import { SingleAgentSurface } from '../node_modules/.cache/trajectory-host/SingleAgentSurface.mjs';
+import {
+  isTrajectoryUiEnabled,
+  normalizeTrajectoryUiEnabled,
+  setTrajectoryUiEnabled,
+} from '../node_modules/.cache/trajectory-host/featureConfig.mjs';
 
 test('trajectory host relies on native sidebar controls', () => {
   const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
@@ -20,8 +25,24 @@ test('trajectory host relies on native sidebar controls', () => {
     new URL('../src/features/trajectory/client/TrajectoryExplorer.tsx', import.meta.url),
     'utf8',
   );
+  const toolbarSource = readFileSync(
+    new URL('../src/features/trajectory/client/TrajectoryToolbar.tsx', import.meta.url),
+    'utf8',
+  );
+  const teamWorkspaceSource = readFileSync(
+    new URL('../src/features/trajectory/TeamTrajectoryWorkspace.tsx', import.meta.url),
+    'utf8',
+  );
+  const teamWorkspaceStyles = readFileSync(
+    new URL('../src/features/trajectory/TeamTrajectoryWorkspace.module.css', import.meta.url),
+    'utf8',
+  );
   const tableSource = readFileSync(
     new URL('../src/features/trajectory/client/TrajectoryTable.tsx', import.meta.url),
+    'utf8',
+  );
+  const tooltipSource = readFileSync(
+    new URL('../src/features/trajectory/primitives/Tooltip.tsx', import.meta.url),
     'utf8',
   );
   const chatPanelSource = readFileSync(
@@ -35,6 +56,14 @@ test('trajectory host relies on native sidebar controls', () => {
   assert.match(appSource, /chat-workspace--trajectory-floating-tools/);
   assert.match(appSource, /shouldInsetTrajectoryForFloatingTasks/);
   assert.doesNotMatch(appStyles, /transition:\s*padding-right/);
+  assert.doesNotMatch(
+    appStyles,
+    /\.chat-workspace--trajectory-floating-tools\s*\{[^}]*padding-right/,
+  );
+  assert.match(
+    appStyles,
+    /\.chat-workspace--trajectory-floating-tools[\s\S]*?single-agent-trajectory-view[\s\S]*?right:\s*364px/,
+  );
   assert.match(appSource, /showNavigation=\{sessionId !== NEW_CONVERSATION_ID\}/);
   assert.doesNotMatch(panelSource, /window\.setInterval/);
   assert.doesNotMatch(panelSource, /data-testid="trajectory-refresh"/);
@@ -59,6 +88,26 @@ test('trajectory host relies on native sidebar controls', () => {
   assert.doesNotMatch(panelSource, /setRecords\(|setRawRecords\(|setLifecycleByRecordId\(/);
   assert.match(panelSource, /export const TrajectoryPanel = memo/);
   assert.match(explorerSource, /export const TrajectoryExplorer = memo/);
+  assert.match(explorerSource, /displayMode\?: 'full' \| 'overview' \| 'records'/);
+  assert.match(explorerSource, /displayMode !== 'records'/);
+  assert.match(explorerSource, /displayMode !== 'overview'/);
+  assert.match(toolbarSource, /showViewControls\?: boolean/);
+  assert.match(toolbarSource, /showSearch\?: boolean/);
+  assert.match(toolbarSource, /\{afterActions\}/);
+  assert.match(panelSource, /displayMode=\{expanded \? 'full' : 'overview'\}/);
+  assert.match(panelSource, /showToolbarViewControls=\{false\}/);
+  assert.match(panelSource, /toolbarAddon=\{toolbarAddon\}/);
+  assert.match(panelSource, /viewState=\{viewState\}/);
+  assert.match(teamWorkspaceSource, /data-member-lane=\{lane\.subjectId\}/);
+  assert.match(teamWorkspaceSource, /<TrajectoryToolbar/);
+  assert.match(teamWorkspaceSource, /showSearch=\{false\}/);
+  assert.match(teamWorkspaceSource, /viewState,/);
+  assert.doesNotMatch(teamWorkspaceSource, /setSearchQuery/);
+  assert.doesNotMatch(teamWorkspaceStyles, /grid-template-columns/);
+  assert.doesNotMatch(teamWorkspaceStyles, /border-radius: 0\.5rem/);
+  assert.match(teamWorkspaceStyles, /\.lanes[\s\S]*?overflow-y: auto/);
+  assert.match(teamWorkspaceStyles, /\.laneRowExpanded[\s\S]*?flex: 0 0 100%/);
+  assert.match(teamWorkspaceSource, /lanesElement\.scrollTop \+= rowBounds\.top - lanesBounds\.top/);
   assert.match(chatPanelSource, /export const ChatPanel = React\.memo/);
   assert.match(
     appStyles,
@@ -72,6 +121,18 @@ test('trajectory host relies on native sidebar controls', () => {
   assert.match(tableSource, /label="Compaction facts JSON"/);
   assert.match(tableSource, />Session cumulative</);
   assert.doesNotMatch(tableSource, />Window cumulative</);
+  assert.match(tooltipSource, /createPortal\(/);
+  assert.match(tooltipSource, /jiuwenTrajectoryPortal/);
+  assert.match(tooltipSource, /document\.body/);
+});
+
+test('trajectory feature setting updates the current window state immediately', () => {
+  setTrajectoryUiEnabled(false);
+  assert.equal(isTrajectoryUiEnabled(), false);
+  setTrajectoryUiEnabled(true);
+  assert.equal(isTrajectoryUiEnabled(), true);
+  assert.equal(normalizeTrajectoryUiEnabled('false'), false);
+  assert.equal(normalizeTrajectoryUiEnabled('true'), true);
 });
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
@@ -149,6 +210,7 @@ test('single-Agent tabs keep chat mounted and load trajectory only after first r
         { fallback: React.createElement('div', null, 'Loading') },
         React.createElement(LazyTrajectoryProbe),
       ),
+      trajectoryEnabled: true,
       trajectoryLabel: 'Trajectory',
       trajectoryRequested,
     });
@@ -220,6 +282,7 @@ test('single-Agent welcome surface hides navigation until a conversation exists'
       showNavigation: false,
       tabListLabel: 'Single Agent surface',
       trajectory: React.createElement('div', null, 'trace'),
+      trajectoryEnabled: true,
       trajectoryLabel: 'Trajectory',
       trajectoryRequested: false,
     }));
@@ -249,10 +312,11 @@ test('non-Agent modes never expose tabs or mount trajectory UI', async () => {
       activeView: 'trajectory',
       chat: React.createElement('div', { 'data-testid': 'chat-probe' }, 'chat'),
       chatLabel: 'Chat',
-      mode: 'team',
+      mode: 'auto_harness',
       onViewChange: () => {},
       tabListLabel: 'Single Agent surface',
       trajectory: React.createElement(TrajectoryProbe),
+      trajectoryEnabled: true,
       trajectoryLabel: 'Trajectory',
       trajectoryRequested: true,
     }));
@@ -264,6 +328,114 @@ test('non-Agent modes never expose tabs or mount trajectory UI', async () => {
     container.querySelector('[data-testid="single-agent-chat-view"]').getAttribute('aria-hidden'),
     'false',
   );
+  assert.equal(trajectoryMounts, 0);
+
+  await act(async () => {
+    root.unmount();
+  });
+  container.remove();
+});
+
+test('Team modes expose trajectory tabs and load the trajectory surface', async () => {
+  let trajectoryLoads = 0;
+  let trajectoryMounts = 0;
+  function LazyTrajectoryProbe() {
+    React.useEffect(() => {
+      trajectoryLoads += 1;
+      return () => { trajectoryLoads += 1; };
+    }, []);
+    trajectoryMounts += 1;
+    return React.createElement('div', { 'data-testid': 'trajectory-probe' }, 'trace');
+  }
+
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(React.createElement(SingleAgentSurface, {
+      activeView: 'chat',
+      chat: React.createElement('div', { 'data-testid': 'chat-probe' }, 'chat'),
+      chatLabel: 'Chat',
+      mode: 'team',
+      onViewChange: (view) => {
+        if (view === 'trajectory') {
+          root.render(React.createElement(SingleAgentSurface, {
+            activeView: 'trajectory',
+            chat: React.createElement('div', { 'data-testid': 'chat-probe' }, 'chat'),
+            chatLabel: 'Chat',
+            mode: 'team',
+            onViewChange: () => {},
+            tabListLabel: 'Team surface',
+            trajectory: React.createElement(
+              React.Suspense,
+              { fallback: React.createElement('div', null, 'Loading') },
+              React.createElement(React.lazy(async () => ({
+                default: LazyTrajectoryProbe,
+              }))),
+            ),
+            trajectoryEnabled: true,
+            trajectoryLabel: 'Trajectory',
+            trajectoryRequested: true,
+          }));
+        }
+      },
+      tabListLabel: 'Team surface',
+      trajectory: React.createElement('div', null, 'trace'),
+      trajectoryEnabled: true,
+      trajectoryLabel: 'Trajectory',
+      trajectoryRequested: false,
+    }));
+  });
+
+  assert.ok(container.querySelector('[data-testid="single-agent-surface-tabs"]'));
+  assert.equal(container.querySelectorAll('[role="tab"]').length, 2);
+  assert.equal(container.querySelector('[data-testid="single-agent-trajectory-view"]'), null);
+
+  await act(async () => {
+    click(container.querySelector('[data-testid="single-agent-trajectory-tab"]'));
+    await Promise.resolve();
+  });
+
+  assert.ok(container.querySelector('[data-testid="trajectory-probe"]'));
+  assert.equal(
+    container.querySelector('[data-testid="single-agent-trajectory-view"]').getAttribute('aria-hidden'),
+    'false',
+  );
+
+  await act(async () => {
+    root.unmount();
+  });
+  container.remove();
+});
+
+test('disabled trajectory feature restores the legacy chat-only Agent surface', async () => {
+  let trajectoryMounts = 0;
+  function TrajectoryProbe() {
+    trajectoryMounts += 1;
+    return React.createElement('div', null, 'trace');
+  }
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+
+  await act(async () => {
+    root.render(React.createElement(SingleAgentSurface, {
+      activeView: 'trajectory',
+      chat: React.createElement('div', { 'data-testid': 'legacy-chat' }, 'chat'),
+      chatLabel: 'Chat',
+      mode: 'team',
+      onViewChange: () => {},
+      tabListLabel: 'Team surface',
+      trajectory: React.createElement(TrajectoryProbe),
+      trajectoryEnabled: false,
+      trajectoryLabel: 'Trajectory',
+      trajectoryRequested: true,
+    }));
+  });
+
+  assert.ok(container.querySelector('[data-testid="legacy-chat"]'));
+  assert.equal(container.querySelector('[data-testid="single-agent-surface-tabs"]'), null);
+  assert.equal(container.querySelector('[data-testid="single-agent-trajectory-view"]'), null);
   assert.equal(trajectoryMounts, 0);
 
   await act(async () => {

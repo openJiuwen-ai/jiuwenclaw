@@ -125,15 +125,16 @@ def test_trajectory_ui_is_an_additive_agent_provider_demand(monkeypatch, tmp_pat
     monkeypatch.setattr(
         agent_observability,
         "sync_trajectory_runtime",
-        lambda settings: runtime_settings.append(settings),
+        lambda settings, **kwargs: runtime_settings.append((settings, kwargs)),
     )
 
     agent_observability.sync_agent_observability()
 
     assert len(acquired) == 1
     assert len(runtime_settings) == 1
-    assert runtime_settings[0].enabled is True
-    assert runtime_settings[0].database_path == tmp_path / "trajectory.sqlite3"
+    assert runtime_settings[0][0].enabled is True
+    assert runtime_settings[0][0].database_path == tmp_path / "trajectory.sqlite3"
+    assert runtime_settings[0][1] == {"demand": "agent"}
     assert agent_observability._agent_observability_active is True
 
 
@@ -157,13 +158,14 @@ def test_disabled_trajectory_runtime_is_stopped_while_exporters_remain_active(
     monkeypatch.setattr(
         agent_observability,
         "sync_trajectory_runtime",
-        lambda settings: runtime_settings.append(settings),
+        lambda settings, **kwargs: runtime_settings.append((settings, kwargs)),
     )
 
     agent_observability.sync_agent_observability()
 
     assert len(runtime_settings) == 1
-    assert runtime_settings[0].enabled is False
+    assert runtime_settings[0][0].enabled is False
+    assert runtime_settings[0][1] == {"demand": "agent"}
     assert agent_observability._agent_observability_active is True
 
 
@@ -173,7 +175,7 @@ def test_agent_shutdown_unregisters_trajectory_before_releasing_provider(monkeyp
     monkeypatch.setattr(
         agent_observability,
         "shutdown_trajectory_runtime",
-        lambda: events.append("trajectory.shutdown") or True,
+        lambda **kwargs: events.append("trajectory.shutdown") or True,
     )
     monkeypatch.setattr(
         agent_observability,
@@ -264,3 +266,71 @@ def test_team_observability_init_receives_process_processor(monkeypatch, tmp_pat
     team_manager.sync_team_observability()
 
     assert calls == [(processor, span_record_processor)]
+
+
+def test_team_trajectory_ui_starts_sink_and_acquires_provider(monkeypatch, tmp_path):
+    """trajectory_ui.enabled pulls the Team provider up and starts the sink."""
+    acquired = []
+    runtime_settings = []
+    monkeypatch.setattr(
+        team_manager,
+        "get_config",
+        lambda: {
+            "team_observability": {"enabled": False, "exporter": "file"},
+            "trajectory_ui": {
+                "enabled": True,
+                "db_path": str(tmp_path / "trajectory.sqlite3"),
+            },
+        },
+    )
+    monkeypatch.setattr(
+        team_manager.team_observability,
+        "acquire_observability",
+        lambda config: acquired.append(config) or False,
+    )
+    monkeypatch.setattr(
+        team_manager,
+        "sync_trajectory_runtime",
+        lambda settings, **kwargs: runtime_settings.append((settings, kwargs)),
+    )
+
+    team_manager.sync_team_observability()
+
+    assert len(acquired) == 1
+    assert len(runtime_settings) == 1
+    assert runtime_settings[0][0].enabled is True
+    assert runtime_settings[0][0].database_path == tmp_path / "trajectory.sqlite3"
+    assert runtime_settings[0][1] == {"demand": "team"}
+    assert team_manager._observability_active is True
+
+
+def test_team_trajectory_disabled_stops_sink(monkeypatch, tmp_path):
+    """Team trajectory disabled stops the sink without releasing the provider."""
+    runtime_settings = []
+    team_manager._observability_active = True
+    monkeypatch.setattr(
+        team_manager,
+        "get_config",
+        lambda: {
+            "react": {"evolution": {"skill_evolution": False}},
+            "team_observability": {"enabled": True, "exporter": "file"},
+            "trajectory_ui": {"enabled": False},
+        },
+    )
+    monkeypatch.setattr(
+        team_manager,
+        "sync_trajectory_runtime",
+        lambda settings, **kwargs: runtime_settings.append((settings, kwargs)),
+    )
+    monkeypatch.setattr(
+        team_manager.team_observability,
+        "acquire_observability",
+        lambda config: False,
+    )
+
+    team_manager.sync_team_observability()
+
+    assert len(runtime_settings) == 1
+    assert runtime_settings[0][0].enabled is False
+    assert runtime_settings[0][1] == {"demand": "team"}
+    assert team_manager._observability_active is True

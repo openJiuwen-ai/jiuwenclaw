@@ -1072,6 +1072,7 @@ test('every visible Settings control maps to an exact persistence field or RPC',
     'proactive_recommendation_enabled',
     'proactive_recommendation_max_recommend_per_day',
     'proactive_recommendation_max_rounds_per_tick',
+    'trajectory_ui_enabled',
   ]);
 
   const channelCatalogFile = parseTsx('src/features/settings/modules/channels/channelCatalog.ts');

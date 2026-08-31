@@ -63,7 +63,7 @@ async def test_gateway_routes_cross_process_hint_into_webchannel_coalescer() -> 
     handler = object.__new__(MessageHandler)
     scheduled: list[tuple[CommittedTraceUpdate, ...]] = []
     web_channel = SimpleNamespace(
-        _schedule_trajectory_updates=lambda updates: scheduled.append(tuple(updates))
+        schedule_trajectory_updates=lambda updates: scheduled.append(tuple(updates))
     )
     handler._resolve_web_channel = lambda: web_channel
     handler._stream_sessions = {}

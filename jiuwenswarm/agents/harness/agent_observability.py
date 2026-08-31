@@ -99,7 +99,7 @@ def sync_agent_observability(*, force: bool = False) -> None:
 
     if not want_enabled:
         try:
-            sync_trajectory_runtime(trajectory_settings)
+            sync_trajectory_runtime(trajectory_settings, demand="agent")
         except Exception as exc:
             logger.warning("[AgentObservability] trajectory runtime stop failed: %s", exc)
         if _agent_observability_active:
@@ -118,7 +118,7 @@ def sync_agent_observability(*, force: bool = False) -> None:
         was_active = _agent_observability_active
         _agent_observability_active = True
         try:
-            sync_trajectory_runtime(trajectory_settings)
+            sync_trajectory_runtime(trajectory_settings, demand="agent")
         except Exception as exc:
             # The trajectory read store is an optional fan-out. Existing file,
             # OTLP and Langfuse exporters must keep the Agent path available.
@@ -154,7 +154,7 @@ def shutdown_agent_observability() -> None:
     """Shutdown single-agent observability (on disable or process exit)."""
     global _agent_observability_active
     try:
-        if not shutdown_trajectory_runtime():
+        if not shutdown_trajectory_runtime(demand="agent"):
             logger.warning("[AgentObservability] trajectory runtime did not drain cleanly")
     except Exception as exc:
         logger.warning("[AgentObservability] trajectory runtime shutdown failed: %s", exc)

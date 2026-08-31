@@ -39,19 +39,31 @@ _runtime_lock = threading.RLock()
 _runtime_sink: TrajectorySessionSinkRouter | None = None
 _runtime_processor: _SpanRecordProcessorLike | None = None
 _runtime_settings: TrajectoryStoreSettings | None = None
+_runtime_demands: set[str] = set()
 
 
 def sync_trajectory_runtime(
     settings: TrajectoryStoreSettings | None = None,
     *,
     on_commit: CommitCallback | None = None,
+    demand: str | None = None,
 ) -> TrajectorySessionSinkRouter | None:
     """Synchronize the AgentServer sink with the current trajectory settings."""
     resolved = settings or load_trajectory_store_settings()
+    normalized_demand = str(demand or "").strip()
     if not resolved.enabled:
-        shutdown_trajectory_runtime()
+        shutdown_trajectory_runtime(demand=normalized_demand or None)
         return None
-    return start_trajectory_runtime(resolved, on_commit=on_commit)
+    if normalized_demand:
+        with _runtime_lock:
+            _runtime_demands.add(normalized_demand)
+    try:
+        return start_trajectory_runtime(resolved, on_commit=on_commit)
+    except Exception:
+        if normalized_demand:
+            with _runtime_lock:
+                _runtime_demands.discard(normalized_demand)
+        raise
 
 
 def start_trajectory_runtime(
@@ -79,7 +91,7 @@ def start_trajectory_runtime(
             _runtime_sink.set_commit_callback(_combined_commit_callback(on_commit))
             return _runtime_sink
         if _runtime_sink is not None or _runtime_processor is not None:
-            if not _shutdown_locked():
+            if not _shutdown_locked(clear_demands=False):
                 raise RuntimeError("Previous trajectory runtime did not stop cleanly")
 
         sink = _create_sink(
@@ -108,9 +120,18 @@ def start_trajectory_runtime(
         return sink
 
 
-def shutdown_trajectory_runtime(*, timeout: float = 15.0) -> bool:
+def shutdown_trajectory_runtime(
+    *,
+    timeout: float = 15.0,
+    demand: str | None = None,
+) -> bool:
     """Unregister first, then drain and close the process-wide sink."""
     with _runtime_lock:
+        normalized_demand = str(demand or "").strip()
+        if normalized_demand:
+            _runtime_demands.discard(normalized_demand)
+            if _runtime_demands:
+                return True
         return _shutdown_locked(timeout=timeout)
 
 
@@ -120,13 +141,19 @@ def get_trajectory_runtime_sink() -> TrajectorySessionSinkRouter | None:
         return _runtime_sink
 
 
-def _shutdown_locked(*, timeout: float = 15.0) -> bool:
+def _shutdown_locked(
+    *,
+    timeout: float = 15.0,
+    clear_demands: bool = True,
+) -> bool:
     global _runtime_processor, _runtime_settings, _runtime_sink
 
     sink = _runtime_sink
     processor = _runtime_processor
     if sink is None and processor is None:
         _runtime_settings = None
+        if clear_demands:
+            _runtime_demands.clear()
         return True
 
     unregistered = processor is None
@@ -156,6 +183,8 @@ def _shutdown_locked(*, timeout: float = 15.0) -> bool:
         _runtime_sink = None
         _runtime_processor = None
         _runtime_settings = None
+        if clear_demands:
+            _runtime_demands.clear()
         logger.info("Trajectory runtime disabled")
         return True
     return False

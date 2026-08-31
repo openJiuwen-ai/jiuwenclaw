@@ -3,7 +3,7 @@
 /** Standalone trajectory explorer assembled from the DSH presentation components. */
 
 import {
-  memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties,
+  memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode,
 } from 'react'
 import type {
   TrajectoryRequest, TrajectorySnapshot, TrajectoryTurnModel,
@@ -32,6 +32,15 @@ const EMPTY_RECORD_IDS: ReadonlySet<string> = new Set()
 
 interface ExplorerStyle extends CSSProperties {
   '--trajectory-bottom-inset'?: string
+}
+
+/** View controls shared by every member in a Team trajectory workspace. */
+export interface TrajectoryViewState {
+  actualDuration: boolean
+  actualTime: boolean
+  tokenView: boolean
+  turnsCollapsed: boolean
+  callsCollapsed: boolean
 }
 
 /** Ordinary React props; no Cordis, Session, slot, or locale service is required. */
@@ -66,6 +75,18 @@ export interface TrajectoryExplorerProps {
   bottomInset?: number | string
   /** Local viewer palette. The host remains responsible for choosing it. */
   colorMode?: TrajectoryColorMode
+  /** Full explorer, overview-only swimlane, or only the record ledger. */
+  displayMode?: 'full' | 'overview' | 'records'
+  /** Hide the local toolbar when a host renders one shared toolbar. */
+  showToolbar?: boolean
+  /** Hide only the local view controls while preserving member search. */
+  showToolbarViewControls?: boolean
+  /** Host-owned member control placed before the local search field. */
+  toolbarAddon?: ReactNode
+  /** Optional host-controlled view state shared across multiple explorers. */
+  viewState?: TrajectoryViewState
+  /** Expand an overview-only host after a timeline record is activated. */
+  onOverviewActivate?: () => void
   className?: string
 }
 
@@ -99,7 +120,7 @@ function searchIndexes(
   return matches
 }
 
-/** Render the full toolbar, overview timeline, virtual ledger, and inspector. */
+/** Render the full explorer or a host-owned overview with only the record ledger. */
 export const TrajectoryExplorer = memo(function TrajectoryExplorer({
   active = true,
   snapshot,
@@ -116,6 +137,12 @@ export const TrajectoryExplorer = memo(function TrajectoryExplorer({
   translate,
   bottomInset = 0,
   colorMode = 'light',
+  displayMode = 'full',
+  showToolbar = true,
+  showToolbarViewControls = true,
+  toolbarAddon,
+  viewState,
+  onOverviewActivate,
   className,
 }: TrajectoryExplorerProps) {
   const turns = snapshot?.turns ?? staticTurns
@@ -158,19 +185,26 @@ export const TrajectoryExplorer = memo(function TrajectoryExplorer({
   // the newest record. The ref starts false so an initially-active explorer
   // still requests the tail on first render.
   useEffect(() => {
-    const becameActive = active && !wasActiveRef.current
-    wasActiveRef.current = active
+    const ledgerActive = active && displayMode !== 'overview'
+    const becameActive = ledgerActive && !wasActiveRef.current
+    wasActiveRef.current = ledgerActive
     if (becameActive) setScrollToEndSignal(value => value + 1)
-  }, [active])
+  }, [active, displayMode])
+  const resolvedActualDuration = viewState?.actualDuration ?? actualDuration
+  const resolvedActualTime = viewState?.actualTime ?? actualTime
+  const resolvedTokenView = viewState?.tokenView ?? tokenView
   const t = useMemo(
     () => translate ?? trajectoryTranslator(messages),
     [messages, translate],
   )
   const timelineMode: TrajectoryTimelineMode = resolveTimelineMode({
-    tokenView,
-    actualDuration,
-    actualTime,
+    tokenView: resolvedTokenView,
+    actualDuration: resolvedActualDuration,
+    actualTime: resolvedActualTime,
   })
+  useEffect(() => {
+    setTimelineRange(null)
+  }, [timelineMode])
   const searchMatchIndexes = useMemo(
     () => searchIndexes(searchIndex, turns, searchQuery),
     [searchIndex, searchQuery, turns],
@@ -212,6 +246,18 @@ export const TrajectoryExplorer = memo(function TrajectoryExplorer({
     && collapsibleTurnIds.every(turn => collapsedTurns.has(turn))
   const allAssistantsCollapsed = collapsibleAssistantIds.length > 0
     && collapsibleAssistantIds.every(id => collapsedAssistants.has(id))
+  const displayedCollapsedTurns = useMemo<ReadonlySet<number>>(
+    () => viewState === undefined
+      ? collapsedTurns
+      : viewState.turnsCollapsed ? new Set(collapsibleTurnIds) : EMPTY_TURN_IDS,
+    [collapsedTurns, collapsibleTurnIds, viewState],
+  )
+  const displayedCollapsedAssistants = useMemo<ReadonlySet<string>>(
+    () => viewState === undefined
+      ? collapsedAssistants
+      : viewState.callsCollapsed ? new Set(collapsibleAssistantIds) : EMPTY_RECORD_IDS,
+    [collapsedAssistants, collapsibleAssistantIds, viewState],
+  )
   const toggleTurn = useCallback((turn: number) => {
     setCollapsedTurns((current) => {
       const next = new Set(current)
@@ -259,49 +305,60 @@ export const TrajectoryExplorer = memo(function TrajectoryExplorer({
       <div
         className={[css.root, 'jiuwenTrajectoryTheme', className].filter(Boolean).join(' ')}
         data-trajectory-theme={colorMode}
+        data-display-mode={displayMode}
         style={rootStyle}
       >
-      <TrajectoryToolbar
-        actualDuration={actualDuration}
-        onActualDurationChange={(value) => {
-          setActualDuration(value)
-          setTokenView(false)
-          setTimelineRange(null)
-        }}
-        actualTime={actualTime}
-        onActualTimeChange={(value) => { setActualTime(value); setTimelineRange(null) }}
-        tokenView={tokenView}
-        onTokenViewChange={(value) => { setTokenView(value); setTimelineRange(null) }}
-        allTurnsCollapsed={allTurnsCollapsed}
-        onToggleAllTurns={toggleAllTurns}
-        allAssistantsCollapsed={allAssistantsCollapsed}
-        onToggleAllAssistants={toggleAllAssistants}
-        searchQuery={searchQuery}
-        onSearchQueryChange={setSearchQuery}
-        t={t}
-      />
-      <TrajectoryTimeline
-        turns={turns}
-        mode={timelineMode}
-        range={timelineRange}
-        olderHistoryLoading={loadingEarlier}
-        hasEarlierRecords={hasEarlier}
-        {...(loadEarlier === undefined ? {} : { onLoadEarlier: loadEarlier })}
-        selectedIndex={selectedTimelineIndex}
-        searchMatchIndexes={searchMatchIndexes}
-        onRangeChange={setTimelineRange}
-        onRecordSelect={(index) => {
-          setTimelineRange(null)
-          setRecordSelection({ index })
-          setSelectedTimelineIndex(index)
-        }}
-        onRecordFocus={index => { setRecordFocus({ index }) }}
-        nowMilliseconds={liveNowMilliseconds}
-      />
+      {displayMode !== 'records' ? (
+        <>
+          {showToolbar ? <TrajectoryToolbar
+            showViewControls={showToolbarViewControls}
+            actualDuration={actualDuration}
+            onActualDurationChange={(value) => {
+              setActualDuration(value)
+              setTokenView(false)
+              setTimelineRange(null)
+            }}
+            actualTime={actualTime}
+            onActualTimeChange={(value) => { setActualTime(value); setTimelineRange(null) }}
+            tokenView={tokenView}
+            onTokenViewChange={(value) => { setTokenView(value); setTimelineRange(null) }}
+            allTurnsCollapsed={allTurnsCollapsed}
+            onToggleAllTurns={toggleAllTurns}
+            allAssistantsCollapsed={allAssistantsCollapsed}
+            onToggleAllAssistants={toggleAllAssistants}
+            searchQuery={searchQuery}
+            onSearchQueryChange={setSearchQuery}
+            afterActions={toolbarAddon}
+            t={t}
+          /> : null}
+          <TrajectoryTimeline
+            turns={turns}
+            mode={timelineMode}
+            range={timelineRange}
+            olderHistoryLoading={loadingEarlier}
+            hasEarlierRecords={hasEarlier}
+            {...(loadEarlier === undefined ? {} : { onLoadEarlier: loadEarlier })}
+            selectedIndex={selectedTimelineIndex}
+            searchMatchIndexes={searchMatchIndexes}
+            onRangeChange={setTimelineRange}
+            onRecordSelect={(index) => {
+              setTimelineRange(null)
+              setRecordSelection({ index })
+              setSelectedTimelineIndex(index)
+              onOverviewActivate?.()
+            }}
+            onRecordFocus={(index) => {
+              setRecordFocus({ index })
+              onOverviewActivate?.()
+            }}
+            nowMilliseconds={liveNowMilliseconds}
+          />
+        </>
+      ) : null}
       {error !== null && (
         <div className={css.error} role="status">{error}</div>
       )}
-      <div className={css.ledger}>
+      {displayMode !== 'overview' ? <div className={css.ledger}>
         <TrajectoryTable
           turns={turns}
           scrollToEndSignal={scrollToEndSignal}
@@ -323,15 +380,15 @@ export const TrajectoryExplorer = memo(function TrajectoryExplorer({
           hasOlderRecords={hasEarlier}
           {...(loadEarlier === undefined ? {} : { onLoadOlder: loadEarlier })}
           onClearSelection={() => { setTimelineRange(null) }}
-          collapsedTurns={collapsedTurns}
+          collapsedTurns={displayedCollapsedTurns}
           onToggleTurn={toggleTurn}
-          collapsedAssistants={collapsedAssistants}
+          collapsedAssistants={displayedCollapsedAssistants}
           onToggleAssistant={toggleAssistant}
           inspectCallId={inspectCallId}
           nowMilliseconds={liveNowMilliseconds}
           {...(onInspectApplied === undefined ? {} : { onInspectApplied })}
         />
-      </div>
+      </div> : null}
       </div>
     </TrajectoryThemeProvider>
   )

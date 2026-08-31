@@ -5,18 +5,22 @@
 from __future__ import annotations
 
 import base64
-import binascii
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response
 
-from jiuwenswarm.common.mode_matrix import canonicalize_mode_text, is_single_agent_mode
+from jiuwenswarm.common.mode_matrix import (
+    canonicalize_mode_text,
+    is_single_agent_mode,
+    is_team_mode,
+)
 from jiuwenswarm.common.security.ws_origin import (
     get_allowed_origin_hosts,
     is_allowed_browser_origin,
@@ -51,17 +55,56 @@ class TrajectoryHttpService:
 
     def __init__(
         self,
-        settings: TrajectoryStoreSettings,
+        settings: TrajectoryStoreSettings | None = None,
         *,
         reader: AsyncTrajectoryReader | None = None,
         metadata_loader: SessionMetadataLoader | None = None,
     ) -> None:
-        self.settings = settings
-        self.reader = reader or AsyncTrajectoryReader(
-            settings.database_path,
-            session_scoped=True,
-        )
+        # A pinned snapshot keeps callers that own their settings deterministic.
+        # The gateway leaves it unset: `trajectory_ui.enabled` is toggled at
+        # runtime through config.set, and the reload broadcast only reaches the
+        # Agent runtime, so a snapshot taken at mount time would keep answering
+        # TRAJECTORY_DISABLED until the gateway process restarts.
+        self._pinned_settings = settings
+        self._reader_override = reader
+        self._reader: AsyncTrajectoryReader | None = None
+        self._reader_database_path: Path | None = None
         self._metadata_loader = metadata_loader or _load_session_metadata
+
+    @property
+    def settings(self) -> TrajectoryStoreSettings:
+        """Return the pinned snapshot, or the live ``trajectory_ui`` settings."""
+        if self._pinned_settings is not None:
+            return self._pinned_settings
+        return load_trajectory_store_settings()
+
+    @property
+    def reader(self) -> AsyncTrajectoryReader:
+        """Return the reader bound to the currently configured store root."""
+        return self._reader_for(self.settings)
+
+    def _reader_for(
+        self,
+        settings: TrajectoryStoreSettings,
+    ) -> AsyncTrajectoryReader:
+        """Return a reader for one resolved settings snapshot.
+
+        Args:
+            settings: Settings resolved once for the current request.
+
+        Returns:
+            Reader bound to ``settings.database_path``; rebuilt only when the
+            configured store root changes.
+        """
+        if self._reader_override is not None:
+            return self._reader_override
+        database_path = settings.database_path
+        reader = self._reader
+        if reader is None or self._reader_database_path != database_path:
+            reader = AsyncTrajectoryReader(database_path, session_scoped=True)
+            self._reader = reader
+            self._reader_database_path = database_path
+        return reader
 
     async def list_traces(
         self,
@@ -71,7 +114,8 @@ class TrajectoryHttpService:
         cursor: str | None,
     ) -> Response:
         """Build the paginated trace-list response for one single-Agent session."""
-        error = self._validate_access(session_id)
+        settings = self.settings
+        error = self._validate_access(session_id, settings)
         if error is not None:
             return error
         if not 1 <= limit <= 100:
@@ -88,7 +132,7 @@ class TrajectoryHttpService:
                 next_cursor,
                 revision_cursor,
                 store_epoch,
-            ) = await self.reader.list_traces_with_revision_cursor(
+            ) = await self._reader_for(settings).list_traces_with_revision_cursor(
                 session_id,
                 limit=limit,
                 cursor=cursor,
@@ -115,12 +159,13 @@ class TrajectoryHttpService:
 
     async def export_archive(self, session_id: str) -> Response:
         """Export a stable archive of every current record in one session."""
-        error = self._validate_access(session_id)
+        settings = self.settings
+        error = self._validate_access(session_id, settings)
         if error is not None:
             return error
         try:
             records, store_epoch, revision = (
-                await self.reader.get_session_archive_records(session_id)
+                await self._reader_for(settings).get_session_archive_records(session_id)
             )
         except Exception:
             logger.exception(
@@ -153,11 +198,14 @@ class TrajectoryHttpService:
 
     async def get_session_usage(self, session_id: str) -> Response:
         """Return session-complete request usage partitioned by execution subject."""
-        error = self._validate_access(session_id)
+        settings = self.settings
+        error = self._validate_access(session_id, settings)
         if error is not None:
             return error
         try:
-            items, store_epoch = await self.reader.get_session_request_usage(session_id)
+            items, store_epoch = await self._reader_for(settings).get_session_request_usage(
+                session_id
+            )
         except Exception:
             logger.exception(
                 "Trajectory session-usage query failed: session_id=%s",
@@ -184,7 +232,8 @@ class TrajectoryHttpService:
         limit: int,
     ) -> Response:
         """Build one stable page of trace summaries changed since a cursor."""
-        error = self._validate_access(session_id)
+        settings = self.settings
+        error = self._validate_access(session_id, settings)
         if error is not None:
             return error
         if not 1 <= limit <= 100:
@@ -207,7 +256,7 @@ class TrajectoryHttpService:
                 has_more,
                 reset,
                 store_epoch,
-            ) = await self.reader.list_trace_revisions(
+            ) = await self._reader_for(settings).list_trace_revisions(
                 session_id,
                 after_revision=after_revision,
                 limit=limit,
@@ -250,7 +299,8 @@ class TrajectoryHttpService:
         limit: int,
     ) -> Response:
         """Build a complete or incremental trace-detail response."""
-        error = self._validate_access(session_id)
+        settings = self.settings
+        error = self._validate_access(session_id, settings)
         if error is not None:
             return error
         normalized_trace_id = str(trace_id or "").strip().lower()
@@ -267,12 +317,12 @@ class TrajectoryHttpService:
                 400,
             )
         try:
-            result = await self.reader.get_trace_records(
+            result = await self._reader_for(settings).get_trace_records(
                 session_id,
                 normalized_trace_id,
                 since_revision=since_revision,
                 limit=limit,
-                max_bytes=self.settings.detail_max_bytes,
+                max_bytes=settings.detail_max_bytes,
             )
         except Exception:
             logger.exception(
@@ -303,7 +353,8 @@ class TrajectoryHttpService:
         span_id: str,
     ) -> Response:
         """Return the exact stored OTLP bytes for one session-owned span."""
-        error = self._validate_access(session_id)
+        settings = self.settings
+        error = self._validate_access(session_id, settings)
         if error is not None:
             return error
         normalized_trace_id = str(trace_id or "").strip().lower()
@@ -313,7 +364,7 @@ class TrajectoryHttpService:
         if _SPAN_ID_PATTERN.fullmatch(normalized_span_id) is None:
             return _error_response("invalid span_id", "BAD_REQUEST", 400)
         try:
-            raw_json = await self.reader.get_raw_record(
+            raw_json = await self._reader_for(settings).get_raw_record(
                 session_id,
                 normalized_trace_id,
                 normalized_span_id,
@@ -341,8 +392,12 @@ class TrajectoryHttpService:
             },
         )
 
-    def _validate_access(self, session_id: str) -> Response | None:
-        if not self.settings.enabled:
+    def _validate_access(
+        self,
+        session_id: str,
+        settings: TrajectoryStoreSettings,
+    ) -> Response | None:
+        if not settings.enabled:
             return _error_response(
                 "trajectory UI is disabled",
                 "TRAJECTORY_DISABLED",
@@ -369,15 +424,17 @@ class TrajectoryHttpService:
         raw_mode_value = getattr(raw_mode, "value", raw_mode)
         if not isinstance(raw_mode_value, str) or not raw_mode_value.strip():
             return _error_response(
-                "trajectory UI supports known single-Agent sessions only",
+                "trajectory UI supports known Agent sessions only",
                 "UNSUPPORTED_SESSION_MODE",
                 403,
             )
         normalized_mode = canonicalize_mode_text(raw_mode)
         team_name = str(metadata.get("team_name") or "").strip()
-        if not is_single_agent_mode(normalized_mode) or team_name:
+        single_agent_session = is_single_agent_mode(normalized_mode) and not team_name
+        team_session = is_team_mode(normalized_mode) and bool(team_name)
+        if not single_agent_session and not team_session:
             return _error_response(
-                "trajectory UI supports single-Agent sessions only",
+                "trajectory UI supports Agent and Team sessions only",
                 "UNSUPPORTED_SESSION_MODE",
                 403,
             )
@@ -397,7 +454,8 @@ def attach_trajectory_routes(
     Args:
         app: WebChannel FastAPI application.
         channel: Owning WebChannel, retained on app state for route provenance.
-        settings: Optional resolved settings override.
+        settings: Optional pinned settings override. Omit it so every request
+            resolves the live ``trajectory_ui`` settings.
         reader: Optional reader override for tests.
         metadata_loader: Optional session metadata loader override.
 
@@ -405,7 +463,7 @@ def attach_trajectory_routes(
         Mounted service instance.
     """
     service = TrajectoryHttpService(
-        settings or load_trajectory_store_settings(),
+        settings,
         reader=reader,
         metadata_loader=metadata_loader,
     )
@@ -588,12 +646,9 @@ def _http_trace_summary(item: Mapping[str, Any]) -> dict[str, Any]:
 
 def _parse_integer_query(value: str) -> int | None:
     normalized = str(value or "").strip()
-    if (
-        not normalized
-        or len(normalized) > _MAX_INTEGER_QUERY_CHARS
-        or not normalized.isascii()
-        or not normalized.isdecimal()
-    ):
+    if not normalized or len(normalized) > _MAX_INTEGER_QUERY_CHARS:
+        return None
+    if not normalized.isascii() or not normalized.isdecimal():
         return None
     try:
         parsed = int(normalized)
@@ -605,13 +660,11 @@ def _parse_integer_query(value: str) -> int | None:
 def _is_valid_cursor_text(value: str) -> bool:
     """Accept only canonical unpadded base64url before touching the reader."""
     normalized = str(value or "")
-    if (
-        normalized != normalized.strip()
-        or not 0 < len(normalized) <= _MAX_CURSOR_LENGTH
-        or not normalized.isascii()
-        or _CURSOR_PATTERN.fullmatch(normalized) is None
-        or len(normalized) % 4 == 1
-    ):
+    if normalized != normalized.strip() or not 0 < len(normalized) <= _MAX_CURSOR_LENGTH:
+        return False
+    if not normalized.isascii() or len(normalized) % 4 == 1:
+        return False
+    if _CURSOR_PATTERN.fullmatch(normalized) is None:
         return False
     padding = "=" * (-len(normalized) % 4)
     try:
@@ -620,10 +673,35 @@ def _is_valid_cursor_text(value: str) -> bool:
             altchars=b"-_",
             validate=True,
         )
-    except (binascii.Error, ValueError):
+    except ValueError:
         return False
     canonical = base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=")
     return canonical == normalized
+
+
+def _is_malformed_raw_host(raw_host: str) -> bool:
+    """Return whether a raw Host header value is unusable before parsing."""
+    if not raw_host or len(raw_host) > 512:
+        return True
+    if not raw_host.isascii() or raw_host.endswith(":"):
+        return True
+    has_control_character = any(
+        character.isspace() or ord(character) < 32 or ord(character) == 127
+        for character in raw_host
+    )
+    if has_control_character:
+        return True
+    return any(
+        separator in raw_host
+        for separator in ("/", "\\", "?", "#", "@", ",")
+    )
+
+
+def _has_unexpected_host_parts(parsed_host: SplitResult) -> bool:
+    """Return whether a parsed Host authority carries non-authority parts."""
+    if parsed_host.username is not None or parsed_host.password is not None:
+        return True
+    return bool(parsed_host.path or parsed_host.query or parsed_host.fragment)
 
 
 def _request_host_name(request: Request) -> str | None:
@@ -632,20 +710,7 @@ def _request_host_name(request: Request) -> str | None:
     if len(host_values) != 1:
         return None
     raw_host = str(host_values[0] or "").strip()
-    if (
-        not raw_host
-        or len(raw_host) > 512
-        or not raw_host.isascii()
-        or raw_host.endswith(":")
-        or any(
-            character.isspace() or ord(character) < 32 or ord(character) == 127
-            for character in raw_host
-        )
-        or any(
-            separator in raw_host
-            for separator in ("/", "\\", "?", "#", "@", ",")
-        )
-    ):
+    if _is_malformed_raw_host(raw_host):
         return None
     try:
         parsed_host = urlsplit(f"//{raw_host}")
@@ -653,23 +718,12 @@ def _request_host_name(request: Request) -> str | None:
         parsed_host.port
     except ValueError:
         return None
-    if (
-        hostname is None
-        or parsed_host.username is not None
-        or parsed_host.password is not None
-        or parsed_host.path
-        or parsed_host.query
-        or parsed_host.fragment
-    ):
+    if hostname is None or _has_unexpected_host_parts(parsed_host):
         return None
     normalized_hostname = hostname.lower().rstrip(".")
-    if (
-        not normalized_hostname
-        or not normalized_hostname.isascii()
-        or "%" in normalized_hostname
-    ):
+    if not normalized_hostname or not normalized_hostname.isascii():
         return None
-    return normalized_hostname
+    return None if "%" in normalized_hostname else normalized_hostname
 
 
 def _is_allowed_request_host(request: Request) -> bool:

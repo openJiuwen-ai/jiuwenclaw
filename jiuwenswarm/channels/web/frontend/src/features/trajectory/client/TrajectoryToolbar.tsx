@@ -6,11 +6,16 @@
  * under the repository MIT license.
  */
 
+import type { ReactNode } from 'react'
 import { IconSearchOutline16 } from '../primitives/index.ts'
 import type { TrajectoryTranslate } from './i18n.ts'
 import css from './TrajectoryToolbar.module.css'
 
 export interface TrajectoryToolbarProps {
+  /** Whether duration, token, turn, and call controls are visible. */
+  showViewControls?: boolean
+  /** Whether the record search field is visible. */
+  showSearch?: boolean
   /** Whether timeline blocks use recorded durations instead of equal widths. */
   actualDuration: boolean
   /** Select recorded-duration or equal-width blocks. */
@@ -35,6 +40,8 @@ export interface TrajectoryToolbarProps {
   searchQuery: string
   /** Update the live ledger search query. */
   onSearchQueryChange: (query: string) => void
+  /** Host-owned member control placed before the search field. */
+  afterActions?: ReactNode
   /** Translate a toolbar dictionary key. */
   t: TrajectoryTranslate
 }
@@ -45,6 +52,8 @@ export interface TrajectoryToolbarProps {
  * @returns the toolbar element.
  */
 export function TrajectoryToolbar({
+  showViewControls = true,
+  showSearch = true,
   actualDuration,
   onActualDurationChange,
   actualTime,
@@ -57,12 +66,14 @@ export function TrajectoryToolbar({
   onToggleAllAssistants,
   searchQuery,
   onSearchQueryChange,
+  afterActions,
   t,
 }: TrajectoryToolbarProps) {
   return (
     <div className={css.root} role="toolbar" aria-label={t('toolbar.aria')}>
       <div className={css.inner}>
         <div className={css.actions}>
+          {showViewControls ? <>
           <button
             type="button"
             className={css.toggle}
@@ -139,8 +150,10 @@ export function TrajectoryToolbar({
             </span>
             {t('toolbar.calls')}
           </button>
+          </> : null}
+          {afterActions}
         </div>
-        <div className={css.search}>
+        {showSearch ? <div className={css.search}>
           <IconSearchOutline16 size={11} className={css.searchIcon} />
           <input
             type="search"
@@ -150,7 +163,7 @@ export function TrajectoryToolbar({
             value={searchQuery}
             onChange={(event) => { onSearchQueryChange(event.currentTarget.value) }}
           />
-        </div>
+        </div> : null}
       </div>
     </div>
   )

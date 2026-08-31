@@ -101,7 +101,10 @@ reasonix.toml
 
 # Build-time Node runtime cache used by packaging scripts.
 vendor/node/
-AGENTS.local.md
+/AGENTS.local.md
 report/index.html
-tmp/
-memory/
+/tmp/
+/memory/
+/sub_agents/
+/context/
+/.plans/

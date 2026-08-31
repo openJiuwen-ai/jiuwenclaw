@@ -10,7 +10,7 @@ import { detailRecordIdentity, spansOf } from './trajectoryWindow';
 export const MAIN_TRAJECTORY_SUBJECT_ID = 'main';
 export const UNASSIGNED_TRAJECTORY_SUBJECT_ID = '__unassigned__';
 
-export type TrajectorySubjectKind = 'main_agent' | 'subagent' | 'unassigned';
+export type TrajectorySubjectKind = 'main_agent' | 'team_leader' | 'team_member' | 'subagent' | 'unassigned';
 
 export interface TrajectorySubject {
   id: string;
@@ -33,6 +33,11 @@ export interface TrajectorySubjectGroup {
 export interface TrajectorySubjectGroups {
   groups: TrajectorySubjectGroup[];
   byId: ReadonlyMap<string, TrajectorySubjectGroup>;
+}
+
+export interface TrajectorySubjectGroupingOptions {
+  /** Team mode: skip the synthetic `main` group and treat team members as roots. */
+  teamMode?: boolean;
 }
 
 export interface TrajectorySubjectView<TSnapshot> {
@@ -97,11 +102,25 @@ export function trajectorySubjectOf(
       span.attributes,
       OPENJIUWEN_ATTRIBUTES.executionSubjectSessionId,
     )?.trim();
+    const executionKind = stringAttribute(
+      span.attributes,
+      OPENJIUWEN_ATTRIBUTES.executionSubjectKind,
+    )?.trim();
     if (trajectorySubjectId === MAIN_TRAJECTORY_SUBJECT_ID) {
       return {
         id: trajectorySubjectId,
         displayName: legacyDisplayName || mainSubject.displayName,
         kind: 'main_agent',
+        parentId: parentId || null,
+        sessionId: sessionId || null,
+      };
+    }
+    if ((executionKind === 'team_leader' || executionKind === 'team_member')
+      && legacyDisplayName) {
+      return {
+        id: trajectorySubjectId,
+        displayName: legacyDisplayName,
+        kind: executionKind,
         parentId: parentId || null,
         sessionId: sessionId || null,
       };
@@ -139,6 +158,16 @@ export function trajectorySubjectOf(
     return {
       id,
       displayName: displayName?.trim() || mainSubject.displayName,
+      kind,
+      parentId: parentId?.trim() || null,
+      sessionId: subjectSessionId?.trim() || null,
+    };
+  }
+  if ((kind === 'team_leader' || kind === 'team_member')
+    && id?.trim() && displayName?.trim()) {
+    return {
+      id: id.trim(),
+      displayName: displayName.trim(),
       kind,
       parentId: parentId?.trim() || null,
       sessionId: subjectSessionId?.trim() || null,
@@ -245,6 +274,7 @@ export function groupTrajectorySubjects(
   rawRecords: readonly TrajectoryDetailRecord[],
   lifecycleByRecordId: ReadonlyMap<string, 'running' | 'completed' | 'error'>,
   ownerSessionId?: string,
+  options: TrajectorySubjectGroupingOptions = {},
 ): TrajectorySubjectGroups {
   const mutable = new Map<string, Omit<TrajectorySubjectGroup, 'label' | 'traceCount'>>();
   const ensure = (subject: TrajectorySubject, observedTime: string | null) => {
@@ -266,10 +296,17 @@ export function groupTrajectorySubjects(
     return group;
   };
 
-  ensure(mainSubject, null);
+  if (!options.teamMode) ensure(mainSubject, null);
+  const belongsToTeam = (subject: TrajectorySubject): boolean => (
+    subject.kind === 'team_leader' || subject.kind === 'team_member'
+  );
   for (const record of records) {
     const span = firstSpan(record);
     const subject = trajectorySubjectOf(record);
+    // Team mode shows only concrete member lanes. Records without an
+    // execution-subject block (team root / monitor spans) would otherwise fall
+    // back to a synthetic "Main Agent" lane, so skip them.
+    if (options.teamMode && !belongsToTeam(subject)) continue;
     if (subject.kind === 'subagent'
       && subject.sessionId !== null
       && ownerSessionId
@@ -279,6 +316,7 @@ export function groupTrajectorySubjects(
   for (const rawRecord of rawRecords) {
     const span = firstSpan(rawRecord.otlp);
     const subject = trajectorySubjectOf(rawRecord.otlp);
+    if (options.teamMode && !belongsToTeam(subject)) continue;
     if (subject.kind === 'subagent'
       && subject.sessionId !== null
       && ownerSessionId
@@ -298,6 +336,8 @@ export function groupTrajectorySubjects(
   const ordered = [...mutable.values()].sort((left, right) => {
     if (left.subject.kind === 'main_agent') return right.subject.kind === 'main_agent' ? 0 : -1;
     if (right.subject.kind === 'main_agent') return 1;
+    if (left.subject.kind === 'team_leader') return right.subject.kind === 'team_leader' ? 0 : -1;
+    if (right.subject.kind === 'team_leader') return 1;
     if (left.subject.kind === 'unassigned') return right.subject.kind === 'unassigned' ? 0 : 1;
     if (right.subject.kind === 'unassigned') return -1;
     return compareNano(left.firstObservedTimeUnixNano, right.firstObservedTimeUnixNano)

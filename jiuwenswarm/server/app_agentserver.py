@@ -30,6 +30,7 @@ from jiuwenswarm.common.utils import cleanup_stale_openjiuwen_descs
 cleanup_stale_openjiuwen_descs()
 
 from openjiuwen.core.common.logging import LogManager  # pylint: disable=wrong-import-order
+from openjiuwen.harness.observability import install_subagent_observability_hook  # pylint: disable=wrong-import-order
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
@@ -216,8 +217,6 @@ apply_task_tool_debug_patch()
 # 让所有分发路径创建的 subagent 都带上 OTel 观测 rail（内置 task_tool、自定义
 # agent 工具、后台 subagent），这样子 agent 的 llm/tool span 归属自己的
 # agent.<type>.invoke span，而不是挂到派发它的 agent 身上。
-from openjiuwen.harness.observability import install_subagent_observability_hook
-
 install_subagent_observability_hook()
 
 
@@ -262,7 +261,7 @@ async def _run(host: str, port: int) -> None:
         port=port
     )
     await server.start()
-logger.info(
+    logger.info(
         "[AgentServer] port listening: ws://%s:%s (elapsed %.2fs)",
         host,
         port,

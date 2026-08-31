@@ -120,6 +120,96 @@ function v2Record({
   };
 }
 
+function legacyInferenceRecord({
+  output,
+  requestNumber,
+  spanId,
+  startTimeUnixNano,
+  stepId,
+  stepNumber,
+  toolCall,
+}) {
+  const traceId = 'abababababababababababababababab';
+  const attributes = [
+    v2Attribute('session.id', 'team-session'),
+    v2Attribute('gen_ai.conversation.id', 'team-session'),
+    v2Attribute('gen_ai.request.model', 'test-model'),
+    v2Attribute('gen_ai.input.messages', JSON.stringify([
+      structuredMessage('user', `input ${requestNumber}`),
+    ])),
+    v2Attribute('gen_ai.output.messages', JSON.stringify([{
+      role: 'assistant',
+      parts: [
+        { type: 'text', content: output },
+        ...(toolCall === undefined ? [] : [{ type: 'tool_call', ...toolCall }]),
+      ],
+    }])),
+    v2Attribute('openjiuwen.execution.subject.id', 'team-leader'),
+    v2Attribute('openjiuwen.execution.subject.kind', 'team_leader'),
+    v2Attribute('openjiuwen.execution.subject.session_id', 'team-session'),
+    v2Attribute('openjiuwen.execution.subject.request.number', requestNumber, true),
+    v2Attribute('openjiuwen.request.number', requestNumber, true),
+    v2Attribute('openjiuwen.request.purpose', 'assistant'),
+    v2Attribute('openjiuwen.inference.id', spanId),
+    v2Attribute('openjiuwen.turn.number', 1, true),
+    v2Attribute('openjiuwen.step.number', stepNumber, true),
+    v2Attribute('openjiuwen.step.id', stepId),
+  ];
+  return {
+    resourceSpans: [{
+      scopeSpans: [{
+        spans: [{
+          traceId,
+          spanId,
+          name: 'llm.call',
+          startTimeUnixNano: String(startTimeUnixNano),
+          endTimeUnixNano: String(startTimeUnixNano + 1000),
+          attributes,
+        }],
+      }],
+    }],
+  };
+}
+
+function trajectoryLogEventRecord({ eventKind, eventId, payload, sequence, time }) {
+  const traceId = 'abababababababababababababababab';
+  return {
+    resourceSpans: [{
+      scopeSpans: [{
+        spans: [{
+          traceId,
+          spanId: String(sequence + 100).padStart(16, '0'),
+          name: `agent.team-leader.iteration.${sequence}`,
+          startTimeUnixNano: String(time - 10),
+          endTimeUnixNano: String(time + 10),
+          attributes: [
+            v2Attribute('session.id', 'team-session'),
+            v2Attribute('openjiuwen.execution.subject.id', 'team-leader'),
+            v2Attribute('openjiuwen.execution.subject.kind', 'team_leader'),
+            v2Attribute('openjiuwen.turn.number', 1, true),
+            v2Attribute('openjiuwen.step.number', sequence, true),
+          ],
+          events: [{
+            name: eventKind,
+            timeUnixNano: String(time),
+            attributes: [
+              v2Attribute('openjiuwen.trajectory.schema_version', '2'),
+              v2Attribute('openjiuwen.trajectory.event_id', eventId),
+              v2Attribute('openjiuwen.trajectory.event_kind', eventKind),
+              v2Attribute('openjiuwen.trajectory.subject_id', 'team-leader'),
+              v2Attribute('openjiuwen.trajectory.subject_sequence', sequence, true),
+              v2Attribute('openjiuwen.trajectory.sequence_epoch', 'ask-user-epoch'),
+              v2Attribute('openjiuwen.trajectory.session_id', 'team-session'),
+              v2Attribute('openjiuwen.trajectory.recorded_at_unix_nano', time, true),
+              v2Attribute('openjiuwen.trajectory.payload', JSON.stringify(payload)),
+            ],
+          }],
+        }],
+      }],
+    }],
+  };
+}
+
 function contextCommit(windowId, baseWindowId, messages, delta) {
   return {
     window_id: windowId,
@@ -1330,6 +1420,45 @@ test('only explicit compaction.completed events create v2 compaction history', (
   )));
 });
 
+test('final compaction Span revision replaces its provisional event payload', () => {
+  const reducer = createTrajectoryV2Reducer();
+  const provisional = v2Record({
+    eventId: 'compaction-revision',
+    eventKind: 'compaction.completed',
+    sequence: 1,
+    payload: {
+      operation_id: 'operation-revision',
+      summary: 'Compaction is still finalizing',
+      model_requests: [{ request_id: 'request-revision', inference_id: 'inference-1' }],
+    },
+  });
+  const completed = v2Record({
+    eventId: 'compaction-revision',
+    eventKind: 'compaction.completed',
+    sequence: 1,
+    payload: {
+      operation_id: 'operation-revision',
+      summary: 'Compressed 86 -> 16 messages',
+      compact_summary: '<memory_block_dialogue>final summary</memory_block_dialogue>',
+      model_requests: [{ request_id: 'request-revision', inference_id: 'inference-1' }],
+    },
+  });
+
+  const provisionalView = reducer.apply([provisional]);
+  const completedView = reducer.apply([completed]);
+  const provisionalCells = [...provisionalView.subjects.values()].flatMap(subject => (
+    subject.events.flatMap(event => event.cells)
+  ));
+  const completedCells = [...completedView.subjects.values()].flatMap(subject => (
+    subject.events.flatMap(event => event.cells)
+  ));
+
+  assert.equal(provisionalCells.some(cell => cell.kind === 'compacted'), false);
+  assert.equal(completedCells.filter(cell => cell.kind === 'compacted').length, 1);
+  assert.ok(completedCells.some(cell => cell.text === 'Compressed 86 -> 16 messages'));
+  assert.ok(!completedView.diagnostics.some(item => item.code === 'v2.event_id_conflict'));
+});
+
 test('one-to-many compaction inferences retain physical request boundaries', () => {
   const compacted = v2Record({
     eventId: 'compaction-many-requests',
@@ -1465,12 +1594,10 @@ test('attribute-pressure llm.call spans keep tool-only and final Assistant reque
   ]);
 });
 
-test('canonical v2 context suppresses partial legacy diagnostics for the same request', async () => {
+test('canonical v2 context suppresses partial legacy diagnostics for its physical inference', async () => {
   const records = await fixtureRecords('attribute-pressure-llm-call-records.json');
   const llmSpans = spansOf(records).filter(span => span.name === 'llm.call');
-  for (const span of llmSpans) {
-    setStringAttribute(span, 'openjiuwen.request.id', 'request-pressure');
-  }
+  assert.ok(llmSpans[0]);
   const system = contextMessage(
     'pressure-system',
     'system',
@@ -1483,7 +1610,7 @@ test('canonical v2 context suppresses partial legacy diagnostics for the same re
     sequence: 1,
     subjectId: 'subagent:pressure',
     traceId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    inferenceId: 'inference-21',
+    inferenceId: llmSpans[0].spanId,
     payload: contextCommit('window-pressure', null, [system], []),
   });
 
@@ -1495,6 +1622,70 @@ test('canonical v2 context suppresses partial legacy diagnostics for the same re
   assert.ok(!(snapshot.diagnostics ?? []).some(diagnostic => (
     diagnostic.code === 'legacy.partial_snapshot'
   )));
+});
+
+test('canonical v2 context suppresses legacy input rows by physical inference', async () => {
+  const records = await fixtureRecords('attribute-pressure-llm-call-records.json');
+  const inferenceRecord = structuredClone(records.find(record => spansOf([record]).some(span => (
+    span.name === 'llm.call'
+  ))));
+  assert.ok(inferenceRecord);
+  const inference = spansOf([inferenceRecord])[0];
+  assert.ok(inference);
+  setStringAttribute(inference, 'gen_ai.system_instructions', JSON.stringify([
+    { type: 'text', content: 'Stable system prompt' },
+  ]));
+  setStringAttribute(inference, 'gen_ai.input.messages', JSON.stringify([
+    structuredMessage('user', '<system-reminder>Dynamic context</system-reminder>'),
+    structuredMessage('user', 'Current user query'),
+  ]));
+  setStringAttribute(inference, 'gen_ai.output.messages', JSON.stringify([
+    structuredMessage('assistant', 'Current assistant response'),
+  ]));
+  inference.attributes = inference.attributes.filter(attribute => (
+    attribute.key !== 'openjiuwen.request.id'
+  ));
+  const system = contextMessage(
+    'physical-system',
+    'system',
+    'Stable system prompt',
+    'harness_internal',
+  );
+  const dynamic = contextMessage(
+    'physical-dynamic',
+    'user',
+    '<system-reminder>Dynamic context</system-reminder>',
+    'harness_internal',
+  );
+  const user = contextMessage(
+    'physical-user',
+    'user',
+    'Current user query',
+    'external_user',
+  );
+  const context = v2Record({
+    eventId: 'event-physical-context',
+    requestId: 'different-request-namespace',
+    sequence: 1,
+    subjectId: 'subagent:pressure',
+    traceId: inference.traceId,
+    inferenceId: inference.spanId,
+    payload: contextCommit('window-physical', null, [system, dynamic, user], []),
+  });
+
+  const cells = cellsOf(projectOtelTrajectory([inferenceRecord, context]));
+
+  assert.equal(cells.filter(cell => cell.text === 'Stable system prompt').length, 1);
+  assert.equal(cells.filter(cell => cell.text === 'Current user query').length, 1);
+  assert.equal(cells.filter(cell => (
+    cell.text === '<system-reminder>Dynamic context</system-reminder>'
+  )).length, 1);
+  assert.equal(cells.find(cell => cell.text === 'Current user query')?.kind, 'user');
+  assert.equal(cells.find(cell => (
+    cell.text === '<system-reminder>Dynamic context</system-reminder>'
+  ))?.kind, 'context');
+  assert.equal(cells.filter(cell => cell.text === 'Current assistant response').length, 1);
+  assert.equal(cells.find(cell => cell.text === 'Current assistant response')?.kind, 'message');
 });
 
 test('Request numbers are local to an execution subject without changing physical ownership', async () => {
@@ -1521,6 +1712,132 @@ test('Request numbers are local to an execution subject without changing physica
   assert.ok(mainThird && ownedTool);
   assert.equal(ownedTool.requestRecordId, mainThird.requestRecordId);
   assert.equal(cells.filter(cell => cell.kind === 'message' && cell.text === 'Repeated output').length, 6);
+});
+
+test('Team requests remain chronological when task iterations restart Step numbering', () => {
+  const records = [
+    legacyInferenceRecord({
+      output: 'first request',
+      requestNumber: 1,
+      spanId: '1111111111111111',
+      startTimeUnixNano: 1_000_000,
+      stepId: 'iteration-1-step-1',
+      stepNumber: 1,
+    }),
+    legacyInferenceRecord({
+      output: 'second request',
+      requestNumber: 2,
+      spanId: '2222222222222222',
+      startTimeUnixNano: 2_000_000,
+      stepId: 'iteration-1-step-2',
+      stepNumber: 2,
+    }),
+    legacyInferenceRecord({
+      output: 'third request',
+      requestNumber: 3,
+      spanId: '3333333333333333',
+      startTimeUnixNano: 3_000_000,
+      stepId: 'iteration-2-step-1',
+      stepNumber: 1,
+    }),
+  ];
+
+  const snapshot = projectOtelTrajectory(records);
+  const messages = snapshot.turns[0].groups.flatMap(group => (
+    group.cells.filter(cell => cell.kind === 'message').map(cell => cell.text)
+  ));
+
+  assert.deepEqual(messages, ['first request', 'second request', 'third request']);
+  assert.deepEqual((snapshot.requests ?? []).map(request => request.number), [1, 2, 3]);
+});
+
+test('ask_user is not inferred from llm output without authoritative events', () => {
+  const record = legacyInferenceRecord({
+    output: 'Please confirm the member roles.',
+    requestNumber: 1,
+    spanId: '4444444444444444',
+    startTimeUnixNano: 4_000_000,
+    stepId: 'ask-user-step',
+    stepNumber: 1,
+    toolCall: {
+      id: 'call-ask-user-interrupted',
+      name: 'ask_user',
+      arguments: { query: 'Which roles should be added?' },
+    },
+  });
+
+  const tools = cellsOf(projectOtelTrajectory([record])).filter(cell => cell.kind === 'tool');
+
+  assert.equal(tools.length, 0);
+});
+
+test('ask_user projects only from requested and resolved OTel events', () => {
+  const callId = 'call-ask-user-resolved';
+  const request = legacyInferenceRecord({
+    output: 'Please choose a role plan.',
+    requestNumber: 1,
+    spanId: '5555555555555555',
+    startTimeUnixNano: 5_000_000,
+    stepId: 'ask-user-request-step',
+    stepNumber: 1,
+    toolCall: {
+      id: callId,
+      name: 'ask_user',
+      arguments: { query: 'Which role plan?' },
+    },
+  });
+  const requested = trajectoryLogEventRecord({
+    eventKind: 'ask_user.requested',
+    eventId: 'event-ask-user-requested',
+    sequence: 1,
+    time: 6_000_000,
+    payload: {
+      interaction_id: callId,
+      tool_call_id: callId,
+      tool_name: 'ask_user',
+      arguments: { query: 'Which role plan?' },
+      schema: {
+        name: 'ask_user',
+        description: 'Ask the user a structured question.',
+        parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      },
+      status: 'pending',
+    },
+  });
+  const resolved = trajectoryLogEventRecord({
+    eventKind: 'ask_user.resolved',
+    eventId: 'event-ask-user-resolved',
+    sequence: 2,
+    time: 10_000_000,
+    payload: {
+      interaction_id: callId,
+      tool_call_id: callId,
+      tool_name: 'ask_user',
+      answers: { plan: 'suggested' },
+      outcome: 'answered',
+      result: 'plan=suggested',
+      status: 'completed',
+    },
+  });
+
+  const pendingTool = cellsOf(projectOtelTrajectory([request, requested])).find(cell => (
+    cell.kind === 'tool' && cell.callId === callId
+  ));
+  assert.ok(pendingTool);
+  assert.equal(pendingTool.status, 'running');
+  assert.equal(pendingTool.timeSeconds, null);
+
+  const tool = cellsOf(projectOtelTrajectory([request, requested, resolved])).find(cell => (
+    cell.kind === 'tool' && cell.callId === callId
+  ));
+
+  assert.ok(tool);
+  assert.equal(tool.status, 'complete');
+  assert.equal(tool.result, 'plan=suggested');
+  assert.match(tool.schemaDetail, /Ask the user a structured question/);
+  assert.equal(tool.startedAt, 6);
+  assert.equal(tool.timeSeconds, 0.004);
+  assert.ok(tool.requestRecordId?.includes('5555555555555555'));
 });
 
 test('legacy archives deterministically rebuild Request numbers per subject and physical time', async () => {

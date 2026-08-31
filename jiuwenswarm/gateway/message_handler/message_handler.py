@@ -3125,7 +3125,7 @@ class MessageHandler(ABC):
             return True
         from jiuwenswarm.observability.models import CommittedTraceUpdate
 
-        web_channel._schedule_trajectory_updates(
+        web_channel.schedule_trajectory_updates(
             (
                 CommittedTraceUpdate(
                     session_id=resolved_session_id,

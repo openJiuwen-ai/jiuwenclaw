@@ -729,7 +729,8 @@ class TrajectorySessionSinkRouter:
             return
         raise RuntimeError("Trajectory Session writer did not stop before deletion")
 
-    def abort_session_delete(self, session_id: str) -> None:
+    @staticmethod
+    def abort_session_delete(session_id: str) -> None:
         """Allow a rolled-back Session to lazily create a fresh route."""
         if not str(session_id or "").strip():
             raise ValueError("session_id is required")
@@ -758,13 +759,13 @@ class TrajectorySessionSinkRouter:
         session_id = raw_session_id.strip()
         trace_id = str(getattr(record, "trace_id", "") or "").strip().lower()
         span_id = str(getattr(record, "span_id", "") or "").strip().lower()
-        if (
-            (session_id and session_id != raw_session_id)
-            or not trace_id
-            or not span_id
-            or not isinstance(getattr(record, "raw_json", None), bytes)
-            or not _record_owner_is_consistent(record)
-        ):
+        malformed_identity = (
+            (session_id and session_id != raw_session_id) or not trace_id or not span_id
+        )
+        if malformed_identity or not isinstance(getattr(record, "raw_json", None), bytes):
+            self._increment("failed")
+            return
+        if not _record_owner_is_consistent(record):
             self._increment("failed")
             return
         if session_id and not trajectory_session_accepts_records(session_id):

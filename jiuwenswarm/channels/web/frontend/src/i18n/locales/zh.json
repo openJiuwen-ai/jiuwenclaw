@@ -236,6 +236,7 @@
       "externalCliAgents": "三方 Agent",
       "externalCliAgentsDescription": "仅用于集群模式。",
       "a2ui": "A2UI 界面生成",
+      "trajectoryUi": "轨迹界面",
       "proactive": "主动推荐",
       "proactiveLimits": "推荐频率限制",
       "proactiveLimitsDescription": "每天最多 {{daily}} 条，每次检查 {{rounds}} 轮对话。",
@@ -295,6 +296,7 @@
       "video_provider": { "title": "模型提供商" },
       "permissions_mode": { "title": "全局权限模式", "description": "为普通 Agent 与 Team 选择统一的安全护栏模式。" },
       "a2ui_enabled": { "title": "启用 A2UI", "description": "允许将支持的结果渲染成交互式界面。" },
+      "trajectory_ui_enabled": { "title": "启用轨迹界面", "description": "在单 Agent 和集群模式中显示对话与轨迹切换，并启用轨迹观测数据链路。" },
       "external_cli_agent_claude_enabled": {
         "title": "启用 Claude",
         "description": "允许 Team Leader 拉起 Claude Agent。"
@@ -337,8 +339,12 @@
   "trajectory": {
     "loading": "正在加载轨迹界面…",
     "tabs": {
-      "aria": "单 Agent 内容视图",
+      "aria": "Agent 与团队内容视图",
       "trajectory": "轨迹"
+    },
+    "team": {
+      "memberLanes": "成员轨迹泳道",
+      "members": "成员"
     },
     "layout": {
       "hideSessions": "收起会话栏",

@@ -136,6 +136,11 @@ import {
 import {
   shouldInsetTrajectoryForFloatingTasks,
 } from './features/trajectory/trajectoryLayout';
+import {
+  normalizeTrajectoryUiEnabled,
+  setTrajectoryUiEnabled,
+  useTrajectoryUiEnabled,
+} from './features/trajectory/featureConfig';
 import './App.css';
 
 const LazyTrajectoryPanel = lazy(async () => {
@@ -299,6 +304,7 @@ function AppContent({
   const kvCacheAffinityEnabled = normalizeConfigBoolean(
     serverConfig?.kv_cache_affinity_enabled,
   );
+  const trajectoryUiEnabled = useTrajectoryUiEnabled();
   const [configError, setConfigError] = useState<string | null>(null);
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
   const [restartModalOpen, setRestartModalOpen] = useState(false);
@@ -586,7 +592,8 @@ function AppContent({
     )) ?? null;
   }, [currentSession, projects, sessions, sessionId]);
   const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent');
-  const chatSurfaceView: ChatSurfaceView = mode === 'agent'
+  const chatSurfaceView: ChatSurfaceView = trajectoryUiEnabled
+    && (mode === 'agent' || mode === 'team')
     ? (chatSurfaceViews[sessionId] ?? 'chat')
     : 'chat';
   const selectChatSurfaceView = useCallback((nextView: ChatSurfaceView) => {
@@ -1427,6 +1434,7 @@ function AppContent({
     try {
       const config = await request<Record<string, unknown>>('config.get');
       setA2UIFeatureEnabled(normalizeA2UIEnabled(config.a2ui_enabled));
+      setTrajectoryUiEnabled(normalizeTrajectoryUiEnabled(config.trajectory_ui_enabled));
       setServerConfig(config);
       setConfigError(null);
       if (!modelSetupGuideEvaluatedRef.current) {
@@ -3069,10 +3077,12 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                       >
                         <LazyTrajectoryPanel
                           active={chatSurfaceView === 'trajectory'}
+                          mode={mode}
                           sessionId={sessionId}
                         />
                       </Suspense>
                     )}
+                    trajectoryEnabled={trajectoryUiEnabled}
                     trajectoryLabel={t('trajectory.tabs.trajectory')}
                     showNavigation={sessionId !== NEW_CONVERSATION_ID}
                     trajectoryRequested={trajectoryUiRequested}

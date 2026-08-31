@@ -18,6 +18,10 @@
   background: var(--dsw-alias-bg-layer-1);
 }
 
+.root[data-display-mode='overview'] {
+  height: auto;
+}
+
 .ledger {
   position: relative;
   z-index: 0;

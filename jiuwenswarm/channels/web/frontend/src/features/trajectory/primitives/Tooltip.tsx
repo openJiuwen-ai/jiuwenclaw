@@ -5,13 +5,14 @@
 // vertical collision flips the bubble to the other side, but there is no
 // arrow) — visuals and behavior get a proper pass later.
 // The anchor is the child element itself (cloneElement, no wrapper node), so
-// attaching a tooltip never changes the anchor's layout context. The bubble is
-// position:fixed and coordinates come from the anchor's rect at show time, so
-// it escapes ancestor overflow clipping (the sidebar rail clips its column)
-// without a portal.
+// attaching a tooltip never changes the anchor's layout context. The fixed
+// bubble is portaled to document.body so sibling trajectory stacking contexts
+// cannot cover it.
 
 import { cloneElement, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FocusEventHandler, MouseEventHandler, MutableRefObject, ReactElement, Ref } from 'react'
+import { createPortal } from 'react-dom'
+import { useTrajectoryColorMode } from '../theme/context.tsx'
 import css from './Tooltip.module.css'
 
 /** Bubble placement relative to the anchor. */
@@ -41,6 +42,7 @@ type TooltipLabel = string | (() => string)
  * @returns the cloned anchor plus a fixed-position bubble while hovered/focused.
  */
 export function Tooltip({ label, side = 'right', delayMs = 0, disabled = false, maxWidth, children }: { label: TooltipLabel; side?: TooltipSide; delayMs?: number; disabled?: boolean; maxWidth?: number; children: ReactElement<AnchorProps> }) {
+  const colorMode = useTrajectoryColorMode()
   const anchor = useRef<HTMLElement | null>(null)
   // React 18 keeps the element's ref outside props; forward it so wrapping an
   // anchor in Tooltip never silently severs the owner's ref.
@@ -154,16 +156,18 @@ export function Tooltip({ label, side = 'right', delayMs = 0, disabled = false, 
         onFocus: (e) => { children.props.onFocus?.(e); triggers.current.focus = true; cancelShow(); show() },
         onBlur: (e) => { children.props.onBlur?.(e); triggers.current.focus = false; hide() },
       })}
-      {pos !== null && (
+      {pos !== null && createPortal(
         <span
           ref={bubble}
-          className={css.bubble}
+          className={`${css.bubble} jiuwenTrajectoryPortal`}
+          data-trajectory-theme={colorMode}
           data-side={placement}
           style={{ left: pos.x, top: y, ...maxWidth === undefined ? {} : { maxWidth } }}
           role="tooltip"
         >
           {resolvedLabel}
-        </span>
+        </span>,
+        document.body,
       )}
     </>
   )

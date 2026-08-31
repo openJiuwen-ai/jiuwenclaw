@@ -78,6 +78,7 @@ from jiuwenswarm.common.config import (
     update_a2ui_in_config,
     update_updater_in_config,
     update_proactive_recommendation_in_config,
+    update_trajectory_ui_in_config,
     update_skill_evolution_enabled_in_config,
 )
 from jiuwenswarm.common.kv_cache_affinity_config import (
@@ -187,6 +188,8 @@ class _ConfigChangeSet:
                 scopes.add("proactive")
             elif key_text.startswith("symphony") or key_text.startswith("skill_retrieval"):
                 scopes.add("agent_runtime")
+            elif key_text == "trajectory_ui_enabled":
+                scopes.update({"agent_runtime", "web_ui"})
             elif key_text.startswith("a2ui_") or key_text == "setup_guide_enabled":
                 scopes.add("web_ui")
             else:
@@ -1053,6 +1056,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "memory_forbidden_enabled",
     "memory_forbidden_description",
     "a2ui_enabled",
+    "trajectory_ui_enabled",
     "proactive_recommendation_enabled",
     "proactive_recommendation_max_recommend_per_day",
     "proactive_recommendation_max_rounds_per_tick",
@@ -2836,6 +2840,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             memory_desc = memory_cfg.get("description") or {}
             payload["memory_forbidden_description"] = memory_desc
             payload.update(get_a2ui_config_payload(raw))
+            trajectory_cfg = raw.get("trajectory_ui") or {}
+            payload["trajectory_ui_enabled"] = (
+                "true" if trajectory_cfg.get("enabled", False) else "false"
+            )
             payload.update(_flatten_swarmflow_for_config_panel(raw))
             payload.update(_flatten_external_cli_agents_for_config_panel(raw))
             payload.update(_flatten_symphony_for_config_panel(raw))
@@ -2866,6 +2874,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("swarmflow_enabled", "true" if DEFAULT_SWARMFLOW_ENABLED else "false")
             for key, value in get_default_a2ui_config_payload().items():
                 payload.setdefault(key, value)
+            payload.setdefault("trajectory_ui_enabled", "false")
             for key, (_, value_type, default) in {
                 **_SYMPHONY_CONFIG_SPECS,
                 **_SKILL_RETRIEVAL_CONFIG_SPECS,
@@ -3133,6 +3142,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     if not ok:
                         raise _ConfigBadRequest(error or "invalid A2UI config")
                     update_a2ui_in_config(update)
+                elif param_key == "trajectory_ui_enabled":
+                    update_trajectory_ui_in_config(parsed)
                 elif param_key == "proactive_recommendation_enabled":
                     update_proactive_recommendation_in_config({"enabled": parsed})
                 elif param_key == "proactive_recommendation_max_recommend_per_day":

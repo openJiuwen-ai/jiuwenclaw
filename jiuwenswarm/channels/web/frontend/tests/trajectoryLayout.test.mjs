@@ -30,7 +30,7 @@ test('raw inspector separator supports keyboard resizing and ignores unrelated k
   assert.equal(rawInspectorKeyboardHeight(125, 'ArrowDown', 600), 120);
 });
 
-test('trajectory reserves space only for a visible collapsed floating task panel', () => {
+test('Agent and Team trajectories reserve space for a visible collapsed floating task panel', () => {
   assert.equal(
     shouldInsetTrajectoryForFloatingTasks('agent', 'trajectory', true, false, false),
     true,
@@ -49,6 +49,10 @@ test('trajectory reserves space only for a visible collapsed floating task panel
   );
   assert.equal(
     shouldInsetTrajectoryForFloatingTasks('team', 'trajectory', true, false, false),
+    true,
+  );
+  assert.equal(
+    shouldInsetTrajectoryForFloatingTasks('auto_harness', 'trajectory', true, false, false),
     false,
   );
 });

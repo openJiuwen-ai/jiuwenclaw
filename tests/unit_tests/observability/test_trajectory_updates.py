@@ -128,8 +128,8 @@ async def test_webchannel_coalesces_running_backlog_into_latest_final_hint(
         lifecycle="final",
     )
 
-    channel._schedule_trajectory_updates((running,))
-    channel._schedule_trajectory_updates((stale, final))
+    channel.schedule_trajectory_updates((running,))
+    channel.schedule_trajectory_updates((stale, final))
     task = channel._trajectory_send_task
     assert task is not None
     await task

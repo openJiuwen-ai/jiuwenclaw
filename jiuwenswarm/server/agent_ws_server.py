@@ -6429,7 +6429,7 @@ class AgentWebSocketServer:
             params = request.params or {}
 
             channel_id = request.channel_id or "default"
-            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
+            mode, sub_mode, canonical_mode = resolve_agent_request_mode(params.get("mode", "agent"))
             agent_mode = "agent" if mode == "auto_harness" else mode
             # 同 command.btw：先按 session_id 找承载会话的 agent，按 mode 兜底会命中影子 agent。
             agent = self._agent_manager.get_agent_for_session_nowait(
@@ -6456,12 +6456,20 @@ class AgentWebSocketServer:
             # 与 chat 流式路径一致，先同步 observability 再开一个 run root span（session-keyed
             # registry），使压缩状态回调能解析到 parent，事件进入轨迹 v2 展示。
             sync_agent_observability()
+            execution_subject = None
+            if is_team_mode(canonical_mode):
+                from jiuwenswarm.agents.harness.team import get_team_manager
+
+                team_agent = get_team_manager(channel_id).get_team_agent(session_id)
+                if team_agent is not None:
+                    execution_subject = team_agent.observability_execution_subject(session_id)
             _run_span = open_agent_run_span(
                 session_id=session_id,
                 mode=params.get("mode", "agent"),
                 request_id=request.request_id,
                 run_id=request.request_id,
                 turn_id=request.request_id,
+                execution_subject=execution_subject,
             )
             try:
                 result_data = await agent.compress_context(session_id=session_id, return_state=True)

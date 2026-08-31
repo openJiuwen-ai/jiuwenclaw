@@ -27,6 +27,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from jiuwenswarm.channels.web.app_web import _SpaStaticHandler
+from jiuwenswarm.gateway.channel_manager.web import trajectory_http
 from jiuwenswarm.gateway.channel_manager.web.trajectory_http import (
     TRAJECTORY_API_PREFIX,
     TrajectoryHttpService,
@@ -638,13 +639,9 @@ async def test_http_revision_feed_rejects_invalid_cursor(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_http_forbids_team_and_auto_harness_sessions(tmp_path: Path) -> None:
+async def test_http_forbids_auto_harness_sessions(tmp_path: Path) -> None:
     database_path = tmp_path / "trajectory.sqlite3"
     _seed(database_path)
-    team_service = TrajectoryHttpService(
-        _settings(database_path),
-        metadata_loader=_metadata_loader("team.plan.normal"),
-    )
     harness_service = TrajectoryHttpService(
         _settings(database_path),
         metadata_loader=_metadata_loader("auto_harness"),
@@ -654,7 +651,6 @@ async def test_http_forbids_team_and_auto_harness_sessions(tmp_path: Path) -> No
         metadata_loader=_metadata_loader("auto_harness.plan"),
     )
 
-    team_response = await team_service.list_traces("session-1", limit=30, cursor=None)
     harness_response = await harness_service.list_traces(
         "session-1",
         limit=30,
@@ -666,16 +662,40 @@ async def test_http_forbids_team_and_auto_harness_sessions(tmp_path: Path) -> No
         cursor=None,
     )
 
-    assert team_response.status_code == 403
-    assert team_response.headers["cache-control"] == "no-store"
-    assert _response_json(team_response)["code"] == "UNSUPPORTED_SESSION_MODE"
     assert harness_response.status_code == 403
     assert harness_response.headers["cache-control"] == "no-store"
     assert _response_json(harness_response)["code"] == "UNSUPPORTED_SESSION_MODE"
     assert harness_plan_response.status_code == 403
     assert harness_plan_response.headers["cache-control"] == "no-store"
     assert _response_json(harness_plan_response)["code"] == "UNSUPPORTED_SESSION_MODE"
-    test_logger.info("non-single-Agent sessions rejected by the server")
+    test_logger.info("non-single-Agent and non-Team sessions rejected by the server")
+
+
+@pytest.mark.asyncio
+async def test_http_accepts_team_sessions_with_team_name(tmp_path: Path) -> None:
+    database_path = tmp_path / "trajectory.sqlite3"
+    _seed(database_path)
+
+    def _team_metadata(session_id: str) -> dict[str, str]:
+        if session_id in {"session-1", "session-2"}:
+            return {
+                "session_id": session_id,
+                "mode": "team.plan.normal",
+                "team_name": "research-team",
+            }
+        return {}
+
+    team_service = TrajectoryHttpService(
+        _settings(database_path),
+        reader=AsyncTrajectoryReader(database_path),
+        metadata_loader=_team_metadata,
+    )
+    response = await team_service.list_traces("session-1", limit=30, cursor=None)
+    assert response.status_code == 200
+    payload = _response_json(response)
+    assert payload["session_id"] == "session-1"
+    assert len(payload["items"]) == 1
+    test_logger.info("Team sessions with a team_name accepted by the trajectory server")
 
 
 @pytest.mark.asyncio
@@ -793,6 +813,35 @@ async def test_http_reports_disabled_and_invalid_session(tmp_path: Path) -> None
     assert invalid_response.headers["cache-control"] == "no-store"
     assert _response_json(invalid_response)["code"] == "BAD_REQUEST"
     test_logger.info("disabled and invalid-session states are explicit")
+
+
+@pytest.mark.asyncio
+async def test_http_follows_a_runtime_settings_toggle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_root = tmp_path / "sessions"
+    session_path = session_database_path(store_root, "session-1")
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    _seed(session_path, session_id="session-1")
+    live = {"settings": _settings(store_root, enabled=False)}
+    monkeypatch.setattr(
+        trajectory_http,
+        "load_trajectory_store_settings",
+        lambda: live["settings"],
+    )
+    # No pinned snapshot: this is how the gateway mounts the service.
+    service = TrajectoryHttpService(metadata_loader=_metadata_loader())
+
+    disabled_response = await service.list_traces("session-1", limit=30, cursor=None)
+    live["settings"] = _settings(store_root)
+    enabled_response = await service.list_traces("session-1", limit=30, cursor=None)
+
+    assert disabled_response.status_code == 503
+    assert _response_json(disabled_response)["code"] == "TRAJECTORY_DISABLED"
+    assert enabled_response.status_code == 200
+    assert len(_response_json(enabled_response)["items"]) == 1
+    test_logger.info("a mounted service follows the runtime trajectory toggle")
 
 
 @pytest.mark.asyncio

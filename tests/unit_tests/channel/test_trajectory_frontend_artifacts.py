@@ -6,6 +6,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
+
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 _FRONTEND_ROOT = _REPOSITORY_ROOT / "jiuwenswarm" / "channels" / "web" / "frontend"
@@ -14,8 +16,17 @@ _ARTIFACT_FILES = ("LICENSE", "NOTICE.md", "NOTICE.zh.md")
 
 
 def _require_tool(name: str) -> str:
+    """Return the tool path, skipping the test when the tool is not installed.
+
+    Args:
+        name: Executable name to look up on PATH.
+
+    Returns:
+        Absolute path to the executable.
+    """
     executable = shutil.which(name)
-    assert executable is not None, f"Required artifact build tool is unavailable: {name}"
+    if executable is None:
+        pytest.skip(f"Required artifact build tool is unavailable: {name}")
     return executable
 
 

@@ -81,7 +81,7 @@ export interface TrajectoryV2EventProjection {
 export interface TrajectoryV2SubjectProjection {
   diagnostics: readonly TrajectoryDiagnostic[]
   events: readonly TrajectoryV2EventProjection[]
-  handledRequestIds: ReadonlySet<string>
+  handledInferenceIds: ReadonlySet<string>
   subjectId: string
 }
 
@@ -98,7 +98,7 @@ export interface TrajectoryV2Reducer {
 interface SubjectAccumulator {
   diagnostics: TrajectoryDiagnostic[]
   events: TrajectoryV2EventProjection[]
-  handledRequestIds: Set<string>
+  handledInferenceIds: Set<string>
   windows: Map<string, ContextMessage[]>
 }
 
@@ -184,8 +184,48 @@ function physicalInferenceIds(
 export function isTrajectoryV2Record(record: OtlpExportTraceServiceRequest): boolean {
   const span = soleSpan(record)
   if (span === undefined) return false
-  return textAttribute(attributeMap(span.attributes), OPENJIUWEN_ATTRIBUTES.trajectorySchemaVersion)
-    === TRAJECTORY_V2_SCHEMA_VERSION
+  if (textAttribute(attributeMap(span.attributes), OPENJIUWEN_ATTRIBUTES.trajectorySchemaVersion)
+    === TRAJECTORY_V2_SCHEMA_VERSION) return true
+  return (span.events ?? []).some(event => (
+    textAttribute(attributeMap(event.attributes), OPENJIUWEN_ATTRIBUTES.trajectorySchemaVersion)
+      === TRAJECTORY_V2_SCHEMA_VERSION
+  ))
+}
+
+export function trajectoryV2SubjectIds(record: OtlpExportTraceServiceRequest): string[] {
+  const span = soleSpan(record)
+  if (span === undefined) return []
+  const values = [attributeMap(span.attributes), ...(span.events ?? []).map(event => (
+    attributeMap(event.attributes)
+  ))]
+  return [...new Set(values.flatMap((attributes): string[] => {
+    const subjectId = textAttribute(attributes, OPENJIUWEN_ATTRIBUTES.trajectorySubjectId)
+    return subjectId === undefined ? [] : [subjectId]
+  }))]
+}
+
+function trajectoryV2EventRecords(
+  record: OtlpExportTraceServiceRequest,
+): OtlpExportTraceServiceRequest[] {
+  const span = soleSpan(record)
+  if (span === undefined) return []
+  const records: OtlpExportTraceServiceRequest[] = []
+  if (textAttribute(attributeMap(span.attributes), OPENJIUWEN_ATTRIBUTES.trajectorySchemaVersion)
+    === TRAJECTORY_V2_SCHEMA_VERSION) records.push(record)
+  for (const event of span.events ?? []) {
+    if (textAttribute(attributeMap(event.attributes), OPENJIUWEN_ATTRIBUTES.trajectorySchemaVersion)
+      !== TRAJECTORY_V2_SCHEMA_VERSION) continue
+    const syntheticSpan: OtlpSpan = {
+      ...span,
+      name: event.name,
+      startTimeUnixNano: event.timeUnixNano,
+      endTimeUnixNano: event.timeUnixNano,
+      attributes: [...(span.attributes ?? []), ...(event.attributes ?? [])],
+      events: [],
+    }
+    records.push({ resourceSpans: [{ scopeSpans: [{ spans: [syntheticSpan] }] }] })
+  }
+  return records
 }
 
 function diagnostic(
@@ -901,17 +941,69 @@ function orderedEpochEvents(events: readonly ParsedEvent[]): ParsedEvent[] {
     .flatMap(epoch => epoch.events)
 }
 
+function askUserInteractionId(event: ParsedEvent): string | undefined {
+  const value = event.payload.interaction_id
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
+function askUserEventProjection(
+  requested: ParsedEvent,
+  resolved: ParsedEvent | undefined,
+): TrajectoryV2EventProjection | undefined {
+  const interactionId = askUserInteractionId(requested)
+  const argumentsValue = object(requested.payload.arguments)
+  const schema = object(requested.payload.schema)
+  if (interactionId === undefined || argumentsValue === undefined || schema === undefined) return undefined
+  const input = JSON.stringify(argumentsValue, null, 2)
+  const resultValue = resolved?.payload.result
+  const result = resultValue === undefined
+    ? undefined
+    : typeof resultValue === 'string' ? resultValue : JSON.stringify(resultValue, null, 2)
+  const outcome = resolved?.payload.outcome
+  const failed = resolved !== undefined && outcome !== 'answered'
+  const cell = {
+    ...eventCell(requested, `ask-user:${interactionId}`, 'tool', `ask_user · ${input}`, {
+      kind: 'trajectory_ask_user',
+      interactionId,
+      callId: interactionId,
+    }),
+    callId: interactionId,
+    inputDetail: input,
+    schemaDetail: JSON.stringify(schema),
+    status: resolved === undefined ? 'running' as const : failed ? 'error' as const : 'complete' as const,
+    timeSeconds: resolved === undefined
+      ? null
+      : Number(resolved.recordedAt - requested.recordedAt) / 1_000_000_000,
+    ...(result === undefined ? {} : { outputDetail: result, result }),
+    ...(failed ? { isError: true } : {}),
+  }
+  return {
+    cells: [cell],
+    eventId: requested.eventId,
+    eventKind: requested.eventKind,
+    sequence: requested.sequence,
+    step: requested.step,
+    traceId: requested.traceId,
+    turn: requested.turn,
+    ...(requested.requestId === undefined ? {} : { requestId: requested.requestId }),
+    ...(requested.stepId === undefined ? {} : { stepId: requested.stepId }),
+    ...(requested.turnId === undefined ? {} : { turnId: requested.turnId }),
+  }
+}
+
 function rebuildSubject(subjectId: string, events: readonly ParsedEvent[]): TrajectoryV2SubjectProjection {
   const accumulator: SubjectAccumulator = {
     diagnostics: [],
     events: [],
-    handledRequestIds: new Set(),
+    handledInferenceIds: new Set(),
     windows: new Map(),
   }
   const bySequenceByEpoch = new Map<string, Map<number, ParsedEvent>>()
   const expectedByEpoch = new Map<string, number>()
   const blockedEpochs = new Set<string>()
   const compactionsByOperationId = new Map<string, ParsedEvent | null>()
+  const askUserRequested = new Map<string, ParsedEvent>()
+  const askUserResolved = new Map<string, ParsedEvent>()
   const referencedCompactionOperationIds = new Set<string>()
   let activeEpoch: string | undefined
   let epochBaselineBase: readonly ContextMessage[] | undefined
@@ -1032,7 +1124,7 @@ function rebuildSubject(subjectId: string, events: readonly ParsedEvent[]): Traj
       }
       accumulator.windows.set(payload.window_id, payload.messages)
       lastWindow = payload.messages
-      if (event.requestId !== undefined) accumulator.handledRequestIds.add(event.requestId)
+      accumulator.handledInferenceIds.add(event.inferenceIds[0])
       const referencedOperationId = payload.caused_by_operation_id?.trim()
       if (referencedOperationId) {
         referencedCompactionOperationIds.add(referencedOperationId)
@@ -1129,6 +1221,22 @@ function rebuildSubject(subjectId: string, events: readonly ParsedEvent[]): Traj
       }
       continue
     }
+    if (event.eventKind === 'ask_user.requested' || event.eventKind === 'ask_user.resolved') {
+      const interactionId = askUserInteractionId(event)
+      if (interactionId === undefined) {
+        accumulator.diagnostics.push(diagnostic(
+          'v2.invalid_ask_user',
+          'ask_user event is missing its interaction identity.',
+          subjectId,
+          event.eventId,
+          event.sequence,
+        ))
+        continue
+      }
+      const target = event.eventKind === 'ask_user.requested' ? askUserRequested : askUserResolved
+      if (!target.has(interactionId)) target.set(interactionId, event)
+      continue
+    }
     accumulator.diagnostics.push(diagnostic(
       'v2.unknown_event_kind',
       `Unsupported schema-v2 event kind: ${event.eventKind}.`,
@@ -1136,6 +1244,20 @@ function rebuildSubject(subjectId: string, events: readonly ParsedEvent[]): Traj
       event.eventId,
       event.sequence,
     ))
+  }
+  for (const [interactionId, requested] of askUserRequested) {
+    const projection = askUserEventProjection(requested, askUserResolved.get(interactionId))
+    if (projection === undefined) {
+      accumulator.diagnostics.push(diagnostic(
+        'v2.invalid_ask_user',
+        'ask_user requested payload is incomplete.',
+        subjectId,
+        requested.eventId,
+        requested.sequence,
+      ))
+      continue
+    }
+    accumulator.events.push(projection)
   }
   for (const [operationId, compaction] of compactionsByOperationId) {
     if (compaction === null
@@ -1153,36 +1275,41 @@ function rebuildSubject(subjectId: string, events: readonly ParsedEvent[]): Traj
     subjectId,
     diagnostics: accumulator.diagnostics,
     events: accumulator.events,
-    handledRequestIds: accumulator.handledRequestIds,
+    handledInferenceIds: accumulator.handledInferenceIds,
   }
 }
 
-/** Create one durable UI reducer; duplicate revisions are ignored by event identity. */
+/** Create one durable UI reducer; later revisions of the same Span replace provisional payloads. */
 export function createTrajectoryV2Reducer(): TrajectoryV2Reducer {
   const eventsBySubject = new Map<string, Map<string, ParsedEvent>>()
   const globalDiagnostics: TrajectoryDiagnostic[] = []
   return {
     apply(records) {
       for (const record of records) {
-        if (!isTrajectoryV2Record(record)) continue
-        const parsed = parseEvent(record)
-        if ('code' in parsed) {
-          appendUniqueDiagnostic(globalDiagnostics, parsed)
-          continue
-        }
-        const subjectEvents = eventsBySubject.get(parsed.subjectId) ?? new Map<string, ParsedEvent>()
-        const existing = subjectEvents.get(parsed.eventId)
-        if (existing === undefined) {
-          subjectEvents.set(parsed.eventId, parsed)
-          eventsBySubject.set(parsed.subjectId, subjectEvents)
-        } else if (eventFingerprint(existing) !== eventFingerprint(parsed)) {
-          appendUniqueDiagnostic(globalDiagnostics, diagnostic(
-            'v2.event_id_conflict',
-            'The same event ID changed payload; the first immutable event was retained.',
-            parsed.subjectId,
-            parsed.eventId,
-            parsed.sequence,
-          ))
+        for (const eventRecord of trajectoryV2EventRecords(record)) {
+          const parsed = parseEvent(eventRecord)
+          if ('code' in parsed) {
+            appendUniqueDiagnostic(globalDiagnostics, parsed)
+            continue
+          }
+          const subjectEvents = eventsBySubject.get(parsed.subjectId) ?? new Map<string, ParsedEvent>()
+          const existing = subjectEvents.get(parsed.eventId)
+          if (existing === undefined) {
+            subjectEvents.set(parsed.eventId, parsed)
+            eventsBySubject.set(parsed.subjectId, subjectEvents)
+          } else if (eventFingerprint(existing) !== eventFingerprint(parsed)) {
+            if (existing.traceId === parsed.traceId && existing.span.spanId === parsed.span.spanId) {
+              subjectEvents.set(parsed.eventId, parsed)
+            } else {
+              appendUniqueDiagnostic(globalDiagnostics, diagnostic(
+                'v2.event_id_conflict',
+                'Different Spans reused one event ID; the first immutable event was retained.',
+                parsed.subjectId,
+                parsed.eventId,
+                parsed.sequence,
+              ))
+            }
+          }
         }
       }
       const subjects = new Map([...eventsBySubject].map(([subjectId, events]) => (

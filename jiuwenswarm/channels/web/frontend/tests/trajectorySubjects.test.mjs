@@ -164,6 +164,37 @@ test('the first schema-v2 subagent event creates a tab without misusing the owne
   assert.equal(group.records.length, 1);
 });
 
+test('schema-v2 team leader events remain in the leader lane', () => {
+  const leader = {
+    id: 'team-member:session-main:demo:leader',
+    displayName: 'Leader',
+    kind: 'team_leader',
+    parentId: null,
+    sessionId: 'session-main',
+  };
+  const compacted = record('000000000000001a', 'compaction.completed', '500', leader);
+  const span = compacted.resourceSpans[0].scopeSpans[0].spans[0];
+  span.attributes.push(
+    attribute('openjiuwen.trajectory.schema_version', '2'),
+    attribute('openjiuwen.trajectory.subject_id', leader.id),
+    attribute('openjiuwen.trajectory.session_id', 'session-main'),
+  );
+
+  const result = groupTrajectorySubjects(
+    [compacted],
+    [detail(compacted, 1)],
+    new Map(),
+    'session-main',
+    { teamMode: true },
+  );
+  const group = result.byId.get(leader.id);
+
+  assert.ok(group);
+  assert.equal(group.subject.kind, 'team_leader');
+  assert.equal(group.subject.displayName, 'Leader');
+  assert.equal(group.records.length, 1);
+});
+
 test('subject view cache reuses every unchanged group and projection', () => {
   const records = [
     record('0000000000000020', 'main request', '100', main),
@@ -349,4 +380,77 @@ test('Archive v1 replay produces the same execution-subject groups as live recor
     archived.groups.map(group => [group.subject.id, group.records.length]),
     live.groups.map(group => [group.subject.id, group.records.length]),
   );
+});
+
+test('team leader and teammate subjects group into parallel lanes', () => {
+  const teamLeader = {
+    id: 'team-member:sess:research:team-leader',
+    displayName: 'Team Leader',
+    kind: 'team_leader',
+    parentId: null,
+    sessionId: 'sess',
+  };
+  const engineer = {
+    id: 'team-member:sess:research:engineer',
+    displayName: 'Engineer',
+    kind: 'team_member',
+    parentId: 'team-member:sess:research:team-leader',
+    sessionId: 'sess',
+  };
+  const records = [
+    record('0000000000000040', 'leader plan request', '100', teamLeader),
+    record('0000000000000041', 'engineer tool call', '200', engineer),
+  ];
+  const rawRecords = records.map(detail);
+  const lifecycle = new Map(rawRecords.map(item => [item.record_id, 'completed']));
+  const result = groupTrajectorySubjects(records, rawRecords, lifecycle, 'sess', { teamMode: true });
+
+  assert.deepEqual(result.groups.map(group => group.subject.id), [
+    teamLeader.id,
+    engineer.id,
+  ]);
+  assert.deepEqual(result.groups.map(group => group.subject.kind), [
+    'team_leader',
+    'team_member',
+  ]);
+  assert.deepEqual(result.groups.map(group => group.label), [
+    'Team Leader',
+    'Engineer',
+  ]);
+  assert.equal(result.byId.get(engineer.id).subject.parentId, teamLeader.id);
+  assert.equal(result.byId.get(engineer.id).records.length, 1);
+  assert.equal(result.byId.get(teamLeader.id).records.length, 1);
+});
+
+test('team leader sorts before teammates regardless of observation order', () => {
+  const leader = {
+    id: 'team-member:sess:proj:team-leader',
+    displayName: 'Team Leader',
+    kind: 'team_leader',
+    parentId: null,
+    sessionId: 'sess',
+  };
+  const member = {
+    id: 'team-member:sess:proj:member',
+    displayName: 'Member',
+    kind: 'team_member',
+    parentId: 'team-member:sess:proj:team-leader',
+    sessionId: 'sess',
+  };
+  // Member observed first, leader later.
+  const records = [
+    record('0000000000000050', 'member request', '100', member),
+    record('0000000000000051', 'leader request', '200', leader),
+  ];
+  const result = groupTrajectorySubjects(
+    records,
+    records.map(detail),
+    new Map(),
+    'sess',
+    { teamMode: true },
+  );
+  assert.deepEqual(result.groups.map(group => group.subject.id), [
+    leader.id,
+    member.id,
+  ]);
 });

@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 """WebChannel - WebSocket 通道实现.
 
@@ -702,9 +702,9 @@ class WebChannel(BaseWsChannel):
         loop = self._trajectory_event_loop
         if loop is None or loop.is_closed():
             return
-        loop.call_soon_threadsafe(self._schedule_trajectory_updates, updates)
+        loop.call_soon_threadsafe(self.schedule_trajectory_updates, updates)
 
-    def _schedule_trajectory_updates(self, updates: tuple[Any, ...]) -> None:
+    def schedule_trajectory_updates(self, updates: tuple[Any, ...]) -> None:
         """Coalesce high-frequency Span revisions before WebSocket fan-out.
 
         Streaming model spans can commit hundreds of revisions per second. A
