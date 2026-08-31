@@ -4029,7 +4029,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
     def _build_filesystem_rail() -> SysOperationRail | None:
         """Build SysOperationRail."""
         try:
-            fs_rail = SysOperationRail()
+            fs_rail = SysOperationRail(with_code_tool=True)
             logger.info("[JiuWenSwarmDeepAdapter] SysOperationRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SysOperationRail create failed: %s", exc)
