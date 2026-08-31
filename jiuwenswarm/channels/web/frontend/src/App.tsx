@@ -1359,6 +1359,19 @@ function AppContent({
         if (session?.model) {
           useSessionStore.getState().setSelectedModelName(targetSessionId, session.model);
         }
+        // 恢复会话时同步 swarmflow 开关 + budget：后端 metadata 里的
+        // session_swarmflow_config 是上次会话持久化的配置，刷新/重进后读回。
+        const sfConfig = (session as unknown as Record<string, unknown> | null)?.session_swarmflow_config;
+        if (sfConfig && typeof sfConfig === 'object') {
+          const cfg = sfConfig as { enable_swarmflow?: boolean; swarmflow_budget?: number | null };
+          if (cfg.enable_swarmflow) {
+            useSessionStore.getState().setSwarmflowActive(
+              targetSessionId,
+              true,
+              cfg.swarmflow_budget ?? undefined,
+            );
+          }
+        }
       }
       return session;
     } catch (error) {
@@ -2598,9 +2611,9 @@ function AppContent({
         setHistoryBootstrapKey((k) => k + 1);
       }
       requestComposerFocus();
-      if (!targetSession) {
-        void loadSessionMetadata(targetSessionId);
-      }
+      // 始终拉一次 metadata——targetSession 从会话列表来（summary，无 swarmflow config），
+      // 需要完整 metadata 才能恢复 session_swarmflow_config。
+      void loadSessionMetadata(targetSessionId);
     },
     [
       clearMessages,
