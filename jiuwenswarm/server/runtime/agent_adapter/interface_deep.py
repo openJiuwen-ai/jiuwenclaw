@@ -7320,6 +7320,8 @@ class JiuWenSwarmDeepAdapter:
             mcps=None,
             model=model,
             skills=None,
+            workspace=workspace_obj,
+            sys_operation=self._sys_operation,
         ) or None
         return DeepAgentConfig(
             model=model,
