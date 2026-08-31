@@ -105,6 +105,34 @@ main() {
     DEPLOY_VARS["ENABLE_USER_WEB_EMBEDDING"]=$(
         [[ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]] && printf true || printf false
     )
+    if [[ -z "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]:-}" ]]; then
+        DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]="true"
+    fi
+    local user_web_idp_defaulted="false"
+    local user_web_manager_defaulted="false"
+    if [[ -z "${DEPLOY_VARS["USER_WEB_IDP_TARGET"]:-}" ]]; then
+        DEPLOY_VARS["USER_WEB_IDP_TARGET"]="http://${DEPLOY_VARS["IDENTITY_NAME"]}:${DEPLOY_VARS["IDENTITY_REST_PORT"]}"
+        user_web_idp_defaulted="true"
+    fi
+    if [[ -z "${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]:-}" ]]; then
+        DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]="http://${DEPLOY_VARS["MANAGER_SERVER_NAME"]}:${DEPLOY_VARS["MANAGER_REST_PORT"]}"
+        user_web_manager_defaulted="true"
+    fi
+    if [[ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]]; then
+        if [[ "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "true" ]]; then
+            info "【登录认证模拟调试模式已开启】"
+        elif [[ "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "false" ]]; then
+            info "【正式身份认证模式，依赖manager ID认证服务】"
+            if [[ "${user_web_idp_defaulted}" == "true" ]]; then
+                info "USER_WEB_IDP_TARGET 未配置，暂使用当前集群 Identity：${DEPLOY_VARS["USER_WEB_IDP_TARGET"]}"
+            fi
+            if [[ "${user_web_manager_defaulted}" == "true" ]]; then
+                info "USER_WEB_MANAGER_TARGET 未配置，暂使用当前集群 Manager：${DEPLOY_VARS["USER_WEB_MANAGER_TARGET"]}"
+            fi
+        fi
+    elif [[ "${DEPLOY_VARS["LOGIN_AUTH_SIMULATE"]}" == "false" ]]; then
+        warning "配置冲突：personal 模式仍将跳过企业登录认证"
+    fi
 
     parse_args "$@"
     detect_os

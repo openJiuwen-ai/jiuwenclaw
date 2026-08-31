@@ -3,7 +3,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: <<REDIS_NAME>>
-  namespace: default
+  namespace: <<NAMESPACE>>
 spec:
   selector:
     app: <<REDIS_NAME>>
@@ -17,6 +17,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: <<REDIS_NAME>>-nodeport
+  namespace: <<NAMESPACE>>
 spec:
   type: NodePort
   ports:
@@ -31,7 +32,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: <<REDIS_NAME>>
-  namespace: default
+  namespace: <<NAMESPACE>>
 spec:
   replicas: 1
   selector:

@@ -8,11 +8,10 @@ import logging
 from typing import Any
 
 from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
+from jiuwenswarm.gateway.config.enterprise.tables.application_config_models import LOG_MASKING_RULE_TABLE_DEF
 from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
-
 from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import assert_jiuwenclaw_id_matches, format_ts, utc_now
-from ...models.application_config_models import LOG_MASKING_RULE_TABLE_DEF
 from ...schemas.application_config_schemas import (
     LogMaskingRuleCreateRequest,
     LogMaskingRuleUpdateRequest,

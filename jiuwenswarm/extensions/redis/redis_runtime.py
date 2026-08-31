@@ -1,11 +1,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Gateway 进程内 Redis 生命周期：配置解析、连接、健康检查。
+"""Gateway 进程内 Redis 生命周期：配置解析、连接、健康检查（§3.3.4）。
 
-企业版（``gateway.edition=enterprise``）启动时连接 Redis，供 Ephemeral 存储使用；
-个人版跳过。连接失败时降级为无 Redis，业务模块通过 ``get_gateway_redis_client()`` 判空。
+``deployment_mode=standalone`` 或未成功连上 Redis 时，不创建客户端；业务模块可通过
+``get_gateway_redis_client()`` 判空后回退本地实现。
 """
 
 from __future__ import annotations
+
 import asyncio
 import importlib
 import logging
@@ -14,6 +15,7 @@ import uuid
 from importlib.metadata import entry_points
 from typing import Any
 
+from jiuwenswarm.common.local_env_config import is_enterprise
 from jiuwenswarm.extensions.redis.redis_client import RedisConfig
 
 logger = logging.getLogger(__name__)
@@ -71,7 +73,7 @@ def get_declared_deployment_mode() -> str:
 
 
 def get_effective_distributed_redis_active() -> bool:
-    """企业版 Redis 已连接且未因健康检查标记为 degraded。"""
+    """声明为 active-standby 且 Redis 已连接、未因健康检查标记为 degraded。"""
     return _effective_distributed_redis and not _redis_degraded and _redis_client is not None
 
 
@@ -142,20 +144,32 @@ async def init_gateway_redis_from_config(full_cfg: dict[str, Any] | None) -> Non
     gw = cfg_in.get("gateway")
     gw = gw if isinstance(gw, dict) else {}
     declared = str(gw.get("deployment_mode") or "standalone").strip().lower()
-    _declared_deployment_mode = declared if declared in ("standalone", "active-standby") else "standalone"
+    _declared_deployment_mode = (
+        declared
+        if declared in ("standalone", "active-standby", "distributed")
+        else "standalone"
+    )
 
     iid = str(gw.get("instance_id") or "").strip()
-    if _declared_deployment_mode == "active-standby":
+    # active-standby / distributed 都需要 instance_id 标识（主备选主 / 多副本区分）
+    if _declared_deployment_mode in ("active-standby", "distributed"):
         _gateway_instance_id = iid or uuid.uuid4().hex
         if not iid:
             logger.info("[GatewayRedis] gateway.instance_id unset; generated %s", _gateway_instance_id)
     else:
         _gateway_instance_id = iid if iid else None
 
-    from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE, resolve_gateway_edition
+    # 仅 standalone 跳过 Redis init；active-standby / distributed 都需要连 Redis
+    if _declared_deployment_mode == "standalone":
+        logger.debug("[GatewayRedis] deployment_mode=standalone; skip Redis init (§3.3.4)")
+        return
 
-    if resolve_gateway_edition(cfg_in) != EDITION_ENTERPRISE:
-        logger.debug("[GatewayRedis] personal edition; skip Redis init")
+    # 企业版特性：仅企业版开启时启用主备 Redis
+    if not is_enterprise():
+        logger.debug(
+            "[GatewayRedis] deployment_mode=%s but not enterprise edition; skip Redis init",
+            _declared_deployment_mode,
+        )
         return
 
     r_cfg = RedisConfig.from_mapping(cfg_in.get("redis") if isinstance(cfg_in.get("redis"), dict) else {})

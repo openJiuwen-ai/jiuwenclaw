@@ -38,6 +38,7 @@ def test_single_replica_sqlite_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_enterprise_context_requires_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("GATEWAY_REPLICAS", "1")
     monkeypatch.setenv("GATEWAY_DB_TYPE", "sqlite")
     monkeypatch.setattr(
@@ -51,6 +52,7 @@ def test_enterprise_context_requires_redis(monkeypatch: pytest.MonkeyPatch) -> N
 def test_enterprise_context_replicas_forbid_sqlite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("GATEWAY_REPLICAS", "2")
     monkeypatch.setenv("GATEWAY_DB_TYPE", "sqlite")
     monkeypatch.setattr(
@@ -62,6 +64,7 @@ def test_enterprise_context_replicas_forbid_sqlite(
 
 
 def test_enterprise_context_uses_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JIUWENSWARM_EDITION", "enterprise")
     monkeypatch.setenv("GATEWAY_REPLICAS", "2")
     monkeypatch.setenv("GATEWAY_DB_TYPE", "postgresql")
     monkeypatch.setattr(

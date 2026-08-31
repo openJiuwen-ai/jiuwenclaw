@@ -287,6 +287,7 @@ _SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_adapter_token"
 _SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_metadata_token"
 _SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_workspace_token"
 _SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_interactive_ask_token"
+_SKILL_TURBO_RESUME_ANSWERS_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_resume_answers_token"
 _SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY = "_jiuwenswarm_subagent_parent_session_token"
 
 
@@ -328,6 +329,18 @@ def _reset_skill_turbo_interactive_ask_token(ctx: AgentCallbackContext) -> None:
             reset_interactive_ask,
         )
         reset_interactive_ask(token)
+
+
+def _reset_skill_turbo_resume_answers_token(ctx: AgentCallbackContext) -> None:
+    extra = getattr(ctx, "extra", None)
+    if not isinstance(extra, dict):
+        return
+    token = extra.pop(_SKILL_TURBO_RESUME_ANSWERS_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+            reset_skill_turbo_resume_answers,
+        )
+        reset_skill_turbo_resume_answers(token)
 
 
 def _reset_subagent_parent_session_token(ctx: AgentCallbackContext) -> None:
@@ -934,6 +947,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_metadata_token(ctx)
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
+        _reset_skill_turbo_resume_answers_token(ctx)
         _reset_subagent_parent_session_token(ctx)
 
     # ------------------------------------------------------------------
@@ -1158,9 +1172,18 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                         exc,
                     )
                 ctx.inputs.tool_args = cleaned_args
-            await self._emit_tool_call(session, tc, model_display_name=model_display)
-            if not ctx.extra.get("_skip_tool"):
-                await self._emit_tool_update(session, tc, status="in_progress")
+            extra = getattr(ctx, "extra", None)
+            if not isinstance(extra, dict):
+                extra = {}
+            from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
+            skip_resume_tool_call = (
+                tool_name == "skill_acceleration_exec"
+                and extra.get(RESUME_USER_INPUT_KEY) is not None
+            )
+            if not skip_resume_tool_call:
+                await self._emit_tool_call(session, tc, model_display_name=model_display)
+                if not ctx.extra.get("_skip_tool"):
+                    await self._emit_tool_update(session, tc, status="in_progress")
             self._symphony_stream_handler.bind_progress(ctx, session, tc)
             # Track in-flight tool call for cancellation
             tc_id = getattr(tc, "id", "")
@@ -1234,12 +1257,25 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             parent_token = set_subagent_parent_session(actual_session)
             ctx.extra[_SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY] = parent_token
 
+        extra = getattr(ctx, "extra", None)
+        if isinstance(extra, dict):
+            from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
+            resume_answers = extra.get(RESUME_USER_INPUT_KEY)
+            if resume_answers is not None:
+                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                    set_skill_turbo_resume_answers,
+                )
+                extra[_SKILL_TURBO_RESUME_ANSWERS_TOKEN_EXTRA_KEY] = (
+                    set_skill_turbo_resume_answers(resume_answers)
+                )
+
     # ------------------------------------------------------------------
     # after_tool_call: emit tool_result + todo.updated
     # ------------------------------------------------------------------
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         _reset_subagent_parent_session_token(ctx)
+        _reset_skill_turbo_resume_answers_token(ctx)
 
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
@@ -1259,6 +1295,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             _reset_skill_turbo_metadata_token(ctx)
             _reset_skill_turbo_workspace_token(ctx)
             _reset_skill_turbo_interactive_ask_token(ctx)
+            # Already reset at after_tool_call entry for the session-is-None
+            # early return; this pop is defensive if that path was skipped.
+            _reset_skill_turbo_resume_answers_token(ctx)
             try:
                 from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
                     get_skill_turbo_hitl_tic,
@@ -1276,7 +1315,12 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                             tool_call=ctx.inputs.tool_call,
                         )
                         ctx.inputs.tool_result = new_tic
-                        ctx.inputs.tool_msg = None
+                        ctx.inputs.tool_msg = ToolMessage(
+                            content=self._tool_interrupted_message(
+                                ctx.inputs.tool_name or "skill_acceleration_exec"
+                            ),
+                            tool_call_id=ctx.inputs.tool_call.id,
+                        )
                     logger.info(
                         "[StreamEventRail] SkillTurbo HITL: rewrote tool_result to TIE. "
                         "original_tcid=%s harness_tcid=%s",
@@ -1349,6 +1393,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_metadata_token(ctx)
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
+        _reset_skill_turbo_resume_answers_token(ctx)
         _reset_subagent_parent_session_token(ctx)
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")

@@ -4,24 +4,19 @@
 
 本模块把推给当前连接抽象成推给已注册的订阅者，WS与HTTP都注册进来：
 HTTP客户端通过一条SSE长连接（``GET /api/v1/events/stream``）订阅，
-WS连接以:data:`WS_PUSH_SUBSCRIBER_ID`注册。
+WS连接以 :func:`make_ws_push_subscriber_id` 生成的**每连接唯一** id 注册。
 
-WS 侧的单槽位语义（刻意如此，勿当 bug 修）
----------------------------------------
-WS 一律用 :data:`WS_PUSH_SUBSCRIBER_ID` 这**一个**固定 id 注册，由此得到两条
-既有语义：
+WS 侧语义（2026-08 起）
+----------------------
+每条 Gateway/Relay WS 使用唯一 subscriber id（``gateway-ws:<id(ws)>``）：
 
-1. **后连接覆盖前者** —— 同 id 重复注册即覆盖，「同时只有最后一条 Gateway
-   连接能收到推送」；
-2. **断开时无条件清空** —— ``unregister(WS_PUSH_SUBSCRIBER_ID)`` 无条件生效，
-   即使已有新连接接管也会抹掉。
+1. **并存扇出** —— 多条存活连接各自占一个订阅位，``push`` 扇给全部匹配者；
+2. **断开只清自己** —— ``finally`` 只 ``unregister`` 本连接的 id，不得再用固定
+   全局 id 无条件清空（旧单槽位曾导致：短连接覆盖后断开 → 长连接仍在收请求流、
+   但 ``send_push`` 永久失败，前端收不到 ``chat.file`` 且工具误报成功）。
 
-2026-08-20 真机实测过它的杀伤力：几条只活 5 秒的短连接轮流接入/断开，把长连接
-挤出槽位后又清空；长连接因为一直没断**不会重新注册**，于是前端**永久收不到推送
-且毫无报错**，只能重启服务恢复（刷新浏览器无效）。
-
-> 想改成「多 Gateway 连接各自收推送」，只需把固定 id 换成每连接唯一 id、并在
-> ``finally`` 里注销**自己那个** id。那是一次有意的行为变更，应单独验证。
+历史：固定 id ``gateway-ws`` 单槽 + 断开无条件清空，真机出现过「短连接挤掉长连接
+后永久无推送」。``WS_PUSH_SUBSCRIBER_ID`` 常量仅作前缀/兼容别名保留。
 
 与 ``server.gateway_push`` 的区别（名字相近，角色相反）
 --------------------------------------------------
@@ -47,11 +42,16 @@ from jiuwenswarm.server.transports.sink import ResponseSink
 logger = logging.getLogger(__name__)
 
 
-#: Gateway WebSocket 连接在注册表里的**固定** id。
-#:
-#: 固定而非每连接唯一，由此得到 WS 侧的单槽位语义：同 id 重复注册即覆盖
-#: （后连接顶掉前者），``unregister`` 无条件生效（断开即清空）。详见模块 docstring。
-WS_PUSH_SUBSCRIBER_ID = "gateway-ws"
+#: WS 订阅 id 前缀。完整 id 见 :func:`make_ws_push_subscriber_id`。
+#: 保留旧名 ``WS_PUSH_SUBSCRIBER_ID`` 以免外部 import 断裂；**不要**再拿它当全局单槽注册。
+WS_PUSH_SUBSCRIBER_ID_PREFIX = "gateway-ws"
+WS_PUSH_SUBSCRIBER_ID = WS_PUSH_SUBSCRIBER_ID_PREFIX
+
+
+def make_ws_push_subscriber_id(ws: Any) -> str:
+    """为一条 Gateway/Relay WebSocket 生成 PushRegistry 订阅 id。"""
+    return f"{WS_PUSH_SUBSCRIBER_ID_PREFIX}:{id(ws)}"
+
 
 #: 单个订阅者的推送投递上限（秒）。超时即判定该订阅者停滞并注销 ——
 #: 见 :meth:`PushRegistry.push` 的 note。
@@ -74,11 +74,9 @@ class _Subscriber:
             队列满即无限阻塞，必须设上限，否则一个停止读取的客户端能把整轮扇出
             连同调用方一起卡死。
 
-            ``False``（**WS 用**）：不设上限、也不注销。WS 侧的出口是
-            ``_GatewayWSPushSink``，它的契约是「发送失败只记 warning、连接照旧留着」——
-            因为 ``gateway-ws`` 是**固定 id 的单槽位**，一旦被摘掉，长连接不会重新注册，
-            前端就此永久收不到推送、只能重启服务。给它套超时等于绕过那层保护：
-            一次慢发送（大帧、背压、排在连接级 ``send_lock`` 后面）就会触发注销。
+            ``False``（**WS 用**）：不设上限、也不因慢发送注销。WS 侧出口是
+            ``_GatewayWSPushSink``（发送失败只 warning、连接照旧）。给 WS 套超时
+            会在大帧/背压时误摘订阅者，导致 ``send_file`` 等推送静默丢失。
     """
 
     sink: ResponseSink

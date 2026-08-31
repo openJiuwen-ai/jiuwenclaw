@@ -12,7 +12,7 @@ parse_args() {
                 CMD="${args[$i]}"
                 i=$((i+1))
                 ;;
-            nfs|nfs-sc|rabbitmq|mysql|redis|postgresql|minio|log|jina|gateway|web|manager|runtime)
+            nfs|nfs-sc|rabbitmq|mysql|postgresql|minio|log|jina|gateway|web|manager|runtime)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
@@ -51,7 +51,7 @@ parse_args() {
 }
 
 process_modules() {
-    MODULES=("GATEWAY" "WEB" "MANAGER" "RUNTIME")
+    MODULES=("GATEWAY" "WEB" "RUNTIME")
 }
 
 # Print help info and exit
@@ -68,7 +68,6 @@ Modules (Optional):
   nfs       NFS service module (deploys to default namespace, ignores -n parameter)
   rabbitmq  RabbitMQ module (deploys to default namespace, ignores -n parameter)
   mysql     MySQL module (deploys to default namespace, ignores -n parameter)
-  redis     Redis module (deploys to default namespace, ignores -n parameter)
   minio     Minio module (deploys to default namespace, ignores -n parameter)
   log       Log module (deploys to default namespace, ignores -n parameter)
   jina      Jina module (deploys to default namespace, ignores -n parameter)

@@ -8,10 +8,9 @@ import logging
 from typing import Any
 
 from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
-
+from jiuwenswarm.gateway.config.enterprise.tables.instance_resource_models import INSTANCE_AGENT_RESOURCE_TABLE_DEF
 from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import parse_iso_datetime, utc_now
-from ...models.instance_resource_models import INSTANCE_AGENT_RESOURCE_TABLE_DEF
 from ...schemas.instance_resource_schemas import InstanceAgentResourceUpsertRequest
 
 _TABLE = INSTANCE_AGENT_RESOURCE_TABLE_DEF.table_name
@@ -48,9 +47,13 @@ def _build_row_from_resource(
         "resource_name": req.resource_name.strip(),
         "resource_desc": req.resource_desc,
         "ref_template_id": req.ref_template_id.strip(),
-        "grants": [grant.model_dump(mode="json") for grant in req.grants],
-        "created_at": parse_iso_datetime(resource.get("created_at")) or now,
-        "updated_at": parse_iso_datetime(resource.get("updated_at")) or now,
+        "match_expr": req.match_expr if req.match_expr is not None else [],
+        "granted_by": req.granted_by,
+        "expires_at": req.expires_at,
+        "enabled": bool(req.enabled),
+        "data": req.data,
+        "created_at": now,
+        "updated_at": now,
     }
 
 
@@ -69,7 +72,8 @@ async def _upsert_instance_agent_resource(
         return
     created_at = existing.get("created_at")
     if created_at is not None:
-        row_data["created_at"] = created_at
+        # existing 可能是 ISO 字符串；asyncpg 要求 datetime
+        row_data["created_at"] = parse_iso_datetime(created_at) or now
     updates = {
         key: value
         for key, value in row_data.items()

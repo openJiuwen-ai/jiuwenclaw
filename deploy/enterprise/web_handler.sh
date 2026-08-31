@@ -9,11 +9,6 @@ gen_web_file() {
 
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
 
-    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]; then
-        local nodeport_name="${DEPLOY_VARS["WEB_NAME"]}-nodeport"
-        yq eval 'select(.metadata.name != "'"${nodeport_name}"'")' -i "${file}"
-    fi
-
     if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]}" == "true" ]; then
         obs_url="${DEPLOY_VARS["OBS_URL"]}"
     fi
@@ -46,6 +41,16 @@ gen_web_file() {
         }
     ]' -i "${file}"
 
+    if [ "${DEPLOY_VARS["DB_TYPE"]}" == "postgresql" ]; then
+        yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].env += [
+            {
+                "name": "WEB_PG_SCHEMA",
+                "value": "'"${DEPLOY_VARS["WEB_PG_SCHEMA"]}"'"
+            }
+        ]' -i "${file}"
+    fi
+
     add_resource_if_set "WEB" "${file}"
 
     # yq 追加资源配置时可能重复 env；Deployment strategic merge patch 不接受重复键，
@@ -57,9 +62,7 @@ gen_web_file() {
 
 render_web_files() {
     render_secret_configmap
-    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" != "enterprise" ]; then
-        ensure_available_port "WEB_NODE_PORT"
-    fi
+    ensure_available_port "WEB_NODE_PORT"
     gen_web_file
 }
 
@@ -71,12 +74,7 @@ deploy_web() {
     ensure_secret_configmap
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
-    if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ]; then
-        delete_k8s_resource "service" "${name}-nodeport" "${namespace}"
-        success "User Web is available through Manager Web; standalone NodePort is disabled"
-    else
-        success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
-    fi
+    success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
 }
 
 uninstall_web() {

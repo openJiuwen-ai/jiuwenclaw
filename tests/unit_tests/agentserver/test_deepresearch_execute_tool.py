@@ -118,11 +118,19 @@ async def test_runner_error_preserves_bounded_subprocess_diagnostics():
 
 @pytest.mark.asyncio
 async def test_new_query_starts_sdk_directly():
+    sdk_usage = {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "total_tokens": 150,
+        "llm_call_count": 2,
+        "agent_name_token_usage": [],
+    }
     completed = {
         "status": "completed",
         "conversation_id": "conversation-1",
         "report_delivered": True,
         "report_chars": 42,
+        "workflow_llm_token_usage": sdk_usage,
     }
     with patch.object(
         de,
@@ -132,6 +140,7 @@ async def test_new_query_starts_sdk_directly():
         result, saved = await _invoke(query="研究智能家电竞争格局")
 
     assert result["kind"] == "completed"
+    assert result["workflow_llm_token_usage"] == sdk_usage
     assert saved[0]["phase"] == "starting"
     stream.assert_awaited_once()
 
@@ -409,6 +418,37 @@ async def test_feedback_answer_resumes_once_and_returns_direct_completion():
     assert stream.await_args.kwargs["action"] == "resume"
     assert stream.await_args.kwargs["node"] == "feedback_handler"
     assert "空调与冰箱" in stream.await_args.kwargs["feedback"]
+
+
+@pytest.mark.asyncio
+async def test_completion_warns_when_html_style_falls_back():
+    completed = {
+        "status": "completed",
+        "conversation_id": "conversation-1",
+        "report_delivered": True,
+        "report_chars": 42,
+        "html_style_status": "fallback",
+        "html_style_phase": "invoke_llm",
+        "html_style_reason_code": "llm_call_failed",
+    }
+    with patch.object(
+        de,
+        "_call_deepresearch_stream_impl",
+        new=AsyncMock(return_value=json.dumps(completed, ensure_ascii=False)),
+    ):
+        result, saved = await _invoke(query="研究智能家电竞争格局")
+
+    assert result["kind"] == "completed"
+    assert result["html_style_status"] == "fallback"
+    assert result["html_style_phase"] == "invoke_llm"
+    assert result["html_style_reason_code"] == "llm_call_failed"
+    assert (
+        "HTML 已交付内置基础视觉模板，但 AI 生成的增强样式未应用"
+        in result["content"]
+    )
+    assert saved[-1]["html_style_status"] == "fallback"
+    assert saved[-1]["html_style_phase"] == "invoke_llm"
+    assert saved[-1]["html_style_reason_code"] == "llm_call_failed"
 
 
 @pytest.mark.asyncio

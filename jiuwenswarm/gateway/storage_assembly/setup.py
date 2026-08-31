@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""按 ``gateway.edition`` 装配 StorageContext。"""
+"""按 ``is_enterprise()`` 装配 StorageContext（个人版/企业版）。"""
 
 from __future__ import annotations
 
@@ -8,11 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.gateway.edition import (
-    EDITION_ENTERPRISE,
-    EDITION_PERSONAL,
-    resolve_gateway_edition,
-)
+from jiuwenswarm.common.utils import is_enterprise
 from jiuwenswarm.gateway.storage.backends.db.persistent_store import DbPersistentBackend
 from jiuwenswarm.gateway.storage.backends.file_persistent import FilePersistentBackend
 from jiuwenswarm.gateway.storage.backends.memory_ephemeral import MemoryEphemeralBackend
@@ -48,8 +44,8 @@ def _redis_client() -> Any | None:
     return client
 
 
-def _create_persistent(edition: str) -> PersistentStore:
-    if edition == "enterprise":
+def _create_persistent() -> PersistentStore:
+    if is_enterprise():
         from jiuwenswarm.gateway.storage_assembly.db_connection import GatewayDbConnection
 
         assert_replicas_db_compat()
@@ -88,8 +84,8 @@ def _require_redis_client() -> Any:
     return client
 
 
-def _create_ephemeral_factory(edition: str):
-    if edition != "enterprise":
+def _create_ephemeral_factory():
+    if not is_enterprise():
         def memory_factory(namespace: str) -> EphemeralStore:
             return MemoryEphemeralBackend(namespace)
 
@@ -212,30 +208,21 @@ def _wire_personal_yaml_section_repositories(
         set_preferred_language_config_repository,
     )
 
-    if resolve_gateway_edition(cfg) != EDITION_PERSONAL:
+    if is_enterprise():
         return
 
-    edition = EDITION_PERSONAL
     instance_id = resolve_storage_instance_id(cfg)
     set_heartbeat_config_repository(
-        create_heartbeat_config_repository(
-            store, edition, instance_id=instance_id
-        )
+        create_heartbeat_config_repository(store, instance_id=instance_id)
     )
     set_browser_config_repository(
-        create_browser_config_repository(
-            store, edition, instance_id=instance_id
-        )
+        create_browser_config_repository(store, instance_id=instance_id)
     )
     set_preferred_language_config_repository(
-        create_preferred_language_config_repository(
-            store, edition, instance_id=instance_id
-        )
+        create_preferred_language_config_repository(store, instance_id=instance_id)
     )
     set_a2ui_config_repository(
-        create_a2ui_config_repository(
-            store, edition, instance_id=instance_id
-        )
+        create_a2ui_config_repository(store, instance_id=instance_id)
     )
 
 
@@ -253,27 +240,18 @@ def _wire_config_and_cron_repositories(
     from jiuwenswarm.gateway.cron.job_access import set_cron_persistent_store
     from jiuwenswarm.gateway.storage.access import set_persistent_store
 
-    edition = resolve_gateway_edition(cfg)
     instance_id = resolve_storage_instance_id(cfg)
     set_channel_config_repository(
-        create_channel_config_repository(
-            store, edition, instance_id=instance_id
-        )
+        create_channel_config_repository(store, instance_id=instance_id)
     )
     set_permissions_config_repository(
-        create_permissions_config_repository(
-            store, edition, instance_id=instance_id
-        )
+        create_permissions_config_repository(store, instance_id=instance_id)
     )
     set_logging_config_repository(
-        create_logging_config_repository(
-            store, edition, instance_id=instance_id
-        )
+        create_logging_config_repository(store, instance_id=instance_id)
     )
     set_memory_config_repository(
-        create_memory_config_repository(
-            store, edition, instance_id=instance_id
-        )
+        create_memory_config_repository(store, instance_id=instance_id)
     )
     set_persistent_store(store)
     set_cron_persistent_store(store)
@@ -348,7 +326,7 @@ async def setup_gateway_storage_repositories(
     if repos_on:
         _wire_config_and_cron_repositories(store, cfg)
 
-    if resolve_gateway_edition(cfg) == EDITION_ENTERPRISE:
+    if is_enterprise():
         from jiuwenswarm.gateway.config.enterprise.access import (
             set_enterprise_record_repositories,
         )
@@ -395,7 +373,7 @@ def ensure_enterprise_storage_context(
         from jiuwenswarm.common.config import get_config
 
         cfg = get_config()
-    if resolve_gateway_edition(cfg) != EDITION_ENTERPRISE:
+    if not is_enterprise():
         raise ValueError("ensure_enterprise_storage_context requires enterprise edition")
     return create_gateway_storage_context(cfg)
 
@@ -419,7 +397,7 @@ async def wire_enterprise_manager_ws_store_async(
         from jiuwenswarm.common.config import get_config
 
         cfg = get_config()
-    if resolve_gateway_edition(cfg) != EDITION_ENTERPRISE:
+    if not is_enterprise():
         return
     from jiuwenswarm.gateway.storage_assembly.manager_ws_bridge import (
         wire_manager_ws_table_store,
@@ -482,9 +460,9 @@ async def teardown_session_map_repository(ctx: StorageContext) -> None:
 
 
 def create_gateway_storage_context(cfg: dict[str, Any] | None = None) -> StorageContext:
-    """按 ``gateway.edition`` 组装进程级 ``StorageContext``（持久化 + 临时态入口）。
+    """按 ``is_enterprise()`` 组装进程级 ``StorageContext``（持久化 + 临时态入口）。
 
-    - 解析 edition（``personal`` / ``enterprise``）
+    - 企业版/个人版由 ``is_enterprise()`` 判定
     - 选择 Persistent backend：personal → 文件；enterprise → DB
     - 选择 Ephemeral 工厂：personal → 内存；enterprise → Redis
 
@@ -495,27 +473,25 @@ def create_gateway_storage_context(cfg: dict[str, Any] | None = None) -> Storage
         from jiuwenswarm.common.config import get_config
 
         cfg = get_config()
-    edition = resolve_gateway_edition(cfg)
     return StorageContext(
-        _create_persistent(edition),
-        ephemeral_factory=_create_ephemeral_factory(edition),
+        _create_persistent(),
+        ephemeral_factory=_create_ephemeral_factory(),
     )
 
 
 def create_channel_config_repository(
     store: PersistentStore,
-    edition: str,
     *,
     instance_id: str = "",
 ):
-    """按 edition 选 Codec，业务侧拿到的是同一个 Repository。"""
+    """按 ``is_enterprise()`` 选 Codec，业务侧拿到的是同一个 Repository。"""
     from jiuwenswarm.gateway.config.channel import (
         ChannelConfigRepository,
         DbRowChannelCodec,
         YamlMapChannelCodec,
     )
 
-    if edition == EDITION_ENTERPRISE:
+    if is_enterprise():
         codec = DbRowChannelCodec(instance_id=instance_id)
     else:
         codec = YamlMapChannelCodec()
@@ -528,9 +504,20 @@ def create_session_map_repository(store: PersistentStore):
     return SessionMapRepository(store)
 
 
+def create_a2a_outbound_repository(
+    store: PersistentStore,
+):
+    """Create the personal-edition JSON-backed outbound Repository."""
+    from jiuwenswarm.gateway.a2a_manager.outbound import (
+        A2AOutboundRepository,
+        JsonA2AOutboundRecordCodec,
+    )
+
+    return A2AOutboundRepository(store, JsonA2AOutboundRecordCodec())
+
+
 def create_permissions_config_repository(
     store: PersistentStore,
-    edition: str,
     *,
     instance_id: str = "",
 ):
@@ -542,7 +529,7 @@ def create_permissions_config_repository(
 
     codec = (
         DbBodySectionCodec()
-        if edition == EDITION_ENTERPRISE
+        if is_enterprise()
         else YamlSectionCodec()
     )
     return PermissionsConfigRepository(
@@ -552,7 +539,6 @@ def create_permissions_config_repository(
 
 def create_logging_config_repository(
     store: PersistentStore,
-    edition: str,
     *,
     instance_id: str = "",
 ):
@@ -564,7 +550,7 @@ def create_logging_config_repository(
 
     codec = (
         db_logging_codec()
-        if edition == EDITION_ENTERPRISE
+        if is_enterprise()
         else YamlSectionCodec()
     )
     return LoggingConfigRepository(store, codec, instance_id=instance_id)
@@ -572,7 +558,6 @@ def create_logging_config_repository(
 
 def create_memory_config_repository(
     store: PersistentStore,
-    edition: str,
     *,
     instance_id: str = "",
 ):
@@ -584,15 +569,15 @@ def create_memory_config_repository(
 
     codec = (
         DbBodySectionCodec()
-        if edition == EDITION_ENTERPRISE
+        if is_enterprise()
         else YamlSectionCodec()
     )
     return MemoryConfigRepository(store, codec, instance_id=instance_id)
 
 
-def _require_personal_config_store(edition: str, store_name: str) -> None:
+def _require_personal_config_store(store_name: str) -> None:
     """heartbeat / browser / preferred_language / a2ui 无企业同构表。"""
-    if edition == EDITION_ENTERPRISE:
+    if is_enterprise():
         raise ValueError(
             f"{store_name} is personal-only (YAML overlay); "
             "no enterprise DB table"
@@ -601,7 +586,6 @@ def _require_personal_config_store(edition: str, store_name: str) -> None:
 
 def create_heartbeat_config_repository(
     store: PersistentStore,
-    edition: str,
     *,
     instance_id: str = "",
 ):
@@ -610,7 +594,7 @@ def create_heartbeat_config_repository(
         YamlSectionCodec,
     )
 
-    _require_personal_config_store(edition, "heartbeat_config")
+    _require_personal_config_store("heartbeat_config")
     return HeartbeatConfigRepository(
         store, YamlSectionCodec(), instance_id=instance_id
     )
@@ -618,7 +602,6 @@ def create_heartbeat_config_repository(
 
 def create_browser_config_repository(
     store: PersistentStore,
-    edition: str,
     *,
     instance_id: str = "",
 ):
@@ -627,7 +610,7 @@ def create_browser_config_repository(
         YamlSectionCodec,
     )
 
-    _require_personal_config_store(edition, "browser_config")
+    _require_personal_config_store("browser_config")
     return BrowserConfigRepository(
         store, YamlSectionCodec(), instance_id=instance_id
     )
@@ -635,7 +618,6 @@ def create_browser_config_repository(
 
 def create_preferred_language_config_repository(
     store: PersistentStore,
-    edition: str,
     *,
     instance_id: str = "",
 ):
@@ -644,7 +626,7 @@ def create_preferred_language_config_repository(
         YamlSectionCodec,
     )
 
-    _require_personal_config_store(edition, "preferred_language_config")
+    _require_personal_config_store("preferred_language_config")
     return PreferredLanguageConfigRepository(
         store, YamlSectionCodec(), instance_id=instance_id
     )
@@ -652,7 +634,6 @@ def create_preferred_language_config_repository(
 
 def create_a2ui_config_repository(
     store: PersistentStore,
-    edition: str,
     *,
     instance_id: str = "",
 ):
@@ -661,7 +642,7 @@ def create_a2ui_config_repository(
         YamlSectionCodec,
     )
 
-    _require_personal_config_store(edition, "a2ui_config")
+    _require_personal_config_store("a2ui_config")
     return A2uiConfigRepository(
         store, YamlSectionCodec(), instance_id=instance_id
     )
@@ -706,6 +687,7 @@ def create_enterprise_record_repositories(
 
 
 __all__ = [
+    "create_a2a_outbound_repository",
     "create_a2ui_config_repository",
     "create_browser_config_repository",
     "create_channel_config_repository",

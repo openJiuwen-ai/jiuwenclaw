@@ -48,12 +48,11 @@ from jiuwenswarm.common.utils import (
     update_config,
     migrate_legacy_user_config_if_needed,
 )
-# Needed before workspace update_config gate (module top-level uses is_enterprise).
+# Needed before workspace update_config gate (module top-level uses is_enterprise;
+# enterprise multi-Pod shared PVC skips startup merge).
 from jiuwenswarm.common.local_env_config import is_enterprise
 
 migrate_legacy_user_config_if_needed()
-
-from jiuwenswarm.common.local_env_config import is_enterprise
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
@@ -279,17 +278,6 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
         logger.info("[AgentServer] log masking rules loaded from Gateway DB (if any)")
     except Exception:  # noqa: BLE001
         logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
-
-    if is_enterprise():
-        try:
-            from jiuwenswarm.agents.harness.common.memory.config import (
-                reload_embed_config_from_gateway_db,
-            )
-
-            await reload_embed_config_from_gateway_db()
-            logger.info("[AgentServer] embed_config loaded from Gateway DB (if any)")
-        except Exception:  # noqa: BLE001
-            logger.warning("[AgentServer] embed_config cold load skipped", exc_info=True)
 
     if is_enterprise():
         try:

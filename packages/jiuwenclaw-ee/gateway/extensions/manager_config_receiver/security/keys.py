@@ -16,13 +16,13 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.security import link_auth
 
-from ..infrastructure.repository_access import require_enterprise_repository
-from ..infrastructure.utils import utc_now
-from ..models.key_models import (
+from jiuwenswarm.gateway.config.enterprise.tables.key_models import (
     GATEWAY_ENC_KEYPAIR_TABLE_DEF,
     GATEWAY_SIGN_KEYPAIR_TABLE_DEF,
     MANAGER_SIGN_PUBKEY_TABLE_DEF,
 )
+from ..infrastructure.repository_access import require_enterprise_repository
+from ..infrastructure.utils import utc_now
 from . import crypto_primitives as cp
 
 logger = logging.getLogger(__name__)
@@ -133,7 +133,7 @@ async def store_manager_sign_pubkey(
     sign_alg: str = "Ed25519",
     fingerprint: str | None = None,
 ) -> None:
-    """落库/更新 Manager 签名公钥（握手 register.ack 时调用，即“确认配对”）。
+    """落库/更新 Manager 签名公钥（可选；用于 config.push 验签）。
 
     读写走装配层注入的 ``manager_sign_pubkey`` Repository（按启动时 ``instance_id`` 隔离）。
     ``jiuwenclaw_id`` 仍写入行内，供对账；lookup 以 Repository scope 为准。

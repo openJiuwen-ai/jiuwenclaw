@@ -8,10 +8,9 @@ import logging
 from typing import Any
 
 from jiuwenswarm.gateway.config.enterprise.repository import EnterpriseRecordRepository
-
+from jiuwenswarm.gateway.config.enterprise.tables.template_models import EXTENSION_CONFIG_TEMPLATE_TABLE_DEF
 from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import parse_iso_datetime, utc_now
-from ...models.template_models import EXTENSION_CONFIG_TEMPLATE_TABLE_DEF
 from ...schemas.template_schemas import (
     ExtensionConfigTemplateUpdateRequest,
     HookConfig,
@@ -149,8 +148,8 @@ def _build_row_from_template(
         "custom_config": custom_config,
         "enabled": bool(template.get("enabled", True)),
         "data": template.get("data"),
-        "created_at": parse_iso_datetime(template.get("created_at")) or now,
-        "updated_at": parse_iso_datetime(template.get("updated_at")) or now,
+        "created_at": now,
+        "updated_at": now,
     }
 
 
@@ -171,7 +170,8 @@ async def _upsert_extension_config_template_from_sync(
         return
     created_at = existing.get("created_at")
     if created_at is not None:
-        row_data["created_at"] = created_at
+        # existing 可能是 ISO 字符串；asyncpg 要求 datetime
+        row_data["created_at"] = parse_iso_datetime(created_at) or now
     updates = {
         k: v for k, v in row_data.items() if k not in ("jiuwenclaw_id", "template_id")
     }

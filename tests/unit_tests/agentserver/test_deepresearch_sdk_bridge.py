@@ -18,6 +18,7 @@ import pytest
 
 from jiuwenswarm.agents.harness.common.tools.deepresearch import sdk_bridge as bridge
 from jiuwenswarm.agents.harness.common.tools.deepresearch import runtime
+from jiuwenswarm.common.local_env_config import get_task_env_overlay
 
 
 def _zip_bytes() -> bytes:
@@ -34,9 +35,10 @@ def _private_file(path: Path) -> None:
 
 def _request() -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "final_result": {"response_content": "report"},
         "llm_config": {"general": {"api_key": "secret", "model_name": "m"}},
+        "llm_auth": {},
         "tls": {"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": True},
     }
 
@@ -77,7 +79,7 @@ def test_bridge_streaming_reader_handles_short_reads():
     "mutation",
     [
         lambda request: request.update(extra=True),
-        lambda request: request.update(schema_version=2),
+        lambda request: request.update(schema_version=1),
         lambda request: request.update(tls={"LLM_SSL_VERIFY": False}),
         lambda request: request.update(tls={"LLM_SSL_VERIFY": "false", "TOOL_SSL_VERIFY": True}),
     ],
@@ -89,7 +91,28 @@ def test_request_schema_is_strict(mutation):
         bridge.read_request(io.BytesIO(json.dumps(request).encode()))
 
 
-@pytest.mark.parametrize("schema_version", [True, 1.0, "1", -1])
+@pytest.mark.parametrize(
+    "llm_auth",
+    [
+        None,
+        {"default_headers": ""},
+        {"default_headers": "not-json"},
+        {"default_headers": "{}"},
+        {"default_headers": '{"X-Extra":"1"}'},
+        {
+            "default_headers": '{"Authorization":"Basic abc","X-Extra":"1"}'
+        },
+        {"default_headers": '{"Authorization":"Basic abc"}', "extra": "x"},
+    ],
+)
+def test_request_schema_rejects_nonminimal_llm_auth(llm_auth):
+    request = _request()
+    request["llm_auth"] = llm_auth
+    with pytest.raises(bridge.BridgeError, match="bridge_request_invalid"):
+        bridge.read_request(io.BytesIO(json.dumps(request).encode()))
+
+
+@pytest.mark.parametrize("schema_version", [True, 2.0, "2", -1])
 def test_request_schema_version_requires_exact_integer(schema_version):
     request = _request()
     request["schema_version"] = schema_version
@@ -325,8 +348,10 @@ async def test_sdk_is_lazy_logs_only_to_stderr_and_restores_tls(tmp_path: Path, 
         print("sdk-style-log")
         return types.SimpleNamespace(
             convert_content=base64.b64encode(_zip_bytes()).decode(),
-            style_applied=True,
-            style_status="applied",
+            style_applied=False,
+            style_status="fallback",
+            style_phase="invoke_llm",
+            style_reason_code="llm_call_failed",
         )
 
     modules = {
@@ -349,12 +374,76 @@ async def test_sdk_is_lazy_logs_only_to_stderr_and_restores_tls(tmp_path: Path, 
     result = await bridge.stylize_request(_request(), output)
     captured = capsys.readouterr()
     assert result["status"] == "completed"
+    assert result["style_phase"] == "invoke_llm"
+    assert result["style_reason_code"] == "llm_call_failed"
     assert captured.out == ""
     assert "sdk-context-log" in captured.err and "sdk-style-log" in captured.err
     assert observed["tls"] == ("false", "true")
     assert observed["config"]["general"]["api_key"] == bytearray(b"secret")
     assert os.environ["LLM_SSL_VERIFY"] == "parent-llm"
     assert "TOOL_SSL_VERIFY" not in os.environ
+
+
+@pytest.mark.asyncio
+async def test_sdk_binds_request_scoped_auth_overlay_and_restores_it(
+    tmp_path: Path, monkeypatch
+):
+    output = tmp_path / "styled.zip"
+    _private_file(output)
+    authorization = "Basic c3R5bGUtY2hpbGQ="
+    observed = {}
+
+    @asynccontextmanager
+    async def context(_config):
+        observed["overlay"] = get_task_env_overlay()
+        from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
+            OpenAIModelClient,
+        )
+        from openjiuwen.core.foundation.llm.schema.config import (
+            ModelClientConfig,
+            ModelRequestConfig,
+        )
+
+        model_client = OpenAIModelClient(
+            ModelRequestConfig(),
+            ModelClientConfig(
+                api_key="huawei-maas-session",
+                api_base="https://example.invalid/v1",
+                client_provider="OpenAI",
+                use_shared_llm_http_client=False,
+            ),
+        )
+        client = model_client._create_async_openai_client()
+        observed["authorization"] = client._custom_headers.get("Authorization")
+        await client.close()
+        yield {"llm": True}
+
+    async def stylize(_final_result, _llm):
+        return types.SimpleNamespace(
+            convert_content=base64.b64encode(_zip_bytes()).decode(),
+            style_applied=True,
+            style_status="applied",
+        )
+
+    service = types.ModuleType("openjiuwen_deepsearch.algorithm.report_style.service")
+    style_runtime = types.ModuleType(
+        "openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime"
+    )
+    service.stylize_report = stylize
+    style_runtime.report_style_llm_context = context
+    monkeypatch.setitem(sys.modules, service.__name__, service)
+    monkeypatch.setitem(sys.modules, style_runtime.__name__, style_runtime)
+    request = _request()
+    request["llm_auth"] = {
+        "default_headers": json.dumps({"Authorization": authorization})
+    }
+
+    result = await bridge.stylize_request(request, output)
+
+    assert result["status"] == "completed"
+    assert observed["overlay"] == request["llm_auth"]
+    assert observed["authorization"] == authorization
+    assert get_task_env_overlay() is None
 
 
 @pytest.mark.asyncio
@@ -376,6 +465,46 @@ async def test_sdk_exception_is_safe_and_restores_tls(tmp_path: Path, monkeypatc
     with pytest.raises(bridge.BridgeError, match="SDK report styling failed") as caught:
         await bridge.stylize_request(_request(), output)
     assert "secret" not in str(caught.value)
+    assert get_task_env_overlay() is None
+
+
+@pytest.mark.asyncio
+async def test_sdk_cancellation_restores_auth_overlay(tmp_path: Path, monkeypatch):
+    output = tmp_path / "styled.zip"
+    _private_file(output)
+    started = asyncio.Event()
+    observed = {}
+
+    @asynccontextmanager
+    async def context(_config):
+        observed["overlay"] = get_task_env_overlay()
+        yield {"llm": True}
+
+    async def stylize(_final_result, _llm):
+        started.set()
+        await asyncio.Event().wait()
+
+    service = types.ModuleType("openjiuwen_deepsearch.algorithm.report_style.service")
+    style_runtime = types.ModuleType(
+        "openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime"
+    )
+    service.stylize_report = stylize
+    style_runtime.report_style_llm_context = context
+    monkeypatch.setitem(sys.modules, service.__name__, service)
+    monkeypatch.setitem(sys.modules, style_runtime.__name__, style_runtime)
+    request = _request()
+    request["llm_auth"] = {
+        "default_headers": '{"Authorization":"Basic Y2FuY2Vs"}'
+    }
+
+    task = asyncio.create_task(bridge.stylize_request(request, output))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert observed["overlay"] == request["llm_auth"]
+    assert get_task_env_overlay() is None
 
 
 def test_cli_stdout_is_exactly_one_versioned_result_line(tmp_path: Path, monkeypatch, capsys):
@@ -390,6 +519,8 @@ def test_cli_stdout_is_exactly_one_versioned_result_line(tmp_path: Path, monkeyp
             "output_path": str(output),
             "style_applied": True,
             "style_status": "applied",
+            "style_phase": None,
+            "style_reason_code": None,
     }
 
     async def stylize(_request_value, _output_value):
@@ -488,6 +619,7 @@ async def test_parent_client_tracks_validates_and_cleans_owned_archive(tmp_path:
     executable.parent.mkdir(parents=True)
     executable.write_text("python")
     output_holder = {}
+    authorization = "Basic cGFyZW50LXRvLWNoaWxk"
     manager = types.SimpleNamespace(track_process=lambda *_: None, untrack_process=lambda *_: None)
 
     async def spawn(*args, **kwargs):
@@ -498,11 +630,16 @@ async def test_parent_client_tracks_validates_and_cleans_owned_archive(tmp_path:
             "schema_version": 1,
             "status": "completed",
             "output_path": str(output),
-            "style_applied": True,
-            "style_status": "applied",
+            "style_applied": False,
+            "style_status": "fallback",
+            "style_phase": "invoke_llm",
+            "style_reason_code": "llm_call_failed",
         }
         output_holder["env"] = kwargs["env"]
-        return _Process((json.dumps(frame) + "\n").encode(), b"sdk logs")
+        output_holder["args"] = args
+        process = _Process((json.dumps(frame) + "\n").encode(), b"sdk logs")
+        output_holder["process"] = process
+        return process
 
     monkeypatch.setattr(runtime, "resolve_python_executable", lambda: executable)
     monkeypatch.setattr(runtime, "build_child_env", lambda _: {
@@ -514,16 +651,50 @@ async def test_parent_client_tracks_validates_and_cleans_owned_archive(tmp_path:
     async with runtime.stylize_report_archive(
         final_result={"response_content": "r"},
         llm_config={"general": {"api_key": "secret"}},
+        llm_auth={
+            "default_headers": json.dumps({"Authorization": authorization})
+        },
         tls={"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False},
         manager=manager,
         session_id="S1",
     ) as archive:
-        assert archive == output_holder["path"]
-        assert archive.exists()
+        assert archive.path == output_holder["path"]
+        assert archive.path.exists()
+        assert archive.style_applied is False
+        assert archive.style_status == "fallback"
+        assert archive.style_phase == "invoke_llm"
+        assert archive.style_reason_code == "llm_call_failed"
     assert not output_holder["path"].exists()
     assert not output_holder["path"].parent.exists()
     assert "LLM_SSL_VERIFY" not in output_holder["env"]
     assert "TOOL_SSL_VERIFY" not in output_holder["env"]
+    request = json.loads(bytes(output_holder["process"].stdin.data))
+    assert request["schema_version"] == 2
+    assert request["llm_auth"] == {
+        "default_headers": json.dumps({"Authorization": authorization})
+    }
+    assert authorization not in " ".join(map(str, output_holder["args"]))
+    assert authorization not in json.dumps(output_holder["env"])
+
+
+@pytest.mark.parametrize(
+    "llm_auth",
+    [
+        {"default_headers": "{}"},
+        {"default_headers": '{"Authorization":"Basic abc","X-Extra":"1"}'},
+        {"unexpected": "value"},
+    ],
+)
+def test_parent_rejects_nonminimal_llm_auth_before_spawn(llm_auth):
+    with pytest.raises(
+        runtime.DeepResearchRuntimeError, match="sdk_bridge_request_invalid"
+    ):
+        runtime._encode_bridge_request(
+            final_result={},
+            llm_config={},
+            llm_auth=llm_auth,
+            tls={"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False},
+        )
 
 
 @pytest.mark.asyncio
@@ -545,7 +716,7 @@ async def test_parent_client_rejects_stdout_injection_and_cleans(tmp_path: Path,
     monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
     with pytest.raises(runtime.DeepResearchRuntimeError, match="sdk_bridge_protocol_invalid"):
         async with runtime.stylize_report_archive(
-            final_result={}, llm_config={},
+            final_result={}, llm_config={}, llm_auth={},
             tls={"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False},
             manager=manager, session_id="S1",
         ):
@@ -586,6 +757,7 @@ async def test_parent_client_requires_exact_integer_schema_version(
         async with runtime.stylize_report_archive(
             final_result={},
             llm_config={},
+            llm_auth={},
             tls={"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False},
             manager=manager,
             session_id="S1",
@@ -612,7 +784,7 @@ async def test_parent_client_track_failure_reaps_and_does_not_untrack(tmp_path: 
     monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
     with pytest.raises(RuntimeError, match="closed"):
         async with runtime.stylize_report_archive(
-            final_result={}, llm_config={},
+            final_result={}, llm_config={}, llm_auth={},
             tls={"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False},
             manager=manager, session_id="S1",
         ):
@@ -643,7 +815,7 @@ async def test_parent_client_repeated_cancel_reaps_untracks_and_cleans(tmp_path:
 
     async def invoke():
         async with runtime.stylize_report_archive(
-            final_result={}, llm_config={},
+            final_result={}, llm_config={}, llm_auth={},
             tls={"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False},
             manager=manager, session_id="S1",
         ):

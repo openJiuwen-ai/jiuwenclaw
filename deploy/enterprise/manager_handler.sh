@@ -33,7 +33,7 @@ gen_identity_file() {
         select(.kind == "Deployment").spec.template.spec.containers[0].env += [
             {
                 "name": "IDENTITY_PG_SCHEMA",
-                "value": "'"${DEPLOY_VARS["MANAGER_PG_SCHEMA"]}"'"
+                "value": "'"${DEPLOY_VARS["IDENTITY_PG_SCHEMA"]}"'"
             }
         ]' -i "${file}"
     fi
@@ -87,15 +87,6 @@ deploy_manager() {
         wait_k8s_resource_ready "deployment" "${manager_web_name}" "${namespace}"
         success "MANAGER_WEB_NODE_PORT: ${DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]}"
 
-        # WEB 先于 MANAGER 渲染时无法知道 Manager Web 的 NodePort。
-        # Manager 就绪后重新渲染并应用 User Web，端口由 kubectl 实时读取。
-        if [ "${DEPLOY_VARS["USER_WEB_MODE"]}" == "enterprise" ] \
-            && module_is_selected "WEB"; then
-            # WEB 已经在前面分配过 NodePort；这里只重新渲染登录跳转地址，
-            # 不能再次调用 ensure_available_port，否则会把自身端口判定为冲突。
-            gen_web_file
-            deploy_web
-        fi
     fi
 
 }

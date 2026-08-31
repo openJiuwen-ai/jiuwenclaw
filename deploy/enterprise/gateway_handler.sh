@@ -6,12 +6,6 @@ gen_gateway_env_file() {
     local env_template_file="${CONFIG["GATEWAY_ENV_TEMPLATE_FILE"]}"
     local envfile_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_CM_NAME"]}"
     local env_file="${CONFIG["GATEWAY_ENV_FILE"]}"
-    local deploy_mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]}"
-
-
-    if [ "${deploy_mode}" == "active-standby" ]; then
-         DEPLOY_VARS["GATEWAY_INSTANCE_ID"]="gateway-${namespace}"
-    fi
 
     render_config_template "${env_template_file}" "${env_file}" "DEPLOY_VARS"
 
@@ -125,9 +119,6 @@ render_gateway_files() {
     ensure_jiuwenclaw_id
     gen_gateway_env_file
     gen_gateway_config_file
-    if [ "${DEPLOY_VARS["DEPLOYMENT_MODE"]}" == "active-standby" ]; then
-        DEPLOY_VARS["GATEWAY_REPLICAS"]="2"
-    fi
 
     if [[ "${mount_type}" == "pvc" && "${is_external_pvc}" == "false" ]]; then
         render_config_template "${pvc_template_file}" "${pvc_file}" "DEPLOY_VARS"
@@ -203,4 +194,5 @@ uninstall_gateway() {
         exec_cmd kubectl delete -f ${pvc_file}  --ignore-not-found=true
     fi
     uninstall_secret_configmap
+    ensure_redis_down "runtime"
 }

@@ -172,7 +172,6 @@ FEISHU_BOTS="
 - **nfs**：NFS 存储服务模块
 - **nfs-sc**：NFS 存储供给模块
 - **mysql**：MySQL 存储服务模块
-- **redis**：Redis 服务模块
 - **postgresql**：PostgreSQL 存储服务模块
 - **minio**：Minio 存储服务模块
 - **log**：日志管理模块
@@ -186,7 +185,6 @@ FEISHU_BOTS="
 ./deploy.sh [操作命令] nfs          # 仅操作 NFS 存储模块
 ./deploy.sh [操作命令] nfs-sc       # 仅操作 NFS 存储供给模块
 ./deploy.sh [操作命令] mysql        # 仅操作 MySQL 模块
-./deploy.sh [操作命令] redis        # 仅操作 Redis 模块
 ./deploy.sh [操作命令] postgresql   # 仅操作 PostgreSQL 模块
 ./deploy.sh [操作命令] minio        # 仅操作 MinIO 模块
 ./deploy.sh [操作命令] log          # 仅操作日志管理模块
@@ -198,7 +196,8 @@ FEISHU_BOTS="
 
 **重要约束：**
 
-- **NFS / MySQL / PostgreSQL / Redis / Log / Jina：** 以上基础依赖模块全局仅支持单次部署，固定运行于 default 命名空间，部署命令自动忽略自定义命名空间参数。
+- **NFS / MySQL / PostgreSQL / Log / Jina：** 以上基础依赖模块全局仅支持单次部署，固定运行于 default 命名空间，部署命令自动忽略自定义命名空间参数。
+- **Redis：** 不作为独立模块部署，仅作为 Gateway、Runtime 的附属依赖。每个命名空间拥有独立的 Redis 实例（Deployment 名为 `jiuwenclaw-redis`），实现多业务实例间数据隔离。启动 Gateway 或 Runtime 等依赖 Redis 的业务模块时，部署工具会自动执行就绪检查：已配置外挂 Redis 则复用外部服务；否则复用同命名空间已有的内置 Redis；若同命名空间既无外挂 Redis 也无内置 Redis，则自动拉起一个内置 Redis 实例。
 - **Web / Gateway / Manager：** 业务服务模块需保持命名空间一致（为了环境隔离与日志运维，禁止使用default命令空间），否则服务间网络互通异常、功能不可用。
 
 **使用示例：**
@@ -209,7 +208,6 @@ FEISHU_BOTS="
 ./deploy.sh up mysql      # 启动 MySQL 存储模块（只需一次）
 ./deploy.sh up postgresql # 启动 PostgreSQL 存储模块（只需一次）
 ./deploy.sh up minio      # 启动 MinIO 存储模块（只需一次）
-./deploy.sh up redis      # 启动 Redis 存储模块（只需一次）
 ./deploy.sh up log        # 启动日志管理服务模块（只需一次）
 ./deploy.sh up jina       # 启动网页内容提取服务模块（只需一次）
 ./deploy.sh up gateway    # 启动 Gateway 服务模块
@@ -222,7 +220,6 @@ FEISHU_BOTS="
 ./deploy.sh down gateway    # 卸载 Gateway 服务模块（按需卸载）
 ./deploy.sh down jina       # 卸载网页内容提取服务模块（非必要不卸载）
 ./deploy.sh down log        # 卸载日志管理服务模块（非必要不卸载）
-./deploy.sh down redis      # 卸载 Redis 存储模块（非必要不卸载）
 ./deploy.sh down minio      # 卸载 MinIO 存储模块（非必要不卸载
 ./deploy.sh down postgresql # 卸载 PostgreSQL 存储模块（非必要不卸载）
 ./deploy.sh down mysql      # 卸载 MySQL 存储模块（非必要不卸载）
@@ -234,7 +231,6 @@ FEISHU_BOTS="
 ./deploy.sh restart mysql       # 重启 MySQL 存储模块（非必要不重启）
 ./deploy.sh restart postgresql  # 重启 PostgreSQL 存储模块（非必要不重启）
 ./deploy.sh restart minio       # 重启 MinIO 存储模块（非必要不重启）
-./deploy.sh restart redis       # 重启 Redis 存储模块（非必要不重启）
 ./deploy.sh restart log         # 重启日志管理模块（非必要不重启）
 ./deploy.sh restart jina        # 重启网页内容提取服务模块（非必要不重启）
 ./deploy.sh restart gateway     # 重启 Gateway 服务模块（按需重启）
@@ -243,12 +239,12 @@ FEISHU_BOTS="
 ```
 
 **重要说明：**
-每当升级新版本服务时，对于**NFS、NFS-SC、MySQL、PostgreSQL、Redis、MinIO、Log、Jina** 等全局基础依赖组件应尽量保持不变，无需重复部署。仅需对业务服务**Gateway、Web、CLAW-Manager**进行版本替换：在旧版本部署目录中，依次卸载 业务模块；随后切换至新版本部署工具目录，启动对应新版业务模块。
+每当升级新版本服务时，对于**NFS、NFS-SC、MySQL、PostgreSQL、MinIO、Log、Jina** 等全局基础依赖组件应尽量保持不变，无需重复部署。**Redis** 已改为按命名空间独立部署、随业务实例隔离（不支持单独部署），升级业务模块时各命名空间下的 Redis 实例保持不变即可。仅需对业务服务**Gateway、Web、CLAW-Manager**进行版本替换：在旧版本部署目录中，依次卸载 业务模块；随后切换至新版本部署工具目录，启动对应新版业务模块。
 
 ### 2.3 配置参数（选填）
 
 **参数说明：**
-- `-n`:  指定部署目标命名空间, 从而实现模块多实例隔离部署，不同命名空间的资源不冲突，默认值：`default`。需要注意的是：操作基础依赖模块时，该参数强制失效，固定部署于 `default` 命名空间。
+- `-n`:  指定部署目标命名空间, 从而实现模块多实例隔离部署，不同命名空间的资源不冲突，默认值：`default`。需要注意的是：操作 NFS / MySQL / PostgreSQL / Log / Jina 等基础依赖模块时，该参数强制失效，固定部署于 `default` 命名空间；**Redis** 随业务模块按 `-n` 指定的命名空间自动部署（不支持单独部署）。
 - `--render-only`：只渲染模板输出文件至 conf 目录，不操作集群、不校验集群资源
 
 **参数使用示例：**
@@ -331,13 +327,13 @@ NFS_SC_NAME=""
 
 ### 3.2 部署数据库服务
 
-本产品支持 SQLite、PostgreSQL、MySQL 三种数据库类型，可根据具体需求三选一配置即可。选定数据库类型后，在配置文件 `.env.custom` 中指定：
+本产品支持 PostgreSQL、MySQL 两种数据库类型，可根据具体需求二选一配置即可。选定数据库类型后，在配置文件 `.env.custom` 中指定：
 ```
-# 数据库类型，支持mysql、sqlite、postgresql, 默认为sqlite
-DB_TYPE="sqlite"
+# 数据库类型，支持 mysql、postgresql，默认 mysql
+DB_TYPE="mysql"
 ```
 
-**说明：** SQLite 为嵌入式内置数据库，无需部署。
+**说明：** SQLite 已不再支持（企业版多 Pod 共享场景下本地 sqlite 文件无法跨 Pod 共享）；个人版单机走内存/本地，不经此部署工具。
 
 #### 3.2.1 工具内置部署（开发环境可用）
 
@@ -384,29 +380,44 @@ GATEWAY_DB_PASSWORD=""
 MANAGER_DB_USER=""
 MANAGER_DB_PASSWORD=""
 
-# (仅 PostgreSQL 有效) Manager 模块的专属 Schema 名称, 默认为public
+# (仅 PostgreSQL 有效) 各模块的专属 Schema 名称, 默认为 public
 MANAGER_PG_SCHEMA=""
-
-# (仅 PostgreSQL 有效) Gateway 模块的专属 Schema 名称, 默认为public
 GATEWAY_PG_SCHEMA=""
+IDENTITY_PG_SCHEMA=""
+WEB_PG_SCHEMA=""
+RUNTIME_PG_SCHEMA=""
 ```
+
+#### 3.2.3 多实例数据库隔离
+
+数据库服务（MySQL/PostgreSQL）为所有业务实例共享同一台 DB Server。在多实例（多命名空间）部署场景下，部署工具会自动为每个实例隔离各模块数据，实例间互不干扰，默认无需任何手动配置。
+
+**默认行为（推荐）**：未显式指定各模块数据库名时，部署工具按实例（命名空间）自动为每个模块分配独立的数据库，天然保证各实例数据隔离：
+
+- **MySQL**：每个实例的每个模块使用形如 `<模块库名>_<命名空间>` 的独立数据库（如实例 `test` 的 Gateway 库为 `gateway_test`）。
+- **PostgreSQL**：在同一共享数据库内，为每个实例使用以命名空间命名的独立 schema 实现隔离（如实例 `test` 使用 schema `test`）。
+
+各模块默认库名为：Gateway→`gateway`、Manager→`manager`、Identity→`identity`、Runtime→`runtime`、Web→`web`。
+
+**自定义数据库名**：如需指定，可在 `.env.custom` 中为各模块设置对应变量（MySQL 为 `*_DB_NAME`，PostgreSQL 为 `*_PG_SCHEMA`）。一旦显式设置，部署工具将直接采用该值并不再自动分配——**请务必保证同一套部署中每个实例的各模块数据库名（或 PostgreSQL schema 名）互不相同**，否则不同实例会读写同一数据库，导致数据串台。
+
+> 提示：如无特殊需求，建议保持默认，由部署工具自动分配，既省心又能可靠保证隔离性。
 
 ### 3.3 部署redis服务
 
-当Gateway开启主备模式时，需要提前部署Redis服务。
+Redis 不支持单独部署，仅作为 Gateway、Runtime 的附属依赖，随业务模块启动时按命名空间自动就绪。每个命名空间拥有独立的 Redis 实例（Deployment 名为 `jiuwenclaw-redis`），实现多业务实例间的数据隔离。
 
-#### 3.3.1 工具内置部署（开发环境可用）
+部署 Gateway 或 Runtime 等依赖 Redis 的业务模块时，部署工具会自动执行 Redis 就绪检查（`ensure_redis_up`），其行为如下：
 
-本部署工具提供一键部署能力，可在集群内快速拉起单节点 Redis 实例：
-```
-./deploy.sh up redis        # 部署 Redis（只需也只能部署一次）
-```
+1. 若已在 `.env.custom` 中配置外挂 Redis（`REDIS_HOST`），则直接复用外部 Redis 服务，跳过内置部署；
+2. 否则检测同命名空间下是否已存在内置 Redis 实例（Deployment `jiuwenclaw-redis`），存在则直接复用；
+3. 若同命名空间下既未配置外挂 Redis、也不存在内置 Redis 实例，则自动拉起一个单节点内置 Redis 实例于该命名空间。
 
-**注意：** 本部署工具仅支持单实例Redis服务部署，如需高可用Redis服务，请采用外部独立部署方式。
+**注意：** 内置 Redis 为单节点实例，如需高可用 Redis 服务，请采用外部独立部署方式。
 
-#### 3.3.2 外部独立部署（生产环境推荐）
+#### 3.3.1 外部独立部署（生产环境推荐）
 
-生产环境下，推荐用户自行搭建高可用的外部 Redis 服务，搭建完成后需在自定义配置文件 `.env.custom` 中填写如下参数，完成外部 Redis 服务的对接工作。
+生产环境下，推荐用户自行为每套实例搭建高可用的外部 Redis 服务，搭建完成后需在自定义配置文件 `.env.custom` 中填写如下参数，完成外部 Redis 服务的对接工作。
 
 ```
 # 外部 Redis 服务的连接地址
@@ -580,7 +591,7 @@ LOG_TO_FILE_ENABLED=false
 
 JiuwenSwarm 企业级服务完整支持基于 Kubernetes 命名空间的多实例隔离部署，可在同一集群内通过不同命名空间部署多套独立运行的业务实例，实现环境隔离、多实例并行使用。
 
-同一业务实例下的所有组件（Gateway、Web、CLAW-Manager）只有部署在同一个命名空间内才能服务调用和互通。而基础依赖组件（NFS、MySQL、Redis、MinIO、PostgreSQL）为所有业务实例的公共组件，无需随业务实例重复部署。
+同一业务实例下的所有组件（Gateway、Web、CLAW-Manager、Redis）只有部署在同一个命名空间内才能服务调用和互通。其中 NFS、MySQL、MinIO、PostgreSQL 等基础依赖组件为所有业务实例的公共组件，固定部署于 default 命名空间，无需随业务实例重复部署；而 Redis 不作为独立模块部署，随业务实例按命名空间隔离，启动业务模块时由部署工具自动就绪。
 
 **注意**：
 - 业务组件请勿部署至 default 默认命名空间。
@@ -600,11 +611,11 @@ Gateway 是 JiuwenSwarm 的多渠道接入网关与消息调度核心，负责 A
 
 部署时会检查 `.env.custom` 中的 `JIUWENCLAW_ID`：未配置则自动生成并写回；已配置则沿用原值。
 
-注意：默认以单机单实例模式运行；若需启用双实例主备高可用架构，请在启动前，修改配置文件 `.env.custom` 如下参数：
+注意：Gateway 仅支持分布式多副本部署模式（`DEPLOYMENT_MODE=distributed`）：多副本同时在线、连接 Redis 共享会话、无选主（cron 默认关闭、仅 web/tui 通道）。所需 Redis 由部署工具按命名空间自动拉起（详见 3.3 节）。启动前可在配置文件 `.env.custom` 中确认如下参数：
 
 ```
-# Gateway 部署模式：standalone（默认，不连 Redis）| active-standby（双实例主备，需 Redis）
-DEPLOYMENT_MODE=standalone
+# Gateway 部署模式：distributed（多副本同时在线，连接 Redis 共享 session，无选主；cron 默认关闭；仅 web/tui 通道）
+DEPLOYMENT_MODE=distributed
 ```
 
 若需为业务服务挂载外部 NFS 服务实现数据持久化，需在配置文件`.env.custom` 中设置：
@@ -675,26 +686,55 @@ Web 为 JiuwenSwarm 企业版面向终端用户的对话可视化前端，用于
 用户面通过 `USER_WEB_MODE` 选择产品形态：
 
 ```bash
-# personal：通过 User Web NodePort 提供独立用户面
-# enterprise：通过 Manager Web 统一登录并内嵌用户面，不暴露 User Web NodePort
+# personal：独立用户面，跳过企业登录
+# enterprise：独立用户面，启用企业登录和用户上下文面板
 USER_WEB_MODE=personal
 ```
 
-`personal` 模式下，用户通过 User Web NodePort 直接使用独立用户面。`enterprise`
-模式下，Manager Web 是唯一对外入口：用户先通过 Identity Center 登录，在 Manager Web
-中选择组网、组织和 Bot，再进入同源 `/chat/` 内嵌用户面。User Web 仍保留供 Manager Web
-访问的 ClusterIP 服务，但部署脚本不会创建其 NodePort；enterprise 模式必须部署 Manager Web：
+登录认证模拟由独立参数控制：
 
 ```bash
-USER_WEB_MODE=enterprise
-IS_UP_MANAGER_WEB=true
+# 默认 true：企业模式使用 debug-user/debug-group/debug-gateway/debug-agent，
+# 不请求 Identity/Manager 用户目录接口。
+LOGIN_AUTH_SIMULATE=true
+
+# 正式模式：调用客户侧 manager 提供的 ID 认证和用户目录接口。
+LOGIN_AUTH_SIMULATE=false
+
+# 暂未配置客户接口时可以留空，部署工具会回落到当前集群内 Identity/Manager。
+USER_WEB_IDP_TARGET=""
+USER_WEB_MANAGER_TARGET=""
 ```
+
+`LOGIN_AUTH_SIMULATE` 仅接受 `true` 或 `false`。在 `personal` 模式下用户面始终跳过
+企业登录；若同时配置 `LOGIN_AUTH_SIMULATE=false`，部署和启动日志会提示该参数冲突且
+不会改变 personal 行为。正式模式启动时会分别检查 ID 认证服务和 Manager 业务接口的
+连通性并输出明确日志。
+
+认证模拟实现按插件装配。内部联调制品保持 `LOGIN_AUTH_SIMULATE_AVAILABLE=true`；
+客户正式制品使用前端 `npm run build:customer` 构建，并配置
+`LOGIN_AUTH_SIMULATE_AVAILABLE=false`、`LOGIN_AUTH_SIMULATE=false`。客户构建不会将
+`src/auth/simulate/` 内的默认用户和三元组实现打入静态产物，该目录也可从客户源码包
+直接剥离。若不含插件的制品误开模拟认证，部署检查和 User Web 启动均会明确拒绝启动。
+
+`personal` 和 `enterprise` 均通过 User Web NodePort 提供独立入口，不要求部署 Manager Web。
+`enterprise` 仅控制企业登录及用户、组织、组网、Agent 上下文面板。模拟模式完全不依赖
+Manager；正式模式保留对 Manager ID 认证及业务目录接口的调用。
+
+当前客户接口尚未提供时，目标地址留空会使用以下集群内默认值：
+
+```bash
+USER_WEB_IDP_TARGET=http://jiuwenclaw-identity:8770
+USER_WEB_MANAGER_TARGET=http://jiuwenclaw-manager-server:8765
+```
+
+这两个组件仅作为现阶段正式模式联调后端，可通过 `./deploy.sh up manager` 单独部署；
+无参数默认交付不再部署 Manager。客户接口就绪后，只需覆盖两个目标地址，不改变现有接口路径。
 
 旧配置 `ENABLE_USER_WEB_EMBEDDING` 仅作兼容输入：`true` 等价于
 `USER_WEB_MODE=enterprise`，`false` 等价于 `USER_WEB_MODE=personal`。新部署不应继续使用。
 
-Manager Web 内嵌入口使用以下同源路由，不需要额外暴露 Identity、Manager Server 或
-Gateway：
+User Web 使用以下同源代理路由访问认证、Manager 业务接口和 Gateway：
 
 | 路径 | 目标服务 | 用途 |
 |---|---|---|
@@ -703,6 +743,7 @@ Gateway：
 | `/chat/*` | User Web HTTP | 用户面对话界面 |
 | `/ws*` | Gateway WebSocket | 用户面默认消息通道 |
 | `/gateway-api/*` | Gateway Web HTTP/SSE | 用户面 REST/SSE 通道，与 Manager `/api/v1` 隔离 |
+
 | `/file-api/*`、`/share-api/*` | Gateway Web HTTP | 文件与分享接口 |
 
 Manager Web 与 `/chat/` 使用同一浏览器源，登录状态由 Manager Web 统一管理。User Web

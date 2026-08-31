@@ -66,6 +66,42 @@ class _Reader:
         return self.payload
 
 
+class _DelayedFinalReportReader:
+    def __init__(
+        self,
+        initial: bytes,
+        terminal: bytes,
+        delay: float,
+        *,
+        initial_delay: float = 0.0,
+    ):
+        self.initial = initial
+        self.terminal = terminal
+        self.delay = delay
+        self.initial_delay = initial_delay
+        self.reads = 0
+        self.cancelled = False
+
+    async def read(self, _size: int = -1) -> bytes:
+        self.reads += 1
+        if self.reads == 1:
+            if self.initial_delay:
+                try:
+                    await asyncio.sleep(self.initial_delay)
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+            return self.initial
+        if self.reads == 2:
+            try:
+                await asyncio.sleep(self.delay)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            return self.terminal
+        return b""
+
+
 class _Proc:
     """Small asyncio subprocess double with observable lifecycle."""
 
@@ -1118,6 +1154,13 @@ async def test_completed_marker_requires_all_section_progress():
 async def test_completed_marker_accepts_p_numbered_sections_beneath_wrapper_heading(
     tmp_path: Path,
 ):
+    sdk_usage = {
+        "input_tokens": 120,
+        "output_tokens": 30,
+        "total_tokens": 150,
+        "llm_call_count": 2,
+        "agent_name_token_usage": [],
+    }
     outline = (
         "# 大纲：用户需求洞察报告\n"
         "## 页面规划\n"
@@ -1145,7 +1188,10 @@ async def test_completed_marker_accepts_p_numbered_sections_beneath_wrapper_head
             {
                 "__deepsearch_status__": "completed",
                 "conversation_id": "C1",
-                "final_result": {"response_content": "# Final"},
+                "final_result": {
+                    "response_content": "# Final",
+                    "workflow_llm_token_usage": sdk_usage,
+                },
             }
         ),
     ]
@@ -1180,6 +1226,7 @@ async def test_completed_marker_accepts_p_numbered_sections_beneath_wrapper_head
         "conversation_id": "C1",
         "report_delivered": True,
         "report_chars": len("# Final"),
+        "workflow_llm_token_usage": sdk_usage,
     }
 
 
@@ -1511,7 +1558,12 @@ async def test_completed_report_delivers_markdown_html_and_hidden_bundle(tmp_pat
     }
     push = AsyncMock()
     write_report = AsyncMock(
-        return_value={"md": str(tmp_path / "r.md"), "html": str(tmp_path / "r.html")}
+        return_value=(
+            {"md": str(tmp_path / "r.md"), "html": str(tmp_path / "r.html")},
+            "fallback",
+            "invoke_llm",
+            "llm_call_failed",
+        )
     )
     patches = _stream_patches(proc, route=route)
     with ExitStack() as stack:
@@ -1530,6 +1582,9 @@ async def test_completed_report_delivers_markdown_html_and_hidden_bundle(tmp_pat
         "conversation_id": "C1",
         "report_delivered": True,
         "report_chars": len("# Final"),
+        "html_style_status": "fallback",
+        "html_style_phase": "invoke_llm",
+        "html_style_reason_code": "llm_call_failed",
     }
     file_payload = next(
         call.args[0]["payload"]
@@ -1537,10 +1592,125 @@ async def test_completed_report_delivers_markdown_html_and_hidden_bundle(tmp_pat
         if call.args[0]["payload"].get("event_type") == "chat.file"
     )
     assert [item["name"] for item in file_payload["files"]] == ["r.md", "r.html"]
+    assert file_payload["metadata"]["htmlStyleStatus"] == "fallback"
+    assert file_payload["metadata"]["htmlStylePhase"] == "invoke_llm"
+    assert file_payload["metadata"]["htmlStyleReasonCode"] == "llm_call_failed"
     serialized = json.dumps(file_payload)
     assert "/hidden/raw.md" in serialized
     assert "/hidden/citations.preview.json" in serialized
     assert "/must/not/expose.json" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_final_report_idle_stream_emits_processing_heartbeat_without_cancelling_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    initial = b"".join(
+        (
+            json.dumps(
+                {"__deepsearch_status__": "started", "conversation_id": "C1"}
+            ).encode("utf-8")
+            + b"\n",
+            json.dumps(
+                {
+                    "agent": "sub_reporter",
+                    "section_idx": "1",
+                    "section_total": 1,
+                    "event": "done",
+                }
+            ).encode("utf-8")
+            + b"\n",
+        )
+    )
+    terminal = (
+        json.dumps(
+            {
+                "__deepsearch_status__": "completed",
+                "conversation_id": "C1",
+                "final_result": {"response_content": "# Final"},
+            }
+        ).encode("utf-8")
+        + b"\n"
+    )
+    reader = _DelayedFinalReportReader(
+        initial,
+        terminal,
+        delay=0.08,
+        initial_delay=0.06,
+    )
+    proc = _Proc()
+    proc.stdout = reader
+    route = {
+        "request_id": "R1",
+        "channel_id": "CH1",
+        "session_id": "S1",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    push = AsyncMock()
+    heartbeat_observations: list[tuple[str, int]] = []
+    phase = "stream"
+
+    async def record_push(envelope: dict[str, Any]) -> None:
+        payload = envelope["payload"]
+        if (
+            payload.get("event_type") == "chat.processing_status"
+            and payload.get("current_task") == "in_progress"
+        ):
+            heartbeat_observations.append((phase, reader.reads))
+
+    push.send_push.side_effect = record_push
+
+    async def delayed_write(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        nonlocal phase
+        phase = "artifact"
+        await asyncio.sleep(0.08)
+        return {"md": str(tmp_path / "r.md")}
+
+    monkeypatch.setattr(
+        dt,
+        "DEEPRESEARCH_FINAL_REPORT_PROGRESS_INTERVAL_SECONDS",
+        0.02,
+        raising=False,
+    )
+    patches = _stream_patches(proc, route=route)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=push)
+        )
+        stack.enter_context(
+            patch.object(
+                dt,
+                "_write_report_artifacts_stream",
+                new=delayed_write,
+            )
+        )
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(action="start", query="q")
+        )
+
+    heartbeats = [
+        call.args[0]["payload"]
+        for call in push.send_push.await_args_list
+        if call.args[0]["payload"].get("event_type") == "chat.processing_status"
+        and call.args[0]["payload"].get("current_task") == "in_progress"
+    ]
+    assert len(heartbeats) >= 4
+    stream_heartbeat_reads = {
+        read_number
+        for observed_phase, read_number in heartbeat_observations
+        if observed_phase == "stream"
+    }
+    assert stream_heartbeat_reads == {2}
+    assert any(
+        observed_phase == "artifact"
+        for observed_phase, _read_number in heartbeat_observations
+    )
+    assert reader.cancelled is False
+    assert outcome["status"] == "completed"
+    assert outcome["report_delivered"] is True
 
 
 def test_offline_html_converter_sanitizes_active_content(tmp_path: Path):
@@ -1701,11 +1871,19 @@ async def test_report_publication_writes_markdown_html_snapshot_and_provenance(
         "citations_preview_path": "/hidden/citations.preview.json",
     }
     with patch.object(dt, "get_cwd", return_value=str(tmp_path)):
-        artifacts = await dt._write_report_artifacts_stream(
+        (
+            artifacts,
+            html_style_status,
+            html_style_phase,
+            html_style_reason_code,
+        ) = await dt._write_report_artifacts_stream(
             final_result, "Research", "C1", citation_artifacts
         )
 
     assert set(artifacts) == {"md", "html"}
+    assert html_style_status == "fallback"
+    assert html_style_phase is None
+    assert html_style_reason_code is None
     markdown = Path(artifacts["md"])
     assert markdown.read_text(encoding="utf-8").startswith("# Report")
     assert Path(artifacts["html"]).read_text(encoding="utf-8").startswith("<!DOCTYPE html>")
@@ -1727,11 +1905,19 @@ async def test_html_failure_keeps_published_markdown(tmp_path: Path):
     with patch.object(dt, "get_cwd", return_value=str(tmp_path)), patch.object(
         dt, "_generate_report_html", new=AsyncMock(return_value=None)
     ):
-        artifacts = await dt._write_report_artifacts_stream(
+        (
+            artifacts,
+            html_style_status,
+            html_style_phase,
+            html_style_reason_code,
+        ) = await dt._write_report_artifacts_stream(
             final_result, "Research", "C1"
         )
 
     assert set(artifacts) == {"md"}
+    assert html_style_status is None
+    assert html_style_phase is None
+    assert html_style_reason_code is None
     assert Path(artifacts["md"]).is_file()
 
 
@@ -1775,11 +1961,13 @@ async def test_concurrent_same_title_report_publication_allocates_distinct_outpu
         "chart_messages": [],
     }
     with patch.object(dt, "get_cwd", return_value=str(tmp_path)):
-        first, second = await asyncio.gather(
+        first_result, second_result = await asyncio.gather(
             dt._write_report_artifacts_stream(final_result, "Same", "C1"),
             dt._write_report_artifacts_stream(final_result, "Same", "C2"),
         )
 
+    first, _, _, _ = first_result
+    second, _, _, _ = second_result
     assert first["md"] != second["md"]
     assert Path(first["md"]).is_file()
     assert Path(second["md"]).is_file()
@@ -1938,6 +2126,49 @@ def test_build_deepresearch_config_empty_values_are_not_forwarded():
     )
     assert "LLM_API_KEY" not in config
     assert all(value != "" for value in config.values())
+
+
+def test_styled_export_auth_carries_only_maas_authorization():
+    authorization = "Basic c3R5bGUtcmVxdWVzdA=="
+    auth = dt._build_styled_export_llm_auth(
+        {
+            "default_headers": json.dumps(
+                {"authorization": authorization, "X-Unrelated": "must-not-cross"}
+            )
+        },
+        {"general": {"api_key": "huawei-maas-session"}},
+    )
+
+    assert json.loads(auth["default_headers"]) == {
+        "Authorization": authorization
+    }
+    assert "X-Unrelated" not in auth["default_headers"]
+
+
+def test_styled_export_auth_does_not_apply_to_ordinary_api_keys():
+    assert dt._build_styled_export_llm_auth(
+        {"default_headers": "not-json"},
+        {"general": {"api_key": "ordinary-api-key"}},
+    ) == {}
+
+
+@pytest.mark.parametrize(
+    "raw_headers",
+    [
+        "",
+        "{}",
+        '{"X-Other":"1"}',
+        '{"Authorization":"Basic one","authorization":"Basic two"}',
+    ],
+)
+def test_styled_export_auth_fails_closed_without_one_maas_authorization(
+    raw_headers: str,
+):
+    with pytest.raises(ValueError, match="MaaS Authorization is unavailable"):
+        dt._build_styled_export_llm_auth(
+            {"default_headers": raw_headers},
+            {"general": {"api_key": "huawei-maas-session"}},
+        )
 
 
 def test_resolve_runner_rejects_symlink_and_hardlink(tmp_path: Path):
@@ -2437,6 +2668,59 @@ async def test_feedback_resume_does_not_repeat_stage_one_transition():
 
 
 @pytest.mark.asyncio
+async def test_outline_resume_starts_from_stage_three_without_replaying_prior_stages():
+    proc = _Proc(
+        [
+            json.dumps({"__deepsearch_status__": "resuming", "conversation_id": "C1"}),
+            json.dumps(
+                {
+                    "agent": "collector_info_retrieval",
+                    "section_idx": "1",
+                    "section_total": 1,
+                    "event": "start",
+                    "content": "searching",
+                }
+            ),
+            json.dumps({"__deepsearch_status__": "error", "error": "stop"}),
+        ]
+    )
+    route = {
+        "request_id": "R",
+        "channel_id": "CH",
+        "session_id": "S",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    push = AsyncMock()
+    patches = _stream_patches(proc, route=route)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=push)
+        )
+        await dt.deepresearch_stream._func(
+            action="resume",
+            conversation_id="C1",
+            node="outline_interaction",
+            interaction_result=(
+                '{"status":"answered","answers":[{"question":"q",'
+                '"selected_options":["outline_confirm"],"custom_input":null}]}'
+            ),
+        )
+
+    transition_payloads = [
+        call.args[0]["payload"]
+        for call in push.send_push.await_args_list
+        if call.args[0]["payload"].get("event_type") == "chat.delta"
+        and "[DeepResearch 阶段切换]" in call.args[0]["payload"].get("content", "")
+    ]
+    assert [payload["task_id"] for payload in transition_payloads] == [
+        "deepresearch_stage_3"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_user_feedback_resume_can_complete_final_report_without_section_replay(
     tmp_path: Path,
 ):
@@ -2459,12 +2743,13 @@ async def test_user_feedback_resume_can_complete_final_report_without_section_re
         "service_id": "default",
         "agent_id": "default",
     }
+    push = AsyncMock()
     patches = _stream_patches(proc, route=route)
     with ExitStack() as stack:
         for item in patches:
             stack.enter_context(item)
         stack.enter_context(
-            patch.object(dt, "WebSocketGatewayPushTransport", return_value=AsyncMock())
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=push)
         )
         stack.enter_context(
             patch.object(
@@ -2481,6 +2766,14 @@ async def test_user_feedback_resume_can_complete_final_report_without_section_re
             )
         )
     assert outcome["status"] == "completed"
+    transition_task_ids = [
+        call.args[0]["payload"]["task_id"]
+        for call in push.send_push.await_args_list
+        if call.args[0]["payload"].get("event_type") == "chat.delta"
+        and "[DeepResearch 阶段切换]"
+        in call.args[0]["payload"].get("content", "")
+    ]
+    assert transition_task_ids == ["deepresearch_stage_4"]
 
 
 def test_artifact_bundle_ignores_blank_and_unapproved_companions():
@@ -2512,8 +2805,12 @@ async def test_offline_html_uses_verified_snapshot_and_preserves_occupied_output
 ):
     markdown = tmp_path / "report.md"
     markdown.write_text("mutated source", encoding="utf-8")
-    result = await dt._generate_report_html({}, markdown, "verified snapshot")
-    assert result is not None
+    generated = await dt._generate_report_html({}, markdown, "verified snapshot")
+    assert generated is not None
+    result, html_style_status, html_style_phase, html_style_reason_code = generated
+    assert html_style_status == "fallback"
+    assert html_style_phase is None
+    assert html_style_reason_code is None
     rendered = result.read_text(encoding="utf-8")
     assert "verified snapshot" in rendered
     assert "mutated source" not in rendered
@@ -2541,33 +2838,61 @@ async def test_styled_html_uses_isolated_bridge_as_primary(tmp_path: Path):
     @asynccontextmanager
     async def bridge(**kwargs):
         observed.update(kwargs)
-        yield archive
+        yield SimpleNamespace(
+            path=archive,
+            style_status="fallback",
+            style_phase="invoke_llm",
+            style_reason_code="llm_call_failed",
+        )
 
     route = {
         "session_id": "S1",
         "service_id": "svc",
         "agent_id": "agent",
     }
+    authorization = "Basic c3R5bGUtY2hpbGQ="
+    runtime_config = {
+        "LLM_SSL_VERIFY": "false",
+        "TOOL_SSL_VERIFY": "true",
+        "default_headers": json.dumps(
+            {"Authorization": authorization, "X-Unrelated": "do-not-forward"}
+        ),
+    }
     with patch.object(dt, "_get_route", return_value=route), patch.object(
         dt, "_build_deepresearch_request_config",
-        return_value={"LLM_SSL_VERIFY": "false", "TOOL_SSL_VERIFY": "true"},
+        return_value=runtime_config,
     ), patch.object(
         dt, "_build_styled_export_llm_config",
-        return_value={"general": {"api_key": "secret"}},
-    ), patch.object(dt, "get_deepresearch_manager", return_value=Mock()), patch.object(
+        return_value={"general": {"api_key": "huawei-maas-session"}},
+    ) as build_llm, patch.object(
+        dt, "get_deepresearch_manager", return_value=Mock()
+    ), patch.object(
         dt, "stylize_report_archive", bridge
     ):
         result = await dt._generate_report_html(
             {"response_content": "report"}, markdown, "offline"
         )
 
-    assert result == markdown.with_suffix(".html")
-    assert result.read_text(encoding="utf-8") == "<h1>styled</h1>"
+    assert result == (
+        markdown.with_suffix(".html"),
+        "fallback",
+        "invoke_llm",
+        "llm_call_failed",
+    )
+    assert result[0].read_text(encoding="utf-8") == "<h1>styled</h1>"
     assert observed["tls"] == {
         "LLM_SSL_VERIFY": False,
         "TOOL_SSL_VERIFY": True,
     }
     assert observed["session_id"] == "S1"
+    assert observed["llm_auth"] == {
+        "default_headers": json.dumps(
+            {"Authorization": authorization},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    }
+    build_llm.assert_called_once_with(runtime_config)
 
 
 @pytest.mark.asyncio
@@ -2588,7 +2913,7 @@ async def test_styled_html_primary_does_not_require_offline_markdown(tmp_path: P
     async def bridge(**_kwargs):
         nonlocal bridge_calls
         bridge_calls += 1
-        yield archive
+        yield SimpleNamespace(path=archive, style_status="applied")
 
     route = {"session_id": "S1", "service_id": "svc", "agent_id": "agent"}
     with patch.object(dt, "_get_route", return_value=route), patch.object(
@@ -2603,8 +2928,34 @@ async def test_styled_html_primary_does_not_require_offline_markdown(tmp_path: P
         )
 
     assert bridge_calls == 1
-    assert result == markdown.with_suffix(".html")
-    assert result.read_text(encoding="utf-8") == "<h1>styled</h1>"
+    assert result == (markdown.with_suffix(".html"), "applied", None, None)
+    assert result[0].read_text(encoding="utf-8") == "<h1>styled</h1>"
+
+
+@pytest.mark.asyncio
+async def test_styled_html_missing_maas_auth_falls_back_without_starting_bridge(
+    tmp_path: Path,
+):
+    markdown = tmp_path / "report.md"
+    bridge = Mock()
+    with patch.object(
+        dt,
+        "_build_deepresearch_request_config",
+        return_value={"LLM_SSL_VERIFY": "false", "TOOL_SSL_VERIFY": "false"},
+    ), patch.object(
+        dt,
+        "_build_styled_export_llm_config",
+        return_value={"general": {"api_key": "huawei-maas-session"}},
+    ), patch.object(
+        dt, "get_deepresearch_manager", return_value=Mock()
+    ), patch.object(
+        dt, "stylize_report_archive", bridge
+    ):
+        result = await dt._generate_report_html({}, markdown, "offline report")
+
+    assert result == (markdown.with_suffix(".html"), "fallback", None, None)
+    assert "offline report" in result[0].read_text(encoding="utf-8")
+    bridge.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -40,10 +40,18 @@ spec:
               value: "<<USER_WEB_MODE>>"
             - name: VITE_ENABLE_USER_WEB_EMBEDDING
               value: "<<ENABLE_USER_WEB_EMBEDDING>>"
+            - name: LOGIN_AUTH_SIMULATE
+              value: "<<LOGIN_AUTH_SIMULATE>>"
+            - name: VITE_LOGIN_AUTH_SIMULATE
+              value: "<<LOGIN_AUTH_SIMULATE>>"
+            - name: LOGIN_AUTH_SIMULATE_AVAILABLE
+              value: "<<LOGIN_AUTH_SIMULATE_AVAILABLE>>"
+            - name: VITE_LOGIN_AUTH_SIMULATE_AVAILABLE
+              value: "<<LOGIN_AUTH_SIMULATE_AVAILABLE>>"
             - name: USER_WEB_IDP_TARGET
-              value: "http://<<IDENTITY_NAME>>:<<IDENTITY_REST_PORT>>"
+              value: "<<USER_WEB_IDP_TARGET>>"
             - name: USER_WEB_MANAGER_TARGET
-              value: "http://<<MANAGER_SERVER_NAME>>:<<MANAGER_REST_PORT>>"
+              value: "<<USER_WEB_MANAGER_TARGET>>"
             - name: FRONTEND_PORT
               value: "<<WEB_HTTP_PORT>>"
             - name: VITE_WEB_TRANSPORT

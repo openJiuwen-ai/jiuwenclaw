@@ -7,9 +7,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from jiuwenswarm.gateway.config.enterprise.tables.application_config_models import TASK_MEMORY_CONFIG_TABLE_DEF
 from ...infrastructure.repository_access import require_enterprise_repository
 from ...infrastructure.utils import format_ts, utc_now
-from ...models.application_config_models import TASK_MEMORY_CONFIG_TABLE_DEF
 
 _TABLE = TASK_MEMORY_CONFIG_TABLE_DEF.table_name
 logger = logging.getLogger(__name__)

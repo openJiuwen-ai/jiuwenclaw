@@ -28,7 +28,26 @@ BRIDGE_JSON_MAX_CONTAINER = 20_000
 BRIDGE_ZIP_MAX_MEMBERS = 1024
 BRIDGE_ZIP_MEMBER_MAX_BYTES = 64 * 1024 * 1024
 BRIDGE_ZIP_TOTAL_MAX_BYTES = 128 * 1024 * 1024
+BRIDGE_REQUEST_SCHEMA_VERSION = 2
 _TLS_KEYS = frozenset({"LLM_SSL_VERIFY", "TOOL_SSL_VERIFY"})
+_STYLE_PHASES = frozenset({
+    "build_style_context",
+    "apply_prompt",
+    "invoke_llm",
+    "extract_css_response",
+    "normalize_css_output",
+    "append_cover_title_contrast_safeguard",
+    "inject_css",
+})
+_STYLE_REASON_CODES = frozenset({
+    "style_context_failed",
+    "style_prompt_failed",
+    "llm_call_failed",
+    "css_response_invalid",
+    "css_response_empty",
+    "css_safeguard_failed",
+    "css_injection_failed",
+})
 
 
 class BridgeError(RuntimeError):
@@ -90,6 +109,7 @@ def read_request(stream: BinaryIO) -> dict[str, object]:
         "schema_version",
         "final_result",
         "llm_config",
+        "llm_auth",
         "tls",
     }:
         raise BridgeError("bridge_request_invalid")
@@ -99,10 +119,14 @@ def read_request(stream: BinaryIO) -> dict[str, object]:
         and not isinstance(schema_version, bool)
         and schema_version.__class__ is int
     )
-    if not is_exact_schema_version_type or schema_version != 1:
+    if (
+        not is_exact_schema_version_type
+        or schema_version != BRIDGE_REQUEST_SCHEMA_VERSION
+    ):
         raise BridgeError("bridge_request_invalid")
     if not isinstance(request["final_result"], dict) or not isinstance(request["llm_config"], dict):
         raise BridgeError("bridge_request_invalid")
+    _validate_llm_auth(request["llm_auth"])
     tls = request["tls"]
     invalid_tls = (
         not isinstance(tls, dict)
@@ -112,6 +136,34 @@ def read_request(stream: BinaryIO) -> dict[str, object]:
     if invalid_tls:
         raise BridgeError("bridge_request_invalid")
     return request
+
+
+def _validate_llm_auth(llm_auth: object) -> None:
+    if not isinstance(llm_auth, dict):
+        raise BridgeError("bridge_request_invalid")
+    if not llm_auth:
+        return
+    if set(llm_auth) != {"default_headers"}:
+        raise BridgeError("bridge_request_invalid")
+    raw_headers = llm_auth.get("default_headers")
+    if not isinstance(raw_headers, str) or not raw_headers.strip():
+        raise BridgeError("bridge_request_invalid")
+    try:
+        headers = json.loads(raw_headers)
+    except (TypeError, ValueError) as exc:
+        raise BridgeError("bridge_request_invalid") from exc
+    if not isinstance(headers, dict):
+        raise BridgeError("bridge_request_invalid")
+    authorization = [
+        value
+        for key, value in headers.items()
+        if isinstance(key, str) and key.lower() == "authorization"
+    ]
+    if len(headers) != 1 or len(authorization) != 1:
+        raise BridgeError("bridge_request_invalid")
+    authorization_value = authorization[0]
+    if not isinstance(authorization_value, str) or not authorization_value.strip():
+        raise BridgeError("bridge_request_invalid")
 
 
 def _decode_archive(convert_content: object) -> bytes:
@@ -238,19 +290,50 @@ async def stylize_request(request: dict[str, object], output: str | Path) -> dic
         for key in _TLS_KEYS:
             os.environ[key] = "true" if tls[key] else "false"
         with redirect_stdout(sys.stderr):
-            from openjiuwen_deepsearch.algorithm.report_style.service import stylize_report
-            from openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime import report_style_llm_context
+            from jiuwenswarm.common.local_env_config import (
+                bind_task_env_overlay,
+                reset_task_env_overlay,
+            )
+            from jiuwenswarm.llm_sse_patch import apply_openai_auth_header_patch
 
-            llm_config = _sdk_llm_config(request["llm_config"])
-            async with report_style_llm_context(llm_config) as llm:
-                result = await stylize_report(request["final_result"], llm)
+            llm_auth = request["llm_auth"]
+            if __debug__ and not isinstance(llm_auth, dict):
+                raise AssertionError()
+            auth_token = bind_task_env_overlay(llm_auth)
+            try:
+                apply_openai_auth_header_patch()
+                from openjiuwen_deepsearch.algorithm.report_style.service import stylize_report
+                from openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime import report_style_llm_context
+
+                llm_config = _sdk_llm_config(request["llm_config"])
+                async with report_style_llm_context(llm_config) as llm:
+                    result = await stylize_report(request["final_result"], llm)
+            finally:
+                reset_task_env_overlay(auth_token)
         write_convert_content(output, getattr(result, "convert_content", None))
+        style_status = str(getattr(result, "style_status", "fallback"))
+        style_phase = getattr(result, "style_phase", None)
+        style_reason_code = getattr(result, "style_reason_code", None)
+        valid_style_fallback = style_status == "fallback"
+        if valid_style_fallback:
+            valid_style_fallback = isinstance(style_phase, str)
+        if valid_style_fallback:
+            valid_style_fallback = style_phase in _STYLE_PHASES
+        if valid_style_fallback:
+            valid_style_fallback = isinstance(style_reason_code, str)
+        if valid_style_fallback:
+            valid_style_fallback = style_reason_code in _STYLE_REASON_CODES
+        if not valid_style_fallback:
+            style_phase = None
+            style_reason_code = None
         return {
             "schema_version": 1,
             "status": "completed",
             "output_path": str(Path(output)),
             "style_applied": bool(getattr(result, "style_applied", False)),
-            "style_status": str(getattr(result, "style_status", "fallback")),
+            "style_status": style_status,
+            "style_phase": style_phase,
+            "style_reason_code": style_reason_code,
         }
     except BridgeError:
         raise

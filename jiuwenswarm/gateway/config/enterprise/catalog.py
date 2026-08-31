@@ -24,10 +24,6 @@ class EnterpriseRecordSpec:
 # store name == DB 表名；与 layouts / EE TableDefinition 对齐。
 # ``cron_job`` 另有 personal JSON 布局（见 ``layouts._legacy_gateway_cron_job_layout``）。
 ENTERPRISE_RECORD_SPECS: dict[str, EnterpriseRecordSpec] = {
-    "config_effective_global_policy": EnterpriseRecordSpec(key_fields=("policy_id",)),
-    "config_effective_service_policy": EnterpriseRecordSpec(key_fields=("policy_id",)),
-    "config_effective_agent_policy": EnterpriseRecordSpec(key_fields=("policy_id",)),
-    "config_default_template_mapping": EnterpriseRecordSpec(key_fields=("policy_id",)),
     "model_template": EnterpriseRecordSpec(key_fields=("template_id",)),
     "embedding_template": EnterpriseRecordSpec(key_fields=("template_id",)),
     "extension_config_template": EnterpriseRecordSpec(key_fields=("template_id",)),
