@@ -1460,6 +1460,15 @@ def _read_zip_index_version(zip_path: Path) -> str | None:
         return None
 
 
+def _print_console_progress(message: str) -> None:
+    """Print progress without letting a legacy console encoding abort startup."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        escaped = message.encode("ascii", errors="backslashreplace").decode("ascii")
+        print(escaped)
+
+
 def _ensure_mcp_builtins(
     template_agent_workspace: Path,
     mcp_builtins_dir: Path,
@@ -1505,7 +1514,7 @@ def _ensure_mcp_builtins(
         "[mcp_builtins] %s: seed=%s local=%s -> extract %s",
         action, seed_version, local_version, seed_zip.name,
     )
-    print(
+    _print_console_progress(
         f"[jiuwenswarm-init] MCP 预置包 {action} (v{seed_version or '?'}) "
         f"<- {seed_zip.name}"
     )

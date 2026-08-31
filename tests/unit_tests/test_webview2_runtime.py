@@ -124,7 +124,9 @@ def test_installer_embeds_and_verifies_webview2_prerequisite():
     assert "uv sync --extra dev" in build_script
     assert "--extra codex" not in build_script
     assert "--extra claude" not in build_script
-    assert "claude_agent_sdk" not in pyinstaller_spec
-    assert "openai_codex" not in pyinstaller_spec
-    assert "codex_cli_bin" not in pyinstaller_spec
+    excludes = pyinstaller_spec.split("excludes = [", maxsplit=1)[1].split("]", maxsplit=1)[0]
+    for optional_runtime in ("claude_agent_sdk", "openai_codex", "codex_cli_bin"):
+        assert f'"{optional_runtime}"' in excludes
+        assert f'collect_all("{optional_runtime}")' not in pyinstaller_spec
+        assert f'collect_submodules("{optional_runtime}")' not in pyinstaller_spec
     assert "webbrowser" not in runtime_check
