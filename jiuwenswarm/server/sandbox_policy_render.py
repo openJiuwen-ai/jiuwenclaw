@@ -10,7 +10,7 @@ default) + **副本** (user_config) 合并 (``policy_engine.merge_policy``, list
 副本结构 (``<config_dir>/windows-policy.runtime.yaml``, 稀疏, 只存用户改的字段):
     windows:
       filesystem:
-        allow_read:  [<用户白名单>]   # merge 时去重并集到基底 allow_read (workspace/skills 必需集不丢)
+        allow_read:  [<用户白名单>]   # merge 时去重并集到基底 allow_read (workspace 必需集不丢)
         allow_write: [<用户白名单>]
         deny_read:   [<用户黑名单>]   # deny_read/deny_write 用户段
         deny_write:  [<用户黑名单>]

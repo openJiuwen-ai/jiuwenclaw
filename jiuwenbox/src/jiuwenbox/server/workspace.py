@@ -30,8 +30,7 @@ def _effective_user_home() -> Path:
 #
 # OFFICE_CLAW_DATA_ROOT: 上游产品数据根 (~/.office-claw),
 # 与 relay-claw 同算法 (env OFFICE_CLAW_DATA_DIR > fallback ~/.office-claw).
-# 沙箱 workspace/venv/产物都在该根子树, 受限 token 访问子路径需该根 traverse,
-# 默认 ACL 不含 jbx-sandbox/合成 SID → lstat EPERM, apply_sandbox_acl 对该根施加非递归 traverse read 解决. 见 win_acl.py.
+# 该根不再给沙箱特殊授权; workspace 祖先 traverse 由 grant_parent_traverse 覆盖.
 if sys.platform == "win32":
     _win_root_env = os.environ.get("JIUWENCLAW_DATA_DIR", "").strip()
     JIUWENCLAW_DATA_DIR_PATH = (
