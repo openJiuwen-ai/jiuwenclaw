@@ -21,7 +21,6 @@ import { CompactTaskList } from './CompactTaskList';
 import { getTotalTaskVisualProgressPercent } from './taskProgress';
 import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { SwarmflowTreeView } from './SwarmflowTreeView';
-import { SwarmflowGraphView } from './SwarmflowGraphView';
 
 type TaskPlanningPanelProps = {
   variant: 'compact' | 'expanded';
@@ -392,11 +391,9 @@ export function TaskPlanningPanel({
       ) : view === 'workflow' ? (
         <div className="flex h-full flex-col px-6 pb-6" data-testid="team-area-task-planning-workflow-view">
           {header}
+          <ProgressBar progressPercent={progressPercent} groupedTasks={groupedTasks} />
           {workflowRuns.length > 0 && activeSessionId ? (
-            <>
-              <SwarmflowTreeView runs={workflowRuns} sessionId={activeSessionId} />
-              <SwarmflowGraphView runs={workflowRuns} sessionId={activeSessionId} />
-            </>
+            <SwarmflowTreeView runs={workflowRuns} sessionId={activeSessionId} />
           ) : null}
         </div>
       ) : (

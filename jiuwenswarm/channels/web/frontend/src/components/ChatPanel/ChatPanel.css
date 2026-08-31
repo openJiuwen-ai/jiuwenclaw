@@ -2980,19 +2980,61 @@ overflow: hidden;
   background: var(--color-surface-card);
 }
 
-.chat-input-swarmflow-config__header {
+.chat-mode-select__option-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chat-mode-select__config-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.chat-mode-select__config-btn:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.chat-mode-select__config-btn--disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat-swarmflow-config-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 280px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-md, 0 4px 12px rgba(0, 0, 0, 0.08));
+}
+
+.chat-swarmflow-config-panel__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
 
-.chat-input-swarmflow-config__title {
+.chat-swarmflow-config-panel__title {
   font-size: var(--font-size-sm);
   font-weight: 600;
   color: var(--color-text-strong);
 }
 
-.chat-input-swarmflow-config__close {
+.chat-swarmflow-config-panel__close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3005,18 +3047,18 @@ overflow: hidden;
   cursor: pointer;
 }
 
-.chat-input-swarmflow-config__close:hover {
+.chat-swarmflow-config-panel__close:hover {
   background: var(--color-surface-hover);
   color: var(--color-text-primary);
 }
 
-.chat-input-swarmflow-config__field {
+.chat-swarmflow-config-panel__field {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.chat-input-swarmflow-config__label {
+.chat-swarmflow-config-panel__label {
   font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
   line-height: 1.4;
