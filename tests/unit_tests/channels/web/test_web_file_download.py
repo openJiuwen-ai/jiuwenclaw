@@ -19,6 +19,7 @@ from jiuwenswarm.agents.harness.common.tools.web_file_download import (
 )
 from jiuwenswarm.channels.web import app_web
 from jiuwenswarm.channels.web.app_web import _SpaStaticHandler
+from jiuwenswarm.gateway.routing import agent_http_bridge
 from jiuwenswarm.server.agent_ws_server import _parse_single_byte_range
 
 
@@ -99,7 +100,9 @@ class _FakeAgentDownloadServer(BaseHTTPRequestHandler):
             "Accept-Ranges": "bytes",
         }
         range_header = self.headers.get("Range")
-        byte_range = _parse_single_byte_range(range_header, file_size) if range_header else None
+        byte_range = (
+            _parse_single_byte_range(range_header, file_size) if range_header else None
+        )
         if range_header and byte_range is None:
             self.send_response(416)
             self.send_header("Content-Range", f"bytes */{file_size}")
@@ -185,30 +188,56 @@ def test_tampered_token_is_rejected() -> None:
     assert manager.validate_token(f"{encoded}x.{signature}") is None
 
 
-def test_agent_http_bases_are_embedded_per_token(
+def test_agent_http_bases_use_trusted_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """独立 Web 静态进程可由 AgentServer 签发的 token 路由到用户 sandbox。"""
-    monkeypatch.setenv(
-        "JIUWENSWARM_AGENT_DOWNLOAD_HTTP_BASE", "http://agent-a:18092"
-    )
-    monkeypatch.setenv(
-        "JIUWENSWARM_AGENT_UPLOAD_HTTP_BASE", "http://agent-a:18093"
-    )
+    """可信 resolver 可按 token payload 将请求路由到用户 sandbox。"""
+    monkeypatch.setenv("JIUWENSWARM_AGENT_DOWNLOAD_HTTP_BASE", "http://agent-a:18092")
+    monkeypatch.setenv("JIUWENSWARM_AGENT_UPLOAD_HTTP_BASE", "http://agent-a:18093")
     download_token = web_file_download.generate_file_download_token("/tmp/a.txt", "s1")
-    upload_token = web_file_download.generate_file_upload_token("agent/workspace/a.txt", "s1")
+    upload_token = web_file_download.generate_file_upload_token(
+        "agent/workspace/a.txt", "s1"
+    )
+    monkeypatch.setattr(
+        agent_http_bridge,
+        "_agent_http_base_resolver",
+        lambda payload, endpoint: (
+            "http://agent-a:18092" if endpoint == "download" else "http://agent-a:18093"
+        ),
+    )
 
     assert (
-        app_web.resolve_agent_http_base_for_token(
-            download_token, endpoint="download"
-        )
+        app_web.resolve_agent_http_base_for_token(download_token, endpoint="download")
         == "http://agent-a:18092"
     )
     assert (
-        app_web.resolve_agent_http_base_for_token(
-            upload_token, endpoint="upload"
-        )
+        app_web.resolve_agent_http_base_for_token(upload_token, endpoint="upload")
         == "http://agent-a:18093"
+    )
+
+
+def test_agent_http_base_does_not_trust_unsigned_token_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Client-controlled bridge URLs must not redirect Gateway requests."""
+    monkeypatch.setenv("JIUWENSWARM_AGENT_HTTP_BASE", "http://trusted-agent:18092")
+    monkeypatch.setattr(agent_http_bridge, "_agent_http_base_resolver", None)
+    token = web_file_download.generate_file_download_token("/tmp/a.txt", "s1")
+    payload = WebFileDownloadManager.get_instance().validate_token(token)
+    assert payload is not None
+    payload["download_http_base"] = "http://169.254.169.254/latest/meta-data"
+
+    tampered_payload = json.dumps(payload, separators=(",", ":")).encode()
+    import base64
+
+    forged_token = (
+        base64.urlsafe_b64encode(tampered_payload).rstrip(b"=").decode()
+        + ".attacker-controlled-signature"
+    )
+
+    assert (
+        app_web.resolve_agent_http_base_for_token(forged_token, endpoint="download")
+        == ""
     )
 
 
@@ -365,9 +394,7 @@ def test_download_handler_proxies_agent_server_403(
             lambda: f"http://127.0.0.1:{server.server_address[1]}",
         )
         handler = _DownloadHandlerStub(command="GET")
-        _SpaStaticHandler._handle_file_download(
-            handler, {"token": "signed-token"}
-        )
+        _SpaStaticHandler._handle_file_download(handler, {"token": "signed-token"})
         assert handler.status == 403
         assert handler.wfile.getvalue() == b"path_outside_workspace"
     finally:
@@ -376,12 +403,20 @@ def test_download_handler_proxies_agent_server_403(
 
 
 def test_verified_single_user_download_fallback_keeps_range_support(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     file_path = tmp_path / "legacy-range.txt"
     file_path.write_bytes(b"legacy-content")
-    monkeypatch.setattr(web_file_download, "validate_file_download_token", lambda _token: {"path": str(file_path)})
-    monkeypatch.setattr(web_file_download, "is_path_within_user_dirs", lambda _path: True)
+    monkeypatch.setattr(
+        web_file_download,
+        "validate_file_download_token",
+        lambda _token: {"path": str(file_path)},
+    )
+    monkeypatch.setattr(
+        web_file_download, "is_path_within_user_dirs", lambda _path: True
+    )
+
     def _unexpected_proxy(*_args, **_kwargs):
         raise AssertionError("legacy local download must not proxy to the WS port")
 
@@ -396,7 +431,8 @@ def test_verified_single_user_download_fallback_keeps_range_support(
 
 
 def test_verified_agentos_token_uses_bridge_when_gateway_cannot_see_user_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """共享密钥不应让 Gateway 把容器内路径误判为本地 404。"""
     container_only_path = tmp_path / "not-mounted-in-gateway" / "report.txt"
@@ -423,7 +459,8 @@ def test_verified_agentos_token_uses_bridge_when_gateway_cannot_see_user_path(
 
 
 def test_verified_single_user_upload_persists_without_http_bridge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(app_web, "_uses_agentos_routing", lambda: False)
     monkeypatch.setattr(

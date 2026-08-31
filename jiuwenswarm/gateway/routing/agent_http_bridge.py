@@ -129,17 +129,14 @@ def _decode_token_payload(token: str) -> dict[str, Any] | None:
 def resolve_agent_http_base_for_token(token: str, *, endpoint: str) -> str:
     """解析当前请求应代理到的 AgentServer HTTP 基址。
 
-    AgentServer 在签发 token 时会将 AgentOS 注入的目标 bridge 基址写入
-    ``download_http_base`` / ``upload_http_base``。这是 Web 静态服务跨进程
-    代理到正确用户 sandbox 的主通路。旧部署可继续注册 resolver 作为兼容回退。
+    Token payload 只用于提取 resolver 所需的路由标识，不能提供代理目标：
+    payload 在此处尚未完成签名校验，直接使用其中的 URL 会让攻击者控制
+    Gateway 的出站请求目标。AgentOS 多用户部署应注册 resolver；旧部署继续
+    使用环境变量或单机默认推导。
     """
     if endpoint not in {"download", "upload"}:
         raise ValueError(f"unsupported HTTP bridge endpoint: {endpoint}")
     payload = _decode_token_payload(token)
-    if payload is not None:
-        embedded = str(payload.get(f"{endpoint}_http_base") or "").strip()
-        if embedded:
-            return embedded.rstrip("/")
     resolver = _agent_http_base_resolver
     if resolver is not None and payload is not None:
         try:
@@ -149,14 +146,18 @@ def resolve_agent_http_base_for_token(token: str, *, endpoint: str) -> str:
             except TypeError:
                 base = resolver(payload)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[agent_http_bridge] agent http base resolver failed: %s", exc)
+            logger.warning(
+                "[agent_http_bridge] agent http base resolver failed: %s", exc
+            )
             base = None
         if base:
             return str(base).rstrip("/")
     return ""
 
 
-def upload_file_bytes(content: bytes, target_rel_path: str) -> tuple[bool, dict[str, Any]]:
+def upload_file_bytes(
+    content: bytes, target_rel_path: str
+) -> tuple[bool, dict[str, Any]]:
     """把文件字节经受认证 HTTP bridge 上传到目标 AgentServer，返回 ``(ok, payload)``。
 
     - ``target_rel_path`` 为相对用户目录根的目标路径（如
@@ -201,14 +202,19 @@ def upload_file_bytes(content: bytes, target_rel_path: str) -> tuple[bool, dict[
             raw = exc.read()
         except Exception:  # noqa: BLE001
             raw = b""
-        message = raw.decode("utf-8", errors="replace").strip() or f"upload failed: {exc.code}"
+        message = (
+            raw.decode("utf-8", errors="replace").strip()
+            or f"upload failed: {exc.code}"
+        )
         return False, {"error": message, "code": "UPLOAD_FAILED"}
     except Exception as exc:  # noqa: BLE001
         logger.warning("[agent_http_bridge] upload 转发失败: %s", exc)
         return False, {"error": str(exc), "code": "SERVICE_UNAVAILABLE"}
 
     if status != 200:
-        message = raw.decode("utf-8", errors="replace").strip() or f"upload failed: {status}"
+        message = (
+            raw.decode("utf-8", errors="replace").strip() or f"upload failed: {status}"
+        )
         return False, {"error": message, "code": "UPLOAD_FAILED"}
     try:
         payload = _json.loads(raw.decode("utf-8"))
@@ -247,7 +253,7 @@ async def upload_file_bytes_via_e2a(
     resolved_path = ""
     last_payload: dict[str, Any] = {}
     for offset in range(0, len(content), _E2A_UPLOAD_CHUNK_BYTES):
-        chunk = content[offset:offset + _E2A_UPLOAD_CHUNK_BYTES]
+        chunk = content[offset : offset + _E2A_UPLOAD_CHUNK_BYTES]
         ok, payload = await fetch_agent_unary(
             agent_client=agent_client,
             req_method=ReqMethod.FILE_UPLOAD_CHUNK,
@@ -267,6 +273,9 @@ async def upload_file_bytes_via_e2a(
             return False, payload
         resolved_path = str(payload.get("path") or "").strip()
         if not resolved_path:
-            return False, {"error": "upload response missing path", "code": "UPLOAD_FAILED"}
+            return False, {
+                "error": "upload response missing path",
+                "code": "UPLOAD_FAILED",
+            }
         last_payload = payload
     return True, last_payload
