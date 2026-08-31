@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import re
 
-_FENCE_INFO_CONTINUATION = re.compile(r"^[A-Za-z][A-Za-z0-9_+-]*")
+# Whole first line must be a single language tag (no spaces), so English progress
+# text like "Processing results..." is not treated as ``` + json continuation.
+_FENCE_INFO_CONTINUATION = re.compile(r"^[A-Za-z][A-Za-z0-9_+-]*\s*$")
 
 
 def _looks_like_fence_line(line: str) -> bool:

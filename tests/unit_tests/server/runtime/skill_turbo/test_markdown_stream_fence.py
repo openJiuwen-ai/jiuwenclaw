@@ -22,6 +22,14 @@ def test_progress_text_is_not_stuck_on_closing_fence():
     assert "```\n未发现附件" in joined
 
 
+def test_english_progress_text_is_not_stuck_on_closing_fence():
+    previous = '{"step":"search"}\n```'
+    incoming = "Processing results..."
+    joined = previous + markdown_stream_incoming(previous, incoming)
+    assert "```Processing" not in joined
+    assert "```\nProcessing results..." in joined
+
+
 def test_streaming_json_info_string_stays_on_fence_line():
     previous = "```"
     incoming = "json\n{"
