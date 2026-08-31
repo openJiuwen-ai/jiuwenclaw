@@ -22,8 +22,6 @@ import {
   Square,
   Smile,
   Loader2,
-  Network,
-  ListTree,
   Pause,
   Play,
   RefreshCw,
@@ -50,7 +48,6 @@ import { useChatStore } from '../../stores/chatStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { webRequest } from '../../services/webClient';
 import type { AskUserQuestionPayload } from '../../types/websocket';
-import { SwarmflowGraphView } from './SwarmflowGraphView';
 import {
   AgentDetailModal,
   buildDetailSections,
@@ -981,7 +978,6 @@ export interface SwarmflowTreeViewProps {
 
 export function SwarmflowTreeView({ runs, sessionId }: SwarmflowTreeViewProps) {
   const { t } = useTranslation();
-  const [layout, setLayout] = useState<'indented' | 'orgchart'>('indented');
 
   if (runs.length === 0) {
     return (
@@ -993,48 +989,13 @@ export function SwarmflowTreeView({ runs, sessionId }: SwarmflowTreeViewProps) {
 
   return (
     <div className="flex flex-col h-full">
-      {/* 布局切换 */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-border shrink-0">
-        <button
-          type="button"
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs transition-colors ${
-            layout === 'indented'
-              ? 'bg-blue-500/10 text-blue-500'
-              : 'text-text-muted hover:bg-secondary'
-          }`}
-          onClick={() => setLayout('indented')}
-        >
-          <ListTree className="w-3.5 h-3.5" />
-          {t('swarmflow.layoutIndented')}
-        </button>
-        <button
-          type="button"
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs transition-colors ${
-            layout === 'orgchart'
-              ? 'bg-blue-500/10 text-blue-500'
-              : 'text-text-muted hover:bg-secondary'
-          }`}
-          onClick={() => setLayout('orgchart')}
-        >
-          <Network className="w-3.5 h-3.5" />
-          {t('swarmflow.layoutOrgChart')}
-        </button>
+      <div className="flex-1 overflow-auto">
+        <div className="flex flex-col gap-2 p-2">
+          {runs.map((run) => (
+            <RunNode key={run.id} run={run} sessionId={sessionId} />
+          ))}
+        </div>
       </div>
-
-      {/* 内容区 */}
-      {layout === 'indented' ? (
-        <div className="flex-1 overflow-auto">
-          <div className="flex flex-col gap-2 p-2">
-            {runs.map((run) => (
-              <RunNode key={run.id} run={run} sessionId={sessionId} />
-            ))}
-          </div>
-        </div>
-      ) : (
-        <div className="flex-1 overflow-hidden">
-          <SwarmflowGraphView runs={runs} sessionId={sessionId} />
-        </div>
-      )}
     </div>
   );
 }

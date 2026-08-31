@@ -21,6 +21,7 @@ import { CompactTaskList } from './CompactTaskList';
 import { getTotalTaskVisualProgressPercent } from './taskProgress';
 import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
 import { SwarmflowTreeView } from './SwarmflowTreeView';
+import { SwarmflowGraphView } from './SwarmflowGraphView';
 
 type TaskPlanningPanelProps = {
   variant: 'compact' | 'expanded';
@@ -375,25 +376,32 @@ export function TaskPlanningPanel({
       {view === 'list' ? (
         <div className="flex h-full flex-col px-6 pb-6" data-testid="team-area-task-planning-list-view">
           {header}
-          <ProgressSection
-            tasks={tasks}
-            progressTasks={progressTasks}
-            now={now}
-            groupedTasks={groupedTasks}
-            completedTasks={completedTasks}
-            totalTasks={totalTasks}
-            displayMode="percent"
-            members={members}
-            hideAssignee={hideAssignee}
-            emptyIllustration={emptyIllustration}
-          />
+          {workflowRuns.length > 0 && activeSessionId ? (
+            <>
+              <ProgressBar progressPercent={progressPercent} groupedTasks={groupedTasks} />
+              <SwarmflowTreeView runs={workflowRuns} sessionId={activeSessionId} />
+            </>
+          ) : (
+            <ProgressSection
+              tasks={tasks}
+              progressTasks={progressTasks}
+              now={now}
+              groupedTasks={groupedTasks}
+              completedTasks={completedTasks}
+              totalTasks={totalTasks}
+              displayMode="percent"
+              members={members}
+              hideAssignee={hideAssignee}
+              emptyIllustration={emptyIllustration}
+            />
+          )}
         </div>
       ) : view === 'workflow' ? (
         <div className="flex h-full flex-col px-6 pb-6" data-testid="team-area-task-planning-workflow-view">
           {header}
           <ProgressBar progressPercent={progressPercent} groupedTasks={groupedTasks} />
           {workflowRuns.length > 0 && activeSessionId ? (
-            <SwarmflowTreeView runs={workflowRuns} sessionId={activeSessionId} />
+            <SwarmflowGraphView runs={workflowRuns} sessionId={activeSessionId} />
           ) : null}
         </div>
       ) : (
