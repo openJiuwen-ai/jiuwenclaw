@@ -1,0 +1,2719 @@
+.agent-management-panel {
+  --agent-content-max: 1400px;
+  --agent-page-gutter: 32px;
+  --agent-radius-chip: 4px;
+  --agent-opacity-disabled: 0.45;
+  --agent-opacity-muted: 0.55;
+  --agent-opacity-hidden: 0;
+  --agent-opacity-visible: 1;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  background: var(--color-surface-content);
+  color: var(--color-text-primary);
+}
+
+.agent-management-panel--create .agent-management-editor,
+.agent-management-panel--detail .agent-management-detail {
+  transform: translateX(4px);
+}
+
+.agent-management-header,
+.agent-management-primary-row,
+.agent-management-catalog,
+.agent-management-detail,
+.agent-management-editor {
+  width: min(calc(100% - (var(--agent-page-gutter) * 2)), var(--agent-content-max));
+  margin-right: auto;
+  margin-left: auto;
+}
+
+.agent-management-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding-top: 64px;
+}
+
+.agent-management-header h1,
+.agent-management-editor h1 {
+  margin: 0;
+  color: var(--color-text-strong);
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 36px;
+}
+
+.agent-management-header p {
+  margin: 4px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.agent-management-primary-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-top: 33px;
+}
+
+.agent-management-primary-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: stretch;
+  gap: 32px;
+  min-width: 0;
+}
+
+.agent-management-primary-tabs button,
+.agent-management-primary-tab,
+.agent-management-category,
+.agent-management-detail-tabs button {
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.agent-management-primary-tabs button {
+  min-height: 32px;
+  padding: 0 0 8px;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.agent-management-primary-tab {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: flex-start;
+  padding: 0 0 8px;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+  white-space: nowrap;
+}
+
+.agent-management-primary-tab--disabled {
+  color: var(--color-text-tertiary);
+  cursor: not-allowed;
+}
+
+.agent-management-primary-tabs button::after,
+.agent-management-detail-tabs button::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  background: transparent;
+  content: '';
+}
+
+.agent-management-primary-tabs button.is-active,
+.agent-management-category.is-active,
+.agent-management-detail-tabs button.is-active {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.agent-management-primary-tabs button.is-active::after,
+.agent-management-detail-tabs button.is-active::after {
+  background: var(--color-text-primary);
+}
+
+.agent-management-primary-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 0 0 auto;
+  padding-bottom: 0;
+}
+
+.agent-management-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 360px;
+  height: 32px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-card);
+  color: var(--color-text-secondary);
+  padding: 0 12px;
+}
+
+.agent-management-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 14px;
+}
+
+.agent-management-search input:focus,
+.agent-management-search input:focus-visible {
+  box-shadow: none;
+}
+
+.agent-management-search:focus-within {
+  box-shadow: none;
+}
+
+.agent-management-create-menu {
+  position: relative;
+}
+
+.agent-management-create-menu__popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 20;
+  min-width: 131px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-md);
+  padding: 6px;
+}
+
+.agent-management-create-menu__popover button {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: 8px 12px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.agent-management-create-menu__popover button:hover,
+.agent-management-create-menu__popover button:focus-visible {
+  background: var(--color-action-secondary);
+  outline: 0;
+}
+
+.agent-management-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-sm);
+  padding: 0 14px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.agent-management-button:disabled {
+  cursor: wait;
+  opacity: var(--agent-opacity-muted);
+}
+
+.agent-management-button--primary {
+  border-color: var(--color-action-primary);
+  background: var(--color-action-primary);
+  color: var(--color-action-primary-text);
+}
+
+.agent-management-button--primary:hover:not(:disabled) {
+  background: var(--color-action-primary-hover);
+}
+
+.agent-management-button--secondary {
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+}
+
+.agent-management-button--secondary:hover:not(:disabled) {
+  border-color: var(--color-border-hover);
+  background: var(--color-action-secondary);
+}
+
+.agent-management-create {
+  min-width: 88px;
+  min-height: 32px;
+  border-color: var(--color-text-strong);
+  border-radius: var(--radius-full);
+  background: var(--color-text-strong);
+  color: var(--color-text-inverse);
+}
+
+.agent-management-create:hover:not(:disabled) {
+  border-color: var(--color-text-primary);
+  background: var(--color-text-primary);
+}
+
+.agent-management-catalog {
+  padding-top: 16px;
+  padding-bottom: 40px;
+}
+
+.agent-management-toolbar {
+  min-height: 24px;
+}
+
+.agent-management-category-row {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.agent-management-category-row::-webkit-scrollbar {
+  display: none;
+}
+
+.agent-management-category {
+  flex: 0 0 auto;
+  border-right: 1px solid var(--color-border-default);
+  padding: 0 13px;
+  font-size: 16px;
+  line-height: 24px;
+  white-space: nowrap;
+}
+
+.agent-management-category:first-child {
+  padding-left: 0;
+}
+
+.agent-management-category:last-child {
+  border-right: 0;
+}
+
+.agent-management-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 33px;
+}
+
+.agent-management-panel--mine .agent-management-card {
+  height: 160px;
+}
+
+.agent-management-card {
+  position: relative;
+  min-width: 0;
+  height: 160px;
+  overflow: visible;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-card);
+  transition:
+    border-color var(--duration-normal) var(--ease-out),
+    box-shadow var(--duration-normal) var(--ease-out),
+    transform var(--duration-normal) var(--ease-out);
+}
+
+.agent-management-card:hover,
+.agent-management-card:focus-within {
+  border-color: var(--color-border-hover);
+  box-shadow: var(--effect-shadow-md);
+  transform: translateY(-1px);
+}
+
+.agent-management-card__body {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  border: 0;
+  background: transparent;
+  padding: 23px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-management-card__heading {
+  display: flex;
+  height: 56px;
+  flex: 0 0 56px;
+  align-items: flex-start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.agent-management-card__content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 0;
+}
+
+.agent-management-card__title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-management-card__title {
+  overflow: hidden;
+  color: var(--color-text-strong);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 28px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-management-card__description {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 12px;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 22px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.agent-management-card__meta {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-management-card__update {
+  position: relative;
+  display: inline-flex;
+  width: 18px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-primary);
+}
+
+.agent-management-card__update-dot {
+  position: absolute;
+  top: 0;
+  right: -1px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--color-surface-card);
+  border-radius: var(--radius-full);
+  background: var(--color-feedback-success);
+}
+
+.agent-management-card__update-tooltip {
+  position: absolute;
+  bottom: calc(100% + 12px);
+  left: 50%;
+  z-index: 5;
+  width: max-content;
+  max-width: 220px;
+  border-radius: var(--radius-md);
+  background: var(--color-text-strong);
+  box-shadow: var(--effect-shadow-md);
+  color: var(--color-text-inverse);
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+  opacity: var(--agent-opacity-hidden);
+  pointer-events: none;
+  transform: translate(-50%, 4px);
+  transition:
+    opacity var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
+}
+
+.agent-management-card__update-tooltip::after {
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  background: var(--color-text-strong);
+  content: '';
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.agent-management-card:hover .agent-management-card__update-tooltip,
+.agent-management-card:focus-within .agent-management-card__update-tooltip {
+  opacity: var(--agent-opacity-visible);
+  transform: translate(-50%, 0);
+}
+
+.agent-management-card__actions {
+  position: absolute;
+  right: 24px;
+  top: 36px;
+  display: flex;
+  gap: 8px;
+  opacity: var(--agent-opacity-hidden);
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition:
+    opacity var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
+}
+
+.agent-management-card:hover .agent-management-card__actions,
+.agent-management-card:focus-within .agent-management-card__actions {
+  opacity: var(--agent-opacity-visible);
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.agent-management-card__actions .agent-management-button {
+  min-width: 56px;
+  min-height: 28px;
+  border-radius: var(--radius-full);
+  padding: 0 12px;
+  font-size: 14px;
+}
+
+.agent-management-card__actions .agent-management-button--primary,
+.agent-management-detail-action--install {
+  border-color: var(--color-text-strong);
+  background: var(--color-text-strong);
+  color: var(--color-text-inverse);
+}
+
+.agent-management-card__actions .agent-management-button--primary:hover:not(:disabled),
+.agent-management-detail-action--install:hover:not(:disabled) {
+  border-color: var(--color-text-primary);
+  background: var(--color-text-primary);
+}
+
+.agent-management-card__actions .agent-management-button--secondary {
+  border-color: var(--color-text-primary);
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+}
+
+.agent-management-card__actions .agent-management-button--secondary:hover:not(:disabled) {
+  border-color: var(--color-text-strong);
+  background: var(--color-action-secondary);
+}
+
+.agent-management-card-action--use:disabled,
+.agent-management-detail-action--use:disabled {
+  cursor: not-allowed;
+  opacity: var(--agent-opacity-disabled);
+}
+
+.agent-management-avatar {
+  display: inline-flex;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: var(--color-action-primary-subtle);
+  color: var(--color-text-link);
+}
+
+.agent-management-avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.agent-management-tag,
+.agent-management-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--color-action-secondary);
+  color: var(--color-text-secondary);
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.agent-management-state,
+.agent-management-detail--state {
+  display: flex;
+  min-height: 240px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 16px;
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+
+.agent-management-state p,
+.agent-management-detail--state p {
+  margin: 0;
+}
+
+.agent-management-inline-error,
+.agent-management-form-error {
+  border: 1px solid var(--color-border-danger);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-card);
+  color: var(--color-feedback-danger);
+  padding: 12px 16px;
+}
+
+.agent-management-inline-error {
+  width: min(calc(100% - (var(--agent-page-gutter) * 2)), var(--agent-content-max));
+  margin: 16px auto 0;
+}
+
+.agent-management-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 24px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.agent-management-pagination__buttons {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.agent-management-pagination__buttons button {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.agent-management-pagination__buttons button:disabled {
+  cursor: not-allowed;
+  opacity: var(--agent-opacity-disabled);
+}
+
+.agent-management-card--skeleton {
+  background: var(--color-action-secondary);
+  animation: agent-management-pulse 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes agent-management-pulse {
+  from {
+    opacity: var(--agent-opacity-muted);
+  }
+  to {
+    opacity: var(--agent-opacity-visible);
+  }
+}
+
+.agent-management-detail,
+.agent-management-editor {
+  padding-top: 68px;
+  padding-bottom: 72px;
+}
+
+.agent-management-detail {
+  padding-top: 70px;
+  font-family: var(--font-body);
+}
+
+.agent-management-editor {
+  padding-top: 64px;
+}
+
+.agent-management-editor h1 {
+  font-size: 20px;
+  line-height: 30px;
+}
+
+.agent-management-detail > .agent-management-back,
+.agent-management-detail > .agent-management-detail__header,
+.agent-management-detail > .agent-management-detail-section,
+.agent-management-detail > .agent-management-detail-capabilities,
+.agent-management-detail > .agent-management-detail-tabs,
+.agent-management-detail > .agent-management-detail-content {
+  margin-right: 0;
+  margin-left: 0;
+}
+
+.agent-management-detail > .agent-management-back {
+  position: relative;
+  top: -5px;
+}
+
+.agent-management-detail > .agent-management-detail__header {
+  margin-left: 16px;
+}
+
+.agent-management-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: 0;
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.agent-management-back:hover {
+  color: var(--color-text-strong);
+}
+
+.agent-management-back svg {
+  width: 12px;
+  height: 12px;
+}
+
+.agent-management-detail__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-top: 26px;
+}
+
+.agent-management-detail__identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 16px;
+}
+
+.agent-management-detail__identity h1 {
+  margin: 0 0 1px;
+  color: var(--color-text-primary);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 30px;
+}
+
+.agent-management-avatar--detail {
+  width: 32px;
+  height: 32px;
+  flex-basis: 32px;
+  border-radius: var(--radius-md);
+}
+
+.agent-management-detail__badges,
+.agent-management-chip-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.agent-management-detail__badges {
+  gap: 17px;
+}
+
+.agent-management-detail__badges .agent-management-tag {
+  color: var(--color-text-primary);
+  padding-right: 4px;
+  padding-left: 4px;
+}
+
+.agent-management-source,
+.agent-management-installed {
+  color: var(--color-text-primary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.agent-management-detail__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.agent-management-detail-action--install {
+  min-width: 56px;
+  min-height: 28px;
+  border-radius: var(--radius-full);
+}
+
+.agent-management-detail-action--use {
+  min-width: 56px;
+  min-height: 28px;
+  border-radius: var(--radius-full);
+}
+
+.agent-management-detail-action--uninstall {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: 0 8px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.agent-management-detail-action--uninstall:hover:not(:disabled) {
+  background: var(--color-action-secondary);
+}
+
+.agent-management-detail-action--uninstall:disabled {
+  cursor: wait;
+  opacity: var(--agent-opacity-muted);
+}
+
+.agent-management-inline-error {
+  margin-top: 20px;
+}
+
+.agent-management-inline-notice,
+.agent-management-connection-warning {
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-card);
+  color: var(--color-feedback-success);
+  padding: 12px 16px;
+}
+
+.agent-management-inline-notice {
+  width: min(calc(100% - (var(--agent-page-gutter) * 2)), var(--agent-content-max));
+  margin: 16px auto 0;
+}
+
+.agent-management-connection-warning {
+  margin-top: 16px;
+  color: var(--color-text-secondary);
+}
+
+.agent-management-detail-section {
+  margin-top: 31px;
+}
+
+.agent-management-detail-section--prompts {
+  margin-top: 32px;
+}
+
+.agent-management-detail-section h2,
+.agent-management-detail-capability-group h2 {
+  margin: 0 0 8px;
+  color: var(--color-text-primary);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.agent-management-form-section h2 {
+  margin: 0 0 16px;
+  color: var(--color-text-primary);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 22px;
+}
+
+.agent-management-detail-description {
+  max-width: 100%;
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.agent-management-detail-capabilities {
+  display: block;
+  margin-top: 32px;
+}
+
+.agent-management-detail-capability-group {
+  min-width: 0;
+}
+
+.agent-management-detail-capability-group h2 {
+  margin-bottom: 8px;
+}
+
+.agent-management-detail-capability-group .agent-management-chip {
+  min-height: 32px;
+  border-radius: var(--agent-radius-chip);
+  background: var(--color-sidebar-nav-hover);
+  color: var(--color-text-primary);
+  padding: 0 16px;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.agent-management-detail-capability-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.agent-management-detail-capability-grid .agent-management-capability-card {
+  min-height: 116px;
+}
+
+.agent-management-detail-capability-group + .agent-management-detail-capability-group {
+  margin-top: 32px;
+}
+
+.agent-management-prompt-list {
+  display: grid;
+  max-width: 696px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.agent-management-prompt {
+  display: flex;
+  min-width: 0;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid var(--color-sidebar-nav-hover);
+  border-radius: var(--radius-md);
+  background: var(--color-task-card-surface);
+  color: var(--color-chat-supporting-text);
+  padding: 0 16px;
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.agent-management-prompt span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-management-prompt__send {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--color-chat-supporting-text);
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-management-prompt__send:disabled {
+  cursor: not-allowed;
+  opacity: var(--agent-opacity-disabled);
+}
+
+.agent-management-detail-tabs {
+  display: flex;
+  gap: 32px;
+  margin-top: 32px;
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.agent-management-detail-tabs button {
+  min-height: 42px;
+  padding: 0 0 12px;
+  color: var(--color-text-primary);
+  font-size: 16px;
+  line-height: 24px;
+  min-width: 64px;
+}
+
+.agent-management-detail-tabs button:disabled {
+  cursor: not-allowed;
+  opacity: var(--agent-opacity-disabled);
+}
+
+.agent-management-detail-content {
+  padding-top: 21px;
+  color: var(--color-text-primary);
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.agent-management-detail-content h1,
+.agent-management-detail-content h2,
+.agent-management-detail-content h3 {
+  margin: 0 0 8px;
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.agent-management-detail-content h1 {
+  font-size: 18px;
+  line-height: 28px;
+}
+
+.agent-management-detail-content h2 {
+  font-size: 18px;
+  line-height: 28px;
+}
+
+.agent-management-detail-content h3 {
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.agent-management-detail-content p {
+  margin: 0 0 24px;
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.agent-management-file-preview {
+  display: grid;
+  grid-template-columns: 296px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  height: 650px;
+  min-height: 0;
+  margin-top: 24px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-card);
+}
+
+.agent-management-file-tree {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--color-border-default);
+  padding: 14px 0 12px;
+  --agent-management-file-indent: 24px;
+  --agent-management-file-pad: 2px;
+}
+
+.agent-management-file-preview--unavailable {
+  display: flex;
+  height: auto;
+  min-height: 240px;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-management-file-entry {
+  display: flex;
+  width: 100%;
+  min-height: 36px;
+  margin-bottom: 8px;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-right: 8px;
+  cursor: pointer;
+  text-align: left;
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.agent-management-file-tree > div > .agent-management-file-entry,
+.agent-management-file-entry.is-skill-definition {
+  margin-bottom: 6px;
+}
+
+.agent-management-file-entry:hover,
+.agent-management-file-entry.is-selected {
+  background: var(--color-action-secondary);
+  color: var(--color-text-strong);
+}
+
+.agent-management-file-entry.is-unsupported {
+  color: var(--color-text-tertiary);
+}
+
+.agent-management-file-entry__chevron {
+  display: inline-flex;
+  width: 14px;
+  flex: 0 0 14px;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-management-file-entry__icon {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-management-file-entry__icon > svg {
+  flex: 0 0 auto;
+}
+
+.agent-management-file-entry__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-management-file-content {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.agent-management-file-content__header {
+  display: flex;
+  flex: 0 0 58px;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--color-border-default);
+  padding: 0 23px;
+  color: var(--color-text-strong);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.agent-management-file-content__header > * {
+  position: relative;
+  top: -2px;
+}
+
+.agent-management-file-content__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-management-file-content__actions button {
+  display: inline-flex;
+  min-width: 30px;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0 6px;
+  cursor: pointer;
+}
+
+.agent-management-file-content__actions button:hover:not(:disabled) {
+  background: var(--color-action-secondary);
+  color: var(--color-text-strong);
+}
+
+.agent-management-file-content__actions button:disabled {
+  cursor: not-allowed;
+  opacity: var(--agent-opacity-disabled);
+}
+
+.agent-management-file-content__body {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 15px;
+}
+
+.agent-management-markdown {
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  line-height: 24px;
+}
+
+.agent-management-markdown__frontmatter {
+  max-width: 100%;
+  margin: 0 0 20px;
+  overflow: auto;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-panel);
+  color: var(--color-text-secondary);
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-management-markdown__body {
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  line-height: 24px;
+}
+
+.agent-management-markdown__body > :first-child {
+  margin-top: 0;
+}
+
+.agent-management-markdown__body > :last-child {
+  margin-bottom: 0;
+}
+
+.agent-management-markdown__body :where(h1, h2, h3, h4, h5, h6) {
+  color: var(--color-text-strong);
+  font-weight: 600;
+}
+
+.agent-management-markdown__body :where(h1) {
+  margin: 0 0 16px;
+  font-size: 20px;
+  line-height: 28px;
+}
+
+.agent-management-markdown__body :where(h2) {
+  margin: 24px 0 8px;
+  font-size: 18px;
+  line-height: 24px;
+}
+
+.agent-management-markdown__body :where(h3) {
+  margin: 20px 0 8px;
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.agent-management-markdown__body :where(p) {
+  margin: 0 0 12px;
+  font-size: 14px;
+  line-height: 24px;
+}
+
+.agent-management-markdown__body :where(ul, ol) {
+  margin: 0 0 16px;
+  padding-left: 22px;
+}
+
+.agent-management-markdown__body :where(li + li) {
+  margin-top: 4px;
+}
+
+.agent-management-markdown__body :where(blockquote) {
+  border-left-color: var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.agent-management-markdown__body :where(:not(pre) > code) {
+  border-radius: var(--radius-sm);
+  background: var(--color-action-secondary);
+  color: var(--color-text-strong);
+  padding: 2px 5px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  white-space: break-spaces;
+}
+
+.agent-management-markdown__body :where(pre) {
+  max-width: 100%;
+  margin: 16px 0;
+  overflow: auto;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-panel);
+  padding: 12px 14px;
+}
+
+.agent-management-markdown__body :where(pre code) {
+  background: transparent;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: pre;
+}
+
+.agent-management-code {
+  max-width: 100%;
+  min-height: 100%;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-panel);
+  color: var(--color-text-primary);
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: pre;
+}
+
+.agent-management-code-preview {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-panel);
+}
+
+.agent-management-code-preview .cm-editor {
+  height: 100%;
+}
+
+.agent-management-detail-content :where(code)::before,
+.agent-management-detail-content :where(code)::after,
+.agent-management-markdown :where(code)::before,
+.agent-management-markdown :where(code)::after {
+  content: none !important;
+}
+
+.agent-management-file-state {
+  display: flex;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--color-text-secondary);
+  padding: 16px;
+  text-align: center;
+  font-size: 13px;
+}
+
+.agent-management-file-state p {
+  margin: 0;
+}
+
+.agent-management-file-state--error {
+  color: var(--color-feedback-danger);
+}
+
+.agent-management-editor__header {
+  margin-top: 29px;
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.agent-management-editor__tabs {
+  display: flex;
+  gap: 14px;
+  margin-top: 32px;
+}
+
+.agent-management-editor__tabs span {
+  position: relative;
+  min-height: 32px;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.agent-management-editor__tabs span:nth-child(-n + 2) {
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.agent-management-editor__tabs span:nth-child(1) {
+  width: 80px;
+}
+
+.agent-management-editor__tabs span:nth-child(2) {
+  width: 64px;
+}
+
+.agent-management-editor__tabs span:nth-child(3) {
+  width: 70px;
+}
+
+.agent-management-editor__tabs span:first-child {
+  margin-right: 18px;
+}
+
+.agent-management-editor__tabs span.is-active {
+  color: var(--color-text-strong);
+  font-weight: 600;
+}
+
+.agent-management-editor__tabs span.is-active::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  background: var(--color-text-strong);
+  content: '';
+}
+
+.agent-management-editor__tabs span.is-disabled {
+  color: var(--color-text-tertiary);
+}
+
+.agent-management-form-section {
+  margin-top: 32px;
+}
+
+.agent-management-editor > .agent-management-form-section:first-of-type {
+  margin-top: 32px;
+}
+
+.agent-management-form-section > h2 {
+  margin-bottom: 24px;
+  font-size: 18px;
+  line-height: 28px;
+}
+
+.agent-management-editor > .agent-management-form-section:first-of-type > h2 {
+  margin-bottom: 16px;
+  line-height: 28px;
+}
+
+.agent-management-form-section__header p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.agent-management-form-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+.agent-management-form-grid label {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.agent-management-form-grid > .agent-management-form-field--wide {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.agent-management-form-grid > .agent-management-form-field--runtime-id {
+  order: 5;
+}
+
+.agent-management-form-grid > .agent-management-form-field--tag-picker {
+  gap: 2px;
+  margin-bottom: 16px;
+}
+
+.agent-management-tag-picker {
+  position: relative;
+}
+
+.agent-management-tag-picker__trigger {
+  display: flex;
+  width: 100%;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+  height: 32px;
+  padding: 0 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-management-tag-picker__trigger:focus-visible {
+  border-color: var(--color-border-focus);
+  box-shadow: var(--effect-focus-ring);
+  outline: 0;
+}
+
+.agent-management-tag-picker__values {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-management-tag--selected {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  gap: 8px;
+  background: var(--color-action-secondary);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  font: inherit;
+}
+
+.agent-management-tag--selected > button {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+}
+
+.agent-management-tag--selected:hover {
+  background: var(--color-border-default);
+}
+
+.agent-management-tag-picker__chevron {
+  color: var(--color-text-secondary);
+}
+
+.agent-management-tag-picker__toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-management-tag-picker__toggle:hover {
+  background: var(--color-action-secondary);
+}
+
+.agent-management-tag-picker__toggle:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 1px;
+}
+
+.agent-management-form-placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.agent-management-tag-picker__options {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  z-index: 10;
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-md);
+  max-height: min(320px, 50vh);
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.agent-management-tag-picker__options button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  font: inherit;
+}
+
+.agent-management-tag-picker__options button:hover,
+.agent-management-tag-picker__options button.is-selected {
+  background: var(--color-action-secondary);
+}
+
+.agent-management-tag-picker__options button svg {
+  flex: 0 0 auto;
+  color: var(--color-text-link);
+}
+
+.agent-management-tag-picker__custom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-top: 1px solid var(--color-border-default);
+  margin-top: 4px;
+  padding: 8px 4px 2px;
+}
+
+.agent-management-tag-picker__custom input {
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 32px;
+}
+
+.agent-management-tag-picker__custom button {
+  flex: 0 0 auto;
+  justify-content: center;
+  gap: 4px;
+  background: var(--color-action-secondary);
+  padding: 7px 9px;
+  font-size: 13px;
+}
+
+.agent-management-tag-picker__custom button:disabled {
+  color: var(--color-text-placeholder);
+  cursor: not-allowed;
+}
+
+.agent-management-form-grid input,
+.agent-management-form-grid textarea {
+  width: 100%;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  outline: 0;
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+  padding: 10px 12px;
+  font: inherit;
+  line-height: 20px;
+  resize: vertical;
+}
+
+.agent-management-form-grid input {
+  height: 32px;
+}
+
+.agent-management-form-grid textarea:focus,
+.agent-management-form-grid input:focus {
+  border-color: var(--color-border-default);
+  box-shadow: none;
+}
+
+.agent-management-form-grid textarea {
+  min-height: 64px;
+}
+
+.agent-management-form-grid textarea:not(.agent-management-persona) {
+  height: 64px;
+}
+
+.agent-management-form-grid .agent-management-persona {
+  height: 280px;
+  min-height: 280px;
+  line-height: 1.7;
+}
+
+.agent-management-form-grid > label:has(.agent-management-persona) {
+  gap: 14px;
+}
+
+.agent-management-persona-field {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-management-persona-surface {
+  min-height: 280px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-card);
+}
+
+.agent-management-persona-surface:focus-within {
+  border-color: var(--color-border-default);
+  box-shadow: none;
+}
+
+.agent-management-persona-surface .agent-management-persona {
+  display: block;
+  height: 280px;
+  min-height: 280px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  padding: 10px 12px;
+  line-height: 1.7;
+}
+
+.agent-management-persona-rendered {
+  min-height: 280px;
+  cursor: text;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.agent-management-persona-rendered:focus {
+  outline: 0;
+}
+
+.agent-management-persona-placeholder {
+  color: var(--color-text-placeholder);
+}
+
+.agent-management-persona-rendered .agent-management-markdown {
+  overflow: auto;
+  max-height: 258px;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.agent-management-persona-rendered .agent-management-markdown > h1,
+.agent-management-persona-rendered .agent-management-markdown > h2,
+.agent-management-persona-rendered .agent-management-markdown > h3 {
+  color: var(--color-text-strong);
+}
+
+.agent-management-persona-rendered .agent-management-markdown > h1 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.agent-management-persona-rendered .agent-management-markdown > h2 {
+  margin: 24px 0 8px;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.agent-management-persona-rendered .agent-management-markdown > p {
+  margin: 0 0 24px;
+  font-size: 16px;
+  line-height: 24px;
+  white-space: pre-line;
+}
+
+.agent-management-field-error {
+  color: var(--color-feedback-danger);
+  font-size: 12px;
+}
+
+.agent-management-form-section__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.agent-management-form-section__heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.agent-management-section-toggle {
+  display: inline-flex;
+  width: 22px;
+  height: 28px;
+  flex: 0 0 22px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-management-section-toggle:hover,
+.agent-management-section-toggle:focus-visible {
+  color: var(--color-text-strong);
+  outline: 0;
+}
+
+.agent-management-form-section__header h2 {
+  margin-bottom: 4px;
+  font-size: 18px;
+  line-height: 28px;
+}
+
+.agent-management-prompt-editor-list {
+  display: grid;
+  gap: 16px;
+}
+
+.agent-management-prompt-editor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-management-prompt-editor input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  outline: 0;
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+  padding: 0 12px;
+  font: inherit;
+}
+
+.agent-management-prompt-editor input:focus {
+  border-color: var(--color-border-default);
+  box-shadow: none;
+}
+
+.agent-management-prompt-editor button {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-card);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 18px;
+}
+
+.agent-management-prompt-editor button:hover,
+.agent-management-prompt-editor button:focus-visible {
+  background: var(--color-action-secondary);
+  color: var(--color-text-strong);
+  outline: 0;
+}
+
+.agent-management-selected-capabilities {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.agent-management-capability-card,
+.agent-management-selection-card {
+  display: flex;
+  min-width: 0;
+  min-height: 116px;
+  align-items: flex-start;
+  gap: 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+  padding: 20px;
+  text-align: left;
+}
+
+.agent-management-capability-card > span:nth-child(2),
+.agent-management-selection-card > span:nth-child(2) {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-management-capability-card strong,
+.agent-management-selection-card strong {
+  overflow: hidden;
+  color: var(--color-text-strong);
+  font-size: 14px;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-management-capability-card small,
+.agent-management-selection-card small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 20px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.agent-management-capability-card__icon {
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-action-primary-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-action-primary-subtle);
+  color: var(--color-text-link);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.agent-management-capability-card__remove {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-management-capability-card__remove:hover,
+.agent-management-capability-card__remove:focus-visible {
+  color: var(--color-text-strong);
+  outline: 0;
+}
+
+.agent-management-selected-capabilities .agent-management-capability-card {
+  height: 156px;
+  min-height: 156px;
+  flex-direction: column;
+  gap: 16px;
+  border: 0;
+  border-radius: var(--radius-md);
+  padding: 24px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.agent-management-selected-capabilities .agent-management-capability-card__heading {
+  display: flex;
+  width: 100%;
+  height: 48px;
+  min-width: 0;
+  flex: 0 0 48px;
+  align-items: center;
+  gap: 16px;
+}
+
+.agent-management-selected-capabilities .agent-management-capability-card__heading strong {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  font-size: 18px;
+  line-height: 28px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-management-selected-capabilities .agent-management-capability-card__icon {
+  width: 48px;
+  height: 48px;
+  flex-basis: 48px;
+  border-radius: 10px;
+  font-size: 20px;
+}
+
+.agent-management-selected-capabilities .agent-management-capability-card > small {
+  display: -webkit-box;
+  width: 100%;
+  height: 44px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 22px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.agent-management-selected-capabilities .agent-management-capability-card__remove {
+  width: 32px;
+  height: 32px;
+  flex-basis: 32px;
+}
+
+.agent-management-upload-dialog {
+  display: flex;
+  width: min(550px, calc(100vw - 48px));
+  height: min(460px, calc(100vh - 48px));
+  max-height: calc(100vh - 48px);
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-xl);
+  padding: 24px;
+}
+
+.agent-management-upload-dialog > header,
+.agent-management-upload-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.agent-management-upload-dialog > header {
+  justify-content: space-between;
+}
+
+.agent-management-upload-dialog > header h2 {
+  margin: 0;
+  color: var(--color-text-strong);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.agent-management-upload-dialog:focus {
+  outline: 0;
+  box-shadow: none;
+}
+
+.agent-management-upload-dialog > header button {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-management-upload-dialog > header button:hover,
+.agent-management-upload-dialog > header button:focus-visible {
+  background: var(--color-action-secondary);
+  color: var(--color-text-strong);
+  outline: 0;
+}
+
+.agent-management-upload-dialog__hint {
+  display: flex;
+  min-height: 56px;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-chat-accent-subtle);
+  color: var(--color-text-primary);
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.agent-management-upload-dialog__hint svg {
+  flex: 0 0 14px;
+  margin-top: 2px;
+  color: var(--color-chat-accent);
+}
+
+.agent-management-upload-picker {
+  display: flex;
+  min-height: 212px;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px dashed var(--color-border-default);
+  border-radius: var(--radius-xl);
+  background: var(--color-tag-neutral-surface);
+  color: var(--color-text-secondary);
+  padding: 24px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.agent-management-upload-picker:hover,
+.agent-management-upload-picker:focus-visible,
+.agent-management-upload-picker.is-dragging {
+  border-color: var(--color-border-hover);
+  outline: 0;
+}
+
+.agent-management-upload-picker.has-error {
+  border-color: var(--color-border-danger);
+}
+
+.agent-management-upload-picker > span {
+  color: var(--color-chat-supporting-text);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.agent-management-upload-picker__selected {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+}
+
+.agent-management-upload-picker__selected > svg {
+  flex: 0 0 22px;
+  color: var(--color-text-secondary);
+}
+
+.agent-management-upload-picker__selected > div {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.agent-management-upload-picker__selected p,
+.agent-management-upload-picker__selected small {
+  display: block;
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-management-upload-picker__selected p {
+  color: var(--color-text-primary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.agent-management-upload-picker__selected small {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.agent-management-upload-picker__selected button {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-management-upload-picker__selected button:hover,
+.agent-management-upload-picker__selected button:focus-visible {
+  background: var(--color-action-secondary);
+  color: var(--color-text-strong);
+  outline: 0;
+}
+
+.agent-management-upload-picker__spinner {
+  animation: agent-management-upload-spin 1s linear infinite;
+}
+
+.agent-management-upload-dialog__error {
+  margin: -12px 0 0;
+  color: var(--color-feedback-danger);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.agent-management-upload-dialog > footer .agent-management-button {
+  min-height: 32px;
+  border-radius: var(--radius-full);
+  padding-right: 16px;
+  padding-left: 16px;
+}
+
+.agent-management-upload-dialog > footer .agent-management-button--primary {
+  border-color: var(--color-text-strong);
+  background: var(--color-text-strong);
+  color: var(--color-text-inverse);
+}
+
+.agent-management-upload-dialog > footer .agent-management-button--primary:hover:not(:disabled) {
+  border-color: var(--color-text-primary);
+  background: var(--color-text-primary);
+}
+
+@keyframes agent-management-upload-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.agent-management-selection-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  background: var(--color-backdrop);
+  padding: 24px;
+}
+
+.agent-management-selection-dialog {
+  display: flex;
+  width: min(720px, calc(100vw - 48px));
+  height: min(720px, calc(100vh - 48px));
+  max-height: calc(100vh - 48px);
+  flex-direction: column;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-xl);
+}
+
+.agent-management-selection-dialog > header,
+.agent-management-selection-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 0;
+  padding: 16px 24px;
+}
+
+.agent-management-selection-dialog > header h2 {
+  margin: 0;
+  color: var(--color-text-strong);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.agent-management-selection-tabs {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  border-bottom: 1px solid var(--color-border-default);
+  padding: 0 24px;
+}
+
+.agent-management-selection-tab {
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 12px 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+}
+
+.agent-management-selection-tab.is-active {
+  color: var(--color-text-strong);
+}
+
+.agent-management-selection-tab.is-active::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  background: var(--color-text-strong);
+  content: '';
+}
+
+.agent-management-selection-tab[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.agent-management-selection-search {
+  display: flex;
+  flex: 0 0 32px;
+  height: 32px;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 24px 0;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  color: var(--color-text-tertiary);
+  padding: 0 12px;
+}
+
+.agent-management-selection-controls {
+  position: relative;
+  display: flex;
+  flex: 0 0 32px;
+  gap: 8px;
+  align-items: center;
+  margin: 16px 24px 0;
+}
+
+.agent-management-selection-controls .agent-management-selection-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.agent-management-selection-filter {
+  position: relative;
+  flex: 0 0 132px;
+  width: 132px;
+}
+
+.agent-management-selection-filter__trigger {
+  display: flex;
+  width: 100%;
+  height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  outline: 0;
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+  padding: 0 12px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.agent-management-selection-filter__trigger:hover,
+.agent-management-selection-filter__trigger:focus-visible {
+  border-color: var(--color-border-default);
+  box-shadow: none;
+}
+
+.agent-management-selection-filter__menu {
+  position: absolute;
+  z-index: 2;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-md);
+  padding: 4px;
+}
+
+.agent-management-selection-filter__menu button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: 8px 10px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.agent-management-selection-filter__menu button:hover,
+.agent-management-selection-filter__menu button[aria-selected='true'] {
+  background: var(--color-action-secondary);
+}
+
+.agent-management-selection-search:focus-within {
+  border-color: var(--color-border-default);
+  box-shadow: none;
+}
+
+.agent-management-selection-search input {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  font: inherit;
+}
+
+.agent-management-selection-search input:focus,
+.agent-management-selection-search input:focus-visible {
+  box-shadow: none;
+}
+
+.agent-management-selection-dialog > header button {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  cursor: pointer;
+}
+
+.agent-management-selection-dialog > header button:hover,
+.agent-management-selection-dialog > header button:focus-visible {
+  background: var(--color-action-secondary);
+  color: var(--color-text-strong);
+  outline: 0;
+}
+
+.agent-management-selection-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 24px 24px;
+}
+
+.agent-management-selection-dialog__body.is-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-management-selection-empty-state {
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.agent-management-selection-empty-state p {
+  margin: 0;
+}
+
+.agent-management-selection-dialog > footer {
+  border-top: 1px solid var(--color-border-default);
+  border-bottom: 0;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+}
+
+.agent-management-selection-dialog > footer .agent-management-button {
+  min-height: 32px;
+  border-radius: var(--radius-full);
+  padding-right: 16px;
+  padding-left: 16px;
+}
+
+.agent-management-selection-dialog > footer .agent-management-button--primary {
+  border-color: var(--color-text-strong);
+  background: var(--color-text-strong);
+  color: var(--color-text-inverse);
+}
+
+.agent-management-selection-dialog > footer .agent-management-button--primary:hover:not(:disabled) {
+  border-color: var(--color-text-primary);
+  background: var(--color-text-primary);
+}
+
+.agent-management-selection-dialog > footer > div {
+  display: flex;
+  gap: 12px;
+}
+
+.agent-management-selection-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.agent-management-selection-card {
+  position: relative;
+  min-height: 140px;
+  cursor: pointer;
+}
+
+.agent-management-selection-card__action {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+}
+
+.agent-management-selection-card__action svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.agent-management-selection-card:hover,
+.agent-management-selection-card:focus-visible,
+.agent-management-selection-card.is-selected {
+  border-color: var(--color-action-primary);
+  outline: 0;
+}
+
+.agent-management-selection-card.is-selected {
+  background: var(--color-feedback-info-subtle);
+}
+
+.agent-management-inline-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 2px 0;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.agent-management-inline-action:hover {
+  color: var(--color-text-strong);
+}
+
+.agent-management-skill-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.agent-management-skill-option {
+  display: flex;
+  min-width: 0;
+  min-height: 156px;
+  align-items: flex-start;
+  gap: 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-card);
+  padding: 24px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-management-skill-option:hover,
+.agent-management-skill-option.is-selected {
+  border-color: var(--color-border-hover);
+  background: var(--color-action-secondary);
+}
+
+.agent-management-skill-option__icon {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--color-action-primary-subtle);
+  color: var(--color-text-link);
+}
+
+.agent-management-skill-option > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-management-skill-option strong {
+  overflow: hidden;
+  color: var(--color-text-strong);
+  font-size: 14px;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-management-skill-option small {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.agent-management-form-muted {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.agent-management-form-empty-state {
+  margin: 0 0 20px;
+}
+
+.agent-management-form-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.agent-management-form-error button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.agent-management-form-error--submit {
+  margin-top: 24px;
+}
+
+.agent-management-editor__footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 40px;
+  border-top: 1px solid var(--color-border-default);
+  background: var(--color-surface-content);
+  padding: 16px 0;
+}
+
+.agent-management-editor__footer .agent-management-button--primary {
+  border-color: var(--color-text-strong);
+  background: var(--color-text-strong);
+  color: var(--color-text-inverse);
+}
+
+.agent-management-editor__footer .agent-management-button--primary:hover:not(:disabled) {
+  border-color: var(--color-text-primary);
+  background: var(--color-text-primary);
+}
+
+.agent-management-editor__footer .agent-management-button {
+  min-height: 36px;
+  min-width: 76px;
+  border-radius: var(--radius-full);
+  padding-right: 18px;
+  padding-left: 18px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .agent-management-search {
+    width: 280px;
+  }
+}
+
+@media (max-width: 800px) {
+  .agent-management-panel {
+    --agent-page-gutter: 20px;
+  }
+
+  .agent-management-primary-row,
+  .agent-management-detail__header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .agent-management-primary-actions,
+  .agent-management-search {
+    width: 100%;
+  }
+
+  .agent-management-primary-actions {
+    padding-bottom: 16px;
+  }
+
+  .agent-management-card-grid,
+  .agent-management-detail-capabilities,
+  .agent-management-detail-capability-grid,
+  .agent-management-prompt-list,
+  .agent-management-skill-options,
+  .agent-management-selected-capabilities,
+  .agent-management-selection-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-management-selection-dialog {
+    width: 100%;
+  }
+
+  .agent-management-card {
+    min-height: 160px;
+  }
+
+  .agent-management-card__body {
+    padding-bottom: 64px;
+  }
+
+  .agent-management-card__actions {
+    right: 16px;
+    top: auto;
+    bottom: 16px;
+    opacity: var(--agent-opacity-visible);
+    pointer-events: auto;
+    transform: none;
+  }
+
+  .agent-management-file-preview {
+    grid-template-columns: 1fr;
+    grid-template-rows: 280px minmax(0, 1fr);
+  }
+
+  .agent-management-file-tree {
+    max-height: none;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border-default);
+  }
+}
+
+@media (max-width: 560px) {
+  .agent-management-primary-tabs {
+    gap: 24px;
+  }
+
+  .agent-management-category-row {
+    margin-right: calc(var(--agent-page-gutter) * -1);
+    margin-left: calc(var(--agent-page-gutter) * -1);
+    padding: 0 var(--agent-page-gutter);
+  }
+
+  .agent-management-card {
+    height: auto;
+  }
+
+  .agent-management-pagination {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

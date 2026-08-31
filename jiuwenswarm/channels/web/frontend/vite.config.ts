@@ -152,7 +152,7 @@ function safeStringify(v: unknown): string {
 
 
 /**
- * file-api 使用的项目根目录，需与后端 get_root_dir() 一致，前端编辑的 HEARTBEAT.md 才会被心跳读到。
+ * file-api 使用的项目根目录，需与后端 get_root_dir() 一致。
  * 优先级：环境变量 > 已存在的用户工作区 ~/.jiuwenswarm > 仓库根。
  */
 function resolveProjectRootDir(): string {
@@ -1238,7 +1238,7 @@ export default defineConfig({
   },
   server: {
     host: true,
-    allowedHosts: ['jiuwenswarm.local'],
+    allowedHosts: ['127.0.0.1'],
     port: frontendPort,
     strictPort: true,
     proxy: {
@@ -1252,7 +1252,7 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/skillhub-api/, '/api/v1'),
       },
       '/ws': {
-        target: webTarget,
+        target: webTarget, 
         ws: true,
         changeOrigin: true,
         configure: (proxy) => {

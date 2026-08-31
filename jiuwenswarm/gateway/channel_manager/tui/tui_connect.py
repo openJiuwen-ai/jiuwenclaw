@@ -40,6 +40,7 @@ from jiuwenswarm.common.config import (
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.context_window import resolve_context_window_tokens
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -295,6 +296,14 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "plugins.enable",
         "plugins.disable",
         "plugins.reload",
+        "agent_groups.list",
+        "agent_groups.show",
+        "agent_groups.file.list",
+        "agent_groups.file.read",
+        "agent_groups.create",
+        "agent_groups.import_local",
+        "agent_groups.install",
+        "agent_groups.uninstall",
         "agent_templates.list",
         "agent_templates.show",
         "agent_templates.file.list",
@@ -412,6 +421,14 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "plugins.enable",
         "plugins.disable",
         "plugins.reload",
+        "agent_groups.list",
+        "agent_groups.show",
+        "agent_groups.file.list",
+        "agent_groups.file.read",
+        "agent_groups.create",
+        "agent_groups.import_local",
+        "agent_groups.install",
+        "agent_groups.uninstall",
         "agent_templates.list",
         "agent_templates.show",
         "agent_templates.file.list",
@@ -3000,35 +3017,43 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload["available_models"] = names
             _raw = get_config_raw()
             _defs = (_raw.get("models") or {}).get("defaults")
+
+            # _model_meta 必须在 if/else 之前定义，两个分支共用；
+            # 否则 else 分支（models.defaults 为空、仅配 agentos 的场景）
+            # 会 UnboundLocalError——恰是本 PR 要修复的场景。
+            def _model_meta(i: int, e: dict, *, is_agentos: bool = False) -> dict:
+                mcc = e.get("model_client_config") or {}
+                mco = e.get("model_config_obj") or {}
+                _alias = e.get("alias", "")
+                _resolved_alias = resolve_env_vars(str(_alias)) if _alias else ""
+                _model_name = resolve_env_vars(str(mcc.get("model_name", "")))
+                _api_key = resolve_env_vars(str(mcc.get("api_key", "")))
+                # agentos 条目 index 用 "a" 前缀编码，与 defaults 的纯数字 index 区分，
+                # 避免切换时按 index 命中错位。is_current 仅 defaults 首位为 true
+                # （agentos 永不抢默认，不会是 current）。
+                return {
+                    "index": f"a{i}" if is_agentos else i,
+                    "name": _resolved_alias or _model_name,
+                    "alias": _resolved_alias,
+                    "model_name": _model_name,
+                    "model_provider": resolve_env_vars(str(mcc.get("client_provider", ""))),
+                    "api_base": resolve_env_vars(str(mcc.get("api_base", ""))),
+                    "reasoning_level": resolve_env_vars(str(mco.get("reasoning_level", ""))),
+                    # 同名模型冲突时用于区分：仅展示末4位，避免泄露过多 key 信息
+                    "api_key_suffix": _api_key[-4:] if _api_key else "",
+                    "is_current": (i == 0 and not is_agentos),
+                    "is_agentos": is_agentos,
+                }
+
+            # agentos 备份模型追加逻辑两个分支都要用，提前读取
+            _agentos_raw = (_raw.get("models") or {}).get("agentos")
+            _agentos_list = _agentos_raw if isinstance(_agentos_raw, list) else []
+
             if isinstance(_defs, list) and _defs:
                 _first_name = resolve_env_vars(str((_defs[0].get("model_client_config") or {}).get("model_name", "")))
                 _first_alias = resolve_env_vars(str(_defs[0].get("alias", ""))) if _defs[0].get("alias") else ""
                 payload["current"] = _first_alias or _first_name or os.getenv("MODEL_NAME", "unknown")
                 payload["current_model_name"] = _first_name or os.getenv("MODEL_NAME", "unknown")
-
-                def _model_meta(i: int, e: dict, *, is_agentos: bool = False) -> dict:
-                    mcc = e.get("model_client_config") or {}
-                    mco = e.get("model_config_obj") or {}
-                    _alias = e.get("alias", "")
-                    _resolved_alias = resolve_env_vars(str(_alias)) if _alias else ""
-                    _model_name = resolve_env_vars(str(mcc.get("model_name", "")))
-                    _api_key = resolve_env_vars(str(mcc.get("api_key", "")))
-                    # agentos 条目 index 用 "a" 前缀编码，与 defaults 的纯数字 index 区分，
-                    # 避免切换时按 index 命中错位。is_current 仅 defaults 首位为 true
-                    # （agentos 永不抢默认，不会是 current）。
-                    return {
-                        "index": f"a{i}" if is_agentos else i,
-                        "name": _resolved_alias or _model_name,
-                        "alias": _resolved_alias,
-                        "model_name": _model_name,
-                        "model_provider": resolve_env_vars(str(mcc.get("client_provider", ""))),
-                        "api_base": resolve_env_vars(str(mcc.get("api_base", ""))),
-                        "reasoning_level": resolve_env_vars(str(mco.get("reasoning_level", ""))),
-                        # 同名模型冲突时用于区分：仅展示末4位，避免泄露过多 key 信息
-                        "api_key_suffix": _api_key[-4:] if _api_key else "",
-                        "is_current": (i == 0 and not is_agentos),
-                        "is_agentos": is_agentos,
-                    }
 
                 _models_list = [
                     _model_meta(i, e)
@@ -3036,8 +3061,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 ]
                 # 追加 agentos 备份模型：与 defaults 并列展示、同等可选可切换，
                 # 但 is_current 恒 False、is_agentos True 供前端区分渲染与切换路径
-                _agentos_raw = (_raw.get("models") or {}).get("agentos")
-                _agentos_list = _agentos_raw if isinstance(_agentos_raw, list) else []
                 for _ai, _ab in enumerate(_agentos_list):
                     if not isinstance(_ab, dict):
                         continue
@@ -3047,7 +3070,19 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     _models_list.append(_model_meta(_ai, _ab, is_agentos=True))
                 payload["models"] = _models_list
             else:
+                # models.defaults 不存在/为空：仍需展示 agentos 备份模型（若有），
+                # 否则 .env 全空且只有 agentos 时列表为空，用户无法切换。
                 payload["current"] = os.getenv("MODEL_NAME", "unknown")
+                _models_list = []
+                for _ai, _ab in enumerate(_agentos_list):
+                    if not isinstance(_ab, dict):
+                        continue
+                    _ab_mcc = _ab.get("model_client_config")
+                    if not (isinstance(_ab_mcc, dict) and _ab_mcc.get("model_name")):
+                        continue
+                    _models_list.append(_model_meta(_ai, _ab, is_agentos=True))
+                if _models_list:
+                    payload["models"] = _models_list
             await channel.send_response(ws, req_id, ok=True, payload=payload)
             return
 
@@ -3066,24 +3101,51 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         _agentos_blocks = (_raw_cfg.get("models") or {}).get("agentos")
         _agentos_blocks = _agentos_blocks if isinstance(_agentos_blocks, list) else []
         _agentos_matched_name = ""
-        for _ab in _agentos_blocks:
-            if not isinstance(_ab, dict):
+        _agentos_matched_provider = ""
+        _agentos_matched_global_idx: int | None = None
+        logger.info(
+            "[cli command.model] agentos 匹配: target=%s, blocks=%d, raw_has_agentos=%s",
+            target, len(_agentos_blocks), _agentos_blocks is not None and len(_agentos_blocks) > 0,
+        )
+        # 遍历合并后的 defaults+agentos 列表（与 AgentServer _build_model_cache_from_defaults
+        # 同源、同序），按 global_idx 定位命中的 agentos 条目。回包 current 带
+        # ``{model_name}#{global_idx}``，供前端注入 chat.send 的 model_name，
+        # 后端 _resolve_model_by_name 据此精确命中 agentos 缓存条目——否则同名时
+        # 纯 model_name 会被解析到 defaults 首条（is_default=true），误路由。
+        for _gi, _e in enumerate(get_default_models(_raw_cfg)):
+            if not isinstance(_e, dict):
                 continue
-            _ab_mcc = _ab.get("model_client_config") or {}
-            if not (isinstance(_ab_mcc, dict) and _ab_mcc.get("model_name")):
+            _e_mco = _e.get("model_config_obj") or {}
+            if not (isinstance(_e_mco, dict) and _e_mco.get("_source") == "agentos"):
                 continue
-            _ab_name = resolve_env_vars(str(_ab_mcc.get("model_name", "")))
-            _ab_alias = resolve_env_vars(str(_ab.get("alias", ""))) if _ab.get("alias") else ""
+            _e_mcc = _e.get("model_client_config") or {}
+            if not (isinstance(_e_mcc, dict) and _e_mcc.get("model_name")):
+                continue
+            _ab_name = resolve_env_vars(str(_e_mcc.get("model_name", "")))
+            _ab_alias = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
+            logger.info(
+                "[cli command.model] agentos 条目: name=%s alias=%s vs target=%s global_idx=%d",
+                _ab_name, _ab_alias, target, _gi,
+            )
             if _ab_name == target or (_ab_alias and _ab_alias == target):
                 _agentos_matched_name = _ab_name
+                _agentos_matched_provider = resolve_env_vars(str(_e_mcc.get("client_provider", "")))
+                _agentos_matched_global_idx = _gi
                 break
-        if _agentos_matched_name:
+        if _agentos_matched_name and _agentos_matched_global_idx is not None:
+            # 注入名带 #global_idx，与 Web 的 model_name#origin_index 契约一致；
+            # 后端 _resolve_model_by_name 走 _global_index_to_cache_key 换算精确命中
+            # 同名 defaults/agentos 中的指定条目。current 仍为纯名供前端展示，
+            # model_key 专供 chat.send 的 model_name 注入。
+            _agentos_inject_key = f"{_agentos_matched_name}#{_agentos_matched_global_idx}"
             logger.info(
                 "[cli command.model] 切换 agentos 备份模型（请求级注入，不 reload）: %s",
-                _agentos_matched_name,
+                _agentos_inject_key,
             )
             await channel.send_response(ws, req_id, ok=True, payload={
                 "current": _agentos_matched_name,
+                "model_key": _agentos_inject_key,
+                "provider": _agentos_matched_provider,
                 "requested": target,
                 "type": "switched_agentos",
                 "applied": True,
@@ -3241,25 +3303,19 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             config = get_config()
             models = get_default_models(config)
             result = []
-            # 显式配置的上下文窗口上限（react.context_engine_config.context_window_tokens）
-            # 优先级高于按模型名解析，与 AgentServer 侧 ContextEngine 行为保持一致
-            cec = (config.get("react", {}) or {}).get("context_engine_config", {}) or {}
-            cw_override = cec.get("context_window_tokens")
-            if not (isinstance(cw_override, int) and cw_override > 0):
-                cw_override = None
             for entry in models:
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
                 model_name = mcc.get("model_name", "")
                 # 解析模型的上下文窗口大小
-                context_window_tokens = 0
                 try:
-                    from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-                    context_window_tokens = ContextUtils.resolve_context_max(
+                    context_window_tokens = resolve_context_window_tokens(
                         model_name=model_name,
-                        fallback_context_window_tokens=cw_override,
+                        context_engine_config=(config.get("react", {}) or {}),
+                        model_config_obj=mco,
                     )
                 except Exception:
+                    context_window_tokens = 0
                     logger.debug("Failed to resolve context_window_tokens for model %s", model_name, exc_info=True)
                 result.append({
                     "model_name": model_name,

@@ -1,3 +1,4 @@
+; Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 ; Inno Setup installer script
 ; 仅由 scripts\build-exe.ps1 调用；wrapper 从 pyproject.toml 读取并传入构建配置。
 
@@ -24,7 +25,7 @@
 #define MyAppURL "https://openjiuwen.com"
 
 [Setup]
-AppId={{B8F3A2D1-7E4C-4A9B-8D6F-1C2E3F4A5B6C}
+AppId={{6DC96977-C194-44FE-812D-D4F0B576BD905}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -42,7 +43,7 @@ WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; Keep the legacy mutexes as a stable upgrade protocol for the existing AppId.
+; Keep the legacy and current mutexes stable across installer AppId transitions.
 ; New frozen processes also create the product-derived mutexes.
 AppMutex=JiuwenSwarm.App,Global\JiuwenSwarm.App,{#MyAppName}.App,Global\{#MyAppName}.App
 CloseApplications=yes
@@ -57,6 +58,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "..\dist\{#BuildDistDirName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[UninstallRun]
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--desktop-reset-external-cli-config"; Flags: runhidden waituntilterminated; RunOnceId: "ResetExternalCliConfig"
+
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
@@ -64,7 +68,8 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [UninstallDelete]
 ; Remove only application-owned paths that may gain runtime-generated files.
-; User data lives outside {app}, under ~/.jiuwenswarm, and is intentionally kept.
+; User configuration lives outside {app}; optional Windows runtimes live under {app}\runtime.
+; The uninstall command resets external CLI switches before this directory is removed.
 Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{app}\runtime"
 Type: files; Name: "{app}\{#MyAppExeName}"

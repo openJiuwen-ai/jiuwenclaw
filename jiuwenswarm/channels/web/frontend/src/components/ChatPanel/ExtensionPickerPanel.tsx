@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type RefObjec
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { Loader2, Plus } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { useChatStore, useSessionStore } from '../../stores';
 import { useConnectorStore } from '../../stores/connectorStore';
 import { usePluginPackageStore } from '../../stores/pluginPackageStore';
@@ -17,6 +17,8 @@ import { requestManageView } from '../ConnectorMarket';
 import { usePendingConnectorFlow, PendingConnectorModals } from '../ConnectorMarket/usePendingConnectorFlow';
 import { Switch } from '../Switch';
 import { pruneEnabledExtensions } from '../../utils/enabledExtensions';
+import PlusIcon from '../../assets/agent-management/agent-plus.svg?react';
+import SearchIcon from '../../assets/agent-management/agent-search.svg?react';
 
 const PANEL_WIDTH = 320;
 const PANEL_MAX_HEIGHT = 440;
@@ -273,9 +275,7 @@ export function ExtensionPickerPanel({ anchorRect, onClose, panelRef }: Extensio
         </div>
 
         <div className="chat-skill-select__search">
-          <svg className="chat-skill-select__search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM17.5 17.5l-3.7-3.7" />
-          </svg>
+          <SearchIcon className="chat-skill-select__search-icon" aria-hidden="true" />
           <input
             type="text"
             value={searchQuery}
@@ -447,7 +447,7 @@ function ConnectButton({ label, onClick }: { label: string; onClick: () => void 
       }}
       onBlur={() => setPoint(null)}
     >
-      <Plus size={16} strokeWidth={2.5} />
+      <PlusIcon aria-hidden="true" />
       {point && <ItemTooltipPortal point={point} text={label} />}
     </button>
   );

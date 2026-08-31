@@ -508,6 +508,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         "MemoryForbiddenRail",
         "AgentModeRail", "StructuredAskUserRail", "ConfirmInterruptRail",
         "FileSystemRail",  # 别名
+        "DesignRail",  # SDD 状态机（wave-1），受 modes.code.sdd.enabled 门控
         "SubagentRail",
         # The AgentServer-owned Job Heartbeat Rail is always mounted above.
         # Treat a same-named resource entry as fixed so it cannot be mounted a
@@ -730,13 +731,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
         context_engine_config = _deep_agent_context_engine_config(
             config,
-            full_config=config_base,
-            model_name=getattr(
-                getattr(model, "model_config", None),
-                "model_name",
-                "",
-            ),
-            model=model,
         )
         logger.info(
             "[JiuwenSwarmCodeAdapter] ContextEngineConfig resolved: "
@@ -1095,8 +1089,18 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         config_base: dict[str, Any] | None = None,
         env_overrides: dict[str, Any] | None = None,
         target_session_id: str | None = None,
+        reload_scopes: set[str] | None = None,
     ) -> None:
         """Hot-apply a newly generated DeepAgentSpec to the existing code agent."""
+        scope_set = set(reload_scopes) if reload_scopes else set()
+        if scope_set == {"multimodal"}:
+            await super().reload_agent_config(
+                config_base,
+                env_overrides,
+                target_session_id=target_session_id,
+                reload_scopes=scope_set,
+            )
+            return
         target_sid = str(target_session_id or "").strip() or None
         if self._is_session_scoped_adapter and target_sid:
             own_sid = self._session_adapter_key(self._parent_session_id)
@@ -1134,6 +1138,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 config_base,
                 env_overrides,
                 target_session_id=target_sid,
+                reload_scopes=scope_set,
             )
             return
 
@@ -1401,9 +1406,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # 固定 Rails — code 模式特有
         rail_infos = [
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
-            _RailBuildInfo(
-                "_eternal_conversation_rail", self._build_eternal_conversation_rail
-            ),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_skill_retrieval_prompt_rail", self._build_skill_retrieval_prompt_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
@@ -1437,9 +1439,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 {"tool_names": ["switch_mode"]},
             ),
             _RailBuildInfo("_context_processor_rail", self._build_context_processor_rail),
+            _RailBuildInfo(
+                "_eternal_conversation_rail", self._build_eternal_conversation_rail
+            ),
             _RailBuildInfo("_code_task_planning_rail", self._build_code_task_planning_rail),
             _RailBuildInfo("_code_agent_rail", self._build_code_agent_rail),
             _RailBuildInfo("_code_plan_approval_rail", self._build_plan_approval_rail),
+            _RailBuildInfo("_design_rail", self._build_design_rail),
             _RailBuildInfo(
                 "_subagent_rail",
                 self._build_subagent_rail,
@@ -1685,6 +1691,54 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[JiuwenSwarmCodeAdapter] ProjectMemoryRail create failed: %s", exc,
+            )
+            return None
+
+    def _build_design_rail(self) -> Any | None:
+        """构建 DesignRail（SDD 状态机，wave-1：需求分析与设计）.
+
+        条件挂载固定 Rail：受 ``modes.code.sdd.enabled`` 开关控制，关闭
+        （默认）返回 None，存量行为零回归（NFR-001）。开启时构造
+        DesignRail（内部加载+校验 config.yaml，校验失败抛异常被此处
+        try/except 捕获 → 返回 None，BC-005），绝不抛异常以免 agent 创建失败。
+        DesignRail 挂载时注册 ``sdd_advance`` 工具（rail-owns-tools 模式，
+        仅 code + sdd=true 可见，team/deep 零感知）。
+        """
+        try:
+            import jiuwenswarm.agents.harness.code.rails.sdd.design_rail as _dr_pkg
+            from pathlib import Path
+
+            from jiuwenswarm.agents.harness.code.rails.sdd.design_rail import (
+                DesignRail as _DesignRail,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuwenSwarmCodeAdapter] DesignRail import failed: %s", exc
+            )
+            return None
+
+        config_base = get_config() or {}
+        code_cfg = (config_base.get("modes") or {}).get("code") or {}
+        sdd_cfg = code_cfg.get("sdd") or {}
+        if not sdd_cfg.get("enabled", False):
+            logger.info(
+                "[JiuwenSwarmCodeAdapter] DesignRail disabled by modes.code.sdd.enabled"
+            )
+            return None
+
+        try:
+            rail_pkg_dir = Path(_dr_pkg.__file__).resolve().parent
+            rail = _DesignRail(
+                rail_pkg_dir=rail_pkg_dir,
+                project_dir=self._project_dir or os.getcwd(),
+            )
+            logger.info("[JiuwenSwarmCodeAdapter] DesignRail create success")
+            return rail
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuwenSwarmCodeAdapter] DesignRail create failed (config "
+                "validation or construction error): %s",
+                exc,
             )
             return None
 
@@ -2040,12 +2094,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
-        from jiuwenswarm.agents.harness.common.rails.browser_task_prompt_rail import (
-            BrowserTaskPromptRail,
-        )
-
-        if isinstance(self._subagent_rail, BrowserTaskPromptRail):
-            self._subagent_rail.set_channel(resolved_channel)
         eternal_conversation_rail = getattr(self, "_eternal_conversation_rail", None)
         if eternal_conversation_rail is not None:
             self._eternal_conversation_enabled = runtime_config.eternal_conversation_enabled

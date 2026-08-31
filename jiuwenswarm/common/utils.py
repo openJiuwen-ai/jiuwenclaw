@@ -482,6 +482,25 @@ def _find_package_root() -> Path | None:
     return current
 
 
+def _find_config_template_path() -> Path:
+    """Locate the shipped ``config.yaml`` template inside the package."""
+    package_root = _find_package_root()
+    if not package_root:
+        raise RuntimeError("package root not found")
+
+    candidates = [
+        package_root / "resources" / "config.yaml",
+        package_root / "config" / "config.yaml",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise RuntimeError(
+        "config.yaml template not found; tried: "
+        + ", ".join(str(p) for p in candidates)
+    )
+
+
 def _resolve_preferred_language(
     config_yaml_dest: Path, explicit: Optional[str]
 ) -> str:
@@ -828,6 +847,32 @@ def ensure_default_builtin_skills() -> None:
         _update_skills_state_for_builtin(user_skills_dir, installed_skills)
 
 
+def ensure_config_migrated_from_template(
+    workspace_dir: Optional[Path] = None,
+) -> bool:
+    """将模板新增的配置项合并进用户 config.yaml（保留用户已有值）。
+
+    与 ``prepare_workspace`` 不同，本函数设计为每次启动都可安全调用：
+    合并为空操作时不写盘，从而让新增配置项在老用户工作区中也能自动补齐。
+    """
+    from jiuwenswarm.common.config import migrate_config_from_template
+
+    root = Path(workspace_dir) if workspace_dir else get_user_workspace_dir()
+    config_path = root / "config" / "config.yaml"
+
+    try:
+        template_path = _find_config_template_path()
+    except RuntimeError as e:
+        logger.warning(f"跳过配置迁移: {e}")
+        return False
+
+    if not migrate_config_from_template(template_path, config_path):
+        return False
+
+    logger.info(f"已从模板合并新增配置项: {config_path}")
+    return True
+
+
 def _migrate_from_jiuwenclaw_root() -> bool:
     """Migrate from legacy ~/.jiuwenclaw/ to ~/.jiuwenswarm/.
 
@@ -1139,6 +1184,9 @@ def prepare_workspace(
     cumulative_diff = CopyDiffResult([], [], [])
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
+    # Create logs directory at workspace root (~/.jiuwenswarm/logs)
+    (workspace_dir / "logs").mkdir(parents=True, exist_ok=True)
+
     # Migrate from legacy jiuwenclaw_workspace directory name to workspace
     _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir)
 
@@ -1174,18 +1222,7 @@ def prepare_workspace(
 
     # ----- config: copy config.yaml -----
     resources_dir = package_root / "resources"
-    config_yaml_src_candidates = [
-        resources_dir / "config.yaml",
-        package_root / "config" / "config.yaml",
-    ]
-
-    config_yaml_src = next((p for p in config_yaml_src_candidates if p.exists()), None)
-
-    if not config_yaml_src:
-        raise RuntimeError(
-            "config.yaml template not found; tried: "
-            + ", ".join(str(p) for p in config_yaml_src_candidates)
-        )
+    config_yaml_src = _find_config_template_path()
 
     config_dest_dir = workspace_dir / "config"
     config_dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1355,12 +1392,16 @@ def prepare_workspace(
     agent_sessions.mkdir(parents=True, exist_ok=True)
     default_project_workspace.mkdir(parents=True, exist_ok=True)
 
-    # Equipment tree: plugins/{agent_templates,agent_groups,plugin_packages}/{built_in,local}.
+    # Single-Agent equipment remains in the DeepAgent workspace. AgentGroup
+    # definitions are team-owned state and therefore live below .agent_teams.
     # Template copy ignores plugins/; package reconcile belongs to runtime equipment module.
-    for kind in ("agent_templates", "agent_groups", "plugin_packages"):
+    for kind in ("agent_templates", "plugin_packages"):
         kind_root = deepagent_workspace / "plugins" / kind
         (kind_root / "built_in").mkdir(parents=True, exist_ok=True)
         (kind_root / "local").mkdir(parents=True, exist_ok=True)
+    agent_group_root = workspace_dir / ".agent_teams" / "agent_groups"
+    (agent_group_root / "built_in").mkdir(parents=True, exist_ok=True)
+    (agent_group_root / "local").mkdir(parents=True, exist_ok=True)
 
     from jiuwenswarm.common.config import migrate_config_from_template, set_preferred_language_in_config_file
 

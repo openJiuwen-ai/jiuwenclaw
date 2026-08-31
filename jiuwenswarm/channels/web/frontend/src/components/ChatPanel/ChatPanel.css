@@ -1,4 +1,4 @@
-/* Input/welcome vertical alignment tuning */
+﻿/* Input/welcome vertical alignment tuning */
 :root {
   --chat-input-textarea-min-height: 96px;
 }
@@ -9,6 +9,7 @@
 
 .chat-panel-shell {
   position: relative;
+  container-type: inline-size;
 }
 
 /* ===========================
@@ -80,6 +81,7 @@
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  cursor: pointer;
 }
 
 .chat-header-icon-btn {
@@ -92,15 +94,21 @@
   border: 0;
   border-radius: 4px;
   background: transparent;
+  /* 与 .share-export-btn 保持同一套配色：img 资源图标本身带底色不受影响，
+     只影响用 currentColor 描边的 lucide 图标（如心跳的 Activity），避免它
+     跟着环境文字色走、和旁边几个图标颜色对不上。 */
+  color: var(--color-text-tertiary);
   cursor: pointer;
 }
 
 .chat-header-icon-btn:hover {
   background: var(--color-action-secondary);
+  color: var(--color-text-primary);
 }
 
 .chat-header-icon-btn--active {
   background: var(--color-action-secondary);
+  color: var(--color-text-primary);
 }
 
 .chat-header-icon-btn:disabled {
@@ -188,9 +196,29 @@ overflow: hidden;
   border-color: var(--color-feedback-danger) !important;
 }
 
+.chat-input-container--command-pending {
+  background: var(--color-surface-muted);
+}
+
 .chat-input-frame {
   position: relative;
   width: 100%;
+}
+
+.chat-input-compact-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  margin: 0 4px 8px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.chat-input-compact-progress__spinner {
+  flex: 0 0 auto;
+  animation: harness-spin 0.9s linear infinite;
 }
 
 .chat-active-team-group {
@@ -828,6 +856,11 @@ overflow: hidden;
   box-shadow: none;
 }
 
+.chat-input-editor--disabled {
+  color: var(--color-text-secondary);
+  cursor: not-allowed;
+}
+
 /* inline chip（contenteditable 内的技能标签） */
 .chat-input-chip-inline {
   position: relative;
@@ -878,8 +911,8 @@ overflow: hidden;
   position: absolute;
   inset: 0;
   background: var(--color-chat-accent);
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
   opacity: 1;
 }
 
@@ -1368,8 +1401,8 @@ overflow: hidden;
   width: 20px;
   height: 20px;
   background: currentColor;
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
 }
 
 .chat-composer-suggestion__source {
@@ -1444,8 +1477,8 @@ overflow: hidden;
   flex: 0 0 auto;
   position: relative;
   box-sizing: border-box;
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
 }
 
 .chat-message-skill-chip__label {
@@ -1505,8 +1538,8 @@ overflow: hidden;
   position: absolute;
   inset: 0;
   background: var(--color-chat-accent);
-  -webkit-mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
-  mask: url('../../assets/skillIcon.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
+  mask: url('../../assets/agent-management/agent-skill.svg') no-repeat center / contain;
   opacity: 1;
 }
 
@@ -1698,13 +1731,13 @@ overflow: hidden;
 .chat-config-icon--skill {
   width: 14px;
   height: 14px;
-  -webkit-mask-image: url('../../assets/skillIcon.svg');
-  mask-image: url('../../assets/skillIcon.svg');
+  -webkit-mask-image: url('../../assets/agent-management/agent-skill.svg');
+  mask-image: url('../../assets/agent-management/agent-skill.svg');
 }
 
 .chat-config-icon--settings {
-  -webkit-mask-image: url('../../assets/sidebar/config.svg');
-  mask-image: url('../../assets/sidebar/config.svg');
+  -webkit-mask-image: url('../../assets/settings/navigation/models.svg');
+  mask-image: url('../../assets/settings/navigation/models.svg');
 }
 
 .chat-config-icon--folder {
@@ -1717,12 +1750,9 @@ overflow: hidden;
   height: 14px;
 }
 
-/* "+"菜单的"扩展"项单独放大图标（用户 2026-08-19 反馈手绘拼图图标比旁边 lucide 图标显得小）。
-   选择器叠两个 class（.chat-mode-select__icon.chat-mode-select__icon--lg）保证特异度稳定盖过
-   上面那条共享基础规则，不依赖源码顺序，也不影响其余三个菜单项。 */
-.chat-mode-select__icon.chat-mode-select__icon--lg svg {
-  width: 18px;
-  height: 18px;
+.chat-mode-select__icon.chat-mode-select__icon--asset svg {
+  width: 16px;
+  height: 16px;
 }
 
 .chat-mode-select__label {
@@ -1844,6 +1874,313 @@ overflow: hidden;
 .chat-input-attach-menu-anchor {
   position: relative;
   display: inline-flex;
+}
+
+.chat-agent-picker-trigger__chevron {
+  flex: 0 0 auto;
+  color: var(--color-text-secondary);
+}
+
+.chat-input-attach-menu {
+  overflow: visible;
+}
+
+.chat-agent-picker {
+  position: absolute;
+  top: -6px;
+  left: calc(100% + 8px);
+  z-index: 1;
+  display: flex;
+  width: 248px;
+  max-height: min(360px, 60vh);
+  flex-direction: column;
+  padding: 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 10px;
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-lg);
+}
+
+.chat-agent-picker--up {
+  top: auto;
+  bottom: 0;
+}
+
+.chat-agent-picker__tabs {
+  display: flex;
+  gap: 18px;
+  min-height: 30px;
+  align-items: flex-start;
+  border-bottom: 1px solid var(--color-border-default);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.chat-agent-picker__tabs span {
+  position: relative;
+  padding: 0 2px 8px;
+  white-space: nowrap;
+}
+
+.chat-agent-picker__tabs span.is-active {
+  color: var(--color-text-strong);
+  font-weight: 600;
+}
+
+.chat-agent-picker__tabs span.is-active::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  background: var(--color-text-strong);
+  content: '';
+}
+
+.chat-agent-picker__tabs span[aria-disabled='true'] {
+  color: var(--color-text-placeholder);
+  cursor: not-allowed;
+}
+
+.chat-agent-picker__search {
+  display: flex;
+  height: 32px;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 6px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 7px;
+  color: var(--color-text-secondary);
+  padding: 0 8px;
+}
+
+.chat-agent-picker__search:focus-within {
+  border-color: var(--color-border-default);
+  box-shadow: none;
+  outline: 0;
+}
+
+.chat-agent-picker__search input {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 12px;
+}
+
+.chat-agent-picker__search input:focus-visible {
+  box-shadow: none;
+  outline: 0;
+}
+
+.chat-agent-picker__state {
+  display: flex;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary);
+  padding: 16px 10px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.chat-agent-picker__list {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.chat-agent-picker__item {
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: 5px 7px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-agent-picker__item:hover,
+.chat-agent-picker__item:focus-visible,
+.chat-agent-picker__item.is-selected {
+  background: var(--color-action-secondary);
+  outline: 0;
+}
+
+.chat-agent-picker__avatar {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--color-action-primary-subtle);
+  color: var(--color-text-link);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chat-agent-picker__avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.chat-agent-picker__item-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.chat-agent-picker__tooltip {
+  position: fixed;
+  z-index: 10000;
+  width: 240px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-md);
+  color: var(--color-text-primary);
+  padding: 8px 10px;
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.chat-agent-picker__check {
+  flex: 0 0 auto;
+  color: var(--color-text-strong);
+  font-size: 14px;
+}
+
+.chat-agent-picker__footer {
+  flex: 0 0 auto;
+  margin-top: 6px;
+  border-top: 1px solid var(--color-border-default);
+  padding-top: 6px;
+}
+
+.chat-agent-picker__footer button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: 7px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.chat-agent-picker__footer button:hover,
+.chat-agent-picker__footer button:focus-visible {
+  background: var(--color-action-secondary);
+  outline: 0;
+}
+
+.chat-agent-tag {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 180px;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: 0;
+}
+
+.chat-agent-tag__avatar {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--color-action-primary-subtle);
+  color: var(--color-text-link);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.chat-agent-tag__avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.chat-agent-tag__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.chat-agent-tag__close {
+  display: inline-flex;
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.chat-agent-tag:hover .chat-agent-tag__avatar,
+.chat-agent-tag:focus-within .chat-agent-tag__avatar {
+  opacity: 0;
+}
+
+.chat-agent-tag:hover .chat-agent-tag__close,
+.chat-agent-tag:focus-within .chat-agent-tag__close,
+.chat-agent-tag__close:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-agent-tag__close:hover,
+.chat-agent-tag__close:focus-visible {
+  background: var(--color-action-secondary);
+  color: var(--color-text-strong);
+  outline: 0;
 }
 
 /* 工具栏"目标"标签：目标存续期间常驻，× 只在 hover 时出现，不占布局空间；
@@ -2852,6 +3189,20 @@ overflow: hidden;
  * 数值和项目现成 token 对不上，不能照抄 .chat-skill-select__item--selected 那套
  * --color-action-primary，见 ExtensionPickerPanel.tsx 组件头注释。
  */
+
+/* ===== 输入栏"+"菜单「技能」二级面板（从工具条搬进+号菜单，结构与扩展面板一致） ===== */
+.chat-skill-picker {
+  display: flex;
+  flex-direction: column;
+  width: 336px;
+  max-height: 358px;
+  padding: 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 14px;
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-lg);
+  box-sizing: border-box;
+}
 .chat-extension-picker {
   display: flex;
   flex-direction: column;
@@ -3646,6 +3997,7 @@ overflow: hidden;
 
 /* Welcome screen */
 .chat-welcome {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -3663,15 +4015,34 @@ overflow: hidden;
 
 .chat-welcome__banner {
   position: absolute;
-  top: -124px;
-  right: -129px;
-  width: 300px;
-  height: 150px;
   max-width: 100%;
   display: block;
   object-fit: contain;
   pointer-events: none;
   z-index: 10;
+}
+
+.chat-welcome__banner--bubble {
+  top: -30px;
+  right: -114px;
+  z-index: 12;
+  background: var(--color-surface-card);
+  border-radius: 16px;
+  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+  width: 186px;
+  height: auto;
+  padding: 12px 16px;
+  font-size: 14px;
+  color: var(--color-chat-supporting-text);
+  transition: right 0.3s ease, top 0.3s ease;
+}
+
+.chat-welcome__banner--bee {
+  top: -120px;
+  right: -16px;
+  width: 200px;
+  height: auto;
+  z-index: 11;
 }
 
 .chat-welcome__heading {
@@ -3682,6 +4053,15 @@ overflow: hidden;
   margin: 0 0 20px 0;
   text-align: left;
   align-self: flex-start;
+}
+
+@container (max-width: 799px) {
+  .chat-welcome__heading-highlight {
+    display: block;
+  }
+  .chat-welcome__banner--bubble {
+    top: 18px;
+  }
 }
 
 .chat-welcome__subtext {

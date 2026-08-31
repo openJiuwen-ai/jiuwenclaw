@@ -34,6 +34,9 @@ async def test_run_does_not_delete_agent_teams_directory(monkeypatch: pytest.Mon
         async def stop(self) -> None:
             server_events.append("stop")
 
+        def schedule_image_modality_warmup(self, *, reason: str) -> None:
+            _ = reason
+
     class _FakeExtensionManager:
         def __init__(self, registry) -> None:
             self.registry = registry

@@ -54,7 +54,7 @@
     "zh": "依托现代健康科学，提供营养膳食、作息睡眠、情绪调养咨询，生成个性化可迭代的长期健康生活规划方案。"
   },
   "category": "Life",
-  "avatar": "",
+  "avatar": "avatars/avatar.png",
   "source": "builtin",
   "default_init_input": {
     "zh": "帮我评估饮食、睡眠和情绪状况，制定个性化的健康生活方案。",

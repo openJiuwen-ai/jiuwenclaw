@@ -204,7 +204,7 @@ WebSocket。Python 扩展与 iframe 当前都运行在 Jiuwen 的信任边界内
 
 `jiuwenswarm/extensions/video_duplex` 是第一个应用插件，演示了 bundled React 页面、
 RPC、WebSocket、Schema 设置以及旧 `.env` 配置兼容。其模型、ASR、TTS 和开关均位于
-“更多 → 应用插件 → 全双工”。宿主根据 `extension.yaml` 自动生成设置表单：切换
+侧栏“应用插件 → 全双工”。宿主根据 `extension.yaml` 自动生成设置表单：切换
 JoyAI 或 Qwen 时只展示当前 Provider 所需字段，密钥保存后不会回传明文。
 
 设置保存后会更新当前 Gateway 进程及 Jiuwen 实例 `.env`，下一次全双工连接即可使用；

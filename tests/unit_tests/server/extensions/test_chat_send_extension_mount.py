@@ -27,6 +27,10 @@ from tests.unit_tests.server.extensions.conftest import (
 )
 
 _LIFECYCLE_METHODS: tuple[tuple[ReqMethod, str], ...] = (
+    (ReqMethod.AGENT_GROUPS_CREATE, "agent_groups.create"),
+    (ReqMethod.AGENT_GROUPS_IMPORT_LOCAL, "agent_groups.import_local"),
+    (ReqMethod.AGENT_GROUPS_INSTALL, "agent_groups.install"),
+    (ReqMethod.AGENT_GROUPS_UNINSTALL, "agent_groups.uninstall"),
     (ReqMethod.AGENT_TEMPLATES_CREATE, "agent_templates.create"),
     (ReqMethod.AGENT_TEMPLATES_IMPORT_LOCAL, "agent_templates.import_local"),
     (ReqMethod.AGENT_TEMPLATES_INSTALL, "agent_templates.install"),
@@ -38,6 +42,10 @@ _LIFECYCLE_METHODS: tuple[tuple[ReqMethod, str], ...] = (
 )
 
 _CATALOG_METHODS: tuple[ReqMethod, ...] = (
+    ReqMethod.AGENT_GROUPS_LIST,
+    ReqMethod.AGENT_GROUPS_SHOW,
+    ReqMethod.AGENT_GROUPS_FILE_LIST,
+    ReqMethod.AGENT_GROUPS_FILE_READ,
     ReqMethod.AGENT_TEMPLATES_LIST,
     ReqMethod.AGENT_TEMPLATES_SHOW,
     ReqMethod.AGENT_TEMPLATES_FILE_LIST,
@@ -249,7 +257,7 @@ class TestChatSendMountAndGates:
 
 
 class TestPackageCatalogReqMethodRouting:
-    """12 catalog RPCs are stateless; install pending payload; uninstall unloads first."""
+    """Catalog RPCs are stateless; install pending payload; uninstall unloads first."""
 
     def test_catalog_methods_are_stateless_and_forwarded(self) -> None:
         assert not hasattr(ReqMethod, "PLUGIN_PACKAGES_TOGGLE")
@@ -264,6 +272,130 @@ class TestPackageCatalogReqMethodRouting:
             assert value in app_web_handlers._FORWARD_NO_LOCAL_HANDLER_METHODS
             assert value in CLI_FORWARD_REQ_METHODS
             assert value in CLI_FORWARD_NO_LOCAL_HANDLER_METHODS
+        for forwarded in (
+            "agent_groups.list",
+            "agent_groups.show",
+            "agent_groups.file.list",
+            "agent_groups.file.read",
+        ):
+            assert forwarded in app_web_handlers._FORWARD_REQ_METHODS
+            assert forwarded in app_web_handlers._FORWARD_NO_LOCAL_HANDLER_METHODS
+            assert forwarded in CLI_FORWARD_REQ_METHODS
+            assert forwarded in CLI_FORWARD_NO_LOCAL_HANDLER_METHODS
+
+    async def test_agent_group_list_payload(self, monkeypatch) -> None:
+        iface = _iface()
+        expected = [{"name": "technical-proposal-review", "memberCount": 3}]
+        monkeypatch.setattr(
+            iface.package_manager,
+            "list_agent_groups",
+            lambda params: expected if params == {"filter": "builtin"} else [],
+        )
+
+        response = await iface.JiuWenSwarm._handle_package_catalog_request(
+            None,
+            _req(
+                {"filter": "builtin"},
+                method=ReqMethod.AGENT_GROUPS_LIST,
+            ),
+        )
+
+        assert response.ok is True
+        assert response.payload == {"agentGroups": expected}
+
+    async def test_agent_group_show_payload(self, monkeypatch) -> None:
+        iface = _iface()
+        expected = {
+            "name": "technical-proposal-review",
+            "memberCount": 3,
+            "details": "# 技术方案评审专家团",
+        }
+        monkeypatch.setattr(
+            iface.package_manager,
+            "show_agent_group",
+            lambda name: expected if name == "technical-proposal-review" else None,
+        )
+
+        response = await iface.JiuWenSwarm._handle_package_catalog_request(
+            None,
+            _req(
+                {"name": "technical-proposal-review"},
+                method=ReqMethod.AGENT_GROUPS_SHOW,
+            ),
+        )
+
+        assert response.ok is True
+        assert response.payload == {"group": expected}
+
+    @pytest.mark.parametrize(
+        "method,function_name,expected",
+        [
+            (ReqMethod.AGENT_GROUPS_FILE_LIST, "list_agent_group_files", {"tree": []}),
+            (
+                ReqMethod.AGENT_GROUPS_FILE_READ,
+                "read_agent_group_file",
+                {"path": "README.md", "content": "# Group"},
+            ),
+            (ReqMethod.AGENT_GROUPS_CREATE, "create_agent_group", {"id": "group-a"}),
+            (
+                ReqMethod.AGENT_GROUPS_IMPORT_LOCAL,
+                "import_agent_group",
+                {"id": "group-a"},
+            ),
+        ],
+    )
+    async def test_agent_group_definition_payloads(
+        self, monkeypatch, method, function_name, expected
+    ) -> None:
+        iface = _iface()
+        if method == ReqMethod.AGENT_GROUPS_FILE_LIST:
+            monkeypatch.setattr(
+                iface.package_manager, function_name, lambda _name: []
+            )
+            params = {"id": "group-a"}
+        elif method == ReqMethod.AGENT_GROUPS_FILE_READ:
+            monkeypatch.setattr(
+                iface.package_manager,
+                function_name,
+                lambda _name, path: {"path": path, "content": "# Group"},
+            )
+            params = {"id": "group-a", "path": "README.md"}
+        else:
+            monkeypatch.setattr(
+                iface.package_manager, function_name, lambda _params: expected
+            )
+            params = {"id": "group-a"}
+        response = await iface.JiuWenSwarm._handle_package_catalog_request(
+            None,
+            _req(params, method=method),
+        )
+        assert response.ok is True
+        assert response.payload == expected
+
+    @pytest.mark.parametrize(
+        "method,function_name",
+        [
+            (ReqMethod.AGENT_GROUPS_INSTALL, "install_agent_group"),
+            (ReqMethod.AGENT_GROUPS_UNINSTALL, "uninstall_agent_group"),
+        ],
+    )
+    async def test_agent_group_install_uninstall_payload(
+        self, monkeypatch, method, function_name
+    ) -> None:
+        iface = _iface()
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            iface.package_manager,
+            function_name,
+            lambda params: calls.append(params),
+        )
+        response = await iface.JiuWenSwarm._handle_package_catalog_request(
+            None,
+            _req({"id": "group-a"}, method=method),
+        )
+        assert response.ok is True
+        assert response.payload == {}
+        assert calls == [{"id": "group-a"}]
 
     def test_legacy_plugins_routes_stay_separate(self) -> None:
         iface = _iface()

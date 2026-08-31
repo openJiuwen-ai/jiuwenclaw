@@ -13,7 +13,7 @@ except ImportError:
 
 UI_E2E_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WEB_DIR = REPO_ROOT / "jiuwenswarm" / "web"
+WEB_DIR = REPO_ROOT / "jiuwenswarm" / "channels" / "web" / "frontend"
 
 CASE_SCRIPTS = {
     "todo": UI_E2E_ROOT / "todo_ui_report.py",

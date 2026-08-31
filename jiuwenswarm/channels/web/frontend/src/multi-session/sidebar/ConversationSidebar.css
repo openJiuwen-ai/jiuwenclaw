@@ -18,11 +18,17 @@
   left: 0;
   z-index: 30;
   box-shadow: var(--color-sidebar-shadow, 2px 0 8px rgba(0, 0, 0, 0.08));
-  transition: transform 0.25s ease, width 0.25s ease, min-width 0.25s ease;
+  transition:
+    transform 0.25s ease,
+    width 0.25s ease,
+    min-width 0.25s ease;
 }
 
 .conversation-sidebar:not(.is-floating) {
-  transition: transform 0.25s ease, width 0.25s ease, min-width 0.25s ease;
+  transition:
+    transform 0.25s ease,
+    width 0.25s ease,
+    min-width 0.25s ease;
 }
 
 .conversation-sidebar.is-floating.is-collapsed {
@@ -217,7 +223,7 @@
   min-height: 0;
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 24px 16px 8px;
+  padding: 24px 8px 8px;
   scrollbar-color: transparent transparent;
   scrollbar-width: thin;
   box-sizing: border-box;
@@ -256,7 +262,7 @@
   height: 24px;
   align-items: center;
   justify-content: space-between;
-  margin: 0px 4px 4px 0;
+  padding: 0 8px;
 }
 
 .conversation-sidebar__project-add {
@@ -306,7 +312,7 @@
   pointer-events: auto;
 }
 
-.conversation-sidebar__section-action[aria-disabled="true"] {
+.conversation-sidebar__section-action[aria-disabled='true'] {
   cursor: default;
 }
 
@@ -320,13 +326,13 @@
 }
 
 .conversation-sidebar__section-heading:hover .conversation-sidebar__section-actions,
-.conversation-sidebar__section-heading:has(.conversation-sidebar__section-action[aria-expanded="true"]) .conversation-sidebar__section-actions {
+.conversation-sidebar__section-heading:has(.conversation-sidebar__section-action[aria-expanded='true']) .conversation-sidebar__section-actions {
   opacity: 1;
   pointer-events: auto;
 }
 
 .conversation-sidebar__section-heading:hover .conversation-sidebar__section-new,
-.conversation-sidebar__section-new[aria-expanded="true"] {
+.conversation-sidebar__section-new[aria-expanded='true'] {
   opacity: 1;
   pointer-events: auto;
 }
@@ -347,7 +353,7 @@
 .conversation-sidebar__group {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 10px;
 }
 
 .conversation-sidebar__body > .conversation-sidebar__group + .conversation-sidebar__group {
@@ -357,7 +363,7 @@
 .conversation-sidebar__group-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 10px;
 }
 
 .conversation-sidebar__pagination {
@@ -392,7 +398,7 @@
 .conversation-sidebar__empty {
   padding: 12px 10px;
   color: var(--color-text-secondary);
-  opacity: .6;
+  opacity: 0.6;
   font-size: 12px;
   text-align: left;
 }
@@ -410,7 +416,7 @@
   height: 32px;
   align-items: center;
   gap: 2px;
-  padding-right: 6px;
+  padding-right: 8px;
   border-radius: 8px;
 }
 
@@ -427,9 +433,9 @@
 .conversation-entity-row__main {
   display: flex;
   width: 100%;
-  min-height: 32px;
+  min-height: 36px;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
   padding: 0 58px 0 8px;
   border: 0;
   border-radius: 8px;
@@ -446,11 +452,11 @@
 
 .conversation-entity-row__icon {
   display: inline-flex;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   align-items: center;
   justify-content: center;
-  color: var(--color-text-secondary);
+  color: var(--color-text-primary);
 }
 
 .conversation-entity-row__icon svg,
@@ -566,7 +572,7 @@
   height: 32px;
   align-items: center;
   gap: 8px;
-  padding: 0 6px 0 20px;
+  padding: 0 10px 0 32px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -576,7 +582,7 @@
 }
 
 .conversation-list-item--nested .conversation-list-item__main {
-  padding-left: 20px;
+  padding-left: 32px;
 }
 
 .conversation-list-item:hover {
@@ -622,7 +628,7 @@
   width: 14px;
   height: 14px;
   flex: 0 0 auto;
-  animation: conversation-spin .9s linear infinite;
+  animation: conversation-spin 0.9s linear infinite;
 }
 
 .conversation-list-item__status-dot {
@@ -761,8 +767,14 @@
   white-space: nowrap;
 }
 
-.conversation-sidebar__group--pinned > .conversation-sidebar__group-list > .conversation-list-item:first-child .conversation-list-item__pin-action[data-tooltip]:hover::after,
-.conversation-sidebar__group--pinned > .conversation-sidebar__group-list > .conversation-list-item:first-child .conversation-list-item__pin-action[data-tooltip]:focus-visible::after {
+.conversation-sidebar__group--pinned
+  > .conversation-sidebar__group-list
+  > .conversation-list-item:first-child
+  .conversation-list-item__pin-action[data-tooltip]:hover::after,
+.conversation-sidebar__group--pinned
+  > .conversation-sidebar__group-list
+  > .conversation-list-item:first-child
+  .conversation-list-item__pin-action[data-tooltip]:focus-visible::after {
   top: 30px;
   bottom: auto;
 }
@@ -837,7 +849,7 @@
 
 .conversation-list-item__menu-item:disabled {
   cursor: not-allowed;
-  opacity: .45;
+  opacity: 0.45;
 }
 
 .conversation-path-dialog-backdrop {
@@ -938,7 +950,7 @@
   cursor: pointer;
 }
 
-.conversation-path-dialog__actions button[type="submit"] {
+.conversation-path-dialog__actions button[type='submit'] {
   border-color: var(--color-action-primary);
   background: var(--color-action-primary);
   color: var(--color-action-primary-text);
@@ -946,11 +958,13 @@
 
 .conversation-path-dialog__actions button:disabled {
   cursor: not-allowed;
-  opacity: .5;
+  opacity: 0.5;
 }
 
 @keyframes conversation-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ---- 定时任务折叠列表 ---- */
@@ -997,7 +1011,7 @@
   width: 14px;
   height: 14px;
   flex: 0 0 auto;
-  opacity: .7;
+  opacity: 0.7;
 }
 
 .conversation-sidebar__cron-row-name {
@@ -1013,7 +1027,7 @@
   width: 12px;
   height: 12px;
   flex: 0 0 auto;
-  opacity: .5;
+  opacity: 0.5;
 }
 
 /* 定时任务触发会话列表 */

@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from jiuwenswarm.extensions.agentos.agentos_router.logutil import log_agentos
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_SSH_PORT = 2222
@@ -183,16 +185,21 @@ class YuanrongSshRelay:
         try:
             exit_code = await self._relay(session, instance_id, user_id=user_id)
         except asyncio.CancelledError:
-            logger.info(
-                "[YuanrongSshRelay] relay cancelled: session=%s instance=%s",
-                session.session_id,
-                instance_id,
+            log_agentos(
+                logger,
+                logging.INFO,
+                "ssh.south.cancelled",
+                user_id=user_id,
+                session_id=str(session.session_id or ""),
+                sandbox_id=instance_id,
+                instance=instance_id,
             )
             exit_code = 130
             raise
         except Exception as exc:  # noqa: BLE001 - report any relay failure to the client
             logger.exception(
-                "[YuanrongSshRelay] relay failed: session=%s instance=%s",
+                "[AgentOS] ssh.south.fail user_id=%s session_id=%s sandbox_id=%s",
+                user_id,
                 session.session_id,
                 instance_id,
             )
@@ -269,16 +276,22 @@ class YuanrongSshRelay:
         attempt = 0
         while True:
             attempt += 1
-            logger.info(
-                "[YuanrongSshRelay] connecting: %s@%s:%s session=%s "
-                "attempt=%s keys_dir=%s keys=%s",
-                username,
-                host,
-                self._settings.port,
-                session_id or "-",
-                attempt,
+            log_agentos(
+                logger,
+                logging.DEBUG,
+                "ssh.south.connect",
+                user_id=user_id,
+                session_id=session_id,
+                sandbox_id=instance_id,
+                instance=instance_id,
+                attempt=attempt,
+            )
+            logger.debug(
+                "[AgentOS] ssh.south.connect keys_dir=%s keys=%s user_id=%s sandbox_id=%s",
                 keys_dir,
                 len(client_keys),
+                user_id,
+                instance_id,
             )
             try:
                 conn = await asyncio.wait_for(
@@ -297,25 +310,30 @@ class YuanrongSshRelay:
                 if remaining <= 0 or not _is_ssh_connect_retryable(exc):
                     raise
                 sleep_for = min(_SSH_CONNECT_RETRY_INTERVAL_SECONDS, remaining)
-                logger.warning(
-                    "[YuanrongSshRelay] ssh not ready, retrying: "
-                    "session=%s instance=%s attempt=%s sleep=%.1fs error=%s",
-                    session_id or "-",
-                    instance_id,
-                    attempt,
-                    sleep_for,
-                    exc,
+                log_agentos(
+                    logger,
+                    logging.WARNING,
+                    "ssh.south.retry",
+                    user_id=user_id,
+                    session_id=session_id,
+                    sandbox_id=instance_id,
+                    instance=instance_id,
+                    attempt=attempt,
+                    error=type(exc).__name__,
+                    sleep=f"{sleep_for:.1f}s",
                 )
                 await asyncio.sleep(sleep_for)
                 continue
-            if attempt > 1:
-                logger.info(
-                    "[YuanrongSshRelay] ssh ready after retry: "
-                    "session=%s instance=%s attempts=%s",
-                    session_id or "-",
-                    instance_id,
-                    attempt,
-                )
+            log_agentos(
+                logger,
+                logging.INFO,
+                "ssh.south.ready",
+                user_id=user_id,
+                session_id=session_id,
+                sandbox_id=instance_id,
+                instance=instance_id,
+                attempt=attempt,
+            )
             return conn
 
     async def _relay(

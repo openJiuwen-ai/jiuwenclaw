@@ -16,7 +16,7 @@ description: 运行 JiuwenSwarm Web UI 端到端测试并收集截图、日志�
 ## 准备环境
 
 - 选择用于启动 `jiuwenswarm.app` 和 `jiuwenswarm.app_web` 的 Python 解释器。
-- 在该解释器里安装项目依赖和 `.[e2e]`。
+- 在该解释器里安装项目依赖（Playwright 已是核心依赖，随项目一起安装）。
 - 确保 `jiuwenswarm/channels/web/frontend` 已安装前端依赖。
 - 确保本机可用 Chrome/Chromium；没有时再安装 Playwright 浏览器。
 
@@ -24,7 +24,7 @@ description: 运行 JiuwenSwarm Web UI 端到端测试并收集截图、日志�
 
 ```bash
 export JIUWENSWARM_E2E_PYTHON=.venv/bin/python
-"$JIUWENSWARM_E2E_PYTHON" -m pip install -e ".[e2e]"
+"$JIUWENSWARM_E2E_PYTHON" -m pip install -e .
 "$JIUWENSWARM_E2E_PYTHON" -m playwright install chromium
 ```
 
