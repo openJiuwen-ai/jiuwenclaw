@@ -256,6 +256,9 @@ def _evaluate_paths(
             )
         level = _permission_result_level(result)
         if level is None:
+            # OpenJiuwen returns None when every extracted access is ALLOW or
+            # the path layer has no objection. Native schema and legacy call
+            # shapes are validated before this point; failures return ask above.
             level = "allow"
         elif level not in precedence:
             return _unevaluable(
