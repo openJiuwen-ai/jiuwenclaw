@@ -56,6 +56,80 @@ export interface TrajectoryTimelineModel extends TrajectoryTimeRange {
   turnBoundaries: readonly TrajectoryTimelineTurnBoundary[]
 }
 
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value))
+}
+
+function boundedViewport(
+  fullRange: TrajectoryTimeRange,
+  viewport: TrajectoryTimeRange | null,
+): TrajectoryTimeRange {
+  const fullDuration = Math.max(0, fullRange.end - fullRange.start)
+  if (viewport === null) return { ...fullRange }
+  const duration = clamp(viewport.end - viewport.start, 0, fullDuration)
+  const start = clamp(viewport.start, fullRange.start, fullRange.end - duration)
+  return { start, end: start + duration }
+}
+
+/**
+ * Zoom a timeline viewport around the pointer without moving its anchored time.
+ * @param fullRange - Complete timeline domain.
+ * @param viewport - Current viewport, or null for the complete domain.
+ * @param anchorFraction - Pointer position inside the viewport, in the range zero to one.
+ * @param wheelDelta - Normalized vertical wheel delta; negative values zoom in.
+ * @param minimumDuration - Smallest duration allowed for this projection.
+ * @returns The next bounded viewport, or null when zoomed fully out.
+ */
+export function zoomTrajectoryTimelineViewport(
+  fullRange: TrajectoryTimeRange,
+  viewport: TrajectoryTimeRange | null,
+  anchorFraction: number,
+  wheelDelta: number,
+  minimumDuration: number,
+): TrajectoryTimeRange | null {
+  const fullDuration = Math.max(0, fullRange.end - fullRange.start)
+  if (fullDuration === 0) return null
+  const current = boundedViewport(fullRange, viewport)
+  const currentDuration = current.end - current.start
+  const nextDuration = clamp(
+    currentDuration * Math.exp(wheelDelta * 0.0015),
+    Math.min(minimumDuration, fullDuration),
+    fullDuration,
+  )
+  if (nextDuration >= fullDuration * 0.999) return null
+  const anchor = clamp(anchorFraction, 0, 1)
+  const anchorTime = current.start + anchor * currentDuration
+  const nextStart = clamp(
+    anchorTime - anchor * nextDuration,
+    fullRange.start,
+    fullRange.end - nextDuration,
+  )
+  return { start: nextStart, end: nextStart + nextDuration }
+}
+
+/**
+ * Pan a zoomed timeline viewport by a fraction of its visible width.
+ * @param fullRange - Complete timeline domain.
+ * @param viewport - Current viewport, or null for the complete domain.
+ * @param deltaFraction - Signed horizontal travel in viewport widths.
+ * @returns The next bounded viewport, or null when the full domain is visible.
+ */
+export function panTrajectoryTimelineViewport(
+  fullRange: TrajectoryTimeRange,
+  viewport: TrajectoryTimeRange | null,
+  deltaFraction: number,
+): TrajectoryTimeRange | null {
+  if (viewport === null) return null
+  const current = boundedViewport(fullRange, viewport)
+  const duration = current.end - current.start
+  const nextStart = clamp(
+    current.start + deltaFraction * duration,
+    fullRange.start,
+    fullRange.end - duration,
+  )
+  return { start: nextStart, end: nextStart + duration }
+}
+
 /**
  * Format a timeline duration as an integer-millisecond label.
  * @param milliseconds - Non-negative duration in milliseconds.

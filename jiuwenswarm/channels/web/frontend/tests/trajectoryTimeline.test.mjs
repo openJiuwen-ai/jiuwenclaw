@@ -5,8 +5,10 @@ import test from 'node:test';
 
 import {
   deriveTrajectoryTimeline,
+  panTrajectoryTimelineViewport,
   resolveTimelineMode,
   trajectoryTimelineFocusIndexes,
+  zoomTrajectoryTimelineViewport,
 } from '../node_modules/.cache/trajectory-timeline/timeline.mjs';
 
 function cell(index, kind, extra = {}) {
@@ -203,4 +205,49 @@ test('token cost wins over the recorded-duration and complete-time switches', ()
     resolveTimelineMode({ tokenView: false, actualDuration: false, actualTime: true }),
     'time',
   );
+});
+
+test('zoom keeps the pointed timeline time anchored and respects the minimum width', () => {
+  const next = zoomTrajectoryTimelineViewport(
+    { start: 0, end: 1_000 },
+    null,
+    0.75,
+    -500,
+    100,
+  );
+
+  assert.ok(next !== null);
+  assert.ok(next.end - next.start >= 100);
+  assert.ok(Math.abs(next.start + 0.75 * (next.end - next.start) - 750) < 0.000_001);
+});
+
+test('zooming back to the complete domain clears the viewport', () => {
+  assert.equal(
+    zoomTrajectoryTimelineViewport(
+      { start: 0, end: 1_000 },
+      { start: 250, end: 750 },
+      0.5,
+      10_000,
+      100,
+    ),
+    null,
+  );
+});
+
+test('horizontal scrolling pans a zoomed viewport and clamps both edges', () => {
+  const fullRange = { start: 0, end: 1_000 };
+
+  assert.deepEqual(
+    panTrajectoryTimelineViewport(fullRange, { start: 200, end: 600 }, 0.25),
+    { start: 300, end: 700 },
+  );
+  assert.deepEqual(
+    panTrajectoryTimelineViewport(fullRange, { start: 200, end: 600 }, -10),
+    { start: 0, end: 400 },
+  );
+  assert.deepEqual(
+    panTrajectoryTimelineViewport(fullRange, { start: 200, end: 600 }, 10),
+    { start: 600, end: 1_000 },
+  );
+  assert.equal(panTrajectoryTimelineViewport(fullRange, null, 0.25), null);
 });

@@ -64,6 +64,10 @@
   cursor: grabbing;
 }
 
+.track[data-pannable='true']:not([data-panning='true']) {
+  cursor: grab;
+}
+
 .earlierHistory {
   position: absolute;
   z-index: 5;

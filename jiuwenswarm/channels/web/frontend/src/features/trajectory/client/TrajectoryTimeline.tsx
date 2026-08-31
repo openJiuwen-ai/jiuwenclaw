@@ -7,8 +7,8 @@
  */
 
 import {
-  memo, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent,
-  type PointerEvent,
+  memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties,
+  type KeyboardEvent, type PointerEvent,
 } from 'react'
 import { Tooltip } from '../primitives/index.ts'
 import type { TrajectoryTurnModel } from '../trajectory/model.ts'
@@ -17,10 +17,12 @@ import { formatTokenCount, liveElapsedSeconds } from '../trajectory/record.ts'
 import {
   deriveTrajectoryTimeline,
   formatTimelineOffset,
+  panTrajectoryTimelineViewport,
   type TrajectoryTimelineMode,
   type TrajectoryTimelineSegment,
   type TrajectoryTimelineSpan,
   type TrajectoryTimeRange,
+  zoomTrajectoryTimelineViewport,
 } from '../trajectory/timeline.ts'
 import css from './TrajectoryTimeline.module.css'
 
@@ -32,6 +34,7 @@ const EDGE_PAN_ZONE_FRACTION = 0.08
 const EDGE_PAN_STEP_FRACTION = 0.025
 const MAXIMUM_EDGE_PAN_PX = 32
 const TIMELINE_TOOLTIP_DELAY_MS = 500
+const WHEEL_SETTLE_MS = 140
 
 interface TimelineRecordDetail {
   decodingMs?: number
@@ -58,9 +61,13 @@ interface HoverPoint {
 interface PanGesture {
   anchorClientX: number
   anchorStart: number
+  anchorTime: number
+  button: number
+  duration: number
   moved: boolean
   pannable: boolean
   pointerId: number
+  spanKey: string | null
 }
 
 function assistantTimingDetail(
@@ -284,6 +291,50 @@ function rangeFraction(
   }
 }
 
+function viewportGeometry(
+  model: TrajectoryTimeRange,
+  viewport: TrajectoryTimeRange | null,
+): { domainDuration: number; domainStart: number; fullDuration: number } {
+  const fullDuration = Math.max(1, model.end - model.start)
+  const domainDuration = viewport === null
+    ? fullDuration
+    : Math.min(fullDuration, Math.max(1, viewport.end - viewport.start))
+  const domainStart = viewport === null
+    ? model.start
+    : Math.min(Math.max(viewport.start, model.start), model.end - domainDuration)
+  return { domainDuration, domainStart, fullDuration }
+}
+
+function projectedDomainStyle(
+  model: TrajectoryTimeRange,
+  viewport: TrajectoryTimeRange | null,
+): CSSProperties {
+  const { domainDuration, domainStart, fullDuration } = viewportGeometry(model, viewport)
+  return {
+    '--trajectory-domain-left': `${-(domainStart - model.start) / domainDuration * 100}%`,
+    '--trajectory-domain-width': `${fullDuration / domainDuration * 100}%`,
+  } as CSSProperties
+}
+
+function applyProjectedDomain(
+  track: HTMLElement,
+  model: TrajectoryTimeRange,
+  viewport: TrajectoryTimeRange | null,
+): void {
+  const { domainDuration, domainStart, fullDuration } = viewportGeometry(model, viewport)
+  track.style.setProperty(
+    '--trajectory-domain-left',
+    `${-(domainStart - model.start) / domainDuration * 100}%`,
+  )
+  track.style.setProperty(
+    '--trajectory-domain-width',
+    `${fullDuration / domainDuration * 100}%`,
+  )
+  track.querySelectorAll<HTMLElement>('[data-animate-viewport]').forEach((element) => {
+    element.removeAttribute('data-animate-viewport')
+  })
+}
+
 function LaneLabels({ mode }: { mode: TrajectoryTimelineMode }) {
   if (mode === 'tokens') {
     return (
@@ -339,7 +390,7 @@ function EarlierHistoryBoundary({
   )
 }
 
-/** Overview renderer with drag ranges, click-sized focus, and Escape reset. */
+/** Overview renderer with deferred wheel zoom, horizontal panning, range focus, and reset. */
 export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   turns,
   mode,
@@ -376,6 +427,8 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   const panRef = useRef<PanGesture | null>(null)
   const rootRef = useRef<HTMLElement | null>(null)
   const trackRef = useRef<HTMLDivElement | null>(null)
+  const pendingViewportRef = useRef<TrajectoryTimeRange | null | undefined>(undefined)
+  const wheelCommitTimerRef = useRef<number | null>(null)
   const [draft, setDraft] = useState<TrajectoryTimeRange | null>(null)
   const [hover, setHover] = useState<HoverPoint | null>(null)
   const loadingEarlierRef = useRef<Promise<boolean> | null>(null)
@@ -387,6 +440,12 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   const [panning, setPanning] = useState(false)
   const [viewport, setViewport] = useState<TrajectoryTimeRange | null>(null)
   const [animateViewport, setAnimateViewport] = useState(false)
+  const modelRef = useRef(model)
+  const viewportRef = useRef(viewport)
+  const modeRef = useRef(mode)
+  modelRef.current = model
+  viewportRef.current = viewport
+  modeRef.current = mode
   useEffect(() => {
     if (
       model !== null
@@ -403,6 +462,11 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
       current !== null && (current.end < model.start || current.start > model.end)
         ? null
         : current)
+  }, [model])
+  useLayoutEffect(() => {
+    const pending = pendingViewportRef.current
+    if (model === null || pending === undefined || trackRef.current === null) return
+    applyProjectedDomain(trackRef.current, model, pending)
   }, [model])
   useEffect(() => {
     if (model === null || selectedIndex === null) return
@@ -427,19 +491,10 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
       return { start: nextStart, end: nextStart + duration }
     })
   }, [model, selectedIndex])
-  const fullDuration = Math.max(1, (model?.end ?? 0) - (model?.start ?? 0))
-  const viewportDuration = Math.min(
-    fullDuration,
-    Math.max(1, (viewport?.end ?? 0) - (viewport?.start ?? 0)),
-  )
-  const viewportStart = model === null || viewport === null
-    ? model?.start ?? 0
-    : Math.min(
-      Math.max(viewport.start, model.start),
-      model.end - viewportDuration,
-    )
-  const domainDuration = viewport === null ? fullDuration : viewportDuration
-  const domainStart = viewport === null ? model?.start ?? 0 : viewportStart
+  const geometry = model === null
+    ? { domainDuration: 1, domainStart: 0, fullDuration: 1 }
+    : viewportGeometry(model, viewport)
+  const { domainDuration, domainStart, fullDuration } = geometry
   const showsEarlierBoundary = hasEarlierRecords
     && model !== null
     && domainStart === model.start
@@ -457,13 +512,9 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
         setLocalOlderHistoryLoading(false)
       })
     }
-  const projectedDomainStyle = model === null
+  const domainStyle = model === null
     ? undefined
-    : {
-      '--trajectory-domain-left':
-        `${-(domainStart - model.start) / domainDuration * 100}%`,
-      '--trajectory-domain-width': `${fullDuration / domainDuration * 100}%`,
-    } as CSSProperties
+    : projectedDomainStyle(model, viewport)
   const committed = model === null || range === null
     ? null
     : rangeFraction(range, domainStart, domainDuration, model.start, model.end)
@@ -476,34 +527,59 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
     const root = rootRef.current
     if (root === null) return
     const onWheel = (event: globalThis.WheelEvent): void => {
-      event.preventDefault()
       const track = trackRef.current
-      if (track === null || model === null) return
-      setAnimateViewport(false)
+      const currentModel = modelRef.current
+      if (track === null || currentModel === null) return
       const rect = track.getBoundingClientRect()
-      const anchorFraction =
-        clampFraction((event.clientX - rect.left) / Math.max(1, rect.width))
-      const nextDuration = Math.min(
-        fullDuration,
-        Math.max(
-          Math.min(minimumZoomDomain(mode), fullDuration),
-          domainDuration * Math.exp(event.deltaY * 0.0015),
-        ),
-      )
-      if (nextDuration >= fullDuration * 0.999) {
-        setViewport(null)
-        return
+      const unit = event.deltaMode === globalThis.WheelEvent.DOM_DELTA_LINE
+        ? 16
+        : event.deltaMode === globalThis.WheelEvent.DOM_DELTA_PAGE ? rect.width : 1
+      const horizontal = event.shiftKey && Math.abs(event.deltaX) < Math.abs(event.deltaY)
+        ? event.deltaY
+        : event.deltaX
+      const pansHorizontally = event.shiftKey
+        || Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      const currentViewport = pendingViewportRef.current === undefined
+        ? viewportRef.current
+        : pendingViewportRef.current
+      const nextViewport = pansHorizontally
+        ? panTrajectoryTimelineViewport(
+          currentModel,
+          currentViewport,
+          horizontal * unit / Math.max(1, rect.width),
+        )
+        : zoomTrajectoryTimelineViewport(
+          currentModel,
+          currentViewport,
+          clampFraction((event.clientX - rect.left) / Math.max(1, rect.width)),
+          event.deltaY * unit,
+          minimumZoomDomain(modeRef.current),
+        )
+      if (pansHorizontally && currentViewport === null) return
+      event.preventDefault()
+      pendingViewportRef.current = nextViewport
+      applyProjectedDomain(track, currentModel, nextViewport)
+      if (wheelCommitTimerRef.current !== null) {
+        window.clearTimeout(wheelCommitTimerRef.current)
       }
-      const anchorTime = domainStart + anchorFraction * domainDuration
-      const nextStart = Math.min(
-        Math.max(anchorTime - anchorFraction * nextDuration, model.start),
-        model.end - nextDuration,
-      )
-      setViewport({ start: nextStart, end: nextStart + nextDuration })
+      wheelCommitTimerRef.current = window.setTimeout(() => {
+        const pending = pendingViewportRef.current
+        wheelCommitTimerRef.current = null
+        pendingViewportRef.current = undefined
+        if (pending === undefined) return
+        setAnimateViewport(false)
+        setViewport(pending)
+      }, WHEEL_SETTLE_MS)
     }
     root.addEventListener('wheel', onWheel, { passive: false })
-    return () => { root.removeEventListener('wheel', onWheel) }
-  }, [domainDuration, domainStart, fullDuration, mode, model])
+    return () => {
+      root.removeEventListener('wheel', onWheel)
+      if (wheelCommitTimerRef.current !== null) {
+        window.clearTimeout(wheelCommitTimerRef.current)
+        wheelCommitTimerRef.current = null
+      }
+    }
+  }, [])
 
   if (model === null) {
     return (
@@ -555,19 +631,36 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   }
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    if (event.button === 2) {
+    const currentViewport = pendingViewportRef.current === undefined
+      ? viewport
+      : pendingViewportRef.current
+    const currentGeometry = viewportGeometry(model, currentViewport)
+    const startsPan = event.button === 1
+      || event.button === 2
+      || (event.button === 0 && currentViewport !== null && !event.shiftKey)
+    if (startsPan) {
       panRef.current = {
         anchorClientX: event.clientX,
-        anchorStart: domainStart,
+        anchorStart: currentGeometry.domainStart,
+        anchorTime: currentGeometry.domainStart
+          + fractionAt(event) * currentGeometry.domainDuration,
+        button: event.button,
+        duration: currentGeometry.domainDuration,
         moved: false,
-        pannable: viewport !== null,
+        pannable: currentViewport !== null,
         pointerId: event.pointerId,
+        spanKey: spanKeyAt(event),
       }
-      if (viewport !== null) setAnimateViewport(false)
-      setPanning(true)
+      if (wheelCommitTimerRef.current !== null) {
+        window.clearTimeout(wheelCommitTimerRef.current)
+        wheelCommitTimerRef.current = null
+      }
+      setHover(null)
+      if (currentViewport !== null) setPanning(true)
       if (typeof event.currentTarget.setPointerCapture === 'function') {
         event.currentTarget.setPointerCapture(event.pointerId)
       }
+      event.preventDefault()
       return
     }
     if (event.button !== 0) return
@@ -590,22 +683,24 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
 
   const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect()
-    const fraction = fractionAt(event)
-    setHover({ fraction, recordIndex: recordIndexAt(event) })
     const pan = panRef.current
     if (pan !== null && pan.pointerId === event.pointerId) {
       if (Math.abs(event.clientX - pan.anchorClientX) >= MINIMUM_DRAG_PX) {
         pan.moved = true
       }
-      if (!pan.pannable) return
+      if (!pan.pannable || !pan.moved) return
       const delta = (event.clientX - pan.anchorClientX) / Math.max(1, rect.width)
-      const nextStart = Math.min(
-        Math.max(pan.anchorStart - delta * domainDuration, model.start),
-        model.end - domainDuration,
+      const nextViewport = panTrajectoryTimelineViewport(
+        model,
+        { start: pan.anchorStart, end: pan.anchorStart + pan.duration },
+        -delta,
       )
-      setViewport({ start: nextStart, end: nextStart + domainDuration })
+      pendingViewportRef.current = nextViewport
+      applyProjectedDomain(event.currentTarget, model, nextViewport)
       return
     }
+    const fraction = fractionAt(event)
+    setHover({ fraction, recordIndex: recordIndexAt(event) })
     const drag = dragRef.current
     if (drag === null || drag.pointerId !== event.pointerId) return
     let nextDomainStart = domainStart
@@ -650,7 +745,52 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
         || Math.abs(event.clientX - pan.anchorClientX) >= MINIMUM_DRAG_PX
       panRef.current = null
       setPanning(false)
-      if (!moved) onRangeChange(null)
+      if (moved && pan.pannable) {
+        const pending = pendingViewportRef.current
+        pendingViewportRef.current = undefined
+        if (pending !== undefined) {
+          setAnimateViewport(false)
+          setViewport(pending)
+        }
+        return
+      }
+      pendingViewportRef.current = undefined
+      applyProjectedDomain(event.currentTarget, model, viewport)
+      if (pan.button === 2) {
+        onRangeChange(null)
+        return
+      }
+      if (pan.button !== 0) return
+      const clickedSpan = pan.spanKey === null
+        ? undefined
+        : model.spans.find(span => spanKey(span) === pan.spanKey)
+      if (clickedSpan !== undefined) {
+        if (clickedSpan.segment === 'input') {
+          onRangeChange({ start: clickedSpan.start, end: clickedSpan.end })
+          onRecordFocus?.(clickedSpan.coveredIndexes?.[0] ?? clickedSpan.index)
+          return
+        }
+        onRangeChange(null)
+        onRecordSelect?.(clickedSpan.index)
+        return
+      }
+      const clickRange = centeredRange(
+        pan.anchorTime,
+        Math.min(pan.duration, fullDuration / model.spans.length),
+        model.start,
+        model.end,
+      )
+      commit(clickRange)
+      const nearest = model.spans.reduce((candidate, span) => {
+        const candidateDistance = pan.anchorTime < candidate.start
+          ? candidate.start - pan.anchorTime
+          : pan.anchorTime > candidate.end ? pan.anchorTime - candidate.end : 0
+        const spanDistance = pan.anchorTime < span.start
+          ? span.start - pan.anchorTime
+          : pan.anchorTime > span.end ? pan.anchorTime - span.end : 0
+        return spanDistance < candidateDistance ? span : candidate
+      })
+      onRecordFocus?.(nearest.index)
       return
     }
     const drag = dragRef.current
@@ -710,6 +850,14 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   const onPointerCancel = () => {
     dragRef.current = null
     panRef.current = null
+    pendingViewportRef.current = undefined
+    if (wheelCommitTimerRef.current !== null) {
+      window.clearTimeout(wheelCommitTimerRef.current)
+      wheelCommitTimerRef.current = null
+    }
+    if (trackRef.current !== null && modelRef.current !== null) {
+      applyProjectedDomain(trackRef.current, modelRef.current, viewportRef.current)
+    }
     setDraft(null)
     setHover(null)
     setPanning(false)
@@ -723,7 +871,9 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
           ref={trackRef}
           className={css.track}
           data-panning={panning || undefined}
-          aria-label="Timeline overview; drag horizontally to focus events"
+          data-pannable={viewport !== null || undefined}
+          aria-label="Timeline overview; scroll or drag horizontally to pan, wheel to zoom, Shift-drag to focus events"
+          style={domainStyle}
           tabIndex={0}
           onKeyDown={onKeyDown}
           onPointerDown={onPointerDown}
@@ -784,13 +934,9 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
             className={css.turnBoundaries}
             data-animate-viewport={animateViewport || undefined}
             aria-hidden="true"
-            style={projectedDomainStyle}
           >
             {model.turnBoundaries
-              .filter(boundary =>
-                boundary.time > model.start
-                && boundary.time >= domainStart
-                && boundary.time <= domainStart + domainDuration)
+              .filter(boundary => boundary.time > model.start)
               .map(boundary => (
                 <span
                   className={css.turnBoundary}
@@ -807,13 +953,8 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
             className={css.lanes}
             data-animate-viewport={animateViewport || undefined}
             data-timeline-domain
-            style={projectedDomainStyle}
           >
-            {model.spans
-              .filter(span =>
-                spanCovers(span, selectedIndex)
-                || (span.end >= domainStart && span.start <= domainStart + domainDuration))
-              .map((span) => {
+            {model.spans.map((span) => {
                 const left = (span.start - model.start) / fullDuration
                 const width = (span.end - span.start) / fullDuration
                 const widthPercent = width * 100
