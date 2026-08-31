@@ -224,18 +224,20 @@ async def _run(host: str, port: int) -> None:
     # 会话 metadata 的字段补全已改为惰性迁移:读取时按需推断并写回磁盘
     # (见 session_metadata._apply_metadata_defaults_with_inference),无需启动全量扫描。
 
-    # ---------- 图像模态探针预热 ----------
-    # 在开始接受连接之前把探针缓存坐实：晚于这里的话，第一批 agent（含每个
-    # subagent）会各自在后台补探，多发无谓的 LLM 请求。
-    from jiuwenswarm.server.runtime.image_modality_warmup import warm_image_modality_cache
-
-    await warm_image_modality_cache(get_config(), reason="startup")
-
     server = AgentWebSocketServer.get_instance(
         host=host,
         port=port
     )
     await server.start()
+
+    # ---------- 图像模态探针预热 ----------
+    # listen 之后后台 fire-and-forget:探针只往进程级缓存写 (api_base, model_name)
+    # ->bool, agent 用时缓存未命中会自己 schedule 后台探针并降级 metadata-only,
+    # 所以预热挪到 listen 之后不影响首请求可用性,只把端口开放从"等探针跑完"
+    # 解放出来(单模型最坏 10s、整体 30s 上限,原是 listen 前最大耗时项)。
+    # 经 server 统一任务槽位调度:模型配置变更会取消本轮预热、避免写回过期结论;
+    # shutdown 时由 server.stop() 统一 cancel 回收。
+    server.schedule_image_modality_warmup(reason="startup")
 
     # ---------- ProactiveEngine 初始化 ----------
     # 适配逻辑（建专用 agent + 触发主 agent 回调）封装在 proactive_adapter，
