@@ -79,26 +79,67 @@ function entryPath(): string {
   return window.location.pathname.startsWith('/chat') ? '/chat/' : '/';
 }
 
-function contextUrl(userId: string, resolved: ResolvedContext): string {
+function contextUrl(userId: string, resolved: ResolvedContext, debugContext = false): string {
   const query = new URLSearchParams({
     user_id: userId,
     group_id: resolved.org.group_id,
     bot_id: resolved.selectedBot,
     gateway_id: resolved.gateway.jiuwenclaw_id,
   });
+  if (debugContext) query.set('debug_context', '1');
   return `${entryPath()}?${query.toString()}`;
 }
 
-function activateContext(userId: string, resolved: ResolvedContext, navigate: boolean): void {
+function activateContext(userId: string, resolved: ResolvedContext, navigate: boolean, debugContext = false): void {
   setRuntimeScope({
     userId,
     groupId: resolved.org.group_id,
     botId: resolved.selectedBot,
     gatewayId: resolved.gateway.jiuwenclaw_id,
   });
-  const nextUrl = contextUrl(userId, resolved);
+  const nextUrl = contextUrl(userId, resolved, debugContext);
   if (navigate) window.location.replace(nextUrl);
   else window.history.replaceState({}, '', nextUrl);
+}
+
+export function isDebugContext(search: string): boolean {
+  return new URLSearchParams(search).get('debug_context') === '1';
+}
+
+export function buildRequestedDebugContext(
+  orgs: EnterpriseOrg[],
+  gateways: EnterpriseGateway[],
+  agents: EnterpriseAgent[],
+  preferred: ReturnType<typeof parseRuntimeScope>,
+): ResolvedContext | null {
+  if (!preferred.groupId || !preferred.gatewayId || !preferred.botId) return null;
+  const org = orgs.find(item => item.group_id === preferred.groupId) ?? {
+    group_id: preferred.groupId,
+    name: preferred.groupId,
+  };
+  const gateway = gateways.find(item => item.jiuwenclaw_id === preferred.gatewayId) ?? {
+    jiuwenclaw_id: preferred.gatewayId,
+    jiuwenclaw_name: preferred.gatewayId,
+    gateway_endpoint: null,
+  };
+  return { org, gateway, agents, selectedBot: preferred.botId };
+}
+
+async function resolveRequestedDebugContext(
+  provider: EnterpriseAuthProvider,
+  orgs: EnterpriseOrg[],
+  gateways: EnterpriseGateway[],
+  preferred: ReturnType<typeof parseRuntimeScope>,
+): Promise<ResolvedContext | null> {
+  if (!preferred.groupId || !preferred.gatewayId || !preferred.botId) return null;
+  let agents: EnterpriseAgent[] = [];
+  try {
+    agents = await provider.listAgents(preferred.groupId, preferred.gatewayId);
+  } catch (error) {
+    if (error instanceof EnterpriseAuthError && error.status === 401) throw error;
+    // 自定义 ID 用于联调错误路由；列表查询失败不能覆盖手工输入的上下文。
+  }
+  return buildRequestedDebugContext(orgs, gateways, agents, preferred);
 }
 
 function errorText(error: unknown): string {
@@ -162,11 +203,13 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
           provider.listOrganizations(),
           provider.listGateways(),
         ]);
-        const resolved = await resolveFirstContext(
-          provider,
-          orderedContextCandidates(gateways, orgs, preferred.gatewayId, preferred.groupId),
-          preferred.botId,
-        );
+        const resolved = isDebugContext(window.location.search)
+          ? await resolveRequestedDebugContext(provider, orgs, gateways, preferred)
+          : await resolveFirstContext(
+              provider,
+              orderedContextCandidates(gateways, orgs, preferred.gatewayId, preferred.groupId),
+              preferred.botId,
+            );
         if (cancelled) return;
         if (!resolved) {
           setPhase('empty');
@@ -232,7 +275,17 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
       contextSwitching,
       onOrgChange: orgId => {
         const org = context.orgs.find(item => item.group_id === orgId);
-        if (!org) return;
+        if (!org) {
+          const normalized = orgId.trim();
+          if (!normalized) return;
+          activateContext(
+            context.user.user_id,
+            { ...context, org: { group_id: normalized, name: normalized } },
+            true,
+            true,
+          );
+          return;
+        }
         const gateways = movePreferredFirst([...context.gateways], item => item.jiuwenclaw_id === context.gateway.jiuwenclaw_id);
         void switchContext(
           gateways.map(gateway => ({ gateway, org })),
@@ -242,7 +295,24 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
       },
       onGatewayChange: gatewayId => {
         const gateway = context.gateways.find(item => item.jiuwenclaw_id === gatewayId);
-        if (!gateway) return;
+        if (!gateway) {
+          const normalized = gatewayId.trim();
+          if (!normalized) return;
+          activateContext(
+            context.user.user_id,
+            {
+              ...context,
+              gateway: {
+                jiuwenclaw_id: normalized,
+                jiuwenclaw_name: normalized,
+                gateway_endpoint: null,
+              },
+            },
+            true,
+            true,
+          );
+          return;
+        }
         const orgs = movePreferredFirst([...context.orgs], item => item.group_id === context.org.group_id);
         void switchContext(
           orgs.map(org => ({ gateway, org })),
@@ -252,7 +322,23 @@ export function EnterpriseEntry({ children }: { children: ReactNode }) {
       },
       onBotChange: botId => {
         const selected = context.agents.find(agent => agentRuntimeId(agent) === botId);
-        if (!selected || botId === context.selectedBot) return;
+        if (botId === context.selectedBot) return;
+        if (!selected) {
+          const normalized = botId.trim();
+          if (!normalized) return;
+          activateContext(
+            context.user.user_id,
+            {
+              gateway: context.gateway,
+              org: context.org,
+              agents: context.agents,
+              selectedBot: normalized,
+            },
+            true,
+            true,
+          );
+          return;
+        }
         activateContext(
           context.user.user_id,
           {

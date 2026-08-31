@@ -21,7 +21,13 @@ globalThis.window = {
   location: { pathname: '/', search: '', replace() {} },
 };
 
-const { EnterpriseEntry, chooseAgent, orderedContextCandidates } = await import('../node_modules/.cache/user-web-entry/EnterpriseEntry.mjs');
+const {
+  EnterpriseEntry,
+  buildRequestedDebugContext,
+  chooseAgent,
+  isDebugContext,
+  orderedContextCandidates,
+} = await import('../node_modules/.cache/user-web-entry/EnterpriseEntry.mjs');
 const { parseLoginAuthSimulate } = await import('../node_modules/.cache/user-web-entry/auth/config.js');
 const { buildSimulatedEnterpriseContext } = await import('../node_modules/.cache/user-web-entry/auth/simulate/SimulatedAuthProvider.js');
 
@@ -123,4 +129,19 @@ test('agent selection accepts a still-authorized URL agent and otherwise falls b
   assert.equal(chooseAgent(agents, 'agent-2')?.resource_id, 'agent-2');
   assert.equal(chooseAgent(agents, 'removed-agent')?.resource_id, 'agent-1');
   assert.equal(chooseAgent([], 'agent-2'), null);
+});
+
+test('debug context preserves explicitly entered routing identifiers', () => {
+  const debugContext = buildRequestedDebugContext(
+    [{ group_id: 'group-1', name: 'Group 1' }],
+    [{ jiuwenclaw_id: 'gateway-1', jiuwenclaw_name: 'Gateway 1', gateway_endpoint: null }],
+    [],
+    { groupId: 'debug-group', gatewayId: 'debug-gateway', botId: 'debug-bot' },
+  );
+
+  assert.equal(isDebugContext('?debug_context=1'), true);
+  assert.equal(isDebugContext('?debug_context=0'), false);
+  assert.equal(debugContext?.org.group_id, 'debug-group');
+  assert.equal(debugContext?.gateway.jiuwenclaw_id, 'debug-gateway');
+  assert.equal(debugContext?.selectedBot, 'debug-bot');
 });

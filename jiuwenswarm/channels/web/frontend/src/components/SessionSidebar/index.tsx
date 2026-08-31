@@ -22,6 +22,7 @@ import AgentDesignIcon from '../../assets/智能体.svg?react';
 import MoreDesignIcon from '../../assets/更多.svg?react';
 import { webRequest } from '../../services/webClient';
 import { useEnterpriseContext } from '../../services/enterpriseContext';
+import { EditableCombobox } from './EditableCombobox';
 
 type MainNavKey =
   'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel' | 'a2aingress';
@@ -279,37 +280,36 @@ export function SessionSidebar({
           </div>
           <label>
             组织（group_id）
-            <select value={enterprise.org.group_id} disabled={enterprise.contextSwitching} onChange={event => enterprise.onOrgChange(event.target.value)}>
-              {enterprise.orgs.map(item => (
-                <option key={item.group_id} value={item.group_id}>
-                  {item.name} · {item.group_id}
-                </option>
-              ))}
-            </select>
+            <EditableCombobox
+              ariaLabel="组织（group_id）"
+              value={enterprise.org.group_id}
+              disabled={enterprise.contextSwitching}
+              options={enterprise.orgs.map(item => ({ value: item.group_id, label: `${item.name} · ${item.group_id}` }))}
+              onChange={enterprise.onOrgChange}
+            />
           </label>
           <label>
             组网（gateway_id）
-            <select
+            <EditableCombobox
+              ariaLabel="组网（gateway_id）"
               value={enterprise.gateway.jiuwenclaw_id}
               disabled={enterprise.contextSwitching}
-              onChange={event => enterprise.onGatewayChange(event.target.value)}
-            >
-              {enterprise.gateways.map(item => (
-                <option key={item.jiuwenclaw_id} value={item.jiuwenclaw_id}>
-                  {item.jiuwenclaw_name} · {item.jiuwenclaw_id}
-                </option>
-              ))}
-            </select>
+              options={enterprise.gateways.map(item => ({ value: item.jiuwenclaw_id, label: `${item.jiuwenclaw_name} · ${item.jiuwenclaw_id}` }))}
+              onChange={enterprise.onGatewayChange}
+            />
           </label>
           <label>
             Agent（bot_id）
-            <select value={enterprise.selectedBot} disabled={enterprise.contextSwitching} onChange={event => enterprise.onBotChange(event.target.value)}>
-              {enterprise.agents.map(item => (
-                <option key={item.resource_id || item.template_id} value={item.resource_id || item.template_id}>
-                  {item.template_name} · {item.resource_id || item.template_id}
-                </option>
-              ))}
-            </select>
+            <EditableCombobox
+              ariaLabel="Agent（bot_id）"
+              value={enterprise.selectedBot}
+              disabled={enterprise.contextSwitching}
+              options={enterprise.agents.map(item => ({
+                value: item.resource_id || item.template_id,
+                label: `${item.template_name} · ${item.resource_id || item.template_id}`,
+              }))}
+              onChange={enterprise.onBotChange}
+            />
           </label>
           {enterprise.contextSwitching && <div className="enterprise-context-popover__status">正在切换...</div>}
           {enterprise.contextError && <div className="enterprise-context-popover__error">{enterprise.contextError}</div>}
