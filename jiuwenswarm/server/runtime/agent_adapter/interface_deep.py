@@ -166,6 +166,11 @@ from jiuwenswarm.common.stage_timer import StageTimer
 from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool, unregister_tool
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.common.invocation_context.model_trace import TraceAwareModel
+from jiuwenswarm.common.invocation_context.billing_trace import (
+    billing_marker_enabled,
+    has_begun,
+    terminal_trace_id,
+)
 from jiuwenswarm.server.xiaoyi_invocation import get_xiaoyi_trace_header_exporters
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
@@ -304,6 +309,9 @@ from jiuwenswarm.common.config import (
     get_evolution_review_trigger_enabled,
     get_evolution_auto_save_enabled,
     get_evolution_signal_trigger_enabled,
+    get_progressive_tool_always_visible_tools,
+    get_progressive_tool_default_visible_tools,
+    get_progressive_tool_enabled,
     get_sandbox_endpoint,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
@@ -391,6 +399,11 @@ def get_runtime_tool_session_id() -> str | None:
     return _CRON_TOOL_SESSION_ID.get()
 
 logger = logging.getLogger(__name__)
+
+# 临时计费标记（docs/billing-trace-marker-design.md）：终态虚拟模型调用的提示词与
+# fire-and-forget 任务集合（防 GC；任务自带 done_callback 移除）
+_BILLING_MARKER_PROMPT = "please only reply NO_REPLY"
+_BILLING_MARKER_TASKS: set[asyncio.Task] = set()
 
 _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
@@ -1369,11 +1382,14 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 )
                 return
         try:
-            await adapter.reload_agent_config(
-                config_base,
-                self._pending_session_reload_env_overrides,
-                target_session_id=session_id,
-            )
+            from jiuwenswarm.common.stall_watchdog import stall_watchdog
+
+            async with stall_watchdog(f"reload_session_adapter sid={session_id}"):
+                await adapter.reload_agent_config(
+                    config_base,
+                    self._pending_session_reload_env_overrides,
+                    target_session_id=session_id,
+                )
         except Exception as exc:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] lazy session adapter reload failed: session_id=%s error=%s",
@@ -1508,14 +1524,18 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 else None
             )
             create_started_at = time.monotonic()
-            await adapter.create_instance(
-                config,
-                mode=self._session_instance_mode,
-                sub_mode=self._session_instance_sub_mode,
-            )
+            from jiuwenswarm.common.stall_watchdog import stall_watchdog
+
+            async with stall_watchdog(f"create_instance sid={sid}"):
+                await adapter.create_instance(
+                    config,
+                    mode=self._session_instance_mode,
+                    sub_mode=self._session_instance_sub_mode,
+                )
             instance_ready_at = time.monotonic()
 
-            await adapter.start_interaction(session_id=sid)
+            async with stall_watchdog(f"start_interaction sid={sid}", first_after_seconds=15.0):
+                await adapter.start_interaction(session_id=sid)
             interaction_ready_at = time.monotonic()
 
             self._session_adapters[sid] = adapter
@@ -4378,9 +4398,13 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
 
     @staticmethod
     def _build_task_planning_rail() -> TaskPlanningRail | None:
-        """Build TaskPlanningRail."""
+        """Build TaskPlanningRail.
+
+        inject_prompt=True：向 system prompt 注入 todo 规划段——仅简单对话类任务
+        不使用 todo，涉及工具调用/任务拆分的情景都需要调用 todo 工具。
+        """
         try:
-            task_planning_rail = TaskPlanningRail(inject_prompt=False)
+            task_planning_rail = TaskPlanningRail(inject_prompt=True)
             logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] TaskPlanningRail create failed: %s", exc)
@@ -5008,6 +5032,17 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         """与 create_deep_agent() 中 DeepAgentConfig 构造保持一致."""
         resolved_language = self._resolve_runtime_language()
         config_base = config_base or get_config()
+        # 沙箱（jiuwenbox）以受限 token 写文件：workspace 根对沙箱账号没有
+        # 「创建子目录」权限，运行期新建 workspace/todo 会被拒（WinError 5）。
+        # 主进程预创建后，目录创建时即继承写 ACE，沙箱即可在其中写
+        # <workspace>/todo/<session>/todo.json。必须在沙箱创建（会话首次
+        # 沙箱操作）之前完成——agent 配置构建先于会话执行，时机满足。
+        try:
+            (Path(self._workspace_dir or "") / "todo").mkdir(parents=True, exist_ok=True)
+        except OSError as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ensure workspace/todo dir failed: %s", exc
+            )
         workspace_obj = Workspace(root_path=self._workspace_dir or "./", language=resolved_language)
         normalized_tool_cards = [
             tool.card if hasattr(tool, "card") else tool for tool in (tool_cards or [])
@@ -5038,6 +5073,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
             completion_timeout=config.get("completion_timeout", 3600.0),
+            # 渐进式工具曝光：对齐 develop 部署默认（todo 工具 always-visible 优先级最高，
+            # 核心工作工具 default-visible，其余工具经 search_tools/load_tools 延迟发现）
+            progressive_tool_enabled=get_progressive_tool_enabled(config_base),
+            progressive_tool_always_visible_tools=get_progressive_tool_always_visible_tools(config_base),
+            progressive_tool_default_visible_tools=get_progressive_tool_default_visible_tools(config_base),
         )
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
@@ -9629,6 +9669,8 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
         interaction_stream_abort = True
+        # 临时计费标记：本轮是否已判定异常终态（task_failed/answer error/异常抛出）
+        _billing_failed = False
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -9959,6 +10001,10 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                         (time.monotonic() - runner_stream_started_at) * 1000,
                         getattr(chunk, "type", None) or type(chunk).__name__,
                     )
+                # 临时计费标记：终端失败判定（与 debug 日志同一 _run_failure 口径，
+                # 但独立跟踪——debug 关闭时计费终态仍准确）
+                if not _billing_failed and self._run_failure(chunk) is not None:
+                    _billing_failed = True
                 if _debug_logger is not None:
                     _debug_logger.feed(chunk)
                     # Surface run-level terminal failures (model/task_failed,
@@ -9968,6 +10014,13 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                         run_failure = self._run_failure(chunk)
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                     parsed = self._parse_stream_chunk(chunk)
+                    # 解析后的终端失败帧（task_failed/answer error → chat.error）同样计入
+                    if (
+                        not _billing_failed
+                        and isinstance(parsed, dict)
+                        and parsed.get("event_type") == "chat.error"
+                    ):
+                        _billing_failed = True
                     # Only stamp provenance / inject split on new visible deltas.
                     # A late user-round chat.final must keep the prior content kind.
                     if isinstance(parsed, dict) and parsed.get("event_type") == "chat.delta":
@@ -10283,6 +10336,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 _debug_logger.end_run(status="cancelled")
             raise
         except Exception as exc:
+            _billing_failed = True
             logger.exception("[JiuWenSwarmDeepAdapter] 流式任务异常: %s", exc)
             if _debug_logger is not None:
                 _debug_logger.end_run(status="error", error=exc)
@@ -10305,6 +10359,16 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 is_complete=False,
             )
         finally:
+            # 临时计费标记（docs/billing-trace-marker-design.md）：一轮 query 收口，
+            # 按终态补发一次虚拟模型调用（xiaoyi-work-end-/failed- 前缀）。
+            # HITL 挂起等用户输入（ask_user 已发出）不判终态——续跑复用同
+            # interaction_id/task_id（同 core），终态在续跑收口时发出。
+            # 用户停止/中止（CancelledError）按既有计费语义视为正常完成（END）。
+            self._fire_billing_terminal_marker(
+                invocation,
+                failed=_billing_failed,
+                hitl_pending=bool(emitted_ask_user_request_ids),
+            )
             close_agent_run_span(_run_span, session_id=session_id)
             if _debug_logger is not None:
                 _debug_logger.flush()
@@ -10487,6 +10551,72 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             return "answer_error", str(chunk.get("output") or "task failed")
 
         return None
+
+    def _fire_billing_terminal_marker(
+        self,
+        invocation: Any,
+        *,
+        failed: bool,
+        hitl_pending: bool,
+    ) -> None:
+        """临时计费标记的终态触发（fire-and-forget，不阻塞流收口）。
+
+        一轮 query 语义收口时，追加一次虚拟模型调用（system/user 均为
+        "please only reply NO_REPLY"）携带 xiaoyi-work-end-/failed- 前缀的
+        x-hag-trace-id——jiuwen 无法预知哪次模型调用是最后一次，用这次额外
+        调用让计费方从模型网关日志感知对话终态（覆盖本地对话与 xiaoyi 渠道
+        两场景：两者都经本适配器的流式 dispatch）。
+
+        守卫：HITL 挂起（等用户输入，语义未终结）跳过；本轮无模型调用
+        （has_begun 为假——slash/早退路径）不发 orphan end。
+        """
+        try:
+            if hitl_pending or not billing_marker_enabled():
+                return
+            trace = getattr(invocation, "trace", None)
+            core = getattr(trace, "trace_id", None) if trace is not None else None
+            if not core or not has_begun(core):
+                return
+            if self._model is None:
+                logger.warning("[billing-trace] 终态标记跳过：model 实例不可用")
+                return
+            terminal = terminal_trace_id(core, ok=not failed)
+            task = asyncio.create_task(self._run_billing_marker_call(terminal))
+            _BILLING_MARKER_TASKS.add(task)
+            task.add_done_callback(_BILLING_MARKER_TASKS.discard)
+        except Exception:
+            # 计费标记永不影响会话主路径
+            logger.debug("[billing-trace] 终态标记派发失败", exc_info=True)
+
+    async def _run_billing_marker_call(self, terminal_trace: str) -> None:
+        """执行终态虚拟模型调用（显式 trace 头——TraceAwareModel 不覆盖不改写），失败重试 1 次。"""
+        from openjiuwen.core.foundation.llm.schema.message import (
+            SystemMessage,
+            UserMessage,
+        )
+
+        messages = [
+            SystemMessage(content=_BILLING_MARKER_PROMPT),
+            UserMessage(content=_BILLING_MARKER_PROMPT),
+        ]
+        for attempt in (1, 2):
+            try:
+                await self._model.invoke(
+                    messages,
+                    custom_headers={"x-hag-trace-id": terminal_trace},
+                )
+                logger.info("[billing-trace] 终态标记已上行: %s", terminal_trace)
+                return
+            except Exception as exc:
+                if attempt == 2:
+                    logger.warning(
+                        "[billing-trace] 终态标记上行失败（重试后仍失败）: %s trace=%s",
+                        exc,
+                        terminal_trace,
+                    )
+                else:
+                    logger.info("[billing-trace] 终态标记上行失败，重试一次: %s", exc)
+                    await asyncio.sleep(1)
 
     @staticmethod
     def _parse_stream_chunk(

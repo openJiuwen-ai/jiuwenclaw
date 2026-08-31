@@ -163,6 +163,61 @@ async def test_fetch_ok_extracts_to_cache(cache_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_strips_single_top_level_dir(cache_dir: Path) -> None:
+    """上架工具「连目录一起压缩」的形态：条目全在一个一级目录下，自动剥层。"""
+    payload = _zip_bytes(
+        {
+            "doc-writer/": "",
+            "doc-writer/manifest.json": "{}",
+            "doc-writer/agents/": "",
+            "doc-writer/agents/00-identity.md": "# 人设",
+        }
+    )
+    source = es.HttpRepoExpertPackageSource(
+        client=_mock_client(lambda request: httpx.Response(200, content=payload))
+    )
+    package_dir = await source.fetch("doc-writer")
+    assert (package_dir / "manifest.json").is_file()
+    assert not (package_dir / "doc-writer").exists()
+    assert (package_dir / "agents" / "00-identity.md").read_text(
+        encoding="utf-8"
+    ) == "# 人设"
+
+
+@pytest.mark.asyncio
+async def test_fetch_no_strip_when_multiple_top_levels(cache_dir: Path) -> None:
+    """存在第二个顶层名时不是包裹形态，原样解压（由装载校验报错）。"""
+    payload = _zip_bytes(
+        {"a/manifest.json": "{}", "b/readme.md": "x"}
+    )
+    source = es.HttpRepoExpertPackageSource(
+        client=_mock_client(lambda request: httpx.Response(200, content=payload))
+    )
+    package_dir = await source.fetch("security-reviewer")
+    assert not (package_dir / "manifest.json").exists()
+    assert (package_dir / "a" / "manifest.json").is_file()
+    assert (package_dir / "b" / "readme.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_fetch_flat_zip_with_dir_entries_not_stripped(cache_dir: Path) -> None:
+    """平铺但带目录条目的 zip：根级文件存在即判定非包裹形态，原样解压。"""
+    payload = _zip_bytes(
+        {
+            "agents/": "",
+            "agents/00-identity.md": "# 人设",
+            "manifest.json": "{}",
+        }
+    )
+    source = es.HttpRepoExpertPackageSource(
+        client=_mock_client(lambda request: httpx.Response(200, content=payload))
+    )
+    package_dir = await source.fetch("security-reviewer")
+    assert (package_dir / "manifest.json").is_file()
+    assert (package_dir / "agents" / "00-identity.md").is_file()
+
+
+@pytest.mark.asyncio
 async def test_fetch_404_raises_not_found() -> None:
     source = es.HttpRepoExpertPackageSource(
         client=_mock_client(lambda request: httpx.Response(404))

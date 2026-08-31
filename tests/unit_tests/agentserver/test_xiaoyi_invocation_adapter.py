@@ -136,6 +136,47 @@ def test_desktop_cron_run_uses_session_and_interaction() -> None:
     assert trace.trace_id == "desktop_cron_sess&cron-run-1"
 
 
+def test_desktop_long_interaction_id_shortened_to_8() -> None:
+    """x-hag-trace-id 上限 64（celia 模型网关拒绝更长、回空错误帧）：
+    interactionId 为长 id（UUID 36 字符）时只取前 8 位，缩短后整体不再超限。"""
+    session_id = "desktop_1a03c6682bc_1e6cef4a2c5a"  # 32 字符
+    interaction_id = "b7c1de13-5cbb-46b2-b703-cf6746b59ef2"  # UUID 36 字符
+    request = AgentRequest(
+        request_id="req-1",
+        channel_id="desktop",
+        session_id=session_id,
+        metadata={"interaction_id": interaction_id},
+    )
+
+    trace = build_xiaoyi_trace_context(request)
+
+    assert trace is not None
+    assert trace.trace_id == f"{session_id}&{interaction_id[:8]}"
+    assert len(trace.trace_id) <= 64
+    # conversation_id/interaction_id 字段不受缩短影响（仍是完整值）
+    assert trace.conversation_id == session_id
+    assert trace.interaction_id == interaction_id
+
+
+def test_desktop_overlong_trace_truncated_from_tail() -> None:
+    """sessionId 极长时核心段上限 45（64 - 最长计费前缀 19），先截 session 段、
+    保住 interaction 短码（每轮 query 的唯一区分维度）。"""
+    session_id = "s" * 100
+    interaction_id = "b7c1de13-5cbb-46b2-b703-cf6746b59ef2"
+    request = AgentRequest(
+        request_id="req-1",
+        channel_id="desktop",
+        session_id=session_id,
+        metadata={"interaction_id": interaction_id},
+    )
+
+    trace = build_xiaoyi_trace_context(request)
+
+    assert trace is not None
+    assert len(trace.trace_id) == 45
+    assert trace.trace_id == f'{"s" * 36}&{interaction_id[:8]}'
+
+
 def test_xiaoyi_channel_task_id_branch_unchanged() -> None:
     """回归：xiaoyi 渠道仍按 task_id 全串派生 trace。"""
     request = AgentRequest(

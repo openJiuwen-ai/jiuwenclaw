@@ -523,11 +523,13 @@ class TestDesktopChannelsPipe:
     async def test_pipe_verify_client_rejects_foreign_image(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """verify_client=make_image_verifier([sys.executable])：白名单不含本进程
-        镜像时（模拟外来仿冒进程），accept 阶段即断管。"""
+        """verify_client=make_image_verifier({sys.executable, sys._base_executable})：
+        白名单（两者）不含本进程镜像时（模拟外来仿冒进程），accept 阶段即断管。"""
         path = _pipe_path("verify-reject")
         _feed_secrets(monkeypatch, path)
         monkeypatch.setattr(sys, "executable", r"C:\nonexistent\fake-jiuwenswarm.exe")
+        # uv trampoline 下进程实际镜像是 _base_executable，白名单两个都查，须一并遮蔽
+        monkeypatch.setattr(sys, "_base_executable", r"C:\nonexistent\fake-jiuwenswarm.exe")
         kernel = _FakeKernel()
         channels, pair = await _make_channels(kernel)
         await channels.start()

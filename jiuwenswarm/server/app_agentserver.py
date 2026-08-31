@@ -134,9 +134,12 @@ install_shell_tool_safety_hooks()
 install_connector_host_exec_hooks()
 
 # 兼容 SSE-only 网关：让非流式 invoke()（subagent / 心跳等）能解析 text/event-stream 响应
-from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
+from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch, apply_openai_sse_stream_patch
 
 apply_openai_sse_invoke_patch()
+# 流式同兼容：网关 chunk 内容在 choices[0].message.token_text（非标准 delta.content），
+# 原解析读 delta → 对话空返回（content_len=0）；delta 在场时补丁零介入
+apply_openai_sse_stream_patch()
 
 # 命名管道模型通道：桌面形态 API_BASE=np:// 时 LLM 调用走 Windows 命名管道
 # （非 np:// 时零行为变化；幂等）

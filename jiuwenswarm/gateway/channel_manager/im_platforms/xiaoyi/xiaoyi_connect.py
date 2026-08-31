@@ -442,7 +442,8 @@ class XiaoyiChannel(BaseChannel):
         self._ws_connections: dict[str, Any] = {}  # Dual channel connections
         self._send_locks: dict[str, asyncio.Lock] = {}
         self._running = False
-        self._heartbeat_tasks: dict[str, asyncio.Task] = {}  # Heartbeat tasks for each channel
+        # ws/link 的 clawd_bot_init / heartbeat 由应用层（桌面客户端 cloud-ws-relay）
+        # 统一构造发送；channel 层只发 agent_response，不再维护协议级心跳任务。
         self._connect_tasks: dict[str, asyncio.Task] = {}  # Connection tasks for each channel
         self._session_task_map: dict[str, str] = {}
         # Team responses are produced by the first request's long-lived
@@ -571,11 +572,6 @@ class XiaoyiChannel(BaseChannel):
         # 注销全局实例
         _xiaoyi_channel_instances.pop(self.channel_id, None)
         logger.info("XiaoyiChannel 已注销")
-        # Cancel all heartbeat tasks
-        for url_key in list(self._heartbeat_tasks.keys()):
-            if self._heartbeat_tasks[url_key]:
-                self._heartbeat_tasks[url_key].cancel()
-                self._heartbeat_tasks[url_key] = None
         # Cancel all connection tasks
         for url_key in list(self._connect_tasks.keys()):
             if self._connect_tasks[url_key]:
@@ -602,7 +598,6 @@ class XiaoyiChannel(BaseChannel):
                 except Exception as e:
                     logger.warning(f"关闭连接失败 ({url_key}): {e}")
                 self._ws_connections[url_key] = None
-        self._heartbeat_tasks.clear()
         self._connect_tasks.clear()
         self._session_heartbeat_tasks.clear()
         self._task_timeout_tasks.clear()
@@ -1003,12 +998,38 @@ class XiaoyiChannel(BaseChannel):
                 )
             return
 
+        # todos 帧：只下发当前执行中的 todo 步骤（status=in_progress）的
+        # activeForm 作为 status-update 文本（覆盖式推进态；替代原工具状态文案）
+        if event_name == "todo.updated":
+            if session_id and self._is_session_active(session_id, task_id):
+                active_form = ""
+                if isinstance(payload, dict):
+                    todos = payload.get("todos")
+                    if isinstance(todos, list):
+                        for item in todos:
+                            if not isinstance(item, dict):
+                                continue
+                            if str(item.get("status", "")).strip().lower() == "in_progress":
+                                active_form = str(
+                                    item.get("activeForm", "") or item.get("content", "") or ""
+                                ).strip()
+                                break
+                if active_form:
+                    for url_key in list(self._ws_connections.keys()):
+                        await self._send_status_update_with_state(
+                            task_id, session_id, active_form, "working", url_key
+                        )
+                    logger.info(
+                        "[GUI_AGENT_DIAG] phase=XIAOYI_TODO_STATUS message_id=%s "
+                        "session_id=%s task_id=%s active_form=%r",
+                        msg.id,
+                        session_id,
+                        task_id,
+                        active_form,
+                    )
+            return
+
         if should_send_as_status_update(msg.event_type):
-            if is_team_session and msg.event_type in {
-                EventType.CHAT_TOOL_CALL,
-                EventType.CHAT_TOOL_RESULT,
-            }:
-                return
             is_processing = (
                 msg.payload.get("is_processing", True)
                 if isinstance(msg.payload, dict)
@@ -1729,11 +1750,8 @@ class XiaoyiChannel(BaseChannel):
             self._send_locks[url_key] = asyncio.Lock()
             logger.info(f"XiaoyiChannel 已连接 {url_key}: {url}")
 
-            # 发送初始化消息（必须在 heartbeat 之前）
-            await self._send_init_message(url_key)
-
-            # 启动心跳
-            self._heartbeat_tasks[url_key] = asyncio.create_task(self._heartbeat_loop(url_key))
+            # clawd_bot_init / heartbeat 由应用层（桌面客户端 cloud-ws-relay）统一发送，
+            # channel 层不再构造，只发 agent_response（本连接仅承担收发业务帧）。
 
             try:
                 async for raw in ws:
@@ -1741,9 +1759,6 @@ class XiaoyiChannel(BaseChannel):
             except Exception as e:
                 logger.warning(f"XiaoyiChannel 连接异常 ({url_key}): {e}")
             finally:
-                if self._heartbeat_tasks.get(url_key):
-                    self._heartbeat_tasks[url_key].cancel()
-                    self._heartbeat_tasks[url_key] = None
                 self._ws_connections[url_key] = None
                 self._send_locks.pop(url_key, None)
                 close_code = getattr(ws, "close_code", None)
@@ -1771,11 +1786,8 @@ class XiaoyiChannel(BaseChannel):
             # 首帧鉴权（必须在任何业务帧之前；验签失败对端直接断管）
             await pipe.send_frame(_generate_pipe_auth_frame(self.config))
 
-            # 发送初始化消息（必须在 heartbeat 之前）
-            await self._send_init_message(url_key)
-
-            # 启动心跳
-            self._heartbeat_tasks[url_key] = asyncio.create_task(self._heartbeat_loop(url_key))
+            # clawd_bot_init / heartbeat 由应用层（桌面客户端 cloud-ws-relay）统一发送，
+            # channel 层不再构造，只发 agent_response（本连接仅承担收发业务帧）。
 
             try:
                 while True:
@@ -1787,9 +1799,6 @@ class XiaoyiChannel(BaseChannel):
             except Exception as e:
                 logger.warning(f"XiaoyiChannel 管道连接异常 ({url_key}): {e}")
         finally:
-            if self._heartbeat_tasks.get(url_key):
-                self._heartbeat_tasks[url_key].cancel()
-                self._heartbeat_tasks[url_key] = None
             self._ws_connections[url_key] = None
             self._send_locks.pop(url_key, None)
             try:
@@ -1808,39 +1817,6 @@ class XiaoyiChannel(BaseChannel):
             await asyncio.wait_for(ws.close(), timeout=5)
             return
         await ws.close()
-
-    async def _send_init_message(self, url_key: str) -> None:
-        """发送初始化消息 (clawd_bot_init) 到指定通道."""
-        ws = self._ws_connections.get(url_key)
-        if not ws:
-            return
-        init_message = {
-            "msgType": "clawd_bot_init",
-            "agentId": self.config.agent_id,
-        }
-        try:
-            await self._safe_ws_send(url_key, init_message)
-            logger.info(f"XiaoyiChannel 已发送初始化消息 ({url_key})")
-        except Exception as e:
-            logger.warning(f"XiaoyiChannel 发送初始化消息失败 ({url_key}): {e}")
-            raise
-
-    async def _heartbeat_loop(self, url_key: str) -> None:
-        """应用层心跳循环（20秒间隔）."""
-        while self._running and self._ws_connections.get(url_key):
-            try:
-                heartbeat = {"msgType": "heartbeat", "agentId": self.config.agent_id}
-                await self._safe_ws_send(url_key, heartbeat)
-            except Exception as e:
-                logger.warning(f"XiaoyiChannel 心跳发送失败 ({url_key}): {e}")
-                ws = self._ws_connections.get(url_key)
-                if ws:
-                    try:
-                        await self._close_transport(ws)
-                    except Exception as close_error:
-                        logger.warning(f"XiaoyiChannel 关闭连接失败 ({url_key}): {close_error}")
-                break
-            await asyncio.sleep(20)
 
     async def _handle_raw_message(self, raw: str | bytes, url_key: str | None = None) -> None:
         """处理接收到的原始消息，转换为 JiuwenSwarm 内部格式."""

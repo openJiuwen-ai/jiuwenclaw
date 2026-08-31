@@ -258,17 +258,53 @@ class HttpRepoExpertPackageSource:
         return target_dir
 
 
+def _single_top_level_prefix(names: list[str]) -> str:
+    """所有条目共享同一个一级目录前缀时返回该前缀（含 ``/``），否则返回 ''。
+
+    上架工具常「连目录一起压缩」，条目全部落在同一个一级目录下
+    （如 ``doc-writer/manifest.json``）；契约形态是条目平铺在 zip 根
+    （``manifest.json``）。出现任何根级文件或第二个顶层名即判定非包裹形态。
+    """
+    candidate: str | None = None
+    for name in names:
+        parts = [p for p in name.split("/") if p]
+        if not parts:
+            continue
+        # 顶层目录条目本身（如 "doc-writer/"）不否决，可作为候选前缀
+        if len(parts) == 1 and not name.endswith("/"):
+            return ""
+        top = parts[0]
+        if candidate is None:
+            candidate = top
+        elif top != candidate:
+            return ""
+    return f"{candidate}/" if candidate else ""
+
+
 def _extract_zip(content: bytes, target_dir: Path) -> None:
-    """解压到 target_dir（先清空旧目录），拒绝路径逃逸的条目。"""
+    """解压到 target_dir（先清空旧目录），拒绝路径逃逸的条目。
+
+    容错：条目全部位于同一个一级目录前缀下时自动剥掉该层，让
+    ``manifest.json`` 落到包根目录，与平铺打包形态等价。
+    """
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
-        for name in zf.namelist():
+        names = zf.namelist()
+        for name in names:
             normalized = Path(name)
             if normalized.is_absolute() or ".." in normalized.parts:
                 raise ValueError(f"zip 条目路径非法: {name}")
+        prefix = _single_top_level_prefix(names)
         if target_dir.exists():
             shutil.rmtree(target_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
-        zf.extractall(target_dir)
+        for name in names:
+            rel = name[len(prefix):] if prefix else name
+            if not rel or rel.endswith("/"):
+                continue
+            dest = target_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(name) as src, open(dest, "wb") as dst:
+                shutil.copyfileobj(src, dst)
 
 
 class LocalDirExpertPackageSource:

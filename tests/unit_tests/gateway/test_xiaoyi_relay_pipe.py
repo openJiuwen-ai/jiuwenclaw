@@ -10,11 +10,12 @@ sign = base64(HMAC-SHA256(sk, ts))，ts 为毫秒时间戳字符串）；
 之后每帧 = 一条原 WS 文本消息（JSON 对象），下行同样逐帧下发。
 
 覆盖：
-  - np:// 连接成功：首帧 auth 字段与签名正确，随后 init（clawd_bot_init）
+  - np:// 连接成功：首帧 auth 字段与签名正确；clawd_bot_init/heartbeat 由应用层
+    （桌面客户端 cloud-ws-relay）统一发送，channel 层连接后不再构造任何协议帧
   - 业务帧 roundtrip：_safe_ws_send 发 dict 帧 + 下行帧进 _handle_raw_message
   - 错误签名被服务端断管 → 客户端观测断连、重连循环存活（5s 退避语义平移）
   - ak/sk/agentId 来源：密钥包 vault 优先，回退渠道配置（兼容旧桌面）
-  - ws:// 形态回归：仍走 websockets.connect + 握手头鉴权，无管道首帧
+  - ws:// 形态回归：仍走 websockets.connect + 握手头鉴权，无管道首帧、无 init/heartbeat
 """
 
 from __future__ import annotations
@@ -77,10 +78,6 @@ async def _shutdown(channel: XiaoyiChannel, task: "asyncio.Task | None") -> None
     if task is not None:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-    for hb in channel._heartbeat_tasks.values():
-        if hb:
-            hb.cancel()
-    channel._heartbeat_tasks.clear()
 
 
 class _FakeRelay:
@@ -159,12 +156,12 @@ pytestmark = [
 @pytest.mark.skipif(sys.platform != "win32", reason="命名管道仅 Windows")
 class TestXiaoyiRelayPipe:
     @pytest.mark.asyncio
-    async def test_connect_sends_auth_frame_then_init(self) -> None:
+    async def test_connect_sends_auth_frame_only(self) -> None:
         async with _FakeRelay() as relay:
             channel = _make_channel(ws_url1=relay.url)
             task = asyncio.create_task(channel._connect("ws_url1", relay.url))
             try:
-                assert await _wait_until(lambda: len(relay.frames) >= 1)
+                assert await _wait_until(lambda: len(relay.auth_frames) >= 1)
                 # 首帧 = 鉴权帧（WS 握手头下沉形态）
                 auth = relay.auth_frames[0]
                 assert auth["type"] == "auth"
@@ -173,9 +170,11 @@ class TestXiaoyiRelayPipe:
                 assert isinstance(auth["ts"], str) and auth["ts"].isdigit()
                 assert abs(int(time.time() * 1000) - int(auth["ts"])) < 60_000
                 assert auth["sign"] == _sign(TEST_SK, auth["ts"])
-                # 鉴权帧之后第一条业务帧 = init（clawd_bot_init 在心跳之前）
-                assert relay.frames[0] == {"msgType": "clawd_bot_init", "agentId": TEST_AGENT_ID}
                 assert channel.is_ready
+                # 连接稳定后 channel 层不发任何协议帧：clawd_bot_init/heartbeat
+                # 统一由应用层（桌面客户端 cloud-ws-relay）构造发送
+                await asyncio.sleep(0.5)
+                assert relay.frames == []
             finally:
                 await _shutdown(channel, task)
 
@@ -192,7 +191,8 @@ class TestXiaoyiRelayPipe:
             channel._handle_raw_message = _capture
             task = asyncio.create_task(channel._connect("ws_url1", relay.url))
             try:
-                assert await _wait_until(lambda: len(relay.frames) >= 1)
+                # 连接就绪（channel 层不再发 init/heartbeat，无连接即发的业务帧）
+                assert await _wait_until(lambda: channel.is_ready)
                 # 上行：_safe_ws_send 直接发 dict 帧，服务端收到同形 JSON 对象
                 payload = {"msgType": "custom_biz", "text": "你好管道", "n": 7}
                 await channel._safe_ws_send("ws_url1", payload)
@@ -323,9 +323,9 @@ class TestWsFormUnchanged:
             assert headers["x-agent-id"] == TEST_AGENT_ID
             assert headers["x-ts"].isdigit()
             assert headers["x-sign"] == _sign(TEST_SK, headers["x-ts"])
-            # 首条上行消息仍是 init（握手头鉴权，线上无首帧 auth）
-            assert sent, "init 消息应已发送"
-            assert json.loads(sent[0]) == {"msgType": "clawd_bot_init", "agentId": TEST_AGENT_ID}
+            # channel 层不再发送 init/heartbeat（由应用层 cloud-ws-relay 统一构造）：
+            # 建链后无任何上行消息
+            assert sent == []
             # 连接走完后清理连接槽位
             assert channel._ws_connections.get("ws_url1") is None
         finally:

@@ -162,8 +162,12 @@ class DesktopE2aChannels:
             logger.error("[E2A][desktop] 命名管道传输不可用: %s", exc)
             return
         # gateway 与 agent 是同一个 jiuwenswarm.exe：PID→镜像白名单校验对端身份
-        # （连接时 GetNamedPipeClientProcessId → 镜像路径比对，防同用户仿冒进程）
-        verify_client = make_image_verifier([sys.executable])
+        # （连接时 GetNamedPipeClientProcessId → 镜像路径比对，防同用户仿冒进程）。
+        # 白名单同时纳入 sys._base_executable：uv 对 python-build-standalone 基线
+        # 创建的 .venv 是 trampoline 结构——进程实际镜像为 base python，而
+        # sys.executable 仍报告 .venv 路径，仅比 executable 会把 gateway 兄弟
+        # 进程误判为仿冒（WriteFile 233 永久拒连）。exe 发布形态两者恒等，无影响。
+        verify_client = make_image_verifier({sys.executable, sys._base_executable})
         try:
             self.pipe_server = await serve_pipe(
                 pipe_path,

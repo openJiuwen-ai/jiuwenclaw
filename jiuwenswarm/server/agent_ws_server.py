@@ -35,7 +35,8 @@ from jiuwenswarm.common.e2a.wire_trace import trace_inbound
 from jiuwenswarm.server.gui_rpc import get_gui_rpc_client
 from jiuwenswarm.server.gui_rpc.client import GuiRpcClientError
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
-from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file, mask_sensitive
+from jiuwenswarm.common.utils import get_agent_sessions_dir, get_agent_workspace_dir, get_config_file, mask_sensitive
+from jiuwenswarm.common.todo_snapshot import load_todo_snapshot_for_frontend
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
@@ -1377,6 +1378,18 @@ class AgentWebSocketServer:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "[AgentWebSocketServer] inject JIUWENBOX_VENV_DIR failed: %s",
+                            exc,
+                        )
+                    # skills 目录注入：policy 基底 allow_read 用 %JIUWENBOX_SKILLS_DIR%
+                    # 占位（os.path.expandvars 语义），不注入则展不开 → apply_sandbox_acl
+                    # 跳过 → 沙箱受限 token 读技能文件 Errno 13（skill_tool 读取失败）。
+                    try:
+                        skills_dir = Path(get_agent_workspace_dir()) / "skills"
+                        if skills_dir.is_dir():
+                            sandbox_env["JIUWENBOX_SKILLS_DIR"] = str(skills_dir)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[AgentWebSocketServer] inject JIUWENBOX_SKILLS_DIR failed: %s",
                             exc,
                         )
                 except Exception as exc:  # noqa: BLE001
@@ -5466,6 +5479,44 @@ class AgentWebSocketServer:
                     )
                     return
 
+        done_seq = len(messages) if isinstance(messages, list) else 0
+
+        # Session open / refresh: push full todo snapshot before history "done"
+        # so the frontend todo panel restores without reading workspace files.
+        # Only page 1 — pagination must not re-flash the panel.
+        if page_idx == 1 and isinstance(session_id, str) and session_id.strip():
+            todos = load_todo_snapshot_for_frontend(session_id)
+            todo_chunk = AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={
+                    "event_type": "todo.updated",
+                    "todos": todos,
+                    "session_id": session_id.strip(),
+                },
+                is_complete=False,
+            )
+            wire_todo = encode_agent_chunk_for_wire(
+                todo_chunk,
+                response_id=request.request_id,
+                sequence=done_seq,
+            )
+            sent_todo = False
+            async with send_lock:
+                sent_todo = await send_wire_payload(ws, wire_todo)
+            if not sent_todo:
+                # chat timeline still finishes; log so oversized snapshots are visible.
+                logger.warning(
+                    "[AgentWebSocketServer] history todo.updated snapshot send failed "
+                    "(oversized or replaced): request_id=%s session_id=%s seq=%s "
+                    "todo_count=%s",
+                    request.request_id,
+                    session_id.strip(),
+                    done_seq,
+                    len(todos),
+                )
+            done_seq += 1
+
         done_chunk = AgentResponseChunk(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -5478,7 +5529,6 @@ class AgentWebSocketServer:
             },
             is_complete=True,
         )
-        done_seq = len(messages) if isinstance(messages, list) else 0
         wire_done = encode_agent_chunk_for_wire(
             done_chunk,
             response_id=request.request_id,
