@@ -6,8 +6,9 @@
 不可用期间，把一轮 query 的生命周期直接标记到模型调用的 x-hag-trace-id 上，
 计费方从模型网关日志按前缀归集一轮 query 的全部模型消耗：
 
-  - 一轮 query 的第一次模型调用：``xiaoyi-work-begin-<core>``
-  - 中间所有模型调用：``xiaoyi-work-<core>``
+  - 一轮 query 的首次模型调用前：jiuwen 追加一次虚拟模型调用携带
+    ``xiaoyi-work-begin-<core>``（2026-08-31 起 begin 独立成虚拟调用，与终态同形态）
+  - 该轮所有真实模型调用：``xiaoyi-work-<core>``
   - 正常结束：jiuwen 追加一次虚拟模型调用携带 ``xiaoyi-work-end-<core>``
   - 异常结束：jiuwen 追加一次虚拟模型调用携带 ``xiaoyi-work-failed-<core>``
 
@@ -18,9 +19,11 @@ celia 模型网关拒绝 x-hag-trace-id > 64（回 ``data: {"error":{}}`` 空错
 （每轮 query 的唯一区分维度）。
 
 挂点（最终方案上线时随本模块整体移除）：
-  - ``model_trace.TraceAwareModel._with_trace_headers``：每次模型调用经
-    ``mark_model_call`` 改写（首次 begin，其后裸前缀）；
-  - ``interface_deep.process_message_stream_impl`` finally：按终态补发虚拟模型调用；
+  - ``model_trace.TraceAwareModel.invoke/stream``：每次真实模型调用经
+    ``mark_model_call`` 登记并携带裸前缀；某 core 首次登记时先经
+    ``schedule_marker_call`` 派发 begin 虚拟调用（显式头不被改写、不递归）；
+  - ``interface_deep.process_message_stream_impl`` finally：按终态经
+    ``schedule_marker_call`` 派发 end/failed 虚拟调用；
   - ``xiaoyi_invocation.build_trace_id``：core 构造委托 ``build_billing_core``。
 
 开关：环境变量 ``JIUWEN_BILLING_TRACE_MARKER=off`` 整体关闭（默认开）。
@@ -28,9 +31,13 @@ celia 模型网关拒绝 x-hag-trace-id > 64（回 ``data: {"error":{}}`` 空错
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import time
 from collections import OrderedDict
+
+logger = logging.getLogger(__name__)
 
 TRACE_PREFIX = "xiaoyi-work-"
 BEGIN_PREFIX = "xiaoyi-work-begin-"
@@ -86,34 +93,99 @@ def _purge_registry(now: float) -> None:
         _begun.popitem(last=False)
 
 
-def mark_model_call(core: str) -> str:
-    """一轮 query 的模型调用标记：该 core 的首次调用加 begin-，其后加裸前缀。
+def mark_model_call(core: str) -> tuple[str, bool]:
+    """一轮 query 的模型调用标记登记：返回 (本调用应携带的 trace 值, 是否该 core 首次登记)。
 
-    非计费 trace（空 core）或开关关闭时原样返回。注册表按 core 记首次——
-    HITL 续跑（interaction_id/task_id 不变）的模型调用仍判 middle，不会重发 begin。
+    真实模型调用一律携带裸前缀 ``xiaoyi-work-<core>``；首次登记（is_first=True）
+    由调用方（TraceAwareModel）在真实调用前经 ``schedule_marker_call`` 补发 begin
+    虚拟调用——begin 形态只出现在虚拟标记调用上。非计费 trace（空 core）或开关
+    关闭时原样返回 (core, False)。注册表按 core 记首次——HITL 续跑
+    （interaction_id/task_id 不变）的模型调用仍判 middle，不会重发 begin。
     """
     if not core or not billing_marker_enabled():
-        return core
+        return core, False
     now = time.monotonic()
     _purge_registry(now)
     if core in _begun:
         _begun[core] = now
         _begun.move_to_end(core)
-        return f"{TRACE_PREFIX}{core}"[:MAX_TRACE_ID_LEN]
+        return f"{TRACE_PREFIX}{core}"[:MAX_TRACE_ID_LEN], False
     _begun[core] = now
     _purge_registry(now)
-    return f"{BEGIN_PREFIX}{core}"[:MAX_TRACE_ID_LEN]
+    return f"{TRACE_PREFIX}{core}"[:MAX_TRACE_ID_LEN], True
 
 
 def has_begun(core: str) -> bool:
-    """该 core 是否已上行过 begin（终态触发守卫：无模型调用的早退路径不发 end）。"""
+    """该 core 是否已登记过首次模型调用（终态触发守卫：无模型调用的早退路径不发 end）。"""
     return core in _begun
+
+
+def begin_trace_id(core: str) -> str:
+    """begin 虚拟调用的 trace：``xiaoyi-work-begin-<core>``。"""
+    return f"{BEGIN_PREFIX}{core}"[:MAX_TRACE_ID_LEN]
 
 
 def terminal_trace_id(core: str, ok: bool) -> str:
     """终态虚拟调用的 trace：ok → xiaoyi-work-end-，否则 xiaoyi-work-failed-。"""
     prefix = END_PREFIX if ok else FAILED_PREFIX
     return f"{prefix}{core}"[:MAX_TRACE_ID_LEN]
+
+
+# 虚拟标记调用的提示词与 fire-and-forget 任务集合（防 GC；任务自带 done_callback 移除）
+_MARKER_PROMPT = "please only reply NO_REPLY"
+_MARKER_TASKS: set[asyncio.Task] = set()
+
+
+def schedule_marker_call(model: object, trace_value: str) -> bool:
+    """派发一次虚拟标记模型调用（fire-and-forget，不阻塞调用方主路径）。
+
+    成功派发返回 True；无运行中事件循环等派发失败返回 False（调用方可兜底，
+    如 begin 退回真实首呼自身携带）。计费标记永不影响会话主路径。
+    """
+    coro = _run_marker_call(model, trace_value)
+    try:
+        task = asyncio.create_task(coro)
+    except Exception:
+        # 无运行中事件循环等：协程未挂起，主动 close 防 unawaited 警告
+        coro.close()
+        logger.debug("[billing-trace] 标记调用派发失败: %s", trace_value, exc_info=True)
+        return False
+    _MARKER_TASKS.add(task)
+    task.add_done_callback(_MARKER_TASKS.discard)
+    return True
+
+
+async def _run_marker_call(model: object, trace_value: str) -> None:
+    """执行虚拟标记调用（system/user 均为 NO_REPLY 提示词，显式 trace 头——
+    TraceAwareModel 不覆盖不改写），失败重试 1 次；仍失败记 warn（临时方案
+    允许丢单，不阻塞/不影响会话）。"""
+    from openjiuwen.core.foundation.llm.schema.message import (
+        SystemMessage,
+        UserMessage,
+    )
+
+    messages = [
+        SystemMessage(content=_MARKER_PROMPT),
+        UserMessage(content=_MARKER_PROMPT),
+    ]
+    for attempt in (1, 2):
+        try:
+            await model.invoke(
+                messages,
+                custom_headers={"x-hag-trace-id": trace_value},
+            )
+            logger.info("[billing-trace] 标记已上行: %s", trace_value)
+            return
+        except Exception as exc:
+            if attempt == 2:
+                logger.warning(
+                    "[billing-trace] 标记上行失败（重试后仍失败）: %s trace=%s",
+                    exc,
+                    trace_value,
+                )
+            else:
+                logger.info("[billing-trace] 标记上行失败，重试一次: %s", exc)
+                await asyncio.sleep(1)
 
 
 def reset_billing_trace_registry() -> None:
@@ -129,10 +201,12 @@ __all__ = [
     "MAX_TRACE_ID_LEN",
     "SHORT_INTERACTION_ID_MAX_LEN",
     "TRACE_PREFIX",
+    "begin_trace_id",
     "billing_marker_enabled",
     "build_billing_core",
     "has_begun",
     "mark_model_call",
     "reset_billing_trace_registry",
+    "schedule_marker_call",
     "terminal_trace_id",
 ]

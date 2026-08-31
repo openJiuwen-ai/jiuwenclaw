@@ -169,6 +169,7 @@ from jiuwenswarm.common.invocation_context.model_trace import TraceAwareModel
 from jiuwenswarm.common.invocation_context.billing_trace import (
     billing_marker_enabled,
     has_begun,
+    schedule_marker_call,
     terminal_trace_id,
 )
 from jiuwenswarm.server.xiaoyi_invocation import get_xiaoyi_trace_header_exporters
@@ -400,10 +401,8 @@ def get_runtime_tool_session_id() -> str | None:
 
 logger = logging.getLogger(__name__)
 
-# 临时计费标记（docs/billing-trace-marker-design.md）：终态虚拟模型调用的提示词与
-# fire-and-forget 任务集合（防 GC；任务自带 done_callback 移除）
-_BILLING_MARKER_PROMPT = "please only reply NO_REPLY"
-_BILLING_MARKER_TASKS: set[asyncio.Task] = set()
+# 临时计费标记（docs/billing-trace-marker-design.md）：终态虚拟模型调用经
+# billing_trace.schedule_marker_call 派发（begin 同机制，挂点在 TraceAwareModel）。
 
 _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
@@ -10581,42 +10580,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 logger.warning("[billing-trace] 终态标记跳过：model 实例不可用")
                 return
             terminal = terminal_trace_id(core, ok=not failed)
-            task = asyncio.create_task(self._run_billing_marker_call(terminal))
-            _BILLING_MARKER_TASKS.add(task)
-            task.add_done_callback(_BILLING_MARKER_TASKS.discard)
+            if not schedule_marker_call(self._model, terminal):
+                logger.warning("[billing-trace] 终态标记派发失败: %s", terminal)
         except Exception:
             # 计费标记永不影响会话主路径
             logger.debug("[billing-trace] 终态标记派发失败", exc_info=True)
-
-    async def _run_billing_marker_call(self, terminal_trace: str) -> None:
-        """执行终态虚拟模型调用（显式 trace 头——TraceAwareModel 不覆盖不改写），失败重试 1 次。"""
-        from openjiuwen.core.foundation.llm.schema.message import (
-            SystemMessage,
-            UserMessage,
-        )
-
-        messages = [
-            SystemMessage(content=_BILLING_MARKER_PROMPT),
-            UserMessage(content=_BILLING_MARKER_PROMPT),
-        ]
-        for attempt in (1, 2):
-            try:
-                await self._model.invoke(
-                    messages,
-                    custom_headers={"x-hag-trace-id": terminal_trace},
-                )
-                logger.info("[billing-trace] 终态标记已上行: %s", terminal_trace)
-                return
-            except Exception as exc:
-                if attempt == 2:
-                    logger.warning(
-                        "[billing-trace] 终态标记上行失败（重试后仍失败）: %s trace=%s",
-                        exc,
-                        terminal_trace,
-                    )
-                else:
-                    logger.info("[billing-trace] 终态标记上行失败，重试一次: %s", exc)
-                    await asyncio.sleep(1)
 
     @staticmethod
     def _parse_stream_chunk(

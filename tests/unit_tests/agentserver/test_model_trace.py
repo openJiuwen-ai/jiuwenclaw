@@ -61,7 +61,7 @@ def test_trace_aware_model_keeps_caller_explicit_trace_header() -> None:
     与 model-proxy hasTraceId 语义一致）。"""
     token = set_current_invocation_context(_invocation())
     try:
-        kwargs = _trace_model(XiaoyiTraceHeaderExporter())._with_trace_headers(
+        kwargs, begin_core = _trace_model(XiaoyiTraceHeaderExporter())._with_trace_headers(
             {
                 "custom_headers": {
                     "x-hag-trace-id": "xiaoyi-work-end-root&19&abc&0",
@@ -72,6 +72,7 @@ def test_trace_aware_model_keeps_caller_explicit_trace_header() -> None:
     finally:
         reset_current_invocation_context(token)
 
+    assert begin_core is None
     assert kwargs["custom_headers"] == {
         "x-hag-trace-id": "xiaoyi-work-end-root&19&abc&0",
         "x-request-id": "keep",
@@ -98,12 +99,14 @@ def test_trace_aware_model_uses_only_injected_exporters() -> None:
         )
     )
     try:
-        kwargs = _trace_model(Exporter())._with_trace_headers(
+        kwargs, begin_core = _trace_model(Exporter())._with_trace_headers(
             {"custom_headers": {"x-request-id": "keep"}}
         )
     finally:
         reset_current_invocation_context(token)
 
+    # 自定义 exporter 未导出 x-hag-trace-id：无 core 可标记，不上报 begin
+    assert begin_core is None
     assert kwargs["custom_headers"] == {
         "x-example-trace": "trusted",
         "x-request-id": "keep",
