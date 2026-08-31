@@ -5111,21 +5111,32 @@ export class AppScreen implements Component, Focusable {
     const target = this.modelList?.target;
     if (!target) return;
     try {
-      // 删除前重新拉取列表并按 name 稳定标识解析当前 index，
+      // 删除前重新拉取列表并按 name 稳态标识解析当前 index，
       // 避免"确认页停留期间 defaults 被其他窗口切换重排"导致 index 漂移删错。
       // 后端 delete_model 会用 model 字段按 model_name/alias 匹配，index 仅兜底。
-      const payload = await this.state.request<ModelListPayload>("command.model", {});
-      const metas = payload.models ?? [];
+      // 指纹必须取自用户当时选中的条目（旧 modelsMeta 快照），而非新列表中占据旧
+      // index 位置的那条——后者在重排后会指向另一条模型，导致指纹匹配删错。
+      const oldMeta = this.modelList?.modelsMeta.find(
+        (m) => m.index !== undefined && m.index === target.index,
+      );
       const mk = (mm: ModelMeta | undefined): string =>
         `${mm?.alias ?? ""}|${mm?.model_provider ?? ""}|${mm?.api_base ?? ""}`;
+      const targetFingerprint = oldMeta ? mk(oldMeta) : undefined;
+      const payload = await this.state.request<ModelListPayload>("command.model", {});
+      const metas = payload.models ?? [];
       // 1) 同名区分：name + alias + provider + api_base 完全相同 → 用户当时选的那一条
       // 2) 退化为纯 name 匹配（后端再按 model 字段做同名消歧与 index 校验）
       const sameName = metas.filter((m) => m.name === target.name && !m.is_agentos);
       let match: ModelMeta | undefined;
       if (sameName.length > 1) {
-        // 同名多条：优先匹配原 index，其次匹配 alias/provider/api_base 指纹
-        match = sameName.find((m) => m.index === target.index)
-          ?? sameName.find((m) => mk(m) === mk(metas.find((x) => x.index === target.index)));
+        // 同名多条：优先用原指纹在新列表定位（index 重排后不可靠，仅作弱提示）
+        if (targetFingerprint !== undefined) {
+          match = sameName.find((m) => mk(m) === targetFingerprint);
+        }
+        // 指纹未命中或旧快照未取到指纹：退化为原 index 匹配
+        if (!match) {
+          match = sameName.find((m) => m.index === target.index);
+        }
       } else {
         match = sameName[0];
       }
