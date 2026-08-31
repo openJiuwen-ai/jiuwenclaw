@@ -1713,7 +1713,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _a2a_outbound_list(ws, req_id, params, session_id):
-        await _send_a2a_outbound(ws, req_id, a2a_manager.outbound_list)
+        await _send_a2a_outbound(ws, req_id, lambda: a2a_manager.outbound_list())
 
     async def _a2a_outbound_get(ws, req_id, params, session_id):
         await _send_a2a_outbound(

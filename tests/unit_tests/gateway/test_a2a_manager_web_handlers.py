@@ -221,17 +221,36 @@ async def test_a2a_outbound_web_handlers_expose_management_facade():
         {"discovery_id": "disc-1", "display_name": "Agent"},
         "session",
     )
+    await channel.methods["a2a.outbound.list"](object(), "list", {}, "session")
+    await channel.methods["a2a.outbound.get"](
+        object(), "get", {"agent_id": "agent-1"}, "session"
+    )
     await channel.methods["a2a.outbound.update"](
         object(), "update", {"agent_id": "agent-1", "enabled": False}, "session"
+    )
+    await channel.methods["a2a.outbound.refresh"](
+        object(), "refresh", {"agent_id": "agent-1"}, "session"
     )
     await channel.methods["a2a.outbound.confirm_revision"](
         object(), "confirm", {"agent_id": "agent-1", "accept": False}, "session"
     )
+    await channel.methods["a2a.outbound.delete"](
+        object(), "delete", {"agent_id": "agent-1"}, "session"
+    )
+    await channel.methods["a2a.outbound.dispatch.get"](
+        object(), "dispatch_get", {"dispatch_id": "dispatch-1"}, "session"
+    )
 
     assert channel.responses[0]["payload"]["discovery_id"] == "disc-1"
     assert channel.responses[1]["payload"]["agent_id"] == "agent-1"
-    assert channel.responses[2]["payload"]["enabled"] is False
-    assert channel.responses[3]["payload"]["accepted"] is False
+    assert channel.responses[2]["payload"]["total"] == 0
+    assert channel.responses[3]["payload"]["agent_id"] == "agent-1"
+    assert channel.responses[4]["payload"]["enabled"] is False
+    assert channel.responses[5]["payload"]["refreshed"] is True
+    assert channel.responses[6]["payload"]["accepted"] is False
+    assert channel.responses[7]["payload"]["deleted"] is True
+    assert channel.responses[8]["payload"]["dispatch_id"] == "dispatch-1"
+    assert all(item["ok"] for item in channel.responses)
 
 
 @pytest.mark.asyncio
@@ -254,6 +273,38 @@ async def test_a2a_outbound_confirm_revision_requires_explicit_boolean(params):
 
     assert channel.responses[-1]["ok"] is False
     assert channel.responses[-1]["code"] == "A2A_OUTBOUND_STORE_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_a2a_outbound_handlers_tolerate_missing_manager():
+    channel = _WebChannelProbe()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, a2a_manager=None))
+
+    await channel.methods["a2a.outbound.discover"](
+        object(), "discover", {"url": "https://agent.example.com"}, "session"
+    )
+    await channel.methods["a2a.outbound.list"](object(), "list", {}, "session")
+    await channel.methods["a2a.outbound.get"](
+        object(), "get", {"agent_id": "agent-1"}, "session"
+    )
+    await channel.methods["a2a.outbound.update"](
+        object(), "update", {"agent_id": "agent-1"}, "session"
+    )
+    await channel.methods["a2a.outbound.refresh"](
+        object(), "refresh", {"agent_id": "agent-1"}, "session"
+    )
+    await channel.methods["a2a.outbound.confirm_revision"](
+        object(), "confirm", {"agent_id": "agent-1", "accept": True}, "session"
+    )
+    await channel.methods["a2a.outbound.delete"](
+        object(), "delete", {"agent_id": "agent-1"}, "session"
+    )
+    await channel.methods["a2a.outbound.dispatch.get"](
+        object(), "dispatch_get", {"dispatch_id": "dispatch-1"}, "session"
+    )
+
+    assert [item["ok"] for item in channel.responses] == [False] * 8
+    assert {item["code"] for item in channel.responses} == {"A2A_OUTBOUND_STORE_INVALID"}
 
 
 def test_a2a_outbound_http_routes_map_to_rpc_methods():
