@@ -1,6 +1,10 @@
 # 前端显示语言：zh（中文）/ en（英文），与 Web 界面语言切换同步
 preferred_language: zh
 
+# Agent-Core 文件操作历史开关；新安装默认关闭，未配置时由代码兼容回退为 true。
+file_operation_history:
+  enabled: false
+
 # 渐进式工具曝光（progressive tool loading）：
 # true：模型仅直接可见下面两个名单的工具，其余工具经 search_tools/load_tools 延迟发现。
 # always_visible = 始终直接可见（todo 工具优先级最高）；
