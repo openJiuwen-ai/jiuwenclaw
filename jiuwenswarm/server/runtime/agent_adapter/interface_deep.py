@@ -7094,7 +7094,7 @@ class JiuWenSwarmDeepAdapter:
             return None
 
     def _build_a2a_outbound_toolkit_rail(self) -> A2AOutboundToolkitRail | None:
-        if is_enterprise_runtime():
+        if is_enterprise():
             return None
         return A2AOutboundToolkitRail(runtime_route=self._get_a2a_outbound_tool_route)
 
