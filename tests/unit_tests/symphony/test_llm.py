@@ -1,7 +1,11 @@
+import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 
 from jiuwenswarm.symphony.adapter import llm_config_signature
 from jiuwenswarm.symphony.llm import (
@@ -10,6 +14,7 @@ from jiuwenswarm.symphony.llm import (
     create_model_response_observer,
     extract_message_content,
     get_llm_token_usage_summary,
+    probe_model_connection,
     reset_llm_token_usage,
     thinking_disabled_request_overrides,
     _record_usage_from_response,
@@ -257,6 +262,88 @@ def test_llm_config_creates_native_openjiuwen_model(monkeypatch):
     assert isinstance(model, FakeModel)
     assert captured["request"].model_name == "model-a"
     assert captured["client"].api_base == "https://example.test/v1"
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_uses_bounded_low_cost_request(monkeypatch):
+    model = _FakeInvokeModel()
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: model)
+
+    await probe_model_connection(_llm_config())
+
+    assert model.calls == [
+        {
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 16,
+            "timeout": 25,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_preserves_framework_model_error(monkeypatch):
+    expected = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg="model unavailable",
+    )
+
+    class FailingModel:
+        async def invoke(self, **kwargs):
+            del kwargs
+            raise expected
+
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: FailingModel())
+
+    with pytest.raises(BaseError) as exc_info:
+        await probe_model_connection(_llm_config())
+
+    assert exc_info.value is expected
+    assert (
+        str(exc_info.value) == "[181001] model call failed, reason: model unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_wraps_untyped_provider_error(monkeypatch):
+    class FailingModel:
+        async def invoke(self, **kwargs):
+            del kwargs
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: FailingModel())
+
+    with pytest.raises(BaseError) as exc_info:
+        await probe_model_connection(_llm_config())
+
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
+    assert (
+        str(exc_info.value) == "[181001] model call failed, reason: connection refused"
+    )
+    assert isinstance(exc_info.value.cause, OSError)
+
+
+@pytest.mark.asyncio
+async def test_probe_model_connection_enforces_coroutine_deadline(monkeypatch):
+    class HangingModel:
+        async def invoke(self, **kwargs):
+            del kwargs
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(LLMConfig, "create_model", lambda _config: HangingModel())
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.llm._MODEL_CONNECTION_PROBE_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    with pytest.raises(BaseError) as exc_info:
+        await probe_model_connection(_llm_config())
+
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
+    assert str(exc_info.value) == (
+        "[181001] model call failed, reason: "
+        "model connection test timed out after 0.01s"
+    )
+    assert isinstance(exc_info.value.cause, TimeoutError)
 
 
 def test_model_response_observer_preserves_orchestration_usage_context():

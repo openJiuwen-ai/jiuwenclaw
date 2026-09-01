@@ -281,5 +281,7 @@
   --color-connector-tool-icon-border: #dfdfdf;
   --color-connector-add-hover-surface: rgba(20, 118, 255, 0.06);
   --color-icon-remove: #c2c2c2;
+  --color-switch-track-off: #c2c2c2;
+  --color-switch-track-on: #1476ff;
   color-scheme: light;
 }

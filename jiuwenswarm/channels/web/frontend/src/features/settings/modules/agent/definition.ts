@@ -30,10 +30,5 @@ export const agentModule: SettingsModuleDefinition = {
       titleKey: 'settingsPanel.agent.mediaTools',
       items: [{ id: 'media-tools-settings', component: 'custom', render: AgentMediaSettings }],
     },
-    {
-      id: 'team',
-      titleKey: 'settingsPanel.agent.team',
-      items: [{ id: 'swarmflow', component: 'switch', key: 'swarmflow_enabled' }],
-    },
   ],
 };

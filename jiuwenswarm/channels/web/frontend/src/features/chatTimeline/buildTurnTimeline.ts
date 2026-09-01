@@ -66,6 +66,7 @@ export type RenderItem =
       key: string;
       showAvatar: boolean;
       executions: ToolExecution[];
+      agentTemplateName?: string;
       notices: string[];
       collapseSkillTreeWhenContentStarts: boolean;
       turnId: number;
@@ -242,6 +243,8 @@ function consolidateReasoning(items: RenderItem[], isTeamMode: boolean): RenderI
             ...prev.segment,
             text: mergedText,
             closed: item.segment.closed,
+            agentTemplateName:
+              prev.segment.agentTemplateName ?? item.segment.agentTemplateName,
             updatedAt: mergedUpdatedAt,
           },
         };
@@ -267,6 +270,9 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
       key: `tool-group-${pendingToolExecutions[0].toolCallId}`,
       showAvatar: true,
       executions: pendingToolExecutions,
+      agentTemplateName: pendingToolExecutions
+        .map((execution) => execution.agentTemplateName?.trim())
+        .find((name): name is string => Boolean(name)),
       notices: [],
       collapseSkillTreeWhenContentStarts,
       turnId: currentTurnId,

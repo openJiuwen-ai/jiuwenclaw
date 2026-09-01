@@ -286,18 +286,20 @@ call `symphony_compose_graph` before executing any Skill or returning a final
 answer. Pass the selected Skills' exact identifiers or names as
 `candidate_skill_ids`; never pass every Skill returned by exploration. If no
 candidate can be selected confidently, still call `symphony_compose_graph`
-with the original query and omit `candidate_skill_ids`.
+with the original query and omit `candidate_skill_ids`. Use retrieval metadata
+directly: between `skill_branch_explore` and `symphony_compose_graph`, do not call
+`skill_tool`, `read_file`, or read any SKILL.md.
 
 Do not choose the execution chain yourself; the orchestration tool determines
-Skill ordering and graph composition. After it returns, present its returned
-`content` directly to the user. If the orchestration tool reports missing
-inputs, ask for those inputs.
-
-If the orchestration tool reports no suitable candidates, a missing capability,
-or caveats that point to a Skill gap, use `search_skill` to discover external
-Skills. When installing a discovered Skill is appropriate, call
-`install_skill`; after a successful install, call `symphony_refresh_graph` and
-then call `symphony_compose_graph` again with the original user task.
+Skill ordering and graph composition. It returns `planned_graph`; read
+`planned_graph.graph.metadata.status`, `planned_graph.graph.nodes`, and
+`planned_graph.graph.edges`, then decide whether to execute, request more
+information, or take other appropriate next steps. Do not present a planning
+rendering for confirmation. When status is `ready`, use the graph to choose one
+currently executable Skill, read only that Skill's SKILL.md immediately before
+executing it, complete its execution, and then read the next executable Skill.
+Do not preload all selected Skill instructions. When status is `needs_input` or
+`no_plan`, do not read Skills merely for orchestration.
 
 If either graph tool returns `graph_build_timeout` or `manual_graph_build`, do
 not call `symphony_compose_graph` or `symphony_refresh_graph` again in the

@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { File, Maximize2, Puzzle } from 'lucide-react';
+import { File, GitBranch, Maximize2, Puzzle } from 'lucide-react';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { useChatStore, useSessionStore } from '../../stores';
 import type { TeamTask as SessionTeamTask } from '../../stores/sessionStore';
 import recentTasksIcon from '../../assets/work-mode/recent-tasks.svg';
 import ListViewIcon from '../../assets/work-mode/view-list.svg?react';
@@ -19,6 +20,9 @@ import {
 import { CompactTaskList } from './CompactTaskList';
 import { getTotalTaskVisualProgressPercent } from './taskProgress';
 import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
+import { SwarmflowTreeView } from './SwarmflowTreeView';
+import { SwarmflowGraphView } from './SwarmflowGraphView';
+import type { WorkflowRun } from './workflowTypes';
 
 type TaskPlanningPanelProps = {
   variant: 'compact' | 'expanded';
@@ -112,6 +116,7 @@ export function ProgressSection({
   maxCollapsedCount,
   expanded,
   emptyIllustration,
+  workflowRuns,
 }: {
   tasks: SessionTeamTask[];
   progressTasks?: SessionTeamTask[];
@@ -126,6 +131,7 @@ export function ProgressSection({
   maxCollapsedCount?: number;
   expanded?: boolean;
   emptyIllustration?: string;
+  workflowRuns?: WorkflowRun[];
 }) {
   const { t } = useTranslation();
   const emptyIllustrationSize = displayMode === 'count' ? 48 : 72;
@@ -142,6 +148,7 @@ export function ProgressSection({
   const progressPercent = getTotalTaskVisualProgressPercent(progressTasks ?? tasks, now ?? Date.now());
 
   if (displayMode === 'count') {
+    const hasWorkflow = Boolean(workflowRuns && workflowRuns.length > 0);
     return (
       <div className="flex flex-col flex-1 min-h-0" data-testid="team-area-task-planning-progress-section">
         <div className="shrink-0" data-testid="team-area-task-planning-progress">
@@ -175,16 +182,48 @@ export function ProgressSection({
           </div>
         </div>
         <div className="flex-1 overflow-y-auto">
-          <CompactTaskList
-            tasks={tasks}
-            members={members}
-            hideAssignee={hideAssignee ?? false}
-            renderTaskIcon={renderTaskIcon}
-            maxCollapsedCount={maxCollapsedCount}
-            expanded={expanded}
-            emptyText={t('team.noTasks')}
-            emptyIllustration={emptyIllustration}
-          />
+          {hasWorkflow && workflowRuns ? (
+            workflowRuns.map((run) => {
+              const runTasks = tasks.filter((t) => t.workflow_run_id === run.id);
+              if (runTasks.length === 0) return null;
+              const maxPerRun = 4;
+              const visible = expanded ? runTasks : runTasks.slice(0, maxPerRun);
+              const remaining = expanded ? 0 : runTasks.length - visible.length;
+              return (
+                <div key={run.id} className="border-b border-border last:border-b-0">
+                  <div className="px-2 py-1.5 text-xs text-text-muted font-medium">
+                    {run.name ?? run.id}
+                  </div>
+                  <CompactTaskList
+                    tasks={visible}
+                    members={members}
+                    hideAssignee={hideAssignee ?? false}
+                    renderTaskIcon={renderTaskIcon}
+                    maxCollapsedCount={maxCollapsedCount}
+                    expanded={expanded}
+                    emptyText={t('team.noTasks')}
+                    emptyIllustration={emptyIllustration}
+                  />
+                  {remaining > 0 && (
+                    <div className="px-2 py-1 text-xs text-text-muted">
+                      {t('team.moreTasks', { count: remaining })}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          ) : (
+            <CompactTaskList
+              tasks={tasks}
+              members={members}
+              hideAssignee={hideAssignee ?? false}
+              renderTaskIcon={renderTaskIcon}
+              maxCollapsedCount={maxCollapsedCount}
+              expanded={expanded}
+              emptyText={t('team.noTasks')}
+              emptyIllustration={emptyIllustration}
+            />
+          )}
         </div>
       </div>
     );
@@ -212,9 +251,11 @@ export function ProgressSection({
 export function ViewSwitcher({
   view,
   onViewChange,
+  showWorkflow = false,
 }: {
-  view: 'board' | 'list';
-  onViewChange: (view: 'board' | 'list') => void;
+  view: 'board' | 'list' | 'workflow';
+  onViewChange: (view: 'board' | 'list' | 'workflow') => void;
+  showWorkflow?: boolean;
 }) {
   const { t } = useTranslation();
   const { tooltip, handlers: tooltipHandlers } = useAdaptiveTooltip();
@@ -250,6 +291,19 @@ export function ViewSwitcher({
         <BoardViewIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
       </button>
       {tooltip}
+      {showWorkflow && (
+        <button
+          type="button"
+          onClick={() => onViewChange('workflow')}
+          data-testid="team-area-task-planning-view-workflow-button"
+          className={`flex h-6 w-6 items-center justify-center rounded-[4px] transition-colors ${view === 'workflow' ? 'bg-card text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
+          aria-label={t('team.planning.views.workflow')}
+          title={t('team.planning.views.workflow')}
+          aria-pressed={view === 'workflow'}
+        >
+          <GitBranch className="h-4 w-4 shrink-0" aria-hidden="true" />
+        </button>
+      )}
     </div>
   );
 }
@@ -274,7 +328,11 @@ export function TaskPlanningPanel({
   emptyIllustration,
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
-  const [view, setView] = useState<'board' | 'list'>('list');
+  const [view, setView] = useState<'board' | 'list' | 'workflow'>('list');
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const workflowRuns = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.workflowRuns ?? [],
+  );
   const groupedTasks = useMemo(() => {
     const groups: Record<TaskColumnKey, SessionTeamTask[]> = {
       waiting: [],
@@ -333,13 +391,14 @@ export function TaskPlanningPanel({
           maxCollapsedCount={maxCollapsedCount}
           expanded={expanded}
           emptyIllustration={emptyIllustration}
+          workflowRuns={workflowRuns}
         />
       </div>
     );
   }
 
   const viewSwitcher = (
-    <ViewSwitcher view={view} onViewChange={setView} />
+    <ViewSwitcher view={view} onViewChange={setView} showWorkflow={workflowRuns.length > 0} />
   );
 
   const header = (
@@ -354,18 +413,33 @@ export function TaskPlanningPanel({
       {view === 'list' ? (
         <div className="flex h-full flex-col px-6 pb-6" data-testid="team-area-task-planning-list-view">
           {header}
-          <ProgressSection
-            tasks={tasks}
-            progressTasks={progressTasks}
-            now={now}
-            groupedTasks={groupedTasks}
-            completedTasks={completedTasks}
-            totalTasks={totalTasks}
-            displayMode="percent"
-            members={members}
-            hideAssignee={hideAssignee}
-            emptyIllustration={emptyIllustration}
-          />
+          {workflowRuns.length > 0 && activeSessionId ? (
+            <>
+              <ProgressBar progressPercent={progressPercent} groupedTasks={groupedTasks} />
+              <SwarmflowTreeView runs={workflowRuns} sessionId={activeSessionId} />
+            </>
+          ) : (
+            <ProgressSection
+              tasks={tasks}
+              progressTasks={progressTasks}
+              now={now}
+              groupedTasks={groupedTasks}
+              completedTasks={completedTasks}
+              totalTasks={totalTasks}
+              displayMode="percent"
+              members={members}
+              hideAssignee={hideAssignee}
+              emptyIllustration={emptyIllustration}
+            />
+          )}
+        </div>
+      ) : view === 'workflow' ? (
+        <div className="flex h-full flex-col px-6 pb-6" data-testid="team-area-task-planning-workflow-view">
+          {header}
+          <ProgressBar progressPercent={progressPercent} groupedTasks={groupedTasks} />
+          {workflowRuns.length > 0 && activeSessionId ? (
+            <SwarmflowGraphView runs={workflowRuns} sessionId={activeSessionId} />
+          ) : null}
         </div>
       ) : (
         <div className="flex h-full flex-col px-6 pb-6">

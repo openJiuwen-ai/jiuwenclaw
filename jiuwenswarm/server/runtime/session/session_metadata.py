@@ -14,7 +14,13 @@ from typing import Any
 from datetime import datetime, timezone
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir
-from jiuwenswarm.common.mode_matrix import deprecate_mode, is_new_canonical_mode, is_team_mode
+from jiuwenswarm.common.mode_matrix import (
+    NEW_AGENT_CODE_NORMAL,
+    NEW_AGENT_WORK_NORMAL,
+    deprecate_mode,
+    is_new_canonical_mode,
+    is_team_mode,
+)
 from jiuwenswarm.server.runtime.session.work_mode import (
     DEFAULT_WEB_WORK_MODE,
     SUPPORTED_WORK_MODES,
@@ -252,6 +258,28 @@ def _apply_metadata_defaults_with_inference(
                 "非新 canonical 但未在 DEPRECATION_MAP，原样保留",
                 session_id, existing_mode,
             )
+
+    # Older subagent history writes could leak their internal item mode into
+    # the owning Web/TUI product Session. Recover only an unmistakable parent
+    # Session; a real standalone subagent channel keeps its original mode.
+    normalized_mode = str(metadata.get("mode") or "").strip().lower()
+    channel_id = str(metadata.get("channel_id") or "").strip().lower()
+    team_name = str(metadata.get("team_name") or "").strip()
+    if normalized_mode == "subagent" and channel_id != "subagent" and not team_name:
+        work_mode = str(metadata.get("work_mode") or "").strip().lower()
+        repaired_mode = (
+            NEW_AGENT_CODE_NORMAL
+            if work_mode == "code"
+            else NEW_AGENT_WORK_NORMAL
+        )
+        logger.warning(
+            "repair leaked subagent Session mode: session=%s mode='%s' -> '%s'",
+            session_id,
+            metadata.get("mode"),
+            repaired_mode,
+        )
+        metadata["mode"] = repaired_mode
+        changed = True
 
     # project_id: 缺失时尝试按 work_mode 反查唯一真实 Project
     if not str(metadata.get("project_id") or "").strip():

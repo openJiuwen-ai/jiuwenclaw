@@ -131,6 +131,7 @@ export function DefinitionDetailPage({
   const avatarUrl = getAgentAvatarUrl(detail);
   const canUse = detail.installed && detail.connectionState === 'connected' && detail.enabled !== false;
   const needsConnection = detail.installed && detail.connectionState !== 'connected';
+  const canDelete = detail.source === 'local' && !detail.installed;
   const canPreviewFiles = detail.source === 'local' || detail.installed;
   return (
     <div className="agent-management-detail" data-testid="agent-detail">
@@ -191,15 +192,29 @@ export function DefinitionDetailPage({
               </button>
             </>
           ) : (
-            <button
-              type="button"
-              className="agent-management-button agent-management-button--primary agent-management-detail-action--install"
-              disabled={busy}
-              aria-busy={busy}
-              onClick={() => onInstall(detail.id)}
-            >
-              {busy ? t('agentManagement.actions.installing') : t('agentManagement.actions.install')}
-            </button>
+            <>
+              {canDelete ? (
+                <button
+                  type="button"
+                  className="agent-management-detail-action agent-management-detail-action--uninstall"
+                  disabled={busy}
+                  aria-busy={busy}
+                  onClick={() => onUninstall(detail.id)}
+                >
+                  <UninstallIcon aria-hidden="true" />
+                  {busy ? t('agentManagement.actions.deleting') : t('agentManagement.actions.delete')}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="agent-management-button agent-management-button--primary agent-management-detail-action--install"
+                disabled={busy}
+                aria-busy={busy}
+                onClick={() => onInstall(detail.id)}
+              >
+                {busy ? t('agentManagement.actions.installing') : t('agentManagement.actions.install')}
+              </button>
+            </>
           )}
         </div>
       </header>

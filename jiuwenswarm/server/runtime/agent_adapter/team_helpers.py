@@ -22,6 +22,7 @@ from openjiuwen.agent_teams.paths import (
     team_home,
 )
 from openjiuwen.agent_teams.runtime import RunActionKind
+from openjiuwen.agent_teams.runtime.background_task_controller import BackgroundTaskController
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.monitor import TeamStreamLogger
 from openjiuwen.core.runner import Runner
@@ -32,7 +33,7 @@ from jiuwenswarm.agents.harness.team import TeamManager, get_team_manager
 from jiuwenswarm.agents.harness.team.team_manager import TEAM_EVENT_QUEUE_MAXSIZE
 from jiuwenswarm.common.log_preview import DEFAULT_PREVIEW_MAX_CHARS, preview_text
 from jiuwenswarm.common.utils import get_agent_skills_dir
-from jiuwenswarm.common.config import get_skill_evolution_enabled
+from jiuwenswarm.common.config import get_config, get_skill_evolution_enabled
 from jiuwenswarm.common.cron_team_completion import (
     _cron_solo_harness_end_pending,
     _drain_cron_delegation_grace_events,
@@ -98,6 +99,8 @@ logger = logging.getLogger(__name__)
 # is no module-level global waiter registry — reach it via
 # get_team_manager(channel_id) or the team_manager handle passed in.
 _WORKFLOW_RUNS_STATE_KEY = "workflow_runs"
+_SESSION_BUDGET_STATE_KEY = "session_budget"
+_SESSION_SWARMFLOW_CONFIG_KEY = "session_swarmflow_config"
 
 _TEAM_CREATE_KINDS = {
     RunActionKind.CREATE.value,
@@ -134,6 +137,24 @@ def reset_team_heartbeat_service(token: Token[Any | None]) -> None:
 
 def _new_team_event_queue() -> asyncio.Queue:
     return asyncio.Queue(maxsize=TEAM_EVENT_QUEUE_MAXSIZE)
+
+
+# Session-scoped BackgroundTaskController instances (one per session_id). This
+# is the leader's external pause/resume/stop surface for background work
+# (today: swarmflow runs). It must be reused across streaming rounds of the
+# same session so a pause in one round and a resume in a later round observe
+# the same _paused registry, so it lives here keyed by session_id, mirroring
+# the per-session team state held on the singleton TeamManager.
+_BACKGROUND_TASK_CONTROLLERS: dict[str, BackgroundTaskController] = {}
+
+
+def get_background_task_controller(session_id: str) -> BackgroundTaskController:
+    """Return the session's BackgroundTaskController, lazily creating it once."""
+    controller = _BACKGROUND_TASK_CONTROLLERS.get(session_id)
+    if controller is None:
+        controller = BackgroundTaskController()
+        _BACKGROUND_TASK_CONTROLLERS[session_id] = controller
+    return controller
 
 
 def _safe_team_path_segment(value: str, fallback: str = "_") -> str:
@@ -682,8 +703,20 @@ def sync_team_identity_metadata(
     )
 
 
-def persist_workflow_runs(runs: dict[str, WorkflowRunState], session_id: str) -> None:
-    """Persist WorkflowRunState dict to session metadata (file-based store)."""
+def persist_workflow_runs(
+    runs: dict[str, WorkflowRunState],
+    session_id: str,
+    session_budget: dict | None = None,
+) -> None:
+    """Persist WorkflowRunState dict (and optionally the session budget) to session metadata.
+
+    ``session_budget`` MUST ride on the same read-modify-write as the runs:
+    persisting them via two separate calls makes each one ``cache_bust``-read
+    the disk before the other's async-queued write is flushed, so the second
+    write replaces the whole file carrying the FIRST one's stale runs — a
+    lost update that freezes ``workflow_runs`` on the checkpoint (observed
+    as a stopped workflow restoring as still-running).
+    """
     from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata, _enqueue_write
     runs_data = {run_id: run_state.model_dump() for run_id, run_state in runs.items()}
     metadata = _read_metadata(session_id, cache_bust=True)
@@ -698,6 +731,8 @@ def persist_workflow_runs(runs: dict[str, WorkflowRunState], session_id: str) ->
         )
         return
     metadata[_WORKFLOW_RUNS_STATE_KEY] = runs_data
+    if session_budget is not None:
+        metadata[_SESSION_BUDGET_STATE_KEY] = session_budget
     _enqueue_write(session_id, metadata)
 
 
@@ -712,6 +747,123 @@ def restore_workflow_runs(session_id: str) -> dict[str, WorkflowRunState] | None
         run_id: WorkflowRunState.model_validate(run_data)
         for run_id, run_data in runs_data.items()
     }
+
+
+def persist_session_budget(session_id: str, snapshot: dict) -> None:
+    """Persist the session-wide (leader-shared) budget snapshot to session metadata.
+
+    The session budget is team-scoped and shared across every run, so it lives in
+    metadata alongside ``workflow_runs`` (NOT inside any single run's journal).
+    ``snapshot`` is ``{total, spent, remaining, scope, exhausted}``. No-op when the
+    metadata read fails (mirrors ``persist_workflow_runs``).
+    """
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata, _enqueue_write
+    metadata = _read_metadata(session_id, cache_bust=True)
+    if not metadata.get("session_id"):
+        logger.warning(
+            "[TeamHelpers] skipping session_budget persist: failed to read "
+            "session metadata (session_id=%s)",
+            session_id,
+        )
+        return
+    metadata[_SESSION_BUDGET_STATE_KEY] = snapshot
+    _enqueue_write(session_id, metadata)
+
+
+def restore_session_budget(session_id: str) -> dict | None:
+    """Restore the session-wide budget snapshot from session metadata, or None."""
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata
+    metadata = _read_metadata(session_id, cache_bust=True)
+    snapshot = metadata.get(_SESSION_BUDGET_STATE_KEY)
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def persist_session_swarmflow_config(session_id: str, config: dict) -> None:
+    """Persist session-level swarmflow config to session metadata.
+
+    ``config`` is ``{enable_swarmflow: bool, swarmflow_budget: int | None}``.
+    Mirrors persist_session_budget (read-modify-write, no-op on read failure).
+    """
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata, _enqueue_write
+    metadata = _read_metadata(session_id, cache_bust=True)
+    if not metadata.get("session_id"):
+        logger.warning(
+            "[TeamHelpers] skipping session_swarmflow_config persist: "
+            "failed to read session metadata (session_id=%s)",
+            session_id,
+        )
+        return
+    metadata[_SESSION_SWARMFLOW_CONFIG_KEY] = config
+    _enqueue_write(session_id, metadata)
+
+
+def restore_session_swarmflow_config(session_id: str) -> dict | None:
+    """Restore session-level swarmflow config from session metadata, or None."""
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata
+    metadata = _read_metadata(session_id, cache_bust=True)
+    config = metadata.get(_SESSION_SWARMFLOW_CONFIG_KEY)
+    return config if isinstance(config, dict) else None
+
+
+def _coerce_budget(value) -> int | None:
+    """Coerce a raw budget value to a positive int, else None."""
+    if value is None:
+        return None
+    try:
+        n = int(value)
+    except (ValueError, TypeError):
+        return None
+    return n if n > 0 else None
+
+
+def _resolve_session_swarmflow_config(
+    params: dict | None,
+    config_base: dict,
+    *,
+    session_id: str,
+) -> dict:
+    """Resolve session-level swarmflow config by priority:
+
+    request params > metadata persisted > config.yaml.
+    """
+    team_cfg = ((config_base.get("modes") or {}).get("team") or {}).get("jiuwen_team") or {}
+    config_enabled = bool(team_cfg.get("enable_swarmflow", False))
+    config_budget_raw = team_cfg.get("swarmflow_budget")
+    config_budget = (
+        int(config_budget_raw)
+        if isinstance(config_budget_raw, (int, float)) and config_budget_raw > 0
+        else None
+    )
+
+    if params and params.get("enable_swarmflow") is not None:
+        result = {
+            "enable_swarmflow": bool(params.get("enable_swarmflow")),
+            "swarmflow_budget": _coerce_budget(params.get("swarmflow_budget")),
+        }
+        logger.info(
+            "[TeamHelpers] swarmflow config (source=request params, session=%s): %s",
+            session_id, result,
+        )
+        return result
+
+    persisted = restore_session_swarmflow_config(session_id)
+    if persisted is not None:
+        result = {
+            "enable_swarmflow": bool(persisted.get("enable_swarmflow", False)),
+            "swarmflow_budget": _coerce_budget(persisted.get("swarmflow_budget")),
+        }
+        logger.info(
+            "[TeamHelpers] swarmflow config (source=metadata, session=%s): %s",
+            session_id, result,
+        )
+        return result
+
+    result = {"enable_swarmflow": config_enabled, "swarmflow_budget": config_budget}
+    logger.info(
+        "[TeamHelpers] swarmflow config (source=config.yaml, session=%s): %s",
+        session_id, result,
+    )
+    return result
 
 
 def _resolve_channel_id(channel_id: str | None) -> str:
@@ -2147,6 +2299,12 @@ async def process_team_message_stream(
         ) or None
         # Provider-based assembly: build members from the shared config source,
         # no pre-built parent DeepAgent required.
+        # 会话级 swarmflow 配置：请求 params > metadata > config.yaml
+        swarmflow_config = _resolve_session_swarmflow_config(
+            params_obj if isinstance(params_obj, dict) else None,
+            get_config(),
+            session_id=session_id,
+        )
         team_spec = await team_manager.get_swarm_enriched_team_spec(
             session_id=session_id,
             mode=resolved_mode,
@@ -2158,7 +2316,14 @@ async def process_team_message_stream(
             request_metadata=request_metadata,
             requested_model_name=requested_model_name,
             agent_group_name=agent_group_name,
+            swarmflow_config=swarmflow_config,
         )
+        # 请求携带了会话级配置时持久化（刷新恢复用）
+        if (
+            isinstance(params_obj, dict)
+            and params_obj.get("enable_swarmflow") is not None
+        ):
+            persist_session_swarmflow_config(session_id, swarmflow_config)
         if team_skill_names is not None:
             await _apply_team_skill_selection(
                 team_manager=team_manager,
@@ -2751,6 +2916,7 @@ async def _consume_stream_with_query(
             session=session_id,
             envs=envs,
             stream_logger=lg,
+            background_task_controller=get_background_task_controller(session_id),
         ):
             received_chunks += 1
             # First event of any kind from the runner — usually a framework
@@ -3278,6 +3444,7 @@ def _workflow_updated_to_team_events(
                     "task_id": task_id,
                     "title": phase.get("name") or phase_id,
                     "status": task_status,
+                    "workflow_run_id": run_id,
                 }
                 if terminal_planned:
                     task_event["content"] = _WF_TERMINAL_PLANNED_CONTENT
@@ -3307,6 +3474,7 @@ def _workflow_updated_to_team_events(
                             "member_id": member_id,
                             "name": agent.get("name") or agent_id,
                             "status": "busy",
+                            "workflow_run_id": run_id,
                         },
                     )
                 )
@@ -3325,9 +3493,64 @@ def _workflow_updated_to_team_events(
                                 "member_id": member_id,
                                 "old_status": old_status,
                                 "new_status": agent_status,
+                                "workflow_run_id": run_id,
                             },
                         )
                     )
+
+    return out
+
+
+def _detect_human_waiting_prompts(
+    wf: dict[str, Any],
+    session_id: str,
+    seen_human_waiting: set[str],
+) -> list[dict[str, Any]]:
+    """检测新进入 waiting_for_human 的 human/human_session agent。
+
+    为每个**首次**进入 waiting_for_human 的 agent 生成一个
+    ``chat.ask_user_question`` 事件，使 web 端 ``InteractionPrompt``
+    能展示 human_prompt 并收集用户回复。agent 离开该状态后从集合
+    移除，允许后续多轮 human_session 再次触发。
+    """
+    out: list[dict[str, Any]] = []
+    run_id = str(wf.get("id") or "")
+    if not run_id:
+        return out
+
+    for phase in wf.get("phases", []) or []:
+        phase_name = phase.get("name") or phase.get("id") or ""
+        for agent in phase.get("agents", []) or []:
+            agent_id = agent.get("id") or ""
+            agent_status = agent.get("status") or ""
+            member_key = f"{run_id}:{agent_id}"
+
+            if agent_status == "waiting_for_human" and member_key not in seen_human_waiting:
+                seen_human_waiting.add(member_key)
+                correlation_id = agent.get("correlation_id") or agent_id
+                agent_name = agent.get("name") or agent_id
+                human_prompt = agent.get("human_prompt") or ""
+
+                out.append({
+                    "event_type": "chat.ask_user_question",
+                    "session_id": session_id,
+                    "request_id": f"swarmflow:{run_id}:{correlation_id}",
+                    "source": "swarmflow_human",
+                    "questions": [{
+                        "question": human_prompt or "(SwarmFlow is waiting for your input)",
+                        "header": f"{agent_name} · {phase_name}",
+                        "options": [],
+                        "multi_select": False,
+                    }],
+                    "swarmflow_meta": {
+                        "run_id": run_id,
+                        "correlation_id": correlation_id,
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                    },
+                })
+            elif agent_status != "waiting_for_human" and member_key in seen_human_waiting:
+                seen_human_waiting.discard(member_key)
 
     return out
 
@@ -3339,14 +3562,16 @@ async def _consume_workflow_events(
 ) -> None:
     """Consume workflow events in the background and broadcast them.
 
-    TUI keeps the native ``workflow.updated`` stream. Every other channel (web)
-    gets the events translated into ``team.member`` / ``team.task`` so the
-    existing web frontend can render swarmflow workers/phases.
+    所有通道都收到原始 ``workflow.updated`` 事件（供 web 端树视图渲染）。
+    非 TUI 通道额外转换为 ``team.member`` / ``team.task`` 扁平事件（向后兼容），
+    并检测 ``waiting_for_human`` agent 生成 ``chat.ask_user_question`` 事件。
     """
     is_tui = _resolve_channel_id(channel_id) == "tui"
     seen_phase: dict[str, str] = {}
     seen_agent: dict[str, str] = {}
     spawned_members: set[str] = set()
+    seen_human_waiting: set[str] = set()
+    swarmflow_activated_sent = False
     try:
         logger.info(
             "[TeamHelpers] workflow event loop started: channel_id=%s session_id=%s is_tui=%s",
@@ -3372,10 +3597,27 @@ async def _consume_workflow_events(
                 wf.get("agent_count", 0),
                 wf.get("completed_agent_count", 0),
             )
+            wf_status = (wf.get("status") or "").strip()
+
+            # ── swarmflow.activated: 首次收到活跃 workflow 时通知前端切树视图 ──
+            if (
+                not swarmflow_activated_sent
+                and wf_status in ("running", "planned", "pending")
+                and wf.get("id")
+            ):
+                swarmflow_activated_sent = True
+                await _broadcast_event(channel_id, session_id, {
+                    "event_type": "swarmflow.activated",
+                    "session_id": session_id,
+                    "run_id": wf.get("id", ""),
+                    "workflow_name": wf.get("name", ""),
+                })
+
+            # ── 所有通道都广播原始 workflow.updated（供 web 树视图渲染）──
+            await _broadcast_event(channel_id, session_id, event)
+
             if is_tui:
-                await _broadcast_event(channel_id, session_id, event)
-                # Check terminal status for TUI path too
-                wf_status = (wf.get("status") or "").strip()
+                # TUI: 只需原始事件 + 终态检查
                 if wf_status in ("completed", "failed", "stopped"):
                     logger.info(
                         "[TeamHelpers] workflow terminal: channel_id=%s session_id=%s wf_status=%s",
@@ -3383,21 +3625,30 @@ async def _consume_workflow_events(
                     )
                     get_team_manager(channel_id).mark_workflow_completed(session_id)
                 continue
+
+            # ── 非 TUI: 额外转换扁平 team.task/team.member 事件（向后兼容）──
             for team_ev in _workflow_updated_to_team_events(
                 event, session_id, seen_phase, seen_agent, spawned_members
             ):
                 _persist_team_history_event(channel_id, session_id, team_ev)
                 await _broadcast_event(channel_id, session_id, team_ev)
-            # When the workflow reaches a terminal status, mark
-            # workflow_completed and broadcast chat.processing_status
-            # so the frontend transitions out of the processing state.
-            wf_status = (wf.get("status") or "").strip()
+
+            # ── 非 TUI: 检测 waiting_for_human → chat.ask_user_question ──
+            for human_ev in _detect_human_waiting_prompts(wf, session_id, seen_human_waiting):
+                await _broadcast_event(channel_id, session_id, human_ev)
+
+            # ── 终态处理 ──
             if wf_status in ("completed", "failed", "stopped"):
                 logger.info(
                     "[TeamHelpers] workflow terminal: channel_id=%s session_id=%s wf_status=%s",
                     _resolve_channel_id(channel_id), session_id, wf_status,
                 )
                 get_team_manager(channel_id).mark_workflow_completed(session_id)
+                await _broadcast_event(channel_id, session_id, {
+                    "event_type": "swarmflow.deactivated",
+                    "session_id": session_id,
+                    "run_id": wf.get("id", ""),
+                })
         logger.info(
             "[TeamHelpers] workflow event loop ended: channel_id=%s session_id=%s",
             _resolve_channel_id(channel_id),
