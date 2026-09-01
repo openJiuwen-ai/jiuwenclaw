@@ -31,6 +31,10 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools import TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
+from jiuwenswarm.agents.harness.common.provenance.artifact import (
+    extract_explicit_artifact_provenance,
+    prepare_artifact_provenance_for_external,
+)
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     convert_interactions_to_ask_user_question,
 )
@@ -725,7 +729,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if tc_id:
             self._inflight_tool_calls.pop(tc_id, None)
 
-        await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
+        await self._emit_tool_result(
+            session, tc, ctx.inputs.tool_result, context=ctx
+        )
         self._symphony_stream_handler.request_force_finish(
             ctx,
             tc,
@@ -800,6 +806,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         session: Session,
         tool_call: Any,
         result: Any,
+        *,
+        context: Any | None = None,
     ) -> None:
         try:
             raw_output = _structured_tool_result_payload(result)
@@ -815,6 +823,34 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     tool_result_payload,
                     raw_output,
                 )
+            artifact_provenance = extract_explicit_artifact_provenance(
+                raw_output if raw_output is not None else result
+            )
+            if not artifact_provenance and context is not None:
+                for candidate in (
+                    getattr(context, "extra", None),
+                    getattr(getattr(context, "inputs", None), "metadata", None),
+                ):
+                    artifact_provenance = extract_explicit_artifact_provenance(
+                        candidate
+                    )
+                    if artifact_provenance:
+                        break
+            if artifact_provenance:
+                artifact_provenance = prepare_artifact_provenance_for_external(
+                    artifact_provenance
+                )
+                source_payload = raw_output if raw_output is not None else result
+                if (
+                    isinstance(source_payload, dict)
+                    and "artifact_provenance" in source_payload
+                ):
+                    safe_output = dict(source_payload)
+                    safe_output["artifact_provenance"] = artifact_provenance
+                    if raw_output is not None:
+                        tool_result_payload["raw_output"] = safe_output
+                    tool_result_payload["result"] = str(safe_output)[:60000]
+                tool_result_payload["artifact_provenance"] = artifact_provenance
             error_state = _infer_tool_result_error(raw_output if raw_output is not None else result)
             if error_state is not None:
                 tool_result_payload["success"] = not error_state
