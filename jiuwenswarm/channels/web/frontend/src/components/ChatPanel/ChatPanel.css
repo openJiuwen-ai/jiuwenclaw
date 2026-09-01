@@ -3072,12 +3072,13 @@ overflow: hidden;
 
 .chat-swarmflow-config-panel__budget-row .ui-input {
   flex: 1;
-  min-width: 0;
+  min-width: 120px;
 }
 
 .chat-swarmflow-config-panel__budget-row .ui-select {
   width: auto;
   flex-shrink: 0;
+  min-width: 80px;
 }
 
 .chat-swarmflow-config-panel__unlimited-row {

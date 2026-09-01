@@ -3183,7 +3183,7 @@
     "configTitle": "SwarmFlow Configuration",
     "configReadonlyHint": "Session is active, config is read-only",
     "budgetPanelTitle": "SwarmFlow Budget",
-    "budgetPanelHint": "Set the Token limit for this session. Team mode only.",
+    "budgetPanelHint": "Set the Token limit for this session.",
     "budgetPlaceholder": "Enter number",
     "budgetActualHint": "Actual limit: {{count}} tokens",
     "workflowList": "Workflow List"

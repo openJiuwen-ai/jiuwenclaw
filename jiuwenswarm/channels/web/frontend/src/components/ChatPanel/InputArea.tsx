@@ -3809,12 +3809,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       <Input
                         type="number"
                         value={inputValue}
-                        placeholder={t('swarmflow.budgetPlaceholder')}
-                        readOnly={swarmflowToggleDisabled || isUnlimited}
+                        placeholder={isUnlimited ? '' : t('swarmflow.budgetPlaceholder')}
+                        readOnly={swarmflowToggleDisabled}
                         onChange={(v) => {
                           if (swarmflowToggleDisabled) return;
                           const unit = inputUnit;
                           const actual = computeBudget(v, unit, false);
+                          // 输入数字时自动取消"无限制"
                           useSessionStore.getState().setSwarmflowActive(
                             activeSessionId, true, actual,
                           );
@@ -3822,7 +3823,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       />
                       <Select
                         value={inputUnit}
-                        disabled={swarmflowToggleDisabled || isUnlimited}
+                        disabled={swarmflowToggleDisabled}
                         options={[
                           { value: 'token', label: 'token' },
                           { value: 'K', label: 'K (×1,000)' },
@@ -3831,7 +3832,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                         onChange={(val) => {
                           if (swarmflowToggleDisabled) return;
                           const unit = val as 'token' | 'K' | 'M';
-                          const actual = computeBudget(inputValue, unit, false);
+                          const actual = computeBudget(inputValue || '500', unit, false);
                           useSessionStore.getState().setSwarmflowActive(
                             activeSessionId, true, actual,
                           );
@@ -3845,9 +3846,17 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                         disabled={swarmflowToggleDisabled}
                         onChange={(e) => {
                           if (swarmflowToggleDisabled) return;
-                          useSessionStore.getState().setSwarmflowActive(
-                            activeSessionId, true, e.target.checked ? null : computeBudget(inputValue, inputUnit, false),
-                          );
+                          if (e.target.checked) {
+                            // 勾选"无限制"→ budget=null
+                            useSessionStore.getState().setSwarmflowActive(
+                              activeSessionId, true, null,
+                            );
+                          } else {
+                            // 取消勾选→给一个默认值（500K）
+                            useSessionStore.getState().setSwarmflowActive(
+                              activeSessionId, true, 500000,
+                            );
+                          }
                         }}
                       />
                       <span className="text-xs text-text-muted">{t('swarmflow.budgetUnlimited')}</span>
